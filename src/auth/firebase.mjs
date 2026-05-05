@@ -18,9 +18,23 @@ function initFirebaseAdmin() {
     initializeApp({ credential: cert(JSON.parse(json)) });
     return;
   }
-  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || LOCAL_SERVICE_ACCOUNT;
-  if (credentialsPath && existsSync(credentialsPath)) {
-    initializeApp({ credential: cert(JSON.parse(readFileSync(credentialsPath, 'utf8'))) });
+  const credentialsEnv = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (credentialsEnv) {
+    // If it looks like a file path, read from disk; otherwise treat as base64-encoded JSON
+    if (existsSync(credentialsEnv)) {
+      initializeApp({ credential: cert(JSON.parse(readFileSync(credentialsEnv, 'utf8'))) });
+      return;
+    }
+    try {
+      const decoded = Buffer.from(credentialsEnv, 'base64').toString('utf8');
+      initializeApp({ credential: cert(JSON.parse(decoded)) });
+      return;
+    } catch {
+      // Fall through if not valid base64 JSON
+    }
+  }
+  if (existsSync(LOCAL_SERVICE_ACCOUNT)) {
+    initializeApp({ credential: cert(JSON.parse(readFileSync(LOCAL_SERVICE_ACCOUNT, 'utf8'))) });
     return;
   }
   initializeApp();
