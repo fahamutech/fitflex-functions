@@ -1,6 +1,9 @@
 {
   "ignore": [
     "**/node_modules/**",
+    "**/prisma/**",
+    "**/script/**",
+    "**/src/**",
     "**/specs/**",
     "**/*.specs.js",
     "**/*.specs.mjs"
