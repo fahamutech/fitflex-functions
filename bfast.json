@@ -2,7 +2,6 @@
   "ignore": [
     "**/node_modules/**",
     "**/specs/**",
-    "**/src/**",
     "**/*.specs.js",
     "**/*.specs.mjs"
   ]
