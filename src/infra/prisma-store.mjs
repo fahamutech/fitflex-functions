@@ -109,23 +109,31 @@ export function collection(name) {
     throw new Error(`prisma-store: unknown collection "${name}". Add it to MODEL_MAP.`);
   }
 
-  // Synchronous cache for backwards compat during migration.
-  // First call loads synchronously from cache (empty until primed).
-  let _syncData = null;
+  // In-memory store. Initialised to [] immediately so pre-prime writes
+  // go into the same array reference (not a throw-away []).
+  let _syncData = [];
   let _primed = false;
 
-  // Prime the cache at construction time (fire-and-forget)
+  // Prime by merging PG rows into the existing array.
+  // Any writes that arrived before the prime completes are kept as-is
+  // (they are already being persisted asynchronously).
   const primePromise = loadAll(name, meta).then(rows => {
-    _syncData = rows;
+    const pkF = pkField(name);
+    const inMemoryPks = new Set(_syncData.map(r => r[pkF]));
+    for (const row of rows) {
+      if (!inMemoryPks.has(row[pkF])) {
+        _syncData.push(row);
+      }
+      // If already in memory (pre-prime write), keep the in-memory version
+    }
     _primed = true;
   }).catch(err => {
     console.error(`[prisma-store] Failed to prime "${name}":`, err.message);
-    _syncData = [];
     _primed = true;
   });
 
   function getSyncData() {
-    return _syncData ?? [];
+    return _syncData; // always the same array reference
   }
 
   const col = {
@@ -166,7 +174,7 @@ export function collection(name) {
             await delegate.create({ data: writeData });
           }
         } catch (err) {
-          console.error(`[prisma-store] insert ${name}:`, err.message);
+          console.error(`[prisma-store] insert ${name} (id=${row.id || row.phone || '?'}):`, err.message, err.meta || '');
         }
       })();
 
@@ -212,7 +220,7 @@ export function collection(name) {
             await delegate.update({ where: { [pk]: id }, data: writeData });
           }
         } catch (err) {
-          console.error(`[prisma-store] update ${name}:`, err.message);
+          console.error(`[prisma-store] update ${name} (id=${updated[pkField(name)] || '?'}):`, err.message, err.meta || '');
         }
       })();
 
@@ -240,6 +248,36 @@ export function collection(name) {
       return row;
     },
 
+    // Shared DB-persist logic used by both upsert (sync) and upsertAsync (awaitable)
+    _persistUpsert: async (row) => {
+      const delegate = meta.delegate();
+      if (name === 'otps') {
+        await delegate.upsert({
+          where: { phone: row.phone },
+          create: { phone: row.phone, code: row.code, userType: row.userType, expiresAt: new Date(row.expiresAt) },
+          update: { code: row.code, userType: row.userType, expiresAt: new Date(row.expiresAt) },
+        });
+      } else if (name === 'platform_settings') {
+        const writeData = prepareForPrisma(name, row);
+        await delegate.upsert({
+          where: { id: row.id || 'platform' },
+          create: writeData,
+          update: writeData,
+        });
+      } else {
+        const pk = pkField(name);
+        const id = row[pk];
+        if (!id) return;
+        const writeData = prepareForPrisma(name, row);
+        const { [pk]: _omit, createdAt: _ca, ...updateData } = writeData;
+        await delegate.upsert({
+          where: { [pk]: id },
+          create: writeData,
+          update: updateData,
+        });
+      }
+    },
+
     upsert: (pred, row) => {
       const data = getSyncData();
       const i = data.findIndex(pred);
@@ -250,38 +288,25 @@ export function collection(name) {
       }
       invalidate(name);
 
-      (async () => {
-        try {
-          const delegate = meta.delegate();
-          if (name === 'otps') {
-            await delegate.upsert({
-              where: { phone: row.phone },
-              create: { phone: row.phone, code: row.code, userType: row.userType, expiresAt: new Date(row.expiresAt) },
-              update: { code: row.code, userType: row.userType, expiresAt: new Date(row.expiresAt) },
-            });
-          } else if (name === 'platform_settings') {
-            const writeData = prepareForPrisma(name, row);
-            await delegate.upsert({
-              where: { id: row.id || 'platform' },
-              create: writeData,
-              update: writeData,
-            });
-          } else {
-            const pk = pkField(name);
-            const id = row[pk];
-            if (!id) return;
-            const writeData = prepareForPrisma(name, row);
-            await delegate.upsert({
-              where: { [pk]: id },
-              create: writeData,
-              update: writeData,
-            });
-          }
-        } catch (err) {
-          console.error(`[prisma-store] upsert ${name}:`, err.message);
-        }
-      })();
+      // Fire-and-forget persist — for critical paths use upsertAsync instead
+      col._persistUpsert(row).catch(err => {
+        console.error(`[prisma-store] upsert ${name} (id=${row[pkField(name)]}):`, err.message, err.meta || '');
+      });
 
+      return row;
+    },
+
+    /** Like upsert() but awaits the DB write — use for critical data (gym creation etc.) */
+    upsertAsync: async (pred, row) => {
+      const data = getSyncData();
+      const i = data.findIndex(pred);
+      if (i < 0) {
+        data.push(row);
+      } else {
+        data[i] = { ...data[i], ...row };
+      }
+      invalidate(name);
+      await col._persistUpsert(row);
       return row;
     },
   };
@@ -292,14 +317,14 @@ export function collection(name) {
 // Known scalar columns per model — only these are written to PG.
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
-  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','gymId','gymIds','createdAt','updatedAt']),
-  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','images','coordinates','amenities','equipment','createdAt','updatedAt']),
+  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','memberProfile','gymId','gymIds','createdAt','updatedAt']),
+  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','images','coordinates','amenities','equipment','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed']),
   payment_requests: new Set(['id','memberId','subscriptionId','tier','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt']),
-  trainers:         new Set(['id','userId','email','displayName','photoUrl','specialties','bio','rating','reviewCount','hourlyRateTzs','experienceYears','status','approvalStatus','availability','createdAt','updatedAt']),
+  trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','specialties','bio','rating','reviewCount','hourlyRateTzs','experienceYears','status','approvalStatus','availability','createdAt','updatedAt']),
   trainer_bookings: new Set(['id','memberId','trainerId','gymId','date','slot','amountTzs','status','createdAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','updatedAt']),

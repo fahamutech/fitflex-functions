@@ -20,6 +20,7 @@ model User {
   passwordHash    String?  // demo only — replace with bcrypt in production
   approvalNote    String?
   onboardingCompleted Boolean @default(false)
+  memberProfile   Json?    // fitness goals, level, height, weight, dob, gender, workout times
   gymId           String?  // primary gym for operators
   gymIds          String[] @default([]) // multiple gyms for operators
   createdAt       DateTime @default(now())
@@ -56,6 +57,10 @@ model Gym {
   coordinates    Json?    // { lat: number, lng: number }
   amenities      String[] @default([]) // e.g. ['WiFi', 'Shower', 'Sauna', 'Parking']
   equipment      String[] @default([]) // e.g. ['Treadmill', 'Dumbbells', 'Bench Press']
+  paymentBank    String?  // Bank/FSP name
+  paymentNumber  String?  // Payment account number
+  paymentNotes   String?  // Notes for payment
+  tinNumber      String?  // Tax Identification Number
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -180,8 +185,10 @@ model TrainerProfile {
   id              String   @id
   userId          String?  @unique
   email           String?
+  phone           String?
   displayName     String
   photoUrl        String?
+  gender          String?  // male | female | other
   specialties     String[] @default([])
   bio             String?
   rating          Float    @default(0)

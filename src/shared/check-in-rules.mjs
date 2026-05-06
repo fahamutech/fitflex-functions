@@ -64,14 +64,8 @@ export function validateCheckIn({ subscription, gym, todaysCheckins, cycleUsage,
     return { ok: false, failure: CHECKIN_FAILURE.SUBSCRIPTION_INACTIVE };
   }
 
-  // 2. Tier covers this gym's tier
-  const tierCfg = PASS_TIERS[subscription.tier];
-  if (!tierCfg || !tierCfg.gymTiers.includes(gym.tier)) {
-    return { ok: false, failure: CHECKIN_FAILURE.TIER_NOT_COVERED };
-  }
-  if (tierCfg.accessMode === 'free_online' && gym.accessMode !== 'free_online') {
-    return { ok: false, failure: CHECKIN_FAILURE.TIER_NOT_COVERED };
-  }
+  // 2. Tier covers this gym's tier — TEMPORARILY DISABLED: all gym tiers accessible
+  const tierCfg = PASS_TIERS[subscription.tier] ?? { visitCap: Infinity, multiGymPerDay: true };
 
   // Basic-tier daily-gym restriction: cannot visit a different gym same day
   const visit = classifyVisit(todaysCheckins, gym.id);

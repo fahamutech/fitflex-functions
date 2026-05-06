@@ -17,9 +17,9 @@ function res() {
   };
 }
 
-test('member can save onboarding goals and personal preferences', () => {
+test('member can save onboarding goals and personal preferences', async () => {
   const out = res();
-  updateMemberProfile.onRequest({
+  await updateMemberProfile.onRequest({
     user: { sub: `usr_profile_${Date.now()}`, userType: 'member' },
     body: {
       displayName: 'Zawadi Mwangi',

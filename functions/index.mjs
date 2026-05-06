@@ -21,6 +21,7 @@ const auditLog = collection('audit_log');
 const paymentRequests = collection('payment_requests');
 const trainers = collection('trainers');
 const trainerBookings = collection('trainer_bookings');
+const platformSettings = collection('platform_settings');
 
 // Lazy init: seed + prime on first request (no top-level await for bfast compat)
 let _initDone = false;
@@ -33,6 +34,7 @@ function ensureInit() {
       await Promise.all([
         users.ready, gyms.ready, subscriptions.ready, checkins.ready, otps.ready,
         auditLog.ready, paymentRequests.ready, trainers.ready, trainerBookings.ready,
+        platformSettings.ready,
       ]);
       _initDone = true;
       console.log('[fitflex] All collections primed from PostgreSQL.');
@@ -79,12 +81,12 @@ function normalizeGymPayload(body = {}, prior) {
   const accessMode = body.accessMode ?? prior.accessMode ?? 'paid_visit';
   const isOnlineFree = venueType === 'online' || accessMode === 'free_online';
   return {
-    id: body.id || prior.id,
+    id: body.id || prior.id || `gym_${randomUUID().slice(0, 8)}`,
     status: body.status || prior.status || 'active',
     commissionRate: Number(body.commissionRate ?? prior.commissionRate ?? 12),
-    name: body.name ?? prior.name,
+    name: body.name ?? prior.name ?? 'Unnamed Gym',
     tier: isOnlineFree ? 'online' : (body.tier ?? prior.tier ?? 'standard'),
-    location: body.location ?? prior.location,
+    location: body.location ?? prior.location ?? '',
     perVisitRate: isOnlineFree ? 0 : Number(body.perVisitRate ?? prior.perVisitRate ?? 0),
     accessMode: isOnlineFree ? 'free_online' : accessMode,
     venueType,
@@ -99,6 +101,10 @@ function normalizeGymPayload(body = {}, prior) {
     operatingHours: body.operatingHours ?? prior.operatingHours ?? null,
     amenities: Array.isArray(body.amenities) ? body.amenities : (prior.amenities || []),
     equipment: Array.isArray(body.equipment) ? body.equipment : (prior.equipment || []),
+    paymentBank: body.paymentBank ?? prior.paymentBank ?? null,
+    paymentNumber: body.paymentNumber ?? prior.paymentNumber ?? null,
+    paymentNotes: body.paymentNotes ?? prior.paymentNotes ?? null,
+    tinNumber: body.tinNumber ?? prior.tinNumber ?? null,
   };
 }
 
@@ -128,8 +134,10 @@ function normalizeTrainerPayload(body = {}, prior = {}) {
     id: body.id || prior.id || `trn_${randomUUID().slice(0, 8)}`,
     userId: body.userId ?? prior.userId ?? null,
     email: body.email ?? prior.email ?? null,
+    phone: body.phone ?? prior.phone ?? null,
     displayName: body.displayName ?? prior.displayName,
     photoUrl: body.photoUrl ?? prior.photoUrl ?? null,
+    gender: body.gender ?? prior.gender ?? null,
     specialties,
     bio: body.bio ?? prior.bio ?? '',
     rating: Number(body.rating ?? prior.rating ?? 0),
@@ -146,7 +154,9 @@ function normalizeTrainerPayload(body = {}, prior = {}) {
 }
 
 function hydrateGymOwner(row) {
-  return { ...row, accountStatus: row.accountStatus || 'active', gym: row.gymId ? gyms.find(g => g.id === row.gymId) || null : null };
+  const ids = row.gymIds || (row.gymId ? [row.gymId] : []);
+  const linkedGyms = ids.map(id => gyms.find(g => g.id === id)).filter(Boolean);
+  return { ...row, gymIds: ids, accountStatus: row.accountStatus || 'active', gym: linkedGyms[0] || null, gyms: linkedGyms };
 }
 
 function hydrateTrainerBooking(row) {
@@ -270,7 +280,7 @@ export const authFirebaseSession = {
     }
 
     if (!user) {
-      user = {
+      const row = {
         id: `usr_${randomUUID().slice(0, 8)}`,
         firebaseUid: fb.uid,
         email: fb.email,
@@ -278,19 +288,23 @@ export const authFirebaseSession = {
         photoUrl: fb.picture,
         userType: isAdminEmail ? 'admin' : selfRole,
         approvalStatus: isAdminEmail ? 'approved' : approvalStatusForRole(selfRole),
+        accountStatus: 'active',
+        onboardingCompleted: false,
         createdAt: new Date().toISOString()
       };
-      users.insert(user);
+      user = await users.upsertAsync(u => u.id === row.id, row);
     } else {
       const patch = {
         firebaseUid: isAdminEmail ? fb.uid : (user.firebaseUid || fb.uid),
         email: user.email || fb.email,
         displayName: fb.name || user.displayName,
         photoUrl: fb.picture || user.photoUrl,
+        accountStatus: user.accountStatus || 'active',
+        onboardingCompleted: user.onboardingCompleted || false,
         approvalStatus: user.approvalStatus || 'approved',
         ...(isAdminEmail ? { userType: 'admin' } : {})
       };
-      user = users.update(u => u.id === user.id, patch);
+      user = await users.upsertAsync(u => u.id === user.id, { ...user, ...patch, updatedAt: new Date().toISOString() });
     }
 
     // Block suspended accounts
@@ -437,6 +451,8 @@ export const me = {
   onGuard: requireAuth(),
   onRequest: (req, res) => {
     const user = users.find(u => u.id === req.user.sub);
+    if (!user) return res.status(404).json({ error: 'user_not_found' });
+
     const subs = subscriptions.filter(s => s.memberId === req.user.sub);
     const sub  = subs
       .filter(s => ['active', 'expired', 'suspended'].includes(s.status))
@@ -459,17 +475,19 @@ export const updateMemberProfile = {
   created, method: 'post', path: '/me/profile',
   description: 'Member: save onboarding goals, personal details, workout times, and notification preferences.',
   onGuard: requireAuth('member'),
-  onRequest: (req, res) => {
+  onRequest: async (req, res) => {
     const user = users.find(u => u.id === req.user.sub) || {
       id: req.user.sub,
       userType: 'member',
+      accountStatus: 'active',
+      approvalStatus: 'approved',
       createdAt: new Date().toISOString()
     };
-    if (!users.find(u => u.id === user.id)) users.insert(user);
     const body = req.body || {};
     const memberProfile = {
       ...(user.memberProfile || {}),
       fitnessGoal: body.fitnessGoal ?? user.memberProfile?.fitnessGoal ?? null,
+      fitnessGoals: Array.isArray(body.fitnessGoals) ? body.fitnessGoals : (user.memberProfile?.fitnessGoals || []),
       fitnessLevel: body.fitnessLevel ?? user.memberProfile?.fitnessLevel ?? null,
       heightCm: body.heightCm ?? user.memberProfile?.heightCm ?? null,
       weightKg: body.weightKg ?? user.memberProfile?.weightKg ?? null,
@@ -483,11 +501,14 @@ export const updateMemberProfile = {
         ...(body.notificationPreferences || {})
       }
     };
-    const updated = users.update(u => u.id === user.id, {
+    const updated = await users.upsertAsync(u => u.id === user.id, {
+      ...user,
       displayName: body.displayName ?? user.displayName,
       phone: body.phone ?? user.phone,
+      email: body.email ?? user.email ?? null,
       onboardingCompleted: true,
-      memberProfile
+      memberProfile,
+      updatedAt: new Date().toISOString()
     });
     res.json({ user: updated });
   }
@@ -682,11 +703,8 @@ export const operatorVerifyQr = {
       const since = +new Date(sub.cycleStartedAt);
       visitsUsed = checkins.filter(c => c.memberId === member.id && c.visitConsumed && +new Date(c.timestamp) >= since).length;
       visitCap = Number.isFinite(tier?.visitCap) ? tier.visitCap : null;
-      const gymAccess = tier?.gymAccess || [];
-      const gymTier = gym?.tier || 'standard';
-      if (!gymAccess.includes(gymTier)) {
-        reason = 'gym_tier_not_covered';
-      } else if (visitCap !== null && visitsUsed >= visitCap) {
+      // Gym-tier access gate TEMPORARILY DISABLED: all active passes may visit any gym.
+      if (visitCap !== null && visitsUsed >= visitCap) {
         reason = 'visit_cap_reached';
       } else {
         eligible = true;
@@ -774,29 +792,53 @@ export const gymOwnerRegister = {
   created, method: 'post', path: '/gym-owner/register',
   description: 'Gym Owner: self-register with gym details. Creates one or more gyms and assigns to owner.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const body = req.body || {};
-    const user = users.find(u => u.id === req.user.sub);
-    if (!user) return res.status(404).json({ error: 'user_not_found' });
-    const gymList = Array.isArray(body.gyms) ? body.gyms : [];
-    if (gymList.length === 0) return res.status(400).json({ error: 'at_least_one_gym_required' });
-    const createdGyms = [];
-    const gymIds = [];
-    for (const g of gymList) {
-      const row = normalizeGymPayload(g, {});
-      row.status = 'active';
-      gyms.upsert(x => x.id === row.id, row);
-      createdGyms.push(row);
-      gymIds.push(row.id);
+  onRequest: async (req, res) => {
+    try {
+      const body = req.body || {};
+      const user = users.find(u => u.id === req.user.sub);
+      if (!user) return res.status(404).json({ error: 'user_not_found' });
+      const gymList = Array.isArray(body.gyms) ? body.gyms : [];
+      if (gymList.length === 0) return res.status(400).json({ error: 'at_least_one_gym_required' });
+      const createdGyms = [];
+      const gymIds = [];
+      for (const g of gymList) {
+        const gymData = { ...g };
+        if (!gymData.images && Array.isArray(gymData.imagePaths)) {
+          gymData.images = gymData.imagePaths;
+          delete gymData.imagePaths;
+        }
+        if (!gymData.id) gymData.id = `gym_${randomUUID().slice(0, 8)}`;
+        const row = normalizeGymPayload(gymData, {});
+        row.status = 'active';
+        await gyms.upsertAsync(x => x.id === row.id, row);
+        createdGyms.push(row);
+        gymIds.push(row.id);
+
+        const trainerIdList = Array.isArray(g.trainerIds) ? g.trainerIds : [];
+        for (const tid of trainerIdList) {
+          const trainer = trainers.find(t => t.id === tid);
+          if (trainer) {
+            const existingGymIds = trainer.gymIds || [];
+            if (!existingGymIds.includes(row.id)) {
+              trainers.update(t => t.id === tid, { gymIds: [...existingGymIds, row.id] });
+            }
+          }
+        }
+      }
+      // Await the user update so gymIds are confirmed in PG before responding
+      await users.upsertAsync(u => u.id === user.id, {
+        ...user,
+        displayName: body.displayName || user.displayName,
+        phone: body.phone || user.phone,
+        gymId: gymIds[0],
+        gymIds,
+        onboardingCompleted: true,
+      });
+      res.json({ gyms: createdGyms, gymIds });
+    } catch (err) {
+      console.error('[gymOwnerRegister] error:', err.message, err.meta || '');
+      res.status(500).json({ error: 'registration_failed', detail: err.message });
     }
-    // Update owner user with gym assignments and mark onboarding done
-    users.update(u => u.id === req.user.sub, {
-      displayName: body.displayName || user.displayName,
-      gymId: gymIds[0],
-      gymIds,
-      onboardingCompleted: true,
-    });
-    res.json({ gyms: createdGyms, gymIds });
   }
 };
 
@@ -863,21 +905,133 @@ export const ownerGymCheckins = {
   }
 };
 
+// Sync the trainer↔gym join so a gym's trainerIds list becomes the source of
+// truth: any trainer not in the new list loses this gym, any new one gains it.
+function syncTrainersForGym(gymId, trainerIdList) {
+  const desired = new Set(Array.isArray(trainerIdList) ? trainerIdList.filter(Boolean) : []);
+  const current = trainers.filter(t => Array.isArray(t.gymIds) && t.gymIds.includes(gymId));
+  // Remove gym from trainers no longer linked
+  for (const t of current) {
+    if (!desired.has(t.id)) {
+      const remaining = (t.gymIds || []).filter(id => id !== gymId);
+      trainers.update(x => x.id === t.id, { gymIds: remaining });
+    }
+  }
+  // Add gym to newly-linked trainers
+  for (const tid of desired) {
+    const t = trainers.find(x => x.id === tid);
+    if (!t) continue;
+    const existing = t.gymIds || [];
+    if (!existing.includes(gymId)) {
+      trainers.update(x => x.id === tid, { gymIds: [...existing, gymId] });
+    }
+  }
+}
+
 export const ownerUpdateGym = {
   created, method: 'put', path: '/owner/gyms/:gymId',
   description: 'Owner: update details of an owned gym.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    try {
+      const owner = users.find(u => u.id === req.user.sub);
+      const ids = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+      if (!ids.includes(req.params.gymId)) return res.status(403).json({ error: 'not_your_gym' });
+      const prior = gyms.find(g => g.id === req.params.gymId);
+      if (!prior) return res.status(404).json({ error: 'gym_not_found' });
+      const body = req.body || {};
+      const row = normalizeGymPayload({ ...body, id: prior.id }, prior);
+      row.status = prior.status; // owner can't change status
+      await gyms.upsertAsync(g => g.id === row.id, row);
+      if (Array.isArray(body.trainerIds)) {
+        syncTrainersForGym(row.id, body.trainerIds);
+      }
+      res.json(row);
+    } catch (err) {
+      console.error('[ownerUpdateGym] error:', err.message, err.meta || '');
+      res.status(500).json({ error: 'update_gym_failed', detail: err.message });
+    }
+  }
+};
+
+export const ownerCreateGym = {
+  created, method: 'post', path: '/owner/gyms',
+  description: 'Owner: add a new gym to their account.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    try {
+      const owner = users.find(u => u.id === req.user.sub);
+      if (!owner) return res.status(404).json({ error: 'user_not_found' });
+      const body = req.body || {};
+      if (!body.name) return res.status(400).json({ error: 'name_required' });
+      const id = `gym_${randomUUID().slice(0, 8)}`;
+      const row = normalizeGymPayload({ ...body, id }, {});
+      row.status = 'active';
+      await gyms.upsertAsync(g => g.id === row.id, row);
+      if (Array.isArray(body.trainerIds) && body.trainerIds.length) {
+        syncTrainersForGym(row.id, body.trainerIds);
+      }
+      const currentGymIds = owner.gymIds || (owner.gymId ? [owner.gymId] : []);
+      const updatedGymIds = [...currentGymIds, id];
+      await users.upsertAsync(u => u.id === owner.id, { ...owner, gymIds: updatedGymIds, gymId: updatedGymIds[0], onboardingCompleted: true });
+      res.status(201).json(row);
+    } catch (err) {
+      console.error('[ownerCreateGym] error:', err.message, err.meta || '');
+      res.status(500).json({ error: 'create_gym_failed', detail: err.message });
+    }
+  }
+};
+
+export const ownerDeleteGym = {
+  created, method: 'post', path: '/owner/gyms/:gymId/delete',
+  description: 'Owner: delete a gym from their account (soft-remove).',
   onGuard: requireAuth('gym_operator'),
   onRequest: (req, res) => {
     const owner = users.find(u => u.id === req.user.sub);
     const ids = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     if (!ids.includes(req.params.gymId)) return res.status(403).json({ error: 'not_your_gym' });
-    const prior = gyms.find(g => g.id === req.params.gymId);
-    if (!prior) return res.status(404).json({ error: 'gym_not_found' });
+    gyms.remove(g => g.id === req.params.gymId);
+    const updatedGymIds = ids.filter(id => id !== req.params.gymId);
+    users.update(u => u.id === req.user.sub, {
+      gymIds: updatedGymIds,
+      gymId: updatedGymIds[0] || null,
+      onboardingCompleted: updatedGymIds.length > 0,
+    });
+    res.json({ ok: true });
+  }
+};
+
+export const ownerUpdateTrainer = {
+  created, method: 'post', path: '/owner/trainers/:trainerId',
+  description: 'Owner: update a trainer assigned to their gym(s).',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: (req, res) => {
+    const owner = users.find(u => u.id === req.user.sub);
+    const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+    const trainer = trainers.find(t => t.id === req.params.trainerId);
+    if (!trainer) return res.status(404).json({ error: 'trainer_not_found' });
+    const tGymIds = trainer.gymIds || [];
+    if (!tGymIds.some(id => ownerGymIds.includes(id))) return res.status(403).json({ error: 'trainer_not_at_your_gym' });
     const body = req.body || {};
-    const row = normalizeGymPayload({ ...body, id: prior.id }, prior);
-    row.status = prior.status; // owner can't change status
-    gyms.upsert(g => g.id === row.id, row);
-    res.json(row);
+    const row = normalizeTrainerPayload({ ...body, id: trainer.id, userId: trainer.userId, email: trainer.email }, trainer);
+    trainers.upsert(t => t.id === row.id, row);
+    res.json(hydrateTrainer(row));
+  }
+};
+
+export const ownerRemoveTrainer = {
+  created, method: 'post', path: '/owner/trainers/:trainerId/remove',
+  description: 'Owner: remove a trainer from all their gym(s). The trainer profile persists but is unlinked.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: (req, res) => {
+    const owner = users.find(u => u.id === req.user.sub);
+    const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+    const trainer = trainers.find(t => t.id === req.params.trainerId);
+    if (!trainer) return res.status(404).json({ error: 'trainer_not_found' });
+    const tGymIds = trainer.gymIds || [];
+    const remainingGymIds = tGymIds.filter(id => !ownerGymIds.includes(id));
+    trainers.update(t => t.id === trainer.id, { gymIds: remainingGymIds });
+    res.json({ ok: true });
   }
 };
 
@@ -892,7 +1046,8 @@ export const ownerAddTrainer = {
     if (!body.email) return res.status(400).json({ error: 'email_required' });
     if (!body.displayName) return res.status(400).json({ error: 'displayName_required' });
     const gymIds = parseStringList(body.gymIds, []).filter(id => ownerGymIds.includes(id));
-    if (gymIds.length === 0) return res.status(400).json({ error: 'must_assign_to_at_least_one_owned_gym' });
+    // Allow creating trainers without gym assignment during onboarding (owner has no gyms yet)
+    if (gymIds.length === 0 && ownerGymIds.length > 0) return res.status(400).json({ error: 'must_assign_to_at_least_one_owned_gym' });
 
     // Unique email per user type check
     const existingUser = users.find(u => u.email === body.email && u.userType === 'trainer');
@@ -930,12 +1085,16 @@ export const ownerListTrainers = {
 
 export const trainerRegister = {
   created, method: 'post', path: '/trainer/register',
-  description: 'Trainer: self-register full profile (displayName, specialties, bio, hourlyRate, experience, availability). Creates trainer profile if missing.',
+  description: 'Trainer: self-register full profile (displayName, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing.',
   onGuard: requireAuth('trainer'),
   onRequest: (req, res) => {
     const body = req.body || {};
     const user = users.find(u => u.id === req.user.sub);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
+    if (!body.photoUrl) return res.status(400).json({ error: 'photoUrl_required' });
+    const validGenders = ['male', 'female', 'other'];
+    if (!body.gender || !validGenders.includes(body.gender))
+      return res.status(400).json({ error: 'gender_required', validValues: validGenders });
     let profile = trainers.find(t => t.userId === req.user.sub || t.id === req.user.sub);
     const row = normalizeTrainerPayload({
       ...body,
@@ -1301,13 +1460,17 @@ export const adminUpsertGymOwner = {
         existingRole: duplicateEmail.userType
       });
     }
+    const gymIds = Array.isArray(body.gymIds) ? body.gymIds : (prior?.gymIds || (body.gymId ? [body.gymId] : (prior?.gymId ? [prior.gymId] : [])));
     const row = {
       id,
       userType: 'gym_operator',
       email: body.email ?? prior?.email,
       displayName: body.displayName ?? prior?.displayName ?? null,
+      phone: body.phone ?? prior?.phone ?? null,
       photoUrl: body.photoUrl ?? prior?.photoUrl ?? null,
-      gymId: body.gymId ?? prior?.gymId ?? null,
+      gymId: gymIds[0] || body.gymId || prior?.gymId || null,
+      gymIds,
+      onboardingCompleted: body.onboardingCompleted ?? prior?.onboardingCompleted ?? false,
       accountStatus: body.accountStatus ?? prior?.accountStatus ?? 'active',
       approvalStatus: body.approvalStatus ?? prior?.approvalStatus ?? 'approved',
       createdAt: prior?.createdAt || new Date().toISOString(),
@@ -1868,8 +2031,6 @@ export const adminGetInvoice = {
 };
 
 // ───────────────────────────────────────── Platform Settings ───────────────────────────────
-
-const platformSettings = collection('platform_settings');
 
 // Seed default settings if none exist
 function ensureDefaultSettings() {
