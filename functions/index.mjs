@@ -65,7 +65,8 @@ function approvalStatusForRole(role) {
   return ['gym_operator', 'trainer'].includes(role) ? 'pending_approval' : 'approved';
 }
 
-function normalizeGymPayload(body = {}, prior = {}) {
+function normalizeGymPayload(body = {}, prior) {
+  prior = prior || {};
   const images = Array.isArray(body.images)
     ? body.images
     : String(body.images || prior.images?.join('\n') || '')
