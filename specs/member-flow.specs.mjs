@@ -36,6 +36,23 @@ test('member can save onboarding goals and personal preferences', async () => {
   assert.deepEqual(out.body.user.memberProfile.preferredWorkoutTimes, ['early_morning', 'evening']);
 });
 
+test('non-member can save basic profile details without member-only guard', async () => {
+  const out = res();
+  await updateMemberProfile.onRequest({
+    user: { sub: `usr_owner_profile_${Date.now()}`, userType: 'gym_operator' },
+    body: {
+      displayName: 'Gym Owner',
+      phone: '+255700111222'
+    }
+  }, out);
+
+  assert.equal(out.statusCode, 200);
+  assert.equal(out.body.user.userType, 'gym_operator');
+  assert.equal(out.body.user.displayName, 'Gym Owner');
+  assert.equal(out.body.user.phone, '+255700111222');
+  assert.equal(out.body.user.onboardingCompleted, undefined);
+});
+
 test('member trainer discovery supports list, detail, and booking branch', () => {
   const list = res();
   listTrainers.onRequest({}, list);

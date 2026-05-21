@@ -26,3 +26,18 @@ export function requireAuth(...roles) {
     next();
   };
 }
+
+/**
+ * ACL scope guard for portal staff.
+ * Super-admins (portalUser: false or missing) pass freely.
+ * Portal staff (portalUser: true) must have the scope in their aclPermissions JWT claim.
+ * Always call AFTER requireAuth.
+ */
+export function requireAcl(scope) {
+  return (req, res, next) => {
+    const { portalUser, aclPermissions } = req.user || {};
+    if (!portalUser) return next(); // super-admin — unrestricted
+    if (Array.isArray(aclPermissions) && aclPermissions.includes(scope)) return next();
+    return res.status(403).json({ error: 'acl_forbidden', requiredScope: scope });
+  };
+}

@@ -4,8 +4,8 @@
 import { randomUUID } from 'node:crypto';
 import { collection } from '../src/infra/prisma-store.mjs';
 import { ensureSeedPrisma } from '../src/infra/seed-prisma.mjs';
-import { sign as signJwt, requireAuth } from '../src/auth/jwt.mjs';
-import { verifyFirebaseIdToken } from '../src/auth/firebase.mjs';
+import { sign as signJwt, requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../src/auth/firebase.mjs';
 import { issue as issueQr, verify as verifyQr } from '../src/auth/qr-token.mjs';
 import { createCheckInService } from '../src/services/check-in-service.mjs';
 import { PASS_TIERS } from '../src/shared/constants.mjs';
@@ -58,6 +58,7 @@ function isConfiguredAdminEmail(email) {
 }
 
 function normalizeRequestedRole(role) {
+  if (role === 'admin') return 'admin';
   if (role === 'gym_owner' || role === 'gym_operator') return 'gym_operator';
   if (role === 'trainer') return 'trainer';
   return 'member';
@@ -143,9 +144,10 @@ function normalizeTrainerPayload(body = {}, prior = {}) {
     rating: Number(body.rating ?? prior.rating ?? 0),
     reviewCount: Number(body.reviewCount ?? prior.reviewCount ?? 0),
     hourlyRateTzs: Number(body.hourlyRateTzs ?? prior.hourlyRateTzs ?? 0),
+    sessionRateCurrency: body.sessionRateCurrency ?? prior.sessionRateCurrency ?? 'TZS',
     experienceYears: Number(body.experienceYears ?? prior.experienceYears ?? 0),
     gymIds,
-    status: body.status ?? prior.status ?? 'active',
+    status: ['active', 'inactive', 'suspended'].includes(body.status) ? body.status : (prior.status ?? 'active'),
     approvalStatus: body.approvalStatus ?? prior.approvalStatus ?? 'approved',
     availability: Array.isArray(body.availability) ? body.availability : (prior.availability || []),
     createdAt: prior.createdAt || new Date().toISOString(),
@@ -236,23 +238,31 @@ export const authVerifyOtp = {
 
 export const authLogin = {
   created, method: 'post', path: '/auth/login',
-  description: 'Email+password login (operators & admins). Demo only — replace with bcrypt.',
-  requestSample: { email: 'operator@iron-paradise.tz', password: 'operator123' },
-  responseSample: { token: 'jwt...', user: { id: 'usr_op_1', userType: 'gym_operator' } },
+  description: 'Email+password login for portal-only admin users. Uses Firebase idToken verification path for production; demo hash in dev.',
+  requestSample: { email: 'staff@fitflex.af', password: 'securepassword' },
+  responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'admin' } },
   onRequest: (req, res) => {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
-    // Demo passwords blocked in production
-    if (process.env.NODE_ENV === 'production') {
-      return res.status(403).json({ error: 'demo_login_disabled_in_production' });
-    }
     const user = users.find(u => u.email === email);
-    if (!user || user.passwordHash !== `demo:${password}`)
-      return res.status(401).json({ error: 'invalid_credentials' });
+    if (!user) return res.status(401).json({ error: 'invalid_credentials' });
     // Block suspended accounts
     if (user.accountStatus === 'suspended')
       return res.status(403).json({ error: 'account_suspended' });
-    const token = signJwt({ sub: user.id, userType: user.userType, gymId: user.gymId });
+    // Portal users authenticate via Firebase client SDK (email/password) then hit /auth/firebase/session
+    // This endpoint handles dev-mode demo passwords only
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'use_firebase_email_password_sign_in' });
+    }
+    if (user.passwordHash !== `demo:${password}`)
+      return res.status(401).json({ error: 'invalid_credentials' });
+    const token = signJwt({
+      sub: user.id,
+      userType: user.userType,
+      gymId: user.gymId,
+      portalUser: user.portalUser || false,
+      aclPermissions: user.aclPermissions || [],
+    });
     res.json({ token, user });
   }
 };
@@ -271,15 +281,35 @@ export const authFirebaseSession = {
     const isAdminEmail = isConfiguredAdminEmail(fb.email);
     let user = users.find(u => u.firebaseUid === fb.uid) || (fb.email ? users.find(u => u.email === fb.email) : null);
 
-    if (user && !isAdminEmail && user.userType !== selfRole) {
-      return res.status(409).json({
-        error: 'email_already_used_for_different_role',
-        existingRole: user.userType,
-        requestedRole: selfRole
-      });
-    }
-
-    if (!user) {
+    if (user) {
+      // Existing user: NEVER change their stored userType via this endpoint.
+      // Only exception: configured admin email always stays admin.
+      // Role-conflict: if a non-admin email tries to sign in requesting a role
+      // different from what they already have, reject.
+      if (!isAdminEmail && user.userType !== 'admin' && selfRole !== 'admin' && user.userType !== selfRole) {
+        return res.status(409).json({
+          error: 'email_already_used_for_different_role',
+          existingRole: user.userType,
+          requestedRole: selfRole
+        });
+      }
+      const patch = {
+        firebaseUid: user.firebaseUid || fb.uid,
+        email: user.email || fb.email,
+        displayName: fb.name || user.displayName,
+        photoUrl: fb.picture || user.photoUrl,
+        accountStatus: user.accountStatus || 'active',
+        onboardingCompleted: user.onboardingCompleted || false,
+        approvalStatus: user.approvalStatus || 'approved',
+        ...(isAdminEmail ? { userType: 'admin' } : {})
+      };
+      user = await users.upsertAsync(u => u.id === user.id, { ...user, ...patch, updatedAt: new Date().toISOString() });
+    } else {
+      // New user: only allow creation if NOT requesting admin.
+      // Admin/portal users must be pre-created by an existing admin.
+      if (selfRole === 'admin' && !isAdminEmail) {
+        return res.status(403).json({ error: 'admin_self_registration_not_allowed' });
+      }
       const row = {
         id: `usr_${randomUUID().slice(0, 8)}`,
         firebaseUid: fb.uid,
@@ -293,20 +323,12 @@ export const authFirebaseSession = {
         createdAt: new Date().toISOString()
       };
       user = await users.upsertAsync(u => u.id === row.id, row);
-    } else {
-      const patch = {
-        firebaseUid: isAdminEmail ? fb.uid : (user.firebaseUid || fb.uid),
-        email: user.email || fb.email,
-        displayName: fb.name || user.displayName,
-        photoUrl: fb.picture || user.photoUrl,
-        accountStatus: user.accountStatus || 'active',
-        onboardingCompleted: user.onboardingCompleted || false,
-        approvalStatus: user.approvalStatus || 'approved',
-        ...(isAdminEmail ? { userType: 'admin' } : {})
-      };
-      user = await users.upsertAsync(u => u.id === user.id, { ...user, ...patch, updatedAt: new Date().toISOString() });
     }
 
+    // Block portal-only staff from logging in via the app's Firebase session
+    if (user.portalUser === true && requestedRole !== 'admin') {
+      return res.status(403).json({ error: 'portal_user_app_access_denied' });
+    }
     // Block suspended accounts
     if (user.accountStatus === 'suspended') {
       return res.status(403).json({ error: 'account_suspended' });
@@ -320,7 +342,9 @@ export const authFirebaseSession = {
       sub: user.id,
       userType: user.userType,
       email: user.email,
-      gymId: user.gymId
+      gymId: user.gymId,
+      portalUser: user.portalUser || false,
+      aclPermissions: user.aclPermissions || [],
     });
     res.json({ token, user, pendingApproval: user.approvalStatus === 'pending_approval' });
   }
@@ -348,7 +372,7 @@ export const adminUpsertGym = {
   created, method: 'post', path: '/admin/gyms',
   description: 'Admin: create or update a gym (tier set here only — audit logged).',
   requestSample: { id: 'gym_006', name: 'New Gym', tier: 'midtier', location: 'DSM', perVisitRate: 8000, commissionRate: 12 },
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('gyms')],
   onRequest: (req, res) => {
     const body = req.body || {};
     if (!body.name || !body.tier) return res.status(400).json({ error: 'name_and_tier_required' });
@@ -368,7 +392,7 @@ export const adminUpsertGym = {
 export const adminDeleteGym = {
   created, method: 'delete', path: '/admin/gyms/:id',
   description: 'Admin: delete a gym from the pilot catalogue.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('gyms')],
   onRequest: (req, res) => {
     const prior = gyms.find(g => g.id === req.params.id);
     if (!prior) return res.status(404).json({ error: 'not_found' });
@@ -473,17 +497,32 @@ export const me = {
 
 export const updateMemberProfile = {
   created, method: 'post', path: '/me/profile',
-  description: 'Member: save onboarding goals, personal details, workout times, and notification preferences.',
-  onGuard: requireAuth('member'),
+  description: 'Authenticated user: save profile details; members can also save onboarding goals and preferences.',
+  onGuard: requireAuth(),
   onRequest: async (req, res) => {
+    const role = req.user.userType || 'member';
     const user = users.find(u => u.id === req.user.sub) || {
       id: req.user.sub,
-      userType: 'member',
+      userType: role,
       accountStatus: 'active',
-      approvalStatus: 'approved',
+      approvalStatus: approvalStatusForRole(role),
       createdAt: new Date().toISOString()
     };
     const body = req.body || {};
+    const baseProfile = {
+      ...user,
+      displayName: body.displayName ?? user.displayName,
+      phone: body.phone ?? user.phone,
+      email: body.email ?? user.email ?? null,
+      photoUrl: body.photoUrl ?? user.photoUrl ?? null,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (user.userType !== 'member') {
+      const updated = await users.upsertAsync(u => u.id === user.id, baseProfile);
+      return res.json({ user: updated });
+    }
+
     const memberProfile = {
       ...(user.memberProfile || {}),
       fitnessGoal: body.fitnessGoal ?? user.memberProfile?.fitnessGoal ?? null,
@@ -502,13 +541,9 @@ export const updateMemberProfile = {
       }
     };
     const updated = await users.upsertAsync(u => u.id === user.id, {
-      ...user,
-      displayName: body.displayName ?? user.displayName,
-      phone: body.phone ?? user.phone,
-      email: body.email ?? user.email ?? null,
+      ...baseProfile,
       onboardingCompleted: true,
       memberProfile,
-      updatedAt: new Date().toISOString()
     });
     res.json({ user: updated });
   }
@@ -535,7 +570,7 @@ export const listTrainers = {
     const q = String(req.query?.q || '').toLowerCase();
     const specialty = String(req.query?.specialty || '').toLowerCase();
     const list = trainers
-      .filter(t => t.status === 'active')
+      .filter(t => t.status === 'active' || t.status === 'inactive')
       .filter(t => !q || t.displayName.toLowerCase().includes(q) || t.specialties.join(' ').toLowerCase().includes(q))
       .filter(t => !specialty || t.specialties.some(s => s.toLowerCase().includes(specialty)))
       .map(hydrateTrainer);
@@ -556,7 +591,7 @@ export const getTrainer = {
 export const adminListTrainers = {
   created, method: 'get', path: '/admin/trainers',
   description: 'Admin: list all trainer profiles with linked gyms.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('trainers')],
   onRequest: (_, res) => {
     res.json(trainers.all().map(hydrateTrainer).sort((a, b) => String(a.displayName || '').localeCompare(String(b.displayName || ''))));
   }
@@ -565,7 +600,7 @@ export const adminListTrainers = {
 export const adminUpsertTrainer = {
   created, method: 'post', path: '/admin/trainers',
   description: 'Admin: create or update trainer profile data used by member discovery.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('trainers')],
   onRequest: (req, res) => {
     const body = req.body || {};
     if (!body.id && !body.displayName) return res.status(400).json({ error: 'displayName_required' });
@@ -587,7 +622,7 @@ export const adminUpsertTrainer = {
 export const adminDeleteTrainer = {
   created, method: 'delete', path: '/admin/trainers/:id',
   description: 'Admin: delete trainer profile if it has no bookings.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('trainers')],
   onRequest: (req, res) => {
     const prior = trainers.find(t => t.id === req.params.id);
     if (!prior) return res.status(404).json({ error: 'not_found' });
@@ -635,7 +670,7 @@ export const createTrainerBooking = {
 export const adminListTrainerBookings = {
   created, method: 'get', path: '/admin/trainer-bookings',
   description: 'Admin: list trainer sessions and booking status.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('trainers')],
   onRequest: (_, res) => {
     const list = trainerBookings
       .all()
@@ -648,7 +683,7 @@ export const adminListTrainerBookings = {
 export const adminUpdateTrainerBooking = {
   created, method: 'post', path: '/admin/trainer-bookings/:id',
   description: 'Admin: update trainer booking status.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('trainers')],
   onRequest: (req, res) => {
     const { status } = req.body || {};
     if (!['confirmed', 'completed', 'cancelled'].includes(status)) return res.status(400).json({ error: 'invalid_status' });
@@ -1035,6 +1070,89 @@ export const ownerRemoveTrainer = {
   }
 };
 
+export const ownerCreateMember = {
+  created, method: 'post', path: '/owner/members',
+  description: 'Owner: register a new member under their gym with payment info and create a subscription.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = users.find(u => u.id === req.user.sub);
+    const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+    if (ownerGymIds.length === 0) return res.status(400).json({ error: 'owner_has_no_gyms' });
+
+    const { displayName, email, phone, gymId, paidAmount, durationUnit, startDate, endDate, tier } = req.body || {};
+    if (!displayName?.trim()) return res.status(400).json({ error: 'displayName_required' });
+    if (!email?.trim() && !phone?.trim()) return res.status(400).json({ error: 'email_or_phone_required' });
+    if (!['D', 'W', 'M'].includes(durationUnit)) return res.status(400).json({ error: 'durationUnit_must_be_D_W_or_M' });
+    if (!startDate || !endDate) return res.status(400).json({ error: 'startDate_and_endDate_required' });
+
+    const assignedGymId = gymId && ownerGymIds.includes(gymId) ? gymId : ownerGymIds[0];
+
+    // Check for existing member with same email
+    if (email) {
+      const existing = users.find(u => u.email === email && u.userType === 'member');
+      if (existing) return res.status(409).json({ error: 'email_already_registered' });
+    }
+
+    const memberId = `usr_${randomUUID().slice(0, 8)}`;
+    const memberRow = {
+      id: memberId,
+      displayName: displayName.trim(),
+      email: email?.trim() || null,
+      phone: phone?.trim() || null,
+      userType: 'member',
+      accountStatus: 'active',
+      approvalStatus: 'approved',
+      onboardingCompleted: true,
+      createdAt: new Date().toISOString(),
+    };
+    await users.upsertAsync(u => u.id === memberId, memberRow);
+
+    // Create subscription
+    const subTier = tier || 'basic';
+    const sub = {
+      id: `sub_${randomUUID().slice(0, 8)}`,
+      memberId,
+      gymId: assignedGymId,
+      tier: subTier,
+      type: 'gym_direct',
+      status: 'active',
+      startDate,
+      expiresAt: endDate,
+      renewsAt: endDate,
+      createdAt: new Date().toISOString(),
+    };
+    subscriptions.insert(sub);
+
+    // Create payment record
+    if (paidAmount && Number(paidAmount) > 0) {
+      paymentRequests.insert({
+        id: `pay_${randomUUID().slice(0, 8)}`,
+        memberId,
+        subscriptionId: sub.id,
+        tier: subTier,
+        amountTzs: Number(paidAmount),
+        durationUnit: durationUnit || 'M',
+        startDate,
+        endDate,
+        status: 'approved',
+        provider: 'cash',
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: req.user?.sub, action: 'owner_created_member',
+      target: memberId, before: null, after: { email: memberRow.email, gymId: assignedGymId }
+    });
+
+    res.status(201).json({
+      member: memberRow,
+      subscription: sub,
+    });
+  }
+};
+
 export const ownerAddTrainer = {
   created, method: 'post', path: '/owner/trainers',
   description: 'Owner: add a trainer to their gym(s). Trainer becomes auto-active. Email must be unique per user type.',
@@ -1208,14 +1326,14 @@ export const memberPaymentHistory = {
 export const adminListGyms = {
   created, method: 'get', path: '/admin/gyms',
   description: 'Admin: list gyms.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('gyms')],
   onRequest: (_, res) => res.json(gyms.all())
 };
 
 export const adminPaymentRequests = {
   created, method: 'get', path: '/admin/payment-requests',
   description: 'Admin: list pilot payment requests.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: (_, res) => {
     const list = paymentRequests.all()
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))
@@ -1231,7 +1349,7 @@ export const adminPaymentRequests = {
 export const adminDecidePaymentRequest = {
   created, method: 'post', path: '/admin/payment-requests/:id/decision',
   description: 'Admin: approve or reject a pilot payment request. Approval activates the subscription.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: (req, res) => {
     const { decision, reference, note } = req.body || {};
     if (!['approve', 'reject'].includes(decision)) return res.status(400).json({ error: 'invalid_decision' });
@@ -1269,7 +1387,7 @@ export const adminDecidePaymentRequest = {
 export const adminUpdatePaymentRequest = {
   created, method: 'post', path: '/admin/payment-requests/:id',
   description: 'Admin: update pilot payment request status, reference, and note.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: (req, res) => {
     const { status, reference, note } = req.body || {};
     const allowed = ['pending', 'approved', 'rejected', 'cancelled'];
@@ -1301,7 +1419,7 @@ export const adminUpdatePaymentRequest = {
 export const adminMembers = {
   created, method: 'get', path: '/admin/members',
   description: 'Admin: members and their latest subscription/payment state.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('members')],
   onRequest: (_, res) => {
     const list = users.filter(u => u.userType === 'member').map(u => ({
       ...u,
@@ -1318,7 +1436,7 @@ export const adminMembers = {
 export const adminUpsertMember = {
   created, method: 'post', path: '/admin/members',
   description: 'Admin: create or update a member profile.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('members')],
   onRequest: (req, res) => {
     const body = req.body || {};
     if (!body.id && !body.email && !body.phone) return res.status(400).json({ error: 'email_or_phone_required' });
@@ -1372,7 +1490,7 @@ export const adminUpsertMember = {
 export const adminMemberPayments = {
   created, method: 'get', path: '/admin/members/:id/payments',
   description: 'Admin: get all payment requests for a specific member.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('members')],
   onRequest: (req, res) => {
     const memberId = req.params.id;
     const list = paymentRequests
@@ -1382,10 +1500,25 @@ export const adminMemberPayments = {
   }
 };
 
+export const adminMemberQr = {
+  created, method: 'get', path: '/admin/members/:id/qr',
+  description: 'Admin: issue a rotating member QR token for portal-assisted check-in.',
+  onGuard: [requireAuth('admin'), requireAcl('members')],
+  onRequest: (req, res) => {
+    const member = users.find(u => u.id === req.params.id && u.userType === 'member');
+    if (!member) return res.status(404).json({ error: 'member_not_found' });
+    const active = subscriptions
+      .filter(s => s.memberId === member.id && s.status === 'active')
+      .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0];
+    if (!active) return res.status(403).json({ error: 'active_subscription_required' });
+    res.json(issueQr(member.id));
+  }
+};
+
 export const adminMemberCheckins = {
   created, method: 'get', path: '/admin/members/:id/checkins',
   description: 'Admin: visit history for a specific member, with optional ?from=&to= date range.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('members')],
   onRequest: (req, res) => {
     const memberId = req.params.id;
     const from = req.query?.from ? +new Date(req.query.from + 'T00:00:00Z') : 0;
@@ -1402,7 +1535,7 @@ export const adminMemberCheckins = {
 export const adminSetMemberStatus = {
   created, method: 'post', path: '/admin/members/:id/status',
   description: 'Admin: activate or suspend a member and latest subscription.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('members')],
   onRequest: (req, res) => {
     const { status } = req.body || {};
     if (!['active', 'suspended'].includes(status)) return res.status(400).json({ error: 'invalid_status' });
@@ -1433,7 +1566,7 @@ export const adminSetMemberStatus = {
 export const adminListGymOwners = {
   created, method: 'get', path: '/admin/gym-owners',
   description: 'Admin: list gym owner/operator profiles with assigned gym.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('owners')],
   onRequest: (_, res) => {
     const list = users
       .filter(u => u.userType === 'gym_operator')
@@ -1446,7 +1579,7 @@ export const adminListGymOwners = {
 export const adminUpsertGymOwner = {
   created, method: 'post', path: '/admin/gym-owners',
   description: 'Admin: create or update gym owner profile and gym assignment.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('owners')],
   onRequest: (req, res) => {
     const body = req.body || {};
     if (!body.id && !body.email) return res.status(400).json({ error: 'email_required' });
@@ -1489,7 +1622,7 @@ export const adminUpsertGymOwner = {
 export const adminDeleteGymOwner = {
   created, method: 'delete', path: '/admin/gym-owners/:id',
   description: 'Admin: delete a gym owner/operator profile if it has no check-in activity.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('owners')],
   onRequest: (req, res) => {
     const prior = users.find(u => u.id === req.params.id && u.userType === 'gym_operator');
     if (!prior) return res.status(404).json({ error: 'not_found' });
@@ -1507,7 +1640,7 @@ export const adminDeleteGymOwner = {
 export const adminRoleApprovals = {
   created, method: 'get', path: '/admin/role-approvals',
   description: 'Admin: list gym owner and trainer profiles waiting for approval.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('approvals')],
   onRequest: (req, res) => {
     const status = req.query?.status || 'pending_approval';
     const list = users
@@ -1521,7 +1654,7 @@ export const adminRoleApprovals = {
 export const adminDecideRoleApproval = {
   created, method: 'post', path: '/admin/role-approvals/:id/decision',
   description: 'Admin: approve or reject a pending gym owner or trainer profile.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('approvals')],
   onRequest: (req, res) => {
     const { decision, note } = req.body || {};
     if (!['approve', 'reject'].includes(decision)) return res.status(400).json({ error: 'invalid_decision' });
@@ -2093,7 +2226,7 @@ export const adminUpdateSettings = {
     const current = ensureDefaultSettings();
     const before = { ...current };
     const patch = req.body || {};
-    const allowed = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency'];
+    const allowed = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency', 'trainerSpecialties'];
     const updates = {};
     for (const k of allowed) {
       if (patch[k] !== undefined) updates[k] = patch[k];
@@ -2106,6 +2239,215 @@ export const adminUpdateSettings = {
       target: 'platform', before, after: updated
     });
     res.json(updated);
+  }
+};
+
+// ───────────────────────────────────────── Specialties endpoints ─────────────────────────
+
+const DEFAULT_SPECIALTIES = [
+  'Yoga', 'Cardio', 'Aerobics', 'Weight Loss', 'Muscle Gain', 'Dance',
+  'Physiotherapy', 'Women Only', 'Weight Training', 'Boxing', 'Pilates',
+  'CrossFit', 'Swimming', 'Nutrition', 'HIIT', 'Stretching', 'Zumba',
+  'Kickboxing', 'Calisthenics', 'Martial Arts',
+];
+
+function getSpecialtiesList() {
+  const settings = ensureDefaultSettings();
+  return settings.trainerSpecialties || DEFAULT_SPECIALTIES;
+}
+
+export const publicGetSpecialties = {
+  created, method: 'get', path: '/settings/specialties',
+  description: 'Public: list trainer specialty options.',
+  onRequest: (_req, res) => res.json(getSpecialtiesList())
+};
+
+export const adminGetSpecialties = {
+  created, method: 'get', path: '/admin/settings/specialties',
+  description: 'Admin: get trainer specialty list.',
+  onGuard: requireAuth('admin'),
+  onRequest: (_req, res) => res.json(getSpecialtiesList())
+};
+
+export const adminAddSpecialty = {
+  created, method: 'post', path: '/admin/settings/specialties',
+  description: 'Admin: add a trainer specialty.',
+  onGuard: [requireAuth('admin'), requireAcl('settings')],
+  onRequest: (req, res) => {
+    const { name } = req.body || {};
+    if (!name?.trim()) return res.status(400).json({ error: 'name_required' });
+    const list = getSpecialtiesList();
+    const trimmed = name.trim();
+    if (list.some(s => s.toLowerCase() === trimmed.toLowerCase())) return res.status(409).json({ error: 'specialty_exists' });
+    const updated = [...list, trimmed];
+    platformSettings.update(s => s.id === 'platform', { trainerSpecialties: updated, updatedAt: new Date().toISOString() });
+    res.json(updated);
+  }
+};
+
+export const adminDeleteSpecialty = {
+  created, method: 'delete', path: '/admin/settings/specialties/:name',
+  description: 'Admin: remove a trainer specialty.',
+  onGuard: [requireAuth('admin'), requireAcl('settings')],
+  onRequest: (req, res) => {
+    const name = decodeURIComponent(req.params.name || '');
+    const list = getSpecialtiesList();
+    const updated = list.filter(s => s.toLowerCase() !== name.toLowerCase());
+    platformSettings.update(s => s.id === 'platform', { trainerSpecialties: updated, updatedAt: new Date().toISOString() });
+    res.json(updated);
+  }
+};
+
+// ───────────────────────────────────────── Portal User Management ────────────────────────
+
+const PORTAL_ACL_SCOPES = ['gyms', 'owners', 'trainers', 'members', 'payments', 'approvals', 'settings', 'users'];
+
+export const adminListPortalUsers = {
+  created, method: 'get', path: '/admin/portal-users',
+  description: 'Admin: list all portal-only staff users with their ACL permissions.',
+  onGuard: [requireAuth('admin'), requireAcl('users')],
+  onRequest: (_, res) => {
+    const list = users
+      .filter(u => u.portalUser === true || u.userType === 'admin')
+      .map(u => ({
+        id: u.id,
+        email: u.email,
+        displayName: u.displayName,
+        userType: u.userType,
+        accountStatus: u.accountStatus || 'active',
+        portalUser: u.portalUser || false,
+        aclPermissions: u.aclPermissions || [],
+        createdAt: u.createdAt,
+        isEnvAdmin: isConfiguredAdminEmail(u.email),
+      }));
+    res.json(list);
+  }
+};
+
+export const adminCreatePortalUser = {
+  created, method: 'post', path: '/admin/portal-users',
+  description: 'Admin: create a portal-only staff user. Registers them in Firebase with email/password, stores in DB with ACL.',
+  onGuard: [requireAuth('admin'), requireAcl('users')],
+  onRequest: async (req, res) => {
+    const { email, password, displayName, aclPermissions = [] } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
+    if (!Array.isArray(aclPermissions)) return res.status(400).json({ error: 'aclPermissions_must_be_array' });
+    const invalid = aclPermissions.filter(p => !PORTAL_ACL_SCOPES.includes(p));
+    if (invalid.length) return res.status(400).json({ error: 'invalid_acl_scopes', invalid });
+    const existing = users.find(u => u.email === email);
+    if (existing) return res.status(409).json({ error: 'email_already_exists' });
+
+    // Register in Firebase Auth
+    let firebaseUid = null;
+    try {
+      initFirebaseAdmin();
+      const fbUser = await getAdminAuth().createUser({ email, password, displayName: displayName || email });
+      firebaseUid = fbUser.uid;
+    } catch (fbErr) {
+      console.error('[portal-users] Firebase user creation failed:', fbErr?.message);
+      return res.status(502).json({ error: 'firebase_user_creation_failed', detail: fbErr?.message });
+    }
+
+    const row = {
+      id: `usr_${randomUUID().slice(0, 8)}`,
+      firebaseUid,
+      email,
+      displayName: displayName || email,
+      userType: 'admin',
+      accountStatus: 'active',
+      approvalStatus: 'approved',
+      portalUser: true,
+      aclPermissions,
+      onboardingCompleted: true,
+      createdAt: new Date().toISOString(),
+    };
+    const created_user = await users.upsertAsync(u => u.id === row.id, row);
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: req.user?.sub, action: 'portal_user_created',
+      target: row.id, before: null, after: { email: row.email, aclPermissions }
+    });
+    res.status(201).json({
+      id: created_user.id,
+      email: created_user.email,
+      displayName: created_user.displayName,
+      userType: created_user.userType,
+      accountStatus: created_user.accountStatus,
+      portalUser: true,
+      aclPermissions: created_user.aclPermissions || [],
+      createdAt: created_user.createdAt,
+    });
+  }
+};
+
+export const adminUpdatePortalUser = {
+  created, method: 'put', path: '/admin/portal-users/:id',
+  description: 'Admin: update ACL permissions or status of a portal staff user.',
+  onGuard: [requireAuth('admin'), requireAcl('users')],
+  onRequest: async (req, res) => {
+    // Find any admin-type user by id — allows repairing misclassified records
+    const target = users.find(u => u.id === req.params.id && u.userType === 'admin');
+    if (!target) return res.status(404).json({ error: 'portal_user_not_found' });
+    // Env-configured super-admins are immutable
+    if (target.email && isConfiguredAdminEmail(target.email)) {
+      return res.status(403).json({ error: 'env_admin_immutable', message: 'Super-admin accounts from environment config cannot be modified.' });
+    }
+    const { aclPermissions, accountStatus, displayName, portalUser } = req.body || {};
+    const patch = {};
+    if (Array.isArray(aclPermissions)) {
+      const invalid = aclPermissions.filter(p => !PORTAL_ACL_SCOPES.includes(p));
+      if (invalid.length) return res.status(400).json({ error: 'invalid_acl_scopes', invalid });
+      patch.aclPermissions = aclPermissions;
+    }
+    if (accountStatus && ['active', 'suspended'].includes(accountStatus)) patch.accountStatus = accountStatus;
+    if (displayName) patch.displayName = displayName;
+    if (typeof portalUser === 'boolean') patch.portalUser = portalUser;
+    const updated = await users.upsertAsync(u => u.id === target.id, { ...target, ...patch, updatedAt: new Date().toISOString() });
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: req.user?.sub, action: 'portal_user_updated',
+      target: target.id, before: { aclPermissions: target.aclPermissions, accountStatus: target.accountStatus, portalUser: target.portalUser }, after: patch
+    });
+    res.json({
+      id: updated.id,
+      email: updated.email,
+      displayName: updated.displayName,
+      userType: updated.userType,
+      accountStatus: updated.accountStatus,
+      portalUser: updated.portalUser || false,
+      aclPermissions: updated.aclPermissions || [],
+    });
+  }
+};
+
+export const adminDeletePortalUser = {
+  created, method: 'delete', path: '/admin/portal-users/:id',
+  description: 'Admin: remove a portal staff user. Cannot delete the last admin.',
+  onGuard: [requireAuth('admin'), requireAcl('users')],
+  onRequest: async (req, res) => {
+    if (req.params.id === req.user.sub) return res.status(400).json({ error: 'cannot_delete_self' });
+    const target = users.find(u => u.id === req.params.id && u.portalUser === true);
+    if (!target) return res.status(404).json({ error: 'portal_user_not_found' });
+    // Env-configured super-admins are immutable
+    if (target.email && isConfiguredAdminEmail(target.email)) {
+      return res.status(403).json({ error: 'env_admin_immutable', message: 'Super-admin accounts from environment config cannot be deleted.' });
+    }
+    // Delete from Firebase Auth
+    if (target.firebaseUid) {
+      try {
+        initFirebaseAdmin();
+        await getAdminAuth().deleteUser(target.firebaseUid);
+      } catch (fbErr) {
+        console.warn('[portal-users] Firebase user deletion failed:', fbErr?.message);
+      }
+    }
+    users.remove(u => u.id === target.id);
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: req.user?.sub, action: 'portal_user_deleted',
+      target: target.id, before: { email: target.email }, after: null
+    });
+    res.json({ ok: true });
   }
 };
 

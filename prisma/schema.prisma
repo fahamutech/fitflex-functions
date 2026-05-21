@@ -20,6 +20,8 @@ model User {
   passwordHash    String?  // demo only — replace with bcrypt in production
   approvalNote    String?
   onboardingCompleted Boolean @default(false)
+  portalUser      Boolean  @default(false)   // true = admin-created portal user (cannot access mobile app)
+  aclPermissions  String[] @default([])       // e.g. ['gyms','owners','trainers','members','payments','approvals']
   memberProfile   Json?    // fitness goals, level, height, weight, dob, gender, workout times
   gymId           String?  // primary gym for operators
   gymIds          String[] @default([]) // multiple gyms for operators

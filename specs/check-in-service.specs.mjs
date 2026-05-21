@@ -51,12 +51,15 @@ test('second check-in same day same gym is idempotent — returns existing recor
   assert.equal(r.checkin.id, first.checkin.id);
 });
 
-test('check-in at a different gym same day consumes another visit (Pro)', () => {
+test('check-in at a different gym same day is idempotent and does not consume another visit', () => {
   svc.perform({ memberId: 'm1', gymId: 'g1' });
   const r = svc.perform({ memberId: 'm1', gymId: 'g2' });
   assert.equal(r.ok, true);
+  assert.equal(r.idempotent, true);
+  assert.equal(r.checkin.gymId, 'g1');
   assert.equal(r.checkin.visitConsumed, true);
-  assert.equal(r.checkin.visitNumberInCycle, 2);
+  assert.equal(r.checkin.visitNumberInCycle, 1);
+  assert.equal(checkins.all().length, 1);
 });
 
 test('Basic tier blocked at midtier gym', () => {

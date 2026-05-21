@@ -11,7 +11,7 @@ const LOCAL_SERVICE_ACCOUNT = join(
   'firebase-service-account.json'
 );
 
-function initFirebaseAdmin() {
+export function initFirebaseAdmin() {
   if (getApps().length) return;
   const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   if (json) {
@@ -39,6 +39,8 @@ function initFirebaseAdmin() {
   }
   initializeApp();
 }
+
+export { getAuth as getAdminAuth } from 'firebase-admin/auth';
 
 export async function verifyFirebaseIdToken(idToken) {
   if (!idToken) return null;

@@ -30,19 +30,20 @@ const isGymOpen = (gym, now) => {
 
 /**
  * BL-010 / BL-011: determine whether THIS check-in consumes a visit slot.
- * Same gym, same calendar day = does NOT consume an additional slot.
- * Different gym, same day = consumes 1 slot (and Basic tier blocks this entirely).
+ * Any prior same-day check-in = does NOT consume an additional slot.
  *
  * @param {Array} todaysCheckins same-day prior check-ins for the member
  * @param {string} gymId
- * @returns {{ consumesVisit: boolean, sameDaySameGym: boolean, differentGymToday: boolean }}
+ * @returns {{ consumesVisit: boolean, sameDaySameGym: boolean, sameDayAlreadyCheckedIn: boolean, differentGymToday: boolean }}
  */
 export function classifyVisit(todaysCheckins, gymId) {
   const sameGym = todaysCheckins.some(c => c.gymId === gymId);
   const otherGym = todaysCheckins.some(c => c.gymId !== gymId);
+  const alreadyCheckedInToday = todaysCheckins.length > 0;
   return {
-    consumesVisit: !sameGym, // first time at any new gym today => consume one
+    consumesVisit: !alreadyCheckedInToday,
     sameDaySameGym: sameGym,
+    sameDayAlreadyCheckedIn: alreadyCheckedInToday,
     differentGymToday: otherGym
   };
 }

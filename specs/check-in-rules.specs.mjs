@@ -17,10 +17,11 @@ test('BL-010: same gym same day does NOT consume an additional visit', () => {
   assert.equal(c.sameDaySameGym, true);
 });
 
-test('BL-011: different gym same day DOES consume a visit', () => {
+test('BL-011: different gym same day does NOT consume another visit', () => {
   const todays = [{ gymId: 'g1' }];
   const c = classifyVisit(todays, 'g2');
-  assert.equal(c.consumesVisit, true);
+  assert.equal(c.consumesVisit, false);
+  assert.equal(c.sameDayAlreadyCheckedIn, true);
   assert.equal(c.differentGymToday, true);
 });
 

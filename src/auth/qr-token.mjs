@@ -19,9 +19,25 @@ export function issue(userId, now = Date.now()) {
   };
 }
 
+function verifyPortalToken(token, now = Date.now()) {
+  const parts = token.split(':');
+  if (parts.length !== 4) return null;
+  const [prefix, kind, userId, tsStr] = parts;
+  if (prefix !== 'fitflex' || kind !== 'member' || !userId) return null;
+  const issuedAt = Number(tsStr);
+  if (!Number.isFinite(issuedAt)) return null;
+
+  const maxAgeMs = QR_ROTATION_SECONDS * 2 * 1000;
+  if (Math.abs(now - issuedAt) > maxAgeMs) return null;
+  return { userId };
+}
+
 /** Validates a member QR token. Allows current bucket and previous (clock skew tolerance). */
 export function verify(token, now = Date.now()) {
   if (typeof token !== 'string') return null;
+  const portalClaim = verifyPortalToken(token, now);
+  if (portalClaim) return portalClaim;
+
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [userId, bStr, sig] = parts;

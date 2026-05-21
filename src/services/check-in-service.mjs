@@ -48,14 +48,19 @@ export function createCheckInService({ users, gyms, subscriptions, checkins }) {
       const cycleUsage = { visitsUsedInCycle: visitsUsedInCycle(memberId, sub) };
       const todays = todaysCheckins(memberId, now);
 
+      // Idempotency: one counted check-in per member per EAT calendar day.
+      const existingToday = todays[0];
+      if (existingToday) {
+        return {
+          ok: true,
+          checkin: existingToday,
+          visitNumberInCycle: existingToday.visitNumberInCycle,
+          idempotent: true
+        };
+      }
+
       const result = validateCheckIn({ subscription: sub, gym, todaysCheckins: todays, cycleUsage, now });
       if (!result.ok) return result;
-
-      // Idempotency: if same member already checked in at same gym today, return existing
-      const existing = todays.find(c => c.gymId === gymId);
-      if (existing) {
-        return { ok: true, checkin: existing, visitNumberInCycle: existing.visitNumberInCycle, idempotent: true };
-      }
 
       // Log check-in (all 8 BL-015 fields)
       const visitNumber = result.visitConsumed
