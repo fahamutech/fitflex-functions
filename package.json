@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "postinstall": "prisma generate && prisma migrate deploy && node scripts/seed.mjs",
+    "postinstall": "prisma generate && node scripts/migrate.mjs && node scripts/seed.mjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:ci": "DATABASE_URL=${DATABASE_URL_CI:-$DATABASE_URL} prisma migrate deploy",
