@@ -28,6 +28,26 @@ const isGymOpen = (gym, now) => {
   return m >= openH * 60 + openM && m < closeH * 60 + closeM;
 };
 
+const gymAccessTiers = (access) => {
+  switch (access) {
+    case 'standard':
+      return ['standard'];
+    case 'midtier':
+      return ['standard', 'midtier'];
+    case 'premium':
+      return ['standard', 'midtier', 'premium'];
+    case 'luxury_executive':
+      return ['standard', 'midtier', 'premium', 'luxury_executive'];
+    default:
+      return null;
+  }
+};
+
+const tierCoversGym = (tierCfg, gym) => {
+  const tiers = tierCfg.gymTiers ?? gymAccessTiers(tierCfg.gymAccess);
+  return !tiers || tiers.includes(gym.tier);
+};
+
 /**
  * BL-010 / BL-011: determine whether THIS check-in consumes a visit slot.
  * Any prior same-day check-in = does NOT consume an additional slot.
@@ -57,16 +77,19 @@ export function classifyVisit(todaysCheckins, gymId) {
  * @param {Array}  ctx.todaysCheckins same-day check-ins for the member
  * @param {Object} ctx.cycleUsage { visitsUsedInCycle }
  * @param {Date}   ctx.now
+ * @param {Object} ctx.tierConfig optional subscription-tier override from platform settings
  */
-export function validateCheckIn({ subscription, gym, todaysCheckins, cycleUsage, now = new Date() }) {
+export function validateCheckIn({ subscription, gym, todaysCheckins, cycleUsage, now = new Date(), tierConfig }) {
   // 1. Subscription active (with grace)
   if (!subscription || (subscription.status !== 'active' &&
       !(subscription.status === 'expired' && isWithinGrace(subscription.expiresAt, +now)))) {
     return { ok: false, failure: CHECKIN_FAILURE.SUBSCRIPTION_INACTIVE };
   }
 
-  // 2. Tier covers this gym's tier — TEMPORARILY DISABLED: all gym tiers accessible
-  const tierCfg = PASS_TIERS[subscription.tier] ?? { visitCap: Infinity, multiGymPerDay: true };
+  const tierCfg = tierConfig ?? PASS_TIERS[subscription.tier] ?? { visitCap: Infinity, multiGymPerDay: true };
+  if (!tierCoversGym(tierCfg, gym)) {
+    return { ok: false, failure: CHECKIN_FAILURE.TIER_NOT_COVERED };
+  }
 
   // Basic-tier daily-gym restriction: cannot visit a different gym same day
   const visit = classifyVisit(todaysCheckins, gym.id);

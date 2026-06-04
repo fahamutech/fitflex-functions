@@ -8,8 +8,11 @@ import { sign as signJwt, requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../src/auth/firebase.mjs';
 import { issue as issueQr, verify as verifyQr } from '../src/auth/qr-token.mjs';
 import { createCheckInService } from '../src/services/check-in-service.mjs';
+import { validateCheckIn } from '../src/shared/check-in-rules.mjs';
 import { PASS_TIERS } from '../src/shared/constants.mjs';
+import { operatorGymIds, resolveOperatorGymSelection } from '../src/shared/operator-gym-selection.mjs';
 import { calculatePayout } from '../src/shared/payout-engine.mjs';
+import { buildDevIdentity, DEV_GYM_ID, DEV_OWNER_GYM_ID } from '../src/shared/dev-login.mjs';
 
 const created = new Date().toISOString();
 const users = collection('users');
@@ -45,7 +48,7 @@ function ensureInit() {
 // Fire init eagerly (non-blocking) so it's ready before first request
 ensureInit();
 
-const checkInService = createCheckInService({ users, gyms, subscriptions, checkins });
+const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig });
 const configuredAdminEmails = new Set(
   (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
     .split(',')
@@ -113,6 +116,60 @@ function latestMemberSubscription(memberId) {
   return subscriptions
     .filter(s => s.memberId === memberId)
     .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+}
+
+function publicUserId(userOrId, role) {
+  const id = typeof userOrId === 'string' ? userOrId : userOrId?.id;
+  const user = typeof userOrId === 'object' ? userOrId : users.find(u => u.id === id);
+  const userType = role || user?.userType;
+  const prefix = userType === 'trainer' ? 'FT' : userType === 'gym_operator' ? 'FO' : 'FM';
+  const roleUsers = users
+    .filter(u => (u.userType || 'member') === (userType || 'member'))
+    .sort((a, b) => String(a.createdAt || a.id).localeCompare(String(b.createdAt || b.id)));
+  const index = roleUsers.findIndex(u => u.id === id);
+  if (index >= 0) return `${prefix}${String(index + 1).padStart(3, '0')}`;
+  const seed = String(id || prefix);
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) % 999;
+  return `${prefix}${String(hash + 1).padStart(3, '0')}`;
+}
+
+function getTierConfig(tierKey) {
+  const settings = ensureDefaultSettings();
+  const configured = (settings.subscriptionTiers || []).find(t => t.key === tierKey);
+  if (!configured) return PASS_TIERS[tierKey] ?? null;
+  const visitCap = Number(configured.visits) === -1 ? Infinity : Number(configured.visits ?? 0);
+  return {
+    price: Number(configured.monthlyPrice ?? 0),
+    visitCap,
+    gymAccess: configured.gymAccess,
+    multiGymPerDay: tierKey !== 'basic',
+  };
+}
+
+function visitCapForTier(tierKey) {
+  const cap = getTierConfig(tierKey)?.visitCap;
+  return Number.isFinite(cap) ? cap : null;
+}
+
+function priceForTier(tierKey) {
+  return Number(getTierConfig(tierKey)?.price ?? PASS_TIERS[tierKey]?.price ?? 0);
+}
+
+function resolveOperatorGym(operator, requestedGymId) {
+  const selection = resolveOperatorGymSelection(operator, requestedGymId);
+  if (!selection.ok) return null;
+  return gyms.find(g => g.id === selection.gymId) || null;
+}
+
+function sameEatDate(a, b) {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Dar_es_Salaam',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  return fmt.format(new Date(a)) === fmt.format(new Date(b));
 }
 
 function hydrateTrainer(row) {
@@ -350,6 +407,98 @@ export const authFirebaseSession = {
   }
 };
 
+// ───────────────────────────── Dev-only mock auth (blackbox testing) ──────────────────────
+// Mints a FitFlex session for a deterministic test user without Firebase, and seeds the
+// supporting fixtures (gym, subscription, trainer profile) so the role lands fully onboarded.
+// HARD-BLOCKED in production.
+export const authDevLogin = {
+  created, method: 'post', path: '/auth/dev/login',
+  description: 'DEV ONLY: mock login as member/trainer/gym_operator for blackbox testing. Disabled in production.',
+  requestSample: { role: 'member' },
+  responseSample: { token: 'jwt...', user: { id: 'usr_dev_member', userType: 'member' } },
+  onRequest: async (req, res) => {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'dev_login_disabled_in_production' });
+    }
+    try {
+      const identity = buildDevIdentity(req.body?.role);
+      if (!identity) return res.status(400).json({ error: 'invalid_role', allowed: ['member', 'trainer', 'owner'] });
+
+      const now = new Date();
+      const nowIso = now.toISOString();
+
+      // Shared demo gym (used for member browsing + trainer linkage).
+      await gyms.upsertAsync(g => g.id === DEV_GYM_ID, normalizeGymPayload({
+        id: DEV_GYM_ID,
+        name: 'Iron Paradise (Dev)',
+        tier: 'standard',
+        location: 'Masaki, Dar es Salaam',
+        perVisitRate: 5000,
+        status: 'active',
+        images: [
+          'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?w=800',
+          'https://images.unsplash.com/photo-1571902943202-507ec2618e8f?w=800',
+        ],
+        amenities: ['dry sauna', 'lockers', 'showers', 'wifi'],
+        equipment: ['treadmills', 'squat racks', 'dumbbell racks'],
+      }, {}));
+
+      let user;
+      if (identity.userType === 'gym_operator') {
+        await gyms.upsertAsync(g => g.id === DEV_OWNER_GYM_ID, normalizeGymPayload({
+          id: DEV_OWNER_GYM_ID,
+          name: 'Dev Owner Gym',
+          tier: 'standard',
+          location: 'Mikocheni, Dar es Salaam',
+          perVisitRate: 5000,
+          status: 'active',
+          images: ['https://images.unsplash.com/photo-1534438327276-14e5300c3a48?w=800'],
+          amenities: ['lockers', 'showers'],
+        }, {}));
+        user = await users.upsertAsync(u => u.id === identity.id, {
+          id: identity.id, userType: 'gym_operator', email: identity.email, phone: identity.phone,
+          displayName: identity.displayName, accountStatus: 'active', approvalStatus: 'approved',
+          onboardingCompleted: true, gymId: DEV_OWNER_GYM_ID, gymIds: [DEV_OWNER_GYM_ID],
+          createdAt: nowIso, updatedAt: nowIso,
+        });
+      } else if (identity.userType === 'trainer') {
+        user = await users.upsertAsync(u => u.id === identity.id, {
+          id: identity.id, userType: 'trainer', email: identity.email, phone: identity.phone,
+          displayName: identity.displayName, accountStatus: 'active', approvalStatus: 'approved',
+          onboardingCompleted: true, createdAt: nowIso, updatedAt: nowIso,
+        });
+        await trainers.upsertAsync(t => t.id === 'trn_dev', normalizeTrainerPayload({
+          id: 'trn_dev', userId: identity.id, email: identity.email, displayName: identity.displayName,
+          photoUrl: 'https://images.unsplash.com/photo-1567013127542-490d757e51fc?w=400',
+          gender: 'female', specialties: ['strength', 'mobility'], bio: 'Dev trainer profile.',
+          hourlyRateTzs: 20000, experienceYears: 5, gymIds: [DEV_GYM_ID],
+          status: 'active', approvalStatus: 'approved',
+        }, {}));
+      } else {
+        user = await users.upsertAsync(u => u.id === identity.id, {
+          id: identity.id, userType: 'member', email: identity.email, phone: identity.phone,
+          displayName: identity.displayName, accountStatus: 'active', approvalStatus: 'approved',
+          onboardingCompleted: true, createdAt: nowIso, updatedAt: nowIso,
+        });
+        // Active premium subscription so QR + check-in journeys work end-to-end.
+        const renewsAt = new Date(+now + 30 * 86_400_000).toISOString();
+        await subscriptions.upsertAsync(s => s.id === 'sub_dev_member', {
+          id: 'sub_dev_member', memberId: identity.id, type: 'platform_pass', tier: 'premium',
+          status: 'active', startedAt: nowIso, cycleStartedAt: nowIso, renewsAt, expiresAt: renewsAt,
+          paymentRef: 'DEV_MOCK',
+        });
+      }
+
+      const token = signJwt({ sub: user.id, userType: user.userType, email: user.email, gymId: user.gymId });
+      console.log(`[dev-login] minted session for ${user.userType} (${user.id})`);
+      res.json({ token, user: { ...user, publicId: publicUserId(user), userCode: publicUserId(user) }, pendingApproval: false });
+    } catch (err) {
+      console.error('[authDevLogin] error:', err.message, err.meta || '');
+      res.status(500).json({ error: 'dev_login_failed', detail: err.message });
+    }
+  }
+};
+
 // ───────────────────────────────────────── Gyms ───────────────────────────────────────────
 export const listGyms = {
   created, method: 'get', path: '/gyms',
@@ -432,7 +581,7 @@ export const subscribe = {
       return res.status(400).json({ error: 'invalid_tier' });
     const now = new Date();
     const renewsAt = new Date(+now + 30 * 86_400_000);
-    const amountTzs = PASS_TIERS[tier]?.price;
+    const amountTzs = priceForTier(tier);
     const isFreeOnline = amountTzs === 0 && PASS_TIERS[tier]?.accessMode === 'free_online';
     const sub = {
       id: `sub_${randomUUID().slice(0, 8)}`,
@@ -488,10 +637,9 @@ export const me = {
     if (sub) {
       const since = +new Date(sub.cycleStartedAt);
       visitsUsed = checkins.filter(c => c.memberId === user.id && c.visitConsumed && +new Date(c.timestamp) >= since).length;
-      const cap = PASS_TIERS[sub.tier]?.visitCap;
-      visitCap = Number.isFinite(cap) ? cap : null;
+      visitCap = visitCapForTier(sub.tier);
     }
-    res.json({ user, subscription: sub, pendingPayment, visitsUsed, visitCap });
+    res.json({ user: { ...user, publicId: publicUserId(user), userCode: publicUserId(user) }, subscription: sub, pendingPayment, visitsUsed, visitCap });
   }
 };
 
@@ -717,40 +865,55 @@ export const operatorVerifyQr = {
   created, method: 'post', path: '/operator/verify-qr',
   description: 'Operator: verify a member QR and return member details + pass eligibility without check-in.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const { qrToken } = req.body || {};
+  onRequest: async (req, res) => {
+    const { qrToken, gymId } = req.body || {};
     const claim = verifyQr(qrToken);
     if (!claim) return res.status(401).json({ ok: false, failure: 'invalid_or_expired_qr' });
-    const operator = users.find(u => u.id === req.user.sub);
-    if (!operator?.gymId) return res.status(400).json({ error: 'operator_not_assigned_to_gym' });
-    const member = users.find(u => u.id === claim.userId);
+    const operator = await users.findByIdAsync(req.user.sub);
+    const gymSelection = resolveOperatorGymSelection(operator, gymId);
+    const operatorGymIdList = gymSelection.ids;
+    const gym = gymSelection.ok ? gyms.find(g => g.id === gymSelection.gymId) || null : null;
+    if (gymSelection.failure === 'not_your_gym') return res.status(403).json({ error: 'not_your_gym' });
+    const member = await users.findByIdAsync(claim.userId);
     if (!member) return res.status(404).json({ error: 'member_not_found' });
-    const gym = gyms.find(g => g.id === operator.gymId);
-    const sub = subscriptions
-      .filter(s => s.memberId === member.id && s.status === 'active')
-      .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+    const allSubs = await subscriptions.filterAsync(s => s.memberId === member.id && s.status === 'active');
+    const sub = allSubs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
     let eligible = false;
     let reason = 'no_active_pass';
     let visitsUsed = 0;
     let visitCap = null;
-    if (sub) {
-      const tier = PASS_TIERS[sub.tier];
+    if (gymSelection.requiresGymSelection) {
+      reason = 'select_gym';
+    } else if (!gym) {
+      return res.status(400).json({ error: 'operator_not_assigned_to_gym' });
+    } else if (sub) {
       const since = +new Date(sub.cycleStartedAt);
-      visitsUsed = checkins.filter(c => c.memberId === member.id && c.visitConsumed && +new Date(c.timestamp) >= since).length;
-      visitCap = Number.isFinite(tier?.visitCap) ? tier.visitCap : null;
-      // Gym-tier access gate TEMPORARILY DISABLED: all active passes may visit any gym.
-      if (visitCap !== null && visitsUsed >= visitCap) {
-        reason = 'visit_cap_reached';
-      } else {
+      const allCheckins = await checkins.filterAsync(c => c.memberId === member.id && c.visitConsumed && +new Date(c.timestamp) >= since);
+      visitsUsed = allCheckins.length;
+      visitCap = visitCapForTier(sub.tier);
+      const now = new Date();
+      const allTodaysCheckins = await checkins.filterAsync(c => c.memberId === member.id && sameEatDate(c.timestamp, now));
+      const validation = validateCheckIn({
+        subscription: sub,
+        gym,
+        todaysCheckins: allTodaysCheckins,
+        cycleUsage: { visitsUsedInCycle: visitsUsed },
+        now,
+        tierConfig: getTierConfig(sub.tier),
+      });
+      if (validation.ok) {
         eligible = true;
         reason = 'pass_valid';
+      } else {
+        reason = validation.failure;
       }
     }
     res.json({
       ok: true,
-      member: { id: member.id, displayName: member.displayName, email: member.email, phone: member.phone, photoUrl: member.photoUrl },
+      member: { id: member.id, publicId: publicUserId(member), userCode: publicUserId(member), photoUrl: member.photoUrl },
       subscription: sub ? { tier: sub.tier, status: sub.status } : null,
       gym: gym ? { id: gym.id, name: gym.name, tier: gym.tier } : null,
+      requiresGymSelection: !gym && operatorGymIdList.length > 1,
       eligible,
       reason,
       visitsUsed,
@@ -764,20 +927,31 @@ export const operatorCheckIn = {
   description: 'Operator scans a member QR and triggers BL-012 validation + logging.',
   requestSample: { qrToken: 'usr_x.123456.signature' },
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const { qrToken } = req.body || {};
+  onRequest: async (req, res) => {
+    const { qrToken, gymId } = req.body || {};
     const claim = verifyQr(qrToken);
     if (!claim) return res.status(401).json({ ok: false, failure: 'invalid_or_expired_qr' });
-    const operator = users.find(u => u.id === req.user.sub);
-    if (!operator?.gymId) return res.status(400).json({ error: 'operator_not_assigned_to_gym' });
+    const operator = await users.findByIdAsync(req.user.sub);
+    const gymSelection = resolveOperatorGymSelection(operator, gymId);
+    if (gymSelection.requiresGymSelection) {
+      return res.status(400).json({ ok: false, failure: 'gym_required' });
+    }
+    if (gymSelection.failure === 'not_your_gym') return res.status(403).json({ error: 'not_your_gym' });
+    const gym = gymSelection.ok ? gyms.find(g => g.id === gymSelection.gymId) || null : null;
+    if (!gym) return res.status(400).json({ error: 'operator_not_assigned_to_gym' });
 
     const result = checkInService.perform({
       memberId: claim.userId,
-      gymId: operator.gymId,
+      gymId: gym.id,
       method: 'gym_scanned'
     });
     if (!result.ok) return res.status(409).json(result);
-    res.json(result);
+    res.json({
+      ...result,
+      checkin: result.checkin
+        ? { ...result.checkin, memberPublicId: publicUserId(claim.userId, 'member') }
+        : result.checkin,
+    });
   }
 };
 
@@ -785,39 +959,110 @@ export const operatorRecentCheckIns = {
   created, method: 'get', path: '/operator/checkins',
   description: 'List of recent check-ins at the operator gym.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const operator = users.find(u => u.id === req.user.sub);
-    const list = checkins
-      .filter(c => c.gymId === operator?.gymId)
+  onRequest: async (req, res) => {
+    const operator = await users.findByIdAsync(req.user.sub);
+    const ids = operatorGymIds(operator);
+    const allCheckins = await checkins.filterAsync(c => ids.includes(c.gymId));
+    const list = allCheckins
       .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
       .slice(0, 50)
-      .map(c => {
-        const m = users.find(u => u.id === c.memberId);
-        return { ...c, memberPhone: m?.phone ?? null, memberEmail: m?.email ?? null };
-      });
+      .map(c => ({ ...c, memberPublicId: publicUserId(c.memberId, 'member'), memberPhone: null, memberEmail: null }));
     res.json(list);
   }
 };
 
 export const operatorDashboard = {
   created, method: 'get', path: '/operator/dashboard',
-  description: 'Basic analytics for the operator gym (today visits, period total, current band).',
+  description: 'Owner/operator analytics across owned gyms with configurable period and direct/FitFlex split.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const operator = users.find(u => u.id === req.user.sub);
-    const gym = gyms.find(g => g.id === operator?.gymId);
+  onRequest: async (req, res) => {
+    const operator = await users.findByIdAsync(req.user.sub);
+    const ownedGymIds = operatorGymIds(operator);
+    const ownedGyms = [];
+    for (const id of ownedGymIds) {
+      const gym = await gyms.findByIdAsync(id);
+      if (gym) ownedGyms.push(gym);
+    }
+    const requestedGymId = req.query?.gymId ? String(req.query.gymId) : null;
+    const gym = (requestedGymId && ownedGymIds.includes(requestedGymId)
+      ? await gyms.findByIdAsync(requestedGymId)
+      : ownedGyms[0]) || null;
     if (!gym) return res.status(404).json({ error: 'gym_not_found' });
 
     const now = new Date();
     const startOfDay = new Date(now); startOfDay.setUTCHours(0, 0, 0, 0);
     const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const todayCount = checkins.filter(c => c.gymId === gym.id && +new Date(c.timestamp) >= +startOfDay).length;
-    const monthVisits = checkins.filter(c => c.gymId === gym.id && +new Date(c.timestamp) >= +startOfMonth && c.subscriptionType === 'platform_pass').length;
+    const periodStart = req.query?.periodStart
+      ? new Date(`${String(req.query.periodStart).slice(0, 10)}T00:00:00Z`)
+      : startOfMonth;
+    const periodEnd = req.query?.periodEnd
+      ? new Date(`${String(req.query.periodEnd).slice(0, 10)}T23:59:59Z`)
+      : now;
+    const memberType = ['all', 'direct', 'fitflex'].includes(String(req.query?.memberType || ''))
+      ? String(req.query.memberType)
+      : 'all';
+    const inPeriod = c => {
+      const t = +new Date(c.timestamp);
+      return t >= +periodStart && t <= +periodEnd;
+    };
+    const isFitFlexVisit = c => ['platform_pass', 'roaming_topup'].includes(c.subscriptionType);
+    const isDirectVisit = c => !isFitFlexVisit(c);
+    const matchesMemberType = c => memberType === 'all' || (memberType === 'fitflex' ? isFitFlexVisit(c) : isDirectVisit(c));
+    const allCheckins = await checkins.allAsync();
+    const selectedGymPeriodCheckins = allCheckins.filter(c => c.gymId === gym.id && inPeriod(c));
+    const selectedGymFilteredCheckins = selectedGymPeriodCheckins.filter(matchesMemberType);
+    const ownedPeriodCheckins = allCheckins.filter(c => ownedGymIds.includes(c.gymId) && inPeriod(c));
+    const ownedFilteredCheckins = ownedPeriodCheckins.filter(matchesMemberType);
+    const unique = rows => new Set(rows.map(c => c.memberId).filter(Boolean)).size;
+
+    const todayCount = allCheckins.filter(c => c.gymId === gym.id && +new Date(c.timestamp) >= +startOfDay).length;
+    const monthVisits = allCheckins.filter(c => c.gymId === gym.id && +new Date(c.timestamp) >= +startOfMonth && isFitFlexVisit(c)).length;
+    const gymSummaries = ownedGyms.map(g => {
+      const rows = ownedPeriodCheckins.filter(c => c.gymId === g.id);
+      const fitflexRows = rows.filter(isFitFlexVisit);
+      const directRows = rows.filter(isDirectVisit);
+      return {
+        gymId: g.id,
+        gymName: g.name,
+        tier: g.tier,
+        totalVisits: rows.length,
+        uniqueMembers: unique(rows),
+        directVisits: directRows.length,
+        directMembers: unique(directRows),
+        fitflexVisits: fitflexRows.length,
+        fitflexMembers: unique(fitflexRows),
+      };
+    });
     const payout = monthVisits >= 500
       ? { band: 5, note: 'Negotiate flat fee' }
       : calculatePayout({ visitCount: monthVisits, gymTier: gym.tier, negotiatedPerVisitRate: gym.perVisitRate });
 
-    res.json({ gym, todayCount, monthVisits, payout });
+    res.json({
+      gym,
+      gyms: ownedGyms,
+      todayCount,
+      monthVisits,
+      periodStart: periodStart.toISOString().slice(0, 10),
+      periodEnd: periodEnd.toISOString().slice(0, 10),
+      memberType,
+      periodVisits: selectedGymFilteredCheckins.length,
+      periodMembers: unique(selectedGymFilteredCheckins),
+      directVisits: selectedGymPeriodCheckins.filter(isDirectVisit).length,
+      directMembers: unique(selectedGymPeriodCheckins.filter(isDirectVisit)),
+      fitflexVisits: selectedGymPeriodCheckins.filter(isFitFlexVisit).length,
+      fitflexMembers: unique(selectedGymPeriodCheckins.filter(isFitFlexVisit)),
+      overall: {
+        gymCount: ownedGyms.length,
+        totalVisits: ownedFilteredCheckins.length,
+        uniqueMembers: unique(ownedFilteredCheckins),
+        directVisits: ownedPeriodCheckins.filter(isDirectVisit).length,
+        directMembers: unique(ownedPeriodCheckins.filter(isDirectVisit)),
+        fitflexVisits: ownedPeriodCheckins.filter(isFitFlexVisit).length,
+        fitflexMembers: unique(ownedPeriodCheckins.filter(isFitFlexVisit)),
+      },
+      gymSummaries,
+      payout,
+    });
   }
 };
 
@@ -881,11 +1126,15 @@ export const ownerMyGyms = {
   created, method: 'get', path: '/owner/gyms',
   description: 'Owner: list gyms assigned to the authenticated owner.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const owner = await users.findByIdAsync(req.user.sub);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
     const ids = owner.gymIds || (owner.gymId ? [owner.gymId] : []);
-    const owned = ids.map(id => gyms.find(g => g.id === id)).filter(Boolean);
+    const owned = [];
+    for (const id of ids) {
+      const gym = await gyms.findByIdAsync(id);
+      if (gym) owned.push(gym);
+    }
     res.json(owned);
   }
 };
@@ -932,10 +1181,7 @@ export const ownerGymCheckins = {
       .filter(c => c.gymId === req.params.gymId)
       .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
       .slice(0, 100)
-      .map(c => {
-        const m = users.find(u => u.id === c.memberId);
-        return { ...c, memberName: m?.displayName || m?.email || c.memberId };
-      });
+      .map(c => ({ ...c, memberName: publicUserId(c.memberId, 'member'), memberPublicId: publicUserId(c.memberId, 'member') }));
     res.json(list);
   }
 };
@@ -1165,7 +1411,7 @@ export const ownerAddTrainer = {
     if (!body.displayName) return res.status(400).json({ error: 'displayName_required' });
     const gymIds = parseStringList(body.gymIds, []).filter(id => ownerGymIds.includes(id));
     // Allow creating trainers without gym assignment during onboarding (owner has no gyms yet)
-    if (gymIds.length === 0 && ownerGymIds.length > 0) return res.status(400).json({ error: 'must_assign_to_at_least_one_owned_gym' });
+    if (gymIds.length === 0 && ownerGymIds.length > 0 && !body.pendingGymAssignment) return res.status(400).json({ error: 'must_assign_to_at_least_one_owned_gym' });
 
     // Unique email per user type check
     const existingUser = users.find(u => u.email === body.email && u.userType === 'trainer');

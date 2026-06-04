@@ -4,7 +4,7 @@
 import { validateCheckIn } from '../shared/check-in-rules.mjs';
 import { randomUUID } from 'node:crypto';
 
-export function createCheckInService({ users, gyms, subscriptions, checkins }) {
+export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig }) {
   function todayBoundsUTC(now = new Date()) {
     // EAT (UTC+3) day window expressed in UTC
     const eatNow = new Date(now.getTime() + 3 * 3_600_000);
@@ -59,7 +59,14 @@ export function createCheckInService({ users, gyms, subscriptions, checkins }) {
         };
       }
 
-      const result = validateCheckIn({ subscription: sub, gym, todaysCheckins: todays, cycleUsage, now });
+      const result = validateCheckIn({
+        subscription: sub,
+        gym,
+        todaysCheckins: todays,
+        cycleUsage,
+        now,
+        tierConfig: getTierConfig?.(sub.tier),
+      });
       if (!result.ok) return result;
 
       // Log check-in (all 8 BL-015 fields)

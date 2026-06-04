@@ -68,3 +68,41 @@ test('Basic tier blocked at midtier gym', () => {
   assert.equal(r.ok, false);
   assert.equal(r.failure, 'tier_not_covered');
 });
+
+test('configured tier cap overrides hard-coded pass constants', () => {
+  checkins = mkCol([
+    { memberId: 'm1', gymId: 'g1', timestamp: '2026-01-02T00:00:00Z', visitConsumed: true },
+    { memberId: 'm1', gymId: 'g1', timestamp: '2026-01-03T00:00:00Z', visitConsumed: true },
+  ]);
+  svc = createCheckInService({
+    users,
+    gyms,
+    subscriptions,
+    checkins,
+    getTierConfig: tier => tier === 'pro' ? { visitCap: 2, multiGymPerDay: true } : null,
+  });
+
+  const r = svc.perform({ memberId: 'm1', gymId: 'g1', now: new Date('2026-01-04T00:00:00Z') });
+  assert.equal(r.ok, false);
+  assert.equal(r.failure, 'visits_exhausted');
+});
+
+test('configured unlimited tier never exhausts', () => {
+  subscriptions.update(s => s.id === 's1', { tier: 'executive' });
+  checkins = mkCol(Array.from({ length: 40 }, (_, i) => ({
+    memberId: 'm1',
+    gymId: 'g1',
+    timestamp: `2026-01-${String(i + 1).padStart(2, '0')}T00:00:00Z`,
+    visitConsumed: true,
+  })));
+  svc = createCheckInService({
+    users,
+    gyms,
+    subscriptions,
+    checkins,
+    getTierConfig: tier => tier === 'executive' ? { visitCap: Infinity, multiGymPerDay: true } : null,
+  });
+
+  const r = svc.perform({ memberId: 'm1', gymId: 'g2', now: new Date('2026-02-15T00:00:00Z') });
+  assert.equal(r.ok, true);
+});

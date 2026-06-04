@@ -63,7 +63,7 @@ const ID_PK_COLLECTIONS = new Set(['webhook_seen', 'platform_settings']);
 // In-memory cache to support predicate-based find/filter without hitting PG every time.
 // Cache is invalidated on writes. For pilot scale this is fine.
 const cache = new Map();
-const CACHE_TTL = 5_000; // 5s
+const CACHE_TTL = 1_000; // 1s - reduced for near real-time data
 const cacheTimers = new Map();
 
 async function loadAll(name, meta) {
@@ -143,6 +143,38 @@ export function collection(name) {
     all:    () => getSyncData().slice(),
     find:   (pred) => getSyncData().find(pred) ?? null,
     filter: (pred) => getSyncData().filter(pred),
+
+    /** Async versions that always query the database directly (bypass cache) */
+    allAsync: async () => {
+      const rows = await loadAll(name, meta);
+      return rows.slice();
+    },
+
+    findAsync: async (pred) => {
+      const rows = await loadAll(name, meta);
+      return rows.find(pred) ?? null;
+    },
+
+    filterAsync: async (pred) => {
+      const rows = await loadAll(name, meta);
+      return rows.filter(pred);
+    },
+
+    /** Find by ID directly from database (bypasses cache) */
+    findByIdAsync: async (id) => {
+      const delegate = meta.delegate();
+      let include = undefined;
+      if (name === 'trainers') include = { gyms: true };
+
+      let row = await delegate.findFirst({
+        where: { id },
+        ...(include ? { include } : {})
+      });
+
+      if (row && meta.transform) row = meta.transform(row);
+      if (row) row = JSON.parse(JSON.stringify(row, (_, v) => typeof v === 'bigint' ? Number(v) : v));
+      return row ?? null;
+    },
 
     insert: (row) => {
       // Optimistic: add to sync cache immediately, then persist async
