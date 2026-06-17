@@ -1403,7 +1403,7 @@ export const ownerAddTrainer = {
   created, method: 'post', path: '/owner/trainers',
   description: 'Owner: add a trainer to their gym(s). Trainer becomes auto-active. Email must be unique per user type.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
+  onRequest: async (req, res) => {
     const owner = users.find(u => u.id === req.user.sub);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     const body = req.body || {};
@@ -1426,7 +1426,24 @@ export const ownerAddTrainer = {
       approvalStatus: 'approved',
     }, {});
     trainers.upsert(t => t.id === row.id, row);
-    res.json(hydrateTrainer(row));
+
+    // B.2 fix: Also create a user record so the trainer can log in via email+PIN
+    const userId = `usr_${randomUUID().slice(0, 8)}`;
+    const userRow = {
+      id: userId,
+      email: body.email,
+      displayName: body.displayName,
+      userType: 'trainer',
+      accountStatus: 'active',
+      approvalStatus: 'approved',
+      onboardingCompleted: false,
+      createdAt: new Date().toISOString(),
+    };
+    await users.upsertAsync(u => u.id === userId, userRow);
+    // Link the trainer profile to the user
+    trainers.upsert(t => t.id === row.id, { ...row, userId });
+
+    res.json(hydrateTrainer({ ...row, userId }));
   }
 };
 
