@@ -118,6 +118,14 @@ function latestMemberSubscription(memberId) {
     .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
 }
 
+/** Resolve the authenticated user from JWT claims — handles stale sub IDs via email/phone fallback. */
+async function resolveRequestUser(req) {
+  let user = await users.findByIdAsync(req.user.sub);
+  if (!user && req.user.email) user = await users.findAsync(u => u.email === req.user.email);
+  if (!user && req.user.phone) user = await users.findAsync(u => u.phone === req.user.phone);
+  return user;
+}
+
 function publicUserId(userOrId, role) {
   const id = typeof userOrId === 'string' ? userOrId : userOrId?.id;
   const user = typeof userOrId === 'object' ? userOrId : users.find(u => u.id === id);
@@ -273,21 +281,21 @@ export const authVerifyOtp = {
   description: 'Verify OTP, create user if new, return JWT.',
   requestSample: { phone: '+255712345678', code: '123456' },
   responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'member' } },
-  onRequest: (req, res) => {
+  onRequest: async (req, res) => {
     const { phone, code } = req.body || {};
-    const otp = otps.find(o => o.phone === phone);
+    const otp = await otps.findAsync(o => o.phone === phone);
     if (!otp || otp.code !== code) return res.status(401).json({ error: 'invalid_otp' });
     if (Date.now() > otp.expiresAt) return res.status(401).json({ error: 'otp_expired' });
 
-    let user = users.find(u => u.phone === phone);
+    let user = await users.findAsync(u => u.phone === phone);
     if (!user) {
       user = {
         id: `usr_${randomUUID().slice(0, 8)}`,
         phone, userType: otp.userType, createdAt: new Date().toISOString()
       };
-      users.insert(user);
+      await users.upsertAsync(u => u.id === user.id, user);
     }
-    otps.update(o => o.phone === phone, { code: null });
+    await otps.upsertAsync(o => o.phone === phone, { ...otp, code: null });
     const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone });
     res.json({ token, user });
   }
@@ -336,7 +344,7 @@ export const authFirebaseSession = {
 
     const selfRole = normalizeRequestedRole(requestedRole);
     const isAdminEmail = isConfiguredAdminEmail(fb.email);
-    let user = users.find(u => u.firebaseUid === fb.uid) || (fb.email ? users.find(u => u.email === fb.email) : null);
+    let user = await users.findAsync(u => u.firebaseUid === fb.uid) || (fb.email ? await users.findAsync(u => u.email === fb.email) : null);
 
     if (user) {
       // Existing user: NEVER change their stored userType via this endpoint.
@@ -622,21 +630,22 @@ export const me = {
   created, method: 'get', path: '/me',
   description: 'Authenticated user profile + active subscription + visit counter.',
   onGuard: requireAuth(),
-  onRequest: (req, res) => {
-    const user = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const user = await resolveRequestUser(req);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
 
-    const subs = subscriptions.filter(s => s.memberId === req.user.sub);
+    const uid = user.id;
+    const subs = subscriptions.filter(s => s.memberId === uid);
     const sub  = subs
       .filter(s => ['active', 'expired', 'suspended'].includes(s.status))
       .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
     const pendingPayment = paymentRequests
-      .filter(p => p.memberId === req.user.sub && p.status === 'pending')
+      .filter(p => p.memberId === uid && p.status === 'pending')
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))[0] || null;
     let visitsUsed = 0, visitCap = null;
     if (sub) {
       const since = +new Date(sub.cycleStartedAt);
-      visitsUsed = checkins.filter(c => c.memberId === user.id && c.visitConsumed && +new Date(c.timestamp) >= since).length;
+      visitsUsed = checkins.filter(c => c.memberId === uid && c.visitConsumed && +new Date(c.timestamp) >= since).length;
       visitCap = visitCapForTier(sub.tier);
     }
     res.json({ user: { ...user, publicId: publicUserId(user), userCode: publicUserId(user) }, subscription: sub, pendingPayment, visitsUsed, visitCap });
@@ -649,7 +658,7 @@ export const updateMemberProfile = {
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     const role = req.user.userType || 'member';
-    const user = users.find(u => u.id === req.user.sub) || {
+    const user = await resolveRequestUser(req) || {
       id: req.user.sub,
       userType: role,
       accountStatus: 'active',
@@ -869,7 +878,7 @@ export const operatorVerifyQr = {
     const { qrToken, gymId } = req.body || {};
     const claim = verifyQr(qrToken);
     if (!claim) return res.status(401).json({ ok: false, failure: 'invalid_or_expired_qr' });
-    const operator = await users.findByIdAsync(req.user.sub);
+    const operator = await resolveRequestUser(req);
     const gymSelection = resolveOperatorGymSelection(operator, gymId);
     const operatorGymIdList = gymSelection.ids;
     const gym = gymSelection.ok ? gyms.find(g => g.id === gymSelection.gymId) || null : null;
@@ -931,7 +940,7 @@ export const operatorCheckIn = {
     const { qrToken, gymId } = req.body || {};
     const claim = verifyQr(qrToken);
     if (!claim) return res.status(401).json({ ok: false, failure: 'invalid_or_expired_qr' });
-    const operator = await users.findByIdAsync(req.user.sub);
+    const operator = await resolveRequestUser(req);
     const gymSelection = resolveOperatorGymSelection(operator, gymId);
     if (gymSelection.requiresGymSelection) {
       return res.status(400).json({ ok: false, failure: 'gym_required' });
@@ -960,7 +969,7 @@ export const operatorRecentCheckIns = {
   description: 'List of recent check-ins at the operator gym.',
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
-    const operator = await users.findByIdAsync(req.user.sub);
+    const operator = await resolveRequestUser(req);
     const ids = operatorGymIds(operator);
     const allCheckins = await checkins.filterAsync(c => ids.includes(c.gymId));
     const list = allCheckins
@@ -976,7 +985,7 @@ export const operatorDashboard = {
   description: 'Owner/operator analytics across owned gyms with configurable period and direct/FitFlex split.',
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
-    const operator = await users.findByIdAsync(req.user.sub);
+    const operator = await resolveRequestUser(req);
     const ownedGymIds = operatorGymIds(operator);
     const ownedGyms = [];
     for (const id of ownedGymIds) {
@@ -1015,6 +1024,37 @@ export const operatorDashboard = {
     const ownedFilteredCheckins = ownedPeriodCheckins.filter(matchesMemberType);
     const unique = rows => new Set(rows.map(c => c.memberId).filter(Boolean)).size;
 
+    // ── Previous period (same duration, immediately before current period) ──
+    const periodDurationMs = +periodEnd - +periodStart;
+    const prevPeriodEnd = new Date(+periodStart - 1); // 1 ms before current start
+    const prevPeriodStart = new Date(+prevPeriodEnd - periodDurationMs);
+    const inPrevPeriod = c => {
+      const t = +new Date(c.timestamp);
+      return t >= +prevPeriodStart && t <= +prevPeriodEnd;
+    };
+    const selectedGymPrevCheckins = allCheckins.filter(c => c.gymId === gym.id && inPrevPeriod(c));
+    const selectedGymPrevFiltered = selectedGymPrevCheckins.filter(matchesMemberType);
+
+    // ── Time-series chart data: split period into up to 5 equal buckets ──
+    const BUCKETS = 5;
+    const bucketMs = Math.max(Math.floor(periodDurationMs / BUCKETS), 1);
+    const chartSeries = Array.from({ length: BUCKETS }, (_, i) => {
+      const bucketStart = new Date(+periodStart + i * bucketMs);
+      const bucketEnd = new Date(Math.min(+periodStart + (i + 1) * bucketMs - 1, +periodEnd));
+      const inBucket = c => {
+        const t = +new Date(c.timestamp);
+        return t >= +bucketStart && t <= +bucketEnd && c.gymId === gym.id;
+      };
+      const bucketRows = selectedGymPeriodCheckins.filter(inBucket);
+      const bucketDate = bucketStart;
+      const label = `${bucketDate.getUTCMonth() + 1}/${bucketDate.getUTCDate()}`;
+      return {
+        label,
+        direct: unique(bucketRows.filter(isDirectVisit)),
+        fitflex: unique(bucketRows.filter(isFitFlexVisit)),
+      };
+    });
+
     const todayCount = allCheckins.filter(c => c.gymId === gym.id && +new Date(c.timestamp) >= +startOfDay).length;
     const monthVisits = allCheckins.filter(c => c.gymId === gym.id && +new Date(c.timestamp) >= +startOfMonth && isFitFlexVisit(c)).length;
     const gymSummaries = ownedGyms.map(g => {
@@ -1047,6 +1087,8 @@ export const operatorDashboard = {
       memberType,
       periodVisits: selectedGymFilteredCheckins.length,
       periodMembers: unique(selectedGymFilteredCheckins),
+      prevPeriodVisits: selectedGymPrevFiltered.length,
+      prevPeriodMembers: unique(selectedGymPrevFiltered),
       directVisits: selectedGymPeriodCheckins.filter(isDirectVisit).length,
       directMembers: unique(selectedGymPeriodCheckins.filter(isDirectVisit)),
       fitflexVisits: selectedGymPeriodCheckins.filter(isFitFlexVisit).length,
@@ -1062,6 +1104,7 @@ export const operatorDashboard = {
       },
       gymSummaries,
       payout,
+      chartSeries,
     });
   }
 };
@@ -1075,8 +1118,18 @@ export const gymOwnerRegister = {
   onRequest: async (req, res) => {
     try {
       const body = req.body || {};
-      const user = users.find(u => u.id === req.user.sub);
-      if (!user) return res.status(404).json({ error: 'user_not_found' });
+      let user = await resolveRequestUser(req);
+      if (!user) {
+        console.warn(`[gymOwnerRegister] user ${req.user.sub} missing — auto-provisioning`);
+        user = await users.upsertAsync(u => u.id === req.user.sub, {
+          id: req.user.sub,
+          userType: req.user.userType || 'gym_operator',
+          accountStatus: 'active',
+          approvalStatus: 'pending_approval',
+          onboardingCompleted: false,
+          createdAt: new Date().toISOString(),
+        });
+      }
       const gymList = Array.isArray(body.gyms) ? body.gyms : [];
       if (gymList.length === 0) return res.status(400).json({ error: 'at_least_one_gym_required' });
       const createdGyms = [];
@@ -1127,7 +1180,7 @@ export const ownerMyGyms = {
   description: 'Owner: list gyms assigned to the authenticated owner.',
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
-    const owner = await users.findByIdAsync(req.user.sub);
+    const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
     const ids = owner.gymIds || (owner.gymId ? [owner.gymId] : []);
     const owned = [];
@@ -1143,8 +1196,8 @@ export const ownerMyInvoices = {
   created, method: 'get', path: '/owner/invoices',
   description: 'Owner: list invoices for their gyms.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
     const ids = owner.gymIds || (owner.gymId ? [owner.gymId] : []);
     const allInv = invoices.filter(i => ids.includes(i.gymId));
@@ -1157,8 +1210,8 @@ export const ownerMyEarnings = {
   created, method: 'get', path: '/owner/earnings',
   description: 'Owner: summary of earnings (paid invoices) for their gyms.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
     const ids = owner.gymIds || (owner.gymId ? [owner.gymId] : []);
     const paid = invoices.filter(i => ids.includes(i.gymId) && i.status === 'paid');
@@ -1173,8 +1226,8 @@ export const ownerGymCheckins = {
   created, method: 'get', path: '/owner/gyms/:gymId/checkins',
   description: 'Owner: recent check-ins at a specific owned gym.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
     const ids = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     if (!ids.includes(req.params.gymId)) return res.status(403).json({ error: 'not_your_gym' });
     const list = checkins
@@ -1215,7 +1268,7 @@ export const ownerUpdateGym = {
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
     try {
-      const owner = users.find(u => u.id === req.user.sub);
+      const owner = await resolveRequestUser(req);
       const ids = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
       if (!ids.includes(req.params.gymId)) return res.status(403).json({ error: 'not_your_gym' });
       const prior = gyms.find(g => g.id === req.params.gymId);
@@ -1241,7 +1294,7 @@ export const ownerCreateGym = {
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
     try {
-      const owner = users.find(u => u.id === req.user.sub);
+      const owner = await resolveRequestUser(req);
       if (!owner) return res.status(404).json({ error: 'user_not_found' });
       const body = req.body || {};
       if (!body.name) return res.status(400).json({ error: 'name_required' });
@@ -1267,13 +1320,14 @@ export const ownerDeleteGym = {
   created, method: 'post', path: '/owner/gyms/:gymId/delete',
   description: 'Owner: delete a gym from their account (soft-remove).',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
     const ids = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     if (!ids.includes(req.params.gymId)) return res.status(403).json({ error: 'not_your_gym' });
     gyms.remove(g => g.id === req.params.gymId);
     const updatedGymIds = ids.filter(id => id !== req.params.gymId);
-    users.update(u => u.id === req.user.sub, {
+    users.update(u => u.id === owner.id, {
       gymIds: updatedGymIds,
       gymId: updatedGymIds[0] || null,
       onboardingCompleted: updatedGymIds.length > 0,
@@ -1286,8 +1340,8 @@ export const ownerUpdateTrainer = {
   created, method: 'post', path: '/owner/trainers/:trainerId',
   description: 'Owner: update a trainer assigned to their gym(s).',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     const trainer = trainers.find(t => t.id === req.params.trainerId);
     if (!trainer) return res.status(404).json({ error: 'trainer_not_found' });
@@ -1304,8 +1358,8 @@ export const ownerRemoveTrainer = {
   created, method: 'post', path: '/owner/trainers/:trainerId/remove',
   description: 'Owner: remove a trainer from all their gym(s). The trainer profile persists but is unlinked.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     const trainer = trainers.find(t => t.id === req.params.trainerId);
     if (!trainer) return res.status(404).json({ error: 'trainer_not_found' });
@@ -1321,7 +1375,7 @@ export const ownerCreateMember = {
   description: 'Owner: register a new member under their gym with payment info and create a subscription.',
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+    const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     if (ownerGymIds.length === 0) return res.status(400).json({ error: 'owner_has_no_gyms' });
 
@@ -1404,7 +1458,7 @@ export const ownerAddTrainer = {
   description: 'Owner: add a trainer to their gym(s). Trainer becomes auto-active. Email must be unique per user type.',
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+    const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     const body = req.body || {};
     if (!body.email) return res.status(400).json({ error: 'email_required' });
@@ -1413,10 +1467,10 @@ export const ownerAddTrainer = {
     // Allow creating trainers without gym assignment during onboarding (owner has no gyms yet)
     if (gymIds.length === 0 && ownerGymIds.length > 0 && !body.pendingGymAssignment) return res.status(400).json({ error: 'must_assign_to_at_least_one_owned_gym' });
 
-    // Unique email per user type check
-    const existingUser = users.find(u => u.email === body.email && u.userType === 'trainer');
+    // Unique email check — block if the email is already used by ANY user record or trainer profile
+    const existingUser = users.find(u => u.email === body.email);
     const existingTrainer = trainers.find(t => t.email === body.email);
-    if (existingUser || existingTrainer) return res.status(409).json({ error: 'email_already_used_for_trainer' });
+    if (existingUser || existingTrainer) return res.status(409).json({ error: 'email_already_in_use' });
 
     // Create trainer profile (auto-active, auto-approved)
     const row = normalizeTrainerPayload({
@@ -1451,8 +1505,8 @@ export const ownerListTrainers = {
   created, method: 'get', path: '/owner/trainers',
   description: 'Owner: list trainers assigned to their gyms.',
   onGuard: requireAuth('gym_operator'),
-  onRequest: (req, res) => {
-    const owner = users.find(u => u.id === req.user.sub);
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
     const list = trainers.filter(t => {
       const tGymIds = t.gymIds || [];
@@ -1468,9 +1522,9 @@ export const trainerRegister = {
   created, method: 'post', path: '/trainer/register',
   description: 'Trainer: self-register full profile (displayName, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing.',
   onGuard: requireAuth('trainer'),
-  onRequest: (req, res) => {
+  onRequest: async (req, res) => {
     const body = req.body || {};
-    const user = users.find(u => u.id === req.user.sub);
+    const user = await resolveRequestUser(req);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
     if (!body.photoUrl) return res.status(400).json({ error: 'photoUrl_required' });
     const validGenders = ['male', 'female', 'other'];
