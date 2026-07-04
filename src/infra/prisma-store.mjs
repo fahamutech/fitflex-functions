@@ -350,7 +350,7 @@ export function collection(name) {
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
   users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','memberProfile','gymId','gymIds','createdAt','updatedAt']),
-  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','images','coordinates','amenities','equipment','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
+  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','images','thumbnails','coordinates','amenities','equipment','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed']),
   payment_requests: new Set(['id','memberId','subscriptionId','tier','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),

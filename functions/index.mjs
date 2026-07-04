@@ -8,6 +8,7 @@ import { sign as signJwt, requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../src/auth/firebase.mjs';
 import { issue as issueQr, verify as verifyQr } from '../src/auth/qr-token.mjs';
 import { createCheckInService } from '../src/services/check-in-service.mjs';
+import { createMemberManagementService } from '../src/services/member-management-service.mjs';
 import { validateCheckIn } from '../src/shared/check-in-rules.mjs';
 import { PASS_TIERS } from '../src/shared/constants.mjs';
 import { operatorGymIds, resolveOperatorGymSelection } from '../src/shared/operator-gym-selection.mjs';
@@ -49,6 +50,7 @@ function ensureInit() {
 ensureInit();
 
 const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig });
+const memberManagement = createMemberManagementService({ users, gyms, subscriptions, checkins, paymentRequests, publicUserId });
 const configuredAdminEmails = new Set(
   (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
     .split(',')
@@ -79,6 +81,7 @@ function normalizeGymPayload(body = {}, prior) {
       .split(/\n|,/)
       .map(url => url.trim())
       .filter(Boolean);
+  const thumbnails = Array.isArray(body.thumbnails) ? body.thumbnails : (prior.thumbnails || []);
   const lat = body.coordinates?.lat ?? body.lat ?? prior.coordinates?.lat ?? null;
   const lng = body.coordinates?.lng ?? body.lng ?? prior.coordinates?.lng ?? null;
   const venueType = body.venueType ?? prior.venueType ?? 'physical';
@@ -102,6 +105,7 @@ function normalizeGymPayload(body = {}, prior) {
     ratePerWeek: Number(body.ratePerWeek ?? prior.ratePerWeek ?? 0),
     ratePerMonth: Number(body.ratePerMonth ?? prior.ratePerMonth ?? 0),
     images,
+    thumbnails,
     operatingHours: body.operatingHours ?? prior.operatingHours ?? null,
     amenities: Array.isArray(body.amenities) ? body.amenities : (prior.amenities || []),
     equipment: Array.isArray(body.equipment) ? body.equipment : (prior.equipment || []),
@@ -512,6 +516,12 @@ export const listGyms = {
   created, method: 'get', path: '/gyms',
   description: 'Public list of active gyms.',
   responseSample: [{ id: 'gym_001', name: 'Iron Paradise Masaki', tier: 'standard' }],
+  // Note: the mobile app fetches this list once and reuses it for both the
+  // gym grid (thumbnails) and the gym detail carousel (full images) — there
+  // is no separate per-gym fetch — so both `images` and `thumbnails` must be
+  // present here. Payload size is instead controlled by compressing images
+  // to WebP and capping dimensions at upload time (see image-upload.tsx /
+  // gym_form_page.dart), not by trimming the array server-side.
   onRequest: (_, res) => res.json(gyms.filter(g => g.status === 'active'))
 };
 
@@ -1372,84 +1382,149 @@ export const ownerRemoveTrainer = {
 
 export const ownerCreateMember = {
   created, method: 'post', path: '/owner/members',
-  description: 'Owner: register a new member under their gym with payment info and create a subscription.',
+  description: 'Owner: register a new member under their gym with payment info and create a gym-linked subscription.',
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
-    const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
-    if (ownerGymIds.length === 0) return res.status(400).json({ error: 'owner_has_no_gyms' });
-
-    const { displayName, email, phone, gymId, paidAmount, durationUnit, startDate, endDate, tier } = req.body || {};
-    if (!displayName?.trim()) return res.status(400).json({ error: 'displayName_required' });
-    if (!email?.trim() && !phone?.trim()) return res.status(400).json({ error: 'email_or_phone_required' });
-    if (!['D', 'W', 'M'].includes(durationUnit)) return res.status(400).json({ error: 'durationUnit_must_be_D_W_or_M' });
-    if (!startDate || !endDate) return res.status(400).json({ error: 'startDate_and_endDate_required' });
-
-    const assignedGymId = gymId && ownerGymIds.includes(gymId) ? gymId : ownerGymIds[0];
-
-    // Check for existing member with same email
-    if (email) {
-      const existing = users.find(u => u.email === email && u.userType === 'member');
-      if (existing) return res.status(409).json({ error: 'email_already_registered' });
-    }
-
-    const memberId = `usr_${randomUUID().slice(0, 8)}`;
-    const memberRow = {
-      id: memberId,
-      displayName: displayName.trim(),
-      email: email?.trim() || null,
-      phone: phone?.trim() || null,
-      userType: 'member',
-      accountStatus: 'active',
-      approvalStatus: 'approved',
-      onboardingCompleted: true,
-      createdAt: new Date().toISOString(),
-    };
-    await users.upsertAsync(u => u.id === memberId, memberRow);
-
-    // Create subscription
-    const subTier = tier || 'basic';
-    const sub = {
-      id: `sub_${randomUUID().slice(0, 8)}`,
-      memberId,
-      gymId: assignedGymId,
-      tier: subTier,
-      type: 'gym_direct',
-      status: 'active',
-      startDate,
-      expiresAt: endDate,
-      renewsAt: endDate,
-      createdAt: new Date().toISOString(),
-    };
-    subscriptions.insert(sub);
-
-    // Create payment record
-    if (paidAmount && Number(paidAmount) > 0) {
-      paymentRequests.insert({
-        id: `pay_${randomUUID().slice(0, 8)}`,
-        memberId,
-        subscriptionId: sub.id,
-        tier: subTier,
-        amountTzs: Number(paidAmount),
-        durationUnit: durationUnit || 'M',
-        startDate,
-        endDate,
-        status: 'approved',
-        provider: 'cash',
-        createdAt: new Date().toISOString(),
-      });
-    }
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = await memberManagement.createMember({ owner, body: req.body || {} });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
 
     auditLog.insert({
       id: randomUUID(), at: new Date().toISOString(),
       actor: req.user?.sub, action: 'owner_created_member',
-      target: memberId, before: null, after: { email: memberRow.email, gymId: assignedGymId }
+      target: result.member.id, before: null,
+      after: { email: result.member.email, gymId: result.subscription.homeGymId },
     });
 
-    res.status(201).json({
-      member: memberRow,
-      subscription: sub,
+    res.status(201).json({ member: result.member, subscription: result.subscription, payment: result.payment });
+  }
+};
+
+export const ownerListMembers = {
+  created, method: 'get', path: '/owner/members',
+  description: 'Owner: list direct + FitFlex roaming members across owned gyms with stats and filters (memberType, status, search, gymId).',
+  responseSample: {
+    members: [{ id: 'usr_x', publicId: 'FM001', displayName: 'Amina Said', memberType: 'direct', tier: 'premium', status: 'active' }],
+    stats: { totalMembers: 128, activeToday: 24, expiringSoon: 8 },
+  },
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = memberManagement.listMembers({ owner, query: req.query || {} });
+    res.json(result);
+  }
+};
+
+export const ownerMemberDetail = {
+  created, method: 'get', path: '/owner/members/:memberId',
+  description: 'Owner: member details — profile, check-in summary, membership plan, recent check-ins and payment history.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = memberManagement.getMemberDetail({ owner, memberId: req.params.memberId });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json(result.detail);
+  }
+};
+
+export const ownerMemberCheckInSummary = {
+  created, method: 'get', path: '/owner/members/:memberId/checkin-summary',
+  description: 'Owner: member check-in summary (visits/lastCheckin/streak) for a period preset (week|month|year) or a custom from/to range.',
+  responseSample: { period: 'month', from: '2026-06-01T00:00:00.000Z', to: null, visits: 12, lastCheckinAt: '2026-06-27T08:30:00.000Z', streakDays: 4 },
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const q = req.query || {};
+    const result = memberManagement.getCheckInSummary({
+      owner, memberId: req.params.memberId, period: q.period, from: q.from, to: q.to,
     });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json(result.summary);
+  }
+};
+
+export const ownerMemberCheckins = {
+  created, method: 'get', path: '/owner/members/:memberId/checkins',
+  description: 'Owner: paginated member check-in history with optional from/to date range and search. Query: cursor (offset), limit, from, to, search.',
+  responseSample: { items: [{ id: 'ci_1', timestamp: '2026-06-27T08:30:00.000Z', gymId: 'gym_1', gymName: 'Vik100 Gym' }], total: 42, nextCursor: 20 },
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = memberManagement.listMemberCheckins({ owner, memberId: req.params.memberId, query: req.query || {} });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json(result);
+  }
+};
+
+export const ownerMemberPayments = {
+  created, method: 'get', path: '/owner/members/:memberId/payments',
+  description: 'Owner: paginated member payment history with optional from/to date range and search. Query: cursor (offset), limit, from, to, search.',
+  responseSample: { items: [{ id: 'pay_1', amountTzs: 180000, tier: 'premium', status: 'approved', requestedAt: '2026-01-12T00:00:00.000Z' }], total: 6, nextCursor: 20 },
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = memberManagement.listMemberPayments({ owner, memberId: req.params.memberId, query: req.query || {} });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json(result);
+  }
+};
+
+export const ownerCheckInMember = {
+  created, method: 'post', path: '/owner/members/:memberId/checkin',
+  description: 'Owner: manually check a member in at one of their gyms.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = memberManagement.checkInMember({ owner, memberId: req.params.memberId, gymId: req.body?.gymId });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json(result);
+  }
+};
+
+export const ownerRenewMember = {
+  created, method: 'post', path: '/owner/members/:memberId/renew',
+  description: 'Owner: renew/extend a member subscription and record the payment.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = memberManagement.renewMember({ owner, memberId: req.params.memberId, body: req.body || {} });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json(result);
+  }
+};
+
+export const ownerUpdateMember = {
+  created, method: 'patch', path: '/owner/members/:memberId',
+  description: 'Owner: update a direct member profile fields (displayName, phone, tier).',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = memberManagement.updateMember({ owner, memberId: req.params.memberId, body: req.body || {} });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json(result);
+  }
+};
+
+export const ownerSuspendMember = {
+  created, method: 'post', path: '/owner/members/:memberId/suspend',
+  description: 'Owner: suspend or reactivate a member (body { suspend: true|false }).',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const suspend = req.body?.suspend !== false;
+    const result = memberManagement.setMemberStatus({ owner, memberId: req.params.memberId, suspend });
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json(result);
   }
 };
 

@@ -56,6 +56,7 @@ model Gym {
   commissionRate Int      @default(12)
   status         String   @default("active") // active | inactive | suspended
   images         String[] @default([])
+  thumbnails     String[] @default([]) // small WebP previews, parallel to `images` (same index = same photo)
   coordinates    Json?    // { lat: number, lng: number }
   amenities      String[] @default([]) // e.g. ['WiFi', 'Shower', 'Sauna', 'Parking']
   equipment      String[] @default([]) // e.g. ['Treadmill', 'Dumbbells', 'Bench Press']
