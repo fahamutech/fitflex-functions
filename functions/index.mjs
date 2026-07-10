@@ -365,6 +365,98 @@ export const privacyPolicy = {
     .send(privacyPolicyHtml)
 };
 
+const deleteAccountHtml = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Delete Your FitFlex Account</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; line-height: 1.6; color: #111827; background: #ffffff; }
+    main { max-width: 880px; margin: 0 auto; padding: 40px 20px 64px; }
+    h1, h2 { line-height: 1.25; color: #111827; }
+    h1 { font-size: 32px; margin: 0 0 8px; }
+    h2 { font-size: 22px; margin: 32px 0 8px; }
+    p, li { font-size: 16px; }
+    .muted { color: #4b5563; }
+    .section-divider { margin-top: 48px; padding-top: 32px; border-top: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Delete Your FitFlex Account</h1>
+    <p class="muted">Last updated: July 10, 2026</p>
+
+    <p>This page explains how to request deletion of your FitFlex account and associated personal data, for members, gym owners, and trainers.</p>
+
+    <h2>How to Request Deletion In the App</h2>
+    <ol>
+      <li>Open the FitFlex app and sign in.</li>
+      <li>Go to the <strong>Profile</strong> tab.</li>
+      <li>Under <strong>Account Settings</strong>, tap <strong>Help</strong> to contact FitFlex Support via WhatsApp.</li>
+      <li>Send a message stating you want your FitFlex account deleted, including the phone number or email used on your account.</li>
+      <li>Support will verify your identity and confirm once your account and data are deleted or scheduled for deletion.</li>
+    </ol>
+
+    <h2>Alternative: Request by Email</h2>
+    <p>You can also request deletion without using the app by emailing <strong>privacy@fitflex.af</strong> from the address linked to your account, with the subject "Delete My Account".</p>
+
+    <h2>What Gets Deleted</h2>
+    <ul>
+      <li>Your profile information, such as name, phone number, email address, and profile photo.</li>
+      <li>Membership, subscription, and check-in history linked to your account.</li>
+      <li>Trainer or gym operator profile details, where applicable.</li>
+    </ul>
+
+    <h2>What May Be Retained</h2>
+    <p>We may retain limited records, such as payment/transaction history and support communications, where required for legal, accounting, fraud prevention, dispute resolution, or safety purposes. These records are retained only as long as necessary and are not used for any other purpose.</p>
+
+    <h2>How Long It Takes</h2>
+    <p>Account deletion requests are typically processed within 30 days. If deletion cannot happen immediately, we will explain why and complete deletion or anonymization once retention is no longer required.</p>
+
+    <h2>Contact</h2>
+    <p>For questions about account or data deletion, contact FitFlex at privacy@fitflex.af.</p>
+
+    <section class="section-divider" lang="sw">
+      <h1>Futa Akaunti Yako ya FitFlex</h1>
+      <p class="muted">Ilisasishwa mwisho: Julai 10, 2026</p>
+      <p>Ukurasa huu unaelezea jinsi ya kuomba kufutwa kwa akaunti yako ya FitFlex na taarifa zako binafsi, kwa wanachama, wamiliki wa gym, na wakufunzi.</p>
+
+      <h2>Jinsi ya Kuomba Ndani ya Programu</h2>
+      <ol>
+        <li>Fungua programu ya FitFlex na ingia.</li>
+        <li>Fungua kichupo cha <strong>Profile</strong>.</li>
+        <li>Chini ya <strong>Account Settings</strong>, bonyeza <strong>Help</strong> kuwasiliana na Usaidizi wa FitFlex kupitia WhatsApp.</li>
+        <li>Tuma ujumbe ukieleza unataka akaunti yako ya FitFlex ifutwe, ukijumuisha namba ya simu au barua pepe iliyotumika kwenye akaunti.</li>
+        <li>Timu ya usaidizi itathibitisha utambulisho wako na kukujulisha baada ya akaunti na taarifa zako kufutwa.</li>
+      </ol>
+
+      <h2>Njia Nyingine: Ombi kwa Barua Pepe</h2>
+      <p>Unaweza pia kuomba kufutwa bila kutumia programu kwa kutuma barua pepe kwa <strong>privacy@fitflex.af</strong> kutoka anwani iliyounganishwa na akaunti yako, ukiandika "Delete My Account" kwenye kichwa cha ujumbe.</p>
+
+      <h2>Taarifa Zinazofutwa</h2>
+      <p>Taarifa za wasifu wako, historia ya uanachama na malipo, na taarifa za wakufunzi au wamiliki wa gym zinazohusiana na akaunti yako.</p>
+
+      <h2>Taarifa Zinazoweza Kuhifadhiwa</h2>
+      <p>Tunaweza kuhifadhi kumbukumbu chache, kama historia ya malipo na mawasiliano ya usaidizi, pale inapohitajika kisheria, kwa uhasibu, kuzuia udanganyifu, au kutatua migogoro, kwa muda unaohitajika tu.</p>
+
+      <p>Ombi za kufuta akaunti kwa kawaida zinashughulikiwa ndani ya siku 30. Kwa maswali, wasiliana na FitFlex kupitia privacy@fitflex.af.</p>
+    </section>
+  </main>
+</body>
+</html>`;
+
+export const deleteAccount = {
+  created, method: 'get', path: '/delete-account',
+  description: 'Public: FitFlex account deletion instructions for Play Store listing and app users.',
+  responseSample: '<!doctype html><html lang="en">...</html>',
+  onRequest: (_req, res) => res
+    .status(200)
+    .type('text/html; charset=utf-8')
+    .set('Cache-Control', 'public, max-age=3600')
+    .send(deleteAccountHtml)
+};
+
 // ───────────────────────────────────────── Auth: OTP ──────────────────────────────────────
 export const authRequestOtp = {
   created, method: 'post', path: '/auth/otp/request',
