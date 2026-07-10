@@ -14,7 +14,7 @@ model User {
   email           String?  @unique
   displayName     String?
   photoUrl        String?
-  userType        String   // member | gym_operator | trainer | admin
+  userType        String   // member | gym_operator | trainer | admin | gym_staff
   accountStatus   String   @default("active") // active | suspended
   approvalStatus  String   @default("approved") // pending_approval | approved | rejected
   passwordHash    String?  // demo only — replace with bcrypt in production
@@ -200,6 +200,7 @@ model TrainerProfile {
   experienceYears Int      @default(0)
   status          String   @default("active") // active | suspended
   approvalStatus  String   @default("approved")
+  pendingGymIds   String[] @default([]) // gyms the trainer has applied to, awaiting owner approval
   availability    Json?    // [{ date, slots }]
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt

@@ -223,11 +223,21 @@ export function createMemberManagementService({
     return { member, subscription: sub, payment };
   }
 
-  function listMembers({ owner, query = {} }) {
-    const gymIds = ownerGymIdsOf(owner);
-    const now = new Date();
+  // Resolves the effective gym scope for a members/stats query: a single
+  // owned gym when `requestedGymId` is provided and owned, otherwise every
+  // gym the owner has (aggregate view).
+  function scopedGymIds(owner, requestedGymId) {
+    const ownedGymIds = ownerGymIdsOf(owner);
+    const gymId = requestedGymId ? String(requestedGymId) : null;
+    return gymId && ownedGymIds.includes(gymId) ? [gymId] : ownedGymIds;
+  }
+
+  // Builds the member rows + summary stats for a given gym scope. Shared by
+  // [listMembers] (owner Members screen) and [getMemberStats] (owner Home
+  // dashboard "total members" card) so the two never disagree.
+  function computeRowsAndStats(gymIds, now) {
     if (gymIds.length === 0) {
-      return { members: [], stats: { totalMembers: 0, activeToday: 0, expiringSoon: 0 } };
+      return { rows: [], stats: { totalMembers: 0, activeToday: 0, expiringSoon: 0 } };
     }
 
     const directByMember = new Map();
@@ -258,6 +268,13 @@ export function createMemberManagementService({
       activeToday: rows.filter((r) => r.status === 'checked_in').length,
       expiringSoon: rows.filter((r) => r.status === 'expiring_soon').length,
     };
+    return { rows, stats };
+  }
+
+  function listMembers({ owner, query = {} }) {
+    const gymIds = scopedGymIds(owner, query.gymId);
+    const now = new Date();
+    const { rows, stats } = computeRowsAndStats(gymIds, now);
 
     let filtered = rows;
     const memberType = query.memberType;
@@ -277,6 +294,15 @@ export function createMemberManagementService({
 
     filtered.sort((a, b) => (+new Date(b.lastCheckinAt || 0)) - (+new Date(a.lastCheckinAt || 0)));
     return { members: filtered, stats };
+  }
+
+  // Gym-scoped member stats only (no row list) — used by the owner Home
+  // dashboard to show the gym's real registered member count, independent
+  // of the analytics date-range/period filters.
+  function getMemberStats({ owner, gymId }) {
+    const gymIds = scopedGymIds(owner, gymId);
+    const { stats } = computeRowsAndStats(gymIds, new Date());
+    return stats;
   }
 
   function getMemberDetail({ owner, memberId }) {
@@ -545,6 +571,7 @@ export function createMemberManagementService({
   return {
     createMember,
     listMembers,
+    getMemberStats,
     getMemberDetail,
     getCheckInSummary,
     listMemberCheckins,

@@ -11,20 +11,20 @@ function res() {
   };
 }
 
-function createTrainerUser(phone) {
+async function createTrainerUser(phone) {
   const otpRes = res();
   authRequestOtp.onRequest({ body: { phone, userType: 'trainer' } }, otpRes);
   const code = otpRes.body.devOtp;
 
   const verifyRes = res();
-  authVerifyOtp.onRequest({ body: { phone, code } }, verifyRes);
+  await authVerifyOtp.onRequest({ body: { phone, code } }, verifyRes);
   return verifyRes.body.user;
 }
 
-test('trainerRegister: rejects when photoUrl (picture) is missing', () => {
-  const user = createTrainerUser(`+255700000${Date.now().toString().slice(-4)}`);
+test('trainerRegister: rejects when photoUrl (picture) is missing', async () => {
+  const user = await createTrainerUser(`+255700000${Date.now().toString().slice(-4)}`);
   const out = res();
-  trainerRegister.onRequest({
+  await trainerRegister.onRequest({
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Amina Trainer',
@@ -38,10 +38,10 @@ test('trainerRegister: rejects when photoUrl (picture) is missing', () => {
   assert.ok(out.body.error.includes('photoUrl'));
 });
 
-test('trainerRegister: rejects when gender is missing', () => {
-  const user = createTrainerUser(`+255700001${Date.now().toString().slice(-4)}`);
+test('trainerRegister: rejects when gender is missing', async () => {
+  const user = await createTrainerUser(`+255700001${Date.now().toString().slice(-4)}`);
   const out = res();
-  trainerRegister.onRequest({
+  await trainerRegister.onRequest({
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Amina Trainer',
@@ -55,10 +55,10 @@ test('trainerRegister: rejects when gender is missing', () => {
   assert.ok(out.body.error.includes('gender'));
 });
 
-test('trainerRegister: rejects when gender value is invalid', () => {
-  const user = createTrainerUser(`+255700002${Date.now().toString().slice(-4)}`);
+test('trainerRegister: rejects when gender value is invalid', async () => {
+  const user = await createTrainerUser(`+255700002${Date.now().toString().slice(-4)}`);
   const out = res();
-  trainerRegister.onRequest({
+  await trainerRegister.onRequest({
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Amina Trainer',
@@ -73,10 +73,10 @@ test('trainerRegister: rejects when gender value is invalid', () => {
   assert.ok(out.body.error.includes('gender'));
 });
 
-test('trainerRegister: succeeds with photoUrl and gender present', () => {
-  const user = createTrainerUser(`+255700003${Date.now().toString().slice(-4)}`);
+test('trainerRegister: succeeds with photoUrl and gender present', async () => {
+  const user = await createTrainerUser(`+255700003${Date.now().toString().slice(-4)}`);
   const out = res();
-  trainerRegister.onRequest({
+  await trainerRegister.onRequest({
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Baraka Kocha',
@@ -94,10 +94,10 @@ test('trainerRegister: succeeds with photoUrl and gender present', () => {
   assert.equal(out.body.approvalStatus, 'pending_approval');
 });
 
-test('trainerRegister: stores gender in profile and returns it', () => {
-  const user = createTrainerUser(`+255700004${Date.now().toString().slice(-4)}`);
+test('trainerRegister: stores gender in profile and returns it', async () => {
+  const user = await createTrainerUser(`+255700004${Date.now().toString().slice(-4)}`);
   const out = res();
-  trainerRegister.onRequest({
+  await trainerRegister.onRequest({
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Fatuma Kocha',

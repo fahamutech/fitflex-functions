@@ -41,3 +41,20 @@ export function requireAcl(scope) {
     return res.status(403).json({ error: 'acl_forbidden', requiredScope: scope });
   };
 }
+
+/**
+ * ACL scope guard for gym-level staff (receptionists etc.) created by a gym owner.
+ * Gym owners (userType: 'gym_operator') are unrestricted over their own gyms.
+ * Gym staff (userType: 'gym_staff') must have the scope in their aclPermissions JWT claim.
+ * Always call AFTER requireAuth.
+ */
+export function requireGymAcl(scope) {
+  return (req, res, next) => {
+    const { userType, aclPermissions } = req.user || {};
+    if (userType === 'gym_operator') return next(); // owner — unrestricted
+    if (userType === 'gym_staff' && Array.isArray(aclPermissions) && aclPermissions.includes(scope)) {
+      return next();
+    }
+    return res.status(403).json({ error: 'acl_forbidden', requiredScope: scope });
+  };
+}

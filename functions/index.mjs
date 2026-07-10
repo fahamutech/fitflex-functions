@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { collection } from '../src/infra/prisma-store.mjs';
 import { ensureSeedPrisma } from '../src/infra/seed-prisma.mjs';
-import { sign as signJwt, requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import { sign as signJwt, requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../src/auth/firebase.mjs';
 import { issue as issueQr, verify as verifyQr } from '../src/auth/qr-token.mjs';
 import { createCheckInService } from '../src/services/check-in-service.mjs';
@@ -46,8 +46,10 @@ function ensureInit() {
   }
   return _initPromise;
 }
-// Fire init eagerly (non-blocking) so it's ready before first request
-ensureInit();
+// Fire init eagerly (non-blocking) so it's ready before first request.
+ensureInit().catch(err => {
+  console.warn('[fitflex] Background collection priming failed:', err?.message || err);
+});
 
 const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig });
 const memberManagement = createMemberManagementService({ users, gyms, subscriptions, checkins, paymentRequests, publicUserId });
@@ -66,8 +68,11 @@ function normalizeRequestedRole(role) {
   if (role === 'admin') return 'admin';
   if (role === 'gym_owner' || role === 'gym_operator') return 'gym_operator';
   if (role === 'trainer') return 'trainer';
+  if (role === 'gym_staff') return 'gym_staff';
   return 'member';
 }
+
+const GYM_STAFF_ACL_SCOPES = ['members', 'checkins', 'payments', 'trainers', 'gyms', 'shop'];
 
 function approvalStatusForRole(role) {
   return ['gym_operator', 'trainer'].includes(role) ? 'pending_approval' : 'approved';
@@ -188,7 +193,10 @@ function hydrateTrainer(row) {
   const linkedGyms = (row.gymIds || [])
     .map(id => gyms.find(g => g.id === id))
     .filter(Boolean);
-  return { ...row, gyms: linkedGyms };
+  const pendingGyms = (row.pendingGymIds || [])
+    .map(id => gyms.find(g => g.id === id))
+    .filter(Boolean);
+  return { ...row, gyms: linkedGyms, pendingGyms };
 }
 
 function parseStringList(value, fallback = []) {
@@ -199,6 +207,7 @@ function parseStringList(value, fallback = []) {
 
 function normalizeTrainerPayload(body = {}, prior = {}) {
   const gymIds = parseStringList(body.gymIds, prior.gymIds || []);
+  const pendingGymIds = parseStringList(body.pendingGymIds, prior.pendingGymIds || []);
   const specialties = parseStringList(body.specialties, prior.specialties || []);
   return {
     id: body.id || prior.id || `trn_${randomUUID().slice(0, 8)}`,
@@ -216,6 +225,7 @@ function normalizeTrainerPayload(body = {}, prior = {}) {
     sessionRateCurrency: body.sessionRateCurrency ?? prior.sessionRateCurrency ?? 'TZS',
     experienceYears: Number(body.experienceYears ?? prior.experienceYears ?? 0),
     gymIds,
+    pendingGymIds,
     status: ['active', 'inactive', 'suspended'].includes(body.status) ? body.status : (prior.status ?? 'active'),
     approvalStatus: body.approvalStatus ?? prior.approvalStatus ?? 'approved',
     availability: Array.isArray(body.availability) ? body.availability : (prior.availability || []),
@@ -261,6 +271,100 @@ export const health = {
   onRequest: (_, res) => res.status(200).json({ status: 'ok', service: 'fitflex-functions' })
 };
 
+const privacyPolicyHtml = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FitFlex Privacy Policy</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; line-height: 1.6; color: #111827; background: #ffffff; }
+    main { max-width: 880px; margin: 0 auto; padding: 40px 20px 64px; }
+    h1, h2 { line-height: 1.25; color: #111827; }
+    h1 { font-size: 32px; margin: 0 0 8px; }
+    h2 { font-size: 22px; margin: 32px 0 8px; }
+    p, li { font-size: 16px; }
+    .muted { color: #4b5563; }
+    .section-divider { margin-top: 48px; padding-top: 32px; border-top: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>FitFlex Privacy Policy</h1>
+    <p class="muted">Last updated: July 4, 2026</p>
+
+    <p>FitFlex provides fitness membership, gym access, trainer booking, payment, and check-in services. This Privacy Policy explains how FitFlex collects, uses, shares, and protects information when you use the FitFlex mobile app, portals, websites, and related services.</p>
+
+    <h2>Information We Collect</h2>
+    <ul>
+      <li>Account information, such as your name, phone number, email address, profile photo, role, and authentication identifiers.</li>
+      <li>Membership and activity information, such as subscriptions, gym visits, QR check-ins, trainer bookings, credits, payment status, and support requests.</li>
+      <li>Gym, operator, and trainer information, such as business profile details, location, services, availability, and approval or compliance information.</li>
+      <li>Device and technical information, such as app version, device identifiers, IP address, logs, crash data, and security events.</li>
+      <li>Location information when needed to show nearby gyms, verify gym access, or support location-based features, depending on your device permissions.</li>
+    </ul>
+
+    <h2>How We Use Information</h2>
+    <ul>
+      <li>To create and manage accounts, subscriptions, gym access, trainer bookings, check-ins, payments, and customer support.</li>
+      <li>To verify identity, prevent fraud, enforce access rules, protect users and partner gyms, and maintain service security.</li>
+      <li>To send service messages, receipts, account notices, renewal reminders, and important policy updates.</li>
+      <li>To improve app performance, diagnose bugs, measure service usage, and develop better FitFlex features.</li>
+      <li>To comply with legal, tax, accounting, safety, dispute resolution, and regulatory obligations.</li>
+    </ul>
+
+    <h2>Sharing Information</h2>
+    <p>We do not sell personal information. We may share information with gyms, trainers, payment processors, authentication providers, hosting providers, analytics or crash reporting providers, support tools, professional advisers, regulators, or law enforcement when needed to operate FitFlex, process transactions, protect rights and safety, or comply with law. Gym operators receive only the information needed to provide access and manage memberships. QR scan flows are designed to use masked member identifiers where possible.</p>
+
+    <h2>Payments</h2>
+    <p>FitFlex may use third-party payment partners to process subscriptions, payouts, credits, refunds, and related financial transactions. Payment partners may collect and process payment details under their own terms and privacy notices. FitFlex stores transaction references, statuses, amounts, and related account records needed to operate the service.</p>
+
+    <h2>Data Retention</h2>
+    <p>We retain information for as long as needed to provide FitFlex services, comply with legal and accounting obligations, resolve disputes, prevent fraud, and maintain audit records. Retention periods may vary by data type and legal requirement.</p>
+
+    <h2>Data Deletion</h2>
+    <p>You may request account or personal data deletion by contacting us at privacy@fitflex.af. We may need to retain limited records when required for legal, accounting, fraud prevention, dispute resolution, or safety purposes. If deletion is not immediately possible, we will explain the reason and complete deletion or anonymization when retention is no longer required.</p>
+
+    <h2>Security</h2>
+    <p>We use administrative, technical, and organizational safeguards designed to protect personal information. No internet service is completely secure, so we cannot guarantee absolute security. You should keep your login credentials and devices secure.</p>
+
+    <h2>Children</h2>
+    <p>FitFlex is not intended for children under 13. We do not knowingly collect personal information from children under 13. If you believe a child has provided personal information, contact us so we can take appropriate action.</p>
+
+    <h2>Your Choices and Rights</h2>
+    <p>You may update account details in the app where available, control device permissions through your device settings, opt out of non-essential communications where supported, and request access, correction, deletion, or other privacy rights by contacting us.</p>
+
+    <h2>International Processing</h2>
+    <p>FitFlex may process and store information in countries where we, our infrastructure providers, or service providers operate. We take steps designed to protect information consistent with this policy and applicable law.</p>
+
+    <h2>Changes to This Policy</h2>
+    <p>We may update this Privacy Policy from time to time. If changes are material, we will provide notice through the app, website, or other appropriate channels. The updated date above shows when the policy was last revised.</p>
+
+    <h2>Contact</h2>
+    <p>For privacy questions or requests, contact FitFlex at privacy@fitflex.af.</p>
+
+    <section class="section-divider" lang="sw">
+      <h1>Sera ya Faragha ya FitFlex</h1>
+      <p class="muted">Ilisasishwa mwisho: Julai 4, 2026</p>
+      <p>FitFlex hukusanya na kutumia taarifa zinazohitajika kutoa huduma za uanachama wa mazoezi, kuingia gym kwa QR, malipo, miadi na wakufunzi, usaidizi kwa wateja, usalama, na uboreshaji wa huduma.</p>
+      <p>Hatuiuzi taarifa binafsi. Tunaweza kushiriki taarifa zinazohitajika na gym, wakufunzi, watoa huduma za malipo, uthibitishaji, hosting, usaidizi, au mamlaka pale inapohitajika kuendesha huduma, kulinda watumiaji, au kutimiza matakwa ya kisheria.</p>
+      <p>Unaweza kuomba kusahihisha au kufuta taarifa zako kwa kutuandikia kupitia privacy@fitflex.af. Baadhi ya kumbukumbu zinaweza kuhifadhiwa kwa muda unaohitajika kwa sheria, uhasibu, usalama, kuzuia udanganyifu, au kutatua migogoro.</p>
+    </section>
+  </main>
+</body>
+</html>`;
+
+export const privacyPolicy = {
+  created, method: 'get', path: '/privacy-policy',
+  description: 'Public: FitFlex privacy policy for Play Store listing and app users.',
+  responseSample: '<!doctype html><html lang="en">...</html>',
+  onRequest: (_req, res) => res
+    .status(200)
+    .type('text/html; charset=utf-8')
+    .set('Cache-Control', 'public, max-age=3600')
+    .send(privacyPolicyHtml)
+};
+
 // ───────────────────────────────────────── Auth: OTP ──────────────────────────────────────
 export const authRequestOtp = {
   created, method: 'post', path: '/auth/otp/request',
@@ -287,7 +391,10 @@ export const authVerifyOtp = {
   responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'member' } },
   onRequest: async (req, res) => {
     const { phone, code } = req.body || {};
-    const otp = await otps.findAsync(o => o.phone === phone);
+    // otps.upsert() (in authRequestOtp) writes synchronously to the in-memory cache and
+    // persists to PG in the background — reading via findAsync() here would bypass that
+    // cache and could race the background write, intermittently returning stale/empty data.
+    const otp = otps.find(o => o.phone === phone);
     if (!otp || otp.code !== code) return res.status(401).json({ error: 'invalid_otp' });
     if (Date.now() > otp.expiresAt) return res.status(401).json({ error: 'otp_expired' });
 
@@ -378,6 +485,10 @@ export const authFirebaseSession = {
       // Admin/portal users must be pre-created by an existing admin.
       if (selfRole === 'admin' && !isAdminEmail) {
         return res.status(403).json({ error: 'admin_self_registration_not_allowed' });
+      }
+      // Gym staff (receptionists etc.) must be pre-created by their gym owner.
+      if (selfRole === 'gym_staff') {
+        return res.status(403).json({ error: 'gym_staff_self_registration_not_allowed' });
       }
       const row = {
         id: `usr_${randomUUID().slice(0, 8)}`,
@@ -662,6 +773,52 @@ export const me = {
   }
 };
 
+export const deleteMyAccount = {
+  created, method: 'delete', path: '/me',
+  description: 'Authenticated user: permanently delete own account + Firebase identity (Play Store account-deletion requirement). Blocked if the account has data that requires an assisted transfer first (gym owner with check-in activity, trainer with bookings).',
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => {
+    const user = await resolveRequestUser(req);
+    if (!user) return res.status(404).json({ error: 'user_not_found' });
+
+    if (user.userType === 'gym_operator') {
+      const ownedGymIds = user.gymIds || (user.gymId ? [user.gymId] : []);
+      if (ownedGymIds.some(id => checkins.find(c => c.gymId === id))) {
+        return res.status(409).json({
+          error: 'gym_owner_has_checkin_activity',
+          message: 'Your gym(s) have check-in activity. Contact support@fitflex.af to transfer or close your gym(s) before deleting your account.'
+        });
+      }
+    }
+
+    const trainerProfile = user.userType === 'trainer' ? trainers.find(t => t.userId === user.id) : null;
+    if (trainerProfile && trainerBookings.find(b => b.trainerId === trainerProfile.id)) {
+      return res.status(409).json({
+        error: 'trainer_has_bookings',
+        message: 'Your trainer profile has bookings. Contact support@fitflex.af before deleting your account.'
+      });
+    }
+
+    if (user.firebaseUid) {
+      try {
+        initFirebaseAdmin();
+        await getAdminAuth().deleteUser(user.firebaseUid);
+      } catch (fbErr) {
+        console.warn('[account-delete] Firebase user deletion failed:', fbErr?.message);
+      }
+    }
+
+    if (trainerProfile) await trainers.removeAsync(t => t.id === trainerProfile.id);
+    await users.removeAsync(u => u.id === user.id);
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: user.id, action: 'self_account_deleted',
+      target: user.id, before: { email: user.email, phone: user.phone, userType: user.userType }, after: null,
+    });
+    res.json({ ok: true, message: 'Your account and personal data have been deleted.' });
+  }
+};
+
 export const updateMemberProfile = {
   created, method: 'post', path: '/me/profile',
   description: 'Authenticated user: save profile details; members can also save onboarding goals and preferences.',
@@ -883,7 +1040,7 @@ export const myQr = {
 export const operatorVerifyQr = {
   created, method: 'post', path: '/operator/verify-qr',
   description: 'Operator: verify a member QR and return member details + pass eligibility without check-in.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('checkins')],
   onRequest: async (req, res) => {
     const { qrToken, gymId } = req.body || {};
     const claim = verifyQr(qrToken);
@@ -945,7 +1102,7 @@ export const operatorCheckIn = {
   created, method: 'post', path: '/operator/checkins',
   description: 'Operator scans a member QR and triggers BL-012 validation + logging.',
   requestSample: { qrToken: 'usr_x.123456.signature' },
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('checkins')],
   onRequest: async (req, res) => {
     const { qrToken, gymId } = req.body || {};
     const claim = verifyQr(qrToken);
@@ -977,7 +1134,7 @@ export const operatorCheckIn = {
 export const operatorRecentCheckIns = {
   created, method: 'get', path: '/operator/checkins',
   description: 'List of recent check-ins at the operator gym.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('checkins')],
   onRequest: async (req, res) => {
     const operator = await resolveRequestUser(req);
     const ids = operatorGymIds(operator);
@@ -992,8 +1149,8 @@ export const operatorRecentCheckIns = {
 
 export const operatorDashboard = {
   created, method: 'get', path: '/operator/dashboard',
-  description: 'Owner/operator analytics across owned gyms with configurable period and direct/FitFlex split.',
-  onGuard: requireAuth('gym_operator'),
+  description: 'Owner/operator analytics across owned gyms with configurable period and direct/FitFlex split. Basic cross-feature context — visible to any gym_staff regardless of their ACL scopes.',
+  onGuard: requireAuth('gym_operator', 'gym_staff'),
   onRequest: async (req, res) => {
     const operator = await resolveRequestUser(req);
     const ownedGymIds = operatorGymIds(operator);
@@ -1087,6 +1244,10 @@ export const operatorDashboard = {
       ? { band: 5, note: 'Negotiate flat fee' }
       : calculatePayout({ visitCount: monthVisits, gymTier: gym.tier, negotiatedPerVisitRate: gym.perVisitRate });
 
+    // Real registered-member count for the selected gym (independent of the
+    // period/date filters above) — backs the Home dashboard "Total Members" card.
+    const memberStats = memberManagement.getMemberStats({ owner: operator, gymId: gym.id });
+
     res.json({
       gym,
       gyms: ownedGyms,
@@ -1095,6 +1256,9 @@ export const operatorDashboard = {
       periodStart: periodStart.toISOString().slice(0, 10),
       periodEnd: periodEnd.toISOString().slice(0, 10),
       memberType,
+      totalMembers: memberStats.totalMembers,
+      activeTodayMembers: memberStats.activeToday,
+      expiringSoonMembers: memberStats.expiringSoon,
       periodVisits: selectedGymFilteredCheckins.length,
       periodMembers: unique(selectedGymFilteredCheckins),
       prevPeriodVisits: selectedGymPrevFiltered.length,
@@ -1187,8 +1351,8 @@ export const gymOwnerRegister = {
 
 export const ownerMyGyms = {
   created, method: 'get', path: '/owner/gyms',
-  description: 'Owner: list gyms assigned to the authenticated owner.',
-  onGuard: requireAuth('gym_operator'),
+  description: 'Owner: list gyms assigned to the authenticated owner. Basic cross-feature context — visible to any gym_staff regardless of their ACL scopes.',
+  onGuard: requireAuth('gym_operator', 'gym_staff'),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1205,7 +1369,7 @@ export const ownerMyGyms = {
 export const ownerMyInvoices = {
   created, method: 'get', path: '/owner/invoices',
   description: 'Owner: list invoices for their gyms.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('payments')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1218,12 +1382,16 @@ export const ownerMyInvoices = {
 
 export const ownerMyEarnings = {
   created, method: 'get', path: '/owner/earnings',
-  description: 'Owner: summary of earnings (paid invoices) for their gyms.',
-  onGuard: requireAuth('gym_operator'),
+  description: 'Owner: summary of earnings (paid invoices) for their gyms. Optional ?gymId scopes to a single owned gym.',
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('payments')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
-    const ids = owner.gymIds || (owner.gymId ? [owner.gymId] : []);
+    const ownedGymIds = owner.gymIds || (owner.gymId ? [owner.gymId] : []);
+    const requestedGymId = req.query?.gymId ? String(req.query.gymId) : null;
+    const ids = requestedGymId && ownedGymIds.includes(requestedGymId)
+      ? [requestedGymId]
+      : ownedGymIds;
     const paid = invoices.filter(i => ids.includes(i.gymId) && i.status === 'paid');
     const totalPaid = paid.reduce((s, i) => s + (i.amount || 0), 0);
     const pending = invoices.filter(i => ids.includes(i.gymId) && i.status === 'unpaid');
@@ -1235,7 +1403,7 @@ export const ownerMyEarnings = {
 export const ownerGymCheckins = {
   created, method: 'get', path: '/owner/gyms/:gymId/checkins',
   description: 'Owner: recent check-ins at a specific owned gym.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('checkins')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const ids = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
@@ -1275,7 +1443,7 @@ function syncTrainersForGym(gymId, trainerIdList) {
 export const ownerUpdateGym = {
   created, method: 'put', path: '/owner/gyms/:gymId',
   description: 'Owner: update details of an owned gym.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')],
   onRequest: async (req, res) => {
     try {
       const owner = await resolveRequestUser(req);
@@ -1301,7 +1469,7 @@ export const ownerUpdateGym = {
 export const ownerCreateGym = {
   created, method: 'post', path: '/owner/gyms',
   description: 'Owner: add a new gym to their account.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')],
   onRequest: async (req, res) => {
     try {
       const owner = await resolveRequestUser(req);
@@ -1329,7 +1497,7 @@ export const ownerCreateGym = {
 export const ownerDeleteGym = {
   created, method: 'post', path: '/owner/gyms/:gymId/delete',
   description: 'Owner: delete a gym from their account (soft-remove).',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1349,7 +1517,7 @@ export const ownerDeleteGym = {
 export const ownerUpdateTrainer = {
   created, method: 'post', path: '/owner/trainers/:trainerId',
   description: 'Owner: update a trainer assigned to their gym(s).',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
@@ -1367,7 +1535,7 @@ export const ownerUpdateTrainer = {
 export const ownerRemoveTrainer = {
   created, method: 'post', path: '/owner/trainers/:trainerId/remove',
   description: 'Owner: remove a trainer from all their gym(s). The trainer profile persists but is unlinked.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
@@ -1383,7 +1551,7 @@ export const ownerRemoveTrainer = {
 export const ownerCreateMember = {
   created, method: 'post', path: '/owner/members',
   description: 'Owner: register a new member under their gym with payment info and create a gym-linked subscription.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1408,7 +1576,7 @@ export const ownerListMembers = {
     members: [{ id: 'usr_x', publicId: 'FM001', displayName: 'Amina Said', memberType: 'direct', tier: 'premium', status: 'active' }],
     stats: { totalMembers: 128, activeToday: 24, expiringSoon: 8 },
   },
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1420,7 +1588,7 @@ export const ownerListMembers = {
 export const ownerMemberDetail = {
   created, method: 'get', path: '/owner/members/:memberId',
   description: 'Owner: member details — profile, check-in summary, membership plan, recent check-ins and payment history.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1434,7 +1602,7 @@ export const ownerMemberCheckInSummary = {
   created, method: 'get', path: '/owner/members/:memberId/checkin-summary',
   description: 'Owner: member check-in summary (visits/lastCheckin/streak) for a period preset (week|month|year) or a custom from/to range.',
   responseSample: { period: 'month', from: '2026-06-01T00:00:00.000Z', to: null, visits: 12, lastCheckinAt: '2026-06-27T08:30:00.000Z', streakDays: 4 },
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1451,7 +1619,7 @@ export const ownerMemberCheckins = {
   created, method: 'get', path: '/owner/members/:memberId/checkins',
   description: 'Owner: paginated member check-in history with optional from/to date range and search. Query: cursor (offset), limit, from, to, search.',
   responseSample: { items: [{ id: 'ci_1', timestamp: '2026-06-27T08:30:00.000Z', gymId: 'gym_1', gymName: 'Vik100 Gym' }], total: 42, nextCursor: 20 },
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1465,7 +1633,7 @@ export const ownerMemberPayments = {
   created, method: 'get', path: '/owner/members/:memberId/payments',
   description: 'Owner: paginated member payment history with optional from/to date range and search. Query: cursor (offset), limit, from, to, search.',
   responseSample: { items: [{ id: 'pay_1', amountTzs: 180000, tier: 'premium', status: 'approved', requestedAt: '2026-01-12T00:00:00.000Z' }], total: 6, nextCursor: 20 },
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1478,7 +1646,7 @@ export const ownerMemberPayments = {
 export const ownerCheckInMember = {
   created, method: 'post', path: '/owner/members/:memberId/checkin',
   description: 'Owner: manually check a member in at one of their gyms.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('checkins')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1491,7 +1659,7 @@ export const ownerCheckInMember = {
 export const ownerRenewMember = {
   created, method: 'post', path: '/owner/members/:memberId/renew',
   description: 'Owner: renew/extend a member subscription and record the payment.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1504,7 +1672,7 @@ export const ownerRenewMember = {
 export const ownerUpdateMember = {
   created, method: 'patch', path: '/owner/members/:memberId',
   description: 'Owner: update a direct member profile fields (displayName, phone, tier).',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1517,7 +1685,7 @@ export const ownerUpdateMember = {
 export const ownerSuspendMember = {
   created, method: 'post', path: '/owner/members/:memberId/suspend',
   description: 'Owner: suspend or reactivate a member (body { suspend: true|false }).',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -1528,66 +1696,230 @@ export const ownerSuspendMember = {
   }
 };
 
-export const ownerAddTrainer = {
-  created, method: 'post', path: '/owner/trainers',
-  description: 'Owner: add a trainer to their gym(s). Trainer becomes auto-active. Email must be unique per user type.',
-  onGuard: requireAuth('gym_operator'),
+export const ownerListTrainers = {
+  created, method: 'get', path: '/owner/trainers',
+  description: 'Owner: list trainers assigned to their gyms. Optional ?gymId scopes the list to a single owned gym.',
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
-    const body = req.body || {};
-    if (!body.email) return res.status(400).json({ error: 'email_required' });
-    if (!body.displayName) return res.status(400).json({ error: 'displayName_required' });
-    const gymIds = parseStringList(body.gymIds, []).filter(id => ownerGymIds.includes(id));
-    // Allow creating trainers without gym assignment during onboarding (owner has no gyms yet)
-    if (gymIds.length === 0 && ownerGymIds.length > 0 && !body.pendingGymAssignment) return res.status(400).json({ error: 'must_assign_to_at_least_one_owned_gym' });
-
-    // Unique email check — block if the email is already used by ANY user record or trainer profile
-    const existingUser = users.find(u => u.email === body.email);
-    const existingTrainer = trainers.find(t => t.email === body.email);
-    if (existingUser || existingTrainer) return res.status(409).json({ error: 'email_already_in_use' });
-
-    // Create trainer profile (auto-active, auto-approved)
-    const row = normalizeTrainerPayload({
-      ...body,
-      gymIds,
-      status: 'active',
-      approvalStatus: 'approved',
-    }, {});
-    trainers.upsert(t => t.id === row.id, row);
-
-    // B.2 fix: Also create a user record so the trainer can log in via email+PIN
-    const userId = `usr_${randomUUID().slice(0, 8)}`;
-    const userRow = {
-      id: userId,
-      email: body.email,
-      displayName: body.displayName,
-      userType: 'trainer',
-      accountStatus: 'active',
-      approvalStatus: 'approved',
-      onboardingCompleted: false,
-      createdAt: new Date().toISOString(),
-    };
-    await users.upsertAsync(u => u.id === userId, userRow);
-    // Link the trainer profile to the user
-    trainers.upsert(t => t.id === row.id, { ...row, userId });
-
-    res.json(hydrateTrainer({ ...row, userId }));
+    const requestedGymId = req.query?.gymId ? String(req.query.gymId) : null;
+    const scopeGymIds = requestedGymId && ownerGymIds.includes(requestedGymId)
+      ? [requestedGymId]
+      : ownerGymIds;
+    const list = trainers.filter(t => {
+      const tGymIds = t.gymIds || [];
+      return tGymIds.some(id => scopeGymIds.includes(id));
+    }).map(hydrateTrainer);
+    res.json(list);
   }
 };
 
-export const ownerListTrainers = {
-  created, method: 'get', path: '/owner/trainers',
-  description: 'Owner: list trainers assigned to their gyms.',
+export const ownerPendingTrainers = {
+  created, method: 'get', path: '/owner/trainers/pending',
+  description: 'Owner: list trainers who self-registered and applied to join one of their gyms, awaiting approval.',
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+    const list = trainers
+      .filter(t => (t.pendingGymIds || []).some(id => ownerGymIds.includes(id)))
+      .map(t => ({
+        ...hydrateTrainer(t),
+        pendingGyms: (t.pendingGymIds || [])
+          .filter(id => ownerGymIds.includes(id))
+          .map(id => gyms.find(g => g.id === id))
+          .filter(Boolean),
+      }));
+    res.json(list);
+  }
+};
+
+export const ownerDecideTrainerJoin = {
+  created, method: 'post', path: '/owner/trainers/:trainerId/decision',
+  description: "Owner: approve or reject a trainer's request to join one of their gyms.",
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+    const { gymId, decision } = req.body || {};
+    if (!gymId) return res.status(400).json({ error: 'gymId_required' });
+    if (!['approve', 'reject'].includes(decision)) return res.status(400).json({ error: 'invalid_decision' });
+    if (!ownerGymIds.includes(gymId)) return res.status(403).json({ error: 'not_your_gym' });
+
+    const trainer = trainers.find(t => t.id === req.params.trainerId);
+    if (!trainer) return res.status(404).json({ error: 'trainer_not_found' });
+    const pendingGymIds = trainer.pendingGymIds || [];
+    if (!pendingGymIds.includes(gymId)) return res.status(400).json({ error: 'no_pending_request_for_gym' });
+
+    const remainingPending = pendingGymIds.filter(id => id !== gymId);
+    const patch = { pendingGymIds: remainingPending };
+    if (decision === 'approve') {
+      const gymIds = trainer.gymIds || [];
+      patch.gymIds = gymIds.includes(gymId) ? gymIds : [...gymIds, gymId];
+    }
+    const updated = trainers.update(t => t.id === trainer.id, patch);
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: req.user?.sub, action: decision === 'approve' ? 'trainer_join_approved' : 'trainer_join_rejected',
+      target: trainer.id, before: { pendingGymIds }, after: patch,
+    });
+    res.json(hydrateTrainer(updated));
+  }
+};
+
+// ───────────────────────────────────────── Gym Staff Roster (RBAC) ────────────────────────
+// Owners create gym-level staff (e.g. receptionists) scoped to their own gym(s) with a
+// per-feature ACL (see GYM_STAFF_ACL_SCOPES). Staff sign in the same way as owner-created
+// trainers used to: the owner sets their email + PIN directly via Firebase Admin, so the
+// staff member can log in immediately without a separate self-registration step.
+
+function hydrateStaff(u) {
+  return {
+    id: u.id,
+    email: u.email,
+    displayName: u.displayName,
+    userType: u.userType,
+    accountStatus: u.accountStatus || 'active',
+    gymIds: u.gymIds || [],
+    aclPermissions: u.aclPermissions || [],
+    createdAt: u.createdAt,
+  };
+}
+
+export const ownerListStaff = {
+  created, method: 'get', path: '/owner/staff',
+  description: 'Owner: list gym staff (e.g. receptionists) they have created for their gym(s).',
   onGuard: requireAuth('gym_operator'),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
-    const list = trainers.filter(t => {
-      const tGymIds = t.gymIds || [];
-      return tGymIds.some(id => ownerGymIds.includes(id));
-    }).map(hydrateTrainer);
+    const list = users
+      .filter(u => u.userType === 'gym_staff' && (u.gymIds || []).some(id => ownerGymIds.includes(id)))
+      .map(hydrateStaff);
     res.json(list);
+  }
+};
+
+export const ownerCreateStaff = {
+  created, method: 'post', path: '/owner/staff',
+  description: 'Owner: create a gym staff account (e.g. receptionist) with a PIN and a subset of RBAC permissions, scoped to one or more of their gyms.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const ownerGymIds = owner.gymIds || (owner.gymId ? [owner.gymId] : []);
+    const { email, password, displayName, aclPermissions = [], gymIds = [] } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
+    if (!displayName) return res.status(400).json({ error: 'displayName_required' });
+    if (!Array.isArray(aclPermissions)) return res.status(400).json({ error: 'aclPermissions_must_be_array' });
+    const invalidScopes = aclPermissions.filter(p => !GYM_STAFF_ACL_SCOPES.includes(p));
+    if (invalidScopes.length) return res.status(400).json({ error: 'invalid_acl_scopes', invalid: invalidScopes });
+    const scopedGymIds = parseStringList(gymIds, []).filter(id => ownerGymIds.includes(id));
+    if (scopedGymIds.length === 0) return res.status(400).json({ error: 'must_assign_to_at_least_one_owned_gym' });
+
+    const existing = users.find(u => u.email === email);
+    if (existing) return res.status(409).json({ error: 'email_already_in_use' });
+
+    let firebaseUid = null;
+    try {
+      initFirebaseAdmin();
+      const fbUser = await getAdminAuth().createUser({ email, password, displayName });
+      firebaseUid = fbUser.uid;
+    } catch (fbErr) {
+      console.error('[owner-staff] Firebase user creation failed:', fbErr?.message);
+      return res.status(502).json({ error: 'firebase_user_creation_failed', detail: fbErr?.message });
+    }
+
+    const row = {
+      id: `usr_${randomUUID().slice(0, 8)}`,
+      firebaseUid,
+      email,
+      displayName,
+      userType: 'gym_staff',
+      accountStatus: 'active',
+      approvalStatus: 'approved',
+      portalUser: false,
+      aclPermissions,
+      gymIds: scopedGymIds,
+      gymId: scopedGymIds[0],
+      onboardingCompleted: true,
+      createdAt: new Date().toISOString(),
+    };
+    const created_staff = await users.upsertAsync(u => u.id === row.id, row);
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: req.user?.sub, action: 'gym_staff_created',
+      target: row.id, before: null, after: { email: row.email, aclPermissions, gymIds: scopedGymIds },
+    });
+    res.status(201).json(hydrateStaff(created_staff));
+  }
+};
+
+export const ownerUpdateStaff = {
+  created, method: 'put', path: '/owner/staff/:id',
+  description: 'Owner: update a gym staff member\u2019s permissions, gym assignment, name or status.',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+    const target = users.find(u => u.id === req.params.id && u.userType === 'gym_staff');
+    if (!target) return res.status(404).json({ error: 'staff_not_found' });
+    if (!(target.gymIds || []).some(id => ownerGymIds.includes(id))) {
+      return res.status(403).json({ error: 'staff_not_at_your_gym' });
+    }
+    const { displayName, aclPermissions, gymIds, accountStatus } = req.body || {};
+    const patch = {};
+    if (displayName) patch.displayName = displayName;
+    if (Array.isArray(aclPermissions)) {
+      const invalidScopes = aclPermissions.filter(p => !GYM_STAFF_ACL_SCOPES.includes(p));
+      if (invalidScopes.length) return res.status(400).json({ error: 'invalid_acl_scopes', invalid: invalidScopes });
+      patch.aclPermissions = aclPermissions;
+    }
+    if (gymIds !== undefined) {
+      const scopedGymIds = parseStringList(gymIds, []).filter(id => ownerGymIds.includes(id));
+      if (scopedGymIds.length === 0) return res.status(400).json({ error: 'must_assign_to_at_least_one_owned_gym' });
+      patch.gymIds = scopedGymIds;
+      patch.gymId = scopedGymIds[0];
+    }
+    if (accountStatus && ['active', 'suspended'].includes(accountStatus)) patch.accountStatus = accountStatus;
+    const updated = await users.upsertAsync(u => u.id === target.id, { ...target, ...patch, updatedAt: new Date().toISOString() });
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: req.user?.sub, action: 'gym_staff_updated',
+      target: target.id, before: { aclPermissions: target.aclPermissions, gymIds: target.gymIds, accountStatus: target.accountStatus }, after: patch,
+    });
+    res.json(hydrateStaff(updated));
+  }
+};
+
+export const ownerRemoveStaff = {
+  created, method: 'post', path: '/owner/staff/:id/remove',
+  description: 'Owner: remove a gym staff account entirely (Firebase + database record).',
+  onGuard: requireAuth('gym_operator'),
+  onRequest: async (req, res) => {
+    const owner = await resolveRequestUser(req);
+    const ownerGymIds = owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+    const target = users.find(u => u.id === req.params.id && u.userType === 'gym_staff');
+    if (!target) return res.status(404).json({ error: 'staff_not_found' });
+    if (!(target.gymIds || []).some(id => ownerGymIds.includes(id))) {
+      return res.status(403).json({ error: 'staff_not_at_your_gym' });
+    }
+    if (target.firebaseUid) {
+      try {
+        initFirebaseAdmin();
+        await getAdminAuth().deleteUser(target.firebaseUid);
+      } catch (fbErr) {
+        console.warn('[owner-staff] Firebase user deletion failed:', fbErr?.message);
+      }
+    }
+    users.remove(u => u.id === target.id);
+    auditLog.insert({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: req.user?.sub, action: 'gym_staff_removed',
+      target: target.id, before: { email: target.email }, after: null,
+    });
+    res.json({ ok: true });
   }
 };
 
@@ -1628,12 +1960,46 @@ export const trainerRegister = {
 
 export const trainerMyProfile = {
   created, method: 'get', path: '/trainer/me',
-  description: 'Trainer: get own profile and linked gyms.',
+  description: 'Trainer: get own profile, linked gyms and pending gym applications.',
   onGuard: requireAuth('trainer'),
   onRequest: (req, res) => {
     const profile = trainers.find(t => t.userId === req.user.sub || t.id === req.user.sub);
     if (!profile) return res.status(404).json({ error: 'trainer_profile_not_found' });
     res.json(hydrateTrainer(profile));
+  }
+};
+
+export const trainerApplyToGym = {
+  created, method: 'post', path: '/trainer/gyms/:gymId/apply',
+  description: "Trainer: request to join a gym. The gym owner must approve before the trainer is linked and visible to members.",
+  onGuard: requireAuth('trainer'),
+  onRequest: (req, res) => {
+    const profile = trainers.find(t => t.userId === req.user.sub || t.id === req.user.sub);
+    if (!profile) return res.status(404).json({ error: 'trainer_profile_not_found' });
+    const gym = gyms.find(g => g.id === req.params.gymId && g.status === 'active');
+    if (!gym) return res.status(404).json({ error: 'gym_not_found' });
+    const gymIds = profile.gymIds || [];
+    if (gymIds.includes(gym.id)) return res.status(409).json({ error: 'already_linked_to_gym' });
+    const pendingGymIds = profile.pendingGymIds || [];
+    if (pendingGymIds.includes(gym.id)) return res.status(409).json({ error: 'application_already_pending' });
+    const updated = trainers.update(t => t.id === profile.id, { pendingGymIds: [...pendingGymIds, gym.id] });
+    res.status(201).json(hydrateTrainer(updated));
+  }
+};
+
+export const trainerCancelGymApplication = {
+  created, method: 'post', path: '/trainer/gyms/:gymId/apply/cancel',
+  description: 'Trainer: withdraw a pending request to join a gym.',
+  onGuard: requireAuth('trainer'),
+  onRequest: (req, res) => {
+    const profile = trainers.find(t => t.userId === req.user.sub || t.id === req.user.sub);
+    if (!profile) return res.status(404).json({ error: 'trainer_profile_not_found' });
+    const pendingGymIds = profile.pendingGymIds || [];
+    if (!pendingGymIds.includes(req.params.gymId)) return res.status(400).json({ error: 'no_pending_request_for_gym' });
+    const updated = trainers.update(t => t.id === profile.id, {
+      pendingGymIds: pendingGymIds.filter(id => id !== req.params.gymId),
+    });
+    res.json(hydrateTrainer(updated));
   }
 };
 

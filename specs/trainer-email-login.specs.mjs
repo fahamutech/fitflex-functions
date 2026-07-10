@@ -1,9 +1,14 @@
-// TDD: B.2 — Trainer created via owner email should be able to log in with email + PIN.
-// The ownerAddTrainer endpoint must also create a user record so authFirebaseSession can match it.
+// TDD: B.2 — Trainers now self-register (see trainer-registration.specs.mjs) and no longer
+// get an email+PIN account pre-created by the owner. The same "pre-created account, then
+// Firebase email/PIN sign-in links by email" mechanism now applies to gym staff created by
+// the owner (see ownerCreateStaff) — but that endpoint also calls Firebase Admin to actually
+// create the login itself, so the trainer-style "link by email on first Firebase sign-in"
+// path only remains relevant for roles that self-register. This spec now asserts that a
+// self-registering trainer's Firebase session behaves the same way B.2 originally covered.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ownerAddTrainer, authFirebaseSession, authDevLogin } from '../functions/index.mjs';
+import { authFirebaseSession, authDevLogin } from '../functions/index.mjs';
 
 function res() {
   return {
@@ -21,25 +26,8 @@ test('B.2: setup - seed dev owner', async () => {
   assert.equal(r.statusCode, 200, 'dev owner seed should succeed');
 });
 
-test('B.2: ownerAddTrainer creates a user record with trainer email', async () => {
+test('B.2: a self-registering trainer can sign in via Firebase email/PIN and gets a JWT', async () => {
   const trainerEmail = `trainer_b2_${Date.now()}@test.com`;
-  const ownerReq = {
-    user: { sub: 'usr_dev_owner', userType: 'gym_operator' },
-    body: {
-      email: trainerEmail,
-      displayName: 'Test Trainer B2',
-      gymIds: ['gym_dev_owner'],
-      hourlyRateTzs: 15000,
-      specialties: ['yoga'],
-    },
-  };
-  const ownerRes = res();
-  await ownerAddTrainer.onRequest(ownerReq, ownerRes);
-  assert.equal(ownerRes.statusCode, 200, `trainer creation should succeed, got: ${JSON.stringify(ownerRes.body)}`);
-  assert.ok(ownerRes.body.id, 'trainer should have an ID');
-
-  // Now the trainer signs in with Firebase using same email
-  // Simulate Firebase session exchange
   const sessionReq = {
     body: {
       idToken: `dev:${Buffer.from(JSON.stringify({
@@ -56,45 +44,25 @@ test('B.2: ownerAddTrainer creates a user record with trainer email', async () =
   assert.equal(sessionRes.statusCode, 200, `firebase session should succeed for trainer email, got: ${JSON.stringify(sessionRes.body)}`);
   assert.equal(sessionRes.body.user.userType, 'trainer');
   assert.equal(sessionRes.body.user.email, trainerEmail);
+  assert.equal(sessionRes.body.user.approvalStatus, 'pending_approval', 'new trainers await admin approval before onboarding');
   assert.ok(sessionRes.body.token, 'should return a JWT token');
 });
 
-test('B.2: trainer created by owner can log in without Google, just email+PIN', async () => {
-  const trainerEmail = `trainer_pin_${Date.now()}@test.com`;
-  const ownerReq = {
-    user: { sub: 'usr_dev_owner', userType: 'gym_operator' },
-    body: {
-      email: trainerEmail,
-      displayName: 'PIN Trainer',
-      gymIds: ['gym_dev_owner'],
-      hourlyRateTzs: 20000,
-      specialties: ['cardio'],
-    },
-  };
-  const ownerRes = res();
-  await ownerAddTrainer.onRequest(ownerReq, ownerRes);
-  assert.equal(ownerRes.statusCode, 200);
-
-  // The trainer's user record should exist with their email
-  // When they sign in via Firebase email/password (PIN), the session endpoint
-  // should find them by email and link their firebaseUid
-  const fbUid = `fb_pin_trainer_${Date.now()}`;
+test('B.2: gym staff self-registration via Firebase is explicitly blocked — must be created by the owner', async () => {
+  const staffEmail = `staff_b2_${Date.now()}@test.com`;
   const sessionReq = {
     body: {
       idToken: `dev:${Buffer.from(JSON.stringify({
-        uid: fbUid,
-        email: trainerEmail,
-        name: 'PIN Trainer',
+        uid: `fb_staff_b2_${Date.now()}`,
+        email: staffEmail,
+        name: 'Rogue Staff',
       })).toString('base64url')}`,
-      requestedRole: 'trainer',
+      requestedRole: 'gym_staff',
     },
   };
   const sessionRes = res();
   await authFirebaseSession.onRequest(sessionReq, sessionRes);
 
-  assert.equal(sessionRes.statusCode, 200, `login should work: ${JSON.stringify(sessionRes.body)}`);
-  assert.equal(sessionRes.body.user.email, trainerEmail);
-  assert.equal(sessionRes.body.user.userType, 'trainer');
-  // The firebaseUid should now be linked
-  assert.equal(sessionRes.body.user.firebaseUid, fbUid);
+  assert.equal(sessionRes.statusCode, 403);
+  assert.equal(sessionRes.body.error, 'gym_staff_self_registration_not_allowed');
 });

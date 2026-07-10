@@ -280,6 +280,26 @@ export function collection(name) {
       return row;
     },
 
+    /** Like remove() but awaits the DB delete — use for critical paths (e.g. account deletion). */
+    removeAsync: async (pred) => {
+      const data = getSyncData();
+      const i = data.findIndex(pred);
+      if (i < 0) return null;
+      const [row] = data.splice(i, 1);
+      invalidate(name);
+
+      try {
+        const delegate = meta.delegate();
+        const pk = pkField(name);
+        const id = row[pk];
+        if (id) await delegate.delete({ where: { [pk]: id } });
+      } catch (err) {
+        console.error(`[prisma-store] removeAsync ${name}:`, err.message);
+      }
+
+      return row;
+    },
+
     // Shared DB-persist logic used by both upsert (sync) and upsertAsync (awaitable)
     _persistUpsert: async (row) => {
       const delegate = meta.delegate();
@@ -349,14 +369,14 @@ export function collection(name) {
 // Known scalar columns per model — only these are written to PG.
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
-  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','memberProfile','gymId','gymIds','createdAt','updatedAt']),
+  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','createdAt','updatedAt']),
   gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','images','thumbnails','coordinates','amenities','equipment','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed']),
   payment_requests: new Set(['id','memberId','subscriptionId','tier','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt']),
-  trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','specialties','bio','rating','reviewCount','hourlyRateTzs','experienceYears','status','approvalStatus','availability','createdAt','updatedAt']),
+  trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','specialties','bio','rating','reviewCount','hourlyRateTzs','experienceYears','status','approvalStatus','pendingGymIds','availability','createdAt','updatedAt']),
   trainer_bookings: new Set(['id','memberId','trainerId','gymId','date','slot','amountTzs','status','createdAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','updatedAt']),
