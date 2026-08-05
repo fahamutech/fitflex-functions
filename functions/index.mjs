@@ -189,13 +189,21 @@ function sameEatDate(a, b) {
   return fmt.format(new Date(a)) === fmt.format(new Date(b));
 }
 
+function slimGym(g) {
+  if (!g) return g;
+  const { images, thumbnails, operatingHours, ...rest } = g;
+  return { ...rest, thumbnail: (thumbnails && thumbnails[0]) || (images && images[0]) || null };
+}
+
 function hydrateTrainer(row) {
   const linkedGyms = (row.gymIds || [])
     .map(id => gyms.find(g => g.id === id))
-    .filter(Boolean);
+    .filter(Boolean)
+    .map(slimGym);
   const pendingGyms = (row.pendingGymIds || [])
     .map(id => gyms.find(g => g.id === id))
-    .filter(Boolean);
+    .filter(Boolean)
+    .map(slimGym);
   return { ...row, gyms: linkedGyms, pendingGyms };
 }
 
@@ -236,7 +244,7 @@ function normalizeTrainerPayload(body = {}, prior = {}) {
 
 function hydrateGymOwner(row) {
   const ids = row.gymIds || (row.gymId ? [row.gymId] : []);
-  const linkedGyms = ids.map(id => gyms.find(g => g.id === id)).filter(Boolean);
+  const linkedGyms = ids.map(id => gyms.find(g => g.id === id)).filter(Boolean).map(slimGym);
   return { ...row, gymIds: ids, accountStatus: row.accountStatus || 'active', gym: linkedGyms[0] || null, gyms: linkedGyms };
 }
 
@@ -2177,7 +2185,13 @@ export const adminListGyms = {
   created, method: 'get', path: '/admin/gyms',
   description: 'Admin: list gyms.',
   onGuard: [requireAuth('admin'), requireAcl('gyms')],
-  onRequest: (_, res) => res.json(gyms.all())
+  onRequest: (req, res) => {
+    if (req.query.full === 'true') return res.json(gyms.all());
+    res.json(gyms.all().map(g => {
+      const { operatingHours, ...rest } = g;
+      return rest;
+    }));
+  }
 };
 
 export const adminPaymentRequests = {
