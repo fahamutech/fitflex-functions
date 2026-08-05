@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { adminListGyms, adminUpsertGym } from '../functions/gyms.mjs';
-import { adminListGymOwners } from '../functions/admin-owners.mjs';
+import { adminListGymOwners, adminUpsertGymOwner } from '../functions/admin-owners.mjs';
 import { adminListTrainers, adminUpsertTrainer } from '../functions/trainers.mjs';
 import { updateMemberProfile } from '../functions/subscriptions.mjs';
 
@@ -152,10 +152,11 @@ test('adminListGymOwners ?refs=true returns a lightweight id/displayName/email/g
   }), res());
 
   const ownerId = uniq('usr_or');
-  await ensureUser({
-    id: ownerId, userType: 'gym_operator', displayName: 'Refs Owner',
-    phone: uniqPhone(), gymId, gymIds: [gymId],
-  });
+  const ownerUpsertRes = res();
+  await adminUpsertGymOwner.onRequest(adminReq({
+    body: { id: ownerId, displayName: 'Refs Owner', email: `${ownerId}@x.test`, gymId },
+  }), ownerUpsertRes);
+  assert.equal(ownerUpsertRes.statusCode < 300, true, `owner upsert failed: ${JSON.stringify(ownerUpsertRes.body)}`);
 
   const refsRes = res();
   await adminListGymOwners.onRequest(adminReq({ query: { refs: 'true' } }), refsRes);
