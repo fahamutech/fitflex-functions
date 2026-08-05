@@ -1,10 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  adminDecideRoleApproval,
-  adminRoleApprovals,
-  authFirebaseSession
-} from '../functions/index.mjs';
+import { adminDecideRoleApproval, adminRoleApprovals } from '../functions/admin-approvals.mjs';
+import { authFirebaseSession } from '../functions/auth.mjs';
 
 function devToken(payload) {
   return `dev:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
@@ -32,12 +29,12 @@ test('admin can list and approve pending gym owner or trainer profiles', async (
   assert.equal(created.body.user.approvalStatus, 'pending_approval');
 
   const list = res();
-  adminRoleApprovals.onRequest({ query: { status: 'pending_approval' } }, list);
+  await adminRoleApprovals.onRequest({ query: { status: 'pending_approval' } }, list);
   assert.equal(list.statusCode, 200);
   assert.ok(list.body.some(u => u.email === email));
 
   const decided = res();
-  adminDecideRoleApproval.onRequest({
+  await adminDecideRoleApproval.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     params: { id: created.body.user.id },
     body: { decision: 'approve', note: 'Pilot accepted' }

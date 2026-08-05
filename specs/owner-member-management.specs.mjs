@@ -10,9 +10,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { updateMemberProfile } from '../functions/subscriptions.mjs';
+import { ownerCreateGym } from '../functions/owner-gyms.mjs';
 import {
-  updateMemberProfile,
-  ownerCreateGym,
   ownerCreateMember,
   ownerListMembers,
   ownerMemberDetail,
@@ -22,7 +22,7 @@ import {
   ownerMemberCheckInSummary,
   ownerMemberCheckins,
   ownerMemberPayments,
-} from '../functions/index.mjs';
+} from '../functions/owner-members.mjs';
 
 function res() {
   return {

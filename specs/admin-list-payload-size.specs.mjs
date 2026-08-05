@@ -1,18 +1,19 @@
 // Regression: admin list endpoints must return slimmed payloads.
-// Ensures gym objects embedded in owners/trainers do NOT carry heavy fields
-// (images, thumbnails, operatingHours) — only a single `thumbnail`.
-// Also verifies adminListGyms strips operatingHours by default but keeps
-// images (needed for table thumbnails).
+// Ensures gym objects embedded in trainers carry only a single `thumbnail`
+// (no images/thumbnails/operatingHours), and gym objects embedded in owners
+// are lean references (id/name/tier — no image at all, since an owner can be
+// linked to many gyms). Also verifies adminListGyms is slimmed by default
+// (single `thumbnail`, no `images`/`thumbnails`/`operatingHours` — gym images
+// are full-size base64 data URIs, so embedding them per row previously made
+// this the largest admin payload by far) and only returns everything with
+// `?full=true`.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  adminListGyms,
-  adminListGymOwners,
-  adminListTrainers,
-  adminUpsertGym,
-  updateMemberProfile,
-} from '../functions/index.mjs';
+import { adminListGyms, adminUpsertGym } from '../functions/gyms.mjs';
+import { adminListGymOwners } from '../functions/admin-owners.mjs';
+import { adminListTrainers, adminUpsertTrainer } from '../functions/trainers.mjs';
+import { updateMemberProfile } from '../functions/subscriptions.mjs';
 
 function res() {
   return {
@@ -58,19 +59,28 @@ test('adminListGyms strips operatingHours from default response', async () => {
   }), gymRes);
   assert.equal(gymRes.statusCode < 300, true, `gym upsert failed: ${JSON.stringify(gymRes.body)}`);
 
-  // Default list should NOT include operatingHours
+  // Default list should be slimmed: no operatingHours, no images/thumbnails
+  // arrays — just a single `thumbnail` (only set when a real thumbnail was
+  // uploaded; never a fallback to the raw base64 image).
   const listRes = res();
   await adminListGyms.onRequest(adminReq(), listRes);
   const gym = listRes.body.find(g => g.id === gymId);
   assert.ok(gym, 'seeded gym should appear in list');
   assert.equal(gym.operatingHours, undefined, 'operatingHours should be stripped from default list');
-  assert.ok(gym.images, 'images should still be present for table thumbnails');
+  assert.equal(gym.images, undefined, 'images array should NOT be present in the default admin list');
+  assert.equal(gym.thumbnails, undefined, 'thumbnails array should NOT be present in the default admin list');
+  assert.equal(gym.thumbnail, 'data:image/webp;base64,BBBB', 'a real uploaded thumbnail should still surface as a single field');
+  assert.equal(gym.amenities, undefined, 'amenities should be stripped from table-level list');
+  assert.equal(gym.equipment, undefined, 'equipment should be stripped from table-level list');
+  assert.equal(gym.coordinates, undefined, 'coordinates should be stripped from table-level list');
+  assert.equal(gym.paymentBank, undefined, 'paymentBank should be stripped from table-level list');
 
   // ?full=true should include everything
   const fullRes = res();
   await adminListGyms.onRequest(adminReq({ query: { full: 'true' } }), fullRes);
   const fullGym = fullRes.body.find(g => g.id === gymId);
   assert.ok(fullGym.operatingHours, 'operatingHours should be present with ?full=true');
+  assert.ok(fullGym.images, 'images should be present with ?full=true');
 });
 
 test('adminListGymOwners returns slimmed gym objects without images/thumbnails', async () => {
@@ -104,11 +114,12 @@ test('adminListGymOwners returns slimmed gym objects without images/thumbnails',
   const owner = listRes.body.find(o => o.id === ownerId);
   assert.ok(owner, 'seeded owner should appear in list');
 
-  // The embedded gym should be slimmed
+  // The embedded gym should be a lean reference (id/name/tier only — no image at all;
+  // callers needing the image fetch the gym directly via GET /gyms/:id).
   if (owner.gym) {
     assert.equal(owner.gym.images, undefined, 'embedded gym should NOT have images array');
     assert.equal(owner.gym.thumbnails, undefined, 'embedded gym should NOT have thumbnails array');
-    assert.ok(owner.gym.thumbnail !== undefined, 'embedded gym should have a single thumbnail field');
+    assert.equal(owner.gym.thumbnail, undefined, 'embedded gym should NOT have a thumbnail field either');
   }
   if (owner.gyms && owner.gyms.length > 0) {
     for (const g of owner.gyms) {
@@ -132,4 +143,59 @@ test('adminListTrainers returns slimmed gym objects without images/thumbnails', 
       }
     }
   }
+});
+
+test('adminListGymOwners ?refs=true returns a lightweight id/displayName/email/gymIds projection', async () => {
+  const gymId = uniq('gym_or');
+  await adminUpsertGym.onRequest(adminReq({
+    body: { id: gymId, name: 'Refs Owner Gym', tier: 'standard', location: 'DSM' },
+  }), res());
+
+  const ownerId = uniq('usr_or');
+  await ensureUser({
+    id: ownerId, userType: 'gym_operator', displayName: 'Refs Owner',
+    phone: uniqPhone(), gymId, gymIds: [gymId],
+  });
+
+  const refsRes = res();
+  await adminListGymOwners.onRequest(adminReq({ query: { refs: 'true' } }), refsRes);
+  const owner = refsRes.body.find(o => o.id === ownerId);
+  assert.ok(owner, 'seeded owner should appear in refs list');
+  assert.deepEqual(
+    Object.keys(owner).sort(),
+    ['displayName', 'email', 'gymId', 'gymIds', 'id'],
+    'refs projection should only contain id/displayName/email/gymId/gymIds'
+  );
+  assert.equal(owner.gymIds.includes(gymId), true);
+
+  // Default (non-refs) list should still return the full hydrated shape.
+  const fullRes = res();
+  await adminListGymOwners.onRequest(adminReq(), fullRes);
+  const fullOwner = fullRes.body.find(o => o.id === ownerId);
+  assert.ok('accountStatus' in fullOwner, 'default list should retain full owner fields');
+});
+
+test('adminListTrainers ?refs=true returns a lightweight id/displayName/email/gymIds projection', async () => {
+  const trainerId = uniq('trn_r');
+  const upsertRes = res();
+  await adminUpsertTrainer.onRequest(adminReq({
+    body: { id: trainerId, displayName: 'Refs Trainer', email: `${trainerId}@x.test`, hourlyRateTzs: 10000, status: 'active' },
+  }), upsertRes);
+  assert.equal(upsertRes.statusCode < 300, true, `trainer upsert failed: ${JSON.stringify(upsertRes.body)}`);
+
+  const refsRes = res();
+  await adminListTrainers.onRequest(adminReq({ query: { refs: 'true' } }), refsRes);
+  const trainer = refsRes.body.find(t => t.id === trainerId);
+  assert.ok(trainer, 'seeded trainer should appear in refs list');
+  assert.deepEqual(
+    Object.keys(trainer).sort(),
+    ['displayName', 'email', 'gymIds', 'id'],
+    'refs projection should only contain id/displayName/email/gymIds'
+  );
+
+  // Default (non-refs) list should still return the full profile shape.
+  const fullRes = res();
+  await adminListTrainers.onRequest(adminReq(), fullRes);
+  const fullTrainer = fullRes.body.find(t => t.id === trainerId);
+  assert.ok('specialties' in fullTrainer, 'default list should retain full trainer fields');
 });

@@ -1,14 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  updateMemberProfile,
-  deleteMyAccount,
-  me,
-  authFirebaseSession,
-  trainerRegister,
-  createTrainerBooking,
-  adminUpsertGym,
-} from '../functions/index.mjs';
+import { updateMemberProfile, deleteMyAccount, me } from '../functions/subscriptions.mjs';
+import { authFirebaseSession } from '../functions/auth.mjs';
+import { trainerRegister } from '../functions/trainers.mjs';
+import { createTrainerBooking } from '../functions/trainer-bookings.mjs';
+import { adminUpsertGym } from '../functions/gyms.mjs';
 
 function devToken(payload) {
   return `dev:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
@@ -54,7 +50,7 @@ test('deleteMyAccount: 404s when the account no longer exists', async () => {
 
 test('deleteMyAccount: blocks a trainer with active bookings and keeps the account intact', async () => {
   const gymRes = res();
-  adminUpsertGym.onRequest({
+  await adminUpsertGym.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     body: { name: uniq('Delete Test Gym'), tier: 'standard', location: 'DSM Test', perVisitRate: 5000 }
   }, gymRes);
@@ -94,7 +90,7 @@ test('deleteMyAccount: blocks a trainer with active bookings and keeps the accou
     res(),
   );
   const bookingRes = res();
-  createTrainerBooking.onRequest({
+  await createTrainerBooking.onRequest({
     user: { sub: memberId, userType: 'member' },
     body: { trainerId, gymId, date: '2026-06-06', slot: '10:00' }
   }, bookingRes);

@@ -14,15 +14,16 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
     return { startUtc, endUtc };
   }
 
-  function visitsUsedInCycle(memberId, sub) {
+  async function visitsUsedInCycle(memberId, sub) {
     if (!sub) return 0;
     const since = +new Date(sub.cycleStartedAt || sub.startedAt);
-    return checkins.filter(c => c.memberId === memberId && +new Date(c.timestamp) >= since && c.visitConsumed).length;
+    const rows = await checkins.filterAsync(c => c.memberId === memberId && +new Date(c.timestamp) >= since && c.visitConsumed);
+    return rows.length;
   }
 
-  function todaysCheckins(memberId, now = new Date()) {
+  async function todaysCheckins(memberId, now = new Date()) {
     const { startUtc, endUtc } = todayBoundsUTC(now);
-    return checkins.filter(c =>
+    return checkins.filterAsync(c =>
       c.memberId === memberId &&
       new Date(c.timestamp) >= startUtc &&
       new Date(c.timestamp) <  endUtc
@@ -34,19 +35,19 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
      * Perform a check-in for memberId at gymId, scanned by operator.
      * @returns { ok, failure?, checkin?, visitNumberInCycle? }
      */
-    perform({ memberId, gymId, method = 'gym_scanned', now = new Date() }) {
-      const member = users.find(u => u.id === memberId);
+    async perform({ memberId, gymId, method = 'gym_scanned', now = new Date() }) {
+      const member = await users.findByIdAsync(memberId);
       if (!member) return { ok: false, failure: 'member_not_found' };
       const gym = gyms.find(g => g.id === gymId);
       if (!gym) return { ok: false, failure: 'gym_not_found' };
 
-      const subs = subscriptions.filter(s => s.memberId === memberId);
+      const subs = await subscriptions.filterAsync(s => s.memberId === memberId);
       const sub  = subs
         .filter(s => ['active', 'expired', 'suspended'].includes(s.status))
         .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0];
 
-      const cycleUsage = { visitsUsedInCycle: visitsUsedInCycle(memberId, sub) };
-      const todays = todaysCheckins(memberId, now);
+      const cycleUsage = { visitsUsedInCycle: await visitsUsedInCycle(memberId, sub) };
+      const todays = await todaysCheckins(memberId, now);
 
       // Idempotency: one counted check-in per member per EAT calendar day.
       const existingToday = todays[0];
@@ -86,7 +87,7 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         creditsDeductedTzs: 0,                 // roaming wired separately
         visitConsumed: !!result.visitConsumed
       };
-      checkins.insert(row);
+      await checkins.insertAsync(row);
       return { ok: true, checkin: row, visitNumberInCycle: row.visitNumberInCycle };
     }
   };

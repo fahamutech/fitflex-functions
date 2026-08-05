@@ -1,15 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  adminDeleteTrainer,
-  adminListGymOwners,
-  adminListTrainerBookings,
-  adminListTrainers,
-  adminUpdateTrainerBooking,
-  adminUpsertGymOwner,
-  adminUpsertTrainer,
-  createTrainerBooking
-} from '../functions/index.mjs';
+import { adminDeleteTrainer, adminListTrainers, adminUpsertTrainer } from '../functions/trainers.mjs';
+import { adminListGymOwners, adminUpsertGymOwner } from '../functions/admin-owners.mjs';
+import { adminListTrainerBookings, adminUpdateTrainerBooking, createTrainerBooking } from '../functions/trainer-bookings.mjs';
+import { updateMemberProfile } from '../functions/subscriptions.mjs';
+import { ensureInit } from '../functions/index.mjs';
+
+// Collections are primed from PostgreSQL asynchronously in the background
+// (see ensureInit() in functions/index.mjs); this file's first test is fully
+// synchronous, so without this await it can run before `gyms`/`trainers` are
+// primed, causing spurious `not found` / empty-relation failures.
+await ensureInit();
 
 function res() {
   return {
@@ -20,10 +21,10 @@ function res() {
   };
 }
 
-test('admin can create update and delete trainer profiles used by member discovery', () => {
+test('admin can create update and delete trainer profiles used by member discovery', async () => {
   const suffix = Date.now();
   const created = res();
-  adminUpsertTrainer.onRequest({
+  await adminUpsertTrainer.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     body: {
       displayName: `CRUD Trainer ${suffix}`,
@@ -42,7 +43,7 @@ test('admin can create update and delete trainer profiles used by member discove
   assert.deepEqual(created.body.specialties, ['Strength', 'Mobility']);
 
   const updated = res();
-  adminUpsertTrainer.onRequest({
+  await adminUpsertTrainer.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     body: { id: created.body.id, displayName: `Updated Trainer ${suffix}`, hourlyRateTzs: 30000, status: 'suspended' }
   }, updated);
@@ -51,11 +52,11 @@ test('admin can create update and delete trainer profiles used by member discove
   assert.equal(updated.body.hourlyRateTzs, 30000);
 
   const list = res();
-  adminListTrainers.onRequest({}, list);
+  await adminListTrainers.onRequest({}, list);
   assert.ok(list.body.some(t => t.id === created.body.id && t.gyms.length === 1));
 
   const deleted = res();
-  adminDeleteTrainer.onRequest({
+  await adminDeleteTrainer.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     params: { id: created.body.id }
   }, deleted);
@@ -63,10 +64,10 @@ test('admin can create update and delete trainer profiles used by member discove
   assert.equal(deleted.body.ok, true);
 });
 
-test('admin can create and update gym owner assignments with unique email by role', () => {
+test('admin can create and update gym owner assignments with unique email by role', async () => {
   const suffix = Date.now();
   const created = res();
-  adminUpsertGymOwner.onRequest({
+  await adminUpsertGymOwner.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     body: {
       email: `owner-crud-${suffix}@example.com`,
@@ -82,7 +83,7 @@ test('admin can create and update gym owner assignments with unique email by rol
   assert.equal(created.body.gym?.id, 'gym_001');
 
   const updated = res();
-  adminUpsertGymOwner.onRequest({
+  await adminUpsertGymOwner.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     body: { id: created.body.id, displayName: 'Updated Gym Owner', accountStatus: 'suspended' }
   }, updated);
@@ -90,31 +91,33 @@ test('admin can create and update gym owner assignments with unique email by rol
   assert.equal(updated.body.accountStatus, 'suspended');
 
   const conflict = res();
-  adminUpsertGymOwner.onRequest({
+  await adminUpsertGymOwner.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     body: { email: created.body.email, displayName: 'Duplicate Owner' }
   }, conflict);
   assert.equal(conflict.statusCode, 409);
 
   const list = res();
-  adminListGymOwners.onRequest({}, list);
+  await adminListGymOwners.onRequest({}, list);
   assert.ok(list.body.some(owner => owner.id === created.body.id));
 });
 
-test('admin can list and update trainer booking status', () => {
+test('admin can list and update trainer booking status', async () => {
+  const memberId = `usr_booking_${Date.now()}`;
+  await updateMemberProfile.onRequest({ user: { sub: memberId, userType: 'member' }, body: { displayName: 'Booking Member' } }, res());
   const booked = res();
-  createTrainerBooking.onRequest({
-    user: { sub: `usr_booking_${Date.now()}`, userType: 'member' },
+  await createTrainerBooking.onRequest({
+    user: { sub: memberId, userType: 'member' },
     body: { trainerId: 'trn_ali', gymId: 'gym_001', date: '2026-05-10', slot: '09:00' }
   }, booked);
   assert.equal(booked.statusCode, 201);
 
   const list = res();
-  adminListTrainerBookings.onRequest({}, list);
+  await adminListTrainerBookings.onRequest({}, list);
   assert.ok(list.body.some(booking => booking.id === booked.body.booking.id && booking.trainer));
 
   const updated = res();
-  adminUpdateTrainerBooking.onRequest({
+  await adminUpdateTrainerBooking.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     params: { id: booked.body.booking.id },
     body: { status: 'completed' }

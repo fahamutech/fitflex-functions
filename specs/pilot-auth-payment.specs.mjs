@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { authFirebaseSession, subscribe, myQr } from '../functions/index.mjs';
+import { authFirebaseSession } from '../functions/auth.mjs';
+import { subscribe, updateMemberProfile } from '../functions/subscriptions.mjs';
+import { myQr } from '../functions/checkins.mjs';
 
 function devToken(payload) {
   return `dev:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
@@ -95,25 +97,29 @@ test('Firebase session rejects reusing one email for a different role', async ()
   assert.equal(owner.body.error, 'email_already_used_for_different_role');
 });
 
-test('pass request stays payment_pending and cannot issue QR before admin approval', () => {
-  const req = { user: { sub: `usr_pay_${Date.now()}`, userType: 'member' }, body: { tier: 'pro', type: 'platform_pass' } };
+test('pass request stays payment_pending and cannot issue QR before admin approval', async () => {
+  const userId = `usr_pay_${Date.now()}`;
+  await updateMemberProfile.onRequest({ user: { sub: userId, userType: 'member' }, body: { displayName: 'Pay Test' } }, res());
+  const req = { user: { sub: userId, userType: 'member' }, body: { tier: 'pro', type: 'platform_pass' } };
   const created = res();
-  subscribe.onRequest(req, created);
+  await subscribe.onRequest(req, created);
 
   assert.equal(created.statusCode, 202);
   assert.equal(created.body.subscription.status, 'payment_pending');
   assert.equal(created.body.paymentRequest.status, 'pending');
 
   const qr = res();
-  myQr.onRequest({ user: req.user }, qr);
+  await myQr.onRequest({ user: req.user }, qr);
   assert.equal(qr.statusCode, 403);
   assert.equal(qr.body.error, 'active_subscription_required');
 });
 
-test('online free plan activates without creating a payment request', () => {
-  const req = { user: { sub: `usr_online_${Date.now()}`, userType: 'member' }, body: { tier: 'online_free', type: 'platform_pass' } };
+test('online free plan activates without creating a payment request', async () => {
+  const userId = `usr_online_${Date.now()}`;
+  await updateMemberProfile.onRequest({ user: { sub: userId, userType: 'member' }, body: { displayName: 'Online Test' } }, res());
+  const req = { user: { sub: userId, userType: 'member' }, body: { tier: 'online_free', type: 'platform_pass' } };
   const created = res();
-  subscribe.onRequest(req, created);
+  await subscribe.onRequest(req, created);
 
   assert.equal(created.statusCode, 201);
   assert.equal(created.body.subscription.status, 'active');

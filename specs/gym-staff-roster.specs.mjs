@@ -11,7 +11,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { requireGymAcl } from '../src/auth/jwt.mjs';
-import { updateMemberProfile, ownerListStaff, ownerUpdateStaff, ownerRemoveStaff } from '../functions/index.mjs';
+import { updateMemberProfile } from '../functions/subscriptions.mjs';
+import { ownerListStaff, ownerUpdateStaff, ownerRemoveStaff } from '../functions/owner-staff.mjs';
 
 function res() {
   return {

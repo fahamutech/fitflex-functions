@@ -1,4 +1,4 @@
-// Minimal JSON-file store, swappable for Prisma/Postgres later via DI.
+// Minimal JSON-file store, swappable for Knex/Postgres later via DI.
 // Persists collections to ./.data/<name>.json. Synchronous read on first access; debounced write.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';

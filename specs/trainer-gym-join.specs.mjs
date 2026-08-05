@@ -4,18 +4,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { authRequestOtp, authVerifyOtp } from '../functions/auth.mjs';
+import { updateMemberProfile } from '../functions/subscriptions.mjs';
+import { trainerRegister, trainerApplyToGym, trainerCancelGymApplication } from '../functions/trainers.mjs';
 import {
-  authRequestOtp,
-  authVerifyOtp,
-  updateMemberProfile,
   ownerCreateGym,
-  trainerRegister,
-  trainerApplyToGym,
-  trainerCancelGymApplication,
   ownerPendingTrainers,
   ownerDecideTrainerJoin,
   ownerListTrainers,
-} from '../functions/index.mjs';
+} from '../functions/owner-gyms.mjs';
 
 function res() {
   return {

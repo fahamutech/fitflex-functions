@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { authRequestOtp, authVerifyOtp, trainerRegister } from '../functions/index.mjs';
+import { authRequestOtp, authVerifyOtp } from '../functions/auth.mjs';
+import { trainerRegister } from '../functions/trainers.mjs';
 
 function res() {
   return {

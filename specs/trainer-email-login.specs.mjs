@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { authFirebaseSession, authDevLogin } from '../functions/index.mjs';
+import { authFirebaseSession, authDevLogin } from '../functions/auth.mjs';
 
 function res() {
   return {

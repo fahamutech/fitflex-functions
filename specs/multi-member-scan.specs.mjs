@@ -15,6 +15,14 @@ const mkCol = (initial = []) => {
     insert: (row) => { arr.push(row); return row; },
     update: (pred, patch) => { const i = arr.findIndex(pred); if (i < 0) return null; arr[i] = { ...arr[i], ...patch }; return arr[i]; },
     upsert: (pred, row) => { const i = arr.findIndex(pred); if (i < 0) arr.push(row); else arr[i] = { ...arr[i], ...row }; return row; },
+    // Async variants used by check-in-service after DB-only migration
+    findByIdAsync: async (id) => arr.find(r => r.id === id) ?? null,
+    findAsync: async (pred) => arr.find(pred) ?? null,
+    filterAsync: async (pred) => arr.filter(pred),
+    allAsync: async () => [...arr],
+    insertAsync: async (row) => { arr.push(row); return row; },
+    updateByIdAsync: async (id, patch) => { const i = arr.findIndex(r => r.id === id); if (i < 0) return null; arr[i] = { ...arr[i], ...patch }; return arr[i]; },
+    upsertAsync: async (pred, row) => { const i = arr.findIndex(pred); if (i < 0) arr.push(row); else arr[i] = { ...arr[i], ...row }; return row; },
   };
 };
 
@@ -57,16 +65,16 @@ function subscribe(memberId, { tier, startedAt }) {
 }
 
 // ─── B.3: Scanning multiple members should add visit numbers on dashboard ───
-test('B.3: scanning 3 different members in same gym creates 3 separate visit records', () => {
+test('B.3: scanning 3 different members in same gym creates 3 separate visit records', async () => {
   subscribe('m1', { tier: 'basic' });
   subscribe('m2', { tier: 'pro' });
   subscribe('m3', { tier: 'premium' });
 
   const now = new Date('2026-03-15T09:00:00Z');
 
-  const r1 = svc.perform({ memberId: 'm1', gymId: 'gymA', now });
-  const r2 = svc.perform({ memberId: 'm2', gymId: 'gymA', now });
-  const r3 = svc.perform({ memberId: 'm3', gymId: 'gymA', now });
+  const r1 = await svc.perform({ memberId: 'm1', gymId: 'gymA', now });
+  const r2 = await svc.perform({ memberId: 'm2', gymId: 'gymA', now });
+  const r3 = await svc.perform({ memberId: 'm3', gymId: 'gymA', now });
 
   assert.equal(r1.ok, true, 'member 1 scan should succeed');
   assert.equal(r2.ok, true, 'member 2 scan should succeed');
@@ -77,13 +85,13 @@ test('B.3: scanning 3 different members in same gym creates 3 separate visit rec
   assert.equal(gymVisits.length, 3, 'dashboard should show 3 visits for the gym');
 });
 
-test('B.3: each member scan has unique check-in IDs', () => {
+test('B.3: each member scan has unique check-in IDs', async () => {
   subscribe('m1', { tier: 'basic' });
   subscribe('m2', { tier: 'basic' });
 
   const now = new Date('2026-03-15T09:00:00Z');
-  const r1 = svc.perform({ memberId: 'm1', gymId: 'gymA', now });
-  const r2 = svc.perform({ memberId: 'm2', gymId: 'gymA', now });
+  const r1 = await svc.perform({ memberId: 'm1', gymId: 'gymA', now });
+  const r2 = await svc.perform({ memberId: 'm2', gymId: 'gymA', now });
 
   assert.notEqual(r1.checkin.id, r2.checkin.id, 'check-in IDs must be unique');
   assert.equal(r1.checkin.memberId, 'm1');
@@ -91,21 +99,21 @@ test('B.3: each member scan has unique check-in IDs', () => {
 });
 
 // ─── A.8: Remaining visits should reduce after each successful scan ───
-test('A.8: visitNumberInCycle increments with each scan (remaining decreases)', () => {
+test('A.8: visitNumberInCycle increments with each scan (remaining decreases)', async () => {
   subscribe('m1', { tier: 'basic', startedAt: '2026-03-01T00:00:00Z' });
 
   // Day 1 scan
-  const r1 = svc.perform({ memberId: 'm1', gymId: 'gymA', now: new Date('2026-03-01T09:00:00Z') });
+  const r1 = await svc.perform({ memberId: 'm1', gymId: 'gymA', now: new Date('2026-03-01T09:00:00Z') });
   assert.equal(r1.ok, true);
   assert.equal(r1.visitNumberInCycle, 1, 'first scan: visit #1');
 
   // Day 2 scan
-  const r2 = svc.perform({ memberId: 'm1', gymId: 'gymA', now: new Date('2026-03-02T09:00:00Z') });
+  const r2 = await svc.perform({ memberId: 'm1', gymId: 'gymA', now: new Date('2026-03-02T09:00:00Z') });
   assert.equal(r2.ok, true);
   assert.equal(r2.visitNumberInCycle, 2, 'second scan: visit #2');
 
   // Day 3 scan
-  const r3 = svc.perform({ memberId: 'm1', gymId: 'gymA', now: new Date('2026-03-03T09:00:00Z') });
+  const r3 = await svc.perform({ memberId: 'm1', gymId: 'gymA', now: new Date('2026-03-03T09:00:00Z') });
   assert.equal(r3.ok, true);
   assert.equal(r3.visitNumberInCycle, 3, 'third scan: visit #3');
 
@@ -114,35 +122,35 @@ test('A.8: visitNumberInCycle increments with each scan (remaining decreases)', 
   assert.equal(remaining, 9, 'remaining visits should decrease after each scan');
 });
 
-test('A.8: idempotent scan on same day does NOT consume another visit', () => {
+test('A.8: idempotent scan on same day does NOT consume another visit', async () => {
   subscribe('m1', { tier: 'basic', startedAt: '2026-03-01T00:00:00Z' });
 
   const now = new Date('2026-03-01T09:00:00Z');
-  const r1 = svc.perform({ memberId: 'm1', gymId: 'gymA', now });
+  const r1 = await svc.perform({ memberId: 'm1', gymId: 'gymA', now });
   assert.equal(r1.ok, true);
   assert.equal(r1.visitNumberInCycle, 1);
 
   // Same day, same member — idempotent
-  const r2 = svc.perform({ memberId: 'm1', gymId: 'gymA', now: new Date('2026-03-01T14:00:00Z') });
+  const r2 = await svc.perform({ memberId: 'm1', gymId: 'gymA', now: new Date('2026-03-01T14:00:00Z') });
   assert.equal(r2.ok, true);
   assert.equal(r2.idempotent, true, 'second scan same day should be idempotent');
   assert.equal(r2.visitNumberInCycle, 1, 'should not increment on idempotent');
 });
 
-test('A.8: when visit cap is exhausted, scan is rejected', () => {
+test('A.8: when visit cap is exhausted, scan is rejected', async () => {
   subscribe('m1', { tier: 'basic', startedAt: '2026-03-01T00:00:00Z' });
 
   // Use all 12 visits
   for (let day = 1; day <= 12; day++) {
     const d = new Date('2026-03-01T09:00:00Z');
     d.setUTCDate(d.getUTCDate() + day - 1);
-    const r = svc.perform({ memberId: 'm1', gymId: 'gymA', now: d });
+    const r = await svc.perform({ memberId: 'm1', gymId: 'gymA', now: d });
     assert.equal(r.ok, true, `visit ${day} should succeed`);
     assert.equal(r.visitNumberInCycle, day);
   }
 
   // 13th visit should fail
-  const rejected = svc.perform({
+  const rejected = await svc.perform({
     memberId: 'm1',
     gymId: 'gymA',
     now: new Date('2026-03-13T09:00:00Z'),

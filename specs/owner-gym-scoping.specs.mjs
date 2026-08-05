@@ -8,19 +8,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { updateMemberProfile } from '../functions/subscriptions.mjs';
+import { ownerCreateMember, ownerListMembers } from '../functions/owner-members.mjs';
+import { operatorDashboard } from '../functions/checkins.mjs';
+import { trainerRegister, trainerApplyToGym } from '../functions/trainers.mjs';
 import {
-  updateMemberProfile,
   ownerCreateGym,
-  ownerCreateMember,
-  ownerListMembers,
-  operatorDashboard,
-  trainerRegister,
-  trainerApplyToGym,
   ownerDecideTrainerJoin,
   ownerListTrainers,
   ownerMyEarnings,
-  adminCreateInvoice,
-} from '../functions/index.mjs';
+} from '../functions/owner-gyms.mjs';
+import { adminCreateInvoice } from '../functions/admin-invoices.mjs';
 
 function res() {
   return {

@@ -11,14 +11,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  updateMemberProfile,
-  ownerCreateGym,
-  ownerCreateStaff,
-  operatorVerifyQr,
-  operatorDashboard,
-  me,
-} from '../functions/index.mjs';
+import { updateMemberProfile, me } from '../functions/subscriptions.mjs';
+import { ownerCreateGym } from '../functions/owner-gyms.mjs';
+import { ownerCreateStaff } from '../functions/owner-staff.mjs';
+import { operatorVerifyQr, operatorDashboard } from '../functions/checkins.mjs';
 import { issue as issueQr } from '../src/auth/qr-token.mjs';
 
 function res() {

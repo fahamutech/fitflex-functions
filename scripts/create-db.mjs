@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Creates the PostgreSQL database if it does not already exist.
-// Reads DATABASE_URL from the environment (same format Prisma uses).
+// Reads DATABASE_URL from the environment (same format Knex uses).
 
 import { execSync } from 'node:child_process';
 

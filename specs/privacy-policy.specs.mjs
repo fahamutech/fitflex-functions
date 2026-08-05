@@ -16,7 +16,7 @@ function res() {
 }
 
 test('privacy policy is exposed as a public Play Store HTML endpoint', async () => {
-  const { privacyPolicy } = await import('../functions/index.mjs');
+  const { privacyPolicy } = await import('../functions/health.mjs');
 
   assert.equal(privacyPolicy.method, 'get');
   assert.equal(privacyPolicy.path, '/privacy-policy');

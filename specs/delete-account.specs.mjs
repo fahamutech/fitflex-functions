@@ -16,7 +16,7 @@ function res() {
 }
 
 test('delete account instructions are exposed as a public Play Store HTML endpoint', async () => {
-  const { deleteAccount } = await import('../functions/index.mjs');
+  const { deleteAccount } = await import('../functions/health.mjs');
 
   assert.equal(deleteAccount.method, 'get');
   assert.equal(deleteAccount.path, '/delete-account');

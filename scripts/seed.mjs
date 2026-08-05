@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Standalone seed runner for postinstall — seeds admin user + platform settings.
-import { ensureSeedPrisma } from '../src/infra/seed-prisma.mjs';
+import { ensureSeedDb } from '../src/infra/seed-db.mjs';
 
 try {
-  await ensureSeedPrisma();
+  await ensureSeedDb();
   process.exit(0);
 } catch (err) {
   console.error('[seed] Failed to seed database:', err.message);

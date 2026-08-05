@@ -37,37 +37,36 @@ export function createMemberManagementService({
     return Math.ceil((+new Date(expiresAt) - +now) / 86_400_000);
   }
 
-  function latestDirectSub(memberId, gymIds) {
-    return subscriptions
-      .filter((s) => s.memberId === memberId && s.type === 'direct_sub' && gymIds.includes(s.homeGymId))
-      .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+  async function latestDirectSub(memberId, gymIds) {
+    const subs = await subscriptions.filterAsync((s) => s.memberId === memberId && s.type === 'direct_sub' && gymIds.includes(s.homeGymId));
+    return subs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
   }
 
-  function ownerCheckinsFor(memberId, gymIds) {
-    return checkins
-      .filter((c) => c.memberId === memberId && gymIds.includes(c.gymId))
-      .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
+  async function ownerCheckinsFor(memberId, gymIds) {
+    const rows = await checkins.filterAsync((c) => c.memberId === memberId && gymIds.includes(c.gymId));
+    return rows.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
   }
 
-  function hasCheckinToday(memberId, gymIds, now) {
+  async function hasCheckinToday(memberId, gymIds, now) {
     const start = +startOfDayUtc(now);
-    return checkins.filter(
+    const rows = await checkins.filterAsync(
       (c) => c.memberId === memberId && gymIds.includes(c.gymId) && +new Date(c.timestamp) >= start,
-    ).length > 0;
+    );
+    return rows.length > 0;
   }
 
-  function statusForDirect(member, sub, gymIds, now) {
+  async function statusForDirect(member, sub, gymIds, now) {
     if (member.accountStatus === 'suspended' || sub?.status === 'suspended') return 'suspended';
-    if (hasCheckinToday(member.id, gymIds, now)) return 'checked_in';
+    if (await hasCheckinToday(member.id, gymIds, now)) return 'checked_in';
     const dl = sub ? daysLeft(sub.expiresAt, now) : null;
     if (dl == null || dl < 0) return 'expired';
     if (dl <= EXPIRING_SOON_DAYS) return 'expiring_soon';
     return 'active';
   }
 
-  function statusForRoaming(member, gymIds, now) {
+  async function statusForRoaming(member, gymIds, now) {
     if (member.accountStatus === 'suspended') return 'suspended';
-    if (hasCheckinToday(member.id, gymIds, now)) return 'checked_in';
+    if (await hasCheckinToday(member.id, gymIds, now)) return 'checked_in';
     return 'active';
   }
 
@@ -86,14 +85,14 @@ export function createMemberManagementService({
     return streak;
   }
 
-  function buildRow(member, memberType, sub, gymIds, now) {
+  async function buildRow(member, memberType, sub, gymIds, now) {
     const status = memberType === 'direct'
-      ? statusForDirect(member, sub, gymIds, now)
-      : statusForRoaming(member, gymIds, now);
-    const recent = ownerCheckinsFor(member.id, gymIds);
+      ? await statusForDirect(member, sub, gymIds, now)
+      : await statusForRoaming(member, gymIds, now);
+    const recent = await ownerCheckinsFor(member.id, gymIds);
     return {
       id: member.id,
-      publicId: publicUserId(member, 'member'),
+      publicId: await publicUserId(member, 'member'),
       displayName: member.displayName || null,
       phone: member.phone || null,
       photoUrl: member.photoUrl || null,
@@ -107,9 +106,10 @@ export function createMemberManagementService({
     };
   }
 
-  function membershipOwnership(memberId, gymIds) {
-    const sub = latestDirectSub(memberId, gymIds);
-    const hasOwnerCheckin = checkins.filter((c) => c.memberId === memberId && gymIds.includes(c.gymId)).length > 0;
+  async function membershipOwnership(memberId, gymIds) {
+    const sub = await latestDirectSub(memberId, gymIds);
+    const ownerCheckins = await checkins.filterAsync((c) => c.memberId === memberId && gymIds.includes(c.gymId));
+    const hasOwnerCheckin = ownerCheckins.length > 0;
     return { sub, owns: Boolean(sub) || hasOwnerCheckin };
   }
 
@@ -168,7 +168,7 @@ export function createMemberManagementService({
 
     const assignedGymId = gymId && gymIds.includes(gymId) ? gymId : gymIds[0];
     if (email) {
-      const existing = users.find((u) => u.email === email && u.userType === 'member');
+      const existing = await users.findAsync((u) => u.email === email && u.userType === 'member');
       if (existing) return { error: 'email_already_registered', status: 409 };
     }
 
@@ -202,7 +202,7 @@ export function createMemberManagementService({
       expiresAt: endIso,
       createdAt: nowIso,
     };
-    subscriptions.insert(sub);
+    await subscriptions.insertAsync(sub);
 
     let payment = null;
     if (paidAmount && Number(paidAmount) > 0) {
@@ -217,7 +217,7 @@ export function createMemberManagementService({
         requestedAt: nowIso,
         decidedAt: nowIso,
       };
-      paymentRequests.insert(payment);
+      await paymentRequests.insertAsync(payment);
     }
 
     return { member, subscription: sub, payment };
@@ -235,32 +235,33 @@ export function createMemberManagementService({
   // Builds the member rows + summary stats for a given gym scope. Shared by
   // [listMembers] (owner Members screen) and [getMemberStats] (owner Home
   // dashboard "total members" card) so the two never disagree.
-  function computeRowsAndStats(gymIds, now) {
+  async function computeRowsAndStats(gymIds, now) {
     if (gymIds.length === 0) {
       return { rows: [], stats: { totalMembers: 0, activeToday: 0, expiringSoon: 0 } };
     }
 
     const directByMember = new Map();
-    for (const s of subscriptions.filter((x) => x.type === 'direct_sub' && gymIds.includes(x.homeGymId))) {
+    const allDirectSubs = await subscriptions.filterAsync((x) => x.type === 'direct_sub' && gymIds.includes(x.homeGymId));
+    for (const s of allDirectSubs) {
       const prev = directByMember.get(s.memberId);
       if (!prev || +new Date(s.startedAt) > +new Date(prev.startedAt)) directByMember.set(s.memberId, s);
     }
 
+    const roamingCheckins = await checkins.filterAsync((c) => gymIds.includes(c.gymId) && FITFLEX_VISIT_TYPES.includes(c.subscriptionType));
     const roamingMemberIds = new Set(
-      checkins
-        .filter((c) => gymIds.includes(c.gymId) && FITFLEX_VISIT_TYPES.includes(c.subscriptionType))
+      roamingCheckins
         .map((c) => c.memberId)
         .filter((id) => id && !directByMember.has(id)),
     );
 
     const rows = [];
     for (const [memberId, sub] of directByMember) {
-      const member = users.find((u) => u.id === memberId);
-      if (member) rows.push(buildRow(member, 'direct', sub, gymIds, now));
+      const member = await users.findByIdAsync(memberId);
+      if (member) rows.push(await buildRow(member, 'direct', sub, gymIds, now));
     }
     for (const memberId of roamingMemberIds) {
-      const member = users.find((u) => u.id === memberId);
-      if (member) rows.push(buildRow(member, 'fitflex', null, gymIds, now));
+      const member = await users.findByIdAsync(memberId);
+      if (member) rows.push(await buildRow(member, 'fitflex', null, gymIds, now));
     }
 
     const stats = {
@@ -271,10 +272,10 @@ export function createMemberManagementService({
     return { rows, stats };
   }
 
-  function listMembers({ owner, query = {} }) {
+  async function listMembers({ owner, query = {} }) {
     const gymIds = scopedGymIds(owner, query.gymId);
     const now = new Date();
-    const { rows, stats } = computeRowsAndStats(gymIds, now);
+    const { rows, stats } = await computeRowsAndStats(gymIds, now);
 
     let filtered = rows;
     const memberType = query.memberType;
@@ -299,25 +300,25 @@ export function createMemberManagementService({
   // Gym-scoped member stats only (no row list) — used by the owner Home
   // dashboard to show the gym's real registered member count, independent
   // of the analytics date-range/period filters.
-  function getMemberStats({ owner, gymId }) {
+  async function getMemberStats({ owner, gymId }) {
     const gymIds = scopedGymIds(owner, gymId);
-    const { stats } = computeRowsAndStats(gymIds, new Date());
+    const { stats } = await computeRowsAndStats(gymIds, new Date());
     return stats;
   }
 
-  function getMemberDetail({ owner, memberId }) {
+  async function getMemberDetail({ owner, memberId }) {
     const gymIds = ownerGymIdsOf(owner);
-    const member = users.find((u) => u.id === memberId);
+    const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
 
-    const { sub, owns } = membershipOwnership(memberId, gymIds);
+    const { sub, owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
 
     const now = new Date();
     const memberType = sub ? 'direct' : 'fitflex';
-    const status = sub ? statusForDirect(member, sub, gymIds, now) : statusForRoaming(member, gymIds, now);
+    const status = sub ? await statusForDirect(member, sub, gymIds, now) : await statusForRoaming(member, gymIds, now);
 
-    const sorted = ownerCheckinsFor(memberId, gymIds);
+    const sorted = await ownerCheckinsFor(memberId, gymIds);
     const recentCheckins = sorted.slice(0, 10).map((c) => {
       const gym = gyms.find((g) => g.id === c.gymId);
       return { id: c.id, timestamp: c.timestamp, gymId: c.gymId, gymName: gym?.name || null };
@@ -326,8 +327,8 @@ export function createMemberManagementService({
     const startMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
     const visits = sorted.filter((c) => +new Date(c.timestamp) >= +startMonth).length;
 
-    const paymentHistory = paymentRequests
-      .filter((p) => p.memberId === memberId)
+    const allPayments = await paymentRequests.filterAsync((p) => p.memberId === memberId);
+    const paymentHistory = allPayments
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))
       .map((p) => ({
         id: p.id,
@@ -340,7 +341,7 @@ export function createMemberManagementService({
     return {
       detail: {
         id: member.id,
-        publicId: publicUserId(member, 'member'),
+        publicId: await publicUserId(member, 'member'),
         displayName: member.displayName || null,
         email: member.email || null,
         phone: member.phone || null,
@@ -369,15 +370,15 @@ export function createMemberManagementService({
     };
   }
 
-  function getCheckInSummary({ owner, memberId, period = 'month', from, to }) {
+  async function getCheckInSummary({ owner, memberId, period = 'month', from, to }) {
     const gymIds = ownerGymIdsOf(owner);
-    const member = users.find((u) => u.id === memberId);
+    const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
-    const { owns } = membershipOwnership(memberId, gymIds);
+    const { owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
 
     const now = new Date();
-    const sorted = ownerCheckinsFor(memberId, gymIds);
+    const sorted = await ownerCheckinsFor(memberId, gymIds);
     const { start, end } = periodRange(period, from, to, now);
     const visits = sorted.filter((c) => inWindow(c.timestamp, start, end)).length;
 
@@ -393,17 +394,17 @@ export function createMemberManagementService({
     };
   }
 
-  function listMemberCheckins({ owner, memberId, query = {} }) {
+  async function listMemberCheckins({ owner, memberId, query = {} }) {
     const gymIds = ownerGymIdsOf(owner);
-    const member = users.find((u) => u.id === memberId);
+    const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
-    const { owns } = membershipOwnership(memberId, gymIds);
+    const { owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
 
     const { start, end } = customRange(query.from, query.to);
     const search = String(query.search || '').trim().toLowerCase();
 
-    let rows = ownerCheckinsFor(memberId, gymIds).map((c) => {
+    let rows = (await ownerCheckinsFor(memberId, gymIds)).map((c) => {
       const gym = gyms.find((g) => g.id === c.gymId);
       return { id: c.id, timestamp: c.timestamp, gymId: c.gymId, gymName: gym?.name || null };
     });
@@ -413,18 +414,17 @@ export function createMemberManagementService({
     return paginate(rows, query);
   }
 
-  function listMemberPayments({ owner, memberId, query = {} }) {
+  async function listMemberPayments({ owner, memberId, query = {} }) {
     const gymIds = ownerGymIdsOf(owner);
-    const member = users.find((u) => u.id === memberId);
+    const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
-    const { owns } = membershipOwnership(memberId, gymIds);
+    const { owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
 
     const { start, end } = customRange(query.from, query.to);
     const search = String(query.search || '').trim().toLowerCase();
 
-    let rows = paymentRequests
-      .filter((p) => p.memberId === memberId)
+    let rows = (await paymentRequests.filterAsync((p) => p.memberId === memberId))
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))
       .map((p) => ({
         id: p.id,
@@ -444,9 +444,9 @@ export function createMemberManagementService({
     return paginate(rows, query);
   }
 
-  function checkInMember({ owner, memberId, gymId }) {
+  async function checkInMember({ owner, memberId, gymId }) {
     const gymIds = ownerGymIdsOf(owner);
-    const member = users.find((u) => u.id === memberId);
+    const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
 
     const targetGymId = gymId && gymIds.includes(gymId) ? gymId : gymIds[0];
@@ -454,13 +454,13 @@ export function createMemberManagementService({
     const gym = gyms.find((g) => g.id === targetGymId);
     if (!gym) return { error: 'gym_not_found', status: 404 };
 
-    const { sub, owns } = membershipOwnership(memberId, gymIds);
+    const { sub, owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
     if (member.accountStatus === 'suspended') return { error: 'member_suspended', status: 409 };
 
     const now = new Date();
     const start = +startOfDayUtc(now);
-    const existing = checkins.find(
+    const existing = await checkins.findAsync(
       (c) => c.memberId === memberId && gymIds.includes(c.gymId) && +new Date(c.timestamp) >= start,
     );
     if (existing) return { ok: true, checkin: existing, idempotent: true };
@@ -478,16 +478,16 @@ export function createMemberManagementService({
       creditsDeductedTzs: 0,
       visitConsumed: true,
     };
-    checkins.insert(row);
+    await checkins.insertAsync(row);
     return { ok: true, checkin: row };
   }
 
-  function renewMember({ owner, memberId, body }) {
+  async function renewMember({ owner, memberId, body }) {
     const gymIds = ownerGymIdsOf(owner);
-    const member = users.find((u) => u.id === memberId);
+    const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
 
-    const sub = latestDirectSub(memberId, gymIds);
+    const sub = await latestDirectSub(memberId, gymIds);
     if (!sub) return { error: 'not_your_member', status: 403 };
 
     const { tier, paidAmount, startDate, endDate } = body || {};
@@ -495,14 +495,14 @@ export function createMemberManagementService({
 
     const startIso = toIso(startDate);
     const endIso = toIso(endDate);
-    subscriptions.update((s) => s.id === sub.id, {
+    await subscriptions.updateByIdAsync(sub.id, {
       status: 'active',
       cycleStartedAt: startIso,
       renewsAt: endIso,
       expiresAt: endIso,
       tier: tier || sub.tier,
     });
-    const updatedSub = subscriptions.find((s) => s.id === sub.id);
+    const updatedSub = await subscriptions.findByIdAsync(sub.id);
 
     let payment = null;
     if (paidAmount && Number(paidAmount) > 0) {
@@ -518,22 +518,22 @@ export function createMemberManagementService({
         requestedAt: nowIso,
         decidedAt: nowIso,
       };
-      paymentRequests.insert(payment);
+      await paymentRequests.insertAsync(payment);
     }
 
     if (member.accountStatus === 'suspended') {
-      users.update((u) => u.id === memberId, { accountStatus: 'active' });
+      await users.updateByIdAsync(memberId, { accountStatus: 'active' });
     }
 
     return { subscription: updatedSub, payment };
   }
 
-  function updateMember({ owner, memberId, body }) {
+  async function updateMember({ owner, memberId, body }) {
     const gymIds = ownerGymIdsOf(owner);
-    const member = users.find((u) => u.id === memberId);
+    const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
 
-    const { sub, owns } = membershipOwnership(memberId, gymIds);
+    const { sub, owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
 
     const { displayName, phone, tier } = body || {};
@@ -543,27 +543,27 @@ export function createMemberManagementService({
       displayName: displayName.trim(),
       phone: phone?.trim() || member.phone || null,
     };
-    users.update((u) => u.id === memberId, userPatch);
+    await users.updateByIdAsync(memberId, userPatch);
 
     if (tier && sub) {
-      subscriptions.update((s) => s.id === sub.id, { tier });
+      await subscriptions.updateByIdAsync(sub.id, { tier });
     }
 
-    const updated = users.find((u) => u.id === memberId);
+    const updated = await users.findByIdAsync(memberId);
     return { member: { id: memberId, displayName: updated.displayName, phone: updated.phone } };
   }
 
-  function setMemberStatus({ owner, memberId, suspend }) {
+  async function setMemberStatus({ owner, memberId, suspend }) {
     const gymIds = ownerGymIdsOf(owner);
-    const member = users.find((u) => u.id === memberId);
+    const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
 
-    const { sub, owns } = membershipOwnership(memberId, gymIds);
+    const { sub, owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
 
     const accountStatus = suspend ? 'suspended' : 'active';
-    users.update((u) => u.id === memberId, { accountStatus });
-    if (sub) subscriptions.update((s) => s.id === sub.id, { status: suspend ? 'suspended' : 'active' });
+    await users.updateByIdAsync(memberId, { accountStatus });
+    if (sub) await subscriptions.updateByIdAsync(sub.id, { status: suspend ? 'suspended' : 'active' });
 
     return { member: { id: memberId, accountStatus } };
   }
