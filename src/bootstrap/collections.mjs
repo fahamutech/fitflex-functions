@@ -17,3 +17,7 @@ export const invoices = collection('invoices');
 export const gymPayouts = collection('gym_payouts');
 export const gymOwners = collection('gym_owners');
 export const webhookSeen = collection('webhook_seen');
+export const trainerEngagements = collection('trainer_engagements');
+export const trainerSessions = collection('trainer_sessions');
+export const products = collection('products');
+export const shopOrders = collection('shop_orders');

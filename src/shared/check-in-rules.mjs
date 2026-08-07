@@ -2,6 +2,7 @@
 // Pure functions — no I/O, fully unit-testable.
 
 import { PASS_TIERS, SUBSCRIPTION_GRACE_HOURS } from './constants.mjs';
+import { effectiveSubscriptionStatus } from './subscription-status.mjs';
 
 /**
  * Check-in failure codes mapped to specific user-facing CTAs (per BL-012).
@@ -80,9 +81,10 @@ export function classifyVisit(todaysCheckins, gymId) {
  * @param {Object} ctx.tierConfig optional subscription-tier override from platform settings
  */
 export function validateCheckIn({ subscription, gym, todaysCheckins, cycleUsage, now = new Date(), tierConfig }) {
-  // 1. Subscription active (with grace)
-  if (!subscription || (subscription.status !== 'active' &&
-      !(subscription.status === 'expired' && isWithinGrace(subscription.expiresAt, +now)))) {
+  // 1. Subscription active (with grace) — status is DERIVED from expiresAt (A1)
+  const status = effectiveSubscriptionStatus(subscription, now);
+  if (!subscription || (status !== 'active' &&
+      !(status === 'expired' && isWithinGrace(subscription.expiresAt, +now)))) {
     return { ok: false, failure: CHECKIN_FAILURE.SUBSCRIPTION_INACTIVE };
   }
 

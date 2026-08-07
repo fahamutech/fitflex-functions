@@ -21,6 +21,40 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     const venueType = body.venueType ?? prior.venueType ?? 'physical';
     const accessMode = body.accessMode ?? prior.accessMode ?? 'paid_visit';
     const isOnlineFree = venueType === 'online' || accessMode === 'free_online';
+    const amenities = Array.isArray(body.amenities) ? body.amenities : (prior.amenities || []);
+    const equipment = Array.isArray(body.equipment) ? body.equipment : (prior.equipment || []);
+    // B11: gym classes (Yoga, Aerobics, ...) with schedule/price/location.
+    const classes = (Array.isArray(body.classes) ? body.classes : (prior.classes || []))
+      .filter(c => c && String(c.name || '').trim())
+      .map(c => ({
+        id: c.id || `cls_${randomUUID().slice(0, 8)}`,
+        name: String(c.name).trim(),
+        schedule: c.schedule || null,
+        price: c.price == null ? null : Number(c.price),
+        location: c.location || null,
+      }));
+    // B12: trainer pass — fee external trainers pay to train clients here.
+    const tpBody = body.trainerPass ?? prior.trainerPass ?? {};
+    const trainerPass = {
+      enabled: Boolean(tpBody.enabled),
+      feeTzs: Number(tpBody.feeTzs ?? 0),
+      period: ['daily', 'weekly', 'monthly'].includes(tpBody.period) ? tpBody.period : 'monthly',
+    };
+    // A6: verified = explicit flag (admin/prior) if set, otherwise derived
+    // from profile completeness (location + coordinates + photos + amenities
+    // + equipment).
+    const explicitVerified = typeof body.verified === 'boolean'
+      ? body.verified
+      : (typeof prior.verified === 'boolean' ? prior.verified : null);
+    const hasCoords = lat !== null && lat !== '' && lng !== null && lng !== '';
+    const autoVerified = Boolean(
+      (body.name ?? prior.name) &&
+      (body.location ?? prior.location) &&
+      hasCoords &&
+      images.length > 0 &&
+      amenities.length > 0 &&
+      equipment.length > 0,
+    );
     return {
       id: body.id || prior.id || `gym_${randomUUID().slice(0, 8)}`,
       status: body.status || prior.status || 'active',
@@ -41,8 +75,11 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
       images,
       thumbnails,
       operatingHours: body.operatingHours ?? prior.operatingHours ?? null,
-      amenities: Array.isArray(body.amenities) ? body.amenities : (prior.amenities || []),
-      equipment: Array.isArray(body.equipment) ? body.equipment : (prior.equipment || []),
+      amenities,
+      equipment,
+      classes,
+      trainerPass,
+      verified: explicitVerified ?? autoVerified,
       paymentBank: body.paymentBank ?? prior.paymentBank ?? null,
       paymentNumber: body.paymentNumber ?? prior.paymentNumber ?? null,
       paymentNotes: body.paymentNotes ?? prior.paymentNotes ?? null,
@@ -77,6 +114,7 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
       id: g.id,
       name: g.name,
       tier: g.tier,
+      verified: g.verified ?? false,
       location: g.location,
       venueType: g.venueType,
       accessMode: g.accessMode,
@@ -95,7 +133,7 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
   /** Leanest possible gym reference for list-level embeds (owners list, member rows, etc.) — no image at all. */
   function slimGymRef(g) {
     if (!g) return g;
-    return { id: g.id, name: g.name, tier: g.tier };
+    return { id: g.id, name: g.name, tier: g.tier, verified: g.verified ?? false };
   }
 
   function findById(id) {

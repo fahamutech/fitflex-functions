@@ -17,8 +17,8 @@ export const subscribe = {
   requestSample: { tier: 'pro', type: 'platform_pass' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
-    const { tier, type = 'platform_pass', homeGymId } = req.body || {};
-    const result = await subscriptionService.subscribe({ memberId: req.user.sub, tier, type, homeGymId });
+    const { tier, type = 'platform_pass', homeGymId, plan } = req.body || {};
+    const result = await subscriptionService.subscribe({ memberId: req.user.sub, tier, type, homeGymId, plan });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(result.status).json({ subscription: result.subscription, paymentRequest: result.paymentRequest });
   }

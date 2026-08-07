@@ -3,6 +3,7 @@
 // Backs the Gym Owner app "Members Management Flow".
 
 import { randomUUID } from 'node:crypto';
+import { effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 
 const EXPIRING_SOON_DAYS = 7;
 const FITFLEX_VISIT_TYPES = ['platform_pass', 'roaming_topup'];
@@ -14,6 +15,8 @@ export function createMemberManagementService({
   checkins,
   paymentRequests,
   publicUserId,
+  initFirebaseAdmin,
+  getAdminAuth,
 }) {
   // ── helpers ──────────────────────────────────────────────────────────────
   const ownerGymIdsOf = (owner) => owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
@@ -160,16 +163,41 @@ export function createMemberManagementService({
     const gymIds = ownerGymIdsOf(owner);
     if (gymIds.length === 0) return { error: 'owner_has_no_gyms', status: 400 };
 
-    const { displayName, email, phone, gymId, paidAmount, durationUnit, startDate, endDate, tier } = body || {};
+    const { displayName, email, phone, gymId, paidAmount, durationUnit, startDate, endDate, tier, initialPassword } = body || {};
     if (!displayName?.trim()) return { error: 'displayName_required', status: 400 };
     if (!email?.trim() && !phone?.trim()) return { error: 'email_or_phone_required', status: 400 };
     if (!['D', 'W', 'M'].includes(durationUnit)) return { error: 'durationUnit_must_be_D_W_or_M', status: 400 };
     if (!startDate || !endDate) return { error: 'startDate_and_endDate_required', status: 400 };
+    // B2: optional login credential for the member.
+    if (initialPassword != null && String(initialPassword).length > 0) {
+      if (String(initialPassword).length < 6) return { error: 'initialPassword_too_short', status: 400 };
+      if (!email?.trim()) return { error: 'email_required_for_credentials', status: 400 };
+    }
 
     const assignedGymId = gymId && gymIds.includes(gymId) ? gymId : gymIds[0];
     if (email) {
       const existing = await users.findAsync((u) => u.email === email && u.userType === 'member');
       if (existing) return { error: 'email_already_registered', status: 409 };
+    }
+
+    // B2: create the Firebase login before persisting so the member row can
+    // carry the linked firebaseUid. A Firebase outage must not block
+    // registration — the owner can retry the credential later.
+    let firebaseUid = null;
+    let credentialCreated = false;
+    if (initialPassword && email?.trim() && initFirebaseAdmin && getAdminAuth) {
+      try {
+        initFirebaseAdmin();
+        const fbUser = await getAdminAuth().createUser({
+          email: email.trim(),
+          password: String(initialPassword),
+          displayName: displayName.trim(),
+        });
+        firebaseUid = fbUser.uid;
+        credentialCreated = true;
+      } catch (fbErr) {
+        console.warn('[owner-members] Firebase credential creation failed:', fbErr?.message);
+      }
     }
 
     const memberId = `usr_${randomUUID().slice(0, 8)}`;
@@ -179,6 +207,7 @@ export function createMemberManagementService({
       displayName: displayName.trim(),
       email: email?.trim() || null,
       phone: phone?.trim() || null,
+      firebaseUid,
       userType: 'member',
       accountStatus: 'active',
       approvalStatus: 'approved',
@@ -220,7 +249,7 @@ export function createMemberManagementService({
       await paymentRequests.insertAsync(payment);
     }
 
-    return { member, subscription: sub, payment };
+    return { member, subscription: sub, payment, credentialCreated };
   }
 
   // Resolves the effective gym scope for a members/stats query: a single
@@ -457,6 +486,10 @@ export function createMemberManagementService({
     const { sub, owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
     if (member.accountStatus === 'suspended') return { error: 'member_suspended', status: 409 };
+    // A1: direct memberships must not check in past their plan expiry.
+    if (sub && effectiveSubscriptionStatus(sub) === 'expired') {
+      return { error: 'membership_expired', status: 409 };
+    }
 
     const now = new Date();
     const start = +startOfDayUtc(now);

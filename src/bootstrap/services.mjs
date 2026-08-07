@@ -24,15 +24,19 @@ import { createFinanceService } from '../services/finance-service.mjs';
 import { createInvoiceService } from '../services/invoice-service.mjs';
 import { createPortalUserService } from '../services/portal-user-service.mjs';
 import { createWebhookService } from '../services/webhook-service.mjs';
+import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
+import { createShopService } from '../services/shop-service.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
+  trainerEngagements, trainerSessions, products, shopOrders,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
 export {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
+  trainerEngagements, trainerSessions, products, shopOrders,
 };
 
 export const identityService = createIdentityService({ users });
@@ -41,7 +45,9 @@ const { resolveRequestUser, publicUserId } = identityService;
 export const settingsService = createSettingsService({ platformSettings, auditLog });
 export const gymService = createGymService({ gyms, users, checkins, auditLog });
 export const trainerService = createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService });
-export const trainerBookingService = createTrainerBookingService({ trainerBookings, trainers, gyms, users, auditLog, trainerService });
+export const trainerBookingService = createTrainerBookingService({ trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService });
+export const trainerEngagementService = createTrainerEngagementService({ trainerEngagements, trainers, users, trainerService });
+export const shopService = createShopService({ products, shopOrders, users, auditLog });
 
 export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps,
@@ -54,7 +60,9 @@ export const accountService = createAccountService({
 });
 
 export const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig: settingsService.getTierConfig });
-export const memberManagement = createMemberManagementService({ users, gyms, subscriptions, checkins, paymentRequests, publicUserId });
+export const memberManagement = createMemberManagementService({
+  users, gyms, subscriptions, checkins, paymentRequests, publicUserId, initFirebaseAdmin, getAdminAuth,
+});
 export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
 });

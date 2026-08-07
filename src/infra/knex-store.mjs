@@ -34,6 +34,10 @@ const TABLE_MAP = {
   gym_payouts:       { table: 'GymPayout' },
   webhook_seen:      { table: 'WebhookSeen' },
   gym_owners:        { table: 'User', defaultFilter: { userType: 'gym_operator' } },
+  trainer_engagements: { table: 'TrainerEngagement' },
+  trainer_sessions:  { table: 'TrainerSession' },
+  products:          { table: 'Product' },
+  shop_orders:       { table: 'ShopOrder' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -451,10 +455,10 @@ export function collection(name) {
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
   users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','createdAt','updatedAt']),
-  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','images','thumbnails','coordinates','amenities','equipment','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
-  subscriptions:    new Set(['id','memberId','type','tier','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
+  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
+  subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed']),
-  payment_requests: new Set(['id','memberId','subscriptionId','tier','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
+  payment_requests: new Set(['id','memberId','subscriptionId','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt']),
   trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','specialties','bio','rating','reviewCount','hourlyRateTzs','experienceYears','status','approvalStatus','pendingGymIds','availability','createdAt','updatedAt']),
@@ -464,6 +468,10 @@ const ALLOWED_FIELDS = {
   webhook_seen:     new Set(['id','at']),
   otps:             new Set(['phone','code','userType','expiresAt']),
   gym_owners:       new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','gymId','gymIds','createdAt','updatedAt']),
+  trainer_engagements: new Set(['id','memberId','trainerId','type','message','gymId','status','createdAt']),
+  trainer_sessions: new Set(['id','trainerId','memberId','customerName','customerEmail','customerPhone','gymId','date','slot','source','status','amountTzs','createdAt']),
+  products:         new Set(['id','vendorId','name','description','category','priceTzs','stock','images','status','createdAt','updatedAt']),
+  shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','note','createdAt','updatedAt']),
 };
 
 // jsonb columns that may hold array-shaped (or otherwise non-object) JSON —
@@ -474,9 +482,10 @@ const ALLOWED_FIELDS = {
 // need this, but stringifying them too is harmless and keeps this uniform.)
 const JSON_FIELDS = {
   users: ['memberProfile'],
-  gyms: ['operatingHours', 'coordinates'],
+  gyms: ['operatingHours', 'coordinates', 'classes', 'trainerPass'],
   platform_settings: ['subscriptionTiers', 'payoutBands'],
   audit_log: ['before', 'after'],
+  shop_orders: ['items'],
 };
 
 /**
