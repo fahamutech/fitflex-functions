@@ -19,6 +19,7 @@ exports.up = async function up(knex) {
       table.text('userType').notNullable();
       table.text('accountStatus').notNullable().defaultTo('active');
       table.text('approvalStatus').notNullable().defaultTo('approved');
+      table.boolean('verified').notNullable().defaultTo(false);
       table.text('passwordHash');
       table.text('approvalNote');
       table.boolean('onboardingCompleted').notNullable().defaultTo(false);

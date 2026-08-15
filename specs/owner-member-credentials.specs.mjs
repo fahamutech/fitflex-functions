@@ -73,15 +73,15 @@ const baseBody = () => ({
 
 const owner = { id: 'usr_owner_1', gymIds: ['gym_1'] };
 
-test('B2: createMember with initialPassword creates a Firebase credential', async () => {
+test('B2: a 4-digit FitFlex PIN creates a Firebase-compatible credential', async () => {
   const createUserCalls = [];
   const service = makeService({ createUserCalls });
-  const body = { ...baseBody(), initialPassword: 'secret123' };
+  const body = { ...baseBody(), initialPassword: 'fitflex-pin:2468' };
   const out = await service.createMember({ owner, body });
   assert.ok(!out.error, JSON.stringify(out));
   assert.equal(createUserCalls.length, 1);
   assert.equal(createUserCalls[0].email, body.email);
-  assert.equal(createUserCalls[0].password, 'secret123');
+  assert.equal(createUserCalls[0].password, 'fitflex-pin:2468');
   assert.equal(out.credentialCreated, true);
   assert.ok(out.member.firebaseUid, 'member must be linked to the Firebase login');
 });
@@ -145,7 +145,7 @@ async function createOwnerWithGym() {
   return { ownerId, gym: gymRes.body };
 }
 
-test('B3: an owner-created member can sign in with their email and use the app', async () => {
+test('B3: an owner-created member can sign in without choosing a role', async () => {
   const { ownerId, gym } = await createOwnerWithGym();
   const email = uniq('login_member') + '@example.com';
 
@@ -165,7 +165,6 @@ test('B3: an owner-created member can sign in with their email and use the app',
     {
       body: {
         idToken: `dev:${Buffer.from(JSON.stringify({ uid: `fb_${email}`, email, name: 'Cred Member' })).toString('base64url')}`,
-        requestedRole: 'member',
       },
     },
     session,

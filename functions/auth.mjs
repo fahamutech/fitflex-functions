@@ -49,7 +49,7 @@ export const authFirebaseSession = {
   requestSample: { idToken: 'firebase-id-token', requestedRole: 'member' },
   responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'member' } },
   onRequest: async (req, res) => {
-    const { idToken, requestedRole = 'member' } = req.body || {};
+    const { idToken, requestedRole } = req.body || {};
     const result = await authService.firebaseSession({ idToken, requestedRole });
     if (result.error) {
       const body = { error: result.error };

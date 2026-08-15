@@ -74,6 +74,29 @@ test('Firebase session creates gym owner and trainer profiles pending admin appr
   assert.equal(trainer.body.user.approvalStatus, 'pending_approval');
 });
 
+test('sign-in automatically resolves existing owner and trainer roles', async () => {
+  for (const requestedRole of ['gym_owner', 'trainer']) {
+    const stamp = `${requestedRole}-${Date.now()}-${Math.random()}`;
+    const identity = {
+      uid: `fb_auto_${stamp}`,
+      email: `auto-${stamp}@example.com`,
+      name: `Auto ${requestedRole}`,
+    };
+    const created = res();
+    await authFirebaseSession.onRequest({
+      body: { idToken: devToken(identity), requestedRole },
+    }, created);
+    assert.equal(created.statusCode, 200);
+
+    const signedIn = res();
+    await authFirebaseSession.onRequest({
+      body: { idToken: devToken(identity) },
+    }, signedIn);
+    assert.equal(signedIn.statusCode, 200);
+    assert.equal(signedIn.body.user.userType, created.body.user.userType);
+  }
+});
+
 test('Firebase session rejects reusing one email for a different role', async () => {
   const email = `role-conflict-${Date.now()}@example.com`;
   const member = res();

@@ -26,6 +26,9 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       pendingGymIds,
       status: ['active', 'inactive', 'suspended'].includes(body.status) ? body.status : (prior.status ?? 'active'),
       approvalStatus: body.approvalStatus ?? prior.approvalStatus ?? 'approved',
+      verified: typeof body.verified === 'boolean'
+        ? body.verified
+        : (prior.verified ?? false),
       availability: Array.isArray(body.availability) ? body.availability : (prior.availability || []),
       createdAt: prior.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()

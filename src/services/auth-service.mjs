@@ -87,18 +87,22 @@ export function createAuthService({
     return { token, user };
   }
 
-  async function firebaseSession({ idToken, requestedRole = 'member' }) {
+  async function firebaseSession({ idToken, requestedRole }) {
     const fb = await verifyFirebaseIdToken(idToken);
     if (!fb) return { error: 'invalid_firebase_token', status: 401 };
 
-    const selfRole = normalizeRequestedRole(requestedRole);
+    // Sign-in deliberately omits requestedRole so an existing account's role
+    // is resolved from FitFlex. Sign-up supplies it from the dedicated role
+    // choice page. Keep member as the legacy default for a new identity.
+    const hasRequestedRole = requestedRole != null && String(requestedRole).trim() !== '';
+    const selfRole = hasRequestedRole ? normalizeRequestedRole(requestedRole) : null;
     const isAdminEmail = isConfiguredAdminEmail(fb.email);
     let user = await users.findAsync(u => u.firebaseUid === fb.uid) || (fb.email ? await users.findAsync(u => u.email === fb.email) : null);
 
     if (user) {
       // Existing user: NEVER change their stored userType via this endpoint.
       // Only exception: configured admin email always stays admin.
-      if (!isAdminEmail && user.userType !== 'admin' && selfRole !== 'admin' && user.userType !== selfRole) {
+      if (hasRequestedRole && !isAdminEmail && user.userType !== 'admin' && selfRole !== 'admin' && user.userType !== selfRole) {
         return {
           error: 'email_already_used_for_different_role',
           status: 409,
@@ -118,18 +122,19 @@ export function createAuthService({
       };
       user = await users.upsertAsync(u => u.id === user.id, { ...user, ...patch, updatedAt: new Date().toISOString() });
     } else {
+      const newUserRole = selfRole || 'member';
       // New user: only allow creation if NOT requesting admin.
-      if (selfRole === 'admin' && !isAdminEmail) return { error: 'admin_self_registration_not_allowed', status: 403 };
+      if (newUserRole === 'admin' && !isAdminEmail) return { error: 'admin_self_registration_not_allowed', status: 403 };
       // Gym staff (receptionists etc.) must be pre-created by their gym owner.
-      if (selfRole === 'gym_staff') return { error: 'gym_staff_self_registration_not_allowed', status: 403 };
+      if (newUserRole === 'gym_staff') return { error: 'gym_staff_self_registration_not_allowed', status: 403 };
       const row = {
         id: `usr_${randomUUID().slice(0, 8)}`,
         firebaseUid: fb.uid,
         email: fb.email,
         displayName: fb.name,
         photoUrl: fb.picture,
-        userType: isAdminEmail ? 'admin' : selfRole,
-        approvalStatus: isAdminEmail ? 'approved' : approvalStatusForRole(selfRole),
+        userType: isAdminEmail ? 'admin' : newUserRole,
+        approvalStatus: isAdminEmail ? 'approved' : approvalStatusForRole(newUserRole),
         accountStatus: 'active',
         onboardingCompleted: false,
         createdAt: new Date().toISOString()
