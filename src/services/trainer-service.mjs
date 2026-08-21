@@ -181,7 +181,15 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
   function updateProfile({ userId, body }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
-    const allowed = ['bio', 'specialties', 'hourlyRateTzs', 'experienceYears', 'availability', 'photoUrl'];
+    const allowed = [
+      'bio',
+      'specialties',
+      'hourlyRateTzs',
+      'sessionRateCurrency',
+      'experienceYears',
+      'availability',
+      'photoUrl',
+    ];
     const updates = {};
     for (const k of allowed) {
       if (body[k] !== undefined) updates[k] = body[k];

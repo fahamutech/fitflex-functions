@@ -75,19 +75,14 @@ const PHONE_PK_COLLECTIONS = new Set(['otps']);
 // which only auto-generates the value when the caller does not supply one.
 const AUTO_UPDATED_AT = new Set(['users', 'gyms', 'trainers', 'platform_settings']);
 
-// Collections that are small and static enough to be loaded into memory at startup.
-// All other collections are queried directly from PG on demand (DB-only mode).
+// Collections retained for legacy synchronous service call sites. New service
+// reads must use the *Async methods below, which always query PostgreSQL.
 const PRIMED_COLLECTIONS = new Set([
   'platform_settings', // single row
   'otps',              // small, ephemeral
   'gyms',              // small catalogue, frequently accessed
   'trainers',          // small set, frequently accessed
 ]);
-
-// In-memory cache to support predicate-based find/filter without hitting PG every time.
-// Only used for PRIMED collections; DB-only collections skip caching entirely.
-const cache = new Map();
-const CACHE_TTL = 1_000; // 1s - reduced for near real-time data
 
 async function fetchTrainerGymLinks(trainerIds) {
   if (!trainerIds.length) return new Map();
@@ -101,10 +96,6 @@ async function fetchTrainerGymLinks(trainerIds) {
 }
 
 async function loadAll(name, meta) {
-  const now = Date.now();
-  const cached = cache.get(name);
-  if (cached && (now - cached.ts < CACHE_TTL)) return cached.data;
-
   let query = db(meta.table).select('*');
   if (meta.defaultFilter) query = query.where(meta.defaultFilter);
   let rows = await query;
@@ -117,13 +108,12 @@ async function loadAll(name, meta) {
   if (meta.transform) rows = rows.map(meta.transform);
   // Convert dates and BigInts to plain values for compatibility
   rows = rows.map(r => JSON.parse(JSON.stringify(r, (_, v) => typeof v === 'bigint' ? Number(v) : v)));
-  cache.set(name, { data: rows, ts: now });
   return rows;
 }
 
-function invalidate(name) {
-  cache.delete(name);
-}
+// Async reads are never cached. Kept as a no-op while legacy synchronous
+// collection methods are migrated away from their startup snapshots.
+function invalidate(_) {}
 
 function pkField(name) {
   if (PHONE_PK_COLLECTIONS.has(name)) return 'phone';
