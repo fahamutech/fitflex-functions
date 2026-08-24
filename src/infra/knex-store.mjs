@@ -64,7 +64,14 @@ function trainerToDb(data) {
   if (rest.availability !== undefined && rest.availability !== null && typeof rest.availability !== 'string') {
     rest.availability = JSON.stringify(rest.availability);
   }
-  return { fields: rest, gymIds: gymIds ?? null };
+  // Keep parity with the generic Knex writer: the deployed TrainerProfile
+  // schema may lag optional API fields (for example sessionRateCurrency).
+  // Sending those fields makes every trainer upsert fail.
+  const allowed = ALLOWED_FIELDS.trainers;
+  const fields = Object.fromEntries(
+    Object.entries(rest).filter(([key, value]) => allowed.has(key) && value !== undefined),
+  );
+  return { fields, gymIds: gymIds ?? null };
 }
 
 // OTP uses phone as PK — need special handling for upsert
@@ -189,6 +196,25 @@ export function collection(name) {
     } else if (name === 'platform_settings') {
       const writeData = prepareForKnex(name, row);
       await db(meta.table).insert(writeData).onConflict('id').merge(writeData);
+    } else if (name === 'trainers') {
+      // Trainer profiles use a jsonb availability column and a gym join
+      // table, so they cannot use the generic upsert serializer.
+      const { fields, gymIds } = trainerToDb(row);
+      const updateData = { ...fields, updatedAt: new Date() };
+      await db.transaction(async (trx) => {
+        await trx(meta.table)
+          .insert({ id: row.id, ...fields, updatedAt: new Date() })
+          .onConflict('id')
+          .merge(updateData);
+        if (gymIds) {
+          await trx(TRAINER_GYM_TABLE).where({ trainerId: row.id }).del();
+          if (gymIds.length) {
+            await trx(TRAINER_GYM_TABLE).insert(
+              gymIds.map((gymId) => ({ trainerId: row.id, gymId })),
+            );
+          }
+        }
+      });
     } else {
       const pk = pkField(name);
       const id = row[pk];
@@ -459,7 +485,7 @@ const ALLOWED_FIELDS = {
   otps:             new Set(['phone','code','userType','expiresAt']),
   gym_owners:       new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','gymId','gymIds','createdAt','updatedAt']),
   trainer_engagements: new Set(['id','memberId','trainerId','type','message','gymId','status','createdAt']),
-  trainer_sessions: new Set(['id','trainerId','memberId','customerName','customerEmail','customerPhone','gymId','date','slot','source','status','amountTzs','createdAt']),
+  trainer_sessions: new Set(['id','trainerId','memberId','customerName','customerEmail','customerPhone','gymId','locationType','locationLabel','date','slot','source','status','amountTzs','createdAt']),
   products:         new Set(['id','vendorId','name','description','category','priceTzs','stock','images','status','createdAt','updatedAt']),
   shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','note','createdAt','updatedAt']),
 };

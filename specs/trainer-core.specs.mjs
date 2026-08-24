@@ -163,6 +163,21 @@ test('C3: manual session requires a customer contact', async () => {
   assert.equal(out.error, 'customer_contact_required');
 });
 
+test('C3: manual sessions retain an explicitly named other location', async () => {
+  const { service } = makeBookingService();
+  const result = await service.createManualSession({
+    userId: 'usr_trainer_1',
+    body: {
+      customerName: 'Beach client', date: MONDAY, locationType: 'other_location',
+      locationLabel: 'Coco Beach', amountTzs: 20000,
+    },
+  });
+  assert.equal(result.error, undefined);
+  const sessions = await service.trainerSessionsForDate({ userId: 'usr_trainer_1', date: MONDAY });
+  assert.equal(sessions.sessions[0].locationType, 'other_location');
+  assert.equal(sessions.sessions[0].locationLabel, 'Coco Beach');
+});
+
 // ───────────────────── C2: earnings ─────────────────────
 
 test('C2: earnings sum confirmed/completed bookings plus manual sessions', async () => {

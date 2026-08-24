@@ -146,6 +146,24 @@ export const ownerUpdateTrainer = {
   }
 };
 
+export const ownerCreateTrainer = {
+  created, method: 'post', path: '/owner/trainers',
+  description: 'Owner: create a trainer account and assign it to one of their gyms.',
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onRequest: async (req, res) => {
+    try {
+      const owner = await resolveRequestUser(req);
+      if (!owner) return res.status(404).json({ error: 'user_not_found' });
+      const result = await ownerGymService.createTrainer({ owner, body: req.body || {} });
+      if (result.error) return res.status(result.status).json({ error: result.error });
+      res.status(201).json(result.trainer);
+    } catch (err) {
+      console.error('[ownerCreateTrainer] error:', err.message, err.meta || '');
+      res.status(500).json({ error: 'create_trainer_failed', detail: err.message });
+    }
+  },
+};
+
 export const ownerRemoveTrainer = {
   created, method: 'post', path: '/owner/trainers/:trainerId/remove',
   description: 'Owner: remove a trainer from all their gym(s). The trainer profile persists but is unlinked.',

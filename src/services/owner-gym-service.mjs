@@ -149,6 +149,46 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     return { trainer: trainerService.hydrateTrainer(row) };
   }
 
+  async function createTrainer({ owner, body }) {
+    const gymId = String(body.gymId || body.gymIds?.[0] || '');
+    const ownerGymIds = ownerGymIdsOf(owner);
+    if (!gymId) return { error: 'gym_required', status: 400 };
+    if (!ownerGymIds.includes(gymId)) return { error: 'not_your_gym', status: 403 };
+    const displayName = String(body.displayName || '').trim();
+    const email = String(body.email || '').trim().toLowerCase();
+    const initialPin = String(body.initialPin || '');
+    if (!displayName) return { error: 'display_name_required', status: 400 };
+    if (!email) return { error: 'email_required', status: 400 };
+    if (!/^\d{4}$/.test(initialPin)) return { error: 'invalid_pin', status: 400 };
+    if (await users.findAsync(u => String(u.email || '').toLowerCase() === email)) {
+      return { error: 'email_already_used', status: 409 };
+    }
+    if (trainers.find(t => String(t.email || '').toLowerCase() === email)) {
+      return { error: 'email_already_used', status: 409 };
+    }
+
+    const now = new Date().toISOString();
+    const userId = `usr_${randomUUID().slice(0, 8)}`;
+    const trainerId = `trn_${randomUUID().slice(0, 8)}`;
+    const user = {
+      id: userId, userType: 'trainer', email, phone: body.phone || null,
+      displayName, passwordHash: `demo:${initialPin}`, accountStatus: 'active',
+      approvalStatus: 'approved', onboardingCompleted: true, gymId, gymIds: [gymId],
+      createdAt: now, updatedAt: now,
+    };
+    const trainer = trainerService.normalizeTrainerPayload({
+      ...body, id: trainerId, userId, email, displayName, gymIds: [gymId],
+      status: 'active', approvalStatus: 'approved',
+    }, {});
+    await users.upsertAsync(u => u.id === userId, user);
+    await trainers.upsertAsync(t => t.id === trainerId, trainer);
+    auditLog.insert({
+      id: randomUUID(), at: now, actor: owner.id, action: 'trainer_created_by_owner',
+      target: trainerId, before: null, after: trainer,
+    });
+    return { trainer: trainerService.hydrateTrainer(trainer) };
+  }
+
   function removeTrainer({ owner, trainerId }) {
     const ownerGymIds = ownerGymIdsOf(owner);
     const trainer = trainers.find(t => t.id === trainerId);
@@ -206,6 +246,6 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
 
   return {
     ownerGymIdsOf, syncTrainersForGym, registerOwner, myGyms, myInvoices, myEarnings, gymCheckIns,
-    updateGym, createGym, deleteGym, updateTrainer, removeTrainer, listTrainers, pendingTrainers, decideTrainerJoin,
+    updateGym, createGym, deleteGym, createTrainer, updateTrainer, removeTrainer, listTrainers, pendingTrainers, decideTrainerJoin,
   };
 }

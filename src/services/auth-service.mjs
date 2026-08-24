@@ -211,6 +211,7 @@ export function createAuthService({
         photoUrl: 'https://images.unsplash.com/photo-1567013127542-490d757e51fc?w=400',
         gender: 'female', specialties: ['strength', 'mobility'], bio: 'Dev trainer profile.',
         hourlyRateTzs: 20000, experienceYears: 5, gymIds: [DEV_GYM_ID],
+        availability: [{ day: 'monday', gymId: DEV_GYM_ID, slots: ['09:00', '10:00'] }],
         status: 'active', approvalStatus: 'approved',
       }, {}));
     } else {

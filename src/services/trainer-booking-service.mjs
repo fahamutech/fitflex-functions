@@ -126,9 +126,29 @@ export function createTrainerBookingService({ trainerBookings, trainerSessions, 
     const profile = trainerService.findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     const { customerName, customerEmail, customerPhone, gymId, date, slot, amountTzs, memberId } = body || {};
+    const locationType = body?.locationType || 'my_gym';
+    const locationLabel = body?.locationLabel?.trim() || null;
     if (!date) return { error: 'date_required', status: 400 };
     if (!memberId && !customerEmail?.trim() && !customerPhone?.trim() && !customerName?.trim()) {
       return { error: 'customer_contact_required', status: 400 };
+    }
+    if (!['my_gym', 'other_gym', 'other_location'].includes(locationType)) {
+      return { error: 'invalid_location_type', status: 400 };
+    }
+    if (locationType !== 'my_gym' && !locationLabel) {
+      return { error: 'location_required', status: 400 };
+    }
+    const resolvedGymId = locationType === 'my_gym'
+      ? (gymId || profile.gymIds?.[0] || null)
+      : (gymId || null);
+    if (locationType === 'my_gym' && !resolvedGymId) {
+      return { error: 'my_gym_required', status: 400 };
+    }
+    if (locationType === 'my_gym' && !profile.gymIds?.includes(resolvedGymId)) {
+      return { error: 'gym_not_linked', status: 403 };
+    }
+    if (locationType === 'my_gym' && !gyms.find(g => g.id === resolvedGymId)) {
+      return { error: 'gym_not_found', status: 404 };
     }
     const session = await trainerSessions.insertAsync({
       id: `tss_${randomUUID().slice(0, 8)}`,
@@ -137,7 +157,9 @@ export function createTrainerBookingService({ trainerBookings, trainerSessions, 
       customerName: customerName?.trim() || null,
       customerEmail: customerEmail?.trim() || null,
       customerPhone: customerPhone?.trim() || null,
-      gymId: gymId || null,
+      gymId: resolvedGymId,
+      locationType,
+      locationLabel,
       date,
       slot: slot || null,
       source: 'manual',
@@ -181,6 +203,8 @@ export function createTrainerBookingService({ trainerBookings, trainerSessions, 
         slot: s.slot,
         gymId: s.gymId,
         gym: gyms.find(g => g.id === s.gymId) || null,
+        locationType: s.locationType || 'my_gym',
+        locationLabel: s.locationLabel || null,
         amountTzs: s.amountTzs || 0,
         status: s.status,
         member: null,

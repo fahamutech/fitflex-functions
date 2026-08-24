@@ -8,10 +8,21 @@ import assert from 'node:assert/strict';
 import { createGymService } from '../src/services/gym-service.mjs';
 
 const service = createGymService({
-  gyms: { find: () => null, filter: () => [], all: () => [], upsert: () => {}, remove: () => {} },
+  gyms: { find: () => null, filter: () => [], filterAsync: async () => [], all: () => [], upsert: () => {}, remove: () => {} },
   users: { findAsync: async () => null },
   checkins: { findAsync: async () => null },
   auditLog: { insert: () => {} },
+});
+
+test('active gym catalogue can be read asynchronously', async () => {
+  const rows = [{ id: 'gym_active', status: 'active' }, { id: 'gym_inactive', status: 'inactive' }];
+  const asyncService = createGymService({
+    gyms: { filter: () => [], filterAsync: async (predicate) => rows.filter(predicate) },
+    users: { findAsync: async () => null },
+    checkins: { findAsync: async () => null },
+    auditLog: { insert: () => {} },
+  });
+  assert.deepEqual(await asyncService.listActiveAsync(), [rows[0]]);
 });
 
 test('B11: classes are normalized onto the gym payload', () => {

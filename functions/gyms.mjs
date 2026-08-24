@@ -15,7 +15,7 @@ export const listGyms = {
   // present here. Payload size is instead controlled by compressing images
   // to WebP and capping dimensions at upload time (see image-upload.tsx /
   // gym_form_page.dart), not by trimming the array server-side.
-  onRequest: (_, res) => res.json(gymService.listActive())
+  onRequest: async (_, res) => res.json(await gymService.listActiveAsync())
 };
 
 export const getGym = {

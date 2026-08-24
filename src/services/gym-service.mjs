@@ -144,6 +144,10 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     return gyms.filter(g => g.status === 'active');
   }
 
+  async function listActiveAsync() {
+    return await gyms.filterAsync(g => g.status === 'active');
+  }
+
   /**
    * Admin gym table. Default response is slimmed (single `thumbnail`, no
    * `images`/`thumbnails` arrays or `operatingHours`) — this was previously
@@ -186,5 +190,5 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     return { gym: removed };
   }
 
-  return { normalizeGymPayload, slimGym, slimGymRef, findById, listActive, listAdmin, upsert, remove };
+  return { normalizeGymPayload, slimGym, slimGymRef, findById, listActive, listActiveAsync, listAdmin, upsert, remove };
 }
