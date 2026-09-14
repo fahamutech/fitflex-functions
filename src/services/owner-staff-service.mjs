@@ -34,7 +34,7 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
     const scopedGymIds = parseStringList(gymIds, []).filter(id => ownerGymIds.includes(id));
     if (scopedGymIds.length === 0) return { error: 'must_assign_to_at_least_one_owned_gym', status: 400 };
 
-    const existing = await users.findAsync(u => u.email === email);
+    const existing = await users.findAsync(u => u.email === email && u.userType === 'gym_staff');
     if (existing) return { error: 'email_already_in_use', status: 409 };
 
     let firebaseUid = null;
@@ -43,8 +43,18 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
       const fbUser = await getAdminAuth().createUser({ email, password, displayName });
       firebaseUid = fbUser.uid;
     } catch (fbErr) {
-      console.error('[owner-staff] Firebase user creation failed:', fbErr?.message);
-      return { error: 'firebase_user_creation_failed', status: 502, detail: fbErr?.message };
+      const duplicateIdentity = ['auth/email-already-exists', 'email-already-exists']
+        .includes(fbErr?.code);
+      if (!duplicateIdentity) {
+        console.error('[owner-staff] Firebase user creation failed:', fbErr?.message);
+        return { error: 'firebase_user_creation_failed', status: 502, detail: fbErr?.message };
+      }
+      try {
+        firebaseUid = (await getAdminAuth().getUserByEmail(email)).uid;
+      } catch (lookupErr) {
+        console.error('[owner-staff] Existing Firebase identity lookup failed:', lookupErr?.message);
+        return { error: 'firebase_user_lookup_failed', status: 502, detail: lookupErr?.message };
+      }
     }
 
     const row = {

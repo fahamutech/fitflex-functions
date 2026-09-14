@@ -9,6 +9,7 @@ const ROLE_ALIASES = Object.freeze({
   owner: 'gym_operator',
   gym_owner: 'gym_operator',
   gym_operator: 'gym_operator',
+  vendor: 'vendor',
 });
 
 const IDENTITIES = Object.freeze({
@@ -29,6 +30,12 @@ const IDENTITIES = Object.freeze({
     email: 'dev.owner@fitflex.test',
     phone: '+255700000012',
     displayName: 'Dev Owner',
+  },
+  vendor: {
+    id: 'usr_dev_vendor',
+    email: 'dev.vendor@fitflex.test',
+    phone: '+255700000013',
+    displayName: 'Dev Vendor',
   },
 });
 

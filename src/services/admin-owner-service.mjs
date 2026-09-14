@@ -53,7 +53,9 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     if (body.gymId && !gyms.find(g => g.id === body.gymId)) return { error: 'gym_not_found', status: 400 };
     const id = body.id || `usr_${randomUUID().slice(0, 8)}`;
     const prior = await users.findByIdAsync(id);
-    const duplicateEmail = body.email && await users.findAsync(u => u.email === body.email && u.id !== id);
+    const duplicateEmail = body.email && await users.findAsync(
+      u => u.email === body.email && u.userType === 'gym_operator' && u.id !== id,
+    );
     if (duplicateEmail) return { error: 'email_already_used', status: 409, existingRole: duplicateEmail.userType };
 
     const gymIds = Array.isArray(body.gymIds) ? body.gymIds : (prior?.gymIds || (body.gymId ? [body.gymId] : (prior?.gymId ? [prior.gymId] : [])));

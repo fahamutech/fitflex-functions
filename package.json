@@ -5,12 +5,12 @@
   "scripts": {
     "postinstall": "node scripts/migrate.mjs && node scripts/seed.mjs",
     "knex:migrate": "knex --knexfile knexfile.cjs migrate:latest",
-    "knex:migrate:ci": "DATABASE_URL=${DATABASE_URL_CI:-$DATABASE_URL} knex --knexfile knexfile.cjs migrate:latest",
+    "knex:migrate:ci": "FITFLEX_USE_CI_DB=1 knex --knexfile knexfile.cjs migrate:latest",
     "knex:migrate:make": "knex --knexfile knexfile.cjs migrate:make",
     "knex:rollback": "knex --knexfile knexfile.cjs migrate:rollback",
     "db:setup": "node scripts/create-db.mjs && npm run knex:migrate",
-    "db:setup:ci": "DATABASE_URL=${DATABASE_URL_CI:-$DATABASE_URL} node scripts/create-db.mjs && npm run knex:migrate:ci",
-    "test": "DATABASE_URL=${DATABASE_URL_CI:-$DATABASE_URL} node --test 'specs/**/*.specs.mjs'",
+    "db:setup:ci": "FITFLEX_USE_CI_DB=1 node scripts/create-db.mjs && npm run knex:migrate:ci",
+    "test": "FITFLEX_USE_CI_DB=1 node --test --test-concurrency=1 --test-force-exit 'specs/**/*.specs.mjs'",
     "dev:fs": "bfast fs serve --port 3000",
     "start:fs": "bfast fs serve --port 3000 --static"
   },

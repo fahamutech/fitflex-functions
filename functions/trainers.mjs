@@ -32,8 +32,8 @@ export const adminUpsertTrainer = {
   created, method: 'post', path: '/admin/trainers',
   description: 'Admin: create or update trainer profile data used by member discovery.',
   onGuard: [requireAuth('admin'), requireAcl('trainers')],
-  onRequest: (req, res) => {
-    const result = trainerService.adminUpsert({ body: req.body || {}, actorId: req.user?.sub });
+  onRequest: async (req, res) => {
+    const result = await trainerService.adminUpsert({ body: req.body || {}, actorId: req.user?.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(result.created ? 201 : 200).json(result.trainer);
   }

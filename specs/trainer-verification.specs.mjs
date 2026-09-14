@@ -18,6 +18,7 @@ const trainers = {
     else rows.push(row);
     return row;
   },
+  upsertAsync: async (predicate, row) => trainers.upsert(predicate, row),
 };
 
 const service = createTrainerService({
@@ -28,14 +29,14 @@ const service = createTrainerService({
   gymService: { slimGym: (gym) => gym, slimGymRef: (gym) => gym },
 });
 
-test('admin verification is explicit and preserved on trainer updates', () => {
-  const created = service.adminUpsert({
+test('admin verification is explicit and preserved on trainer updates', async () => {
+  const created = await service.adminUpsert({
     actorId: 'admin-1',
     body: { displayName: 'Amina Trainer', verified: true },
   });
   assert.equal(created.trainer.verified, true);
 
-  const updated = service.adminUpsert({
+  const updated = await service.adminUpsert({
     actorId: 'admin-1',
     body: { id: created.trainer.id, bio: 'Updated bio' },
   });
@@ -47,8 +48,8 @@ test('new trainers are unverified until an admin verifies them', () => {
   assert.equal(trainer.verified, false);
 });
 
-test('trainer professional updates persist the selected session currency', () => {
-  const created = service.adminUpsert({
+test('trainer professional updates persist the selected session currency', async () => {
+  const created = await service.adminUpsert({
     actorId: 'admin-1',
     body: {
       userId: 'trainer-user-currency',
@@ -65,4 +66,36 @@ test('trainer professional updates persist the selected session currency', () =>
 
   assert.equal(updated.trainer.hourlyRateTzs, 50);
   assert.equal(updated.trainer.sessionRateCurrency, 'USD');
+});
+
+test('admin trainer profiles retain multiple portfolio images without a gym assignment', async () => {
+  const images = [
+    'https://images.example.test/trainer-one.webp',
+    'https://images.example.test/trainer-two.webp',
+  ];
+  const imageThumbnails = [
+    'https://images.example.test/trainer-one-thumb.webp',
+    'https://images.example.test/trainer-two-thumb.webp',
+  ];
+  const created = await service.adminUpsert({
+    actorId: 'admin-1',
+    body: {
+      displayName: 'Independent Trainer',
+      images,
+      imageThumbnails,
+      gymIds: [],
+    },
+  });
+
+  assert.deepEqual(created.trainer.images, images);
+  assert.deepEqual(created.trainer.imageThumbnails, imageThumbnails);
+  assert.equal(created.trainer.photoUrl, images[0]);
+  assert.deepEqual(created.trainer.gymIds, []);
+
+  const updated = await service.adminUpsert({
+    actorId: 'admin-1',
+    body: { id: created.trainer.id, bio: 'Updated independently' },
+  });
+  assert.deepEqual(updated.trainer.images, images);
+  assert.deepEqual(updated.trainer.imageThumbnails, imageThumbnails);
 });

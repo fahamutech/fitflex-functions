@@ -3,8 +3,11 @@
 // Reads DATABASE_URL from the environment (same format Knex uses).
 
 import { execSync } from 'node:child_process';
+import 'dotenv/config';
 
-const url = process.env.DATABASE_URL;
+const url = process.env.FITFLEX_USE_CI_DB === '1'
+  ? process.env.DATABASE_URL_CI
+  : process.env.DATABASE_URL;
 if (!url) {
   console.error('ERROR: DATABASE_URL is not set.');
   process.exit(1);

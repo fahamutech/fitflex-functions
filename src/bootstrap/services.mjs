@@ -30,6 +30,7 @@ import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
   trainerEngagements, trainerSessions, products, shopOrders,
+  marketplaceEnquiries, marketplaceNotifications, productReviews,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -37,6 +38,7 @@ export {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
   trainerEngagements, trainerSessions, products, shopOrders,
+  marketplaceEnquiries, marketplaceNotifications, productReviews,
 };
 
 export const identityService = createIdentityService({ users });
@@ -47,10 +49,13 @@ export const gymService = createGymService({ gyms, users, checkins, auditLog });
 export const trainerService = createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService });
 export const trainerBookingService = createTrainerBookingService({ trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService });
 export const trainerEngagementService = createTrainerEngagementService({ trainerEngagements, trainers, users, trainerService });
-export const shopService = createShopService({ products, shopOrders, users, auditLog });
+export const shopService = createShopService({
+  products, shopOrders, users, auditLog,
+  marketplaceEnquiries, marketplaceNotifications, productReviews,
+});
 
 export const authService = createAuthService({
-  users, gyms, subscriptions, trainers, otps,
+  users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
 });
 

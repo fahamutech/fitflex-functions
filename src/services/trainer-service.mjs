@@ -7,13 +7,17 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const gymIds = parseStringList(body.gymIds, prior.gymIds || []);
     const pendingGymIds = parseStringList(body.pendingGymIds, prior.pendingGymIds || []);
     const specialties = parseStringList(body.specialties, prior.specialties || []);
+    const images = parseStringList(body.images, prior.images || (prior.photoUrl ? [prior.photoUrl] : []));
+    const imageThumbnails = parseStringList(body.imageThumbnails, prior.imageThumbnails || []);
     return {
       id: body.id || prior.id || `trn_${randomUUID().slice(0, 8)}`,
       userId: body.userId ?? prior.userId ?? null,
       email: body.email ?? prior.email ?? null,
       phone: body.phone ?? prior.phone ?? null,
       displayName: body.displayName ?? prior.displayName,
-      photoUrl: body.photoUrl ?? prior.photoUrl ?? null,
+      photoUrl: body.photoUrl ?? images[0] ?? prior.photoUrl ?? null,
+      images,
+      imageThumbnails,
       gender: body.gender ?? prior.gender ?? null,
       specialties,
       bio: body.bio ?? prior.bio ?? '',
@@ -29,6 +33,10 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       verified: typeof body.verified === 'boolean'
         ? body.verified
         : (prior.verified ?? false),
+      homepageVisible: typeof body.homepageVisible === 'boolean'
+        ? body.homepageVisible
+        : (prior.homepageVisible ?? true),
+      homepagePriority: Number(body.homepagePriority ?? prior.homepagePriority ?? 0),
       availability: Array.isArray(body.availability) ? body.availability : (prior.availability || []),
       createdAt: prior.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -55,10 +63,11 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const query = String(q || '').toLowerCase();
     const spec = String(specialty || '').toLowerCase();
     return trainers
-      .filter(t => t.status === 'active' || t.status === 'inactive')
+      .filter(t => (t.status === 'active' || t.status === 'inactive') && t.homepageVisible !== false)
       .filter(t => !query || t.displayName.toLowerCase().includes(query) || t.specialties.join(' ').toLowerCase().includes(query))
       .filter(t => !spec || t.specialties.some(s => s.toLowerCase().includes(spec)))
-      .map(hydrateTrainer);
+      .map(hydrateTrainer)
+      .sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0));
   }
 
   function getActive(id) {
@@ -98,14 +107,14 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       .sort((a, b) => String(a.displayName || '').localeCompare(String(b.displayName || '')));
   }
 
-  function adminUpsert({ body, actorId }) {
+  async function adminUpsert({ body, actorId }) {
     if (!body?.id && !body?.displayName) return { error: 'displayName_required', status: 400 };
     const id = body.id || `trn_${randomUUID().slice(0, 8)}`;
     const prior = trainers.find(t => t.id === id);
     const duplicateEmail = body.email && trainers.find(t => t.email === body.email && t.id !== id);
     if (duplicateEmail) return { error: 'email_already_used', status: 409 };
     const row = normalizeTrainerPayload({ ...body, id }, prior || {});
-    trainers.upsert(t => t.id === id, row);
+    await trainers.upsertAsync(t => t.id === id, row);
     auditLog.insert({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'trainer_updated' : 'trainer_created',
@@ -189,6 +198,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       'experienceYears',
       'availability',
       'photoUrl',
+      'images',
+      'imageThumbnails',
     ];
     const updates = {};
     for (const k of allowed) {

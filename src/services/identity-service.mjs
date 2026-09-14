@@ -5,8 +5,12 @@ export function createIdentityService({ users }) {
   /** Resolve the authenticated user from JWT claims — handles stale sub IDs via email/phone fallback. */
   async function resolveRequestUser(req) {
     let user = await users.findByIdAsync(req.user.sub);
-    if (!user && req.user.email) user = await users.findAsync(u => u.email === req.user.email);
-    if (!user && req.user.phone) user = await users.findAsync(u => u.phone === req.user.phone);
+    if (!user && req.user.email) {
+      user = await users.findAsync(u => u.email === req.user.email && u.userType === req.user.userType);
+    }
+    if (!user && req.user.phone) {
+      user = await users.findAsync(u => u.phone === req.user.phone && u.userType === req.user.userType);
+    }
     return user;
   }
 

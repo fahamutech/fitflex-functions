@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { listTrainers, getTrainer } from '../functions/trainers.mjs';
+import { adminUpsertTrainer } from '../functions/trainers.mjs';
+import { adminUpsertGym } from '../functions/gyms.mjs';
 import { updateMemberProfile, memberCheckIns } from '../functions/subscriptions.mjs';
 import { createTrainerBooking } from '../functions/trainer-bookings.mjs';
 
@@ -51,26 +54,54 @@ test('non-member can save basic profile details without member-only guard', asyn
 });
 
 test('member trainer discovery supports list, detail, and booking branch', async () => {
+  const suffix = randomUUID();
+  const gym = res();
+  await adminUpsertGym.onRequest({
+    user: { sub: 'usr_admin_1', userType: 'admin' },
+    body: {
+      name: `Member Discovery Gym ${suffix}`,
+      tier: 'standard',
+      location: 'Dar es Salaam',
+      perVisitRate: 5000,
+      status: 'active',
+    },
+  }, gym);
+  assert.equal(gym.statusCode, 200);
+
+  const createdTrainer = res();
+  await adminUpsertTrainer.onRequest({
+    user: { sub: 'usr_admin_1', userType: 'admin' },
+    body: {
+      displayName: `Member Discovery Trainer ${suffix}`,
+      email: `member-discovery-${suffix}@example.com`,
+      gymIds: [gym.body.id],
+      status: 'active',
+      availability: [{ day: '2099-05-05', gymId: gym.body.id, slots: ['09:00'] }],
+    },
+  }, createdTrainer);
+  assert.equal(createdTrainer.statusCode, 201);
+
   const list = res();
   await listTrainers.onRequest({}, list);
 
   assert.equal(list.statusCode, 200);
-  assert.ok(list.body.length >= 1);
-  assert.ok(list.body[0].gyms.length >= 1);
+  const discovered = list.body.find((trainer) => trainer.id === createdTrainer.body.id);
+  assert.ok(discovered);
+  assert.equal(discovered.gyms[0].id, gym.body.id);
 
-  const trainerId = list.body[0].id;
+  const trainerId = discovered.id;
   const detail = res();
   await getTrainer.onRequest({ params: { id: trainerId } }, detail);
   assert.equal(detail.statusCode, 200);
   assert.equal(detail.body.id, trainerId);
   assert.ok(detail.body.availability.length >= 1);
 
-  const bookingUserId = `usr_booking_${Date.now()}`;
+  const bookingUserId = `usr_booking_${suffix}`;
   await updateMemberProfile.onRequest({ user: { sub: bookingUserId, userType: 'member' }, body: { displayName: 'Booking Member' } }, res());
   const booking = res();
   await createTrainerBooking.onRequest({
     user: { sub: bookingUserId, userType: 'member' },
-    body: { trainerId, gymId: detail.body.gyms[0].id, date: '2026-05-05', slot: '09:00' }
+    body: { trainerId, gymId: gym.body.id, date: '2099-05-05', slot: '09:00' }
   }, booking);
   assert.equal(booking.statusCode, 201);
   assert.equal(booking.body.booking.status, 'confirmed');

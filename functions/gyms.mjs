@@ -40,8 +40,8 @@ export const adminUpsertGym = {
   description: 'Admin: create or update a gym (tier set here only — audit logged).',
   requestSample: { id: 'gym_006', name: 'New Gym', tier: 'midtier', location: 'DSM', perVisitRate: 8000, commissionRate: 12 },
   onGuard: [requireAuth('admin'), requireAcl('gyms')],
-  onRequest: (req, res) => {
-    const result = gymService.upsert({ body: req.body || {}, actorId: req.user?.sub });
+  onRequest: async (req, res) => {
+    const result = await gymService.upsert({ body: req.body || {}, actorId: req.user?.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.gym);
   }

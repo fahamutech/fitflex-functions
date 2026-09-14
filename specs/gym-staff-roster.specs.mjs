@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { requireGymAcl } from '../src/auth/jwt.mjs';
 import { updateMemberProfile } from '../functions/subscriptions.mjs';
 import { ownerListStaff, ownerUpdateStaff, ownerRemoveStaff } from '../functions/owner-staff.mjs';
+import { createOwnerStaffService } from '../src/services/owner-staff-service.mjs';
 
 function res() {
   return {
@@ -64,6 +65,55 @@ test('requireGymAcl: any other role (e.g. trainer) is forbidden', () => {
   const { nextCalled, result } = runGuard(guard, { userType: 'trainer', aclPermissions: ['members'] });
   assert.equal(nextCalled, false);
   assert.equal(result.code, 403);
+});
+
+test('owner can reuse an existing member Firebase email for a separate staff profile', async () => {
+  const email = 'shared-role@example.com';
+  const rows = [{
+    id: 'usr_existing_member',
+    email,
+    firebaseUid: 'firebase-shared-role',
+    userType: 'member',
+  }];
+  const users = {
+    findAsync: async (predicate) => rows.find(predicate) || null,
+    filterAsync: async (predicate) => rows.filter(predicate),
+    upsertAsync: async (predicate, row) => {
+      const index = rows.findIndex(predicate);
+      if (index >= 0) rows[index] = row;
+      else rows.push(row);
+      return row;
+    },
+  };
+  const duplicate = Object.assign(new Error('email already exists'), {
+    code: 'auth/email-already-exists',
+  });
+  const service = createOwnerStaffService({
+    users,
+    auditLog: { insert: () => {} },
+    initFirebaseAdmin: () => {},
+    getAdminAuth: () => ({
+      createUser: async () => { throw duplicate; },
+      getUserByEmail: async () => ({ uid: 'firebase-shared-role' }),
+    }),
+  });
+
+  const result = await service.create({
+    ownerGymIds: ['gym-one'],
+    actorId: 'usr-owner',
+    body: {
+      email,
+      password: '246810',
+      displayName: 'Shared Role Staff',
+      gymIds: ['gym-one'],
+      aclPermissions: ['members'],
+    },
+  });
+
+  assert.equal(result.staff.userType, 'gym_staff');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].firebaseUid, 'firebase-shared-role');
+  assert.equal(rows[0].userType, 'member');
 });
 
 test('ownerListStaff: a fresh owner with no staff sees an empty roster', async () => {

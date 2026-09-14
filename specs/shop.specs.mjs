@@ -38,7 +38,22 @@ async function seedProduct(service, { name = 'Whey Protein', priceTzs = 85000, s
     body: { name, category: 'supplements', priceTzs, stock },
   });
   assert.ok(!out.error, JSON.stringify(out));
+  await service.adminUpdateProductListing({
+    productId: out.product.id,
+    body: { approvalStatus: 'approved' },
+    actorId: 'admin_test',
+  });
   return out.product;
+}
+
+function checkout(items) {
+  return {
+    items,
+    deliveryMethod: 'home_delivery',
+    deliveryAddress: 'Test address',
+    paymentMethod: 'mpesa',
+    paymentOutcome: 'success',
+  };
 }
 
 // ── catalogue ──────────────────────────────────────────────
@@ -97,7 +112,7 @@ test('D1: placing an order deducts stock and totals correctly', async () => {
   const product = await seedProduct(service, { priceTzs: 5000, stock: 10 });
   const out = await service.createOrder({
     buyerId: 'usr_m1',
-    body: { items: [{ productId: product.id, qty: 3 }] },
+    body: checkout([{ productId: product.id, qty: 3 }]),
   });
   assert.ok(!out.error, JSON.stringify(out));
   assert.equal(out.order.totalTzs, 15000);
@@ -110,7 +125,7 @@ test('D1: insufficient stock rejects the order', async () => {
   const product = await seedProduct(service, { stock: 2 });
   const out = await service.createOrder({
     buyerId: 'usr_m1',
-    body: { items: [{ productId: product.id, qty: 5 }] },
+    body: checkout([{ productId: product.id, qty: 5 }]),
   });
   assert.equal(out.status, 409);
   assert.equal(out.error, 'insufficient_stock');
@@ -128,7 +143,7 @@ test('D1: cancelling an order restocks the items', async () => {
   const product = await seedProduct(service, { stock: 10 });
   const placed = await service.createOrder({
     buyerId: 'usr_m1',
-    body: { items: [{ productId: product.id, qty: 4 }] },
+    body: checkout([{ productId: product.id, qty: 4 }]),
   });
   assert.equal(products.rows[0].stock, 6);
   const cancelled = await service.updateOrderStatus({
@@ -143,13 +158,13 @@ test('D1: order lifecycle pending → confirmed → fulfilled', async () => {
   const product = await seedProduct(service);
   const placed = await service.createOrder({
     buyerId: 'usr_m1',
-    body: { items: [{ productId: product.id, qty: 1 }] },
+    body: checkout([{ productId: product.id, qty: 1 }]),
   });
-  const confirmed = await service.updateOrderStatus({ orderId: placed.order.id, status: 'confirmed', actorId: 'v' });
+  const confirmed = await service.updateOrderStatus({ orderId: placed.order.id, status: 'confirmed', actorId: 'usr_vendor_1' });
   assert.equal(confirmed.order.status, 'confirmed');
-  const fulfilled = await service.updateOrderStatus({ orderId: placed.order.id, status: 'fulfilled', actorId: 'v' });
-  assert.equal(fulfilled.order.status, 'fulfilled');
-  const invalid = await service.updateOrderStatus({ orderId: placed.order.id, status: 'nonsense', actorId: 'v' });
+  const fulfilled = await service.updateOrderStatus({ orderId: placed.order.id, status: 'fulfilled', actorId: 'usr_vendor_1' });
+  assert.equal(fulfilled.order.status, 'delivered');
+  const invalid = await service.updateOrderStatus({ orderId: placed.order.id, status: 'nonsense', actorId: 'usr_vendor_1' });
   assert.equal(invalid.error, 'invalid_status');
 });
 
@@ -159,11 +174,29 @@ test('D1: vendor sees only orders containing their products', async () => {
   const other = await service.upsertProduct({
     vendorId: 'usr_vendor_2', body: { name: 'Other Product', priceTzs: 1000, stock: 5 },
   });
-  await service.createOrder({ buyerId: 'usr_m1', body: { items: [{ productId: mine.id, qty: 1 }] } });
-  await service.createOrder({ buyerId: 'usr_m2', body: { items: [{ productId: other.product.id, qty: 1 }] } });
+  await service.adminUpdateProductListing({ productId: other.product.id, body: { approvalStatus: 'approved' }, actorId: 'admin_test' });
+  await service.createOrder({ buyerId: 'usr_m1', body: checkout([{ productId: mine.id, qty: 1 }]) });
+  await service.createOrder({ buyerId: 'usr_m2', body: checkout([{ productId: other.product.id, qty: 1 }]) });
 
   const vendorView = await service.vendorOrders('usr_vendor_1');
   assert.equal(vendorView.length, 1);
   const buyerView = await service.myOrders('usr_m1');
   assert.equal(buyerView.length, 1);
+});
+
+test('D1: a vendor cannot update an order belonging to another vendor', async () => {
+  const { service } = makeService();
+  const product = await seedProduct(service);
+  const placed = await service.createOrder({
+    buyerId: 'usr_m1',
+    body: checkout([{ productId: product.id, qty: 1 }]),
+  });
+  const out = await service.updateOrderStatus({
+    orderId: placed.order.id,
+    status: 'confirmed',
+    actorId: 'usr_vendor_2',
+    actorRole: 'vendor',
+  });
+  assert.equal(out.status, 403);
+  assert.equal(out.error, 'order_not_owned_by_vendor');
 });

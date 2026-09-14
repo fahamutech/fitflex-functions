@@ -8,7 +8,9 @@ dotenv.config();
 
 import knexFactory from 'knex';
 
-const connectionString = process.env.DATABASE_URL;
+const connectionString = process.env.FITFLEX_USE_CI_DB === '1'
+  ? process.env.DATABASE_URL_CI
+  : process.env.DATABASE_URL;
 if (!connectionString) throw new Error('FATAL: DATABASE_URL must be set. Create a .env file or export it.');
 
 const db = knexFactory({
@@ -38,6 +40,9 @@ const TABLE_MAP = {
   trainer_sessions:  { table: 'TrainerSession' },
   products:          { table: 'Product' },
   shop_orders:       { table: 'ShopOrder' },
+  marketplace_enquiries: { table: 'MarketplaceEnquiry' },
+  marketplace_notifications: { table: 'MarketplaceNotification' },
+  product_reviews:   { table: 'ProductReview' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -470,14 +475,14 @@ export function collection(name) {
 // Known scalar columns per model — only these are written to PG.
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
-  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','createdAt','updatedAt']),
-  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
+  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','createdAt','updatedAt']),
+  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed']),
   payment_requests: new Set(['id','memberId','subscriptionId','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt']),
-  trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','specialties','bio','rating','reviewCount','hourlyRateTzs','experienceYears','status','approvalStatus','verified','pendingGymIds','availability','createdAt','updatedAt']),
+  trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','availability','createdAt','updatedAt']),
   trainer_bookings: new Set(['id','memberId','trainerId','gymId','date','slot','amountTzs','status','createdAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','updatedAt']),
@@ -486,8 +491,11 @@ const ALLOWED_FIELDS = {
   gym_owners:       new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','gymId','gymIds','createdAt','updatedAt']),
   trainer_engagements: new Set(['id','memberId','trainerId','type','message','gymId','status','createdAt']),
   trainer_sessions: new Set(['id','trainerId','memberId','customerName','customerEmail','customerPhone','gymId','locationType','locationLabel','date','slot','source','status','amountTzs','createdAt']),
-  products:         new Set(['id','vendorId','name','description','category','priceTzs','stock','images','status','createdAt','updatedAt']),
-  shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','note','createdAt','updatedAt']),
+  products:         new Set(['id','vendorId','name','description','category','brand','priceTzs','discountPriceTzs','stock','sku','weightKg','distanceKm','variants','images','visibility','deliveryAvailable','status','approvalStatus','rating','reviewCount','soldCount','homepageVisible','homepagePriority','deletedAt','createdAt','updatedAt']),
+  shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','deliveryMethod','pickupGymId','deliveryAddress','paymentMethod','paymentStatus','paymentReference','timeline','settlementStatus','note','createdAt','updatedAt']),
+  marketplace_enquiries: new Set(['id','buyerId','vendorId','productId','subject','status','messages','createdAt','updatedAt']),
+  marketplace_notifications: new Set(['id','userId','type','data','read','createdAt']),
+  product_reviews:  new Set(['id','buyerId','orderId','productId','rating','comment','createdAt']),
 };
 
 // jsonb columns that may hold array-shaped (or otherwise non-object) JSON —
@@ -497,11 +505,14 @@ const ALLOWED_FIELDS = {
 // serialized correctly by node-postgres automatically and don't strictly
 // need this, but stringifying them too is harmless and keeps this uniform.)
 const JSON_FIELDS = {
-  users: ['memberProfile'],
+  users: ['memberProfile', 'vendorProfile'],
   gyms: ['operatingHours', 'coordinates', 'classes', 'trainerPass'],
   platform_settings: ['subscriptionTiers', 'payoutBands'],
   audit_log: ['before', 'after'],
-  shop_orders: ['items'],
+  shop_orders: ['items', 'timeline'],
+  products: ['variants'],
+  marketplace_enquiries: ['messages'],
+  marketplace_notifications: ['data'],
 };
 
 /**

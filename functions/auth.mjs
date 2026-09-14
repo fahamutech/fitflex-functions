@@ -36,9 +36,14 @@ export const authLogin = {
   requestSample: { email: 'staff@fitflex.af', password: 'securepassword' },
   responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'admin' } },
   onRequest: async (req, res) => {
-    const { email, password } = req.body || {};
-    const result = await authService.login({ email, password });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    const { email, password, requestedRole } = req.body || {};
+    const result = await authService.login({ email, password, requestedRole });
+    if (result.error) {
+      return res.status(result.status).json({
+        error: result.error,
+        ...(result.availableRoles ? { availableRoles: result.availableRoles } : {}),
+      });
+    }
     res.json(result);
   }
 };
@@ -54,10 +59,70 @@ export const authFirebaseSession = {
     if (result.error) {
       const body = { error: result.error };
       if (result.existingRole) { body.existingRole = result.existingRole; body.requestedRole = result.requestedRole; }
+      if (result.availableRoles) body.availableRoles = result.availableRoles;
       if (result.approvalNote !== undefined) body.approvalNote = result.approvalNote;
       return res.status(result.status).json(body);
     }
     res.json(result);
+  }
+};
+
+// ───────────────────────────── Dev-only test data cleanup (blackbox testing) ──────────────
+// Removes E2E-generated test data by email pattern. HARD-BLOCKED in production.
+export const authDevCleanup = {
+  created, method: 'post', path: '/auth/dev/cleanup',
+  description: 'DEV ONLY: remove test users + related data created by E2E runs. Disabled in production.',
+  requestSample: { emailPattern: '@example.com' },
+  responseSample: { ok: true, removedUsers: 3 },
+  onRequest: async (req, res) => {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'dev_cleanup_disabled_in_production' });
+    }
+    try {
+      const { emailPattern, emails } = req.body || {};
+      const { users, subscriptions, checkins, trainers, trainerBookings,
+              trainerEngagements, trainerSessions, shopOrders,
+              marketplaceEnquiries, products } = await import('../src/bootstrap/services.mjs');
+
+      // Find E2E users by email pattern or explicit email list
+      let e2eUsers = [];
+      if (emails && Array.isArray(emails)) {
+        for (const email of emails) {
+          const user = await users.findAsync(u => u.email === email);
+          if (user) e2eUsers.push(user);
+        }
+      } else if (emailPattern) {
+        e2eUsers = await users.filterAsync(u =>
+          u.email && u.email.includes(emailPattern) &&
+          // Never delete dev seed users or admin
+          !u.id.startsWith('usr_dev_') && u.id !== 'usr_admin_1'
+        );
+      } else {
+        return res.status(400).json({ error: 'provide_emailPattern_or_emails' });
+      }
+
+      const removedIds = [];
+      for (const user of e2eUsers) {
+        // Remove related data
+        await subscriptions.removeAsync(s => s.memberId === user.id).catch(() => {});
+        await checkins.removeAsync(c => c.memberId === user.id).catch(() => {});
+        await trainerBookings.removeAsync(b => b.memberId === user.id || b.trainerId === user.id).catch(() => {});
+        await trainerEngagements.removeAsync(e => e.memberId === user.id || e.trainerId === user.id).catch(() => {});
+        await trainerSessions.removeAsync(s => s.trainerId === user.id).catch(() => {});
+        await trainers.removeAsync(t => t.userId === user.id).catch(() => {});
+        if (shopOrders) await shopOrders.removeAsync(o => o.memberId === user.id).catch(() => {});
+        if (marketplaceEnquiries) await marketplaceEnquiries.removeAsync(e => e.memberId === user.id).catch(() => {});
+        // Remove the user record itself
+        await users.removeAsync(u => u.id === user.id);
+        removedIds.push(user.id);
+      }
+
+      console.log(`[dev-cleanup] removed ${removedIds.length} E2E users:`, removedIds);
+      res.json({ ok: true, removedUsers: removedIds.length, removedIds });
+    } catch (err) {
+      console.error('[dev-cleanup] error:', err.message, err.meta || '');
+      res.status(500).json({ error: 'dev_cleanup_failed', detail: err.message });
+    }
   }
 };
 

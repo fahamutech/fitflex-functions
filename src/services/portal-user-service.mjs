@@ -1,7 +1,7 @@
 // Portal (admin) staff user management — email/password accounts scoped by ACL.
 import { randomUUID } from 'node:crypto';
 
-export const PORTAL_ACL_SCOPES = ['gyms', 'owners', 'trainers', 'members', 'payments', 'approvals', 'settings', 'users'];
+export const PORTAL_ACL_SCOPES = ['gyms', 'owners', 'trainers', 'members', 'shop', 'payments', 'approvals', 'settings', 'users'];
 
 export function createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail }) {
   function slim(u) {
@@ -28,7 +28,7 @@ export function createPortalUserService({ users, auditLog, initFirebaseAdmin, ge
     if (!Array.isArray(aclPermissions)) return { error: 'aclPermissions_must_be_array', status: 400 };
     const invalid = aclPermissions.filter(p => !PORTAL_ACL_SCOPES.includes(p));
     if (invalid.length) return { error: 'invalid_acl_scopes', status: 400, invalid };
-    const existing = await users.findAsync(u => u.email === email);
+    const existing = await users.findAsync(u => u.email === email && u.userType === 'admin');
     if (existing) return { error: 'email_already_exists', status: 409 };
 
     let firebaseUid = null;
@@ -37,8 +37,18 @@ export function createPortalUserService({ users, auditLog, initFirebaseAdmin, ge
       const fbUser = await getAdminAuth().createUser({ email, password, displayName: displayName || email });
       firebaseUid = fbUser.uid;
     } catch (fbErr) {
-      console.error('[portal-users] Firebase user creation failed:', fbErr?.message);
-      return { error: 'firebase_user_creation_failed', status: 502, detail: fbErr?.message };
+      const duplicateIdentity = ['auth/email-already-exists', 'email-already-exists']
+        .includes(fbErr?.code);
+      if (!duplicateIdentity) {
+        console.error('[portal-users] Firebase user creation failed:', fbErr?.message);
+        return { error: 'firebase_user_creation_failed', status: 502, detail: fbErr?.message };
+      }
+      try {
+        firebaseUid = (await getAdminAuth().getUserByEmail(email)).uid;
+      } catch (lookupErr) {
+        console.error('[portal-users] Existing Firebase identity lookup failed:', lookupErr?.message);
+        return { error: 'firebase_user_lookup_failed', status: 502, detail: lookupErr?.message };
+      }
     }
 
     const row = {

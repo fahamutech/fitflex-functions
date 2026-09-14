@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { adminDeleteTrainer, adminListTrainers, adminUpsertTrainer } from '../functions/trainers.mjs';
+import { adminDeleteGym, adminUpsertGym } from '../functions/gyms.mjs';
 import { adminListGymOwners, adminUpsertGymOwner } from '../functions/admin-owners.mjs';
 import { adminListTrainerBookings, adminUpdateTrainerBooking, createTrainerBooking } from '../functions/trainer-bookings.mjs';
 import { updateMemberProfile } from '../functions/subscriptions.mjs';
@@ -21,8 +23,25 @@ function res() {
   };
 }
 
-test('admin can create update and delete trainer profiles used by member discovery', async () => {
-  const suffix = Date.now();
+async function createGymFixture(suffix) {
+  const output = res();
+  await adminUpsertGym.onRequest({
+    user: { sub: 'usr_admin_1', userType: 'admin' },
+    body: {
+      name: `CRUD Gym ${suffix}`,
+      tier: 'standard',
+      location: 'Dar es Salaam',
+      perVisitRate: 5000,
+      status: 'active',
+    },
+  }, output);
+  assert.equal(output.statusCode, 200);
+  return output.body;
+}
+
+test('admin can create/update/delete trainer profiles and delete an unused gym', async () => {
+  const suffix = randomUUID();
+  const gym = await createGymFixture(suffix);
   const created = res();
   await adminUpsertTrainer.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
@@ -33,7 +52,7 @@ test('admin can create update and delete trainer profiles used by member discove
       bio: 'Pilot trainer profile',
       hourlyRateTzs: 24000,
       experienceYears: 5,
-      gymIds: ['gym_001'],
+      gymIds: [gym.id],
       status: 'active',
       availability: [{ date: '2026-05-09', slots: ['09:00'] }]
     }
@@ -62,17 +81,27 @@ test('admin can create update and delete trainer profiles used by member discove
   }, deleted);
   assert.equal(deleted.statusCode, 200);
   assert.equal(deleted.body.ok, true);
+
+  const deletedGym = res();
+  await adminDeleteGym.onRequest({
+    user: { sub: 'usr_admin_1', userType: 'admin' },
+    params: { id: gym.id }
+  }, deletedGym);
+  assert.equal(deletedGym.statusCode, 200);
+  assert.equal(deletedGym.body.ok, true);
+  assert.equal(deletedGym.body.gym.id, gym.id);
 });
 
 test('admin can create and update gym owner assignments with unique email by role', async () => {
-  const suffix = Date.now();
+  const suffix = randomUUID();
+  const gym = await createGymFixture(suffix);
   const created = res();
   await adminUpsertGymOwner.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     body: {
       email: `owner-crud-${suffix}@example.com`,
       displayName: 'CRUD Gym Owner',
-      gymId: 'gym_001',
+      gymId: gym.id,
       approvalStatus: 'approved',
       accountStatus: 'active'
     }
@@ -80,7 +109,7 @@ test('admin can create and update gym owner assignments with unique email by rol
 
   assert.equal(created.statusCode, 201);
   assert.equal(created.body.userType, 'gym_operator');
-  assert.equal(created.body.gym?.id, 'gym_001');
+  assert.equal(created.body.gym?.id, gym.id);
 
   const updated = res();
   await adminUpsertGymOwner.onRequest({
@@ -103,12 +132,27 @@ test('admin can create and update gym owner assignments with unique email by rol
 });
 
 test('admin can list and update trainer booking status', async () => {
-  const memberId = `usr_booking_${Date.now()}`;
+  const suffix = randomUUID();
+  const gym = await createGymFixture(suffix);
+  const trainer = res();
+  await adminUpsertTrainer.onRequest({
+    user: { sub: 'usr_admin_1', userType: 'admin' },
+    body: {
+      displayName: `Booking Trainer ${suffix}`,
+      email: `booking-trainer-${suffix}@example.com`,
+      gymIds: [gym.id],
+      status: 'active',
+      availability: [{ day: '2099-05-10', gymId: gym.id, slots: ['09:00'] }],
+    },
+  }, trainer);
+  assert.equal(trainer.statusCode, 201);
+
+  const memberId = `usr_booking_${suffix}`;
   await updateMemberProfile.onRequest({ user: { sub: memberId, userType: 'member' }, body: { displayName: 'Booking Member' } }, res());
   const booked = res();
   await createTrainerBooking.onRequest({
     user: { sub: memberId, userType: 'member' },
-    body: { trainerId: 'trn_ali', gymId: 'gym_001', date: '2026-05-10', slot: '09:00' }
+    body: { trainerId: trainer.body.id, gymId: gym.id, date: '2099-05-10', slot: '09:00' }
   }, booked);
   assert.equal(booked.statusCode, 201);
 

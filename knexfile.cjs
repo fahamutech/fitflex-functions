@@ -5,7 +5,9 @@ require('dotenv').config();
 /** @type {import('knex').Knex.Config} */
 const config = {
   client: 'pg',
-  connection: process.env.DATABASE_URL,
+  connection: process.env.FITFLEX_USE_CI_DB === '1'
+    ? process.env.DATABASE_URL_CI
+    : process.env.DATABASE_URL,
   migrations: {
     directory: './db/migrations',
     tableName: 'knex_migrations',

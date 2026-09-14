@@ -21,3 +21,6 @@ export const trainerEngagements = collection('trainer_engagements');
 export const trainerSessions = collection('trainer_sessions');
 export const products = collection('products');
 export const shopOrders = collection('shop_orders');
+export const marketplaceEnquiries = collection('marketplace_enquiries');
+export const marketplaceNotifications = collection('marketplace_notifications');
+export const productReviews = collection('product_reviews');

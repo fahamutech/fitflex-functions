@@ -160,7 +160,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     if (!displayName) return { error: 'display_name_required', status: 400 };
     if (!email) return { error: 'email_required', status: 400 };
     if (!/^\d{4}$/.test(initialPin)) return { error: 'invalid_pin', status: 400 };
-    if (await users.findAsync(u => String(u.email || '').toLowerCase() === email)) {
+    if (await users.findAsync(u => u.userType === 'trainer' && String(u.email || '').toLowerCase() === email)) {
       return { error: 'email_already_used', status: 409 };
     }
     if (trainers.find(t => String(t.email || '').toLowerCase() === email)) {

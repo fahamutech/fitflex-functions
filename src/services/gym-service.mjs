@@ -58,6 +58,10 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     return {
       id: body.id || prior.id || `gym_${randomUUID().slice(0, 8)}`,
       status: body.status || prior.status || 'active',
+      homepageVisible: typeof body.homepageVisible === 'boolean'
+        ? body.homepageVisible
+        : (prior.homepageVisible ?? true),
+      homepagePriority: Number(body.homepagePriority ?? prior.homepagePriority ?? 0),
       commissionRate: Number(body.commissionRate ?? prior.commissionRate ?? 12),
       name: body.name ?? prior.name ?? 'Unnamed Gym',
       tier: isOnlineFree ? 'online' : (body.tier ?? prior.tier ?? 'standard'),
@@ -124,6 +128,8 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
       ratePerMonth: g.ratePerMonth,
       commissionRate: g.commissionRate,
       status: g.status,
+      homepageVisible: g.homepageVisible ?? true,
+      homepagePriority: Number(g.homepagePriority || 0),
       thumbnail: (g.thumbnails && g.thumbnails[0]) || null,
       createdAt: g.createdAt,
       updatedAt: g.updatedAt,
@@ -141,11 +147,14 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
   }
 
   function listActive() {
-    return gyms.filter(g => g.status === 'active');
+    return gyms
+      .filter(g => g.status === 'active' && g.homepageVisible !== false)
+      .sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0));
   }
 
   async function listActiveAsync() {
-    return await gyms.filterAsync(g => g.status === 'active');
+    const rows = await gyms.filterAsync(g => g.status === 'active' && g.homepageVisible !== false);
+    return rows.sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0));
   }
 
   /**
@@ -161,12 +170,12 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     return gyms.all().map(slimGymForTable);
   }
 
-  function upsert({ body, actorId }) {
+  async function upsert({ body, actorId }) {
     if (!body?.name || !body?.tier) return { error: 'name_and_tier_required', status: 400 };
     const id = body.id || `gym_${randomUUID().slice(0, 6)}`;
     const prior = findById(id);
     const row = normalizeGymPayload({ ...body, id }, prior);
-    gyms.upsert(g => g.id === id, row);
+    await gyms.upsertAsync(g => g.id === id, row);
     auditLog.insert({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'gym_updated' : 'gym_created',

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { authFirebaseSession } from '../functions/auth.mjs';
+import { authFirebaseSession, authRequestOtp, authVerifyOtp } from '../functions/auth.mjs';
 import { subscribe, updateMemberProfile } from '../functions/subscriptions.mjs';
 import { myQr } from '../functions/checkins.mjs';
 
@@ -97,12 +97,13 @@ test('sign-in automatically resolves existing owner and trainer roles', async ()
   }
 });
 
-test('Firebase session rejects reusing one email for a different role', async () => {
+test('Firebase session gives one identity separate member, trainer, and vendor profiles', async () => {
   const email = `role-conflict-${Date.now()}@example.com`;
+  const uid = `fb_multi_role_${Date.now()}`;
   const member = res();
   await authFirebaseSession.onRequest({
     body: {
-      idToken: devToken({ uid: `fb_member_${Date.now()}`, email, name: 'Member' }),
+      idToken: devToken({ uid, email, name: 'Multi-role User' }),
       requestedRole: 'member'
     }
   }, member);
@@ -112,12 +113,46 @@ test('Firebase session rejects reusing one email for a different role', async ()
   const owner = res();
   await authFirebaseSession.onRequest({
     body: {
-      idToken: devToken({ uid: `fb_owner_conflict_${Date.now()}`, email, name: 'Owner' }),
-      requestedRole: 'gym_owner'
+      idToken: devToken({ uid, email, name: 'Multi-role User' }),
+      requestedRole: 'trainer'
     }
   }, owner);
-  assert.equal(owner.statusCode, 409);
-  assert.equal(owner.body.error, 'email_already_used_for_different_role');
+  assert.equal(owner.statusCode, 200);
+  assert.equal(owner.body.user.userType, 'trainer');
+  assert.notEqual(owner.body.user.id, member.body.user.id);
+
+  const vendor = res();
+  await authFirebaseSession.onRequest({
+    body: {
+      idToken: devToken({ uid, email, name: 'Multi-role User' }),
+      requestedRole: 'vendor'
+    }
+  }, vendor);
+  assert.equal(vendor.statusCode, 200);
+  assert.equal(vendor.body.user.userType, 'vendor');
+  assert.notEqual(vendor.body.user.id, member.body.user.id);
+  assert.notEqual(vendor.body.user.id, owner.body.user.id);
+});
+
+test('one mobile number can create separate member, trainer, and vendor profiles', async () => {
+  const phone = `+2557${String(Date.now()).slice(-8)}`;
+  const ids = new Set();
+
+  for (const userType of ['member', 'trainer', 'vendor']) {
+    const requested = res();
+    authRequestOtp.onRequest({ body: { phone, userType } }, requested);
+    assert.equal(requested.statusCode, 200);
+
+    const verified = res();
+    await authVerifyOtp.onRequest({
+      body: { phone, code: requested.body.devOtp }
+    }, verified);
+    assert.equal(verified.statusCode, 200);
+    assert.equal(verified.body.user.userType, userType);
+    ids.add(verified.body.user.id);
+  }
+
+  assert.equal(ids.size, 3);
 });
 
 test('pass request stays payment_pending and cannot issue QR before admin approval', async () => {

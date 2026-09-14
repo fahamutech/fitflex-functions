@@ -29,7 +29,10 @@ export function createAccountService({
       };
     }
 
-    if (user.firebaseUid) {
+    const sharedIdentity = user.firebaseUid
+      ? await users.findAsync(u => u.id !== user.id && u.firebaseUid === user.firebaseUid)
+      : null;
+    if (user.firebaseUid && !sharedIdentity) {
       try {
         initFirebaseAdmin();
         await getAdminAuth().deleteUser(user.firebaseUid);

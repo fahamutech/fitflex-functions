@@ -68,7 +68,9 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     const id = body.id || `usr_${randomUUID().slice(0, 8)}`;
     const prior = await users.findByIdAsync(id);
     if (body.email && !body.id) {
-      const dup = await users.findAsync(u => u.email === body.email && u.id !== id);
+      const dup = await users.findAsync(
+        u => u.email === body.email && u.userType === 'member' && u.id !== id,
+      );
       if (dup) return { error: 'email_already_used', status: 409, existingRole: dup.userType };
     }
     const priorProfile = prior?.memberProfile || {};
