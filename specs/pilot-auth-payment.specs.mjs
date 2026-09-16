@@ -109,6 +109,36 @@ test('sign-in automatically resolves existing owner, trainer and vendor roles', 
   }
 });
 
+test('sign-in prefers a single operational profile over a duplicate member profile', async () => {
+  for (const requestedRole of ['gym_owner', 'trainer', 'vendor']) {
+    const stamp = `${requestedRole}-${Date.now()}-${Math.random()}`;
+    const identity = {
+      uid: `fb_duplicate_${stamp}`,
+      email: `duplicate-${stamp}@example.com`,
+      name: `Duplicate ${requestedRole}`,
+    };
+
+    const member = res();
+    await authFirebaseSession.onRequest({
+      body: { idToken: devToken(identity), requestedRole: 'member' },
+    }, member);
+    assert.equal(member.statusCode, 200);
+
+    const operational = res();
+    await authFirebaseSession.onRequest({
+      body: { idToken: devToken(identity), requestedRole },
+    }, operational);
+    assert.equal(operational.statusCode, 200);
+
+    const signedIn = res();
+    await authFirebaseSession.onRequest({
+      body: { idToken: devToken(identity) },
+    }, signedIn);
+    assert.equal(signedIn.statusCode, 200);
+    assert.equal(signedIn.body.user.userType, operational.body.user.userType);
+  }
+});
+
 test('Firebase session gives one identity separate member, trainer, and vendor profiles', async () => {
   const email = `role-conflict-${Date.now()}@example.com`;
   const uid = `fb_multi_role_${Date.now()}`;

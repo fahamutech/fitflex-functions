@@ -123,11 +123,18 @@ export function createAuthService({
       u => u.firebaseUid === fb.uid || Boolean(fb.email && u.email === fb.email),
     );
     const requestedUserType = isAdminEmail ? 'admin' : selfRole;
+    const operationalMatches = identityMatches.filter(u => u.userType !== 'member');
     let user = requestedUserType
       ? identityMatches.find(u => u.userType === requestedUserType)
-      : identityMatches[0];
+      : operationalMatches.length === 1
+        ? operationalMatches[0]
+        : identityMatches[0];
 
-    if (!hasRequestedRole && !isAdminEmail && identityMatches.length > 1) {
+    // Old app versions could create a member row before an owner, trainer, or
+    // vendor registration completed. Prefer that single operational profile
+    // on later sign-ins. Only ask for a role when multiple non-member profiles
+    // remain genuinely ambiguous.
+    if (!hasRequestedRole && !isAdminEmail && operationalMatches.length > 1) {
       return {
         error: 'profile_role_required',
         status: 409,
