@@ -1,4 +1,4 @@
-// Admin role-approval queue — gym owner / trainer profiles awaiting review.
+// Admin role-approval queue — owner, trainer and vendor profiles awaiting review.
 import { randomUUID } from 'node:crypto';
 
 export function createAdminApprovalService({ users, auditLog }) {
@@ -12,7 +12,7 @@ export function createAdminApprovalService({ users, auditLog }) {
   async function list(status = 'pending_approval') {
     // Pushed-down SQL WHERE ... IN (...) instead of loading + JS-filtering
     // the entire users table on every request.
-    const allApprovals = await users.filterByColumnInAsync('userType', ['gym_operator', 'trainer']);
+    const allApprovals = await users.filterByColumnInAsync('userType', ['gym_operator', 'trainer', 'vendor']);
     return allApprovals
       .filter(u => status === 'all' || (u.approvalStatus || 'approved') === status)
       .map(slimApprovalRow)
@@ -21,7 +21,7 @@ export function createAdminApprovalService({ users, auditLog }) {
 
   async function decide({ id, decision, note, actorId }) {
     if (!['approve', 'reject'].includes(decision)) return { error: 'invalid_decision', status: 400 };
-    const target = await users.findAsync(u => u.id === id && ['gym_operator', 'trainer'].includes(u.userType));
+    const target = await users.findAsync(u => u.id === id && ['gym_operator', 'trainer', 'vendor'].includes(u.userType));
     if (!target) return { error: 'not_found', status: 404 };
     const before = { ...target };
     const status = decision === 'approve' ? 'approved' : 'rejected';

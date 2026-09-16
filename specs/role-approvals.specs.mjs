@@ -16,16 +16,17 @@ function res() {
   };
 }
 
-test('admin can list and approve pending gym owner or trainer profiles', async () => {
+test('admin can list and approve pending owner, trainer or vendor profiles', async () => {
   const email = `approval-${Date.now()}@example.com`;
   const created = res();
   await authFirebaseSession.onRequest({
     body: {
       idToken: devToken({ uid: `fb_approval_${Date.now()}`, email, name: 'Approval User' }),
-      requestedRole: 'trainer'
+      requestedRole: 'vendor'
     }
   }, created);
   assert.equal(created.statusCode, 200);
+  assert.equal(created.body.user.userType, 'vendor');
   assert.equal(created.body.user.approvalStatus, 'pending_approval');
 
   const list = res();

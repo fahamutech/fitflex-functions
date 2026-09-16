@@ -8,6 +8,7 @@ const PAYMENT_METHODS = new Set(['mpesa', 'airtel_money', 'mixx', 'card', 'bank'
 const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'settlementAccount'];
 const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
 const STAFF_PERMISSIONS = new Set(['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
+const PRODUCT_REVIEW_FIELDS = new Set(['name', 'description', 'category', 'brand', 'priceTzs', 'discountPriceTzs', 'images', 'variants']);
 const PUBLIC_PROFILE_FIELDS = ['vendorId', 'businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'status'];
 const publicProfile = profile => profile?.status === 'published'
   ? Object.fromEntries(PUBLIC_PROFILE_FIELDS.filter(key => profile[key] !== undefined).map(key => [key, profile[key]]))
@@ -109,6 +110,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (Array.isArray(input.images)) patch.images = input.images;
       if (Array.isArray(input.variants)) patch.variants = input.variants;
       if (input.status && PRODUCT_STATUSES.has(input.status)) patch.status = input.status;
+      if (prior.approvalStatus === 'approved' && Object.keys(input).some(field => PRODUCT_REVIEW_FIELDS.has(field))) {
+        patch.approvalStatus = 'pending';
+      }
       return { product: await products.updateByIdAsync(productId, patch) };
     }
     if (!input.name?.trim()) return { error: 'name_required', status: 400 };
@@ -142,6 +146,30 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function adminListProducts() {
     return (await products.filterAsync(product => !product.deletedAt)).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
   }
+  async function adminCreateProduct({ body, actorId }) {
+    const vendorId = String(body?.vendorId || '').trim();
+    if (!vendorId) return { error: 'vendor_required', status: 400 };
+    const vendor = await users.findByIdAsync(vendorId);
+    if (!vendor || vendor.userType !== 'vendor') return { error: 'vendor_not_found', status: 404 };
+    if (vendor.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 409 };
+    const created = await upsertProduct({ vendorId, body });
+    if (created.error) return created;
+    const requestedApproval = ['pending', 'approved', 'rejected'].includes(body?.approvalStatus)
+      ? body.approvalStatus
+      : 'pending';
+    const product = await products.updateByIdAsync(created.product.id, {
+      approvalStatus: requestedApproval,
+      homepageVisible: body?.homepageVisible === true,
+      homepagePriority: Number(body?.homepagePriority || 0),
+      updatedAt: nowIso(),
+    });
+    auditLog.insert({
+      id: randomUUID(), at: nowIso(), actor: actorId, action: 'admin_product_created',
+      target: product.id, before: null, after: { vendorId, approvalStatus: requestedApproval },
+    });
+    if (requestedApproval !== 'pending') await notify(vendorId, `product_${requestedApproval}`, { productId: product.id });
+    return { product, status: 201 };
+  }
   async function adminUpdateProductListing({ productId, body, actorId }) {
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
@@ -150,6 +178,42 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     auditLog.insert({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_listing_updated', target: productId, before: { homepageVisible: prior.homepageVisible ?? true, homepagePriority: Number(prior.homepagePriority || 0), approvalStatus: prior.approvalStatus || 'pending' }, after: patch });
     if (patch.approvalStatus) await notify(prior.vendorId, `product_${patch.approvalStatus}`, { productId });
     return { product };
+  }
+
+  async function adminListVendors() {
+    const vendors = await users.filterAsync(user => user.userType === 'vendor');
+    const allProducts = await products.filterAsync(product => !product.deletedAt);
+    return vendors
+      .map(({ passwordHash, firebaseUid, ...vendor }) => ({
+        ...vendor,
+        vendorProfile: vendor.vendorProfile || null,
+        productCount: allProducts.filter(product => product.vendorId === vendor.id).length,
+        pendingProductCount: allProducts.filter(product => product.vendorId === vendor.id && (product.approvalStatus || 'pending') === 'pending').length,
+      }))
+      .sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
+  }
+
+  async function adminUpdateVendor({ vendorId, body, actorId }) {
+    const vendor = await users.findByIdAsync(vendorId);
+    if (!vendor || vendor.userType !== 'vendor') return { error: 'vendor_not_found', status: 404 };
+    const patch = { updatedAt: nowIso() };
+    if (['pending_approval', 'approved', 'rejected'].includes(body?.approvalStatus)) {
+      patch.approvalStatus = body.approvalStatus;
+      patch.approvalNote = body.approvalNote == null ? vendor.approvalNote || null : String(body.approvalNote).trim() || null;
+      patch.approvedAt = body.approvalStatus === 'approved' ? nowIso() : null;
+      patch.approvedBy = body.approvalStatus === 'approved' ? actorId : null;
+    }
+    if (['active', 'suspended'].includes(body?.accountStatus)) patch.accountStatus = body.accountStatus;
+    if (typeof body?.verified === 'boolean') patch.verified = body.verified;
+    const updated = await users.updateByIdAsync(vendorId, patch);
+    auditLog.insert({
+      id: randomUUID(), at: nowIso(), actor: actorId, action: 'vendor_management_updated',
+      target: vendorId,
+      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, verified: vendor.verified },
+      after: patch,
+    });
+    if (patch.approvalStatus) await notify(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
+    return { vendor: updated };
   }
 
   async function createOrder({ buyerId, buyerRole = 'member', body }) {
@@ -313,5 +377,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminUpdateProductListing, createOrder, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
+  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
 }

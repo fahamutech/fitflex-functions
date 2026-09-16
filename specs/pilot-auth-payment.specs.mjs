@@ -48,7 +48,7 @@ test('Firebase session maps the configured Google account to FitFlex admin', asy
   assert.ok(out.body.user.firebaseUid);
 });
 
-test('Firebase session creates gym owner and trainer profiles pending admin approval', async () => {
+test('Firebase session creates owner, trainer and vendor profiles pending admin approval', async () => {
   const owner = res();
   await authFirebaseSession.onRequest({
     body: {
@@ -72,10 +72,22 @@ test('Firebase session creates gym owner and trainer profiles pending admin appr
   assert.equal(trainer.statusCode, 200);
   assert.equal(trainer.body.user.userType, 'trainer');
   assert.equal(trainer.body.user.approvalStatus, 'pending_approval');
+
+  const vendor = res();
+  await authFirebaseSession.onRequest({
+    body: {
+      idToken: devToken({ uid: `fb_vendor_${Date.now()}`, email: `vendor-${Date.now()}@example.com`, name: 'Vendor' }),
+      requestedRole: 'vendor'
+    }
+  }, vendor);
+
+  assert.equal(vendor.statusCode, 200);
+  assert.equal(vendor.body.user.userType, 'vendor');
+  assert.equal(vendor.body.user.approvalStatus, 'pending_approval');
 });
 
-test('sign-in automatically resolves existing owner and trainer roles', async () => {
-  for (const requestedRole of ['gym_owner', 'trainer']) {
+test('sign-in automatically resolves existing owner, trainer and vendor roles', async () => {
+  for (const requestedRole of ['gym_owner', 'trainer', 'vendor']) {
     const stamp = `${requestedRole}-${Date.now()}-${Math.random()}`;
     const identity = {
       uid: `fb_auto_${stamp}`,

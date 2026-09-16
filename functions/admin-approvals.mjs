@@ -7,14 +7,14 @@ const created = new Date().toISOString();
 
 export const adminRoleApprovals = {
   created, method: 'get', path: '/admin/role-approvals',
-  description: 'Admin: list gym owner and trainer profiles waiting for approval.',
+  description: 'Admin: list gym owner, trainer and vendor profiles waiting for approval.',
   onGuard: [requireAuth('admin'), requireAcl('approvals')],
   onRequest: async (req, res) => res.json(await adminApprovalService.list(req.query?.status || 'pending_approval'))
 };
 
 export const adminDecideRoleApproval = {
   created, method: 'post', path: '/admin/role-approvals/:id/decision',
-  description: 'Admin: approve or reject a pending gym owner or trainer profile.',
+  description: 'Admin: approve or reject a pending gym owner, trainer or vendor profile.',
   onGuard: [requireAuth('admin'), requireAcl('approvals')],
   onRequest: async (req, res) => {
     const { decision, note } = req.body || {};

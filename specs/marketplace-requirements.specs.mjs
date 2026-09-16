@@ -126,6 +126,44 @@ test('marketplace: rich products are approval gated, filterable and sortable', a
   assert.equal(popular[0].name, 'Yoga Mat');
 });
 
+test('marketplace: material vendor edits return an approved product to review', async () => {
+  const { service } = makeService();
+  const productId = await approvedProduct(service);
+
+  const updated = await service.upsertProduct({
+    vendorId: 'vendor-1', productId, body: { priceTzs: 90000 },
+  });
+
+  assert.equal(updated.product.approvalStatus, 'pending');
+  assert.equal((await service.listProducts({})).some(product => product.id === productId), false);
+});
+
+test('marketplace: admin creates products for a real vendor and manages vendor verification', async () => {
+  const { service, users } = makeService();
+  users.rows.push({
+    id: 'vendor-1', userType: 'vendor', displayName: 'Fit Fuel',
+    accountStatus: 'active', approvalStatus: 'pending_approval', createdAt: new Date().toISOString(),
+  });
+
+  const created = await service.adminCreateProduct({
+    actorId: 'admin-1',
+    body: { vendorId: 'vendor-1', name: 'Kettlebell', priceTzs: 65000, stock: 3 },
+  });
+  assert.equal(created.product.vendorId, 'vendor-1');
+  assert.equal(created.product.approvalStatus, 'pending');
+
+  const decision = await service.adminUpdateVendor({
+    vendorId: 'vendor-1', actorId: 'admin-1',
+    body: { approvalStatus: 'approved', verified: true },
+  });
+  assert.equal(decision.vendor.approvalStatus, 'approved');
+  assert.equal(decision.vendor.verified, true);
+
+  const vendors = await service.adminListVendors();
+  assert.equal(vendors[0].productCount, 1);
+  assert.equal(vendors[0].pendingProductCount, 1);
+});
+
 test('marketplace: vendor can duplicate, pause, resume, stock and delete only own products', async () => {
   const { service } = makeService();
   const productId = await approvedProduct(service);

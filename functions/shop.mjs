@@ -129,6 +129,17 @@ export const adminListProducts = {
   onRequest: async (_req, res) => res.json(await shopService.adminListProducts()),
 };
 
+export const adminCreateProduct = {
+  created, method: 'post', path: '/admin/products',
+  description: 'Admin: create a product for a selected vendor.',
+  onGuard: [requireAuth('admin'), requireAcl('shop')],
+  onRequest: async (req, res) => {
+    const result = await shopService.adminCreateProduct({ body: req.body || {}, actorId: req.user.sub });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(201).json(result.product);
+  },
+};
+
 export const adminUpdateProductListing = {
   created, method: 'put', path: '/admin/products/:id/listing',
   description: 'Admin: control whether a product is listed and its homepage priority.',
@@ -141,6 +152,24 @@ export const adminUpdateProductListing = {
     });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.product);
+  },
+};
+
+export const adminListVendors = {
+  created, method: 'get', path: '/admin/vendors',
+  description: 'Admin: list and review marketplace vendors.',
+  onGuard: [requireAuth('admin'), requireAcl('shop')],
+  onRequest: async (_req, res) => res.json(await shopService.adminListVendors()),
+};
+
+export const adminUpdateVendor = {
+  created, method: 'put', path: '/admin/vendors/:id',
+  description: 'Admin: approve, verify, suspend or reactivate a marketplace vendor.',
+  onGuard: [requireAuth('admin'), requireAcl('shop')],
+  onRequest: async (req, res) => {
+    const result = await shopService.adminUpdateVendor({ vendorId: req.params.id, body: req.body || {}, actorId: req.user.sub });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result.vendor);
   },
 };
 

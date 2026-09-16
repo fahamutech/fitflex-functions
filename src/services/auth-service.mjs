@@ -26,7 +26,7 @@ export function normalizeRequestedRole(role) {
 }
 
 export function approvalStatusForRole(role) {
-  return ['gym_operator', 'trainer'].includes(role) ? 'pending_approval' : 'approved';
+  return ['gym_operator', 'trainer', 'vendor'].includes(role) ? 'pending_approval' : 'approved';
 }
 
 export function createAuthService({
