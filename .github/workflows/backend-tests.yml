@@ -34,10 +34,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Node 22+: the `npm test` script passes a quoted 'specs/**/*.specs.mjs'
+      # for the runner itself to expand, and --test only supports glob patterns
+      # from v22. On v20 it is read as a literal path and matches nothing.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       # postinstall runs migrate + seed against DATABASE_URL, which does not
