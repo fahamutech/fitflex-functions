@@ -26,11 +26,14 @@ import { createPortalUserService } from '../services/portal-user-service.mjs';
 import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
 import { createShopService } from '../services/shop-service.mjs';
+import { createCorporateService } from '../services/corporate-service.mjs';
+import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
   trainerEngagements, trainerSessions, products, shopOrders,
   marketplaceEnquiries, marketplaceNotifications, productReviews,
+  corporateAccounts, corporateEmployees, corporateBills,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -39,6 +42,7 @@ export {
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
   trainerEngagements, trainerSessions, products, shopOrders,
   marketplaceEnquiries, marketplaceNotifications, productReviews,
+  corporateAccounts, corporateEmployees, corporateBills,
 };
 
 export const identityService = createIdentityService({ users });
@@ -52,6 +56,10 @@ export const trainerEngagementService = createTrainerEngagementService({ trainer
 export const shopService = createShopService({
   products, shopOrders, users, auditLog,
   marketplaceEnquiries, marketplaceNotifications, productReviews,
+});
+export const whatsAppNotifier = createWhatsAppNotifier();
+export const corporateService = createCorporateService({
+  users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
 });
 
 export const authService = createAuthService({

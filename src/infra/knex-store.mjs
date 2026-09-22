@@ -43,6 +43,9 @@ const TABLE_MAP = {
   marketplace_enquiries: { table: 'MarketplaceEnquiry' },
   marketplace_notifications: { table: 'MarketplaceNotification' },
   product_reviews:   { table: 'ProductReview' },
+  corporate_accounts:  { table: 'CorporateAccount' },
+  corporate_employees: { table: 'CorporateEmployee' },
+  corporate_bills:     { table: 'CorporateBill' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -475,8 +478,8 @@ export function collection(name) {
 // Known scalar columns per model — only these are written to PG.
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
-  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','createdAt','updatedAt']),
-  gyms:             new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
+  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','createdAt','updatedAt']),
+  gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed']),
   payment_requests: new Set(['id','memberId','subscriptionId','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
@@ -496,6 +499,9 @@ const ALLOWED_FIELDS = {
   marketplace_enquiries: new Set(['id','buyerId','vendorId','productId','subject','status','messages','createdAt','updatedAt']),
   marketplace_notifications: new Set(['id','userId','type','data','read','createdAt']),
   product_reviews:  new Set(['id','buyerId','orderId','productId','rating','comment','createdAt']),
+  corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','status','createdAt','updatedAt']),
+  corporate_employees: new Set(['id','corporateId','userId','displayName','phone','email','department','pinHash','status','activatedAt','createdAt','updatedAt']),
+  corporate_bills:     new Set(['id','corporateId','period','passTier','subsidyModel','billingCycle','seatCount','perSeatMonthlyTzs','grossTzs','employerTzs','employeeTzs','status','paymentReference','paidAt','createdAt']),
 };
 
 // jsonb columns that may hold array-shaped (or otherwise non-object) JSON —
