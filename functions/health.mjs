@@ -5,7 +5,7 @@ export const health = {
   created, method: 'get', path: '/health',
   description: 'Liveness probe',
   responseSample: { status: 'ok' },
-  onRequest: (_, res) => res.status(200).json({ status: 'ok', service: 'fitflex-functions' })
+  onRequest: (_, res) => res.status(200).json({ status: 'ok', service: 'fitflex-functions', version: '1.0' }),
 };
 
 const privacyPolicyHtml = `<!doctype html>
