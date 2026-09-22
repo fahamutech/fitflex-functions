@@ -192,7 +192,7 @@ export const operatorGymReviews = {
 // ─────────────────────────────────────────────────────────────────────────────
 export const adminModerateReview = {
   created, method: 'post', path: '/admin/reviews/:id/moderate',
-  description: 'Admin: moderate a review — hide, flag, or restore it. Hidden reviews don't count toward gym rating.',
+  description: "Admin: moderate a review — hide, flag, or restore it. Hidden reviews don't count toward gym rating.",
   requestSample: { action: 'hide' },
   onGuard: requireAuth ? requireAuth('admin') : undefined,
   onRequest: (req, res) => {

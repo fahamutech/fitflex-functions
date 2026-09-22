@@ -12,7 +12,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createMarketplaceService } from '../src/services/marketplace-service.mjs';
-import { PRODUCT_CATEGORIES, ORDER_STATUS } from '../shared/marketplace-constants.mjs';
+import { PRODUCT_CATEGORIES, ORDER_STATUS } from '../src/shared/marketplace-constants.mjs';
 
 let svc = null;
 let requireAuth = null;
