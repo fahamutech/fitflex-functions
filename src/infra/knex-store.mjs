@@ -45,6 +45,8 @@ const TABLE_MAP = {
   product_reviews:   { table: 'ProductReview' },
   gym_reviews:       { table: 'GymReview' },
   trainer_reviews:   { table: 'TrainerReview' },
+  device_tokens:     { table: 'DeviceToken' },
+  notifications:     { table: 'Notification' },
   corporate_accounts:  { table: 'CorporateAccount' },
   corporate_employees: { table: 'CorporateEmployee' },
   corporate_bills:     { table: 'CorporateBill' },
@@ -484,11 +486,11 @@ const ALLOWED_FIELDS = {
   gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed']),
-  payment_requests: new Set(['id','memberId','subscriptionId','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
+  payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','currency','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt']),
   trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','availability','createdAt','updatedAt']),
-  trainer_bookings: new Set(['id','memberId','trainerId','gymId','date','slot','amountTzs','status','createdAt']),
+  trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','paymentRequestId','status','createdAt','updatedAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','updatedAt']),
   webhook_seen:     new Set(['id','at']),
@@ -503,6 +505,8 @@ const ALLOWED_FIELDS = {
   product_reviews:  new Set(['id','buyerId','orderId','productId','rating','comment','createdAt']),
   gym_reviews:      new Set(['id','gymId','memberId','rating','text','status','moderatedBy','moderatedAt','createdAt','updatedAt']),
   trainer_reviews:  new Set(['id','trainerId','memberId','rating','text','status','moderatedBy','moderatedAt','createdAt','updatedAt']),
+  device_tokens:    new Set(['id','userId','token','platform','createdAt','lastSeenAt']),
+  notifications:    new Set(['id','userId','type','title','body','data','readAt','createdAt']),
   corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','status','createdAt','updatedAt']),
   corporate_employees: new Set(['id','corporateId','userId','displayName','phone','email','department','pinHash','status','activatedAt','createdAt','updatedAt']),
   corporate_bills:     new Set(['id','corporateId','period','passTier','subsidyModel','billingCycle','seatCount','perSeatMonthlyTzs','grossTzs','employerTzs','employeeTzs','status','paymentReference','paidAt','createdAt']),
@@ -523,6 +527,7 @@ const JSON_FIELDS = {
   products: ['variants'],
   marketplace_enquiries: ['messages'],
   marketplace_notifications: ['data'],
+  notifications: ['data'],
 };
 
 /**
@@ -542,7 +547,7 @@ function prepareForKnex(name, data, isUpdate = false) {
 
   // Convert date strings to Date objects for timestamp columns
   const DATE_FIELDS = ['createdAt', 'updatedAt', 'startedAt', 'cycleStartedAt', 'renewsAt', 'expiresAt',
-    'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt'];
+    'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt', 'lastSeenAt', 'readAt'];
   for (const f of DATE_FIELDS) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];

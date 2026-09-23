@@ -29,6 +29,8 @@ import { createShopService } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
 import { createWhatsAppService } from '../services/whatsapp-service.mjs';
+import { createNotificationService } from '../services/notification-service.mjs';
+import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import {
@@ -38,6 +40,7 @@ import {
   marketplaceEnquiries, marketplaceNotifications, productReviews,
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
+  deviceTokens, notifications,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -56,7 +59,11 @@ const { resolveRequestUser, publicUserId } = identityService;
 export const settingsService = createSettingsService({ platformSettings, auditLog });
 export const gymService = createGymService({ gyms, users, checkins, auditLog });
 export const trainerService = createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService });
-export const trainerBookingService = createTrainerBookingService({ trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService });
+export const trainerBookingService = createTrainerBookingService({
+  trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
+  subscriptions, paymentRequests,
+  notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
+});
 export const trainerEngagementService = createTrainerEngagementService({ trainerEngagements, trainers, users, trainerService });
 export const shopService = createShopService({
   products, shopOrders, users, auditLog,
@@ -91,7 +98,11 @@ export const ownerStaffService = createOwnerStaffService({ users, auditLog, init
 export const adminMemberService = createAdminMemberService({
   users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr,
 });
-export const adminPaymentService = createAdminPaymentService({ paymentRequests, subscriptions, users, auditLog });
+export const adminPaymentService = createAdminPaymentService({
+  paymentRequests, subscriptions, users, auditLog,
+  onSubscriptionActivated: sub => notificationService.notifySubscriptionActivated(sub),
+  onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
+});
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, gymOwners, settingsService });
@@ -108,3 +119,9 @@ export const whatsAppService = createWhatsAppService({
 });
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
+
+// Push is off unless PUSH_NOTIFICATIONS=on, so local dev and tests never call FCM.
+export const notificationService = createNotificationService({
+  users, deviceTokens, notifications, whatsApp: whatsAppService,
+  getMessaging: process.env.PUSH_NOTIFICATIONS === 'on' ? () => { initFirebaseAdmin(); return getMessaging(); } : null,
+});
