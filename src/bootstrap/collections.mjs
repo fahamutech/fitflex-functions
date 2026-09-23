@@ -31,3 +31,5 @@ export const corporateEmployees = collection('corporate_employees');
 export const corporateBills = collection('corporate_bills');
 export const deviceTokens = collection('device_tokens');
 export const notifications = collection('notifications');
+export const activities = collection('activities');
+export const goals = collection('goals');
