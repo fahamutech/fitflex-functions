@@ -29,6 +29,7 @@ import { createShopService } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
 import { createWhatsAppService } from '../services/whatsapp-service.mjs';
+import { createFavoriteService } from '../services/favorite-service.mjs';
 import { createCorporateService } from '../services/corporate-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import {
