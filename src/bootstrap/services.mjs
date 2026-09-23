@@ -34,6 +34,7 @@ import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
+import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createNotificationService } from '../services/notification-service.mjs';
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
@@ -46,7 +47,7 @@ import {
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
   deviceTokens, notifications, activities, goals, workouts,
-  trainerMemberRelationships, workoutPlans,
+  trainerMemberRelationships, workoutPlans, gymMemberSharing,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -129,6 +130,9 @@ export const favoriteService = createFavoriteService({ users, gyms });
 export const activityService = createActivityService({ activities });
 export const goalService = createGoalService({ goals });
 export const workoutService = createWorkoutService({ workouts, activities });
+export const gymSharingService = createGymSharingService({
+  sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
+});
 
 // Push is off unless PUSH_NOTIFICATIONS=on, so local dev and tests never call FCM.
 export const notificationService = createNotificationService({

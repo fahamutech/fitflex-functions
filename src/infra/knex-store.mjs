@@ -52,6 +52,7 @@ const TABLE_MAP = {
   workouts:          { table: 'Workout' },
   trainer_member_relationships: { table: 'TrainerMemberRelationship' },
   workout_plans:     { table: 'WorkoutPlan' },
+  gym_member_sharing: { table: 'GymMemberSharing' },
   corporate_accounts:  { table: 'CorporateAccount' },
   corporate_employees: { table: 'CorporateEmployee' },
   corporate_bills:     { table: 'CorporateBill' },
@@ -517,6 +518,7 @@ const ALLOWED_FIELDS = {
   workouts:         new Set(['id','userId','trainerId','gymId','templateId','source','name','description','activityType','scheduledDate','estimatedDuration','status','exercises','notes','startedAt','completedAt','activityId','createdAt','updatedAt']),
   trainer_member_relationships: new Set(['id','trainerId','memberId','status','permissions','requestedAt','connectedAt','endedAt','endedBy','createdAt','updatedAt']),
   workout_plans:    new Set(['id','trainerId','name','description','activityType','estimatedDuration','exercises','createdAt','updatedAt']),
+  gym_member_sharing: new Set(['id','gymId','memberId','permissions','createdAt','updatedAt']),
   corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','status','createdAt','updatedAt']),
   corporate_employees: new Set(['id','corporateId','userId','displayName','phone','email','department','pinHash','status','activatedAt','createdAt','updatedAt']),
   corporate_bills:     new Set(['id','corporateId','period','passTier','subsidyModel','billingCycle','seatCount','perSeatMonthlyTzs','grossTzs','employerTzs','employeeTzs','status','paymentReference','paidAt','createdAt']),
@@ -541,6 +543,7 @@ const JSON_FIELDS = {
   workouts: ['exercises'],
   trainer_member_relationships: ['permissions'],
   workout_plans: ['exercises'],
+  gym_member_sharing: ['permissions'],
 };
 
 /**
