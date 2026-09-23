@@ -108,3 +108,4 @@ export const whatsAppService = createWhatsAppService({
 });
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
+export const favoriteService = createFavoriteService({ users, gyms });
