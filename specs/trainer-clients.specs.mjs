@@ -213,3 +213,57 @@ test('server progress rules match the app: local days, grace, weeks', () => {
   const g = goalProgress({ type: 'workouts', period: 'week', target: 3 }, acts, NOW);
   assert.deepEqual(g, { current: 2, target: 3, completed: false, periodStart: '2026-09-21', periodEnd: '2026-09-27' });
 });
+
+test('client list summaries: this week from shared data only, plus prompts', async () => {
+  const s = setup();
+  // m1 shares steps and workout history; nothing else.
+  const rel = await connect(s, { steps: true, workoutHistory: true });
+  // One assignment last Monday the member didn't do.
+  await s.svc.assign('usr_t1', rel, { name: 'Legs', exercises: [{ exerciseName: 'Squat', reps: 5 }], dates: ['2026-09-23'] });
+  const [c] = (await s.svc.clients('usr_t1')).clients;
+  const sum = c.summary;
+  assert.equal(sum.weekStart, '2026-09-21');
+  assert.deepEqual(sum.week, { workouts: 1, steps: 15000 }, 'Mon–Wed: run + 6000 + 9000 steps; no minutes or distance');
+  assert.equal('goal' in sum, false);
+  assert.equal('streak' in sum, false);
+  assert.equal(sum.lastWorkoutDate, '2026-09-23');
+  const codes = sum.attention.map(a => a.code);
+  assert.deepEqual(codes.sort(), ['missed_workouts', 'nothing_planned'].sort());
+  assert.equal(sum.attention.find(a => a.code === 'missed_workouts').value, 1);
+});
+
+test('summaries respect goals and streaks permissions and flag inactivity', async () => {
+  const s = setup();
+  s.goals.rows.push({ id: 'g2', userId: 'm1', type: 'workouts', period: 'week', target: 1, startDate: '2026-09-01', status: 'active', source: 'member' });
+  const rel = await connect(s, { goals: true, streaks: true });
+  await s.svc.assign('usr_t1', rel, { name: 'Legs', exercises: [{ exerciseName: 'Squat', reps: 5 }], dates: ['2026-09-26'] });
+  let [c] = (await s.svc.clients('usr_t1')).clients;
+  assert.deepEqual(c.summary.week, {}, 'no activity permissions → no numbers');
+  assert.equal(c.summary.goal.type, 'workouts', 'weekly workout goal preferred');
+  assert.equal(c.summary.goal.current, 1);
+  assert.ok(c.summary.attention.some(a => a.code === 'goal_met' && a.kind === 'positive'));
+  assert.equal(c.summary.streak.current, 3);
+  assert.equal(c.summary.plannedNext7Days, 1);
+  assert.equal(c.summary.attention.some(a => a.code === 'nothing_planned'), false);
+  assert.equal('lastWorkoutDate' in c.summary, false, 'needs workout history');
+
+  // Revoking takes effect on the very next read.
+  await s.svc.updatePermissions('m1', rel, { permissions: { goals: false, streaks: false, workoutHistory: true } });
+  s.activities.rows.splice(0);
+  [c] = (await s.svc.clients('usr_t1')).clients;
+  assert.equal('goal' in c.summary, false);
+  assert.equal('streak' in c.summary, false);
+  assert.deepEqual(c.summary.attention.find(a => a.code === 'inactive'), { kind: 'attention', code: 'inactive', value: null });
+});
+
+test('requests stay on top; clients needing attention come next', async () => {
+  const s = setup();
+  s.trainers.rows.push({ id: 'trn_3', userId: 'usr_t3', displayName: 'C', status: 'active' });
+  // m1 active with prompts; m2 pending.
+  const rel = await connect(s, { workoutHistory: true });
+  await s.svc.request('m2', 'trn_1', {});
+  const list = (await s.svc.clients('usr_t1')).clients;
+  assert.equal(list[0].status, 'pending');
+  assert.equal(list[1].id, rel);
+  assert.equal('summary' in list[0], false, 'no summary before accepting');
+});

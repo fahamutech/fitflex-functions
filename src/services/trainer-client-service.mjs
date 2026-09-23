@@ -14,7 +14,10 @@
 //   `workoutDetails`.
 import { randomUUID } from 'node:crypto';
 import { validateWorkoutDefinition, newWorkoutRow, isWorkoutDate } from './workout-service.mjs';
-import { dailyTotals, goalProgress, localDay, addDays, streaks as computeStreaks } from '../shared/member-progress.mjs';
+import {
+  dailyTotals, goalProgress, localDay, addDays, weekStart, isWorkout, activeMinutesOf,
+  streaks as computeStreaks,
+} from '../shared/member-progress.mjs';
 
 export const PERMISSIONS = [
   'steps', 'distance', 'activeMinutes', 'workoutHistory',
@@ -26,6 +29,9 @@ const MAX_PLANS_PER_TRAINER = 100;
 const MAX_ASSIGN_DATES = 12;
 const ACTIVITY_DAYS = 14;
 const HISTORY_DAYS = 91;
+// A client with no workout for this many days is flagged for a check-in.
+const INACTIVE_DAYS = 5;
+const LOOKAHEAD_DAYS = 7;
 
 const id = (prefix) => `${prefix}_${randomUUID().slice(0, 12)}`;
 
@@ -155,12 +161,80 @@ export function createTrainerClientService({
     const trainer = await trainerFor(trainerUserId);
     if (!trainer) return { error: 'trainer_profile_not_found', status: 404 };
     const rows = (await relationships.filterByColumnAsync('trainerId', trainer.id))
-      .filter(r => OPEN.has(r.status))
-      .sort((a, b) => (a.status === b.status ? 0 : a.status === 'pending' ? -1 : 1)
-        || +new Date(b.requestedAt) - +new Date(a.requestedAt));
+      .filter(r => OPEN.has(r.status));
     const out = [];
-    for (const r of rows) out.push({ ...r, member: await memberCard(r.memberId) });
+    for (const r of rows) {
+      const row = { ...r, member: await memberCard(r.memberId) };
+      if (r.status === 'active') row.summary = await summarize(trainer, r);
+      out.push(row);
+    }
+    // Requests first, then clients who need a check-in, then the rest.
+    const rank = c => (c.status === 'pending' ? -1000 : -(c.summary?.attention.filter(a => a.kind === 'attention').length ?? 0));
+    out.sort((a, b) => rank(a) - rank(b) || +new Date(b.requestedAt) - +new Date(a.requestedAt));
     return { clients: out };
+  }
+
+  /**
+   * A short "this week" summary for the trainer's client list, built only
+   * from what the member shares, plus prompts the trainer can act on.
+   * Sections the member doesn't share are simply absent.
+   */
+  async function summarize(trainer, r) {
+    const perms = normalizePermissions(r.permissions);
+    const today = localDay(now());
+    const monday = weekStart(today);
+    const needsActivity = perms.steps || perms.distance || perms.activeMinutes
+      || perms.workoutHistory || perms.goals || perms.streaks;
+    const acts = needsActivity
+      ? (await activities.filterByColumnAsync('userId', r.memberId))
+          .filter(a => localDay(a.startedAt) > addDays(today, -HISTORY_DAYS))
+      : [];
+    const thisWeek = acts.filter(a => localDay(a.startedAt) >= monday);
+
+    const week = {
+      ...(perms.workoutHistory && { workouts: thisWeek.filter(isWorkout).length }),
+      ...(perms.steps && { steps: thisWeek.reduce((n, a) => n + (a.steps ?? 0), 0) }),
+      ...(perms.distance && { distanceKm: Math.round(thisWeek.reduce((n, a) => n + (a.distanceKm ?? 0), 0) * 10) / 10 }),
+      ...(perms.activeMinutes && { activeMinutes: thisWeek.reduce((n, a) => n + activeMinutesOf(a), 0) }),
+    };
+    const summary = { weekStart: monday, week, attention: [] };
+
+    let memberGoals = [];
+    if (perms.goals || perms.streaks) {
+      memberGoals = (await goals.filterByColumnAsync('userId', r.memberId)).filter(g => g.status === 'active');
+    }
+    if (perms.goals && memberGoals.length) {
+      // The weekly workout goal says the most at a glance; fall back to the
+      // first active goal.
+      const g = memberGoals.find(x => x.type === 'workouts' && x.period === 'week') ?? memberGoals[0];
+      summary.goal = { type: g.type, period: g.period, ...goalProgress(g, acts, now()) };
+      if (summary.goal.completed) summary.attention.push({ kind: 'positive', code: 'goal_met' });
+    }
+    if (perms.streaks) {
+      const s = computeStreaks(acts, memberGoals, now(), HISTORY_DAYS).activity;
+      summary.streak = { current: s.current, best: s.best };
+      if (s.endedLength) summary.attention.push({ kind: 'attention', code: 'streak_ended', value: s.endedLength });
+    }
+
+    const assigned = (await workouts.filterByColumnAsync('userId', r.memberId))
+      .filter(w => w.trainerId === trainer.id);
+    const upcoming = assigned.filter(w => w.scheduledDate >= today && w.scheduledDate < addDays(today, LOOKAHEAD_DAYS))
+      // Without history the trainer can't know if they were done early, so
+      // every future assignment counts as planned.
+      .filter(w => !perms.workoutHistory || w.status === 'planned' || w.status === 'in_progress');
+    summary.plannedNext7Days = upcoming.length;
+    if (!upcoming.length) summary.attention.push({ kind: 'attention', code: 'nothing_planned' });
+
+    if (perms.workoutHistory) {
+      const missed = assigned.filter(w => w.scheduledDate < today && w.scheduledDate >= addDays(today, -7)
+        && (w.status === 'planned' || w.status === 'in_progress'));
+      if (missed.length) summary.attention.push({ kind: 'attention', code: 'missed_workouts', value: missed.length });
+      const last = acts.filter(isWorkout).map(a => localDay(a.startedAt)).sort().at(-1) ?? null;
+      summary.lastWorkoutDate = last;
+      const idle = last ? Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${last}T00:00:00Z`)) / 86_400_000) : null;
+      if (idle === null || idle >= INACTIVE_DAYS) summary.attention.push({ kind: 'attention', code: 'inactive', value: idle });
+    }
+    return summary;
   }
 
   async function decide(trainerUserId, relId, accept) {
@@ -215,6 +289,7 @@ export function createTrainerClientService({
     const perms = normalizePermissions(r.permissions);
     const out = {
       client: { ...r, permissions: perms, member: await memberCard(r.memberId) },
+      summary: await summarize(trainer, r),
     };
 
     const today = localDay(now());
