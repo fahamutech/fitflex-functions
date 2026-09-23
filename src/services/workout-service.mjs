@@ -83,6 +83,71 @@ function applyProgress(workout, body) {
   return null;
 }
 
+/**
+ * Validates a workout definition (name, type, duration, exercises) as sent
+ * by a member or trainer. Returns { definition } or { error, status }.
+ */
+export function validateWorkoutDefinition(body = {}) {
+  const name = text(body.name, 80);
+  if (!name) return { error: 'invalid_name', status: 400 };
+  const activityType = body.activityType ?? 'strength';
+  if (!WORKOUT_ACTIVITY_TYPES.includes(activityType)) return { error: 'invalid_activity_type', status: 400 };
+  if (!Array.isArray(body.exercises) || !body.exercises.length || body.exercises.length > MAX_EXERCISES) {
+    return { error: 'invalid_exercises', status: 400 };
+  }
+  if (!body.exercises.every(validExerciseInput)) return { error: 'invalid_exercises', status: 400 };
+  const est = body.estimatedDuration;
+  if (est != null && !(Number.isInteger(est) && est >= 1 && est <= 600)) {
+    return { error: 'invalid_estimated_duration', status: 400 };
+  }
+  return {
+    definition: {
+      name,
+      description: text(body.description, 500),
+      activityType,
+      estimatedDuration: est ?? null,
+      exercises: body.exercises.map(e => ({
+        exerciseName: text(e.exerciseName, 80),
+        muscleGroup: text(e.muscleGroup, 40),
+        sets: e.sets ?? 1,
+        reps: e.reps ?? null,
+        duration: e.duration ?? null,
+        instructions: text(e.instructions, 500),
+        tracksWeight: e.tracksWeight === true,
+      })),
+    },
+  };
+}
+
+/** A new planned workout row for a member from a definition/template. */
+export function newWorkoutRow({ memberId, base, scheduledDate, gymId = null, trainerId = null, source, now }) {
+  const workoutId = id('wkt');
+  const stamp = now.toISOString();
+  return {
+    id: workoutId,
+    userId: memberId,
+    trainerId,
+    gymId,
+    templateId: base.id ?? null,
+    source,
+    name: base.name,
+    description: base.description ?? null,
+    activityType: base.activityType,
+    scheduledDate,
+    estimatedDuration: base.estimatedDuration ?? null,
+    status: 'planned',
+    exercises: base.exercises.map(e => buildExercise(workoutId, e)),
+    notes: null,
+    startedAt: null,
+    completedAt: null,
+    activityId: null,
+    createdAt: stamp,
+    updatedAt: stamp,
+  };
+}
+
+export { isDate as isWorkoutDate };
+
 export function createWorkoutService({ workouts, activities, now = () => new Date() }) {
   function templates() {
     return { templates: WORKOUT_TEMPLATES };
@@ -117,53 +182,22 @@ export function createWorkoutService({ workouts, activities, now = () => new Dat
       base = WORKOUT_TEMPLATES.find(t => t.id === body.templateId);
       if (!base) return { error: 'template_not_found', status: 404 };
     } else {
-      const name = text(body.name, 80);
-      if (!name) return { error: 'invalid_name', status: 400 };
-      if (!WORKOUT_ACTIVITY_TYPES.includes(body.activityType ?? 'strength')) return { error: 'invalid_activity_type', status: 400 };
-      if (!Array.isArray(body.exercises) || !body.exercises.length || body.exercises.length > MAX_EXERCISES) {
-        return { error: 'invalid_exercises', status: 400 };
-      }
-      if (!body.exercises.every(validExerciseInput)) return { error: 'invalid_exercises', status: 400 };
-      const est = body.estimatedDuration;
-      if (est != null && !(Number.isInteger(est) && est >= 1 && est <= 600)) {
-        return { error: 'invalid_estimated_duration', status: 400 };
-      }
-      base = {
-        id: null,
-        name,
-        description: text(body.description, 500),
-        activityType: body.activityType ?? 'strength',
-        estimatedDuration: est ?? null,
-        exercises: body.exercises.map(e => ({ ...e, exerciseName: text(e.exerciseName, 80) })),
-      };
+      const def = validateWorkoutDefinition(body);
+      if (def.error) return def;
+      base = { id: null, ...def.definition };
     }
     const sameDay = (await workouts.filterByColumnAsync('userId', memberId))
       .filter(w => w.scheduledDate === body.scheduledDate && w.status === 'planned');
     if (sameDay.length >= MAX_PLANNED_PER_DAY) return { error: 'too_many_planned', status: 400 };
 
-    const workoutId = id('wkt');
-    const stamp = now().toISOString();
-    const row = {
-      id: workoutId,
-      userId: memberId,
-      trainerId: null,
-      gymId: typeof body.gymId === 'string' ? body.gymId : null,
-      templateId: base.id,
-      source: base.id ? 'template' : 'member',
-      name: base.name,
-      description: base.description ?? null,
-      activityType: base.activityType,
+    const row = newWorkoutRow({
+      memberId,
+      base,
       scheduledDate: body.scheduledDate,
-      estimatedDuration: base.estimatedDuration ?? null,
-      status: 'planned',
-      exercises: base.exercises.map(e => buildExercise(workoutId, e)),
-      notes: null,
-      startedAt: null,
-      completedAt: null,
-      activityId: null,
-      createdAt: stamp,
-      updatedAt: stamp,
-    };
+      gymId: typeof body.gymId === 'string' ? body.gymId : null,
+      source: base.id ? 'template' : 'member',
+      now: now(),
+    });
     await workouts.insertAsync(row);
     return { workout: row };
   }

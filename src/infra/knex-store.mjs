@@ -50,6 +50,8 @@ const TABLE_MAP = {
   activities:        { table: 'Activity' },
   goals:             { table: 'Goal' },
   workouts:          { table: 'Workout' },
+  trainer_member_relationships: { table: 'TrainerMemberRelationship' },
+  workout_plans:     { table: 'WorkoutPlan' },
   corporate_accounts:  { table: 'CorporateAccount' },
   corporate_employees: { table: 'CorporateEmployee' },
   corporate_bills:     { table: 'CorporateBill' },
@@ -513,6 +515,8 @@ const ALLOWED_FIELDS = {
   activities:       new Set(['id','userId','type','source','startedAt','durationMinutes','distanceKm','steps','activeMinutes','calories','intensity','workoutId','gymId','trainerId','notes','createdAt']),
   goals:            new Set(['id','userId','type','period','target','startDate','endDate','source','trainerId','challengeId','status','createdAt','updatedAt']),
   workouts:         new Set(['id','userId','trainerId','gymId','templateId','source','name','description','activityType','scheduledDate','estimatedDuration','status','exercises','notes','startedAt','completedAt','activityId','createdAt','updatedAt']),
+  trainer_member_relationships: new Set(['id','trainerId','memberId','status','permissions','requestedAt','connectedAt','endedAt','endedBy','createdAt','updatedAt']),
+  workout_plans:    new Set(['id','trainerId','name','description','activityType','estimatedDuration','exercises','createdAt','updatedAt']),
   corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','status','createdAt','updatedAt']),
   corporate_employees: new Set(['id','corporateId','userId','displayName','phone','email','department','pinHash','status','activatedAt','createdAt','updatedAt']),
   corporate_bills:     new Set(['id','corporateId','period','passTier','subsidyModel','billingCycle','seatCount','perSeatMonthlyTzs','grossTzs','employerTzs','employeeTzs','status','paymentReference','paidAt','createdAt']),
@@ -535,6 +539,8 @@ const JSON_FIELDS = {
   marketplace_notifications: ['data'],
   notifications: ['data'],
   workouts: ['exercises'],
+  trainer_member_relationships: ['permissions'],
+  workout_plans: ['exercises'],
 };
 
 /**
@@ -555,7 +561,7 @@ function prepareForKnex(name, data, isUpdate = false) {
   // Convert date strings to Date objects for timestamp columns
   const DATE_FIELDS = ['createdAt', 'updatedAt', 'startedAt', 'cycleStartedAt', 'renewsAt', 'expiresAt',
     'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt', 'lastSeenAt', 'readAt',
-    'completedAt'];
+    'completedAt', 'connectedAt', 'endedAt'];
   for (const f of DATE_FIELDS) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];

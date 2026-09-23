@@ -34,3 +34,5 @@ export const notifications = collection('notifications');
 export const activities = collection('activities');
 export const goals = collection('goals');
 export const workouts = collection('workouts');
+export const trainerMemberRelationships = collection('trainer_member_relationships');
+export const workoutPlans = collection('workout_plans');

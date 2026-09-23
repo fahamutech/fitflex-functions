@@ -33,6 +33,7 @@ import { createFavoriteService } from '../services/favorite-service.mjs';
 import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
+import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createNotificationService } from '../services/notification-service.mjs';
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
@@ -45,6 +46,7 @@ import {
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
   deviceTokens, notifications, activities, goals, workouts,
+  trainerMemberRelationships, workoutPlans,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -132,4 +134,8 @@ export const workoutService = createWorkoutService({ workouts, activities });
 export const notificationService = createNotificationService({
   users, deviceTokens, notifications, whatsApp: whatsAppService,
   getMessaging: process.env.PUSH_NOTIFICATIONS === 'on' ? () => { initFirebaseAdmin(); return getMessaging(); } : null,
+});
+export const trainerClientService = createTrainerClientService({
+  relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals,
+  notify: (userId, message) => notificationService.notify(userId, message),
 });
