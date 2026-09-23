@@ -43,6 +43,8 @@ const TABLE_MAP = {
   marketplace_enquiries: { table: 'MarketplaceEnquiry' },
   marketplace_notifications: { table: 'MarketplaceNotification' },
   product_reviews:   { table: 'ProductReview' },
+  gym_reviews:       { table: 'GymReview' },
+  trainer_reviews:   { table: 'TrainerReview' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -496,6 +498,8 @@ const ALLOWED_FIELDS = {
   marketplace_enquiries: new Set(['id','buyerId','vendorId','productId','subject','status','messages','createdAt','updatedAt']),
   marketplace_notifications: new Set(['id','userId','type','data','read','createdAt']),
   product_reviews:  new Set(['id','buyerId','orderId','productId','rating','comment','createdAt']),
+  gym_reviews:      new Set(['id','gymId','memberId','rating','text','status','moderatedBy','moderatedAt','createdAt','updatedAt']),
+  trainer_reviews:  new Set(['id','trainerId','memberId','rating','text','status','moderatedBy','moderatedAt','createdAt','updatedAt']),
 };
 
 // jsonb columns that may hold array-shaped (or otherwise non-object) JSON —
@@ -532,7 +536,7 @@ function prepareForKnex(name, data, isUpdate = false) {
 
   // Convert date strings to Date objects for timestamp columns
   const DATE_FIELDS = ['createdAt', 'updatedAt', 'startedAt', 'cycleStartedAt', 'renewsAt', 'expiresAt',
-    'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at'];
+    'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt'];
   for (const f of DATE_FIELDS) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];

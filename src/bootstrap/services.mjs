@@ -26,11 +26,14 @@ import { createPortalUserService } from '../services/portal-user-service.mjs';
 import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
 import { createShopService } from '../services/shop-service.mjs';
+import { createGymReviewService } from '../services/gym-review-service.mjs';
+import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
   trainerEngagements, trainerSessions, products, shopOrders,
   marketplaceEnquiries, marketplaceNotifications, productReviews,
+  gymReviews, trainerReviews,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -39,6 +42,7 @@ export {
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
   trainerEngagements, trainerSessions, products, shopOrders,
   marketplaceEnquiries, marketplaceNotifications, productReviews,
+  gymReviews, trainerReviews,
 };
 
 export const identityService = createIdentityService({ users });
@@ -85,5 +89,7 @@ export const financeService = createFinanceService({ gyms, checkins, invoices, u
 export const invoiceService = createInvoiceService({ invoices, gyms, users, gymPayouts, auditLog });
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
 export const webhookService = createWebhookService({ subscriptions, webhookSeen });
+export const gymReviewService = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog });
+export const trainerReviewService = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog });
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };

@@ -24,3 +24,5 @@ export const shopOrders = collection('shop_orders');
 export const marketplaceEnquiries = collection('marketplace_enquiries');
 export const marketplaceNotifications = collection('marketplace_notifications');
 export const productReviews = collection('product_reviews');
+export const gymReviews = collection('gym_reviews');
+export const trainerReviews = collection('trainer_reviews');
