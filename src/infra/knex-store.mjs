@@ -49,6 +49,7 @@ const TABLE_MAP = {
   notifications:     { table: 'Notification' },
   activities:        { table: 'Activity' },
   goals:             { table: 'Goal' },
+  workouts:          { table: 'Workout' },
   corporate_accounts:  { table: 'CorporateAccount' },
   corporate_employees: { table: 'CorporateEmployee' },
   corporate_bills:     { table: 'CorporateBill' },
@@ -511,6 +512,7 @@ const ALLOWED_FIELDS = {
   notifications:    new Set(['id','userId','type','title','body','data','readAt','createdAt']),
   activities:       new Set(['id','userId','type','source','startedAt','durationMinutes','distanceKm','steps','activeMinutes','calories','intensity','workoutId','gymId','trainerId','notes','createdAt']),
   goals:            new Set(['id','userId','type','period','target','startDate','endDate','source','trainerId','challengeId','status','createdAt','updatedAt']),
+  workouts:         new Set(['id','userId','trainerId','gymId','templateId','source','name','description','activityType','scheduledDate','estimatedDuration','status','exercises','notes','startedAt','completedAt','activityId','createdAt','updatedAt']),
   corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','status','createdAt','updatedAt']),
   corporate_employees: new Set(['id','corporateId','userId','displayName','phone','email','department','pinHash','status','activatedAt','createdAt','updatedAt']),
   corporate_bills:     new Set(['id','corporateId','period','passTier','subsidyModel','billingCycle','seatCount','perSeatMonthlyTzs','grossTzs','employerTzs','employeeTzs','status','paymentReference','paidAt','createdAt']),
@@ -532,6 +534,7 @@ const JSON_FIELDS = {
   marketplace_enquiries: ['messages'],
   marketplace_notifications: ['data'],
   notifications: ['data'],
+  workouts: ['exercises'],
 };
 
 /**
@@ -551,7 +554,8 @@ function prepareForKnex(name, data, isUpdate = false) {
 
   // Convert date strings to Date objects for timestamp columns
   const DATE_FIELDS = ['createdAt', 'updatedAt', 'startedAt', 'cycleStartedAt', 'renewsAt', 'expiresAt',
-    'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt', 'lastSeenAt', 'readAt'];
+    'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt', 'lastSeenAt', 'readAt',
+    'completedAt'];
   for (const f of DATE_FIELDS) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];

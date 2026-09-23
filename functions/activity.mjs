@@ -1,7 +1,8 @@
-// Activity & Progress Engine REST surface — member activities and goals.
+// Activity & Progress Engine REST surface — member activities, goals and
+// workouts.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { activityService, goalService } from '../src/bootstrap/services.mjs';
+import { activityService, goalService, workoutService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -61,4 +62,67 @@ export const updateMyGoal = {
   requestSample: { status: 'archived' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await goalService.update(req.user.sub, req.params.id, req.body || {}))
+};
+
+// ── Workouts ────────────────────────────────────────────────────────────────
+
+export const workoutTemplates = {
+  created, method: 'get', path: '/workouts/templates',
+  description: 'Member: built-in workout templates to plan from.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => res.json(workoutService.templates())
+};
+
+export const myWorkouts = {
+  created, method: 'get', path: '/me/workouts',
+  description: 'Member: workouts, newest scheduled first. Optional `from`/`to` (YYYY-MM-DD) and `status`.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await workoutService.list(req.user.sub, req.query || {}))
+};
+
+export const planMyWorkout = {
+  created, method: 'post', path: '/me/workouts',
+  description: 'Member: plan a workout from { templateId, scheduledDate } or a custom { name, activityType, exercises, scheduledDate }.',
+  requestSample: { templateId: 'tpl_upper_strength', scheduledDate: '2026-09-24' },
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => {
+    const result = await workoutService.create(req.user.sub, req.body || {});
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(201).json(result);
+  }
+};
+
+export const myWorkout = {
+  created, method: 'get', path: '/me/workouts/:id',
+  description: 'Member: one workout with its exercises and sets.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await workoutService.get(req.user.sub, req.params.id))
+};
+
+export const startMyWorkout = {
+  created, method: 'post', path: '/me/workouts/:id/start',
+  description: 'Member: start a planned workout (idempotent while in progress).',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await workoutService.start(req.user.sub, req.params.id))
+};
+
+export const saveMyWorkoutProgress = {
+  created, method: 'patch', path: '/me/workouts/:id',
+  description: 'Member: save logged sets and notes mid-session. { notes?, exercises: [{ id, notes?, workoutSets: [{ id, reps?, weight?, duration?, completed? }] }] }',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await workoutService.saveProgress(req.user.sub, req.params.id, req.body || {}))
+};
+
+export const completeMyWorkout = {
+  created, method: 'post', path: '/me/workouts/:id/complete',
+  description: 'Member: finish a workout (same body as the progress save, plus optional durationMinutes). Records the Activity.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await workoutService.complete(req.user.sub, req.params.id, req.body || {}))
+};
+
+export const skipMyWorkout = {
+  created, method: 'post', path: '/me/workouts/:id/skip',
+  description: 'Member: skip a workout that has not been completed.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await workoutService.skip(req.user.sub, req.params.id))
 };

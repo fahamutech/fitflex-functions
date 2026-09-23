@@ -80,7 +80,8 @@ export function createActivityService({ activities, now = () => new Date() }) {
       startedAt: startedAt.toISOString(),
       ...metrics,
       intensity: body.intensity ?? null,
-      workoutId: typeof body.workoutId === 'string' ? body.workoutId : null,
+      // Workout activities are recorded by completing the workout.
+      workoutId: null,
       gymId: typeof body.gymId === 'string' ? body.gymId : null,
       trainerId: null,
       notes: notes || null,
@@ -95,6 +96,9 @@ export function createActivityService({ activities, now = () => new Date() }) {
     if (!row || row.userId !== memberId) return { error: 'not_found', status: 404 };
     // Trainer/gym records belong to that relationship, not to the member's log.
     if (!MEMBER_SOURCES.has(row.source)) return { error: 'not_member_owned', status: 403 };
+    // A completed workout's activity is its record; removing it would
+    // orphan the workout.
+    if (row.workoutId) return { error: 'linked_to_workout', status: 409 };
     await activities.removeByIdAsync(id);
     return { deleted: true };
   }
