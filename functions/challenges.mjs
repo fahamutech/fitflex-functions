@@ -31,9 +31,25 @@ export const challengeDetail = {
 
 export const joinChallenge = {
   created, method: 'post', path: '/challenges/:id/join',
-  description: 'Member: join a challenge that has not ended.',
+  description: 'Member: join a challenge that has not ended. { teamId? (teams mode), gymId? (gym vs gym), leaderboardOptIn? (default false) }',
+  requestSample: { leaderboardOptIn: false },
   onGuard: requireAuth('member'),
-  onRequest: async (req, res) => send(res, await svc.join(req.user.sub, req.params.id))
+  onRequest: async (req, res) => send(res, await svc.join(req.user.sub, req.params.id, req.body || {}))
+};
+
+export const challengeLeaderboardOptIn = {
+  created, method: 'put', path: '/challenges/:id/leaderboard-opt-in',
+  description: 'Member: choose whether to appear in this challenge\'s ranking. { optIn: true|false }',
+  requestSample: { optIn: true },
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await svc.setLeaderboardOptIn(req.user.sub, req.params.id, req.body || {}))
+};
+
+export const challengeLeaderboard = {
+  created, method: 'get', path: '/challenges/:id/leaderboard',
+  description: 'Participant: opted-in ranking, where you would place, and team standings (teams of 3+).',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await svc.leaderboard({ memberId: req.user.sub }, req.params.id))
 };
 
 export const leaveChallenge = {
@@ -82,6 +98,12 @@ function creatorRoutes(prefix, guard, resolve, label) {
     return handler(creator, req, res);
   };
   return {
+    leaderboard: {
+      created, method: 'get', path: `${prefix}/challenges/:id/leaderboard`,
+      description: `${label}: the opt-in ranking and team standings for a challenge you created.`,
+      onGuard: guard,
+      onRequest: withCreator(async (creator, req, res) => send(res, await svc.leaderboard(creator, req.params.id))),
+    },
     list: {
       created, method: 'get', path: `${prefix}/challenges`,
       description: `${label}: challenges you created.`,
@@ -90,7 +112,7 @@ function creatorRoutes(prefix, guard, resolve, label) {
     },
     create: {
       created, method: 'post', path: `${prefix}/challenges`,
-      description: `${label}: create a challenge. type steps|distance_km|workouts|active_minutes|consistency|gym_attendance.`,
+      description: `${label}: create a challenge. type steps|distance_km|workouts|active_minutes|consistency|gym_attendance; mode individual|teams (with teams: [names])${label === 'FitFlex admin' ? '|gym_vs_gym' : ''}${label === 'Corporate HR' ? '|department' : ''}.`,
       requestSample: CREATE_SAMPLE,
       onGuard: guard,
       onRequest: withCreator(async (creator, req, res) => send(res, await svc.create(creator, req.body || {}), 201)),
@@ -115,21 +137,25 @@ export const trainerChallenges = trainerR.list;
 export const trainerCreateChallenge = trainerR.create;
 export const trainerCancelChallenge = trainerR.cancel;
 export const trainerChallengeParticipants = trainerR.participants;
+export const trainerChallengeLeaderboard = trainerR.leaderboard;
 
 const gymR = creatorRoutes('/owner', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')], gymCreator, 'Gym');
 export const ownerChallenges = gymR.list;
 export const ownerCreateChallenge = gymR.create;
 export const ownerCancelChallenge = gymR.cancel;
 export const ownerChallengeParticipants = gymR.participants;
+export const ownerChallengeLeaderboard = gymR.leaderboard;
 
 const adminR = creatorRoutes('/admin', requireAuth('admin'), fitflexCreator, 'FitFlex admin');
 export const adminChallenges = adminR.list;
 export const adminCreateChallenge = adminR.create;
 export const adminCancelChallenge = adminR.cancel;
 export const adminChallengeParticipants = adminR.participants;
+export const adminChallengeLeaderboard = adminR.leaderboard;
 
 const corpR = creatorRoutes('/corporate', requireAuth('corporate_hr', 'admin'), corporateCreator, 'Corporate HR');
 export const corporateChallenges = corpR.list;
 export const corporateCreateChallenge = corpR.create;
 export const corporateCancelChallenge = corpR.cancel;
 export const corporateChallengeParticipants = corpR.participants;
+export const corporateChallengeLeaderboard = corpR.leaderboard;

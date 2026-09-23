@@ -49,6 +49,7 @@ import {
   corporateAccounts, corporateEmployees, corporateBills,
   deviceTokens, notifications, activities, goals, workouts,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
+  challengeTeams,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -139,7 +140,7 @@ export const challengeService = createChallengeService({
   challenges, participants: challengeParticipants, users, trainers, gyms,
   relationships: trainerMemberRelationships, gymMemberSharing,
   gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
-  activities, checkins,
+  activities, checkins, teams: challengeTeams, corporateEmployees,
 });
 
 // Push is off unless PUSH_NOTIFICATIONS=on, so local dev and tests never call FCM.
