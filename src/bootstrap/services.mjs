@@ -29,12 +29,15 @@ import { createShopService } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
 import { createWhatsAppService } from '../services/whatsapp-service.mjs';
+import { createCorporateService } from '../services/corporate-service.mjs';
+import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
   trainerEngagements, trainerSessions, products, shopOrders,
   marketplaceEnquiries, marketplaceNotifications, productReviews,
   gymReviews, trainerReviews,
+  corporateAccounts, corporateEmployees, corporateBills,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -44,6 +47,7 @@ export {
   trainerEngagements, trainerSessions, products, shopOrders,
   marketplaceEnquiries, marketplaceNotifications, productReviews,
   gymReviews, trainerReviews,
+  corporateAccounts, corporateEmployees, corporateBills,
 };
 
 export const identityService = createIdentityService({ users });
@@ -57,6 +61,10 @@ export const trainerEngagementService = createTrainerEngagementService({ trainer
 export const shopService = createShopService({
   products, shopOrders, users, auditLog,
   marketplaceEnquiries, marketplaceNotifications, productReviews,
+});
+export const whatsAppNotifier = createWhatsAppNotifier();
+export const corporateService = createCorporateService({
+  users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
 });
 
 export const authService = createAuthService({
@@ -92,6 +100,11 @@ export const portalUserService = createPortalUserService({ users, auditLog, init
 export const webhookService = createWebhookService({ subscriptions, webhookSeen });
 export const gymReviewService = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog });
 export const trainerReviewService = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog });
-export const whatsAppService = createWhatsAppService({ apiKey: process.env.AFRICAS_TALKING_API_KEY, users, auditLog });
+export const whatsAppService = createWhatsAppService({
+  apiKey: process.env.AFRICAS_TALKING_API_KEY,
+  apiUrl: process.env.AFRICAS_TALKING_API_URL || undefined,
+  username: process.env.AFRICAS_TALKING_USERNAME || undefined,
+  users, auditLog,
+});
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };

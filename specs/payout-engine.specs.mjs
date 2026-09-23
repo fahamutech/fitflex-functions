@@ -6,16 +6,16 @@ test('Band 1 (0-49): 25% commission, 30-day delay', () => {
   const r = calculatePayout({ visitCount: 10, gymTier: 'standard' });
   assert.equal(r.band, 1);
   assert.equal(r.commissionPct, 25);
-  assert.equal(r.gross, 50_000);
-  assert.equal(r.commission, 12_500);
-  assert.equal(r.net, 37_500);
+  assert.equal(r.gross, 35_000);   // 10 × 3,500 default gym payout (not the 5,000 member price)
+  assert.equal(r.commission, 8_750);
+  assert.equal(r.net, 26_250);
   assert.equal(r.payoutDelayDays, 30);
 });
 
 test('Band 3 (150-299): 15%, 7-day', () => {
   const r = calculatePayout({ visitCount: 200, gymTier: 'midtier' });
   assert.equal(r.band, 3);
-  assert.equal(r.gross, 200 * 8_000);
+  assert.equal(r.gross, 200 * 6_000);
   assert.equal(r.commissionPct, 15);
   assert.equal(r.payoutDelayDays, 7);
 });

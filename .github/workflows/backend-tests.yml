@@ -1,0 +1,55 @@
+name: Backend Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    name: Run Backend Unit Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fitflex
+          POSTGRES_PASSWORD: fitflex
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # The suite runs against the CI database (package.json sets FITFLEX_USE_CI_DB=1).
+      DATABASE_URL_CI: postgresql://fitflex:fitflex@localhost:5432/fitflex_ci
+      JWT_SECRET: ci-only-secret-not-used-outside-github-actions
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Node 22+: the `npm test` script passes a quoted 'specs/**/*.specs.mjs'
+      # for the runner itself to expand, and --test only supports glob patterns
+      # from v22. On v20 it is read as a literal path and matches nothing.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # postinstall runs migrate + seed against DATABASE_URL, which does not
+      # exist on the runner. The CI database is provisioned explicitly below.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Create and migrate the CI database
+        run: npm run db:setup:ci
+
+      - name: Run tests
+        run: npm test

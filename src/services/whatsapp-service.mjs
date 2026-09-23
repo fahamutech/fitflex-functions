@@ -31,8 +31,15 @@ function normalizePhone(phone) {
   return /^\+\d{10,15}$/.test(phone) ? phone : null;
 }
 
-export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.africastalking.com', users, auditLog }) {
-  if (!apiKey) throw new Error('WhatsApp service requires Africa\'s Talking API key');
+export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.africastalking.com', username = 'sandbox', users, auditLog }) {
+  // WhatsApp is optional. This service is built when services.mjs is imported,
+  // which every function file does, so throwing here took the whole server down
+  // (and into a restart loop) whenever AFRICAS_TALKING_API_KEY was unset.
+  // Without a key every send is a no-op that reports why.
+  const enabled = Boolean(apiKey);
+  if (!enabled) {
+    console.warn('[whatsapp] AFRICAS_TALKING_API_KEY is not set — WhatsApp messages are disabled.');
+  }
 
   const headers = {
     'Accept': 'application/json',
@@ -41,6 +48,7 @@ export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.af
   };
 
   async function sendTemplate(phoneNumber, templateId, variables = {}) {
+    if (!enabled) return { error: 'whatsapp_not_configured', status: 503 };
     const phone = normalizePhone(phoneNumber);
     if (!phone) return { error: 'invalid_phone_format', status: 400 };
 
@@ -49,7 +57,7 @@ export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.af
         method: 'POST',
         headers,
         body: new URLSearchParams({
-          username: 'sandbox', // sandbox for testing; use real username in production
+          username,
           to: phone,
           type: 'WhatsApp',
           templateId,
@@ -187,6 +195,7 @@ export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.af
   }
 
   return {
+    enabled,
     sendOtp,
     sendBookingConfirmed,
     sendBookingReminder,

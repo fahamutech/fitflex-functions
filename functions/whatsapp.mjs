@@ -2,15 +2,30 @@
 // Integrates with Africa's Talking API. Webhooks receive inbound replies.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import { timingSafeEqual } from 'node:crypto';
 import { whatsAppService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
+// System-to-system routes must not be callable by the public: anyone could
+// otherwise make FitFlex send an arbitrary "OTP" to any member's WhatsApp.
+// Callers present FITFLEX_INTERNAL_TOKEN; with no token configured the route
+// is closed.
+function hasInternalToken(req) {
+  const expected = process.env.FITFLEX_INTERNAL_TOKEN;
+  const given = req.headers?.['x-fitflex-internal-token'];
+  if (!expected || typeof given !== 'string') return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 // ── Public (system) ──
 export const sendOtp = {
   created, method: 'post', path: '/whatsapp/send-otp',
-  description: 'System: send OTP via WhatsApp to user. POST { userId, code }.',
+  description: 'System: send OTP via WhatsApp to user. POST { userId, code }. Requires x-fitflex-internal-token.',
   onRequest: async (req, res) => {
+    if (!hasInternalToken(req)) return res.status(403).json({ error: 'forbidden' });
     const { userId, code } = req.body || {};
     if (!userId || !code) return res.status(400).json({ error: 'userId_code_required' });
     const result = await whatsAppService.sendOtp(userId, code);

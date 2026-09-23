@@ -197,3 +197,17 @@ test('TEMPLATES constant defined', () => {
   assert.ok(svc.TEMPLATES.vendor_reengagement);
   assert.ok(svc.TEMPLATES.member_reengagement);
 });
+
+test('missing API key: service builds without throwing and sends are disabled', async () => {
+  let called = false;
+  global.fetch = async () => { called = true; throw new Error('must not call the network'); };
+  const svc = createWhatsAppService({
+    apiKey: undefined,
+    users: store([{ id: 'u1', displayName: 'Aisha', phoneNumber: '+255712345678' }]),
+    auditLog: { insertAsync: () => {} },
+  });
+  assert.equal(svc.enabled, false);
+  const result = await svc.sendOtp('u1', '1234');
+  assert.deepEqual(result, { error: 'whatsapp_not_configured', status: 503 });
+  assert.equal(called, false);
+});
