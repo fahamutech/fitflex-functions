@@ -4,7 +4,7 @@
 import { resolveOperatorGymSelection, operatorGymIds } from '../shared/operator-gym-selection.mjs';
 import { validateCheckIn } from '../shared/check-in-rules.mjs';
 import { calculatePayout } from '../shared/payout-engine.mjs';
-import { issue as issueQr, verify as verifyQrToken } from '../auth/qr-token.mjs';
+import { issue as issueQr, verify as verifyQrToken, issueGymQr, verifyGymQr } from '../auth/qr-token.mjs';
 
 function sameEatDate(a, b) {
   const fmt = new Intl.DateTimeFormat('en-CA', {
@@ -249,5 +249,28 @@ export function createOperatorService({
     };
   }
 
-  return { issueMemberQr, verifyQr, checkIn, recentCheckIns, dashboard };
+  /**
+   * Member-scans-gym mode (Tech Brief §5): the member scans the static QR
+   * posted at the entrance. Same BL-012 validation and logging as a staff
+   * scan, recorded as method 'member_scanned'.
+   */
+  async function memberScanGym({ memberId, gymQr }) {
+    const claim = verifyGymQr(gymQr);
+    if (!claim) return { status: 400, body: { ok: false, failure: 'invalid_gym_qr' } };
+    const gym = gyms.find(g => g.id === claim.gymId);
+    if (!gym) return { status: 404, body: { ok: false, failure: 'gym_not_found' } };
+    const result = await checkInService.perform({ memberId, gymId: gym.id, method: 'member_scanned' });
+    if (!result.ok) return { status: 409, body: { ...result, gym: { id: gym.id, name: gym.name, tier: gym.tier } } };
+    return { status: 200, body: { ...result, gym: { id: gym.id, name: gym.name, tier: gym.tier } } };
+  }
+
+  /** The printable entrance QR for a gym the operator manages (or any gym, for admins). */
+  function gymEntranceQr({ operator, gymId, isAdmin = false }) {
+    const gym = gyms.find(g => g.id === gymId);
+    if (!gym) return { status: 404, body: { error: 'gym_not_found' } };
+    if (!isAdmin && !operatorGymIds(operator).includes(gym.id)) return { status: 403, body: { error: 'not_your_gym' } };
+    return { status: 200, body: { gymId: gym.id, gymName: gym.name, payload: issueGymQr(gym.id) } };
+  }
+
+  return { issueMemberQr, verifyQr, checkIn, recentCheckIns, dashboard, memberScanGym, gymEntranceQr };
 }

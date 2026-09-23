@@ -59,15 +59,23 @@ test('second check-in same day same gym is idempotent — returns existing recor
   assert.equal(r.checkin.id, first.checkin.id);
 });
 
-test('check-in at a different gym same day is idempotent and does not consume another visit', async () => {
+test('check-in at a different gym same day is logged at that gym without consuming another visit', async () => {
   await svc.perform({ memberId: 'm1', gymId: 'g1' });
   const r = await svc.perform({ memberId: 'm1', gymId: 'g2' });
   assert.equal(r.ok, true);
-  assert.equal(r.idempotent, true);
-  assert.equal(r.checkin.gymId, 'g1');
-  assert.equal(r.checkin.visitConsumed, true);
+  assert.notEqual(r.idempotent, true);
+  assert.equal(r.checkin.gymId, 'g2');           // g2 gets its own row (payouts)
+  assert.equal(r.checkin.visitConsumed, false);  // BL-011 as implemented today
   assert.equal(r.checkin.visitNumberInCycle, 1);
-  assert.equal(checkins.all().length, 1);
+  assert.equal(checkins.all().length, 2);
+});
+
+test('Basic member cannot check in at a second gym the same day', async () => {
+  subscriptions.update(s => s.id === 's1', { tier: 'basic' });
+  await svc.perform({ memberId: 'm1', gymId: 'g1' });
+  const r = await svc.perform({ memberId: 'm1', gymId: 'g2' });
+  assert.equal(r.ok, false);
+  assert.equal(r.failure, 'basic_daily_limit');
 });
 
 test('Basic tier blocked at midtier gym', async () => {

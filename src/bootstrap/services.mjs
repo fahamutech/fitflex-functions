@@ -29,6 +29,7 @@ import { createShopService } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
 import { createWhatsAppService } from '../services/whatsapp-service.mjs';
+import { createFavoriteService } from '../services/favorite-service.mjs';
 import { createNotificationService } from '../services/notification-service.mjs';
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
@@ -119,6 +120,7 @@ export const whatsAppService = createWhatsAppService({
 });
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
+export const favoriteService = createFavoriteService({ users, gyms });
 
 // Push is off unless PUSH_NOTIFICATIONS=on, so local dev and tests never call FCM.
 export const notificationService = createNotificationService({

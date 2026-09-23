@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { issue, verify } from '../src/auth/qr-token.mjs';
+import { issue, verify, issueGymQr, verifyGymQr } from '../src/auth/qr-token.mjs';
 
 test('verifies signed rotating QR tokens', () => {
   const now = Date.UTC(2026, 4, 21, 7, 0, 0);
@@ -9,16 +9,16 @@ test('verifies signed rotating QR tokens', () => {
   assert.deepEqual(verify(qr.token, now), { userId: 'usr_signed_qr' });
 });
 
-test('verifies fresh portal member QR payloads', () => {
+test('rejects unsigned member QR payloads (anyone could forge them)', () => {
   const now = Date.UTC(2026, 4, 21, 7, 0, 0);
-  const token = `fitflex:member:usr_portal_qr:${now}`;
-
-  assert.deepEqual(verify(token, now + 30_000), { userId: 'usr_portal_qr' });
+  assert.equal(verify(`fitflex:member:usr_portal_qr:${now}`, now + 30_000), null);
 });
 
-test('rejects stale portal member QR payloads', () => {
-  const now = Date.UTC(2026, 4, 21, 7, 0, 0);
-  const token = `fitflex:member:usr_portal_qr:${now - 180_000}`;
-
-  assert.equal(verify(token, now), null);
+test('gym QR round-trips and cannot be minted for another gym', () => {
+  const qr = issueGymQr('gym_001');
+  assert.deepEqual(verifyGymQr(qr), { gymId: 'gym_001' });
+  const forged = qr.replace('gym_001', 'gym_002');
+  assert.equal(verifyGymQr(forged), null);
+  assert.equal(verifyGymQr('fitflex:gym:gym_001:nope'), null);
+  assert.equal(verifyGymQr('gym_001'), null);
 });
