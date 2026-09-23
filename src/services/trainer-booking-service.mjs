@@ -77,7 +77,6 @@ export function createTrainerBookingService({
     const slots = requestedSlots(body);
     if (!slots.length || slots.some(s => !s.date || !s.slot)) return { error: 'date_and_slot_required', status: 400 };
     if (slots.length > MAX_SLOTS_PER_BOOKING) return { error: 'too_many_slots', status: 400 };
-    if (!(Number(trainer.hourlyRateTzs) > 0)) return { error: 'trainer_rate_not_set', status: 400 };
 
     for (const s of slots) {
       // C1: the slot must be inside the trainer's configured availability.
@@ -128,7 +127,10 @@ export function createTrainerBookingService({
     const { trainer, slots, pricing, summary } = plan;
     const now = new Date().toISOString();
     const groupId = `tbg_${randomUUID().slice(0, 8)}`;
-    const paymentRequestId = paymentRequests ? `pay_${randomUUID().slice(0, 8)}` : null;
+    // Free sessions (no rate set) have nothing to pay, so confirm them
+    // straight away; paid ones wait for the payment request.
+    const needsPayment = Boolean(paymentRequests) && summary.total > 0;
+    const paymentRequestId = needsPayment ? `pay_${randomUUID().slice(0, 8)}` : null;
     const per = pricing.perSession;
 
     const bookings = [];
@@ -149,14 +151,14 @@ export function createTrainerBookingService({
         commissionTzs: per.commission,
         trainerPayoutTzs: per.trainerPayout,
         paymentRequestId,
-        status: paymentRequests ? 'payment_pending' : 'confirmed',
+        status: needsPayment ? 'payment_pending' : 'confirmed',
         createdAt: now,
         updatedAt: now,
       }));
     }
 
     let paymentRequest = null;
-    if (paymentRequests) {
+    if (needsPayment) {
       paymentRequest = await paymentRequests.insertAsync({
         id: paymentRequestId,
         memberId,

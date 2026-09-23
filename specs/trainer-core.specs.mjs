@@ -350,3 +350,17 @@ test('unpaid bookings do not count towards earnings', async () => {
   const earnings = await service.trainerEarnings({ userId: 'usr_trainer_1' });
   assert.equal(earnings.earnings.totalTzs, 0);
 });
+
+test('a free session (no rate) is confirmed without a payment request', async () => {
+  const { service, trainerBookings, paymentRequests } = makePaidBookingService();
+  trainerFixture.hourlyRateTzs = 0;
+  try {
+    const out = await service.createBooking({ memberId: 'usr_m1', body: TWO_SLOTS });
+    assert.ok(!out.error, JSON.stringify(out));
+    assert.ok(trainerBookings.rows.every(b => b.status === 'confirmed'));
+    assert.equal(paymentRequests.rows.length, 0);
+    assert.equal(out.paymentRequest, null);
+  } finally {
+    trainerFixture.hourlyRateTzs = 20000;
+  }
+});
