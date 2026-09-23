@@ -96,7 +96,7 @@ test('shared items show when, what and how long — only at this gym', async () 
   const [g] = (await s.svc.ownerMemberActivity(owner, 'm1')).gyms;
   assert.deepEqual(g.classAttendance, [{ date: '2026-09-20', type: 'group_class', durationMinutes: 50 }]);
   assert.deepEqual(g.gymWorkouts, [{ date: '2026-09-22', type: 'strength', durationMinutes: 45 }]);
-  assert.deepEqual(g.challenges, { available: false });
+  assert.deepEqual(g.challenges, [], 'no challenges joined at this gym yet');
   const json = JSON.stringify(g);
   assert.equal(json.includes('running'), false, 'activity elsewhere never shows');
   assert.equal(json.includes('private note'), false);

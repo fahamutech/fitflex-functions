@@ -35,6 +35,7 @@ import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
+import { createChallengeService } from '../services/challenge-service.mjs';
 import { createNotificationService } from '../services/notification-service.mjs';
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
@@ -47,7 +48,7 @@ import {
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
   deviceTokens, notifications, activities, goals, workouts,
-  trainerMemberRelationships, workoutPlans, gymMemberSharing,
+  trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -132,6 +133,13 @@ export const goalService = createGoalService({ goals });
 export const workoutService = createWorkoutService({ workouts, activities });
 export const gymSharingService = createGymSharingService({
   sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
+  challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
+});
+export const challengeService = createChallengeService({
+  challenges, participants: challengeParticipants, users, trainers, gyms,
+  relationships: trainerMemberRelationships, gymMemberSharing,
+  gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
+  activities, checkins,
 });
 
 // Push is off unless PUSH_NOTIFICATIONS=on, so local dev and tests never call FCM.
@@ -142,4 +150,5 @@ export const notificationService = createNotificationService({
 export const trainerClientService = createTrainerClientService({
   relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals,
   notify: (userId, message) => notificationService.notify(userId, message),
+  challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
 });

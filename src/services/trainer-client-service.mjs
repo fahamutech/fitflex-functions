@@ -50,6 +50,9 @@ export function normalizePermissions(input, base = {}) {
 export function createTrainerClientService({
   relationships, trainers, users, workouts, workoutPlans, activities, goals,
   notify = async () => {}, now = () => new Date(),
+  // (creatorType, creatorId, memberId) → the member's progress on that
+  // creator's challenges. Injected to avoid a circular dependency.
+  challengeProgressFor = async () => [],
 }) {
   const stamp = () => now().toISOString();
 
@@ -331,7 +334,7 @@ export function createTrainerClientService({
       }));
     }
     if (perms.streaks) out.streaks = computeStreaks(acts, memberGoals, now(), HISTORY_DAYS);
-    if (perms.challenges) out.challenges = { available: false };
+    if (perms.challenges) out.challenges = await challengeProgressFor('trainer', trainer.id, r.memberId);
     return out;
   }
 

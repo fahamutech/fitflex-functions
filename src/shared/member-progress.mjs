@@ -143,3 +143,38 @@ export function streaks(activities, goals = [], now = new Date(), historyDays = 
   }
   return out;
 }
+
+/**
+ * Progress on a challenge over its dates (inclusive local days). Mirrors
+ * the app's lib/shared/activity/challenge.dart.
+ *  steps / distance_km / active_minutes — totals
+ *  workouts        — workouts done
+ *  consistency     — active days (a workout, or 30+ active minutes)
+ *  gym_attendance  — distinct days with a gym check-in (only at `gymId`
+ *                    when the challenge belongs to a gym)
+ */
+export function challengeProgress(challenge, activities, checkins = [], gymId = null) {
+  const from = challenge.startDate;
+  const to = challenge.endDate;
+  const inRange = d => d >= from && d <= to;
+  const acts = activities.filter(a => inRange(localDay(a.startedAt)));
+  switch (challenge.type) {
+    case 'steps': return acts.reduce((n, a) => n + (a.steps ?? 0), 0);
+    case 'distance_km': return Math.round(acts.reduce((n, a) => n + (a.distanceKm ?? 0), 0) * 100) / 100;
+    case 'active_minutes': return acts.reduce((n, a) => n + activeMinutesOf(a), 0);
+    case 'workouts': return acts.filter(isWorkout).length;
+    case 'consistency': {
+      let n = 0;
+      for (const t of dailyTotals(acts).values()) {
+        if (t.workouts > 0 || t.activeMinutes >= STREAK_MIN_ACTIVE_MINUTES) n += 1;
+      }
+      return n;
+    }
+    case 'gym_attendance':
+      return new Set(checkins
+        .filter(c => !gymId || c.gymId === gymId)
+        .map(c => localDay(c.timestamp))
+        .filter(inRange)).size;
+    default: return 0;
+  }
+}

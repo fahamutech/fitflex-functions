@@ -7,7 +7,7 @@
 //   classAttendance — group classes the member logged at this gym
 //   gymWorkouts     — workouts done at this gym (type, date, duration;
 //                     never sets, weights or notes)
-//   challenges      — gym challenge participation (nothing to share yet)
+//   challenges      — progress on this gym's challenges the member joined
 // Activity elsewhere, steps, goals and streaks are never visible to a gym.
 import { randomUUID } from 'node:crypto';
 import { localDay, addDays, weekStart, isWorkout, activeMinutesOf } from '../shared/member-progress.mjs';
@@ -67,7 +67,11 @@ export function engagementFrom(checkinTimestamps, now) {
   };
 }
 
-export function createGymSharingService({ sharing, gyms, subscriptions, checkins, activities, users, now = () => new Date() }) {
+export function createGymSharingService({
+  sharing, gyms, subscriptions, checkins, activities, users, now = () => new Date(),
+  // (creatorType, creatorId, memberId) → progress on that gym's challenges.
+  challengeProgressFor = async () => [],
+}) {
   const gymCard = g => (g ? { id: g.id, name: g.name ?? null, location: g.location ?? null } : null);
 
   /** Gyms a member is connected to: their home gym(s) and gyms visited recently. */
@@ -160,7 +164,7 @@ export function createGymSharingService({ sharing, gyms, subscriptions, checkins
           entry.gymWorkouts = here.filter(a => a.type !== 'group_class' && isWorkout(a)).slice(0, LIST_LIMIT).map(brief);
         }
       }
-      if (perms.challenges) entry.challenges = { available: false };
+      if (perms.challenges) entry.challenges = await challengeProgressFor('gym', gymId, memberId);
       out.push(entry);
     }
     return { gyms: out };
@@ -214,5 +218,5 @@ export function createGymSharingService({ sharing, gyms, subscriptions, checkins
     };
   }
 
-  return { memberSharing, updateMemberSharing, ownerMemberActivity, ownerEngagement };
+  return { memberSharing, updateMemberSharing, ownerMemberActivity, ownerEngagement, memberGymIds };
 }

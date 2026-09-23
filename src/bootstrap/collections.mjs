@@ -37,3 +37,5 @@ export const workouts = collection('workouts');
 export const trainerMemberRelationships = collection('trainer_member_relationships');
 export const workoutPlans = collection('workout_plans');
 export const gymMemberSharing = collection('gym_member_sharing');
+export const challenges = collection('challenges');
+export const challengeParticipants = collection('challenge_participants');
