@@ -1,6 +1,6 @@
 // 5-band payout engine — pure logic.
 
-import { PAYOUT_BANDS, PER_VISIT_RATES_TZS } from './constants.mjs';
+import { PAYOUT_BANDS, GYM_PAYOUT_RATES_TZS } from './constants.mjs';
 
 export function bandFor(visitCount) {
   return PAYOUT_BANDS.find(b => visitCount >= b.min && visitCount <= b.max);
@@ -25,7 +25,7 @@ export function calculatePayout({ visitCount, gymTier, negotiatedPerVisitRate, f
     return { band: b.band, commissionPct: 0, gross: flatMonthlyFee, commission: 0,
              net: flatMonthlyFee, payoutDelayDays: 0, flatFee: true };
   }
-  const rate  = negotiatedPerVisitRate ?? PER_VISIT_RATES_TZS[gymTier];
+  const rate  = negotiatedPerVisitRate ?? GYM_PAYOUT_RATES_TZS[gymTier];
   const gross = rate * visitCount;
   const commission = Math.round(gross * b.commissionPct / 100);
   return {
