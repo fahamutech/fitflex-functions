@@ -100,6 +100,11 @@ export const portalUserService = createPortalUserService({ users, auditLog, init
 export const webhookService = createWebhookService({ subscriptions, webhookSeen });
 export const gymReviewService = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog });
 export const trainerReviewService = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog });
-export const whatsAppService = createWhatsAppService({ apiKey: process.env.AFRICAS_TALKING_API_KEY, users, auditLog });
+export const whatsAppService = createWhatsAppService({
+  apiKey: process.env.AFRICAS_TALKING_API_KEY,
+  apiUrl: process.env.AFRICAS_TALKING_API_URL || undefined,
+  username: process.env.AFRICAS_TALKING_USERNAME || undefined,
+  users, auditLog,
+});
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
