@@ -47,6 +47,14 @@ const TABLE_MAP = {
   trainer_reviews:   { table: 'TrainerReview' },
   device_tokens:     { table: 'DeviceToken' },
   notifications:     { table: 'Notification' },
+  activities:        { table: 'Activity' },
+  goals:             { table: 'Goal' },
+  workouts:          { table: 'Workout' },
+  trainer_member_relationships: { table: 'TrainerMemberRelationship' },
+  workout_plans:     { table: 'WorkoutPlan' },
+  gym_member_sharing: { table: 'GymMemberSharing' },
+  challenges:        { table: 'Challenge' },
+  challenge_participants: { table: 'ChallengeParticipant' },
   corporate_accounts:  { table: 'CorporateAccount' },
   corporate_employees: { table: 'CorporateEmployee' },
   corporate_bills:     { table: 'CorporateBill' },
@@ -507,6 +515,14 @@ const ALLOWED_FIELDS = {
   trainer_reviews:  new Set(['id','trainerId','memberId','rating','text','status','moderatedBy','moderatedAt','createdAt','updatedAt']),
   device_tokens:    new Set(['id','userId','token','platform','createdAt','lastSeenAt']),
   notifications:    new Set(['id','userId','type','title','body','data','readAt','createdAt']),
+  activities:       new Set(['id','userId','type','source','startedAt','durationMinutes','distanceKm','steps','activeMinutes','calories','intensity','workoutId','gymId','trainerId','notes','createdAt']),
+  goals:            new Set(['id','userId','type','period','target','startDate','endDate','source','trainerId','challengeId','status','createdAt','updatedAt']),
+  workouts:         new Set(['id','userId','trainerId','gymId','templateId','source','name','description','activityType','scheduledDate','estimatedDuration','status','exercises','notes','startedAt','completedAt','activityId','createdAt','updatedAt']),
+  trainer_member_relationships: new Set(['id','trainerId','memberId','status','permissions','requestedAt','connectedAt','endedAt','endedBy','createdAt','updatedAt']),
+  workout_plans:    new Set(['id','trainerId','name','description','activityType','estimatedDuration','exercises','createdAt','updatedAt']),
+  gym_member_sharing: new Set(['id','gymId','memberId','permissions','createdAt','updatedAt']),
+  challenges:       new Set(['id','name','description','type','target','startDate','endDate','creatorType','creatorId','createdBy','rewards','visibility','status','createdAt','updatedAt']),
+  challenge_participants: new Set(['id','challengeId','memberId','status','joinedAt','leftAt']),
   corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','status','createdAt','updatedAt']),
   corporate_employees: new Set(['id','corporateId','userId','displayName','phone','email','department','pinHash','status','activatedAt','createdAt','updatedAt']),
   corporate_bills:     new Set(['id','corporateId','period','passTier','subsidyModel','billingCycle','seatCount','perSeatMonthlyTzs','grossTzs','employerTzs','employeeTzs','status','paymentReference','paidAt','createdAt']),
@@ -528,6 +544,11 @@ const JSON_FIELDS = {
   marketplace_enquiries: ['messages'],
   marketplace_notifications: ['data'],
   notifications: ['data'],
+  workouts: ['exercises'],
+  trainer_member_relationships: ['permissions'],
+  workout_plans: ['exercises'],
+  gym_member_sharing: ['permissions'],
+  challenges: ['rewards'],
 };
 
 /**
@@ -547,7 +568,8 @@ function prepareForKnex(name, data, isUpdate = false) {
 
   // Convert date strings to Date objects for timestamp columns
   const DATE_FIELDS = ['createdAt', 'updatedAt', 'startedAt', 'cycleStartedAt', 'renewsAt', 'expiresAt',
-    'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt', 'lastSeenAt', 'readAt'];
+    'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt', 'lastSeenAt', 'readAt',
+    'completedAt', 'connectedAt', 'endedAt', 'joinedAt', 'leftAt'];
   for (const f of DATE_FIELDS) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];

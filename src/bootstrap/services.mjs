@@ -30,6 +30,12 @@ import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
 import { createWhatsAppService } from '../services/whatsapp-service.mjs';
 import { createFavoriteService } from '../services/favorite-service.mjs';
+import { createActivityService } from '../services/activity-service.mjs';
+import { createGoalService } from '../services/goal-service.mjs';
+import { createWorkoutService } from '../services/workout-service.mjs';
+import { createTrainerClientService } from '../services/trainer-client-service.mjs';
+import { createGymSharingService } from '../services/gym-sharing-service.mjs';
+import { createChallengeService } from '../services/challenge-service.mjs';
 import { createNotificationService } from '../services/notification-service.mjs';
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
@@ -41,7 +47,8 @@ import {
   marketplaceEnquiries, marketplaceNotifications, productReviews,
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
-  deviceTokens, notifications,
+  deviceTokens, notifications, activities, goals, workouts,
+  trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -121,9 +128,27 @@ export const whatsAppService = createWhatsAppService({
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
 export const favoriteService = createFavoriteService({ users, gyms });
+export const activityService = createActivityService({ activities });
+export const goalService = createGoalService({ goals });
+export const workoutService = createWorkoutService({ workouts, activities });
+export const gymSharingService = createGymSharingService({
+  sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
+  challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
+});
+export const challengeService = createChallengeService({
+  challenges, participants: challengeParticipants, users, trainers, gyms,
+  relationships: trainerMemberRelationships, gymMemberSharing,
+  gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
+  activities, checkins,
+});
 
 // Push is off unless PUSH_NOTIFICATIONS=on, so local dev and tests never call FCM.
 export const notificationService = createNotificationService({
   users, deviceTokens, notifications, whatsApp: whatsAppService,
   getMessaging: process.env.PUSH_NOTIFICATIONS === 'on' ? () => { initFirebaseAdmin(); return getMessaging(); } : null,
+});
+export const trainerClientService = createTrainerClientService({
+  relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
 });
