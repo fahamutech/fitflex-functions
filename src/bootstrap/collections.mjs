@@ -39,3 +39,4 @@ export const workoutPlans = collection('workout_plans');
 export const gymMemberSharing = collection('gym_member_sharing');
 export const challenges = collection('challenges');
 export const challengeParticipants = collection('challenge_participants');
+export const challengeTeams = collection('challenge_teams');
