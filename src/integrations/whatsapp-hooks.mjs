@@ -1,375 +1,91 @@
-// FitFlex Af — WhatsApp Integration Hooks for fitflex-functions backend
+// WhatsApp notification hooks — thin client for the standalone
+// fitflex-whatsapp service. Every notification is the same POST shape, so the
+// catalogue below is data rather than one function per template.
 //
-// This module exports helper functions that the existing backend (index.mjs)
-// can call to trigger WhatsApp notifications. It makes HTTP calls to the
-// standalone fitflex-whatsapp service.
-//
-// To wire this into index.mjs:
-//   1. Import at the top:
-//      import { createWhatsAppHooks } from '../src/integrations/whatsapp-hooks.mjs';
-//
-//   2. Initialize after collections are set up:
-//      const whatsapp = createWhatsAppHooks({
-//        apiBase: process.env.WHATSAPP_SERVICE_URL || 'http://localhost:3002',
-//        internalToken: process.env.FITFLEX_INTERNAL_TOKEN || 'fitflex-internal-dev'
-//      });
-//
-//   3. Call from existing endpoints:
-//      await whatsapp.notifyCheckIn({ user, gym, visit });
-//      await whatsapp.notifyBookingConfirmed({ booking, trainer });
-//      await whatsapp.notifySubscriptionRenewal({ subscription, daysRemaining });
-//      await whatsapp.sendOtp({ phone, code });
+// Delivery is fire-and-forget: a notification failure must never surface as an
+// error on the member-facing operation that triggered it.
 
-const BASE_TIMEOUT = 5000; // 5s timeout — notifications are fire-and-forget
+const REQUEST_TIMEOUT_MS = 5000;
 
-async function post(url, token, body) {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), BASE_TIMEOUT);
+// templateKey → params the service's message template interpolates.
+export const NOTIFICATION_TEMPLATES = Object.freeze({
+  checkin_receipt: ['gymName', 'date', 'time', 'visitsUsed', 'visitCap'],
+  checkin_failed: ['gymName', 'reason'],
+  booking_pending: ['trainerName', 'date', 'time'],
+  booking_confirmed: ['trainerName', 'date', 'time', 'gymName'],
+  booking_cancelled: ['trainerName', 'date', 'time', 'reason'],
+  booking_reminder: ['trainerName', 'date', 'time', 'gymName'],
+  trainer_booking_completed: ['memberName', 'date', 'amountTzs'],
+  subscription_activated: ['tier', 'expiresAt', 'visitCap'],
+  subscription_renewal: ['tier', 'daysRemaining', 'amountTzs'],
+  subscription_payment_failed: ['tier', 'amountTzs', 'reason'],
+  subscription_expired: ['tier', 'expiredAt'],
+  gym_payout: ['gymName', 'amountTzs', 'periodStart', 'periodEnd', 'reference'],
+  trainer_payout: ['amountTzs', 'periodStart', 'periodEnd', 'reference'],
+  credits_topup: ['amountTzs', 'balanceTzs'],
+  credits_deducted: ['amountTzs', 'balanceTzs', 'gymName'],
+  credits_expiry_warning: ['amountTzs', 'expiresAt'],
+  streak_nudge: ['streakDays'],
+  low_visits_nudge: ['visitsRemaining', 'daysRemaining'],
+  otp: ['code'],
+  corporate_monthly_report: ['companyName', 'period', 'activeStaff', 'engagementRatePct'],
+});
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
+/**
+ * @param {object}   config
+ * @param {string}  [config.apiBase]        Base URL of fitflex-whatsapp. Unset = notifier disabled.
+ * @param {string}  [config.internalToken]  Shared secret for the service's /internal routes.
+ * @param {boolean} [config.isProd]
+ * @param {Function}[config.fetchImpl]      Injectable for tests.
+ */
+export function createWhatsAppNotifier({
+  apiBase = process.env.WHATSAPP_SERVICE_URL,
+  internalToken = process.env.FITFLEX_INTERNAL_TOKEN,
+  isProd = process.env.NODE_ENV === 'production',
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  const enabled = Boolean(apiBase);
 
-    clearTimeout(timeout);
-    return await response.json();
-  } catch (err) {
-    // Never throw — notifications are fire-and-forget.
-    // Log and swallow so the primary operation is unaffected.
-    console.error('[WhatsApp hook] failed:', err.message);
-    return { ok: false, error: err.message, swallowed: true };
+  // Mirrors the JWT_SECRET contract in src/auth/jwt.mjs: never fall back to a
+  // baked-in shared secret, or an unconfigured production deploy would
+  // authenticate against the service with a publicly known token.
+  if (enabled && !internalToken) {
+    if (isProd) throw new Error('FATAL: FITFLEX_INTERNAL_TOKEN must be set when WHATSAPP_SERVICE_URL is configured');
+    console.warn('[whatsapp] FITFLEX_INTERNAL_TOKEN unset — notifications will be rejected by the service');
   }
-}
-
-export function createWhatsAppHooks({ apiBase, internalToken }) {
-  if (!apiBase) {
-    console.warn('[WhatsApp hooks] No apiBase configured — hooks will be no-ops');
-  }
-
-  const base = apiBase || 'http://localhost:3002';
-  const token = internalToken || 'fitflex-internal-dev';
-
-  // ─── Check-in Notifications ──────────────────────────────────────────────
-
-  async function notifyCheckIn({ user, gym, visit, visitsUsed, visitCap }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'checkin_receipt',
-      language: user.language || 'en',
-      params: {
-        gymName: gym.name,
-        date: visit.date,
-        time: visit.time,
-        visitsUsed: String(visitsUsed),
-        visitCap: visitCap ? String(visitCap) : '∞'
-      },
-      metadata: { type: 'checkin', memberId: user.id, gymId: gym.id }
-    });
+  if (!enabled) {
+    console.warn('[whatsapp] WHATSAPP_SERVICE_URL unset — notifications are disabled');
   }
 
-  async function notifyCheckInFailed({ user, gymName, reason }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'checkin_failed',
-      language: user.language || 'en',
-      params: { gymName, reason },
-      metadata: { type: 'checkin_failed', memberId: user.id }
-    });
+  async function notify({ to, templateKey, language = 'en', params = {}, metadata = {} }) {
+    if (!enabled) return { ok: false, skipped: 'notifier_disabled' };
+    if (!to) return { ok: false, skipped: 'no_recipient' };
+
+    const expected = NOTIFICATION_TEMPLATES[templateKey];
+    if (!expected) return { ok: false, skipped: 'unknown_template', templateKey };
+    const missing = expected.filter(p => params[p] === undefined || params[p] === null);
+    if (missing.length) return { ok: false, skipped: 'missing_params', templateKey, missing };
+
+    // The service interpolates params into a text template, so send strings.
+    const stringParams = Object.fromEntries(expected.map(p => [p, String(params[p])]));
+
+    try {
+      const response = await fetchImpl(`${apiBase}/internal/notify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${internalToken}` },
+        body: JSON.stringify({ to, templateKey, language, params: stringParams, metadata }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        console.warn(`[whatsapp] ${templateKey} rejected with ${response.status}`);
+        return { ok: false, status: response.status };
+      }
+      return { ok: true, ...(await response.json().catch(() => ({}))) };
+    } catch (err) {
+      console.warn(`[whatsapp] ${templateKey} delivery failed:`, err?.message || err);
+      return { ok: false, error: err?.message || 'delivery_failed' };
+    }
   }
 
-  // ─── Booking Notifications ──────────────────────────────────────────────
-
-  async function notifyBookingPending({ member, booking, trainerName }) {
-    return post(`${base}/internal/notify`, token, {
-      to: member.phone,
-      templateKey: 'booking_pending',
-      language: member.language || 'en',
-      params: {
-        trainerName,
-        date: booking.sessionDate,
-        time: booking.sessionTime
-      },
-      metadata: { type: 'booking_pending', bookingId: booking.id }
-    });
-  }
-
-  async function notifyBookingConfirmed({ member, booking, trainerName }) {
-    return post(`${base}/internal/notify`, token, {
-      to: member.phone,
-      templateKey: 'booking_confirmed',
-      language: member.language || 'en',
-      params: {
-        trainerName,
-        date: booking.sessionDate,
-        time: booking.sessionTime,
-        bookingId: booking.id
-      },
-      metadata: { type: 'booking_confirmed', bookingId: booking.id }
-    });
-  }
-
-  async function notifyBookingCancelled({ member, booking, trainerName, reason }) {
-    return post(`${base}/internal/notify`, token, {
-      to: member.phone,
-      templateKey: 'booking_cancelled',
-      language: member.language || 'en',
-      params: {
-        trainerName,
-        date: booking.sessionDate,
-        time: booking.sessionTime,
-        reason: reason || 'N/A'
-      },
-      metadata: { type: 'booking_cancelled', bookingId: booking.id }
-    });
-  }
-
-  async function notifyBookingReminder({ member, booking, trainerName, location }) {
-    return post(`${base}/internal/notify`, token, {
-      to: member.phone,
-      templateKey: 'booking_reminder',
-      language: member.language || 'en',
-      params: { trainerName, time: booking.sessionTime, location: location || 'TBD' },
-      metadata: { type: 'booking_reminder', bookingId: booking.id }
-    });
-  }
-
-  async function notifyTrainerBookingCompleted({ trainer, booking, memberName, monthCount }) {
-    return post(`${base}/internal/notify`, token, {
-      to: trainer.phone,
-      templateKey: 'booking_completed_trainer',
-      language: 'en',
-      params: {
-        memberName,
-        payoutAmount: String(booking.payout?.trainerPayout || 0),
-        payoutRef: booking.payoutRef || 'N/A',
-        monthCount: String(monthCount)
-      },
-      metadata: { type: 'trainer_payout', bookingId: booking.id }
-    });
-  }
-
-  // ─── Subscription Notifications ─────────────────────────────────────────
-
-  async function notifySubscriptionActivated({ user, subscription, visitCap }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'subscription_activated',
-      language: user.language || 'en',
-      params: {
-        tier: subscription.tier,
-        visitCap: visitCap ? String(visitCap) : 'Unlimited',
-        renewalDate: subscription.renewsAt?.split('T')[0] || 'N/A'
-      },
-      metadata: { type: 'subscription_activated', subscriptionId: subscription.id }
-    });
-  }
-
-  async function notifySubscriptionRenewal({ user, subscription, daysRemaining }) {
-    let templateKey;
-    if (daysRemaining === 3) templateKey = 'subscription_renewal_t3';
-    else if (daysRemaining === 1) templateKey = 'subscription_renewal_t1';
-    else if (daysRemaining === 0) templateKey = 'subscription_renewal_success';
-    else return { ok: false, skipped: true };
-
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey,
-      language: user.language || 'en',
-      params: {
-        tier: subscription.tier,
-        renewalDate: subscription.renewsAt?.split('T')[0] || 'N/A',
-        nextRenewalDate: subscription.renewsAt?.split('T')[0] || 'N/A'
-      },
-      metadata: { type: 'subscription_renewal', subscriptionId: subscription.id, daysRemaining }
-    });
-  }
-
-  async function notifySubscriptionPaymentFailed({ user, subscription }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'subscription_payment_failed',
-      language: user.language || 'en',
-      params: { tier: subscription.tier },
-      metadata: { type: 'payment_failed', subscriptionId: subscription.id }
-    });
-  }
-
-  async function notifySubscriptionExpired({ user, subscription }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'subscription_expired',
-      language: user.language || 'en',
-      params: {
-        tier: subscription.tier,
-        reactivationLink: 'https://fitflex.app/renew'
-      },
-      metadata: { type: 'subscription_expired', subscriptionId: subscription.id }
-    });
-  }
-
-  // ─── Payout Notifications ───────────────────────────────────────────────
-
-  async function notifyGymPayout({ operator, amount, walletName, reference, visitCount, band }) {
-    return post(`${base}/internal/notify`, token, {
-      to: operator.phone,
-      templateKey: 'payout_gym_owner',
-      language: 'en',
-      params: {
-        amount: String(amount),
-        walletName,
-        reference,
-        visitCount: String(visitCount),
-        band: String(band)
-      },
-      metadata: { type: 'gym_payout', gymId: operator.gymId }
-    });
-  }
-
-  async function notifyTrainerPayout({ trainer, amount, sessionCount, reference }) {
-    return post(`${base}/internal/notify`, token, {
-      to: trainer.phone,
-      templateKey: 'payout_trainer',
-      language: 'en',
-      params: {
-        amount: String(amount),
-        sessionCount: String(sessionCount),
-        reference
-      },
-      metadata: { type: 'trainer_payout', trainerId: trainer.id }
-    });
-  }
-
-  // ─── Credits Wallet Notifications ───────────────────────────────────────
-
-  async function notifyCreditsTopup({ user, amount, newBalance, expiryDate }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'credits_topup',
-      language: user.language || 'en',
-      params: {
-        amount: String(amount),
-        newBalance: String(newBalance),
-        expiryDate
-      },
-      metadata: { type: 'credits_topup', memberId: user.id }
-    });
-  }
-
-  async function notifyCreditsDeducted({ user, amount, reason, newBalance }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'credits_deducted',
-      language: user.language || 'en',
-      params: { amount: String(amount), reason, newBalance: String(newBalance) },
-      metadata: { type: 'credits_deducted', memberId: user.id }
-    });
-  }
-
-  async function notifyCreditsExpiryWarning({ user, daysRemaining, expiryDate }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'credits_expiry_warning',
-      language: user.language || 'en',
-      params: {
-        daysRemaining: String(daysRemaining),
-        expiryDate
-      },
-      metadata: { type: 'credits_expiry', memberId: user.id }
-    });
-  }
-
-  // ─── Re-engagement (Marketing) ───────────────────────────────────────────
-
-  async function notifyStreakNudge({ user, days, deeplink }) {
-    const templateKey = days >= 10 ? 'streak_nudge_10d' : 'streak_nudge_5d';
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey,
-      language: user.language || 'en',
-      params: {
-        memberName: user.displayName || 'there',
-        deeplink: deeplink || 'https://fitflex.app/gyms'
-      },
-      metadata: { type: 'streak_nudge', memberId: user.id, days }
-    });
-  }
-
-  async function notifyLowVisitsNudge({ user, visitsRemaining, deeplink }) {
-    return post(`${base}/internal/notify`, token, {
-      to: user.phone,
-      templateKey: 'low_visits_nudge',
-      language: user.language || 'en',
-      params: {
-        memberName: user.displayName || 'there',
-        visitsRemaining: String(visitsRemaining),
-        deeplink: deeplink || 'https://fitflex.app/gyms'
-      },
-      metadata: { type: 'low_visits_nudge', memberId: user.id }
-    });
-  }
-
-  // ─── OTP ─────────────────────────────────────────────────────────────────
-
-  async function sendOtp({ phone, code, language = 'en' }) {
-    return post(`${base}/internal/otp`, token, {
-      to: phone,
-      code,
-      language
-    });
-  }
-
-  // ─── Corporate ───────────────────────────────────────────────────────────
-
-  async function notifyCorporateMonthlyReport({ hrPhone, companyName, stats }) {
-    return post(`${base}/internal/notify`, token, {
-      to: hrPhone,
-      templateKey: 'corporate_monthly_report',
-      language: 'en',
-      params: {
-        companyName,
-        staffEnrolled: String(stats.staffEnrolled),
-        engagementRate: String(stats.engagementRate),
-        absenteeismDrop: String(stats.absenteeismDrop),
-        monthVisits: String(stats.monthVisits)
-      },
-      metadata: { type: 'corporate_report', companyName }
-    });
-  }
-
-  return {
-    // Check-in
-    notifyCheckIn,
-    notifyCheckInFailed,
-    // Booking
-    notifyBookingPending,
-    notifyBookingConfirmed,
-    notifyBookingCancelled,
-    notifyBookingReminder,
-    notifyTrainerBookingCompleted,
-    // Subscription
-    notifySubscriptionActivated,
-    notifySubscriptionRenewal,
-    notifySubscriptionPaymentFailed,
-    notifySubscriptionExpired,
-    // Payouts
-    notifyGymPayout,
-    notifyTrainerPayout,
-    // Credits
-    notifyCreditsTopup,
-    notifyCreditsDeducted,
-    notifyCreditsExpiryWarning,
-    // Re-engagement
-    notifyStreakNudge,
-    notifyLowVisitsNudge,
-    // OTP
-    sendOtp,
-    // Corporate
-    notifyCorporateMonthlyReport,
-  };
+  return { enabled, notify, templates: NOTIFICATION_TEMPLATES };
 }

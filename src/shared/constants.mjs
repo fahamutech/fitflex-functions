@@ -11,12 +11,24 @@ export const PASS_TIERS = Object.freeze({
 
 export const GYM_TIERS = Object.freeze(['online', 'standard', 'midtier', 'premium', 'luxury_executive']);
 
+// What a MEMBER pays in credits per visit (Pricing Strategy v2.0 §6.1).
 export const PER_VISIT_RATES_TZS = Object.freeze({
   online: 0,
   standard: 5_000,
   midtier:  8_000,
   premium:  13_000,
   luxury_executive: 22_500 // midpoint of 20-25k
+});
+
+// What FitFlex pays a GYM per visit when no negotiated rate is stored on the
+// gym (Pricing Strategy v2.0 §5.1, top of each range). Deliberately separate
+// from PER_VISIT_RATES_TZS: paying gyms the member price leaves no margin.
+export const GYM_PAYOUT_RATES_TZS = Object.freeze({
+  online: 0,
+  standard: 3_500,
+  midtier:  6_000,
+  premium:  12_000,
+  luxury_executive: 18_000
 });
 
 // 5-band payout structure (BL-019)

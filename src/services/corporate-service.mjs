@@ -1,469 +1,437 @@
-// FitFlex Af — Corporate Wellness Service (clean architecture + DI)
-//
-// Capabilities:
-//   - Corporate onboarding (3-step: identity → objectives → staff provisioning)
-//   - Staff roster with PIN provisioning and auto-generation
-//   - CSV bulk staff import with auto-PIN generation
-//   - Dual-mode dashboard (employer HR vs. insurer) with telemetry
-//   - Absenteeism drop index (from check-in frequency)
-//   - Engagement rate calculation (active / total)
-//   - Department breakdown analytics
-//   - Monthly billing statements (gross, subsidy, copay, net)
-//   - Staff access control (activate, suspend, exit)
-//   - Domain whitelisting for auto-verification
-//   - M-Pesa Business billing reference (Lipa Namba)
-
-import { randomUUID } from 'node:crypto';
+// Corporate wellness (B2B) — account onboarding, seat provisioning, telemetry
+// dashboard and seat billing. Pure DI: receives store collections via the factory.
+import { randomUUID, randomInt } from 'node:crypto';
+import { hashPassword } from '../auth/password-credentials.mjs';
 import {
-  INDUSTRY_SECTORS,
-  WORKFORCE_BRACKETS,
-  SUBSIDY_MODELS,
-  CORPORATE_STATUS,
-  EMPLOYEE_STATUS,
-  DASHBOARD_MODES,
-  HR_OBJECTIVES,
-  ENGAGEMENT_TARGET_PCT,
-  CORPORATE_PASS_TIERS,
-  BILLING_CYCLE,
-  calculateAbsenteeismDrop,
-  calculateEngagementRate,
-  calculateMonthlyBill
+  INDUSTRY_SECTORS, WORKFORCE_BRACKETS, SUBSIDY_MODELS, HR_OBJECTIVES,
+  CORPORATE_STATUS, EMPLOYEE_STATUS, BILLING_CYCLES, DASHBOARD_MODES,
+  ENGAGEMENT_TARGET_PCT, calculateAbsenteeismDrop, calculateEngagementRate, calculateBill,
 } from '../shared/corporate-constants.mjs';
 
-export function createCorporateService({ users, gyms, checkins, corporateAccounts, corporateEmployees, corporateBilling, auditLog }) {
+const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
 
-  // ─── Onboarding ──────────────────────────────────────────────────────────
+export function createCorporateService({
+  users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
+}) {
+  const now = () => new Date().toISOString();
 
-  function onboardCorporate({ companyName, industrySector, workforceBracket, hrContactName, hrContactPhone, hrContactEmail, objectives, subsidyModel, corporatePassTier, billingCycle, domainWhitelist, lipaNamba }) {
-    if (!companyName) return { ok: false, error: 'company_name_required' };
-    if (!industrySector || !INDUSTRY_SECTORS[industrySector])
-      return { ok: false, error: 'invalid_industry_sector' };
-    if (!workforceBracket || !WORKFORCE_BRACKETS[workforceBracket])
-      return { ok: false, error: 'invalid_workforce_bracket' };
-    if (!subsidyModel || !Object.values(SUBSIDY_MODELS).includes(subsidyModel))
-      return { ok: false, error: 'invalid_subsidy_model' };
+  async function audit({ actor, action, target, before = null, after = null }) {
+    await auditLog.insertAsync({
+      id: `aud_${randomUUID().slice(0, 8)}`, at: now(), actor, action, target, before, after,
+    });
+  }
 
-    const account = {
-      id: `crp_${randomUUID().slice(0, 8)}`,
-      companyName,
+  function reference() {
+    return {
+      industrySectors: INDUSTRY_SECTORS,
+      workforceBrackets: WORKFORCE_BRACKETS,
+      subsidyModels: Object.keys(SUBSIDY_MODELS),
+      hrObjectives: HR_OBJECTIVES,
+      billingCycles: BILLING_CYCLES,
+      engagementTargetPct: ENGAGEMENT_TARGET_PCT,
+    };
+  }
+
+  // ── Account lifecycle ─────────────────────────────────────────────────────
+
+  async function onboard({ body = {}, actorId }) {
+    const {
+      companyName, industrySector, workforceBracket, subsidyModel, passTier,
+      hrContactName, hrContactPhone, hrContactEmail, objectives, domainWhitelist,
+      billingCycle = 'monthly', seatLimit = 0, baselineSickDays = 7, lipaNamba,
+    } = body;
+
+    if (!companyName?.trim()) return { error: 'company_name_required', status: 400 };
+    if (!INDUSTRY_SECTORS[industrySector]) return { error: 'invalid_industry_sector', status: 400 };
+    if (!WORKFORCE_BRACKETS[workforceBracket]) return { error: 'invalid_workforce_bracket', status: 400 };
+    if (SUBSIDY_MODELS[subsidyModel] === undefined) return { error: 'invalid_subsidy_model', status: 400 };
+    if (!BILLING_CYCLES.includes(billingCycle)) return { error: 'invalid_billing_cycle', status: 400 };
+    if (!settingsService.getTierConfig(passTier)) return { error: 'invalid_pass_tier', status: 400 };
+
+    const unknownObjectives = (objectives || []).filter(o => !HR_OBJECTIVES.includes(o));
+    if (unknownObjectives.length) {
+      return { error: 'invalid_objectives', status: 400, invalid: unknownObjectives };
+    }
+
+    const account = await corporateAccounts.insertAsync({
+      id: `corp_${randomUUID().slice(0, 8)}`,
+      companyName: companyName.trim(),
       industrySector,
       workforceBracket,
-      hrContactName: hrContactName || null,
-      hrContactPhone: hrContactPhone || null,
-      hrContactEmail: hrContactEmail || null,
+      hrContactName: hrContactName ?? null,
+      hrContactPhone: hrContactPhone ?? null,
+      hrContactEmail: hrContactEmail ?? null,
       objectives: objectives || [],
+      domainWhitelist: (domainWhitelist || []).map(d => String(d).trim().toLowerCase()),
       subsidyModel,
-      corporatePassTier: corporatePassTier || 'basic',
-      billingCycle: billingCycle || BILLING_CYCLE.MONTHLY,
-      domainWhitelist: domainWhitelist || [],
-      lipaNamba: lipaNamba || null,
-      status: CORPORATE_STATUS.PENDING,
-      seatLimit: 0,
+      passTier,
+      billingCycle,
+      seatLimit: Number(seatLimit) || 0,
       seatsUsed: 0,
-      createdAt: new Date().toISOString(),
-      activatedAt: null
-    };
-
-    corporateAccounts.insert(account);
-    return { ok: true, account };
+      baselineSickDays: Number(baselineSickDays) || 7,
+      lipaNamba: lipaNamba ?? null,
+      status: 'pending',
+      createdAt: now(),
+      updatedAt: now(),
+    });
+    await audit({ actor: actorId, action: 'corporate.onboard', target: account.id, after: account });
+    return { account };
   }
 
-  function activateCorporate(accountId, adminId) {
-    const account = corporateAccounts.find(a => a.id === accountId);
-    if (!account) return { ok: false, error: 'account_not_found' };
-    if (account.status === CORPORATE_STATUS.ACTIVE)
-      return { ok: false, error: 'already_active' };
+  async function setStatus({ corporateId, status, actorId }) {
+    if (!CORPORATE_STATUS.includes(status)) return { error: 'invalid_status', status: 400 };
+    const account = await corporateAccounts.findByIdAsync(corporateId);
+    if (!account) return { error: 'account_not_found', status: 404 };
+    if (account.status === status) return { account, unchanged: true };
 
-    const updated = corporateAccounts.update(a => a.id === accountId, {
-      status: CORPORATE_STATUS.ACTIVE,
-      activatedAt: new Date().toISOString(),
-      activatedBy: adminId
-    });
-
-    auditLog?.insert({
-      id: randomUUID(), at: new Date().toISOString(),
-      actor: adminId, action: 'corporate_activated',
-      target: accountId, before: account, after: updated
-    });
-
-    return { ok: true, account: updated };
+    const updated = await corporateAccounts.updateByIdAsync(corporateId, { status, updatedAt: now() });
+    await audit({ actor: actorId, action: `corporate.${status}`, target: corporateId, before: account, after: updated });
+    return { account: updated };
   }
 
-  function suspendCorporate(accountId, adminId) {
-    const updated = corporateAccounts.update(a => a.id === accountId, {
-      status: CORPORATE_STATUS.SUSPENDED
-    });
-    auditLog?.insert({
-      id: randomUUID(), at: new Date().toISOString(),
-      actor: adminId, action: 'corporate_suspended', target: accountId
-    });
-    return { ok: true, account: updated };
-  }
+  async function update({ corporateId, body = {}, actorId }) {
+    const account = await corporateAccounts.findByIdAsync(corporateId);
+    if (!account) return { error: 'account_not_found', status: 404 };
 
-  function updateCorporateAccount(accountId, updates) {
-    const account = corporateAccounts.find(a => a.id === accountId);
-    if (!account) return { ok: false, error: 'account_not_found' };
-    const allowed = ['companyName', 'industrySector', 'workforceBracket', 'hrContactName',
-                     'hrContactPhone', 'hrContactEmail', 'objectives', 'subsidyModel',
-                     'corporatePassTier', 'billingCycle', 'domainWhitelist', 'lipaNamba', 'seatLimit'];
-    const patch = {};
-    for (const key of allowed) {
-      if (updates[key] !== undefined) patch[key] = updates[key];
+    const patch = { updatedAt: now() };
+    if (body.subsidyModel !== undefined) {
+      if (SUBSIDY_MODELS[body.subsidyModel] === undefined) return { error: 'invalid_subsidy_model', status: 400 };
+      patch.subsidyModel = body.subsidyModel;
     }
-    const updated = corporateAccounts.update(a => a.id === accountId, patch);
-    return { ok: true, account: updated };
-  }
-
-  // ─── Staff Roster & PIN Provisioning ──────────────────────────────────────
-
-  function generatePin() {
-    return String(Math.floor(1000 + Math.random() * 9000));
-  }
-
-  function provisionStaff({ accountId, name, phone, email, department, pin }) {
-    const account = corporateAccounts.find(a => a.id === accountId);
-    if (!account) return { ok: false, error: 'account_not_found' };
-    if (account.status !== CORPORATE_STATUS.ACTIVE)
-      return { ok: false, error: 'account_not_active' };
-    if (account.seatLimit > 0 && account.seatsUsed >= account.seatLimit)
-      return { ok: false, error: 'seat_limit_reached' };
-
-    const employee = {
-      id: `emp_${randomUUID().slice(0, 8)}`,
-      accountId,
-      name: name || 'Employee',
-      phone: phone || null,
-      email: email || null,
-      department: department || null,
-      pin: pin || generatePin(),
-      status: EMPLOYEE_STATUS.PENDING,
-      activatedAt: null,
-      lastVisitDate: null,
-      totalVisits: 0,
-      createdAt: new Date().toISOString()
-    };
-
-    corporateEmployees.insert(employee);
-    corporateAccounts.update(a => a.id === accountId, {
-      seatsUsed: (account.seatsUsed || 0) + 1
-    });
-
-    return { ok: true, employee };
-  }
-
-  function bulkProvisionStaff({ accountId, rawText, defaultDepartment }) {
-    const account = corporateAccounts.find(a => a.id === accountId);
-    if (!account) return { ok: false, error: 'account_not_found' };
-    if (account.status !== CORPORATE_STATUS.ACTIVE)
-      return { ok: false, error: 'account_not_active' };
-
-    // Parse CSV (name, phone, email, department)
-    const lines = rawText.trim().split(/\r?\n/).filter(l => l.trim());
-    const imported = [];
-    const errors = [];
-
-    for (let i = 0; i < lines.length; i++) {
-      const cells = lines[i].split(/[,\t]/).map(c => c.trim());
-      const [name, phone, email, department] = cells;
-
-      if (!name) { errors.push({ row: i + 1, error: 'missing_name' }); continue; }
-      if (account.seatLimit > 0 && account.seatsUsed + imported.length >= account.seatLimit) {
-        errors.push({ row: i + 1, error: 'seat_limit_reached' });
-        break;
+    if (body.passTier !== undefined) {
+      if (!settingsService.getTierConfig(body.passTier)) return { error: 'invalid_pass_tier', status: 400 };
+      patch.passTier = body.passTier;
+    }
+    if (body.billingCycle !== undefined) {
+      if (!BILLING_CYCLES.includes(body.billingCycle)) return { error: 'invalid_billing_cycle', status: 400 };
+      patch.billingCycle = body.billingCycle;
+    }
+    if (body.seatLimit !== undefined) {
+      const seatLimit = Number(body.seatLimit);
+      if (!Number.isInteger(seatLimit) || seatLimit < 0) return { error: 'invalid_seat_limit', status: 400 };
+      if (seatLimit > 0 && seatLimit < account.seatsUsed) {
+        return { error: 'seat_limit_below_seats_used', status: 409, seatsUsed: account.seatsUsed };
       }
-
-      const result = provisionStaff({
-        accountId, name, phone, email,
-        department: department || defaultDepartment
-      });
-
-      if (result.ok) imported.push(result.employee);
-      else errors.push({ row: i + 1, error: result.error });
+      patch.seatLimit = seatLimit;
     }
+    for (const field of ['hrContactName', 'hrContactPhone', 'hrContactEmail', 'lipaNamba']) {
+      if (body[field] !== undefined) patch[field] = body[field];
+    }
+    if (body.domainWhitelist !== undefined) {
+      patch.domainWhitelist = (body.domainWhitelist || []).map(d => String(d).trim().toLowerCase());
+    }
+    if (body.baselineSickDays !== undefined) patch.baselineSickDays = Number(body.baselineSickDays) || 7;
 
-    return { ok: true, imported: imported.length, errors: errors.length, errorDetails: errors, employees: imported };
+    const updated = await corporateAccounts.updateByIdAsync(corporateId, patch);
+    await audit({ actor: actorId, action: 'corporate.update', target: corporateId, before: account, after: updated });
+    return { account: updated };
   }
 
-  function activateEmployee(employeeId, adminId) {
-    const employee = corporateEmployees.find(e => e.id === employeeId);
-    if (!employee) return { ok: false, error: 'employee_not_found' };
-    const updated = corporateEmployees.update(e => e.id === employeeId, {
-      status: EMPLOYEE_STATUS.ACTIVE,
-      activatedAt: new Date().toISOString()
+  async function adminList({ status } = {}) {
+    const rows = status
+      ? await corporateAccounts.filterByColumnAsync('status', status)
+      : await corporateAccounts.allAsync();
+    return { accounts: rows.sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0)) };
+  }
+
+  /** Does `email` fall under an account's whitelisted domains? */
+  async function verifyDomain({ corporateId, email }) {
+    const account = await corporateAccounts.findByIdAsync(corporateId);
+    if (!account) return { error: 'account_not_found', status: 404 };
+    const domain = String(email || '').split('@')[1]?.toLowerCase();
+    if (!domain) return { error: 'invalid_email', status: 400 };
+    const whitelist = account.domainWhitelist || [];
+    return { matched: whitelist.includes(domain), domain, whitelist };
+  }
+
+  // ── Seat provisioning ─────────────────────────────────────────────────────
+
+  // 4-digit activation PIN. crypto.randomInt (not Math.random) because this is
+  // a credential; only the scrypt hash is stored.
+  const generatePin = () => String(randomInt(1000, 10000));
+
+  async function requireActiveAccount(corporateId) {
+    const account = await corporateAccounts.findByIdAsync(corporateId);
+    if (!account) return { error: 'account_not_found', status: 404 };
+    if (account.status !== 'active') return { error: 'account_not_active', status: 409, accountStatus: account.status };
+    return { account };
+  }
+
+  async function buildEmployee({ corporateId, displayName, phone, email, department }) {
+    const pin = generatePin();
+    return {
+      row: {
+        id: `cemp_${randomUUID().slice(0, 8)}`,
+        corporateId,
+        userId: null,
+        displayName: String(displayName).trim(),
+        phone: phone?.trim() || null,
+        email: email?.trim()?.toLowerCase() || null,
+        department: department?.trim() || null,
+        pinHash: await hashPassword(pin),
+        status: 'pending',
+        activatedAt: null,
+        createdAt: now(),
+        updatedAt: now(),
+      },
+      pin,
+    };
+  }
+
+  async function provisionStaff({ corporateId, body = {}, actorId }) {
+    const guard = await requireActiveAccount(corporateId);
+    if (guard.error) return guard;
+    const { account } = guard;
+
+    if (!body.displayName?.trim()) return { error: 'display_name_required', status: 400 };
+    if (account.seatLimit > 0 && account.seatsUsed >= account.seatLimit) {
+      return { error: 'seat_limit_reached', status: 409, seatLimit: account.seatLimit };
+    }
+
+    const { row, pin } = await buildEmployee({ corporateId, ...body });
+    const employee = await corporateEmployees.insertAsync(row);
+    await corporateAccounts.updateByIdAsync(corporateId, {
+      seatsUsed: account.seatsUsed + 1, updatedAt: now(),
     });
-    return { ok: true, employee: updated };
+    await audit({ actor: actorId, action: 'corporate.staff.provision', target: employee.id, after: employee });
+
+    // PIN is returned exactly once so HR can distribute it; it is never re-readable.
+    return { employee, pin };
   }
 
-  function suspendEmployee(employeeId, reason) {
-    const updated = corporateEmployees.update(e => e.id === employeeId, {
-      status: EMPLOYEE_STATUS.SUSPENDED,
-      suspensionReason: reason || null
+  /**
+   * Bulk provision from pasted CSV: `name,phone,email,department` per line.
+   * Rows are validated first — the import is all-or-nothing so a typo halfway
+   * down a paste cannot leave an account half-provisioned.
+   */
+  async function bulkProvisionStaff({ corporateId, body = {}, actorId }) {
+    const guard = await requireActiveAccount(corporateId);
+    if (guard.error) return guard;
+    const { account } = guard;
+
+    const lines = String(body.rawText || '')
+      .split('\n').map(l => l.trim()).filter(Boolean);
+    if (!lines.length) return { error: 'no_rows', status: 400 };
+
+    const parsed = [];
+    const errors = [];
+    lines.forEach((line, index) => {
+      const [displayName, phone, email, department] = line.split(',').map(c => c?.trim() ?? '');
+      if (!displayName) return errors.push({ line: index + 1, error: 'display_name_required' });
+      if (email && !email.includes('@')) return errors.push({ line: index + 1, error: 'invalid_email' });
+      parsed.push({ displayName, phone, email, department: department || body.defaultDepartment });
     });
-    return { ok: true, employee: updated };
-  }
+    if (errors.length) return { error: 'invalid_rows', status: 400, errors };
 
-  function exitEmployee(employeeId) {
-    const updated = corporateEmployees.update(e => e.id === employeeId, {
-      status: EMPLOYEE_STATUS.EXITED,
-      exitDate: new Date().toISOString()
+    const seatsAvailable = account.seatLimit > 0 ? account.seatLimit - account.seatsUsed : Infinity;
+    if (parsed.length > seatsAvailable) {
+      return { error: 'seat_limit_reached', status: 409, seatsAvailable, requested: parsed.length };
+    }
+
+    const built = await Promise.all(parsed.map(p => buildEmployee({ corporateId, ...p })));
+    const employees = await Promise.all(built.map(b => corporateEmployees.insertAsync(b.row)));
+    await corporateAccounts.updateByIdAsync(corporateId, {
+      seatsUsed: account.seatsUsed + employees.length, updatedAt: now(),
     });
-    return { ok: true, employee: updated };
+    await audit({
+      actor: actorId, action: 'corporate.staff.bulk_provision', target: corporateId,
+      after: { imported: employees.length },
+    });
+
+    return {
+      imported: employees.length,
+      // Paired with each employee so HR can hand out PINs after a bulk import.
+      credentials: built.map(b => ({ employeeId: b.row.id, displayName: b.row.displayName, pin: b.pin })),
+    };
   }
 
-  function listStaff(accountId, { search, department, status, limit = 100 } = {}) {
-    let list = corporateEmployees.filter(e => e.accountId === accountId);
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter(e =>
-        (e.name || '').toLowerCase().includes(q) ||
-        (e.email || '').toLowerCase().includes(q) ||
-        (e.phone || '').includes(q)
-      );
+  async function setEmployeeStatus({ corporateId, employeeId, status, actorId }) {
+    if (!EMPLOYEE_STATUS.includes(status)) return { error: 'invalid_status', status: 400 };
+    const employee = await corporateEmployees.findByIdAsync(employeeId);
+    if (!employee || employee.corporateId !== corporateId) return { error: 'employee_not_found', status: 404 };
+    if (employee.status === status) return { employee, unchanged: true };
+
+    const patch = { status, updatedAt: now() };
+    if (status === 'active' && !employee.activatedAt) patch.activatedAt = now();
+    const updated = await corporateEmployees.updateByIdAsync(employeeId, patch);
+
+    // Exiting frees the seat back to the account's pool.
+    if (status === 'exited' && employee.status !== 'exited') {
+      const account = await corporateAccounts.findByIdAsync(corporateId);
+      if (account) {
+        await corporateAccounts.updateByIdAsync(corporateId, {
+          seatsUsed: Math.max(0, account.seatsUsed - 1), updatedAt: now(),
+        });
+      }
     }
-    if (department) list = list.filter(e => e.department === department);
-    if (status) list = list.filter(e => e.status === status);
-    return list.sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)).slice(0, limit);
+    await audit({ actor: actorId, action: `corporate.staff.${status}`, target: employeeId, before: employee, after: updated });
+    return { employee: updated };
   }
 
-  function getEmployee(employeeId) {
-    return corporateEmployees.find(e => e.id === employeeId) || null;
+  async function listStaff({ corporateId, search, department, status }) {
+    const rows = await corporateEmployees.filterByColumnAsync('corporateId', corporateId);
+    const needle = search?.trim().toLowerCase();
+    const employees = rows
+      .filter(e => (status ? e.status === status : true))
+      .filter(e => (department ? e.department === department : true))
+      .filter(e => (needle
+        ? [e.displayName, e.email, e.phone].some(v => v?.toLowerCase().includes(needle))
+        : true))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName))
+      // pinHash must never leave the service.
+      .map(({ pinHash, ...rest }) => rest);
+    return { employees };
   }
 
-  // ─── Dashboard & Telemetry ──────────────────────────────────────────────────
+  // ── Dashboard ─────────────────────────────────────────────────────────────
 
-  function getDashboard(accountId, { mode = DASHBOARD_MODES.EMPLOYER } = {}) {
-    const account = corporateAccounts.find(a => a.id === accountId);
-    if (!account) return null;
+  async function dashboard({ corporateId, mode = 'employer' }) {
+    if (!DASHBOARD_MODES.includes(mode)) return { error: 'invalid_mode', status: 400 };
+    const account = await corporateAccounts.findByIdAsync(corporateId);
+    if (!account) return { error: 'account_not_found', status: 404 };
 
-    const employees = corporateEmployees.filter(e => e.accountId === accountId);
-    const activeCount = employees.filter(e => e.status === EMPLOYEE_STATUS.ACTIVE).length;
-    const pendingCount = employees.filter(e => e.status === EMPLOYEE_STATUS.PENDING).length;
-    const totalCount = employees.length;
-    const engagementRate = calculateEngagementRate({ activeCount, totalCount });
+    const roster = await corporateEmployees.filterByColumnAsync('corporateId', corporateId);
+    const enrolled = roster.filter(e => e.status !== 'exited');
+    const activeCount = roster.filter(e => e.status === 'active').length;
+    const engagementRatePct = calculateEngagementRate({ activeCount, totalCount: enrolled.length });
 
-    // Absenteeism drop — from check-in frequency of corporate employees
-    const employeeIds = employees.map(e => e.id);
-    const corporateCheckins = checkins.filter ? checkins.filter(c => employeeIds.includes(c.memberId)) : [];
+    const linkedUserIds = enrolled.map(e => e.userId).filter(Boolean);
+    const visits = linkedUserIds.length
+      ? await checkins.filterByColumnInAsync('memberId', linkedUserIds)
+      : [];
 
-    // Calculate avg visits per week (last 4 weeks)
-    const fourWeeksAgo = Date.now() - 28 * 86_400_000;
-    const recentCheckins = corporateCheckins.filter(c => +new Date(c.timestamp) >= fourWeeksAgo);
-    const activeEmployees = employees.filter(e => e.status === EMPLOYEE_STATUS.ACTIVE).length || 1;
-    const avgVisitsPerWeek = (recentCheckins.length / 4) / activeEmployees;
-    const absenteeism = calculateAbsenteeismDrop({ avgVisitsPerWeek, baselineSickDays: 7 });
+    // Average weekly visits per active employee across the observed window.
+    const timestamps = visits.map(v => +new Date(v.timestamp)).filter(Number.isFinite);
+    const spanWeeks = timestamps.length
+      ? Math.max(1, (Date.now() - Math.min(...timestamps)) / MS_PER_WEEK)
+      : 1;
+    const avgVisitsPerWeek = activeCount ? visits.length / spanWeeks / activeCount : 0;
 
-    // Department breakdown
-    const deptMap = {};
-    for (const emp of employees) {
-      const dept = emp.department || 'Unassigned';
-      if (!deptMap[dept]) deptMap[dept] = { department: dept, total: 0, active: 0, visits: 0 };
-      deptMap[dept].total++;
-      if (emp.status === EMPLOYEE_STATUS.ACTIVE) deptMap[dept].active++;
-      deptMap[dept].visits += emp.totalVisits || 0;
-    }
-    const departmentBreakdown = Object.values(deptMap).map(d => ({
-      ...d,
-      engagementRate: d.total > 0 ? Math.round((d.active / d.total) * 100) : 0
-    })).sort((a, b) => b.active - a.active);
+    const absenteeism = calculateAbsenteeismDrop({
+      avgVisitsPerWeek, baselineSickDays: account.baselineSickDays,
+    });
 
-    // Monthly visit data (last 6 months for trend)
-    const monthlyVisits = {};
-    const now = new Date();
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = d.toISOString().slice(0, 7);
-      monthlyVisits[key] = 0;
-    }
-    for (const c of corporateCheckins) {
-      const key = new Date(c.timestamp).toISOString().slice(0, 7);
-      if (monthlyVisits[key] !== undefined) monthlyVisits[key]++;
-    }
-
-    const base = {
-      account,
-      totalEnrolled: totalCount,
-      activeCount,
-      pendingCount,
-      engagementRate,
-      engagementTarget: ENGAGEMENT_TARGET_PCT,
-      absenteeism,
-      departmentBreakdown,
-      monthlyVisits: Object.entries(monthlyVisits).map(([month, visits]) => ({ month, visits }))
+    const shared = {
+      companyName: account.companyName,
+      mode,
+      seats: {
+        limit: account.seatLimit,
+        used: account.seatsUsed,
+        enrolled: enrolled.length,
+        active: activeCount,
+      },
+      engagement: {
+        ratePct: engagementRatePct,
+        targetPct: ENGAGEMENT_TARGET_PCT,
+        onTrack: engagementRatePct >= ENGAGEMENT_TARGET_PCT,
+      },
+      visits: {
+        total: visits.length,
+        avgPerWeekPerActiveEmployee: Number(avgVisitsPerWeek.toFixed(2)),
+      },
     };
 
-    if (mode === DASHBOARD_MODES.INSURER) {
-      // Insurance-specific metrics
+    if (mode === 'insurer') {
       return {
-        ...base,
-        mode: 'insurer',
-        metrics: {
-          groupSize: totalCount,
-          activeMembers: activeCount,
-          engagementRate,
-          lifestyleRiskMitigation: engagementRate >= 75 ? 'Low Risk' : engagementRate >= 50 ? 'Moderate Risk' : 'High Risk',
-          premiumDiscountEligible: engagementRate >= ENGAGEMENT_TARGET_PCT,
-          estimatedClaimsReduction: absenteeism.dropPct
-        }
+        dashboard: {
+          ...shared,
+          absenteeism,
+          estimatedSickDaysAvoided: absenteeism.estimatedDaysReduced * activeCount,
+        },
       };
     }
 
-    // Employer mode (default)
-    return {
-      ...base,
-      mode: 'employer',
-      metrics: {
-        retentionIndex: Math.round(engagementRate * 0.7), // simplified
-        productivityScore: Math.min(100, Math.round(avgVisitsPerWeek * 20)),
-        burnoutMitigation: engagementRate >= 50 ? 'Effective' : 'Needs attention',
-        staffSatisfaction: engagementRate // proxy
-      }
-    };
+    const byDepartment = {};
+    for (const e of enrolled) {
+      const key = e.department || 'unassigned';
+      byDepartment[key] ??= { enrolled: 0, active: 0 };
+      byDepartment[key].enrolled += 1;
+      if (e.status === 'active') byDepartment[key].active += 1;
+    }
+    return { dashboard: { ...shared, absenteeism, byDepartment } };
   }
 
-  // ─── Billing ────────────────────────────────────────────────────────────────
+  // ── Billing ───────────────────────────────────────────────────────────────
 
-  function getMonthlyBill(accountId, { month } = {}) {
-    const account = corporateAccounts.find(a => a.id === accountId);
-    if (!account) return null;
+  async function generateBill({ corporateId, period, actorId }) {
+    const account = await corporateAccounts.findByIdAsync(corporateId);
+    if (!account) return { error: 'account_not_found', status: 404 };
+    const billingPeriod = period || new Date().toISOString().slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(billingPeriod)) return { error: 'invalid_period', status: 400 };
 
-    const employees = corporateEmployees.filter(e =>
-      e.accountId === accountId &&
-      [EMPLOYEE_STATUS.ACTIVE, EMPLOYEE_STATUS.PENDING].includes(e.status)
+    const existing = await corporateBills.findAsync(
+      b => b.corporateId === corporateId && b.period === billingPeriod,
     );
-    const seatCount = employees.length;
+    if (existing) return { bill: existing, idempotent: true };
 
-    const bill = calculateMonthlyBill({
-      tier: account.corporatePassTier,
-      seatCount,
-      subsidyModel: account.subsidyModel,
-      billingCycle: account.billingCycle
-    });
+    const roster = await corporateEmployees.filterByColumnAsync('corporateId', corporateId);
+    const seatCount = roster.filter(e => e.status === 'active').length;
 
-    const billingRecord = {
-      id: `bil_${randomUUID().slice(0, 8)}`,
-      accountId,
-      month: month || new Date().toISOString().slice(0, 7),
-      ...bill,
-      status: 'pending', // pending → paid
-      generatedAt: new Date().toISOString(),
+    let breakdown;
+    try {
+      breakdown = calculateBill({
+        perSeatMonthlyTzs: settingsService.priceForTier(account.passTier),
+        seatCount,
+        subsidyModel: account.subsidyModel,
+        billingCycle: account.billingCycle,
+      });
+    } catch (err) {
+      return { error: 'bill_calculation_failed', status: 422, detail: err.message };
+    }
+
+    const bill = await corporateBills.insertAsync({
+      id: `cbill_${randomUUID().slice(0, 8)}`,
+      corporateId,
+      period: billingPeriod,
+      passTier: account.passTier,
+      subsidyModel: breakdown.subsidyModel,
+      billingCycle: breakdown.billingCycle,
+      seatCount: breakdown.seatCount,
+      perSeatMonthlyTzs: breakdown.perSeatMonthlyTzs,
+      grossTzs: breakdown.grossTzs,
+      employerTzs: breakdown.employerTzs,
+      employeeTzs: breakdown.employeeTzs,
+      status: 'unpaid',
+      paymentReference: null,
       paidAt: null,
-      paymentRef: null,
-      lipaNamba: account.lipaNamba
-    };
-
-    corporateBilling.insert(billingRecord);
-    return billingRecord;
-  }
-
-  function getBillingHistory(accountId, { limit = 12 } = {}) {
-    return corporateBilling
-      .filter(b => b.accountId === accountId)
-      .sort((a, b) => +new Date(b.generatedAt) - +new Date(a.generatedAt))
-      .slice(0, limit);
-  }
-
-  function markBillPaid(billId, { paymentRef, adminId }) {
-    const bill = corporateBilling.find(b => b.id === billId);
-    if (!bill) return { ok: false, error: 'bill_not_found' };
-    const updated = corporateBilling.update(b => b.id === billId, {
-      status: 'paid',
-      paidAt: new Date().toISOString(),
-      paymentRef: paymentRef || null
+      createdAt: now(),
     });
-    auditLog?.insert({
-      id: randomUUID(), at: new Date().toISOString(),
-      actor: adminId, action: 'corporate_bill_paid', target: billId
+    await audit({ actor: actorId, action: 'corporate.bill.generate', target: bill.id, after: bill });
+    return { bill };
+  }
+
+  async function listBills({ corporateId }) {
+    const rows = await corporateBills.filterByColumnAsync('corporateId', corporateId);
+    return { bills: rows.sort((a, b) => b.period.localeCompare(a.period)) };
+  }
+
+  async function markBillPaid({ billId, paymentReference, actorId }) {
+    if (!paymentReference?.trim()) return { error: 'payment_reference_required', status: 400 };
+    const bill = await corporateBills.findByIdAsync(billId);
+    if (!bill) return { error: 'bill_not_found', status: 404 };
+    if (bill.status === 'paid') return { bill, idempotent: true };
+
+    const updated = await corporateBills.updateByIdAsync(billId, {
+      status: 'paid', paymentReference: paymentReference.trim(), paidAt: now(),
     });
-    return { ok: true, bill: updated };
+    await audit({ actor: actorId, action: 'corporate.bill.paid', target: billId, before: bill, after: updated });
+    return { bill: updated };
   }
 
-  // ─── Domain Whitelisting ────────────────────────────────────────────────────
-
-  function verifyDomain(accountId, email) {
-    const account = corporateAccounts.find(a => a.id === accountId);
-    if (!account) return { ok: false, error: 'account_not_found' };
-    const whitelist = account.domainWhitelist || [];
-    if (whitelist.length === 0) return { ok: false, error: 'no_whitelist_configured' };
-    const domain = email.split('@')[1]?.toLowerCase();
-    if (!domain) return { ok: false, error: 'invalid_email' };
-    const matched = whitelist.some(w => domain === w.replace(/^@/, '').toLowerCase());
-    return { ok: matched, domain, whitelist };
-  }
-
-  // ─── AI Copilot (Stub — wire Gemini later) ──────────────────────────────────
-
-  function getCopilotRecommendations(accountId) {
-    const dashboard = getDashboard(accountId, { mode: DASHBOARD_MODES.EMPLOYER });
-    if (!dashboard) return null;
-    const recs = [];
-
-    if (dashboard.engagementRate < 50) {
-      recs.push({
-        type: 'challenge',
-        title: 'Inter-department 10,000 Step Challenge',
-        description: 'Gamify fitness with a friendly competition across departments to boost engagement.',
-        target: 'all_departments'
-      });
+  /** Resolve the corporate account a request actor is scoped to. */
+  async function resolveActorAccount({ userId, userType, corporateIdParam }) {
+    if (userType === 'admin') {
+      if (!corporateIdParam) return { error: 'corporate_id_required', status: 400 };
+      return { corporateId: corporateIdParam };
     }
-    if (dashboard.engagementRate < 75) {
-      recs.push({
-        type: 'wellness',
-        title: 'Midday Ergonomic Stretch Breaks',
-        description: 'Schedule 15-minute group stretch sessions twice weekly to reduce desk fatigue.',
-        target: 'low_engagement_departments'
-      });
-    }
-    recs.push({
-      type: 'event',
-      title: 'Corporate Marathon Preparation Bootcamp',
-      description: '8-week training program leading to the Kilimanjaro Marathon — team building + fitness.',
-      target: 'active_employees'
-    });
-
-    return {
-      accountId,
-      engagementRate: dashboard.engagementRate,
-      recommendations: recs,
-      note: 'AI Copilot is in stub mode — wire Gemini API for personalized recommendations.'
-    };
-  }
-
-  // ─── Admin: List All Corporate Accounts ──────────────────────────────────────
-
-  function listAccounts({ status, limit = 50 } = {}) {
-    let list = corporateAccounts.all ? corporateAccounts.all() : corporateAccounts.filter(() => true);
-    if (status) list = list.filter(a => a.status === status);
-    return list
-      .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
-      .slice(0, limit)
-      .map(a => ({
-        ...a,
-        seatUtilization: a.seatLimit > 0 ? Math.round((a.seatsUsed / a.seatLimit) * 100) : null
-      }));
+    const user = await users.findByIdAsync(userId);
+    if (!user?.corporateId) return { error: 'not_linked_to_corporate_account', status: 403 };
+    return { corporateId: user.corporateId };
   }
 
   return {
-    // Onboarding
-    onboardCorporate, activateCorporate, suspendCorporate, updateCorporateAccount,
-    // Staff
-    provisionStaff, bulkProvisionStaff, activateEmployee, suspendEmployee, exitEmployee,
-    listStaff, getEmployee,
-    // Dashboard
-    getDashboard,
-    // Billing
-    getMonthlyBill, getBillingHistory, markBillPaid,
-    // Domain
-    verifyDomain,
-    // Copilot (stub)
-    getCopilotRecommendations,
-    // Admin
-    listAccounts,
-    // Constants
-    _constants: {
-      INDUSTRY_SECTORS, WORKFORCE_BRACKETS, SUBSIDY_MODELS, CORPORATE_STATUS,
-      EMPLOYEE_STATUS, DASHBOARD_MODES, HR_OBJECTIVES, ENGAGEMENT_TARGET_PCT,
-      CORPORATE_PASS_TIERS, BILLING_CYCLE, calculateAbsenteeismDrop,
-      calculateEngagementRate, calculateMonthlyBill
-    }
+    reference, onboard, setStatus, update, adminList, verifyDomain,
+    provisionStaff, bulkProvisionStaff, setEmployeeStatus, listStaff,
+    dashboard, generateBill, listBills, markBillPaid, resolveActorAccount,
   };
 }

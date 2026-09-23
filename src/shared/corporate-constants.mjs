@@ -1,9 +1,11 @@
-// FitFlex Af — Corporate Wellness Constants
+// Corporate wellness (B2B) constants and pure calculations.
+//
+// Seat pricing deliberately lives in platform settings (PASS_TIERS /
+// settingsService.priceForTier) rather than here: corporate seats are billed
+// at the same Pass tier prices as retail members, and admins can change those
+// at runtime from the portal. Duplicating the numbers would let the two drift.
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Industry Sectors
-// ─────────────────────────────────────────────────────────────────────────────
-export const INDUSTRY_SECTORS = {
+export const INDUSTRY_SECTORS = Object.freeze({
   banking: 'Banking & Financial Services',
   ngo: 'NGO & Development Agency',
   hospitality: 'Hospitality & Tourism',
@@ -11,164 +13,91 @@ export const INDUSTRY_SECTORS = {
   telecom: 'Telecom & Tech',
   manufacturing: 'Manufacturing & Energy',
   government: 'Government & Public Sector',
-  other: 'Other'
-};
+  other: 'Other',
+});
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Workforce Brackets
-// ─────────────────────────────────────────────────────────────────────────────
-export const WORKFORCE_BRACKETS = {
+export const WORKFORCE_BRACKETS = Object.freeze({
   '50-100': '50 - 100 employees',
   '100-250': '100 - 250 employees',
   '250-500': '250 - 500 employees',
   '500-1000': '500 - 1,000 employees',
-  '1000+': '1,000+ employees'
-};
+  '1000+': '1,000+ employees',
+});
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Subsidy Models
-// ─────────────────────────────────────────────────────────────────────────────
-export const SUBSIDY_MODELS = {
-  FULLY_FUNDED: 'fully_funded',   // 100% employer pays
-  CO_PAY_50_50: 'copay_50_50',    // 50/50 split
-  CO_PAY_70_30: 'copay_70_30',    // 70% employer, 30% employee
-  EMPLOYEE_PAID: 'employee_paid'  // employer provides platform access, employee pays subscription
-};
+// Employer share of the gross seat bill. The employee pays the remainder.
+export const SUBSIDY_MODELS = Object.freeze({
+  fully_funded: 1,
+  copay_50_50: 0.5,
+  copay_70_30: 0.7,
+  employee_paid: 0,
+});
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Corporate Status
-// ─────────────────────────────────────────────────────────────────────────────
-export const CORPORATE_STATUS = {
-  PENDING: 'pending',
-  ACTIVE: 'active',
-  SUSPENDED: 'suspended',
-  TERMINATED: 'terminated'
-};
+export const CORPORATE_STATUS = Object.freeze(['pending', 'active', 'suspended', 'terminated']);
+export const EMPLOYEE_STATUS = Object.freeze(['pending', 'active', 'suspended', 'exited']);
+export const BILLING_CYCLES = Object.freeze(['monthly', 'quarterly', 'annually']);
+export const DASHBOARD_MODES = Object.freeze(['employer', 'insurer']);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Employee Status
-// ─────────────────────────────────────────────────────────────────────────────
-export const EMPLOYEE_STATUS = {
-  PENDING: 'pending',         // provisioned but not yet activated
-  ACTIVE: 'active',           // actively using the platform
-  SUSPENDED: 'suspended',     // temporarily disabled
-  EXITED: 'exited'            // left the company
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Dashboard Modes
-// ─────────────────────────────────────────────────────────────────────────────
-export const DASHBOARD_MODES = {
-  EMPLOYER: 'employer',   // HR view — staff productivity, engagement, retention
-  INSURER: 'insurer'       // Insurance view — claims reduction, actuarial metrics
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HR Objectives
-// ─────────────────────────────────────────────────────────────────────────────
-export const HR_OBJECTIVES = [
+export const HR_OBJECTIVES = Object.freeze([
   'mitigate_burnout',
   'lower_insurance_premiums',
   'boost_talent_retention',
   'hybrid_social_engagement',
   'reduce_absenteeism',
-  'improve_productivity'
-];
+  'improve_productivity',
+]);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Engagement Target (% of enrolled staff actively using the platform)
-// ─────────────────────────────────────────────────────────────────────────────
+// Share of enrolled staff expected to be active for a programme to be on track.
 export const ENGAGEMENT_TARGET_PCT = 75;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Corporate Pass Tier Mapping
-// Corporate employees get the same Pass tiers as regular members.
-// The employer subsidizes a specific tier level.
-// ─────────────────────────────────────────────────────────────────────────────
-export const CORPORATE_PASS_TIERS = {
-  basic: { price: 60000, visitsAllowed: 20 },
-  pro: { price: 120000, visitsAllowed: 30 },
-  premium: { price: 200000, visitsAllowed: 40 },
-  executive: { price: 350000, visitsAllowed: null }  // unlimited
-};
+// Billing-cycle length in months, used to scale a monthly seat price.
+export const BILLING_CYCLE_MONTHS = Object.freeze({ monthly: 1, quarterly: 3, annually: 12 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Billing Cycle
-// ─────────────────────────────────────────────────────────────────────────────
-export const BILLING_CYCLE = {
-  MONTHLY: 'monthly',
-  QUARTERLY: 'quarterly',
-  ANNUALLY: 'annually'
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Absenteeism Drop Index Calculation
-// Estimates reduction in sick-leave days based on gym check-in frequency.
-// Formula: (avg_visits_per_week × 0.3) × 52 weeks = estimated sick days reduced per year
-// Capped at 30% reduction (industry standard for corporate wellness programs).
-// ─────────────────────────────────────────────────────────────────────────────
-export function calculateAbsenteeismDrop({ avgVisitsPerWeek, baselineSickDays }) {
-  if (!avgVisitsPerWeek || avgVisitsPerWeek <= 0) return { dropPct: 0, estimatedDaysReduced: 0 };
-  const dropPct = Math.min(30, Math.round(avgVisitsPerWeek * 3)); // 3% per visit/week, cap at 30%
-  const estimatedDaysReduced = Math.round((baselineSickDays || 7) * (dropPct / 100));
-  return { dropPct, estimatedDaysReduced };
+/**
+ * Absenteeism drop index — estimates sick days avoided from check-in frequency.
+ * 3 percentage points per weekly visit, capped at the 30% ceiling that
+ * corporate wellness literature treats as the realistic upper bound.
+ */
+export function calculateAbsenteeismDrop({ avgVisitsPerWeek, baselineSickDays = 7 }) {
+  if (!Number.isFinite(avgVisitsPerWeek) || avgVisitsPerWeek <= 0) {
+    return { dropPct: 0, estimatedDaysReduced: 0 };
+  }
+  const dropPct = Math.min(30, Math.round(avgVisitsPerWeek * 3));
+  return {
+    dropPct,
+    estimatedDaysReduced: Math.round(baselineSickDays * (dropPct / 100)),
+  };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Engagement Rate Calculation
-// (active employees / total provisioned employees) × 100
-// ─────────────────────────────────────────────────────────────────────────────
+/** Engagement rate — active employees as a percentage of provisioned seats. */
 export function calculateEngagementRate({ activeCount, totalCount }) {
-  if (!totalCount || totalCount === 0) return 0;
+  if (!totalCount) return 0;
   return Math.round((activeCount / totalCount) * 100);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Monthly Billing Calculation
-// ─────────────────────────────────────────────────────────────────────────────
-export function calculateMonthlyBill({ tier, seatCount, subsidyModel, billingCycle }) {
-  const tierCfg = CORPORATE_PASS_TIERS[tier] || CORPORATE_PASS_TIERS.basic;
-  const grossAmount = tierCfg.price * seatCount;
+/**
+ * Split a seat bill between employer and employee for one billing cycle.
+ * `perSeatMonthlyTzs` comes from settingsService.priceForTier(tier).
+ */
+export function calculateBill({ perSeatMonthlyTzs, seatCount, subsidyModel, billingCycle = 'monthly' }) {
+  const employerShareRate = SUBSIDY_MODELS[subsidyModel];
+  if (employerShareRate === undefined) throw new Error(`unknown subsidy model: ${subsidyModel}`);
+  const months = BILLING_CYCLE_MONTHS[billingCycle];
+  if (!months) throw new Error(`unknown billing cycle: ${billingCycle}`);
+  if (!Number.isFinite(perSeatMonthlyTzs) || perSeatMonthlyTzs < 0) throw new Error('invalid per-seat price');
+  if (!Number.isInteger(seatCount) || seatCount < 0) throw new Error('invalid seat count');
 
-  let employerShare = 0;
-  let employeeShare = 0;
-
-  switch (subsidyModel) {
-    case SUBSIDY_MODELS.FULLY_FUNDED:
-      employerShare = grossAmount;
-      employeeShare = 0;
-      break;
-    case SUBSIDY_MODELS.CO_PAY_50_50:
-      employerShare = Math.round(grossAmount * 0.5);
-      employeeShare = grossAmount - employerShare;
-      break;
-    case SUBSIDY_MODELS.CO_PAY_70_30:
-      employerShare = Math.round(grossAmount * 0.7);
-      employeeShare = grossAmount - employerShare;
-      break;
-    case SUBSIDY_MODELS.EMPLOYEE_PAID:
-      employerShare = 0;
-      employeeShare = grossAmount;
-      break;
-    default:
-      employerShare = grossAmount;
-      employeeShare = 0;
-  }
-
-  // FitFlex platform fee (0% for corporate — per-seat model, not commission)
-  const platformFee = 0;
-  const netAmount = grossAmount - platformFee;
+  const grossTzs = perSeatMonthlyTzs * months * seatCount;
+  const employerTzs = Math.round(grossTzs * employerShareRate);
 
   return {
-    tier,
     seatCount,
-    perSeat: tierCfg.price,
-    grossAmount,
-    employerShare,
-    employeeShare,
-    platformFee,
-    netAmount,
-    billingCycle: billingCycle || BILLING_CYCLE.MONTHLY,
-    currency: 'TZS'
+    perSeatMonthlyTzs,
+    months,
+    billingCycle,
+    subsidyModel,
+    grossTzs,
+    employerTzs,
+    employeeTzs: grossTzs - employerTzs,
+    currency: 'TZS',
   };
 }

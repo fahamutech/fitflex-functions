@@ -25,6 +25,10 @@ export function normalizeRequestedRole(role) {
   return 'member';
 }
 
+// Staff roles created by another account holder rather than self-registered:
+// they sign in with a scrypt-hashed password instead of Firebase.
+const SCRYPT_PASSWORD_ROLES = new Set(['vendor_staff', 'corporate_hr']);
+
 export function approvalStatusForRole(role) {
   return ['gym_operator', 'trainer', 'vendor'].includes(role) ? 'pending_approval' : 'approved';
 }
@@ -88,10 +92,10 @@ export function createAuthService({
     if (user.accountStatus === 'suspended') return { error: 'account_suspended', status: 403 };
     // Portal users authenticate via Firebase client SDK (email/password) then hit /auth/firebase/session.
     // This path handles dev-mode demo passwords only.
-    if (process.env.NODE_ENV === 'production' && user.userType !== 'vendor_staff') {
+    if (process.env.NODE_ENV === 'production' && !SCRYPT_PASSWORD_ROLES.has(user.userType)) {
       return { error: 'use_firebase_email_password_sign_in', status: 403 };
     }
-    const validPassword = user.userType === 'vendor_staff'
+    const validPassword = SCRYPT_PASSWORD_ROLES.has(user.userType)
       ? await verifyPassword(password, user.passwordHash)
       : user.passwordHash === `demo:${password}`;
     if (!validPassword) return { error: 'invalid_credentials', status: 401 };
@@ -104,6 +108,7 @@ export function createAuthService({
       vendorId: user.vendorId,
       vendorRole: user.vendorRole,
       vendorPermissions: user.vendorPermissions || [],
+      corporateId: user.corporateId,
     });
     const { passwordHash, ...sessionUser } = user;
     return { token, user: sessionUser };
@@ -192,6 +197,7 @@ export function createAuthService({
       vendorId: user.vendorId,
       vendorRole: user.vendorRole,
       vendorPermissions: user.vendorPermissions || [],
+      corporateId: user.corporateId,
     });
     return { token, user, pendingApproval: user.approvalStatus === 'pending_approval' };
   }

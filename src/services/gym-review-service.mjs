@@ -1,397 +1,177 @@
-// FitFlex Af — Gym Review Service (clean architecture + DI)
-//
-// Capabilities:
-//   - Members submit reviews (star rating + optional free text) for gyms
-//   - Only members who have visited (check-in) or have a direct subscription
-//     to the gym can review it
-//   - One review per member per gym (re-reviewing replaces the previous one)
-//   - Rolling average rating is calculated and stored on the gym record
-//   - Admin can see tier ranking signals (rating crosses thresholds → review)
-//   - Gym owner can see reviews for their gym but cannot delete them
-//   - Admin can hide/flag reviews for moderation
-//
-// Business rules:
-//   - Rating: 1-5 stars (integers only)
-//   - Text: optional, 3-1000 chars if provided
-//   - Eligibility: check-in at gym OR active direct subscription to gym
-//   - One per member per gym (upsert)
-//   - Average rating = simple mean of all published reviews
-//   - Tier ranking: rating is advisory signal, not auto-change (admin decides)
-
+// Gym review domain service. All persistence is dependency-injected and async
+// (Knex/PostgreSQL). Members who have visited a gym (check-in) OR hold an
+// active direct subscription to it may leave one 1-5 star review with optional
+// free text. Rolling average rating + reviewCount are denormalized onto the Gym
+// row. Ratings feed the admin tier-ranking signal (advisory — never auto-changes
+// the tier, which stays admin/rubric-driven).
 import { randomUUID } from 'node:crypto';
-import {
-  MIN_RATING,
-  MAX_RATING,
-  MIN_REVIEW_TEXT_LENGTH,
-  MAX_REVIEW_TEXT_LENGTH,
-  REVIEW_ONE_PER_MEMBER_PER_GYM,
-  TIER_RATING_THRESHOLDS,
-  MIN_REVIEWS_FOR_TIER_ACTION,
-  REVIEW_STATUS
-} from '../shared/gym-review-constants.mjs';
 
-export function createGymReviewService({ users, gyms, subscriptions, checkins, reviews }) {
+const MIN_RATING = 1;
+const MAX_RATING = 5;
+const MIN_TEXT = 3;
+const MAX_TEXT = 1000;
+const MIN_REVIEWS_FOR_TIER_ACTION = 5;
+const REVIEW_STATUS = new Set(['published', 'flagged', 'hidden']);
 
-  // ─── Validation ──────────────────────────────────────────────────────────
+// Below these average ratings, a gym at the given tier should be reviewed for a
+// possible downlift. Advisory only — the admin decides.
+const TIER_DOWNLIFT_BELOW = {
+  standard: null,
+  midtier: 3.0,
+  premium: 3.5,
+  luxury_executive: 4.0,
+};
 
-  function validateRating(rating) {
-    if (typeof rating !== 'number' || !Number.isInteger(rating))
-      return { valid: false, error: 'rating_must_be_integer' };
-    if (rating < MIN_RATING || rating > MAX_RATING)
-      return { valid: false, error: `rating_must_be_between_${MIN_RATING}_and_${MAX_RATING}` };
-    return { valid: true };
-  }
+const makeId = () => `grev_${randomUUID().slice(0, 8)}`;
+const nowIso = () => new Date().toISOString();
 
-  function validateText(text) {
-    if (text === null || text === undefined || text === '')
-      return { valid: true, text: null };
-    if (typeof text !== 'string')
-      return { valid: false, error: 'text_must_be_string' };
-    if (text.trim().length < MIN_REVIEW_TEXT_LENGTH)
-      return { valid: false, error: 'text_too_short' };
-    if (text.length > MAX_REVIEW_TEXT_LENGTH)
-      return { valid: false, error: 'text_too_long' };
-    return { valid: true, text: text.trim() };
-  }
-
-  // ─── Eligibility: can this member review this gym? ───────────────────────
-
-  function isEligibleToReview(memberId, gymId) {
-    // Check 1: Has the member checked in at this gym?
-    const hasCheckin = checkins.some(c =>
-      c.memberId === memberId && c.gymId === gymId
-    );
-
-    // Check 2: Does the member have an active direct subscription to this gym?
-    const hasDirectSub = subscriptions.some(s =>
-      s.memberId === memberId &&
-      s.type === 'direct_sub' &&
-      s.homeGymId === gymId &&
-      s.status === 'active'
-    );
-
-    if (hasCheckin || hasDirectSub) {
-      return {
-        eligible: true,
-        reason: hasDirectSub ? 'direct_subscription' : 'check_in_history'
-      };
+export function createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog }) {
+  function validate(rating, text) {
+    if (!Number.isInteger(rating) || rating < MIN_RATING || rating > MAX_RATING) {
+      return { error: 'rating_must_be_integer_1_to_5', status: 400 };
     }
-
-    return {
-      eligible: false,
-      reason: 'no_checkin_or_direct_subscription',
-      detail: 'You must have visited this gym or have an active direct subscription to review it.'
-    };
+    if (text != null && text !== '') {
+      if (typeof text !== 'string') return { error: 'text_must_be_string', status: 400 };
+      if (text.trim().length < MIN_TEXT) return { error: 'text_too_short', status: 400 };
+      if (text.length > MAX_TEXT) return { error: 'text_too_long', status: 400 };
+    }
+    return { ok: true, text: text ? text.trim() : null };
   }
 
-  // ─── Submit / Update Review ──────────────────────────────────────────────
+  // Eligibility: has this member checked in at the gym OR does the member hold
+  // an active direct subscription with this gym as home gym?
+  async function isEligible(memberId, gymId) {
+    const hasCheckin = (await checkins.filterAsync(c => c.memberId === memberId && c.gymId === gymId)).length > 0;
+    if (hasCheckin) return { eligible: true, reason: 'check_in_history' };
+    const hasDirectSub = (await subscriptions.filterAsync(s =>
+      s.memberId === memberId && s.type === 'direct_sub' && s.homeGymId === gymId && s.status === 'active',
+    )).length > 0;
+    if (hasDirectSub) return { eligible: true, reason: 'direct_subscription' };
+    return { eligible: false, reason: 'no_checkin_or_direct_subscription' };
+  }
 
-  function submitReview({ memberId, gymId, rating, text }) {
-    // Validate gym exists
-    const gym = gyms.find(g => g.id === gymId);
-    if (!gym) return { ok: false, error: 'gym_not_found' };
+  async function recalcRating(gymId) {
+    const published = await gymReviews.filterAsync(r => r.gymId === gymId && r.status === 'published');
+    const count = published.length;
+    const average = count ? Math.round((published.reduce((s, r) => s + Number(r.rating), 0) / count) * 10) / 10 : 0;
+    await gyms.updateByIdAsync(gymId, { rating: average, reviewCount: count });
+    return { gymId, averageRating: average, reviewCount: count };
+  }
 
-    // Validate rating
-    const ratingCheck = validateRating(rating);
-    if (!ratingCheck.valid) return { ok: false, error: ratingCheck.error };
+  // Submit or update (upsert) the caller's review for a gym.
+  async function submit({ memberId, gymId, rating, text }) {
+    const gym = await gyms.findByIdAsync(gymId);
+    if (!gym) return { error: 'gym_not_found', status: 404 };
+    const v = validate(rating, text);
+    if (v.error) return v;
+    const eligibility = await isEligible(memberId, gymId);
+    if (!eligibility.eligible) return { error: eligibility.reason, status: 403 };
 
-    // Validate text
-    const textCheck = validateText(text);
-    if (!textCheck.valid) return { ok: false, error: textCheck.error };
-
-    // Check eligibility
-    const eligibility = isEligibleToReview(memberId, gymId);
-    if (!eligibility.eligible) return { ok: false, error: eligibility.reason };
-
-    const now = new Date().toISOString();
-    const reviewId = `rev_${randomUUID().slice(0, 8)}`;
-
-    // Check for existing review by this member for this gym
-    const existing = reviews.find(r =>
-      r.memberId === memberId && r.gymId === gymId
-    );
-
+    const existing = (await gymReviews.filterAsync(r => r.gymId === gymId && r.memberId === memberId))[0] || null;
+    const now = nowIso();
     let review;
-    if (existing && REVIEW_ONE_PER_MEMBER_PER_GYM) {
-      // Update existing review (upsert)
-      review = reviews.update(r => r.id === existing.id, {
-        rating: rating,
-        text: textCheck.text,
-        status: REVIEW_STATUS.PUBLISHED,
-        updatedAt: now
+    if (existing) {
+      await gymReviews.updateByIdAsync(existing.id, {
+        rating, text: v.text, status: 'published', updatedAt: now,
       });
-      review.id = existing.id; // preserve original ID
-      review.createdAt = existing.createdAt; // preserve original creation
+      review = { ...existing, rating, text: v.text, status: 'published', updatedAt: now };
     } else {
-      // Create new review
       review = {
-        id: reviewId,
-        memberId,
-        gymId,
-        rating,
-        text: textCheck.text,
-        status: REVIEW_STATUS.PUBLISHED,
-        createdAt: now,
-        updatedAt: now
+        id: makeId(), gymId, memberId, rating, text: v.text,
+        status: 'published', createdAt: now, updatedAt: now,
       };
-      reviews.insert(review);
+      await gymReviews.insertAsync(review);
     }
-
-    // Recalculate gym's average rating
-    const updatedRating = recalculateGymRating(gymId);
-
-    return {
-      ok: true,
-      review,
-      gymRating: updatedRating
-    };
+    const gymRating = await recalcRating(gymId);
+    return { review, gymRating, updated: Boolean(existing) };
   }
 
-  // ─── Recalculate Gym Rating ──────────────────────────────────────────────
-
-  function recalculateGymRating(gymId) {
-    const publishedReviews = reviews.filter(r =>
-      r.gymId === gymId && r.status === REVIEW_STATUS.PUBLISHED
-    );
-
-    const count = publishedReviews.length;
-    let average = null;
-
-    if (count > 0) {
-      const sum = publishedReviews.reduce((acc, r) => acc + r.rating, 0);
-      average = Math.round((sum / count) * 10) / 10; // 1 decimal place
-    }
-
-    // Update gym record
-    gyms.update(g => g.id === gymId, {
-      rating: average,
-      reviewCount: count
-    });
-
-    return {
-      gymId,
-      averageRating: average,
-      reviewCount: count
-    };
+  async function myReview(memberId, gymId) {
+    return (await gymReviews.filterAsync(r => r.gymId === gymId && r.memberId === memberId))[0] || null;
   }
 
-  // ─── Get Reviews for a Gym ───────────────────────────────────────────────
-
-  function getGymReviews(gymId, { sortBy = 'recent', limit = 50 } = {}) {
-    let list = reviews.filter(r =>
-      r.gymId === gymId && r.status === REVIEW_STATUS.PUBLISHED
-    );
-
-    if (sortBy === 'recent') {
-      list.sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
-    } else if (sortBy === 'highest') {
-      list.sort((a, b) => b.rating - a.rating);
-    } else if (sortBy === 'lowest') {
-      list.sort((a, b) => a.rating - b.rating);
-    }
-
-    if (limit) list = list.slice(0, limit);
-
-    // Attach member display names
-    return list.map(r => {
-      const user = users.find(u => u.id === r.memberId);
-      return {
-        ...r,
-        memberName: user?.displayName || null,
-        memberPhotoUrl: user?.photoUrl || null
-      };
-    });
+  async function remove({ memberId, gymId }) {
+    const existing = (await gymReviews.filterAsync(r => r.gymId === gymId && r.memberId === memberId))[0];
+    if (!existing) return { error: 'review_not_found', status: 404 };
+    await gymReviews.removeAsync(r => r.id === existing.id);
+    const gymRating = await recalcRating(gymId);
+    return { ok: true, gymRating };
   }
 
-  // ─── Get Gym Rating Summary ──────────────────────────────────────────────
+  async function listForGym(gymId, { sortBy = 'recent', limit = 50 } = {}) {
+    let rows = await gymReviews.filterAsync(r => r.gymId === gymId && r.status === 'published');
+    if (sortBy === 'highest') rows.sort((a, b) => b.rating - a.rating);
+    else if (sortBy === 'lowest') rows.sort((a, b) => a.rating - b.rating);
+    else rows.sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
+    rows = rows.slice(0, limit);
+    return Promise.all(rows.map(async r => {
+      const u = await users.findByIdAsync(r.memberId);
+      return { ...r, memberName: u?.displayName || null, memberPhotoUrl: u?.photoUrl || null };
+    }));
+  }
 
-  function getGymRatingSummary(gymId) {
-    const allReviews = reviews.filter(r => r.gymId === gymId);
-    const publishedReviews = allReviews.filter(r => r.status === REVIEW_STATUS.PUBLISHED);
-
-    if (publishedReviews.length === 0) {
-      return {
-        gymId,
-        averageRating: null,
-        reviewCount: 0,
-        distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
-        tierSignal: null
-      };
-    }
-
-    // Rating distribution (how many 1s, 2s, 3s, 4s, 5s)
+  async function summary(gymId) {
+    const published = await gymReviews.filterAsync(r => r.gymId === gymId && r.status === 'published');
     const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    for (const r of publishedReviews) {
-      distribution[r.rating] = (distribution[r.rating] || 0) + 1;
-    }
-
-    const sum = publishedReviews.reduce((acc, r) => acc + r.rating, 0);
-    const average = Math.round((sum / publishedReviews.length) * 10) / 10;
-
-    return {
-      gymId,
-      averageRating: average,
-      reviewCount: publishedReviews.length,
-      distribution,
-      tierSignal: getTierRankingSignal(gymId, average, publishedReviews.length)
-    };
+    for (const r of published) distribution[r.rating] = (distribution[r.rating] || 0) + 1;
+    const count = published.length;
+    const average = count ? Math.round((published.reduce((s, r) => s + Number(r.rating), 0) / count) * 10) / 10 : null;
+    const gym = await gyms.findByIdAsync(gymId);
+    return { gymId, averageRating: average, reviewCount: count, distribution, tierSignal: tierSignal(gym, average, count) };
   }
 
-  // ─── Tier Ranking Signal (advisory — admin decides) ─────────────────────
-
-  function getTierRankingSignal(gymId, averageRating, reviewCount) {
-    const gym = gyms.find(g => g.id === gymId);
+  function tierSignal(gym, average, count) {
     if (!gym) return null;
-
-    // Not enough reviews to act on
-    if (reviewCount < MIN_REVIEWS_FOR_TIER_ACTION) {
-      return {
-        action: 'insufficient_data',
-        message: `Needs ${MIN_REVIEWS_FOR_TIER_ACTION - reviewCount} more reviews to trigger tier review`,
-        currentTier: gym.tier,
-        averageRating,
-        reviewCount
-      };
+    const tier = gym.tier || 'standard';
+    if (count < MIN_REVIEWS_FOR_TIER_ACTION) {
+      return { action: 'insufficient_data', currentTier: tier, averageRating: average, reviewCount: count,
+        message: `Needs ${MIN_REVIEWS_FOR_TIER_ACTION - count} more reviews to trigger a tier review.` };
     }
-
-    const thresholds = TIER_RATING_THRESHOLDS[gym.tier] || TIER_RATING_THRESHOLDS.standard;
-    const downliftBelow = thresholds.downliftBelow;
-
-    if (downliftBelow !== null && averageRating < downliftBelow) {
-      // Determine which tier to downlift to
-      let suggestedTier = 'standard';
-      if (gym.tier === 'luxury_executive') suggestedTier = 'premium';
-      else if (gym.tier === 'premium') suggestedTier = 'midtier';
-      else if (gym.tier === 'midtier') suggestedTier = 'standard';
-
-      return {
-        action: 'consider_downlift',
-        suggestedTier,
-        message: `Average rating ${averageRating} is below threshold ${downliftBelow} for tier '${gym.tier}'. Admin should review.`,
-        currentTier: gym.tier,
-        averageRating,
-        reviewCount,
-        threshold: downliftBelow
-      };
+    const threshold = TIER_DOWNLIFT_BELOW[tier];
+    if (threshold != null && average < threshold) {
+      const suggested = tier === 'luxury_executive' ? 'premium' : tier === 'premium' ? 'midtier' : 'standard';
+      return { action: 'consider_downlift', currentTier: tier, suggestedTier: suggested, threshold,
+        averageRating: average, reviewCount: count,
+        message: `Average rating ${average} is below ${threshold} for tier '${tier}'. Admin should review.` };
     }
-
-    return {
-      action: 'no_action',
-      message: 'Rating is within acceptable range for current tier',
-      currentTier: gym.tier,
-      averageRating,
-      reviewCount
-    };
+    return { action: 'no_action', currentTier: tier, averageRating: average, reviewCount: count };
   }
 
-  // ─── Get All Tier Signals (for admin dashboard) ──────────────────────────
-
-  function getAllTierSignals() {
-    return gyms.all()
-      .filter(g => g.status === 'active')
-      .map(g => {
-        const summary = getGymRatingSummary(g.id);
-        return {
-          gymId: g.id,
-          gymName: g.name,
-          currentTier: g.tier,
-          averageRating: summary.averageRating,
-          reviewCount: summary.reviewCount,
-          tierSignal: summary.tierSignal
-        };
-      })
-      .filter(g => g.tierSignal && g.tierSignal.action !== 'no_action' && g.tierSignal.action !== 'insufficient_data')
-      .sort((a, b) => (a.averageRating || 5) - (b.averageRating || 5));
+  // Admin: list gyms whose rating suggests a tier re-evaluation.
+  async function tierSignals() {
+    const activeGyms = await gyms.filterAsync(g => g.status === 'active');
+    const out = [];
+    for (const gym of activeGyms) {
+      const s = await summary(gym.id);
+      if (s.tierSignal && !['no_action', 'insufficient_data'].includes(s.tierSignal.action)) {
+        out.push({ gymId: gym.id, gymName: gym.name, ...s.tierSignal });
+      }
+    }
+    return out.sort((a, b) => (a.averageRating || 5) - (b.averageRating || 5));
   }
 
-  // ─── Member: Get Own Review for a Gym ───────────────────────────────────
-
-  function getMyReview(memberId, gymId) {
-    const review = reviews.find(r =>
-      r.memberId === memberId && r.gymId === gymId
-    );
-    return review || null;
-  }
-
-  // ─── Member: Delete Own Review ───────────────────────────────────────────
-
-  function deleteMyReview(memberId, gymId) {
-    const review = reviews.find(r =>
-      r.memberId === memberId && r.gymId === gymId
-    );
-    if (!review) return { ok: false, error: 'review_not_found' };
-
-    reviews.remove(r => r.id === review.id);
-    const updatedRating = recalculateGymRating(gymId);
-
-    return { ok: true, gymRating: updatedRating };
-  }
-
-  // ─── Admin: Moderate Review (hide/flag/restore) ──────────────────────────
-
-  function moderateReview(reviewId, action, adminId) {
-    const validActions = ['hide', 'flag', 'restore'];
-    if (!validActions.includes(action))
-      return { ok: false, error: 'invalid_action' };
-
-    const review = reviews.find(r => r.id === reviewId);
-    if (!review) return { ok: false, error: 'review_not_found' };
-
-    const statusMap = {
-      hide: REVIEW_STATUS.HIDDEN,
-      flag: REVIEW_STATUS.FLAGGED,
-      restore: REVIEW_STATUS.PUBLISHED
-    };
-
-    const updated = reviews.update(r => r.id === reviewId, {
-      status: statusMap[action],
-      moderatedAt: new Date().toISOString(),
-      moderatedBy: adminId
+  // Admin moderation: hide | flag | restore.
+  async function moderate({ reviewId, action, adminId }) {
+    const map = { hide: 'hidden', flag: 'flagged', restore: 'published' };
+    if (!map[action]) return { error: 'invalid_action', status: 400 };
+    const review = (await gymReviews.filterAsync(r => r.id === reviewId))[0];
+    if (!review) return { error: 'review_not_found', status: 404 };
+    await gymReviews.updateByIdAsync(reviewId, {
+      status: map[action], moderatedBy: adminId, moderatedAt: nowIso(),
     });
-
-    // Recalculate gym rating (hidden reviews don't count)
-    recalculateGymRating(review.gymId);
-
-    return { ok: true, review: updated };
+    await recalcRating(review.gymId);
+    auditLog?.insert?.({ id: randomUUID(), at: nowIso(), actor: adminId, action: `gym_review_${action}`, target: reviewId });
+    return { ok: true, reviewId, status: map[action] };
   }
 
-  // ─── Admin: Get All Flagged Reviews ──────────────────────────────────────
-
-  function getFlaggedReviews() {
-    return reviews
-      .filter(r => r.status === REVIEW_STATUS.FLAGGED)
-      .map(r => {
-        const user = users.find(u => u.id === r.memberId);
-        const gym = gyms.find(g => g.id === r.gymId);
-        return {
-          ...r,
-          memberName: user?.displayName || null,
-          gymName: gym?.name || null
-        };
-      });
+  async function flagged() {
+    const rows = await gymReviews.filterAsync(r => r.status === 'flagged');
+    return Promise.all(rows.map(async r => {
+      const u = await users.findByIdAsync(r.memberId);
+      const g = await gyms.findByIdAsync(r.gymId);
+      return { ...r, memberName: u?.displayName || null, gymName: g?.name || null };
+    }));
   }
 
-  return {
-    submitReview,
-    getGymReviews,
-    getGymRatingSummary,
-    getTierRankingSignal,
-    getAllTierSignals,
-    getMyReview,
-    deleteMyReview,
-    moderateReview,
-    getFlaggedReviews,
-    isEligibleToReview,
-    recalculateGymRating,
-    _constants: {
-      MIN_RATING,
-      MAX_RATING,
-      MIN_REVIEW_TEXT_LENGTH,
-      MAX_REVIEW_TEXT_LENGTH,
-      REVIEW_ONE_PER_MEMBER_PER_GYM,
-      TIER_RATING_THRESHOLDS,
-      MIN_REVIEWS_FOR_TIER_ACTION,
-      REVIEW_STATUS
-    }
-  };
+  return { submit, myReview, remove, listForGym, summary, tierSignals, moderate, flagged, isEligible, recalcRating };
 }
