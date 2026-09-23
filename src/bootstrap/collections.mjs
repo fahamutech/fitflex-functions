@@ -29,3 +29,5 @@ export const trainerReviews = collection('trainer_reviews');
 export const corporateAccounts = collection('corporate_accounts');
 export const corporateEmployees = collection('corporate_employees');
 export const corporateBills = collection('corporate_bills');
+export const deviceTokens = collection('device_tokens');
+export const notifications = collection('notifications');

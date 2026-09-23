@@ -5,13 +5,24 @@ import { trainerBookingService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
+export const quoteTrainerBooking = {
+  created, method: 'post', path: '/me/trainer-bookings/quote',
+  description: 'Member: price one or more slots before booking. POST { trainerId, gymId, slots:[{date,slot}] } → summary (Pass discount applied).',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => {
+    const result = await trainerBookingService.quoteBooking({ memberId: req.user.sub, body: req.body || {} });
+    if (result.error) return res.status(result.status).json({ error: result.error, slot: result.slot });
+    res.json(result);
+  }
+};
+
 export const createTrainerBooking = {
   created, method: 'post', path: '/me/trainer-bookings',
-  description: 'Member: book a trainer session. Pilot status is confirmed immediately.',
+  description: 'Member: book one or more trainer slots. POST { trainerId, gymId, slots:[{date,slot}] } (legacy { date, slot } still accepted). Bookings stay payment_pending until the payment request is approved.',
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
     const result = await trainerBookingService.createBooking({ memberId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) return res.status(result.status).json({ error: result.error, slot: result.slot });
     res.status(201).json(result);
   }
 };
