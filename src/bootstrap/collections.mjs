@@ -26,3 +26,6 @@ export const marketplaceNotifications = collection('marketplace_notifications');
 export const productReviews = collection('product_reviews');
 export const gymReviews = collection('gym_reviews');
 export const trainerReviews = collection('trainer_reviews');
+export const corporateAccounts = collection('corporate_accounts');
+export const corporateEmployees = collection('corporate_employees');
+export const corporateBills = collection('corporate_bills');
