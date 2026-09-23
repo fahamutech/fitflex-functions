@@ -28,6 +28,7 @@ import { createTrainerEngagementService } from '../services/trainer-engagement-s
 import { createShopService } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
+import { createWhatsAppService } from '../services/whatsapp-service.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
@@ -91,5 +92,6 @@ export const portalUserService = createPortalUserService({ users, auditLog, init
 export const webhookService = createWebhookService({ subscriptions, webhookSeen });
 export const gymReviewService = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog });
 export const trainerReviewService = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog });
+export const whatsAppService = createWhatsAppService({ apiKey: process.env.AFRICAS_TALKING_API_KEY, users, auditLog });
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
