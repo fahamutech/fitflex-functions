@@ -1,5 +1,12 @@
 // Trainer booking service — member booking creation + trainer/admin session management.
 import { randomUUID } from 'node:crypto';
+import { priceBooking, passDiscountPct, trainerCommissionPct } from '../shared/trainer-pricing.mjs';
+import { effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
+
+// A booking holds its slots from the moment it is requested; one that was
+// rejected or cancelled frees them again.
+const SLOT_RELEASING = new Set(['cancelled', 'payment_rejected']);
+const MAX_SLOTS_PER_BOOKING = 12;
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
@@ -21,7 +28,10 @@ export function slotIsAvailable(availability, { date, slot, gymId }) {
   });
 }
 
-export function createTrainerBookingService({ trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService }) {
+export function createTrainerBookingService({
+  trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
+  subscriptions, paymentRequests, notify = async () => {},
+}) {
   async function hydrateBooking(row) {
     return {
       ...row,
@@ -31,40 +41,179 @@ export function createTrainerBookingService({ trainerBookings, trainerSessions, 
     };
   }
 
-  async function createBooking({ memberId, body }) {
-    const { trainerId, gymId, date, slot } = body || {};
+  /** The member's active Platform Pass tier, if any (drives the trainer discount). */
+  async function activePassTier(memberId) {
+    if (!subscriptions) return null;
+    const subs = await subscriptions.filterAsync(s => s.memberId === memberId && s.type === 'platform_pass');
+    const active = subs.find(s => effectiveSubscriptionStatus(s) === 'active');
+    return active?.tier || null;
+  }
+
+  /** Accept { slots:[{date,slot}] } or the legacy single { date, slot }. */
+  function requestedSlots(body) {
+    const raw = Array.isArray(body?.slots) && body.slots.length
+      ? body.slots
+      : (body?.date || body?.slot ? [{ date: body.date, slot: body.slot }] : []);
+    const seen = new Set();
+    const out = [];
+    for (const s of raw) {
+      const key = `${s?.date}|${s?.slot}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ date: s?.date, slot: s?.slot });
+    }
+    return out.sort((a, b) => `${a.date} ${a.slot}`.localeCompare(`${b.date} ${b.slot}`));
+  }
+
+  /**
+   * Validate the request and price it. Shared by quote (no writes) and
+   * createBooking. Returns { error, status } or the priced plan.
+   */
+  async function planBooking({ memberId, body }) {
+    const { trainerId, gymId } = body || {};
     const trainer = trainers.find(t => t.id === trainerId && t.status === 'active');
     if (!trainer) return { error: 'trainer_not_found', status: 404 };
     if (!trainer.gymIds?.includes(gymId)) return { error: 'trainer_not_available_at_gym', status: 400 };
-    if (!date || !slot) return { error: 'date_and_slot_required', status: 400 };
+    const slots = requestedSlots(body);
+    if (!slots.length || slots.some(s => !s.date || !s.slot)) return { error: 'date_and_slot_required', status: 400 };
+    if (slots.length > MAX_SLOTS_PER_BOOKING) return { error: 'too_many_slots', status: 400 };
+    if (!(Number(trainer.hourlyRateTzs) > 0)) return { error: 'trainer_rate_not_set', status: 400 };
 
-    // C1: the slot must be inside the trainer's configured availability.
-    if (!slotIsAvailable(trainer.availability, { date, slot, gymId })) {
-      return { error: 'slot_not_available', status: 409 };
+    for (const s of slots) {
+      // C1: the slot must be inside the trainer's configured availability.
+      if (!slotIsAvailable(trainer.availability, { date: s.date, slot: s.slot, gymId })) {
+        return { error: 'slot_not_available', status: 409, slot: s };
+      }
+      // C1: reject double booking — same trainer/date/slot still held.
+      const clash = await trainerBookings.findAsync(
+        b => b.trainerId === trainerId && b.date === s.date && b.slot === s.slot && !SLOT_RELEASING.has(b.status),
+      );
+      if (clash) return { error: 'slot_already_booked', status: 409, slot: s };
     }
-    // C1: reject double booking — same trainer/date/slot still active.
-    const clash = await trainerBookings.findAsync(
-      b => b.trainerId === trainerId && b.date === date && b.slot === slot && b.status !== 'cancelled',
-    );
-    if (clash) return { error: 'slot_already_booked', status: 409 };
 
-    const booking = await trainerBookings.insertAsync({
-      id: `tbk_${randomUUID().slice(0, 8)}`,
-      memberId,
-      trainerId,
-      gymId,
-      date,
-      slot,
-      amountTzs: trainer.hourlyRateTzs,
-      status: 'confirmed',
-      createdAt: new Date().toISOString()
+    const passTier = await activePassTier(memberId);
+    const pricing = priceBooking({
+      listPrice: trainer.hourlyRateTzs,
+      slotCount: slots.length,
+      discountPct: passDiscountPct(passTier),
+      commissionPct: trainerCommissionPct(trainer),
     });
+    const summary = {
+      trainerId, gymId, slots,
+      currency: trainer.sessionRateCurrency || 'TZS',
+      passTier,
+      pricePerSession: pricing.perSession.listPrice,
+      discountPct: pricing.perSession.discountPct,
+      subtotal: pricing.listTotal,
+      discount: pricing.discountTotal,
+      total: pricing.memberTotal,
+    };
+    return { trainer, slots, pricing, summary };
+  }
+
+  /** Price a booking without creating it (the "Book Slots" summary screen). */
+  async function quoteBooking({ memberId, body }) {
+    const plan = await planBooking({ memberId, body });
+    if (plan.error) return plan;
+    return { summary: plan.summary };
+  }
+
+  /**
+   * Create one booking per slot, all sharing a groupId, held as
+   * payment_pending until the payment request is approved.
+   */
+  async function createBooking({ memberId, body }) {
+    const plan = await planBooking({ memberId, body });
+    if (plan.error) return plan;
+    const { trainer, slots, pricing, summary } = plan;
+    const now = new Date().toISOString();
+    const groupId = `tbg_${randomUUID().slice(0, 8)}`;
+    const paymentRequestId = paymentRequests ? `pay_${randomUUID().slice(0, 8)}` : null;
+    const per = pricing.perSession;
+
+    const bookings = [];
+    for (const s of slots) {
+      bookings.push(await trainerBookings.insertAsync({
+        id: `tbk_${randomUUID().slice(0, 8)}`,
+        groupId,
+        memberId,
+        trainerId: trainer.id,
+        gymId: summary.gymId,
+        date: s.date,
+        slot: s.slot,
+        currency: summary.currency,
+        listPriceTzs: per.listPrice,
+        discountPct: per.discountPct,
+        amountTzs: per.memberPrice,
+        commissionPct: per.commissionPct,
+        commissionTzs: per.commission,
+        trainerPayoutTzs: per.trainerPayout,
+        paymentRequestId,
+        status: paymentRequests ? 'payment_pending' : 'confirmed',
+        createdAt: now,
+        updatedAt: now,
+      }));
+    }
+
+    let paymentRequest = null;
+    if (paymentRequests) {
+      paymentRequest = await paymentRequests.insertAsync({
+        id: paymentRequestId,
+        memberId,
+        subscriptionId: null,
+        bookingGroupId: groupId,
+        tier: null,
+        plan: 'trainer_session',
+        gymId: summary.gymId,
+        currency: summary.currency,
+        amountTzs: summary.total,
+        status: 'pending',
+        provider: 'admin_approved',
+        reference: null,
+        requestedAt: now,
+        decidedAt: null,
+        decidedBy: null,
+        note: `${slots.length} session(s) with ${trainer.displayName || trainer.id}`,
+      });
+    }
+
     auditLog.insert({
-      id: randomUUID(), at: new Date().toISOString(),
+      id: randomUUID(), at: now,
       actor: memberId, action: 'trainer_booking_created',
-      target: booking.id, before: null, after: booking
+      target: groupId, before: null, after: { bookings: bookings.map(b => b.id), paymentRequestId },
     });
-    return { booking, trainer: trainerService.hydrateTrainer(trainer) };
+    await notify('trainer_booking_requested', { trainer, memberId, bookings, summary });
+    return {
+      bookingGroupId: groupId,
+      booking: bookings[0],
+      bookings,
+      summary,
+      paymentRequest,
+      trainer: trainerService.hydrateTrainer(trainer),
+    };
+  }
+
+  /** Payment decided by an admin: move every booking in the group with it. */
+  async function applyPaymentToGroup(groupId, paymentStatus) {
+    const next = {
+      approved: 'confirmed',
+      rejected: 'payment_rejected',
+      cancelled: 'cancelled',
+      pending: 'payment_pending',
+    }[paymentStatus];
+    if (!next || !groupId) return [];
+    const group = await trainerBookings.filterAsync(b => b.groupId === groupId);
+    const now = new Date().toISOString();
+    const updated = [];
+    for (const b of group) {
+      if (b.status === 'completed') { updated.push(b); continue; }
+      updated.push(await trainerBookings.updateByIdAsync(b.id, { status: next, updatedAt: now }));
+    }
+    if (next === 'confirmed' && updated.length) {
+      const trainer = trainers.find(t => t.id === updated[0].trainerId);
+      await notify('trainer_booking_confirmed', { trainer, memberId: updated[0].memberId, bookings: updated });
+    }
+    return updated;
   }
 
   async function adminList() {
@@ -177,7 +326,7 @@ export function createTrainerBookingService({ trainerBookings, trainerSessions, 
     const day = date || new Date().toISOString().slice(0, 10);
 
     const dayBookings = await trainerBookings.filterAsync(
-      b => b.trainerId === profile.id && b.date === day && b.status !== 'cancelled',
+      b => b.trainerId === profile.id && b.date === day && !SLOT_RELEASING.has(b.status),
     );
     const manualSessions = await trainerSessions.filterAsync(
       s => s.trainerId === profile.id && s.date === day && s.status !== 'cancelled',
@@ -191,7 +340,7 @@ export function createTrainerBookingService({ trainerBookings, trainerSessions, 
         slot: b.slot,
         gymId: b.gymId,
         gym: gyms.find(g => g.id === b.gymId) || null,
-        amountTzs: b.amountTzs || 0,
+        amountTzs: b.trainerPayoutTzs ?? b.amountTzs ?? 0,
         status: b.status,
         member: await users.findByIdAsync(b.memberId),
         customerName: null,
@@ -229,14 +378,15 @@ export function createTrainerBookingService({ trainerBookings, trainerSessions, 
     };
     const noRange = !from && !to;
 
+    // Only paid bookings earn; the trainer is owed the payout after commission.
     const bookings = await trainerBookings.filterAsync(
-      b => b.trainerId === profile.id && b.status !== 'cancelled' && (noRange || inRange(b.date)),
+      b => b.trainerId === profile.id && ['confirmed', 'completed'].includes(b.status) && (noRange || inRange(b.date)),
     );
     const manualSessions = await trainerSessions.filterAsync(
       s => s.trainerId === profile.id && s.status !== 'cancelled' && (noRange || inRange(s.date)),
     );
 
-    const bookingTotal = bookings.reduce((sum, b) => sum + Number(b.amountTzs || 0), 0);
+    const bookingTotal = bookings.reduce((sum, b) => sum + Number(b.trainerPayoutTzs ?? b.amountTzs ?? 0), 0);
     const manualTotal = manualSessions.reduce((sum, s) => sum + Number(s.amountTzs || 0), 0);
 
     return {
@@ -253,7 +403,7 @@ export function createTrainerBookingService({ trainerBookings, trainerSessions, 
   }
 
   return {
-    hydrateBooking, createBooking, adminList, adminUpdateStatus,
+    hydrateBooking, quoteBooking, createBooking, applyPaymentToGroup, adminList, adminUpdateStatus,
     trainerMyBookings, trainerCompleteBooking, memberMyBookings,
     createManualSession, trainerSessionsForDate, trainerEarnings,
   };

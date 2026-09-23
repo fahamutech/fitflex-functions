@@ -3,7 +3,7 @@
 // with memberProfile/aclPermissions) to keep the list endpoint's payload small.
 import { randomUUID } from 'node:crypto';
 
-export function createAdminPaymentService({ paymentRequests, subscriptions, users, auditLog }) {
+export function createAdminPaymentService({ paymentRequests, subscriptions, users, auditLog, onBookingPayment = async () => {}, onSubscriptionActivated = async () => {} }) {
   function slimMember(u) {
     if (!u) return null;
     return { id: u.id, displayName: u.displayName || null, email: u.email || null, phone: u.phone || null, photoUrl: u.photoUrl || null };
@@ -14,7 +14,13 @@ export function createAdminPaymentService({ paymentRequests, subscriptions, user
     return { id: s.id, tier: s.tier, type: s.type, status: s.status };
   }
 
+  // A request pays either for a subscription or for a trainer booking group.
   async function applyPaymentStatusToSubscription(request, status, reference) {
+    if (request.bookingGroupId) {
+      await onBookingPayment(request.bookingGroupId, status);
+      return;
+    }
+    if (!request.subscriptionId) return;
     const subStatus = {
       approved: 'active',
       rejected: 'payment_rejected',
@@ -22,10 +28,13 @@ export function createAdminPaymentService({ paymentRequests, subscriptions, user
       pending: 'payment_pending'
     }[status];
     if (!subStatus) return;
-    await subscriptions.updateByIdAsync(request.subscriptionId, {
+    const updated = await subscriptions.updateByIdAsync(request.subscriptionId, {
       status: subStatus,
       paymentRef: status === 'approved' ? (reference || `ADMIN_${request.id}`) : null
     });
+    if (subStatus === 'active' && updated) {
+      try { await onSubscriptionActivated(updated); } catch { /* notification is best-effort */ }
+    }
   }
 
   async function list() {
@@ -67,11 +76,7 @@ export function createAdminPaymentService({ paymentRequests, subscriptions, user
       decidedAt: now,
       decidedBy: actorId
     });
-    const subStatus = decision === 'approve' ? 'active' : 'payment_rejected';
-    await subscriptions.updateByIdAsync(request.subscriptionId, {
-      status: subStatus,
-      paymentRef: reference || `ADMIN_${request.id}`
-    });
+    await applyPaymentStatusToSubscription(request, status, reference || `ADMIN_${request.id}`);
     auditLog.insert({
       id: randomUUID(), at: now, actor: actorId,
       action: `payment_${status}`, target: request.id, before: request, after: updated
