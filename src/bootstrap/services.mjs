@@ -36,6 +36,7 @@ import { createWorkoutService } from '../services/workout-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createChallengeService } from '../services/challenge-service.mjs';
+import { createAnalyticsService } from '../services/analytics-service.mjs';
 import { createNotificationService } from '../services/notification-service.mjs';
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
@@ -141,6 +142,13 @@ export const challengeService = createChallengeService({
   relationships: trainerMemberRelationships, gymMemberSharing,
   gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
   activities, checkins, teams: challengeTeams, corporateEmployees,
+});
+
+// Internal product analytics (admin portal only).
+export const analyticsService = createAnalyticsService({
+  users, activities, workouts, goals, checkins, challenges,
+  participants: challengeParticipants, relationships: trainerMemberRelationships,
+  gymSharing: gymMemberSharing, gyms,
 });
 
 // Push is off unless PUSH_NOTIFICATIONS=on, so local dev and tests never call FCM.
