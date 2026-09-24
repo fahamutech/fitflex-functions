@@ -522,7 +522,7 @@ const ALLOWED_FIELDS = {
   trainer_member_relationships: new Set(['id','trainerId','memberId','status','permissions','requestedAt','connectedAt','endedAt','endedBy','createdAt','updatedAt']),
   workout_plans:    new Set(['id','trainerId','name','description','activityType','estimatedDuration','exercises','createdAt','updatedAt']),
   gym_member_sharing: new Set(['id','gymId','memberId','permissions','createdAt','updatedAt']),
-  challenges:       new Set(['id','name','description','type','target','startDate','endDate','creatorType','creatorId','createdBy','rewards','visibility','status','mode','createdAt','updatedAt']),
+  challenges:       new Set(['id','name','description','type','target','startDate','endDate','creatorType','creatorId','createdBy','rewards','visibility','status','mode','eligibility','rewardFunding','createdAt','updatedAt']),
   challenge_participants: new Set(['id','challengeId','memberId','status','joinedAt','leftAt','teamId','leaderboardOptIn']),
   challenge_teams:  new Set(['id','challengeId','name','gymId','department','createdAt']),
   corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','status','createdAt','updatedAt']),
@@ -550,7 +550,7 @@ const JSON_FIELDS = {
   trainer_member_relationships: ['permissions'],
   workout_plans: ['exercises'],
   gym_member_sharing: ['permissions'],
-  challenges: ['rewards'],
+  challenges: ['rewards', 'eligibility'],
 };
 
 /**

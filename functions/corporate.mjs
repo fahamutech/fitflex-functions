@@ -45,6 +45,41 @@ export const adminOnboardCorporate = {
   }
 };
 
+export const adminListHrUsers = {
+  created, method: 'get', path: '/admin/corporate/:id/hr-users',
+  description: 'Admin: HR logins for a corporate account.',
+  onGuard: requireAuth('admin'),
+  onRequest: async (req, res) => {
+    const result = await corporateService.listHrUsers({ corporateId: req.params.id });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  }
+};
+
+export const adminCreateHrUser = {
+  created, method: 'post', path: '/admin/corporate/:id/hr-users',
+  description: 'Admin: create an HR login for a corporate account (email + initial password, min 10 characters). HR signs in to the portal with POST /auth/login { email, password, requestedRole: "corporate_hr" }.',
+  requestSample: { displayName: 'Neema HR', email: 'hr@company.co.tz', password: 'a-long-initial-password' },
+  onGuard: requireAuth('admin'),
+  onRequest: async (req, res) => {
+    const result = await corporateService.createHrUser({ corporateId: req.params.id, body: req.body || {}, actorId: req.user.sub });
+    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.minLength ? { minLength: result.minLength } : {}) });
+    res.status(201).json(result);
+  }
+};
+
+export const adminSetHrUserStatus = {
+  created, method: 'post', path: '/admin/corporate/:id/hr-users/:userId/status',
+  description: 'Admin: suspend or re-activate an HR login.',
+  requestSample: { status: 'suspended' },
+  onGuard: requireAuth('admin'),
+  onRequest: async (req, res) => {
+    const result = await corporateService.setHrUserStatus({ corporateId: req.params.id, userId: req.params.userId, status: req.body?.status, actorId: req.user.sub });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  }
+};
+
 export const adminListCorporate = {
   created, method: 'get', path: '/admin/corporate',
   description: 'Admin: list corporate accounts, newest first. Query: ?status=pending|active|suspended|terminated.',

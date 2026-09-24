@@ -123,6 +123,24 @@ function creatorRoutes(prefix, guard, resolve, label) {
       onGuard: guard,
       onRequest: withCreator(async (creator, req, res) => send(res, await svc.cancel(creator, req.params.id))),
     },
+    update: {
+      created, method: 'patch', path: `${prefix}/challenges/:id`,
+      description: `${label}: edit a challenge you created (name, description, target, dates, rewards, rewardFunding, eligibility). Type and mode lock once it starts or anyone joins; the start date locks once it starts.`,
+      onGuard: guard,
+      onRequest: withCreator(async (creator, req, res) => send(res, await svc.update(creator, req.params.id, req.body || {}))),
+    },
+    close: {
+      created, method: 'post', path: `${prefix}/challenges/:id/close`,
+      description: `${label}: end a running challenge today, keeping results.`,
+      onGuard: guard,
+      onRequest: withCreator(async (creator, req, res) => send(res, await svc.close(creator, req.params.id))),
+    },
+    archive: {
+      created, method: 'post', path: `${prefix}/challenges/:id/archive`,
+      description: `${label}: archive an ended or cancelled challenge (hidden from discovery; participants keep it in their history).`,
+      onGuard: guard,
+      onRequest: withCreator(async (creator, req, res) => send(res, await svc.archive(creator, req.params.id))),
+    },
     participants: {
       created, method: 'get', path: `${prefix}/challenges/:id/participants`,
       description: `${label}: who joined. ${label === 'Trainer' || label === 'Gym' ? 'Progress only for members who share challenge data with you.' : 'Totals only — never individuals.'}`,
@@ -138,6 +156,9 @@ export const trainerCreateChallenge = trainerR.create;
 export const trainerCancelChallenge = trainerR.cancel;
 export const trainerChallengeParticipants = trainerR.participants;
 export const trainerChallengeLeaderboard = trainerR.leaderboard;
+export const trainerUpdateChallenge = trainerR.update;
+export const trainerCloseChallenge = trainerR.close;
+export const trainerArchiveChallenge = trainerR.archive;
 
 const gymR = creatorRoutes('/owner', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')], gymCreator, 'Gym');
 export const ownerChallenges = gymR.list;
@@ -145,6 +166,9 @@ export const ownerCreateChallenge = gymR.create;
 export const ownerCancelChallenge = gymR.cancel;
 export const ownerChallengeParticipants = gymR.participants;
 export const ownerChallengeLeaderboard = gymR.leaderboard;
+export const ownerUpdateChallenge = gymR.update;
+export const ownerCloseChallenge = gymR.close;
+export const ownerArchiveChallenge = gymR.archive;
 
 const adminR = creatorRoutes('/admin', requireAuth('admin'), fitflexCreator, 'FitFlex admin');
 export const adminChallenges = adminR.list;
@@ -152,10 +176,16 @@ export const adminCreateChallenge = adminR.create;
 export const adminCancelChallenge = adminR.cancel;
 export const adminChallengeParticipants = adminR.participants;
 export const adminChallengeLeaderboard = adminR.leaderboard;
+export const adminUpdateChallenge = adminR.update;
+export const adminCloseChallenge = adminR.close;
+export const adminArchiveChallenge = adminR.archive;
 
 const corpR = creatorRoutes('/corporate', requireAuth('corporate_hr', 'admin'), corporateCreator, 'Corporate HR');
 export const corporateChallenges = corpR.list;
 export const corporateCreateChallenge = corpR.create;
 export const corporateCancelChallenge = corpR.cancel;
 export const corporateChallengeParticipants = corpR.participants;
+export const corporateUpdateChallenge = corpR.update;
+export const corporateCloseChallenge = corpR.close;
+export const corporateArchiveChallenge = corpR.archive;
 export const corporateChallengeLeaderboard = corpR.leaderboard;
