@@ -9,9 +9,15 @@ export const ACTIVITY_TYPES = [
   'mobility', 'stretching', 'other',
 ];
 export const ACTIVITY_SOURCES = ['device', 'fitflex', 'manual', 'trainer', 'gym'];
-// Trainer- and gym-sourced activities come from their own (future) flows; a
-// member can only record what they tracked or typed themselves.
+export const DEVICE_PLATFORMS = ['apple_health', 'health_connect', 'fitbit', 'garmin', 'other'];
+// Records the member owns and may delete. Trainer- and gym-sourced
+// activities belong to that relationship.
 const MEMBER_SOURCES = new Set(['device', 'fitflex', 'manual']);
+// What the member can create by hand. Device data only ever arrives through
+// a device sync (with its platform and record id) and FitFlex data only from
+// FitFlex itself (e.g. completing a workout), so neither can be typed in:
+// FitFlex never shows fabricated numbers as device or tracked data.
+const LOGGABLE_SOURCES = new Set(['manual']);
 const INTENSITIES = ['low', 'moderate', 'high'];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -52,7 +58,8 @@ export function createActivityService({ activities, now = () => new Date() }) {
   async function log(memberId, body = {}) {
     if (!ACTIVITY_TYPES.includes(body.type)) return { error: 'invalid_type', status: 400 };
     const source = body.source ?? 'manual';
-    if (!MEMBER_SOURCES.has(source)) return { error: 'invalid_source', status: 400 };
+    if (!ACTIVITY_SOURCES.includes(source)) return { error: 'invalid_source', status: 400 };
+    if (!LOGGABLE_SOURCES.has(source)) return { error: 'source_not_loggable', status: 400 };
     const startedAt = parseDate(body.startedAt);
     if (!startedAt) return { error: 'invalid_started_at', status: 400 };
     if (+startedAt > +now() + FUTURE_SLACK_MS) return { error: 'started_in_future', status: 400 };

@@ -35,12 +35,30 @@ test('log a manual run and list it newest first within the window', async () => 
   assert.deepEqual(narrow.map(x => x.id), [b.activity.id]);
 });
 
+test('a manual entry can never carry device provenance', async () => {
+  const activities = store();
+  const svc = createActivityService({ activities, now });
+  const r = await svc.log('m1', {
+    type: 'walking', startedAt: '2026-09-24T07:00:00Z', steps: 25000,
+    devicePlatform: 'apple_health', externalId: 'HK-123', deviceName: 'Apple Watch',
+  });
+  assert.equal(r.activity.source, 'manual');
+  for (const f of ['devicePlatform', 'externalId', 'deviceName']) {
+    assert.equal(f in activities.rows[0], false, f);
+  }
+});
+
 test('rejects bad activities', async () => {
   const svc = createActivityService({ activities: store(), now });
   const ok = { type: 'running', startedAt: '2026-09-24T06:00:00Z', durationMinutes: 30 };
   const cases = [
     [{ ...ok, type: 'teleporting' }, 'invalid_type'],
-    [{ ...ok, source: 'trainer' }, 'invalid_source'],
+    [{ ...ok, source: 'satellite' }, 'invalid_source'],
+    // Only manual entries can be typed in: device and FitFlex-tracked data
+    // come from their own flows, so they can't be faked here.
+    [{ ...ok, source: 'device' }, 'source_not_loggable'],
+    [{ ...ok, source: 'fitflex' }, 'source_not_loggable'],
+    [{ ...ok, source: 'trainer' }, 'source_not_loggable'],
     [{ ...ok, startedAt: 'yesterday' }, 'invalid_started_at'],
     [{ ...ok, startedAt: '2026-09-25T06:00:00Z' }, 'started_in_future'],
     [{ ...ok, intensity: 'extreme' }, 'invalid_intensity'],

@@ -516,7 +516,7 @@ const ALLOWED_FIELDS = {
   trainer_reviews:  new Set(['id','trainerId','memberId','rating','text','status','moderatedBy','moderatedAt','createdAt','updatedAt']),
   device_tokens:    new Set(['id','userId','token','platform','createdAt','lastSeenAt']),
   notifications:    new Set(['id','userId','type','title','body','data','readAt','createdAt']),
-  activities:       new Set(['id','userId','type','source','startedAt','durationMinutes','distanceKm','steps','activeMinutes','calories','intensity','workoutId','gymId','trainerId','notes','createdAt']),
+  activities:       new Set(['id','userId','type','source','startedAt','durationMinutes','distanceKm','steps','activeMinutes','calories','intensity','workoutId','gymId','trainerId','notes','devicePlatform','externalId','deviceName','createdAt']),
   goals:            new Set(['id','userId','type','period','target','startDate','endDate','source','trainerId','challengeId','status','createdAt','updatedAt']),
   workouts:         new Set(['id','userId','trainerId','gymId','templateId','source','name','description','activityType','scheduledDate','estimatedDuration','status','exercises','notes','startedAt','completedAt','activityId','createdAt','updatedAt']),
   trainer_member_relationships: new Set(['id','trainerId','memberId','status','permissions','requestedAt','connectedAt','endedAt','endedBy','createdAt','updatedAt']),
