@@ -44,6 +44,15 @@ export const MIN_TEAM_SIZE = 3;
 const DAILY_CAP = { steps: 100_000, distance_km: 200, workouts: 5, active_minutes: 720, consistency: 1, gym_attendance: 1 };
 const MAX_DAYS = 92;
 const MAX_REWARDS = 5;
+// What a reward can be, and who earns it. Rewards are recorded and handed
+// out by people (see challenge-reward-service); nothing is provisioned
+// automatically.
+export const REWARD_TYPES = ['points', 'discount', 'gym_pass', 'trainer_session', 'vendor_voucher', 'corporate_reward', 'badge', 'certificate', 'other'];
+// finishers — everyone who reaches the target, as soon as they do
+// top       — the top N by progress once the challenge ends (progress > 0)
+// team      — every member of the winning team once it ends (team modes)
+export const REWARD_RULES = ['finishers', 'top', 'team'];
+const MAX_TOP_N = 100;
 // Who pays for a challenge's rewards, by creator. The first is the default.
 const REWARD_FUNDERS = {
   fitflex: ['fitflex', 'partner'],
@@ -56,6 +65,14 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const isDate = s => typeof s === 'string' && DATE_RE.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
 const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
 const daysInclusive = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000) + 1;
+
+/** A challenge's rewards as items (rows from before rewardItems carry labels only). */
+export function rewardItemsOf(c) {
+  if (Array.isArray(c.rewardItems)) return c.rewardItems;
+  return (Array.isArray(c.rewards) ? c.rewards : []).map((label, i) => ({
+    id: `rwd_${String(c.id).slice(-6)}${i + 1}`, type: 'other', label, value: null, rule: 'finishers', topN: null,
+  }));
+}
 
 /** upcoming | active | ended | cancelled, by the member's local date. */
 export function challengePhase(c, now) {
@@ -70,7 +87,7 @@ export function challengePhase(c, now) {
 
 export function createChallengeService({
   challenges, participants, users, trainers, gyms, relationships, gymMemberSharing, gymMemberIds,
-  activities, checkins, teams = null, corporateEmployees = null, subscriptions = null,
+  activities, checkins, teams = null, corporateEmployees = null, subscriptions = null, rewardAwards = null,
   now = () => new Date(),
 }) {
   // ── Audience ──────────────────────────────────────────────────────────────
@@ -397,10 +414,6 @@ export function createChallengeService({
         return { error: 'invalid_teams', status: 400 };
       }
     }
-    const rewards = body.rewards ?? [];
-    if (!Array.isArray(rewards) || rewards.length > MAX_REWARDS || !rewards.every(r => text(r, 80))) {
-      return { error: 'invalid_rewards', status: 400 };
-    }
     return {
       fields: {
         name,
@@ -409,12 +422,61 @@ export function createChallengeService({
         target: ['workouts', 'consistency', 'gym_attendance', 'steps', 'active_minutes'].includes(body.type) ? Math.round(t) : t,
         startDate: body.startDate,
         endDate: body.endDate,
-        rewards: rewards.map(r => text(r, 80)),
         visibility,
         mode,
       },
       teamNames,
     };
+  }
+
+  /**
+   * Rewards from either `rewardItems` (structured) or `rewards` (labels, as
+   * older clients send them: each becomes an 'other' reward for finishers).
+   * Items keep their id across edits, matched by id or else by label.
+   * Returns { fields: { rewardItems, rewards } } or an error.
+   */
+  function validateRewards(body, mode, existing) {
+    const structured = body.rewardItems !== undefined;
+    const raw = structured ? body.rewardItems ?? [] : body.rewards ?? [];
+    if (!Array.isArray(raw) || raw.length > MAX_REWARDS) return { error: 'invalid_rewards', status: 400 };
+    const items = [];
+    for (const r of raw) {
+      const item = structured ? r : { label: r };
+      if (!item || typeof item !== 'object') return { error: 'invalid_rewards', status: 400 };
+      const label = text(item.label, 80);
+      if (!label) return { error: 'invalid_rewards', status: 400 };
+      const type = item.type ?? 'other';
+      if (!REWARD_TYPES.includes(type)) return { error: 'invalid_reward_type', status: 400 };
+      const rule = item.rule ?? 'finishers';
+      if (!REWARD_RULES.includes(rule)) return { error: 'invalid_reward_rule', status: 400 };
+      if (rule === 'team' && mode === 'individual') return { error: 'team_reward_needs_teams', status: 400 };
+      let topN = null;
+      if (rule === 'top') {
+        topN = item.topN;
+        if (!Number.isInteger(topN) || topN < 1 || topN > MAX_TOP_N) return { error: 'invalid_reward_top_n', status: 400 };
+      }
+      const prior = existing.find(e => item.id && e.id === item.id)
+        ?? existing.find(e => !items.some(i => i.id === e.id) && e.label.toLowerCase() === label.toLowerCase());
+      const id = prior?.id ?? `rwd_${randomUUID().slice(0, 8)}`;
+      // A label from an older client keeps the reward it names as it was.
+      if (!structured && prior) { items.push({ ...prior, id, label }); continue; }
+      const value = typeof item.value === 'number' && Number.isFinite(item.value) ? String(item.value) : text(item.value, 40);
+      items.push({ id, type, label, value, rule, topN });
+    }
+    return { fields: { rewardItems: items, rewards: items.map(i => i.label) } };
+  }
+
+  /** A reward someone has already earned can't be removed or redefined. */
+  async function lockedRewardChange(c, nextItems) {
+    if (!rewardAwards) return null;
+    const earned = new Set((await rewardAwards.filterByColumnAsync('challengeId', c.id)).map(a => a.rewardId));
+    const key = i => [i.type, i.value ?? '', i.rule, i.topN ?? ''].join('|');
+    for (const prev of rewardItemsOf(c)) {
+      if (!earned.has(prev.id)) continue;
+      const next = nextItems.find(i => i.id === prev.id);
+      if (!next || key(next) !== key(prev)) return { error: 'reward_locked', status: 409 };
+    }
+    return null;
   }
 
   /** Validates eligibility for this creator. Returns { eligibility } or an error. */
@@ -466,10 +528,13 @@ export function createChallengeService({
     if (el.error) return el;
     const fund = validateFunding(creator, body.rewardFunding);
     if (fund.error) return fund;
+    const rw = validateRewards(body, v.fields.mode, []);
+    if (rw.error) return rw;
     const stamp = now().toISOString();
     const row = {
       id: `chl_${randomUUID().slice(0, 12)}`,
       ...v.fields,
+      ...rw.fields,
       eligibility: el.eligibility,
       rewardFunding: fund.rewardFunding,
       // FitFlex challenges are for everyone.
@@ -533,7 +598,7 @@ export function createChallengeService({
     const v = validate({
       name: pick('name'), description: pick('description'), type: pick('type'),
       target: pick('target'), startDate: pick('startDate'), endDate: pick('endDate'),
-      rewards: pick('rewards') ?? [], visibility: pick('visibility') ?? 'audience',
+      visibility: pick('visibility') ?? 'audience',
       mode: pick('mode') ?? 'individual',
       teams: (await teamList(id)).map(t => t.name),
     });
@@ -542,6 +607,13 @@ export function createChallengeService({
     if (allowed && !allowed.includes(c.creatorType)) return { error: 'mode_not_allowed', status: 400 };
     const patch = { ...v.fields, updatedAt: now().toISOString() };
     if (c.creatorType === 'fitflex') patch.visibility = 'public';
+    if (body.rewardItems !== undefined || body.rewards !== undefined) {
+      const rw = validateRewards(body, v.fields.mode, rewardItemsOf(c));
+      if (rw.error) return rw;
+      const locked = await lockedRewardChange(c, rw.fields.rewardItems);
+      if (locked) return locked;
+      Object.assign(patch, rw.fields);
+    }
     if (body.eligibility !== undefined) {
       const el = await validateEligibility(creator, body.eligibility);
       if (el.error) return el;
@@ -715,6 +787,34 @@ export function createChallengeService({
   }
 
   /**
+   * Everyone taking part, best first (ties: who joined first), and the
+   * winning team — the team (of MIN_TEAM_SIZE or more) with the highest
+   * average completion above zero. For deciding rewards; never returned
+   * to anyone as is.
+   */
+  async function scoreboard(c) {
+    const joined = (await participants.filterByColumnAsync('challengeId', c.id)).filter(p => p.status === 'joined');
+    const scored = [];
+    for (const p of joined) {
+      const progress = await progressFor(c, p.memberId);
+      scored.push({ memberId: p.memberId, teamId: p.teamId ?? null, joinedAt: p.joinedAt, progress, fraction: c.target > 0 ? progress / c.target : 0 });
+    }
+    scored.sort((a, b) => b.fraction - a.fraction || +new Date(a.joinedAt) - +new Date(b.joinedAt));
+    let winningTeamId = null;
+    if ((c.mode ?? 'individual') !== 'individual') {
+      const groups = new Map();
+      for (const s of scored) if (s.teamId) groups.set(s.teamId, [...(groups.get(s.teamId) ?? []), s]);
+      let best = 0;
+      for (const [teamId, members] of groups) {
+        if (members.length < MIN_TEAM_SIZE) continue;
+        const avg = members.reduce((n, s) => n + Math.min(s.fraction, 1), 0) / members.length;
+        if (avg > best) { best = avg; winningTeamId = teamId; }
+      }
+    }
+    return { scored, winningTeamId };
+  }
+
+  /**
    * For a trainer's or gym's view of one member (already permission-checked
    * by the caller): that member's progress on the creator's challenges.
    */
@@ -737,6 +837,7 @@ export function createChallengeService({
     memberChallenges, memberChallenge, join, leave, memberProgressForCreator,
     setLeaderboardOptIn, leaderboard,
     create, creatorList, cancel, update, close, archive, creatorParticipants,
+    scoreboard, progressFor,
   };
 }
 
