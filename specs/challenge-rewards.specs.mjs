@@ -186,6 +186,8 @@ test('pending → approved → issued, with a reason to reject and a full trail'
   assert.equal(issued.reference, 'PASS-7D-0192');
   assert.deepEqual(issued.history.map(h => h.status), ['pending', 'approved', 'issued']);
   assert.equal(issued.history[2].by, 'adm');
+  assert.equal(issued.history[2].byName, null, 'unknown user has no name');
+  assert.equal((await s.rw.setStatus(ADMIN, 'm2', a3.id, { status: 'approved' })).reward.history[1].byName, 'M2 Person', 'named by display name');
   assert.equal((await s.rw.setStatus(ADMIN, 'adm', a1.id, { status: 'rejected', note: 'x' })).error, 'invalid_transition', 'issued is final');
 
   assert.equal((await s.rw.setStatus(ADMIN, 'adm', a3.id, { status: 'rejected' })).error, 'reason_required');
@@ -197,7 +199,7 @@ test('pending → approved → issued, with a reason to reject and a full trail'
   assert.equal(mine.status, 'issued');
   assert.equal(mine.reference, 'PASS-7D-0192');
   assert.deepEqual(s.auditLog.rows.map(r => r.action), [
-    'challenge_reward.approved', 'challenge_reward.issued', 'challenge_reward.rejected', 'challenge_reward.pending',
+    'challenge_reward.approved', 'challenge_reward.issued', 'challenge_reward.approved', 'challenge_reward.rejected', 'challenge_reward.pending',
   ]);
   assert.deepEqual(s.sent.filter(m => m.type !== 'challenge_reward_earned').map(m => m.type), ['challenge_reward_issued', 'challenge_reward_rejected']);
 

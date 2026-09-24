@@ -166,6 +166,15 @@ export function createChallengeRewardService({
     for (const c of await unsettled(x => joined.has(x.id))) await evaluate(c, { memberId });
   }
 
+  /** History with who did each step by name (ids stay for the audit trail). */
+  async function named(history = []) {
+    const names = new Map();
+    for (const h of history) {
+      if (h.by && !names.has(h.by)) names.set(h.by, (await users.findByIdAsync(h.by))?.displayName ?? null);
+    }
+    return history.map(h => ({ ...h, byName: h.by ? names.get(h.by) ?? null : null }));
+  }
+
   const view = (a, c) => ({
     id: a.id,
     challenge: { id: a.challengeId, name: c?.name ?? null, endDate: c?.endDate ?? null },
@@ -220,7 +229,7 @@ export function createChallengeRewardService({
           ...(scope.kind === 'corporate' && { department: staff.get(a.memberId)?.department ?? null }),
         },
         funder: a.funder,
-        history: a.history ?? [],
+        history: await named(a.history ?? []),
         decidedAt: a.decidedAt ?? null,
       });
     }
@@ -271,7 +280,7 @@ export function createChallengeRewardService({
         data: { challengeId: a.challengeId, rewardAwardId: id },
       });
     }
-    return { reward: { ...view(updated, c), funder: updated.funder, history: updated.history } };
+    return { reward: { ...view(updated, c), funder: updated.funder, history: await named(updated.history) } };
   }
 
   /** Reward counts for one challenge, for its creator's detail view. */
