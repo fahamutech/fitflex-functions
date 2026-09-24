@@ -36,6 +36,7 @@ import { createWorkoutService } from '../services/workout-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createChallengeService } from '../services/challenge-service.mjs';
+import { createChallengeRewardService } from '../services/challenge-reward-service.mjs';
 import { createAnalyticsService } from '../services/analytics-service.mjs';
 import { createNotificationService } from '../services/notification-service.mjs';
 import { getMessaging } from 'firebase-admin/messaging';
@@ -50,7 +51,7 @@ import {
   corporateAccounts, corporateEmployees, corporateBills,
   deviceTokens, notifications, activities, goals, workouts,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
-  challengeTeams,
+  challengeTeams, challengeRewards,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -141,7 +142,7 @@ export const challengeService = createChallengeService({
   challenges, participants: challengeParticipants, users, trainers, gyms,
   relationships: trainerMemberRelationships, gymMemberSharing,
   gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
-  activities, checkins, teams: challengeTeams, corporateEmployees, subscriptions,
+  activities, checkins, teams: challengeTeams, corporateEmployees, subscriptions, rewardAwards: challengeRewards,
 });
 
 // Internal product analytics (admin portal only).
@@ -155,6 +156,11 @@ export const analyticsService = createAnalyticsService({
 export const notificationService = createNotificationService({
   users, deviceTokens, notifications, whatsApp: whatsAppService,
   getMessaging: process.env.PUSH_NOTIFICATIONS === 'on' ? () => { initFirebaseAdmin(); return getMessaging(); } : null,
+});
+export const challengeRewardService = createChallengeRewardService({
+  challenges, participants: challengeParticipants, awards: challengeRewards, users, corporateEmployees,
+  challengeService, auditLog,
+  notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const trainerClientService = createTrainerClientService({
   relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals,

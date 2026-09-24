@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -16,5 +16,14 @@ export const renewalNotifier = {
         await notificationService.notifyRenewal(s, days);
       }
     }
+  }
+};
+
+export const challengeRewardSettler = {
+  created, rule: '30 21 * * *', // every day 21:30 UTC = 00:30 EAT, just after challenges end
+  description: 'Record challenge rewards earned by finishers, and settle top-N and winning-team rewards for challenges that have ended.',
+  onJob: async () => {
+    const r = await challengeRewardService.settleDue();
+    console.log(`[rewards] earned=${r.earned} settled=${r.settled}`);
   }
 };
