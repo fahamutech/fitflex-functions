@@ -131,7 +131,7 @@ export const whatsAppService = createWhatsAppService({
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
 export const favoriteService = createFavoriteService({ users, gyms });
 export const activityService = createActivityService({ activities });
-export const goalService = createGoalService({ goals });
+export const goalService = createGoalService({ goals, trainers });
 export const workoutService = createWorkoutService({ workouts, activities });
 export const gymSharingService = createGymSharingService({
   sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
@@ -160,4 +160,5 @@ export const trainerClientService = createTrainerClientService({
   relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals,
   notify: (userId, message) => notificationService.notify(userId, message),
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
+  challenges, participants: challengeParticipants,
 });

@@ -51,6 +51,19 @@ export function dailyTotals(activities) {
   return days;
 }
 
+/**
+ * A goal's progress over [fromDay, toDayExclusive): measured from activity,
+ * or, for a coaching goal (`custom`), the times the member marked it done.
+ */
+function measureGoal(goal, activities, fromDay, toDayExclusive) {
+  if (goal.type === 'custom') {
+    return (goal.completions ?? [])
+      .map(localDay)
+      .filter(d => d >= fromDay && d < toDayExclusive).length;
+  }
+  return measure(goal.type, activities, fromDay, toDayExclusive);
+}
+
 function measure(type, activities, fromDay, toDayExclusive) {
   let total = 0;
   for (const a of activities) {
@@ -82,7 +95,7 @@ export function goalWindow(goal, now) {
 
 export function goalProgress(goal, activities, now = new Date()) {
   const [from, to] = goalWindow(goal, now);
-  const current = measure(goal.type, activities, from, to);
+  const current = measureGoal(goal, activities, from, to);
   return { current, target: goal.target, completed: current >= goal.target, periodStart: from, periodEnd: addDays(to, -1) };
 }
 
@@ -136,7 +149,7 @@ export function streaks(activities, goals = [], now = new Date(), historyDays = 
         first: today, step: 1, floor,
         qualifies: d => {
           const live = daily.filter(g => g.startDate <= d);
-          return live.length > 0 && live.every(g => measure(g.type, activities, d, addDays(d, 1)) >= g.target);
+          return live.length > 0 && live.every(g => measureGoal(g, activities, d, addDays(d, 1)) >= g.target);
         },
       }),
     };

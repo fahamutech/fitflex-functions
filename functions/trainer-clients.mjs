@@ -88,6 +88,22 @@ export const assignTrainerWorkout = {
   onRequest: async (req, res) => send(res, await svc.assign(req.user.sub, req.params.id, req.body || {}), 201)
 };
 
+export const assignTrainerGoal = {
+  created, method: 'post', path: '/trainer/clients/:id/goals',
+  description: 'Trainer: set a goal for an active client. { type, period, target, startDate?, endDate? } for measured goals; { type: "custom", title, target, period } for a coaching goal; { challengeId, target? } for a goal tied to one of your challenges the member joined.',
+  requestSample: { type: 'workouts', period: 'custom', startDate: '2026-09-21', endDate: '2026-09-27', target: 4 },
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => send(res, await svc.assignGoal(req.user.sub, req.params.id, req.body || {}), 201)
+};
+
+export const updateTrainerGoal = {
+  created, method: 'patch', path: '/trainer/clients/:id/goals/:goalId',
+  description: 'Trainer: retarget, retitle or archive a goal you set for this client.',
+  requestSample: { target: 5 },
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => send(res, await svc.updateAssignedGoal(req.user.sub, req.params.id, req.params.goalId, req.body || {}))
+};
+
 export const cancelTrainerWorkout = {
   created, method: 'delete', path: '/trainer/workouts/:id',
   description: 'Trainer: remove an assigned workout the member has not started.',

@@ -18,6 +18,7 @@ import {
   dailyTotals, goalProgress, localDay, addDays, weekStart, isWorkout, activeMinutesOf,
   streaks as computeStreaks,
 } from '../shared/member-progress.mjs';
+import { validateGoalDefinition, GOAL_TYPES } from './goal-service.mjs';
 
 export const PERMISSIONS = [
   'steps', 'distance', 'activeMinutes', 'workoutHistory',
@@ -49,6 +50,8 @@ export function normalizePermissions(input, base = {}) {
 
 export function createTrainerClientService({
   relationships, trainers, users, workouts, workoutPlans, activities, goals,
+  // For goals tied to the trainer's own challenges.
+  challenges = null, participants = null,
   notify = async () => {}, now = () => new Date(),
   // (creatorType, creatorId, memberId) → the member's progress on that
   // creator's challenges. Injected to avoid a circular dependency.
@@ -330,12 +333,128 @@ export function createTrainerClientService({
     if (perms.goals) {
       out.goals = memberGoals.map(g => ({
         id: g.id, type: g.type, period: g.period, target: g.target, source: g.source,
+        title: g.title ?? null,
         ...goalProgress(g, acts, now()),
       }));
     }
     if (perms.streaks) out.streaks = computeStreaks(acts, memberGoals, now(), HISTORY_DAYS);
     if (perms.challenges) out.challenges = await challengeProgressFor('trainer', trainer.id, r.memberId);
+    // The trainer always sees goals they set; progress still needs the
+    // member's `goals` permission, like every other goal.
+    const assigned = (await goals.filterByColumnAsync('userId', r.memberId))
+      .filter(g => g.source === 'trainer' && g.trainerId === trainer.id && g.status !== 'archived');
+    out.assignedGoals = assigned
+      .sort((a, b) => +new Date(a.createdAt) - +new Date(b.createdAt))
+      .map(g => ({
+        ...assignedGoalView(g),
+        ...(perms.goals && { progress: goalProgress(g, acts, now()) }),
+      }));
+    // The trainer's own challenges this member joined: what a challenge
+    // goal can be tied to. Only with the `challenges` permission.
+    if (perms.challenges) out.goalChallenges = await linkableChallenges(trainer, r.memberId);
     return out;
+  }
+
+  // ── Trainer-assigned goals ────────────────────────────────────────────────
+
+  function assignedGoalView(g) {
+    return {
+      id: g.id, type: g.type, period: g.period, target: g.target,
+      startDate: g.startDate, endDate: g.endDate, title: g.title ?? null,
+      challengeId: g.challengeId ?? null, status: g.status, createdAt: g.createdAt,
+    };
+  }
+
+  const CHALLENGE_GOAL_TYPES = { steps: 'steps', workouts: 'workouts', active_minutes: 'active_minutes', distance_km: 'distance_km' };
+
+  async function linkableChallenges(trainer, memberId) {
+    if (!challenges || !participants) return [];
+    const mine = (await participants.filterByColumnAsync('memberId', memberId)).filter(p => p.status === 'joined');
+    const out = [];
+    for (const p of mine) {
+      const c = await challenges.findByIdAsync(p.challengeId);
+      if (!c || c.creatorType !== 'trainer' || c.creatorId !== trainer.id) continue;
+      if (c.status === 'cancelled' || c.endDate < localDay(now()) || !CHALLENGE_GOAL_TYPES[c.type]) continue;
+      out.push({ id: c.id, name: c.name, type: c.type, target: c.target, startDate: c.startDate, endDate: c.endDate });
+    }
+    return out;
+  }
+
+  async function assignGoal(trainerUserId, relId, body = {}) {
+    const res = await trainerConnection(trainerUserId, relId);
+    if (res.error) return res;
+    const { trainer, relationship: r } = res;
+    let input = body;
+    let challengeId = null;
+    if (body.challengeId) {
+      // A challenge goal takes the challenge's measure and dates.
+      const perms = normalizePermissions(r.permissions);
+      if (!perms.challenges) return { error: 'challenges_not_shared', status: 403 };
+      const linkable = await linkableChallenges(trainer, r.memberId);
+      const c = linkable.find(x => x.id === body.challengeId);
+      if (!c) return { error: 'challenge_not_linkable', status: 400 };
+      challengeId = c.id;
+      input = {
+        type: CHALLENGE_GOAL_TYPES[c.type], period: 'custom',
+        startDate: c.startDate, endDate: c.endDate,
+        target: body.target ?? Number(c.target), title: body.title ?? c.name,
+      };
+    }
+    const def = validateGoalDefinition(input, { now, types: GOAL_TYPES });
+    if (def.error) return def;
+    const active = (await goals.filterByColumnAsync('userId', r.memberId)).filter(g => g.status === 'active');
+    if (active.length >= 20) return { error: 'too_many_goals', status: 400 };
+    const row = {
+      id: `goal_${randomUUID().slice(0, 12)}`,
+      userId: r.memberId,
+      ...def.definition,
+      source: 'trainer',
+      trainerId: trainer.id,
+      challengeId,
+      createdByType: 'trainer',
+      createdById: trainerUserId,
+      completions: def.definition.type === 'custom' ? [] : null,
+      status: 'active',
+      createdAt: stamp(),
+      updatedAt: stamp(),
+    };
+    await goals.insertAsync(row);
+    await safeNotify(r.memberId, {
+      type: 'trainer_goal_assigned',
+      title: 'New goal from your trainer',
+      body: `${trainer.displayName || 'Your trainer'} set you a goal${row.title ? `: ${row.title}` : ''}.`,
+      data: { goalId: row.id },
+    });
+    return { goal: assignedGoalView(row) };
+  }
+
+  /** Retarget, retitle or archive a goal this trainer set. */
+  async function updateAssignedGoal(trainerUserId, relId, goalId, body = {}) {
+    const res = await trainerConnection(trainerUserId, relId, { requireActive: false });
+    if (res.error) return res;
+    const { trainer, relationship: r } = res;
+    const g = await goals.findByIdAsync(goalId);
+    if (!g || g.userId !== r.memberId || g.source !== 'trainer' || g.trainerId !== trainer.id) {
+      return { error: 'not_found', status: 404 };
+    }
+    const patch = {};
+    if (body.status !== undefined) {
+      if (!['active', 'archived'].includes(body.status)) return { error: 'invalid_status', status: 400 };
+      patch.status = body.status;
+    }
+    if (body.target !== undefined || body.title !== undefined) {
+      const def = validateGoalDefinition({
+        type: g.type, period: g.period, startDate: g.startDate, endDate: g.endDate,
+        target: body.target ?? g.target, title: body.title ?? g.title,
+      }, { now, types: GOAL_TYPES });
+      if (def.error) return def;
+      patch.target = def.definition.target;
+      patch.title = def.definition.title;
+    }
+    if (!Object.keys(patch).length) return { error: 'nothing_to_update', status: 400 };
+    patch.updatedAt = stamp();
+    const updated = await goals.updateByIdAsync(goalId, patch);
+    return { goal: assignedGoalView(updated ?? { ...g, ...patch }) };
   }
 
   // ── Plans ─────────────────────────────────────────────────────────────────
@@ -434,5 +553,6 @@ export function createTrainerClientService({
     memberConnections, request, updatePermissions, memberEnd,
     clients, accept: (u, id) => decide(u, id, true), decline: (u, id) => decide(u, id, false),
     trainerEnd, overview, listPlans, savePlan, deletePlan, assign, cancelAssignment,
+    assignGoal, updateAssignedGoal,
   };
 }
