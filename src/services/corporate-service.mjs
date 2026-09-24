@@ -419,6 +419,57 @@ export function createCorporateService({
   }
 
   /** Resolve the corporate account a request actor is scoped to. */
+  // ── HR logins (created by FitFlex admins) ─────────────────────────────────
+  // HR users sign in to the portal with email + password (scrypt hash, see
+  // auth-service SCRYPT_PASSWORD_ROLES). They act on their own company only.
+
+  const HR_MIN_PASSWORD = 10;
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const hrView = u => ({
+    id: u.id, displayName: u.displayName, email: u.email,
+    accountStatus: u.accountStatus ?? 'active', createdAt: u.createdAt,
+  });
+
+  async function listHrUsers({ corporateId }) {
+    const account = await corporateAccounts.findByIdAsync(corporateId);
+    if (!account) return { error: 'corporate_not_found', status: 404 };
+    const rows = (await users.filterByColumnAsync('corporateId', corporateId)).filter(u => u.userType === 'corporate_hr');
+    return { hrUsers: rows.map(hrView) };
+  }
+
+  async function createHrUser({ corporateId, body = {}, actorId }) {
+    const account = await corporateAccounts.findByIdAsync(corporateId);
+    if (!account) return { error: 'corporate_not_found', status: 404 };
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const displayName = typeof body.displayName === 'string' ? body.displayName.trim().slice(0, 80) : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!EMAIL_RE.test(email)) return { error: 'invalid_email', status: 400 };
+    if (!displayName) return { error: 'name_required', status: 400 };
+    if (password.length < HR_MIN_PASSWORD) return { error: 'password_too_short', status: 400, minLength: HR_MIN_PASSWORD };
+    const taken = (await users.filterAsync(u => u.email === email)).some(u => u.userType === 'corporate_hr');
+    if (taken) return { error: 'email_in_use', status: 409 };
+    const stamp = now();
+    const row = {
+      id: `usr_${randomUUID().slice(0, 12)}`,
+      userType: 'corporate_hr', corporateId, email, displayName,
+      passwordHash: await hashPassword(password),
+      accountStatus: 'active', approvalStatus: 'approved', onboardingCompleted: true,
+      createdAt: stamp, updatedAt: stamp,
+    };
+    await users.insertAsync(row);
+    await audit({ actor: actorId, action: 'corporate.hr.create', target: row.id, after: hrView(row) });
+    return { hrUser: hrView(row) };
+  }
+
+  async function setHrUserStatus({ corporateId, userId, status, actorId }) {
+    if (!['active', 'suspended'].includes(status)) return { error: 'invalid_status', status: 400 };
+    const u = await users.findByIdAsync(userId);
+    if (!u || u.userType !== 'corporate_hr' || u.corporateId !== corporateId) return { error: 'hr_user_not_found', status: 404 };
+    const updated = await users.updateByIdAsync(userId, { accountStatus: status, updatedAt: now() });
+    await audit({ actor: actorId, action: `corporate.hr.${status}`, target: userId, before: hrView(u), after: hrView(updated ?? { ...u, accountStatus: status }) });
+    return { hrUser: hrView(updated ?? { ...u, accountStatus: status }) };
+  }
+
   async function resolveActorAccount({ userId, userType, corporateIdParam }) {
     if (userType === 'admin') {
       if (!corporateIdParam) return { error: 'corporate_id_required', status: 400 };
@@ -433,5 +484,6 @@ export function createCorporateService({
     reference, onboard, setStatus, update, adminList, verifyDomain,
     provisionStaff, bulkProvisionStaff, setEmployeeStatus, listStaff,
     dashboard, generateBill, listBills, markBillPaid, resolveActorAccount,
+    listHrUsers, createHrUser, setHrUserStatus,
   };
 }

@@ -181,9 +181,11 @@ test('FitFlex and employers only ever see totals', async () => {
     const r = await s.svc.creatorParticipants(creator, c.id);
     assert.equal('participants' in r, false);
     const expected = creator === FITFLEX
-      ? { joined: 2, completed: 1, averageProgress: 0.91 }
-      : { joined: 1, completed: 0, averageProgress: 0.81 };
-    assert.deepEqual(r.summary, expected, creator.creatorType);
+      ? { joined: 2, completed: 1, averageProgress: 0.91, completionRate: 0.5 }
+      : { joined: 1, completed: 0, averageProgress: 0.81, completionRate: 0 };
+    const { eligible, participationRate, ...core } = r.summary;
+    assert.deepEqual(core, expected, creator.creatorType);
+    assert.ok(eligible === null || typeof eligible === 'number');
     assert.equal(JSON.stringify(r).includes('Amina'), false);
   }
 });

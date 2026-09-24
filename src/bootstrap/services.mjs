@@ -141,7 +141,7 @@ export const challengeService = createChallengeService({
   challenges, participants: challengeParticipants, users, trainers, gyms,
   relationships: trainerMemberRelationships, gymMemberSharing,
   gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
-  activities, checkins, teams: challengeTeams, corporateEmployees,
+  activities, checkins, teams: challengeTeams, corporateEmployees, subscriptions,
 });
 
 // Internal product analytics (admin portal only).

@@ -22,6 +22,7 @@ export function normalizeRequestedRole(role) {
   if (role === 'gym_staff') return 'gym_staff';
   if (role === 'vendor') return 'vendor';
   if (role === 'vendor_staff') return 'vendor_staff';
+  if (role === 'corporate_hr') return 'corporate_hr';
   return 'member';
 }
 

@@ -29,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 import { challengeProgress, localDay } from '../shared/member-progress.mjs';
 import { normalizePermissions } from './trainer-client-service.mjs';
 import { normalizeGymPermissions } from './gym-sharing-service.mjs';
+import { PASS_TIERS } from '../shared/constants.mjs';
 
 export const CHALLENGE_TYPES = ['steps', 'distance_km', 'workouts', 'active_minutes', 'consistency', 'gym_attendance'];
 export const CREATOR_TYPES = ['fitflex', 'trainer', 'gym', 'corporate', 'partner'];
@@ -43,6 +44,13 @@ export const MIN_TEAM_SIZE = 3;
 const DAILY_CAP = { steps: 100_000, distance_km: 200, workouts: 5, active_minutes: 720, consistency: 1, gym_attendance: 1 };
 const MAX_DAYS = 92;
 const MAX_REWARDS = 5;
+// Who pays for a challenge's rewards, by creator. The first is the default.
+const REWARD_FUNDERS = {
+  fitflex: ['fitflex', 'partner'],
+  corporate: ['company', 'fitflex', 'partner'],
+};
+const MAX_ELIGIBLE_EMPLOYEES = 2000;
+const EMPLOYEE_ELIGIBLE_STATUSES = new Set(['active', 'pending']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const isDate = s => typeof s === 'string' && DATE_RE.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
@@ -52,6 +60,8 @@ const daysInclusive = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.
 /** upcoming | active | ended | cancelled, by the member's local date. */
 export function challengePhase(c, now) {
   if (c.status === 'cancelled') return 'cancelled';
+  // An archived challenge is finished: shown as ended to those who took part.
+  if (c.status === 'archived' || c.status === 'closed') return 'ended';
   const today = localDay(now);
   if (today < c.startDate) return 'upcoming';
   if (today > c.endDate) return 'ended';
@@ -60,13 +70,42 @@ export function challengePhase(c, now) {
 
 export function createChallengeService({
   challenges, participants, users, trainers, gyms, relationships, gymMemberSharing, gymMemberIds,
-  activities, checkins, teams = null, corporateEmployees = null, now = () => new Date(),
+  activities, checkins, teams = null, corporateEmployees = null, subscriptions = null,
+  now = () => new Date(),
 }) {
   // ── Audience ──────────────────────────────────────────────────────────────
 
   /** Can this member see (and join) the challenge? */
   async function visibleTo(c, memberId, ctx = {}) {
-    if (c.status === 'cancelled') return false;
+    if (c.status === 'cancelled' || c.status === 'archived') return false;
+    if (!(await inAudience(c, memberId, ctx))) return false;
+    return eligible(c, memberId, ctx);
+  }
+
+  /** Eligibility narrows the audience: pass tiers, departments, people. */
+  async function eligible(c, memberId, ctx) {
+    const e = c.eligibility;
+    if (!e || e.kind === 'all') return true;
+    if (e.kind === 'tiers') {
+      if (!subscriptions) return false;
+      const subs = await subscriptions.filterByColumnAsync('memberId', memberId);
+      const today = now();
+      return subs.some(sub => sub.status === 'active' && e.tiers.includes(sub.tier)
+        && (!sub.expiresAt || new Date(sub.expiresAt) > today));
+    }
+    if (!corporateEmployees) return false;
+    ctx.staff ??= await corporateEmployees.filterByColumnAsync('userId', memberId);
+    const me = ctx.staff.find(x => x.corporateId === c.creatorId && EMPLOYEE_ELIGIBLE_STATUSES.has(x.status));
+    if (!me) return false;
+    if (e.kind === 'departments') {
+      const want = new Set(e.departments.map(d => d.toLowerCase()));
+      return !!me.department && want.has(me.department.toLowerCase());
+    }
+    if (e.kind === 'employees') return e.employeeIds.includes(me.id);
+    return false;
+  }
+
+  async function inAudience(c, memberId, ctx) {
     if (c.creatorType === 'fitflex' || c.visibility === 'public') return true;
     switch (c.creatorType) {
       case 'trainer': {
@@ -127,7 +166,7 @@ export function createChallengeService({
     for (const c of all) {
       const phase = challengePhase(c, now());
       const joined = joinedIds.has(c.id);
-      if (phase === 'cancelled' && !joined) continue;
+      if ((phase === 'cancelled' || c.status === 'archived') && !joined) continue;
       if (!joined && (phase === 'ended' || !(await visibleTo(c, memberId, ctx)))) continue;
       const rows = await participants.filterByColumnAsync('challengeId', c.id);
       out.push(await forMember(c, rows, memberId));
@@ -378,6 +417,43 @@ export function createChallengeService({
     };
   }
 
+  /** Validates eligibility for this creator. Returns { eligibility } or an error. */
+  async function validateEligibility(creator, raw) {
+    if (raw == null || raw.kind === 'all') return { eligibility: null };
+    if (creator.creatorType === 'fitflex' && raw.kind === 'tiers') {
+      const tiers = Array.isArray(raw.tiers) ? [...new Set(raw.tiers)] : [];
+      if (!tiers.length || !tiers.every(t => t in PASS_TIERS)) return { error: 'invalid_eligibility', status: 400 };
+      return { eligibility: { kind: 'tiers', tiers } };
+    }
+    if (creator.creatorType === 'corporate' && corporateEmployees) {
+      const staff = (await corporateEmployees.filterByColumnAsync('corporateId', creator.creatorId))
+        .filter(x => EMPLOYEE_ELIGIBLE_STATUSES.has(x.status));
+      if (raw.kind === 'departments') {
+        const known = new Map(staff.filter(x => x.department).map(x => [x.department.toLowerCase(), x.department]));
+        const wanted = Array.isArray(raw.departments) ? raw.departments.map(d => text(d, 60)).filter(Boolean) : [];
+        if (!wanted.length || !wanted.every(d => known.has(d.toLowerCase()))) return { error: 'invalid_eligibility', status: 400 };
+        return { eligibility: { kind: 'departments', departments: [...new Set(wanted.map(d => known.get(d.toLowerCase())))] } };
+      }
+      if (raw.kind === 'employees') {
+        const ids = Array.isArray(raw.employeeIds) ? [...new Set(raw.employeeIds)] : [];
+        const mine = new Set(staff.map(x => x.id));
+        if (!ids.length || ids.length > MAX_ELIGIBLE_EMPLOYEES || !ids.every(id => mine.has(id))) {
+          return { error: 'invalid_eligibility', status: 400 };
+        }
+        return { eligibility: { kind: 'employees', employeeIds: ids } };
+      }
+    }
+    return { error: 'invalid_eligibility', status: 400 };
+  }
+
+  function validateFunding(creator, value, fallback = undefined) {
+    const allowed = REWARD_FUNDERS[creator.creatorType];
+    if (!allowed) return { rewardFunding: null };
+    if (value === undefined) return { rewardFunding: fallback ?? allowed[0] };
+    if (!allowed.includes(value)) return { error: 'invalid_reward_funding', status: 400 };
+    return { rewardFunding: value };
+  }
+
   /** Create a challenge for a creator (resolved and authorised by the caller). */
   async function create({ creatorType, creatorId, createdBy }, body = {}) {
     if (!CREATOR_TYPES.includes(creatorType) || creatorType === 'partner') return { error: 'invalid_creator', status: 400 };
@@ -385,10 +461,17 @@ export function createChallengeService({
     if (v.error) return v;
     const allowed = MODE_CREATORS[v.fields.mode];
     if (allowed && !allowed.includes(creatorType)) return { error: 'mode_not_allowed', status: 400 };
+    const creator = { creatorType, creatorId };
+    const el = await validateEligibility(creator, body.eligibility);
+    if (el.error) return el;
+    const fund = validateFunding(creator, body.rewardFunding);
+    if (fund.error) return fund;
     const stamp = now().toISOString();
     const row = {
       id: `chl_${randomUUID().slice(0, 12)}`,
       ...v.fields,
+      eligibility: el.eligibility,
+      rewardFunding: fund.rewardFunding,
       // FitFlex challenges are for everyone.
       visibility: creatorType === 'fitflex' ? 'public' : v.fields.visibility,
       creatorType,
@@ -431,6 +514,101 @@ export function createChallengeService({
     return { challenge: { ...c, status: 'cancelled', phase: 'cancelled' } };
   }
 
+  /**
+   * Edit a challenge you created. Anything can change before it starts and
+   * before anyone joins; after that the measure (type, mode) and the start
+   * date stay put so nobody's progress changes meaning under them.
+   */
+  async function update(creator, id, body = {}) {
+    const c = await owned(creator, id);
+    if (!c) return { error: 'not_found', status: 404 };
+    if (c.status !== 'active') return { error: 'not_editable', status: 409 };
+    const started = localDay(now()) >= c.startDate;
+    const joined = (await participants.filterByColumnAsync('challengeId', id)).some(p => p.status === 'joined');
+    if ((started || joined) && ((body.type && body.type !== c.type) || (body.mode && body.mode !== (c.mode ?? 'individual')))) {
+      return { error: 'measure_locked', status: 409 };
+    }
+    if (started && body.startDate && body.startDate !== c.startDate) return { error: 'start_locked', status: 409 };
+    const pick = k => (body[k] !== undefined ? body[k] : c[k]);
+    const v = validate({
+      name: pick('name'), description: pick('description'), type: pick('type'),
+      target: pick('target'), startDate: pick('startDate'), endDate: pick('endDate'),
+      rewards: pick('rewards') ?? [], visibility: pick('visibility') ?? 'audience',
+      mode: pick('mode') ?? 'individual',
+      teams: (await teamList(id)).map(t => t.name),
+    });
+    if (v.error) return v;
+    const allowed = MODE_CREATORS[v.fields.mode];
+    if (allowed && !allowed.includes(c.creatorType)) return { error: 'mode_not_allowed', status: 400 };
+    const patch = { ...v.fields, updatedAt: now().toISOString() };
+    if (c.creatorType === 'fitflex') patch.visibility = 'public';
+    if (body.eligibility !== undefined) {
+      const el = await validateEligibility(creator, body.eligibility);
+      if (el.error) return el;
+      patch.eligibility = el.eligibility;
+    }
+    if (body.rewardFunding !== undefined) {
+      const fund = validateFunding(creator, body.rewardFunding);
+      if (fund.error) return fund;
+      patch.rewardFunding = fund.rewardFunding;
+    }
+    const updated = await challenges.updateByIdAsync(id, patch);
+    const row = updated ?? { ...c, ...patch };
+    return { challenge: { ...withCounts(row, await participants.filterByColumnAsync('challengeId', id)), phase: challengePhase(row, now()), teams: await teamList(id) } };
+  }
+
+  /** End a running challenge now, keeping everyone's results up to today. */
+  async function close(creator, id) {
+    const c = await owned(creator, id);
+    if (!c) return { error: 'not_found', status: 404 };
+    if (c.status !== 'active') return { error: 'not_running', status: 409 };
+    const today = localDay(now());
+    if (today < c.startDate) return { error: 'not_started_cancel_instead', status: 409 };
+    if (today > c.endDate) return { error: 'already_ended', status: 409 };
+    await challenges.updateByIdAsync(id, { status: 'closed', endDate: today, updatedAt: now().toISOString() });
+    return { challenge: { ...c, status: 'closed', endDate: today, phase: 'ended' } };
+  }
+
+  /** Put a finished (ended or cancelled) challenge away. */
+  async function archive(creator, id) {
+    const c = await owned(creator, id);
+    if (!c) return { error: 'not_found', status: 404 };
+    if (c.status === 'archived') return { error: 'already_archived', status: 409 };
+    if (c.status === 'active' && localDay(now()) <= c.endDate) return { error: 'still_running', status: 409 };
+    await challenges.updateByIdAsync(id, { status: 'archived', updatedAt: now().toISOString() });
+    return { challenge: { ...c, status: 'archived', phase: 'ended' } };
+  }
+
+  /** Who the challenge is open to, as a count (for participation rates). */
+  async function eligibleCount(c) {
+    const e = c.eligibility;
+    if (c.creatorType === 'fitflex') {
+      if (e?.kind === 'tiers' && subscriptions) {
+        const today = now();
+        const subs = (await subscriptions.allAsync()).filter(sub => sub.status === 'active' && e.tiers.includes(sub.tier)
+          && (!sub.expiresAt || new Date(sub.expiresAt) > today));
+        return new Set(subs.map(sub => sub.memberId)).size;
+      }
+      return (await users.filterByColumnAsync('userType', 'member')).length;
+    }
+    if (c.creatorType === 'corporate' && corporateEmployees) {
+      return (await eligibleStaff(c)).length;
+    }
+    return null;
+  }
+
+  async function eligibleStaff(c) {
+    const e = c.eligibility;
+    const staff = (await corporateEmployees.filterByColumnAsync('corporateId', c.creatorId))
+      .filter(x => EMPLOYEE_ELIGIBLE_STATUSES.has(x.status));
+    if (e?.kind === 'departments') {
+      const want = new Set(e.departments.map(d => d.toLowerCase()));
+      return staff.filter(x => x.department && want.has(x.department.toLowerCase()));
+    }
+    if (e?.kind === 'employees') return staff.filter(x => e.employeeIds.includes(x.id));
+    return staff;
+  }
+
   async function progressFor(c, memberId) {
     const acts = c.type === 'gym_attendance' ? [] : await activities.filterByColumnAsync('userId', memberId);
     const chk = c.type === 'gym_attendance' ? await checkins.filterByColumnAsync('memberId', memberId) : [];
@@ -463,17 +641,60 @@ export function createChallengeService({
     const joined = (await participants.filterByColumnAsync('challengeId', id)).filter(p => p.status === 'joined');
     if (creator.creatorType === 'fitflex' || creator.creatorType === 'corporate') {
       let completed = 0, sum = 0;
+      const fractions = new Map();
       for (const p of joined) {
         const v = await progressFor(c, p.memberId);
+        const f = Math.min(v / c.target, 1);
+        fractions.set(p.memberId, f);
         if (v >= c.target) completed += 1;
-        sum += Math.min(v / c.target, 1);
+        sum += f;
       }
+      const eligibleN = await eligibleCount(c);
+      const pct = (n, d) => (d ? Math.round((n / d) * 1000) / 1000 : null);
+      const summary = {
+        eligible: eligibleN,
+        joined: joined.length,
+        participationRate: eligibleN == null ? null : pct(joined.length, eligibleN),
+        completed,
+        completionRate: pct(completed, joined.length),
+        averageProgress: joined.length ? Math.round((sum / joined.length) * 100) / 100 : 0,
+      };
+      if (c.creatorType !== 'corporate' || !corporateEmployees) return { summary };
+      // By department, for HR. Groups smaller than MIN_TEAM_SIZE are folded
+      // together so no one person's numbers show.
+      const staff = await eligibleStaff(c);
+      const groups = new Map();
+      for (const x of staff) {
+        const key = x.department || null;
+        const g = groups.get(key) ?? { department: key, eligible: 0, joined: 0, completed: 0, sum: 0 };
+        g.eligible += 1;
+        if (x.userId && fractions.has(x.userId)) {
+          g.joined += 1;
+          g.sum += fractions.get(x.userId);
+          if (fractions.get(x.userId) >= 1) g.completed += 1;
+        }
+        groups.set(key, g);
+      }
+      const shown = [];
+      const small = { department: null, other: true, eligible: 0, joined: 0, completed: 0, sum: 0 };
+      for (const g of groups.values()) {
+        const target = g.department && g.eligible >= MIN_TEAM_SIZE ? g : small;
+        if (target === g) shown.push(g);
+        else for (const k of ['eligible', 'joined', 'completed', 'sum']) small[k] += g[k];
+      }
+      if (small.eligible) shown.push(small);
+      const view = g => ({
+        department: g.department, other: g.other === true, eligible: g.eligible,
+        joined: g.joined, participationRate: pct(g.joined, g.eligible),
+        // Progress and completion only once the group is big enough.
+        ...(g.eligible >= MIN_TEAM_SIZE && g.joined >= MIN_TEAM_SIZE
+          ? { completed: g.completed, averageProgress: Math.round((g.sum / g.joined) * 100) / 100 }
+          : {}),
+      });
       return {
-        summary: {
-          joined: joined.length,
-          completed,
-          averageProgress: joined.length ? Math.round((sum / joined.length) * 100) / 100 : 0,
-        },
+        summary,
+        byDepartment: shown.sort((a, b) => (a.other ? 1 : 0) - (b.other ? 1 : 0) || b.eligible - a.eligible).map(view),
+        minGroupSize: MIN_TEAM_SIZE,
       };
     }
     const out = [];
@@ -515,7 +736,7 @@ export function createChallengeService({
   return {
     memberChallenges, memberChallenge, join, leave, memberProgressForCreator,
     setLeaderboardOptIn, leaderboard,
-    create, creatorList, cancel, creatorParticipants,
+    create, creatorList, cancel, update, close, archive, creatorParticipants,
   };
 }
 
