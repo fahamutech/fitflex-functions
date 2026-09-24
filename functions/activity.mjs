@@ -64,6 +64,20 @@ export const updateMyGoal = {
   onRequest: async (req, res) => send(res, await goalService.update(req.user.sub, req.params.id, req.body || {}))
 };
 
+export const checkInMyGoal = {
+  created, method: 'post', path: '/me/goals/:id/check-in',
+  description: 'Member: mark a coaching goal done now (counts toward this period).',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await goalService.checkIn(req.user.sub, req.params.id))
+};
+
+export const undoMyGoalCheckIn = {
+  created, method: 'post', path: '/me/goals/:id/check-in/undo',
+  description: "Member: undo this period's latest \"done\" on a coaching goal.",
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await goalService.undoCheckIn(req.user.sub, req.params.id))
+};
+
 // ── Workouts ────────────────────────────────────────────────────────────────
 
 export const workoutTemplates = {
