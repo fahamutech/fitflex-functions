@@ -49,7 +49,7 @@ import {
   marketplaceEnquiries, marketplaceNotifications, productReviews,
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
-  deviceTokens, notifications, activities, goals, workouts,
+  deviceTokens, notifications, activities, activityRoutes, goals, workouts,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
 } from './collections.mjs';
@@ -131,7 +131,7 @@ export const whatsAppService = createWhatsAppService({
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
 export const favoriteService = createFavoriteService({ users, gyms });
-export const activityService = createActivityService({ activities, users });
+export const activityService = createActivityService({ activities, users, routes: activityRoutes });
 export const goalService = createGoalService({ goals, trainers });
 export const workoutService = createWorkoutService({ workouts, activities });
 export const gymSharingService = createGymSharingService({
