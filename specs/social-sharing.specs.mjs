@@ -39,7 +39,7 @@ function setup() {
   return s;
 }
 
-test('private by default; followers means mutual follows only', async () => {
+test('private by default; `followers` from older apps still means mutual friends', async () => {
   const s = setup();
   const priv = await s.log('ana');
   assert.equal(priv.shareWith, null, 'nothing is shared unless chosen');
@@ -186,7 +186,7 @@ test('default audience applies to new activities', async () => {
   const s = setup();
   const { group } = await s.svc.createGroup({ ownerType: 'member', ownerId: 'ana', createdBy: 'ana' }, { name: 'Club' });
   await s.svc.updateSettings('ana', { defaultShare: { followers: true, groups: [group.id] } });
-  assert.deepEqual((await s.log('ana')).shareWith, { followers: true, groups: [group.id], company: false });
+  assert.deepEqual((await s.log('ana')).shareWith, { friends: true, followers: false, public: false, groups: [group.id], company: false });
   assert.equal((await s.log('ana', null)).shareWith, null, 'choosing private while saving wins');
   assert.equal((await s.svc.updateSettings('ana', { defaultShare: { groups: ['grp_nope'] } })).error, 'not_in_group');
 });

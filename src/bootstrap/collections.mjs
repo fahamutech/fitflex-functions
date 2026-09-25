@@ -40,6 +40,7 @@ export const socialGroups = collection('social_groups');
 export const socialGroupMembers = collection('social_group_members');
 export const activityKudos = collection('activity_kudos');
 export const activityComments = collection('activity_comments');
+export const activityViews = collection('activity_views');
 export const socialReports = collection('social_reports');
 export const goals = collection('goals');
 export const workouts = collection('workouts');
