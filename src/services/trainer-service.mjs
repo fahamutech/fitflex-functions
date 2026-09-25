@@ -136,7 +136,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     return { trainer: removed };
   }
 
-  function register({ userId, user, body }) {
+  async function register({ userId, user, body }) {
     if (!body.photoUrl) return { error: 'photoUrl_required', status: 400 };
     const validGenders = ['male', 'female', 'other'];
     if (!body.gender || !validGenders.includes(body.gender)) {
@@ -153,7 +153,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       status: 'active',
       approvalStatus: 'pending_approval',
     }, profile || {});
-    trainers.upsert(t => t.id === row.id, row);
+    await trainers.upsertAsync(t => t.id === row.id, row);
     return { trainer: hydrateTrainer(row), displayName: body.displayName || user.displayName };
   }
 

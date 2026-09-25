@@ -58,7 +58,7 @@ export const trainerRegister = {
     const user = await resolveRequestUser(req);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
     const body = req.body || {};
-    const result = trainerService.register({ userId: req.user.sub, user, body });
+    const result = await trainerService.register({ userId: req.user.sub, user, body });
     if (result.error) return res.status(result.status).json({ error: result.error, ...(result.validValues ? { validValues: result.validValues } : {}) });
     await users.updateByIdAsync(req.user.sub, {
       displayName: result.displayName,
