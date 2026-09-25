@@ -7,6 +7,7 @@ function memStore(rows = []) {
   return {
     rows,
     async filterAsync(fn) { return rows.filter(fn); },
+    async filterByColumnAsync(col, value) { return rows.filter(r => r[col] === value); },
     async findAsync(fn) { return rows.find(fn) || null; },
     async findByIdAsync(id) { return rows.find(r => r.id === id) || null; },
     async insertAsync(row) { rows.push(row); return row; },

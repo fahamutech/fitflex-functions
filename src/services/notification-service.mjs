@@ -5,6 +5,11 @@
 //
 // Delivery is best-effort: a failed push must never fail the member-facing
 // action that triggered it, so nothing here throws.
+//
+// Campaigns and automations (communication engine) reuse the same inbox and
+// push: `writeInbox` and `sendPush` are the channel primitives the
+// dispatcher calls, and `onOpened` / `onClicked` let it record opens and
+// taps against its delivery ledger.
 import { randomUUID } from 'node:crypto';
 
 // FCM error codes meaning the token will never work again.
@@ -19,6 +24,8 @@ export function createNotificationService({
   getMessaging = null,       // () => firebase-admin Messaging, or null to disable push
   whatsApp = null,           // whatsAppService (optional)
   logger = console,
+  onOpened = async () => {},  // (notifications[]) → after a member reads them
+  onClicked = async () => {}, // (notification, { via }) → after a member taps its button
 }) {
   async function registerDevice({ userId, token, platform }) {
     if (!token || typeof token !== 'string' || token.length > 4096) return { error: 'token_required', status: 400 };
@@ -65,6 +72,26 @@ export function createNotificationService({
   }
 
   /**
+   * Adds one message to a user's inbox. A caller-chosen `id` makes the write
+   * idempotent: writing the same id again returns the existing row with
+   * `created: false` instead of a duplicate. Throws on other failures.
+   */
+  async function writeInbox(userId, { id, type, title, body, data = {}, category = null, gymId = null, campaignId = null }) {
+    const row = {
+      id: id || `ntf_${randomUUID().slice(0, 8)}`, userId, type, title, body,
+      data: { ...data, type }, category, gymId, campaignId, readAt: null, createdAt: new Date().toISOString(),
+    };
+    try {
+      await notifications.insertAsync(row);
+      return { notification: row, created: true };
+    } catch (err) {
+      const existing = id ? await notifications.findByIdAsync(id) : null;
+      if (existing && existing.userId === userId) return { notification: existing, created: false };
+      throw err;
+    }
+  }
+
+  /**
    * Notify one user. Always writes the inbox row; push and WhatsApp are
    * attempted after and their failures are logged, not raised.
    * @param {string} userId
@@ -72,12 +99,12 @@ export function createNotificationService({
    */
   async function notify(userId, { type, title, body, data = {}, whatsapp }) {
     if (!userId) return { ok: false, skipped: 'no_user' };
-    const row = {
+    let row = {
       id: `ntf_${randomUUID().slice(0, 8)}`, userId, type, title, body,
       data: { ...data, type }, readAt: null, createdAt: new Date().toISOString(),
     };
     try {
-      await notifications.insertAsync(row);
+      row = (await writeInbox(userId, { id: row.id, type, title, body, data })).notification;
     } catch (err) {
       logger.warn?.(`[notify] inbox write failed for ${userId}/${type}: ${err.message}`);
     }
@@ -97,8 +124,11 @@ export function createNotificationService({
     return { ok: true, notification: row, push };
   }
 
+  // One member's rows only (indexed on userId), never the whole table.
+  const rowsOf = (userId) => notifications.filterByColumnAsync('userId', userId);
+
   async function inbox({ userId, limit = 50 }) {
-    const rows = await notifications.filterAsync(n => n.userId === userId);
+    const rows = await rowsOf(userId);
     rows.sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
     const capped = rows.slice(0, Math.min(Math.max(Number(limit) || 50, 1), 200));
     return { notifications: capped, unread: rows.filter(n => !n.readAt).length };
@@ -107,14 +137,49 @@ export function createNotificationService({
   async function markRead({ userId, id }) {
     const now = new Date().toISOString();
     if (id === 'all') {
-      const unread = await notifications.filterAsync(n => n.userId === userId && !n.readAt);
+      const unread = (await rowsOf(userId)).filter(n => !n.readAt);
       for (const n of unread) await notifications.updateByIdAsync(n.id, { readAt: now });
+      await hook(onOpened, unread);
       return { ok: true, updated: unread.length };
     }
-    const row = await notifications.findAsync(n => n.id === id && n.userId === userId);
+    const row = await ownRow(userId, id);
     if (!row) return { error: 'not_found', status: 404 };
-    if (!row.readAt) await notifications.updateByIdAsync(row.id, { readAt: now });
+    if (!row.readAt) {
+      await notifications.updateByIdAsync(row.id, { readAt: now });
+      await hook(onOpened, [row]);
+    }
     return { ok: true };
+  }
+
+  async function ownRow(userId, id) {
+    const row = await notifications.findByIdAsync(id);
+    return row && row.userId === userId ? row : null;
+  }
+
+  /**
+   * A member tapped the message's button (in the inbox, or a push). Marks it
+   * read and clicked. `via: 'push'` says the tap came from a notification.
+   */
+  async function markClicked({ userId, id, via = 'inbox' }) {
+    const row = await ownRow(userId, id);
+    if (!row) return { error: 'not_found', status: 404 };
+    const now = new Date().toISOString();
+    const patch = {};
+    if (!row.readAt) patch.readAt = now;
+    if (!row.clickedAt) patch.clickedAt = now;
+    if (Object.keys(patch).length) await notifications.updateByIdAsync(row.id, patch);
+    if (!row.readAt) await hook(onOpened, [row]);
+    await hook(onClicked, row, { via: via === 'push' ? 'push' : 'inbox' });
+    return { ok: true };
+  }
+
+  // Ledger bookkeeping must never break reading the inbox.
+  async function hook(fn, ...args) {
+    try {
+      await fn(...args);
+    } catch (err) {
+      logger.warn?.(`[notify] open/click tracking failed: ${err.message}`);
+    }
   }
 
   // ── Domain events ──────────────────────────────────────────────────────
@@ -175,7 +240,7 @@ export function createNotificationService({
   }
 
   return {
-    registerDevice, unregisterDevice, notify, inbox, markRead,
+    registerDevice, unregisterDevice, notify, inbox, markRead, markClicked, writeInbox, sendPush,
     notifyTrainerBooking, notifyRenewal, notifySubscriptionActivated,
   };
 }

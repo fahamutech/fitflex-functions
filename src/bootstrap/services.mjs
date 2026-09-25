@@ -44,6 +44,9 @@ import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
+import { createCampaignService } from '../services/campaign-service.mjs';
+import { createDeliveryService } from '../services/delivery-service.mjs';
+import { createCommunicationPreferenceService } from '../services/communication-preference-service.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
@@ -56,7 +59,7 @@ import {
   follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
-  communicationPreferences,
+  communicationPreferences, communicationCampaigns,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -174,12 +177,32 @@ export const analyticsService = createAnalyticsService({
 export const notificationService = createNotificationService({
   users, deviceTokens, notifications, whatsApp: whatsAppService,
   getMessaging: process.env.PUSH_NOTIFICATIONS === 'on' ? () => { initFirebaseAdmin(); return getMessaging(); } : null,
+  // Opens and taps of campaign messages update the communications ledger.
+  // deliveryService is defined further down; these only run later.
+  onOpened: (rows) => deliveryService.onOpened(rows),
+  onClicked: (row, opts) => deliveryService.onClicked(row, opts),
 });
 // Communications audiences: who a gym (its direct members only) or FitFlex
 // can message. WhatsApp stays unavailable until a provider is configured (M7).
 export const segmentService = createSegmentService({
   db, communicationPreferences, deviceTokens,
   pushAvailable: () => process.env.PUSH_NOTIFICATIONS === 'on',
+  whatsappAvailable: () => false,
+});
+const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
+export const campaignService = createCampaignService({
+  db, campaigns: communicationCampaigns, gyms, segmentService, auditLog,
+  largeSendThreshold: positiveInt(process.env.COMMS_LARGE_SEND_THRESHOLD, 200),
+  marketingWeeklyCap: positiveInt(process.env.COMMS_MARKETING_WEEKLY_CAP, 2),
+  renewalLink: process.env.COMMS_RENEWAL_URL || null,
+});
+// Delivers queued campaign messages through the inbox and FCM above.
+export const deliveryService = createDeliveryService({
+  db, notificationService, campaignService,
+  batchSize: positiveInt(process.env.COMMS_DISPATCH_BATCH, 200),
+});
+export const communicationPreferenceService = createCommunicationPreferenceService({
+  preferences: communicationPreferences,
   whatsappAvailable: () => false,
 });
 export const challengeRewardService = createChallengeRewardService({

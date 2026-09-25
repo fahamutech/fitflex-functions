@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -25,5 +25,14 @@ export const challengeRewardSettler = {
   onJob: async () => {
     const r = await challengeRewardService.settleDue();
     console.log(`[rewards] earned=${r.earned} settled=${r.settled}`);
+  }
+};
+
+export const communicationDispatcher = {
+  created, rule: '* * * * *', // every minute
+  description: 'Communications: send scheduled campaigns that are due, deliver queued messages (in-app, push) with retries, and close finished campaigns. Safe to overlap — rows are claimed with SKIP LOCKED.',
+  onJob: async () => {
+    const r = await deliveryService.runOnce();
+    if (r.claimed || r.released || r.closed) console.log(`[comms] released=${r.released} claimed=${r.claimed} sent=${r.sent} retry=${r.retry} failed=${r.failed} closed=${r.closed}`);
   }
 };
