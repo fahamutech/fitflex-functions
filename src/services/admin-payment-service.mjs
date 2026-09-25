@@ -77,7 +77,7 @@ export function createAdminPaymentService({ paymentRequests, subscriptions, user
       decidedBy: actorId
     });
     await applyPaymentStatusToSubscription(request, status, reference || `ADMIN_${request.id}`);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: `payment_${status}`, target: request.id, before: request, after: updated
     });
@@ -99,7 +99,7 @@ export function createAdminPaymentService({ paymentRequests, subscriptions, user
       decidedBy: nextStatus === 'pending' ? null : actorId
     });
     await applyPaymentStatusToSubscription(request, nextStatus, reference ?? request.reference);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: 'payment_updated', target: request.id, before: request, after: updated
     });

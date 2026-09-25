@@ -163,7 +163,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       homepagePriority: Number(body?.homepagePriority || 0),
       updatedAt: nowIso(),
     });
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'admin_product_created',
       target: product.id, before: null, after: { vendorId, approvalStatus: requestedApproval },
     });
@@ -175,7 +175,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!prior) return { error: 'product_not_found', status: 404 };
     const patch = { ...(typeof body?.homepageVisible === 'boolean' ? { homepageVisible: body.homepageVisible } : {}), ...(body?.homepagePriority !== undefined ? { homepagePriority: Number(body.homepagePriority) || 0 } : {}), ...(['approved', 'pending', 'rejected'].includes(body?.approvalStatus) ? { approvalStatus: body.approvalStatus } : {}), updatedAt: nowIso() };
     const product = await products.updateByIdAsync(productId, patch);
-    auditLog.insert({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_listing_updated', target: productId, before: { homepageVisible: prior.homepageVisible ?? true, homepagePriority: Number(prior.homepagePriority || 0), approvalStatus: prior.approvalStatus || 'pending' }, after: patch });
+    await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_listing_updated', target: productId, before: { homepageVisible: prior.homepageVisible ?? true, homepagePriority: Number(prior.homepagePriority || 0), approvalStatus: prior.approvalStatus || 'pending' }, after: patch });
     if (patch.approvalStatus) await notify(prior.vendorId, `product_${patch.approvalStatus}`, { productId });
     return { product };
   }
@@ -206,7 +206,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (['active', 'suspended'].includes(body?.accountStatus)) patch.accountStatus = body.accountStatus;
     if (typeof body?.verified === 'boolean') patch.verified = body.verified;
     const updated = await users.updateByIdAsync(vendorId, patch);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'vendor_management_updated',
       target: vendorId,
       before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, verified: vendor.verified },
@@ -272,7 +272,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     timeline.push({ status, at });
     const normalized = status === 'fulfilled' ? 'delivered' : status;
     const updated = await shopOrders.updateByIdAsync(orderId, { status: normalized, timeline, updatedAt: at });
-    auditLog.insert({ id: randomUUID(), at, actor: actorId, action: `shop_order_${normalized}`, target: orderId, before: { status: order.status }, after: { status: normalized } });
+    await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: `shop_order_${normalized}`, target: orderId, before: { status: order.status }, after: { status: normalized } });
     await notify(order.buyerId, `order_${normalized}`, { orderId });
     return { order: updated };
   }

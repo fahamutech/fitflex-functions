@@ -27,7 +27,7 @@ function makeService() {
     products,
     shopOrders,
     users: memStore(),
-    auditLog: { insert: () => {} },
+    auditLog: { insert: () => {}, insertAsync: async () => {} },
   });
   return { service, products, shopOrders };
 }

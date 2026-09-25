@@ -43,7 +43,7 @@ export function createAccountService({
 
     if (trainerProfile) await trainers.removeAsync(t => t.id === trainerProfile.id);
     await users.removeAsync(u => u.id === user.id);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: user.id, action: 'self_account_deleted',
       target: user.id, before: { email: user.email, phone: user.phone, userType: user.userType }, after: null,

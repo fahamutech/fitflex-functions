@@ -10,7 +10,7 @@ const service = createGymService({
   gyms: { find: () => null, filter: () => [], all: () => [], upsert: () => {}, remove: () => {} },
   users: { findAsync: async () => null },
   checkins: { findAsync: async () => null },
-  auditLog: { insert: () => {} },
+  auditLog: { insert: () => {}, insertAsync: async () => {} },
 });
 
 const completeGym = {
