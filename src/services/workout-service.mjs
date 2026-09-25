@@ -148,7 +148,7 @@ export function newWorkoutRow({ memberId, base, scheduledDate, gymId = null, tra
 
 export { isDate as isWorkoutDate };
 
-export function createWorkoutService({ workouts, activities, now = () => new Date() }) {
+export function createWorkoutService({ workouts, activities, defaultShare = null, now = () => new Date() }) {
   function templates() {
     return { templates: WORKOUT_TEMPLATES };
   }
@@ -266,6 +266,8 @@ export function createWorkoutService({ workouts, activities, now = () => new Dat
       gymId: w.gymId ?? null,
       trainerId: w.trainerId ?? null,
       notes: w.name,
+      // The member's default audience for new activities (private unless set).
+      shareWith: defaultShare ? await defaultShare(memberId) : null,
       createdAt: end.toISOString(),
     };
     await activities.insertAsync(activity);

@@ -33,6 +33,7 @@ import { createFavoriteService } from '../services/favorite-service.mjs';
 import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
+import { createSocialService } from '../services/social-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createChallengeService } from '../services/challenge-service.mjs';
@@ -50,6 +51,7 @@ import {
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
+  follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, socialReports,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
 } from './collections.mjs';
@@ -131,9 +133,22 @@ export const whatsAppService = createWhatsAppService({
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
 export const favoriteService = createFavoriteService({ users, gyms });
-export const activityService = createActivityService({ activities, users, routes: activityRoutes });
+// Sharing activities between members (mutual follows, groups, company).
+export const socialService = createSocialService({
+  users, activities, follows, blocks, profiles: socialProfiles, groups: socialGroups,
+  groupMembers: socialGroupMembers, kudos: activityKudos, comments: activityComments, reports: socialReports,
+  auditLog,
+  // notificationService is defined further down; it's only called later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+export const activityService = createActivityService({
+  activities, users, routes: activityRoutes,
+  resolveShare: (memberId, raw) => socialService.resolveShare(memberId, raw),
+});
 export const goalService = createGoalService({ goals, trainers });
-export const workoutService = createWorkoutService({ workouts, activities });
+export const workoutService = createWorkoutService({
+  workouts, activities, defaultShare: memberId => socialService.defaultShareFor(memberId),
+});
 export const gymSharingService = createGymSharingService({
   sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
