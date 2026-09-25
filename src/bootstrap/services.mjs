@@ -53,7 +53,7 @@ import {
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
-  follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, socialReports,
+  follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences,
@@ -139,7 +139,7 @@ export const favoriteService = createFavoriteService({ users, gyms });
 // Sharing activities between members (mutual follows, groups, company).
 export const socialService = createSocialService({
   users, activities, follows, blocks, profiles: socialProfiles, groups: socialGroups,
-  groupMembers: socialGroupMembers, kudos: activityKudos, comments: activityComments, reports: socialReports,
+  groupMembers: socialGroupMembers, kudos: activityKudos, comments: activityComments, views: activityViews, reports: socialReports,
   auditLog,
   // notificationService is defined further down; it's only called later.
   notify: (userId, message) => notificationService.notify(userId, message),

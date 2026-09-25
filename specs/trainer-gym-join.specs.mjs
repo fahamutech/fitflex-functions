@@ -29,7 +29,7 @@ const uniqPhone = () => `+2557${String(Math.floor(Math.random() * 1e8)).padStart
 async function createTrainerUser() {
   const phone = uniqPhone();
   const otpRes = res();
-  authRequestOtp.onRequest({ body: { phone, userType: 'trainer' } }, otpRes);
+  await authRequestOtp.onRequest({ body: { phone, userType: 'trainer' } }, otpRes);
   const verifyRes = res();
   await authVerifyOtp.onRequest({ body: { phone, code: otpRes.body.devOtp } }, verifyRes);
   return verifyRes.body.user;

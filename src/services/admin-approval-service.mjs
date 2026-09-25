@@ -31,7 +31,7 @@ export function createAdminApprovalService({ users, auditLog }) {
       approvedAt: status === 'approved' ? new Date().toISOString() : null,
       approvedBy: status === 'approved' ? actorId : null
     });
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: `role_${status}`,
       target: target.id, before, after: updated

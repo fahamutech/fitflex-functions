@@ -182,7 +182,7 @@ test('one mobile number can create separate member, trainer, and vendor profiles
 
   for (const userType of ['member', 'trainer', 'vendor']) {
     const requested = res();
-    authRequestOtp.onRequest({ body: { phone, userType } }, requested);
+    await authRequestOtp.onRequest({ body: { phone, userType } }, requested);
     assert.equal(requested.statusCode, 200);
 
     const verified = res();

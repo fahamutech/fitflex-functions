@@ -1,12 +1,20 @@
 // Sharing activities between members.
 //
 // Who can see an activity someone shares (and nobody else):
-//   followers — people they follow AND who follow them back (mutual)
+//   friends   — people they follow AND who follow them back (mutual)
+//   followers — anyone who follows them (no follow-back needed)
+//   public    — any member, when their profile is public
 //   groups    — members of those groups who are members themselves
 //   company   — colleagues at the same company (members, never HR)
-// Everything is private until the member shares it. A block hides both
-// people from each other entirely. Owners of trainer, gym or company groups
-// manage the group; they don't see anyone's activity through it.
+// Everything is private until the member shares it. Following is instant;
+// a follow on its own shows only Followers and Public posts. A block hides
+// both people from each other entirely. Owners of trainer, gym or company
+// groups manage the group; they don't see anyone's activity through it.
+//
+// A poster sees how many people viewed a post and who gave kudos or
+// commented (to follow them back); viewers stay anonymous. Only public
+// profiles can be found by name by anyone, have a profile of public posts,
+// and appear in Explore.
 //
 // Never shared: the route, calories, notes about health — a shared activity
 // shows its type, date, duration, distance, pace, splits and climb.
@@ -18,6 +26,7 @@ const MAX_GROUP_MEMBERS = 5000;
 const MAX_COMMENT = 500;
 const FEED_DAYS = 30;
 const FEED_PAGE = 20;
+const EXPLORE_DAYS = 14;
 const REPORT_TARGETS = ['user', 'activity', 'comment', 'group'];
 const DAY_MS = 86_400_000;
 
@@ -45,7 +54,7 @@ export function publicActivity(a) {
 }
 
 export function createSocialService({
-  users, activities, follows, blocks, profiles, groups, groupMembers, kudos, comments, reports,
+  users, activities, follows, blocks, profiles, groups, groupMembers, kudos, comments, reports, views = null,
   notify = async () => {}, auditLog = null, now = () => new Date(),
 }) {
   // ── Relationships ──────────────────────────────────────────────────────
@@ -88,7 +97,9 @@ export function createSocialService({
     const share = activity.shareWith;
     if (!share) return false;
     if (await isBlocked(viewerId, activity.userId)) return false;
-    if (share.followers && (await friends(viewerId)).has(activity.userId)) return true;
+    if (share.public && (await isPublic(activity.userId))) return true;
+    if (share.followers && (await following(viewerId)).has(activity.userId)) return true;
+    if (share.friends && (await friends(viewerId)).has(activity.userId)) return true;
     if (Array.isArray(share.groups) && share.groups.length) {
       const [mine, theirs] = await Promise.all([activeGroupIds(viewerId), activeGroupIds(activity.userId)]);
       if (share.groups.some(g => mine.has(g) && theirs.has(g))) return true;
@@ -98,6 +109,10 @@ export function createSocialService({
       if (a && a === b) return true;
     }
     return false;
+  }
+
+  async function isPublic(userId) {
+    return (await profiles.findByIdAsync(userId))?.publicProfile === true;
   }
 
   async function nameOf(userId) {
@@ -139,20 +154,28 @@ export function createSocialService({
   async function normalizeShare(userId, raw) {
     if (raw == null || raw === false) return { share: null };
     if (typeof raw !== 'object') return { error: 'invalid_share', status: 400 };
-    const followersOn = raw.followers === true;
+    // Apps before followers/public (no `v: 2`) sent `followers` meaning
+    // mutual friends; read it that way so nothing reaches more people than
+    // its owner chose.
+    const legacy = raw.v !== 2 && raw.friends === undefined;
+    const friendsOn = legacy ? raw.followers === true : raw.friends === true;
+    const followersOn = legacy ? false : raw.followers === true;
+    const publicOn = legacy ? false : raw.public === true;
+    if (publicOn && !(await isPublic(userId))) return { error: 'profile_not_public', status: 400 };
     const wanted = Array.isArray(raw.groups) ? [...new Set(raw.groups.filter(g => typeof g === 'string'))] : [];
     const mine = await activeGroupIds(userId);
     if (wanted.some(g => !mine.has(g))) return { error: 'not_in_group', status: 400 };
     const company = raw.company === true;
     if (company && !(await companyOf(userId))) return { error: 'no_company', status: 400 };
-    if (!followersOn && !wanted.length && !company) return { share: null };
-    return { share: { followers: followersOn, groups: wanted, company } };
+    if (!friendsOn && !followersOn && !publicOn && !wanted.length && !company) return { share: null };
+    return { share: { friends: friendsOn, followers: followersOn, public: publicOn, groups: wanted, company } };
   }
 
   async function settings(userId) {
     const p = await profile(userId);
     return {
       defaultShare: p.defaultShare ?? null,
+      publicProfile: p.publicProfile === true,
       inviteCode: p.inviteCode,
       hasCompany: !!(await companyOf(userId)),
       blocked: await Promise.all((await blocks.filterByColumnAsync('blockerId', userId))
@@ -162,9 +185,20 @@ export function createSocialService({
 
   async function updateSettings(userId, body = {}) {
     const p = await profile(userId);
-    const n = await normalizeShare(userId, body.defaultShare);
-    if (n.error) return n;
-    await profiles.updateByIdAsync(p.id, { defaultShare: n.share, updatedAt: now().toISOString() });
+    const patch = { updatedAt: now().toISOString() };
+    if (body.publicProfile !== undefined) {
+      patch.publicProfile = body.publicProfile === true;
+      await profiles.updateByIdAsync(p.id, patch);
+      // Turning it off: public drops out of the default too.
+      if (!patch.publicProfile && p.defaultShare?.public) {
+        await profiles.updateByIdAsync(p.id, { defaultShare: { ...p.defaultShare, public: false } });
+      }
+    }
+    if (body.defaultShare !== undefined) {
+      const n = await normalizeShare(userId, body.defaultShare);
+      if (n.error) return n;
+      await profiles.updateByIdAsync(p.id, { defaultShare: n.share, updatedAt: now().toISOString() });
+    }
     return { settings: await settings(userId) };
   }
 
@@ -175,7 +209,10 @@ export function createSocialService({
     // Groups they've since left drop out; a company they've left does too.
     const mine = await activeGroupIds(userId);
     const n = await normalizeShare(userId, {
+      v: 2,
+      friends: p.defaultShare.friends === true,
       followers: p.defaultShare.followers === true,
+      public: p.defaultShare.public === true && (await isPublic(userId)),
       groups: (p.defaultShare.groups ?? []).filter(g => mine.has(g)),
       company: p.defaultShare.company === true && !!(await companyOf(userId)),
     });
@@ -212,8 +249,8 @@ export function createSocialService({
       const back = (await following(targetId)).has(userId);
       const name = (await nameOf(userId)) ?? 'Someone';
       await notify(targetId, back
-        ? { type: 'social_friends', title: 'You\'re connected', body: `${name} followed you back. You can now see what you share with each other.`, data: { userId } }
-        : { type: 'social_follow', title: 'New follower', body: `${name} followed you. Follow back to see what you share with each other.`, data: { userId } });
+        ? { type: 'social_friends', title: 'You\'re friends', body: `${name} followed you back.`, data: { userId } }
+        : { type: 'social_follow', title: 'New follower', body: `${name} started following you.`, data: { userId } });
     }
     return { person: await person(userId, targetId) };
   }
@@ -275,6 +312,8 @@ export function createSocialService({
     const query = String(q).trim().toLowerCase();
     if (query.length < 2) return { people: [] };
     const pool = new Set();
+    // Public profiles can be found by anyone.
+    for (const p of await profiles.allAsync()) if (p.publicProfile === true) pool.add(p.id);
     for (const g of await activeGroupIds(userId)) {
       for (const m of await groupMembers.filterByColumnAsync('groupId', g)) if (m.status === 'active') pool.add(m.userId);
     }
@@ -304,10 +343,13 @@ export function createSocialService({
 
   // ── Feed, kudos & comments ───────────────────────────────────────────
 
-  async function socialCounts(viewerId, activityId) {
+  async function socialCounts(viewerId, activityId, ownerId = null) {
     const k = await kudos.filterByColumnAsync('activityId', activityId);
     const c = (await comments.filterByColumnAsync('activityId', activityId)).filter(x => !x.deletedAt);
-    return { kudos: k.length, youKudoed: k.some(x => x.userId === viewerId), comments: c.length };
+    const out = { kudos: k.length, youKudoed: k.some(x => x.userId === viewerId), comments: c.length };
+    // Only the poster sees how many people viewed it.
+    if (views && ownerId === viewerId) out.views = (await views.filterByColumnAsync('activityId', activityId)).length;
+    return out;
   }
 
   async function feedItem(viewerId, a, ctx) {
@@ -315,7 +357,7 @@ export function createSocialService({
       activity: publicActivity(a),
       owner: a.userId === viewerId ? { id: viewerId, displayName: await nameOf(viewerId), relationship: 'you' } : await person(viewerId, a.userId, ctx),
       sharedWith: a.userId === viewerId ? a.shareWith ?? null : undefined,
-      ...(await socialCounts(viewerId, a.id)),
+      ...(await socialCounts(viewerId, a.id, a.userId)),
     };
   }
 
@@ -324,7 +366,9 @@ export function createSocialService({
    * member's own shared activities), newest first, the last 30 days.
    */
   async function feed(viewerId, { before = null } = {}) {
-    const circle = new Set(await friends(viewerId));
+    // Everyone the viewer follows (their Followers / Public / Friends posts),
+    // group-mates and colleagues; canView decides each post.
+    const circle = new Set(await following(viewerId));
     for (const g of await activeGroupIds(viewerId)) {
       for (const m of await groupMembers.filterByColumnAsync('groupId', g)) if (m.status === 'active') circle.add(m.userId);
     }
@@ -361,7 +405,104 @@ export function createSocialService({
   async function activityDetail(viewerId, activityId) {
     const a = await visible(viewerId, activityId);
     if (!a) return { error: 'not_found', status: 404 };
+    if (views && a.userId !== viewerId) {
+      const seen = (await views.filterByColumnAsync('activityId', activityId)).some(v => v.userId === viewerId);
+      if (!seen) {
+        try {
+          await views.insertAsync({ id: id('vw'), activityId, userId: viewerId, createdAt: now().toISOString() });
+        } catch (err) {
+          if (!/unique|duplicate/i.test(err.message ?? '')) throw err;
+        }
+      }
+    }
     return { item: await feedItem(viewerId, a, {}), comments: (await listComments(viewerId, activityId)).comments };
+  }
+
+  /**
+   * The poster's view of who engaged: everyone who gave kudos or commented
+   * (with whether they follow each other, to follow back) and the number
+   * of views. Viewers themselves stay anonymous.
+   */
+  async function engagement(userId, activityId) {
+    const a = await activities.findByIdAsync(activityId);
+    if (!a || a.userId !== userId) return { error: 'not_found', status: 404 };
+    const ctx = {};
+    const blockedIds = new Set([
+      ...(await blocks.filterByColumnAsync('blockerId', userId)).map(b => b.blockedId),
+    ]);
+    const kudosFrom = [];
+    for (const k of (await kudos.filterByColumnAsync('activityId', activityId)).sort((x, y) => +new Date(y.createdAt) - +new Date(x.createdAt))) {
+      if (!blockedIds.has(k.userId)) kudosFrom.push(await person(userId, k.userId, ctx));
+    }
+    const seen = new Set();
+    const commenters = [];
+    for (const c of await comments.filterByColumnAsync('activityId', activityId)) {
+      if (c.deletedAt || c.userId === userId || seen.has(c.userId) || blockedIds.has(c.userId)) continue;
+      seen.add(c.userId);
+      commenters.push(await person(userId, c.userId, ctx));
+    }
+    const viewCount = views ? (await views.filterByColumnAsync('activityId', activityId)).length : 0;
+    return { views: viewCount, kudos: kudosFrom, commenters };
+  }
+
+  /** Recent public posts from public profiles the viewer doesn't follow yet (and their own feed stays separate). */
+  async function explore(viewerId, { before = null } = {}) {
+    const since = +now() - EXPLORE_DAYS * DAY_MS;
+    const cutoff = before ? Date.parse(before) : Infinity;
+    const mine = await following(viewerId);
+    const publicIds = (await profiles.allAsync()).filter(p => p.publicProfile === true && p.id !== viewerId).map(p => p.id);
+    const candidates = [];
+    for (const uid of publicIds) {
+      if (await isBlocked(viewerId, uid)) continue;
+      for (const a of await activities.filterByColumnAsync('userId', uid)) {
+        const t = +new Date(a.startedAt);
+        if (!a.shareWith?.public || t < since || !(t < cutoff)) continue;
+        candidates.push(a);
+      }
+    }
+    candidates.sort((x, y) => +new Date(y.startedAt) - +new Date(x.startedAt));
+    const ctx = { following: mine };
+    const items = [];
+    for (const a of candidates.slice(0, FEED_PAGE)) items.push(await feedItem(viewerId, a, ctx));
+    const last = items[items.length - 1];
+    return { items, next: items.length === FEED_PAGE ? new Date(last.activity.startedAt).toISOString() : null };
+  }
+
+  /**
+   * Someone's profile: name, follower counts, how you're connected, and the
+   * posts you can see. Available for public profiles, and for people you're
+   * connected to (follows either way, a shared group or company).
+   */
+  async function profilePage(viewerId, userId, { before = null } = {}) {
+    if (!(await isMember(userId)) || (userId !== viewerId && (await isBlocked(viewerId, userId)))) return { error: 'not_found', status: 404 };
+    const [pub, theirFollowers, theirFollowing] = await Promise.all([isPublic(userId), followers(userId), following(userId)]);
+    let reachable = userId === viewerId || pub || theirFollowers.has(viewerId) || theirFollowing.has(viewerId);
+    if (!reachable) {
+      const [mine, theirs] = await Promise.all([activeGroupIds(viewerId), activeGroupIds(userId)]);
+      reachable = [...mine].some(g => theirs.has(g));
+    }
+    if (!reachable) {
+      const [a, b] = await Promise.all([companyOf(viewerId), companyOf(userId)]);
+      reachable = !!a && a === b;
+    }
+    if (!reachable) return { error: 'not_found', status: 404 };
+    const cutoff = before ? Date.parse(before) : Infinity;
+    const posts = (await activities.filterByColumnAsync('userId', userId))
+      .filter(a => (userId === viewerId ? !!a.shareWith : true) && +new Date(a.startedAt) < cutoff)
+      .sort((x, y) => +new Date(y.startedAt) - +new Date(x.startedAt));
+    const ctx = {};
+    const items = [];
+    for (const a of posts) {
+      if (items.length >= FEED_PAGE) break;
+      if (await canView(viewerId, a)) items.push(await feedItem(viewerId, a, ctx));
+    }
+    const p = userId === viewerId ? { id: userId, displayName: await nameOf(userId), relationship: 'you' } : await person(viewerId, userId, ctx);
+    const last = items[items.length - 1];
+    return {
+      person: { ...p, publicProfile: pub, followers: theirFollowers.size, following: theirFollowing.size },
+      items,
+      next: items.length === FEED_PAGE ? new Date(last.activity.startedAt).toISOString() : null,
+    };
   }
 
   async function toggleKudos(viewerId, activityId, on) {
@@ -664,7 +805,7 @@ export function createSocialService({
   }
 
   return {
-    canView, defaultShareFor, resolveShare, settings, updateSettings,
+    canView, defaultShareFor, resolveShare, settings, updateSettings, engagement, explore, profilePage,
     follow, unfollow, removeFollower, block, unblock, connections, findPeople,
     setActivitySharing, feed, activityDetail, toggleKudos, listComments, addComment, deleteComment,
     createGroup, updateGroup, archiveGroup, myGroups, ownedGroups, discoverGroups, joinGroup, leaveGroup,

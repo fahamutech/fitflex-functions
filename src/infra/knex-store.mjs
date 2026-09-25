@@ -56,6 +56,7 @@ const TABLE_MAP = {
   social_group_members: { table: 'SocialGroupMember' },
   activity_kudos:    { table: 'ActivityKudos' },
   activity_comments: { table: 'ActivityComment' },
+  activity_views:    { table: 'ActivityView' },
   social_reports:    { table: 'SocialReport' },
   goals:             { table: 'Goal' },
   workouts:          { table: 'Workout' },
@@ -321,6 +322,13 @@ export function collection(name) {
         return row;
       },
 
+      insertAsync: async (row) => {
+        getSyncData().push(row);
+        invalidate(name);
+        await _persistInsert(row);
+        return row;
+      },
+
       update: (pred, patch) => {
         const data = getSyncData();
         const i = data.findIndex(pred);
@@ -331,6 +339,19 @@ export function collection(name) {
         const pk = pkField(name);
         const id = updated[pk];
         if (id) _persistUpdate(pk, id, patch).catch(err => console.error(`[knex-store] update ${name} (id=${id}):`, err.message));
+        return updated;
+      },
+
+      updateAsync: async (pred, patch) => {
+        const data = getSyncData();
+        const i = data.findIndex(pred);
+        if (i < 0) return null;
+        data[i] = { ...data[i], ...patch };
+        const updated = data[i];
+        invalidate(name);
+        const pk = pkField(name);
+        const id = updated[pk];
+        if (id) await _persistUpdate(pk, id, patch);
         return updated;
       },
 
@@ -542,7 +563,8 @@ const ALLOWED_FIELDS = {
   activity_routes:  new Set(['id','userId','segments','createdAt']),
   follows:          new Set(['id','followerId','followeeId','createdAt']),
   blocks:           new Set(['id','blockerId','blockedId','createdAt']),
-  social_profiles:  new Set(['id','defaultShare','inviteCode','createdAt','updatedAt']),
+  social_profiles:  new Set(['id','defaultShare','inviteCode','publicProfile','createdAt','updatedAt']),
+  activity_views:   new Set(['id','activityId','userId','createdAt']),
   social_groups:    new Set(['id','name','description','ownerType','ownerId','corporateId','joinPolicy','discoverable','inviteCode','status','createdBy','createdAt','updatedAt']),
   social_group_members: new Set(['id','groupId','userId','role','status','createdAt','updatedAt']),
   activity_kudos:   new Set(['id','activityId','userId','createdAt']),

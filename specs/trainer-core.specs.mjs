@@ -51,7 +51,7 @@ function makeBookingService({ bookings = [], sessions = [], trainer = trainerFix
     },
     gyms: [{ id: 'gym_1', name: 'Gym One', tier: 'standard' }],
     users: memStore([{ id: 'usr_m1', displayName: 'Member One' }]),
-    auditLog: { insert: () => {} },
+    auditLog: { insert: () => {}, insertAsync: async () => {} },
     trainerService: {
       hydrateTrainer: (t) => t,
       findProfileByUser: (uid) => (trainer.userId === uid ? trainer : null),
@@ -284,7 +284,7 @@ function makePaidBookingService({ passTier = null } = {}) {
     trainers: { find: (fn) => [trainerFixture].find(fn) || null, ...memStore([trainerFixture]) },
     gyms: [{ id: 'gym_1', name: 'Gym One', tier: 'standard' }],
     users: memStore([{ id: 'usr_m1', displayName: 'Member One' }]),
-    auditLog: { insert: () => {} },
+    auditLog: { insert: () => {}, insertAsync: async () => {} },
     trainerService: {
       hydrateTrainer: (t) => t,
       findProfileByUser: (uid) => (trainerFixture.userId === uid ? trainerFixture : null),
