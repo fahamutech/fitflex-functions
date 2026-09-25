@@ -30,6 +30,14 @@ export const logMyActivity = {
   }
 };
 
+export const syncMyDeviceActivities = {
+  created, method: 'post', path: '/me/device-activities',
+  description: 'Member app: sync readings from this phone (step sensor) or a health platform. { records: [{ devicePlatform, externalId, type: walking, startedAt, steps, deviceName? }] } — upserted by (devicePlatform, externalId); a day\'s steps only ever go up.',
+  requestSample: { records: [{ devicePlatform: 'phone_sensor', externalId: 'steps:2026-09-24', type: 'walking', startedAt: '2026-09-23T21:00:00.000Z', steps: 4210 }] },
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await activityService.syncDevice(req.user.sub, req.body || {}))
+};
+
 export const deleteMyActivity = {
   created, method: 'delete', path: '/me/activities/:id',
   description: 'Member: delete an activity they recorded.',
