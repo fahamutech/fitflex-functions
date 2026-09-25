@@ -231,8 +231,18 @@ export function createSegmentService({
     };
   }
 
-  /** Per channel: how many of `members` a message can reach, and why the rest can't. */
-  async function channelReach(members, category) {
+  /** Channels this server can send on right now. */
+  function channelAvailability() {
+    return { in_app: true, push: Boolean(pushAvailable()), whatsapp: Boolean(whatsappAvailable()) };
+  }
+
+  /**
+   * Per member and channel: may a message of `category` go out, and if not,
+   * why. Checks what the server has set up, the member's preferences, and
+   * whether the member has a device (push) or phone (WhatsApp).
+   * @returns {Promise<Map<string, Record<string, string|null>>>} memberId → { channel: null | reason }
+   */
+  async function reachByMember(members, category, channels = CHANNELS) {
     const ids = members.map(m => m.memberId);
     const [prefs, tokens] = await Promise.all([
       inChunks(ids, part => communicationPreferences.filterByColumnInAsync('id', part)),
@@ -240,17 +250,33 @@ export function createSegmentService({
     ]);
     const prefById = new Map(prefs.map(p => [p.id, p]));
     const withDevice = new Set(tokens.map(t => t.userId));
-    const reach = Object.fromEntries(CHANNELS.map(ch => [ch, { eligible: 0, excluded: {} }]));
-    const skip = (ch, reason) => { reach[ch].excluded[reason] = (reach[ch].excluded[reason] || 0) + 1; };
+    const available = channelAvailability();
+    const out = new Map();
     for (const m of members) {
-      for (const ch of CHANNELS) {
-        if (ch === 'push' && !pushAvailable()) { skip(ch, 'push_disabled'); continue; }
-        if (ch === 'whatsapp' && !whatsappAvailable()) { skip(ch, 'whatsapp_not_configured'); continue; }
-        const allowed = channelAllowed(prefById.get(m.memberId), ch, category);
-        if (!allowed.allowed) { skip(ch, allowed.reason); continue; }
-        if (ch === 'push' && !withDevice.has(m.memberId)) { skip(ch, 'no_device'); continue; }
-        if (ch === 'whatsapp' && !m.phone) { skip(ch, 'no_phone'); continue; }
-        reach[ch].eligible += 1;
+      const decision = {};
+      for (const ch of channels) {
+        let reason = null;
+        if (!available[ch]) reason = ch === 'push' ? 'push_disabled' : 'whatsapp_not_configured';
+        else {
+          const allowed = channelAllowed(prefById.get(m.memberId), ch, category);
+          if (!allowed.allowed) reason = allowed.reason;
+          else if (ch === 'push' && !withDevice.has(m.memberId)) reason = 'no_device';
+          else if (ch === 'whatsapp' && !m.phone) reason = 'no_phone';
+        }
+        decision[ch] = reason;
+      }
+      out.set(m.memberId, decision);
+    }
+    return out;
+  }
+
+  /** Per channel: how many of `members` a message can reach, and why the rest can't. */
+  async function channelReach(members, category) {
+    const reach = Object.fromEntries(CHANNELS.map(ch => [ch, { eligible: 0, excluded: {} }]));
+    for (const decision of (await reachByMember(members, category)).values()) {
+      for (const [ch, reason] of Object.entries(decision)) {
+        if (reason) reach[ch].excluded[reason] = (reach[ch].excluded[reason] || 0) + 1;
+        else reach[ch].eligible += 1;
       }
     }
     return reach;
@@ -289,5 +315,7 @@ export function createSegmentService({
     resolveAudience,
     previewAudience,
     channelReach,
+    reachByMember,
+    channelAvailability,
   };
 }
