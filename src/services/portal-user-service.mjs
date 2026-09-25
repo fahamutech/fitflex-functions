@@ -1,7 +1,12 @@
 // Portal (admin) staff user management — email/password accounts scoped by ACL.
 import { randomUUID } from 'node:crypto';
 
-export const PORTAL_ACL_SCOPES = ['gyms', 'owners', 'trainers', 'members', 'shop', 'payments', 'approvals', 'settings', 'users'];
+// Must cover every requireAcl(scope) in functions/*.mjs (enforced by specs/portal-acl-scopes.specs.mjs)
+// plus the scopes the portal's Users page offers, or admins can't grant them.
+export const PORTAL_ACL_SCOPES = [
+  'gyms', 'owners', 'trainers', 'members', 'shop', 'payments', 'approvals', 'settings', 'users',
+  'analytics', 'challenges', 'rewards', 'social', 'corporate', 'vendors', 'communications',
+];
 
 export function createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail }) {
   function slim(u) {
