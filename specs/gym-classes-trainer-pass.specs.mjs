@@ -11,7 +11,7 @@ const service = createGymService({
   gyms: { find: () => null, filter: () => [], filterAsync: async () => [], all: () => [], upsert: () => {}, remove: () => {} },
   users: { findAsync: async () => null },
   checkins: { findAsync: async () => null },
-  auditLog: { insert: () => {} },
+  auditLog: { insert: () => {}, insertAsync: async () => {} },
 });
 
 test('active gym catalogue can be read asynchronously', async () => {
@@ -20,7 +20,7 @@ test('active gym catalogue can be read asynchronously', async () => {
     gyms: { filter: () => [], filterAsync: async (predicate) => rows.filter(predicate) },
     users: { findAsync: async () => null },
     checkins: { findAsync: async () => null },
-    auditLog: { insert: () => {} },
+    auditLog: { insert: () => {}, insertAsync: async () => {} },
   });
   assert.deepEqual(await asyncService.listActiveAsync(), [rows[0]]);
 });

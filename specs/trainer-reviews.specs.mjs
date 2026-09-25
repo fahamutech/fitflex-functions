@@ -29,7 +29,7 @@ function setup({ trainerRows, bookingRows = [], userRows = [] } = {}) {
   const trainers = store(trainerRows ?? [{ id: 'trainer1', displayName: 'Coach Mike', rating: 0, reviewCount: 0 }]);
   const trainerBookings = store(bookingRows);
   const users = store(userRows.length ? userRows : [{ id: 'm1', displayName: 'Aisha' }]);
-  const svc = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog: { insert: () => {} } });
+  const svc = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog: { insert: () => {}, insertAsync: async () => {} } });
   return { svc, trainerReviews, trainers, trainerBookings, users };
 }
 

@@ -115,7 +115,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     if (duplicateEmail) return { error: 'email_already_used', status: 409 };
     const row = normalizeTrainerPayload({ ...body, id }, prior || {});
     await trainers.upsertAsync(t => t.id === id, row);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'trainer_updated' : 'trainer_created',
       target: id, before: prior ?? null, after: row
@@ -127,8 +127,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const prior = trainers.find(t => t.id === id);
     if (!prior) return { error: 'not_found', status: 404 };
     if (await trainerBookings.findAsync(b => b.trainerId === prior.id)) return { error: 'trainer_has_bookings', status: 409 };
-    const removed = trainers.remove(t => t.id === prior.id);
-    auditLog.insert({
+    const removed = await trainers.removeAsync(t => t.id === prior.id);
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'trainer_deleted',
       target: prior.id, before: prior, after: null
@@ -163,7 +163,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     return { trainer: hydrateTrainer(profile) };
   }
 
-  function applyToGym({ userId, gymId }) {
+  async function applyToGym({ userId, gymId }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     const gym = gyms.find(g => g.id === gymId && g.status === 'active');
@@ -172,22 +172,22 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     if (gymIds.includes(gym.id)) return { error: 'already_linked_to_gym', status: 409 };
     const pendingGymIds = profile.pendingGymIds || [];
     if (pendingGymIds.includes(gym.id)) return { error: 'application_already_pending', status: 409 };
-    const updated = trainers.update(t => t.id === profile.id, { pendingGymIds: [...pendingGymIds, gym.id] });
+    const updated = await trainers.updateAsync(t => t.id === profile.id, { pendingGymIds: [...pendingGymIds, gym.id] });
     return { trainer: hydrateTrainer(updated) };
   }
 
-  function cancelGymApplication({ userId, gymId }) {
+  async function cancelGymApplication({ userId, gymId }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     const pendingGymIds = profile.pendingGymIds || [];
     if (!pendingGymIds.includes(gymId)) return { error: 'no_pending_request_for_gym', status: 400 };
-    const updated = trainers.update(t => t.id === profile.id, {
+    const updated = await trainers.updateAsync(t => t.id === profile.id, {
       pendingGymIds: pendingGymIds.filter(id => id !== gymId),
     });
     return { trainer: hydrateTrainer(updated) };
   }
 
-  function updateProfile({ userId, body }) {
+  async function updateProfile({ userId, body }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     const allowed = [
@@ -207,7 +207,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     }
     if (body.specialties) updates.specialties = parseStringList(body.specialties, profile.specialties);
     updates.updatedAt = new Date().toISOString();
-    const updated = trainers.update(t => t.id === profile.id, updates);
+    const updated = await trainers.updateAsync(t => t.id === profile.id, updates);
     return { trainer: hydrateTrainer(updated) };
   }
 

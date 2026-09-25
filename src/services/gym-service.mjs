@@ -176,7 +176,7 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     const prior = findById(id);
     const row = normalizeGymPayload({ ...body, id }, prior);
     await gyms.upsertAsync(g => g.id === id, row);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'gym_updated' : 'gym_created',
       target: id, before: prior ?? null, after: row
@@ -190,8 +190,8 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     const assignedOperator = await users.findAsync(u => u.userType === 'gym_operator' && u.gymId === prior.id);
     const hasCheckins = await checkins.findAsync(c => c.gymId === prior.id);
     if (assignedOperator || hasCheckins) return { error: 'gym_has_activity_or_operator', status: 409 };
-    const removed = gyms.remove(g => g.id === prior.id);
-    auditLog.insert({
+    const removed = await gyms.removeAsync(g => g.id === prior.id);
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_deleted',
       target: prior.id, before: prior, after: null

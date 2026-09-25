@@ -38,7 +38,7 @@ function makeService() {
   };
   const service = createShopService({
     ...stores,
-    auditLog: { insert: () => {} },
+    auditLog: { insert: () => {}, insertAsync: async () => {} },
   });
   return { service, ...stores };
 }

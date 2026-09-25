@@ -38,13 +38,13 @@ export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
 }) {
-  function requestOtp({ phone, userType = 'member' }) {
+  async function requestOtp({ phone, userType = 'member' }) {
     if (!phone) return { error: 'phone_required', status: 400 };
     if (!['member', 'trainer', 'gym_operator', 'vendor', 'admin'].includes(userType)) {
       return { error: 'invalid_userType', status: 400 };
     }
     const code = String(Math.floor(100000 + Math.random() * 900000));
-    otps.upsert(o => o.phone === phone, { phone, code, userType, expiresAt: Date.now() + 5 * 60_000 });
+    await otps.upsertAsync(o => o.phone === phone, { phone, code, userType, expiresAt: Date.now() + 5 * 60_000 });
     const isProd = process.env.NODE_ENV === 'production';
     return {
       ok: true,
@@ -54,9 +54,8 @@ export function createAuthService({
   }
 
   async function verifyOtp({ phone, code }) {
-    // otps.upsert() (in requestOtp) writes synchronously to the in-memory cache and
-    // persists to PG in the background — reading via findAsync() here would bypass that
-    // cache and could race the background write, intermittently returning stale/empty data.
+    // otps is a primed collection: requestOtp updates the in-memory cache and awaits the
+    // PG write, so this cached read always sees the latest code.
     const otp = otps.find(o => o.phone === phone);
     if (!otp || otp.code !== code) return { error: 'invalid_otp', status: 401 };
     if (Date.now() > otp.expiresAt) return { error: 'otp_expired', status: 401 };

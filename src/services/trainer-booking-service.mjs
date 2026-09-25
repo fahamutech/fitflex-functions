@@ -179,7 +179,7 @@ export function createTrainerBookingService({
       });
     }
 
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: now,
       actor: memberId, action: 'trainer_booking_created',
       target: groupId, before: null, after: { bookings: bookings.map(b => b.id), paymentRequestId },
@@ -232,7 +232,7 @@ export function createTrainerBookingService({
     const prior = await trainerBookings.findAsync(b => b.id === id);
     if (!prior) return { error: 'not_found', status: 404 };
     const updated = await trainerBookings.updateByIdAsync(prior.id, { status, updatedAt: new Date().toISOString() });
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: `trainer_booking_${status}`,
       target: prior.id, before: prior, after: updated

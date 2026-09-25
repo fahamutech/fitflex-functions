@@ -73,7 +73,7 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
       createdAt: new Date().toISOString(),
     };
     const created = await users.upsertAsync(u => u.id === row.id, row);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_staff_created',
       target: row.id, before: null, after: { email: row.email, aclPermissions, gymIds: scopedGymIds },
@@ -101,7 +101,7 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
     }
     if (accountStatus && ['active', 'suspended'].includes(accountStatus)) patch.accountStatus = accountStatus;
     const updated = await users.upsertAsync(u => u.id === target.id, { ...target, ...patch, updatedAt: new Date().toISOString() });
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_staff_updated',
       target: target.id, before: { aclPermissions: target.aclPermissions, gymIds: target.gymIds, accountStatus: target.accountStatus }, after: patch,
@@ -122,7 +122,7 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
       }
     }
     await users.removeAsync(u => u.id === target.id);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_staff_removed',
       target: target.id, before: { email: target.email }, after: null,
