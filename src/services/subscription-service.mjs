@@ -2,7 +2,7 @@
 // self profile, check-in history, payment history.
 import { randomUUID } from 'node:crypto';
 import { PASS_TIERS } from '../shared/constants.mjs';
-import { effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
+import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
@@ -158,9 +158,7 @@ export function createSubscriptionService({
   async function me(user) {
     const uid = user.id;
     const subs = await subscriptions.filterAsync(s => s.memberId === uid);
-    let sub = subs
-      .filter(s => ['active', 'expired', 'suspended'].includes(s.status))
-      .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+    let sub = currentSubscription(subs);
     // A1: expiry is derived from expiresAt — lazily persist the transition.
     if (sub) {
       const derived = effectiveSubscriptionStatus(sub);

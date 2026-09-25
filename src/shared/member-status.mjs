@@ -11,6 +11,31 @@ export const DIRECT_SUB_TYPE = 'direct_sub';
 export const FITFLEX_VISIT_TYPES = ['platform_pass', 'roaming_topup'];
 export const EXPIRING_SOON_DAYS = 7;
 
+/** The gyms an owner (or gym staff member) works for. */
+export function ownerGymIds(owner) {
+  return owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+}
+
+/**
+ * Each member's latest direct subscription at any of `gymIds`, by start date
+ * (memberId → subscription). These are a gym's direct members, and the
+ * subscription the owner's Members list shows for each.
+ */
+export function latestDirectSubscriptionsByMember(subs, gymIds) {
+  const byMember = new Map();
+  for (const s of subs || []) {
+    if (s.type !== DIRECT_SUB_TYPE || !gymIds.includes(s.homeGymId)) continue;
+    const prev = byMember.get(s.memberId);
+    if (!prev || +new Date(s.startedAt) > +new Date(prev.startedAt)) byMember.set(s.memberId, s);
+  }
+  return byMember;
+}
+
+/** One member's latest direct subscription at any of `gymIds`, or null. */
+export function latestDirectSubscription(subs, gymIds) {
+  return latestDirectSubscriptionsByMember(subs, gymIds).values().next().value ?? null;
+}
+
 /** Whole days until expiresAt (rounded up), negative once past; null without a date. */
 export function daysLeft(expiresAt, now = new Date()) {
   if (!expiresAt) return null;

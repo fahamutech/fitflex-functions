@@ -4,7 +4,9 @@
 
 import { randomUUID } from 'node:crypto';
 import { effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
-import { FITFLEX_VISIT_TYPES, daysLeft, directMembershipStatus } from '../shared/member-status.mjs';
+import {
+  FITFLEX_VISIT_TYPES, daysLeft, directMembershipStatus, latestDirectSubscription, latestDirectSubscriptionsByMember, ownerGymIds,
+} from '../shared/member-status.mjs';
 
 export function createMemberManagementService({
   users,
@@ -17,7 +19,7 @@ export function createMemberManagementService({
   getAdminAuth,
 }) {
   // ── helpers ──────────────────────────────────────────────────────────────
-  const ownerGymIdsOf = (owner) => owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+  const ownerGymIdsOf = ownerGymIds;
 
   const toIso = (dateStr) => {
     if (!dateStr) return null;
@@ -34,8 +36,7 @@ export function createMemberManagementService({
   }
 
   async function latestDirectSub(memberId, gymIds) {
-    const subs = await subscriptions.filterAsync((s) => s.memberId === memberId && s.type === 'direct_sub' && gymIds.includes(s.homeGymId));
-    return subs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+    return latestDirectSubscription(await subscriptions.filterAsync((s) => s.memberId === memberId), gymIds);
   }
 
   async function ownerCheckinsFor(memberId, gymIds) {
@@ -260,12 +261,10 @@ export function createMemberManagementService({
       return { rows: [], stats: { totalMembers: 0, activeToday: 0, expiringSoon: 0 } };
     }
 
-    const directByMember = new Map();
-    const allDirectSubs = await subscriptions.filterAsync((x) => x.type === 'direct_sub' && gymIds.includes(x.homeGymId));
-    for (const s of allDirectSubs) {
-      const prev = directByMember.get(s.memberId);
-      if (!prev || +new Date(s.startedAt) > +new Date(prev.startedAt)) directByMember.set(s.memberId, s);
-    }
+    const directByMember = latestDirectSubscriptionsByMember(
+      await subscriptions.filterAsync((x) => x.type === 'direct_sub' && gymIds.includes(x.homeGymId)),
+      gymIds,
+    );
 
     const roamingCheckins = await checkins.filterAsync((c) => gymIds.includes(c.gymId) && FITFLEX_VISIT_TYPES.includes(c.subscriptionType));
     const roamingMemberIds = new Set(

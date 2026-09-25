@@ -5,6 +5,17 @@
 // is enforced at read/validation time everywhere.
 
 /**
+ * The subscription a member's account runs on: the most recently started
+ * one that has been paid for (active, expired or suspended). Subscriptions
+ * still waiting on, or refused, payment don't count.
+ */
+export function currentSubscription(subs) {
+  return (subs || [])
+    .filter(s => ['active', 'expired', 'suspended'].includes(s.status))
+    .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+}
+
+/**
  * @param {{ status?: string, expiresAt?: string|null }|null} sub
  * @param {Date} now
  * @returns {string|null} derived status ('expired' once past expiresAt),

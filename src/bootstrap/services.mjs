@@ -43,6 +43,8 @@ import { createNotificationService } from '../services/notification-service.mjs'
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
+import { createSegmentService } from '../services/segment-service.mjs';
+import { db } from '../infra/knex-store.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
@@ -54,6 +56,7 @@ import {
   follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, socialReports,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
+  communicationPreferences,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -171,6 +174,13 @@ export const analyticsService = createAnalyticsService({
 export const notificationService = createNotificationService({
   users, deviceTokens, notifications, whatsApp: whatsAppService,
   getMessaging: process.env.PUSH_NOTIFICATIONS === 'on' ? () => { initFirebaseAdmin(); return getMessaging(); } : null,
+});
+// Communications audiences: who a gym (its direct members only) or FitFlex
+// can message. WhatsApp stays unavailable until a provider is configured (M7).
+export const segmentService = createSegmentService({
+  db, communicationPreferences, deviceTokens,
+  pushAvailable: () => process.env.PUSH_NOTIFICATIONS === 'on',
+  whatsappAvailable: () => false,
 });
 export const challengeRewardService = createChallengeRewardService({
   challenges, participants: challengeParticipants, awards: challengeRewards, users, corporateEmployees,

@@ -21,6 +21,11 @@ export function addDays(day, n) {
   return new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
 }
 
+/** Whole days from local day `a` to local day `b` ("YYYY-MM-DD"). */
+export function daysBetween(a, b) {
+  return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / DAY_MS);
+}
+
 /** Monday of the week containing `day`. */
 export function weekStart(day) {
   const dow = new Date(`${day}T00:00:00Z`).getUTCDay(); // 0 = Sunday
