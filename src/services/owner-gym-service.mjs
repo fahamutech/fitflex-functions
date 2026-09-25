@@ -7,13 +7,13 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
 
   // Sync the trainer↔gym join so a gym's trainerIds list becomes the source of
   // truth: any trainer not in the new list loses this gym, any new one gains it.
-  function syncTrainersForGym(gymId, trainerIdList) {
+  async function syncTrainersForGym(gymId, trainerIdList) {
     const desired = new Set(Array.isArray(trainerIdList) ? trainerIdList.filter(Boolean) : []);
     const current = trainers.filter(t => Array.isArray(t.gymIds) && t.gymIds.includes(gymId));
     for (const t of current) {
       if (!desired.has(t.id)) {
         const remaining = (t.gymIds || []).filter(id => id !== gymId);
-        trainers.update(x => x.id === t.id, { gymIds: remaining });
+        await trainers.updateAsync(x => x.id === t.id, { gymIds: remaining });
       }
     }
     for (const tid of desired) {
@@ -21,7 +21,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       if (!t) continue;
       const existing = t.gymIds || [];
       if (!existing.includes(gymId)) {
-        trainers.update(x => x.id === tid, { gymIds: [...existing, gymId] });
+        await trainers.updateAsync(x => x.id === tid, { gymIds: [...existing, gymId] });
       }
     }
   }
@@ -50,7 +50,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
         if (trainer) {
           const existingGymIds = trainer.gymIds || [];
           if (!existingGymIds.includes(row.id)) {
-            trainers.update(t => t.id === tid, { gymIds: [...existingGymIds, row.id] });
+            await trainers.updateAsync(t => t.id === tid, { gymIds: [...existingGymIds, row.id] });
           }
         }
       }
@@ -108,7 +108,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const row = gymService.normalizeGymPayload({ ...body, id: prior.id }, prior);
     row.status = prior.status; // owner can't change status
     await gyms.upsertAsync(g => g.id === row.id, row);
-    if (Array.isArray(body.trainerIds)) syncTrainersForGym(row.id, body.trainerIds);
+    if (Array.isArray(body.trainerIds)) await syncTrainersForGym(row.id, body.trainerIds);
     return { gym: row };
   }
 
@@ -118,7 +118,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const row = gymService.normalizeGymPayload({ ...body, id }, {});
     row.status = 'active';
     await gyms.upsertAsync(g => g.id === row.id, row);
-    if (Array.isArray(body.trainerIds) && body.trainerIds.length) syncTrainersForGym(row.id, body.trainerIds);
+    if (Array.isArray(body.trainerIds) && body.trainerIds.length) await syncTrainersForGym(row.id, body.trainerIds);
     const currentGymIds = ownerGymIdsOf(owner);
     const updatedGymIds = [...currentGymIds, id];
     await users.upsertAsync(u => u.id === owner.id, { ...owner, gymIds: updatedGymIds, gymId: updatedGymIds[0], onboardingCompleted: true });
@@ -128,7 +128,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
   async function deleteGym({ owner, gymId }) {
     const ids = ownerGymIdsOf(owner);
     if (!ids.includes(gymId)) return { error: 'not_your_gym', status: 403 };
-    gyms.remove(g => g.id === gymId);
+    await gyms.removeAsync(g => g.id === gymId);
     const updatedGymIds = ids.filter(id => id !== gymId);
     await users.updateByIdAsync(owner.id, {
       gymIds: updatedGymIds,
@@ -138,14 +138,14 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     return { ok: true };
   }
 
-  function updateTrainer({ owner, trainerId, body }) {
+  async function updateTrainer({ owner, trainerId, body }) {
     const ownerGymIds = ownerGymIdsOf(owner);
     const trainer = trainers.find(t => t.id === trainerId);
     if (!trainer) return { error: 'trainer_not_found', status: 404 };
     const tGymIds = trainer.gymIds || [];
     if (!tGymIds.some(id => ownerGymIds.includes(id))) return { error: 'trainer_not_at_your_gym', status: 403 };
     const row = trainerService.normalizeTrainerPayload({ ...body, id: trainer.id, userId: trainer.userId, email: trainer.email }, trainer);
-    trainers.upsert(t => t.id === row.id, row);
+    await trainers.upsertAsync(t => t.id === row.id, row);
     return { trainer: trainerService.hydrateTrainer(row) };
   }
 
@@ -182,20 +182,20 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     }, {});
     await users.upsertAsync(u => u.id === userId, user);
     await trainers.upsertAsync(t => t.id === trainerId, trainer);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: owner.id, action: 'trainer_created_by_owner',
       target: trainerId, before: null, after: trainer,
     });
     return { trainer: trainerService.hydrateTrainer(trainer) };
   }
 
-  function removeTrainer({ owner, trainerId }) {
+  async function removeTrainer({ owner, trainerId }) {
     const ownerGymIds = ownerGymIdsOf(owner);
     const trainer = trainers.find(t => t.id === trainerId);
     if (!trainer) return { error: 'trainer_not_found', status: 404 };
     const tGymIds = trainer.gymIds || [];
     const remainingGymIds = tGymIds.filter(id => !ownerGymIds.includes(id));
-    trainers.update(t => t.id === trainer.id, { gymIds: remainingGymIds });
+    await trainers.updateAsync(t => t.id === trainer.id, { gymIds: remainingGymIds });
     return { ok: true };
   }
 
@@ -218,7 +218,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       }));
   }
 
-  function decideTrainerJoin({ owner, trainerId, gymId, decision, actorId }) {
+  async function decideTrainerJoin({ owner, trainerId, gymId, decision, actorId }) {
     const ownerGymIds = ownerGymIdsOf(owner);
     if (!gymId) return { error: 'gymId_required', status: 400 };
     if (!['approve', 'reject'].includes(decision)) return { error: 'invalid_decision', status: 400 };
@@ -235,8 +235,8 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       const gymIds = trainer.gymIds || [];
       patch.gymIds = gymIds.includes(gymId) ? gymIds : [...gymIds, gymId];
     }
-    const updated = trainers.update(t => t.id === trainer.id, patch);
-    auditLog.insert({
+    const updated = await trainers.updateAsync(t => t.id === trainer.id, patch);
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: decision === 'approve' ? 'trainer_join_approved' : 'trainer_join_rejected',
       target: trainer.id, before: { pendingGymIds }, after: patch,

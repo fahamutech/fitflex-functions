@@ -58,7 +58,7 @@ export const trainerRegister = {
     const user = await resolveRequestUser(req);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
     const body = req.body || {};
-    const result = trainerService.register({ userId: req.user.sub, user, body });
+    const result = await trainerService.register({ userId: req.user.sub, user, body });
     if (result.error) return res.status(result.status).json({ error: result.error, ...(result.validValues ? { validValues: result.validValues } : {}) });
     await users.updateByIdAsync(req.user.sub, {
       displayName: result.displayName,
@@ -83,8 +83,8 @@ export const trainerApplyToGym = {
   created, method: 'post', path: '/trainer/gyms/:gymId/apply',
   description: "Trainer: request to join a gym. The gym owner must approve before the trainer is linked and visible to members.",
   onGuard: requireAuth('trainer'),
-  onRequest: (req, res) => {
-    const result = trainerService.applyToGym({ userId: req.user.sub, gymId: req.params.gymId });
+  onRequest: async (req, res) => {
+    const result = await trainerService.applyToGym({ userId: req.user.sub, gymId: req.params.gymId });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(201).json(result.trainer);
   }
@@ -94,8 +94,8 @@ export const trainerCancelGymApplication = {
   created, method: 'post', path: '/trainer/gyms/:gymId/apply/cancel',
   description: 'Trainer: withdraw a pending request to join a gym.',
   onGuard: requireAuth('trainer'),
-  onRequest: (req, res) => {
-    const result = trainerService.cancelGymApplication({ userId: req.user.sub, gymId: req.params.gymId });
+  onRequest: async (req, res) => {
+    const result = await trainerService.cancelGymApplication({ userId: req.user.sub, gymId: req.params.gymId });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.trainer);
   }
@@ -105,8 +105,8 @@ export const trainerUpdateProfile = {
   created, method: 'put', path: '/trainer/me',
   description: 'Trainer: update own bio, specialties, hourly rate, availability.',
   onGuard: requireAuth('trainer'),
-  onRequest: (req, res) => {
-    const result = trainerService.updateProfile({ userId: req.user.sub, body: req.body || {} });
+  onRequest: async (req, res) => {
+    const result = await trainerService.updateProfile({ userId: req.user.sub, body: req.body || {} });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.trainer);
   }

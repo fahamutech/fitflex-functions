@@ -22,7 +22,7 @@ export const adminUpdateSettings = {
   created, method: 'put', path: '/admin/settings',
   description: 'Admin: update platform settings.',
   onGuard: [requireAuth('admin'), requireAcl('settings')],
-  onRequest: (req, res) => res.json(settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub }))
+  onRequest: async (req, res) => res.json(await settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub }))
 };
 
 export const publicGetSpecialties = {
@@ -43,8 +43,8 @@ export const adminAddSpecialty = {
   created, method: 'post', path: '/admin/settings/specialties',
   description: 'Admin: add a trainer specialty.',
   onGuard: [requireAuth('admin'), requireAcl('settings')],
-  onRequest: (req, res) => {
-    const result = settingsService.addSpecialty(req.body?.name);
+  onRequest: async (req, res) => {
+    const result = await settingsService.addSpecialty(req.body?.name);
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.specialties);
   }
@@ -54,9 +54,9 @@ export const adminDeleteSpecialty = {
   created, method: 'delete', path: '/admin/settings/specialties/:name',
   description: 'Admin: remove a trainer specialty.',
   onGuard: [requireAuth('admin'), requireAcl('settings')],
-  onRequest: (req, res) => {
+  onRequest: async (req, res) => {
     const name = decodeURIComponent(req.params.name || '');
-    const result = settingsService.deleteSpecialty(name);
+    const result = await settingsService.deleteSpecialty(name);
     res.json(result.specialties);
   }
 };

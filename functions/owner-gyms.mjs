@@ -140,7 +140,7 @@ export const ownerUpdateTrainer = {
   onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
-    const result = ownerGymService.updateTrainer({ owner, trainerId: req.params.trainerId, body: req.body || {} });
+    const result = await ownerGymService.updateTrainer({ owner, trainerId: req.params.trainerId, body: req.body || {} });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.trainer);
   }
@@ -170,7 +170,7 @@ export const ownerRemoveTrainer = {
   onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
-    const result = ownerGymService.removeTrainer({ owner, trainerId: req.params.trainerId });
+    const result = await ownerGymService.removeTrainer({ owner, trainerId: req.params.trainerId });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json({ ok: true });
   }
@@ -204,7 +204,7 @@ export const ownerDecideTrainerJoin = {
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const { gymId, decision } = req.body || {};
-    const result = ownerGymService.decideTrainerJoin({ owner, trainerId: req.params.trainerId, gymId, decision, actorId: req.user?.sub });
+    const result = await ownerGymService.decideTrainerJoin({ owner, trainerId: req.params.trainerId, gymId, decision, actorId: req.user?.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.trainer);
   }

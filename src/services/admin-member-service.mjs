@@ -98,7 +98,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
       updatedAt: new Date().toISOString()
     };
     await users.upsertAsync(u => u.id === id, row);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'member_updated' : 'member_created',
       target: id, before: prior ?? null, after: row
@@ -153,7 +153,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
       });
     }
     const after = { ...updatedUser, subscription: updatedSub };
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: `member_${status}`,
       target: member.id, before, after

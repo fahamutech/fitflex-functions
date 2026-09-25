@@ -90,7 +90,7 @@ test('owner can reuse an existing member Firebase email for a separate staff pro
   });
   const service = createOwnerStaffService({
     users,
-    auditLog: { insert: () => {} },
+    auditLog: { insert: () => {}, insertAsync: async () => {} },
     initFirebaseAdmin: () => {},
     getAdminAuth: () => ({
       createUser: async () => { throw duplicate; },

@@ -14,7 +14,7 @@ function res() {
 
 async function createTrainerUser(phone) {
   const otpRes = res();
-  authRequestOtp.onRequest({ body: { phone, userType: 'trainer' } }, otpRes);
+  await authRequestOtp.onRequest({ body: { phone, userType: 'trainer' } }, otpRes);
   const code = otpRes.body.devOtp;
 
   const verifyRes = res();

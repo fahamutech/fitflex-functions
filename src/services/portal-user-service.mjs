@@ -70,7 +70,7 @@ export function createPortalUserService({ users, auditLog, initFirebaseAdmin, ge
       createdAt: new Date().toISOString(),
     };
     const created = await users.upsertAsync(u => u.id === row.id, row);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'portal_user_created',
       target: row.id, before: null, after: { email: row.email, aclPermissions }
@@ -100,7 +100,7 @@ export function createPortalUserService({ users, auditLog, initFirebaseAdmin, ge
     if (displayName) patch.displayName = displayName;
     if (typeof portalUser === 'boolean') patch.portalUser = portalUser;
     const updated = await users.upsertAsync(u => u.id === target.id, { ...target, ...patch, updatedAt: new Date().toISOString() });
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'portal_user_updated',
       target: target.id, before: { aclPermissions: target.aclPermissions, accountStatus: target.accountStatus, portalUser: target.portalUser }, after: patch
@@ -129,7 +129,7 @@ export function createPortalUserService({ users, auditLog, initFirebaseAdmin, ge
       }
     }
     await users.removeAsync(u => u.id === target.id);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'portal_user_deleted',
       target: target.id, before: { email: target.email }, after: null

@@ -18,6 +18,7 @@ const trainers = {
     else rows.push(row);
     return row;
   },
+  updateAsync: async (predicate, patch) => trainers.update(predicate, patch),
   upsertAsync: async (predicate, row) => trainers.upsert(predicate, row),
 };
 
@@ -25,7 +26,7 @@ const service = createTrainerService({
   trainers,
   gyms: { find: () => null },
   trainerBookings: { findAsync: async () => null },
-  auditLog: { insert: () => {} },
+  auditLog: { insert: () => {}, insertAsync: async () => {} },
   gymService: { slimGym: (gym) => gym, slimGymRef: (gym) => gym },
 });
 
@@ -59,7 +60,7 @@ test('trainer professional updates persist the selected session currency', async
     },
   });
 
-  const updated = service.updateProfile({
+  const updated = await service.updateProfile({
     userId: created.trainer.userId,
     body: { hourlyRateTzs: 50, sessionRateCurrency: 'USD' },
   });

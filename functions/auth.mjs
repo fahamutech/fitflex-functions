@@ -9,9 +9,9 @@ export const authRequestOtp = {
   description: 'Request a phone OTP. Returns the OTP in dev mode (replace with SMS in prod).',
   requestSample: { phone: '+255712345678', userType: 'member' },
   responseSample: { ok: true, devOtp: '123456' },
-  onRequest: (req, res) => {
+  onRequest: async (req, res) => {
     const { phone, userType = 'member' } = req.body || {};
-    const result = authService.requestOtp({ phone, userType });
+    const result = await authService.requestOtp({ phone, userType });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result);
   }

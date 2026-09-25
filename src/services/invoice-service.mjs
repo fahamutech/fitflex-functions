@@ -35,7 +35,7 @@ export function createInvoiceService({ invoices, gyms, users, gymPayouts, auditL
       paidAt: null,
     };
     await invoices.insertAsync(inv);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: inv.createdAt,
       actor: actorId, action: 'invoice_created',
       target: inv.id, before: null, after: inv
@@ -71,7 +71,7 @@ export function createInvoiceService({ invoices, gyms, users, gymPayouts, auditL
     }
 
     const updated = await invoices.updateByIdAsync(inv.id, updates);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'invoice_updated',
       target: inv.id, before, after: updated
