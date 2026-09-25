@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { parseStringList } from '../shared/parse-list.mjs';
 
-export const GYM_STAFF_ACL_SCOPES = ['members', 'checkins', 'payments', 'trainers', 'gyms', 'shop'];
+export const GYM_STAFF_ACL_SCOPES = ['members', 'checkins', 'payments', 'trainers', 'gyms', 'shop', 'communications'];
 
 export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, getAdminAuth }) {
   function hydrateStaff(u) {

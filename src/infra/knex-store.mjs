@@ -69,6 +69,14 @@ const TABLE_MAP = {
   corporate_accounts:  { table: 'CorporateAccount' },
   corporate_employees: { table: 'CorporateEmployee' },
   corporate_bills:     { table: 'CorporateBill' },
+  communication_campaigns:   { table: 'CommunicationCampaign' },
+  communication_messages:    { table: 'CommunicationMessage' },
+  communication_templates:   { table: 'CommunicationTemplate' },
+  whatsapp_templates:        { table: 'WhatsAppTemplate' },
+  communication_preferences: { table: 'CommunicationPreference' },
+  communication_automations: { table: 'CommunicationAutomation' },
+  automation_runs:           { table: 'AutomationRun' },
+  job_runs:                  { table: 'JobRun' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -111,7 +119,11 @@ const PHONE_PK_COLLECTIONS = new Set(['otps']);
 // Models where the `updatedAt` column has no DB-level default and must be
 // (re)computed on every write — mirrors Prisma's `@updatedAt` behaviour,
 // which only auto-generates the value when the caller does not supply one.
-const AUTO_UPDATED_AT = new Set(['users', 'gyms', 'trainers', 'platform_settings']);
+const AUTO_UPDATED_AT = new Set([
+  'users', 'gyms', 'trainers', 'platform_settings',
+  'communication_campaigns', 'communication_messages', 'communication_templates',
+  'whatsapp_templates', 'communication_preferences', 'communication_automations',
+]);
 
 // Collections retained for legacy synchronous service call sites. New service
 // reads must use the *Async methods below, which always query PostgreSQL.
@@ -525,7 +537,7 @@ const ALLOWED_FIELDS = {
   gym_reviews:      new Set(['id','gymId','memberId','rating','text','status','moderatedBy','moderatedAt','createdAt','updatedAt']),
   trainer_reviews:  new Set(['id','trainerId','memberId','rating','text','status','moderatedBy','moderatedAt','createdAt','updatedAt']),
   device_tokens:    new Set(['id','userId','token','platform','createdAt','lastSeenAt']),
-  notifications:    new Set(['id','userId','type','title','body','data','readAt','createdAt']),
+  notifications:    new Set(['id','userId','type','title','body','data','readAt','createdAt','category','gymId','campaignId','clickedAt']),
   activities:       new Set(['id','userId','type','source','startedAt','durationMinutes','distanceKm','steps','activeMinutes','calories','intensity','workoutId','gymId','trainerId','notes','devicePlatform','externalId','deviceName','movingSeconds','elevationGainM','splits','hasRoute','shareWith','createdAt']),
   activity_routes:  new Set(['id','userId','segments','createdAt']),
   follows:          new Set(['id','followerId','followeeId','createdAt']),
@@ -548,6 +560,14 @@ const ALLOWED_FIELDS = {
   corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','status','createdAt','updatedAt']),
   corporate_employees: new Set(['id','corporateId','userId','displayName','phone','email','department','pinHash','status','activatedAt','createdAt','updatedAt']),
   corporate_bills:     new Set(['id','corporateId','period','passTier','subsidyModel','billingCycle','seatCount','perSeatMonthlyTzs','grossTzs','employerTzs','employeeTzs','status','paymentReference','paidAt','createdAt']),
+  communication_campaigns:   new Set(['id','senderType','gymId','name','purpose','category','status','audience','content','channels','templateId','scheduledAt','sendRequestId','counts','createdBy','sentAt','cancelledAt','createdAt','updatedAt']),
+  communication_messages:    new Set(['id','campaignId','automationRunId','senderType','gymId','memberId','channel','category','messageType','title','body','locale','deepLink','notificationId','status','skipReason','providerMessageId','attempts','nextAttemptAt','sentAt','deliveredAt','openedAt','clickedAt','failedAt','failureReason','failurePermanent','createdAt','updatedAt']),
+  communication_templates:   new Set(['id','gymId','key','name','category','purpose','channels','bodies','variables','whatsappTemplateId','status','createdBy','createdAt','updatedAt']),
+  whatsapp_templates:        new Set(['id','provider','providerTemplateName','language','category','variables','approvalStatus','lastSyncedAt','createdAt','updatedAt']),
+  communication_preferences: new Set(['id','inAppMarketing','pushMarketing','whatsappTransactional','whatsappMarketing','whatsappMarketingConsentAt','whatsappMarketingConsentSource','whatsappOptedOutAt','locale','createdAt','updatedAt']),
+  communication_automations: new Set(['id','senderType','gymId','name','trigger','offsetDays','conditions','templateId','channels','status','createdBy','createdAt','updatedAt']),
+  automation_runs:           new Set(['id','automationId','gymId','memberId','occurrenceKey','status','createdAt']),
+  job_runs:                  new Set(['id','job','status','startedAt','finishedAt','stats','error']),
 };
 
 // jsonb columns that may hold array-shaped (or otherwise non-object) JSON —
@@ -576,6 +596,10 @@ const JSON_FIELDS = {
   gym_member_sharing: ['permissions'],
   challenges: ['rewards', 'eligibility', 'rewardItems'],
   challenge_rewards: ['history'],
+  communication_campaigns: ['audience', 'content', 'counts'],
+  communication_templates: ['bodies'],
+  communication_automations: ['conditions'],
+  job_runs: ['stats'],
 };
 
 /**
@@ -596,7 +620,9 @@ function prepareForKnex(name, data, isUpdate = false) {
   // Convert date strings to Date objects for timestamp columns
   const DATE_FIELDS = ['createdAt', 'updatedAt', 'startedAt', 'cycleStartedAt', 'renewsAt', 'expiresAt',
     'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt', 'lastSeenAt', 'readAt',
-    'completedAt', 'connectedAt', 'endedAt', 'joinedAt', 'leftAt'];
+    'completedAt', 'connectedAt', 'endedAt', 'joinedAt', 'leftAt',
+    'scheduledAt', 'sentAt', 'cancelledAt', 'nextAttemptAt', 'deliveredAt', 'openedAt', 'clickedAt', 'failedAt',
+    'lastSyncedAt', 'whatsappMarketingConsentAt', 'whatsappOptedOutAt', 'finishedAt'];
   for (const f of DATE_FIELDS) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];

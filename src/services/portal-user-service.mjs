@@ -1,7 +1,7 @@
 // Portal (admin) staff user management — email/password accounts scoped by ACL.
 import { randomUUID } from 'node:crypto';
 
-export const PORTAL_ACL_SCOPES = ['gyms', 'owners', 'trainers', 'members', 'shop', 'payments', 'approvals', 'settings', 'users'];
+export const PORTAL_ACL_SCOPES = ['gyms', 'owners', 'trainers', 'members', 'shop', 'payments', 'approvals', 'settings', 'users', 'communications'];
 
 export function createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail }) {
   function slim(u) {

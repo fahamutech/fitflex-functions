@@ -1,5 +1,5 @@
 // TDD — Gym staff roster RBAC. Owners create gym-level staff (e.g. receptionists) with a
-// per-feature ACL (GYM_STAFF_ACL_SCOPES: members, checkins, payments, trainers, gyms, shop).
+// per-feature ACL (GYM_STAFF_ACL_SCOPES: members, checkins, payments, trainers, gyms, shop, communications).
 // Owners are always unrestricted over their own gyms; staff need the matching scope.
 //
 // ownerCreateStaff's success path calls Firebase Admin (to actually create the staff
