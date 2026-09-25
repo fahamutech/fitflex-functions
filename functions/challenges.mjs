@@ -1,7 +1,7 @@
 // Challenge engine REST surface. Members see and join challenges; FitFlex
 // (admin), trainers, gyms (owner/staff) and corporate HR create them.
 import '../src/bootstrap/init.mjs';
-import { requireAuth, requireGymAcl } from '../src/auth/jwt.mjs';
+import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
 import {
   challengeService as svc, corporateService, resolveRequestUser, trainers,
 } from '../src/bootstrap/services.mjs';
@@ -170,7 +170,7 @@ export const ownerUpdateChallenge = gymR.update;
 export const ownerCloseChallenge = gymR.close;
 export const ownerArchiveChallenge = gymR.archive;
 
-const adminR = creatorRoutes('/admin', requireAuth('admin'), fitflexCreator, 'FitFlex admin');
+const adminR = creatorRoutes('/admin', [requireAuth('admin'), requireAcl('challenges')], fitflexCreator, 'FitFlex admin');
 export const adminChallenges = adminR.list;
 export const adminCreateChallenge = adminR.create;
 export const adminCancelChallenge = adminR.cancel;
@@ -180,7 +180,7 @@ export const adminUpdateChallenge = adminR.update;
 export const adminCloseChallenge = adminR.close;
 export const adminArchiveChallenge = adminR.archive;
 
-const corpR = creatorRoutes('/corporate', requireAuth('corporate_hr', 'admin'), corporateCreator, 'Corporate HR');
+const corpR = creatorRoutes('/corporate', [requireAuth('corporate_hr', 'admin'), requireAcl('corporate')], corporateCreator, 'Corporate HR');
 export const corporateChallenges = corpR.list;
 export const corporateCreateChallenge = corpR.create;
 export const corporateCancelChallenge = corpR.cancel;
