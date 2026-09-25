@@ -113,7 +113,7 @@ function campaignRoutes(prefix, guard, senderOf, who) {
       async (s, req, res) => send(res, await campaignService.remove(s, req.params.id))),
     preview: route('post', '/campaigns/:id/preview', 'preview a saved campaign.',
       async (s, req, res) => send(res, await campaignService.preview(s, { campaignId: req.params.id }))),
-    schedule: route('post', '/campaigns/:id/schedule', 'schedule a draft. POST { scheduledAt } (5 minutes to 90 days ahead).',
+    schedule: route('post', '/campaigns/:id/schedule', 'schedule a draft. POST { scheduledAt, confirmLargeSend? } (5 minutes to 90 days ahead; large audiences need confirmLargeSend like sending now).',
       async (s, req, res) => send(res, await campaignService.schedule(s, req.params.id, req.body || {}))),
     unschedule: route('post', '/campaigns/:id/unschedule', 'turn a scheduled campaign back into a draft.',
       async (s, req, res) => send(res, await campaignService.unschedule(s, req.params.id))),

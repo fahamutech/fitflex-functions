@@ -247,7 +247,7 @@ export function createCampaignService({
     return { campaign: view(await campaigns.findByIdAsync(c.id)), before: c };
   }
 
-  async function schedule(sender, campaignId, { scheduledAt } = {}) {
+  async function schedule(sender, campaignId, { scheduledAt, confirmLargeSend = false } = {}) {
     const c = await load(sender, campaignId);
     if (!c) return { error: 'not_found', status: 404 };
     const missing = readyToSend(c);
@@ -256,6 +256,14 @@ export function createCampaignService({
     if (Number.isNaN(when)) return { error: 'invalid_schedule', status: 400 };
     if (when < +now() + MIN_SCHEDULE_LEAD_MS) return { error: 'schedule_too_soon', status: 400 };
     if (when > +now() + MAX_SCHEDULE_AHEAD_MS) return { error: 'schedule_too_far', status: 400 };
+    // The same checks as sending now, so scheduling is no way around them.
+    // The audience is worked out again when the campaign goes out.
+    const p = await plan(sender, c);
+    if (p.error) return p;
+    if (!p.counts.targeted) return { error: 'empty_audience', status: 409 };
+    if (p.counts.targeted >= largeSendThreshold && confirmLargeSend !== true) {
+      return { error: 'confirm_large_send', status: 409, count: p.counts.targeted };
+    }
     const r = await transition(sender, campaignId, 'scheduled', { scheduledAt: new Date(when) });
     if (r.error) return r;
     audit(sender, 'communication_campaign_scheduled', r.campaign, { scheduledAt: r.campaign.scheduledAt });
@@ -340,10 +348,7 @@ export function createCampaignService({
           .where({ id: c.id }).whereIn('status', SENDABLE)
           .update({ status: 'sending', sendRequestId, counts: JSON.stringify(p.counts), updatedAt: at });
         if (!n) throw Object.assign(new Error('state_changed'), { code: 'STATE_CHANGED' });
-        for (let i = 0; i < p.rows.length; i += INSERT_CHUNK) {
-          await trx('CommunicationMessage').insert(p.rows.slice(i, i + INSERT_CHUNK))
-            .onConflict(['campaignId', 'memberId', 'channel']).ignore();
-        }
+        await insertRows(trx, p.rows);
       });
     } catch (err) {
       const latest = await campaigns.findByIdAsync(c.id);
@@ -355,6 +360,58 @@ export function createCampaignService({
     const sent = await campaigns.findByIdAsync(c.id);
     audit(sender, 'communication_campaign_sent', sent, { targeted: p.counts.targeted, queued: p.counts.queued });
     return { campaign: view(sent) };
+  }
+
+  async function insertRows(trx, rows) {
+    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+      await trx('CommunicationMessage').insert(rows.slice(i, i + INSERT_CHUNK))
+        .onConflict(['campaignId', 'memberId', 'channel']).ignore();
+    }
+  }
+
+  // Scheduled campaigns go out as the gym (its direct members) or FitFlex,
+  // whoever created them — not as the person who pressed Schedule.
+  function systemSender(campaign) {
+    return campaign.senderType === 'gym'
+      ? { senderType: 'gym', owner: { gymIds: [campaign.gymId] }, actorId: null }
+      : { senderType: 'platform', actorId: null };
+  }
+
+  /**
+   * Sends scheduled campaigns whose time has come: works out the audience
+   * as it is now and queues each member's message, in one transaction with
+   * the move out of `scheduled` — so a campaign cancelled at the last moment,
+   * or released twice, is never queued twice.
+   */
+  async function releaseDue({ limit = 20 } = {}) {
+    const due = await db('CommunicationCampaign')
+      .where('status', 'scheduled').where('scheduledAt', '<=', now())
+      .orderBy('scheduledAt').limit(limit).select('*');
+    const stats = { released: 0, failed: 0, skipped: 0 };
+    for (const c of due) {
+      const sender = systemSender(c);
+      const available = segmentService.channelAvailability();
+      const p = c.channels?.every(ch => available[ch]) ? await plan(sender, c) : { error: 'channel_unavailable' };
+      const at = now();
+      if (p.error || !p.counts.queued) {
+        const n = await db('CommunicationCampaign').where({ id: c.id, status: 'scheduled' }).update({
+          status: 'failed', updatedAt: at, sentAt: at,
+          counts: JSON.stringify(p.counts || { targeted: 0, queued: 0, skipped: {}, byChannel: {}, failure: p.error }),
+        });
+        stats[n ? 'failed' : 'skipped'] += 1;
+        continue;
+      }
+      let claimed = 0;
+      await db.transaction(async (trx) => {
+        claimed = await trx('CommunicationCampaign').where({ id: c.id, status: 'scheduled' })
+          .update({ status: 'sending', counts: JSON.stringify(p.counts), updatedAt: at });
+        if (claimed) await insertRows(trx, p.rows);
+      });
+      if (!claimed) { stats.skipped += 1; continue; }
+      stats.released += 1;
+      audit(sender, 'communication_campaign_released', c, { targeted: p.counts.targeted, queued: p.counts.queued });
+    }
+    return stats;
   }
 
   async function list(sender, { gymId = null, status = null, limit = LIST_LIMIT } = {}) {
@@ -415,5 +472,5 @@ export function createCampaignService({
     }).catch?.(() => {});
   }
 
-  return { create, update, remove, schedule, unschedule, cancel, preview, send, list, get, overview, plan };
+  return { create, update, remove, schedule, unschedule, cancel, preview, send, list, get, overview, plan, releaseDue };
 }
