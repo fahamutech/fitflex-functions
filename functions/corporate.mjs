@@ -1,13 +1,13 @@
 // Corporate wellness (B2B) REST surface — HR self-service plus admin oversight.
 import '../src/bootstrap/init.mjs';
-import { requireAuth } from '../src/auth/jwt.mjs';
+import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { corporateService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
 // HR routes are account-scoped: corporate_hr acts on its own account, while an
 // admin acts on any account by passing ?corporateId=.
-const requireHr = requireAuth('corporate_hr', 'admin');
+const requireHr = [requireAuth('corporate_hr', 'admin'), requireAcl('corporate')];
 
 async function scoped(req, res, handler) {
   const actor = await corporateService.resolveActorAccount({
@@ -37,7 +37,7 @@ export const adminOnboardCorporate = {
     subsidyModel: 'copay_70_30', passTier: 'pro', billingCycle: 'monthly',
     seatLimit: 500, domainWhitelist: ['nmbtz.com'], objectives: ['reduce_absenteeism'],
   },
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.onboard({ body: req.body || {}, actorId: req.user.sub });
     if (result.error) return res.status(result.status).json({ error: result.error, invalid: result.invalid });
@@ -48,7 +48,7 @@ export const adminOnboardCorporate = {
 export const adminListHrUsers = {
   created, method: 'get', path: '/admin/corporate/:id/hr-users',
   description: 'Admin: HR logins for a corporate account.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.listHrUsers({ corporateId: req.params.id });
     if (result.error) return res.status(result.status).json({ error: result.error });
@@ -60,7 +60,7 @@ export const adminCreateHrUser = {
   created, method: 'post', path: '/admin/corporate/:id/hr-users',
   description: 'Admin: create an HR login for a corporate account (email + initial password, min 10 characters). HR signs in to the portal with POST /auth/login { email, password, requestedRole: "corporate_hr" }.',
   requestSample: { displayName: 'Neema HR', email: 'hr@company.co.tz', password: 'a-long-initial-password' },
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.createHrUser({ corporateId: req.params.id, body: req.body || {}, actorId: req.user.sub });
     if (result.error) return res.status(result.status).json({ error: result.error, ...(result.minLength ? { minLength: result.minLength } : {}) });
@@ -72,7 +72,7 @@ export const adminSetHrUserStatus = {
   created, method: 'post', path: '/admin/corporate/:id/hr-users/:userId/status',
   description: 'Admin: suspend or re-activate an HR login.',
   requestSample: { status: 'suspended' },
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.setHrUserStatus({ corporateId: req.params.id, userId: req.params.userId, status: req.body?.status, actorId: req.user.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
@@ -83,7 +83,7 @@ export const adminSetHrUserStatus = {
 export const adminListCorporate = {
   created, method: 'get', path: '/admin/corporate',
   description: 'Admin: list corporate accounts, newest first. Query: ?status=pending|active|suspended|terminated.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.adminList({ status: req.query?.status });
     res.json(result.accounts);
@@ -93,7 +93,7 @@ export const adminListCorporate = {
 export const adminUpdateCorporate = {
   created, method: 'put', path: '/admin/corporate/:id',
   description: 'Admin: update seat limit, subsidy model, pass tier, billing cycle, HR contact or domain whitelist.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.update({
       corporateId: req.params.id, body: req.body || {}, actorId: req.user.sub,
@@ -107,7 +107,7 @@ export const adminSetCorporateStatus = {
   created, method: 'post', path: '/admin/corporate/:id/status',
   description: 'Admin: move a corporate account between pending, active, suspended and terminated.',
   requestSample: { status: 'active' },
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.setStatus({
       corporateId: req.params.id, status: req.body?.status, actorId: req.user.sub,
@@ -120,7 +120,7 @@ export const adminSetCorporateStatus = {
 export const adminVerifyCorporateDomain = {
   created, method: 'get', path: '/admin/corporate/:id/verify-domain',
   description: "Admin: check whether an email's domain is whitelisted for a corporate account. Query: ?email=.",
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.verifyDomain({ corporateId: req.params.id, email: req.query?.email });
     if (result.error) return res.status(result.status).json({ error: result.error });
@@ -201,7 +201,7 @@ export const adminMarkCorporateBillPaid = {
   created, method: 'post', path: '/admin/corporate/billing/:id/paid',
   description: 'Admin: mark a corporate bill paid against an M-Pesa Business / Lipa Namba reference.',
   requestSample: { paymentReference: 'MPESA-XYZ123' },
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const result = await corporateService.markBillPaid({
       billId: req.params.id, paymentReference: req.body?.paymentReference, actorId: req.user.sub,

@@ -14,14 +14,14 @@ export const publicSubscriptionTiers = {
 export const adminGetSettings = {
   created, method: 'get', path: '/admin/settings',
   description: 'Admin: get platform settings (tiers, bands, payment period, etc.).',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('settings')],
   onRequest: (_req, res) => res.json(settingsService.adminGet())
 };
 
 export const adminUpdateSettings = {
   created, method: 'put', path: '/admin/settings',
   description: 'Admin: update platform settings.',
-  onGuard: requireAuth('admin'),
+  onGuard: [requireAuth('admin'), requireAcl('settings')],
   onRequest: async (req, res) => res.json(await settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub }))
 };
 
@@ -34,6 +34,7 @@ export const publicGetSpecialties = {
 export const adminGetSpecialties = {
   created, method: 'get', path: '/admin/settings/specialties',
   description: 'Admin: get trainer specialty list.',
+  // Any admin: the Trainers page (scope 'trainers') reads it too, and /settings/specialties is public anyway.
   onGuard: requireAuth('admin'),
   onRequest: (_req, res) => res.json(settingsService.getSpecialtiesList())
 };

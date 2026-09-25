@@ -90,7 +90,7 @@ export const trainerUpdateGroup = tr.update; export const trainerArchiveGroup = 
 const gy = ownerRoutes('/owner', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')], gymOwner, 'Gym');
 export const ownerGroups = gy.list; export const ownerCreateGroup = gy.create; export const ownerGroupDetail = gy.detail;
 export const ownerUpdateGroup = gy.update; export const ownerArchiveGroup = gy.archive; export const ownerGroupMember = gy.member;
-const co = ownerRoutes('/corporate', requireAuth('corporate_hr', 'admin'), companyOwner, 'Company HR');
+const co = ownerRoutes('/corporate', [requireAuth('corporate_hr', 'admin'), requireAcl('corporate')], companyOwner, 'Company HR');
 export const corporateGroups = co.list; export const corporateCreateGroup = co.create; export const corporateGroupDetail = co.detail;
 export const corporateUpdateGroup = co.update; export const corporateArchiveGroup = co.archive; export const corporateGroupMember = co.member;
 

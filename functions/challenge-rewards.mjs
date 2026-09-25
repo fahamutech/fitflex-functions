@@ -46,7 +46,7 @@ async function corporateScope(req) {
 export const corporateRewards = {
   created, method: 'get', path: '/corporate/rewards',
   description: 'Company HR: company-funded rewards their employees earned, to hand out. Names and reward only, never activity. ?status=&challengeId=',
-  onGuard: requireAuth('corporate_hr', 'admin'),
+  onGuard: [requireAuth('corporate_hr', 'admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const scope = await corporateScope(req);
     if (scope.error) return send(res, scope);
@@ -58,7 +58,7 @@ export const corporateRewardStatus = {
   created, method: 'post', path: '/corporate/rewards/:id/status',
   description: 'Company HR: approve, issue, reject (reason required) or reopen a company-funded reward.',
   requestSample: STATUS_SAMPLE,
-  onGuard: requireAuth('corporate_hr', 'admin'),
+  onGuard: [requireAuth('corporate_hr', 'admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const scope = await corporateScope(req);
     if (scope.error) return send(res, scope);
