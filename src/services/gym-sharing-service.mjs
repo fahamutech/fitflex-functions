@@ -10,7 +10,7 @@
 //   challenges      — progress on this gym's challenges the member joined
 // Activity elsewhere, steps, goals and streaks are never visible to a gym.
 import { randomUUID } from 'node:crypto';
-import { localDay, addDays, weekStart, isWorkout, activeMinutesOf } from '../shared/member-progress.mjs';
+import { localDay, addDays, daysBetween, weekStart, isWorkout, activeMinutesOf } from '../shared/member-progress.mjs';
 
 export const GYM_PERMISSIONS = ['classAttendance', 'gymWorkouts', 'challenges'];
 const HISTORY_DAYS = 90;
@@ -28,8 +28,6 @@ export function normalizeGymPermissions(input, base = {}) {
   }
   return out;
 }
-
-const daysBetween = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
 
 /**
  * Visit patterns from a member's check-ins at one gym. `status` bands:

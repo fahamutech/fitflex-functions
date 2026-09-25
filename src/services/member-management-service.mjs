@@ -4,9 +4,9 @@
 
 import { randomUUID } from 'node:crypto';
 import { effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
-
-const EXPIRING_SOON_DAYS = 7;
-const FITFLEX_VISIT_TYPES = ['platform_pass', 'roaming_topup'];
+import {
+  FITFLEX_VISIT_TYPES, daysLeft, directMembershipStatus, latestDirectSubscription, latestDirectSubscriptionsByMember, ownerGymIds,
+} from '../shared/member-status.mjs';
 
 export function createMemberManagementService({
   users,
@@ -19,7 +19,7 @@ export function createMemberManagementService({
   getAdminAuth,
 }) {
   // ── helpers ──────────────────────────────────────────────────────────────
-  const ownerGymIdsOf = (owner) => owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
+  const ownerGymIdsOf = ownerGymIds;
 
   const toIso = (dateStr) => {
     if (!dateStr) return null;
@@ -35,14 +35,8 @@ export function createMemberManagementService({
     return d;
   }
 
-  function daysLeft(expiresAt, now) {
-    if (!expiresAt) return null;
-    return Math.ceil((+new Date(expiresAt) - +now) / 86_400_000);
-  }
-
   async function latestDirectSub(memberId, gymIds) {
-    const subs = await subscriptions.filterAsync((s) => s.memberId === memberId && s.type === 'direct_sub' && gymIds.includes(s.homeGymId));
-    return subs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+    return latestDirectSubscription(await subscriptions.filterAsync((s) => s.memberId === memberId), gymIds);
   }
 
   async function ownerCheckinsFor(memberId, gymIds) {
@@ -59,12 +53,10 @@ export function createMemberManagementService({
   }
 
   async function statusForDirect(member, sub, gymIds, now) {
-    if (member.accountStatus === 'suspended' || sub?.status === 'suspended') return 'suspended';
+    const status = directMembershipStatus({ accountStatus: member.accountStatus, sub, now });
+    if (status === 'suspended') return status;
     if (await hasCheckinToday(member.id, gymIds, now)) return 'checked_in';
-    const dl = sub ? daysLeft(sub.expiresAt, now) : null;
-    if (dl == null || dl < 0) return 'expired';
-    if (dl <= EXPIRING_SOON_DAYS) return 'expiring_soon';
-    return 'active';
+    return status;
   }
 
   async function statusForRoaming(member, gymIds, now) {
@@ -269,12 +261,10 @@ export function createMemberManagementService({
       return { rows: [], stats: { totalMembers: 0, activeToday: 0, expiringSoon: 0 } };
     }
 
-    const directByMember = new Map();
-    const allDirectSubs = await subscriptions.filterAsync((x) => x.type === 'direct_sub' && gymIds.includes(x.homeGymId));
-    for (const s of allDirectSubs) {
-      const prev = directByMember.get(s.memberId);
-      if (!prev || +new Date(s.startedAt) > +new Date(prev.startedAt)) directByMember.set(s.memberId, s);
-    }
+    const directByMember = latestDirectSubscriptionsByMember(
+      await subscriptions.filterAsync((x) => x.type === 'direct_sub' && gymIds.includes(x.homeGymId)),
+      gymIds,
+    );
 
     const roamingCheckins = await checkins.filterAsync((c) => gymIds.includes(c.gymId) && FITFLEX_VISIT_TYPES.includes(c.subscriptionType));
     const roamingMemberIds = new Set(
