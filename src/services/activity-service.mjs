@@ -74,7 +74,10 @@ const MAX_RUN_KM = 300;
 const MAX_RUN_SPEED_KMH = 25;
 const MAX_RECORD_AGE_DAYS = 7;
 
-export function createActivityService({ activities, users = null, routes = null, now = () => new Date() }) {
+export function createActivityService({ activities, users = null, routes = null, resolveShare = null, now = () => new Date() }) {
+  // Who a new activity is shared with (the social service; private without it).
+  const shareFor = async (memberId, raw) => (resolveShare ? resolveShare(memberId, raw) : { share: null });
+
   async function list(memberId, { from, to } = {}) {
     const end = parseDate(to) || new Date(+now() + DAY_MS);
     const start = parseDate(from) || new Date(+end - DEFAULT_WINDOW_DAYS * DAY_MS);
@@ -111,11 +114,14 @@ export function createActivityService({ activities, users = null, routes = null,
     if (!Object.keys(metrics).length) return { error: 'no_metrics', status: 400 };
 
     const notes = typeof body.notes === 'string' ? body.notes.trim().slice(0, 500) : null;
+    const shared = await shareFor(memberId, body.shareWith);
+    if (shared.error) return shared;
     const row = {
       id: `act_${randomUUID().slice(0, 12)}`,
       userId: memberId,
       type: body.type,
       source,
+      shareWith: shared.share,
       startedAt: startedAt.toISOString(),
       ...metrics,
       intensity: body.intensity ?? null,
@@ -244,10 +250,13 @@ export function createActivityService({ activities, users = null, routes = null,
     const weightKg = users ? (await users.findByIdAsync(memberId))?.memberProfile?.weightKg : null;
     const minutes = Math.max(1, Math.round(m.movingSeconds / 60));
     const notes = typeof body.notes === 'string' ? body.notes.trim().slice(0, 500) : null;
+    const shared = await shareFor(memberId, body.shareWith);
+    if (shared.error) return shared;
     const row = {
       id: `act_${randomUUID().slice(0, 12)}`,
       userId: memberId,
       type,
+      shareWith: shared.share,
       // Tracked inside the FitFlex app itself.
       source: 'fitflex',
       startedAt: startedAt.toISOString(),
