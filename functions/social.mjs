@@ -20,7 +20,7 @@ const me = req => req.user.sub;
 
 // ── Settings, people, follows, blocks ───────────────────────────────────
 export const socialSettings = route('get', '/me/social/settings', 'Member: default audience for new activities, invite code, blocked people.', req => svc.settings(me(req)));
-export const updateSocialSettings = route('put', '/me/social/settings', 'Member: set the default audience. { defaultShare: null | { followers, groups: [id], company } }', req => svc.updateSettings(me(req), req.body || {}));
+export const updateSocialSettings = route('put', '/me/social/settings', 'Member: public profile on/off, and the default audience. { publicProfile?, defaultShare?: null | { v: 2, friends, followers, public, groups: [id], company } }', req => svc.updateSettings(me(req), req.body || {}));
 export const myConnections = route('get', '/me/connections', 'Member: friends (mutual follows), people you follow, and people who follow you.', req => svc.connections(me(req)));
 export const findPeople = route('get', '/social/people', 'Member: find people who share a group or company with you (?q=name), or anyone by invite code (?code=).', req => svc.findPeople(me(req), { q: req.query?.q, code: req.query?.code }));
 export const followPerson = route('post', '/me/follows', 'Member: follow someone. { userId } — you see each other\'s shared activity once they follow back.', req => svc.follow(me(req), req.body?.userId));
@@ -33,6 +33,9 @@ export const unblockPerson = route('delete', '/me/blocks/:userId', 'Member: unbl
 export const shareMyActivity = route('put', '/me/activities/:id/sharing', 'Member: who can see one of your activities. { shareWith: null | { followers, groups: [id], company } }', req => svc.setActivitySharing(me(req), req.params.id, req.body || {}));
 export const myFeed = route('get', '/me/feed', 'Member: what friends, group-mates and colleagues shared, newest first (last 30 days). ?before=ISO for the next page.', req => svc.feed(me(req), { before: req.query?.before || null }));
 export const sharedActivity = route('get', '/social/activities/:id', 'Member: one shared activity with kudos and comments (only if you can see it).', req => svc.activityDetail(me(req), req.params.id));
+export const activityEngagement = route('get', '/social/activities/:id/engagement', 'Poster: views (count only), who gave kudos and who commented — to follow them back.', req => svc.engagement(me(req), req.params.id));
+export const exploreFeed = route('get', '/social/explore', 'Member: recent public posts from public profiles (last 14 days). ?before=ISO for the next page.', req => svc.explore(me(req), { before: req.query?.before || null }));
+export const personProfile = route('get', '/social/people/:id', 'Member: someone\'s profile — follower counts, how you\'re connected, and the posts you can see. Public profiles, or people you\'re connected to.', req => svc.profilePage(me(req), req.params.id, { before: req.query?.before || null }));
 export const giveKudos = route('post', '/social/activities/:id/kudos', 'Member: give kudos.', req => svc.toggleKudos(me(req), req.params.id, true));
 export const takeBackKudos = route('delete', '/social/activities/:id/kudos', 'Member: take kudos back.', req => svc.toggleKudos(me(req), req.params.id, false));
 export const activityComments = route('get', '/social/activities/:id/comments', 'Member: comments on a shared activity.', req => svc.listComments(me(req), req.params.id));
