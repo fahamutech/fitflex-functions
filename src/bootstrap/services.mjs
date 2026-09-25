@@ -131,7 +131,7 @@ export const whatsAppService = createWhatsAppService({
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
 export const favoriteService = createFavoriteService({ users, gyms });
-export const activityService = createActivityService({ activities });
+export const activityService = createActivityService({ activities, users });
 export const goalService = createGoalService({ goals, trainers });
 export const workoutService = createWorkoutService({ workouts, activities });
 export const gymSharingService = createGymSharingService({

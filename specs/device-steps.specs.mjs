@@ -1,7 +1,7 @@
 // Device sync: daily step totals from the member's phone.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createActivityService } from '../src/services/activity-service.mjs';
+import { createActivityService, estimateWalkKm, stepLengthM } from '../src/services/activity-service.mjs';
 import { createChallengeService } from '../src/services/challenge-service.mjs';
 
 function store(rows = []) {
@@ -64,6 +64,29 @@ test('only genuine phone/health-platform readings are accepted', async () => {
   assert.equal(await err({ steps: -1 }), 'invalid_steps');
   // Manual logging still can't claim to be a device.
   assert.equal((await svc.log('m1', { type: 'walking', source: 'device', startedAt: DAY, steps: 10 })).error, 'source_not_loggable');
+});
+
+test('walking distance is estimated from phone steps, using height when known', async () => {
+  assert.equal(stepLengthM(null), 0.7);
+  assert.equal(stepLengthM(170), 0.7);
+  assert.equal(stepLengthM(183), 0.76);
+  assert.equal(stepLengthM(40), 0.7, 'implausible height ignored');
+  assert.equal(estimateWalkKm(3640, null), 2.55);
+
+  const activities = store();
+  const users = store([{ id: 'm1', memberProfile: { heightCm: 183 } }, { id: 'm2' }]);
+  const svc = createActivityService({ activities, users, now });
+  await svc.syncDevice('m1', { records: [rec({ steps: 5000 })] });
+  assert.equal(activities.rows[0].distanceKm, 3.8);
+  await svc.syncDevice('m1', { records: [rec({ steps: 6000 })] });
+  assert.equal(activities.rows[0].distanceKm, 4.56, 'recomputed with the new total');
+  await svc.syncDevice('m2', { records: [rec({ steps: 1000 })] });
+  assert.equal(activities.rows[1].distanceKm, 0.7, 'default step length');
+
+  // A record saved before distances existed gets one on its next sync.
+  activities.rows[1].distanceKm = null;
+  assert.equal((await svc.syncDevice('m2', { records: [rec({ steps: 1000 })] })).updated, 1);
+  assert.equal(activities.rows[1].distanceKm, 0.7);
 });
 
 test('phone steps count toward a steps challenge', async () => {

@@ -44,13 +44,28 @@ const LIMITS = {
 };
 const INTEGER_FIELDS = new Set(['durationMinutes', 'activeMinutes', 'steps', 'calories']);
 
+// Walking distance from a step count — an estimate, used only where the
+// source counts steps and nothing else (the phone's step sensor). A walking
+// step is about 41% of height; without a height, 0.70 m. Keep in step with
+// `estimateWalkKm` in the app (lib/shared/activity/step_ledger.dart).
+export const DEFAULT_STEP_M = 0.7;
+export function stepLengthM(heightCm) {
+  const h = Number(heightCm);
+  return Number.isFinite(h) && h >= 100 && h <= 230 ? Math.round(h * 0.414) / 100 : DEFAULT_STEP_M;
+}
+export function estimateWalkKm(steps, heightCm) {
+  return Math.round(steps * stepLengthM(heightCm) / 10) / 100;
+}
+// Platforms that count steps only; their distance is estimated from steps.
+const STEP_ONLY_PLATFORMS = new Set(['phone_sensor']);
+
 function parseDate(value) {
   if (typeof value !== 'string' || !value) return null;
   const d = new Date(value);
   return Number.isNaN(+d) ? null : d;
 }
 
-export function createActivityService({ activities, now = () => new Date() }) {
+export function createActivityService({ activities, users = null, now = () => new Date() }) {
   async function list(memberId, { from, to } = {}) {
     const end = parseDate(to) || new Date(+now() + DAY_MS);
     const start = parseDate(from) || new Date(+end - DEFAULT_WINDOW_DAYS * DAY_MS);
@@ -148,12 +163,16 @@ export function createActivityService({ activities, now = () => new Date() }) {
     }
 
     const mine = (await activities.filterByColumnAsync('userId', memberId)).filter(a => a.source === 'device');
+    const heightCm = users ? (await users.findByIdAsync(memberId))?.memberProfile?.heightCm : null;
+    const distanceFor = (platform, steps) => (STEP_ONLY_PLATFORMS.has(platform) ? estimateWalkKm(steps, heightCm) : null);
     let created = 0, updated = 0, unchanged = 0;
     for (const r of clean) {
       const existing = mine.find(a => a.devicePlatform === r.devicePlatform && a.externalId === r.externalId);
       if (existing) {
-        if (r.steps > (existing.steps ?? 0)) {
-          await activities.updateByIdAsync(existing.id, { steps: r.steps, ...(r.deviceName && { deviceName: r.deviceName }) });
+        const steps = Math.max(r.steps, existing.steps ?? 0);
+        const distanceKm = distanceFor(r.devicePlatform, steps);
+        if (steps !== existing.steps || (distanceKm != null && distanceKm !== existing.distanceKm)) {
+          await activities.updateByIdAsync(existing.id, { steps, distanceKm, ...(r.deviceName && { deviceName: r.deviceName }) });
           updated += 1;
         } else unchanged += 1;
         continue;
@@ -165,7 +184,7 @@ export function createActivityService({ activities, now = () => new Date() }) {
         source: 'device',
         startedAt: r.startedAt,
         steps: r.steps,
-        durationMinutes: null, distanceKm: null, activeMinutes: null, calories: null,
+        durationMinutes: null, distanceKm: distanceFor(r.devicePlatform, r.steps), activeMinutes: null, calories: null,
         intensity: null, workoutId: null, gymId: null, trainerId: null, notes: null,
         devicePlatform: r.devicePlatform,
         externalId: r.externalId,
