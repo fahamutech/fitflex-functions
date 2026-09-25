@@ -23,10 +23,10 @@ function makeService() {
   const trainers = store();
   const gymService = { slimGym: gym => ({ id: gym.id, name: gym.name }) };
   const trainerService = createTrainerService({
-    trainers, gyms, gymService, trainerBookings: store(), auditLog: { insert: () => {} },
+    trainers, gyms, gymService, trainerBookings: store(), auditLog: { insert: () => {}, insertAsync: async () => {} },
   });
   return { users, trainers, service: createOwnerGymService({
-    gyms, users, trainers, invoices: store(), auditLog: { insert: () => {} }, gymService, trainerService,
+    gyms, users, trainers, invoices: store(), auditLog: { insert: () => {}, insertAsync: async () => {} }, gymService, trainerService,
   }) };
 }
 

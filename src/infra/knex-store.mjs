@@ -322,6 +322,13 @@ export function collection(name) {
         return row;
       },
 
+      insertAsync: async (row) => {
+        getSyncData().push(row);
+        invalidate(name);
+        await _persistInsert(row);
+        return row;
+      },
+
       update: (pred, patch) => {
         const data = getSyncData();
         const i = data.findIndex(pred);
@@ -332,6 +339,19 @@ export function collection(name) {
         const pk = pkField(name);
         const id = updated[pk];
         if (id) _persistUpdate(pk, id, patch).catch(err => console.error(`[knex-store] update ${name} (id=${id}):`, err.message));
+        return updated;
+      },
+
+      updateAsync: async (pred, patch) => {
+        const data = getSyncData();
+        const i = data.findIndex(pred);
+        if (i < 0) return null;
+        data[i] = { ...data[i], ...patch };
+        const updated = data[i];
+        invalidate(name);
+        const pk = pkField(name);
+        const id = updated[pk];
+        if (id) await _persistUpdate(pk, id, patch);
         return updated;
       },
 

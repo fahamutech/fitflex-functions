@@ -75,7 +75,7 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
       updatedAt: new Date().toISOString()
     };
     await users.upsertAsync(u => u.id === id, row);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'gym_owner_updated' : 'gym_owner_created',
       target: id, before: prior ?? null, after: row
@@ -88,7 +88,7 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     if (!prior) return { error: 'not_found', status: 404 };
     if (prior.gymId && await checkins.findAsync(c => c.gymId === prior.gymId)) return { error: 'gym_owner_has_checkin_activity', status: 409 };
     const removed = await users.removeAsync(u => u.id === prior.id);
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_owner_deleted',
       target: prior.id, before: prior, after: null

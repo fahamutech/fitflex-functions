@@ -33,6 +33,8 @@ export function createSettingsService({ platformSettings, auditLog }) {
       currency: 'TZS',
       updatedAt: new Date().toISOString(),
     };
+    // First-boot seed only: the primed cache already holds the row, so sync
+    // readers are unaffected if the background write lands a moment later.
     platformSettings.insert(defaults);
     return defaults;
   }
@@ -74,7 +76,7 @@ export function createSettingsService({ platformSettings, auditLog }) {
     return ensureDefaultSettings();
   }
 
-  function adminUpdate({ body, actorId }) {
+  async function adminUpdate({ body, actorId }) {
     const current = ensureDefaultSettings();
     const before = { ...current };
     const allowed = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency', 'trainerSpecialties'];
@@ -83,8 +85,8 @@ export function createSettingsService({ platformSettings, auditLog }) {
       if (body[k] !== undefined) updates[k] = body[k];
     }
     updates.updatedAt = new Date().toISOString();
-    const updated = platformSettings.update(s => s.id === 'platform', updates);
-    auditLog.insert({
+    const updated = await platformSettings.updateAsync(s => s.id === 'platform', updates);
+    await auditLog.insertAsync({
       id: randomUUID(), at: updates.updatedAt,
       actor: actorId, action: 'settings_updated',
       target: 'platform', before, after: updated
@@ -97,20 +99,20 @@ export function createSettingsService({ platformSettings, auditLog }) {
     return settings.trainerSpecialties || DEFAULT_SPECIALTIES;
   }
 
-  function addSpecialty(name) {
+  async function addSpecialty(name) {
     if (!name?.trim()) return { error: 'name_required', status: 400 };
     const list = getSpecialtiesList();
     const trimmed = name.trim();
     if (list.some(s => s.toLowerCase() === trimmed.toLowerCase())) return { error: 'specialty_exists', status: 409 };
     const updated = [...list, trimmed];
-    platformSettings.update(s => s.id === 'platform', { trainerSpecialties: updated, updatedAt: new Date().toISOString() });
+    await platformSettings.updateAsync(s => s.id === 'platform', { trainerSpecialties: updated, updatedAt: new Date().toISOString() });
     return { specialties: updated };
   }
 
-  function deleteSpecialty(name) {
+  async function deleteSpecialty(name) {
     const list = getSpecialtiesList();
     const updated = list.filter(s => s.toLowerCase() !== String(name).toLowerCase());
-    platformSettings.update(s => s.id === 'platform', { trainerSpecialties: updated, updatedAt: new Date().toISOString() });
+    await platformSettings.updateAsync(s => s.id === 'platform', { trainerSpecialties: updated, updatedAt: new Date().toISOString() });
     return { specialties: updated };
   }
 

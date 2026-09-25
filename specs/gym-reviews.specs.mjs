@@ -34,7 +34,7 @@ function setup({ gymRows, checkinRows = [], subRows = [], userRows = [] } = {}) 
   const checkins = store(checkinRows);
   const subscriptions = store(subRows);
   const users = store(userRows.length ? userRows : [{ id: 'm1', displayName: 'Aisha' }]);
-  const svc = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog: { insert: () => {} } });
+  const svc = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog: { insert: () => {}, insertAsync: async () => {} } });
   return { svc, gymReviews, gyms, checkins, subscriptions, users };
 }
 

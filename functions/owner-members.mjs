@@ -16,7 +16,7 @@ export const ownerCreateMember = {
     const result = await memberManagement.createMember({ owner, body: req.body || {} });
     if (result.error) return res.status(result.status || 400).json({ error: result.error });
 
-    auditLog.insert({
+    await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: req.user?.sub, action: 'owner_created_member',
       target: result.member.id, before: null,
