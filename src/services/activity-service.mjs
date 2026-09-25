@@ -2,6 +2,7 @@
 // workouts). Separate from check-ins: a gym visit never becomes an activity
 // on its own.
 import { randomUUID } from 'node:crypto';
+import { cleanTrack, runCalories, trackMetrics } from '../shared/run-metrics.mjs';
 
 export const ACTIVITY_TYPES = [
   'walking', 'running', 'jogging', 'cycling', 'hiking', 'swimming', 'sports',
@@ -65,7 +66,15 @@ function parseDate(value) {
   return Number.isNaN(+d) ? null : d;
 }
 
-export function createActivityService({ activities, users = null, now = () => new Date() }) {
+// Recorded runs.
+const RECORDABLE_TYPES = new Set(['running']);
+const MAX_ROUTE_POINTS = 30_000;
+const MAX_RUN_KM = 300;
+// Faster than this on average isn't a run (~25 km/h).
+const MAX_RUN_SPEED_KMH = 25;
+const MAX_RECORD_AGE_DAYS = 7;
+
+export function createActivityService({ activities, users = null, routes = null, now = () => new Date() }) {
   async function list(memberId, { from, to } = {}) {
     const end = parseDate(to) || new Date(+now() + DAY_MS);
     const start = parseDate(from) || new Date(+end - DEFAULT_WINDOW_DAYS * DAY_MS);
@@ -204,5 +213,79 @@ export function createActivityService({ activities, users = null, now = () => ne
     return { created, updated, unchanged };
   }
 
-  return { list, log, remove, syncDevice };
+  /**
+   * A run recorded in the app. The phone sends the GPS track; the numbers
+   * are worked out here from the track (distance, moving time, per-km
+   * splits, climb) plus estimated calories from the member's weight — so
+   * what's stored is what the track shows. The track itself is kept
+   * separately and only the member can read it.
+   */
+  async function recordRun(memberId, body = {}) {
+    const type = body.type ?? 'running';
+    if (!RECORDABLE_TYPES.has(type)) return { error: 'invalid_type', status: 400 };
+    const segments = body.segments;
+    if (!Array.isArray(segments) || !segments.length || !segments.every(Array.isArray)) {
+      return { error: 'invalid_route', status: 400 };
+    }
+    const total = segments.reduce((n, s) => n + s.length, 0);
+    if (total < 2 || total > MAX_ROUTE_POINTS) return { error: 'invalid_route', status: 400 };
+    const track = cleanTrack(segments);
+    const first = track[0]?.[0];
+    if (!first) return { error: 'invalid_route', status: 400 };
+    const startedAt = new Date(first[3]);
+    if (+startedAt > +now() + FUTURE_SLACK_MS) return { error: 'started_in_future', status: 400 };
+    if (+now() - +startedAt > MAX_RECORD_AGE_DAYS * DAY_MS) return { error: 'too_old', status: 400 };
+
+    const m = trackMetrics(track);
+    if (m.distanceKm < 0.05 || m.movingSeconds < 60) return { error: 'too_short', status: 400 };
+    if (m.distanceKm > MAX_RUN_KM || m.movingSeconds > LIMITS.durationMinutes * 60) return { error: 'too_long', status: 400 };
+    if (m.distanceKm / (m.movingSeconds / 3600) > MAX_RUN_SPEED_KMH) return { error: 'too_fast', status: 400 };
+
+    const weightKg = users ? (await users.findByIdAsync(memberId))?.memberProfile?.weightKg : null;
+    const minutes = Math.max(1, Math.round(m.movingSeconds / 60));
+    const notes = typeof body.notes === 'string' ? body.notes.trim().slice(0, 500) : null;
+    const row = {
+      id: `act_${randomUUID().slice(0, 12)}`,
+      userId: memberId,
+      type,
+      // Tracked inside the FitFlex app itself.
+      source: 'fitflex',
+      startedAt: startedAt.toISOString(),
+      durationMinutes: minutes,
+      activeMinutes: minutes,
+      distanceKm: m.distanceKm,
+      // Steps during the run are already in the phone's daily count.
+      steps: null,
+      calories: runCalories({ distanceKm: m.distanceKm, movingSeconds: m.movingSeconds, weightKg }),
+      intensity: null, workoutId: null, gymId: null, trainerId: null,
+      notes: notes || null,
+      devicePlatform: null, externalId: null, deviceName: null,
+      movingSeconds: m.movingSeconds,
+      elevationGainM: m.elevationGainM,
+      splits: m.splits,
+      hasRoute: !!routes,
+      createdAt: now().toISOString(),
+    };
+    await activities.insertAsync(row);
+    if (routes) {
+      const round = v => (v == null ? null : Math.round(v * 1e6) / 1e6);
+      await routes.insertAsync({
+        id: row.id,
+        userId: memberId,
+        segments: track.map(seg => seg.map(([lat, lng, alt, t, acc]) => [round(lat), round(lng), alt == null ? null : Math.round(alt * 10) / 10, t, acc])),
+        createdAt: now().toISOString(),
+      });
+    }
+    return { activity: row };
+  }
+
+  /** The route of one of the member's own runs. Nobody else can read it. */
+  async function route(memberId, id) {
+    if (!routes) return { error: 'not_found', status: 404 };
+    const r = await routes.findByIdAsync(id);
+    if (!r || r.userId !== memberId) return { error: 'not_found', status: 404 };
+    return { route: { activityId: id, segments: r.segments } };
+  }
+
+  return { list, log, remove, syncDevice, recordRun, route };
 }

@@ -38,6 +38,24 @@ export const syncMyDeviceActivities = {
   onRequest: async (req, res) => send(res, await activityService.syncDevice(req.user.sub, req.body || {}))
 };
 
+export const recordMyRun = {
+  created, method: 'post', path: '/me/activities/runs',
+  description: 'Member app: save a run recorded with GPS. { type: running, segments: [[[lat, lng, altitudeM, timeMs, accuracyM], …], …], notes? } — one segment per stretch between pauses. Distance, moving time, splits, climb and estimated calories are worked out from the track.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => {
+    const result = await activityService.recordRun(req.user.sub, req.body || {});
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(201).json(result);
+  }
+};
+
+export const myRunRoute = {
+  created, method: 'get', path: '/me/activities/:id/route',
+  description: 'Member: the GPS route of one of your own recorded runs. Private — never shown to trainers, gyms, companies or admins.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await activityService.route(req.user.sub, req.params.id))
+};
+
 export const deleteMyActivity = {
   created, method: 'delete', path: '/me/activities/:id',
   description: 'Member: delete an activity they recorded.',
