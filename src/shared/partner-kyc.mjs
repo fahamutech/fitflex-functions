@@ -55,6 +55,23 @@ export function startsNewRound(from, to) {
 // Reviewer decisions other than approval must say why.
 export const REASON_REQUIRED_FOR = ['rejected', 'info_requested', 'suspended'];
 
+// What each reviewer decision does to a case. A rejection closes the partner
+// role (they can no longer sign in to it, as with role approvals today), so
+// problems a partner can fix should be 'request_info'. 'reopen' starts a
+// fresh round after a rejection.
+export const REVIEW_DECISIONS = Object.freeze({
+  approve: { from: 'in_review', to: 'approved' },
+  reject: { from: 'in_review', to: 'rejected' },
+  request_info: { from: 'in_review', to: 'info_requested' },
+  suspend: { from: 'approved', to: 'suspended' },
+  reinstate: { from: 'suspended', to: 'approved' },
+  reopen: { from: 'rejected', to: 'draft' },
+});
+
+export function reasonRequired(toStatus) {
+  return REASON_REQUIRED_FOR.includes(toStatus);
+}
+
 export const REASON_CODES = [
   'document_unreadable', 'document_expired', 'document_mismatch', 'identity_unverified',
   'business_unverified', 'tax_unverified', 'site_visit_failed', 'settlement_unverified',
