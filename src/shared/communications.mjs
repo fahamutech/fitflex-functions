@@ -130,27 +130,44 @@ export function variablesIn(text) {
 
 const isBlank = (v) => v == null || (typeof v === 'string' && !v.trim());
 
+// Title, body and button text in one language.
+function checkText(input, bad, prefix = '') {
+  const text = (key) => (typeof input?.[key] === 'string' ? input[key].trim() : input?.[key]);
+  const title = text('title');
+  const body = text('body');
+  if (isBlank(title)) return bad(`${prefix}title_required`);
+  if (isBlank(body)) return bad(`${prefix}body_required`);
+  if (typeof title !== 'string' || title.length > CONTENT_LIMITS.title) return bad(`${prefix}title_too_long`);
+  if (typeof body !== 'string' || body.length > CONTENT_LIMITS.body) return bad(`${prefix}body_too_long`);
+  const out = { title, body };
+  const ctaLabel = text('ctaLabel');
+  if (!isBlank(ctaLabel)) {
+    if (typeof ctaLabel !== 'string' || ctaLabel.length > CONTENT_LIMITS.ctaLabel) return bad(`${prefix}cta_label_too_long`);
+    out.ctaLabel = ctaLabel;
+  }
+  return { text: out };
+}
+
 /**
  * Checks a campaign's message and returns a clean copy.
+ * The message is written in `locale` (default English); `translations`
+ * may add the same message in the other app language, e.g.
+ * { sw: { title, body, ctaLabel } }. Members get the version in their app
+ * language when there is one, otherwise the main one.
  * `renewalLinkAvailable` says whether {{renewal_link}} has a URL to point at.
  * @returns {{ content: object } | { error: string, status: number, detail?: string }}
  */
 export function validateContent(input, { renewalLinkAvailable = false } = {}) {
   const bad = (detail) => ({ error: 'invalid_content', status: 400, detail });
   if (!input || typeof input !== 'object') return bad('content_required');
+  const base = checkText(input, bad);
+  if (base.error) return base;
+  const out = { ...base.text, deepLink: 'message' };
   const text = (key) => (typeof input[key] === 'string' ? input[key].trim() : input[key]);
-  const title = text('title');
-  const body = text('body');
-  if (isBlank(title)) return bad('title_required');
-  if (isBlank(body)) return bad('body_required');
-  if (typeof title !== 'string' || title.length > CONTENT_LIMITS.title) return bad('title_too_long');
-  if (typeof body !== 'string' || body.length > CONTENT_LIMITS.body) return bad('body_too_long');
 
-  const out = { title, body, deepLink: 'message' };
-  const ctaLabel = text('ctaLabel');
-  if (!isBlank(ctaLabel)) {
-    if (typeof ctaLabel !== 'string' || ctaLabel.length > CONTENT_LIMITS.ctaLabel) return bad('cta_label_too_long');
-    out.ctaLabel = ctaLabel;
+  if (input.locale != null) {
+    if (!LOCALES.includes(input.locale)) return bad('unknown_locale');
+    out.locale = input.locale;
   }
   if (input.deepLink != null) {
     if (!DEEP_LINKS.includes(input.deepLink)) return bad('unknown_deep_link');
@@ -171,7 +188,22 @@ export function validateContent(input, { renewalLinkAvailable = false } = {}) {
     out.amountTzs = input.amountTzs;
   }
 
-  for (const name of variablesIn(`${title} ${body}`)) {
+  let used = `${out.title} ${out.body}`;
+  if (input.translations != null) {
+    if (typeof input.translations !== 'object' || Array.isArray(input.translations)) return bad('bad_translations');
+    const translations = {};
+    for (const [lang, value] of Object.entries(input.translations)) {
+      if (!LOCALES.includes(lang)) return bad('unknown_locale');
+      if (lang === (out.locale || 'en')) return bad('translation_same_as_main');
+      const tr = checkText(value, bad, `${lang}_`);
+      if (tr.error) return tr;
+      translations[lang] = tr.text;
+      used += ` ${tr.text.title} ${tr.text.body}`;
+    }
+    if (Object.keys(translations).length) out.translations = translations;
+  }
+
+  for (const name of variablesIn(used)) {
     if (!TEMPLATE_VARIABLES.includes(name)) return bad(`unknown_variable:${name}`);
     if (SENDER_VALUES[name] && out[SENDER_VALUES[name]] == null) return bad(`missing_value:${name}`);
     if (name === 'renewal_link' && !renewalLinkAvailable) return bad('variable_unavailable:renewal_link');
@@ -179,22 +211,39 @@ export function validateContent(input, { renewalLinkAvailable = false } = {}) {
   return { content: out };
 }
 
+/**
+ * The title, body and button for one language: the translation when the
+ * message has one for `locale`, otherwise the main version.
+ */
+export function contentFor(content, locale) {
+  const tr = locale ? content?.translations?.[locale] : null;
+  const main = { title: content.title, body: content.body, ctaLabel: content.ctaLabel || null, locale: content.locale || 'en' };
+  return tr ? { title: tr.title, body: tr.body, ctaLabel: tr.ctaLabel || null, locale } : main;
+}
+
 const formatTzs = (n) => `TZS ${Math.round(n).toLocaleString('en-US')}`;
 // Numeric day/month/year reads the same in English and Swahili.
 const formatDay = (day) => (day ? `${day.slice(8, 10)}/${day.slice(5, 7)}/${day.slice(0, 4)}` : '');
 const titleCase = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
 
+// Plan names in the message's language.
+const PLAN_NAMES = {
+  en: { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' },
+  sw: { daily: 'Kila siku', weekly: 'Kila wiki', monthly: 'Kila mwezi' },
+};
+
 /**
  * The values for one member's copy of a message.
  * @param {object} content  validated campaign content
  * @param {object} member   audience facts (displayName, plan, tier, expiresOn)
- * @param {{ gymName?: string, renewalLink?: string }} ctx
+ * @param {{ gymName?: string, renewalLink?: string, locale?: string }} ctx
  */
-export function messageValues(content, member, { gymName = '', renewalLink = '' } = {}) {
+export function messageValues(content, member, { gymName = '', renewalLink = '', locale = 'en' } = {}) {
+  const plan = member?.plan || member?.tier || '';
   return {
     member_name: member?.displayName || '',
     gym_name: gymName || 'FitFlex',
-    plan_name: titleCase(member?.plan || member?.tier || ''),
+    plan_name: PLAN_NAMES[locale]?.[plan] || titleCase(plan),
     expiry_date: formatDay(member?.expiresOn),
     amount: content.amountTzs != null ? formatTzs(content.amountTzs) : '',
     discount: content.discount || '',

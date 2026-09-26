@@ -231,6 +231,12 @@ export function createSegmentService({
     };
   }
 
+  /** Each member's chosen app language (memberId → 'en' | 'sw'), where known. */
+  async function localesByMember(ids) {
+    const prefs = await inChunks(ids, part => communicationPreferences.filterByColumnInAsync('id', part));
+    return new Map(prefs.filter(p => p.locale).map(p => [p.id, p.locale]));
+  }
+
   /** Channels this server can send on right now. */
   function channelAvailability() {
     return { in_app: true, push: Boolean(pushAvailable()), whatsapp: Boolean(whatsappAvailable()) };
@@ -317,5 +323,6 @@ export function createSegmentService({
     channelReach,
     reachByMember,
     channelAvailability,
+    localesByMember,
   };
 }

@@ -45,6 +45,7 @@ import { createCorporateService } from '../services/corporate-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
+import { createTemplateService } from '../services/template-service.mjs';
 import { createDeliveryService } from '../services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../services/communication-preference-service.mjs';
 import { db } from '../infra/knex-store.mjs';
@@ -59,7 +60,7 @@ import {
   follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
-  communicationPreferences, communicationCampaigns,
+  communicationPreferences, communicationCampaigns, communicationTemplates,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -190,8 +191,13 @@ export const segmentService = createSegmentService({
   whatsappAvailable: () => false,
 });
 const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
+// FitFlex system templates and each gym's own.
+export const templateService = createTemplateService({
+  db, templates: communicationTemplates, gyms,
+  renewalLink: process.env.COMMS_RENEWAL_URL || null,
+});
 export const campaignService = createCampaignService({
-  db, campaigns: communicationCampaigns, gyms, segmentService, auditLog,
+  db, campaigns: communicationCampaigns, gyms, segmentService, auditLog, templateService,
   largeSendThreshold: positiveInt(process.env.COMMS_LARGE_SEND_THRESHOLD, 200),
   marketingWeeklyCap: positiveInt(process.env.COMMS_MARKETING_WEEKLY_CAP, 2),
   renewalLink: process.env.COMMS_RENEWAL_URL || null,

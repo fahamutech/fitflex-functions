@@ -7,7 +7,7 @@
 // scope work with all members.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
-import { segmentService, campaignService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { segmentService, campaignService, templateService, resolveRequestUser } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -151,3 +151,52 @@ export const adminCampaignSchedule = admin.schedule;
 export const adminCampaignUnschedule = admin.unschedule;
 export const adminCampaignCancel = admin.cancel;
 export const adminCampaignSend = admin.send;
+
+// ── Templates (M6) ──────────────────────────────────────────────────────────
+// FitFlex system templates for everyone sending; gyms also keep their own.
+// Only gyms create, edit, copy or archive templates.
+
+function templateRoutes(prefix, guard, senderOf, who) {
+  const route = (method, path, description, handler) => ({
+    created, method, path: `${prefix}${path}`, description: `${who}: ${description}`, onGuard: guard,
+    onRequest: async (req, res) => {
+      const sender = await senderOf(req, res);
+      if (sender) await handler(sender, req, res);
+    },
+  });
+  const q = (req) => req.query || {};
+  return {
+    list: route('get', '/templates', 'templates to start a message from — the gym\'s own first, then FitFlex\'s. ?group&purpose&gymId',
+      async (s, req, res) => send(res, await templateService.list(s, { group: q(req).group || null, purpose: q(req).purpose || null, gymId: q(req).gymId ?? null }))),
+    get: route('get', '/templates/:id', 'one template, with whether it can go out on WhatsApp in each language.',
+      async (s, req, res) => send(res, await templateService.get(s, req.params.id))),
+    previewNew: route('post', '/templates/preview', 'preview an unsaved template on each channel and language. POST { name, purpose, group?, deepLink?, bodies: { en?: {title, body, ctaLabel?}, sw?: {…} }, values?: { offerName?, discount?, amountTzs? } }',
+      async (s, req, res) => send(res, await templateService.preview(s, { body: req.body || {}, gymId: req.body?.gymId ?? null, values: req.body?.values || {} }))),
+    preview: route('post', '/templates/:id/preview', 'preview a template on each channel and language, for a sample member. POST { gymId?, values? }',
+      async (s, req, res) => send(res, await templateService.preview(s, { templateId: req.params.id, gymId: req.body?.gymId ?? null, values: req.body?.values || {} }))),
+    create: route('post', '/templates', 'save a gym template. POST { gymId?, name, purpose, group?, deepLink?, bodies }',
+      async (s, req, res) => send(res, await templateService.create(s, req.body || {}), 201)),
+    update: route('patch', '/templates/:id', 'edit a gym template (FitFlex templates are read-only — copy them).',
+      async (s, req, res) => send(res, await templateService.update(s, req.params.id, req.body || {}))),
+    duplicate: route('post', '/templates/:id/duplicate', 'copy a template into the gym\'s own to adapt it. POST { gymId?, name? }',
+      async (s, req, res) => send(res, await templateService.duplicate(s, req.params.id, req.body || {}), 201)),
+    archive: route('post', '/templates/:id/archive', 'hide a gym template. Campaigns keep their own copy of its text.',
+      async (s, req, res) => send(res, await templateService.archive(s, req.params.id))),
+  };
+}
+
+const ownerTpl = templateRoutes('/owner/communications', ownerGuard, gymSender, 'Owner/staff');
+export const ownerTemplateList = ownerTpl.list;
+export const ownerTemplateGet = ownerTpl.get;
+export const ownerTemplatePreviewNew = ownerTpl.previewNew;
+export const ownerTemplatePreview = ownerTpl.preview;
+export const ownerTemplateCreate = ownerTpl.create;
+export const ownerTemplateUpdate = ownerTpl.update;
+export const ownerTemplateDuplicate = ownerTpl.duplicate;
+export const ownerTemplateArchive = ownerTpl.archive;
+
+const adminTpl = templateRoutes('/admin/communications', adminGuard, platformSender, 'Admin (FitFlex-wide)');
+export const adminTemplateList = adminTpl.list;
+export const adminTemplateGet = adminTpl.get;
+export const adminTemplatePreviewNew = adminTpl.previewNew;
+export const adminTemplatePreview = adminTpl.preview;
