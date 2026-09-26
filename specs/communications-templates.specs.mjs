@@ -140,6 +140,8 @@ test('FitFlex templates are read-only; copying one makes a gym template to adapt
   const copy = (await templates.duplicate(w.A, sys)).template;
   assert.deepEqual([copy.system, copy.gymId, copy.basedOn, copy.group, copy.purpose], [false, w.gymA, sys, 'engagement', 'engagement']);
   assert.equal(copy.bodies.sw.title, 'Tumekukumbuka, {{member_name}}');
+  assert.equal(copy.name, 'We miss you', 'a readable name when the app sends none');
+  assert.equal((await templates.duplicate(w.A, sys, { name: 'Tunakukumbuka' })).template.name, 'Tunakukumbuka');
   const edited = (await templates.update(w.A, copy.id, { bodies: { ...copy.bodies, en: { title: 'Come back, {{member_name}}', body: 'We saved your spot at {{gym_name}}.' } } })).template;
   assert.equal(edited.bodies.en.title, 'Come back, {{member_name}}');
   assert.equal(edited.bodies.sw.title, 'Tumekukumbuka, {{member_name}}');

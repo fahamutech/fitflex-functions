@@ -206,7 +206,10 @@ export function createTemplateService({ db, templates, gyms, now = () => new Dat
     if (!src) return { error: 'not_found', status: 404 };
     const bodies = typeof src.bodies === 'string' ? JSON.parse(src.bodies) : src.bodies;
     return create(sender, {
-      gymId, name: name || (src.gymId == null ? src.key : `${src.name} (copy)`).slice(0, NAME_MAX),
+      // Apps pass the name in the owner's language; otherwise "we_miss_you" → "We miss you".
+      gymId, name: (name?.trim() || (src.gymId == null
+        ? src.key.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase())
+        : `${src.name} (copy)`)).slice(0, NAME_MAX),
       group: src.group, purpose: src.purpose, deepLink: src.deepLink, bodies, basedOn: src.id,
     });
   }
