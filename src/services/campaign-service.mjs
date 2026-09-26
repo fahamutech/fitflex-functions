@@ -84,8 +84,10 @@ export function createCampaignService({
         // No text given: start from the template, in the sender's language.
         if (body.content === undefined) {
           const t = await templateService.contentFromTemplate(sender, tpl.id, { locale: body.locale || 'en', values: body.templateValues || {} });
-          body = { ...body, content: t.content, purpose: body.purpose ?? tpl.purpose };
+          body = { ...body, content: t.content };
         }
+        // The template's purpose, unless the sender chose one.
+        if (body.purpose === undefined) body = { ...body, purpose: tpl.purpose };
       }
     }
     if (body.name !== undefined) {
@@ -170,6 +172,35 @@ export function createCampaignService({
       ctaLabel: text.ctaLabel,
       deepLink: content.deepLink || 'message',
       locale: text.locale,
+      values,
+    };
+  }
+
+  /**
+   * A campaign's approved WhatsApp templates by language (empty without
+   * WhatsApp). Worked out once per send.
+   */
+  async function whatsappMappingFor(sender, campaign) {
+    if (!campaign.channels?.includes('whatsapp') || !campaign.templateId || !templateService) return new Map();
+    const tpl = await templateService.load(sender, campaign.templateId);
+    return tpl ? templateService.whatsappMapping(tpl) : new Map();
+  }
+
+  /**
+   * A member's WhatsApp copy. WhatsApp only carries the provider-approved
+   * wording, so this is the template's own text — in the member's language
+   * when that version is approved, otherwise in one that is — not the
+   * sender's edits. Its parameters are the member's values in the order the
+   * provider template numbers them ({{1}}, {{2}}, …).
+   */
+  function whatsappCopy(content, member, name, locale, mapping) {
+    const wa = mapping.get(locale) || [...mapping.values()][0];
+    if (!wa) return null;
+    const text = { ...content, title: wa.text.title, body: wa.text.body, ctaLabel: wa.text.ctaLabel, locale: wa.language, translations: undefined };
+    const copy = render(text, member, name, wa.language);
+    return {
+      copy,
+      payload: { templateName: wa.templateName, language: wa.language, parameters: wa.variables.map(v => String(copy.values[v] ?? '')) },
     };
   }
 
@@ -207,7 +238,8 @@ export function createCampaignService({
     const reach = await segmentService.reachByMember(members, campaign.category, campaign.channels);
     const capped = campaign.category === 'marketing' ? await atMarketingCap(members.map(m => m.memberId)) : new Set();
     const name = await gymName(campaign);
-    const locales = hasTranslations(campaign.content)
+    const mapping = await whatsappMappingFor(sender, campaign);
+    const locales = hasTranslations(campaign.content) || mapping.size
       ? await segmentService.localesByMember(members.map(m => m.memberId))
       : new Map();
     const at = now().toISOString();
@@ -216,14 +248,22 @@ export function createCampaignService({
     for (const m of members) {
       const msg = render(campaign.content, m, name, locales.get(m.memberId));
       for (const ch of campaign.channels) {
-        const reason = capped.has(m.memberId) ? 'marketing_cap' : reach.get(m.memberId)?.[ch] ?? null;
+        let copy = msg;
+        let payload = null;
+        let reason = capped.has(m.memberId) ? 'marketing_cap' : reach.get(m.memberId)?.[ch] ?? null;
+        if (ch === 'whatsapp' && !reason) {
+          const wa = whatsappCopy(campaign.content, m, name, locales.get(m.memberId) || msg.locale, mapping);
+          if (!wa) reason = 'whatsapp_template_not_approved';
+          else ({ copy, payload } = wa);
+        }
         const byCh = counts.byChannel[ch] || (counts.byChannel[ch] = { queued: 0, skipped: 0 });
         if (reason) { counts.skipped[reason] = (counts.skipped[reason] || 0) + 1; byCh.skipped += 1; }
         else { counts.queued += 1; byCh.queued += 1; }
         rows.push({
           id: id('cmm'), campaignId: campaign.id, senderType: campaign.senderType, gymId: campaign.gymId,
           memberId: m.memberId, channel: ch, category: campaign.category, messageType: campaign.purpose,
-          title: msg.title, body: msg.body, deepLink: msg.deepLink, locale: msg.locale,
+          title: copy.title, body: copy.body, deepLink: copy.deepLink, locale: copy.locale,
+          ...(payload ? { payload } : {}),
           status: reason ? 'skipped' : 'queued', skipReason: reason, attempts: 0,
           nextAttemptAt: reason ? null : at, createdAt: at, updatedAt: at,
         });

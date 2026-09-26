@@ -21,7 +21,7 @@ const at = (days) => new Date(Date.now() + days * 86_400_000);
 const made = { users: [], gyms: [], wa: [] };
 const w = {};
 
-const templates = createTemplateService({ db, templates: communicationTemplates, gyms });
+const templates = createTemplateService({ db, templates: communicationTemplates, gyms, whatsappProvider: () => 'spec_provider' });
 const segments = (whatsapp = false) => createSegmentService({ db, communicationPreferences, deviceTokens, pushAvailable: () => true, whatsappAvailable: () => whatsapp });
 const campaignsWith = (seg) => createCampaignService({ db, campaigns: communicationCampaigns, gyms, segmentService: seg, auditLog: null, templateService: templates });
 const campaigns = campaignsWith(segments());

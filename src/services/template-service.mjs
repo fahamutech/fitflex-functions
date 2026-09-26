@@ -25,7 +25,11 @@ import { localDay, addDays } from '../shared/member-progress.mjs';
 const NAME_MAX = 60;
 const CHANNELS_ALL = ['in_app', 'push', 'whatsapp'];
 
-export function createTemplateService({ db, templates, gyms, now = () => new Date(), renewalLink = null }) {
+export function createTemplateService({
+  db, templates, gyms, now = () => new Date(), renewalLink = null,
+  // The WhatsApp provider in use: approvals only count for it.
+  whatsappProvider = () => null,
+}) {
   let synced = null;
 
   /** Writes the code's system templates into the table (idempotent). */
@@ -72,19 +76,47 @@ export function createTemplateService({ db, templates, gyms, now = () => new Dat
    * WhatsApp template the provider has approved. Returns
    * { ready, byLocale: { en: {ready, reason?}, sw: … } }.
    */
+  /** The provider template name a FitFlex or gym template maps to, if any. */
+  async function whatsappName(row) {
+    if (row.whatsappTemplateId) {
+      return (await db('WhatsAppTemplate').where({ id: row.whatsappTemplateId }).first('providerTemplateName'))?.providerTemplateName ?? null;
+    }
+    return row.gymId == null ? systemByKey.get(row.key)?.whatsapp?.name ?? null : null;
+  }
+
+  /**
+   * The template's approved WhatsApp versions for the provider in use:
+   * Map(language → { templateName, language, variables, text }).
+   */
+  async function whatsappMapping(row) {
+    const provider = whatsappProvider();
+    const name = await whatsappName(row);
+    const mapping = new Map();
+    if (!provider || !name) return mapping;
+    const bodies = typeof row.bodies === 'string' ? JSON.parse(row.bodies) : row.bodies || {};
+    const rows = await db('WhatsAppTemplate')
+      .where({ provider, providerTemplateName: name, approvalStatus: 'approved' })
+      .select('language', 'variables');
+    for (const r of rows) {
+      // The approved wording is the template's text in that language.
+      if (!bodies[r.language]) continue;
+      mapping.set(r.language, { templateName: name, language: r.language, variables: r.variables || [], text: bodies[r.language] });
+    }
+    return mapping;
+  }
+
   async function whatsappStatus(row) {
     const byLocale = {};
     const langs = LOCALES.filter(l => row.bodies?.[l]);
-    let approved = [];
-    if (row.whatsappTemplateId) {
-      approved = await db('WhatsAppTemplate').where({ id: row.whatsappTemplateId }).select('language', 'approvalStatus');
-    } else {
-      const name = row.gymId == null ? systemByKey.get(row.key)?.whatsapp?.name : null;
-      if (name) approved = await db('WhatsAppTemplate').where({ providerTemplateName: name }).select('language', 'approvalStatus');
-    }
+    const provider = whatsappProvider();
+    const name = await whatsappName(row);
+    const registered = provider && name
+      ? await db('WhatsAppTemplate').where({ provider, providerTemplateName: name }).select('language', 'approvalStatus')
+      : [];
     for (const l of langs) {
-      const match = approved.find(a => a.language === l);
-      byLocale[l] = !match ? { ready: false, reason: 'not_registered' }
+      const match = registered.find(a => a.language === l);
+      byLocale[l] = !provider ? { ready: false, reason: 'whatsapp_not_configured' }
+        : !match ? { ready: false, reason: 'not_registered' }
         : match.approvalStatus === 'approved' ? { ready: true } : { ready: false, reason: `whatsapp_${match.approvalStatus}` };
     }
     return { ready: Object.values(byLocale).some(s => s.ready), byLocale };
@@ -315,6 +347,6 @@ export function createTemplateService({ db, templates, gyms, now = () => new Dat
 
   return {
     list, get, create, update, duplicate, archive, preview,
-    contentFromTemplate, whatsappStatus, load, syncSystemTemplates: () => { synced = null; return ensureSynced(); },
+    contentFromTemplate, whatsappStatus, whatsappMapping, load, syncSystemTemplates: () => { synced = null; return ensureSynced(); },
   };
 }

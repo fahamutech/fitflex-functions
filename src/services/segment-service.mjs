@@ -17,6 +17,7 @@ import {
 import { currentSubscription } from '../shared/subscription-status.mjs';
 import { localDay, daysBetween } from '../shared/member-progress.mjs';
 import { CHANNELS, categoryForPurpose, channelAllowed } from '../shared/communications.mjs';
+import { toE164 } from '../shared/phone.mjs';
 import { engagementFrom } from './gym-sharing-service.mjs';
 
 const RECENT_DAYS = 91; // engagementFrom looks back 90 local days
@@ -268,6 +269,7 @@ export function createSegmentService({
           if (!allowed.allowed) reason = allowed.reason;
           else if (ch === 'push' && !withDevice.has(m.memberId)) reason = 'no_device';
           else if (ch === 'whatsapp' && !m.phone) reason = 'no_phone';
+          else if (ch === 'whatsapp' && !toE164(m.phone)) reason = 'invalid_phone';
         }
         decision[ch] = reason;
       }
