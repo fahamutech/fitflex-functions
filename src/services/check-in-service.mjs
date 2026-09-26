@@ -1,7 +1,7 @@
 // Check-in service: orchestrates BL-012 validation + BL-010/011 visit counting + logging.
 // Pure DI: receives repos via constructor.
 
-import { validateCheckIn } from '../shared/check-in-rules.mjs';
+import { validateCheckIn, pickSubscriptionForGym } from '../shared/check-in-rules.mjs';
 import { randomUUID } from 'node:crypto';
 
 export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig }) {
@@ -42,9 +42,10 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       if (!gym) return { ok: false, failure: 'gym_not_found' };
 
       const subs = await subscriptions.filterAsync(s => s.memberId === memberId);
-      const sub  = subs
-        .filter(s => ['active', 'expired', 'suspended'].includes(s.status))
-        .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0];
+      const sub  = pickSubscriptionForGym(
+        subs.filter(s => ['active', 'expired', 'suspended'].includes(s.status)),
+        gym,
+      );
 
       const cycleUsage = { visitsUsedInCycle: await visitsUsedInCycle(memberId, sub) };
       const todays = await todaysCheckins(memberId, now);

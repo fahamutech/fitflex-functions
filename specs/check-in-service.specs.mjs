@@ -122,3 +122,31 @@ test('configured unlimited tier never exhausts', async () => {
   const r = await svc.perform({ memberId: 'm1', gymId: 'g2', now: new Date('2026-02-15T00:00:00Z') });
   assert.equal(r.ok, true);
 });
+
+// ── Gym-bound plans (direct gym plan / trainer pass) ──
+
+test('a direct plan bought at g1 is refused at g2 with wrong_gym', async () => {
+  subscriptions = mkCol([{
+    id: 'sd', memberId: 'm1', type: 'direct_sub', tier: null, homeGymId: 'g1',
+    status: 'active', startedAt: '2026-01-01T00:00:00Z',
+    cycleStartedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z'
+  }]);
+  svc = createCheckInService({ users, gyms, subscriptions, checkins });
+  const r = await svc.perform({ memberId: 'm1', gymId: 'g2' });
+  assert.equal(r.ok, false);
+  assert.equal(r.failure, 'wrong_gym');
+  assert.equal((await svc.perform({ memberId: 'm1', gymId: 'g1' })).ok, true);
+});
+
+test('a newer direct plan elsewhere does not hide an older platform pass', async () => {
+  subscriptions = mkCol([
+    { id: 's1', memberId: 'm1', type: 'platform_pass', tier: 'pro', status: 'active',
+      startedAt: '2026-01-01T00:00:00Z', cycleStartedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' },
+    { id: 'sd', memberId: 'm1', type: 'direct_sub', tier: null, homeGymId: 'g1', status: 'active',
+      startedAt: '2026-02-01T00:00:00Z', cycleStartedAt: '2026-02-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' },
+  ]);
+  svc = createCheckInService({ users, gyms, subscriptions, checkins });
+  const r = await svc.perform({ memberId: 'm1', gymId: 'g2' });
+  assert.equal(r.ok, true);
+  assert.equal(r.checkin.subscriptionType, 'platform_pass');
+});

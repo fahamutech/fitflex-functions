@@ -12,8 +12,31 @@ export const CHECKIN_FAILURE = Object.freeze({
   TIER_NOT_COVERED:      'tier_not_covered',
   VISITS_EXHAUSTED:      'visits_exhausted',
   GYM_CLOSED:            'gym_closed',
-  BASIC_DAILY_LIMIT:     'basic_daily_limit'
+  BASIC_DAILY_LIMIT:     'basic_daily_limit',
+  WRONG_GYM:             'wrong_gym'
 });
+
+// Direct gym plans and trainer passes are bought for ONE gym (homeGymId);
+// platform passes roam across every gym their tier covers.
+const GYM_BOUND_TYPES = new Set(['direct_sub', 'trainer_pass']);
+
+/** Does this subscription grant entry to this gym at all (ignoring status)? */
+export function subscriptionCoversGym(subscription, gym) {
+  if (!subscription || !gym) return false;
+  if (GYM_BOUND_TYPES.has(subscription.type)) return subscription.homeGymId === gym.id;
+  return true;
+}
+
+/**
+ * Pick the subscription to validate a check-in against: the newest one that
+ * covers this gym, else the newest overall (so the failure reason is still
+ * meaningful, e.g. wrong_gym).
+ */
+export function pickSubscriptionForGym(subscriptions, gym) {
+  const newestFirst = [...(subscriptions || [])]
+    .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt));
+  return newestFirst.find(s => subscriptionCoversGym(s, gym)) || newestFirst[0] || null;
+}
 
 const isWithinGrace = (expiresAt, nowMs) =>
   expiresAt && nowMs <= +new Date(expiresAt) + SUBSCRIPTION_GRACE_HOURS * 3_600_000;
@@ -86,6 +109,10 @@ export function validateCheckIn({ subscription, gym, todaysCheckins, cycleUsage,
   if (!subscription || (status !== 'active' &&
       !(status === 'expired' && isWithinGrace(subscription.expiresAt, +now)))) {
     return { ok: false, failure: CHECKIN_FAILURE.SUBSCRIPTION_INACTIVE };
+  }
+
+  if (!subscriptionCoversGym(subscription, gym)) {
+    return { ok: false, failure: CHECKIN_FAILURE.WRONG_GYM };
   }
 
   const tierCfg = tierConfig ?? PASS_TIERS[subscription.tier] ?? { visitCap: Infinity, multiGymPerDay: true };

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateCheckIn, classifyVisit, CHECKIN_FAILURE } from '../src/shared/check-in-rules.mjs';
+import { validateCheckIn, classifyVisit, CHECKIN_FAILURE, subscriptionCoversGym, pickSubscriptionForGym } from '../src/shared/check-in-rules.mjs';
 
 const stdGym = { id: 'g1', tier: 'standard' };  // 24/7 (no operatingHours)
 const midGym = { id: 'g2', tier: 'midtier' };
@@ -96,4 +96,41 @@ test('Successful check-in returns visitConsumed=true on first visit of the day',
                               todaysCheckins: [], cycleUsage: { visitsUsedInCycle: 5 } });
   assert.equal(r.ok, true);
   assert.equal(r.visitConsumed, true);
+});
+
+// ── Gym-bound plans: direct gym plans and trainer passes only open their own gym ──
+
+const directAtG1 = { status: 'active', type: 'direct_sub', tier: null, homeGymId: 'g1', expiresAt: '2099-01-01', startedAt: '2026-09-01' };
+const trainerPassAtG1 = { ...directAtG1, type: 'trainer_pass' };
+
+test('Gym-bound: direct plan checks in at its own gym', () => {
+  const r = validateCheckIn({ subscription: directAtG1, gym: stdGym, todaysCheckins: [], cycleUsage: { visitsUsedInCycle: 0 } });
+  assert.equal(r.ok, true);
+});
+
+test('Gym-bound: direct plan is rejected at another gym', () => {
+  const r = validateCheckIn({ subscription: directAtG1, gym: midGym, todaysCheckins: [], cycleUsage: { visitsUsedInCycle: 0 } });
+  assert.equal(r.ok, false);
+  assert.equal(r.failure, CHECKIN_FAILURE.WRONG_GYM);
+});
+
+test('Gym-bound: trainer pass is rejected at another gym', () => {
+  const r = validateCheckIn({ subscription: trainerPassAtG1, gym: midGym, todaysCheckins: [], cycleUsage: { visitsUsedInCycle: 0 } });
+  assert.equal(r.failure, CHECKIN_FAILURE.WRONG_GYM);
+});
+
+test('Gym-bound: platform passes still roam', () => {
+  assert.equal(subscriptionCoversGym({ ...activeExec, type: 'platform_pass' }, midGym), true);
+});
+
+test('pickSubscriptionForGym prefers the newest plan that covers the gym', () => {
+  const olderPlatform = { ...activePro, type: 'platform_pass', startedAt: '2026-08-01' };
+  const newerDirectElsewhere = { ...directAtG1, homeGymId: 'g9', startedAt: '2026-09-10' };
+  assert.equal(pickSubscriptionForGym([newerDirectElsewhere, olderPlatform], stdGym), olderPlatform);
+});
+
+test('pickSubscriptionForGym falls back to the newest plan so the failure is explained', () => {
+  const elsewhere = { ...directAtG1, homeGymId: 'g9' };
+  assert.equal(pickSubscriptionForGym([elsewhere], stdGym), elsewhere);
+  assert.equal(pickSubscriptionForGym([], stdGym), null);
 });
