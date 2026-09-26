@@ -5,6 +5,7 @@
 // where even one image per row is enough to balloon payload size; callers
 // needing the image fetch the gym directly via getGym.
 import { randomUUID } from 'node:crypto';
+import { gymProfileGaps } from '../shared/gym-profile.mjs';
 
 export function createGymService({ gyms, users, checkins, auditLog }) {
   function normalizeGymPayload(body = {}, prior) {
@@ -46,15 +47,12 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     const explicitVerified = typeof body.verified === 'boolean'
       ? body.verified
       : (typeof prior.verified === 'boolean' ? prior.verified : null);
-    const hasCoords = lat !== null && lat !== '' && lng !== null && lng !== '';
-    const autoVerified = Boolean(
-      (body.name ?? prior.name) &&
-      (body.location ?? prior.location) &&
-      hasCoords &&
-      images.length > 0 &&
-      amenities.length > 0 &&
-      equipment.length > 0,
-    );
+    const autoVerified = gymProfileGaps({
+      name: body.name ?? prior.name,
+      location: body.location ?? prior.location,
+      coordinates: { lat, lng },
+      images, amenities, equipment,
+    }).length === 0;
     return {
       id: body.id || prior.id || `gym_${randomUUID().slice(0, 8)}`,
       status: body.status || prior.status || 'active',

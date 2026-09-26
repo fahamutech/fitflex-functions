@@ -7,6 +7,7 @@
 // gym_operator / trainer / vendor, or a CorporateAccount. Its KYC case
 // (PartnerKycCase, one per partner) is the anchor for everything else:
 // people, documents, checks, settlement accounts, agreements and events.
+// What each partner type must provide lives in partner-kyc-requirements.mjs.
 
 export const PARTNER_TYPES = ['gym_owner', 'trainer', 'vendor', 'corporate'];
 
@@ -80,6 +81,12 @@ export const BENEFICIAL_OWNERSHIP_THRESHOLD_PCT = 25;
 
 export const ENTITY_TYPES = ['individual', 'sole_proprietor', 'partnership', 'company', 'ngo', 'government'];
 
+// How a gym owner's principal relates to the business.
+export const RELATIONSHIPS = ['owner', 'co_owner', 'director', 'manager', 'employee', 'other'];
+
+// What a vendor or company representative may sign for.
+export const AUTHORITIES = ['sole_signatory', 'joint_signatory', 'delegated'];
+
 // ── Documents ───────────────────────────────────────────────────────────────
 
 export const DOCUMENT_STATUSES = ['pending', 'accepted', 'rejected', 'expired', 'superseded'];
@@ -88,7 +95,7 @@ export const DOCUMENT_TYPES = [
   'national_id', 'passport', 'selfie',
   'business_registration', 'business_licence', 'tin_certificate', 'memorandum_articles',
   'board_resolution', 'certification', 'liability_insurance',
-  'bank_proof', 'mobile_money_proof', 'site_photo', 'signed_agreement', 'other',
+  'letter_of_authority', 'bank_proof', 'mobile_money_proof', 'site_photo', 'signed_agreement', 'other',
 ];
 
 // Only these file types may be stored as KYC documents.
@@ -159,6 +166,7 @@ export function isPayable(account, now = new Date()) {
 
 export const AGREEMENT_TYPES = [
   'platform_terms', 'partner_agreement', 'commission_schedule', 'data_processing', 'kyc_consent',
+  'corporate_contract',
 ];
 export const AGREEMENT_STATUSES = ['accepted', 'superseded', 'revoked'];
 
@@ -167,83 +175,5 @@ export const AGREEMENT_STATUSES = ['accepted', 'superseded', 'revoked'];
 export const EVENT_TYPES = [
   'status_changed', 'document_uploaded', 'document_reviewed', 'person_updated', 'check_recorded',
   'settlement_account_changed', 'agreement_accepted', 'reviewer_assigned', 'note',
+  'profile_updated', 'document_updated',
 ];
-
-// ── Requirements ────────────────────────────────────────────────────────────
-// What each partner type must provide before its case can be submitted, from
-// the canon KYC tiers (Tier 2 trainers, Tier 3 gym owners). Vendor and
-// corporate sets are provisional until the per-type document list is agreed.
-// perGym: needed once for every gym the owner runs.
-
-export const REQUIREMENTS = Object.freeze({
-  gym_owner: {
-    tier: 3,
-    documents: [
-      { key: 'owner_id', types: ['national_id', 'passport'], expires: true },
-      { key: 'business_registration', types: ['business_registration'] },
-      { key: 'business_licence', types: ['business_licence'], expires: true },
-      { key: 'tin_certificate', types: ['tin_certificate'] },
-    ],
-    checks: [{ type: 'site_visit', perGym: true }],
-    settlementAccount: true,
-    agreements: ['partner_agreement', 'kyc_consent'],
-  },
-  trainer: {
-    tier: 2,
-    documents: [
-      { key: 'trainer_id', types: ['national_id', 'passport'], expires: true },
-      { key: 'certification', types: ['certification'], expires: true },
-      { key: 'liability_insurance', types: ['liability_insurance'], expires: true },
-    ],
-    checks: [],
-    settlementAccount: true,
-    agreements: ['partner_agreement', 'kyc_consent'],
-  },
-  vendor: {
-    tier: 3,
-    provisional: true,
-    documents: [
-      { key: 'director_id', types: ['national_id', 'passport'], expires: true },
-      { key: 'business_registration', types: ['business_registration'] },
-      { key: 'business_licence', types: ['business_licence'], expires: true },
-      { key: 'tin_certificate', types: ['tin_certificate'] },
-    ],
-    checks: [],
-    settlementAccount: true,
-    agreements: ['partner_agreement', 'kyc_consent'],
-  },
-  corporate: {
-    tier: 3,
-    provisional: true,
-    documents: [
-      { key: 'business_registration', types: ['business_registration'] },
-      { key: 'tin_certificate', types: ['tin_certificate'] },
-      { key: 'signatory_id', types: ['national_id', 'passport'], expires: true },
-      { key: 'board_resolution', types: ['board_resolution'] },
-    ],
-    checks: [],
-    settlementAccount: false,
-    agreements: ['partner_agreement', 'kyc_consent'],
-  },
-});
-
-/**
- * Requirement keys still missing for a case. A document counts when it is
- * pending or accepted (not rejected, expired or superseded).
- * @param {string} partnerType
- * @param {{ documents?: object[], settlementAccounts?: object[], agreements?: object[] }} state
- * @returns {string[]}
- */
-export function missingRequirements(partnerType, { documents = [], settlementAccounts = [], agreements = [] } = {}) {
-  const spec = REQUIREMENTS[partnerType];
-  if (!spec) return [];
-  const live = new Set(documents
-    .filter(d => d.status === 'pending' || d.status === 'accepted')
-    .map(d => d.requirementKey));
-  const missing = spec.documents.filter(r => !live.has(r.key)).map(r => r.key);
-  const hasAccount = settlementAccounts.some(a => a.status === 'pending_verification' || a.status === 'verified');
-  if (spec.settlementAccount && !hasAccount) missing.push('settlement_account');
-  const accepted = new Set(agreements.filter(a => a.status === 'accepted').map(a => a.agreementType));
-  for (const type of spec.agreements) if (!accepted.has(type)) missing.push(`agreement:${type}`);
-  return missing;
-}

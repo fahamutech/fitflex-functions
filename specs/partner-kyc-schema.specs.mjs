@@ -259,3 +259,16 @@ test('deleting the partner removes the whole case with it', async () => {
   assert.equal((await db('PartnerPerson').where('caseId', kyc.id)).length, 0);
   assert.equal((await db('PartnerKycEvent').where('caseId', kyc.id)).length, 0);
 });
+
+test('deleting a user who acted on a case clears them from the timeline, and nothing else changes', async () => {
+  const kyc = await makeCase();
+  const actor = await makeUser('admin');
+  const event = await partnerKycEvents.insertAsync({
+    id: uid('pevt'), caseId: kyc.id, round: 1, eventType: 'note', actorId: actor, actorRole: 'admin', note: 'kept', at: now(),
+  });
+  await db('User').where('id', actor).del();
+  const row = await partnerKycEvents.findByIdAsync(event.id);
+  assert.equal(row.actorId, null);
+  assert.equal(row.note, 'kept');
+  await rejects(partnerKycEvents.updateByIdAsync(event.id, { actorId: null, note: 'sneaky' }), 'P0001');
+});
