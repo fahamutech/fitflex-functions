@@ -88,9 +88,11 @@ test('ranking lists only people who opted in, by first name and initial', async 
   // Baraka isn't listed, but sees where he'd place among those who are.
   assert.deepEqual(lb.you, { optedIn: false, rank: 3, of: 4, progress: 25000, teamId: null });
   const json = JSON.stringify(lb);
-  for (const leak of ['Baraka', 'Juma', 'Mollel', 'm1', 'm3', 'weightKg', 'heightCm', '90']) {
+  for (const leak of ['Baraka', 'Juma', 'Mollel', 'm1', 'm3', 'weightKg', 'heightCm']) {
     assert.equal(json.includes(leak), false, leak);
   }
+  // The 90 kg weight as a value, not the digits "90" inside a random id.
+  assert.doesNotMatch(json, /[:,[]90[,\]}]/);
 });
 
 test('opting in and out takes effect immediately', async () => {
