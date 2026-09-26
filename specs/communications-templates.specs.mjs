@@ -180,6 +180,7 @@ test('a campaign started from a template reaches each member in their language',
     audience: { preset: 'active' }, channels: ['in_app'],
   });
   assert.equal(campaign.purpose, 'renewal', 'the template sets the purpose');
+  assert.equal(campaign.templateId, systemTemplateId('membership_expiring'), 'the app shows which template it came from');
   assert.equal(campaign.content.locale, 'sw');
   assert.equal(campaign.content.translations.en.title, 'Your plan ends soon');
   const sent = await campaigns.send(w.A, campaign.id, { sendRequestId: uid('req') });

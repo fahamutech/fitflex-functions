@@ -143,7 +143,7 @@ export function createCampaignService({
     return {
       id: c.id, senderType: c.senderType, gymId: c.gymId, name: c.name, purpose: c.purpose,
       category: c.category, status: c.status, audience: c.audience, content: c.content,
-      channels: c.channels || [], scheduledAt: iso(c.scheduledAt), sentAt: iso(c.sentAt),
+      channels: c.channels || [], templateId: c.templateId || null, scheduledAt: iso(c.scheduledAt), sentAt: iso(c.sentAt),
       cancelledAt: iso(c.cancelledAt), counts: c.counts || null, createdBy: c.createdBy,
       createdAt: iso(c.createdAt), updatedAt: iso(c.updatedAt),
     };
