@@ -38,7 +38,7 @@ export function createTrainerReviewService({ trainerReviews, trainers, trainerBo
     const published = await trainerReviews.filterAsync(r => r.trainerId === trainerId && r.status === 'published');
     const count = published.length;
     const average = count ? Math.round((published.reduce((s, r) => s + Number(r.rating), 0) / count) * 10) / 10 : 0;
-    await trainers.updateByIdAsync(trainerId, { rating: average, reviewCount: count });
+    await trainers.updateAsync(t => t.id === trainerId, { rating: average, reviewCount: count });
     return { trainerId, averageRating: average, reviewCount: count };
   }
 

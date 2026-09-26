@@ -54,7 +54,7 @@ export function createGymReviewService({ gymReviews, gyms, checkins, subscriptio
     const published = await gymReviews.filterAsync(r => r.gymId === gymId && r.status === 'published');
     const count = published.length;
     const average = count ? Math.round((published.reduce((s, r) => s + Number(r.rating), 0) / count) * 10) / 10 : 0;
-    await gyms.updateByIdAsync(gymId, { rating: average, reviewCount: count });
+    await gyms.updateAsync(g => g.id === gymId, { rating: average, reviewCount: count });
     return { gymId, averageRating: average, reviewCount: count };
   }
 
