@@ -139,3 +139,12 @@ export function validateCheckIn({ subscription, gym, todaysCheckins, cycleUsage,
 
   return { ok: true, visitConsumed: visit.consumesVisit, sameDaySameGym: visit.sameDaySameGym };
 }
+
+/**
+ * T5: a trainer linked to the gym (owner-approved) enters free — no pass, no
+ * visit counted; only opening hours apply.
+ */
+export function validateTrainerHomeEntry({ gym, now = new Date() }) {
+  if (!isGymOpen(gym, now)) return { ok: false, failure: CHECKIN_FAILURE.GYM_CLOSED };
+  return { ok: true, visitConsumed: false, sameDaySameGym: false };
+}

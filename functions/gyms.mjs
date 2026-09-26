@@ -1,9 +1,18 @@
 // Gym catalogue REST surface — public discovery + admin CRUD.
 import '../src/bootstrap/init.mjs';
-import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import { requireAuth, requireAcl, bearerFrom, verify } from '../src/auth/jwt.mjs';
+import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
 import { gymService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
+
+// Trainer-pass pricing is for trainers only: anonymous callers and members
+// get gyms without it. (Owners read their gyms via /owner/gyms.)
+function forViewer(req, gym) {
+  const token = bearerFrom(req);
+  const claims = token ? verify(token) : null;
+  return canSeeTrainerPass(claims?.userType) ? gym : hideTrainerPass(gym);
+}
 
 export const listGyms = {
   created, method: 'get', path: '/gyms',
@@ -15,7 +24,7 @@ export const listGyms = {
   // present here. Payload size is instead controlled by compressing images
   // to WebP and capping dimensions at upload time (see image-upload.tsx /
   // gym_form_page.dart), not by trimming the array server-side.
-  onRequest: async (_, res) => res.json(await gymService.listActiveAsync())
+  onRequest: async (req, res) => res.json((await gymService.listActiveAsync()).map(g => forViewer(req, g)))
 };
 
 export const getGym = {
@@ -24,7 +33,7 @@ export const getGym = {
   onRequest: (req, res) => {
     const g = gymService.findById(req.params.id);
     if (!g) return res.status(404).json({ error: 'not_found' });
-    res.json(g);
+    res.json(forViewer(req, g));
   }
 };
 

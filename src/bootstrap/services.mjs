@@ -108,7 +108,7 @@ export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
 });
 
-export const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig: settingsService.getTierConfig });
+export const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig });
 export const memberManagement = createMemberManagementService({
   users, gyms, subscriptions, checkins, paymentRequests, publicUserId, initFirebaseAdmin, getAdminAuth,
 });

@@ -7,8 +7,8 @@ const created = new Date().toISOString();
 
 export const myQr = {
   created, method: 'get', path: '/me/qr',
-  description: 'Issue a 60-second rotating QR token for the authenticated member.',
-  onGuard: requireAuth('member'),
+  description: 'Issue a 60-second rotating QR token for the authenticated member (or trainer: gym pass, member plan or home gym).',
+  onGuard: requireAuth('member', 'trainer'),
   onRequest: async (req, res) => {
     const result = await operatorService.issueMemberQr(req.user.sub);
     if (result.error) return res.status(result.status).json({ error: result.error });
@@ -20,7 +20,7 @@ export const memberScanGymQr = {
   created, method: 'post', path: '/me/checkins/scan',
   description: 'Member scans the static QR at the gym entrance (member-scans-gym mode). POST { gymQr } → same BL-012 result as a staff scan.',
   requestSample: { gymQr: 'fitflex:gym:gym_001:signature' },
-  onGuard: requireAuth('member'),
+  onGuard: requireAuth('member', 'trainer'),
   onRequest: async (req, res) => {
     const result = await operatorService.memberScanGym({ memberId: req.user.sub, gymQr: req.body?.gymQr });
     res.status(result.status).json(result.body);

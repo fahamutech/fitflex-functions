@@ -59,7 +59,13 @@ export const trainerRegister = {
     if (!user) return res.status(404).json({ error: 'user_not_found' });
     const body = req.body || {};
     const result = await trainerService.register({ userId: req.user.sub, user, body });
-    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.validValues ? { validValues: result.validValues } : {}) });
+    if (result.error) {
+      return res.status(result.status).json({
+        error: result.error,
+        ...(result.validValues ? { validValues: result.validValues } : {}),
+        ...(result.platforms ? { platforms: result.platforms } : {}),
+      });
+    }
     await users.updateByIdAsync(req.user.sub, {
       displayName: result.displayName,
       onboardingCompleted: true,
@@ -103,11 +109,11 @@ export const trainerCancelGymApplication = {
 
 export const trainerUpdateProfile = {
   created, method: 'put', path: '/trainer/me',
-  description: 'Trainer: update own bio, specialties, hourly rate, availability.',
+  description: 'Trainer: update own displayName, bio, specialties, hourly rate, availability, photos and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL).',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const result = await trainerService.updateProfile({ userId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.platforms ? { platforms: result.platforms } : {}) });
     res.json(result.trainer);
   }
 };

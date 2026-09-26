@@ -1,7 +1,7 @@
 // A4/C2/C3 — trainer engagement + sessions + earnings REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { trainerEngagementService, trainerBookingService, subscriptionService } from '../src/bootstrap/services.mjs';
+import { trainerEngagementService, trainerBookingService, subscriptionService, trainerService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -76,11 +76,15 @@ export const trainerCreateManualSession = {
 
 export const trainerPurchaseTrainerPass = {
   created, method: 'post', path: '/trainer/gyms/:gymId/trainer-pass',
-  description: "Trainer: pay a gym's trainer-pass fee (pending admin payment approval) to train clients there.",
+  description: "Trainer: buy one of the gym's trainer passes. POST { period: 'daily'|'weekly'|'monthly' } (optional when the gym sells one period). Pending until an admin approves the payment.",
+  requestSample: { period: 'weekly' },
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const result = await subscriptionService.trainerPassPurchase({
-      trainerUserId: req.user.sub, gymId: req.params.gymId,
+      trainerUserId: req.user.sub,
+      gymId: req.params.gymId,
+      period: req.body?.period,
+      trainer: trainerService.findProfileByUser(req.user.sub),
     });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(result.status).json({ subscription: result.subscription, paymentRequest: result.paymentRequest });
