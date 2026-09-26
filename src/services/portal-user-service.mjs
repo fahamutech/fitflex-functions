@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 export const PORTAL_ACL_SCOPES = [
   'gyms', 'owners', 'trainers', 'members', 'shop', 'payments', 'approvals', 'settings', 'users',
   'analytics', 'challenges', 'rewards', 'social', 'corporate', 'vendors', 'communications',
+  'kyc',
 ];
 
 export function createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail }) {

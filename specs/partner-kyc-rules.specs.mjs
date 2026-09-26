@@ -1,11 +1,11 @@
 // Partner KYC — pure rules: case and settlement-account lifecycles, how a case
-// drives the existing approval flag, requirement sets per partner type,
-// registry checks and identifier normalisation.
+// drives the existing approval flag, registry checks and identifier
+// normalisation. Requirement sets are in partner-kyc-requirements.specs.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PARTNER_TYPES, REQUIREMENTS, CASE_STATUSES, canTransitionCase, startsNewRound, approvalStatusForCase,
-  partnerTypeForUserType, canTransitionSettlement, isPayable, missingRequirements,
+  CASE_STATUSES, canTransitionCase, startsNewRound, approvalStatusForCase,
+  partnerTypeForUserType, canTransitionSettlement, isPayable,
   CHECK_PROVIDERS, providerConfirms, normalizeIdentifier,
 } from '../src/shared/partner-kyc.mjs';
 
@@ -75,42 +75,6 @@ test('payouts go only to the verified primary account after its cooling-off peri
   assert.equal(isPayable({ ...account, isPrimary: false }, at), false);
   assert.equal(isPayable({ ...account, status: 'pending_verification' }, at), false);
   assert.equal(isPayable(null, at), false);
-});
-
-// ── Requirements ────────────────────────────────────────────────────────────
-
-test('every partner type has a requirement set, with canon tiers for owners and trainers', () => {
-  for (const type of PARTNER_TYPES) assert.ok(REQUIREMENTS[type], type);
-  assert.equal(REQUIREMENTS.gym_owner.tier, 3);
-  assert.equal(REQUIREMENTS.trainer.tier, 2);
-  assert.ok(REQUIREMENTS.gym_owner.checks.some(c => c.type === 'site_visit' && c.perGym));
-  assert.equal(REQUIREMENTS.corporate.settlementAccount, false);
-});
-
-test('an empty trainer case is missing everything', () => {
-  assert.deepEqual(missingRequirements('trainer', {}), [
-    'trainer_id', 'certification', 'liability_insurance', 'settlement_account',
-    'agreement:partner_agreement', 'agreement:kyc_consent',
-  ]);
-});
-
-test('rejected or expired documents do not count; pending and accepted ones do', () => {
-  const missing = missingRequirements('trainer', {
-    documents: [
-      { requirementKey: 'trainer_id', status: 'accepted' },
-      { requirementKey: 'certification', status: 'pending' },
-      { requirementKey: 'liability_insurance', status: 'expired' },
-    ],
-    settlementAccounts: [{ status: 'rejected' }],
-    agreements: [{ agreementType: 'partner_agreement', status: 'accepted' }, { agreementType: 'kyc_consent', status: 'revoked' }],
-  });
-  assert.deepEqual(missing, ['liability_insurance', 'settlement_account', 'agreement:kyc_consent']);
-});
-
-test('a corporate partner needs no settlement account', () => {
-  const missing = missingRequirements('corporate', {});
-  assert.ok(!missing.includes('settlement_account'));
-  assert.deepEqual(missingRequirements('unknown', {}), []);
 });
 
 // ── Registries and identifiers ──────────────────────────────────────────────

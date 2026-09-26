@@ -48,6 +48,7 @@ import { createCampaignService } from '../services/campaign-service.mjs';
 import { createTemplateService } from '../services/template-service.mjs';
 import { createDeliveryService } from '../services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../services/communication-preference-service.mjs';
+import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
@@ -61,6 +62,8 @@ import {
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
+  partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
+  partnerSettlementAccounts, partnerAgreements, partnerKycEvents,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -221,4 +224,10 @@ export const trainerClientService = createTrainerClientService({
   notify: (userId, message) => notificationService.notify(userId, message),
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
   challenges, participants: challengeParticipants,
+});
+// Partner KYC/KYB: what gym owners, trainers, vendors and companies must provide.
+export const partnerKycService = createPartnerKycService({
+  users, gyms, trainers, corporateAccounts,
+  partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
+  partnerSettlementAccounts, partnerAgreements, partnerKycEvents, auditLog,
 });

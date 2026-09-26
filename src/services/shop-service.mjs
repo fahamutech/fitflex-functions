@@ -6,6 +6,10 @@ const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set(['pending', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup', 'delivered', 'cancelled', 'confirmed', 'fulfilled']);
 const PAYMENT_METHODS = new Set(['mpesa', 'airtel_money', 'mixx', 'card', 'bank']);
 const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'settlementAccount'];
+// Optional profile fields. Partner KYC reads productCategories and returnsPolicy
+// for the vendor's marketplace requirements. Anything else in the body is ignored.
+const PROFILE_OPTIONAL = ['productCategories', 'returnsPolicy'];
+const PROFILE_FIELDS = new Set([...PROFILE_REQUIRED, ...PROFILE_OPTIONAL]);
 const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
 const STAFF_PERMISSIONS = new Set(['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
 const PRODUCT_REVIEW_FIELDS = new Set(['name', 'description', 'category', 'brand', 'priceTzs', 'discountPriceTzs', 'images', 'variants']);
@@ -37,7 +41,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const current = await users.findByIdAsync(vendorId);
     const prior = current?.vendorProfile || {};
     const publish = body?.publish === true;
-    const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => key !== 'publish')), vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
+    const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
     const missing = PROFILE_REQUIRED.filter(key => {
       const value = profile[key];
       if (Array.isArray(value)) return !value.length;

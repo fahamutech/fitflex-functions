@@ -114,7 +114,8 @@ export function createCorporateService({
       }
       patch.seatLimit = seatLimit;
     }
-    for (const field of ['hrContactName', 'hrContactPhone', 'hrContactEmail', 'lipaNamba']) {
+    for (const field of ['hrContactName', 'hrContactPhone', 'hrContactEmail', 'lipaNamba',
+      'billingContactName', 'billingContactPhone', 'billingContactEmail']) {
       if (body[field] !== undefined) patch[field] = body[field];
     }
     if (body.domainWhitelist !== undefined) {
