@@ -49,6 +49,7 @@ import { createTemplateService } from '../services/template-service.mjs';
 import { createDeliveryService } from '../services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../services/communication-preference-service.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
+import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
@@ -232,4 +233,6 @@ export const partnerKycService = createPartnerKycService({
   partnerSettlementAccounts, partnerAgreements, partnerKycEvents, auditLog,
   // notificationService is defined earlier in this file; it's only called later.
   notify: (userId, message) => notificationService.notify(userId, message),
+  // KYC documents stay private on Zebra; the API streams them after its own checks.
+  documentStore: createZebraDocumentStore(),
 });
