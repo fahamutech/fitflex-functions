@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   CHANNELS, PURPOSES, categoryForPurpose, canTransitionCampaign,
-  validateContent, messageValues, renderText,
+  validateContent, messageValues, renderText, contentFor,
 } from '../shared/communications.mjs';
 import { buildAudienceFilter } from '../shared/audience.mjs';
 import { ownerGymIds } from '../shared/member-status.mjs';
@@ -30,10 +30,12 @@ const LIST_LIMIT = 50;
 const INSERT_CHUNK = 500;
 
 const id = (p) => `${p}_${randomUUID().slice(0, 8)}`;
+const hasTranslations = (content) => Boolean(content?.translations && Object.keys(content.translations).length);
 const iso = (v) => (v == null ? null : new Date(v).toISOString());
 
 export function createCampaignService({
   db, campaigns, gyms, segmentService, auditLog,
+  templateService = null,
   now = () => new Date(),
   largeSendThreshold = 200,
   marketingWeeklyCap = 2,
@@ -67,9 +69,25 @@ export function createCampaignService({
 
   // ── input ────────────────────────────────────────────────────────────────
 
-  /** Validates whichever draft fields are present; returns a patch. */
-  function draftFields(body, scope) {
+  /**
+   * Validates whichever draft fields are present; returns a patch.
+   * `sender` lets a template be checked against what the sender may use.
+   */
+  async function draftFields(body, scope, sender = null) {
     const patch = {};
+    if (body.templateId !== undefined) {
+      if (body.templateId === null) patch.templateId = null;
+      else {
+        const tpl = templateService && sender ? await templateService.load(sender, body.templateId) : null;
+        if (!tpl || tpl.status !== 'active') return { error: 'template_not_found', status: 404 };
+        patch.templateId = tpl.id;
+        // No text given: start from the template, in the sender's language.
+        if (body.content === undefined) {
+          const t = await templateService.contentFromTemplate(sender, tpl.id, { locale: body.locale || 'en', values: body.templateValues || {} });
+          body = { ...body, content: t.content, purpose: body.purpose ?? tpl.purpose };
+        }
+      }
+    }
     if (body.name !== undefined) {
       const name = typeof body.name === 'string' ? body.name.trim() : '';
       if (!name || name.length > NAME_MAX) return { error: 'invalid_name', status: 400 };
@@ -102,6 +120,17 @@ export function createCampaignService({
     return { patch };
   }
 
+  /**
+   * WhatsApp only carries provider-approved templates: a campaign can use
+   * it only when its template maps to an approved WhatsApp template.
+   */
+  async function whatsappCheck(sender, campaign) {
+    if (!campaign.channels?.includes('whatsapp')) return null;
+    const tpl = campaign.templateId && templateService ? await templateService.load(sender, campaign.templateId) : null;
+    const status = tpl ? await templateService.whatsappStatus(tpl) : null;
+    return status?.ready ? null : { error: 'whatsapp_template_required', status: 400 };
+  }
+
   function readyToSend(c) {
     if (!c.purpose) return 'purpose_required';
     if (!c.audience) return 'audience_required';
@@ -131,13 +160,16 @@ export function createCampaignService({
     return (await gyms.findByIdAsync(campaign.gymId))?.name || '';
   }
 
-  function render(content, member, name) {
-    const values = messageValues(content, member, { gymName: name, renewalLink: renewalLink || '' });
+  /** One member's copy, in their app language when the message has it. */
+  function render(content, member, name, locale = null) {
+    const text = contentFor(content, locale);
+    const values = messageValues(content, member, { gymName: name, renewalLink: renewalLink || '', locale: text.locale });
     return {
-      title: renderText(content.title, values),
-      body: renderText(content.body, values),
-      ctaLabel: content.ctaLabel || null,
+      title: renderText(text.title, values),
+      body: renderText(text.body, values),
+      ctaLabel: text.ctaLabel,
       deepLink: content.deepLink || 'message',
+      locale: text.locale,
     };
   }
 
@@ -175,11 +207,14 @@ export function createCampaignService({
     const reach = await segmentService.reachByMember(members, campaign.category, campaign.channels);
     const capped = campaign.category === 'marketing' ? await atMarketingCap(members.map(m => m.memberId)) : new Set();
     const name = await gymName(campaign);
+    const locales = hasTranslations(campaign.content)
+      ? await segmentService.localesByMember(members.map(m => m.memberId))
+      : new Map();
     const at = now().toISOString();
     const counts = { targeted: members.length, queued: 0, skipped: {}, byChannel: {} };
     const rows = [];
     for (const m of members) {
-      const msg = render(campaign.content, m, name);
+      const msg = render(campaign.content, m, name, locales.get(m.memberId));
       for (const ch of campaign.channels) {
         const reason = capped.has(m.memberId) ? 'marketing_cap' : reach.get(m.memberId)?.[ch] ?? null;
         const byCh = counts.byChannel[ch] || (counts.byChannel[ch] = { queued: 0, skipped: 0 });
@@ -188,7 +223,7 @@ export function createCampaignService({
         rows.push({
           id: id('cmm'), campaignId: campaign.id, senderType: campaign.senderType, gymId: campaign.gymId,
           memberId: m.memberId, channel: ch, category: campaign.category, messageType: campaign.purpose,
-          title: msg.title, body: msg.body, deepLink: msg.deepLink,
+          title: msg.title, body: msg.body, deepLink: msg.deepLink, locale: msg.locale,
           status: reason ? 'skipped' : 'queued', skipReason: reason, attempts: 0,
           nextAttemptAt: reason ? null : at, createdAt: at, updatedAt: at,
         });
@@ -204,8 +239,8 @@ export function createCampaignService({
     if (!scope) return { error: 'invalid_sender', status: 400 };
     const gym = gymFor(sender, body.gymId ?? null);
     if (gym.error) return gym;
-    if (body.purpose === undefined) return { error: 'invalid_purpose', status: 400 };
-    const f = draftFields(body, scope);
+    if (body.purpose === undefined && body.templateId == null) return { error: 'invalid_purpose', status: 400 };
+    const f = await draftFields(body, scope, sender);
     if (f.error) return f;
     const at = now().toISOString();
     const row = {
@@ -223,7 +258,7 @@ export function createCampaignService({
     const c = await load(sender, campaignId);
     if (!c) return { error: 'not_found', status: 404 };
     if (!EDITABLE.includes(c.status)) return { error: 'not_editable', status: 409 };
-    const f = draftFields(body, c.senderType);
+    const f = await draftFields(body, c.senderType, sender);
     if (f.error) return f;
     if (!Object.keys(f.patch).length) return { campaign: view(c) };
     return { campaign: view(await campaigns.updateByIdAsync(c.id, f.patch)) };
@@ -256,6 +291,8 @@ export function createCampaignService({
     if (Number.isNaN(when)) return { error: 'invalid_schedule', status: 400 };
     if (when < +now() + MIN_SCHEDULE_LEAD_MS) return { error: 'schedule_too_soon', status: 400 };
     if (when > +now() + MAX_SCHEDULE_AHEAD_MS) return { error: 'schedule_too_far', status: 400 };
+    const wa = await whatsappCheck(sender, c);
+    if (wa) return wa;
     // The same checks as sending now, so scheduling is no way around them.
     // The audience is worked out again when the campaign goes out.
     const p = await plan(sender, c);
@@ -293,8 +330,8 @@ export function createCampaignService({
     } else {
       const gym = gymFor(sender, body?.gymId ?? null);
       if (gym.error) return gym;
-      if (body?.purpose === undefined) return { error: 'invalid_purpose', status: 400 };
-      const f = draftFields(body || {}, scope);
+      if (body?.purpose === undefined && body?.templateId == null) return { error: 'invalid_purpose', status: 400 };
+      const f = await draftFields(body || {}, scope, sender);
       if (f.error) return f;
       c = { id: 'preview', senderType: scope, gymId: gym.gymId, channels: [], ...f.patch };
     }
@@ -332,6 +369,8 @@ export function createCampaignService({
     const available = segmentService.channelAvailability();
     const off = c.channels.find(ch => !available[ch]);
     if (off) return { error: 'channel_unavailable', status: 400, detail: off };
+    const wa = await whatsappCheck(sender, c);
+    if (wa) return wa;
 
     const p = await plan(sender, c);
     if (p.error) return p;
@@ -391,7 +430,8 @@ export function createCampaignService({
     for (const c of due) {
       const sender = systemSender(c);
       const available = segmentService.channelAvailability();
-      const p = c.channels?.every(ch => available[ch]) ? await plan(sender, c) : { error: 'channel_unavailable' };
+      const blocked = !c.channels?.every(ch => available[ch]) ? { error: 'channel_unavailable' } : await whatsappCheck(sender, c);
+      const p = blocked || await plan(sender, c);
       const at = now();
       if (p.error || !p.counts.queued) {
         const n = await db('CommunicationCampaign').where({ id: c.id, status: 'scheduled' }).update({

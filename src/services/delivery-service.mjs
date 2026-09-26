@@ -18,6 +18,7 @@
 // a second one. Push is at-least-once: a crash between FCM accepting a push
 // and the ledger update can repeat that one push.
 import { randomUUID } from 'node:crypto';
+import { contentFor } from '../shared/communications.mjs';
 
 export const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000];
 export const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -60,11 +61,14 @@ export function createDeliveryService({
       const c = await db('CommunicationCampaign as c').leftJoin('Gym as g', 'g.id', 'c.gymId')
         .where('c.id', msg.campaignId).first('c.content', 'g.name as gymName');
       campaignInfo.set(msg.campaignId, {
-        ctaLabel: c?.content?.ctaLabel ?? null,
+        content: c?.content ?? null,
         senderName: msg.senderType === 'platform' ? 'FitFlex' : c?.gymName ?? null,
       });
     }
-    return campaignInfo.get(msg.campaignId);
+    const info = campaignInfo.get(msg.campaignId);
+    // The button in the same language as the member's copy of the message.
+    const ctaLabel = info.content ? contentFor(info.content, msg.locale).ctaLabel : null;
+    return { ctaLabel, senderName: info.senderName };
   }
 
   async function payload(msg) {
