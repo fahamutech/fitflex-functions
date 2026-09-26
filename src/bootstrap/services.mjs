@@ -127,7 +127,7 @@ export const adminPaymentService = createAdminPaymentService({
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
-export const adminApprovalService = createAdminApprovalService({ users, auditLog });
+export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, gymOwners, settingsService });
 export const invoiceService = createInvoiceService({ invoices, gyms, users, gymPayouts, auditLog });
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
@@ -230,4 +230,6 @@ export const partnerKycService = createPartnerKycService({
   users, gyms, trainers, corporateAccounts,
   partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
   partnerSettlementAccounts, partnerAgreements, partnerKycEvents, auditLog,
+  // notificationService is defined earlier in this file; it's only called later.
+  notify: (userId, message) => notificationService.notify(userId, message),
 });

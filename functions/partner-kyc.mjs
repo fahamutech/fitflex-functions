@@ -22,7 +22,8 @@ function send(res, result) {
 }
 
 const partnerActor = req => ({ id: req.user.sub, role: 'partner' });
-const adminActor = req => ({ id: req.user.sub, role: 'admin' });
+// Super-admins (not portal staff) may override an incomplete checklist.
+const adminActor = req => ({ id: req.user.sub, role: 'admin', superAdmin: !req.user.portalUser });
 
 /** Run fn with the signed-in partner. */
 const asPartner = fn => async (req, res) => {
@@ -84,6 +85,20 @@ export const myKycRemoveSettlementAccount = {
   description: 'Partner: remove a payout account that has not been verified yet.',
   onGuard: requireAuth(...PARTNER_ROLES),
   onRequest: asPartner((partner, req) => svc.removeSettlementAccount(partner, req.params.id, partnerActor(req))),
+};
+
+export const myKycSubmit = {
+  created, method: 'post', path: '/me/kyc/submit',
+  description: 'Partner: send my KYC for review. Refused with 409 kyc_incomplete and the missing items until the checklist is ready.',
+  onGuard: requireAuth(...PARTNER_ROLES),
+  onRequest: asPartner((partner, req) => svc.submit(partner, partnerActor(req))),
+};
+
+export const myKycWithdraw = {
+  created, method: 'post', path: '/me/kyc/withdraw',
+  description: 'Partner: take a submitted KYC back to draft, before a reviewer picks it up.',
+  onGuard: requireAuth(...PARTNER_ROLES),
+  onRequest: asPartner((partner, req) => svc.withdraw(partner, partnerActor(req))),
 };
 
 // ── Admin ───────────────────────────────────────────────────────────────────
@@ -151,4 +166,35 @@ export const adminKycCorporateContract = {
   requestSample: { version: 'FFB-2026-014', signedOn: '2026-10-01', effectiveFrom: '2026-10-01', expiresOn: '2027-09-30' },
   onGuard: adminGuard,
   onRequest: async (req, res) => send(res, await svc.recordCorporateContract({ corporateId: req.params.corporateId, body: req.body || {}, actor: adminActor(req) })),
+};
+
+// ── Review ──────────────────────────────────────────────────────────────────
+
+export const adminKycClaim = {
+  created, method: 'post', path: '/admin/kyc/cases/:id/claim',
+  description: 'Admin: take a submitted case into review (or reassign a case in review to yourself).',
+  onGuard: adminGuard,
+  onRequest: async (req, res) => send(res, await svc.claim(req.params.id, adminActor(req))),
+};
+
+export const adminKycDecision = {
+  created, method: 'post', path: '/admin/kyc/cases/:id/decision',
+  description: 'Admin: decide a case — decision approve | reject | request_info | suspend | reinstate | reopen, reasonCode (required to reject, request info or suspend), reasonNote (shown to the partner). Approving needs a complete checklist; a super-admin may pass override: true with a reasonNote. Rejecting closes the partner role, so use request_info for anything the partner can fix.',
+  requestSample: { decision: 'request_info', reasonCode: 'document_unreadable', reasonNote: 'Please re-upload your certificate; the number is not readable.' },
+  onGuard: adminGuard,
+  onRequest: async (req, res) => send(res, await svc.decide(req.params.id, req.body || {}, adminActor(req))),
+};
+
+export const adminKycReviewDocument = {
+  created, method: 'post', path: '/admin/kyc/cases/:id/documents/:documentId/review',
+  description: 'Admin: accept or reject a document (decision accept | reject, note — required to reject). The case must be in review, and only a document with its file can be accepted.',
+  onGuard: adminGuard,
+  onRequest: async (req, res) => send(res, await svc.reviewDocument(req.params.id, req.params.documentId, req.body || {}, adminActor(req))),
+};
+
+export const adminKycReviewSettlementAccount = {
+  created, method: 'post', path: '/admin/kyc/cases/:id/settlement-accounts/:accountId/review',
+  description: 'Admin: verify or reject a payout account (decision verify | reject, note — required to reject). Whoever added the account cannot verify it. A verified account becomes the payout account if there is none, after a 48-hour cooling-off period.',
+  onGuard: adminGuard,
+  onRequest: async (req, res) => send(res, await svc.reviewSettlementAccount(req.params.id, req.params.accountId, req.body || {}, adminActor(req))),
 };

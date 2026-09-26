@@ -9,12 +9,18 @@
 // details via /vendor/profile, corporate commercial terms via
 // /admin/corporate/:id) and is only read here.
 //
-// Case submission, review decisions and document files come in later phases.
+// A partner submits once the checklist says they're ready. A FitFlex reviewer
+// claims the case, reviews documents and payout accounts, and decides. The
+// decision drives the approval flag the apps already read (User.approvalStatus,
+// and TrainerProfile.approvalStatus for trainers). Document files come with
+// private storage in a later phase.
 import { randomUUID } from 'node:crypto';
 import {
   PARTNER_SUBJECT, partnerTypeForUserType, normalizeIdentifier,
   ENTITY_TYPES, ID_TYPES, RELATIONSHIPS, AUTHORITIES,
-  SETTLEMENT_METHODS, MOBILE_MONEY_PROVIDERS,
+  SETTLEMENT_METHODS, MOBILE_MONEY_PROVIDERS, SETTLEMENT_COOLDOWN_HOURS,
+  REVIEW_DECISIONS, REASON_CODES, reasonRequired, canTransitionCase, startsNewRound,
+  approvalStatusForCase, canTransitionSettlement,
 } from '../shared/partner-kyc.mjs';
 import {
   evaluateKyc, KYC_TIERS, PERSON_REQUIREMENTS, BUSINESS_REQUIREMENTS,
@@ -93,6 +99,7 @@ export function createPartnerKycService({
   users, gyms, trainers, corporateAccounts,
   partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
   partnerSettlementAccounts, partnerAgreements, partnerKycEvents, auditLog,
+  notify = async () => {},
 }) {
   // ── Partners and cases ────────────────────────────────────────────────────
 
@@ -420,6 +427,218 @@ export function createPartnerKycService({
     return overview(partner);
   }
 
+  // ── Status changes ────────────────────────────────────────────────────────
+
+  // What the partner is told at each step.
+  const MESSAGES = {
+    submitted: () => ({ title: 'Verification details received', body: 'Thank you. FitFlex will review your details and let you know the outcome.' }),
+    info_requested: note => ({ title: 'More information needed', body: note || 'FitFlex needs more information to finish verifying you. Open your verification to see what to update.' }),
+    approved: () => ({ title: 'You are verified', body: 'Your FitFlex partner verification is approved.' }),
+    rejected: note => ({ title: 'Verification not approved', body: note || 'Your FitFlex partner verification was not approved.' }),
+    suspended: note => ({ title: 'Verification suspended', body: note || 'Your FitFlex partner verification has been suspended.' }),
+    reinstated: () => ({ title: 'Verification restored', body: 'Your FitFlex partner verification is active again.' }),
+    reopened: () => ({ title: 'Verification reopened', body: 'You can update your details and submit them again.' }),
+  };
+
+  async function tell(kycCase, key, note) {
+    if (!kycCase.userId || !MESSAGES[key]) return;
+    try {
+      await notify(kycCase.userId, { type: `kyc_${key}`, data: { caseId: kycCase.id }, ...MESSAGES[key](note) });
+    } catch { /* a failed notification never fails the decision */ }
+  }
+
+  /** Keep the approval flags every app reads in step with the case. */
+  async function syncApproval(kycCase, status, note) {
+    if (!kycCase.userId) return;
+    const approvalStatus = approvalStatusForCase(status);
+    const user = await users.findByIdAsync(kycCase.userId);
+    if (user && (user.approvalStatus !== approvalStatus || (note !== undefined && user.approvalNote !== note))) {
+      await users.updateByIdAsync(user.id, { approvalStatus, ...(note !== undefined ? { approvalNote: note } : {}) });
+    }
+    if (kycCase.partnerType === 'trainer') {
+      const profile = await trainers.findAsync(t => t.userId === kycCase.userId);
+      if (profile && profile.approvalStatus !== approvalStatus) await trainers.updateAsync(t => t.id === profile.id, { approvalStatus });
+    }
+  }
+
+  async function moveCase(kycCase, to, actor, { reasonCode = null, reasonNote = null, patch = {}, data = {} } = {}) {
+    if (!canTransitionCase(kycCase.status, to)) return fail('invalid_transition', 409, { caseStatus: kycCase.status, to });
+    const round = startsNewRound(kycCase.status, to) ? (kycCase.round || 1) + 1 : (kycCase.round || 1);
+    const updated = await partnerKycCases.updateByIdAsync(kycCase.id, {
+      status: to, round,
+      reasonCode: reasonRequired(to) ? reasonCode : null,
+      reasonNote: reasonRequired(to) ? reasonNote : null,
+      updatedAt: nowIso(), ...patch,
+    });
+    await record(updated, {
+      eventType: 'status_changed', fromStatus: kycCase.status, toStatus: to,
+      reasonCode: reasonCode || null, note: reasonNote || null, data,
+    }, actor);
+    return { case: updated };
+  }
+
+  /** Partner: send the case for review. Everything the partner provides must be in. */
+  async function submit(partner, actor) {
+    const kycCase = await findCase(partner);
+    if (!kycCase) return fail('kyc_incomplete', 409, { missing: (await evaluate(partner, null)).checklist.missing });
+    if (!['draft', 'info_requested'].includes(kycCase.status)) return fail('invalid_transition', 409, { caseStatus: kycCase.status });
+    const { checklist } = await evaluate(partner, kycCase);
+    if (!checklist.readyToSubmit) return fail('kyc_incomplete', 409, { missing: checklist.missing });
+    const moved = await moveCase(kycCase, 'submitted', actor, { patch: { submittedAt: nowIso() } });
+    if (moved.error) return moved;
+    await syncApproval(moved.case, 'submitted');
+    await tell(moved.case, 'submitted');
+    return overview(partner);
+  }
+
+  /** Partner: take a submitted case back before a reviewer picks it up. */
+  async function withdraw(partner, actor) {
+    const kycCase = await findCase(partner);
+    if (!kycCase) return fail('case_not_found', 404);
+    if (kycCase.status !== 'submitted') return fail('invalid_transition', 409, { caseStatus: kycCase.status });
+    const moved = await moveCase(kycCase, 'draft', actor);
+    if (moved.error) return moved;
+    return overview(partner);
+  }
+
+  async function reviewable(caseId, actor) {
+    const kycCase = await partnerKycCases.findByIdAsync(caseId);
+    if (!kycCase) return fail('case_not_found', 404);
+    // Nobody reviews their own case, including through another of their roles.
+    if (actor.id && kycCase.userId === actor.id) return fail('cannot_review_own_case', 403);
+    return { kycCase };
+  }
+
+  /** Reviewer: take a submitted case into review, or reassign one in review to themselves. */
+  async function claim(caseId, actor) {
+    const { kycCase, error, status } = await reviewable(caseId, actor);
+    if (error) return fail(error, status);
+    if (kycCase.status === 'in_review') {
+      if (kycCase.reviewerId === actor.id) return caseDetail(caseId);
+      await partnerKycCases.updateByIdAsync(caseId, { reviewerId: actor.id, updatedAt: nowIso() });
+      await record(kycCase, { eventType: 'reviewer_assigned', targetType: 'case', data: { from: kycCase.reviewerId || null } }, actor);
+      return caseDetail(caseId);
+    }
+    if (kycCase.status !== 'submitted') return fail('invalid_transition', 409, { caseStatus: kycCase.status });
+    const moved = await moveCase(kycCase, 'in_review', actor, { patch: { reviewerId: actor.id } });
+    if (moved.error) return moved;
+    return caseDetail(caseId);
+  }
+
+  const soonestExpiry = (documents) => documents
+    .filter(d => d.status === 'accepted' && d.expiresOn)
+    .map(d => d.expiresOn).sort()[0] || null;
+
+  /**
+   * Reviewer: decide a case — approve, reject, request_info, suspend,
+   * reinstate or reopen. Approval needs every checklist item complete;
+   * a super-admin may override that with a written reason.
+   */
+  async function decide(caseId, body = {}, actor) {
+    const decision = REVIEW_DECISIONS[body.decision];
+    if (!decision) return fail('invalid_decision', 400, { allowed: Object.keys(REVIEW_DECISIONS) });
+    const { kycCase, error, status } = await reviewable(caseId, actor);
+    if (error) return fail(error, status);
+    if (kycCase.status !== decision.from) return fail('invalid_transition', 409, { caseStatus: kycCase.status, decision: body.decision });
+
+    const reasonNote = typeof body.reasonNote === 'string' ? body.reasonNote.trim().slice(0, 2000) || null : null;
+    const reasonCode = body.reasonCode ?? null;
+    if (reasonRequired(decision.to) && !REASON_CODES.includes(reasonCode)) {
+      return fail('reason_code_required', 400, { allowed: REASON_CODES });
+    }
+
+    const patch = {};
+    const data = { decision: body.decision };
+    if (decision.to === 'approved') {
+      const partner = await resolvePartner(kycCase.partnerType, kycCase.userId || kycCase.corporateId);
+      if (partner.error) return partner;
+      const { rows, checklist } = await evaluate(partner, kycCase);
+      const outstanding = checklist.sections.flatMap(sec => sec.items)
+        .filter(i => i.status !== 'complete').map(i => (i.gymId ? `${i.key}@${i.gymId}` : i.key));
+      // Approving and reinstating both need a complete checklist.
+      if (outstanding.length) {
+        if (body.override !== true) return fail('kyc_incomplete', 409, { outstanding });
+        if (!actor.superAdmin) return fail('override_requires_super_admin', 403);
+        if (!reasonNote) return fail('override_reason_required', 400);
+        data.override = true;
+        data.outstanding = outstanding;
+      }
+      const expiry = soonestExpiry(rows.documents);
+      patch.decidedAt = nowIso();
+      patch.decidedBy = actor.id || null;
+      // Review again when the first document expires, or in a year.
+      patch.reverifyAt = expiry
+        ? new Date(`${expiry}T00:00:00Z`).toISOString()
+        : new Date(Date.now() + 365 * 86_400_000).toISOString();
+    } else if (decision.to === 'rejected' || decision.to === 'info_requested') {
+      patch.decidedAt = nowIso();
+      patch.decidedBy = actor.id || null;
+    }
+
+    const moved = await moveCase(kycCase, decision.to, actor, { reasonCode, reasonNote, patch, data });
+    if (moved.error) return moved;
+    await syncApproval(moved.case, decision.to, decision.to === 'rejected' ? reasonNote : (decision.to === 'approved' ? null : undefined));
+    const message = { approve: 'approved', reject: 'rejected', request_info: 'info_requested', suspend: 'suspended', reinstate: 'reinstated', reopen: 'reopened' }[body.decision];
+    await tell(moved.case, message, reasonNote);
+    return caseDetail(caseId);
+  }
+
+  /** Reviewer: accept or reject one document. Only a document with its file can be accepted. */
+  async function reviewDocument(caseId, documentId, body = {}, actor) {
+    const { kycCase, error, status } = await reviewable(caseId, actor);
+    if (error) return fail(error, status);
+    if (kycCase.status !== 'in_review') return fail('case_not_in_review', 409, { caseStatus: kycCase.status });
+    const doc = await partnerDocuments.findByIdAsync(documentId);
+    if (!doc || doc.caseId !== caseId) return fail('document_not_found', 404);
+    if (doc.status !== 'pending') return fail('document_already_reviewed', 409, { documentStatus: doc.status });
+    if (!['accept', 'reject'].includes(body.decision)) return fail('invalid_decision', 400, { allowed: ['accept', 'reject'] });
+    const note = typeof body.note === 'string' ? body.note.trim().slice(0, 2000) || null : null;
+    if (body.decision === 'accept' && !doc.storageKey) return fail('document_has_no_file', 409);
+    if (body.decision === 'reject' && !note) return fail('note_required', 400);
+    await partnerDocuments.updateByIdAsync(doc.id, {
+      status: body.decision === 'accept' ? 'accepted' : 'rejected',
+      reviewNote: note, reviewedBy: actor.id || null, reviewedAt: nowIso(), updatedAt: nowIso(),
+    });
+    await record(kycCase, {
+      eventType: 'document_reviewed', targetType: 'document', targetId: doc.id, note,
+      data: { requirementKey: doc.requirementKey, decision: body.decision },
+    }, actor);
+    return caseDetail(caseId);
+  }
+
+  /**
+   * Reviewer: verify or reject a payout account. Whoever added the account
+   * can't verify it. A verified account becomes the payout account if there
+   * isn't one yet, and can receive payouts once its cooling-off period ends.
+   */
+  async function reviewSettlementAccount(caseId, accountId, body = {}, actor) {
+    const { kycCase, error, status } = await reviewable(caseId, actor);
+    if (error) return fail(error, status);
+    const account = await partnerSettlementAccounts.findByIdAsync(accountId);
+    if (!account || account.caseId !== caseId) return fail('account_not_found', 404);
+    if (!['verify', 'reject'].includes(body.decision)) return fail('invalid_decision', 400, { allowed: ['verify', 'reject'] });
+    const to = body.decision === 'verify' ? 'verified' : 'rejected';
+    if (!canTransitionSettlement(account.status, to)) return fail('invalid_transition', 409, { accountStatus: account.status });
+    if (actor.id && account.requestedBy === actor.id) return fail('cannot_verify_own_request', 403);
+    const note = typeof body.note === 'string' ? body.note.trim().slice(0, 2000) || null : null;
+    if (to === 'rejected' && !note) return fail('note_required', 400);
+
+    const patch = { status: to, updatedAt: nowIso() };
+    if (to === 'verified') {
+      const accounts = await partnerSettlementAccounts.filterByColumnAsync('caseId', caseId);
+      patch.verifiedBy = actor.id || null;
+      patch.verifiedAt = nowIso();
+      patch.cooldownUntil = new Date(Date.now() + SETTLEMENT_COOLDOWN_HOURS * 3_600_000).toISOString();
+      patch.isPrimary = !accounts.some(a => a.isPrimary);
+    }
+    await partnerSettlementAccounts.updateByIdAsync(account.id, patch);
+    await record(kycCase, {
+      eventType: 'settlement_account_changed', targetType: 'settlement_account', targetId: account.id, note,
+      data: { change: to, method: account.method, provider: account.provider, ...(patch.isPrimary ? { primary: true } : {}) },
+    }, actor);
+    return caseDetail(caseId);
+  }
+
   // ── Admin reads ───────────────────────────────────────────────────────────
 
   async function listCases({ status, partnerType } = {}) {
@@ -467,6 +686,7 @@ export function createPartnerKycService({
     updateBusiness, upsertPerson, upsertDocumentDetails,
     addSettlementAccount, removeSettlementAccount,
     recordSiteVisit, recordCorporateContract,
+    submit, withdraw, claim, decide, reviewDocument, reviewSettlementAccount,
     listCases, caseDetail,
   };
 }
