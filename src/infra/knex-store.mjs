@@ -78,6 +78,13 @@ const TABLE_MAP = {
   communication_automations: { table: 'CommunicationAutomation' },
   automation_runs:           { table: 'AutomationRun' },
   job_runs:                  { table: 'JobRun' },
+  partner_kyc_cases:           { table: 'PartnerKycCase' },
+  partner_people:              { table: 'PartnerPerson' },
+  partner_settlement_accounts: { table: 'PartnerSettlementAccount' },
+  partner_documents:           { table: 'PartnerDocument' },
+  partner_checks:              { table: 'PartnerCheck' },
+  partner_agreements:          { table: 'PartnerAgreement' },
+  partner_kyc_events:          { table: 'PartnerKycEvent' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -124,6 +131,8 @@ const AUTO_UPDATED_AT = new Set([
   'users', 'gyms', 'trainers', 'platform_settings',
   'communication_campaigns', 'communication_messages', 'communication_templates',
   'whatsapp_templates', 'communication_preferences', 'communication_automations',
+  'partner_kyc_cases', 'partner_people', 'partner_settlement_accounts', 'partner_documents',
+  'partner_checks', 'partner_agreements',
 ]);
 
 // Collections retained for legacy synchronous service call sites. New service
@@ -590,6 +599,13 @@ const ALLOWED_FIELDS = {
   communication_automations: new Set(['id','senderType','gymId','name','trigger','offsetDays','conditions','templateId','channels','status','createdBy','createdAt','updatedAt']),
   automation_runs:           new Set(['id','automationId','gymId','memberId','occurrenceKey','status','createdAt']),
   job_runs:                  new Set(['id','job','status','startedAt','finishedAt','stats','error']),
+  partner_kyc_cases:           new Set(['id','partnerType','userId','corporateId','status','tier','round','legalName','tradingName','entityType','registrationNumber','registrationAuthority','incorporatedOn','registeredAddress','tin','submittedAt','reviewerId','decidedAt','decidedBy','reasonCode','reasonNote','reverifyAt','createdAt','updatedAt']),
+  partner_people:              new Set(['id','caseId','role','userId','fullName','dateOfBirth','nationality','idType','idNumber','idExpiresOn','phone','email','position','ownershipPct','isPoliticallyExposed','status','createdAt','updatedAt']),
+  partner_settlement_accounts: new Set(['id','caseId','method','provider','accountName','accountNumber','branch','swiftCode','currency','status','isPrimary','requestedBy','verifiedBy','verifiedAt','cooldownUntil','disabledAt','legacySource','createdAt','updatedAt']),
+  partner_documents:           new Set(['id','caseId','round','requirementKey','docType','personId','settlementAccountId','gymId','storageProvider','storageKey','fileName','mimeType','sizeBytes','sha256','documentNumber','issuedOn','expiresOn','status','supersedesId','reviewNote','reviewedBy','reviewedAt','uploadedBy','createdAt','updatedAt']),
+  partner_checks:              new Set(['id','caseId','round','checkType','targetType','targetId','method','provider','result','evidence','note','performedBy','performedAt','expiresAt','createdAt','updatedAt']),
+  partner_agreements:          new Set(['id','caseId','agreementType','version','status','acceptedBy','acceptedAt','acceptedIp','acceptedUserAgent','signedDocumentId','effectiveFrom','expiresAt','revokedAt','createdAt','updatedAt']),
+  partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
 };
 
 // jsonb columns that may hold array-shaped (or otherwise non-object) JSON —
@@ -622,6 +638,9 @@ const JSON_FIELDS = {
   communication_templates: ['bodies'],
   communication_automations: ['conditions'],
   job_runs: ['stats'],
+  partner_kyc_cases: ['registeredAddress'],
+  partner_checks: ['evidence'],
+  partner_kyc_events: ['data'],
 };
 
 /**
@@ -644,7 +663,9 @@ function prepareForKnex(name, data, isUpdate = false) {
     'requestedAt', 'decidedAt', 'timestamp', 'paidAt', 'lastTopUpAt', 'at', 'moderatedAt', 'lastSeenAt', 'readAt',
     'completedAt', 'connectedAt', 'endedAt', 'joinedAt', 'leftAt',
     'scheduledAt', 'sentAt', 'cancelledAt', 'nextAttemptAt', 'deliveredAt', 'openedAt', 'clickedAt', 'failedAt',
-    'lastSyncedAt', 'whatsappMarketingConsentAt', 'whatsappOptedOutAt', 'finishedAt'];
+    'lastSyncedAt', 'whatsappMarketingConsentAt', 'whatsappOptedOutAt', 'finishedAt',
+    'submittedAt', 'decidedAt', 'reverifyAt', 'verifiedAt', 'cooldownUntil', 'disabledAt', 'reviewedAt',
+    'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt'];
   for (const f of DATE_FIELDS) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];
