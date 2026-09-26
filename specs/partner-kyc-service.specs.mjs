@@ -130,7 +130,8 @@ test('document details are corrected in place while pending, and start over once
   }, p.actor);
   const first = view.documents[0];
   assert.equal(first.documentNumber, 'ACE123');
-  assert.equal(first.storageKey, null);
+  assert.equal(first.hasFile, false);
+  assert.equal('storageKey' in first, false);
   assert.deepEqual(first.details, { level: 'CPT' });
   assert.equal(item(view, 'professional.certification').status, 'file_missing');
 

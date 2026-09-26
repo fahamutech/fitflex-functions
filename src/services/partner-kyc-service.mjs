@@ -12,8 +12,11 @@
 // A partner submits once the checklist says they're ready. A FitFlex reviewer
 // claims the case, reviews documents and payout accounts, and decides. The
 // decision drives the approval flag the apps already read (User.approvalStatus,
-// and TrainerProfile.approvalStatus for trainers). Document files come with
-// private storage in a later phase.
+// and TrainerProfile.approvalStatus for trainers).
+//
+// Document files live in private storage (Zebra). Their storage keys never
+// leave this service: responses say only whether a document has its file,
+// and the file itself is streamed by the API after its own access checks.
 import { randomUUID } from 'node:crypto';
 import {
   PARTNER_SUBJECT, partnerTypeForUserType, normalizeIdentifier,
@@ -27,6 +30,7 @@ import {
   DOCUMENTS_FOR, DOCUMENT_REQUIREMENTS, SETTLEMENT_REQUIRED, currentDocument,
 } from '../shared/partner-kyc-requirements.mjs';
 import { GYM_TIERS } from '../shared/constants.mjs';
+import { prepareDocumentFile, displayFileName, sha256 } from '../infra/document-file.mjs';
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -100,6 +104,7 @@ export function createPartnerKycService({
   partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
   partnerSettlementAccounts, partnerAgreements, partnerKycEvents, auditLog,
   notify = async () => {},
+  documentStore = null,     // { provider, put(buffer, name, mimeType) → { provider, key }, get(key) → Buffer }
 }) {
   // ── Partners and cases ────────────────────────────────────────────────────
 
@@ -204,6 +209,9 @@ export function createPartnerKycService({
     branch: a.branch, currency: a.currency, status: a.status, isPrimary: a.isPrimary, createdAt: a.createdAt,
   });
 
+  // What callers see of a document: never where or how it is stored.
+  const documentView = ({ storageProvider, storageKey, sha256: _hash, ...doc }) => ({ ...doc, hasFile: Boolean(storageKey) });
+
   /** A partner's (or an admin's view of a partner's) KYC: case, details and checklist. */
   async function overview(partner) {
     const kycCase = await findCase(partner);
@@ -212,7 +220,7 @@ export function createPartnerKycService({
       partnerType: partner.partnerType,
       case: kycCase,
       people: rows.people,
-      documents: rows.documents,
+      documents: rows.documents.map(documentView),
       settlementAccounts: rows.settlementAccounts.map(settlementView),
       checklist,
     };
@@ -260,6 +268,106 @@ export function createPartnerKycService({
     return overview(partner);
   }
 
+  // ── Documents ─────────────────────────────────────────────────────────────
+
+  /**
+   * Write to the document standing for a requirement. While it is still
+   * pending it is corrected in place; once reviewed or expired (or if there
+   * is none) a new one starts, pointing back at the one it replaces.
+   */
+  async function writeDocument(kycCase, requirementKey, patch, actor, id = null) {
+    const current = currentDocument(await partnerDocuments.filterByColumnAsync('caseId', kycCase.id), requirementKey);
+    if (current && current.status === 'pending') {
+      await partnerDocuments.updateByIdAsync(current.id, { ...patch, updatedAt: nowIso() });
+      return current.id;
+    }
+    const docId = id || `pdoc_${randomUUID().slice(0, 12)}`;
+    await partnerDocuments.insertAsync({
+      id: docId, caseId: kycCase.id, round: kycCase.round || 1, requirementKey,
+      docType: DOCUMENT_REQUIREMENTS[requirementKey].types[0], details: {},
+      ...patch, status: 'pending', supersedesId: current?.id || null,
+      uploadedBy: actor.id || null, createdAt: nowIso(), updatedAt: nowIso(),
+    });
+    return docId;
+  }
+
+  /**
+   * Attach a document's file (PDF, JPEG, PNG or WebP, up to 10 MB). The type
+   * is read from the file itself; photos are re-encoded without metadata.
+   * Replaces the file of a document still waiting for review.
+   */
+  async function attachDocumentFile(partner, requirementKey, upload = {}, actor) {
+    if (!DOCUMENTS_FOR[partner.partnerType].includes(requirementKey)) {
+      return fail('invalid_requirement', 400, { allowed: DOCUMENTS_FOR[partner.partnerType] });
+    }
+    const spec = DOCUMENT_REQUIREMENTS[requirementKey];
+    if (upload.docType !== undefined && !spec.types.includes(upload.docType)) return fail('invalid_docType', 400, { allowed: spec.types });
+    if (!documentStore) return fail('storage_service_unavailable', 503);
+    if (!Buffer.isBuffer(upload.buffer)) return fail('no_file_provided');
+    const existingCase = await findCase(partner);
+    if (!editable(existingCase, actor)) return fail('case_locked', 409, { caseStatus: existingCase.status });
+
+    const file = await prepareDocumentFile(upload.buffer, { truncated: upload.truncated });
+    if (file.error) return fail(file.error, file.error === 'file_too_large' ? 413 : 400);
+
+    const kycCase = await ensureCase(partner, actor);
+    const newId = `pdoc_${randomUUID().slice(0, 12)}`;
+    let stored;
+    try {
+      // Stored under a random name; the original name is kept only for display.
+      stored = await documentStore.put(file.buffer, `${newId}.${file.ext}`, file.mimeType);
+    } catch (err) {
+      return fail(err.code === 'storage_service_unavailable' ? err.message : 'storage_upload_failed', 503);
+    }
+    const docId = await writeDocument(kycCase, requirementKey, {
+      ...(upload.docType ? { docType: upload.docType } : {}),
+      storageProvider: stored.provider, storageKey: stored.key, mimeType: file.mimeType,
+      sizeBytes: file.sizeBytes, sha256: file.sha256, fileName: displayFileName(upload.filename, file.ext),
+      uploadedBy: actor.id || null,
+    }, actor, newId);
+
+    // The same file on another partner's case is worth a reviewer's attention.
+    const elsewhere = (await partnerDocuments.filterByColumnAsync('sha256', file.sha256)).some(d => d.caseId !== kycCase.id);
+    await record(kycCase, {
+      eventType: 'document_uploaded', targetType: 'document', targetId: docId,
+      data: { requirementKey, mimeType: file.mimeType, sizeBytes: file.sizeBytes, ...(elsewhere ? { sameFileOnAnotherCase: true } : {}) },
+    }, actor);
+    return overview(partner);
+  }
+
+  async function loadDocumentFile(kycCase, documentId, viewer) {
+    const doc = await partnerDocuments.findByIdAsync(documentId);
+    if (!doc || doc.caseId !== kycCase.id) return fail('document_not_found', 404);
+    if (!doc.storageKey) return fail('document_has_no_file', 404);
+    if (!documentStore || documentStore.provider !== doc.storageProvider) return fail('storage_service_unavailable', 503);
+    let buffer;
+    try {
+      buffer = await documentStore.get(doc.storageKey);
+    } catch {
+      return fail('storage_download_failed', 502);
+    }
+    if (sha256(buffer) !== doc.sha256) return fail('file_integrity_failed', 502);
+    await auditLog.insertAsync({
+      id: `aud_${randomUUID().slice(0, 8)}`, at: nowIso(), actor: viewer.id || 'system', action: 'kyc.document_viewed',
+      target: kycCase.id, before: null, after: { documentId: doc.id, requirementKey: doc.requirementKey, viewerRole: viewer.role },
+    });
+    return { file: { buffer, mimeType: doc.mimeType, fileName: doc.fileName || `${doc.requirementKey}` } };
+  }
+
+  /** Partner: one of my own documents' files. */
+  async function readOwnDocumentFile(partner, documentId, viewer) {
+    const kycCase = await findCase(partner);
+    if (!kycCase) return fail('document_not_found', 404);
+    return loadDocumentFile(kycCase, documentId, viewer);
+  }
+
+  /** Reviewer: a document's file. Every view is audited. */
+  async function readDocumentFile(caseId, documentId, viewer) {
+    const kycCase = await partnerKycCases.findByIdAsync(caseId);
+    if (!kycCase) return fail('case_not_found', 404);
+    return loadDocumentFile(kycCase, documentId, viewer);
+  }
+
   // ── Document details ──────────────────────────────────────────────────────
   // The details (number, issuer, dates) are recorded now; the file is
   // attached once private document storage is in place.
@@ -284,22 +392,7 @@ export function createPartnerKycService({
     const existingCase = await findCase(partner);
     if (!editable(existingCase, actor)) return fail('case_locked', 409, { caseStatus: existingCase.status });
     const kycCase = await ensureCase(partner, actor);
-    const current = currentDocument(await partnerDocuments.filterByColumnAsync('caseId', kycCase.id), requirementKey);
-
-    let docId;
-    if (current && current.status === 'pending') {
-      // Still waiting for review: correct it in place.
-      docId = current.id;
-      await partnerDocuments.updateByIdAsync(current.id, { docType, ...patch, ...(details ? { details } : {}), updatedAt: nowIso() });
-    } else {
-      // Nothing yet, or the last one was reviewed or expired: start a new one.
-      docId = `pdoc_${randomUUID().slice(0, 12)}`;
-      await partnerDocuments.insertAsync({
-        id: docId, caseId: kycCase.id, round: kycCase.round || 1, requirementKey, docType,
-        ...patch, details: details || {}, status: 'pending', supersedesId: current?.id || null,
-        uploadedBy: actor.id || null, createdAt: nowIso(), updatedAt: nowIso(),
-      });
-    }
+    const docId = await writeDocument(kycCase, requirementKey, { docType, ...patch, ...(details ? { details } : {}) }, actor);
     await record(kycCase, {
       eventType: 'document_updated', targetType: 'document', targetId: docId,
       data: { requirementKey, docType, fields: Object.keys(patch) },
@@ -684,6 +777,7 @@ export function createPartnerKycService({
   return {
     partnerForUser, resolvePartner, findCase, ensureCase, overview,
     updateBusiness, upsertPerson, upsertDocumentDetails,
+    attachDocumentFile, readOwnDocumentFile, readDocumentFile,
     addSettlementAccount, removeSettlementAccount,
     recordSiteVisit, recordCorporateContract,
     submit, withdraw, claim, decide, reviewDocument, reviewSettlementAccount,

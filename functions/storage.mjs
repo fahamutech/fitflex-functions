@@ -4,15 +4,12 @@
 // bytes, and gym/trainer records store a Zebra URL instead of base64.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import Busboy from '@fastify/busboy';
-import FormData from 'form-data';
-import axios from 'axios';
+import { parseMultipartRequest, uploadToZebra, parseZebraResponse } from '../src/infra/storage-client.mjs';
 import path from 'path';
 import sharp from 'sharp';
 
 const created = new Date().toISOString();
 const ZEBRA_BASE_URL = process.env.ZEBRA_BASE_URL;
-const UPLOAD_TIMEOUT_MS = 60_000;
 
 // Only images are accepted for now — no other file types (PDFs, docs, etc).
 const FULL_MAX_DIMENSION = 1280;
@@ -21,7 +18,6 @@ const THUMB_MAX_DIMENSION = 320;
 const THUMB_WEBP_QUALITY = 70;
 
 const stripTrailingSlash = value => `${value ?? ''}`.replace(/\/+$/g, '');
-const storageEndpoint = () => `${stripTrailingSlash(ZEBRA_BASE_URL)}/storage`;
 const isImageMime = mime => `${mime ?? ''}`.toLowerCase().startsWith('image/');
 const webpName = (filename, suffix = '') => {
   const clean = `${filename ?? 'image'}`.trim() || 'image';
@@ -30,56 +26,12 @@ const webpName = (filename, suffix = '') => {
   return `${base}${suffix}.webp`;
 };
 
-const parseMultipartRequest = request => new Promise((resolve, reject) => {
-  const busboy = new Busboy({ headers: request.headers });
-  const fields = [];
-  const files = [];
-  busboy.on('field', (name, value) => fields.push({ name, value }));
-  busboy.on('file', (fieldname, stream, filename, encoding, mimetype) => {
-    const chunks = [];
-    stream.on('data', chunk => chunks.push(chunk));
-    stream.on('error', reject);
-    stream.on('end', () => {
-      files.push({ fieldname, filename: filename || 'file', encoding, mimetype, buffer: Buffer.concat(chunks) });
-    });
-  });
-  busboy.on('error', reject);
-  busboy.on('finish', () => resolve({ fields, files }));
-  request.pipe(busboy);
-});
-
 /** Downscales + re-encodes as WebP. Skips re-encoding if already WebP and already within bounds. */
 const toWebp = (buffer, maxDimension, quality) => sharp(buffer, { failOn: 'none', animated: true })
   .rotate()
   .resize({ width: maxDimension, height: maxDimension, fit: 'inside', withoutEnlargement: true })
   .webp({ quality })
   .toBuffer();
-
-const uploadToZebra = async (buffer, filename, mimetype) => {
-  const form = new FormData();
-  form.append('file', buffer, { filename, contentType: mimetype });
-  const response = await axios.post(storageEndpoint(), form, {
-    headers: form.getHeaders(),
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-    timeout: UPLOAD_TIMEOUT_MS,
-    validateStatus: () => true
-  });
-  return response;
-};
-
-/**
- * Zebra responds with `{ urls: ["/storage/<cid>/<filename>"] }` — a
- * root-relative path served by *this* server's `getStorageFile` redirect
- * below, not an absolute URL. Normalize to `{ cid, filename, url }`.
- */
-const parseZebraResponse = data => {
-  const relativeUrl = data?.urls?.[0];
-  if (!relativeUrl) return null;
-  const url = relativeUrl.startsWith('/') ? relativeUrl : `/${relativeUrl}`;
-  const [, cid, filename] = url.match(/^\/storage\/([^/]+)\/(.+)$/) || [];
-  return { cid: cid || null, filename: filename || null, url };
-};
 
 // NOTE: this path must NOT be a prefix of getStorageFile's path below —
 // bfast-function registers onGuard via `expressApp.use(path, guard)`, which

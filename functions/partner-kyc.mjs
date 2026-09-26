@@ -8,6 +8,8 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { partnerKycService as svc } from '../src/bootstrap/services.mjs';
+import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
+import { DOCUMENT_MAX_BYTES } from '../src/shared/partner-kyc.mjs';
 
 const created = new Date().toISOString();
 const PARTNER_ROLES = ['gym_operator', 'trainer', 'vendor'];
@@ -19,6 +21,28 @@ function send(res, result) {
     return res.status(status).json({ error, ...extra });
   }
   res.json(result);
+}
+
+/** Read the one 'file' part (and an optional docType field) of a document upload. */
+async function readUpload(req) {
+  const { files, fields } = await parseMultipartRequest(req, { fileSize: DOCUMENT_MAX_BYTES, files: 1, fields: 5 });
+  const file = files.find(f => f.fieldname === 'file') || files[0];
+  const docType = fields.find(f => f.name === 'docType')?.value;
+  return file ? { buffer: file.buffer, filename: file.filename, truncated: file.truncated, ...(docType ? { docType } : {}) } : {};
+}
+
+/** Stream a document back: never cached, never sniffed into another type. */
+function sendFile(res, result) {
+  if (result.error) return send(res, result);
+  const { buffer, mimeType, fileName } = result.file;
+  const safeName = encodeURIComponent(fileName);
+  res.status(200);
+  res.setHeader('Content-Type', mimeType);
+  res.setHeader('Content-Length', String(buffer.length));
+  res.setHeader('Content-Disposition', `inline; filename="${safeName}"; filename*=UTF-8''${safeName}`);
+  res.setHeader('Cache-Control', 'no-store, private');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(buffer);
 }
 
 const partnerActor = req => ({ id: req.user.sub, role: 'partner' });
@@ -70,6 +94,24 @@ export const myKycDocument = {
   requestSample: { docType: 'certification', issuer: 'ACE', documentNumber: 'ACE-123456', issuedOn: '2024-02-01', expiresOn: '2026-12-31', details: { level: 'Personal Trainer' } },
   onGuard: requireAuth(...PARTNER_ROLES),
   onRequest: asPartner((partner, req) => svc.upsertDocumentDetails(partner, req.params.requirementKey, req.body || {}, partnerActor(req))),
+};
+
+export const myKycDocumentFile = {
+  created, method: 'post', path: '/me/kyc/documents/:requirementKey/file',
+  description: 'Partner: upload a document\'s file — multipart/form-data, field "file" (PDF, JPEG, PNG or WebP, up to 10 MB), optional field "docType". The type is read from the file itself. Replaces the file of a document still waiting for review. The file is kept private: responses only say hasFile.',
+  onGuard: requireAuth(...PARTNER_ROLES),
+  onRequest: asPartner(async (partner, req) => svc.attachDocumentFile(partner, req.params.requirementKey, await readUpload(req), partnerActor(req))),
+};
+
+export const myKycReadDocumentFile = {
+  created, method: 'get', path: '/me/kyc/documents/:documentId/file',
+  description: 'Partner: view one of my own uploaded documents.',
+  onGuard: requireAuth(...PARTNER_ROLES),
+  onRequest: async (req, res) => {
+    const partner = await svc.partnerForUser(req.user.sub);
+    if (partner.error) return send(res, partner);
+    sendFile(res, await svc.readOwnDocumentFile(partner, req.params.documentId, partnerActor(req)));
+  },
 };
 
 export const myKycAddSettlementAccount = {
@@ -143,6 +185,20 @@ export const adminKycPartnerDocument = {
   description: 'Admin: record a partner\'s document details on their behalf (same fields as PUT /me/kyc/documents/:requirementKey).',
   onGuard: adminGuard,
   onRequest: forPartner((partner, req) => svc.upsertDocumentDetails(partner, req.params.requirementKey, req.body || {}, adminActor(req))),
+};
+
+export const adminKycPartnerDocumentFile = {
+  created, method: 'post', path: '/admin/kyc/partners/:partnerType/:subjectId/documents/:requirementKey/file',
+  description: 'Admin: upload a document\'s file on a partner\'s behalf (same form as POST /me/kyc/documents/:requirementKey/file).',
+  onGuard: adminGuard,
+  onRequest: forPartner(async (partner, req) => svc.attachDocumentFile(partner, req.params.requirementKey, await readUpload(req), adminActor(req))),
+};
+
+export const adminKycReadDocumentFile = {
+  created, method: 'get', path: '/admin/kyc/cases/:id/documents/:documentId/file',
+  description: 'Admin: view a document on a case. The file is streamed from private storage; every view is audited.',
+  onGuard: adminGuard,
+  onRequest: async (req, res) => sendFile(res, await svc.readDocumentFile(req.params.id, req.params.documentId, adminActor(req))),
 };
 
 export const adminKycPartnerSettlementAccount = {
