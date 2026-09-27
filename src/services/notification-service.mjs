@@ -99,16 +99,20 @@ export function createNotificationService({
    * Notify one user. Always writes the inbox row; push and WhatsApp are
    * attempted after and their failures are logged, not raised.
    * @param {string} userId
-   * @param {{ type:string, title:string, body:string, data?:object, whatsapp?:(user)=>Promise<any> }} message
+   * An `id` makes the call idempotent: notifying again with the same id
+   * finds the inbox row already there and sends nothing more.
+   * @param {{ id?:string, type:string, title:string, body:string, data?:object, whatsapp?:(user)=>Promise<any> }} message
    */
-  async function notify(userId, { type, title, body, data = {}, whatsapp }) {
+  async function notify(userId, { id = null, type, title, body, data = {}, whatsapp }) {
     if (!userId) return { ok: false, skipped: 'no_user' };
     let row = {
-      id: `ntf_${randomUUID().slice(0, 8)}`, userId, type, title, body,
+      id: id || `ntf_${randomUUID().slice(0, 8)}`, userId, type, title, body,
       data: { ...data, type }, readAt: null, createdAt: new Date().toISOString(),
     };
     try {
-      row = (await writeInbox(userId, { id: row.id, type, title, body, data })).notification;
+      const written = await writeInbox(userId, { id: row.id, type, title, body, data });
+      row = written.notification;
+      if (id && !written.created) return { ok: true, notification: row, duplicate: true };
     } catch (err) {
       logger.warn?.(`[notify] inbox write failed for ${userId}/${type}: ${err.message}`);
     }
@@ -224,7 +228,11 @@ export function createNotificationService({
   async function notifyRenewal(sub, daysLeft) {
     const tier = sub.tier ? sub.tier[0].toUpperCase() + sub.tier.slice(1) : 'membership';
     const when = daysLeft === 0 ? 'today' : daysLeft === 1 ? 'tomorrow' : `in ${daysLeft} days`;
+    // One reminder per subscription, renewal date and day — a rerun of the
+    // job the same day finds it already sent.
+    const day = new Date(sub.renewsAt).toISOString().slice(0, 10);
     return notify(sub.memberId, {
+      id: `ntf_renew_${sub.id}_${day}_${daysLeft}`,
       type: 'subscription_renewal',
       title: `Your ${tier} pass renews ${when}`,
       body: 'Keep your plan, change tier or cancel from the Passes screen.',

@@ -50,6 +50,7 @@ import { createDeliveryService } from '../services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../services/communication-preference-service.mjs';
 import { createWhatsAppChannelService } from '../services/whatsapp-channel-service.mjs';
 import { createCommunicationHistoryService } from '../services/communication-history-service.mjs';
+import { createAutomationService } from '../services/automation-service.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
@@ -112,8 +113,15 @@ export const accountService = createAccountService({
 });
 
 export const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig: settingsService.getTierConfig });
+// Lifecycle events for gym automations. automationService is defined further
+// down; these only run later, and never throw.
+const lifecycle = {
+  activated: (sub) => automationService.handleEvent({ type: 'membership_activated', subscription: sub }),
+  paymentFailed: (sub, extra) => automationService.handleEvent({ type: 'payment_failed', subscription: sub, ...extra }),
+};
 export const memberManagement = createMemberManagementService({
   users, gyms, subscriptions, checkins, paymentRequests, publicUserId, initFirebaseAdmin, getAdminAuth,
+  onMembershipActivated: lifecycle.activated,
 });
 export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
@@ -127,7 +135,11 @@ export const adminMemberService = createAdminMemberService({
 });
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
-  onSubscriptionActivated: sub => notificationService.notifySubscriptionActivated(sub),
+  onSubscriptionActivated: async (sub) => {
+    await notificationService.notifySubscriptionActivated(sub);
+    await lifecycle.activated(sub);
+  },
+  onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
@@ -135,7 +147,11 @@ export const adminApprovalService = createAdminApprovalService({ users, auditLog
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, gymOwners, settingsService });
 export const invoiceService = createInvoiceService({ invoices, gyms, users, gymPayouts, auditLog });
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
-export const webhookService = createWebhookService({ subscriptions, webhookSeen });
+export const webhookService = createWebhookService({
+  subscriptions, webhookSeen,
+  onSubscriptionActivated: lifecycle.activated,
+  onPaymentFailed: (sub, paymentId) => lifecycle.paymentFailed(sub, { reference: `selcom:${paymentId}` }),
+});
 export const gymReviewService = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog });
 export const trainerReviewService = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog });
 export const whatsAppService = createWhatsAppService({
@@ -213,6 +229,14 @@ export const templateService = createTemplateService({
 // Communication history: reads the message ledger (campaigns, recipients,
 // member timelines, the message log).
 export const communicationHistoryService = createCommunicationHistoryService({ db });
+// Lifecycle automations: welcome, expiry reminders, expired, failed
+// payment, inactivity — sent through the same ledger and dispatcher.
+export const automationService = createAutomationService({
+  db, segmentService, templateService, auditLog,
+  renewalLink: process.env.COMMS_RENEWAL_URL || null,
+  maxPerRun: positiveInt(process.env.COMMS_AUTOMATION_MAX_PER_RUN, 300),
+  marketingWeeklyCap: positiveInt(process.env.COMMS_MARKETING_WEEKLY_CAP, 2),
+});
 export const campaignService = createCampaignService({
   db, campaigns: communicationCampaigns, gyms, segmentService, auditLog, templateService,
   historyService: communicationHistoryService,

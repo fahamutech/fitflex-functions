@@ -1,21 +1,31 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
 export const renewalNotifier = {
   created, rule: '0 9 * * *', // every day 09:00 UTC
-  description: 'Send T-3 / T-1 / T0 renewal notifications (BL-008) to the inbox, push and WhatsApp.',
+  description: 'Send T-3 / T-1 / T0 renewal notifications (BL-008) to the inbox, push and WhatsApp. Safe to rerun: each reminder is sent once. Gym memberships whose gym has its own expiry reminders switched on are left to the gym (D4).',
   onJob: async () => {
     const now = Date.now();
+    const gymsRemind = await automationService.gymsWithReminders();
     for (const s of await subscriptions.filterAsync(s => s.status === 'active')) {
       const days = Math.round((+new Date(s.renewsAt) - now) / 86_400_000);
-      if ([3, 1, 0].includes(days)) {
-        console.log(`[renewal] member=${s.memberId} sub=${s.id} T-${days} renewsAt=${s.renewsAt}`);
-        await notificationService.notifyRenewal(s, days);
-      }
+      if (![3, 1, 0].includes(days)) continue;
+      if (s.type === 'direct_sub' && gymsRemind.has(s.homeGymId)) continue;
+      const r = await notificationService.notifyRenewal(s, days);
+      if (!r?.duplicate) console.log(`[renewal] member=${s.memberId} sub=${s.id} T-${days} renewsAt=${s.renewsAt}`);
     }
+  }
+};
+
+export const communicationAutomations = {
+  created, rule: '10 * * * *', // hourly; scheduled messages go out 08:00–20:00 EAT
+  description: 'Communications: gym lifecycle automations — welcome, expiry reminders (7/3/1 days), expired, failed payment, 14 days without a visit. Every send is keyed per member and occurrence, so reruns and overlaps never send twice; only one server runs it at a time.',
+  onJob: async () => {
+    const r = await automationService.runDue();
+    if (r.fired || r.paused || r.errors) console.log(`[automations] gyms=${r.gyms} fired=${r.fired} already=${r.already} deferred=${r.deferred} paused=${r.paused} errors=${r.errors}`);
   }
 };
 
