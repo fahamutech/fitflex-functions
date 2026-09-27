@@ -39,6 +39,17 @@ export function createMemberManagementService({
     return latestDirectSubscription(await subscriptions.filterAsync((s) => s.memberId === memberId), gymIds);
   }
 
+  /**
+   * A member's payments that belong to the owner's gyms: memberships at
+   * those gyms. Their FitFlex pass, trainer sessions and payments to other
+   * gyms are theirs and those businesses', not this gym's (audit S1).
+   */
+  async function gymPayments(memberId, gymIds) {
+    const own = new Set((await subscriptions.filterAsync((x) =>
+      x.memberId === memberId && x.type === 'direct_sub' && gymIds.includes(x.homeGymId))).map((x) => x.id));
+    return paymentRequests.filterAsync((p) => p.memberId === memberId && own.has(p.subscriptionId));
+  }
+
   async function ownerCheckinsFor(memberId, gymIds) {
     const rows = await checkins.filterAsync((c) => c.memberId === memberId && gymIds.includes(c.gymId));
     return rows.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
@@ -346,7 +357,7 @@ export function createMemberManagementService({
     const startMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
     const visits = sorted.filter((c) => +new Date(c.timestamp) >= +startMonth).length;
 
-    const allPayments = await paymentRequests.filterAsync((p) => p.memberId === memberId);
+    const allPayments = await gymPayments(memberId, gymIds);
     const paymentHistory = allPayments
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))
       .map((p) => ({
@@ -443,7 +454,7 @@ export function createMemberManagementService({
     const { start, end } = customRange(query.from, query.to);
     const search = String(query.search || '').trim().toLowerCase();
 
-    let rows = (await paymentRequests.filterAsync((p) => p.memberId === memberId))
+    let rows = (await gymPayments(memberId, gymIds))
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))
       .map((p) => ({
         id: p.id,

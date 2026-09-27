@@ -115,9 +115,11 @@ export function createDeliveryService({
     const data = { ...(await payload(msg)), notificationId: hasInbox ? inboxIdFor(hasInbox.id) : '' };
     const r = await notificationService.sendPush(msg.memberId, { title: msg.title, body: msg.body, data });
     if (r?.skipped === 'push_disabled' || r?.skipped === 'push_unavailable') return { permanent: true, reason: r.skipped };
-    if (r?.sent > 0) return { status: 'sent' };
+    // FCM's references, for the history: one id per phone it went to.
+    const fcm = { messageIds: r?.messageIds || [], failed: r?.failed || 0, errors: r?.errors || [] };
+    if (r?.sent > 0) return { status: 'sent', providerMessageId: fcm.messageIds[0] || null, payload: { fcm } };
     if (!r?.failed) return { permanent: true, reason: 'no_device' }; // no (live) tokens left
-    return { temporary: true, reason: 'push_failed' };
+    return { temporary: true, reason: 'push_failed', payload: { fcm } };
   }
 
   const channels = {
@@ -147,13 +149,17 @@ export function createDeliveryService({
         ...(outcome.status === 'delivered' ? { deliveredAt: at } : {}),
         ...(outcome.notificationId ? { notificationId: outcome.notificationId } : {}),
         ...(outcome.providerMessageId ? { providerMessageId: outcome.providerMessageId } : {}),
+        ...(outcome.payload ? { payload: outcome.payload } : {}),
       });
       return 'sent';
     }
     const retry = outcome.temporary && msg.attempts < MAX_ATTEMPTS;
+    // Failures are kept, never dropped: status, reason, time and whatever
+    // the provider said.
+    const extra = outcome.payload ? { payload: outcome.payload } : {};
     await db('CommunicationMessage').where({ id: msg.id }).update(retry
-      ? { status: 'queued', failureReason: outcome.reason, nextAttemptAt: new Date(+at + RETRY_DELAYS_MS[msg.attempts - 1]), updatedAt: at }
-      : { status: 'failed', failureReason: outcome.reason, failurePermanent: Boolean(outcome.permanent), failedAt: at, nextAttemptAt: null, updatedAt: at });
+      ? { status: 'queued', failureReason: outcome.reason, nextAttemptAt: new Date(+at + RETRY_DELAYS_MS[msg.attempts - 1]), updatedAt: at, ...extra }
+      : { status: 'failed', failureReason: outcome.reason, failurePermanent: Boolean(outcome.permanent), failedAt: at, nextAttemptAt: null, updatedAt: at, ...extra });
     return retry ? 'retry' : 'failed';
   }
 
