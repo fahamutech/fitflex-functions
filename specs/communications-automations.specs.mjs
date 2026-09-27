@@ -163,6 +163,8 @@ test('the hourly run sends each due reminder once, however often it runs', async
   assert.ok(first.fired >= 1);
   const again = await automations.runDue({ gymIds: [g] });
   assert.equal(again.fired, 0, 'a rerun sends nothing new');
+  assert.equal(again.already, first.fired, 'and says it was already sent — not held back');
+  assert.equal(again.deferred, 0);
   const runs = await runsOf(g, due7.id);
   assert.equal(runs.length, 1);
   assert.equal(runs[0].occurrenceKey.endsWith(':T-7'), true);

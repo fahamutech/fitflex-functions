@@ -218,7 +218,9 @@ export function createAutomationService({
         id: r.id, memberId: r.memberId, memberName: r.memberName ?? null, occurrenceKey: r.occurrenceKey,
         status: r.status, context: typeof r.context === 'string' ? JSON.parse(r.context) : r.context || null,
         createdAt: iso(r.createdAt),
-        channels: msgs.filter(m => m.automationRunId === r.id).map(m => ({ id: m.id, channel: m.channel, status: m.status, reason: m.failureReason || m.skipReason || null })),
+        channels: msgs.filter(m => m.automationRunId === r.id)
+          .sort((x, y) => CHANNELS.indexOf(x.channel) - CHANNELS.indexOf(y.channel))
+          .map(m => ({ id: m.id, channel: m.channel, status: m.status, reason: m.failureReason || m.skipReason || null })),
       })),
     };
   }
@@ -310,6 +312,8 @@ export function createAutomationService({
       // One member at a time per gym, so two runs can't both slip past the
       // daily limit.
       await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`automation:${gymId}:${memberId}`]);
+      const sent = await trx('AutomationRun').where({ automationId: automation.id, memberId, occurrenceKey }).first('id');
+      if (sent) return 'already';
       if (reachable) {
         const today = await trx('AutomationRun').where({ gymId, memberId, status: 'queued' })
           .where('createdAt', '>=', startOfToday(at)).first('id');
