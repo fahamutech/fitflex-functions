@@ -5,11 +5,13 @@
 // row. Ratings feed the admin tier-ranking signal (advisory — never auto-changes
 // the tier, which stays admin/rubric-driven).
 import { randomUUID } from 'node:crypto';
+import { shortName } from '../shared/public-name.mjs';
 
 const MIN_RATING = 1;
 const MAX_RATING = 5;
 const MIN_TEXT = 3;
 const MAX_TEXT = 1000;
+const ADMIN_LIST_LIMIT = 200;
 const MIN_REVIEWS_FOR_TIER_ACTION = 5;
 const REVIEW_STATUS = new Set(['published', 'flagged', 'hidden']);
 
@@ -109,7 +111,11 @@ export function createGymReviewService({ gymReviews, gyms, checkins, subscriptio
     rows = rows.slice(0, limit);
     return Promise.all(rows.map(async r => {
       const u = await users.findByIdAsync(r.memberId);
-      return { ...r, memberName: u?.displayName || null, memberPhotoUrl: u?.photoUrl || null };
+      // Public: other members see first name + initial, never the member id.
+      return {
+        id: r.id, gymId: r.gymId, rating: r.rating, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt,
+        memberName: shortName(u?.displayName), memberPhotoUrl: u?.photoUrl || null,
+      };
     }));
   }
 
@@ -176,5 +182,18 @@ export function createGymReviewService({ gymReviews, gyms, checkins, subscriptio
     }));
   }
 
-  return { submit, myReview, remove, listForGym, summary, tierSignals, moderate, flagged, isEligible, recalcRating };
+  // Admin moderation list: every review, newest first, optionally one status.
+  async function adminList({ status } = {}) {
+    if (status && !REVIEW_STATUS.has(status)) return { error: 'invalid_status', status: 400 };
+    const rows = (await gymReviews.filterAsync(r => !status || r.status === status))
+      .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
+      .slice(0, ADMIN_LIST_LIMIT);
+    return Promise.all(rows.map(async r => {
+      const u = await users.findByIdAsync(r.memberId);
+      const g = await gyms.findByIdAsync(r.gymId);
+      return { ...r, memberName: u?.displayName || null, gymName: g?.name || null };
+    }));
+  }
+
+  return { submit, myReview, remove, listForGym, summary, tierSignals, moderate, flagged, adminList, isEligible, recalcRating };
 }

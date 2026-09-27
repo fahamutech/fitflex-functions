@@ -28,6 +28,7 @@
 import { randomUUID } from 'node:crypto';
 import { challengeProgress, localDay } from '../shared/member-progress.mjs';
 import { normalizePermissions } from './trainer-client-service.mjs';
+import { shortName } from '../shared/public-name.mjs';
 import { normalizeGymPermissions } from './gym-sharing-service.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
 
@@ -280,12 +281,6 @@ export function createChallengeService({
     await participants.updateByIdAsync(p.id, { leaderboardOptIn: body.optIn });
     return { leaderboardOptIn: body.optIn };
   }
-
-  const shortName = n => {
-    const parts = (n ?? '').trim().split(/\s+/).filter(Boolean);
-    if (!parts.length) return 'FitFlex member';
-    return parts.length === 1 ? parts[0] : `${parts[0]} ${parts.at(-1)[0].toUpperCase()}.`;
-  };
 
   /**
    * The ranking for a challenge. `viewer` is { memberId } (must have

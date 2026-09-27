@@ -3,11 +3,14 @@
 // star review with optional text. Rolling average + reviewCount are denormalized
 // onto TrainerProfile.
 import { randomUUID } from 'node:crypto';
+import { shortName } from '../shared/public-name.mjs';
 
 const MIN_RATING = 1;
 const MAX_RATING = 5;
 const MIN_TEXT = 3;
 const MAX_TEXT = 1000;
+const REVIEW_STATUS = new Set(['published', 'flagged', 'hidden']);
+const ADMIN_LIST_LIMIT = 200;
 const QUALIFYING_BOOKING_STATUSES = new Set(['completed', 'no_show', 'fulfilled']);
 
 const makeId = () => `trev_${randomUUID().slice(0, 8)}`;
@@ -87,7 +90,11 @@ export function createTrainerReviewService({ trainerReviews, trainers, trainerBo
     rows = rows.slice(0, limit);
     return Promise.all(rows.map(async r => {
       const u = await users.findByIdAsync(r.memberId);
-      return { ...r, memberName: u?.displayName || null, memberPhotoUrl: u?.photoUrl || null };
+      // Public: other members see first name + initial, never the member id.
+      return {
+        id: r.id, trainerId: r.trainerId, rating: r.rating, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt,
+        memberName: shortName(u?.displayName), memberPhotoUrl: u?.photoUrl || null,
+      };
     }));
   }
 
@@ -120,5 +127,18 @@ export function createTrainerReviewService({ trainerReviews, trainers, trainerBo
     }));
   }
 
-  return { submit, myReview, remove, listForTrainer, summary, moderate, flagged, isEligible, recalcRating };
+  // Admin moderation list: every review, newest first, optionally one status.
+  async function adminList({ status } = {}) {
+    if (status && !REVIEW_STATUS.has(status)) return { error: 'invalid_status', status: 400 };
+    const rows = (await trainerReviews.filterAsync(r => !status || r.status === status))
+      .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
+      .slice(0, ADMIN_LIST_LIMIT);
+    return Promise.all(rows.map(async r => {
+      const u = await users.findByIdAsync(r.memberId);
+      const t = await trainers.findByIdAsync(r.trainerId);
+      return { ...r, memberName: u?.displayName || null, trainerName: t?.displayName || null };
+    }));
+  }
+
+  return { submit, myReview, remove, listForTrainer, summary, moderate, flagged, adminList, isEligible, recalcRating };
 }
