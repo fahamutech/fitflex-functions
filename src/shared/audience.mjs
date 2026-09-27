@@ -11,9 +11,15 @@
 // (see src/services/segment-service.mjs). Pure functions only.
 import { haversineM } from './run-metrics.mjs';
 
-export const SCOPES = ['gym', 'platform'];
+// `trainers` is a FitFlex-only audience of trainers (not members): admins
+// send them promotions and news with the same composer.
+export const SCOPES = ['gym', 'platform', 'trainers'];
 const BOTH = ['gym', 'platform'];
 const PLATFORM = ['platform'];
+const TRAINERS = ['trainers'];
+
+/** Who a FitFlex campaign goes to. Gym campaigns always go to members. */
+export const RECIPIENTS = Object.freeze(['members', 'trainers']);
 
 const OPS = {
   enum: ['eq', 'neq', 'in', 'not_in', 'exists'],
@@ -34,7 +40,7 @@ export const FIELDS = Object.freeze({
   expiresOn: { type: 'date', scopes: BOTH },
   daysUntilExpiry: { type: 'number', scopes: BOTH },
   daysSinceExpiry: { type: 'number', scopes: BOTH },
-  joinedDaysAgo: { type: 'number', scopes: BOTH },
+  joinedDaysAgo: { type: 'number', scopes: [...BOTH, ...TRAINERS] },
   homeGymId: { type: 'text', scopes: BOTH },
   // Engagement (from check-ins; days are East Africa Time days)
   lastVisitDaysAgo: { type: 'number', scopes: BOTH },
@@ -48,6 +54,14 @@ export const FIELDS = Object.freeze({
   subscriptionType: { type: 'enum', scopes: PLATFORM, values: ['direct_sub', 'platform_pass', 'trainer_pass', 'credits'] },
   passTier: { type: 'text', scopes: PLATFORM },
   area: { type: 'area', scopes: PLATFORM },
+  // Trainers (FitFlex-wide trainer audiences)
+  trainerStatus: { type: 'enum', scopes: TRAINERS, values: ['active', 'inactive', 'suspended'] },
+  trainerVerified: { type: 'enum', scopes: TRAINERS, values: ['yes', 'no'] },
+  trainerApproval: { type: 'enum', scopes: TRAINERS, values: ['approved', 'pending_approval', 'rejected'] },
+  // Any trainer pass: active somewhere, awaiting payment, or none.
+  trainerPass: { type: 'enum', scopes: TRAINERS, values: ['active', 'pending', 'none'] },
+  // Gyms the trainer is linked to (a list: `eq` = linked to that gym).
+  linkedGymId: { type: 'text', scopes: TRAINERS },
 });
 
 const has = (field, scope) => Boolean(FIELDS[field]?.scopes.includes(scope));
@@ -83,7 +97,21 @@ export const PRESETS = Object.freeze({
     new: { all: [c('status', 'neq', 'suspended'), c('joinedDaysAgo', 'lte', 30)] },
     inactive: { all: [VALID_MEMBERSHIP, INACTIVE] },
   },
+  trainers: {
+    all: { all: [c('trainerStatus', 'eq', 'active')] },
+    verified: { all: [c('trainerStatus', 'eq', 'active'), c('trainerVerified', 'eq', 'yes')] },
+    with_pass: { all: [c('trainerStatus', 'eq', 'active'), c('trainerPass', 'eq', 'active')] },
+    no_gym: { all: [c('trainerStatus', 'eq', 'active'), c('linkedGymId', 'exists', false)] },
+    new: { all: [c('trainerStatus', 'eq', 'active'), c('joinedDaysAgo', 'lte', 30)] },
+  },
 });
+
+/** The audience scope for a sender scope + recipients (null when not allowed). */
+export function audienceScope(senderScope, recipients = 'members') {
+  if (!RECIPIENTS.includes(recipients)) return null;
+  if (recipients === 'trainers') return senderScope === 'platform' ? 'trainers' : null;
+  return senderScope;
+}
 
 export const MAX_DEPTH = 3;
 export const MAX_CONDITIONS = 25;
@@ -186,6 +214,12 @@ function lower(v) {
 function test(cond, facts, ctx) {
   const actual = cond.field === 'area' ? facts.areaGymId ?? null : facts[cond.field] ?? null;
   const { op, value } = cond;
+  // List facts (a trainer's gyms): true when any entry matches; empty = missing.
+  if (Array.isArray(actual)) {
+    if (op === 'exists') return (actual.length > 0) === value;
+    if (op === 'neq' || op === 'not_in') return actual.every(a => test(cond, { ...facts, [cond.field]: a }, ctx));
+    return actual.some(a => test(cond, { ...facts, [cond.field]: a }, ctx));
+  }
   if (op === 'exists') return (actual !== null) === value;
   if (actual === null) return false;
   const def = FIELDS[cond.field];

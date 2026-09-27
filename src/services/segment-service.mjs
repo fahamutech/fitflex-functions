@@ -10,7 +10,7 @@
 //   current subscription  → shared/subscription-status.mjs (the member's app)
 //   engagement, visits    → engagementFrom (the owner engagement dashboard)
 // so an audience count always agrees with what owners and members see.
-import { buildAudienceFilter, matchesFilter, audienceCatalog, ageOn } from '../shared/audience.mjs';
+import { buildAudienceFilter, matchesFilter, audienceCatalog, ageOn, audienceScope } from '../shared/audience.mjs';
 import {
   daysLeft, directMembershipStatus, latestDirectSubscriptionsByMember, ownerGymIds,
 } from '../shared/member-status.mjs';
@@ -189,6 +189,48 @@ export function createSegmentService({
     });
   }
 
+  /**
+   * Facts for every FitFlex trainer with an account: profile status,
+   * verification, linked gyms and whether they hold a trainer pass.
+   * `memberId` is the trainer's user id (the message ledger's recipient).
+   */
+  async function platformTrainerFacts() {
+    const at = now();
+    const today = localDay(at);
+    const profiles = await db('TrainerProfile').whereNotNull('userId')
+      .select('id', 'userId', 'displayName', 'phone', 'status', 'approvalStatus', 'verified', 'createdAt');
+    if (!profiles.length) return [];
+    const userIds = profiles.map(p => p.userId);
+    const [users, links, passes] = await Promise.all([
+      usersById(userIds),
+      inChunks(profiles.map(p => p.id), part => db('TrainerProfileGym').whereIn('trainerId', part).select('trainerId', 'gymId')),
+      inChunks(userIds, part => db('Subscription').whereIn('memberId', part).where('type', 'trainer_pass')
+        .select('memberId', 'status', 'expiresAt')),
+    ]);
+    const gymsByTrainer = groupBy(links, 'trainerId');
+    const passesByUser = groupBy(passes, 'memberId');
+    const passState = (list = []) => {
+      if (list.some(p => p.status === 'active' && (!p.expiresAt || new Date(p.expiresAt) > at))) return 'active';
+      if (list.some(p => p.status === 'payment_pending')) return 'pending';
+      return 'none';
+    };
+    return profiles.map(p => {
+      const user = users.get(p.userId);
+      return {
+        memberId: p.userId,
+        displayName: p.displayName || user?.displayName || null,
+        phone: p.phone || user?.phone || null,
+        status: p.status || 'active',
+        trainerStatus: user?.accountStatus === 'suspended' ? 'suspended' : (p.status || 'active'),
+        trainerVerified: p.verified ? 'yes' : 'no',
+        trainerApproval: p.approvalStatus || 'approved',
+        trainerPass: passState(passesByUser.get(p.userId)),
+        linkedGymId: (gymsByTrainer.get(p.id) || []).map(l => l.gymId),
+        joinedDaysAgo: p.createdAt ? daysBetween(localDay(p.createdAt), today) : null,
+      };
+    });
+  }
+
   function mostVisitedGym(rows) {
     const counts = new Map();
     for (const r of rows) counts.set(r.gymId, (counts.get(r.gymId) || 0) + 1);
@@ -207,9 +249,10 @@ export function createSegmentService({
   /**
    * Members matching an audience. `sender` is { senderType: 'gym', owner,
    * gymId? } or { senderType: 'platform' }. For a gym the scope always
-   * comes from the owner's own gyms, never from the request.
+   * comes from the owner's own gyms, never from the request. FitFlex can
+   * also address `recipients: 'trainers'` instead of members.
    */
-  async function resolveAudience({ sender, preset, filter }) {
+  async function resolveAudience({ sender, recipients = 'members', preset, filter }) {
     let scopeGymIds = null;
     if (sender?.senderType === 'gym') {
       const mine = ownerGymIds(sender.owner);
@@ -219,13 +262,17 @@ export function createSegmentService({
     } else if (sender?.senderType !== 'platform') {
       return { error: 'invalid_sender', status: 400 };
     }
-    const scope = sender.senderType;
+    const scope = audienceScope(sender.senderType, recipients);
+    if (!scope) return { error: 'invalid_recipients', status: 400 };
     const built = buildAudienceFilter({ preset, filter }, scope);
     if (built.error) return built;
-    const all = scope === 'gym' ? await gymMemberFacts(scopeGymIds) : await platformMemberFacts();
+    const all = scope === 'gym'
+      ? await gymMemberFacts(scopeGymIds)
+      : scope === 'trainers' ? await platformTrainerFacts() : await platformMemberFacts();
     const ctx = await gymsContext(built.filter);
     return {
-      senderType: scope,
+      senderType: sender.senderType,
+      recipients,
       gymIds: scopeGymIds,
       filter: built.filter,
       members: all.filter(f => matchesFilter(f, built.filter, ctx)),
@@ -295,13 +342,13 @@ export function createSegmentService({
    * reach for the message's category, and a few names to sanity-check.
    * Without a purpose the stricter marketing rules apply.
    */
-  async function previewAudience({ sender, preset, filter, purpose }) {
+  async function previewAudience({ sender, recipients = 'members', preset, filter, purpose }) {
     let category = 'marketing';
     if (purpose != null) {
       category = categoryForPurpose(purpose);
       if (!category) return { error: 'invalid_purpose', status: 400 };
     }
-    const r = await resolveAudience({ sender, preset, filter });
+    const r = await resolveAudience({ sender, recipients, preset, filter });
     if (r.error) return r;
     const sample = [...r.members]
       .sort((a, b) => String(a.displayName || '').localeCompare(String(b.displayName || '')))
@@ -309,6 +356,7 @@ export function createSegmentService({
       .map(m => ({ id: m.memberId, displayName: m.displayName, status: m.status }));
     return {
       senderType: r.senderType,
+      recipients: r.recipients,
       gymIds: r.gymIds,
       category,
       count: r.members.length,

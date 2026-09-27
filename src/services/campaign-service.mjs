@@ -18,7 +18,7 @@ import {
   CHANNELS, PURPOSES, CAMPAIGN_STATUSES, categoryForPurpose, canTransitionCampaign,
   validateContent, messageValues, renderText, contentFor,
 } from '../shared/communications.mjs';
-import { buildAudienceFilter } from '../shared/audience.mjs';
+import { buildAudienceFilter, audienceScope } from '../shared/audience.mjs';
 import { ownerGymIds } from '../shared/member-status.mjs';
 
 const EDITABLE = ['draft'];
@@ -103,10 +103,13 @@ export function createCampaignService({
       patch.category = categoryForPurpose(body.purpose);
     }
     if (body.audience !== undefined) {
-      const { preset = null, filter = null } = body.audience || {};
-      const built = buildAudienceFilter({ preset: preset ?? undefined, filter: filter ?? undefined }, scope);
+      const { preset = null, filter = null, recipients = 'members' } = body.audience || {};
+      // FitFlex may address trainers instead of members; gyms only members.
+      const audScope = audienceScope(scope, recipients);
+      if (!audScope) return { error: 'invalid_recipients', status: 400 };
+      const built = buildAudienceFilter({ preset: preset ?? undefined, filter: filter ?? undefined }, audScope);
       if (built.error) return built;
-      patch.audience = { preset, filter };
+      patch.audience = { preset, filter, ...(recipients === 'members' ? {} : { recipients }) };
     }
     if (body.content !== undefined) {
       const v = validateContent(body.content, { renewalLinkAvailable: Boolean(renewalLink) });
@@ -232,6 +235,7 @@ export function createCampaignService({
   async function plan(sender, campaign) {
     const r = await segmentService.resolveAudience({
       sender: audienceSender(sender, campaign),
+      recipients: campaign.audience.recipients || 'members',
       preset: campaign.audience.preset ?? undefined,
       filter: campaign.audience.filter ?? undefined,
     });
@@ -549,7 +553,7 @@ export function createCampaignService({
     return {
       campaigns: page.map(r => {
         const { content, audience, ...rest } = view(r);
-        return { ...rest, title: content?.title ?? null, preset: audience?.preset ?? null, createdByName: r.createdByName ?? null, stats: stats.get(r.id) ?? null };
+        return { ...rest, title: content?.title ?? null, preset: audience?.preset ?? null, recipients: audience?.recipients || 'members', createdByName: r.createdByName ?? null, stats: stats.get(r.id) ?? null };
       }),
       nextCursor: rows.length > size ? Buffer.from(JSON.stringify({ a: new Date(last.createdAt).toISOString(), i: last.id })).toString('base64url') : null,
     };
@@ -598,10 +602,14 @@ export function createCampaignService({
       sender: sender.senderType === 'gym' ? { senderType: 'gym', owner: sender.owner, gymId } : { senderType: 'platform' },
       preset: 'all',
     });
+    const trainerAudience = sender.senderType === 'platform'
+      ? await segmentService.previewAudience({ sender: { senderType: 'platform' }, recipients: 'trainers', preset: 'all' })
+      : null;
     return {
       senderType: sender.senderType,
       gymIds,
       members: audience.error ? null : audience.count,
+      ...(trainerAudience ? { trainers: trainerAudience.error ? null : trainerAudience.count } : {}),
       campaigns: byStatus,
       recent: recent.campaigns || [],
       channels: segmentService.channelAvailability(),

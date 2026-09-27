@@ -15,6 +15,7 @@ import { trainerPurchaseTrainerPass } from '../functions/trainer-engagements.mjs
 import { trainerGyms, trainerMyPasses, trainerCancelPass, trainerBuyMemberPlan } from '../functions/trainer-passes.mjs';
 import { adminDecidePaymentRequest, adminPaymentRequests } from '../functions/admin-payments.mjs';
 import { myQr, operatorVerifyQr, operatorCheckIn } from '../functions/checkins.mjs';
+import { myNotifications } from '../functions/notifications.mjs';
 
 function res() {
   return {
@@ -132,6 +133,11 @@ test('trainer pass: owner-priced, trainer-only, admin-approved, scanned at its o
   assert.equal(pass.status, 'active');
   assert.ok(Math.abs(+new Date(pass.startedAt) - Date.now()) < 60_000, 'pass period restarts at approval');
   assert.equal(Math.round((+new Date(pass.expiresAt) - +new Date(pass.startedAt)) / 86_400_000), 7);
+  // The trainer's bell says it's a trainer pass, not a gym membership.
+  const inbox = await call(myNotifications, { user: trainer });
+  const activated = inbox.body.notifications.find(n => n.type === 'trainer_pass_activated');
+  assert.ok(activated, JSON.stringify(inbox.body).slice(0, 300));
+  assert.match(activated.body, /weekly trainer pass is active/);
 
   // The owner scans the trainer in at the pass gym…
   const qr = await call(myQr, { user: trainer });
