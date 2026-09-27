@@ -1,6 +1,7 @@
 // Self-service account operations shared across all roles: profile save and
 // account deletion (Play Store account-deletion requirement).
 import { randomUUID } from 'node:crypto';
+import { toSessionUser } from '../shared/session-user.mjs';
 
 export function createAccountService({
   users, trainers, trainerBookings, checkins, auditLog,
@@ -71,7 +72,7 @@ export function createAccountService({
 
     if (current.userType !== 'member') {
       const updated = await users.upsertAsync(u => u.id === current.id, baseProfile);
-      return { user: updated };
+      return { user: toSessionUser(updated) };
     }
 
     const memberProfile = {
@@ -96,7 +97,7 @@ export function createAccountService({
       onboardingCompleted: true,
       memberProfile,
     });
-    return { user: updated };
+    return { user: toSessionUser(updated) };
   }
 
   return { deleteMyAccount, updateMemberProfile };

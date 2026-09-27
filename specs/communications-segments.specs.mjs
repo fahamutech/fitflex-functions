@@ -41,11 +41,11 @@ function runGuard(guard, user) {
 }
 
 // requireAuth checks a real signed token and the caller's role.
-function runAuth(guard, claims) {
+async function runAuth(guard, claims) {
   let code = null;
   let nextCalled = false;
   const req = { headers: { authorization: `Bearer ${sign(claims)}` } };
-  guard(req, { status(c) { code = c; return this; }, json() { return this; } }, () => { nextCalled = true; });
+  await guard(req, { status(c) { code = c; return this; }, json() { return this; } }, () => { nextCalled = true; });
   return { nextCalled, code };
 }
 
@@ -211,8 +211,8 @@ test('gym staff need the communications scope; with it they see their gym only',
   assert.equal(runGuard(gymAcl, { userType: 'gym_staff', aclPermissions: ['communications'] }).nextCalled, true);
   assert.equal(runGuard(gymAcl, { userType: 'gym_operator', aclPermissions: [] }).nextCalled, true);
   const [auth] = ownerAudiencePreview.onGuard;
-  assert.equal(runAuth(auth, { sub: 'm', userType: 'member' }).code, 403, 'members cannot preview audiences');
-  assert.equal(runAuth(auth, { sub: w.staff, userType: 'gym_staff' }).nextCalled, true);
+  assert.equal((await runAuth(auth, { sub: 'm', userType: 'member' })).code, 403, 'members cannot preview audiences');
+  assert.equal((await runAuth(auth, { sub: w.staff, userType: 'gym_staff' })).nextCalled, true);
 
   const out = await preview({ sub: w.staff, userType: 'gym_staff' }, { preset: 'all' });
   assert.equal(out.statusCode, 200);
@@ -285,11 +285,11 @@ test('FitFlex admins see every member, and can target an area', async () => {
   assert.ok(catalog.body.fields.some(f => f.key === 'area'));
 });
 
-test('portal staff need the communications scope', () => {
+test('portal staff need the communications scope', async () => {
   const [, acl] = adminAudiencePreview.onGuard;
   assert.equal(runGuard(acl, { userType: 'admin', portalUser: true, aclPermissions: ['members'] }).result.code, 403);
   assert.equal(runGuard(acl, { userType: 'admin', portalUser: true, aclPermissions: ['communications'] }).nextCalled, true);
   const [auth] = adminAudiencePreview.onGuard;
-  assert.equal(runAuth(auth, { sub: 'o', userType: 'gym_operator' }).code, 403, 'owners cannot use FitFlex audiences');
-  assert.equal(runAuth(auth, { sub: 'a', userType: 'admin' }).nextCalled, true);
+  assert.equal((await runAuth(auth, { sub: 'o', userType: 'gym_operator' })).code, 403, 'owners cannot use FitFlex audiences');
+  assert.equal((await runAuth(auth, { sub: 'a', userType: 'admin' })).nextCalled, true);
 });

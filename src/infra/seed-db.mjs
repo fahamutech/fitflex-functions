@@ -2,6 +2,7 @@
 // All other data (gyms, operators, trainers) is managed by the admin portal.
 // Idempotent — safe to call on every startup.
 import { db } from './knex-store.mjs';
+import { hashPassword } from '../auth/password-credentials.mjs';
 
 const PILOT_ADMIN_EMAIL = process.env.FITFLEX_ADMIN_EMAILS?.split(',')[0]?.trim() || 'mama27j@gmail.com';
 
@@ -28,15 +29,16 @@ const DEFAULT_SETTINGS = {
 export async function ensureSeedDb() {
   const now = new Date();
 
-  // Admin user
+  // Admin user. The dev password is hashed on first insert only, so a
+  // redeploy never writes a plaintext credential back.
   await db('User')
     .insert({
       id: 'usr_admin_1', userType: 'admin', email: PILOT_ADMIN_EMAIL,
-      passwordHash: 'demo:admin123', accountStatus: 'active', approvalStatus: 'approved',
+      passwordHash: await hashPassword('admin123'), accountStatus: 'active', approvalStatus: 'approved',
       updatedAt: now,
     })
     .onConflict('id')
-    .merge({ passwordHash: 'demo:admin123', userType: 'admin', updatedAt: now });
+    .merge({ userType: 'admin', updatedAt: now });
 
   // Platform settings
   await db('PlatformSettings')

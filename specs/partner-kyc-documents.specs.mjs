@@ -258,7 +258,7 @@ async function call(route, claims, { params = {}, req: base } = {}) {
   };
   for (const guard of [route.onGuard].flat()) {
     let passed = false;
-    guard(req, out, () => { passed = true; });
+    await guard(req, out, () => { passed = true; });
     if (!passed) return out;
   }
   await route.onRequest(req, out);

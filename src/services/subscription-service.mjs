@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { PASS_TIERS } from '../shared/constants.mjs';
 import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 import { trainerPassOptions, trainerGymAccess, hideTrainerPass } from '../shared/trainer-access.mjs';
+import { toSessionUser } from '../shared/session-user.mjs';
 
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
@@ -259,7 +260,7 @@ export function createSubscriptionService({
       visitCap = settingsService.visitCapForTier(sub.tier);
     }
     const pubId = await publicUserId(user);
-    return { user: { ...user, publicId: pubId, userCode: pubId }, subscription: sub, pendingPayment, visitsUsed, visitCap };
+    return { user: { ...toSessionUser(user), publicId: pubId, userCode: pubId }, subscription: sub, pendingPayment, visitsUsed, visitCap };
   }
 
   async function memberCheckIns(memberId) {

@@ -4,12 +4,21 @@ import { authService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
+// The phone OTP endpoints have no SMS delivery and no client uses them. Until
+// phone sign-in moves to Firebase (Identity V2), they are closed in production.
+function otpDisabled(res) {
+  if (process.env.NODE_ENV !== 'production') return false;
+  res.status(404).json({ error: 'not_found' });
+  return true;
+}
+
 export const authRequestOtp = {
   created, method: 'post', path: '/auth/otp/request',
   description: 'Request a phone OTP. Returns the OTP in dev mode (replace with SMS in prod).',
   requestSample: { phone: '+255712345678', userType: 'member' },
   responseSample: { ok: true, devOtp: '123456' },
   onRequest: async (req, res) => {
+    if (otpDisabled(res)) return;
     const { phone, userType = 'member' } = req.body || {};
     const result = await authService.requestOtp({ phone, userType });
     if (result.error) return res.status(result.status).json({ error: result.error });
@@ -23,6 +32,7 @@ export const authVerifyOtp = {
   requestSample: { phone: '+255712345678', code: '123456' },
   responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'member' } },
   onRequest: async (req, res) => {
+    if (otpDisabled(res)) return;
     const { phone, code } = req.body || {};
     const result = await authService.verifyOtp({ phone, code });
     if (result.error) return res.status(result.status).json({ error: result.error });

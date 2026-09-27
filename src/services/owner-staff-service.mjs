@@ -1,7 +1,9 @@
 // Gym-staff roster service (RBAC) — owners create gym-level staff (e.g.
 // receptionists) scoped to their own gym(s) with a per-feature ACL.
 import { randomUUID } from 'node:crypto';
+import { deleteFirebaseUserIfUnshared } from '../shared/firebase-identity.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
+import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 
 export const GYM_STAFF_ACL_SCOPES = ['members', 'checkins', 'payments', 'trainers', 'gyms', 'shop', 'communications'];
 
@@ -25,7 +27,8 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
   }
 
   async function create({ ownerGymIds, body, actorId }) {
-    const { email, password, displayName, aclPermissions = [], gymIds = [] } = body || {};
+    const { email: rawEmail, password, displayName, aclPermissions = [], gymIds = [] } = body || {};
+    const email = normalizeEmail(rawEmail);
     if (!email || !password) return { error: 'email_and_password_required', status: 400 };
     if (!displayName) return { error: 'displayName_required', status: 400 };
     if (!Array.isArray(aclPermissions)) return { error: 'aclPermissions_must_be_array', status: 400 };
@@ -34,7 +37,7 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
     const scopedGymIds = parseStringList(gymIds, []).filter(id => ownerGymIds.includes(id));
     if (scopedGymIds.length === 0) return { error: 'must_assign_to_at_least_one_owned_gym', status: 400 };
 
-    const existing = await users.findAsync(u => u.email === email && u.userType === 'gym_staff');
+    const existing = await users.findAsync(u => sameEmail(u.email, email) && u.userType === 'gym_staff');
     if (existing) return { error: 'email_already_in_use', status: 409 };
 
     let firebaseUid = null;
@@ -113,14 +116,7 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
     const target = await users.findAsync(u => u.id === staffId && u.userType === 'gym_staff');
     if (!target) return { error: 'staff_not_found', status: 404 };
     if (!(target.gymIds || []).some(id => ownerGymIds.includes(id))) return { error: 'staff_not_at_your_gym', status: 403 };
-    if (target.firebaseUid) {
-      try {
-        initFirebaseAdmin();
-        await getAdminAuth().deleteUser(target.firebaseUid);
-      } catch (fbErr) {
-        console.warn('[owner-staff] Firebase user deletion failed:', fbErr?.message);
-      }
-    }
+    await deleteFirebaseUserIfUnshared({ users, row: target, initFirebaseAdmin, getAdminAuth, logTag: 'owner-staff' });
     await users.removeAsync(u => u.id === target.id);
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),

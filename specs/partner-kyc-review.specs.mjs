@@ -257,7 +257,7 @@ test('routes: a partner submits; portal staff need the kyc scope to decide', asy
     const out = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
     for (const guard of [route.onGuard].flat()) {
       let passed = false;
-      guard(req, out, () => { passed = true; });
+      await guard(req, out, () => { passed = true; });
       if (!passed) return out;
     }
     await route.onRequest(req, out);

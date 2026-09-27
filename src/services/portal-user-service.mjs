@@ -1,5 +1,7 @@
 // Portal (admin) staff user management — email/password accounts scoped by ACL.
 import { randomUUID } from 'node:crypto';
+import { deleteFirebaseUserIfUnshared } from '../shared/firebase-identity.mjs';
+import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 
 // Must cover every requireAcl(scope) in functions/*.mjs (enforced by specs/portal-acl-scopes.specs.mjs)
 // plus the scopes the portal's Users page offers, or admins can't grant them.
@@ -29,12 +31,13 @@ export function createPortalUserService({ users, auditLog, initFirebaseAdmin, ge
     return rows.map(slim);
   }
 
-  async function create({ email, password, displayName, aclPermissions = [], actorId }) {
+  async function create({ email: rawEmail, password, displayName, aclPermissions = [], actorId }) {
+    const email = normalizeEmail(rawEmail);
     if (!email || !password) return { error: 'email_and_password_required', status: 400 };
     if (!Array.isArray(aclPermissions)) return { error: 'aclPermissions_must_be_array', status: 400 };
     const invalid = aclPermissions.filter(p => !PORTAL_ACL_SCOPES.includes(p));
     if (invalid.length) return { error: 'invalid_acl_scopes', status: 400, invalid };
-    const existing = await users.findAsync(u => u.email === email && u.userType === 'admin');
+    const existing = await users.findAsync(u => sameEmail(u.email, email) && u.userType === 'admin');
     if (existing) return { error: 'email_already_exists', status: 409 };
 
     let firebaseUid = null;
@@ -121,14 +124,7 @@ export function createPortalUserService({ users, auditLog, initFirebaseAdmin, ge
     if (target.email && isConfiguredAdminEmail(target.email)) {
       return { error: 'env_admin_immutable', status: 403, message: 'Super-admin accounts from environment config cannot be deleted.' };
     }
-    if (target.firebaseUid) {
-      try {
-        initFirebaseAdmin();
-        await getAdminAuth().deleteUser(target.firebaseUid);
-      } catch (fbErr) {
-        console.warn('[portal-users] Firebase user deletion failed:', fbErr?.message);
-      }
-    }
+    await deleteFirebaseUserIfUnshared({ users, row: target, initFirebaseAdmin, getAdminAuth, logTag: 'portal-users' });
     await users.removeAsync(u => u.id === target.id);
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),

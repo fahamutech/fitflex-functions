@@ -1,6 +1,7 @@
 // Owner/operator gym management service — self-registration, gym CRUD scoped
 // to the owner's own gym(s), invoices/earnings, trainer↔gym linking.
 import { randomUUID } from 'node:crypto';
+import { hashPassword } from '../auth/password-credentials.mjs';
 
 export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService }) {
   const ownerGymIdsOf = (owner) => owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
@@ -172,7 +173,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const trainerId = `trn_${randomUUID().slice(0, 8)}`;
     const user = {
       id: userId, userType: 'trainer', email, phone: body.phone || null,
-      displayName, passwordHash: `demo:${initialPin}`, accountStatus: 'active',
+      displayName, passwordHash: await hashPassword(initialPin), accountStatus: 'active',
       approvalStatus: 'approved', onboardingCompleted: true, gymId, gymIds: [gymId],
       createdAt: now, updatedAt: now,
     };

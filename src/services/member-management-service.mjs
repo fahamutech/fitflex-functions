@@ -7,6 +7,8 @@ import { effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 import {
   FITFLEX_VISIT_TYPES, daysLeft, directMembershipStatus, latestDirectSubscription, latestDirectSubscriptionsByMember, ownerGymIds,
 } from '../shared/member-status.mjs';
+import { toSessionUser } from '../shared/session-user.mjs';
+import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 
 export function createMemberManagementService({
   users,
@@ -168,9 +170,10 @@ export function createMemberManagementService({
     const gymIds = ownerGymIdsOf(owner);
     if (gymIds.length === 0) return { error: 'owner_has_no_gyms', status: 400 };
 
-    const { displayName, email, phone, gymId, paidAmount, durationUnit, startDate, endDate, tier, initialPassword } = body || {};
+    const { displayName, email: rawEmail, phone, gymId, paidAmount, durationUnit, startDate, endDate, tier, initialPassword } = body || {};
+    const email = normalizeEmail(rawEmail);
     if (!displayName?.trim()) return { error: 'displayName_required', status: 400 };
-    if (!email?.trim() && !phone?.trim()) return { error: 'email_or_phone_required', status: 400 };
+    if (!email && !phone?.trim()) return { error: 'email_or_phone_required', status: 400 };
     if (!['D', 'W', 'M'].includes(durationUnit)) return { error: 'durationUnit_must_be_D_W_or_M', status: 400 };
     if (!startDate || !endDate) return { error: 'startDate_and_endDate_required', status: 400 };
     // B2: optional login credential for the member.
@@ -181,7 +184,7 @@ export function createMemberManagementService({
 
     const assignedGymId = gymId && gymIds.includes(gymId) ? gymId : gymIds[0];
     if (email) {
-      const existing = await users.findAsync((u) => u.email === email && u.userType === 'member');
+      const existing = await users.findAsync((u) => sameEmail(u.email, email) && u.userType === 'member');
       if (existing) return { error: 'email_already_registered', status: 409 };
     }
 
@@ -210,7 +213,7 @@ export function createMemberManagementService({
     const member = {
       id: memberId,
       displayName: displayName.trim(),
-      email: email?.trim() || null,
+      email,
       phone: phone?.trim() || null,
       firebaseUid,
       userType: 'member',
@@ -255,7 +258,7 @@ export function createMemberManagementService({
       await paymentRequests.insertAsync(payment);
     }
 
-    return { member, subscription: sub, payment, credentialCreated };
+    return { member: toSessionUser(member), subscription: sub, payment, credentialCreated };
   }
 
   // Resolves the effective gym scope for a members/stats query: a single

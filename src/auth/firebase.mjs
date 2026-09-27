@@ -53,6 +53,11 @@ export async function verifyFirebaseIdToken(idToken) {
       return {
         uid: payload.uid,
         email: payload.email ?? null,
+        // Dev tokens default to a verified email so existing dev/test sign-ins
+        // keep working; pass email_verified: false to exercise the unverified path.
+        emailVerified: payload.email_verified ?? Boolean(payload.email),
+        phoneNumber: payload.phone_number ?? null,
+        signInProvider: payload.sign_in_provider ?? 'dev',
         name: payload.name ?? null,
         picture: payload.picture ?? null
       };
@@ -67,6 +72,9 @@ export async function verifyFirebaseIdToken(idToken) {
     return {
       uid: decoded.uid,
       email: decoded.email ?? null,
+      emailVerified: decoded.email_verified === true,
+      phoneNumber: decoded.phone_number ?? null,
+      signInProvider: decoded.firebase?.sign_in_provider ?? null,
       name: decoded.name ?? null,
       picture: decoded.picture ?? null
     };
