@@ -1,9 +1,13 @@
 // Owner/operator gym management service — self-registration, gym CRUD scoped
 // to the owner's own gym(s), invoices/earnings, trainer↔gym linking.
 import { randomUUID } from 'node:crypto';
+import { OPEN_GATE } from './partner-gate.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 
-export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService }) {
+export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE }) {
+  // Gyms of new owners wait for their KYC; existing and verified owners' gyms open at once.
+  const newGymStatus = async (owner) => (await partnerGate.isOperational(owner?.id) ? 'active' : 'pending_verification');
+
   const ownerGymIdsOf = (owner) => owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
 
   // Sync the trainer↔gym join so a gym's trainerIds list becomes the source of
@@ -30,6 +34,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
   async function registerOwner({ user, body }) {
     const gymList = Array.isArray(body.gyms) ? body.gyms : [];
     if (gymList.length === 0) return { error: 'at_least_one_gym_required', status: 400 };
+    const status = await newGymStatus(user);
     const createdGyms = [];
     const gymIds = [];
     for (const g of gymList) {
@@ -40,7 +45,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       }
       if (!gymData.id) gymData.id = `gym_${randomUUID().slice(0, 8)}`;
       const row = gymService.normalizeGymPayload(gymData, {});
-      row.status = 'active';
+      row.status = status;
       await gyms.upsertAsync(x => x.id === row.id, row);
       createdGyms.push(row);
       gymIds.push(row.id);
@@ -117,7 +122,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     if (!body.name) return { error: 'name_required', status: 400 };
     const id = `gym_${randomUUID().slice(0, 8)}`;
     const row = gymService.normalizeGymPayload({ ...body, id }, {});
-    row.status = 'active';
+    row.status = await newGymStatus(owner);
     await gyms.upsertAsync(g => g.id === row.id, row);
     if (Array.isArray(body.trainerIds) && body.trainerIds.length) await syncTrainersForGym(row.id, body.trainerIds);
     const currentGymIds = ownerGymIdsOf(owner);

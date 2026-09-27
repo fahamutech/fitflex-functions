@@ -540,6 +540,16 @@ export function createPartnerKycService({
     } catch { /* a failed notification never fails the decision */ }
   }
 
+  /** A verified owner's gyms that were waiting for KYC open to members. */
+  async function openWaitingGyms(userId) {
+    const owner = userId && await users.findByIdAsync(userId);
+    const ids = owner ? (owner.gymIds?.length ? owner.gymIds : (owner.gymId ? [owner.gymId] : [])) : [];
+    for (const id of ids) {
+      const gym = await gyms.findByIdAsync(id);
+      if (gym?.status === 'pending_verification') await gyms.updateAsync(g => g.id === id, { status: 'active' });
+    }
+  }
+
   /** Keep the approval flags every app reads in step with the case. */
   async function syncApproval(kycCase, status, note) {
     if (!kycCase.userId) return;
@@ -670,6 +680,7 @@ export function createPartnerKycService({
 
     const moved = await moveCase(kycCase, decision.to, actor, { reasonCode, reasonNote, patch, data });
     if (moved.error) return moved;
+    if (decision.to === 'approved' && kycCase.partnerType === 'gym_owner') await openWaitingGyms(kycCase.userId);
     await syncApproval(moved.case, decision.to, decision.to === 'rejected' ? reasonNote : (decision.to === 'approved' ? null : undefined));
     const message = { approve: 'approved', reject: 'rejected', request_info: 'info_requested', suspend: 'suspended', reinstate: 'reinstated', reopen: 'reopened' }[body.decision];
     await tell(moved.case, message, reasonNote);
