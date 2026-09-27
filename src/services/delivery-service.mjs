@@ -63,7 +63,27 @@ export function createDeliveryService({
   // Button label and sender name, looked up once per campaign — a sent
   // campaign's content no longer changes.
   const campaignInfo = new Map();
+  // Automation messages: the button of the automation's template in the
+  // member's language, and the gym's name — looked up once per automation.
+  const automationInfo = new Map();
+  async function automationInfoFor(msg) {
+    const run = await db('AutomationRun as r')
+      .join('CommunicationAutomation as a', 'a.id', 'r.automationId')
+      .leftJoin('CommunicationTemplate as t', 't.id', 'a.templateId')
+      .leftJoin('Gym as g', 'g.id', 'a.gymId')
+      .where('r.id', msg.automationRunId).first('a.id', 't.bodies', 'g.name as gymName');
+    if (!run) return { ctaLabel: null, senderName: null };
+    if (!automationInfo.has(run.id)) {
+      const bodies = typeof run.bodies === 'string' ? JSON.parse(run.bodies) : run.bodies || {};
+      automationInfo.set(run.id, { bodies, senderName: run.gymName ?? null });
+    }
+    const info = automationInfo.get(run.id);
+    const text = info.bodies[msg.locale] || info.bodies.en || Object.values(info.bodies)[0];
+    return { ctaLabel: text?.ctaLabel || null, senderName: info.senderName };
+  }
+
   async function infoFor(msg) {
+    if (!msg.campaignId && msg.automationRunId) return automationInfoFor(msg);
     if (!msg.campaignId) return { ctaLabel: null, senderName: null };
     if (!campaignInfo.has(msg.campaignId)) {
       const c = await db('CommunicationCampaign as c').leftJoin('Gym as g', 'g.id', 'c.gymId')

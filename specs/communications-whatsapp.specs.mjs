@@ -79,7 +79,7 @@ before(async () => {
   w.offers = await member('Offers', '0715 555 555', { whatsappMarketing: true, locale: 'sw' });
   // FitFlex templates registered and approved for this provider.
   const synced = await channel.syncTemplates(w.owner);
-  assert.equal(synced.synced, 36, 'every FitFlex template, in English and Swahili');
+  assert.equal(synced.synced, 38, 'every FitFlex template, in English and Swahili');
   w.platformBefore = await db('PlatformSettings').where({ id: 'platform' }).first('communications');
 });
 
@@ -305,12 +305,12 @@ test('a malformed webhook body is ignored, not trusted', async () => {
 test('admin status and registry: what each FitFlex template needs, and registering one', async () => {
   const s = await channel.status();
   assert.deepEqual([s.provider.name, s.provider.configured, s.enabled, s.available], [provider.name, true, true, true]);
-  assert.equal(s.templates.approved, 36);
+  assert.equal(s.templates.approved, 38);
   assert.ok(s.members.withPhone >= 7);
   assert.equal(typeof s.webhook.secretSet, 'boolean');
 
   const reg = await channel.registry();
-  assert.equal(reg.expected.length, 36);
+  assert.equal(reg.expected.length, 38);
   const need = reg.expected.find(e => e.providerTemplateName === 'fitflex_discount_offer' && e.language === 'sw');
   assert.deepEqual([need.category, need.variables, need.registered.approvalStatus], ['marketing', ['member_name', 'discount', 'offer_name', 'gym_name'], 'approved']);
 
