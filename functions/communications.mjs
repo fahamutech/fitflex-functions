@@ -7,7 +7,7 @@
 // scope work with all members.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
-import { segmentService, campaignService, templateService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { segmentService, campaignService, templateService, whatsappChannelService, resolveRequestUser } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -200,3 +200,37 @@ export const adminTemplateList = adminTpl.list;
 export const adminTemplateGet = adminTpl.get;
 export const adminTemplatePreviewNew = adminTpl.previewNew;
 export const adminTemplatePreview = adminTpl.preview;
+
+// ── WhatsApp (M7) ───────────────────────────────────────────────────────────
+// FitFlex admins only: the provider's status, the kill switch, the registry
+// of provider-approved templates, and a test send. Credentials never pass
+// through here — they live in the server's environment.
+
+const waRoute = (method, path, description, handler, extra = {}) => ({
+  created, method, path: `/admin/communications/whatsapp${path}`, description: `Admin: ${description}`,
+  onGuard: adminGuard, ...extra,
+  onRequest: async (req, res) => handler(req.user?.sub || null, req, res),
+});
+
+export const adminWhatsAppStatus = waRoute('get', '', 'WhatsApp status — provider (never its credentials), kill switch, webhook, opted-in members, template approvals, last 7 days of WhatsApp messages.',
+  async (_actor, _req, res) => send(res, await whatsappChannelService.status()));
+
+export const adminWhatsAppSetEnabled = waRoute('put', '', 'the WhatsApp kill switch. PUT { enabled: boolean } — off stops all WhatsApp sending within about 30 seconds; queued messages are skipped.',
+  async (actor, req, res) => send(res, await whatsappChannelService.setEnabled(actor, req.body?.enabled)),
+  { requestSample: { enabled: false } });
+
+export const adminWhatsAppTemplates = waRoute('get', '/templates', 'the provider template registry, and the provider template each FitFlex template needs per language (name, category, variables in order).',
+  async (_actor, _req, res) => send(res, await whatsappChannelService.registry()));
+
+export const adminWhatsAppTemplateRegister = waRoute('post', '/templates', 'register a provider template (or update it). POST { providerTemplateName, language: en|sw, category: utility|marketing|authentication, variables: [..in order], approvalStatus?, provider? }',
+  async (actor, req, res) => send(res, await whatsappChannelService.registerTemplate(actor, req.body || {}), 201),
+  { requestSample: { providerTemplateName: 'fitflex_renewal_reminder', language: 'en', category: 'utility', variables: ['member_name', 'gym_name', 'expiry_date'], approvalStatus: 'approved' } });
+
+export const adminWhatsAppTemplateUpdate = waRoute('patch', '/templates/:id', 'change a registered provider template\'s approval status, category or variables.',
+  async (actor, req, res) => send(res, await whatsappChannelService.updateTemplate(actor, req.params.id, req.body || {})));
+
+export const adminWhatsAppTemplateSync = waRoute('post', '/templates/sync', 'pull template approval statuses from the provider into the registry.',
+  async (actor, _req, res) => send(res, await whatsappChannelService.syncTemplates(actor)));
+
+export const adminWhatsAppTest = waRoute('post', '/test', 'send one approved template to a phone number — the go-live check. POST { phone, templateName, language, parameters: [..] }',
+  async (actor, req, res) => send(res, await whatsappChannelService.sendTest(actor, req.body || {})));
