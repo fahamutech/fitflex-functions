@@ -38,7 +38,10 @@ export function createTrainerReviewService({ trainerReviews, trainers, trainerBo
     const published = await trainerReviews.filterAsync(r => r.trainerId === trainerId && r.status === 'published');
     const count = published.length;
     const average = count ? Math.round((published.reduce((s, r) => s + Number(r.rating), 0) / count) * 10) / 10 : 0;
-    await trainers.updateByIdAsync(trainerId, { rating: average, reviewCount: count });
+    const patch = { rating: average, reviewCount: count };
+    // trainers is primed: a row created on another instance after priming isn't
+    // in this cache, so updateAsync misses it — write through to the DB.
+    if (!(await trainers.updateAsync(t => t.id === trainerId, patch))) await trainers.persistUpdateByIdAsync(trainerId, patch);
     return { trainerId, averageRating: average, reviewCount: count };
   }
 

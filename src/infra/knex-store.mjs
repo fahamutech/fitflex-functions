@@ -7,6 +7,12 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import knexFactory from 'knex';
+import pg from 'pg';
+
+// pg returns NUMERIC/DECIMAL as strings to avoid precision loss. Ours are all
+// small measurements (ratings, weightKg, distanceKm — never money), so parse
+// them as numbers; otherwise Gym.rating reads back as '4.50'.
+pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v) => (v === null ? null : parseFloat(v)));
 
 const connectionString = process.env.FITFLEX_USE_CI_DB === '1'
   ? process.env.DATABASE_URL_CI
@@ -364,6 +370,21 @@ export function collection(name) {
         return updated;
       },
 
+      // Write-through by id for rows the in-memory cache may not hold yet
+      // (e.g. created by another instance after priming). Updates the DB row
+      // directly, then caches the fresh row. Returns null if no row has that id.
+      persistUpdateByIdAsync: async (id, patch) => {
+        const pk = pkField(name);
+        await _persistUpdate(pk, id, patch);
+        const fresh = await _findByIdFromDb(id);
+        if (!fresh) return null;
+        const data = getSyncData();
+        const i = data.findIndex(r => r[pk] === id);
+        if (i < 0) data.push(fresh); else data[i] = fresh;
+        invalidate(name);
+        return fresh;
+      },
+
       remove: (pred) => {
         const data = getSyncData();
         const i = data.findIndex(pred);
@@ -544,7 +565,7 @@ export function collection(name) {
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
   users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','createdAt','updatedAt']),
-  gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','createdAt','updatedAt']),
+  gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','rating','reviewCount','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed']),
   payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','currency','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
