@@ -1,6 +1,7 @@
 // Delivery — turns queued CommunicationMessage rows into real messages
 // through the existing notification service: in-app via its inbox,
-// push via its FCM fan-out. WhatsApp joins here in M7.
+// push via its FCM fan-out, WhatsApp through the WhatsApp channel service
+// (and its provider).
 //
 // Each run (a cron tick, every minute):
 //   1. releases scheduled campaigns whose time has come (campaign service);
@@ -15,8 +16,14 @@
 //
 // In-app delivery is idempotent: the inbox row's id is derived from the
 // ledger row's id, so a retry after a crash finds the row instead of adding
-// a second one. Push is at-least-once: a crash between FCM accepting a push
-// and the ledger update can repeat that one push.
+// a second one. Push and WhatsApp are at-least-once: a crash between the
+// provider accepting a message and the ledger update can repeat that one
+// message (WhatsApp passes the ledger id on, for providers that drop
+// repeats).
+//
+// A channel can also decide at the last moment not to send — WhatsApp
+// switched off, the member opted out since the campaign was sent — and the
+// row is then `skipped` with the reason, not failed.
 import { randomUUID } from 'node:crypto';
 import { contentFor } from '../shared/communications.mjs';
 
@@ -28,6 +35,7 @@ export function createDeliveryService({
   db,
   notificationService,
   campaignService,
+  whatsappChannel = null,
   now = () => new Date(),
   batchSize = 200,
   logger = console,
@@ -107,12 +115,18 @@ export function createDeliveryService({
     const data = { ...(await payload(msg)), notificationId: hasInbox ? inboxIdFor(hasInbox.id) : '' };
     const r = await notificationService.sendPush(msg.memberId, { title: msg.title, body: msg.body, data });
     if (r?.skipped === 'push_disabled' || r?.skipped === 'push_unavailable') return { permanent: true, reason: r.skipped };
-    if (r?.sent > 0) return { status: 'sent' };
+    // FCM's references, for the history: one id per phone it went to.
+    const fcm = { messageIds: r?.messageIds || [], failed: r?.failed || 0, errors: r?.errors || [] };
+    if (r?.sent > 0) return { status: 'sent', providerMessageId: fcm.messageIds[0] || null, payload: { fcm } };
     if (!r?.failed) return { permanent: true, reason: 'no_device' }; // no (live) tokens left
-    return { temporary: true, reason: 'push_failed' };
+    return { temporary: true, reason: 'push_failed', payload: { fcm } };
   }
 
-  const channels = { in_app: deliverInApp, push: deliverPush };
+  const channels = {
+    in_app: deliverInApp,
+    push: deliverPush,
+    whatsapp: (msg) => whatsappChannel ? whatsappChannel.deliver(msg) : { skipped: 'whatsapp_not_configured' },
+  };
 
   async function deliver(msg) {
     const at = now();
@@ -123,18 +137,29 @@ export function createDeliveryService({
     } catch (err) {
       outcome = { temporary: true, reason: String(err?.message || err).slice(0, 200) };
     }
+    if (outcome.skipped) {
+      await db('CommunicationMessage').where({ id: msg.id }).update({
+        status: 'skipped', skipReason: outcome.skipped, updatedAt: at, nextAttemptAt: null,
+      });
+      return 'skipped';
+    }
     if (outcome.status) {
       await db('CommunicationMessage').where({ id: msg.id }).update({
         status: outcome.status, sentAt: at, updatedAt: at, nextAttemptAt: null, failureReason: null,
         ...(outcome.status === 'delivered' ? { deliveredAt: at } : {}),
         ...(outcome.notificationId ? { notificationId: outcome.notificationId } : {}),
+        ...(outcome.providerMessageId ? { providerMessageId: outcome.providerMessageId } : {}),
+        ...(outcome.payload ? { payload: outcome.payload } : {}),
       });
       return 'sent';
     }
     const retry = outcome.temporary && msg.attempts < MAX_ATTEMPTS;
+    // Failures are kept, never dropped: status, reason, time and whatever
+    // the provider said.
+    const extra = outcome.payload ? { payload: outcome.payload } : {};
     await db('CommunicationMessage').where({ id: msg.id }).update(retry
-      ? { status: 'queued', failureReason: outcome.reason, nextAttemptAt: new Date(+at + RETRY_DELAYS_MS[msg.attempts - 1]), updatedAt: at }
-      : { status: 'failed', failureReason: outcome.reason, failurePermanent: Boolean(outcome.permanent), failedAt: at, nextAttemptAt: null, updatedAt: at });
+      ? { status: 'queued', failureReason: outcome.reason, nextAttemptAt: new Date(+at + RETRY_DELAYS_MS[msg.attempts - 1]), updatedAt: at, ...extra }
+      : { status: 'failed', failureReason: outcome.reason, failurePermanent: Boolean(outcome.permanent), failedAt: at, nextAttemptAt: null, updatedAt: at, ...extra });
     return retry ? 'retry' : 'failed';
   }
 
@@ -160,7 +185,7 @@ export function createDeliveryService({
   async function runOnce() {
     const runId = `job_${randomUUID().slice(0, 8)}`;
     const startedAt = now();
-    const stats = { released: 0, claimed: 0, sent: 0, retry: 0, failed: 0, closed: 0 };
+    const stats = { released: 0, claimed: 0, sent: 0, retry: 0, failed: 0, skipped: 0, closed: 0 };
     await db('JobRun').insert({ id: runId, job: 'communication_dispatcher', status: 'running', startedAt }).catch(() => {});
     try {
       stats.released = (await campaignService.releaseDue()).released;

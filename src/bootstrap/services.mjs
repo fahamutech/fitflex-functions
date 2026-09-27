@@ -48,6 +48,9 @@ import { createCampaignService } from '../services/campaign-service.mjs';
 import { createTemplateService } from '../services/template-service.mjs';
 import { createDeliveryService } from '../services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../services/communication-preference-service.mjs';
+import { createWhatsAppChannelService } from '../services/whatsapp-channel-service.mjs';
+import { createCommunicationHistoryService } from '../services/communication-history-service.mjs';
+import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
@@ -187,33 +190,44 @@ export const notificationService = createNotificationService({
   onOpened: (rows) => deliveryService.onOpened(rows),
   onClicked: (row, opts) => deliveryService.onClicked(row, opts),
 });
+// WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
+// (credentials from the environment only), "not configured" by default.
+// Available when a provider is configured and the admin kill switch is on.
+export const whatsAppProvider = createWhatsAppProvider();
+export const whatsappChannelService = createWhatsAppChannelService({ db, provider: whatsAppProvider, auditLog });
+whatsappChannelService.isEnabled().catch(() => {});
 // Communications audiences: who a gym (its direct members only) or FitFlex
-// can message. WhatsApp stays unavailable until a provider is configured (M7).
+// can message.
 export const segmentService = createSegmentService({
   db, communicationPreferences, deviceTokens,
   pushAvailable: () => process.env.PUSH_NOTIFICATIONS === 'on',
-  whatsappAvailable: () => false,
+  whatsappAvailable: () => whatsappChannelService.available(),
 });
 const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
 // FitFlex system templates and each gym's own.
 export const templateService = createTemplateService({
   db, templates: communicationTemplates, gyms,
   renewalLink: process.env.COMMS_RENEWAL_URL || null,
+  whatsappProvider: () => (whatsAppProvider.configured ? whatsAppProvider.name : null),
 });
+// Communication history: reads the message ledger (campaigns, recipients,
+// member timelines, the message log).
+export const communicationHistoryService = createCommunicationHistoryService({ db });
 export const campaignService = createCampaignService({
   db, campaigns: communicationCampaigns, gyms, segmentService, auditLog, templateService,
+  historyService: communicationHistoryService,
   largeSendThreshold: positiveInt(process.env.COMMS_LARGE_SEND_THRESHOLD, 200),
   marketingWeeklyCap: positiveInt(process.env.COMMS_MARKETING_WEEKLY_CAP, 2),
   renewalLink: process.env.COMMS_RENEWAL_URL || null,
 });
-// Delivers queued campaign messages through the inbox and FCM above.
+// Delivers queued campaign messages through the inbox, FCM and WhatsApp above.
 export const deliveryService = createDeliveryService({
-  db, notificationService, campaignService,
+  db, notificationService, campaignService, whatsappChannel: whatsappChannelService,
   batchSize: positiveInt(process.env.COMMS_DISPATCH_BATCH, 200),
 });
 export const communicationPreferenceService = createCommunicationPreferenceService({
   preferences: communicationPreferences,
-  whatsappAvailable: () => false,
+  whatsappAvailable: () => whatsappChannelService.available(),
 });
 export const challengeRewardService = createChallengeRewardService({
   challenges, participants: challengeParticipants, awards: challengeRewards, users, corporateEmployees,
