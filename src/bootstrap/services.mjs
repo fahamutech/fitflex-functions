@@ -123,7 +123,7 @@ export const adminMemberService = createAdminMemberService({
   users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr,
 });
 export const adminPaymentService = createAdminPaymentService({
-  paymentRequests, subscriptions, users, auditLog,
+  paymentRequests, subscriptions, users, auditLog, gyms,
   onSubscriptionActivated: sub => notificationService.notifySubscriptionActivated(sub),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
 });

@@ -13,7 +13,7 @@ import { ownerCreateGym, ownerUpdateGym, ownerDecideTrainerJoin } from '../funct
 import { trainerRegister, trainerApplyToGym } from '../functions/trainers.mjs';
 import { trainerPurchaseTrainerPass } from '../functions/trainer-engagements.mjs';
 import { trainerGyms, trainerMyPasses, trainerCancelPass, trainerBuyMemberPlan } from '../functions/trainer-passes.mjs';
-import { adminDecidePaymentRequest } from '../functions/admin-payments.mjs';
+import { adminDecidePaymentRequest, adminPaymentRequests } from '../functions/admin-payments.mjs';
 import { myQr, operatorVerifyQr, operatorCheckIn } from '../functions/checkins.mjs';
 
 function res() {
@@ -112,6 +112,13 @@ test('trainer pass: owner-priced, trainer-only, admin-approved, scanned at its o
   // Unpaid and not linked to any gym → no QR yet.
   const earlyQr = await call(myQr, { user: trainer });
   assert.equal(earlyQr.statusCode, 403);
+
+  // The admin's payment list says what is being paid for, and where.
+  const queue = await call(adminPaymentRequests, { user: { sub: 'usr_admin_1', userType: 'admin' } });
+  const row = queue.body.find(p => p.id === bought.body.paymentRequest.id);
+  assert.equal(row.subscription.type, 'trainer_pass');
+  assert.equal(row.subscription.plan, 'weekly');
+  assert.deepEqual(row.gym, { id: passGym.id, name: passGym.name });
 
   // T6: a FitFlex admin approves the payment; the week starts now.
   const approved = await call(adminDecidePaymentRequest, {

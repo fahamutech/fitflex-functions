@@ -3,7 +3,7 @@
 // with memberProfile/aclPermissions) to keep the list endpoint's payload small.
 import { randomUUID } from 'node:crypto';
 
-export function createAdminPaymentService({ paymentRequests, subscriptions, users, auditLog, onBookingPayment = async () => {}, onSubscriptionActivated = async () => {} }) {
+export function createAdminPaymentService({ paymentRequests, subscriptions, users, auditLog, gyms = null, onBookingPayment = async () => {}, onSubscriptionActivated = async () => {} }) {
   function slimMember(u) {
     if (!u) return null;
     return { id: u.id, displayName: u.displayName || null, email: u.email || null, phone: u.phone || null, photoUrl: u.photoUrl || null };
@@ -11,7 +11,14 @@ export function createAdminPaymentService({ paymentRequests, subscriptions, user
 
   function slimSub(s) {
     if (!s) return null;
-    return { id: s.id, tier: s.tier, type: s.type, status: s.status };
+    return { id: s.id, tier: s.tier, type: s.type, plan: s.plan ?? null, status: s.status, expiresAt: s.expiresAt ?? null };
+  }
+
+  /** The gym a gym-bound request pays for (trainer pass / direct plan), by name. */
+  function slimGym(gymId) {
+    if (!gymId || !gyms?.find) return null;
+    const g = gyms.find(r => r.id === gymId);
+    return g ? { id: g.id, name: g.name } : null;
   }
 
   // A request pays either for a subscription or for a trainer booking group.
@@ -70,6 +77,7 @@ export function createAdminPaymentService({ paymentRequests, subscriptions, user
       ...p,
       member: slimMember(memberById.get(p.memberId) || null),
       subscription: slimSub(subById.get(p.subscriptionId) || null),
+      gym: slimGym(p.gymId),
     }));
   }
 
