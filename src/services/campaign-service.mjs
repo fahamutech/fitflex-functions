@@ -15,7 +15,7 @@
 //   counted across every gym and FitFlex.
 import { randomUUID } from 'node:crypto';
 import {
-  CHANNELS, PURPOSES, categoryForPurpose, canTransitionCampaign,
+  CHANNELS, PURPOSES, CAMPAIGN_STATUSES, categoryForPurpose, canTransitionCampaign,
   validateContent, messageValues, renderText, contentFor,
 } from '../shared/communications.mjs';
 import { buildAudienceFilter } from '../shared/audience.mjs';
@@ -36,6 +36,8 @@ const iso = (v) => (v == null ? null : new Date(v).toISOString());
 export function createCampaignService({
   db, campaigns, gyms, segmentService, auditLog,
   templateService = null,
+  // Delivery numbers from the ledger (communication-history-service).
+  historyService = null,
   now = () => new Date(),
   largeSendThreshold = 200,
   marketingWeeklyCap = 2,
@@ -84,8 +86,10 @@ export function createCampaignService({
         // No text given: start from the template, in the sender's language.
         if (body.content === undefined) {
           const t = await templateService.contentFromTemplate(sender, tpl.id, { locale: body.locale || 'en', values: body.templateValues || {} });
-          body = { ...body, content: t.content, purpose: body.purpose ?? tpl.purpose };
+          body = { ...body, content: t.content };
         }
+        // The template's purpose, unless the sender chose one.
+        if (body.purpose === undefined) body = { ...body, purpose: tpl.purpose };
       }
     }
     if (body.name !== undefined) {
@@ -170,6 +174,35 @@ export function createCampaignService({
       ctaLabel: text.ctaLabel,
       deepLink: content.deepLink || 'message',
       locale: text.locale,
+      values,
+    };
+  }
+
+  /**
+   * A campaign's approved WhatsApp templates by language (empty without
+   * WhatsApp). Worked out once per send.
+   */
+  async function whatsappMappingFor(sender, campaign) {
+    if (!campaign.channels?.includes('whatsapp') || !campaign.templateId || !templateService) return new Map();
+    const tpl = await templateService.load(sender, campaign.templateId);
+    return tpl ? templateService.whatsappMapping(tpl) : new Map();
+  }
+
+  /**
+   * A member's WhatsApp copy. WhatsApp only carries the provider-approved
+   * wording, so this is the template's own text — in the member's language
+   * when that version is approved, otherwise in one that is — not the
+   * sender's edits. Its parameters are the member's values in the order the
+   * provider template numbers them ({{1}}, {{2}}, …).
+   */
+  function whatsappCopy(content, member, name, locale, mapping) {
+    const wa = mapping.get(locale) || [...mapping.values()][0];
+    if (!wa) return null;
+    const text = { ...content, title: wa.text.title, body: wa.text.body, ctaLabel: wa.text.ctaLabel, locale: wa.language, translations: undefined };
+    const copy = render(text, member, name, wa.language);
+    return {
+      copy,
+      payload: { templateName: wa.templateName, language: wa.language, parameters: wa.variables.map(v => String(copy.values[v] ?? '')) },
     };
   }
 
@@ -207,7 +240,8 @@ export function createCampaignService({
     const reach = await segmentService.reachByMember(members, campaign.category, campaign.channels);
     const capped = campaign.category === 'marketing' ? await atMarketingCap(members.map(m => m.memberId)) : new Set();
     const name = await gymName(campaign);
-    const locales = hasTranslations(campaign.content)
+    const mapping = await whatsappMappingFor(sender, campaign);
+    const locales = hasTranslations(campaign.content) || mapping.size
       ? await segmentService.localesByMember(members.map(m => m.memberId))
       : new Map();
     const at = now().toISOString();
@@ -216,14 +250,22 @@ export function createCampaignService({
     for (const m of members) {
       const msg = render(campaign.content, m, name, locales.get(m.memberId));
       for (const ch of campaign.channels) {
-        const reason = capped.has(m.memberId) ? 'marketing_cap' : reach.get(m.memberId)?.[ch] ?? null;
+        let copy = msg;
+        let payload = null;
+        let reason = capped.has(m.memberId) ? 'marketing_cap' : reach.get(m.memberId)?.[ch] ?? null;
+        if (ch === 'whatsapp' && !reason) {
+          const wa = whatsappCopy(campaign.content, m, name, locales.get(m.memberId) || msg.locale, mapping);
+          if (!wa) reason = 'whatsapp_template_not_approved';
+          else ({ copy, payload } = wa);
+        }
         const byCh = counts.byChannel[ch] || (counts.byChannel[ch] = { queued: 0, skipped: 0 });
         if (reason) { counts.skipped[reason] = (counts.skipped[reason] || 0) + 1; byCh.skipped += 1; }
         else { counts.queued += 1; byCh.queued += 1; }
         rows.push({
           id: id('cmm'), campaignId: campaign.id, senderType: campaign.senderType, gymId: campaign.gymId,
           memberId: m.memberId, channel: ch, category: campaign.category, messageType: campaign.purpose,
-          title: msg.title, body: msg.body, deepLink: msg.deepLink, locale: msg.locale,
+          title: copy.title, body: copy.body, deepLink: copy.deepLink, locale: copy.locale,
+          ...(payload ? { payload } : {}),
           status: reason ? 'skipped' : 'queued', skipReason: reason, attempts: 0,
           nextAttemptAt: reason ? null : at, createdAt: at, updatedAt: at,
         });
@@ -454,28 +496,90 @@ export function createCampaignService({
     return stats;
   }
 
-  async function list(sender, { gymId = null, status = null, limit = LIST_LIMIT } = {}) {
-    const q = db('CommunicationCampaign').orderBy('createdAt', 'desc').limit(Math.min(Math.max(Number(limit) || LIST_LIMIT, 1), 100));
-    if (sender.senderType === 'platform') q.where('senderType', 'platform');
+  /**
+   * Campaign history, newest first. Filters: gymId, status, purpose,
+   * channel, from/to (created), search (name or title); paged with an
+   * opaque cursor. Each campaign carries who created it and its live
+   * delivery numbers from the ledger.
+   */
+  async function list(sender, { gymId = null, status = null, purpose = null, channel = null, from = null, to = null, search = null, cursor = null, limit = LIST_LIMIT } = {}) {
+    const size = Math.min(Math.max(Number(limit) || LIST_LIMIT, 1), 100);
+    const q = db('CommunicationCampaign as c').leftJoin('User as u', 'u.id', 'c.createdBy');
+    if (sender.senderType === 'platform') q.where('c.senderType', 'platform');
     else {
       const mine = ownerGymIds(sender.owner);
       if (gymId != null && !mine.includes(gymId)) return { error: 'not_your_gym', status: 403 };
-      q.where('senderType', 'gym').whereIn('gymId', gymId != null ? [gymId] : mine);
+      q.where('c.senderType', 'gym').whereIn('c.gymId', gymId != null ? [gymId] : mine);
     }
-    if (status) q.where('status', status);
-    const rows = await q.select('*');
-    return { campaigns: rows.map(r => { const { content, audience, ...rest } = view(r); return { ...rest, title: content?.title ?? null, preset: audience?.preset ?? null }; }) };
+    const bad = (detail) => ({ error: 'invalid_filter', status: 400, detail });
+    if (status) {
+      const list = String(status).split(',');
+      if (!list.every(x => CAMPAIGN_STATUSES.includes(x))) return bad('status');
+      q.whereIn('c.status', list);
+    }
+    if (purpose) {
+      if (!PURPOSES.includes(purpose)) return bad('purpose');
+      q.where('c.purpose', purpose);
+    }
+    if (channel) {
+      if (!CHANNELS.includes(channel)) return bad('channel');
+      q.whereRaw('? = ANY(c.channels)', [channel]);
+    }
+    for (const [key, value, op] of [['from', from, '>='], ['to', to, '<=']]) {
+      if (!value) continue;
+      let d = new Date(value);
+      if (Number.isNaN(+d)) return bad(key);
+      if (key === 'to' && /^\d{4}-\d{2}-\d{2}$/.test(String(value))) d = new Date(+d + 86_400_000 - 1);
+      q.where('c.createdAt', op, d);
+    }
+    if (search && String(search).trim()) {
+      const term = `%${String(search).trim().slice(0, 60).replace(/[\\%_]/g, ch => `\\${ch}`)}%`;
+      q.where(b => b.whereILike('c.name', term).orWhereRaw(`c.content->>'title' ILIKE ?`, [term]));
+    }
+    if (cursor) {
+      let c;
+      try { c = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8')); } catch { return bad('cursor'); }
+      q.whereRaw(`(date_trunc('milliseconds', c."createdAt"), c.id) < (?::timestamptz, ?)`, [c?.a, c?.i]);
+    }
+    const rows = await q.orderBy([{ column: db.raw(`date_trunc('milliseconds', c."createdAt")`), order: 'desc' }, { column: 'c.id', order: 'desc' }])
+      .limit(size + 1).select('c.*', 'u.displayName as createdByName');
+    const page = rows.slice(0, size);
+    const stats = historyService ? await historyService.campaignStats(page.map(r => r.id)) : new Map();
+    const last = page.at(-1);
+    return {
+      campaigns: page.map(r => {
+        const { content, audience, ...rest } = view(r);
+        return { ...rest, title: content?.title ?? null, preset: audience?.preset ?? null, createdByName: r.createdByName ?? null, stats: stats.get(r.id) ?? null };
+      }),
+      nextCursor: rows.length > size ? Buffer.from(JSON.stringify({ a: new Date(last.createdAt).toISOString(), i: last.id })).toString('base64url') : null,
+    };
   }
 
-  /** A campaign with live delivery progress per channel from the ledger. */
+  /**
+   * A campaign with live delivery progress per channel from the ledger,
+   * its numbers, who created it and the template it started from.
+   */
   async function get(sender, campaignId) {
     const c = await load(sender, campaignId);
     if (!c) return { error: 'not_found', status: 404 };
-    const rows = await db('CommunicationMessage').where('campaignId', c.id)
-      .groupBy('channel', 'status').select('channel', 'status').count({ n: '*' });
+    const [rows, creator, template] = await Promise.all([
+      db('CommunicationMessage').where('campaignId', c.id)
+        .groupBy('channel', 'status').select('channel', 'status').count({ n: '*' }),
+      c.createdBy ? db('User').where({ id: c.createdBy }).first('displayName') : null,
+      c.templateId ? db('CommunicationTemplate').where({ id: c.templateId }).first('id', 'key', 'name', 'gymId') : null,
+    ]);
     const progress = {};
     for (const r of rows) (progress[r.channel] ||= {})[r.status] = Number(r.n);
-    return { campaign: view(c), progress };
+    const stats = historyService ? (await historyService.campaignStats([c.id])).get(c.id) : null;
+    return {
+      campaign: {
+        ...view(c),
+        createdByName: creator?.displayName ?? null,
+        template: template ? { id: template.id, key: template.key, name: template.name, system: template.gymId == null } : null,
+      },
+      progress,
+      stats,
+    };
   }
 
   async function overview(sender, { gymId = null } = {}) {

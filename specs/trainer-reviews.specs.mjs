@@ -24,9 +24,33 @@ function store(seed = []) {
   };
 }
 
+// Primed collections (gyms, trainers, platform_settings, otps) expose
+// updateAsync(pred, patch) + persistUpdateByIdAsync and no updateByIdAsync —
+// mirror that here.
+function primedStore(seed = []) {
+  const { updateByIdAsync, ...s } = store(seed);
+  return {
+    ...s,
+    updateAsync: async (pred, patch) => {
+      const rows = s._rows();
+      const i = rows.findIndex(pred);
+      if (i < 0) return null;
+      rows[i] = { ...rows[i], ...patch };
+      return rows[i];
+    },
+    persistUpdateByIdAsync: async (id, patch) => {
+      const rows = s._rows();
+      const i = rows.findIndex(r => r.id === id);
+      if (i < 0) return null;
+      rows[i] = { ...rows[i], ...patch };
+      return rows[i];
+    },
+  };
+}
+
 function setup({ trainerRows, bookingRows = [], userRows = [] } = {}) {
   const trainerReviews = store();
-  const trainers = store(trainerRows ?? [{ id: 'trainer1', displayName: 'Coach Mike', rating: 0, reviewCount: 0 }]);
+  const trainers = primedStore(trainerRows ?? [{ id: 'trainer1', displayName: 'Coach Mike', rating: 0, reviewCount: 0 }]);
   const trainerBookings = store(bookingRows);
   const users = store(userRows.length ? userRows : [{ id: 'm1', displayName: 'Aisha' }]);
   const svc = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog: { insert: () => {}, insertAsync: async () => {} } });

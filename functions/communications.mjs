@@ -7,7 +7,7 @@
 // scope work with all members.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
-import { segmentService, campaignService, templateService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { segmentService, campaignService, templateService, whatsappChannelService, communicationHistoryService, resolveRequestUser } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -99,8 +99,13 @@ function campaignRoutes(prefix, guard, senderOf, who) {
   return {
     overview: route('get', '/overview', 'communication overview — members reachable, campaigns by status, recent campaigns, channels available. ?gymId',
       async (s, req, res) => send(res, await campaignService.overview(s, { gymId: q(req).gymId ?? null }))),
-    list: route('get', '/campaigns', 'campaigns, newest first. ?gymId&status&limit',
-      async (s, req, res) => send(res, await campaignService.list(s, { gymId: q(req).gymId ?? null, status: q(req).status || null, limit: q(req).limit }))),
+    list: route('get', '/campaigns', 'campaign history, newest first, each with who created it and its delivery numbers (stats). ?gymId&status (comma list)&purpose&channel&from&to&search&cursor&limit',
+      async (s, req, res) => {
+        const { gymId, status, purpose, channel, from, to, search, cursor, limit } = q(req);
+        send(res, await campaignService.list(s, { gymId: gymId ?? null, status: status || null, purpose: purpose || null, channel: channel || null, from: from || null, to: to || null, search: search || null, cursor: cursor || null, limit }));
+      }),
+    recipients: route('get', '/campaigns/:id/recipients', 'who a campaign went to — one row per member with each channel\'s status, delivery times, failure or skip reason and provider reference. ?channel&status&search&cursor&limit',
+      async (s, req, res) => send(res, await communicationHistoryService.recipients(s, req.params.id, q(req)))),
     create: route('post', '/campaigns', 'save a draft campaign. POST { gymId?, name?, purpose, audience?: { preset?, filter? }, content?: { title, body, ctaLabel?, deepLink?, offerName?, discount?, amountTzs? }, channels? }',
       async (s, req, res) => send(res, await campaignService.create(s, req.body || {}), 201)),
     previewNew: route('post', '/campaigns/preview', 'preview an unsaved campaign: who it reaches on each channel, an example message, warnings. Same body as create.',
@@ -127,6 +132,7 @@ function campaignRoutes(prefix, guard, senderOf, who) {
 const owner = campaignRoutes('/owner/communications', ownerGuard, gymSender, 'Owner/staff');
 export const ownerCommunicationOverview = owner.overview;
 export const ownerCampaignList = owner.list;
+export const ownerCampaignRecipients = owner.recipients;
 export const ownerCampaignCreate = owner.create;
 export const ownerCampaignPreviewNew = owner.previewNew;
 export const ownerCampaignGet = owner.get;
@@ -141,6 +147,7 @@ export const ownerCampaignSend = owner.send;
 const admin = campaignRoutes('/admin/communications', adminGuard, platformSender, 'Admin (FitFlex-wide)');
 export const adminCommunicationOverview = admin.overview;
 export const adminCampaignList = admin.list;
+export const adminCampaignRecipients = admin.recipients;
 export const adminCampaignCreate = admin.create;
 export const adminCampaignPreviewNew = admin.previewNew;
 export const adminCampaignGet = admin.get;
@@ -200,3 +207,76 @@ export const adminTemplateList = adminTpl.list;
 export const adminTemplateGet = adminTpl.get;
 export const adminTemplatePreviewNew = adminTpl.previewNew;
 export const adminTemplatePreview = adminTpl.preview;
+
+// ── WhatsApp (M7) ───────────────────────────────────────────────────────────
+// FitFlex admins only: the provider's status, the kill switch, the registry
+// of provider-approved templates, and a test send. Credentials never pass
+// through here — they live in the server's environment.
+
+const waRoute = (method, path, description, handler, extra = {}) => ({
+  created, method, path: `/admin/communications/whatsapp${path}`, description: `Admin: ${description}`,
+  onGuard: adminGuard, ...extra,
+  onRequest: async (req, res) => handler(req.user?.sub || null, req, res),
+});
+
+export const adminWhatsAppStatus = waRoute('get', '', 'WhatsApp status — provider (never its credentials), kill switch, webhook, opted-in members, template approvals, last 7 days of WhatsApp messages.',
+  async (_actor, _req, res) => send(res, await whatsappChannelService.status()));
+
+export const adminWhatsAppSetEnabled = waRoute('put', '', 'the WhatsApp kill switch. PUT { enabled: boolean } — off stops all WhatsApp sending within about 30 seconds; queued messages are skipped.',
+  async (actor, req, res) => send(res, await whatsappChannelService.setEnabled(actor, req.body?.enabled)),
+  { requestSample: { enabled: false } });
+
+export const adminWhatsAppTemplates = waRoute('get', '/templates', 'the provider template registry, and the provider template each FitFlex template needs per language (name, category, variables in order).',
+  async (_actor, _req, res) => send(res, await whatsappChannelService.registry()));
+
+export const adminWhatsAppTemplateRegister = waRoute('post', '/templates', 'register a provider template (or update it). POST { providerTemplateName, language: en|sw, category: utility|marketing|authentication, variables: [..in order], approvalStatus?, provider? }',
+  async (actor, req, res) => send(res, await whatsappChannelService.registerTemplate(actor, req.body || {}), 201),
+  { requestSample: { providerTemplateName: 'fitflex_renewal_reminder', language: 'en', category: 'utility', variables: ['member_name', 'gym_name', 'expiry_date'], approvalStatus: 'approved' } });
+
+export const adminWhatsAppTemplateUpdate = waRoute('patch', '/templates/:id', 'change a registered provider template\'s approval status, category or variables.',
+  async (actor, req, res) => send(res, await whatsappChannelService.updateTemplate(actor, req.params.id, req.body || {})));
+
+export const adminWhatsAppTemplateSync = waRoute('post', '/templates/sync', 'pull template approval statuses from the provider into the registry.',
+  async (actor, _req, res) => send(res, await whatsappChannelService.syncTemplates(actor)));
+
+export const adminWhatsAppTest = waRoute('post', '/test', 'send one approved template to a phone number — the go-live check. POST { phone, templateName, language, parameters: [..] }',
+  async (actor, req, res) => send(res, await whatsappChannelService.sendTest(actor, req.body || {})));
+
+// ── History (M8) ────────────────────────────────────────────────────────────
+// Every message is already in the CommunicationMessage ledger; these routes
+// read it. Owners and staff see only what their own gyms sent; admins see
+// FitFlex's own messages. Enforced in the history service.
+
+const HISTORY_FILTERS = 'memberId&campaignId&channel&category&messageType&status (a status, or pending|reached|opened; comma list)&from&to&search (member name)&gymId&cursor&limit';
+
+function historyRoutes(prefix, guard, senderOf, who) {
+  const route = (method, path, description, handler) => ({
+    created, method, path: `${prefix}${path}`, description: `${who}: ${description}`, onGuard: guard,
+    onRequest: async (req, res) => {
+      const sender = await senderOf(req, res);
+      if (sender) await handler(sender, req, res);
+    },
+  });
+  return {
+    messages: route('get', '/communications/messages', `the message log, newest first: one row per member per channel, with status, delivery and engagement times, failure or skip reason and provider reference. ?${HISTORY_FILTERS}`,
+      async (s, req, res) => send(res, await communicationHistoryService.messages(s, req.query || {}))),
+    summary: route('get', '/communications/summary', `counts by channel and status, and per day, for the same filters as the log. ?${HISTORY_FILTERS}`,
+      async (s, req, res) => send(res, await communicationHistoryService.summary(s, req.query || {}))),
+    message: route('get', '/communications/messages/:id', 'one message in full — campaign, template, rendered text, provider reference and every timestamp.',
+      async (s, req, res) => send(res, await communicationHistoryService.message(s, req.params.id))),
+    member: route('get', '/members/:memberId/communications', `one member's communications, newest first, each with its channels side by side. ?channel&category&messageType&status&from&to&gymId&cursor&limit`,
+      async (s, req, res) => send(res, await communicationHistoryService.memberTimeline(s, req.params.memberId, req.query || {}))),
+  };
+}
+
+const ownerHistory = historyRoutes('/owner', ownerGuard, gymSender, 'Owner/staff');
+export const ownerCommunicationMessages = ownerHistory.messages;
+export const ownerCommunicationSummary = ownerHistory.summary;
+export const ownerCommunicationMessage = ownerHistory.message;
+export const ownerMemberCommunications = ownerHistory.member;
+
+const adminHistory = historyRoutes('/admin', adminGuard, platformSender, 'Admin (FitFlex\'s own messages)');
+export const adminCommunicationMessages = adminHistory.messages;
+export const adminCommunicationSummary = adminHistory.summary;
+export const adminCommunicationMessage = adminHistory.message;
+export const adminMemberCommunications = adminHistory.member;

@@ -28,9 +28,33 @@ function store(seed = []) {
   };
 }
 
+// Primed collections (gyms, trainers, platform_settings, otps) expose
+// updateAsync(pred, patch) + persistUpdateByIdAsync and no updateByIdAsync —
+// mirror that here.
+function primedStore(seed = []) {
+  const { updateByIdAsync, ...s } = store(seed);
+  return {
+    ...s,
+    updateAsync: async (pred, patch) => {
+      const rows = s._rows();
+      const i = rows.findIndex(pred);
+      if (i < 0) return null;
+      rows[i] = { ...rows[i], ...patch };
+      return rows[i];
+    },
+    persistUpdateByIdAsync: async (id, patch) => {
+      const rows = s._rows();
+      const i = rows.findIndex(r => r.id === id);
+      if (i < 0) return null;
+      rows[i] = { ...rows[i], ...patch };
+      return rows[i];
+    },
+  };
+}
+
 function setup({ gymRows, checkinRows = [], subRows = [], userRows = [] } = {}) {
   const gymReviews = store();
-  const gyms = store(gymRows ?? [{ id: 'gym1', name: 'Power Gym', tier: 'midtier', status: 'active', rating: 0, reviewCount: 0 }]);
+  const gyms = primedStore(gymRows ?? [{ id: 'gym1', name: 'Power Gym', tier: 'midtier', status: 'active', rating: 0, reviewCount: 0 }]);
   const checkins = store(checkinRows);
   const subscriptions = store(subRows);
   const users = store(userRows.length ? userRows : [{ id: 'm1', displayName: 'Aisha' }]);
