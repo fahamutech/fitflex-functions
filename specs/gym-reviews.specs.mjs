@@ -29,7 +29,8 @@ function store(seed = []) {
 }
 
 // Primed collections (gyms, trainers, platform_settings, otps) expose
-// updateAsync(pred, patch) and no updateByIdAsync — mirror that here.
+// updateAsync(pred, patch) + persistUpdateByIdAsync and no updateByIdAsync —
+// mirror that here.
 function primedStore(seed = []) {
   const { updateByIdAsync, ...s } = store(seed);
   return {
@@ -37,6 +38,13 @@ function primedStore(seed = []) {
     updateAsync: async (pred, patch) => {
       const rows = s._rows();
       const i = rows.findIndex(pred);
+      if (i < 0) return null;
+      rows[i] = { ...rows[i], ...patch };
+      return rows[i];
+    },
+    persistUpdateByIdAsync: async (id, patch) => {
+      const rows = s._rows();
+      const i = rows.findIndex(r => r.id === id);
       if (i < 0) return null;
       rows[i] = { ...rows[i], ...patch };
       return rows[i];

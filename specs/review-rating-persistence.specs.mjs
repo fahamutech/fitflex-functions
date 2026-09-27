@@ -51,10 +51,12 @@ after(async () => {
   if (created.trainers.length) {
     await db('TrainerReview').whereIn('trainerId', created.trainers).del();
     for (const id of created.trainers) await trainers.removeAsync(t => t.id === id);
+    await db('TrainerProfile').whereIn('id', created.trainers).del();
   }
   if (created.gyms.length) {
     await db('GymReview').whereIn('gymId', created.gyms).del();
     for (const id of created.gyms) await gyms.removeAsync(g => g.id === id);
+    await db('Gym').whereIn('id', created.gyms).del();
   }
   if (created.users.length) await db('User').whereIn('id', created.users).del();
   await db.destroy();
@@ -104,4 +106,43 @@ test('gym review submit + moderation persist rating and reviewCount on Gym', asy
   const flagged = await svc.moderate({ reviewId: second.review.id, action: 'flag', adminId: 'admin_test' });
   assert.ok(!flagged.error, flagged.error);
   assert.deepEqual(await stored('Gym', gymId), { rating: 4, reviewCount: 1 });
+});
+
+// Rows created by another instance after this one primed its cache: updateAsync
+// misses them, so recalcRating must write through to the database.
+test('trainer rating persists for a TrainerProfile missing from the primed cache', async () => {
+  const svc = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog });
+  await trainers.ready;
+  const trainerId = uid('trn');
+  await db('TrainerProfile').insert({ id: trainerId, displayName: 'Rating Test Coach', updatedAt: new Date() });
+  created.trainers.push(trainerId);
+  const [gymId, memberId] = [await makeGym(), await makeUser()];
+  await trainerBookings.insertAsync({
+    id: uid('tbk'), memberId, trainerId, gymId, date: '2026-09-20', slot: '07:00', amountTzs: 20000,
+    status: 'completed', createdAt: now(), updatedAt: now(),
+  });
+  assert.equal(trainers.find(t => t.id === trainerId), null);
+
+  const r = await svc.submit({ memberId, trainerId, rating: 4 });
+  assert.ok(!r.error, r.error);
+  assert.deepEqual(await stored('TrainerProfile', trainerId), { rating: 4, reviewCount: 1 });
+  assert.equal(trainers.find(t => t.id === trainerId)?.rating, 4);
+});
+
+test('gym rating persists for a Gym missing from the primed cache', async () => {
+  const svc = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog });
+  await gyms.ready;
+  const gymId = uid('gym');
+  await db('Gym').insert({ id: gymId, name: 'Rating Test Gym', tier: 'standard', location: 'Dar es Salaam', updatedAt: new Date() });
+  created.gyms.push(gymId);
+  const memberId = await makeUser();
+  await db('Checkin').insert({
+    id: uid('chk'), memberId, gymId, timestamp: new Date(), method: 'qr', subscriptionType: 'credits', gymTier: 'standard', visitConsumed: true,
+  });
+  assert.equal(gyms.find(g => g.id === gymId), null);
+
+  const r = await svc.submit({ memberId, gymId, rating: 3 });
+  assert.ok(!r.error, r.error);
+  assert.deepEqual(await stored('Gym', gymId), { rating: 3, reviewCount: 1 });
+  assert.equal(Number(gyms.find(g => g.id === gymId)?.rating), 3); // decimal column → pg string
 });

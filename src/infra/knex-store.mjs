@@ -364,6 +364,21 @@ export function collection(name) {
         return updated;
       },
 
+      // Write-through by id for rows the in-memory cache may not hold yet
+      // (e.g. created by another instance after priming). Updates the DB row
+      // directly, then caches the fresh row. Returns null if no row has that id.
+      persistUpdateByIdAsync: async (id, patch) => {
+        const pk = pkField(name);
+        await _persistUpdate(pk, id, patch);
+        const fresh = await _findByIdFromDb(id);
+        if (!fresh) return null;
+        const data = getSyncData();
+        const i = data.findIndex(r => r[pk] === id);
+        if (i < 0) data.push(fresh); else data[i] = fresh;
+        invalidate(name);
+        return fresh;
+      },
+
       remove: (pred) => {
         const data = getSyncData();
         const i = data.findIndex(pred);
