@@ -49,6 +49,7 @@ import { createTemplateService } from '../services/template-service.mjs';
 import { createDeliveryService } from '../services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../services/communication-preference-service.mjs';
 import { createWhatsAppChannelService } from '../services/whatsapp-channel-service.mjs';
+import { createCommunicationHistoryService } from '../services/communication-history-service.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
@@ -209,8 +210,12 @@ export const templateService = createTemplateService({
   renewalLink: process.env.COMMS_RENEWAL_URL || null,
   whatsappProvider: () => (whatsAppProvider.configured ? whatsAppProvider.name : null),
 });
+// Communication history: reads the message ledger (campaigns, recipients,
+// member timelines, the message log).
+export const communicationHistoryService = createCommunicationHistoryService({ db });
 export const campaignService = createCampaignService({
   db, campaigns: communicationCampaigns, gyms, segmentService, auditLog, templateService,
+  historyService: communicationHistoryService,
   largeSendThreshold: positiveInt(process.env.COMMS_LARGE_SEND_THRESHOLD, 200),
   marketingWeeklyCap: positiveInt(process.env.COMMS_MARKETING_WEEKLY_CAP, 2),
   renewalLink: process.env.COMMS_RENEWAL_URL || null,

@@ -68,7 +68,11 @@ export function createNotificationService({
     const dead = [];
     res.responses.forEach((r, i) => { if (!r.success && DEAD_TOKEN_CODES.has(r.error?.code)) dead.push(tokens[i]); });
     if (dead.length) await deviceTokens.removeAsync(d => dead.includes(d.token));
-    return { sent: res.successCount, failed: res.failureCount };
+    // FCM's id for each accepted push, and the error code of each refused
+    // one — kept in the communications ledger as provider references.
+    const messageIds = res.responses.filter(r => r.success && r.messageId).map(r => r.messageId);
+    const errors = [...new Set(res.responses.filter(r => !r.success).map(r => r.error?.code || 'unknown'))];
+    return { sent: res.successCount, failed: res.failureCount, messageIds, errors };
   }
 
   /**
