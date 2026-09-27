@@ -578,7 +578,7 @@ const ALLOWED_FIELDS = {
   webhook_seen:     new Set(['id','at']),
   otps:             new Set(['phone','code','userType','expiresAt']),
   gym_owners:       new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','gymId','gymIds','createdAt','updatedAt']),
-  trainer_engagements: new Set(['id','memberId','trainerId','type','message','gymId','status','createdAt']),
+  trainer_engagements: new Set(['id','memberId','trainerId','type','message','gymId','status','messages','lastMessageAt','lastMessageFrom','trainerReadAt','memberReadAt','createdAt','updatedAt']),
   trainer_sessions: new Set(['id','trainerId','memberId','customerName','customerEmail','customerPhone','gymId','locationType','locationLabel','date','slot','source','status','amountTzs','createdAt']),
   products:         new Set(['id','vendorId','name','description','category','brand','priceTzs','discountPriceTzs','stock','sku','weightKg','distanceKm','variants','images','visibility','deliveryAvailable','status','approvalStatus','rating','reviewCount','soldCount','homepageVisible','homepagePriority','deletedAt','createdAt','updatedAt']),
   shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','deliveryMethod','pickupGymId','deliveryAddress','paymentMethod','paymentStatus','paymentReference','timeline','settlementStatus','note','createdAt','updatedAt']),
@@ -641,6 +641,7 @@ const JSON_FIELDS = {
   platform_settings: ['subscriptionTiers', 'payoutBands'],
   audit_log: ['before', 'after'],
   shop_orders: ['items', 'timeline'],
+  trainer_engagements: ['messages'],
   products: ['variants'],
   marketplace_enquiries: ['messages'],
   marketplace_notifications: ['data'],
@@ -690,7 +691,8 @@ function prepareForKnex(name, data, isUpdate = false) {
     'scheduledAt', 'sentAt', 'cancelledAt', 'nextAttemptAt', 'deliveredAt', 'openedAt', 'clickedAt', 'failedAt',
     'lastSyncedAt', 'whatsappMarketingConsentAt', 'whatsappOptedOutAt', 'finishedAt',
     'submittedAt', 'decidedAt', 'reverifyAt', 'verifiedAt', 'cooldownUntil', 'disabledAt', 'reviewedAt',
-    'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt'];
+    'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
+    'lastMessageAt', 'trainerReadAt', 'memberReadAt'];
   for (const f of DATE_FIELDS) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];
