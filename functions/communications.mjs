@@ -7,7 +7,7 @@
 // scope work with all members.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
-import { segmentService, campaignService, templateService, whatsappChannelService, communicationHistoryService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { segmentService, campaignService, templateService, whatsappChannelService, communicationHistoryService, automationService, resolveRequestUser } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -280,3 +280,30 @@ export const adminCommunicationMessages = adminHistory.messages;
 export const adminCommunicationSummary = adminHistory.summary;
 export const adminCommunicationMessage = adminHistory.message;
 export const adminMemberCommunications = adminHistory.member;
+
+// ── Automations (M9) ────────────────────────────────────────────────────────
+// A gym's lifecycle messages: welcome, expiry reminders, expired, failed
+// payment, inactivity. Every gym has the defaults, switched off until the
+// owner turns them on.
+
+const autoRoute = (path, description, handler, extra = {}) => ({
+  created, method: 'get', path: `/owner/communications/automations${path}`, description: `Owner/staff: ${description}`,
+  onGuard: ownerGuard, ...extra,
+  onRequest: async (req, res) => {
+    const sender = await gymSender(req, res);
+    if (sender) await handler(sender, req, res);
+  },
+});
+
+export const ownerAutomationList = autoRoute('', 'the gym\'s automations (defaults created on first look, switched off), each with its trigger, template, channels, status and last-30-days numbers. ?gymId',
+  async (s, req, res) => send(res, await automationService.list(s, { gymId: req.query?.gymId ?? null })));
+export const ownerAutomationGet = autoRoute('/:id', 'one automation.',
+  async (s, req, res) => send(res, await automationService.get(s, req.params.id)));
+export const ownerAutomationUpdate = autoRoute('/:id', 'switch an automation on or off, or change its channels or template. PATCH { status?: enabled|disabled, channels?: [in_app|push|whatsapp], templateId? }. Turning it on clears an automatic pause.',
+  async (s, req, res) => send(res, await automationService.update(s, req.params.id, req.body || {})),
+  { method: 'patch', requestSample: { status: 'enabled', channels: ['in_app', 'whatsapp'] } });
+export const ownerAutomationRuns = autoRoute('/:id/runs', 'recent firings: which member, for what, and how each channel went. ?limit&before',
+  async (s, req, res) => send(res, await automationService.runs(s, req.params.id, { limit: req.query?.limit, before: req.query?.before || null })));
+export const ownerAutomationPreview = autoRoute('/:id/preview', 'the automation\'s message as a sample member would see it, in each language and channel.',
+  async (s, req, res) => send(res, await automationService.preview(s, req.params.id)),
+  { method: 'post' });

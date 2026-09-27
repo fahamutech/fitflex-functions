@@ -15,6 +15,8 @@ export function createMemberManagementService({
   checkins,
   paymentRequests,
   publicUserId,
+  // A membership started or was renewed here (lifecycle automations).
+  onMembershipActivated = async () => {},
   initFirebaseAdmin,
   getAdminAuth,
 }) {
@@ -235,6 +237,7 @@ export function createMemberManagementService({
       createdAt: nowIso,
     };
     await subscriptions.insertAsync(sub);
+    try { await onMembershipActivated(sub); } catch { /* best-effort */ }
 
     let payment = null;
     if (paidAmount && Number(paidAmount) > 0) {
@@ -537,6 +540,7 @@ export function createMemberManagementService({
       tier: tier || sub.tier,
     });
     const updatedSub = await subscriptions.findByIdAsync(sub.id);
+    try { await onMembershipActivated(updatedSub); } catch { /* best-effort */ }
 
     let payment = null;
     if (paidAmount && Number(paidAmount) > 0) {
