@@ -1,6 +1,6 @@
 // Composition root — every service is instantiated exactly once here with its
 // dependencies injected, then imported by the thin REST modules in functions/.
-import { sign as signJwt } from '../auth/jwt.mjs';
+import { sign as signJwt, registerAccountStatusLookup } from '../auth/jwt.mjs';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
@@ -80,6 +80,9 @@ export {
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
 };
+
+// requireAuth rejects tokens of suspended accounts (the JWT alone can't know).
+registerAccountStatusLookup(async id => (await users.findByIdAsync(id))?.accountStatus ?? null);
 
 export const identityService = createIdentityService({ users });
 const { resolveRequestUser, publicUserId } = identityService;

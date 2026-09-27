@@ -3,6 +3,7 @@
 // many gyms and every embedded thumbnail multiplies payload size; the portal
 // fetches the full gym (with image) on demand via GET /gyms/:id when needed.
 import { randomUUID } from 'node:crypto';
+import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 
 export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService }) {
   /** Strip internal/sensitive fields from owner records for list responses. */
@@ -53,8 +54,9 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     if (body.gymId && !gyms.find(g => g.id === body.gymId)) return { error: 'gym_not_found', status: 400 };
     const id = body.id || `usr_${randomUUID().slice(0, 8)}`;
     const prior = await users.findByIdAsync(id);
-    const duplicateEmail = body.email && await users.findAsync(
-      u => u.email === body.email && u.userType === 'gym_operator' && u.id !== id,
+    const email = normalizeEmail(body.email);
+    const duplicateEmail = email && await users.findAsync(
+      u => sameEmail(u.email, email) && u.userType === 'gym_operator' && u.id !== id,
     );
     if (duplicateEmail) return { error: 'email_already_used', status: 409, existingRole: duplicateEmail.userType };
 
@@ -62,7 +64,7 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     const row = {
       id,
       userType: 'gym_operator',
-      email: body.email ?? prior?.email,
+      email: email ?? prior?.email,
       displayName: body.displayName ?? prior?.displayName ?? null,
       phone: body.phone ?? prior?.phone ?? null,
       photoUrl: body.photoUrl ?? prior?.photoUrl ?? null,

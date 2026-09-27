@@ -2,6 +2,8 @@
 // List responses are kept lean (lean subscription + pendingPayment projections)
 // so the admin members table gets a fast first paint even with many rows.
 import { randomUUID } from 'node:crypto';
+import { toSessionUser } from '../shared/session-user.mjs';
+import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 
 export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr }) {
   async function latestMemberSubscription(memberId) {
@@ -67,9 +69,10 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     if (!body.id && !body.email && !body.phone) return { error: 'email_or_phone_required', status: 400 };
     const id = body.id || `usr_${randomUUID().slice(0, 8)}`;
     const prior = await users.findByIdAsync(id);
-    if (body.email && !body.id) {
+    const email = normalizeEmail(body.email);
+    if (email && !body.id) {
       const dup = await users.findAsync(
-        u => u.email === body.email && u.userType === 'member' && u.id !== id,
+        u => sameEmail(u.email, email) && u.userType === 'member' && u.id !== id,
       );
       if (dup) return { error: 'email_already_used', status: 409, existingRole: dup.userType };
     }
@@ -88,7 +91,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     const row = {
       id,
       userType: 'member',
-      email: body.email ?? prior?.email ?? null,
+      email: email ?? prior?.email ?? null,
       phone: body.phone ?? prior?.phone ?? null,
       displayName: body.displayName ?? prior?.displayName ?? null,
       photoUrl: body.photoUrl ?? prior?.photoUrl ?? null,
@@ -108,7 +111,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     return {
       created: !prior,
       member: {
-        ...row,
+        ...toSessionUser(row),
         subscription: enrichedSub,
         pendingPayment: enrichedPendingPays.sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))[0] || null
       },

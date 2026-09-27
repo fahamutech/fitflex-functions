@@ -1,5 +1,6 @@
 // Admin role-approval queue — owner, trainer and vendor profiles awaiting review.
 import { randomUUID } from 'node:crypto';
+import { toSessionUser } from '../shared/session-user.mjs';
 
 export function createAdminApprovalService({ users, auditLog, partnerKycCases = null }) {
   /** Strip internal/sensitive fields from user records for list responses. */
@@ -41,7 +42,7 @@ export function createAdminApprovalService({ users, auditLog, partnerKycCases = 
       actor: actorId, action: `role_${status}`,
       target: target.id, before, after: updated
     });
-    return { user: updated };
+    return { user: toSessionUser(updated) };
   }
 
   return { list, decide };

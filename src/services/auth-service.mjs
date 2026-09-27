@@ -3,6 +3,8 @@
 import { randomUUID } from 'node:crypto';
 import { verifyPassword } from '../auth/password-credentials.mjs';
 import { buildDevIdentity, DEV_GYM_ID, DEV_OWNER_GYM_ID } from '../shared/dev-login.mjs';
+import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
+import { toSessionUser } from '../shared/session-user.mjs';
 
 const configuredAdminEmails = new Set(
   (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
@@ -70,13 +72,13 @@ export function createAuthService({
     }
     await otps.upsertAsync(o => o.phone === phone, { ...otp, code: null });
     const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone });
-    return { token, user };
+    return { token, user: toSessionUser(user) };
   }
 
   async function login({ email, password, requestedRole }) {
     if (!email || !password) return { error: 'email_and_password_required', status: 400 };
     const role = requestedRole ? normalizeRequestedRole(requestedRole) : null;
-    const matches = await users.filterAsync(u => u.email === email);
+    const matches = await users.filterAsync(u => sameEmail(u.email, email));
     const user = role
       ? matches.find(u => u.userType === role) ||
         (role === 'vendor' ? matches.find(u => u.userType === 'vendor_staff') : null)
@@ -95,9 +97,12 @@ export function createAuthService({
     if (process.env.NODE_ENV === 'production' && !SCRYPT_PASSWORD_ROLES.has(user.userType)) {
       return { error: 'use_firebase_email_password_sign_in', status: 403 };
     }
-    const validPassword = SCRYPT_PASSWORD_ROLES.has(user.userType)
-      ? await verifyPassword(password, user.passwordHash)
-      : user.passwordHash === `demo:${password}`;
+    // Hashes are scrypt; `demo:<plaintext>` survives only on rows written
+    // before the rehash migration and is accepted for the dev-only roles.
+    const storedHash = String(user.passwordHash || '');
+    const validPassword = storedHash.startsWith('scrypt:')
+      ? await verifyPassword(password, storedHash)
+      : !SCRYPT_PASSWORD_ROLES.has(user.userType) && storedHash === `demo:${password}`;
     if (!validPassword) return { error: 'invalid_credentials', status: 401 };
     const token = signJwt({
       sub: user.id,
@@ -110,8 +115,7 @@ export function createAuthService({
       vendorPermissions: user.vendorPermissions || [],
       corporateId: user.corporateId,
     });
-    const { passwordHash, ...sessionUser } = user;
-    return { token, user: sessionUser };
+    return { token, user: toSessionUser(user) };
   }
 
   async function firebaseSession({ idToken, requestedRole }) {
@@ -123,11 +127,28 @@ export function createAuthService({
     // choice page. Keep member as the legacy default for a new identity.
     const hasRequestedRole = requestedRole != null && String(requestedRole).trim() !== '';
     const selfRole = hasRequestedRole ? normalizeRequestedRole(requestedRole) : null;
-    const isAdminEmail = isConfiguredAdminEmail(fb.email);
-    const identityMatches = await users.filterAsync(
-      u => u.firebaseUid === fb.uid || Boolean(fb.email && u.email === fb.email),
+    const fbEmail = normalizeEmail(fb.email);
+    // An email proves who someone is only once Firebase has verified it.
+    // Unverified, it can still reach rows already tied to this Firebase uid,
+    // but it must never claim a row that some other account (or nobody) owns.
+    const emailVerified = Boolean(fbEmail && fb.emailVerified);
+    const isAdminEmail = emailVerified && isConfiguredAdminEmail(fbEmail);
+    const candidates = await users.filterAsync(
+      u => u.firebaseUid === fb.uid || Boolean(fbEmail && sameEmail(u.email, fbEmail)),
     );
+    const uidMatches = candidates.filter(u => u.firebaseUid === fb.uid);
+    const emailOnlyMatches = candidates.filter(u => u.firebaseUid !== fb.uid);
     const requestedUserType = isAdminEmail ? 'admin' : selfRole;
+
+    if (!emailVerified && emailOnlyMatches.length) {
+      // Would the old email match have picked a row this uid does not own?
+      const claimsEmailOnlyRow = requestedUserType
+        ? !uidMatches.some(u => u.userType === requestedUserType)
+          && emailOnlyMatches.some(u => u.userType === requestedUserType)
+        : uidMatches.length === 0;
+      if (claimsEmailOnlyRow) return { error: 'email_verification_required', status: 409 };
+    }
+    const identityMatches = emailVerified ? candidates : uidMatches;
     const operationalMatches = identityMatches.filter(u => u.userType !== 'member');
     let user = requestedUserType
       ? identityMatches.find(u => u.userType === requestedUserType)
@@ -152,7 +173,7 @@ export function createAuthService({
       // Only exception: configured admin email always stays admin.
       const patch = {
         firebaseUid: user.firebaseUid || fb.uid,
-        email: user.email || fb.email,
+        email: user.email || fbEmail,
         displayName: fb.name || user.displayName,
         photoUrl: fb.picture || user.photoUrl,
         accountStatus: user.accountStatus || 'active',
@@ -170,7 +191,7 @@ export function createAuthService({
       const row = {
         id: `usr_${randomUUID().slice(0, 8)}`,
         firebaseUid: fb.uid,
-        email: fb.email,
+        email: fbEmail,
         displayName: fb.name,
         photoUrl: fb.picture,
         userType: isAdminEmail ? 'admin' : newUserRole,
@@ -199,7 +220,7 @@ export function createAuthService({
       vendorPermissions: user.vendorPermissions || [],
       corporateId: user.corporateId,
     });
-    return { token, user, pendingApproval: user.approvalStatus === 'pending_approval' };
+    return { token, user: toSessionUser(user), pendingApproval: user.approvalStatus === 'pending_approval' };
   }
 
   async function devLogin({ role }) {
@@ -314,7 +335,7 @@ export function createAuthService({
     const token = signJwt({ sub: user.id, userType: user.userType, email: user.email, gymId: user.gymId });
     console.log(`[dev-login] minted session for ${user.userType} (${user.id})`);
     const devPubId = await publicUserId(user);
-    return { token, user: { ...user, publicId: devPubId, userCode: devPubId }, pendingApproval: false };
+    return { token, user: { ...toSessionUser(user), publicId: devPubId, userCode: devPubId }, pendingApproval: false };
   }
 
   return { requestOtp, verifyOtp, login, firebaseSession, devLogin };

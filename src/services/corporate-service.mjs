@@ -7,6 +7,7 @@ import {
   CORPORATE_STATUS, EMPLOYEE_STATUS, BILLING_CYCLES, DASHBOARD_MODES,
   ENGAGEMENT_TARGET_PCT, calculateAbsenteeismDrop, calculateEngagementRate, calculateBill,
 } from '../shared/corporate-constants.mjs';
+import { sameEmail } from '../shared/identifiers.mjs';
 
 const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
 
@@ -447,7 +448,7 @@ export function createCorporateService({
     if (!EMAIL_RE.test(email)) return { error: 'invalid_email', status: 400 };
     if (!displayName) return { error: 'name_required', status: 400 };
     if (password.length < HR_MIN_PASSWORD) return { error: 'password_too_short', status: 400, minLength: HR_MIN_PASSWORD };
-    const taken = (await users.filterAsync(u => u.email === email)).some(u => u.userType === 'corporate_hr');
+    const taken = (await users.filterAsync(u => sameEmail(u.email, email))).some(u => u.userType === 'corporate_hr');
     if (taken) return { error: 'email_in_use', status: 409 };
     const stamp = now();
     const row = {

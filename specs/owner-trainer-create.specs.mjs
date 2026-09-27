@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createOwnerGymService } from '../src/services/owner-gym-service.mjs';
 import { createTrainerService } from '../src/services/trainer-service.mjs';
+import { verifyPassword } from '../src/auth/password-credentials.mjs';
 
 function store(rows = []) {
   return {
@@ -39,7 +40,9 @@ test('owner can create a trainer account assigned only to their gym', async () =
   assert.equal(result.error, undefined);
   assert.equal(result.trainer.displayName, 'New Coach');
   assert.deepEqual(result.trainer.gymIds, ['gym_owner']);
-  assert.equal(users.rows[0].passwordHash, 'demo:2468');
+  // The PIN is stored hashed, never as plaintext.
+  assert.match(users.rows[0].passwordHash, /^scrypt:/);
+  assert.equal(await verifyPassword('2468', users.rows[0].passwordHash), true);
   assert.equal(trainers.rows[0].userId, users.rows[0].id);
 });
 
