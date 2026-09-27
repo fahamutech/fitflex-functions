@@ -50,6 +50,8 @@ import { createDeliveryService } from '../services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../services/communication-preference-service.mjs';
 import { createWhatsAppChannelService } from '../services/whatsapp-channel-service.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
+import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
+import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
@@ -63,6 +65,8 @@ import {
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
+  partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
+  partnerSettlementAccounts, partnerAgreements, partnerKycEvents,
 } from './collections.mjs';
 
 export { isConfiguredAdminEmail, approvalStatusForRole };
@@ -126,7 +130,7 @@ export const adminPaymentService = createAdminPaymentService({
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
-export const adminApprovalService = createAdminApprovalService({ users, auditLog });
+export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, gymOwners, settingsService });
 export const invoiceService = createInvoiceService({ invoices, gyms, users, gymPayouts, auditLog });
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
@@ -230,4 +234,14 @@ export const trainerClientService = createTrainerClientService({
   notify: (userId, message) => notificationService.notify(userId, message),
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
   challenges, participants: challengeParticipants,
+});
+// Partner KYC/KYB: what gym owners, trainers, vendors and companies must provide.
+export const partnerKycService = createPartnerKycService({
+  users, gyms, trainers, corporateAccounts,
+  partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
+  partnerSettlementAccounts, partnerAgreements, partnerKycEvents, auditLog,
+  // notificationService is defined earlier in this file; it's only called later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+  // KYC documents stay private on Zebra; the API streams them after its own checks.
+  documentStore: createZebraDocumentStore(),
 });
