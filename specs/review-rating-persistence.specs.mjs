@@ -42,8 +42,9 @@ async function makeTrainer() {
 }
 
 async function stored(table, id) {
+  // No Number() coercion: Gym.rating is decimal(3,2) and must read back as a number.
   const row = await db(table).where({ id }).first('rating', 'reviewCount');
-  return { rating: Number(row.rating), reviewCount: row.reviewCount };
+  return { rating: row.rating, reviewCount: row.reviewCount };
 }
 
 after(async () => {
@@ -102,6 +103,7 @@ test('gym review submit + moderation persist rating and reviewCount on Gym', asy
   const second = await svc.submit({ memberId: m2, gymId, rating: 1 });
   assert.ok(!second.error, second.error);
   assert.deepEqual(await stored('Gym', gymId), { rating: 2.5, reviewCount: 2 });
+  assert.equal((await gyms.findByIdAsync(gymId)).rating, 2.5);
 
   const flagged = await svc.moderate({ reviewId: second.review.id, action: 'flag', adminId: 'admin_test' });
   assert.ok(!flagged.error, flagged.error);
@@ -144,5 +146,5 @@ test('gym rating persists for a Gym missing from the primed cache', async () => 
   const r = await svc.submit({ memberId, gymId, rating: 3 });
   assert.ok(!r.error, r.error);
   assert.deepEqual(await stored('Gym', gymId), { rating: 3, reviewCount: 1 });
-  assert.equal(Number(gyms.find(g => g.id === gymId)?.rating), 3); // decimal column → pg string
+  assert.equal(gyms.find(g => g.id === gymId)?.rating, 3);
 });

@@ -7,6 +7,12 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import knexFactory from 'knex';
+import pg from 'pg';
+
+// pg returns NUMERIC/DECIMAL as strings to avoid precision loss. Ours are all
+// small measurements (ratings, weightKg, distanceKm — never money), so parse
+// them as numbers; otherwise Gym.rating reads back as '4.50'.
+pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v) => (v === null ? null : parseFloat(v)));
 
 const connectionString = process.env.FITFLEX_USE_CI_DB === '1'
   ? process.env.DATABASE_URL_CI
