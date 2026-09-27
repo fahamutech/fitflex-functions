@@ -1,6 +1,7 @@
 // Trainer service — catalogue CRUD, self-service profile + gym applications.
 import { randomUUID } from 'node:crypto';
 import { parseStringList } from '../shared/parse-list.mjs';
+import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
 
 export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService }) {
   function normalizeTrainerPayload(body = {}, prior = {}) {
@@ -37,7 +38,11 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
         ? body.homepageVisible
         : (prior.homepageVisible ?? true),
       homepagePriority: Number(body.homepagePriority ?? prior.homepagePriority ?? 0),
-      availability: Array.isArray(body.availability) ? body.availability : (prior.availability || []),
+      availability: Array.isArray(body.availability) ? normalizeAvailability(body.availability) : (prior.availability || []),
+      // Invalid handles are dropped here; the trainer's own edit rejects them (updateProfile).
+      socialLinks: body.socialLinks !== undefined
+        ? normalizeSocialLinks(body.socialLinks).links
+        : (prior.socialLinks || {}),
       createdAt: prior.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -136,15 +141,31 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     return { trainer: removed };
   }
 
+  /** 400 payload when the trainer typed a handle that is not valid. */
+  function socialLinksError(body) {
+    if (body?.socialLinks === undefined) return null;
+    const { invalid } = normalizeSocialLinks(body.socialLinks);
+    return invalid.length ? { error: 'invalid_social_handle', status: 400, platforms: invalid } : null;
+  }
+
   async function register({ userId, user, body }) {
     if (!body.photoUrl) return { error: 'photoUrl_required', status: 400 };
+    const socialError = socialLinksError(body);
+    if (socialError) return socialError;
     const validGenders = ['male', 'female', 'other'];
     if (!body.gender || !validGenders.includes(body.gender)) {
       return { error: 'gender_required', status: 400, validValues: validGenders };
     }
     const profile = findProfileByUser(userId);
+    // Gym links need the owner's approval (and a linked trainer trains there
+    // free), so a self-registration can only *request* gyms.
+    const linked = profile?.gymIds || [];
+    const requested = parseStringList(body.gymIds, []).filter(id => !linked.includes(id));
+    const pendingGymIds = [...new Set([...(profile?.pendingGymIds || []), ...requested])];
     const row = normalizeTrainerPayload({
       ...body,
+      gymIds: linked,
+      pendingGymIds,
       id: profile?.id || undefined,
       userId,
       email: user.email,
@@ -190,7 +211,10 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
   async function updateProfile({ userId, body }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
+    const socialError = socialLinksError(body);
+    if (socialError) return socialError;
     const allowed = [
+      'displayName',
       'bio',
       'specialties',
       'hourlyRateTzs',
@@ -206,6 +230,16 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       if (body[k] !== undefined) updates[k] = body[k];
     }
     if (body.specialties) updates.specialties = parseStringList(body.specialties, profile.specialties);
+    if (updates.displayName !== undefined) {
+      const name = String(updates.displayName || '').trim();
+      if (!name) return { error: 'displayName_required', status: 400 };
+      updates.displayName = name;
+    }
+    if (body.availability !== undefined) {
+      if (!Array.isArray(body.availability)) return { error: 'invalid_availability', status: 400 };
+      updates.availability = normalizeAvailability(body.availability);
+    }
+    if (body.socialLinks !== undefined) updates.socialLinks = normalizeSocialLinks(body.socialLinks).links;
     updates.updatedAt = new Date().toISOString();
     const updated = await trainers.updateAsync(t => t.id === profile.id, updates);
     return { trainer: hydrateTrainer(updated) };

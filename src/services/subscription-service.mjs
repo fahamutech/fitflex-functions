@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { PASS_TIERS } from '../shared/constants.mjs';
 import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
+import { trainerPassOptions, trainerGymAccess, hideTrainerPass } from '../shared/trainer-access.mjs';
 
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
@@ -70,14 +71,34 @@ export function createSubscriptionService({
     return { status: 202, subscription: sub, paymentRequest };
   }
 
-  // C4/B12: a trainer purchases the gym's trainer pass to train clients there.
-  async function trainerPassPurchase({ trainerUserId, gymId }) {
+  // A pass/plan already held (active or awaiting payment) for this gym.
+  async function heldGymPlan(userId, gymId, type) {
+    const rows = await subscriptions.filterAsync(s =>
+      s.memberId === userId && s.type === type && s.homeGymId === gymId);
+    return rows.find(s => s.status === 'payment_pending' || effectiveSubscriptionStatus(s) === 'active') || null;
+  }
+
+  // C4/B12: a trainer buys one of the gym's trainer passes (daily / weekly /
+  // monthly, priced by the owner) to train clients there. Trainers linked to
+  // the gym train there free, so they never need one.
+  async function trainerPassPurchase({ trainerUserId, gymId, period, trainer = null }) {
     const gym = gyms.find(g => g.id === gymId);
     if (!gym) return { error: 'gym_not_found', status: 404 };
-    const tp = gym.trainerPass;
-    if (!tp?.enabled || !(tp.feeTzs > 0)) return { error: 'trainer_pass_not_offered', status: 400 };
+    const access = trainerGymAccess({ trainer, gym });
+    if (access.access === 'home') return { error: 'home_gym_free', status: 409 };
+    const options = trainerPassOptions(gym);
+    if (!options.length) return { error: 'trainer_pass_not_offered', status: 400 };
+    // Older app builds send no period — fine while the gym sells just one.
+    const chosen = period
+      ? options.find(o => o.period === period)
+      : (options.length === 1 ? options[0] : null);
+    if (!chosen) return { error: period ? 'trainer_pass_period_not_offered' : 'period_required', status: 400 };
+    const held = await heldGymPlan(trainerUserId, gymId, 'trainer_pass');
+    if (held) {
+      return { error: held.status === 'payment_pending' ? 'trainer_pass_pending' : 'trainer_pass_already_active', status: 409 };
+    }
 
-    const days = DIRECT_PLAN_DAYS[tp.period] ?? 30;
+    const days = DIRECT_PLAN_DAYS[chosen.period];
     const now = new Date();
     const expiresAt = new Date(+now + days * 86_400_000);
     const sub = {
@@ -85,7 +106,7 @@ export function createSubscriptionService({
       memberId: trainerUserId,
       type: 'trainer_pass',
       tier: null,
-      plan: tp.period,
+      plan: chosen.period,
       status: 'payment_pending',
       startedAt: now.toISOString(),
       cycleStartedAt: now.toISOString(),
@@ -101,9 +122,9 @@ export function createSubscriptionService({
       memberId: trainerUserId,
       subscriptionId: sub.id,
       tier: null,
-      plan: tp.period,
+      plan: chosen.period,
       gymId,
-      amountTzs: tp.feeTzs,
+      amountTzs: chosen.feeTzs,
       status: 'pending',
       provider: 'admin_approved',
       reference: null,
@@ -113,6 +134,56 @@ export function createSubscriptionService({
       note: 'trainer_pass'
     });
     return { status: 202, subscription: sub, paymentRequest };
+  }
+
+  /**
+   * T4: at a gym that sells no trainer pass, a trainer buys the gym's member
+   * plan instead (member price). Not allowed where trainer passes exist, and
+   * not needed at the trainer's own gyms.
+   */
+  async function trainerMemberPlanPurchase({ trainerUserId, gymId, plan, trainer = null }) {
+    const gym = gyms.find(g => g.id === gymId);
+    if (!gym) return { error: 'gym_not_found', status: 404 };
+    const access = trainerGymAccess({ trainer, gym });
+    if (access.access === 'home') return { error: 'home_gym_free', status: 409 };
+    if (access.access === 'trainer_pass') return { error: 'use_trainer_pass', status: 409 };
+    if (!access.options.some(o => o.period === plan)) return { error: 'invalid_plan', status: 400 };
+    if (await heldGymPlan(trainerUserId, gymId, 'direct_sub')) return { error: 'plan_already_held', status: 409 };
+    return subscribeDirect({ memberId: trainerUserId, homeGymId: gymId, plan });
+  }
+
+  /** A trainer's gym passes and member plans, newest first, with the gym and pending payment. */
+  async function trainerPasses({ trainerUserId }) {
+    const subs = await subscriptions.filterAsync(s =>
+      s.memberId === trainerUserId && (s.type === 'trainer_pass' || s.type === 'direct_sub'));
+    const pending = await paymentRequests.filterAsync(p => p.memberId === trainerUserId && p.status === 'pending');
+    return subs
+      .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))
+      .map(s => {
+        const gym = gyms.find(g => g.id === s.homeGymId);
+        return {
+          ...s,
+          status: s.status === 'payment_pending' ? s.status : effectiveSubscriptionStatus(s),
+          kind: s.type === 'trainer_pass' ? 'trainer_pass' : 'member_plan',
+          gym: gym ? { id: gym.id, name: gym.name, location: gym.location || null } : null,
+          paymentRequest: pending.find(p => p.subscriptionId === s.id) || null,
+        };
+      });
+  }
+
+  /** Withdraw a pass/plan request that has not been paid yet. */
+  async function cancelTrainerPass({ trainerUserId, subscriptionId }) {
+    const sub = await subscriptions.findByIdAsync(subscriptionId);
+    if (!sub || sub.memberId !== trainerUserId || !['trainer_pass', 'direct_sub'].includes(sub.type)) {
+      return { error: 'not_found', status: 404 };
+    }
+    if (sub.status !== 'payment_pending') return { error: 'not_cancellable', status: 409 };
+    const updated = await subscriptions.updateByIdAsync(sub.id, { status: 'payment_cancelled' });
+    const requests = await paymentRequests.filterAsync(p => p.subscriptionId === sub.id && p.status === 'pending');
+    for (const r of requests) {
+      await paymentRequests.updateByIdAsync(r.id, { status: 'cancelled', decidedAt: new Date().toISOString(), note: r.note });
+    }
+    return { status: 200, subscription: updated };
   }
 
   async function subscribe({ memberId, tier, type = 'platform_pass', homeGymId, plan }) {
@@ -195,7 +266,7 @@ export function createSubscriptionService({
     return (await checkins.filterAsync(c => c.memberId === memberId))
       .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
       .slice(0, 50)
-      .map(c => ({ ...c, gym: gyms.find(g => g.id === c.gymId) || null }));
+      .map(c => ({ ...c, gym: hideTrainerPass(gyms.find(g => g.id === c.gymId) || null) }));
   }
 
   async function memberPaymentHistory(memberId) {
@@ -203,5 +274,8 @@ export function createSubscriptionService({
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt));
   }
 
-  return { listPasses, subscribe, trainerPassPurchase, me, memberCheckIns, memberPaymentHistory };
+  return {
+    listPasses, subscribe, trainerPassPurchase, trainerMemberPlanPurchase, trainerPasses, cancelTrainerPass,
+    me, memberCheckIns, memberPaymentHistory,
+  };
 }

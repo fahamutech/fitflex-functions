@@ -25,8 +25,8 @@ function memStore(rows = []) {
   };
 }
 
-// 2026-05-04 is a Monday.
-const MONDAY = '2026-05-04';
+// 2099-05-04 is a Monday (far future, so the slot is never in the past).
+const MONDAY = '2099-05-04';
 const trainerFixture = {
   id: 'trn_1',
   userId: 'usr_trainer_1',
@@ -86,7 +86,7 @@ test('C1: booking a day the trainer is not available is rejected', async () => {
   const { service } = makeBookingService();
   const out = await service.createBooking({
     memberId: 'usr_m1',
-    body: { trainerId: 'trn_1', gymId: 'gym_1', date: '2026-05-05', slot: '09:00' },
+    body: { trainerId: 'trn_1', gymId: 'gym_1', date: '2099-05-05', slot: '09:00' },
   });
   assert.equal(out.status, 409);
   assert.equal(out.error, 'slot_not_available');

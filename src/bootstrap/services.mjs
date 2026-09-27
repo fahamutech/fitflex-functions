@@ -112,7 +112,7 @@ export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
 });
 
-export const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig: settingsService.getTierConfig });
+export const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig });
 // Lifecycle events for gym automations. automationService is defined further
 // down; these only run later, and never throw.
 const lifecycle = {
@@ -134,7 +134,7 @@ export const adminMemberService = createAdminMemberService({
   users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr,
 });
 export const adminPaymentService = createAdminPaymentService({
-  paymentRequests, subscriptions, users, auditLog,
+  paymentRequests, subscriptions, users, auditLog, gyms,
   onSubscriptionActivated: async (sub) => {
     await notificationService.notifySubscriptionActivated(sub);
     await lifecycle.activated(sub);

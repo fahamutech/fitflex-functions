@@ -2,7 +2,7 @@
 // consuming a visit, the actual scan-to-checkin flow, recent activity, and
 // analytics for the owner/operator Home dashboard.
 import { resolveOperatorGymSelection, operatorGymIds } from '../shared/operator-gym-selection.mjs';
-import { validateCheckIn, pickSubscriptionForGym } from '../shared/check-in-rules.mjs';
+import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry } from '../shared/check-in-rules.mjs';
 import { calculatePayout } from '../shared/payout-engine.mjs';
 import { issue as issueQr, verify as verifyQrToken, issueGymQr, verifyGymQr } from '../auth/qr-token.mjs';
 
@@ -21,7 +21,9 @@ export function createOperatorService({
   async function issueMemberQr(memberId) {
     const allSubs = await subscriptions.filterAsync(s => s.memberId === memberId && s.status === 'active');
     const active = allSubs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0];
-    if (!active) return { error: 'active_subscription_required', status: 403 };
+    // T5: trainers linked to a gym get in free, so they need a QR without a pass.
+    const homeTrainer = (checkInService.homeGymIds?.(memberId) || []).length > 0;
+    if (!active && !homeTrainer) return { error: 'active_subscription_required', status: 403 };
     return { qr: issueQr(memberId) };
   }
 
@@ -46,6 +48,10 @@ export function createOperatorService({
       reason = 'select_gym';
     } else if (!gym) {
       return { status: 400, body: { error: 'operator_not_assigned_to_gym' } };
+    } else if (checkInService.isHomeGymTrainer?.(member.id, gym.id)) {
+      const validation = validateTrainerHomeEntry({ gym });
+      eligible = validation.ok;
+      reason = validation.ok ? 'trainer_home_gym' : validation.failure;
     } else if (sub) {
       const since = +new Date(sub.cycleStartedAt);
       const allCheckins = await checkins.filterAsync(c => c.memberId === member.id && c.visitConsumed && +new Date(c.timestamp) >= since);

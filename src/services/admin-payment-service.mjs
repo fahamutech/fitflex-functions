@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
+  gyms = null,
   onBookingPayment = async () => {},
   onSubscriptionActivated = async () => {},
   // A rejected payment for a membership (lifecycle automations).
@@ -17,7 +18,14 @@ export function createAdminPaymentService({
 
   function slimSub(s) {
     if (!s) return null;
-    return { id: s.id, tier: s.tier, type: s.type, status: s.status };
+    return { id: s.id, tier: s.tier, type: s.type, plan: s.plan ?? null, status: s.status, expiresAt: s.expiresAt ?? null };
+  }
+
+  /** The gym a gym-bound request pays for (trainer pass / direct plan), by name. */
+  function slimGym(gymId) {
+    if (!gymId || !gyms?.find) return null;
+    const g = gyms.find(r => r.id === gymId);
+    return g ? { id: g.id, name: g.name } : null;
   }
 
   // A request pays either for a subscription or for a trainer booking group.
@@ -34,10 +42,22 @@ export function createAdminPaymentService({
       pending: 'payment_pending'
     }[status];
     if (!subStatus) return;
-    const updated = await subscriptions.updateByIdAsync(request.subscriptionId, {
+    const patch = {
       status: subStatus,
       paymentRef: status === 'approved' ? (reference || `ADMIN_${request.id}`) : null
-    });
+    };
+    // A trainer pass runs from the moment it is paid for, not from the
+    // request — otherwise a daily pass approved the next morning is spent.
+    if (status === 'approved') {
+      const sub = await subscriptions.findByIdAsync(request.subscriptionId);
+      if (sub?.type === 'trainer_pass' && sub.status === 'payment_pending') {
+        const lengthMs = +new Date(sub.expiresAt) - +new Date(sub.startedAt);
+        const now = new Date();
+        const expiresAt = new Date(+now + Math.max(0, lengthMs)).toISOString();
+        Object.assign(patch, { startedAt: now.toISOString(), cycleStartedAt: now.toISOString(), renewsAt: expiresAt, expiresAt });
+      }
+    }
+    const updated = await subscriptions.updateByIdAsync(request.subscriptionId, patch);
     if (subStatus === 'active' && updated) {
       try { await onSubscriptionActivated(updated); } catch { /* notification is best-effort */ }
     }
@@ -67,6 +87,7 @@ export function createAdminPaymentService({
       ...p,
       member: slimMember(memberById.get(p.memberId) || null),
       subscription: slimSub(subById.get(p.subscriptionId) || null),
+      gym: slimGym(p.gymId),
     }));
   }
 

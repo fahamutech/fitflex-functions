@@ -2,29 +2,28 @@
 import { randomUUID } from 'node:crypto';
 import { priceBooking, passDiscountPct, trainerCommissionPct } from '../shared/trainer-pricing.mjs';
 import { effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
+import {
+  normalizeAvailability, normalizeSlot, weekdayOf, addDays, isPastSlot, buildTrainerSchedule, hideTrainerPass,
+} from '../shared/trainer-access.mjs';
 
 // A booking holds its slots from the moment it is requested; one that was
 // rejected or cancelled frees them again.
 const SLOT_RELEASING = new Set(['cancelled', 'payment_rejected']);
 const MAX_SLOTS_PER_BOOKING = 12;
 
-const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-
 /**
  * C1: does the trainer's configured availability cover this date+slot (+gym)?
  * Trainers with NO configured availability accept any slot (legacy profiles).
  */
 export function slotIsAvailable(availability, { date, slot, gymId }) {
-  const entries = Array.isArray(availability) ? availability : [];
-  if (entries.length === 0) return true;
-  const parsed = new Date(`${date}T00:00:00.000Z`);
-  const dayName = Number.isNaN(+parsed) ? null : WEEKDAYS[parsed.getUTCDay()];
+  if (!Array.isArray(availability) || availability.length === 0) return true;
+  const entries = normalizeAvailability(availability);
+  const wanted = normalizeSlot(slot);
+  const dayName = /^\d{4}-\d{2}-\d{2}$/.test(date || '') ? weekdayOf(date) : null;
   return entries.some((entry) => {
-    const day = String(entry.day || '').toLowerCase();
-    const dayMatches = day === dayName || day === date; // weekday or legacy exact-date entries
-    if (!dayMatches) return false;
+    if (entry.day !== dayName && entry.day !== date) return false; // weekday or exact-date entries
     if (entry.gymId && gymId && entry.gymId !== gymId) return false;
-    return (entry.slots || []).includes(slot);
+    return entry.slots.includes(wanted);
   });
 }
 
@@ -37,7 +36,7 @@ export function createTrainerBookingService({
       ...row,
       member: await users.findByIdAsync(row.memberId),
       trainer: row.trainerId ? trainerService.hydrateTrainer(trainers.find(t => t.id === row.trainerId) || {}) : null,
-      gym: gyms.find(g => g.id === row.gymId) || null
+      gym: hideTrainerPass(gyms.find(g => g.id === row.gymId) || null)
     };
   }
 
@@ -57,10 +56,11 @@ export function createTrainerBookingService({
     const seen = new Set();
     const out = [];
     for (const s of raw) {
-      const key = `${s?.date}|${s?.slot}`;
+      const slot = normalizeSlot(s?.slot) || s?.slot;
+      const key = `${s?.date}|${slot}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ date: s?.date, slot: s?.slot });
+      out.push({ date: s?.date, slot });
     }
     return out.sort((a, b) => `${a.date} ${a.slot}`.localeCompare(`${b.date} ${b.slot}`));
   }
@@ -78,7 +78,9 @@ export function createTrainerBookingService({
     if (!slots.length || slots.some(s => !s.date || !s.slot)) return { error: 'date_and_slot_required', status: 400 };
     if (slots.length > MAX_SLOTS_PER_BOOKING) return { error: 'too_many_slots', status: 400 };
 
+    const now = new Date();
     for (const s of slots) {
+      if (isPastSlot(s.date, s.slot, now)) return { error: 'slot_in_past', status: 400, slot: s };
       // C1: the slot must be inside the trainer's configured availability.
       if (!slotIsAvailable(trainer.availability, { date: s.date, slot: s.slot, gymId })) {
         return { error: 'slot_not_available', status: 409, slot: s };
@@ -404,7 +406,57 @@ export function createTrainerBookingService({
     };
   }
 
+  /** Bookings that still hold their slot, in [from, from + days). */
+  async function heldBookings(trainerId, from, days) {
+    const until = addDays(from, days);
+    return trainerBookings.filterAsync(b =>
+      b.trainerId === trainerId && !SLOT_RELEASING.has(b.status) && b.date >= from && b.date < until);
+  }
+
+  /**
+   * Public calendar for members: offered slots for the next `days` days with
+   * taken ones marked booked — no member details.
+   */
+  async function publicSchedule({ trainerId, from, days, gymId }) {
+    const trainer = trainers.find(t => t.id === trainerId && t.status === 'active');
+    if (!trainer) return { error: 'trainer_not_found', status: 404 };
+    const base = buildTrainerSchedule({ availability: trainer.availability, from, days, gymId });
+    const start = base[0]?.date;
+    const bookings = start ? await heldBookings(trainer.id, start, base.length) : [];
+    return {
+      trainerId: trainer.id,
+      days: buildTrainerSchedule({ availability: trainer.availability, bookings, from: start, days: base.length, gymId }),
+    };
+  }
+
+  /** The trainer's own calendar, with who booked each taken slot. */
+  async function trainerSchedule({ userId, from, days, gymId }) {
+    const profile = trainerService.findProfileByUser(userId);
+    if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
+    const base = buildTrainerSchedule({ availability: profile.availability, from, days, gymId });
+    const start = base[0]?.date;
+    const bookings = start ? await heldBookings(profile.id, start, base.length) : [];
+    const members = new Map();
+    for (const b of bookings) {
+      if (!members.has(b.memberId)) members.set(b.memberId, await users.findByIdAsync(b.memberId));
+    }
+    const describeBooking = (b) => {
+      const m = members.get(b.memberId);
+      return {
+        id: b.id, status: b.status, gymId: b.gymId,
+        member: m ? { id: m.id, displayName: m.displayName || null, photoUrl: m.photoUrl || null } : null,
+      };
+    };
+    return {
+      trainerId: profile.id,
+      days: buildTrainerSchedule({
+        availability: profile.availability, bookings, from: start, days: base.length, gymId, describeBooking,
+      }),
+    };
+  }
+
   return {
+    publicSchedule, trainerSchedule,
     hydrateBooking, quoteBooking, createBooking, applyPaymentToGroup, adminList, adminUpdateStatus,
     trainerMyBookings, trainerCompleteBooking, memberMyBookings,
     createManualSession, trainerSessionsForDate, trainerEarnings,

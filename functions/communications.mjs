@@ -57,19 +57,19 @@ export const ownerAudiencePreview = {
 
 export const adminCommunicationSegments = {
   created, method: 'get', path: '/admin/communications/segments',
-  description: 'Admin: preset audiences and filter fields (including area) for FitFlex-wide messages.',
+  description: 'Admin: preset audiences and filter fields (including area) for FitFlex-wide messages. ?recipients=trainers returns the trainer audiences instead.',
   onGuard: adminGuard,
-  onRequest: async (_req, res) => res.json(segmentService.catalog('platform')),
+  onRequest: async (req, res) => res.json(segmentService.catalog(req.query?.recipients === 'trainers' ? 'trainers' : 'platform')),
 };
 
 export const adminAudiencePreview = {
   created, method: 'post', path: '/admin/communications/audience/preview',
-  description: 'Admin: how many FitFlex members match an audience, what each channel can reach, and a few names. POST { preset?, filter?, purpose? }.',
+  description: 'Admin: how many FitFlex members (or, with recipients: "trainers", trainers) match an audience, what each channel can reach, and a few names. POST { recipients?, preset?, filter?, purpose? }.',
   requestSample: { preset: 'pass_holders', filter: { all: [{ field: 'area', op: 'contains', value: 'Arusha' }] }, purpose: 'promotion' },
   onGuard: adminGuard,
   onRequest: async (req, res) => {
-    const { preset, filter, purpose } = req.body || {};
-    send(res, await segmentService.previewAudience({ sender: { senderType: 'platform' }, preset, filter, purpose }));
+    const { recipients, preset, filter, purpose } = req.body || {};
+    send(res, await segmentService.previewAudience({ sender: { senderType: 'platform' }, recipients, preset, filter, purpose }));
   },
 };
 

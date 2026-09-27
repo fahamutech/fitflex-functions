@@ -73,3 +73,26 @@ export const memberMyBookings = {
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => res.json(await trainerBookingService.memberMyBookings(req.user.sub))
 };
+
+export const trainerPublicSchedule = {
+  created, method: 'get', path: '/trainers/:id/schedule',
+  description: 'Public: a trainer\'s bookable calendar. Query: ?from=YYYY-MM-DD&days=21&gymId= → { days:[{ date, weekday, slots:[{ slot, status: available|booked|past, gymIds }] }] } (EAT; no member details).',
+  onRequest: async (req, res) => {
+    const { from, days, gymId } = req.query || {};
+    const result = await trainerBookingService.publicSchedule({ trainerId: req.params.id, from, days, gymId });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  }
+};
+
+export const trainerMySchedule = {
+  created, method: 'get', path: '/trainer/schedule',
+  description: 'Trainer: own calendar with who booked each taken slot. Query: ?from=YYYY-MM-DD&days=21&gymId=',
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => {
+    const { from, days, gymId } = req.query || {};
+    const result = await trainerBookingService.trainerSchedule({ userId: req.user.sub, from, days, gymId });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  }
+};

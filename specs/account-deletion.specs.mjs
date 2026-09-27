@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { updateMemberProfile, deleteMyAccount, me } from '../functions/subscriptions.mjs';
 import { authFirebaseSession } from '../functions/auth.mjs';
-import { trainerRegister } from '../functions/trainers.mjs';
+import { trainerRegister, adminUpsertTrainer } from '../functions/trainers.mjs';
 import { createTrainerBooking } from '../functions/trainer-bookings.mjs';
 import { adminUpsertGym } from '../functions/gyms.mjs';
 
@@ -83,6 +83,15 @@ test('deleteMyAccount: blocks a trainer with active bookings and keeps the accou
   }, registerRes);
   assert.equal(registerRes.statusCode, 200);
   const trainerId = registerRes.body.id;
+  // Self-registration only requests the gym; an admin (or the owner) links it.
+  assert.deepEqual(registerRes.body.gymIds, []);
+  assert.deepEqual(registerRes.body.pendingGymIds, [gymId]);
+  const linkRes = res();
+  await adminUpsertTrainer.onRequest({
+    user: { sub: 'usr_admin_1', userType: 'admin' },
+    body: { id: trainerId, gymIds: [gymId], pendingGymIds: [] },
+  }, linkRes);
+  assert.equal(linkRes.statusCode, 200);
 
   const memberId = uniq('usr_member_booker');
   await updateMemberProfile.onRequest(
@@ -92,7 +101,7 @@ test('deleteMyAccount: blocks a trainer with active bookings and keeps the accou
   const bookingRes = res();
   await createTrainerBooking.onRequest({
     user: { sub: memberId, userType: 'member' },
-    body: { trainerId, gymId, date: '2026-06-06', slot: '10:00' }
+    body: { trainerId, gymId, date: '2099-06-06', slot: '10:00' }
   }, bookingRes);
   assert.equal(bookingRes.statusCode, 201);
 

@@ -242,6 +242,15 @@ export function createNotificationService({
 
   /** US030: activation confirmation once payment is approved. */
   async function notifySubscriptionActivated(sub) {
+    if (sub.type === 'trainer_pass') {
+      const period = { daily: 'daily', weekly: 'weekly', monthly: 'monthly' }[sub.plan] || '';
+      return notify(sub.memberId, {
+        type: 'trainer_pass_activated',
+        title: 'Trainer pass active',
+        body: `Your ${period ? `${period} ` : ''}trainer pass is active. Show your check-in QR at reception to train your clients.`,
+        data: { subscriptionId: sub.id, gymId: sub.homeGymId || '' },
+      });
+    }
     const tier = sub.tier ? `${sub.tier[0].toUpperCase()}${sub.tier.slice(1)} pass` : 'gym membership';
     return notify(sub.memberId, {
       type: 'subscription_activated',

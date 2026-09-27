@@ -6,6 +6,7 @@
 // needing the image fetch the gym directly via getGym.
 import { randomUUID } from 'node:crypto';
 import { gymProfileGaps } from '../shared/gym-profile.mjs';
+import { normalizeTrainerPassConfig, TRAINER_PASS_PERIODS } from '../shared/trainer-access.mjs';
 
 export function createGymService({ gyms, users, checkins, auditLog }) {
   function normalizeGymPayload(body = {}, prior) {
@@ -34,12 +35,15 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
         price: c.price == null ? null : Number(c.price),
         location: c.location || null,
       }));
-    // B12: trainer pass — fee external trainers pay to train clients here.
-    const tpBody = body.trainerPass ?? prior.trainerPass ?? {};
+    // B12: trainer pass — what external trainers pay to train clients here.
+    // The owner sells any of daily/weekly/monthly; feeTzs/period mirror the
+    // first option so older app builds still render the single-fee form.
+    const tpConfig = normalizeTrainerPassConfig(body.trainerPass ?? prior.trainerPass);
+    const [firstPass] = TRAINER_PASS_PERIODS.filter(p => tpConfig.options[p]);
     const trainerPass = {
-      enabled: Boolean(tpBody.enabled),
-      feeTzs: Number(tpBody.feeTzs ?? 0),
-      period: ['daily', 'weekly', 'monthly'].includes(tpBody.period) ? tpBody.period : 'monthly',
+      ...tpConfig,
+      feeTzs: firstPass ? tpConfig.options[firstPass] : 0,
+      period: firstPass || 'monthly',
     };
     // A6: verified = explicit flag (admin/prior) if set, otherwise derived
     // from profile completeness (location + coordinates + photos + amenities
@@ -100,7 +104,7 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
    */
   function slimGym(g) {
     if (!g) return g;
-    const { images, thumbnails, operatingHours, ...rest } = g;
+    const { images, thumbnails, operatingHours, trainerPass, ...rest } = g;
     return { ...rest, thumbnail: (thumbnails && thumbnails[0]) || null };
   }
 

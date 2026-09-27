@@ -1,10 +1,17 @@
 // Check-in service: orchestrates BL-012 validation + BL-010/011 visit counting + logging.
 // Pure DI: receives repos via constructor.
 
-import { validateCheckIn, pickSubscriptionForGym } from '../shared/check-in-rules.mjs';
+import { validateCheckIn, pickSubscriptionForGym, subscriptionCoversGym, validateTrainerHomeEntry } from '../shared/check-in-rules.mjs';
 import { randomUUID } from 'node:crypto';
 
-export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig }) {
+export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null }) {
+  /** T5: the user is an active trainer linked to this gym (trains there free). */
+  function homeGymIds(userId) {
+    const t = trainers?.find?.(r => (r.userId === userId || r.id === userId) && r.status !== 'inactive' && r.status !== 'suspended');
+    return t?.gymIds || [];
+  }
+  const isHomeGymTrainer = (userId, gymId) => homeGymIds(userId).includes(gymId);
+
   function todayBoundsUTC(now = new Date()) {
     // EAT (UTC+3) day window expressed in UTC
     const eatNow = new Date(now.getTime() + 3 * 3_600_000);
@@ -31,6 +38,9 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
   }
 
   return {
+    homeGymIds,
+    isHomeGymTrainer,
+
     /**
      * Perform a check-in for memberId at gymId, scanned by operator.
      * @returns { ok, failure?, checkin?, visitNumberInCycle? }
@@ -65,14 +75,17 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         };
       }
 
-      const result = validateCheckIn({
-        subscription: sub,
-        gym,
-        todaysCheckins: todays,
-        cycleUsage,
-        now,
-        tierConfig: getTierConfig?.(sub.tier),
-      });
+      const homeTrainer = isHomeGymTrainer(memberId, gymId);
+      const result = homeTrainer
+        ? validateTrainerHomeEntry({ gym, now })
+        : validateCheckIn({
+          subscription: sub,
+          gym,
+          todaysCheckins: todays,
+          cycleUsage,
+          now,
+          tierConfig: getTierConfig?.(sub?.tier),
+        });
       if (!result.ok) return result;
 
       // Log check-in (all 8 BL-015 fields)
@@ -85,8 +98,9 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         gymId,
         timestamp: now.toISOString(),
         method,
-        subscriptionType: sub.type,           // 'platform_pass' | 'direct_sub' | 'roaming_topup'
-        passTier: sub.tier ?? null,
+        // 'platform_pass' | 'direct_sub' | 'roaming_topup' | 'trainer_pass' | 'trainer_home'
+        subscriptionType: homeTrainer ? 'trainer_home' : sub.type,
+        passTier: homeTrainer ? null : (sub.tier ?? null),
         visitNumberInCycle: Number.isFinite(visitNumber) ? visitNumber : null,
         gymTier: gym.tier,
         creditsDeductedTzs: 0,                 // roaming wired separately
