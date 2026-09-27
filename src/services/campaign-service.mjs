@@ -16,9 +16,10 @@
 import { randomUUID } from 'node:crypto';
 import {
   CHANNELS, PURPOSES, CAMPAIGN_STATUSES, categoryForPurpose, canTransitionCampaign,
-  validateContent, messageValues, renderText, contentFor,
+  validateContent,
 } from '../shared/communications.mjs';
 import { buildAudienceFilter, audienceScope } from '../shared/audience.mjs';
+import { renderMessage, whatsappMessage } from '../shared/message-render.mjs';
 import { ownerGymIds } from '../shared/member-status.mjs';
 
 const EDITABLE = ['draft'];
@@ -168,18 +169,8 @@ export function createCampaignService({
   }
 
   /** One member's copy, in their app language when the message has it. */
-  function render(content, member, name, locale = null) {
-    const text = contentFor(content, locale);
-    const values = messageValues(content, member, { gymName: name, renewalLink: renewalLink || '', locale: text.locale });
-    return {
-      title: renderText(text.title, values),
-      body: renderText(text.body, values),
-      ctaLabel: text.ctaLabel,
-      deepLink: content.deepLink || 'message',
-      locale: text.locale,
-      values,
-    };
-  }
+  const render = (content, member, name, locale = null) =>
+    renderMessage(content, member, { gymName: name, renewalLink, locale });
 
   /**
    * A campaign's approved WhatsApp templates by language (empty without
@@ -191,23 +182,8 @@ export function createCampaignService({
     return tpl ? templateService.whatsappMapping(tpl) : new Map();
   }
 
-  /**
-   * A member's WhatsApp copy. WhatsApp only carries the provider-approved
-   * wording, so this is the template's own text — in the member's language
-   * when that version is approved, otherwise in one that is — not the
-   * sender's edits. Its parameters are the member's values in the order the
-   * provider template numbers them ({{1}}, {{2}}, …).
-   */
-  function whatsappCopy(content, member, name, locale, mapping) {
-    const wa = mapping.get(locale) || [...mapping.values()][0];
-    if (!wa) return null;
-    const text = { ...content, title: wa.text.title, body: wa.text.body, ctaLabel: wa.text.ctaLabel, locale: wa.language, translations: undefined };
-    const copy = render(text, member, name, wa.language);
-    return {
-      copy,
-      payload: { templateName: wa.templateName, language: wa.language, parameters: wa.variables.map(v => String(copy.values[v] ?? '')) },
-    };
-  }
+  const whatsappCopy = (content, member, name, locale, mapping) =>
+    whatsappMessage(content, member, { gymName: name, renewalLink, locale, mapping });
 
   // Members who already got the weekly maximum of marketing campaigns.
   async function atMarketingCap(memberIds) {

@@ -86,6 +86,8 @@ export function createSegmentService({
       displayName: user.displayName || null,
       phone: user.phone || null,
       status,
+      subscriptionId: sub?.id ?? null,
+      subscriptionStatus: sub?.status ?? null,
       plan: sub?.plan ?? null,
       tier: sub?.tier ?? null,
       subscriptionType: sub?.type ?? null,
@@ -115,11 +117,12 @@ export function createSegmentService({
     return new Map(rows.map(r => [r.memberId, r]));
   }
 
-  /** Facts for a gym's direct members at `gymIds`. */
-  async function gymMemberFacts(gymIds) {
+  /** Facts for a gym's direct members at `gymIds` (optionally only `memberIds`). */
+  async function gymMemberFacts(gymIds, { memberIds: only = null } = {}) {
     const at = now();
-    const subs = await db('Subscription').where('type', 'direct_sub').whereIn('homeGymId', gymIds)
-      .select('id', 'memberId', 'type', 'tier', 'plan', 'status', 'startedAt', 'expiresAt', 'homeGymId');
+    const q = db('Subscription').where('type', 'direct_sub').whereIn('homeGymId', gymIds);
+    if (only) q.whereIn('memberId', only);
+    const subs = await q.select('id', 'memberId', 'type', 'tier', 'plan', 'status', 'startedAt', 'expiresAt', 'homeGymId');
     const latest = latestDirectSubscriptionsByMember(subs, gymIds);
     const memberIds = [...latest.keys()];
     if (!memberIds.length) return [];
@@ -130,6 +133,7 @@ export function createSegmentService({
     }
     const members = new Set(memberIds);
     const atGym = db('Checkin').whereIn('gymId', gymIds);
+    if (only) atGym.whereIn('memberId', only);
     const since = new Date(+at - RECENT_DAYS * 86_400_000);
     const [users, visits, recentRows, payments] = await Promise.all([
       usersById(memberIds),
@@ -374,5 +378,8 @@ export function createSegmentService({
     reachByMember,
     channelAvailability,
     localesByMember,
+    // Membership facts (status, days to expiry, last visit…) — the same
+    // ones audiences use — for lifecycle automations.
+    gymMemberFacts,
   };
 }

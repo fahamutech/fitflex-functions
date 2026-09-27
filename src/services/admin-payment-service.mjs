@@ -3,7 +3,14 @@
 // with memberProfile/aclPermissions) to keep the list endpoint's payload small.
 import { randomUUID } from 'node:crypto';
 
-export function createAdminPaymentService({ paymentRequests, subscriptions, users, auditLog, gyms = null, onBookingPayment = async () => {}, onSubscriptionActivated = async () => {} }) {
+export function createAdminPaymentService({
+  paymentRequests, subscriptions, users, auditLog,
+  gyms = null,
+  onBookingPayment = async () => {},
+  onSubscriptionActivated = async () => {},
+  // A rejected payment for a membership (lifecycle automations).
+  onPaymentRejected = async () => {},
+}) {
   function slimMember(u) {
     if (!u) return null;
     return { id: u.id, displayName: u.displayName || null, email: u.email || null, phone: u.phone || null, photoUrl: u.photoUrl || null };
@@ -53,6 +60,9 @@ export function createAdminPaymentService({ paymentRequests, subscriptions, user
     const updated = await subscriptions.updateByIdAsync(request.subscriptionId, patch);
     if (subStatus === 'active' && updated) {
       try { await onSubscriptionActivated(updated); } catch { /* notification is best-effort */ }
+    }
+    if (subStatus === 'payment_rejected' && updated) {
+      try { await onPaymentRejected(updated, request); } catch { /* best-effort */ }
     }
   }
 
