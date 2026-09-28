@@ -26,6 +26,7 @@
 // row is then `skipped` with the reason, not failed.
 import { randomUUID } from 'node:crypto';
 import { contentFor } from '../shared/communications.mjs';
+import { directMemberships } from '../shared/communication-tenancy.mjs';
 
 export const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000];
 export const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -148,12 +149,28 @@ export function createDeliveryService({
     whatsapp: (msg) => whatsappChannel ? whatsappChannel.deliver(msg) : { skipped: 'whatsapp_not_configured' },
   };
 
+  // Checked again just before sending (M11): the account may have been
+  // suspended or deleted since the message was queued, and a gym message
+  // only ever goes to a direct member of that gym.
+  async function recipientBlock(msg) {
+    const user = await db('User').where({ id: msg.memberId }).first('id', 'accountStatus');
+    if (!user) return 'member_not_found';
+    if (user.accountStatus === 'suspended') return 'account_suspended';
+    if (msg.senderType === 'gym') {
+      const ok = await directMemberships(db, [msg]);
+      if (!ok.has(`${msg.gymId}:${msg.memberId}`)) return 'not_gym_member';
+    }
+    return null;
+  }
+
   async function deliver(msg) {
     const at = now();
     const deliverTo = channels[msg.channel];
     let outcome;
     try {
-      outcome = deliverTo ? await deliverTo(msg) : { permanent: true, reason: 'channel_not_supported' };
+      const blocked = await recipientBlock(msg);
+      outcome = blocked ? { skipped: blocked }
+        : deliverTo ? await deliverTo(msg) : { permanent: true, reason: 'channel_not_supported' };
     } catch (err) {
       outcome = { temporary: true, reason: String(err?.message || err).slice(0, 200) };
     }

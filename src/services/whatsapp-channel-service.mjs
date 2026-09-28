@@ -18,6 +18,7 @@ import { channelAllowed, LOCALES, TEMPLATE_VARIABLES, variablesIn } from '../sha
 import { SYSTEM_TEMPLATES } from '../shared/communication-templates.mjs';
 import { maskPhone, storedDigitVariants } from '../shared/phone.mjs';
 import { ERRORS } from '../integrations/whatsapp/provider.mjs';
+import { whatsappParameter } from '../shared/message-render.mjs';
 
 export const WHATSAPP_CATEGORIES = ['utility', 'marketing', 'authentication'];
 export const APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'paused'];
@@ -121,7 +122,7 @@ export function createWhatsAppChannelService({
 
     const r = await provider.sendTemplate({
       to: recipient.to, templateName: p.templateName, language: p.language,
-      parameters: p.parameters || [], category: msg.category, reference: msg.id,
+      parameters: (p.parameters || []).map(whatsappParameter), category: msg.category, reference: msg.id,
     });
     if (r.ok) return { status: 'sent', providerMessageId: r.providerMessageId };
     if (r.error === ERRORS.optedOut) {
@@ -376,7 +377,7 @@ export function createWhatsAppChannelService({
       return { error: 'invalid_parameters', status: 400 };
     }
     if (!(await approvedRow(templateName, language))) return { error: 'whatsapp_template_not_approved', status: 400 };
-    const r = await provider.sendTemplate({ to: recipient.to, templateName, language, parameters, category: 'utility', reference: id('watest') });
+    const r = await provider.sendTemplate({ to: recipient.to, templateName, language, parameters: parameters.map(whatsappParameter), category: 'utility', reference: id('watest') });
     audit(actorId, 'whatsapp_test_sent', 'whatsapp', null, { to: maskPhone(recipient.to), templateName, language, ok: Boolean(r.ok), error: r.error || null });
     return r.ok ? { ok: true, providerMessageId: r.providerMessageId } : { error: r.error, status: 502 };
   }

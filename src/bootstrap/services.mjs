@@ -52,6 +52,7 @@ import { createWhatsAppChannelService } from '../services/whatsapp-channel-servi
 import { createCommunicationHistoryService } from '../services/communication-history-service.mjs';
 import { createAutomationService } from '../services/automation-service.mjs';
 import { createCommunicationAnalyticsService } from '../services/communication-analytics-service.mjs';
+import { createCommunicationAccess } from '../services/communication-access.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
@@ -242,6 +243,9 @@ export const templateService = createTemplateService({
 export const communicationHistoryService = createCommunicationHistoryService({ db });
 // Communication analytics: delivery, engagement and attributed payments.
 export const communicationAnalyticsService = createCommunicationAnalyticsService({ db });
+// Who may send communications, and for which gyms — checked against the
+// account on every request, not just the token.
+export const communicationAccess = createCommunicationAccess({ db, resolveRequestUser });
 // Lifecycle automations: welcome, expiry reminders, expired, failed
 // payment, inactivity — sent through the same ledger and dispatcher.
 export const automationService = createAutomationService({

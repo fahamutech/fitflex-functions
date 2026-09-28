@@ -21,6 +21,7 @@ import {
 import { buildAudienceFilter, audienceScope } from '../shared/audience.mjs';
 import { renderMessage, whatsappMessage } from '../shared/message-render.mjs';
 import { ownerGymIds } from '../shared/member-status.mjs';
+import { assertGymRecipients } from '../shared/communication-tenancy.mjs';
 
 const EDITABLE = ['draft'];
 const SENDABLE = ['draft', 'scheduled'];
@@ -416,6 +417,7 @@ export function createCampaignService({
       if (latest?.sendRequestId === sendRequestId) return { campaign: view(latest), replayed: true };
       if (err.code === '23505') return { error: 'duplicate_send_request', status: 409 };
       if (err.code === 'STATE_CHANGED') return { error: 'invalid_state', status: 409, detail: latest?.status };
+      if (err.code === 'TENANT_ISOLATION') return { error: 'recipient_outside_gym', status: 500 };
       throw err;
     }
     const sent = await campaigns.findByIdAsync(c.id);
@@ -424,6 +426,7 @@ export function createCampaignService({
   }
 
   async function insertRows(trx, rows) {
+    await assertGymRecipients(trx, rows);
     for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
       await trx('CommunicationMessage').insert(rows.slice(i, i + INSERT_CHUNK))
         .onConflict(['campaignId', 'memberId', 'channel']).ignore();
@@ -464,11 +467,21 @@ export function createCampaignService({
         continue;
       }
       let claimed = 0;
-      await db.transaction(async (trx) => {
-        claimed = await trx('CommunicationCampaign').where({ id: c.id, status: 'scheduled' })
-          .update({ status: 'sending', counts: JSON.stringify(p.counts), updatedAt: at });
-        if (claimed) await insertRows(trx, p.rows);
-      });
+      try {
+        await db.transaction(async (trx) => {
+          claimed = await trx('CommunicationCampaign').where({ id: c.id, status: 'scheduled' })
+            .update({ status: 'sending', counts: JSON.stringify(p.counts), updatedAt: at });
+          if (claimed) await insertRows(trx, p.rows);
+        });
+      } catch (err) {
+        if (err.code !== 'TENANT_ISOLATION') throw err;
+        await db('CommunicationCampaign').where({ id: c.id, status: 'scheduled' }).update({
+          status: 'failed', updatedAt: at, sentAt: at,
+          counts: JSON.stringify({ targeted: 0, queued: 0, skipped: {}, byChannel: {}, failure: 'recipient_outside_gym' }),
+        });
+        stats.failed += 1;
+        continue;
+      }
       if (!claimed) { stats.skipped += 1; continue; }
       stats.released += 1;
       audit(sender, 'communication_campaign_released', c, { targeted: p.counts.targeted, queued: p.counts.queued });

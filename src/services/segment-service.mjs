@@ -73,6 +73,8 @@ export function createSegmentService({
     return out;
   }
 
+  const suspended = (user) => user.accountStatus === 'suspended';
+
   function facts({ user, sub, joinedAt, visits, recent, paymentStatus, homeGymId, areaGymId, at }) {
     const today = localDay(at);
     const engagement = engagementFrom(recent.map(r => iso(r.timestamp)), at);
@@ -145,7 +147,8 @@ export function createSegmentService({
     const out = [];
     for (const [memberId, sub] of latest) {
       const user = users.get(memberId);
-      if (!user) continue;
+      // Deleted and suspended accounts are never messaged (M11).
+      if (!user || suspended(user)) continue;
       out.push(facts({
         user, sub, joinedAt: joined.get(memberId), visits: visits.get(memberId),
         recent: recent.get(memberId) || [], paymentStatus: payments.get(sub.id),
@@ -178,7 +181,7 @@ export function createSegmentService({
     }
     const payments = await paymentStatusBySub([...current.values()].map(s => s.id));
     const allHomeGyms = [...new Set(subs.map(s => s.homeGymId).filter(Boolean))];
-    return users.map(user => {
+    return users.filter(user => !suspended(user)).map(user => {
       const sub = current.get(user.id) || null;
       const mine = recent.get(user.id) || [];
       // Area: the member's home gym, else the gym they visited most lately.
@@ -218,7 +221,7 @@ export function createSegmentService({
       if (list.some(p => p.status === 'payment_pending')) return 'pending';
       return 'none';
     };
-    return profiles.map(p => {
+    return profiles.filter(p => users.has(p.userId) && !suspended(users.get(p.userId))).map(p => {
       const user = users.get(p.userId);
       return {
         memberId: p.userId,
