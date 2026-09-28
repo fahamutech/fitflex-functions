@@ -2,7 +2,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, bearerFrom, verify } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
-import { gymService } from '../src/bootstrap/services.mjs';
+import { gymService, partnerGate } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -24,13 +24,14 @@ export const listGyms = {
   // present here. Payload size is instead controlled by compressing images
   // to WebP and capping dimensions at upload time (see image-upload.tsx /
   // gym_form_page.dart), not by trimming the array server-side.
-  onRequest: async (req, res) => res.json((await gymService.listActiveAsync()).map(g => forViewer(req, g)))
+  // verified: the owner's KYC outcome (D4); profileComplete: the old automatic check.
+  onRequest: async (req, res) => res.json((await partnerGate.badgeGyms(await gymService.listActiveAsync())).map(g => forViewer(req, g)))
 };
 
 export const getGym = {
   created, method: 'get', path: '/gyms/:id',
   description: 'Get a single gym',
-  onRequest: (req, res) => {
+  onRequest: async (req, res) => {
     const g = gymService.findById(req.params.id);
     if (!g) return res.status(404).json({ error: 'not_found' });
     // A new owner's gym waiting for KYC isn't public yet; admins still see it.
@@ -38,7 +39,8 @@ export const getGym = {
       const token = bearerFrom(req);
       if (verify(token || '')?.userType !== 'admin') return res.status(404).json({ error: 'not_found' });
     }
-    res.json(forViewer(req, g));
+    const [shown] = await partnerGate.badgeGyms([g]);
+    res.json(forViewer(req, shown));
   }
 };
 

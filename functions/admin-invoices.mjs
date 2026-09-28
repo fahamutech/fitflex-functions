@@ -34,7 +34,11 @@ export const adminUpdateInvoice = {
   onRequest: async (req, res) => {
     const { receiptUrl, paymentReference, status, note } = req.body || {};
     const result = await invoiceService.update({ id: req.params.id, receiptUrl, paymentReference, status, note, actorId: req.user.sub });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    // Payout holds explain themselves (reason, until) so the portal can say why.
+    if (result.error) {
+      const { error, status: code, ...extra } = result;
+      return res.status(code).json({ error, ...extra });
+    }
     res.json(result.invoice);
   }
 };

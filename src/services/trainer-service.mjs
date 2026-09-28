@@ -80,13 +80,14 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
   async function listPublic(query) {
     const rows = list(query);
     const ok = await partnerGate.operationalUserIds(rows.map(t => t.userId));
-    return rows.filter(t => !t.userId || ok.has(t.userId));
+    return partnerGate.badgeTrainers(rows.filter(t => !t.userId || ok.has(t.userId)));
   }
 
   async function getPublic(id) {
     const trainer = getActive(id);
     if (!trainer || !(await partnerGate.isOperational(trainer.userId))) return null;
-    return trainer;
+    const [shown] = await partnerGate.badgeTrainers([trainer]);
+    return shown;
   }
 
   function getActive(id) {

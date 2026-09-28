@@ -155,7 +155,9 @@ export const adminPaymentService = createAdminPaymentService({
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, gymOwners, settingsService });
-export const invoiceService = createInvoiceService({ invoices, gyms, users, gymPayouts, auditLog });
+export const invoiceService = createInvoiceService({
+  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
+});
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
 export const webhookService = createWebhookService({
   subscriptions, webhookSeen,

@@ -1,6 +1,8 @@
-// A6 — Verified vs Unverified gyms (FitFlex App Issues 25.07.2026).
-// A gym is auto-verified when its profile is complete (location, coordinates,
-// photos, amenities and equipment). Admin can force the flag explicitly.
+// A6 — Verified vs Unverified gyms (FitFlex App Issues 25.07.2026), as
+// changed by decision D4 (28 Sep 2026): a complete profile (location,
+// coordinates, photos, amenities, equipment) no longer switches "Verified"
+// on; members see it as profileComplete, and "Verified" follows the owner's
+// KYC. The stored flag is set by an admin or kept from before.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,8 +26,13 @@ const completeGym = {
   equipment: ['treadmills'],
 };
 
-test('A6: a gym with complete details is verified', () => {
+test('D4: a complete profile no longer makes a new gym verified', () => {
   const row = service.normalizeGymPayload({ ...completeGym }, {});
+  assert.equal(row.verified, false);
+});
+
+test('D4: an existing gym keeps its verified flag when edited', () => {
+  const row = service.normalizeGymPayload({ name: 'Renamed' }, { ...completeGym, verified: true });
   assert.equal(row.verified, true);
 });
 
@@ -71,7 +78,7 @@ test('A6: an explicit prior verified flag is preserved on partial update', () =>
 });
 
 test('A6: slim gym payloads expose the verified flag', () => {
-  const row = service.normalizeGymPayload({ ...completeGym }, {});
+  const row = service.normalizeGymPayload({ ...completeGym, verified: true }, {});
   assert.equal(service.slimGym(row).verified, true);
   assert.equal(service.slimGymForTable ? service.slimGymForTable(row).verified : row.verified, true);
 });
