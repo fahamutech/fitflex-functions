@@ -5,6 +5,13 @@ import { OPEN_GATE } from './partner-gate.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 
 export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE }) {
+  // Set by FitFlex, never by the owner: the verified badge, commission,
+  // homepage placement, status and payout/tax details. Payout details for new
+  // partners come from their verified KYC payout account.
+  const ADMIN_ONLY_FIELDS = ['verified', 'commissionRate', 'homepageVisible', 'homepagePriority', 'status',
+    'paymentBank', 'paymentNumber', 'paymentNotes', 'tinNumber'];
+  const ownerInput = (body = {}) => Object.fromEntries(Object.entries(body).filter(([key]) => !ADMIN_ONLY_FIELDS.includes(key)));
+
   // Gyms of new owners wait for their KYC; existing and verified owners' gyms open at once.
   const newGymStatus = async (owner) => (await partnerGate.isOperational(owner?.id) ? 'active' : 'pending_verification');
 
@@ -38,7 +45,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const createdGyms = [];
     const gymIds = [];
     for (const g of gymList) {
-      const gymData = { ...g };
+      const gymData = ownerInput(g);
       if (!gymData.images && Array.isArray(gymData.imagePaths)) {
         gymData.images = gymData.imagePaths;
         delete gymData.imagePaths;
@@ -111,8 +118,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     if (!ids.includes(gymId)) return { error: 'not_your_gym', status: 403 };
     const prior = gyms.find(g => g.id === gymId);
     if (!prior) return { error: 'gym_not_found', status: 404 };
-    const row = gymService.normalizeGymPayload({ ...body, id: prior.id }, prior);
-    row.status = prior.status; // owner can't change status
+    const row = gymService.normalizeGymPayload({ ...ownerInput(body), id: prior.id }, prior);
     await gyms.upsertAsync(g => g.id === row.id, row);
     if (Array.isArray(body.trainerIds)) await syncTrainersForGym(row.id, body.trainerIds);
     return { gym: row };
@@ -121,7 +127,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
   async function createGym({ owner, body }) {
     if (!body.name) return { error: 'name_required', status: 400 };
     const id = `gym_${randomUUID().slice(0, 8)}`;
-    const row = gymService.normalizeGymPayload({ ...body, id }, {});
+    const row = gymService.normalizeGymPayload({ ...ownerInput(body), id }, {});
     row.status = await newGymStatus(owner);
     await gyms.upsertAsync(g => g.id === row.id, row);
     if (Array.isArray(body.trainerIds) && body.trainerIds.length) await syncTrainersForGym(row.id, body.trainerIds);

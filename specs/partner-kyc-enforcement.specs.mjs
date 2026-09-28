@@ -211,3 +211,46 @@ test('new partners are approved through KYC, not the old role-approval screen', 
   const old = await makeUser('trainer', { existing: true });
   assert.equal((await adminApprovalService.decide({ id: old, decision: 'approve', actorId: 'usr_admin' })).user.approvalStatus, 'approved');
 });
+
+test('a new vendor is approved through KYC, not the vendor admin page; the admin list shows KYC status', async () => {
+  const fresh = await makeUser('vendor');
+  assert.deepEqual(
+    await shopService.adminUpdateVendor({ vendorId: fresh, body: { approvalStatus: 'approved' }, actorId: 'usr_admin' }),
+    { error: 'use_kyc_review', status: 409 },
+  );
+  // Suspending an account is still an admin action.
+  assert.equal((await shopService.adminUpdateVendor({ vendorId: fresh, body: { accountStatus: 'suspended' }, actorId: 'usr_admin' })).vendor.accountStatus, 'suspended');
+  await approveCase(fresh, 'vendor');
+  const old = await makeUser('vendor', { existing: true });
+  const rows = await shopService.adminListVendors();
+  const row = id => rows.find(v => v.id === id);
+  assert.deepEqual([row(fresh).kycStatus, row(fresh).kycExempt], ['approved', false]);
+  assert.deepEqual([row(old).kycStatus, row(old).kycExempt], [null, true]);
+  assert.equal((await shopService.adminUpdateVendor({ vendorId: old, body: { approvalStatus: 'approved' }, actorId: 'usr_admin' })).vendor.approvalStatus, 'approved');
+});
+
+test('F5: an owner can edit their gym but not its badge, commission, placement, status or payout details', async () => {
+  const ownerId = await makeUser('gym_operator', { existing: true });
+  const owner = await db('User').where('id', ownerId).first();
+  const reg = await ownerGymService.registerOwner({ user: owner, body: { gyms: [{
+    name: 'Honest Gym', tier: 'standard', location: 'Sinza', verified: true, commissionRate: 0, homepagePriority: 9999,
+    paymentBank: 'Sneaky Bank', paymentNumber: '000', tinNumber: '999', status: 'active',
+  }] } });
+  const gymId = reg.gymIds[0];
+  created.gyms.push(gymId);
+  const fresh = await gyms.findByIdAsync(gymId);
+  assert.deepEqual([fresh.commissionRate, Number(fresh.homepagePriority), fresh.paymentBank, fresh.tinNumber], [12, 0, null, null]);
+  assert.equal(fresh.verified, false); // incomplete profile; the owner's "true" is ignored
+
+  // FitFlex sets the commercial fields; the owner then edits the name.
+  await gyms.updateAsync(g => g.id === gymId, { commissionRate: 15, paymentBank: 'CRDB', paymentNumber: '0150', verified: true, status: 'active' });
+  const again = await db('User').where('id', ownerId).first();
+  const edit = await ownerGymService.updateGym({ owner: again, gymId, body: {
+    name: 'Honest Gym Masaki', commissionRate: 0, paymentBank: 'Sneaky Bank', paymentNumber: '111', verified: false,
+    homepageVisible: false, homepagePriority: 9999, status: 'suspended',
+  } });
+  const g = edit.gym;
+  assert.equal(g.name, 'Honest Gym Masaki');
+  assert.deepEqual([g.commissionRate, g.paymentBank, g.paymentNumber, g.verified, g.homepageVisible, Number(g.homepagePriority), g.status],
+    [15, 'CRDB', '0150', true, true, 0, 'active']);
+});

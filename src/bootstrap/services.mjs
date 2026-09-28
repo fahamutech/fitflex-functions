@@ -105,7 +105,7 @@ export const trainerEngagementService = createTrainerEngagementService({
 });
 export const shopService = createShopService({
   products, shopOrders, users, auditLog,
-  marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate,
+  marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases,
 });
 export const whatsAppNotifier = createWhatsAppNotifier();
 export const corporateService = createCorporateService({

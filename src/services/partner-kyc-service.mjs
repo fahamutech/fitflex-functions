@@ -657,7 +657,7 @@ export function createPartnerKycService({
       if (partner.error) return partner;
       const { rows, checklist } = await evaluate(partner, kycCase);
       const outstanding = checklist.sections.flatMap(sec => sec.items)
-        .filter(i => i.status !== 'complete').map(i => (i.gymId ? `${i.key}@${i.gymId}` : i.key));
+        .filter(i => i.status !== 'complete' && !i.optional).map(i => (i.gymId ? `${i.key}@${i.gymId}` : i.key));
       // Approving and reinstating both need a complete checklist.
       if (outstanding.length) {
         if (body.override !== true) return fail('kyc_incomplete', 409, { outstanding });
