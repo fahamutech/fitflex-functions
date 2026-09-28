@@ -71,8 +71,25 @@ export const KYC_TIERS = Object.freeze({ gym_owner: 3, trainer: 2, vendor: 3, co
 export const DOCUMENTS_FOR = Object.freeze({
   gym_owner: ['owner_id', 'business_registration', 'tin_certificate', 'business_licence'],
   trainer: ['trainer_id', 'certification', 'liability_insurance'],
-  vendor: ['business_registration', 'tin_certificate', 'representative_id', 'representative_authority'],
-  corporate: ['business_registration', 'tin_certificate', 'representative_id'],
+  vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id', 'representative_authority'],
+  corporate: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
+});
+
+// Collected but not required for verification (owner decision D6, 28 Sep
+// 2026): for vendors and companies only the TIN and the representative's ID
+// are mandatory. Optional items show in the checklist and are reviewed if
+// given, but never hold up submitting or approving.
+export const OPTIONAL_ITEMS = Object.freeze({
+  vendor: new Set([
+    'business.legalName', 'business.tradingName', 'business.registrationNumber', 'business.registeredAddress',
+    'business.registration_certificate', 'business.tin_certificate', 'business.licence',
+    'representative.position', 'representative.authority', 'representative.authority_document',
+  ]),
+  corporate: new Set([
+    'company.legalName', 'company.registrationNumber', 'company.registeredAddress', 'company.businessActivity',
+    'company.registration_certificate', 'company.tin_certificate', 'company.licence',
+    'representative.position', 'representative.phone', 'representative.email',
+  ]),
 });
 
 export const SETTLEMENT_REQUIRED = Object.freeze({ gym_owner: true, trainer: true, vendor: true, corporate: false });
@@ -231,6 +248,7 @@ function vendorSections(s) {
   return [
     { key: 'business', items: [
       ...businessItems('business', 'vendor', s.case, s.documents, s.now),
+      documentItem('business.licence', s.documents, 'business_licence', s.now),
       { key: 'business.contact', by: BY_PARTNER,
         status: filled(profile.contactNumber) && filled(profile.email) ? 'complete' : 'missing' },
     ] },
@@ -251,7 +269,10 @@ function corporateSections(s) {
   const account = s.corporate || {};
   const contract = (s.agreements || []).some(a => a.agreementType === 'corporate_contract' && a.status === 'accepted');
   return [
-    { key: 'company', items: businessItems('company', 'corporate', s.case, s.documents, s.now) },
+    { key: 'company', items: [
+      ...businessItems('company', 'corporate', s.case, s.documents, s.now),
+      documentItem('company.licence', s.documents, 'business_licence', s.now),
+    ] },
     { key: 'representative', items: personItems('representative', 'corporate', s.people, s.documents, s.now) },
     { key: 'commercial', items: [
       fieldItem('commercial.seats', Number(account.seatLimit) || null),
@@ -275,7 +296,8 @@ const SECTIONS = { gym_owner: gymOwnerSections, trainer: trainerSections, vendor
  * @returns {{ partnerType, tier, sections, missing: string[], awaitingReview: string[], readyToSubmit: boolean, complete: boolean }}
  *   missing: partner items not yet provided. awaitingReview: anything provided but not yet accepted,
  *   plus reviewer items not yet done. readyToSubmit: the partner has provided everything.
- *   complete: every item, partner and reviewer, is complete.
+ *   complete: every required item, partner and reviewer, is complete. Optional
+ *   items (flagged optional: true) never count against either.
  */
 export function evaluateKyc(partnerType, snapshot = {}) {
   const build = SECTIONS[partnerType];
@@ -284,10 +306,14 @@ export function evaluateKyc(partnerType, snapshot = {}) {
     case: null, people: [], documents: [], checks: [], settlementAccounts: [], agreements: [], gyms: [],
     ...snapshot, now: snapshot.now || new Date(),
   };
-  const sections = build(s);
+  const optional = OPTIONAL_ITEMS[partnerType] || new Set();
+  const sections = build(s).map(sec => ({
+    ...sec, items: sec.items.map(i => (optional.has(i.key) ? { ...i, optional: true } : i)),
+  }));
   const items = sections.flatMap(sec => sec.items);
+  const required = items.filter(i => !i.optional);
   const label = (i) => (i.gymId ? `${i.key}@${i.gymId}` : i.key);
-  const partnerItems = items.filter(i => i.by === BY_PARTNER);
+  const partnerItems = required.filter(i => i.by === BY_PARTNER);
   const missing = partnerItems.filter(i => !PROVIDED.has(i.status)).map(label);
   const awaitingReview = items.filter(i => i.status === 'submitted' || (i.by === BY_REVIEWER && i.status !== 'complete')).map(label);
   return {
@@ -297,6 +323,6 @@ export function evaluateKyc(partnerType, snapshot = {}) {
     missing,
     awaitingReview,
     readyToSubmit: missing.length === 0,
-    complete: items.every(i => i.status === 'complete'),
+    complete: required.every(i => i.status === 'complete'),
   };
 }
