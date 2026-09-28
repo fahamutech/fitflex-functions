@@ -53,6 +53,7 @@ import { createCommunicationHistoryService } from '../services/communication-his
 import { createAutomationService } from '../services/automation-service.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
+import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
@@ -85,14 +86,16 @@ export {
 registerAccountStatusLookup(async id => (await users.findByIdAsync(id))?.accountStatus ?? null);
 
 export const identityService = createIdentityService({ users });
+// KYC enforcement for partners created from the enforcement start; existing ones are exempt.
+export const partnerGate = createPartnerGate({ users, partnerKycCases });
 const { resolveRequestUser, publicUserId } = identityService;
 
 export const settingsService = createSettingsService({ platformSettings, auditLog });
 export const gymService = createGymService({ gyms, users, checkins, auditLog });
-export const trainerService = createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService });
+export const trainerService = createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate });
 export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
-  subscriptions, paymentRequests,
+  subscriptions, paymentRequests, partnerGate,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
 });
 export const trainerEngagementService = createTrainerEngagementService({
@@ -102,7 +105,7 @@ export const trainerEngagementService = createTrainerEngagementService({
 });
 export const shopService = createShopService({
   products, shopOrders, users, auditLog,
-  marketplaceEnquiries, marketplaceNotifications, productReviews,
+  marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate,
 });
 export const whatsAppNotifier = createWhatsAppNotifier();
 export const corporateService = createCorporateService({
@@ -134,7 +137,7 @@ export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
 });
 
-export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService });
+export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate });
 export const ownerStaffService = createOwnerStaffService({ users, auditLog, initFirebaseAdmin, getAdminAuth });
 
 export const adminMemberService = createAdminMemberService({
@@ -150,7 +153,7 @@ export const adminPaymentService = createAdminPaymentService({
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
-export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases });
+export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, gymOwners, settingsService });
 export const invoiceService = createInvoiceService({ invoices, gyms, users, gymPayouts, auditLog });
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });

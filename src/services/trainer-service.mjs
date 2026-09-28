@@ -1,9 +1,10 @@
 // Trainer service — catalogue CRUD, self-service profile + gym applications.
 import { randomUUID } from 'node:crypto';
+import { OPEN_GATE } from './partner-gate.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
 import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
 
-export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService }) {
+export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate = OPEN_GATE }) {
   function normalizeTrainerPayload(body = {}, prior = {}) {
     const gymIds = parseStringList(body.gymIds, prior.gymIds || []);
     const pendingGymIds = parseStringList(body.pendingGymIds, prior.pendingGymIds || []);
@@ -73,6 +74,19 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       .filter(t => !spec || t.specialties.some(s => s.toLowerCase().includes(spec)))
       .map(hydrateTrainer)
       .sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0));
+  }
+
+  /** Trainers members can see: new trainers only once their KYC is approved. */
+  async function listPublic(query) {
+    const rows = list(query);
+    const ok = await partnerGate.operationalUserIds(rows.map(t => t.userId));
+    return rows.filter(t => !t.userId || ok.has(t.userId));
+  }
+
+  async function getPublic(id) {
+    const trainer = getActive(id);
+    if (!trainer || !(await partnerGate.isOperational(trainer.userId))) return null;
+    return trainer;
   }
 
   function getActive(id) {
@@ -187,6 +201,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
   async function applyToGym({ userId, gymId }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
+    // A trainer is verified before applying; the gym owner then approves.
+    if (!(await partnerGate.isOperational(userId))) return { error: 'verification_required', status: 403 };
     const gym = gyms.find(g => g.id === gymId && g.status === 'active');
     if (!gym) return { error: 'gym_not_found', status: 404 };
     const gymIds = profile.gymIds || [];
@@ -259,6 +275,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     register,
     myProfile,
     applyToGym,
+    listPublic,
+    getPublic,
     cancelGymApplication,
     updateProfile,
   };

@@ -33,6 +33,11 @@ export const getGym = {
   onRequest: (req, res) => {
     const g = gymService.findById(req.params.id);
     if (!g) return res.status(404).json({ error: 'not_found' });
+    // A new owner's gym waiting for KYC isn't public yet; admins still see it.
+    if (g.status === 'pending_verification') {
+      const token = bearerFrom(req);
+      if (verify(token || '')?.userType !== 'admin') return res.status(404).json({ error: 'not_found' });
+    }
     res.json(forViewer(req, g));
   }
 };

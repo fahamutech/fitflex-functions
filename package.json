@@ -10,7 +10,7 @@
     "knex:rollback": "knex --knexfile knexfile.cjs migrate:rollback",
     "db:setup": "node scripts/create-db.mjs && npm run knex:migrate",
     "db:setup:ci": "FITFLEX_USE_CI_DB=1 node scripts/create-db.mjs && npm run knex:migrate:ci",
-    "test": "FITFLEX_USE_CI_DB=1 node --test --test-concurrency=1 --test-force-exit 'specs/**/*.specs.mjs'",
+    "test": "FITFLEX_USE_CI_DB=1 KYC_ENFORCEMENT=off node --test --test-concurrency=1 --test-force-exit 'specs/**/*.specs.mjs'",
     "dev:fs": "bfast fs serve --port 3000",
     "start:fs": "bfast fs serve --port 3000 --static"
   },
