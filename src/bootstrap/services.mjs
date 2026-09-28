@@ -98,7 +98,11 @@ export const trainerBookingService = createTrainerBookingService({
   subscriptions, paymentRequests, partnerGate,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
 });
-export const trainerEngagementService = createTrainerEngagementService({ trainerEngagements, trainers, users, trainerService });
+export const trainerEngagementService = createTrainerEngagementService({
+  trainerEngagements, trainers, users, trainerService,
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
 export const shopService = createShopService({
   products, shopOrders, users, auditLog,
   marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate,

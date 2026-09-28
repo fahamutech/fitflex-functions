@@ -24,7 +24,7 @@ export const memberEngageTrainer = {
 
 export const memberMyTrainerEngagements = {
   created, method: 'get', path: '/me/trainer-engagements',
-  description: 'Member: list own trainer enquiries and interests.',
+  description: 'Member: own trainer enquiries and interests, most recent activity first, each with its conversation (messages) and whether the trainer replied since the member last read (unread).',
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
     const result = await trainerEngagementService.listForMember({ memberId: req.user.sub });
@@ -34,13 +34,58 @@ export const memberMyTrainerEngagements = {
 
 export const trainerMyEngagements = {
   created, method: 'get', path: '/trainer/engagements',
-  description: 'Trainer: list member enquiries and interests, newest first.',
+  description: 'Trainer: member enquiries and interests, most recent activity first, each with its conversation (messages), status (new | read | replied | closed) and unread.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const result = await trainerEngagementService.listForTrainer({ userId: req.user.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.engagements);
   }
+};
+
+const sendResult = (res, result) => (result.error
+  ? res.status(result.status).json({ error: result.error })
+  : res.json(result.engagement));
+
+export const trainerReplyEngagement = {
+  created, method: 'post', path: '/trainer/engagements/:id/reply',
+  description: 'Trainer: reply to a member enquiry or interest. POST { message } (1–1000 chars). The member is notified (inbox + push).',
+  requestSample: { message: 'Yes — I have 6am slots at Gym Tu on weekdays.' },
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => sendResult(res, await trainerEngagementService.replyAsTrainer({
+    userId: req.user.sub, id: req.params.id, message: req.body?.message,
+  })),
+};
+
+export const trainerReadEngagement = {
+  created, method: 'post', path: '/trainer/engagements/:id/read',
+  description: 'Trainer: mark a conversation as read (a new enquiry becomes "read").',
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => sendResult(res, await trainerEngagementService.markReadByTrainer({ userId: req.user.sub, id: req.params.id })),
+};
+
+export const trainerCloseEngagement = {
+  created, method: 'post', path: '/trainer/engagements/:id/close',
+  description: 'Trainer: close a conversation. A member follow-up reopens it.',
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => sendResult(res, await trainerEngagementService.closeByTrainer({ userId: req.user.sub, id: req.params.id })),
+};
+
+export const memberReplyEngagement = {
+  created, method: 'post', path: '/me/trainer-engagements/:id/reply',
+  description: 'Member: follow up on an enquiry with the trainer. POST { message }. The trainer is notified.',
+  requestSample: { message: 'Great — can I start Monday?' },
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => sendResult(res, await trainerEngagementService.replyAsMember({
+    memberId: req.user.sub, id: req.params.id, message: req.body?.message,
+  })),
+};
+
+export const memberReadEngagement = {
+  created, method: 'post', path: '/me/trainer-engagements/:id/read',
+  description: "Member: mark the trainer's replies as read.",
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => sendResult(res, await trainerEngagementService.markReadByMember({ memberId: req.user.sub, id: req.params.id })),
 };
 
 // ── C3: trainer sessions (bookings + manual) ───────────────────────────────
