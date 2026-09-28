@@ -7,7 +7,7 @@
 // scope work with all members.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
-import { segmentService, campaignService, templateService, whatsappChannelService, communicationHistoryService, automationService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { segmentService, campaignService, templateService, whatsappChannelService, communicationHistoryService, communicationAnalyticsService, automationService, resolveRequestUser } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -307,3 +307,34 @@ export const ownerAutomationRuns = autoRoute('/:id/runs', 'recent firings: which
 export const ownerAutomationPreview = autoRoute('/:id/preview', 'the automation\'s message as a sample member would see it, in each language and channel.',
   async (s, req, res) => send(res, await automationService.preview(s, req.params.id)),
   { method: 'post' });
+
+// ── Analytics (M10) ─────────────────────────────────────────────────────────
+// Delivery, engagement and business results, from the message ledger and
+// approved payments. Attribution: last touch — the last message tapped in
+// the 7 days before paying, else the last one opened in the 3 days before.
+
+function analyticsRoutes(prefix, guard, senderOf, who) {
+  const route = (path, description, handler) => ({
+    created, method: 'get', path: `${prefix}${path}`, description: `${who}: ${description}`, onGuard: guard,
+    onRequest: async (req, res) => {
+      const sender = await senderOf(req, res);
+      if (sender) await handler(sender, req, res);
+    },
+  });
+  return {
+    overview: route('/communications/analytics', 'results for the last ?days (default 30, max 365): members sent to, delivered, opened, tapped; renewed and paid; attributed revenue; and each campaign and automation that sent. ?days&gymId',
+      async (s, req, res) => send(res, await communicationAnalyticsService.overview(s, { days: req.query?.days ?? 30, gymId: req.query?.gymId ?? null }))),
+    campaign: route('/communications/campaigns/:id/analytics', 'one campaign\'s results — delivery (sent, delivered, failed, skipped with reasons), engagement (opened, tapped, CTA completed) and business (renewed, paid, attributed revenue, and who converted).',
+      async (s, req, res) => send(res, await communicationAnalyticsService.campaign(s, req.params.id))),
+  };
+}
+
+const ownerAnalytics = analyticsRoutes('/owner', ownerGuard, gymSender, 'Owner/staff');
+export const ownerCommunicationAnalytics = ownerAnalytics.overview;
+export const ownerCampaignAnalytics = ownerAnalytics.campaign;
+const adminAnalytics = analyticsRoutes('/admin', adminGuard, platformSender, 'Admin (FitFlex\'s own messages)');
+export const adminCommunicationAnalytics = adminAnalytics.overview;
+export const adminCampaignAnalytics = adminAnalytics.campaign;
+
+export const ownerAutomationAnalytics = autoRoute('/:id/analytics', 'one automation\'s results over the last ?days (default 30): delivery, engagement and attributed payments.',
+  async (s, req, res) => send(res, await communicationAnalyticsService.automation(s, req.params.id, { days: req.query?.days ?? 30 })));
