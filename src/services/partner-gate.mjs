@@ -13,7 +13,8 @@
 //
 // A suspended case stays operational: suspension holds payouts, not listings.
 
-export const ENFORCEMENT_START = '2026-09-28T00:00:00.000Z';
+// Set just after this change goes live, so everyone who signed up before it is exempt.
+export const ENFORCEMENT_START = '2026-09-28T06:00:00.000Z';
 
 /** Lets everyone through — the default for services built without a gate (e.g. unit specs). */
 export const OPEN_GATE = Object.freeze({
