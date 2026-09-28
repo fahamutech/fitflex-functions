@@ -2,7 +2,7 @@
 // session with; public read; admin moderation.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { trainerReviewService } from '../src/bootstrap/services.mjs';
+import { trainerReviewService, trainerService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -80,8 +80,10 @@ export const trainerOwnReviews = {
   description: 'Trainer: read-only reviews + summary for own profile.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
-    // Trainer profile id === the user's trainer profile; resolve via sub.
-    const trainerId = req.user?.trainerId || req.user?.sub;
+    // Reviews are keyed by TrainerProfile.id, which is not the user id in the token.
+    const profile = trainerService.findProfileByUser(req.user.sub);
+    if (!profile) return res.status(404).json({ error: 'trainer_profile_not_found' });
+    const trainerId = profile.id;
     const [summary, reviews] = await Promise.all([
       trainerReviewService.summary(trainerId),
       trainerReviewService.listForTrainer(trainerId, { limit: 100 }),
@@ -90,11 +92,24 @@ export const trainerOwnReviews = {
   },
 };
 
-// ── Admin ──
+// ── Admin ── review moderation sits under the 'social' (community moderation) scope.
+const adminGuard = [requireAuth('admin'), requireAcl('social')];
+
+export const adminListTrainerReviews = {
+  created, method: 'get', path: '/admin/trainer-reviews',
+  description: 'Admin: all trainer reviews, newest first (max 200). ?status=published|flagged|hidden',
+  onGuard: adminGuard,
+  onRequest: async (req, res) => {
+    const result = await trainerReviewService.adminList({ status: req.query?.status || null });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  },
+};
+
 export const adminModerateTrainerReview = {
   created, method: 'post', path: '/admin/trainer-reviews/:id/moderate',
   description: 'Admin: moderate a trainer review — { action: hide | flag | restore }.',
-  onGuard: [requireAuth('admin'), requireAcl('trainers')],
+  onGuard: adminGuard,
   onRequest: async (req, res) => {
     const result = await trainerReviewService.moderate({ reviewId: req.params.id, action: req.body?.action, adminId: req.user?.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
@@ -105,6 +120,6 @@ export const adminModerateTrainerReview = {
 export const adminFlaggedTrainerReviews = {
   created, method: 'get', path: '/admin/trainer-reviews/flagged',
   description: 'Admin: flagged trainer reviews moderation queue.',
-  onGuard: [requireAuth('admin'), requireAcl('trainers')],
+  onGuard: adminGuard,
   onRequest: async (_req, res) => res.json(await trainerReviewService.flagged()),
 };

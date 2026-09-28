@@ -1,8 +1,9 @@
 // Gym review REST surface — members rate gyms they've visited or hold a direct
 // subscription to; public read; admin moderation + tier-ranking signals.
 import '../src/bootstrap/init.mjs';
-import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { gymReviewService } from '../src/bootstrap/services.mjs';
+import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
+import { gymReviewService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { resolveOperatorGymSelection } from '../src/shared/operator-gym-selection.mjs';
 
 const created = new Date().toISOString();
 
@@ -74,14 +75,20 @@ export const canReviewGym = {
   },
 };
 
-// ── Gym operator (read-only) ──
+// ── Gym owner / staff (read-only) ──
 export const operatorGymReviews = {
   created, method: 'get', path: '/operator/gym-reviews',
-  description: 'Gym operator: read-only reviews + summary for the assigned gym.',
-  onGuard: requireAuth('gym_operator'),
+  description: 'Gym owner or staff (gyms scope): read-only reviews + summary for one of their gyms. ?gymId= is required when they have more than one.',
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')],
   onRequest: async (req, res) => {
-    const gymId = req.user?.gymId;
-    if (!gymId) return res.status(400).json({ error: 'operator_not_assigned_to_gym' });
+    const operator = await resolveRequestUser(req);
+    if (!operator) return res.status(404).json({ error: 'user_not_found' });
+    const selection = resolveOperatorGymSelection(operator, req.query?.gymId);
+    if (!selection.ok) {
+      const status = selection.failure === 'not_your_gym' ? 403 : 400;
+      return res.status(status).json({ error: selection.failure, gymIds: selection.ids });
+    }
+    const { gymId } = selection;
     const [summary, reviews] = await Promise.all([
       gymReviewService.summary(gymId),
       gymReviewService.listForGym(gymId, { limit: 100 }),
@@ -90,11 +97,24 @@ export const operatorGymReviews = {
   },
 };
 
-// ── Admin ──
+// ── Admin ── review moderation sits under the 'social' (community moderation) scope.
+const moderationGuard = [requireAuth('admin'), requireAcl('social')];
+
+export const adminListGymReviews = {
+  created, method: 'get', path: '/admin/gym-reviews',
+  description: 'Admin: all gym reviews, newest first (max 200). ?status=published|flagged|hidden',
+  onGuard: moderationGuard,
+  onRequest: async (req, res) => {
+    const result = await gymReviewService.adminList({ status: req.query?.status || null });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  },
+};
+
 export const adminModerateGymReview = {
   created, method: 'post', path: '/admin/gym-reviews/:id/moderate',
   description: 'Admin: moderate a gym review — { action: hide | flag | restore }.',
-  onGuard: [requireAuth('admin'), requireAcl('gyms')],
+  onGuard: moderationGuard,
   onRequest: async (req, res) => {
     const result = await gymReviewService.moderate({ reviewId: req.params.id, action: req.body?.action, adminId: req.user?.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
@@ -105,7 +125,7 @@ export const adminModerateGymReview = {
 export const adminFlaggedGymReviews = {
   created, method: 'get', path: '/admin/gym-reviews/flagged',
   description: 'Admin: flagged gym reviews moderation queue.',
-  onGuard: [requireAuth('admin'), requireAcl('gyms')],
+  onGuard: moderationGuard,
   onRequest: async (_req, res) => res.json(await gymReviewService.flagged()),
 };
 
