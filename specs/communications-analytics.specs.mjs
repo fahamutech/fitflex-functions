@@ -174,6 +174,21 @@ test('a payment goes to the last message tapped, so no two campaigns take the sa
   assert.ok(!sept.conversions.some(c => c.memberName === 'Daudi'));
 });
 
+test('a renewal on the same membership counts as renewed, not a first payment', async () => {
+  const g = await gym('Upya Gym');
+  const S = { senderType: 'gym', owner: { gymIds: [g] } };
+  const c = await campaign(g, 'Renew now');
+  const m = await user({ displayName: 'Kassim' });
+  // The membership starts after the tap (a new sign-up)… then is renewed.
+  const s1 = await sub(m, g, { startedDaysAgo: 8 });
+  await pay(m, s1, 50000, 8);
+  await msg(c, g, m, 'in_app', reached(3, { status: 'clicked', openedAt: ago(3), clickedAt: ago(3) }));
+  await pay(m, s1, 50000, 2);
+  const r = await analytics.campaign(S, c);
+  assert.deepEqual([r.members.paid, r.members.renewed], [1, 1]);
+  assert.equal(r.conversions[0].renewal, true);
+});
+
 test('CTA completed follows the button: a gym button counts a visit', async () => {
   const r = await analytics.campaign(w.S, w.gymVisit);
   assert.deepEqual([r.members.clicked, r.members.ctaCompleted, r.members.paid], [1, 1, 0]);
@@ -194,6 +209,7 @@ test('an automation\'s results over a period, and a message with no CTA has none
 test('the overview: totals for the period, and each campaign and automation', async () => {
   const o = await analytics.overview(w.S, { days: 30 });
   assert.equal(o.period.days, 30);
+  assert.ok(o.members.ctaCompleted >= 5, 'CTA completed counted across the period too');
   assert.ok(o.members.recipients >= 9);
   assert.deepEqual([o.revenue.attributedTzs, o.revenue.payments], [130000 + 60000 + 25000, 5]);
   const by = Object.fromEntries(o.sources.map(s => [s.name, s]));

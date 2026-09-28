@@ -112,10 +112,16 @@ export function createCommunicationAnalyticsService({ db, now = () => new Date()
       .where(b => b.whereNotNull('m.clickedAt').orWhereNotNull('m.openedAt'))
       .where(b => b.where('m.clickedAt', '>=', new Date(+from - clickMs)).orWhere('m.openedAt', '>=', new Date(+from - clickMs)))
       .select(COLUMNS);
-    // Earlier memberships at the gym, to tell a renewal from a first payment.
-    const earlier = await db('Subscription').whereIn('memberId', [...new Set(payments.map(p => p.memberId))])
-      .modify(q => (scope.platform ? q.where('type', 'platform_pass') : q.where('type', 'direct_sub').whereIn('homeGymId', scope.gymIds)))
-      .select('id', 'memberId', 'homeGymId', 'startedAt');
+    // To tell a renewal from a first payment: earlier memberships at the
+    // gym, and earlier approved payments on the same membership (an owner's
+    // "Renew" extends the same subscription).
+    const [earlier, paidBefore] = await Promise.all([
+      db('Subscription').whereIn('memberId', [...new Set(payments.map(p => p.memberId))])
+        .modify(q => (scope.platform ? q.where('type', 'platform_pass') : q.where('type', 'direct_sub').whereIn('homeGymId', scope.gymIds)))
+        .select('id', 'memberId', 'homeGymId', 'startedAt'),
+      db('PaymentRequest').where('status', 'approved').whereIn('subscriptionId', [...new Set(payments.map(p => p.subscriptionId))])
+        .select('id', 'subscriptionId', { at: db.raw('coalesce("decidedAt", "requestedAt")') }),
+    ]);
     const out = [];
     for (const p of payments) {
       const at = ms(p.paidAt);
@@ -128,6 +134,7 @@ export function createCommunicationAnalyticsService({ db, now = () => new Date()
       if (!touch) continue;
       const touchAt = ms(click ? touch.clickedAt : touch.openedAt);
       const renewal = earlier.some(s => s.memberId === p.memberId && s.id !== p.subscriptionId && ms(s.startedAt) < at)
+        || paidBefore.some(x => x.subscriptionId === p.subscriptionId && x.id !== p.id && ms(x.at) < at)
         || (p.subStartedAt && ms(p.subStartedAt) < touchAt);
       out.push({
         paymentId: p.id, memberId: p.memberId, amountTzs: Number(p.amountTzs || 0), paidAt: iso(p.paidAt),
@@ -283,6 +290,7 @@ export function createCommunicationAnalyticsService({ db, now = () => new Date()
       attribution: ATTRIBUTION,
       members: {
         ...f.members,
+        ctaCompleted: await ctaCompleted(scope, rows),
         renewed: new Set(credited.filter(c => c.renewal).map(c => c.memberId)).size,
         paid: new Set(credited.map(c => c.memberId)).size,
       },
