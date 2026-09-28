@@ -8,14 +8,14 @@ const created = new Date().toISOString();
 export const listTrainers = {
   created, method: 'get', path: '/trainers',
   description: 'Public trainer discovery list.',
-  onRequest: (req, res) => res.json(trainerService.list({ q: req.query?.q, specialty: req.query?.specialty }))
+  onRequest: async (req, res) => res.json(await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty }))
 };
 
 export const getTrainer = {
   created, method: 'get', path: '/trainers/:id',
   description: 'Public trainer profile detail.',
-  onRequest: (req, res) => {
-    const trainer = trainerService.getActive(req.params.id);
+  onRequest: async (req, res) => {
+    const trainer = await trainerService.getPublic(req.params.id);
     if (!trainer) return res.status(404).json({ error: 'not_found' });
     res.json(trainer);
   }

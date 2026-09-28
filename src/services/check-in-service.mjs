@@ -50,6 +50,8 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       if (!member) return { ok: false, failure: 'member_not_found' };
       const gym = gyms.find(g => g.id === gymId);
       if (!gym) return { ok: false, failure: 'gym_not_found' };
+      // A new owner's gym opens once their KYC is approved.
+      if (gym.status === 'pending_verification') return { ok: false, failure: 'gym_not_verified' };
 
       const subs = await subscriptions.filterAsync(s => s.memberId === memberId);
       const sub  = pickSubscriptionForGym(

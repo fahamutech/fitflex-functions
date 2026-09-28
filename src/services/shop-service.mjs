@@ -1,6 +1,7 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
 import { randomUUID } from 'node:crypto';
 import { hashPassword } from '../auth/password-credentials.mjs';
+import { OPEN_GATE } from './partner-gate.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set(['pending', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup', 'delivered', 'cancelled', 'confirmed', 'fulfilled']);
@@ -24,7 +25,7 @@ const bool = value => value === true || value === 'true' || value === '1' ? true
 const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0) ? Number(product.discountPriceTzs) : Number(product.priceTzs || 0);
 const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
 
-export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews }) {
+export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate = OPEN_GATE }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -57,6 +58,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   async function getVendorStore(vendorId) {
+    if (!(await partnerGate.isOperational(vendorId))) return null;
     const profile = publicProfile(await getVendorProfile(vendorId));
     if (!profile) return null;
     const storeProducts = await listProducts({ vendorId });
@@ -72,6 +74,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       return product.status === 'active' && !['pending', 'rejected'].includes(product.approvalStatus) && product.visibility !== 'hidden' && product.homepageVisible !== false;
     });
     if (vendorId) rows = rows.filter(product => product.vendorId === vendorId);
+    // Buyers only see products from vendors who may sell (new vendors: once verified).
+    if (!includeArchived) {
+      const ok = await partnerGate.operationalUserIds(rows.map(product => product.vendorId));
+      rows = rows.filter(product => ok.has(product.vendorId));
+    }
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
     const deliveryFlag = bool(delivery);
@@ -237,6 +244,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (qty <= 0) return { error: 'invalid_quantity', status: 400 };
       const product = await products.findByIdAsync(item.productId);
       if (!product || product.deletedAt || product.status !== 'active' || ['pending', 'rejected'].includes(product.approvalStatus)) return { error: 'product_not_found', status: 404, productId: item.productId };
+      if (!(await partnerGate.isOperational(product.vendorId))) return { error: 'product_not_found', status: 404, productId: item.productId };
       if (Number(product.stock) < qty) return { error: 'insufficient_stock', status: 409, productId: product.id };
       resolved.push({ product, qty });
     }

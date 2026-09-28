@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
 
-export function createAdminApprovalService({ users, auditLog, partnerKycCases = null }) {
+export function createAdminApprovalService({ users, auditLog, partnerKycCases = null, partnerGate = null }) {
   /** Strip internal/sensitive fields from user records for list responses. */
   function slimApprovalRow(u) {
     if (!u) return u;
@@ -29,6 +29,8 @@ export function createAdminApprovalService({ users, auditLog, partnerKycCases = 
     if (partnerKycCases && (await partnerKycCases.filterByColumnAsync('userId', target.id)).length) {
       return { error: 'use_kyc_review', status: 409 };
     }
+    // New partners (not exempt from enforcement) go through KYC review, case or not.
+    if (partnerGate && !partnerGate.exempt(target)) return { error: 'use_kyc_review', status: 409 };
     const before = { ...target };
     const status = decision === 'approve' ? 'approved' : 'rejected';
     const updated = await users.updateByIdAsync(target.id, {
