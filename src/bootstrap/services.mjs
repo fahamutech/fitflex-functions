@@ -51,6 +51,7 @@ import { createCommunicationPreferenceService } from '../services/communication-
 import { createWhatsAppChannelService } from '../services/whatsapp-channel-service.mjs';
 import { createCommunicationHistoryService } from '../services/communication-history-service.mjs';
 import { createAutomationService } from '../services/automation-service.mjs';
+import { createCommunicationAnalyticsService } from '../services/communication-analytics-service.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
@@ -241,6 +242,8 @@ export const templateService = createTemplateService({
 // Communication history: reads the message ledger (campaigns, recipients,
 // member timelines, the message log).
 export const communicationHistoryService = createCommunicationHistoryService({ db });
+// Communication analytics: delivery, engagement and attributed payments.
+export const communicationAnalyticsService = createCommunicationAnalyticsService({ db });
 // Lifecycle automations: welcome, expiry reminders, expired, failed
 // payment, inactivity — sent through the same ledger and dispatcher.
 export const automationService = createAutomationService({
