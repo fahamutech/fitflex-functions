@@ -2,7 +2,7 @@
 // how (home gym free / trainer pass / member plan), plus their passes.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { gymService, subscriptionService, trainerService } from '../src/bootstrap/services.mjs';
+import { gymService, subscriptionService, trainerService, partnerGate } from '../src/bootstrap/services.mjs';
 import { trainerGymAccess } from '../src/shared/trainer-access.mjs';
 
 const created = new Date().toISOString();
@@ -15,7 +15,7 @@ export const trainerGyms = {
     const trainer = trainerService.findProfileByUser(req.user.sub);
     const passes = await subscriptionService.trainerPasses({ trainerUserId: req.user.sub });
     const current = (gymId) => passes.find(p => p.homeGymId === gymId && ['active', 'payment_pending'].includes(p.status)) || null;
-    const gyms = await gymService.listActiveAsync();
+    const gyms = await partnerGate.badgeGyms(await gymService.listActiveAsync());
     res.json(gyms.map(gym => ({ ...gym, trainerAccess: trainerGymAccess({ trainer, gym }), currentPass: current(gym.id) })));
   }
 };
