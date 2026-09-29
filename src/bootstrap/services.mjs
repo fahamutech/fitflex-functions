@@ -107,7 +107,7 @@ export const trainerEngagementService = createTrainerEngagementService({
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const shopService = createShopService({
-  products, shopOrders, users, auditLog,
+  products, shopOrders, users, auditLog, paymentRequests,
   marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases,
 });
 export const whatsAppNotifier = createWhatsAppNotifier();
@@ -156,6 +156,7 @@ export const adminPaymentService = createAdminPaymentService({
   },
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
+  onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });

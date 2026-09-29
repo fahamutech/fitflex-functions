@@ -2,11 +2,13 @@
 // embed a LEAN member/subscription projection only (not the full user row
 // with memberProfile/aclPermissions) to keep the list endpoint's payload small.
 import { randomUUID } from 'node:crypto';
+import { activationDates } from '../shared/subscription-status.mjs';
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
   gyms = null,
   onBookingPayment = async () => {},
+  onOrderPayment = async () => {},
   onSubscriptionActivated = async () => {},
   // A rejected payment for a membership (lifecycle automations).
   onPaymentRejected = async () => {},
@@ -28,10 +30,14 @@ export function createAdminPaymentService({
     return g ? { id: g.id, name: g.name } : null;
   }
 
-  // A request pays either for a subscription or for a trainer booking group.
+  // A request pays for a subscription, a trainer booking group or a shop order.
   async function applyPaymentStatusToSubscription(request, status, reference) {
     if (request.bookingGroupId) {
       await onBookingPayment(request.bookingGroupId, status);
+      return;
+    }
+    if (request.orderId) {
+      await onOrderPayment(request.orderId, status);
       return;
     }
     if (!request.subscriptionId) return;
@@ -46,16 +52,9 @@ export function createAdminPaymentService({
       status: subStatus,
       paymentRef: status === 'approved' ? (reference || `ADMIN_${request.id}`) : null
     };
-    // A trainer pass runs from the moment it is paid for, not from the
-    // request — otherwise a daily pass approved the next morning is spent.
+    // Every paid plan runs from the moment it is paid for, not from the request.
     if (status === 'approved') {
-      const sub = await subscriptions.findByIdAsync(request.subscriptionId);
-      if (sub?.type === 'trainer_pass' && sub.status === 'payment_pending') {
-        const lengthMs = +new Date(sub.expiresAt) - +new Date(sub.startedAt);
-        const now = new Date();
-        const expiresAt = new Date(+now + Math.max(0, lengthMs)).toISOString();
-        Object.assign(patch, { startedAt: now.toISOString(), cycleStartedAt: now.toISOString(), renewsAt: expiresAt, expiresAt });
-      }
+      Object.assign(patch, activationDates(await subscriptions.findByIdAsync(request.subscriptionId)));
     }
     const updated = await subscriptions.updateByIdAsync(request.subscriptionId, patch);
     if (subStatus === 'active' && updated) {

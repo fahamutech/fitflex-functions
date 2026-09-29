@@ -118,7 +118,12 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     if (!ids.includes(gymId)) return { error: 'not_your_gym', status: 403 };
     const prior = gyms.find(g => g.id === gymId);
     if (!prior) return { error: 'gym_not_found', status: 404 };
-    const row = gymService.normalizeGymPayload({ ...ownerInput(body), id: prior.id }, prior);
+    // The classification is FitFlex's, set after inspection: an owner may
+    // propose one when adding a gym, but never change it afterwards. A gym
+    // leaving free-online mode goes back to Standard until FitFlex classifies it.
+    const { tier: _tier, ...input } = ownerInput(body);
+    const tier = prior.tier === 'online' ? 'standard' : prior.tier;
+    const row = gymService.normalizeGymPayload({ ...input, tier, id: prior.id }, prior);
     await gyms.upsertAsync(g => g.id === row.id, row);
     if (Array.isArray(body.trainerIds)) await syncTrainersForGym(row.id, body.trainerIds);
     return { gym: row };

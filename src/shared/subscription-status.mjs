@@ -27,3 +27,16 @@ export function effectiveSubscriptionStatus(sub, now = new Date()) {
   if (sub.expiresAt && +now > +new Date(sub.expiresAt)) return 'expired';
   return sub.status ?? null;
 }
+
+/**
+ * The dates a paid plan runs on once its payment is confirmed. A plan's
+ * period starts when it is paid for, not when it was requested — otherwise
+ * the days spent waiting for approval are lost. The plan keeps its length
+ * (1, 7 or 30 days). Returns {} for a plan not waiting on payment.
+ */
+export function activationDates(sub, now = new Date()) {
+  if (!sub || sub.status !== 'payment_pending' || !sub.startedAt || !sub.expiresAt) return {};
+  const lengthMs = Math.max(0, +new Date(sub.expiresAt) - +new Date(sub.startedAt));
+  const expiresAt = new Date(+now + lengthMs).toISOString();
+  return { startedAt: now.toISOString(), cycleStartedAt: now.toISOString(), renewsAt: expiresAt, expiresAt };
+}
