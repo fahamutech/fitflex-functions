@@ -110,6 +110,8 @@ function campaignRoutes(prefix, guard, senderOf, who) {
       async (s, req, res) => send(res, await campaignService.create(s, req.body || {}), 201)),
     previewNew: route('post', '/campaigns/preview', 'preview an unsaved campaign: who it reaches on each channel, an example message, warnings. Same body as create.',
       async (s, req, res) => send(res, await campaignService.preview(s, { body: req.body || {} }))),
+    duplicate: route('post', '/campaigns/:id/duplicate', 'copy any campaign (sent, cancelled or draft) into a new draft with the same purpose, audience, message and channels. POST { name? } — defaults to "<name> (copy)". The audience is worked out again when the copy is sent.',
+      async (s, req, res) => send(res, await campaignService.duplicate(s, req.params.id, req.body || {}), 201)),
     get: route('get', '/campaigns/:id', 'one campaign with delivery progress per channel.',
       async (s, req, res) => send(res, await campaignService.get(s, req.params.id))),
     update: route('patch', '/campaigns/:id', 'edit a draft. Any of the create fields except gymId.',
@@ -135,6 +137,7 @@ export const ownerCampaignList = owner.list;
 export const ownerCampaignRecipients = owner.recipients;
 export const ownerCampaignCreate = owner.create;
 export const ownerCampaignPreviewNew = owner.previewNew;
+export const ownerCampaignDuplicate = owner.duplicate;
 export const ownerCampaignGet = owner.get;
 export const ownerCampaignUpdate = owner.update;
 export const ownerCampaignDelete = owner.remove;
@@ -150,6 +153,7 @@ export const adminCampaignList = admin.list;
 export const adminCampaignRecipients = admin.recipients;
 export const adminCampaignCreate = admin.create;
 export const adminCampaignPreviewNew = admin.previewNew;
+export const adminCampaignDuplicate = admin.duplicate;
 export const adminCampaignGet = admin.get;
 export const adminCampaignUpdate = admin.update;
 export const adminCampaignDelete = admin.remove;

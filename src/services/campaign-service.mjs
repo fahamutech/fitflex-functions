@@ -277,6 +277,39 @@ export function createCampaignService({
     return { campaign: view(await campaigns.findByIdAsync(row.id)) };
   }
 
+  /**
+   * A new draft from any campaign the sender can see — sent, cancelled or
+   * still a draft — with its purpose, audience, message and channels, to
+   * send again (say, the same renewal offer next month). The audience is
+   * worked out afresh when the copy is sent. Channels switched off on the
+   * server since, and an archived template, are left out.
+   */
+  async function duplicate(sender, campaignId, body = {}) {
+    const c = await load(sender, campaignId);
+    if (!c) return { error: 'not_found', status: 404 };
+    let name = `${c.name} (copy)`;
+    if (body.name !== undefined) {
+      name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name || name.length > NAME_MAX) return { error: 'invalid_name', status: 400 };
+    }
+    const available = segmentService.channelAvailability();
+    const template = c.templateId
+      ? await db('CommunicationTemplate').where({ id: c.templateId }).first('id', 'status')
+      : null;
+    const at = now().toISOString();
+    const row = {
+      id: id('cmp'), senderType: c.senderType, gymId: c.gymId, name: name.slice(0, NAME_MAX),
+      purpose: c.purpose, category: c.category, audience: c.audience, content: c.content,
+      channels: (c.channels || []).filter(ch => available[ch]),
+      templateId: template && template.status !== 'archived' ? template.id : null,
+      status: 'draft', createdBy: sender.actorId || null, createdAt: at, updatedAt: at,
+    };
+    await campaigns.insertAsync(row);
+    const copy = await campaigns.findByIdAsync(row.id);
+    audit(sender, 'communication_campaign_duplicated', copy, { from: c.id });
+    return { campaign: view(copy) };
+  }
+
   async function update(sender, campaignId, body = {}) {
     const c = await load(sender, campaignId);
     if (!c) return { error: 'not_found', status: 404 };
@@ -613,5 +646,5 @@ export function createCampaignService({
     }).catch?.(() => {});
   }
 
-  return { create, update, remove, schedule, unschedule, cancel, preview, send, list, get, overview, plan, releaseDue };
+  return { create, duplicate, update, remove, schedule, unschedule, cancel, preview, send, list, get, overview, plan, releaseDue };
 }
