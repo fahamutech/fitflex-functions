@@ -28,7 +28,7 @@
 // the cutover date are still open decisions).
 
 const DATE_RE = `'^\\d{4}-\\d{2}-\\d{2}$'`;
-const SEEDED_BY = 'migration:20261024090000';
+const SEEDED_BY = 'migration:20261027090000';
 
 async function commonChecks(knex, table, prefix, requiredWhenActive) {
   const add = async (name, sql) => {
