@@ -9,3 +9,5 @@ firebase-service-account*.json
 firebase-service-account.json
 *-firebase-adminsdk-*.json
 backup/fitflex.dump
+backup/roles.sql
+*.dump
