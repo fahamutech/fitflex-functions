@@ -33,11 +33,11 @@ export function createAdminApprovalService({ users, auditLog, partnerKycCases = 
     if (partnerGate && !partnerGate.exempt(target)) return { error: 'use_kyc_review', status: 409 };
     const before = { ...target };
     const status = decision === 'approve' ? 'approved' : 'rejected';
+    // Who approved and when is kept in the audit log below (and, for KYC
+    // partners, on their case); the user row only holds the flag and note.
     const updated = await users.updateByIdAsync(target.id, {
       approvalStatus: status,
       approvalNote: note ?? null,
-      approvedAt: status === 'approved' ? new Date().toISOString() : null,
-      approvedBy: status === 'approved' ? actorId : null
     });
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),

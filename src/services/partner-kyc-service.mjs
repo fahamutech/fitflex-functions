@@ -40,6 +40,20 @@ const MAX_TEXT = 300;
 // admins may also correct a case that is waiting for or in review.
 const PARTNER_EDITABLE = new Set(['draft', 'info_requested']);
 const ADMIN_EDITABLE = new Set(['draft', 'info_requested', 'submitted', 'in_review']);
+// Once verified, a partner can still renew a document (a licence about to
+// expire or already expired) without reopening the case; a reviewer then
+// accepts or rejects the new document on its own (owner decision, 28 Sep).
+const RENEWABLE = new Set(['approved', 'suspended']);
+
+const REQUIREMENT_NAMES = {
+  owner_id: 'ID', trainer_id: 'ID', representative_id: 'representative ID',
+  business_registration: 'business registration certificate', tin_certificate: 'TIN certificate',
+  business_licence: 'business licence', certification: 'certification', liability_insurance: 'liability cover',
+  representative_authority: 'proof of authority',
+};
+
+// Expiry reminders go out this many days before a document expires, and on the day.
+export const EXPIRY_REMINDER_DAYS = [30, 7, 0];
 
 const ADDRESS_FIELDS = ['line1', 'line2', 'city', 'region', 'country', 'postalCode'];
 const BUSINESS_FIELDS = ['legalName', 'tradingName', 'entityType', 'registrationNumber', 'registrationAuthority',
@@ -174,6 +188,9 @@ export function createPartnerKycService({
     return !kycCase || allowed.has(kycCase.status);
   }
 
+  /** Documents can also be renewed on a verified case. */
+  const documentEditable = (kycCase, actor) => editable(kycCase, actor) || RENEWABLE.has(kycCase?.status);
+
   async function caseRows(kycCase) {
     if (!kycCase) return { people: [], documents: [], checks: [], settlementAccounts: [], agreements: [] };
     const [people, documents, checks, settlementAccounts, agreements] = await Promise.all([
@@ -305,7 +322,7 @@ export function createPartnerKycService({
     if (!documentStore) return fail('storage_service_unavailable', 503);
     if (!Buffer.isBuffer(upload.buffer)) return fail('no_file_provided');
     const existingCase = await findCase(partner);
-    if (!editable(existingCase, actor)) return fail('case_locked', 409, { caseStatus: existingCase.status });
+    if (!documentEditable(existingCase, actor)) return fail('case_locked', 409, { caseStatus: existingCase.status });
 
     const file = await prepareDocumentFile(upload.buffer, { truncated: upload.truncated });
     if (file.error) return fail(file.error, file.error === 'file_too_large' ? 413 : 400);
@@ -390,7 +407,7 @@ export function createPartnerKycService({
       details = body.details;
     }
     const existingCase = await findCase(partner);
-    if (!editable(existingCase, actor)) return fail('case_locked', 409, { caseStatus: existingCase.status });
+    if (!documentEditable(existingCase, actor)) return fail('case_locked', 409, { caseStatus: existingCase.status });
     const kycCase = await ensureCase(partner, actor);
     const docId = await writeDocument(kycCase, requirementKey, { docType, ...patch, ...(details ? { details } : {}) }, actor);
     await record(kycCase, {
@@ -657,7 +674,7 @@ export function createPartnerKycService({
       if (partner.error) return partner;
       const { rows, checklist } = await evaluate(partner, kycCase);
       const outstanding = checklist.sections.flatMap(sec => sec.items)
-        .filter(i => i.status !== 'complete').map(i => (i.gymId ? `${i.key}@${i.gymId}` : i.key));
+        .filter(i => i.status !== 'complete' && !i.optional).map(i => (i.gymId ? `${i.key}@${i.gymId}` : i.key));
       // Approving and reinstating both need a complete checklist.
       if (outstanding.length) {
         if (body.override !== true) return fail('kyc_incomplete', 409, { outstanding });
@@ -691,7 +708,10 @@ export function createPartnerKycService({
   async function reviewDocument(caseId, documentId, body = {}, actor) {
     const { kycCase, error, status } = await reviewable(caseId, actor);
     if (error) return fail(error, status);
-    if (kycCase.status !== 'in_review') return fail('case_not_in_review', 409, { caseStatus: kycCase.status });
+    // In review, or a renewal on a verified case.
+    if (kycCase.status !== 'in_review' && !RENEWABLE.has(kycCase.status)) {
+      return fail('case_not_in_review', 409, { caseStatus: kycCase.status });
+    }
     const doc = await partnerDocuments.findByIdAsync(documentId);
     if (!doc || doc.caseId !== caseId) return fail('document_not_found', 404);
     if (doc.status !== 'pending') return fail('document_already_reviewed', 409, { documentStatus: doc.status });
@@ -703,9 +723,20 @@ export function createPartnerKycService({
       status: body.decision === 'accept' ? 'accepted' : 'rejected',
       reviewNote: note, reviewedBy: actor.id || null, reviewedAt: nowIso(), updatedAt: nowIso(),
     });
+    if (body.decision === 'accept' && RENEWABLE.has(kycCase.status)) {
+      // An accepted renewal replaces the document it renews and moves the
+      // next review date.
+      if (doc.supersedesId) {
+        const old = await partnerDocuments.findByIdAsync(doc.supersedesId);
+        if (old?.status === 'accepted') await partnerDocuments.updateByIdAsync(old.id, { status: 'superseded', updatedAt: nowIso() });
+      }
+      const standing = (await partnerDocuments.filterByColumnAsync('caseId', caseId)).filter(d => d.status === 'accepted');
+      const expiry = soonestExpiry(standing);
+      if (expiry) await partnerKycCases.updateByIdAsync(caseId, { reverifyAt: new Date(`${expiry}T00:00:00Z`).toISOString(), updatedAt: nowIso() });
+    }
     await record(kycCase, {
       eventType: 'document_reviewed', targetType: 'document', targetId: doc.id, note,
-      data: { requirementKey: doc.requirementKey, decision: body.decision },
+      data: { requirementKey: doc.requirementKey, decision: body.decision, ...(RENEWABLE.has(kycCase.status) ? { renewal: true } : {}) },
     }, actor);
     return caseDetail(caseId);
   }
@@ -743,6 +774,59 @@ export function createPartnerKycService({
     return caseDetail(caseId);
   }
 
+  // ── Expiry reminders ──────────────────────────────────────────────────────
+
+  /**
+   * Remind verified partners about documents that expire soon: 30 and 7 days
+   * before, and on the day (or when found already expired). Reminders only —
+   * nothing is suspended (owner decision, 28 Sep). Each reminder is sent once
+   * per document and window; a renewal already uploaded stops them.
+   */
+  async function sendExpiryReminders({ now = new Date() } = {}) {
+    const today = new Date(`${new Date(now).toISOString().slice(0, 10)}T00:00:00Z`);
+    const cases = [
+      ...await partnerKycCases.filterByColumnAsync('status', 'approved'),
+      ...await partnerKycCases.filterByColumnAsync('status', 'suspended'),
+    ].filter(c => c.userId);
+    let sent = 0;
+    let already = 0;
+    for (const kycCase of cases) {
+      const documents = await partnerDocuments.filterByColumnAsync('caseId', kycCase.id);
+      const events = await partnerKycEvents.filterByColumnAsync('caseId', kycCase.id);
+      const reminded = new Set(events
+        .filter(e => e.eventType === 'note' && e.data?.kind === 'expiry_reminder')
+        .map(e => `${e.targetId}:${e.data.window}`));
+      for (const requirementKey of new Set(documents.map(d => d.requirementKey))) {
+        const doc = currentDocument(documents, requirementKey);
+        if (!doc || doc.status !== 'accepted' || !doc.expiresOn) continue; // none, or a renewal is waiting
+        const daysLeft = Math.round((+new Date(`${doc.expiresOn}T00:00:00Z`) - +today) / 86_400_000);
+        if (daysLeft < -30) continue; // long expired: reminded already
+        const window = EXPIRY_REMINDER_DAYS.filter(d => daysLeft <= d).pop();
+        if (window === undefined) continue;
+        if (reminded.has(`${doc.id}:${window}`)) { already += 1; continue; }
+        const name = REQUIREMENT_NAMES[requirementKey] || 'document';
+        const body = daysLeft > 0
+          ? `Your ${name} expires on ${doc.expiresOn}. Upload the renewed one in Verification.`
+          : `Your ${name} expired on ${doc.expiresOn}. Upload the renewed one in Verification.`;
+        try {
+          await notify(kycCase.userId, {
+            type: 'kyc_document_expiring',
+            title: daysLeft > 0 ? `Your ${name} expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}` : `Your ${name} has expired`,
+            body,
+            data: { caseId: kycCase.id, requirementKey, expiresOn: doc.expiresOn },
+          });
+        } catch { /* a failed notification is retried on the next run */ continue; }
+        await partnerKycEvents.insertAsync({
+          id: `pevt_${randomUUID().slice(0, 12)}`, caseId: kycCase.id, round: kycCase.round || 1,
+          eventType: 'note', targetType: 'document', targetId: doc.id, actorId: null, actorRole: 'system',
+          note: body, data: { kind: 'expiry_reminder', window, requirementKey, expiresOn: doc.expiresOn }, at: nowIso(),
+        });
+        sent += 1;
+      }
+    }
+    return { cases: cases.length, sent, already };
+  }
+
   // ── Admin reads ───────────────────────────────────────────────────────────
 
   async function listCases({ status, partnerType } = {}) {
@@ -758,11 +842,18 @@ export function createPartnerKycService({
       ...userRows.map(u => [u.id, u.vendorProfile?.businessName || u.displayName || u.email || u.id]),
       ...companyRows.map(c => [c.id, c.companyName]),
     ]);
+    // Documents with a file waiting for a reviewer — including renewals on
+    // cases that are already approved.
+    const toReview = new Map();
+    for (const d of await partnerDocuments.filterByColumnAsync('status', 'pending')) {
+      if (d.storageKey) toReview.set(d.caseId, (toReview.get(d.caseId) || 0) + 1);
+    }
     return rows
       .map(c => ({
         id: c.id, partnerType: c.partnerType, subjectId: c.userId || c.corporateId,
         partnerName: names.get(c.userId || c.corporateId) || null, legalName: c.legalName,
         status: c.status, tier: c.tier, round: c.round, submittedAt: c.submittedAt, updatedAt: c.updatedAt, createdAt: c.createdAt,
+        documentsToReview: toReview.get(c.id) || 0,
       }))
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
@@ -791,7 +882,7 @@ export function createPartnerKycService({
     attachDocumentFile, readOwnDocumentFile, readDocumentFile,
     addSettlementAccount, removeSettlementAccount,
     recordSiteVisit, recordCorporateContract,
-    submit, withdraw, claim, decide, reviewDocument, reviewSettlementAccount,
+    submit, withdraw, claim, decide, reviewDocument, reviewSettlementAccount, sendExpiryReminders,
     listCases, caseDetail,
   };
 }

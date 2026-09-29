@@ -64,7 +64,7 @@ test('a vendor is checked on business, representative and marketplace', () => {
   const c = evaluateKyc('vendor', { now: NOW });
   assert.deepEqual(keys(c), [
     ['business', ['business.legalName', 'business.tradingName', 'business.registrationNumber', 'business.tin', 'business.registeredAddress',
-      'business.registration_certificate', 'business.tin_certificate', 'business.contact']],
+      'business.registration_certificate', 'business.tin_certificate', 'business.licence', 'business.contact']],
     ['representative', ['representative.fullName', 'representative.idNumber', 'representative.position', 'representative.authority',
       'representative.id_document', 'representative.authority_document']],
     ['marketplace', ['marketplace.product_categories', 'marketplace.delivery', 'marketplace.returns', 'marketplace.settlement']],
@@ -75,7 +75,7 @@ test('a company is checked on company, representative and commercial terms — n
   const c = evaluateKyc('corporate', { now: NOW });
   assert.deepEqual(keys(c), [
     ['company', ['company.legalName', 'company.registrationNumber', 'company.tin', 'company.registeredAddress', 'company.businessActivity',
-      'company.registration_certificate', 'company.tin_certificate']],
+      'company.registration_certificate', 'company.tin_certificate', 'company.licence']],
     ['representative', ['representative.fullName', 'representative.idNumber', 'representative.position', 'representative.phone',
       'representative.email', 'representative.id_document']],
     ['commercial', ['commercial.seats', 'commercial.pass_tier', 'commercial.subsidy', 'commercial.billing_cycle', 'commercial.contract', 'commercial.billing_contact']],
@@ -262,4 +262,54 @@ test('corporate commercial terms come from the corporate account, plus a signed 
   const noSeats = evaluateKyc('corporate', { corporate: { ...corporate, seatLimit: 0 }, agreements: [{ agreementType: 'corporate_contract', status: 'superseded' }], now: NOW });
   assert.equal(item(noSeats, 'commercial.seats').status, 'missing');
   assert.equal(item(noSeats, 'commercial.contract').status, 'missing');
+});
+
+// ── D6: for vendors and companies only the TIN and representative ID are required ──
+
+test('a vendor with just the TIN, representative ID and marketplace details can submit', () => {
+  const rep = { role: 'authorised_representative', fullName: 'John Kimaro', idType: 'nida', idNumber: '1' };
+  const c = evaluateKyc('vendor', {
+    case: { tin: '123456789' }, people: [rep], documents: [doc('representative_id')],
+    vendorProfile: { contactNumber: '+255700000000', email: 'shop@example.com', businessCategory: 'Gear', deliveryRegions: ['Dar'], returnsPolicy: '7 days' },
+    settlementAccounts: [verifiedAccount], now: NOW,
+  });
+  assert.deepEqual(c.missing, []);
+  assert.equal(c.readyToSubmit, true);
+  assert.equal(c.complete, true);
+  const optional = c.sections.flatMap(s => s.items).filter(i => i.optional).map(i => i.key);
+  assert.deepEqual(optional.sort(), [
+    'business.legalName', 'business.licence', 'business.registeredAddress', 'business.registrationNumber',
+    'business.registration_certificate', 'business.tin_certificate', 'business.tradingName',
+    'representative.authority', 'representative.authority_document', 'representative.position',
+  ]);
+  assert.equal(item(c, 'business.licence').status, 'missing'); // collected if given, never required
+});
+
+test('a vendor without the TIN or the representative\'s ID can\'t submit', () => {
+  const c = evaluateKyc('vendor', { now: NOW });
+  for (const key of ['business.tin', 'representative.fullName', 'representative.idNumber', 'representative.id_document']) {
+    assert.ok(c.missing.includes(key), key);
+  }
+  assert.ok(!c.missing.includes('business.legalName'));
+  assert.ok(!c.missing.includes('business.licence'));
+});
+
+test('a company needs its TIN, representative ID and commercial terms; the rest is optional', () => {
+  const corporate = { seatLimit: 50, passTier: 'pro', subsidyModel: 'fully_funded', billingCycle: 'monthly', billingContactName: 'AP', billingContactEmail: 'ap@x.co.tz' };
+  const rep = { role: 'authorised_representative', fullName: 'Grace Mrema', idType: 'nida', idNumber: '1' };
+  const c = evaluateKyc('corporate', {
+    case: { tin: '111222333' }, people: [rep], documents: [doc('representative_id')], corporate,
+    agreements: [{ agreementType: 'corporate_contract', status: 'accepted' }], now: NOW,
+  });
+  assert.deepEqual(c.missing, []);
+  assert.equal(c.complete, true);
+  assert.equal(item(c, 'company.licence').optional, true);
+  assert.equal(item(c, 'representative.email').optional, true);
+});
+
+test('gym owners and trainers keep every item required', () => {
+  for (const type of ['gym_owner', 'trainer']) {
+    const c = evaluateKyc(type, { now: NOW });
+    assert.equal(c.sections.flatMap(s => s.items).some(i => i.optional), false, type);
+  }
 });

@@ -25,7 +25,7 @@ const bool = value => value === true || value === 'true' || value === '1' ? true
 const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0) ? Number(product.discountPriceTzs) : Number(product.priceTzs || 0);
 const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
 
-export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate = OPEN_GATE }) {
+export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate = OPEN_GATE, partnerKycCases = null }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -194,10 +194,17 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function adminListVendors() {
     const vendors = await users.filterAsync(user => user.userType === 'vendor');
     const allProducts = await products.filterAsync(product => !product.deletedAt);
+    // "Verified" for a vendor is their KYC outcome, not a manual flag.
+    const cases = partnerKycCases && vendors.length
+      ? await partnerKycCases.filterByColumnInAsync('userId', vendors.map(v => v.id))
+      : [];
+    const kycStatus = new Map(cases.filter(c => c.partnerType === 'vendor').map(c => [c.userId, c.status]));
     return vendors
       .map(({ passwordHash, firebaseUid, ...vendor }) => ({
         ...vendor,
         vendorProfile: vendor.vendorProfile || null,
+        kycStatus: kycStatus.get(vendor.id) || null,
+        kycExempt: partnerGate.exempt(vendor),
         productCount: allProducts.filter(product => product.vendorId === vendor.id).length,
         pendingProductCount: allProducts.filter(product => product.vendorId === vendor.id && (product.approvalStatus || 'pending') === 'pending').length,
       }))
@@ -209,18 +216,17 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!vendor || vendor.userType !== 'vendor') return { error: 'vendor_not_found', status: 404 };
     const patch = { updatedAt: nowIso() };
     if (['pending_approval', 'approved', 'rejected'].includes(body?.approvalStatus)) {
+      // New vendors are approved through their KYC case.
+      if (!partnerGate.exempt(vendor)) return { error: 'use_kyc_review', status: 409 };
       patch.approvalStatus = body.approvalStatus;
       patch.approvalNote = body.approvalNote == null ? vendor.approvalNote || null : String(body.approvalNote).trim() || null;
-      patch.approvedAt = body.approvalStatus === 'approved' ? nowIso() : null;
-      patch.approvedBy = body.approvalStatus === 'approved' ? actorId : null;
     }
     if (['active', 'suspended'].includes(body?.accountStatus)) patch.accountStatus = body.accountStatus;
-    if (typeof body?.verified === 'boolean') patch.verified = body.verified;
     const updated = await users.updateByIdAsync(vendorId, patch);
     await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'vendor_management_updated',
       target: vendorId,
-      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, verified: vendor.verified },
+      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus },
       after: patch,
     });
     if (patch.approvalStatus) await notify(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });

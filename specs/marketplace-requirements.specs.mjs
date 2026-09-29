@@ -157,7 +157,8 @@ test('marketplace: admin creates products for a real vendor and manages vendor v
     body: { approvalStatus: 'approved', verified: true },
   });
   assert.equal(decision.vendor.approvalStatus, 'approved');
-  assert.equal(decision.vendor.verified, true);
+  // "Verified" comes from the vendor's KYC case; a manual flag is ignored.
+  assert.equal(decision.vendor.verified, undefined);
 
   const vendors = await service.adminListVendors();
   assert.equal(vendors[0].productCount, 1);

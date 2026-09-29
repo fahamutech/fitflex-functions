@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -44,5 +44,14 @@ export const communicationDispatcher = {
   onJob: async () => {
     const r = await deliveryService.runOnce();
     if (r.claimed || r.released || r.closed) console.log(`[comms] released=${r.released} claimed=${r.claimed} sent=${r.sent} retry=${r.retry} failed=${r.failed} closed=${r.closed}`);
+  }
+};
+
+export const kycExpiryReminders = {
+  created, rule: '0 6 * * *', // every day 06:00 UTC = 09:00 EAT
+  description: 'Partner KYC: remind verified partners 30 days, 7 days and on the day a document (ID, licence, certificate, insurance) expires. Reminders only; nothing is suspended. Safe to rerun: each reminder is sent once.',
+  onJob: async () => {
+    const r = await partnerKycService.sendExpiryReminders();
+    if (r.sent) console.log(`[kyc-expiry] cases=${r.cases} sent=${r.sent} already=${r.already}`);
   }
 };

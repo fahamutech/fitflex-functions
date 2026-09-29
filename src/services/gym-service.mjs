@@ -5,7 +5,6 @@
 // where even one image per row is enough to balloon payload size; callers
 // needing the image fetch the gym directly via getGym.
 import { randomUUID } from 'node:crypto';
-import { gymProfileGaps } from '../shared/gym-profile.mjs';
 import { normalizeTrainerPassConfig, TRAINER_PASS_PERIODS } from '../shared/trainer-access.mjs';
 
 export function createGymService({ gyms, users, checkins, auditLog }) {
@@ -45,18 +44,11 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
       feeTzs: firstPass ? tpConfig.options[firstPass] : 0,
       period: firstPass || 'monthly',
     };
-    // A6: verified = explicit flag (admin/prior) if set, otherwise derived
-    // from profile completeness (location + coordinates + photos + amenities
-    // + equipment).
+    // The stored flag: set by an admin, or kept from before. What members see
+    // is worked out from the owner's KYC (see partner-gate.mjs, D4).
     const explicitVerified = typeof body.verified === 'boolean'
       ? body.verified
       : (typeof prior.verified === 'boolean' ? prior.verified : null);
-    const autoVerified = gymProfileGaps({
-      name: body.name ?? prior.name,
-      location: body.location ?? prior.location,
-      coordinates: { lat, lng },
-      images, amenities, equipment,
-    }).length === 0;
     return {
       id: body.id || prior.id || `gym_${randomUUID().slice(0, 8)}`,
       status: body.status || prior.status || 'active',
@@ -85,7 +77,10 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
       equipment,
       classes,
       trainerPass,
-      verified: explicitVerified ?? autoVerified,
+      // D4: "Verified" means KYC-approved (worked out when gyms are shown to
+      // members). A complete profile no longer switches it on by itself; it's
+      // shown separately as profileComplete. Existing gyms keep their flag.
+      verified: explicitVerified ?? false,
       paymentBank: body.paymentBank ?? prior.paymentBank ?? null,
       paymentNumber: body.paymentNumber ?? prior.paymentNumber ?? null,
       paymentNotes: body.paymentNotes ?? prior.paymentNotes ?? null,
