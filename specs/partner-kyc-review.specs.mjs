@@ -45,6 +45,9 @@ async function readyTrainer() {
   // Files arrive with private storage (a later phase); attach them directly here.
   await db('PartnerDocument').where('caseId', kycCase.id).update(FILE);
   const { account } = await svc.addSettlementAccount(partner, { method: 'mobile_money', provider: 'mpesa', accountName: 'Review Trainer', accountNumber: '0754000222' }, actor);
+  for (const a of (await svc.agreements(partner)).agreements) {
+    await svc.acceptAgreement(partner, { agreementType: a.agreementType, version: a.version }, actor);
+  }
   return { id, partner, actor, caseId: kycCase.id, accountId: account.id };
 }
 

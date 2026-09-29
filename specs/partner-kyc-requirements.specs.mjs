@@ -7,6 +7,7 @@ import {
   evaluateKyc, documentStatus, currentDocument, addressComplete, KYC_TIERS,
 } from '../src/shared/partner-kyc-requirements.mjs';
 import { gymProfileGaps, gymRateCardGaps } from '../src/shared/gym-profile.mjs';
+import { requiredAgreements } from '../src/shared/partner-agreements.mjs';
 
 const NOW = new Date('2026-10-10T09:00:00Z');
 const address = { line1: 'Plot 12, Haile Selassie Rd', city: 'Dar es Salaam' };
@@ -34,6 +35,9 @@ const passedVisit = (gymId, extra = {}) => ({
   evidence: { score: 17, maxScore: 20, tier: 'midtier', visitedOn: '2026-10-02' }, createdAt: '2026-10-02T10:00:00Z', ...extra,
 });
 const verifiedAccount = { status: 'verified' };
+/** The partner type's in-app agreements, accepted at their current versions. */
+const signed = type => requiredAgreements(type).map(a => ({ agreementType: a.agreementType, version: a.text.version, status: 'accepted' }));
+const AGREEMENTS = ['agreements', ['agreements.partner_terms', 'agreements.kyc_consent']];
 
 // ── Shape per partner type ──────────────────────────────────────────────────
 
@@ -46,6 +50,7 @@ test('a gym owner is checked on identity, business, operations and payout', () =
       'business.registration_certificate', 'business.tin_certificate', 'business.licence', 'business.gym_location']],
     ['operational', ['operational.gym_profile', 'operational.rate_card', 'operational.site_verification', 'operational.vetting_score', 'operational.gym_tier']],
     ['settlement', ['settlement.payout_account']],
+    AGREEMENTS,
   ]);
 });
 
@@ -56,6 +61,7 @@ test('a trainer is checked on identity and professional credentials, not gym aff
     ['identity', ['identity.fullName', 'identity.idNumber', 'identity.phone', 'identity.email', 'identity.address', 'identity.id_document']],
     ['professional', ['professional.certification', 'professional.specialisation', 'professional.liability_cover']],
     ['settlement', ['settlement.payout_account']],
+    AGREEMENTS,
   ]);
   assert.ok(!JSON.stringify(c).includes('gym'));
 });
@@ -68,6 +74,7 @@ test('a vendor is checked on business, representative and marketplace', () => {
     ['representative', ['representative.fullName', 'representative.idNumber', 'representative.position', 'representative.authority',
       'representative.id_document', 'representative.authority_document']],
     ['marketplace', ['marketplace.product_categories', 'marketplace.delivery', 'marketplace.returns', 'marketplace.settlement']],
+    AGREEMENTS,
   ]);
 });
 
@@ -96,7 +103,7 @@ test('a fully documented gym owner with a passed site visit is complete', () => 
     case: businessCase, people: [principal], gyms: [completeGym], checks: [passedVisit('gym_a')],
     documents: [doc('owner_id'), doc('business_registration'), doc('tin_certificate'),
       doc('business_licence', { issuer: 'Kinondoni MC', expiresOn: '2027-06-30' })],
-    settlementAccounts: [verifiedAccount], now: NOW,
+    settlementAccounts: [verifiedAccount], agreements: signed('gym_owner'), now: NOW,
   });
   assert.deepEqual(c.missing, []);
   assert.deepEqual(c.awaitingReview, []);
@@ -110,7 +117,7 @@ test('site visits, vetting and tier are FitFlex steps: they never block the owne
     case: businessCase, people: [principal], gyms: [completeGym],
     documents: [doc('owner_id'), doc('business_registration'), doc('tin_certificate'),
       doc('business_licence', { issuer: 'Kinondoni MC', expiresOn: '2027-06-30' })],
-    settlementAccounts: [{ status: 'pending_verification' }], now: NOW,
+    settlementAccounts: [{ status: 'pending_verification' }], agreements: signed('gym_owner'), now: NOW,
   });
   assert.equal(c.readyToSubmit, true);
   assert.equal(c.complete, false);
@@ -218,7 +225,7 @@ test('a document waiting for its file keeps the partner from submitting', () => 
     people: [principal], trainer: { specialties: ['yoga'] }, settlementAccounts: [verifiedAccount],
     documents: [doc('trainer_id'), doc('certification', { issuer: 'ACE', issuedOn: '2024-01-01', expiresOn: '2027-01-01' }),
       doc('liability_insurance', { issuer: 'Jubilee', expiresOn: '2027-01-01', storageKey: null, status: 'pending' })],
-    now: NOW,
+    agreements: signed('trainer'), now: NOW,
   });
   assert.deepEqual(c.missing, ['professional.liability_cover']);
   assert.equal(c.readyToSubmit, false);
@@ -271,7 +278,7 @@ test('a vendor with just the TIN, representative ID and marketplace details can 
   const c = evaluateKyc('vendor', {
     case: { tin: '123456789' }, people: [rep], documents: [doc('representative_id')],
     vendorProfile: { contactNumber: '+255700000000', email: 'shop@example.com', businessCategory: 'Gear', deliveryRegions: ['Dar'], returnsPolicy: '7 days' },
-    settlementAccounts: [verifiedAccount], now: NOW,
+    settlementAccounts: [verifiedAccount], agreements: signed('vendor'), now: NOW,
   });
   assert.deepEqual(c.missing, []);
   assert.equal(c.readyToSubmit, true);
