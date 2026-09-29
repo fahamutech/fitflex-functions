@@ -9,6 +9,8 @@ import {
 } from '../shared/member-status.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
+import { CHECKIN_STATUS, CHECKIN_SOURCE } from '../shared/checkin-status.mjs';
+import { localDay } from '../shared/member-progress.mjs';
 
 export function createMemberManagementService({
   users,
@@ -493,15 +495,27 @@ export function createMemberManagementService({
     const { sub, owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
     if (member.accountStatus === 'suspended') return { error: 'member_suspended', status: 409 };
+    // Manual check-in is for the gym's own (direct) members. A FitFlex pass
+    // member checks in by QR, where the visit allowance, tier and same-day
+    // rules apply; recording them here as a direct visit would use up a pass
+    // visit the gym is never paid for (settlement Phase 2, PR 1).
+    if (!sub) return { error: 'direct_membership_required', status: 409 };
     // A1: direct memberships must not check in past their plan expiry.
-    if (sub && effectiveSubscriptionStatus(sub) === 'expired') {
+    const membershipStatus = effectiveSubscriptionStatus(sub);
+    if (membershipStatus === 'expired') {
       return { error: 'membership_expired', status: 409 };
     }
+    // A plan the gym has paused can't be checked in by hand either (the QR
+    // path already refuses it as inactive).
+    if (membershipStatus === 'suspended') {
+      return { error: 'member_suspended', status: 409 };
+    }
 
+    // One manual visit per member per East Africa Time day across the owner's gyms.
     const now = new Date();
-    const start = +startOfDayUtc(now);
+    const today = localDay(now);
     const existing = await checkins.findAsync(
-      (c) => c.memberId === memberId && gymIds.includes(c.gymId) && +new Date(c.timestamp) >= start,
+      (c) => c.memberId === memberId && gymIds.includes(c.gymId) && (c.businessDate || localDay(c.timestamp)) === today,
     );
     if (existing) return { ok: true, checkin: existing, idempotent: true };
 
@@ -511,12 +525,16 @@ export function createMemberManagementService({
       gymId: targetGymId,
       timestamp: now.toISOString(),
       method: 'gym_scanned',
-      subscriptionType: sub?.type || 'direct_sub',
-      passTier: sub?.tier || null,
+      subscriptionType: sub.type || 'direct_sub',
+      passTier: sub.tier || null,
       visitNumberInCycle: null,
       gymTier: gym.tier,
       creditsDeductedTzs: 0,
       visitConsumed: true,
+      status: CHECKIN_STATUS.VALID,
+      subscriptionId: sub.id ?? null,
+      businessDate: today,
+      source: CHECKIN_SOURCE.OWNER_MANUAL,
     };
     await checkins.insertAsync(row);
     return { ok: true, checkin: row };
