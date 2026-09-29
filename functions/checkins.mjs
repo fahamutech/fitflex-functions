@@ -1,7 +1,7 @@
 // QR check-in REST surface — member QR issuance + operator scan/verify/dashboard.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireGymAcl, requireAcl } from '../src/auth/jwt.mjs';
-import { operatorService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { operatorService, resolveRequestUser, checkinStatusService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -45,6 +45,19 @@ export const adminGymEntranceQr = {
   onRequest: async (req, res) => {
     const result = operatorService.gymEntranceQr({ gymId: req.params.gymId, isAdmin: true });
     res.status(result.status).json(result.body);
+  }
+};
+
+export const adminSetCheckinStatus = {
+  created, method: 'post', path: '/admin/checkins/:id/status',
+  description: 'Admin: dispute, flag, reinstate or void a check-in (DR-14). A reason is required; every change is audited and a void is final.',
+  requestSample: { status: 'voided', reason: 'Duplicate scan confirmed with the gym' },
+  onGuard: [requireAuth('admin'), requireAcl('payments')],
+  onRequest: async (req, res) => {
+    const { status, reason } = req.body || {};
+    const result = await checkinStatusService.setStatus({ checkinId: req.params.id, status, reason, actorId: req.user?.sub });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result.checkin);
   }
 };
 
