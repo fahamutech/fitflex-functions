@@ -324,6 +324,55 @@ if (!corpId) {
   });
 }
 
+// ── Communications ──────────────────────────────────────────────────────
+// The owner's Communication Center end to end (a draft is created, copied,
+// previewed and deleted — nothing is sent), the member's inbox and message
+// settings, and the tenant checks.
+current = 'communications';
+const cq = ownerGymId ? `?gymId=${encodeURIComponent(ownerGymId)}` : '';
+await check('owner: overview, audiences, templates, automations, history, results', async () => {
+  const o = must(await call('get', `/owner/communications/overview${cq}`, { token: O }), 'overview');
+  must(await call('get', '/owner/communications/segments', { token: O }), 'segments');
+  const a = must(await call('post', '/owner/communications/audience/preview', { token: O, body: { gymId: ownerGymId, preset: 'expiring', purpose: 'renewal' } }), 'audience');
+  must(await call('get', `/owner/communications/templates${cq}`, { token: O }), 'templates');
+  const autos = must(await call('get', `/owner/communications/automations${cq}`, { token: O }), 'automations');
+  must(await call('get', `/owner/communications/messages${cq}`, { token: O }), 'message log');
+  must(await call('get', `/owner/communications/analytics${cq}`, { token: O }), 'results');
+  return `${o.members} members, ${a.count} expiring, ${autos.automations.length} automations`;
+});
+await check('owner: draft → preview → duplicate → delete (nothing sent)', async () => {
+  const c = must(await call('post', '/owner/communications/campaigns', { token: O, body: {
+    gymId: ownerGymId, name: `Smoke ${Date.now()}`, purpose: 'announcement', audience: { preset: 'all' }, channels: ['in_app'],
+    content: { title: 'Smoke test', body: 'Hi {{member_name}}, this is a draft.' },
+  } }), 'create').campaign;
+  const p = must(await call('post', `/owner/communications/campaigns/${c.id}/preview`, { token: O }), 'preview');
+  const copy = must(await call('post', `/owner/communications/campaigns/${c.id}/duplicate`, { token: O }), 'duplicate').campaign;
+  must(await call('delete', `/owner/communications/campaigns/${copy.id}`, { token: O }), 'delete copy');
+  must(await call('delete', `/owner/communications/campaigns/${c.id}`, { token: O }), 'delete');
+  return `would reach ${p.counts.targeted}`;
+});
+await check('member: inbox and message settings', async () => {
+  const n = must(await call('get', '/me/notifications', { token: M }), 'inbox');
+  const p = must(await call('get', '/me/communication-preferences', { token: M }), 'preferences').preferences;
+  return `${n.unread} unread, WhatsApp offers ${p.whatsappMarketing ? 'on' : 'off'}`;
+});
+await check('members and trainers are refused the Communication Center', async () => {
+  for (const [who, t] of [['member', M], ['trainer', T]]) {
+    const r = await call('get', '/owner/communications/overview', { token: t, expect: [401, 403] });
+    if (!r.ok) throw new Error(`${who} got HTTP ${r.status}`);
+  }
+  const r = await call('get', '/admin/communications/overview', { token: O, expect: [401, 403] });
+  if (!r.ok) throw new Error(`owner got HTTP ${r.status} on the FitFlex centre`);
+  return 'refused';
+});
+await check('another gym\'s campaign looks like it does not exist', async () => {
+  const r = await call('get', '/owner/communications/campaigns/cmp_not_yours', { token: O, expect: [404] });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const g = await call('get', '/owner/communications/overview?gymId=gym_not_yours', { token: O, expect: [403] });
+  if (!g.ok) throw new Error(`gymId of another gym: HTTP ${g.status}`);
+  return 'not_found / not_your_gym';
+});
+
 // ── Report ──────────────────────────────────────────────────────────────
 let area = '';
 for (const r of results) {
