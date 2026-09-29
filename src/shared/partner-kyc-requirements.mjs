@@ -14,6 +14,7 @@
 // the gym owner approves (TrainerProfile.pendingGymIds → gymIds).
 // Corporate employees get no KYC of their own; only the company does.
 import { gymProfileGaps, gymRateCardGaps } from './gym-profile.mjs';
+import { requiredAgreements } from './partner-agreements.mjs';
 
 // Who completes an item: the partner (or an admin on their behalf), or a
 // FitFlex reviewer (site visits, vetting).
@@ -211,6 +212,15 @@ function gymItems(gym, checks) {
   ];
 }
 
+/** One item per in-app agreement: complete once its current version is accepted. */
+function agreementItems(partnerType, agreements) {
+  return requiredAgreements(partnerType).map(({ agreementType, checklistKey, text }) => ({
+    key: checklistKey, by: BY_PARTNER, agreementType, version: text.version,
+    status: (agreements || []).some(a => a.agreementType === agreementType && a.version === text.version && a.status === 'accepted')
+      ? 'complete' : 'missing',
+  }));
+}
+
 // ── Per partner type ────────────────────────────────────────────────────────
 
 function gymOwnerSections(s) {
@@ -228,6 +238,7 @@ function gymOwnerSections(s) {
       ? gymRows.filter(i => i.key.startsWith('operational.'))
       : [{ key: 'operational.gym_profile', by: BY_PARTNER, status: 'missing' }] },
     { key: 'settlement', items: [settlementItem(s.settlementAccounts)] },
+    { key: 'agreements', items: agreementItems('gym_owner', s.agreements) },
   ];
 }
 
@@ -240,6 +251,7 @@ function trainerSections(s) {
       documentItem('professional.liability_cover', s.documents, 'liability_insurance', s.now),
     ] },
     { key: 'settlement', items: [settlementItem(s.settlementAccounts)] },
+    { key: 'agreements', items: agreementItems('trainer', s.agreements) },
   ];
 }
 
@@ -262,6 +274,7 @@ function vendorSections(s) {
       fieldItem('marketplace.returns', profile.returnsPolicy),
       { ...settlementItem(s.settlementAccounts), key: 'marketplace.settlement' },
     ] },
+    { key: 'agreements', items: agreementItems('vendor', s.agreements) },
   ];
 }
 

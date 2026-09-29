@@ -30,6 +30,7 @@ import {
   DOCUMENTS_FOR, DOCUMENT_REQUIREMENTS, SETTLEMENT_REQUIRED, currentDocument,
 } from '../shared/partner-kyc-requirements.mjs';
 import { GYM_TIERS } from '../shared/constants.mjs';
+import { requiredAgreements, agreementText } from '../shared/partner-agreements.mjs';
 import { prepareDocumentFile, displayFileName, sha256 } from '../infra/document-file.mjs';
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -505,6 +506,57 @@ export function createPartnerKycService({
     return { check: await partnerChecks.findByIdAsync(id), gymTier: gym.tier, tierMatches: gym.tier === body.tier };
   }
 
+  // ── In-app agreements ─────────────────────────────────────────────────────
+
+  /** Partner: the agreements to accept, in their language, and whether each is accepted. */
+  async function agreements(partner, lang) {
+    const kycCase = await findCase(partner);
+    const rows = kycCase ? await partnerAgreements.filterByColumnAsync('caseId', kycCase.id) : [];
+    return {
+      agreements: requiredAgreements(partner.partnerType).map(({ agreementType, text }) => {
+        const accepted = rows.find(a => a.agreementType === agreementType && a.version === text.version && a.status === 'accepted');
+        return { agreementType, ...agreementText(text, lang), acceptedAt: accepted?.acceptedAt || null };
+      }),
+    };
+  }
+
+  /**
+   * Partner: accept the current version of an agreement. Accepting again is a
+   * no-op; accepting a new version supersedes the earlier one.
+   */
+  async function acceptAgreement(partner, body = {}, actor, meta = {}) {
+    const required = requiredAgreements(partner.partnerType).find(a => a.agreementType === body.agreementType);
+    if (!required) return fail('invalid_agreement', 400, { allowed: requiredAgreements(partner.partnerType).map(a => a.agreementType) });
+    const { version } = required.text;
+    if (body.version !== version) return fail('agreement_version_outdated', 409, { version });
+    const kycCase = await ensureCase(partner, actor);
+    const rows = await partnerAgreements.filterByColumnAsync('caseId', kycCase.id);
+    const same = rows.filter(a => a.agreementType === body.agreementType);
+    if (same.some(a => a.version === version && a.status === 'accepted')) return overview(partner);
+    const at = nowIso();
+    const existing = same.find(a => a.version === version); // revoked earlier: accept it again
+    const fields = {
+      status: 'accepted', acceptedBy: actor.id || null, acceptedAt: at, revokedAt: null,
+      acceptedIp: typeof meta.ip === 'string' ? meta.ip.slice(0, 64) : null,
+      acceptedUserAgent: typeof meta.userAgent === 'string' ? meta.userAgent.slice(0, 300) : null,
+      effectiveFrom: at, updatedAt: at,
+    };
+    if (existing) await partnerAgreements.updateByIdAsync(existing.id, fields);
+    else {
+      await partnerAgreements.insertAsync({
+        id: `pagr_${randomUUID().slice(0, 12)}`, caseId: kycCase.id, agreementType: body.agreementType, version,
+        ...fields, createdAt: at,
+      });
+    }
+    for (const a of same.filter(r => r.version !== version && r.status === 'accepted')) {
+      await partnerAgreements.updateByIdAsync(a.id, { status: 'superseded', updatedAt: at });
+    }
+    await record(kycCase, {
+      eventType: 'agreement_accepted', targetType: 'case', data: { agreementType: body.agreementType, version },
+    }, actor);
+    return overview(partner);
+  }
+
   /** Record a signed corporate contract (FitFlex keeps the signed copy). */
   async function recordCorporateContract({ corporateId, body = {}, actor }) {
     const partner = await resolvePartner('corporate', corporateId);
@@ -881,7 +933,7 @@ export function createPartnerKycService({
     updateBusiness, upsertPerson, upsertDocumentDetails,
     attachDocumentFile, readOwnDocumentFile, readDocumentFile,
     addSettlementAccount, removeSettlementAccount,
-    recordSiteVisit, recordCorporateContract,
+    recordSiteVisit, recordCorporateContract, agreements, acceptAgreement,
     submit, withdraw, claim, decide, reviewDocument, reviewSettlementAccount, sendExpiryReminders,
     listCases, caseDetail,
   };

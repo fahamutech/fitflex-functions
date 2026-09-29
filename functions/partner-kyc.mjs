@@ -129,6 +129,27 @@ export const myKycRemoveSettlementAccount = {
   onRequest: asPartner((partner, req) => svc.removeSettlementAccount(partner, req.params.id, partnerActor(req))),
 };
 
+/** Where an acceptance came from, kept with the agreement record. */
+const acceptanceMeta = req => {
+  const h = req.headers || {};
+  const forwarded = typeof h['x-forwarded-for'] === 'string' ? h['x-forwarded-for'].split(',')[0].trim() : '';
+  return { ip: forwarded || req.ip || req.socket?.remoteAddress || null, userAgent: h['user-agent'] || null };
+};
+
+export const myKycAgreements = {
+  created, method: 'get', path: '/me/kyc/agreements',
+  description: 'Partner: the agreements to accept before submitting (partner terms and verification consent), with their text. ?lang=en|sw',
+  onGuard: requireAuth(...PARTNER_ROLES),
+  onRequest: asPartner((partner, req) => svc.agreements(partner, req.query?.lang)),
+};
+
+export const myKycAcceptAgreement = {
+  created, method: 'post', path: '/me/kyc/agreements',
+  description: 'Partner: accept an agreement. Body { agreementType, version }; the version must be the current one (409 agreement_version_outdated otherwise).',
+  onGuard: requireAuth(...PARTNER_ROLES),
+  onRequest: asPartner((partner, req) => svc.acceptAgreement(partner, req.body || {}, partnerActor(req), acceptanceMeta(req))),
+};
+
 export const myKycSubmit = {
   created, method: 'post', path: '/me/kyc/submit',
   description: 'Partner: send my KYC for review. Refused with 409 kyc_incomplete and the missing items until the checklist is ready.',
