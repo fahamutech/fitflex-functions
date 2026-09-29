@@ -5,9 +5,13 @@
 // gyms' direct members only; the gym scope comes from the signed-in owner,
 // never from the request. FitFlex admins with the `communications` portal
 // scope work with all members.
+//
+// The guards check the token; every handler then checks the account as it
+// is now (communicationAccess — M11): still active, staff still hold the
+// scope, and only gyms that exist and are still theirs.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
-import { segmentService, campaignService, templateService, whatsappChannelService, communicationHistoryService, communicationAnalyticsService, automationService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { segmentService, campaignService, templateService, whatsappChannelService, communicationHistoryService, communicationAnalyticsService, automationService, communicationAccess } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -21,6 +25,15 @@ function send(res, result, okStatus = 200) {
   }
   res.status(okStatus).json(result);
 }
+
+// Who is sending, from the account as it is now; refused requests stop here.
+const gymSender = (req) => communicationAccess.gymSender(req);
+const platformSender = (req) => communicationAccess.platformSender(req);
+const withSender = (senderOf, handler) => async (req, res) => {
+  const sender = await senderOf(req);
+  if (sender.error) return send(res, sender);
+  await handler(sender, req, res);
+};
 
 const previewSample = {
   senderType: 'gym', gymIds: ['gym_1'], category: 'transactional', count: 84,
@@ -36,7 +49,7 @@ export const ownerCommunicationSegments = {
   created, method: 'get', path: '/owner/communications/segments',
   description: 'Owner/staff: preset audiences and filter fields for messaging their gym\'s direct members.',
   onGuard: ownerGuard,
-  onRequest: async (_req, res) => res.json(segmentService.catalog('gym')),
+  onRequest: withSender(gymSender, async (_s, _req, res) => res.json(segmentService.catalog('gym'))),
 };
 
 export const ownerAudiencePreview = {
@@ -45,21 +58,19 @@ export const ownerAudiencePreview = {
   requestSample: { preset: 'active', filter: { all: [{ field: 'daysUntilExpiry', op: 'lte', value: 7 }] }, purpose: 'renewal' },
   responseSample: previewSample,
   onGuard: ownerGuard,
-  onRequest: async (req, res) => {
-    const owner = await resolveRequestUser(req);
-    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+  onRequest: withSender(gymSender, async (s, req, res) => {
     const { gymId, preset, filter, purpose } = req.body || {};
     send(res, await segmentService.previewAudience({
-      sender: { senderType: 'gym', owner, gymId: gymId ?? null }, preset, filter, purpose,
+      sender: { senderType: 'gym', owner: s.owner, gymId: gymId ?? null }, preset, filter, purpose,
     }));
-  },
+  }),
 };
 
 export const adminCommunicationSegments = {
   created, method: 'get', path: '/admin/communications/segments',
   description: 'Admin: preset audiences and filter fields (including area) for FitFlex-wide messages. ?recipients=trainers returns the trainer audiences instead.',
   onGuard: adminGuard,
-  onRequest: async (req, res) => res.json(segmentService.catalog(req.query?.recipients === 'trainers' ? 'trainers' : 'platform')),
+  onRequest: withSender(platformSender, async (_s, req, res) => res.json(segmentService.catalog(req.query?.recipients === 'trainers' ? 'trainers' : 'platform'))),
 };
 
 export const adminAudiencePreview = {
@@ -67,10 +78,10 @@ export const adminAudiencePreview = {
   description: 'Admin: how many FitFlex members (or, with recipients: "trainers", trainers) match an audience, what each channel can reach, and a few names. POST { recipients?, preset?, filter?, purpose? }.',
   requestSample: { preset: 'pass_holders', filter: { all: [{ field: 'area', op: 'contains', value: 'Arusha' }] }, purpose: 'promotion' },
   onGuard: adminGuard,
-  onRequest: async (req, res) => {
+  onRequest: withSender(platformSender, async (_s, req, res) => {
     const { recipients, preset, filter, purpose } = req.body || {};
     send(res, await segmentService.previewAudience({ sender: { senderType: 'platform' }, recipients, preset, filter, purpose }));
-  },
+  }),
 };
 
 // ── Campaigns (M4) ──────────────────────────────────────────────────────────
@@ -78,22 +89,11 @@ export const adminAudiencePreview = {
 // FitFlex (admins → all members). Who is sending is always taken from the
 // signed-in user, never from the request body.
 
-async function gymSender(req, res) {
-  const owner = await resolveRequestUser(req);
-  if (!owner) { res.status(404).json({ error: 'user_not_found' }); return null; }
-  return { senderType: 'gym', owner, actorId: owner.id };
-}
-async function platformSender(req) {
-  return { senderType: 'platform', actorId: req.user?.sub || null };
-}
 
 function campaignRoutes(prefix, guard, senderOf, who) {
   const route = (method, path, description, handler, extra = {}) => ({
     created, method, path: `${prefix}${path}`, description: `${who}: ${description}`, onGuard: guard, ...extra,
-    onRequest: async (req, res) => {
-      const sender = await senderOf(req, res);
-      if (sender) await handler(sender, req, res);
-    },
+    onRequest: withSender(senderOf, handler),
   });
   const q = (req) => req.query || {};
   return {
@@ -166,10 +166,7 @@ export const adminCampaignSend = admin.send;
 function templateRoutes(prefix, guard, senderOf, who) {
   const route = (method, path, description, handler) => ({
     created, method, path: `${prefix}${path}`, description: `${who}: ${description}`, onGuard: guard,
-    onRequest: async (req, res) => {
-      const sender = await senderOf(req, res);
-      if (sender) await handler(sender, req, res);
-    },
+    onRequest: withSender(senderOf, handler),
   });
   const q = (req) => req.query || {};
   return {
@@ -216,7 +213,7 @@ export const adminTemplatePreview = adminTpl.preview;
 const waRoute = (method, path, description, handler, extra = {}) => ({
   created, method, path: `/admin/communications/whatsapp${path}`, description: `Admin: ${description}`,
   onGuard: adminGuard, ...extra,
-  onRequest: async (req, res) => handler(req.user?.sub || null, req, res),
+  onRequest: withSender(platformSender, (s, req, res) => handler(s.actorId, req, res)),
 });
 
 export const adminWhatsAppStatus = waRoute('get', '', 'WhatsApp status — provider (never its credentials), kill switch, webhook, opted-in members, template approvals, last 7 days of WhatsApp messages.',
@@ -252,10 +249,7 @@ const HISTORY_FILTERS = 'memberId&campaignId&channel&category&messageType&status
 function historyRoutes(prefix, guard, senderOf, who) {
   const route = (method, path, description, handler) => ({
     created, method, path: `${prefix}${path}`, description: `${who}: ${description}`, onGuard: guard,
-    onRequest: async (req, res) => {
-      const sender = await senderOf(req, res);
-      if (sender) await handler(sender, req, res);
-    },
+    onRequest: withSender(senderOf, handler),
   });
   return {
     messages: route('get', '/communications/messages', `the message log, newest first: one row per member per channel, with status, delivery and engagement times, failure or skip reason and provider reference. ?${HISTORY_FILTERS}`,
@@ -289,10 +283,7 @@ export const adminMemberCommunications = adminHistory.member;
 const autoRoute = (path, description, handler, extra = {}) => ({
   created, method: 'get', path: `/owner/communications/automations${path}`, description: `Owner/staff: ${description}`,
   onGuard: ownerGuard, ...extra,
-  onRequest: async (req, res) => {
-    const sender = await gymSender(req, res);
-    if (sender) await handler(sender, req, res);
-  },
+  onRequest: withSender(gymSender, handler),
 });
 
 export const ownerAutomationList = autoRoute('', 'the gym\'s automations (defaults created on first look, switched off), each with its trigger, template, channels, status and last-30-days numbers. ?gymId',
@@ -316,10 +307,7 @@ export const ownerAutomationPreview = autoRoute('/:id/preview', 'the automation\
 function analyticsRoutes(prefix, guard, senderOf, who) {
   const route = (path, description, handler) => ({
     created, method: 'get', path: `${prefix}${path}`, description: `${who}: ${description}`, onGuard: guard,
-    onRequest: async (req, res) => {
-      const sender = await senderOf(req, res);
-      if (sender) await handler(sender, req, res);
-    },
+    onRequest: withSender(senderOf, handler),
   });
   return {
     overview: route('/communications/analytics', 'results for the last ?days (default 30, max 365): members sent to, delivered, opened, tapped; renewed and paid; attributed revenue; and each campaign and automation that sent. ?days&gymId',

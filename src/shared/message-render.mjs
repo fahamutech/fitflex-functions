@@ -16,6 +16,23 @@ export function renderMessage(content, member, { gymName = '', renewalLink = '',
   };
 }
 
+export const WHATSAPP_PARAMETER_MAX = 1024;
+
+/**
+ * One value for a WhatsApp template variable. Providers refuse values with
+ * new lines, tabs or more than four spaces in a row, and a member's name or
+ * an offer typed by a sender could hold any of them — so they are folded to
+ * single spaces and the value is capped.
+ */
+export function whatsappParameter(value) {
+  return String(value ?? '')
+    .replace(/[\r\n\t\u2028\u2029]+/g, ' ')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/ {2,}/g, ' ')
+    .trim()
+    .slice(0, WHATSAPP_PARAMETER_MAX);
+}
+
 /**
  * A member's WhatsApp copy. WhatsApp only carries the provider-approved
  * wording, so this is the template's own text — in the member's language
@@ -31,6 +48,6 @@ export function whatsappMessage(content, member, { gymName = '', renewalLink = '
   const copy = renderMessage(text, member, { gymName, renewalLink, locale: wa.language });
   return {
     copy,
-    payload: { templateName: wa.templateName, language: wa.language, parameters: wa.variables.map(v => String(copy.values[v] ?? '')) },
+    payload: { templateName: wa.templateName, language: wa.language, parameters: wa.variables.map(v => whatsappParameter(copy.values[v])) },
   };
 }

@@ -273,6 +273,8 @@ test('the owner catalogue has gym presets and no FitFlex-only fields', async () 
 
 test('FitFlex admins see every member, and can target an area', async () => {
   const admin = { sub: uniq('usr_admin'), userType: 'admin' };
+  await db('User').insert({ id: admin.sub, userType: 'admin', displayName: 'FitFlex Admin', accountStatus: 'active', updatedAt: new Date() });
+  made.users.push(admin.sub);
   const byArea = await call(adminAudiencePreview, admin, { preset: 'all', filter: { all: [{ field: 'area', op: 'contains', value: w.area }] } });
   assert.equal(byArea.statusCode, 200, JSON.stringify(byArea.body));
   assert.equal(byArea.body.count, 7, "gym A's six direct members plus the pass holder who trains there");

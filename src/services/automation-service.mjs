@@ -37,6 +37,7 @@ import { systemTemplateId } from '../shared/communication-templates.mjs';
 import { renderMessage, whatsappMessage } from '../shared/message-render.mjs';
 import { addDays, localDay, MEMBER_UTC_OFFSET_MINUTES } from '../shared/member-progress.mjs';
 import { ownerGymIds } from '../shared/member-status.mjs';
+import { assertGymRecipients } from '../shared/communication-tenancy.mjs';
 
 /** The automations every gym starts with (all switched off). */
 export const DEFAULT_AUTOMATIONS = Object.freeze([
@@ -324,7 +325,10 @@ export function createAutomationService({
         status: reachable ? 'queued' : 'skipped', subscriptionId, context, createdAt: at,
       }).onConflict(['automationId', 'memberId', 'occurrenceKey']).ignore().returning('id');
       if (!inserted.length) return 'already';
-      if (rows.length) await trx('CommunicationMessage').insert(rows);
+      if (rows.length) {
+        await assertGymRecipients(trx, rows);
+        await trx('CommunicationMessage').insert(rows);
+      }
       await trx('CommunicationAutomation').where({ id: automation.id }).update({ lastRunAt: at });
       return 'fired';
     });
