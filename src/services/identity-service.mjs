@@ -2,6 +2,7 @@
 // mints masked public-facing IDs (FM/FT/FO + sequence). Used across nearly
 // every domain, so it is composed once and injected wherever needed.
 import { sameEmail } from '../shared/identifiers.mjs';
+import { identityFlag } from '../shared/feature-flags.mjs';
 
 export function createIdentityService({ users }) {
   /** Resolve the authenticated user from JWT claims — handles stale sub IDs via email/phone fallback. */
@@ -20,6 +21,11 @@ export function createIdentityService({ users }) {
     const id = typeof userOrId === 'string' ? userOrId : userOrId?.id;
     const user = typeof userOrId === 'object' ? userOrId : await users.findByIdAsync(id);
     const userType = role || user?.userType;
+    // Identity V2 · I1: the code frozen by the foundation migration can't
+    // renumber when earlier rows are deleted. Only for the row's own role.
+    if (identityFlag('V2_FOUNDATION') && user?.publicId && (!role || role === user.userType)) {
+      return user.publicId;
+    }
     const prefix = userType === 'trainer' ? 'FT' : userType === 'gym_operator' ? 'FO' : 'FM';
     const roleUsers = await users.filterByColumnAsync('userType', userType || 'member');
     roleUsers.sort((a, b) => String(a.createdAt || a.id).localeCompare(String(b.createdAt || b.id)));
