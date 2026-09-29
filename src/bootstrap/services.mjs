@@ -5,6 +5,7 @@ import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
 import { createSettlementConfigService } from '../services/settlement-config-service.mjs';
+import { createCheckinStatusService } from '../services/checkin-status-service.mjs';
 import { createMemberManagementService } from '../services/member-management-service.mjs';
 import { createIdentityService } from '../services/identity-service.mjs';
 import { createGymService } from '../services/gym-service.mjs';
@@ -128,6 +129,7 @@ export const accountService = createAccountService({
 export const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig });
 // Gym settlement configuration (settlement Phase 2): not used by any payout flow yet.
 export const settlementConfigService = createSettlementConfigService();
+export const checkinStatusService = createCheckinStatusService({ checkins, auditLog });
 // Lifecycle events for gym automations. automationService is defined further
 // down; these only run later, and never throw.
 const lifecycle = {

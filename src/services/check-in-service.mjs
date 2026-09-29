@@ -2,6 +2,8 @@
 // Pure DI: receives repos via constructor.
 
 import { validateCheckIn, pickSubscriptionForGym, subscriptionCoversGym, validateTrainerHomeEntry } from '../shared/check-in-rules.mjs';
+import { CHECKIN_STATUS, sourceForMethod } from '../shared/checkin-status.mjs';
+import { localDay } from '../shared/member-progress.mjs';
 import { randomUUID } from 'node:crypto';
 
 export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null }) {
@@ -106,7 +108,13 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         visitNumberInCycle: Number.isFinite(visitNumber) ? visitNumber : null,
         gymTier: gym.tier,
         creditsDeductedTzs: 0,                 // roaming wired separately
-        visitConsumed: !!result.visitConsumed
+        visitConsumed: !!result.visitConsumed,
+        // Settlement inputs: lifecycle, the member cycle (subscription) this
+        // visit was validated against, its EAT day, and how it was recorded.
+        status: CHECKIN_STATUS.VALID,
+        subscriptionId: homeTrainer ? null : (sub.id ?? null),
+        businessDate: localDay(now),
+        source: sourceForMethod(method)
       };
       await checkins.insertAsync(row);
       return { ok: true, checkin: row, visitNumberInCycle: row.visitNumberInCycle };
