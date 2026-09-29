@@ -185,6 +185,17 @@ describe('owner manual check-in', () => {
     assert.deepEqual(r, { error: 'direct_membership_required', status: 409 });
     assert.equal(checkins.rows.length, 1, 'no direct_sub row recorded for a pass member');
   });
+  test('a direct member whose plan the gym has paused is refused', async () => {
+    const { checkins } = setup();
+    const paused = { ...directSub, id: 'sub-paused', memberId: 'm-direct', status: 'suspended', startedAt: '2026-10-02T07:00:00Z' };
+    const svc2 = createMemberManagementService({
+      users: mkCol([{ id: 'm-direct', userType: 'member' }]),
+      gyms: mkCol([{ id: 'g1', name: 'Gym One', tier: 'standard' }]),
+      subscriptions: mkCol([paused]), checkins, paymentRequests: mkCol(), publicUserId: async () => 'FM001',
+    });
+    assert.deepEqual(await svc2.checkInMember({ owner, memberId: 'm-direct', gymId: 'g1' }), { error: 'member_suspended', status: 409 });
+    assert.equal(checkins.rows.length, 0);
+  });
   test('a direct member is checked in with the settlement fields', async () => {
     const { svc } = setup();
     const r = await svc.checkInMember({ owner, memberId: 'm-direct', gymId: 'g1' });

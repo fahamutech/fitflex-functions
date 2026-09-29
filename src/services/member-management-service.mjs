@@ -501,8 +501,14 @@ export function createMemberManagementService({
     // visit the gym is never paid for (settlement Phase 2, PR 1).
     if (!sub) return { error: 'direct_membership_required', status: 409 };
     // A1: direct memberships must not check in past their plan expiry.
-    if (effectiveSubscriptionStatus(sub) === 'expired') {
+    const membershipStatus = effectiveSubscriptionStatus(sub);
+    if (membershipStatus === 'expired') {
       return { error: 'membership_expired', status: 409 };
+    }
+    // A plan the gym has paused can't be checked in by hand either (the QR
+    // path already refuses it as inactive).
+    if (membershipStatus === 'suspended') {
+      return { error: 'member_suspended', status: 409 };
     }
 
     // One manual visit per member per East Africa Time day across the owner's gyms.
@@ -574,10 +580,8 @@ export function createMemberManagementService({
       await paymentRequests.insertAsync(payment);
     }
 
-    if (member.accountStatus === 'suspended') {
-      await users.updateByIdAsync(memberId, { accountStatus: 'active' });
-    }
-
+    // Renewing re-opens the membership at this gym only. A suspended FitFlex
+    // account is FitFlex's to lift, never the gym's.
     return { subscription: updatedSub, payment };
   }
 
@@ -586,8 +590,12 @@ export function createMemberManagementService({
     const member = await users.findByIdAsync(memberId);
     if (!member) return { error: 'member_not_found', status: 404 };
 
+    // Only the gym's own direct members, and only their membership here:
+    // a member who signs in themselves keeps control of their own details.
     const { sub, owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
+    if (!sub) return { error: 'direct_membership_required', status: 409 };
+    if (member.firebaseUid) return { error: 'member_manages_own_details', status: 409 };
 
     const { displayName, phone, tier } = body || {};
     if (!displayName?.trim()) return { error: 'displayName_required', status: 400 };
@@ -613,12 +621,13 @@ export function createMemberManagementService({
 
     const { sub, owns } = await membershipOwnership(memberId, gymIds);
     if (!owns) return { error: 'not_your_member', status: 403 };
+    // A gym can pause a member's plan at its own gym, never their whole
+    // FitFlex account (Terms of Use 17): Pass members aren't the gym's to suspend.
+    if (!sub) return { error: 'direct_membership_required', status: 409 };
 
-    const accountStatus = suspend ? 'suspended' : 'active';
-    await users.updateByIdAsync(memberId, { accountStatus });
-    if (sub) await subscriptions.updateByIdAsync(sub.id, { status: suspend ? 'suspended' : 'active' });
-
-    return { member: { id: memberId, accountStatus } };
+    await subscriptions.updateByIdAsync(sub.id, { status: suspend ? 'suspended' : 'active' });
+    const membershipStatus = suspend ? 'suspended' : effectiveSubscriptionStatus({ ...sub, status: 'active' });
+    return { member: { id: memberId, accountStatus: member.accountStatus || 'active', membershipStatus } };
   }
 
   return {

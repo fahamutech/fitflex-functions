@@ -1,3 +1,5 @@
+import { activationDates } from '../shared/subscription-status.mjs';
+
 // Payment-provider webhook handling — Selcom (idempotent on payment_id).
 export function createWebhookService({
   subscriptions, webhookSeen,
@@ -15,7 +17,8 @@ export function createWebhookService({
       if (!sub) return { error: 'subscription_not_found', status: 404 };
       await webhookSeen.insertAsync({ id: payment_id, at: new Date().toISOString() });
       if (sub.status !== 'payment_pending') return { ok: true, ignored: 'not_payment_pending' };
-      const updated = await subscriptions.updateByIdAsync(subscription_id, { status: 'active', paymentRef: payment_id });
+      // The plan's period starts now that it is paid for.
+      const updated = await subscriptions.updateByIdAsync(subscription_id, { status: 'active', paymentRef: payment_id, ...activationDates(sub) });
       try { await onSubscriptionActivated(updated || { ...sub, status: 'active' }); } catch { /* best-effort */ }
       return { ok: true };
     }

@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
 import { checkins, auditLog } from '../src/bootstrap/collections.mjs';
 import { createCheckinStatusService } from '../src/services/checkin-status-service.mjs';
-import migration from '../db/migrations/20261023090000-checkin-settlement-integrity.cjs';
+import migration from '../db/migrations/20261026090000-checkin-settlement-integrity.cjs';
 
 const uid = (p) => `${p}_${randomUUID().slice(0, 8)}`;
 const created = { users: [], gyms: [], checkins: [] };
