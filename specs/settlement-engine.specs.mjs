@@ -10,11 +10,11 @@ import {
 import { resolveGymRateSnapshot } from '../src/shared/settlement-config.mjs';
 import { localDay } from '../src/shared/member-progress.mjs';
 import {
-  RULES, RATE_CARDS, CEILINGS, PASS_FOR_GYM_TIER, PASS_TIER_VERSIONS,
+  RATE_CARDS, CEILINGS, PASS_FOR_GYM_TIER, PASS_TIER_VERSIONS,
   ceilingSnapshot, cycleFor, dailyVisits, CYCLE_END
 } from './fixtures/settlement-dar.mjs';
 
-const snap = gymId => resolveGymRateSnapshot({ rateCards: RATE_CARDS, rules: RULES, gymId, date: '2026-10-01' }).snapshot;
+const snap = gymId => resolveGymRateSnapshot({ rateCards: RATE_CARDS, gymId, date: '2026-10-01' }).snapshot;
 const gymOf = (r, gymId) => r.gyms.find(g => g.gymId === gymId);
 const visitOf = (r, checkinId) => r.visits.find(v => v.checkinId === checkinId);
 const sum = xs => xs.reduce((s, x) => s + x, 0);

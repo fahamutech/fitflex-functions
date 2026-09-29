@@ -91,6 +91,11 @@ const TABLE_MAP = {
   partner_checks:              { table: 'PartnerCheck' },
   partner_agreements:          { table: 'PartnerAgreement' },
   partner_kyc_events:          { table: 'PartnerKycEvent' },
+  // Settlement configuration (settlement Phase 2). Database-authoritative:
+  // never primed into the in-memory cache.
+  pass_tier_versions:          { table: 'PassTierVersion' },
+  settlement_rules:            { table: 'SettlementRule' },
+  gym_rate_cards:              { table: 'GymRateCard' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -139,6 +144,7 @@ const AUTO_UPDATED_AT = new Set([
   'whatsapp_templates', 'communication_preferences', 'communication_automations',
   'partner_kyc_cases', 'partner_people', 'partner_settlement_accounts', 'partner_documents',
   'partner_checks', 'partner_agreements',
+  'pass_tier_versions', 'settlement_rules', 'gym_rate_cards',
 ]);
 
 // Collections retained for legacy synchronous service call sites. New service
@@ -626,6 +632,9 @@ const ALLOWED_FIELDS = {
   partner_documents:           new Set(['id','caseId','round','requirementKey','docType','issuer','details','personId','settlementAccountId','gymId','storageProvider','storageKey','fileName','mimeType','sizeBytes','sha256','documentNumber','issuedOn','expiresOn','status','supersedesId','reviewNote','reviewedBy','reviewedAt','uploadedBy','createdAt','updatedAt']),
   partner_checks:              new Set(['id','caseId','round','checkType','targetType','targetId','method','provider','result','evidence','note','performedBy','performedAt','expiresAt','createdAt','updatedAt']),
   partner_agreements:          new Set(['id','caseId','agreementType','version','status','acceptedBy','acceptedAt','acceptedIp','acceptedUserAgent','signedDocumentId','effectiveFrom','expiresAt','revokedAt','createdAt','updatedAt']),
+  pass_tier_versions:          new Set(['id','tierKey','version','priceTzs','visitAllowance','status','effectiveFrom','effectiveTo','reason','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
+  settlement_rules:            new Set(['id','name','version','scopeType','scopeId','networkPayoutBps','dailyDiscountBps','weeklyDiscountBps','monthlyDiscountBps','dailyCeilingTzs','weeklyCeilingTzs','monthlyCeilingTzs','contractRef','status','effectiveFrom','effectiveTo','reason','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
+  gym_rate_cards:              new Set(['id','gymId','version','gymTier','retailDailyTzs','retailWeeklyTzs','retailMonthlyTzs','dailyDiscountBps','weeklyDiscountBps','monthlyDiscountBps','dailyCeilingTzs','weeklyCeilingTzs','monthlyCeilingTzs','ruleSources','status','effectiveFrom','effectiveTo','reason','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
   partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
 };
 
@@ -667,7 +676,14 @@ const JSON_FIELDS = {
   partner_documents: ['details'],
   partner_checks: ['evidence'],
   partner_kyc_events: ['data'],
+  gym_rate_cards: ['ruleSources'],
 };
+
+// Collections whose effectiveFrom / effectiveTo are EAT calendar days stored
+// as "YYYY-MM-DD" text (settlement configuration), not timestamps: they must
+// skip the DATE_FIELDS conversion below, which would turn them into instants.
+const CALENDAR_DATE_COLLECTIONS = new Set(['pass_tier_versions', 'settlement_rules', 'gym_rate_cards']);
+const CALENDAR_DATE_FIELDS = new Set(['effectiveFrom', 'effectiveTo']);
 
 /**
  * Prepare a plain object for a Knex insert/update by keeping only known
@@ -694,6 +710,7 @@ function prepareForKnex(name, data, isUpdate = false) {
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
     'lastMessageAt', 'trainerReadAt', 'memberReadAt'];
   for (const f of DATE_FIELDS) {
+    if (CALENDAR_DATE_COLLECTIONS.has(name) && CALENDAR_DATE_FIELDS.has(f)) continue;
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];
       cleaned[f] = typeof val === 'number' ? new Date(val) : new Date(val);

@@ -116,21 +116,35 @@ export function resolvePassTierVersion({ passTierVersions, tierKey, date }) {
 }
 
 /**
- * The immutable rate snapshot the engine needs for one gym, resolved as of
- * the cycle start. Returns { snapshot } or { error, missing } — never a
- * partial snapshot, so a gym is held rather than paid on a guess.
+ * The discounts and ceilings to copy onto a gym rate card when it is approved
+ * (DR-23): the rules in force on the card's effectiveFrom, for the card's gym
+ * tier and gym. Returns { values, sources, missing }; approve only when
+ * `missing` is empty. A later rule change never edits an approved card: it
+ * needs a new card version from the rule's effective date.
  */
-export function resolveGymRateSnapshot({ rateCards, rules, gymId, date }) {
+export function deriveRateCardRuleValues({ rules, effectiveFrom, gymTier, gymId }) {
+  assertDate(effectiveFrom, 'effectiveFrom');
+  return resolveReimbursementRule({ rules, date: effectiveFrom, gymTier, gymId });
+}
+
+/**
+ * The immutable rate snapshot the engine needs for one gym: the gym's card in
+ * force on the cycle start (DR-10), with the retail rates and the discounts
+ * and ceilings copied onto it when it was approved (DR-23). Returns
+ * { snapshot } or { error, missing } — never a partial snapshot, so a gym is
+ * held rather than paid on a guess.
+ */
+export function resolveGymRateSnapshot({ rateCards, gymId, date }) {
   const card = resolveRateCard({ rateCards, gymId, date });
   if (!card) return { error: 'no_rate_card', missing: [] };
-  const rule = resolveReimbursementRule({ rules, date, gymTier: card.gymTier, gymId });
-  if (rule.missing.length) return { error: 'rule_missing', missing: rule.missing };
+  const missing = REIMBURSEMENT_FIELDS.filter(f => card[f] == null);
+  if (missing.length) return { error: 'rate_card_incomplete', missing };
   return {
     snapshot: Object.freeze({
       gymId, gymTier: card.gymTier, rateCardId: card.id, rateCardVersion: card.version ?? null,
       retailDailyTzs: card.retailDailyTzs, retailWeeklyTzs: card.retailWeeklyTzs, retailMonthlyTzs: card.retailMonthlyTzs,
-      ...rule.values,
-      ruleSources: Object.freeze({ ...rule.sources })
+      ...Object.fromEntries(REIMBURSEMENT_FIELDS.map(f => [f, card[f]])),
+      ruleSources: card.ruleSources ? Object.freeze({ ...card.ruleSources }) : null
     })
   };
 }

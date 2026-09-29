@@ -8,7 +8,7 @@ import {
   legacyKycGraceActive
 } from '../src/shared/settlement-config.mjs';
 import { calculateMemberSettlement } from '../src/shared/settlement-engine.mjs';
-import { RULES, RATE_CARDS, PASS_TIER_VERSIONS, cycleFor, dailyVisits } from './fixtures/settlement-dar.mjs';
+import { RULES, RATE_CARDS, PASS_TIER_VERSIONS, cycleFor, dailyVisits, approveCard } from './fixtures/settlement-dar.mjs';
 
 const rule = (id, fields) => ({ id, version: 1, status: 'active', effectiveFrom: '2026-01-01', effectiveTo: null, ...fields });
 
@@ -70,8 +70,10 @@ describe('field-level rule precedence (DR-06, DR-07, DR-10)', () => {
   test('a missing field is reported, not defaulted', () => {
     const r = resolveReimbursementRule({ rules: [rules[0]], date: '2026-10-01', gymTier: 'standard', gymId: 'gym-A' });
     assert.deepEqual(r.missing, ['dailyCeilingTzs', 'weeklyCeilingTzs', 'monthlyCeilingTzs']);
-    const s = resolveGymRateSnapshot({ rateCards: RATE_CARDS, rules: [rules[0]], gymId: 'gym-A', date: '2026-10-01' });
-    assert.equal(s.error, 'rule_missing');
+    const { dailyCeilingTzs, ...incomplete } = RATE_CARDS[0];
+    const s = resolveGymRateSnapshot({ rateCards: [incomplete], gymId: 'gym-A', date: '2026-10-01' });
+    assert.equal(s.error, 'rate_card_incomplete');
+    assert.deepEqual(s.missing, ['dailyCeilingTzs']);
     assert.equal(s.snapshot, undefined);
   });
   test('two effective rules at the same scope are a configuration error', () => {
@@ -84,7 +86,7 @@ describe('K: historical rate cards and rules (DR-10, DR-23)', () => {
   const cards = [
     { id: 'rc-A-1', gymId: 'gym-A', version: 1, gymTier: 'standard', status: 'active', effectiveFrom: '2026-01-01', effectiveTo: '2026-10-15', retailDailyTzs: 5_000, retailWeeklyTzs: 15_000, retailMonthlyTzs: 50_000 },
     { id: 'rc-A-2', gymId: 'gym-A', version: 2, gymTier: 'standard', status: 'active', effectiveFrom: '2026-10-15', effectiveTo: null, retailDailyTzs: 4_000, retailWeeklyTzs: 12_000, retailMonthlyTzs: 40_000 }
-  ];
+  ].map(card => approveCard(card));
   test('a cycle starting before the rate change uses the old card; after, the new one', () => {
     assert.equal(resolveRateCard({ rateCards: cards, gymId: 'gym-A', date: '2026-10-01' }).id, 'rc-A-1');
     assert.equal(resolveRateCard({ rateCards: cards, gymId: 'gym-A', date: '2026-10-14' }).id, 'rc-A-1');
@@ -93,7 +95,7 @@ describe('K: historical rate cards and rules (DR-10, DR-23)', () => {
   });
   test('visits after the change still pay the rate in force at the cycle start', () => {
     const date = resolutionDateForCycle('2026-10-01T07:00:00.000Z');
-    const { snapshot } = resolveGymRateSnapshot({ rateCards: cards, rules: RULES, gymId: 'gym-A', date });
+    const { snapshot } = resolveGymRateSnapshot({ rateCards: cards, gymId: 'gym-A', date });
     // all 5 visits fall on 16–20 Oct, after rc-A-2 took effect
     const r = calculateMemberSettlement({ cycle: cycleFor('basic'), visits: dailyVisits('gym-A', 5, { firstDay: 16 }), gymRates: [snapshot] });
     assert.equal(r.gyms[0].rateCardSnapshot.rateCardId, 'rc-A-1');
@@ -101,7 +103,7 @@ describe('K: historical rate cards and rules (DR-10, DR-23)', () => {
   });
   test('changing today\'s configuration does not change an old snapshot\'s result', () => {
     const date = '2026-10-01';
-    const { snapshot } = resolveGymRateSnapshot({ rateCards: cards, rules: RULES, gymId: 'gym-A', date });
+    const { snapshot } = resolveGymRateSnapshot({ rateCards: cards, gymId: 'gym-A', date });
     const input = { cycle: cycleFor('basic'), visits: dailyVisits('gym-A', 8), gymRates: [snapshot] };
     const before = calculateMemberSettlement(input);
     // Later: the gym's card is edited and a new ceiling rule is approved.
@@ -114,12 +116,22 @@ describe('K: historical rate cards and rules (DR-10, DR-23)', () => {
     assert.equal(again.values.weeklyCeilingTzs, 12_000);
     assert.equal(before.gyms[0].preliminaryTzs, 24_000);
   });
+  test('approval copies the rules in force on the card\'s start date; a later rule needs a new card version', () => {
+    // Activating v2 closes v1 on the day v2 starts.
+    const closed = RULES.map(r => (r.id === 'rule-ceil-standard' ? { ...r, effectiveTo: '2026-11-01' } : r));
+    const laterRules = [...closed, { id: 'rule-ceil-standard-2', version: 2, scopeType: 'gym_tier', scopeId: 'standard', status: 'active', effectiveFrom: '2026-11-01', effectiveTo: null,
+      dailyCeilingTzs: 3_500, weeklyCeilingTzs: 5_000, monthlyCeilingTzs: 42_000 }];
+    const card = { id: 'rc-A-9', gymId: 'gym-A', version: 9, gymTier: 'standard', status: 'active', effectiveFrom: '2026-10-15', effectiveTo: null, retailDailyTzs: 5_000, retailWeeklyTzs: 15_000, retailMonthlyTzs: 50_000 };
+    assert.equal(approveCard(card, laterRules).weeklyCeilingTzs, 12_000);                                  // approved before the rule starts
+    assert.equal(approveCard({ ...card, effectiveFrom: '2026-11-01' }, laterRules).weeklyCeilingTzs, 5_000); // the re-derived version
+    assert.deepEqual(approveCard(card, laterRules).ruleSources.weeklyCeilingTzs, { ruleId: 'rule-ceil-standard', version: 1, scopeType: 'gym_tier', scopeId: 'standard' });
+  });
   test('two overlapping rate cards for one gym are a configuration error', () => {
     const clash = [...cards, { ...cards[1], id: 'rc-A-x' }];
     assert.throws(() => resolveRateCard({ rateCards: clash, gymId: 'gym-A', date: '2026-10-20' }), /overlapping/);
   });
   test('a gym without a card gives no snapshot', () => {
-    assert.equal(resolveGymRateSnapshot({ rateCards: cards, rules: RULES, gymId: 'gym-Q', date: '2026-10-20' }).error, 'no_rate_card');
+    assert.equal(resolveGymRateSnapshot({ rateCards: cards, gymId: 'gym-Q', date: '2026-10-20' }).error, 'no_rate_card');
   });
 });
 
