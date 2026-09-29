@@ -66,3 +66,6 @@ export const partnerDocuments = collection('partner_documents');
 export const partnerChecks = collection('partner_checks');
 export const partnerAgreements = collection('partner_agreements');
 export const partnerKycEvents = collection('partner_kyc_events');
+export const passTierVersions = collection('pass_tier_versions');
+export const settlementRules = collection('settlement_rules');
+export const gymRateCards = collection('gym_rate_cards');

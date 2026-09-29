@@ -1,3 +1,5 @@
+import { deriveRateCardRuleValues } from '../../src/shared/settlement-config.mjs';
+
 // Approved initial Dar es Salaam settlement configuration (decision register
 // DR-06, DR-07, DR-22), used by the settlement specs only. Not production
 // config: nothing reads this outside specs/ (bfast.json ignores specs/).
@@ -36,6 +38,13 @@ export const RULES = [
   }))
 ];
 
+/** A rate card as approval leaves it: the rules in force on its start date copied onto it (DR-23). */
+export function approveCard(card, rules = RULES) {
+  const { values, sources, missing } = deriveRateCardRuleValues({ rules, effectiveFrom: card.effectiveFrom, gymTier: card.gymTier, gymId: card.gymId });
+  if (missing.length) throw new Error(`rules missing for ${card.id}: ${missing.join(', ')}`);
+  return { ...card, ...values, ruleSources: sources };
+}
+
 // Illustrative gyms (retail rates are examples, not real gyms).
 export const RATE_CARDS = [
   { id: 'rc-A-1', gymId: 'gym-A', version: 1, gymTier: 'standard',         status: 'active', effectiveFrom: EFFECTIVE_FROM, effectiveTo: null, retailDailyTzs: 5_000,  retailWeeklyTzs: 15_000,  retailMonthlyTzs: 50_000 },
@@ -43,7 +52,7 @@ export const RATE_CARDS = [
   { id: 'rc-C-1', gymId: 'gym-C', version: 1, gymTier: 'midtier',          status: 'active', effectiveFrom: EFFECTIVE_FROM, effectiveTo: null, retailDailyTzs: 10_000, retailWeeklyTzs: 35_000,  retailMonthlyTzs: 120_000 },
   { id: 'rc-D-1', gymId: 'gym-D', version: 1, gymTier: 'premium',          status: 'active', effectiveFrom: EFFECTIVE_FROM, effectiveTo: null, retailDailyTzs: 20_000, retailWeeklyTzs: 70_000,  retailMonthlyTzs: 250_000 },
   { id: 'rc-E-1', gymId: 'gym-E', version: 1, gymTier: 'luxury_executive', status: 'active', effectiveFrom: EFFECTIVE_FROM, effectiveTo: null, retailDailyTzs: 30_000, retailWeeklyTzs: 100_000, retailMonthlyTzs: 350_000 }
-];
+].map(card => approveCard(card));
 
 /** A rate snapshot whose retail rates sit above every ceiling of the tier, so wholesale = the tier ceilings. */
 export function ceilingSnapshot(gymId, gymTier) {
