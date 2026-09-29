@@ -234,8 +234,9 @@ export function createNotificationService({
     return notify(sub.memberId, {
       id: `ntf_renew_${sub.id}_${day}_${daysLeft}`,
       type: 'subscription_renewal',
-      title: `Your ${tier} pass renews ${when}`,
-      body: 'Keep your plan, change tier or cancel from the Passes screen.',
+      // Passes are prepaid and never charged automatically (Member Terms 3.4).
+      title: `Your ${tier} pass ends ${when}`,
+      body: 'To keep training, renew it from the Passes screen. You can also choose a different tier.',
       data: { subscriptionId: sub.id, daysLeft },
     });
   }

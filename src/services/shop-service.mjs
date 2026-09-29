@@ -25,7 +25,7 @@ const bool = value => value === true || value === 'true' || value === '1' ? true
 const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0) ? Number(product.discountPriceTzs) : Number(product.priceTzs || 0);
 const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
 
-export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate = OPEN_GATE, partnerKycCases = null }) {
+export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -242,8 +242,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (deliveryMethod === 'home_delivery' && !body?.deliveryAddress) return { error: 'delivery_address_required', status: 400 };
     const paymentMethod = body?.paymentMethod || 'mpesa';
     if (!PAYMENT_METHODS.has(paymentMethod)) return { error: 'invalid_payment_method', status: 400 };
+    // The app's own payment result is never trusted: an order is paid only
+    // once FitFlex confirms the payment (admin approval of its payment request).
     if (body?.paymentOutcome === 'failed') return { error: 'payment_failed', status: 402 };
-    if (body?.paymentOutcome !== 'success') return { error: 'payment_confirmation_required', status: 402 };
     const resolved = [];
     for (const item of items) {
       const qty = Number(item.qty || 0);
@@ -258,10 +259,53 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const orderItems = resolved.map(({ product, qty }) => ({ productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs: priceOf(product), image: product.images?.[0] || null }));
     const totalTzs = orderItems.reduce((sum, item) => sum + item.priceTzs * item.qty, 0);
     const at = nowIso();
-    const order = await shopOrders.insertAsync({ id: makeId('ord'), buyerId, buyerRole, items: orderItems, totalTzs, status: 'pending', deliveryMethod, pickupGymId: deliveryMethod === 'gym_pickup' ? body.pickupGymId : null, deliveryAddress: deliveryMethod === 'home_delivery' ? body.deliveryAddress : null, paymentMethod, paymentStatus: 'paid', paymentReference: body.paymentReference || makeId('pay'), timeline: [{ status: 'pending', at }], note: body?.note || null, settlementStatus: 'pending', createdAt: at, updatedAt: at });
-    for (const vendorId of new Set(orderItems.map(item => item.vendorId))) await notify(vendorId, 'new_order', { orderId: order.id });
-    await notify(buyerId, 'payment_received', { orderId: order.id, totalTzs });
-    return { order, status: 201 };
+    const free = totalTzs === 0 || !paymentRequests;
+    const order = await shopOrders.insertAsync({ id: makeId('ord'), buyerId, buyerRole, items: orderItems, totalTzs, status: 'pending', deliveryMethod, pickupGymId: deliveryMethod === 'gym_pickup' ? body.pickupGymId : null, deliveryAddress: deliveryMethod === 'home_delivery' ? body.deliveryAddress : null, paymentMethod, paymentStatus: free ? 'paid' : 'pending', paymentReference: body.paymentReference || null, timeline: [{ status: 'pending', at }], note: body?.note || null, settlementStatus: 'pending', createdAt: at, updatedAt: at });
+    if (free) {
+      await orderPaid(order);
+      return { order, status: 201 };
+    }
+    // Stock stays reserved while the payment is confirmed.
+    const paymentRequest = await paymentRequests.insertAsync({
+      id: makeId('pay'), memberId: buyerId, orderId: order.id, amountTzs: totalTzs, currency: 'TZS',
+      status: 'pending', provider: 'admin_approved', reference: body.paymentReference || null,
+      requestedAt: at, decidedAt: null, decidedBy: null, note: null,
+    });
+    return { order, paymentRequest, status: 202 };
+  }
+
+  async function orderPaid(order) {
+    for (const vendorId of new Set((order.items || []).map(item => item.vendorId))) await notify(vendorId, 'new_order', { orderId: order.id });
+    await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
+  }
+
+  async function restock(order) {
+    for (const item of order.items || []) {
+      const product = await products.findByIdAsync(item.productId);
+      if (product) await products.updateByIdAsync(product.id, { stock: Number(product.stock) + Number(item.qty || 0), updatedAt: nowIso() });
+    }
+  }
+
+  /**
+   * An order's payment was decided (admin approval of its payment request).
+   * Approved: the order is paid and the vendors hear about it. Rejected or
+   * cancelled: the order is cancelled and its stock released.
+   */
+  async function applyPaymentToOrder(orderId, status) {
+    const order = await shopOrders.findByIdAsync(orderId);
+    if (!order || order.paymentStatus === 'paid') return;
+    const at = nowIso();
+    if (status === 'approved') {
+      if (order.status === 'cancelled') return; // cancelled while waiting: FitFlex refunds it
+      const updated = await shopOrders.updateByIdAsync(orderId, { paymentStatus: 'paid', updatedAt: at });
+      await orderPaid(updated || order);
+      return;
+    }
+    if (!['rejected', 'cancelled'].includes(status) || order.status === 'cancelled') return;
+    await restock(order);
+    const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at }];
+    await shopOrders.updateByIdAsync(orderId, { status: 'cancelled', paymentStatus: 'failed', timeline, updatedAt: at });
+    await notify(order.buyerId, 'order_cancelled', { orderId, reason: 'payment_not_confirmed' });
   }
   async function myOrders(buyerId) {
     return (await shopOrders.filterAsync(order => order.buyerId === buyerId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
@@ -281,15 +325,22 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const ids = new Set((await products.filterAsync(product => product.vendorId === actorId)).map(product => product.id));
       if (!direct && !(order.items || []).some(item => ids.has(item.productId))) return { error: 'order_not_owned_by_vendor', status: 403 };
     }
-    if (status === 'cancelled' && order.status !== 'cancelled') for (const item of order.items || []) {
-      const product = await products.findByIdAsync(item.productId);
-      if (product) await products.updateByIdAsync(product.id, { stock: Number(product.stock) + Number(item.qty || 0), updatedAt: nowIso() });
+    // Vendors fulfil paid orders only; an unpaid order can only be cancelled.
+    if (order.paymentStatus && order.paymentStatus !== 'paid' && status !== 'cancelled') return { error: 'order_not_paid', status: 409 };
+    if (status === 'cancelled' && order.status !== 'cancelled') {
+      await restock(order);
+      if (order.paymentStatus === 'pending' && paymentRequests) {
+        for (const r of await paymentRequests.filterAsync(p => p.orderId === orderId && p.status === 'pending')) {
+          await paymentRequests.updateByIdAsync(r.id, { status: 'cancelled', decidedAt: nowIso(), decidedBy: actorId });
+        }
+      }
     }
     const at = nowIso();
     const timeline = Array.isArray(order.timeline) ? order.timeline : [];
     timeline.push({ status, at });
     const normalized = status === 'fulfilled' ? 'delivered' : status;
-    const updated = await shopOrders.updateByIdAsync(orderId, { status: normalized, timeline, updatedAt: at });
+    const paymentPatch = normalized === 'cancelled' && order.paymentStatus === 'pending' ? { paymentStatus: 'cancelled' } : {};
+    const updated = await shopOrders.updateByIdAsync(orderId, { status: normalized, timeline, ...paymentPatch, updatedAt: at });
     await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: `shop_order_${normalized}`, target: orderId, before: { status: order.status }, after: { status: normalized } });
     await notify(order.buyerId, `order_${normalized}`, { orderId });
     return { order: updated };
@@ -395,5 +446,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
+  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
 }
