@@ -18,6 +18,7 @@
 
 import { SUBSCRIPTION_GRACE_HOURS } from './constants.mjs';
 import { localDay } from './member-progress.mjs';
+import { CHECKIN_STATUS } from './checkin-status.mjs';
 
 export const SETTLEMENT_ENGINE_VERSION = 'settlement-engine/1';
 
@@ -25,13 +26,8 @@ export const SETTLEMENT_ENGINE_VERSION = 'settlement-engine/1';
 // Values are the Checkin.subscriptionType strings the check-in service writes.
 export const SETTLEABLE_SUBSCRIPTION_TYPES = Object.freeze(['platform_pass']);
 
-// DR-14: the check-in lifecycle the settlement phase will add to Checkin.
-export const CHECKIN_STATUS = Object.freeze({
-  VALID:    'valid',
-  FLAGGED:  'flagged',
-  DISPUTED: 'disputed',
-  VOIDED:   'voided'
-});
+// DR-14: the check-in lifecycle, as stored on Checkin (one definition).
+export { CHECKIN_STATUS };
 
 /** What happens to a visit in this calculation. */
 export const VISIT_OUTCOME = Object.freeze({
