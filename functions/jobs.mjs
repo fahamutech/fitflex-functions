@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -53,5 +53,14 @@ export const kycExpiryReminders = {
   onJob: async () => {
     const r = await partnerKycService.sendExpiryReminders();
     if (r.sent) console.log(`[kyc-expiry] cases=${r.cases} sent=${r.sent} already=${r.already}`);
+  }
+};
+
+export const b2bProgramExpiry = {
+  created, rule: '5 21 * * *', // every day 21:05 UTC = 00:05 EAT, the first minute of a new EAT day
+  description: 'B2B: mark active or paused wellness programmes whose end date has passed as expired. Idempotent.',
+  onJob: async () => {
+    const r = await b2bProgramService.expireDue();
+    if (r.expired) console.log(`[b2b-programs] expired=${r.expired}`);
   }
 };

@@ -7,7 +7,7 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -194,5 +194,131 @@ export const deactivateB2BBeneficiary = {
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.deactivateBeneficiary({
     access, beneficiaryId: req.params.beneficiaryId, actorId: req.user.sub,
+  })),
+};
+
+// ── Wellness programmes and benefits (Phase 2) ─────────────────────────────
+// Rules only: no usage is counted and no money moves through these routes.
+
+const programs = b2bProgramService;
+
+export const b2bProgramReference = {
+  created, method: 'get', path: '/b2b/programs/reference',
+  description: 'Public: programme types and lifecycle, benefit types (and the FitFlex service that fulfils each), funding types, usage periods and eligibility scopes.',
+  onRequest: (_req, res) => res.json(programs.reference()),
+};
+
+export const adminListB2BPrograms = {
+  created, method: 'get', path: '/admin/b2b/programs',
+  description: 'Admin: wellness programmes across organisations. Query: ?organizationId=&status=&limit=&cursor=.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await programs.adminListPrograms({ query: req.query || {} })),
+};
+
+export const myB2BBenefits = {
+  created, method: 'get', path: '/b2b/me/benefits',
+  description: 'The caller\'s B2B wellness benefits today, across every organisation that sponsors them (read-only; remaining allowance comes with usage tracking).',
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => send(res, await programs.myBenefits({ userId: req.user.sub })),
+};
+
+export const listB2BPrograms = {
+  created, method: 'get', path: '/b2b/organizations/:id/programs',
+  description: 'Programmes of an organisation (programs.read). Query: ?status=&limit=&cursor=.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.listPrograms({ access, query: req.query || {} })),
+};
+
+export const createB2BProgram = {
+  created, method: 'post', path: '/b2b/organizations/:id/programs',
+  description: 'Create a draft programme (programs.manage). Eligibility: { scope: all | groups | selected, groups, beneficiaryIds, beneficiaryTypes, enrolledOnOrBefore }.',
+  requestSample: {
+    name: 'ABC Employee Wellness 2027', programType: 'employee_wellness', startDate: '2027-01-01', endDate: '2027-12-31',
+    eligibility: { scope: 'groups', groups: ['Finance', 'Operations'] }, budgetTzs: 50000000,
+  },
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.createProgram({ access, body: req.body || {}, actorId: req.user.sub }), 201),
+};
+
+export const getB2BProgram = {
+  created, method: 'get', path: '/b2b/organizations/:id/programs/:programId',
+  description: 'A programme with its benefits (programs.read).',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.getProgram({ access, programId: req.params.programId })),
+};
+
+export const updateB2BProgram = {
+  created, method: 'put', path: '/b2b/organizations/:id/programs/:programId',
+  description: 'Edit a programme (programs.manage). Draft and pending: any field. Active or paused: name, description, a later end date or a larger budget.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.updateProgram({
+    access, programId: req.params.programId, body: req.body || {}, actorId: req.user.sub,
+  })),
+};
+
+export const setB2BProgramStatus = {
+  created, method: 'post', path: '/b2b/organizations/:id/programs/:programId/status',
+  description: 'Programme lifecycle (programs.manage): pending (submit), draft (withdraw), active (FitFlex activates a pending programme; the organisation may resume a paused one), paused, cancelled.',
+  requestSample: { status: 'pending' },
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.setProgramStatus({
+    access, programId: req.params.programId, status: req.body?.status, reason: req.body?.reason, actorId: req.user.sub,
+  })),
+};
+
+export const listB2BProgramEligibility = {
+  created, method: 'get', path: '/b2b/organizations/:id/programs/:programId/eligibility',
+  description: 'Beneficiaries the programme (or ?benefitId=) reaches (programs.read + beneficiaries.read). ?include=all also lists the rest with the reason.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.listEligibleBeneficiaries({
+    access, programId: req.params.programId, query: req.query || {},
+  })),
+};
+
+export const listB2BBenefits = {
+  created, method: 'get', path: '/b2b/organizations/:id/programs/:programId/benefits',
+  description: 'Benefits of a programme (programs.read).',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.listBenefits({ access, programId: req.params.programId })),
+};
+
+export const createB2BBenefit = {
+  created, method: 'post', path: '/b2b/organizations/:id/programs/:programId/benefits',
+  description: 'Add a draft benefit (programs.manage).',
+  requestSample: {
+    name: '8 gym visits a month', benefitType: 'gym_access', fundingType: 'sponsor_percentage', sponsorShareBps: 6000,
+    usageLimit: 8, usagePeriod: 'month', providerRules: { scope: 'selected', gymTiers: ['standard', 'midtier'] },
+  },
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.createBenefit({
+    access, programId: req.params.programId, body: req.body || {}, actorId: req.user.sub,
+  }), 201),
+};
+
+export const getB2BBenefit = {
+  created, method: 'get', path: '/b2b/organizations/:id/programs/:programId/benefits/:benefitId',
+  description: 'One benefit with today\'s usage window (programs.read).',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.getBenefit({
+    access, programId: req.params.programId, benefitId: req.params.benefitId,
+  })),
+};
+
+export const updateB2BBenefit = {
+  created, method: 'put', path: '/b2b/organizations/:id/programs/:programId/benefits/:benefitId',
+  description: 'Edit a benefit (programs.manage). While it is active in a live programme only name, description and terms change.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.updateBenefit({
+    access, programId: req.params.programId, benefitId: req.params.benefitId, body: req.body || {}, actorId: req.user.sub,
+  })),
+};
+
+export const setB2BBenefitStatus = {
+  created, method: 'post', path: '/b2b/organizations/:id/programs/:programId/benefits/:benefitId/status',
+  description: 'Activate or deactivate a benefit (programs.manage).',
+  requestSample: { status: 'active' },
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => programs.setBenefitStatus({
+    access, programId: req.params.programId, benefitId: req.params.benefitId, status: req.body?.status, actorId: req.user.sub,
   })),
 };
