@@ -1,6 +1,7 @@
 // Auth REST surface — thin controllers delegating to authService.
 import '../src/bootstrap/init.mjs';
 import { authService } from '../src/bootstrap/services.mjs';
+import { requireAuth } from '../src/auth/jwt.mjs';
 
 const created = new Date().toISOString();
 
@@ -65,7 +66,8 @@ export const authFirebaseSession = {
   responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'member' } },
   onRequest: async (req, res) => {
     const { idToken, requestedRole } = req.body || {};
-    const result = await authService.firebaseSession({ idToken, requestedRole });
+    const client = req.headers?.['x-fitflex-client'] || null;
+    const result = await authService.firebaseSession({ idToken, requestedRole, client });
     if (result.error) {
       const body = { error: result.error };
       if (result.existingRole) { body.existingRole = result.existingRole; body.requestedRole = result.requestedRole; }
@@ -75,6 +77,32 @@ export const authFirebaseSession = {
     }
     res.json(result);
   }
+};
+
+// ───────────────────────────── Identity V2 · I2: personas ─────────────────────────────────
+// Both answer 404 unless IDENTITY_V2 and V2_PERSONAS are on.
+
+function sendResult(res, result) {
+  if (result.error) {
+    const { error, status, approvalNote } = result;
+    return res.status(status).json({ error, ...(approvalNote !== undefined ? { approvalNote } : {}) });
+  }
+  res.json(result);
+}
+
+export const myPersonas = {
+  created, method: 'get', path: '/me/personas',
+  description: 'Identity V2: the caller\'s Person and personas (User rows).',
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => sendResult(res, await authService.myPersonas({ claims: req.user })),
+};
+
+export const authSwitchPersona = {
+  created, method: 'post', path: '/auth/switch-persona',
+  description: 'Identity V2: mint a session for another persona of the same Person.',
+  requestSample: { personaId: 'usr_x' },
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => sendResult(res, await authService.switchPersona({ claims: req.user, personaId: req.body?.personaId })),
 };
 
 // ───────────────────────────── Dev-only test data cleanup (blackbox testing) ──────────────

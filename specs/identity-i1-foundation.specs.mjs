@@ -15,6 +15,11 @@ import { normalizePhone } from '../src/shared/identifiers.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 import { toSessionUser } from '../src/shared/session-user.mjs';
 import foundation from '../db/migrations/20261030090000-identity-foundation.cjs';
+import linking from '../db/migrations/20261101090000-identity-linking.cjs';
+
+// Later identity migrations depend on Person, so a rollback runs newest first.
+// Add each new identity migration here.
+const LATER_IDENTITY_MIGRATIONS = [linking];
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
 const now = () => new Date().toISOString();
@@ -249,12 +254,14 @@ test('rolling the migration back and forward keeps every User and its history', 
   const { member, subId, checkinId } = await memberWithHistory();
   const idsBefore = (await db('User').orderBy('id').select('id')).map(r => r.id);
 
+  for (const m of [...LATER_IDENTITY_MIGRATIONS].reverse()) await m.down(db);
   await foundation.down(db);
   assert.equal(await db.schema.hasTable('Person'), false);
   assert.equal(await db.schema.hasColumn('User', 'personId'), false);
   assert.deepEqual((await db('User').orderBy('id').select('id')).map(r => r.id), idsBefore, 'down keeps User rows');
 
   await foundation.up(db);
+  for (const m of LATER_IDENTITY_MIGRATIONS) await m.up(db);
   const idsAfter = await db('User').orderBy('id').select('id', 'personId');
   assert.deepEqual(idsAfter.map(r => r.id), idsBefore, 'User ids unchanged');
   assert.equal(idsAfter.filter(r => !r.personId).length, 0, 'every User maps to a Person again');
