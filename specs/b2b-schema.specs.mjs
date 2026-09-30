@@ -23,8 +23,8 @@ async function inRollback(fn) {
 }
 
 /** Expect a Postgres error inside a savepoint, so the outer transaction survives. */
-async function rejects(trx, fn, code) {
-  await assert.rejects(trx.transaction(fn), err => err.code === code, `expected Postgres error ${code}`);
+async function rejects(trx, fn, ...codes) {
+  await assert.rejects(trx.transaction(fn), err => codes.includes(err.code), `expected Postgres error ${codes.join(' or ')}`);
 }
 
 const org = (extra = {}) => ({ id: uid('b2bo'), organizationType: 'insurer', legalName: 'Schema Insurer', ...extra });
@@ -50,7 +50,7 @@ test('organisation status, type shape, name and the employer-only corporate link
   // A future type needs no DDL.
   await trx('B2BOrganization').insert(org({ organizationType: 'cooperative_society' }));
   // A mapped company can't be deleted out from under its organisation.
-  await rejects(trx, t => t('CorporateAccount').where({ id: c.id }).del(), '23001');   // restrict_violation
+  await rejects(trx, t => t('CorporateAccount').where({ id: c.id }).del(), '23001', '23503');   // restrict_violation (PG 17+) or foreign_key_violation
 }));
 
 test('registration and tax numbers are unique across organisations', () => inRollback(async (trx) => {
