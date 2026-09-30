@@ -45,6 +45,7 @@ import { createAnalyticsService } from '../services/analytics-service.mjs';
 import { createNotificationService } from '../services/notification-service.mjs';
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
+import { createB2BService } from '../services/b2b-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -68,6 +69,7 @@ import {
   marketplaceEnquiries, marketplaceNotifications, productReviews,
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
+  b2bOrganizations, b2bOrganizationUsers, b2bBeneficiaries,
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
   follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
@@ -126,6 +128,15 @@ export const shopService = createShopService({
 export const whatsAppNotifier = createWhatsAppNotifier();
 export const corporateService = createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
+  // Every new company gets its employer B2B organisation. b2bService is defined
+  // below; the hook only runs later, at onboarding.
+  onAccountCreated: (account, actorId) => b2bService.ensureOrganizationForCorporate({ corporateId: account.id, actorId }),
+});
+// B2B Foundation V1: generalised organisations next to Corporate (which it reads through).
+export const b2bService = createB2BService({
+  users, corporateAccounts, corporateEmployees, partnerKycCases,
+  organizations: b2bOrganizations, organizationUsers: b2bOrganizationUsers, beneficiaries: b2bBeneficiaries,
+  auditLog,
 });
 
 export const identityLinkService = createIdentityLinkService({ db });

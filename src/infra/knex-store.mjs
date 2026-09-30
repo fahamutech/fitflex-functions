@@ -76,6 +76,9 @@ const TABLE_MAP = {
   corporate_accounts:  { table: 'CorporateAccount' },
   corporate_employees: { table: 'CorporateEmployee' },
   corporate_bills:     { table: 'CorporateBill' },
+  b2b_organizations:      { table: 'B2BOrganization' },
+  b2b_organization_users: { table: 'B2BOrganizationUser' },
+  b2b_beneficiaries:      { table: 'B2BBeneficiary' },
   communication_campaigns:   { table: 'CommunicationCampaign' },
   communication_messages:    { table: 'CommunicationMessage' },
   communication_templates:   { table: 'CommunicationTemplate' },
@@ -628,6 +631,9 @@ const ALLOWED_FIELDS = {
   corporate_accounts:  new Set(['id','companyName','industrySector','workforceBracket','hrContactName','hrContactPhone','hrContactEmail','objectives','domainWhitelist','subsidyModel','passTier','billingCycle','seatLimit','seatsUsed','baselineSickDays','lipaNamba','billingContactName','billingContactPhone','billingContactEmail','status','createdAt','updatedAt']),
   corporate_employees: new Set(['id','corporateId','userId','displayName','phone','email','department','pinHash','status','activatedAt','createdAt','updatedAt']),
   corporate_bills:     new Set(['id','corporateId','period','passTier','subsidyModel','billingCycle','seatCount','perSeatMonthlyTzs','grossTzs','employerTzs','employeeTzs','status','paymentReference','paidAt','createdAt']),
+  b2b_organizations:      new Set(['id','organizationType','legalName','tradingName','industrySector','registrationNumber','taxIdentificationNumber','email','phone','address','status','statusReason','statusChangedAt','legacyCorporateId','createdBy','createdAt','updatedAt']),
+  b2b_organization_users: new Set(['id','organizationId','userId','role','permissions','status','removedAt','createdBy','createdAt','updatedAt']),
+  b2b_beneficiaries:      new Set(['id','organizationId','userId','externalReference','beneficiaryType','groupName','status','enrolledAt','statusChangedAt','createdBy','createdAt','updatedAt']),
   communication_campaigns:   new Set(['id','senderType','gymId','name','purpose','category','status','audience','content','channels','templateId','scheduledAt','sendRequestId','counts','createdBy','sentAt','cancelledAt','createdAt','updatedAt']),
   communication_messages:    new Set(['id','campaignId','automationRunId','senderType','gymId','memberId','channel','category','messageType','title','body','locale','deepLink','notificationId','status','skipReason','providerMessageId','payload','attempts','nextAttemptAt','sentAt','deliveredAt','openedAt','clickedAt','failedAt','failureReason','failurePermanent','createdAt','updatedAt']),
   communication_templates:   new Set(['id','gymId','key','name','category','purpose','channels','bodies','variables','whatsappTemplateId','status','createdBy','createdAt','updatedAt','group','deepLink','basedOn']),
@@ -697,6 +703,7 @@ const JSON_FIELDS = {
   member_cycle_settlements: ['explanation'],
   gym_settlements: ['destinationSnapshot'],
   gym_settlement_lines: ['rateCardSnapshot', 'calculationBasis'],
+  b2b_organizations: ['address'],
 };
 
 // Collections whose effectiveFrom / effectiveTo are EAT calendar days stored
@@ -729,7 +736,7 @@ function prepareForKnex(name, data, isUpdate = false) {
     'submittedAt', 'decidedAt', 'reverifyAt', 'verifiedAt', 'cooldownUntil', 'disabledAt', 'reviewedAt',
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
     'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'statusChangedAt', 'voidedAt',
-    'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt'];
+    'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt', 'enrolledAt', 'removedAt'];
   for (const f of DATE_FIELDS) {
     if (CALENDAR_DATE_COLLECTIONS.has(name) && CALENDAR_DATE_FIELDS.has(f)) continue;
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
