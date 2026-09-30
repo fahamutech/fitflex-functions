@@ -96,6 +96,14 @@ const TABLE_MAP = {
   pass_tier_versions:          { table: 'PassTierVersion' },
   settlement_rules:            { table: 'SettlementRule' },
   gym_rate_cards:              { table: 'GymRateCard' },
+  // Settlement results (settlement Phase 2, PR 3). Financial records:
+  // database-authoritative, never cached; written in transactions.
+  settlement_runs:             { table: 'SettlementRun' },
+  member_cycle_settlements:    { table: 'MemberCycleSettlement' },
+  gym_settlements:             { table: 'GymSettlement' },
+  gym_settlement_lines:        { table: 'GymSettlementLine' },
+  settlement_visits:           { table: 'SettlementVisit' },
+  settlement_adjustments:      { table: 'SettlementAdjustment' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -145,6 +153,7 @@ const AUTO_UPDATED_AT = new Set([
   'partner_kyc_cases', 'partner_people', 'partner_settlement_accounts', 'partner_documents',
   'partner_checks', 'partner_agreements',
   'pass_tier_versions', 'settlement_rules', 'gym_rate_cards',
+  'settlement_runs', 'gym_settlements', 'settlement_adjustments',
 ]);
 
 // Collections retained for legacy synchronous service call sites. New service
@@ -577,7 +586,7 @@ const ALLOWED_FIELDS = {
                               'status','statusReason','statusChangedBy','statusChangedAt','voidedAt','voidedBy','voidReason','subscriptionId','businessDate','source']),
   payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','orderId','currency','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
-  gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt']),
+  gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
   trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','availability','socialLinks','createdAt','updatedAt']),
   trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','paymentRequestId','status','createdAt','updatedAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
@@ -636,6 +645,12 @@ const ALLOWED_FIELDS = {
   pass_tier_versions:          new Set(['id','tierKey','version','priceTzs','visitAllowance','status','effectiveFrom','effectiveTo','reason','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
   settlement_rules:            new Set(['id','name','version','scopeType','scopeId','networkPayoutBps','dailyDiscountBps','weeklyDiscountBps','monthlyDiscountBps','dailyCeilingTzs','weeklyCeilingTzs','monthlyCeilingTzs','contractRef','status','effectiveFrom','effectiveTo','reason','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
   gym_rate_cards:              new Set(['id','gymId','version','gymTier','retailDailyTzs','retailWeeklyTzs','retailMonthlyTzs','dailyDiscountBps','weeklyDiscountBps','monthlyDiscountBps','dailyCeilingTzs','weeklyCeilingTzs','monthlyCeilingTzs','ruleSources','status','effectiveFrom','effectiveTo','reason','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
+  settlement_runs:             new Set(['id','mode','periodStartDate','periodEndDate','status','engineVersion','inputsHash','configurationSnapshot','jobRunId','error','createdBy','lockedBy','lockedAt','createdAt','updatedAt']),
+  member_cycle_settlements:    new Set(['id','runId','mode','memberId','subscriptionId','cycleStart','cycleEnd','passTier','passTierVersion','catalogPriceTzs','visitAllowance','collectedApprovedAmountTzs','networkPayoutBps','networkCapTzs','totalPreliminaryTzs','totalFinalTzs','networkAdjustmentTzs','capApplied','payableVisitCount','heldVisitCount','excludedVisitCount','engineVersion','explanation','active','createdAt']),
+  gym_settlements:             new Set(['id','runId','mode','gymId','periodStartDate','periodEndDate','memberCycleCount','qualifyingVisitCount','heldVisitCount','preliminaryTzs','networkAdjustmentTzs','adjustmentsTzs','carryForwardTzs','finalNetTzs','status','holdReason','destinationSnapshot','submittedBy','submittedAt','approvedBy','approvedAt','paidBy','paidAt','paymentReference','receiptUrl','voidedBy','voidedAt','voidReason','createdAt','updatedAt']),
+  gym_settlement_lines:        new Set(['id','runId','mode','gymSettlementId','memberCycleSettlementId','memberId','gymId','qualifyingVisitCount','heldVisitCount','bracket','rawPreliminaryTzs','preliminaryTzs','monotonicGuardApplied','networkAdjustmentTzs','finalTzs','rateCardSnapshot','calculationBasis','createdAt']),
+  settlement_visits:           new Set(['id','runId','mode','memberCycleSettlementId','lineId','checkinId','gymId','businessDate','outcome','eligibility','allowanceSlot','active','createdAt']),
+  settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
   partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
 };
 
@@ -678,6 +693,10 @@ const JSON_FIELDS = {
   partner_checks: ['evidence'],
   partner_kyc_events: ['data'],
   gym_rate_cards: ['ruleSources'],
+  settlement_runs: ['configurationSnapshot'],
+  member_cycle_settlements: ['explanation'],
+  gym_settlements: ['destinationSnapshot'],
+  gym_settlement_lines: ['rateCardSnapshot', 'calculationBasis'],
 };
 
 // Collections whose effectiveFrom / effectiveTo are EAT calendar days stored
@@ -709,7 +728,8 @@ function prepareForKnex(name, data, isUpdate = false) {
     'lastSyncedAt', 'whatsappMarketingConsentAt', 'whatsappOptedOutAt', 'finishedAt',
     'submittedAt', 'decidedAt', 'reverifyAt', 'verifiedAt', 'cooldownUntil', 'disabledAt', 'reviewedAt',
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
-    'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'statusChangedAt', 'voidedAt'];
+    'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'statusChangedAt', 'voidedAt',
+    'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt'];
   for (const f of DATE_FIELDS) {
     if (CALENDAR_DATE_COLLECTIONS.has(name) && CALENDAR_DATE_FIELDS.has(f)) continue;
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
