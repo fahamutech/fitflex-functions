@@ -5,6 +5,7 @@ import { verifyPassword } from '../auth/password-credentials.mjs';
 import { buildDevIdentity, DEV_GYM_ID, DEV_OWNER_GYM_ID } from '../shared/dev-login.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
+import { identityFlag } from '../shared/feature-flags.mjs';
 
 const configuredAdminEmails = new Set(
   (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
@@ -36,10 +37,45 @@ export function approvalStatusForRole(role) {
   return ['gym_operator', 'trainer', 'vendor'].includes(role) ? 'pending_approval' : 'approved';
 }
 
+// Clients that understand persons and personas identify themselves with this
+// header (decision C3b). Everyone else keeps legacy session behaviour.
+export const IDENTITY_V2_CLIENT = 'identity-v2';
+
 export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
+  identityLink = null,
 }) {
+  /** JWT claims for a persona row. `sub` stays the persona (User) id. */
+  function sessionClaims(user) {
+    return {
+      sub: user.id,
+      userType: user.userType,
+      email: user.email,
+      gymId: user.gymId,
+      portalUser: user.portalUser || false,
+      aclPermissions: user.aclPermissions || [],
+      vendorId: user.vendorId,
+      vendorRole: user.vendorRole,
+      vendorPermissions: user.vendorPermissions || [],
+      corporateId: user.corporateId,
+      // Identity V2 · I2 (C3a): the Person rides along; nothing reads it as `sub`.
+      ...(identityFlag('V2_PERSONAS') && user.personId ? { pid: user.personId, ver: 2 } : {}),
+    };
+  }
+
+  /** Person + personas payload for Identity V2 clients. */
+  async function personaPayload(user, extra = {}) {
+    const [person, personas] = await Promise.all([
+      identityLink.personOf(user.personId), identityLink.personasOf(user.personId),
+    ]);
+    return {
+      person: person ? { id: person.id, status: person.status } : null,
+      personas,
+      activePersonaId: user.id,
+      ...extra,
+    };
+  }
   async function requestOtp({ phone, userType = 'member' }) {
     if (!phone) return { error: 'phone_required', status: 400 };
     if (!['member', 'trainer', 'gym_operator', 'vendor', 'admin'].includes(userType)) {
@@ -104,21 +140,11 @@ export function createAuthService({
       ? await verifyPassword(password, storedHash)
       : !SCRYPT_PASSWORD_ROLES.has(user.userType) && storedHash === `demo:${password}`;
     if (!validPassword) return { error: 'invalid_credentials', status: 401 };
-    const token = signJwt({
-      sub: user.id,
-      userType: user.userType,
-      gymId: user.gymId,
-      portalUser: user.portalUser || false,
-      aclPermissions: user.aclPermissions || [],
-      vendorId: user.vendorId,
-      vendorRole: user.vendorRole,
-      vendorPermissions: user.vendorPermissions || [],
-      corporateId: user.corporateId,
-    });
+    const token = signJwt(sessionClaims(user));
     return { token, user: toSessionUser(user) };
   }
 
-  async function firebaseSession({ idToken, requestedRole }) {
+  async function firebaseSession({ idToken, requestedRole, client = null }) {
     const fb = await verifyFirebaseIdToken(idToken);
     if (!fb) return { error: 'invalid_firebase_token', status: 401 };
 
@@ -149,6 +175,7 @@ export function createAuthService({
       if (claimsEmailOnlyRow) return { error: 'email_verification_required', status: 409 };
     }
     const identityMatches = emailVerified ? candidates : uidMatches;
+    const v2Client = client === IDENTITY_V2_CLIENT && identityFlag('V2_PERSONAS') && Boolean(identityLink);
     const operationalMatches = identityMatches.filter(u => u.userType !== 'member');
     let user = requestedUserType
       ? identityMatches.find(u => u.userType === requestedUserType)
@@ -160,7 +187,8 @@ export function createAuthService({
     // vendor registration completed. Prefer that single operational profile
     // on later sign-ins. Only ask for a role when multiple non-member profiles
     // remain genuinely ambiguous.
-    if (!hasRequestedRole && !isAdminEmail && operationalMatches.length > 1) {
+    // Identity V2 clients get their personas and choose instead (C3b).
+    if (!v2Client && !hasRequestedRole && !isAdminEmail && operationalMatches.length > 1) {
       return {
         error: 'profile_role_required',
         status: 409,
@@ -203,24 +231,44 @@ export function createAuthService({
       user = await users.upsertAsync(u => u.id === row.id, row);
     }
 
+    // Identity V2 · I2: link this person's personas on verified evidence only.
+    // Linking must never block a sign-in, so a failure is logged and skipped.
+    if (identityFlag('V2_LINKING') && identityLink) {
+      try {
+        await identityLink.linkOnVerifiedSignIn({
+          anchorUserId: user.id, uid: fb.uid,
+          email: emailVerified ? fbEmail : null,
+          phone: fb.phoneNumber || null,
+          provider: fb.signInProvider || null,
+        });
+        user = (await users.findByIdAsync(user.id)) || user;
+      } catch (err) {
+        console.warn('[identity] linking skipped:', err?.message);
+      }
+    }
+
+    let personaChoiceRequired = false;
+    if (v2Client && user.personId && !requestedUserType) {
+      // Restore the persona used last; otherwise ask when it's genuinely ambiguous.
+      const [person, personas] = await Promise.all([
+        identityLink.personOf(user.personId), identityLink.personasOf(user.personId),
+      ]);
+      const usable = personas.filter(p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected');
+      const last = usable.find(p => p.id === person?.lastPersonaId);
+      if (last && last.id !== user.id) user = (await users.findByIdAsync(last.id)) || user;
+      personaChoiceRequired = !last && usable.filter(p => p.userType !== 'member').length > 1;
+    }
+
     // Block portal-only staff from logging in via the app's Firebase session
     if (user.portalUser === true && requestedRole !== 'admin') return { error: 'portal_user_app_access_denied', status: 403 };
     if (user.accountStatus === 'suspended') return { error: 'account_suspended', status: 403 };
     if (user.approvalStatus === 'rejected') return { error: 'profile_rejected', status: 403, approvalNote: user.approvalNote || null };
 
-    const token = signJwt({
-      sub: user.id,
-      userType: user.userType,
-      email: user.email,
-      gymId: user.gymId,
-      portalUser: user.portalUser || false,
-      aclPermissions: user.aclPermissions || [],
-      vendorId: user.vendorId,
-      vendorRole: user.vendorRole,
-      vendorPermissions: user.vendorPermissions || [],
-      corporateId: user.corporateId,
-    });
-    return { token, user: toSessionUser(user), pendingApproval: user.approvalStatus === 'pending_approval' };
+    const token = signJwt(sessionClaims(user));
+    const session = { token, user: toSessionUser(user), pendingApproval: user.approvalStatus === 'pending_approval' };
+    if (!v2Client) return session;
+    await identityLink.rememberPersona(user.personId, user.id);
+    return { ...session, ...(await personaPayload(user, { personaChoiceRequired })) };
   }
 
   async function devLogin({ role }) {
@@ -338,5 +386,42 @@ export function createAuthService({
     return { token, user: { ...toSessionUser(user), publicId: devPubId, userCode: devPubId }, pendingApproval: false };
   }
 
-  return { requestOtp, verifyOtp, login, firebaseSession, devLogin };
+  /** Identity V2 · I2: the caller's Person and personas. */
+  async function myPersonas({ claims }) {
+    if (!identityFlag('V2_PERSONAS') || !identityLink) return { error: 'not_found', status: 404 };
+    const user = await users.findByIdAsync(claims.sub);
+    if (!user?.personId) return { error: 'user_not_found', status: 404 };
+    return personaPayload(user);
+  }
+
+  /**
+   * Identity V2 · I2: mint a session for another persona of the same Person.
+   * No Firebase round trip; the target must be one of the caller's own live,
+   * usable personas.
+   */
+  async function switchPersona({ claims, personaId }) {
+    if (!identityFlag('V2_PERSONAS') || !identityLink) return { error: 'not_found', status: 404 };
+    if (!personaId) return { error: 'personaId_required', status: 400 };
+    const caller = await users.findByIdAsync(claims.sub);
+    if (!caller?.personId) return { error: 'user_not_found', status: 404 };
+    const target = await users.findByIdAsync(personaId);
+    // Same answer whether the persona doesn't exist or belongs to someone else.
+    if (!target || target.personId !== caller.personId || target.accountStatus === 'closed') {
+      return { error: 'persona_not_found', status: 404 };
+    }
+    const person = await identityLink.personOf(caller.personId);
+    if (person?.status !== 'active') return { error: 'person_not_active', status: 403 };
+    if (target.portalUser === true || target.userType === 'admin') return { error: 'portal_persona_not_switchable', status: 403 };
+    if (target.accountStatus === 'suspended') return { error: 'account_suspended', status: 403 };
+    if (target.approvalStatus === 'rejected') return { error: 'profile_rejected', status: 403, approvalNote: target.approvalNote || null };
+    await identityLink.rememberPersona(target.personId, target.id);
+    return {
+      token: signJwt(sessionClaims(target)),
+      user: toSessionUser(target),
+      pendingApproval: target.approvalStatus === 'pending_approval',
+      ...(await personaPayload(target)),
+    };
+  }
+
+  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona };
 }

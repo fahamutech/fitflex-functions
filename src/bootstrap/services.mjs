@@ -13,6 +13,7 @@ import { createTrainerService } from '../services/trainer-service.mjs';
 import { createTrainerBookingService } from '../services/trainer-booking-service.mjs';
 import { createSettingsService } from '../services/settings-service.mjs';
 import { createAuthService, isConfiguredAdminEmail, approvalStatusForRole } from '../services/auth-service.mjs';
+import { createIdentityLinkService } from '../services/identity-link-service.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
 import { createAccountService } from '../services/account-service.mjs';
 import { createOperatorService } from '../services/operator-service.mjs';
@@ -87,7 +88,18 @@ export {
 };
 
 // requireAuth rejects tokens of suspended accounts (the JWT alone can't know).
-registerAccountStatusLookup(async id => (await users.findByIdAsync(id))?.accountStatus ?? null);
+// A suspended Person (FitFlex-level only) suspends every persona; a suspended
+// persona never suspends the Person (invariant 30).
+registerAccountStatusLookup(async id => {
+  const user = await users.findByIdAsync(id);
+  if (!user) return null;
+  if (user.accountStatus === 'suspended') return 'suspended';
+  if (user.personId) {
+    const person = await db('Person').where({ id: user.personId }).first('status');
+    if (person?.status === 'suspended') return 'suspended';
+  }
+  return user.accountStatus ?? null;
+});
 
 export const identityService = createIdentityService({ users });
 // KYC enforcement for partners created from the enforcement start; existing ones are exempt.
@@ -116,9 +128,11 @@ export const corporateService = createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
 });
 
+export const identityLinkService = createIdentityLinkService({ db });
 export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
+  identityLink: identityLinkService,
 });
 
 export const subscriptionService = createSubscriptionService({ subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId });
