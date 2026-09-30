@@ -13,6 +13,7 @@ const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
 
 export function createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
+  onAccountCreated = null,
 }) {
   const now = () => new Date().toISOString();
 
@@ -76,6 +77,15 @@ export function createCorporateService({
       updatedAt: now(),
     });
     await audit({ actor: actorId, action: 'corporate.onboard', target: account.id, after: account });
+    // Side effects (the B2B organisation mapping) must never fail onboarding;
+    // POST /admin/b2b/corporate-sync repairs a missed one.
+    if (onAccountCreated) {
+      try {
+        await onAccountCreated(account, actorId);
+      } catch (err) {
+        console.warn('[corporate] onAccountCreated failed:', err?.message);
+      }
+    }
     return { account };
   }
 
