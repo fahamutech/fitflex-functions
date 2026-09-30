@@ -79,6 +79,8 @@ const TABLE_MAP = {
   b2b_organizations:      { table: 'B2BOrganization' },
   b2b_organization_users: { table: 'B2BOrganizationUser' },
   b2b_beneficiaries:      { table: 'B2BBeneficiary' },
+  b2b_programs:           { table: 'B2BWellnessProgram' },
+  b2b_benefits:           { table: 'B2BBenefit' },
   communication_campaigns:   { table: 'CommunicationCampaign' },
   communication_messages:    { table: 'CommunicationMessage' },
   communication_templates:   { table: 'CommunicationTemplate' },
@@ -634,6 +636,8 @@ const ALLOWED_FIELDS = {
   b2b_organizations:      new Set(['id','organizationType','legalName','tradingName','industrySector','registrationNumber','taxIdentificationNumber','email','phone','address','status','statusReason','statusChangedAt','legacyCorporateId','createdBy','createdAt','updatedAt']),
   b2b_organization_users: new Set(['id','organizationId','userId','role','permissions','status','removedAt','createdBy','createdAt','updatedAt']),
   b2b_beneficiaries:      new Set(['id','organizationId','userId','externalReference','beneficiaryType','groupName','status','enrolledAt','statusChangedAt','createdBy','createdAt','updatedAt']),
+  b2b_programs:           new Set(['id','organizationId','name','description','programType','status','statusReason','statusChangedAt','startDate','endDate','eligibility','budgetTzs','activatedAt','activatedBy','createdBy','createdAt','updatedAt']),
+  b2b_benefits:           new Set(['id','programId','name','description','benefitType','status','fundingType','sponsorAmountTzs','sponsorShareBps','sponsorCapTzs','beneficiaryAmountTzs','usageLimit','usagePeriod','periodSponsorCapTzs','eligibility','providerRules','startDate','endDate','terms','createdBy','createdAt','updatedAt']),
   communication_campaigns:   new Set(['id','senderType','gymId','name','purpose','category','status','audience','content','channels','templateId','scheduledAt','sendRequestId','counts','createdBy','sentAt','cancelledAt','createdAt','updatedAt']),
   communication_messages:    new Set(['id','campaignId','automationRunId','senderType','gymId','memberId','channel','category','messageType','title','body','locale','deepLink','notificationId','status','skipReason','providerMessageId','payload','attempts','nextAttemptAt','sentAt','deliveredAt','openedAt','clickedAt','failedAt','failureReason','failurePermanent','createdAt','updatedAt']),
   communication_templates:   new Set(['id','gymId','key','name','category','purpose','channels','bodies','variables','whatsappTemplateId','status','createdBy','createdAt','updatedAt','group','deepLink','basedOn']),
@@ -704,6 +708,8 @@ const JSON_FIELDS = {
   gym_settlements: ['destinationSnapshot'],
   gym_settlement_lines: ['rateCardSnapshot', 'calculationBasis'],
   b2b_organizations: ['address'],
+  b2b_programs: ['eligibility'],
+  b2b_benefits: ['eligibility', 'providerRules'],
 };
 
 // Collections whose effectiveFrom / effectiveTo are EAT calendar days stored
