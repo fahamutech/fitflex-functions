@@ -44,14 +44,15 @@ const activeFields = (from = '2026-01-01', to = null) => ({ status: 'active', ef
 
 // ── seeds ────────────────────────────────────────────────────────────────────
 
-test('the approved Dar values are seeded as drafts with no start date', async () => {
+test('the approved Dar values are seeded and active from 1 Oct 2026', async () => {
   const passes = await db('PassTierVersion').whereIn('id', ['ptv-basic-1', 'ptv-pro-1', 'ptv-premium-1', 'ptv-executive-1']).orderBy('priceTzs');
   assert.deepEqual(passes.map((p) => [p.tierKey, p.priceTzs, p.visitAllowance, p.status, p.effectiveFrom]), [
-    ['basic', 60000, 16, 'draft', null], ['pro', 150000, 18, 'draft', null],
-    ['premium', 250000, 20, 'draft', null], ['executive', 400000, 24, 'draft', null],
+    ['basic', 60000, 16, 'active', '2026-10-01'], ['pro', 150000, 18, 'active', '2026-10-01'],
+    ['premium', 250000, 20, 'active', '2026-10-01'], ['executive', 400000, 24, 'active', '2026-10-01'],
   ]);
+  assert.ok(passes.every((p) => p.approvedBy && p.approvedBy !== p.createdBy && p.effectiveTo === null));
   const global = await db('SettlementRule').where({ id: 'rule-global-1' }).first();
-  assert.deepEqual([global.dailyDiscountBps, global.weeklyDiscountBps, global.monthlyDiscountBps, global.networkPayoutBps, global.status], [2500, 2000, 2000, 7500, 'draft']);
+  assert.deepEqual([global.dailyDiscountBps, global.weeklyDiscountBps, global.monthlyDiscountBps, global.networkPayoutBps, global.status], [2500, 2000, 2000, 7500, 'active']);
   const ceilings = Object.fromEntries((await db('SettlementRule').where({ scopeType: 'gym_tier' }).whereLike('id', 'rule-ceil-%'))
     .map((r) => [r.scopeId, [r.dailyCeilingTzs, r.weeklyCeilingTzs, r.monthlyCeilingTzs]]));
   assert.deepEqual(ceilings, {
@@ -169,16 +170,19 @@ test('activation: maker-checker, closes the version it replaces, never starts in
 }));
 
 test('a rate card copies the rules in force on its start date; missing rules block approval', () => inRollback(async (trx) => {
-  const gymId = await makeGym(trx, 'standard');
-  const card = (await service.createRateCard({ gymId, retailDailyTzs: 5000, retailWeeklyTzs: 15000, retailMonthlyTzs: 50000, actorId: 'maker' }, { trx })).rateCard;
-  assert.equal(card.gymTier, 'standard');
-  // No active rules yet (the seeds are drafts).
-  const blocked = await service.activate({ kind: 'rate_card', id: card.id, effectiveFrom: '2026-11-01', actorId: 'checker' }, { trx });
+  // An online gym has no ceiling rules, so its card can't be approved.
+  const online = await makeGym(trx, 'online');
+  const onlineCard = (await service.createRateCard({ gymId: online, retailDailyTzs: 1000, retailWeeklyTzs: 3000, retailMonthlyTzs: 9000, actorId: 'maker' }, { trx })).rateCard;
+  const blocked = await service.activate({ kind: 'rate_card', id: onlineCard.id, effectiveFrom: '2026-11-01', actorId: 'checker' }, { trx });
   assert.equal(blocked.error, 'rule_missing');
+  assert.deepEqual(blocked.missing, ['dailyCeilingTzs', 'weeklyCeilingTzs', 'monthlyCeilingTzs']);
+  // And before the rules start there is nothing to copy either.
+  const gymId = await makeGym(trx, 'standard');
+  const early = (await service.createRateCard({ gymId, retailDailyTzs: 5000, retailWeeklyTzs: 15000, retailMonthlyTzs: 50000, actorId: 'maker' }, { trx })).rateCard;
+  assert.equal((await service.activate({ kind: 'rate_card', id: early.id, effectiveFrom: '2026-09-01', actorId: 'checker' }, { trx })).error, 'rule_missing');
 
-  for (const id of ['rule-global-1', 'rule-ceil-standard-1']) {
-    assert.ok((await service.activate({ kind: 'rule', id, effectiveFrom: '2026-11-01', actorId: 'checker' }, { trx })).rule);
-  }
+  const card = early;
+  assert.equal(card.gymTier, 'standard');
   const ok = await service.activate({ kind: 'rate_card', id: card.id, effectiveFrom: '2026-11-01', actorId: 'checker' }, { trx });
   const c = ok.rateCard;
   assert.deepEqual([c.dailyDiscountBps, c.weeklyDiscountBps, c.monthlyDiscountBps, c.dailyCeilingTzs, c.weeklyCeilingTzs, c.monthlyCeilingTzs],
@@ -189,7 +193,6 @@ test('a rate card copies the rules in force on its start date; missing rules blo
 
 test('a gym-specific rule overrides its tier field by field', () => inRollback(async (trx) => {
   const gymId = await makeGym(trx, 'standard');
-  for (const id of ['rule-global-1', 'rule-ceil-standard-1']) await service.activate({ kind: 'rule', id, effectiveFrom: '2026-11-01', actorId: 'checker' }, { trx });
   const gymRule = (await service.createRule({ scopeType: 'gym', scopeId: gymId, monthlyCeilingTzs: 45000, monthlyDiscountBps: 1800, actorId: 'maker' }, { trx })).rule;
   await service.activate({ kind: 'rule', id: gymRule.id, effectiveFrom: '2026-11-01', actorId: 'checker' }, { trx });
   const card = (await service.createRateCard({ gymId, retailDailyTzs: 5000, retailWeeklyTzs: 15000, retailMonthlyTzs: 60000, actorId: 'maker' }, { trx })).rateCard;
@@ -215,9 +218,6 @@ test('the service refuses invalid drafts before they reach the database', async 
 
 test('the Phase 1 engine settles a cycle straight from the configuration tables', () => inRollback(async (trx) => {
   const gymId = await makeGym(trx, 'midtier');
-  for (const id of ['ptv-pro-1', 'rule-global-1', 'rule-ceil-midtier-1']) {
-    await service.activate({ kind: id.startsWith('ptv') ? 'pass_tier' : 'rule', id, effectiveFrom: '2026-10-01', actorId: 'checker' }, { trx });
-  }
   const card = (await service.createRateCard({ gymId, retailDailyTzs: 10000, retailWeeklyTzs: 35000, retailMonthlyTzs: 120000, actorId: 'maker' }, { trx })).rateCard;
   await service.activate({ kind: 'rate_card', id: card.id, effectiveFrom: '2026-10-01', actorId: 'checker' }, { trx });
 

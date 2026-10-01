@@ -34,17 +34,16 @@ function services(trx, at = '2026-12-02T09:00:00.000Z') {
 }
 
 /**
- * The approved Dar configuration made active, plus a mid-tier gym C and a
- * premium gym D with approved rate cards (the spec's illustrative rates).
+ * The approved Dar configuration (active from 1 Oct 2026, by migration), plus
+ * a mid-tier gym C and a premium gym D with approved rate cards (the spec's
+ * illustrative rates).
  */
-async function world(trx, { tiers = ['premium'] } = {}) {
+async function world(trx) {
   // Other specs leave subscriptions behind in the shared CI database; take
   // them out of play for this (rolled-back) transaction.
   await trx('Subscription').update({ status: 'payment_cancelled' });
   const { configService } = services(trx);
-  const activate = (kind, id) => configService.activate({ kind, id, effectiveFrom: '2026-09-01', actorId: 'checker' }, { trx });
-  for (const t of tiers) assert.ok((await activate('pass_tier', `ptv-${t}-1`)).passTierVersion, `pass ${t}`);
-  for (const id of ['rule-global-1', 'rule-ceil-midtier-1', 'rule-ceil-premium-1']) assert.ok((await activate('rule', id)).rule, id);
+  const activate = (kind, id) => configService.activate({ kind, id, effectiveFrom: '2026-10-01', actorId: 'checker' }, { trx });
   const gym = async (tier, retail) => {
     const id = uid(`gym${tier[0]}`);
     await trx('Gym').insert({ id, name: `Settlement ${tier}`, tier, location: 'Dar es Salaam', updatedAt: new Date() });
@@ -224,11 +223,11 @@ test('a disputed visit or a gym with no rate card holds the whole cycle: nothing
 }));
 
 test('a voided visit is simply not paid; a cycle with no pass version in force is skipped', () => inRollback(async (trx) => {
-  const w = await world(trx);   // only the premium pass version is active
+  const w = await world(trx);
   const voided = await memberCycle(trx);
   const rows = await visits(trx, voided, w.gymD, 4);
   await trx('Checkin').where({ id: rows[0].id }).update({ status: 'voided', statusReason: 'Duplicate', voidedAt: new Date(), voidedBy: 'admin', voidReason: 'Duplicate' });
-  const basic = await memberCycle(trx, { tier: 'basic', paid: 60000 });
+  const basic = await memberCycle(trx, { tier: 'gold', paid: 60000 });   // no such pass tier version
 
   const { settlement } = services(trx);
   const out = await settlement.run({ ...NOVEMBER, mode: 'live' });
