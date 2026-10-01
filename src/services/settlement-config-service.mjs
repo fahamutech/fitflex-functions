@@ -173,5 +173,36 @@ export function createSettlementConfigService({ db = defaultDb, now = () => new 
     return { passTierVersions, rules, rateCards };
   }
 
-  return { createPassTierVersion, createRule, createRateCard, activate, reject, activeConfiguration };
+  /** Everything, for the admin screens: drafts, active (including closed) and rejected. */
+  async function listConfiguration({ status } = {}) {
+    const where = status && status !== 'all' ? { status } : {};
+    const [passTierVersions, rules, rateCards] = await Promise.all([
+      db('PassTierVersion').where(where).orderBy([{ column: 'tierKey' }, { column: 'version', order: 'desc' }]),
+      db('SettlementRule').where(where).orderBy([{ column: 'scopeType' }, { column: 'scopeId' }, { column: 'version', order: 'desc' }]),
+      db('GymRateCard').where(where).orderBy([{ column: 'gymId' }, { column: 'version', order: 'desc' }]),
+    ]);
+    return { passTierVersions, rules, rateCards };
+  }
+
+  /**
+   * Draft a rate card, from the gym's own retail rates, for every gym that
+   * has no card at all (a new gym). Drafts only: each still needs approving
+   * by someone else. Gyms missing a rate are reported, not guessed.
+   */
+  async function draftRateCardsForGyms({ actorId }, { trx } = {}) {
+    return run(trx, async (q) => {
+      const gyms = await q('Gym').whereNotIn('id', q('GymRateCard').select('gymId')).select('id', 'name', 'tier', 'ratePerDay', 'ratePerWeek', 'ratePerMonth').orderBy('id');
+      const drafted = [];
+      const skipped = [];
+      for (const g of gyms) {
+        if (g.tier === 'online') { skipped.push({ gymId: g.id, reason: 'online_gym' }); continue; }
+        if (!(g.ratePerDay > 0 && g.ratePerWeek > 0 && g.ratePerMonth > 0)) { skipped.push({ gymId: g.id, reason: 'retail_rates_missing' }); continue; }
+        drafted.push(await insertDraft(q, 'GymRateCard', { gymId: g.id },
+          { gymId: g.id, gymTier: g.tier, retailDailyTzs: g.ratePerDay, retailWeeklyTzs: g.ratePerWeek, retailMonthlyTzs: g.ratePerMonth, reason: 'Drafted from the gym\'s retail rates' }, actorId));
+      }
+      return { drafted, skipped };
+    });
+  }
+
+  return { createPassTierVersion, createRule, createRateCard, activate, reject, activeConfiguration, listConfiguration, draftRateCardsForGyms };
 }
