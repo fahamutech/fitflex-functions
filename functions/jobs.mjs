@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, settlementService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -62,5 +62,15 @@ export const b2bProgramExpiry = {
   onJob: async () => {
     const r = await b2bProgramService.expireDue();
     if (r.expired) console.log(`[b2b-programs] expired=${r.expired}`);
+  }
+};
+
+export const settlementCloser = {
+  created, rule: '30 21 * * *', // every day 21:30 UTC = 00:30 EAT
+  description: 'Gym settlement: calculate and store the previous EAT month once it has ended (finished Platform Pass cycles only). SETTLEMENT_MODE = shadow (default: stored, never payable), live or off. It never approves or pays. Safe to rerun and to overlap: one server at a time, one run per month, everything in one transaction.',
+  onJob: async () => {
+    const r = await settlementService.runDue();
+    if (r.run && !r.alreadyRun) console.log(`[settlement] ${r.run.mode} ${r.run.periodStartDate} cycles=${r.stats.settledCycles} skipped=${r.stats.skippedCycles} statements=${r.stats.statements} final=${r.stats.totalFinalTzs}`);
+    else if (r.error) console.error(`[settlement] ${r.error}${r.message ? `: ${r.message}` : ''}`);
   }
 };
