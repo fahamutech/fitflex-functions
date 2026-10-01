@@ -32,7 +32,7 @@ export const adminRunSettlement = {
   created, method: 'post', path: '/admin/settlements/runs',
   description: 'Admin: calculate and store one EAT month. mode "shadow" (default) stores a run that can never be paid; "live" stores the real one (once per month, only after the month has ended). Nothing is approved or paid.',
   requestSample: { month: '2026-10', mode: 'shadow' },
-  onGuard: guard,
+  onGuard: [requireAuth('admin'), requireAcl('settlements_prepare')],
   onRequest: async (req, res) => {
     const { month, mode = 'shadow' } = req.body || {};
     const period = periodForMonth(month);
