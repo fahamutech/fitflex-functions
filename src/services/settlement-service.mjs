@@ -18,8 +18,7 @@
 // Company-funded (B2B) gym visits are settled the same way (decided 1 Oct
 // 2026): the same brackets and network cap, but one cycle per beneficiary per
 // EAT month, capped against what was charged for those visits (the approved
-// B2B consumptions' gross value). A company-funded visit is charged on its
-// own, so two gyms on one day both count.
+// B2B consumptions' gross value).
 //
 // Safety: an advisory lock (one server at a time), everything in one
 // transaction (a failure stores nothing), the run locked at the end with a
@@ -197,7 +196,6 @@ export function createSettlementService({ db = defaultDb, configService, now = (
             cycleStart: iso(eatDayStart(monthStart)), cycleEnd: iso(eatDayStart(monthEnd)),
             collectedApprovedAmountTzs: sum('grossTzs'), networkPayoutBps: net.networkPayoutBps,
             visitAllowance: rows.length,   // the benefit's own allowance was enforced at check-in
-            oneGymPerDay: false,           // each company-funded visit was charged on its own
           },
           visits: rows.map((c) => {
             const chk = b2bCheckins.get(c.sourceId);

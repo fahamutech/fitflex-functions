@@ -90,7 +90,10 @@ const tierCoversGym = (tierCfg, gym) => {
 
 /**
  * BL-010 / BL-011: determine whether THIS check-in consumes a visit slot.
- * Any prior same-day check-in = does NOT consume an additional slot.
+ * Each gym visited on a day consumes one visit (decided 1 Oct 2026): a second
+ * gym the same day uses a second visit, and that gym is paid for it. Going
+ * back into the SAME gym the same day consumes nothing more. (Basic is still
+ * limited to one gym a day; see validateCheckIn.)
  *
  * @param {Array} todaysCheckins same-day prior check-ins for the member
  * @param {string} gymId
@@ -101,7 +104,7 @@ export function classifyVisit(todaysCheckins, gymId) {
   const otherGym = todaysCheckins.some(c => c.gymId !== gymId);
   const alreadyCheckedInToday = todaysCheckins.length > 0;
   return {
-    consumesVisit: !alreadyCheckedInToday,
+    consumesVisit: !sameGym,
     sameDaySameGym: sameGym,
     sameDayAlreadyCheckedIn: alreadyCheckedInToday,
     differentGymToday: otherGym

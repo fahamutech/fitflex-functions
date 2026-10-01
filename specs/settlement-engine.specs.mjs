@@ -190,35 +190,41 @@ describe('DR-01 hard allowance', () => {
 
 // ── same EAT day (DR-13) ─────────────────────────────────────────────────────
 
-describe('DR-13 one payable gym per member per EAT day', () => {
+describe('DR-13 (revised): one visit per gym per EAT day; a second gym the same day is paid', () => {
   const cycle = cycleFor('pro');
   const rates = [snap('gym-A'), snap('gym-C')];
   const v = (checkinId, gymId, timestamp, visitConsumed = true) =>
     ({ checkinId, memberId: 'member-1', cycleId: 'cycle-1', gymId, timestamp, status: 'valid', visitConsumed, subscriptionType: 'platform_pass' });
 
-  test('first gym payable, second gym same day not payable, next EAT day payable', () => {
+  test('two gyms on one day are both payable, and each uses an allowance slot', () => {
     const r = calculateMemberSettlement({ cycle, gymRates: rates, visits: [
       v('c1', 'gym-A', '2026-10-05T06:00:00.000Z'),            // 09:00 EAT 5 Oct
-      v('c2', 'gym-C', '2026-10-05T15:00:00.000Z', false),     // 18:00 EAT 5 Oct (logged, not consumed)
+      v('c2', 'gym-C', '2026-10-05T15:00:00.000Z'),            // 18:00 EAT 5 Oct, a second gym
       v('c3', 'gym-C', '2026-10-06T06:00:00.000Z')             // 09:00 EAT 6 Oct
     ] });
-    assert.equal(visitOf(r, 'c1').outcome, VISIT_OUTCOME.PAYABLE);
-    assert.equal(visitOf(r, 'c2').eligibility, VISIT_ELIGIBILITY.SECOND_GYM_SAME_DAY);
-    assert.equal(visitOf(r, 'c3').outcome, VISIT_OUTCOME.PAYABLE);
+    assert.deepEqual(r.visits.map(x => [x.checkinId, x.outcome, x.allowanceSlot]), [['c1', 'payable', 1], ['c2', 'payable', 2], ['c3', 'payable', 3]]);
+    assert.deepEqual(r.gyms.map(g => [g.gymId, g.qualifyingVisitCount, g.finalTzs]), [['gym-A', 1, 3_500], ['gym-C', 2, 15_000]]);
   });
-  test('the day is the EAT day, not the UTC day: 23:59 and 00:00 EAT are different days', () => {
+  test('a second-gym check-in recorded before the change (not consumed) stays unpaid', () => {
+    const r = calculateMemberSettlement({ cycle, gymRates: rates, visits: [
+      v('c1', 'gym-A', '2026-10-05T06:00:00.000Z'), v('c2', 'gym-C', '2026-10-05T15:00:00.000Z', false)
+    ] });
+    assert.equal(visitOf(r, 'c2').eligibility, VISIT_ELIGIBILITY.NOT_CONSUMED);
+    assert.equal(r.member.payableVisitCount, 1);
+  });
+  test('the day is the EAT day, not the UTC day: 23:59 and 00:00 EAT at one gym are two visit-days', () => {
     const r = calculateMemberSettlement({ cycle, gymRates: rates, visits: [
       v('c1', 'gym-A', '2026-10-05T20:59:00.000Z'),            // 23:59 EAT 5 Oct
-      v('c2', 'gym-C', '2026-10-05T21:00:00.000Z')             // 00:00 EAT 6 Oct (same UTC day)
+      v('c2', 'gym-A', '2026-10-05T21:00:00.000Z')             // 00:00 EAT 6 Oct (same UTC day)
     ] });
-    assert.equal(r.member.payableVisitCount, 2);
+    assert.equal(gymOf(r, 'gym-A').qualifyingVisitCount, 2);
   });
-  test('two UTC days can be one EAT day', () => {
+  test('two UTC days can be one EAT day: the same gym then counts once', () => {
     const r = calculateMemberSettlement({ cycle, gymRates: rates, visits: [
       v('c1', 'gym-A', '2026-10-05T21:30:00.000Z'),            // 00:30 EAT 6 Oct
-      v('c2', 'gym-C', '2026-10-06T06:00:00.000Z', false)      // 09:00 EAT 6 Oct
+      v('c2', 'gym-A', '2026-10-06T06:00:00.000Z')             // 09:00 EAT 6 Oct
     ] });
-    assert.equal(visitOf(r, 'c2').eligibility, VISIT_ELIGIBILITY.SECOND_GYM_SAME_DAY);
+    assert.equal(visitOf(r, 'c2').eligibility, VISIT_ELIGIBILITY.DUPLICATE_SAME_DAY);
     assert.equal(visitOf(r, 'c1').businessDate, '2026-10-06');
   });
   test('the same gym twice in one day counts once', () => {
@@ -228,13 +234,14 @@ describe('DR-13 one payable gym per member per EAT day', () => {
     assert.equal(visitOf(r, 'c2').eligibility, VISIT_ELIGIBILITY.DUPLICATE_SAME_DAY);
     assert.equal(gymOf(r, 'gym-A').qualifyingVisitCount, 1);
   });
-  test('second gym is excluded even if wrongly marked consumed', () => {
-    const r = calculateMemberSettlement({ cycle, gymRates: rates, visits: [
-      v('c1', 'gym-A', '2026-10-05T06:00:00.000Z'), v('c2', 'gym-C', '2026-10-05T10:00:00.000Z', true)
-    ] });
-    assert.equal(visitOf(r, 'c2').eligibility, VISIT_ELIGIBILITY.SECOND_GYM_SAME_DAY);
+  test('second-gym visits count against the allowance like any other', () => {
+    const visits = [...dailyVisits('gym-A', 10), ...dailyVisits('gym-C', 10, { prefix: 'gym-C' }).map(x => ({ ...x, timestamp: x.timestamp.replace('T12:', 'T16:') }))];
+    const r = calculateMemberSettlement({ cycle, gymRates: rates, visits });   // Pro: 18 visits
+    assert.equal(r.member.payableVisitCount, 18);
+    assert.equal(r.visits.filter(x => x.eligibility === VISIT_ELIGIBILITY.OVER_ALLOWANCE).length, 2);
+    assert.deepEqual(r.gyms.map(g => [g.gymId, g.qualifyingVisitCount]), [['gym-A', 9], ['gym-C', 9]]);
   });
-  test('a day whose visit was not consumed pays nothing', () => {
+  test('a visit that was not consumed pays nothing', () => {
     const r = calculateMemberSettlement({ cycle, gymRates: rates, visits: [v('c1', 'gym-A', '2026-10-05T06:00:00.000Z', false)] });
     assert.equal(visitOf(r, 'c1').eligibility, VISIT_ELIGIBILITY.NOT_CONSUMED);
     assert.equal(r.member.totalFinalTzs, 0);
@@ -573,8 +580,8 @@ describe('invariants over 400 generated scenarios', () => {
     assert.equal(sum(again.allocations.map(a => a.finalTzs)), again.totalFinalTzs);
   });
   each('7. deterministic', (r, input) => assert.deepEqual(calculateMemberSettlement(structuredClone(input)), r));
-  each('8. at most one payable visit per EAT day', r => {
-    const days = r.visits.filter(v => v.outcome === VISIT_OUTCOME.PAYABLE).map(v => localDay(v.timestamp));
+  each('8. at most one payable visit per gym per EAT day', r => {
+    const days = r.visits.filter(v => v.outcome === VISIT_OUTCOME.PAYABLE).map(v => `${localDay(v.timestamp)}:${v.gymId}`);
     assert.equal(new Set(days).size, days.length);
   });
   each('9. VOIDED is never payable or held', (r, input) => {
