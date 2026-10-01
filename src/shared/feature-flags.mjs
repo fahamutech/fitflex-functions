@@ -15,3 +15,18 @@ export function identityFlag(name) {
   if (!IDENTITY_V2_FLAGS.includes(name)) throw new Error(`unknown Identity V2 flag: ${name}`);
   return on('IDENTITY_V2') && on(name);
 }
+
+/**
+ * How organisation authorisation is decided (Identity V2 · I5):
+ *   'off'     legacy rules only (default)
+ *   'shadow'  legacy rules decide; the membership decision is computed
+ *             alongside and disagreements are logged (V2_ORG_AUTHZ=shadow)
+ *   'enforce' OrgMembership decides (V2_ORG_AUTHZ=true)
+ * Both need the IDENTITY_V2 umbrella.
+ */
+export function orgAuthzMode() {
+  if (!on('IDENTITY_V2')) return 'off';
+  const value = String(process.env.V2_ORG_AUTHZ ?? '').trim().toLowerCase();
+  if (value === 'shadow') return 'shadow';
+  return TRUE_VALUES.has(value) ? 'enforce' : 'off';
+}

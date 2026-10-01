@@ -1,7 +1,8 @@
 // Auth REST surface — thin controllers delegating to authService.
 import '../src/bootstrap/init.mjs';
 import { authService } from '../src/bootstrap/services.mjs';
-import { requireAuth } from '../src/auth/jwt.mjs';
+import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import { orgAuthzStats } from '../src/auth/org-authz.mjs';
 
 const created = new Date().toISOString();
 
@@ -95,6 +96,13 @@ export const myPersonas = {
   description: 'Identity V2: the caller\'s Person and personas (User rows).',
   onGuard: requireAuth(),
   onRequest: async (req, res) => sendResult(res, await authService.myPersonas({ claims: req.user })),
+};
+
+export const adminOrgAuthzReport = {
+  created, method: 'get', path: '/admin/identity/org-authz',
+  description: 'Admin: Identity V2 organisation-authorisation mode and, in shadow/enforce, how often the membership decision disagreed with the legacy one since this process started (per route).',
+  onGuard: [requireAuth('admin'), requireAcl('settings')],
+  onRequest: async (_req, res) => res.json(orgAuthzStats()),
 };
 
 export const myMemberships = {
