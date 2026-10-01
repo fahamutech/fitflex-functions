@@ -15,6 +15,8 @@ import { createTrainerBookingService } from '../services/trainer-booking-service
 import { createSettingsService } from '../services/settings-service.mjs';
 import { createAuthService, isConfiguredAdminEmail, approvalStatusForRole } from '../services/auth-service.mjs';
 import { createIdentityLinkService } from '../services/identity-link-service.mjs';
+import { createOrgMembershipService } from '../services/org-membership-service.mjs';
+import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
 import { createAccountService } from '../services/account-service.mjs';
 import { createOperatorService } from '../services/operator-service.mjs';
@@ -163,10 +165,14 @@ export const b2bConsumptionService = createB2BConsumptionService({
 });
 
 export const identityLinkService = createIdentityLinkService({ db });
+
+// Identity V2 · I4: OrgMembership follows every write to its sources.
+export const orgMembershipService = createOrgMembershipService({ db });
+attachOrgMembershipSync({ users, trainers, subscriptions, orgMemberships: orgMembershipService });
 export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
-  identityLink: identityLinkService, auditLog,
+  identityLink: identityLinkService, auditLog, orgMemberships: orgMembershipService,
 });
 
 export const subscriptionService = createSubscriptionService({ subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId });
