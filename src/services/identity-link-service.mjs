@@ -68,9 +68,11 @@ export function createIdentityLinkService({ db }) {
    * @param {string|null} [p.email]  only when Firebase verified it
    * @param {string|null} [p.phone]  only when Firebase verified it
    * @param {string|null} [p.provider] Firebase sign-in provider
+   * @param {boolean} [p.attachOnly]  record the verified identifiers on the
+   *   anchor's Person without looking for other rows to link (V2_LINKING off)
    * @returns {Promise<{personId: string|null, linkedUserIds: string[], mergedPersonIds: string[], conflicts: object[]}>}
    */
-  async function linkOnVerifiedSignIn({ anchorUserId, uid, email = null, phone = null, provider = null, trigger = 'firebase_session' }) {
+  async function linkOnVerifiedSignIn({ anchorUserId, uid, email = null, phone = null, provider = null, trigger = 'firebase_session', attachOnly = false }) {
     const verifiedEmail = normalizeEmail(email);
     const verifiedPhone = normalizePhone(phone);
     return db.transaction(async trx => {
@@ -85,10 +87,10 @@ export function createIdentityLinkService({ db }) {
       const personId = uidOwner?.personId ?? anchor.personId;
 
       // Rows the verified evidence points at.
-      const byUid = await trx('User').where({ firebaseUid: uid });
-      const byEmail = verifiedEmail
+      const byUid = attachOnly ? [] : await trx('User').where({ firebaseUid: uid });
+      const byEmail = verifiedEmail && !attachOnly
         ? await trx('User').whereRaw('lower(btrim(email)) = ?', [verifiedEmail]) : [];
-      const byPhone = verifiedPhone
+      const byPhone = verifiedPhone && !attachOnly
         // Stored phones are free text ("0712 345 678"); narrow on digits, then normalise.
         ? (await trx('User').whereNotNull('phone')
           .whereRaw("regexp_replace(phone, '\\D', '', 'g') LIKE ?", [`%${verifiedPhone.slice(-9)}`]))

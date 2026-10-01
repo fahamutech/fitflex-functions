@@ -17,6 +17,8 @@ import { createAuthService, isConfiguredAdminEmail, approvalStatusForRole } from
 import { createIdentityLinkService } from '../services/identity-link-service.mjs';
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
+import { createIdentifierService } from '../services/identifier-service.mjs';
+import { identityFlag } from '../shared/feature-flags.mjs';
 import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
 import { registerOrgMembershipLookup } from '../auth/org-authz.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
@@ -309,6 +311,12 @@ export const invitationService = createInvitationService({
   createPersona: args => identityLinkService.createPersona(args),
   vendorStaffRoles: [...VENDOR_STAFF_ROLES], vendorStaffPermissions: [...VENDOR_STAFF_PERMISSIONS],
   ensureVendor: vendorUserId => orgMembershipService.syncUser(vendorUserId),
+});
+// Identity V2 · I6a: a person proves an email or phone through Firebase.
+export const identifierService = createIdentifierService({
+  db, users, verifyFirebaseIdToken, identityLink: identityLinkService, auditLog,
+  claimInvitations: personId => invitationService.claimFor(personId),
+  linkingEnabled: () => identityFlag('V2_LINKING'),
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.
