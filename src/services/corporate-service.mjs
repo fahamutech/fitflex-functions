@@ -14,6 +14,7 @@ const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
 export function createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
   onAccountCreated = null,
+  billedByProgramme = null,
 }) {
   const now = () => new Date().toISOString();
 
@@ -393,6 +394,9 @@ export function createCorporateService({
     if (!account) return { error: 'account_not_found', status: 404 };
     const billingPeriod = period || new Date().toISOString().slice(0, 7);
     if (!/^\d{4}-\d{2}$/.test(billingPeriod)) return { error: 'invalid_period', status: 400 };
+    // Once a company's seats run as a B2B programme it is invoiced there;
+    // a seat bill as well would charge it twice.
+    if (billedByProgramme && await billedByProgramme(corporateId)) return { error: 'billed_by_programme', status: 409 };
 
     const existing = await corporateBills.findAsync(
       b => b.corporateId === corporateId && b.period === billingPeriod,

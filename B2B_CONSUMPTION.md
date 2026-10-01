@@ -187,6 +187,8 @@ Every consumption, reversal and budget pause is written to `AuditLog` (`b2b.cons
 
 ## 10. Phase 4 handoff: the settlement candidate
 
+> Since this was written: sponsor-funded gym visits are settled to gyms by the settlement engine, and what sponsors and members are charged is in [B2B_BILLING.md](B2B_BILLING.md).
+
 Phase 3 hands Phase 4 one thing: approved ledger rows. `settlementCandidate(row)` in `src/shared/b2b-programs.mjs` is the shape (admin detail returns it):
 
 ```

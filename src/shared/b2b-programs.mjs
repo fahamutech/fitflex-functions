@@ -36,7 +36,7 @@ export const PROGRAM_TRANSITIONS = Object.freeze({
 export const PROGRAM_STATUS = Object.freeze(Object.keys(PROGRAM_TRANSITIONS));
 export const CLOSED_PROGRAM_STATUSES = Object.freeze(['expired', 'cancelled']);
 // While live, only these programme fields may change (no destructive edits).
-export const LIVE_PROGRAM_FIELDS = Object.freeze(['name', 'description', 'endDate', 'budgetTzs']);
+export const LIVE_PROGRAM_FIELDS = Object.freeze(['name', 'description', 'endDate', 'budgetTzs', 'discountBps']);
 
 export const BENEFIT_TRANSITIONS = Object.freeze({
   draft: ['active', 'inactive'],
@@ -59,6 +59,10 @@ export const BENEFIT_TYPES = Object.freeze({
   marketplace: { label: 'Marketplace', fulfilledBy: 'Shop orders (ShopOrder)', providerKeys: ['vendorIds', 'productCategories'] },
   wellness_activity: { label: 'Wellness activity', fulfilledBy: 'Not in FitFlex yet (events / workshops)', providerKeys: [] },
   custom: { label: 'Custom', fulfilledBy: 'Described in the benefit terms', providerKeys: [] },
+  // Flat fee: the sponsor pays per covered person per month in advance and the
+  // member holds a real platform pass (src/services/b2b-billing-service.mjs).
+  // Every other type is charged per use from the consumption ledger.
+  sponsored_pass: { label: 'Sponsored pass (flat fee)', fulfilledBy: 'Platform pass (Subscription)', providerKeys: [], billing: 'flat_fee' },
 });
 
 export const FUNDING_TYPES = Object.freeze({
@@ -398,4 +402,35 @@ export function settlementCandidate(row) {
     verifiedAt: row.verifiedAt,
     settleable: row.status === 'approved',
   };
+}
+
+// ── Sponsor billing ─────────────────────────────────────────────────────────
+
+/** The benefit type billed as a flat fee per covered person. */
+export const FLAT_FEE_BENEFIT = 'sponsored_pass';
+
+/** A programme's fee for a tier: the tier's price less the programme's discount, in whole TZS. */
+export function discountedFeeTzs(listPriceTzs, discountBps = 0) {
+  return Math.round((listPriceTzs * (10000 - discountBps)) / 10000);
+}
+
+/** VAT contained in a VAT-inclusive total at `rateBps` (1800 = 18%). */
+export function vatContainedTzs(totalTzs, rateBps) {
+  if (!rateBps || totalTzs <= 0) return 0;
+  return Math.round((totalTzs * rateBps) / (10000 + rateBps));
+}
+
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+export const isMonth = v => typeof v === 'string' && MONTH_RE.test(v);
+
+/** An EAT month "YYYY-MM" as its first day, its last day and the first day after it. */
+export function monthBounds(period) {
+  const [y, m] = period.split('-').map(Number);
+  const next = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+  return { startDate: `${period}-01`, endDate: addDays(`${next}-01`, -1), nextStartDate: `${next}-01`, nextPeriod: next };
+}
+
+/** The instant an EAT calendar day starts (EAT is UTC+3, no daylight saving). */
+export function eatDayStart(day) {
+  return new Date(Date.parse(`${day}T00:00:00Z`) - 3 * 3_600_000);
 }
