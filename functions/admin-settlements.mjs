@@ -4,7 +4,7 @@
 // and paying are separate permission scopes (DR-09).
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { settlementService, settlementWorkflowService } from '../src/bootstrap/services.mjs';
+import { settlementService, settlementWorkflowService, settlementViewService } from '../src/bootstrap/services.mjs';
 import { periodForMonth } from '../src/services/settlement-service.mjs';
 
 const created = new Date().toISOString();
@@ -22,7 +22,7 @@ export const adminSettlementRun = {
   description: 'Admin: one settlement run with its gym statements, totals and skipped cycles.',
   onGuard: guard,
   onRequest: async (req, res) => {
-    const result = await settlementService.getRun(req.params.id);
+    const result = await settlementViewService.adminRun(req.params.id);
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result);
   }
@@ -32,7 +32,7 @@ export const adminRunSettlement = {
   created, method: 'post', path: '/admin/settlements/runs',
   description: 'Admin: calculate and store one EAT month. mode "shadow" (default) stores a run that can never be paid; "live" stores the real one (once per month, only after the month has ended). Nothing is approved or paid.',
   requestSample: { month: '2026-10', mode: 'shadow' },
-  onGuard: guard,
+  onGuard: [requireAuth('admin'), requireAcl('settlements_prepare')],
   onRequest: async (req, res) => {
     const { month, mode = 'shadow' } = req.body || {};
     const period = periodForMonth(month);
@@ -49,7 +49,7 @@ export const adminSettlementStatement = {
   description: 'Admin: one gym statement with its lines (member cycle at the gym), the check-ins behind each line, and adjustments.',
   onGuard: guard,
   onRequest: async (req, res) => {
-    const result = await settlementService.getStatement(req.params.id);
+    const result = await settlementViewService.adminStatement(req.params.id);
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result);
   }
@@ -69,7 +69,7 @@ export const adminSettlementStatements = {
   created, method: 'get', path: '/admin/settlements/statements',
   description: 'Admin: gym statements, newest period first. Optional ?status=, ?gymId=, ?mode=live|shadow (default live).',
   onGuard: guard,
-  onRequest: async (req, res) => res.json(await settlementWorkflowService.list({ status: req.query?.status, gymId: req.query?.gymId, mode: req.query?.mode || 'live', limit: req.query?.limit }))
+  onRequest: async (req, res) => res.json((await settlementWorkflowService.list({ status: req.query?.status, gymId: req.query?.gymId, mode: req.query?.mode || 'live', limit: req.query?.limit })).map(settlementViewService.withGym))
 };
 
 export const adminSubmitStatement = {

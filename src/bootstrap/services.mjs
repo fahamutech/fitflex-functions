@@ -8,6 +8,7 @@ import { createSettlementConfigService } from '../services/settlement-config-ser
 import { createSettlementService } from '../services/settlement-service.mjs';
 import { createSettlementWorkflowService } from '../services/settlement-workflow-service.mjs';
 import { createPayoutEligibility } from '../services/payout-eligibility.mjs';
+import { createSettlementViewService } from '../services/settlement-view-service.mjs';
 import { createCheckinStatusService } from '../services/checkin-status-service.mjs';
 import { createMemberManagementService } from '../services/member-management-service.mjs';
 import { createIdentityService } from '../services/identity-service.mjs';
@@ -242,6 +243,7 @@ export const financeService = createFinanceService({ gyms, checkins, invoices, u
 // Gym settlement workflow (settlement Phase 4): submit, approve, hold, pay.
 export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts });
 export const settlementWorkflowService = createSettlementWorkflowService({ payoutEligibility });
+export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId });
 export const invoiceService = createInvoiceService({
   invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
 });
