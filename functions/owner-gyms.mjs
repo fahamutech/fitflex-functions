@@ -1,6 +1,7 @@
 // Owner/operator gym management REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireGymAcl } from '../src/auth/jwt.mjs';
+import { identityFlag } from '../src/shared/feature-flags.mjs';
 import { ownerGymService, resolveRequestUser, publicUserId, checkins, users } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -151,6 +152,14 @@ export const ownerCreateTrainer = {
   description: 'Owner: create a trainer account and assign it to one of their gyms.',
   onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
   onRequest: async (req, res) => {
+    // With invitations on, an organisation no longer sets a person's credentials.
+    if (identityFlag('V2_INVITES')) {
+      return res.status(400).json({
+        error: 'credentials_not_accepted',
+        message: 'Trainers are now invited instead of being given a PIN. Update the app and use Invite.',
+        use: 'POST /orgs/gym/:gymId/invitations',
+      });
+    }
     try {
       const owner = await resolveRequestUser(req);
       if (!owner) return res.status(404).json({ error: 'user_not_found' });
