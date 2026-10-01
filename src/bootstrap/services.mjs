@@ -17,6 +17,7 @@ import { createAuthService, isConfiguredAdminEmail, approvalStatusForRole } from
 import { createIdentityLinkService } from '../services/identity-link-service.mjs';
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
+import { registerOrgMembershipLookup } from '../auth/org-authz.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
 import { createAccountService } from '../services/account-service.mjs';
 import { createOperatorService } from '../services/operator-service.mjs';
@@ -169,6 +170,11 @@ export const identityLinkService = createIdentityLinkService({ db });
 // Identity V2 · I4: OrgMembership follows every write to its sources.
 export const orgMembershipService = createOrgMembershipService({ db });
 attachOrgMembershipSync({ users, trainers, subscriptions, orgMemberships: orgMembershipService });
+
+// Identity V2 · I5: the gym memberships a persona's organisation authority comes from.
+registerOrgMembershipLookup(personaId => db('OrgMembership')
+  .where({ personaId, orgType: 'gym' }).whereIn('role', ['owner', 'staff'])
+  .select('gymId', 'role', 'status', 'aclPermissions'));
 export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
