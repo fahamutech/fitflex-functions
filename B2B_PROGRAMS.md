@@ -152,7 +152,7 @@ Nothing Corporate changed: `CorporateAccount`, `CorporateEmployee`, `corporateId
 
 A mapped company (Phase 1) can run programmes like any organisation. Its eligible population is its employees, read through with their department as the group.
 
-The existing Corporate offer can later be expressed as a programme without a destructive migration. `CorporateAccount.passTier` and `subsidyModel` become an "employer seat programme" with one `gym_access` benefit: the tier's visit allowance per month, `sponsor_percentage` at the `SUBSIDY_MODELS` share (for example `copay_70_30` → 7000 bps), and providers limited to that pass tier's `gymTiers`. Until Phase 3 consumes programmes, Corporate seat billing stays authoritative. **Don't create a second gym-access programme for a company that bills seats**, or the two would double-fund the same visits (see section 11).
+The existing Corporate offer can later be expressed as a programme without a destructive migration. `CorporateAccount.passTier` and `subsidyModel` become an "employer seat programme" with one `gym_access` benefit: the tier's visit allowance per month, `sponsor_percentage` at the `SUBSIDY_MODELS` share (for example `copay_70_30` → 7000 bps), and providers limited to that pass tier's `gymTiers`. The decision (section 11) is to make that conversion the single model. Until it's built, Corporate seat billing stays authoritative, so **don't create a gym-access programme for a company that bills seats**, or the two would fund the same visits twice.
 
 Known gap: `CorporateEmployee.userId` is still never written, so most employees can be *eligible* but can't *use* a benefit until Phase 3 links them to their FitFlex user.
 
@@ -162,13 +162,16 @@ Known gap: `CorporateEmployee.userId` is still never written, so most employees 
 
 On each check-in, booking or order: find the member's relationships (`beneficiaryRelationshipsForUser`) → programmes → benefits that match the service and provider (`providerRules`) → `evaluateEligibility` → count usage in `usageWindow` → apply `usageLimit` and `periodSponsorCapTzs` → `calculateResponsibility` → record a **usage ledger** row (benefit, beneficiary, service reference, price, sponsor share, beneficiary share, window). It also brings "remaining allowance" to `GET /b2b/me/benefits` and a mobile "My wellness benefits" screen.
 
-Open questions for Phase 3:
+Decisions for Phase 3 (product owner, 2026-10-01):
 
-- **Order:** which benefit is consumed first? This probably needs a `priority` per benefit, or cheapest-to-member first.
-- **Stacking:** can an employer benefit and an insurer benefit both fund one visit? The default should be one benefit per transaction.
-- **Fallback:** when the allowance runs out, does the visit fall back to the member's personal pass or subscription, or is it refused?
-- **Budget:** what happens when a programme's `budgetTzs` is exhausted?
-- **Corporate:** how do Corporate seat billing and a gym-access programme coexist, and when should the Corporate offer migrate to a programme?
+| Question | Decision |
+|---|---|
+| Order | A sponsor (B2B) benefit is used first, then the member's personal pass or benefits. |
+| Stacking | None. One visit is funded by **one** sponsor benefit plus the individual: employer + individual or insurer + individual, never two sponsor benefits. |
+| Tie-break | When benefits from more than one sponsor could fund the same visit, use the one that leaves the member paying least. If equal, the employer's. |
+| Fallback | Yes. When the allowance runs out, the member falls back to their personal pass. |
+| Budget | When a programme's `budgetTzs` runs out, the programme pauses. Only a FitFlex admin can resume it, with a mandatory remark saying why. (Today an organisation can resume its own paused programme; a budget pause will be the exception.) |
+| Corporate seats | **Convert seats into a programme** (there are no live corporate clients). The seat becomes a programme with a "sponsored pass" benefit: the employer funds its `SUBSIDY_MODELS` share of the monthly pass, and `CorporateBill` becomes a programme invoice in Phase 4. Phase 3 must also link each `CorporateEmployee` to their FitFlex user, because today a seat is only a roster entry and a bill: nothing grants the employee a pass or is seen by check-ins. |
 
 **Phase 4, settlement.** There's a clean boundary:
 
