@@ -6,7 +6,7 @@ import { CHECKIN_STATUS, sourceForMethod } from '../shared/checkin-status.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 import { randomUUID } from 'node:crypto';
 
-export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null }) {
+export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null, b2bFunding = null }) {
   /** T5: the user is an active trainer linked to this gym (trains there free). */
   function homeGymIds(userId) {
     const t = trainers?.find?.(r => (r.userId === userId || r.id === userId) && r.status !== 'inactive' && r.status !== 'suspended');
@@ -37,6 +37,64 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       new Date(c.timestamp) >= startUtc &&
       new Date(c.timestamp) <  endUtc
     );
+  }
+
+  /**
+   * Check in on a B2B benefit: reserve the allowance, record the visit, then
+   * confirm. Returns null when no benefit covers the visit. The member's own
+   * pass is not consulted and no pass visit is used.
+   */
+  async function performWithBenefit({ memberId, gym, method, now }) {
+    const checkinId = randomUUID();
+    let hold = null;
+    try {
+      hold = await b2bFunding.holdGymVisit({ memberId, gym, checkinId, now, method });
+    } catch (err) {
+      console.warn('[check-in] B2B benefit evaluation failed, using the member\'s own pass:', err?.message);
+      return null;
+    }
+    if (!hold) return null;
+
+    const row = {
+      id: checkinId,
+      memberId,
+      gymId: gym.id,
+      timestamp: now.toISOString(),
+      method,
+      subscriptionType: 'b2b_benefit',
+      passTier: null,
+      visitNumberInCycle: null,
+      gymTier: gym.tier,
+      creditsDeductedTzs: 0,
+      visitConsumed: false,                    // no visit taken from a personal pass
+      status: CHECKIN_STATUS.VALID,
+      subscriptionId: null,
+      businessDate: localDay(now),
+      source: sourceForMethod(method)
+    };
+    try {
+      await checkins.insertAsync(row);
+    } catch (err) {
+      await b2bFunding.cancel({ consumptionId: hold.consumption.id, reason: 'checkin_not_recorded' }).catch(() => {});
+      throw err;
+    }
+    await b2bFunding.confirm({ consumptionId: hold.consumption.id });
+    const c = hold.consumption;
+    return {
+      ok: true,
+      checkin: row,
+      visitNumberInCycle: null,
+      b2b: {
+        consumptionId: c.id,
+        organization: hold.organization ?? null,
+        program: hold.program ?? null,
+        benefit: hold.benefit ?? null,
+        grossTzs: c.grossTzs,
+        sponsorTzs: c.sponsorTzs,
+        beneficiaryTzs: c.beneficiaryTzs,
+        remaining: hold.remaining ?? null,
+      },
+    };
   }
 
   return {
@@ -80,6 +138,16 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       }
 
       const homeTrainer = isHomeGymTrainer(memberId, gymId);
+
+      // A sponsor's B2B benefit pays for the visit before the member's own
+      // pass is touched. When none applies (no benefit, wrong gym, allowance
+      // used up, anything going wrong) the normal validation below decides,
+      // exactly as it always has.
+      if (b2bFunding && !homeTrainer && validateTrainerHomeEntry({ gym, now }).ok) {
+        const funded = await performWithBenefit({ memberId, gym, method, now });
+        if (funded) return funded;
+      }
+
       const result = homeTrainer
         ? validateTrainerHomeEntry({ gym, now })
         : validateCheckIn({

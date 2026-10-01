@@ -297,3 +297,105 @@ export function evaluateEligibility({ program, benefit = null, beneficiary, day 
   if (mismatch) return no(mismatch);
   return { eligible: true, reason: null };
 }
+
+// ── Consumption (Phase 3) ───────────────────────────────────────────────────
+
+export const CONSUMPTION_STATUS = Object.freeze(['pending', 'approved', 'rejected', 'reversed', 'cancelled']);
+// Rows that hold allowance and sponsor money.
+export const LIVE_CONSUMPTION_STATUSES = Object.freeze(['pending', 'approved']);
+
+/** Existing usage events a consumption can point at, and the benefit type each can use. */
+export const USAGE_SOURCES = Object.freeze({
+  gym_checkin: { serviceType: 'gym_access', providerType: 'gym', table: 'Checkin' },
+  trainer_booking: { serviceType: 'trainer_session', providerType: 'trainer', table: 'TrainerBooking' },
+});
+
+/** Retail value of one gym visit: the gym's day rate (never a payout figure). */
+export function gymVisitValueTzs(gym) {
+  const value = Math.round(Number(gym?.ratePerDay ?? gym?.perVisitRate ?? 0));
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Does the benefit's provider rule allow this provider? `provider` is
+ * { type: 'gym', id, tier } or { type: 'trainer', id }. With several lists, a
+ * provider qualifies by matching any one of them (a listed gym OR a listed tier).
+ */
+export function providerMatches(benefit, provider) {
+  const rules = benefit.providerRules || { scope: 'all' };
+  if (rules.scope !== 'selected') return true;
+  if (provider.type === 'gym') {
+    return (rules.gymIds || []).includes(provider.id) || (!!provider.tier && (rules.gymTiers || []).includes(provider.tier));
+  }
+  if (provider.type === 'trainer') return (rules.trainerIds || []).includes(provider.id);
+  return false;
+}
+
+/**
+ * Deterministic choice between benefits that could each cover one usage.
+ * Exactly one is ever applied (no stacking): the one that leaves the member
+ * paying least; if equal, an employer's; then the older programme; then id.
+ * Each candidate is { organization, program, benefit, split }.
+ */
+export function orderCandidates(candidates) {
+  const employerFirst = c => (c.organization.organizationType === 'employer' ? 0 : 1);
+  return [...candidates].sort((a, b) =>
+    a.split.beneficiaryTzs - b.split.beneficiaryTzs
+    || employerFirst(a) - employerFirst(b)
+    || String(a.program.createdAt ?? '').localeCompare(String(b.program.createdAt ?? ''))
+    || String(a.benefit.id).localeCompare(String(b.benefit.id)));
+}
+
+/**
+ * Apply the allowance to one use, given what the ledger already holds in the
+ * benefit's window. Returns { ok, sponsorTzs, beneficiaryTzs, remaining } or
+ * { ok: false, reason }. A per-period sponsor cap covers what is left of it
+ * (the member pays the rest); a count limit is all-or-nothing.
+ */
+export function applyAllowance({ benefit, split, quantity = 1, used }) {
+  const limit = benefit.usageLimit ?? null;
+  if (limit !== null && used.quantity + quantity > limit) return { ok: false, reason: 'usage_limit_reached' };
+  let sponsorTzs = split.sponsorTzs;
+  const cap = benefit.periodSponsorCapTzs ?? null;
+  if (cap !== null) {
+    const left = Math.max(0, cap - used.sponsorTzs);
+    if (left === 0 && sponsorTzs > 0) return { ok: false, reason: 'period_sponsor_cap_reached' };
+    sponsorTzs = Math.min(sponsorTzs, left);
+  }
+  return {
+    ok: true,
+    sponsorTzs,
+    beneficiaryTzs: split.priceTzs - sponsorTzs,
+    remaining: {
+      uses: limit === null ? null : limit - used.quantity - quantity,
+      sponsorTzs: cap === null ? null : cap - used.sponsorTzs - sponsorTzs,
+    },
+  };
+}
+
+/** What Phase 4 settlement reads from an approved consumption. No payout figures. */
+export function settlementCandidate(row) {
+  return {
+    consumptionId: row.id,
+    organizationId: row.organizationId,
+    programId: row.programId,
+    benefitId: row.benefitId,
+    beneficiaryId: row.beneficiaryId,
+    userId: row.userId,
+    providerType: row.providerType,
+    providerId: row.providerId,
+    serviceType: row.serviceType,
+    sourceType: row.sourceType,
+    sourceId: row.sourceId,
+    consumedAt: row.consumedAt,
+    businessDate: row.businessDate,
+    quantity: row.quantity,
+    grossTzs: row.grossTzs,
+    sponsorTzs: row.sponsorTzs,
+    beneficiaryTzs: row.beneficiaryTzs,
+    currency: 'TZS',
+    status: row.status,
+    verifiedAt: row.verifiedAt,
+    settleable: row.status === 'approved',
+  };
+}

@@ -8,7 +8,7 @@
 //   list, tagged `fitflex`, but gyms can't message them.
 
 export const DIRECT_SUB_TYPE = 'direct_sub';
-export const FITFLEX_VISIT_TYPES = ['platform_pass', 'roaming_topup'];
+export const FITFLEX_VISIT_TYPES = ['platform_pass', 'roaming_topup', 'b2b_benefit'];
 export const EXPIRING_SOON_DAYS = 7;
 
 /** The gyms an owner (or gym staff member) works for. */
