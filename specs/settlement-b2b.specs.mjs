@@ -16,6 +16,7 @@ import { fundedBySubscription } from '../src/shared/check-in-rules.mjs';
 import { calculateMemberSettlement, VISIT_ELIGIBILITY, VISIT_OUTCOME, SETTLEABLE_SUBSCRIPTION_TYPES } from '../src/shared/settlement-engine.mjs';
 import { createSettlementConfigService } from '../src/services/settlement-config-service.mjs';
 import { createSettlementService, periodForMonth, b2bCycleKey } from '../src/services/settlement-service.mjs';
+import { createSettlementClawbackService } from '../src/services/settlement-clawback-service.mjs';
 import { ceilingSnapshot } from './fixtures/settlement-dar.mjs';
 
 const uid = (p) => `${p}_${randomUUID().slice(0, 8)}`;
@@ -275,4 +276,28 @@ test('only approved consumptions of finished months are settled; a disputed visi
   const december = await later.run({ ...periodForMonth('2026-12'), mode: 'shadow' });
   assert.ok(december.exceptions.some((x) => x.reason === 'held_visits'));
   assert.equal(december.stats.b2bCycles, 1);   // notFinal's November
+}));
+
+test('a company-funded visit voided after settlement is clawed back, with its reversed charge out of the cap', () => inRollback(async (trx) => {
+  const w = await world(trx);
+  const e = await employee(trx);
+  for (let d = 1; d <= 5; d++) await b2bVisit(trx, w, e, w.gymA, d);        // one weekly rate
+  const atB = [];
+  for (let d = 10; d <= 11; d++) atB.push(await b2bVisit(trx, w, e, w.gymB, d));   // 2 × daily
+  const { settlement, configService } = settlementFor(trx);
+  await settlement.run({ ...NOVEMBER, mode: 'live' });
+  const lineB = await trx('GymSettlementLine').where({ gymId: w.gymB, mode: 'live' }).first();
+  const lineA = await trx('GymSettlementLine').where({ gymId: w.gymA, mode: 'live' }).first();
+
+  // The visit is voided and the sponsor's charge for it reversed (what the check-in void hook does).
+  await trx('Checkin').where({ id: atB[1] }).update({ status: 'voided', statusReason: 'x', voidedAt: new Date(), voidedBy: 'voider', voidReason: 'x' });
+  await trx('B2BBenefitConsumption').where({ sourceId: atB[1] }).update({ status: 'reversed', reversedAt: new Date(), reversedBy: 'voider', reversalReason: 'check-in voided' });
+
+  const clawback = createSettlementClawbackService({ db: trx, configService, workflow: { hold: async () => ({ error: 'unused' }) }, logger: { warn() {} } });
+  const out = await clawback.sweep();
+  // Both statements are still drafts, so each takes its own difference: gym B
+  // loses one daily rate; gym A is unchanged (30,000 charged, cap 22,500, still above what the gyms earn).
+  assert.deepEqual(out.raised.map((r) => [r.gymId, r.type, r.amountTzs, r.gymSettlementId]), [[w.gymB, 'clawback', -lineB.finalTzs / 2, lineB.gymSettlementId]]);
+  assert.deepEqual([out.pending, out.skipped], [[], []]);
+  assert.equal((await trx('SettlementAdjustment').where({ gymSettlementId: lineA.gymSettlementId })).length, 0);
 }));
