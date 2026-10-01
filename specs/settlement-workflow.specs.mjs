@@ -198,7 +198,9 @@ test('the payout check gates "payable" and runs again at payment', () => inRollb
 }));
 
 test('a statement with nothing to pay can\'t be made payable', () => inRollback(async (trx) => {
-  const { id, workflow } = await setup(trx, { amounts: { preliminaryTzs: 12000, adjustmentsTzs: -20000, finalNetTzs: 0, carryForwardTzs: -8000 } });
+  const { id, workflow } = await setup(trx, { amounts: { preliminaryTzs: 12000, finalNetTzs: 12000 } });
+  const { adjustment } = await workflow.proposeAdjustment({ statementId: id, amountTzs: -20000, type: 'clawback', reason: 'Visits voided after payment', actorId: 'maker' });
+  await workflow.decideAdjustment({ id: adjustment.id, decision: 'apply', actorId: 'checker' });
   await workflow.submit({ id, actorId: 'maker' });
   await workflow.approve({ id, actorId: 'checker' });
   assert.equal((await workflow.markPayable({ id, actorId: 'payer' })).error, 'nothing_to_pay');
@@ -208,9 +210,9 @@ test('the engine\'s figures freeze when the run locks; adjustments can still cha
   const { id, workflow } = await setup(trx);
   await rejects(trx, (t) => t('GymSettlement').where({ id }).update({ preliminaryTzs: 50000, finalNetTzs: 45000 }), 'P0001');
   await rejects(trx, (t) => t('GymSettlement').where({ id }).update({ qualifyingVisitCount: 99 }), 'P0001');
-  await trx('GymSettlement').where({ id }).update({ adjustmentsTzs: -5000, finalNetTzs: 30000 });   // a draft correction
-  await workflow.submit({ id, actorId: 'maker' });
-  await rejects(trx, (t) => t('GymSettlement').where({ id }).update({ adjustmentsTzs: 0, finalNetTzs: 35000 }), 'P0001');
+  await trx('GymSettlement').where({ id }).update({ adjustmentsTzs: -5000, finalNetTzs: 30000 });   // a draft's adjustment total may change
+  await workflow.submit({ id, actorId: 'maker' });   // (submit re-totals from the applied adjustments: none here)
+  await rejects(trx, (t) => t('GymSettlement').where({ id }).update({ adjustmentsTzs: -1000, finalNetTzs: 34000 }), 'P0001');
 }));
 
 test('statements are listed by status and gym; shadow ones only when asked for', () => inRollback(async (trx) => {

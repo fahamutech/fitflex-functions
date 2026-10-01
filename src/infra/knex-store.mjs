@@ -660,7 +660,7 @@ const ALLOWED_FIELDS = {
   gym_settlements:             new Set(['id','runId','mode','gymId','periodStartDate','periodEndDate','memberCycleCount','qualifyingVisitCount','heldVisitCount','preliminaryTzs','networkAdjustmentTzs','adjustmentsTzs','carryForwardTzs','finalNetTzs','status','holdReason','destinationSnapshot','submittedBy','submittedAt','approvedBy','approvedAt','paidBy','paidAt','paymentReference','receiptUrl','voidedBy','voidedAt','voidReason','createdAt','updatedAt','heldBy','heldAt','rejectedBy','rejectedAt','rejectReason','payableAt']),
   gym_settlement_lines:        new Set(['id','runId','mode','gymSettlementId','memberCycleSettlementId','memberId','gymId','qualifyingVisitCount','heldVisitCount','bracket','rawPreliminaryTzs','preliminaryTzs','monotonicGuardApplied','networkAdjustmentTzs','finalTzs','rateCardSnapshot','calculationBasis','createdAt']),
   settlement_visits:           new Set(['id','runId','mode','memberCycleSettlementId','lineId','checkinId','gymId','businessDate','outcome','eligibility','allowanceSlot','active','createdAt']),
-  settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
+  settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt','appliedAt','rejectedBy','rejectReason']),
   partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
 };
 
