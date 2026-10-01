@@ -32,7 +32,19 @@ export function createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, notify = async () => {},
   partnerGate = OPEN_GATE,
+  onStatusChanged = null,
 }) {
+  // Side effects of a status change (B2B benefit consumption). The change has
+  // already happened; a failing hook must never undo or fail it.
+  async function statusChanged(booking, from, actorId) {
+    if (!onStatusChanged || booking.status === from) return;
+    try {
+      await onStatusChanged({ booking, from, actorId });
+    } catch (err) {
+      console.warn('[trainer-booking] onStatusChanged failed:', err?.message);
+    }
+  }
+
   async function hydrateBooking(row) {
     return {
       ...row,
@@ -241,6 +253,7 @@ export function createTrainerBookingService({
       actor: actorId, action: `trainer_booking_${status}`,
       target: prior.id, before: prior, after: updated
     });
+    await statusChanged(updated, prior.status, actorId);
     return { booking: await hydrateBooking(updated) };
   }
 
@@ -263,6 +276,7 @@ export function createTrainerBookingService({
     if (!booking) return { error: 'booking_not_found', status: 404 };
     if (booking.status !== 'confirmed') return { error: 'booking_not_confirmable', status: 409 };
     const updated = await trainerBookings.updateByIdAsync(booking.id, { status: 'completed', updatedAt: new Date().toISOString() });
+    await statusChanged(updated, booking.status, userId);
     return { booking: await hydrateBooking(updated) };
   }
 

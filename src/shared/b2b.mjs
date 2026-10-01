@@ -53,15 +53,16 @@ export const PERMISSIONS = Object.freeze([
   'beneficiaries.manage',
   'programs.read',
   'programs.manage',
+  'usage.read',
 ]);
 
 export const ROLE_PERMISSIONS = Object.freeze({
   owner: PERMISSIONS,
   admin: PERMISSIONS,
-  manager: ['organization.read', 'users.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'programs.manage'],
+  manager: ['organization.read', 'users.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'programs.manage', 'usage.read'],
   hr: ['organization.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read'],
-  finance: ['organization.read', 'programs.read'],
-  analyst: ['organization.read', 'beneficiaries.read', 'programs.read'],
+  finance: ['organization.read', 'programs.read', 'usage.read'],
+  analyst: ['organization.read', 'beneficiaries.read', 'programs.read', 'usage.read'],
   viewer: ['organization.read', 'programs.read'],
 });
 export const ORGANIZATION_USER_ROLES = Object.freeze(Object.keys(ROLE_PERMISSIONS));

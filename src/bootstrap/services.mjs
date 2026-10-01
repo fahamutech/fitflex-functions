@@ -47,6 +47,7 @@ import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
 import { createB2BService } from '../services/b2b-service.mjs';
 import { createB2BProgramService } from '../services/b2b-program-service.mjs';
+import { createB2BConsumptionService } from '../services/b2b-consumption-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -116,6 +117,13 @@ export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
+  // A completed session may use a B2B trainer benefit; un-completing it gives the benefit back.
+  // b2bConsumptionService is defined below; this only runs later.
+  onStatusChanged: ({ booking, from, actorId }) => (booking.status === 'completed'
+    ? b2bConsumptionService.consumeTrainerSession({ booking })
+    : from === 'completed'
+      ? b2bConsumptionService.releaseForSource({ sourceType: 'trainer_booking', sourceId: booking.id, reason: `booking ${booking.status}`, actorId })
+      : null),
 });
 export const trainerEngagementService = createTrainerEngagementService({
   trainerEngagements, trainers, users, trainerService,
@@ -142,6 +150,15 @@ export const b2bService = createB2BService({
 // B2B Phase 2: wellness programmes and benefit rules (no usage counting or payouts).
 export const b2bProgramService = createB2BProgramService({
   programs: b2bPrograms, benefits: b2bBenefits, gyms, trainers, users, challenges, auditLog, b2bService,
+  // b2bConsumptionService is defined below; these only run later, per request.
+  usage: {
+    allowanceFor: args => b2bConsumptionService.allowanceFor(args),
+    sponsorSpentForProgram: id => b2bConsumptionService.sponsorSpentForProgram(id),
+  },
+});
+// B2B Phase 3: benefit evaluation and the consumption ledger (no payouts).
+export const b2bConsumptionService = createB2BConsumptionService({
+  db, programs: b2bPrograms, benefits: b2bBenefits, users, gyms, trainers, checkins, trainerBookings, auditLog, b2bService,
 });
 
 export const identityLinkService = createIdentityLinkService({ db });
@@ -156,10 +173,20 @@ export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
 });
 
-export const checkInService = createCheckInService({ users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig });
+export const checkInService = createCheckInService({
+  users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
+  // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
+  b2bFunding: b2bConsumptionService,
+});
 // Gym settlement configuration (settlement Phase 2): not used by any payout flow yet.
 export const settlementConfigService = createSettlementConfigService();
-export const checkinStatusService = createCheckinStatusService({ checkins, auditLog });
+export const checkinStatusService = createCheckinStatusService({
+  checkins, auditLog,
+  // Voiding a visit gives its B2B allowance back.
+  onVoided: ({ checkin, reason, actorId }) => b2bConsumptionService.releaseForSource({
+    sourceType: 'gym_checkin', sourceId: checkin.id, reason: `check-in voided: ${reason}`, actorId,
+  }),
+});
 // Lifecycle events for gym automations. automationService is defined further
 // down; these only run later, and never throw.
 const lifecycle = {
@@ -172,6 +199,7 @@ export const memberManagement = createMemberManagementService({
 });
 export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
+  b2bFunding: b2bConsumptionService,
 });
 
 export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate });

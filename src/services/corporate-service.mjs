@@ -280,6 +280,29 @@ export function createCorporateService({
     return { employee: updated };
   }
 
+  /**
+   * Link an employee to their FitFlex member account (or unlink with a null
+   * userId). The link is what lets the employee use the company's benefits.
+   */
+  async function linkEmployeeUser({ corporateId, employeeId, userId, actorId }) {
+    const employee = await corporateEmployees.findByIdAsync(employeeId);
+    if (!employee || employee.corporateId !== corporateId) return { error: 'employee_not_found', status: 404 };
+    if (userId === null || userId === undefined || userId === '') {
+      const updated = await corporateEmployees.updateByIdAsync(employeeId, { userId: null, updatedAt: now() });
+      await audit({ actor: actorId, action: 'corporate.staff.unlink', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId: null } });
+      return { employee: (({ pinHash, ...rest }) => rest)(updated) };
+    }
+    const user = await users.findByIdAsync(userId);
+    if (!user) return { error: 'user_not_found', status: 404 };
+    if (user.userType !== 'member') return { error: 'user_must_be_member', status: 400 };
+    const taken = (await corporateEmployees.filterByColumnAsync('userId', userId))
+      .find(e => e.corporateId === corporateId && e.id !== employeeId && e.status !== 'exited');
+    if (taken) return { error: 'user_already_linked', status: 409, employeeId: taken.id };
+    const updated = await corporateEmployees.updateByIdAsync(employeeId, { userId, updatedAt: now() });
+    await audit({ actor: actorId, action: 'corporate.staff.link', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId } });
+    return { employee: (({ pinHash, ...rest }) => rest)(updated) };
+  }
+
   async function listStaff({ corporateId, search, department, status }) {
     const rows = await corporateEmployees.filterByColumnAsync('corporateId', corporateId);
     const needle = search?.trim().toLowerCase();
@@ -494,7 +517,7 @@ export function createCorporateService({
 
   return {
     reference, onboard, setStatus, update, adminList, verifyDomain,
-    provisionStaff, bulkProvisionStaff, setEmployeeStatus, listStaff,
+    provisionStaff, bulkProvisionStaff, setEmployeeStatus, listStaff, linkEmployeeUser,
     dashboard, generateBill, listBills, markBillPaid, resolveActorAccount,
     listHrUsers, createHrUser, setHrUserStatus,
   };

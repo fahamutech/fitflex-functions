@@ -156,7 +156,9 @@ The existing Corporate offer can later be expressed as a programme without a des
 
 Known gap: `CorporateEmployee.userId` is still never written, so most employees can be *eligible* but can't *use* a benefit until Phase 3 links them to their FitFlex user.
 
-## 11. Phase 3 and Phase 4 considerations (deliberately not built)
+## 11. Phase 3 and Phase 4 considerations
+
+Phase 3 is now built: see [B2B_CONSUMPTION.md](B2B_CONSUMPTION.md). The notes below are the original plan and the decisions it followed.
 
 **Phase 3, consumption and usage engine.**
 
