@@ -7,7 +7,7 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService, b2bProgramService } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService, b2bConsumptionService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -320,5 +320,53 @@ export const setB2BBenefitStatus = {
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => programs.setBenefitStatus({
     access, programId: req.params.programId, benefitId: req.params.benefitId, status: req.body?.status, actorId: req.user.sub,
+  })),
+};
+
+// ── Benefit usage (Phase 3) ────────────────────────────────────────────────
+// Benefits are consumed by the existing services (gym check-in, trainer
+// booking completion), never through a route: no caller can name a benefit,
+// an amount or a usage count. These routes read the ledger and correct it.
+
+const usage = b2bConsumptionService;
+
+export const adminListB2BConsumptions = {
+  created, method: 'get', path: '/admin/b2b/consumptions',
+  description: 'Admin: the benefit consumption ledger, newest first. Query: ?organizationId=&programId=&benefitId=&beneficiaryId=&userId=&providerType=&providerId=&serviceType=&sourceType=&sourceId=&status=&from=&to=&limit=&cursor=. Returns { items, total, nextCursor, totals }.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await usage.adminList({ query: req.query || {} })),
+};
+
+export const adminGetB2BConsumption = {
+  created, method: 'get', path: '/admin/b2b/consumptions/:consumptionId',
+  description: 'Admin: one consumption with the rules in force, its source usage event (check-in or booking) and the settlement candidate.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await usage.adminGet({ consumptionId: req.params.consumptionId })),
+};
+
+export const adminReverseB2BConsumption = {
+  created, method: 'post', path: '/admin/b2b/consumptions/:consumptionId/reverse',
+  description: 'Admin: reverse an approved consumption. The row is kept and marked reversed with who, when and why; the allowance and budget get it back.',
+  requestSample: { reason: 'Checked in at the wrong gym' },
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await usage.reverse({
+    consumptionId: req.params.consumptionId, reason: req.body?.reason, actorId: req.user.sub,
+  })),
+};
+
+export const adminEvaluateB2BUsage = {
+  created, method: 'post', path: '/admin/b2b/evaluate-usage',
+  description: 'Admin: dry run — which benefit would cover this member at this gym or trainer right now, and why the others would not. Writes nothing.',
+  requestSample: { userId: 'usr_…', serviceType: 'gym_access', providerId: 'gym_…' },
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await usage.adminEvaluate({ body: req.body || {} })),
+};
+
+export const getB2BProgramUsage = {
+  created, method: 'get', path: '/b2b/organizations/:id/programs/:programId/usage',
+  description: 'Usage of a programme (usage.read): totals, budget, and breakdowns by benefit, provider and beneficiary. Aggregates only. Query: ?from=&to= (EAT days).',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => usage.programUsage({
+    access, programId: req.params.programId, query: req.query || {},
   })),
 };
