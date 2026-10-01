@@ -9,6 +9,7 @@ import { createSettlementService } from '../services/settlement-service.mjs';
 import { createSettlementWorkflowService } from '../services/settlement-workflow-service.mjs';
 import { createPayoutEligibility } from '../services/payout-eligibility.mjs';
 import { createSettlementViewService } from '../services/settlement-view-service.mjs';
+import { createSettlementClawbackService } from '../services/settlement-clawback-service.mjs';
 import { createCheckinStatusService } from '../services/checkin-status-service.mjs';
 import { createMemberManagementService } from '../services/member-management-service.mjs';
 import { createIdentityService } from '../services/identity-service.mjs';
@@ -202,9 +203,13 @@ export const settlementService = createSettlementService({ configService: settle
 export const checkinStatusService = createCheckinStatusService({
   checkins, auditLog,
   // Voiding a visit gives its B2B allowance back.
-  onVoided: ({ checkin, reason, actorId }) => b2bConsumptionService.releaseForSource({
-    sourceType: 'gym_checkin', sourceId: checkin.id, reason: `check-in voided: ${reason}`, actorId,
-  }),
+  onVoided: async ({ checkin, reason, actorId }) => {
+    await b2bConsumptionService.releaseForSource({
+      sourceType: 'gym_checkin', sourceId: checkin.id, reason: `check-in voided: ${reason}`, actorId,
+    });
+    // If the visit was already settled, raise what the gyms were overpaid.
+    await settlementClawbackService.sweepQuietly({ checkinId: checkin.id, actorId });
+  },
 });
 // Lifecycle events for gym automations. automationService is defined further
 // down; these only run later, and never throw.
@@ -244,6 +249,9 @@ export const financeService = createFinanceService({ gyms, checkins, invoices, u
 export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts });
 export const settlementWorkflowService = createSettlementWorkflowService({ payoutEligibility });
 export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId });
+// Recalculates a settled member cycle when one of its check-ins is voided and
+// raises each gym's difference as an adjustment (settlement Phase 6).
+export const settlementClawbackService = createSettlementClawbackService({ configService: settlementConfigService, workflow: settlementWorkflowService });
 export const invoiceService = createInvoiceService({
   invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
 });

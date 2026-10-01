@@ -5,6 +5,8 @@
 //     ▲                  │                      ▲                     │
 //     └──── reject ──────┘                      └────── hold ─────────┘
 //
+//   draft | submitted | approved ──void──► voided   (final: never paid)
+//
 // Four things stay separate (the spec's N): calculated (the run), approved
 // (a second person agreed), payable (the payout check passed and nothing
 // holds it) and paid (the money went, with a reference).
@@ -26,6 +28,12 @@
 // carryForwardTzs, and is pulled into the gym's next statement as a
 // carry_forward adjustment when that one is submitted — once.
 //
+// Voiding cancels an unpaid statement for good, with a reason. Its
+// adjustments are cancelled with it, so a carried-forward shortfall or a
+// clawback that sat on it is raised again on the gym's next statement. Its
+// visits stay settled: they are never paid by a later run. To pay later
+// rather than never, hold the statement instead.
+//
 // Each step is one transaction with the row locked, and is audited.
 import { randomUUID } from 'node:crypto';
 import { db as defaultDb } from '../infra/knex-store.mjs';
@@ -34,6 +42,7 @@ import { statementNet } from '../shared/settlement-rows.mjs';
 const fail = (error, status = 409, extra = {}) => ({ error, status, ...extra });
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
 const HOLDABLE = ['draft', 'submitted', 'approved', 'payable'];
+const VOIDABLE = ['draft', 'submitted', 'approved'];
 const MANUAL_ADJUSTMENT_TYPES = ['correction', 'clawback', 'manual'];
 const CARRY_FORWARD_ACTOR = 'system:carry-forward';
 
@@ -59,7 +68,7 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
     });
   }
 
-  const wrongStatus = (statement, expected) => fail('invalid_status', 409, { status: statement.status, expected });
+  const wrongStatus = (statement, expected) => fail('invalid_status', 409, { currentStatus: statement.status, expected });
 
   /** Recompute a draft statement's adjustment total and net from its applied adjustments. */
   async function retotal(q, statement) {
@@ -167,6 +176,24 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
     };
   }, opts);
 
+  /**
+   * draft | submitted | approved → voided: the statement will never be paid.
+   * A payable statement has to be put on hold first (back to approved); a
+   * paid one is final.
+   */
+  const voidStatement = ({ id, reason, actorId }, opts) => step(id, 'voided', actorId, async (s, q) => {
+    if (!VOIDABLE.includes(s.status)) return wrongStatus(s, VOIDABLE.join('|'));
+    if (!text(reason)) return fail('reason_required', 400);
+    const at = now();
+    const cancelledAdjustments = await q('SettlementAdjustment').where({ gymSettlementId: id }).whereIn('status', ['proposed', 'applied'])
+      .update({ status: 'voided', updatedAt: at });
+    return {
+      patch: { status: 'voided', voidedBy: actorId, voidedAt: at, voidReason: text(reason) },
+      audit: { reason: text(reason), finalNetTzs: s.finalNetTzs, cancelledAdjustments },
+      extra: { cancelledAdjustments },
+    };
+  }, opts);
+
   // ── adjustments (DR-20) ─────────────────────────────────────────────────────
 
   /** Propose a signed correction or clawback on a draft statement. */
@@ -200,7 +227,7 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
     return (trx || db).transaction(async (q) => {
       const adjustment = await q('SettlementAdjustment').where({ id }).forUpdate().first();
       if (!adjustment) return fail('adjustment_not_found', 404);
-      if (adjustment.status !== 'proposed') return fail('invalid_status', 409, { status: adjustment.status, expected: 'proposed' });
+      if (adjustment.status !== 'proposed') return fail('invalid_status', 409, { currentStatus: adjustment.status, expected: 'proposed' });
       const statement = await q('GymSettlement').where({ id: adjustment.gymSettlementId }).forUpdate().first();
       const at = now();
       if (decision === 'reject') {
@@ -229,5 +256,5 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
     return query;
   }
 
-  return { submit, reject, approve, hold, release, markPayable, pay, list, proposeAdjustment, decideAdjustment };
+  return { submit, reject, approve, hold, release, markPayable, pay, voidStatement, list, proposeAdjustment, decideAdjustment };
 }

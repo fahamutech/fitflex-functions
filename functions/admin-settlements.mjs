@@ -4,7 +4,7 @@
 // and paying are separate permission scopes (DR-09).
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { settlementService, settlementWorkflowService, settlementViewService } from '../src/bootstrap/services.mjs';
+import { settlementService, settlementWorkflowService, settlementViewService, settlementClawbackService } from '../src/bootstrap/services.mjs';
 import { periodForMonth } from '../src/services/settlement-service.mjs';
 
 const created = new Date().toISOString();
@@ -40,6 +40,8 @@ export const adminRunSettlement = {
     const result = await settlementService.run({ ...period, mode, actorId: req.user?.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
     if (result.skipped) return res.status(409).json({ error: 'settlement_run_in_progress' });
+    // New draft statements can take clawbacks that were waiting for one.
+    if (mode === 'live' && !result.alreadyRun) await settlementClawbackService.sweepQuietly({ actorId: req.user?.sub });
     res.status(result.alreadyRun ? 200 : 201).json(result);
   }
 };
@@ -84,7 +86,12 @@ export const adminRejectStatement = {
   description: 'Admin: send a submitted statement back to draft, with a reason.',
   requestSample: { reason: 'Visit count looks wrong for 12 Oct' },
   onGuard: [requireAuth('admin'), requireAcl('settlements_approve')],
-  onRequest: async (req, res) => respond(res, await settlementWorkflowService.reject({ id: req.params.id, reason: req.body?.reason, actorId: req.user?.sub }))
+  onRequest: async (req, res) => {
+    const result = await settlementWorkflowService.reject({ id: req.params.id, reason: req.body?.reason, actorId: req.user?.sub });
+    // Back in draft, the statement can take a clawback that was waiting.
+    if (!result.error) await settlementClawbackService.sweepQuietly({ actorId: req.user?.sub });
+    respond(res, result);
+  }
 };
 
 export const adminApproveStatement = {
@@ -124,6 +131,18 @@ export const adminPayStatement = {
   onRequest: async (req, res) => respond(res, await settlementWorkflowService.pay({ id: req.params.id, paymentReference: req.body?.paymentReference, receiptUrl: req.body?.receiptUrl, actorId: req.user?.sub }))
 };
 
+export const adminVoidStatement = {
+  created, method: 'post', path: '/admin/settlements/statements/:id/void',
+  description: 'Admin: void a draft, submitted or approved statement, with a reason. It will never be paid and its visits are not settled again; its adjustments are cancelled, and a carried-forward shortfall or clawback among them is raised again on the gym\'s next statement. A payable statement must be put on hold first; a paid one is final. To pay later instead, use hold.',
+  requestSample: { reason: 'Gym left the network; nothing is owed for October' },
+  onGuard: [requireAuth('admin'), requireAcl('settlements_approve')],
+  onRequest: async (req, res) => {
+    const result = await settlementWorkflowService.voidStatement({ id: req.params.id, reason: req.body?.reason, actorId: req.user?.sub });
+    if (!result.error) await settlementClawbackService.sweepQuietly({ actorId: req.user?.sub });
+    respond(res, result);
+  }
+};
+
 // ── adjustments (DR-20) ─────────────────────────────────────────────────────
 
 export const adminProposeAdjustment = {
@@ -152,4 +171,22 @@ export const adminRejectAdjustment = {
   requestSample: { reason: 'Already corrected last month' },
   onGuard: [requireAuth('admin'), requireAcl('settlements_approve')],
   onRequest: async (req, res) => respond(res, await settlementWorkflowService.decideAdjustment({ id: req.params.id, decision: 'reject', reason: req.body?.reason, actorId: req.user?.sub }))
+};
+
+// ── clawbacks after a voided check-in (DR-20) ───────────────────────────────
+
+const withGyms = (r) => ({ ...r, raised: (r.raised || []).map(settlementViewService.withGym), pending: (r.pending || []).map(settlementViewService.withGym) });
+
+export const adminSettlementClawbacks = {
+  created, method: 'get', path: '/admin/settlements/clawbacks',
+  description: 'Admin: what a sweep would do now, without doing it. "pending" are differences from voided check-ins whose gym has no draft statement to take them yet; "raised" would be proposed on a draft; "skipped" are member cycles that need a person (a disputed visit, or amounts that can no longer be reproduced).',
+  onGuard: guard,
+  onRequest: async (req, res) => res.json(withGyms(await settlementClawbackService.sweep({ dryRun: true })))
+};
+
+export const adminSweepSettlementClawbacks = {
+  created, method: 'post', path: '/admin/settlements/clawbacks/sweep',
+  description: 'Admin: recalculate settled member cycles that have a check-in voided since, and propose each gym\'s difference on its draft statement. Runs by itself when a check-in is voided, after each live run, and when a statement is rejected or voided; safe to repeat.',
+  onGuard: [requireAuth('admin'), requireAcl('settlements_prepare')],
+  onRequest: async (req, res) => res.json(withGyms(await settlementClawbackService.sweep({ actorId: req.user?.sub })))
 };
