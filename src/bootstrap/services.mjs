@@ -16,13 +16,14 @@ import { createSettingsService } from '../services/settings-service.mjs';
 import { createAuthService, isConfiguredAdminEmail, approvalStatusForRole } from '../services/auth-service.mjs';
 import { createIdentityLinkService } from '../services/identity-link-service.mjs';
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
+import { createInvitationService } from '../services/invitation-service.mjs';
 import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
 import { registerOrgMembershipLookup } from '../auth/org-authz.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
 import { createAccountService } from '../services/account-service.mjs';
 import { createOperatorService } from '../services/operator-service.mjs';
 import { createOwnerGymService } from '../services/owner-gym-service.mjs';
-import { createOwnerStaffService } from '../services/owner-staff-service.mjs';
+import { createOwnerStaffService, GYM_STAFF_ACL_SCOPES } from '../services/owner-staff-service.mjs';
 import { createAdminMemberService } from '../services/admin-member-service.mjs';
 import { createAdminPaymentService } from '../services/admin-payment-service.mjs';
 import { createAdminOwnerService } from '../services/admin-owner-service.mjs';
@@ -298,6 +299,14 @@ export const notificationService = createNotificationService({
   // deliveryService is defined further down; these only run later.
   onOpened: (rows) => deliveryService.onOpened(rows),
   onClicked: (row, opts) => deliveryService.onClicked(row, opts),
+});
+
+// Identity V2 · I6: invitations (gym staff and trainers; no credentials set by organisations).
+export const invitationService = createInvitationService({
+  db, users, trainers, auditLog, ownerStaffAclScopes: GYM_STAFF_ACL_SCOPES,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  activateDirectMembership: args => memberManagement.activateDirectMembership(args),
+  createPersona: args => identityLinkService.createPersona(args),
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.
