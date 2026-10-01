@@ -46,6 +46,7 @@ import { createNotificationService } from '../services/notification-service.mjs'
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
 import { createB2BService } from '../services/b2b-service.mjs';
+import { createB2BProgramService } from '../services/b2b-program-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -69,7 +70,7 @@ import {
   marketplaceEnquiries, marketplaceNotifications, productReviews,
   gymReviews, trainerReviews,
   corporateAccounts, corporateEmployees, corporateBills,
-  b2bOrganizations, b2bOrganizationUsers, b2bBeneficiaries,
+  b2bOrganizations, b2bOrganizationUsers, b2bBeneficiaries, b2bPrograms, b2bBenefits,
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
   follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
@@ -137,6 +138,10 @@ export const b2bService = createB2BService({
   users, corporateAccounts, corporateEmployees, partnerKycCases,
   organizations: b2bOrganizations, organizationUsers: b2bOrganizationUsers, beneficiaries: b2bBeneficiaries,
   auditLog,
+});
+// B2B Phase 2: wellness programmes and benefit rules (no usage counting or payouts).
+export const b2bProgramService = createB2BProgramService({
+  programs: b2bPrograms, benefits: b2bBenefits, gyms, trainers, users, challenges, auditLog, b2bService,
 });
 
 export const identityLinkService = createIdentityLinkService({ db });

@@ -544,13 +544,35 @@ export function createB2BService({
     return rows.map(r => ({ ...r, displayName: nameOf.get(r.userId) ?? null, source: 'b2b', readOnly: false }));
   }
 
+  /** Every beneficiary of an organisation view: native rows plus a mapped company's employees. */
+  async function allBeneficiaries(org) {
+    const views = await nativeViews(await beneficiaries.filterByColumnAsync('organizationId', org.id));
+    if (org.legacyCorporateId) {
+      const staff = await corporateEmployees.filterByColumnAsync('corporateId', org.legacyCorporateId);
+      views.push(...staff.map(e => employeeView(e, org.id)));
+    }
+    return views;
+  }
+
+  /** A member's beneficiary relationships across organisations (native and corporate), with their organisation views. */
+  async function beneficiaryRelationshipsForUser(userId) {
+    const native = await beneficiaries.filterByColumnAsync('userId', userId);
+    const staff = await corporateEmployees.filterByColumnAsync('userId', userId);
+    const mapped = staff.length ? await organizations.filterByColumnInAsync('legacyCorporateId', staff.map(e => e.corporateId)) : [];
+    const orgIds = [...new Set([...native.map(b => b.organizationId), ...mapped.map(o => o.id)])];
+    const orgs = new Map((await present(orgIds.length ? await organizations.filterByColumnInAsync('id', orgIds) : [])).map(o => [o.id, o]));
+    const orgForCorporate = new Map(mapped.map(o => [o.legacyCorporateId, o.id]));
+    const out = (await nativeViews(native)).map(b => ({ organization: orgs.get(b.organizationId), beneficiary: b }));
+    for (const e of staff) {
+      const orgId = orgForCorporate.get(e.corporateId);
+      if (orgId) out.push({ organization: orgs.get(orgId), beneficiary: employeeView(e, orgId) });
+    }
+    return out.filter(r => r.organization);
+  }
+
   async function listBeneficiaries({ access, query = {} }) {
     if (!can(access, 'beneficiaries.read')) return forbidden('beneficiaries.read');
-    const views = await nativeViews(await beneficiaries.filterByColumnAsync('organizationId', access.org.id));
-    if (access.org.legacyCorporateId) {
-      const staff = await corporateEmployees.filterByColumnAsync('corporateId', access.org.legacyCorporateId);
-      views.push(...staff.map(e => employeeView(e, access.org.id)));
-    }
+    const views = await allBeneficiaries(access.org);
     const needle = text(query.search)?.toLowerCase();
     const filtered = views
       .filter(b => (query.status ? b.status === query.status : true))
@@ -661,6 +683,7 @@ export function createB2BService({
     ensureOrganizationForCorporate, syncCorporateOrganizations, organizationForCorporate,
     resolveAccess, listMyOrganizations,
     listOrganizationUsers, addOrganizationUser, updateOrganizationUser, removeOrganizationUser,
+    allBeneficiaries, beneficiaryRelationshipsForUser,
     listBeneficiaries, getBeneficiary, enrollBeneficiary, setBeneficiaryStatus, deactivateBeneficiary,
   };
 }

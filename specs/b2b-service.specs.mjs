@@ -192,7 +192,7 @@ test('permission enforcement: roles, no escalation, owners protect owners, last 
   await s.b2b.addOrganizationUser({ access: admin, body: { userId: 'viewer_a', role: 'viewer' } });
 
   const viewer = await access(s, orgId, { userId: 'viewer_a', userType: 'member' });
-  assert.deepEqual(viewer.permissions, ['organization.read']);
+  assert.deepEqual(viewer.permissions, ['organization.read', 'programs.read']);
   assert.deepEqual((await s.b2b.listOrganizationUsers({ access: viewer })).requiredPermission, 'users.read');
   assert.equal((await s.b2b.listBeneficiaries({ access: viewer })).status, 403);
 
@@ -223,7 +223,7 @@ test('pending organisations are read-only for their users; suspended ones are cl
   const { id } = (await s.b2b.createOrganization({ body: insurer })).organization;
   await s.b2b.addOrganizationUser({ access: await access(s, id), body: { userId: 'owner_a', role: 'owner' } });
   const pending = await access(s, id, { userId: 'owner_a', userType: 'member' });
-  assert.deepEqual(pending.permissions, ['organization.read', 'users.read', 'beneficiaries.read']);
+  assert.deepEqual(pending.permissions, ['organization.read', 'users.read', 'beneficiaries.read', 'programs.read']);
   await s.b2b.setOrganizationStatus({ organizationId: id, status: 'active' });
   await s.b2b.setOrganizationStatus({ organizationId: id, status: 'suspended' });
   const closed = await access(s, id, { userId: 'owner_a', userType: 'member' });

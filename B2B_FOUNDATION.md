@@ -112,9 +112,9 @@ All B2B list endpoints return `{ items, total, nextCursor }`, taking `limit` (ma
 
 `B2BOrganizationUser` and `B2BBeneficiary` are organisation relationships, which is the role Identity V2 plans for `OrgMembership` in phase I4. They key on `User.id` like every existing foreign key. When I4 lands, they can either become `OrgMembership` rows (`orgType = 'b2b'`) or reference `Person` through `User.personId`. A member's B2B relationships are always separate rows and never change their persona, so one member can be an employee of A, a policyholder of B and a personal subscriber at the same time.
 
-## 7. Next phase: wellness programmes
+## 7. Wellness programmes
 
-Planned, not built:
+Built in Phase 2: see [B2B_PROGRAMS.md](B2B_PROGRAMS.md). The original sketch:
 
 ```
 B2BOrganization ──< WellnessProgram ──< Benefit (sponsored / subsidised access, challenge, service)
