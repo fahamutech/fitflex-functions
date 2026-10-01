@@ -97,6 +97,15 @@ export const myPersonas = {
   onRequest: async (req, res) => sendResult(res, await authService.myPersonas({ claims: req.user })),
 };
 
+export const myMemberships = {
+  created, method: 'get', path: '/me/memberships',
+  description: 'Identity V2: the caller\'s organisation relationships across gyms, vendors and companies (?includeEnded=1 for history). 404 unless V2_ORG_WRITE is on.',
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => sendResult(res, await authService.myMemberships({
+    claims: req.user, includeEnded: ['1', 'true'].includes(String(req.query?.includeEnded ?? '')),
+  })),
+};
+
 export const addMyPersona = {
   created, method: 'post', path: '/me/personas',
   description: 'Identity V2: add a persona (member, trainer, gym_operator, vendor) to the caller\'s own Person. 404 unless V2_ADD_PERSONA is on.',

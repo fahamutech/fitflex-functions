@@ -48,7 +48,7 @@ export const ADDABLE_PERSONA_TYPES = ['member', 'trainer', 'gym_operator', 'vend
 export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
-  identityLink = null, auditLog = null,
+  identityLink = null, auditLog = null, orgMemberships = null,
 }) {
   /** JWT claims for a persona row. `sub` stays the persona (User) id. */
   function sessionClaims(user) {
@@ -469,5 +469,16 @@ export function createAuthService({
     return { created: true, persona: payload.personas.find(p => p.id === result.row.id), ...payload };
   }
 
-  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona };
+  /**
+   * Identity V2 · I4: every organisation relationship of the caller's Person
+   * (gyms and vendors from OrgMembership, corporate from the B2B tables).
+   */
+  async function myMemberships({ claims, includeEnded = false }) {
+    if (!identityFlag('V2_ORG_WRITE') || !orgMemberships) return { error: 'not_found', status: 404 };
+    const user = await users.findByIdAsync(claims.sub);
+    if (!user?.personId) return { error: 'user_not_found', status: 404 };
+    return { memberships: await orgMemberships.membershipsOfPerson(user.personId, { includeEnded }) };
+  }
+
+  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships };
 }
