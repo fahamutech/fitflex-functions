@@ -16,11 +16,16 @@
 //                only on acceptance and starts on the payment date (O2). If a
 //                paid invitation expires unaccepted it is held for the gym to
 //                re-issue or refund — nothing is refunded automatically.
+//   vendor staff (slice C) a vendor_staff persona for that Person at the
+//                inviting vendor, with the invitation's role and permissions.
+//                Only the vendor (owner) invites.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 
 const OPEN = ['pending', 'claimed'];
-const INVITABLE_ROLES = { gym: ['staff', 'trainer', 'member'] };
+const INVITABLE_ROLES = { gym: ['staff', 'trainer', 'member'], vendor: ['staff'] };
+// The persona type that owns each kind of organisation.
+const OWNER_TYPE = { gym: 'gym_operator', vendor: 'vendor' };
 // Staff and trainers are the owner's to invite; staff with the members scope may invite members.
 const OWNER_ONLY_ROLES = ['staff', 'trainer'];
 const toDate = v => { const d = new Date(v); return Number.isNaN(+d) ? null : d; };
@@ -66,22 +71,31 @@ export function maskName(name) {
 export function createInvitationService({
   db, users, trainers, notify = null, auditLog = null, ownerStaffAclScopes = [],
   activateDirectMembership = null, createPersona = null,
+  vendorStaffRoles = [], vendorStaffPermissions = [], ensureVendor = null,
 }) {
   const gymOf = gymId => (gymId ? db('Gym').where({ id: gymId }).first('id', 'name') : null);
+  // An invitation or membership points at its organisation through gymId or vendorId.
+  const orgRef = (orgType, orgId) => ({ orgType, [orgType === 'vendor' ? 'vendorId' : 'gymId']: orgId });
+  const orgIdOf = inv => inv.gymId ?? inv.vendorId;
+  const orgOf = inv => (inv.orgType === 'vendor'
+    ? db('Vendor').where({ id: inv.vendorId }).first('id', 'name')
+    : gymOf(inv.gymId));
+  const isOwner = (actor, orgType) => actor.userType === OWNER_TYPE[orgType];
   const audit = async (actor, action, target, after) => {
     if (!auditLog) return;
     await auditLog.insertAsync({ id: randomUUID(), at: new Date().toISOString(), actor, action, target, before: null, after });
   };
   const view = (inv, extra = {}) => ({
-    id: inv.id, orgType: inv.orgType, orgId: inv.gymId ?? inv.vendorId, role: inv.role, status: inv.status,
+    id: inv.id, orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role, status: inv.status,
     identifierType: inv.identifierType, aclPermissions: inv.aclPermissions || [], message: inv.message ?? null,
     expiresAt: inv.expiresAt, createdAt: inv.createdAt, respondedAt: inv.respondedAt ?? null,
     ...(inv.payload?.plan ? { plan: inv.payload.plan, paidAmountTzs: inv.payload.payment?.amountTzs ?? null } : {}),
+    ...(inv.payload?.vendorRole ? { vendorRole: inv.payload.vendorRole } : {}),
     ...extra,
   });
   /** A paid invitation that lapsed unaccepted, not yet re-issued or refunded by the gym. */
   const needsResolution = inv => inv.status === 'expired' && Boolean(inv.payload?.payment) && !inv.payload?.resolution;
-  const canManage = (actor, inv) => actor.userType === 'gym_operator' || inv.role === 'member';
+  const canManage = (actor, inv) => isOwner(actor, inv.orgType) || inv.role === 'member';
 
   /** Validated plan + desk payment for a member invitation, or { error }. */
   function memberPayload(body) {
@@ -99,6 +113,18 @@ export function createInvitationService({
         ...(amount ? { payment: { amountTzs: amount, paidAt: start.toISOString() } } : {}),
       },
     };
+  }
+
+  /** A vendor staff invitation carries the staff role and its permissions, as the legacy form did. */
+  function vendorStaffAccess(body) {
+    const vendorRole = String(body?.vendorRole || '');
+    if (!vendorStaffRoles.includes(vendorRole)) return { error: 'invalid_staff_role', status: 400, allowed: vendorStaffRoles };
+    const permissions = vendorRole === 'admin'
+      ? [...vendorStaffPermissions]
+      : [...new Set(Array.isArray(body.permissions) ? body.permissions : [])];
+    const invalid = permissions.filter(p => !vendorStaffPermissions.includes(p));
+    if (invalid.length) return { error: 'invalid_staff_permissions', status: 400, invalid };
+    return { payload: { vendorRole }, aclPermissions: permissions };
   }
 
   /** Verified, live owner of an exact identifier, if any. */
@@ -162,35 +188,42 @@ export function createInvitationService({
     if (!INVITABLE_ROLES[orgType]?.includes(role)) {
       return { error: 'role_not_invitable', status: 400, allowed: INVITABLE_ROLES[orgType] || [] };
     }
-    if (OWNER_ONLY_ROLES.includes(role) && actor.userType !== 'gym_operator') return { error: 'owner_only', status: 403 };
+    if (OWNER_ONLY_ROLES.includes(role) && !isOwner(actor, orgType)) return { error: 'owner_only', status: 403 };
     const identifier = parseIdentifier(body);
     if (!identifier) return { error: 'one_phone_or_email_required', status: 400 };
-    const extra = role === 'member' ? memberPayload(body) : { payload: null };
+    const extra = orgType === 'vendor' ? vendorStaffAccess(body)
+      : role === 'member' ? memberPayload(body) : { payload: null };
     if (extra.error) return extra;
-    const aclPermissions = role === 'staff' ? [...new Set(body.aclPermissions || [])] : [];
-    const invalid = aclPermissions.filter(p => !ownerStaffAclScopes.includes(p));
-    if (invalid.length) return { error: 'invalid_acl_scopes', status: 400, invalid };
+    const aclPermissions = extra.aclPermissions ?? (role === 'staff' ? [...new Set(body.aclPermissions || [])] : []);
+    if (orgType === 'gym') {
+      const invalid = aclPermissions.filter(p => !ownerStaffAclScopes.includes(p));
+      if (invalid.length) return { error: 'invalid_acl_scopes', status: 400, invalid };
+    } else {
+      // The vendor's organisation record (I4) must exist before anything can point at it.
+      if (ensureVendor) await ensureVendor(orgId);
+      if (!(await db('Vendor').where({ id: orgId }).first('id'))) return { error: 'organisation_not_found', status: 409 };
+    }
 
     await expireDue();
     const targetPersonId = await verifiedPerson(identifier);
     if (targetPersonId) {
       const member = await db('OrgMembership')
-        .where({ personId: targetPersonId, orgType, gymId: orgId, role }).whereIn('status', ['active', 'suspended']).first('id');
+        .where({ personId: targetPersonId, ...orgRef(orgType, orgId), role }).whereIn('status', ['active', 'suspended']).first('id');
       if (member) return { error: 'already_a_member', status: 409 };
       if (role === 'staff') {
         const owner = await db('OrgMembership')
-          .where({ personId: targetPersonId, orgType, gymId: orgId, role: 'owner', status: 'active' }).first('id');
+          .where({ personId: targetPersonId, ...orgRef(orgType, orgId), role: 'owner', status: 'active' }).first('id');
         if (owner) return { error: 'already_owner', status: 409 };
       }
     }
     const open = await db('Invitation')
-      .where({ orgType, gymId: orgId, role, identifierType: identifier.type, identifierValue: identifier.value })
+      .where({ ...orgRef(orgType, orgId), role, identifierType: identifier.type, identifierValue: identifier.value })
       .whereIn('status', OPEN).first();
     if (open) return { created: false, invitation: view(open) };
 
     const token = newToken();
     const row = {
-      id: id('inv'), orgType, gymId: orgId, vendorId: null, role, targetPersonId,
+      id: id('inv'), gymId: null, vendorId: null, ...orgRef(orgType, orgId), role, targetPersonId,
       identifierType: identifier.type, identifierValue: identifier.value, tokenHash: sha256(token),
       status: 'pending', requiresAcceptance: true, aclPermissions,
       payload: extra.payload ? JSON.stringify(extra.payload) : null,
@@ -209,14 +242,14 @@ export function createInvitationService({
   async function tellPerson(inv) {
     if (!notify || !inv.targetPersonId) return;
     try {
-      const gym = await gymOf(inv.gymId);
+      const org = await orgOf(inv);
       const personas = await db('User').where({ personId: inv.targetPersonId }).select('id');
       for (const p of personas) {
         await notify(p.id, {
           id: `ntf_${inv.id}_${p.id}`.slice(0, 60), type: 'org_invitation',
           title: 'You have an invitation',
-          body: `${gym?.name || 'A gym'} invited you to join as ${inv.role}.`,
-          data: { invitationId: inv.id, orgType: inv.orgType, orgId: inv.gymId ?? inv.vendorId, role: inv.role },
+          body: `${org?.name || (inv.orgType === 'vendor' ? 'A shop' : 'A gym')} invited you to join as ${inv.role}.`,
+          data: { invitationId: inv.id, orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role },
         });
       }
     } catch (err) {
@@ -226,13 +259,13 @@ export function createInvitationService({
 
   async function listForOrg({ actor, orgType, orgId, onlyNeedsResolution = false }) {
     await expireDue();
-    const rows = (await db('Invitation').where({ orgType, gymId: orgId }).orderBy('createdAt', 'desc').limit(200))
+    const rows = (await db('Invitation').where(orgRef(orgType, orgId)).orderBy('createdAt', 'desc').limit(200))
       .filter(r => canManage(actor, r) && (!onlyNeedsResolution || needsResolution(r)));
     return { invitations: rows.map(r => view(r, { identifierValue: r.identifierValue, needsResolution: needsResolution(r) })) };
   }
 
   async function ownInvitation({ orgType, orgId, invitationId }) {
-    const inv = await db('Invitation').where({ id: invitationId, orgType, gymId: orgId }).first();
+    const inv = await db('Invitation').where({ id: invitationId, ...orgRef(orgType, orgId) }).first();
     return inv || null;
   }
 
@@ -325,8 +358,8 @@ export function createInvitationService({
   }
 
   async function describe(inv) {
-    const gym = await gymOf(inv.gymId);
-    return view(inv, { orgName: gym?.name ?? null });
+    const org = await orgOf(inv);
+    return view(inv, { orgName: org?.name ?? null });
   }
 
   async function listMine({ personId }) {
@@ -361,7 +394,7 @@ export function createInvitationService({
     const found = await mine({ personId: user.personId, invitationId });
     if (found.error) return found;
     await db('Invitation').where({ id: found.inv.id }).update({ status: 'declined', respondedAt: db.fn.now(), updatedAt: db.fn.now() });
-    await audit(user.id, 'invitation_declined', found.inv.id, { orgType: found.inv.orgType, orgId: found.inv.gymId });
+    await audit(user.id, 'invitation_declined', found.inv.id, { orgType: found.inv.orgType, orgId: orgIdOf(found.inv) });
     return { invitation: view({ ...found.inv, status: 'declined' }) };
   }
 
@@ -371,11 +404,11 @@ export function createInvitationService({
     const { inv } = found;
     const person = await db('Person').where({ id: user.personId }).first('id', 'status');
     if (person?.status !== 'active') return { error: 'person_not_active', status: 403 };
-    if (!(await gymOf(inv.gymId))) return { error: 'organisation_not_found', status: 409 };
+    if (!(await orgOf(inv))) return { error: 'organisation_not_found', status: 409 };
 
     let personaId;
     if (inv.role === 'staff') {
-      const result = await acceptStaff(user, inv);
+      const result = inv.orgType === 'vendor' ? await acceptVendorStaff(user, inv) : await acceptStaff(user, inv);
       if (result.error) return result;
       personaId = result.personaId;
     } else if (inv.role === 'trainer') {
@@ -391,13 +424,13 @@ export function createInvitationService({
     }
 
     const membership = await db('OrgMembership')
-      .where({ personId: user.personId, orgType: inv.orgType, gymId: inv.gymId, role: inv.role })
+      .where({ personId: user.personId, ...orgRef(inv.orgType, orgIdOf(inv)), role: inv.role })
       .orderByRaw(`CASE WHEN status IN ('active', 'suspended') THEN 0 ELSE 1 END, "createdAt" DESC`).first('id');
     await db('Invitation').where({ id: inv.id }).update({
       status: 'accepted', respondedAt: db.fn.now(), membershipId: membership?.id ?? null, updatedAt: db.fn.now(),
     });
     if (membership) await db('OrgMembership').where({ id: membership.id }).update({ source: 'invite', invitedBy: inv.invitedBy });
-    await audit(user.id, 'invitation_accepted', inv.id, { orgType: inv.orgType, orgId: inv.gymId, role: inv.role, personaId });
+    await audit(user.id, 'invitation_accepted', inv.id, { orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role, personaId });
     return { invitation: view({ ...inv, status: 'accepted' }), personaId, membershipId: membership?.id ?? null };
   }
 
@@ -418,6 +451,33 @@ export function createInvitationService({
         displayName: user.displayName ?? null, photoUrl: user.photoUrl ?? null,
         accountStatus: 'active', approvalStatus: 'approved', onboardingCompleted: true, portalUser: false,
         aclPermissions: inv.aclPermissions || [], gymIds: [inv.gymId], gymId: inv.gymId,
+        createdAt: new Date(), updatedAt: new Date(),
+      });
+    } catch (err) {
+      if (err?.code === '23505') return { error: 'persona_identifier_in_use', status: 409 };
+      throw err;
+    }
+    // Through the collection, so the I4 hook derives the staff membership.
+    await users.updateByIdAsync(staffId, { updatedAt: new Date().toISOString() });
+    return { personaId: staffId };
+  }
+
+  /** A vendor_staff persona for this Person at the inviting vendor. No password is set. */
+  async function acceptVendorStaff(user, inv) {
+    const existing = await db('User').where({ personId: user.personId, userType: 'vendor_staff' }).first();
+    if (existing) {
+      // One staff persona belongs to one vendor in the legacy model.
+      if (existing.vendorId !== inv.vendorId) return { error: 'already_staff_elsewhere', status: 409 };
+      return { personaId: existing.id };
+    }
+    const staffId = `usr_${randomUUID().slice(0, 8)}`;
+    try {
+      await db('User').insert({
+        id: staffId, personId: user.personId, userType: 'vendor_staff',
+        firebaseUid: user.firebaseUid ?? null, email: user.email ?? null,
+        displayName: user.displayName ?? null, photoUrl: user.photoUrl ?? null,
+        accountStatus: 'active', approvalStatus: 'approved', onboardingCompleted: true,
+        vendorId: inv.vendorId, vendorRole: inv.payload?.vendorRole ?? null, vendorPermissions: inv.aclPermissions || [],
         createdAt: new Date(), updatedAt: new Date(),
       });
     } catch (err) {

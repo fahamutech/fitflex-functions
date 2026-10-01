@@ -33,7 +33,7 @@ import { createInvoiceService } from '../services/invoice-service.mjs';
 import { createPortalUserService } from '../services/portal-user-service.mjs';
 import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
-import { createShopService } from '../services/shop-service.mjs';
+import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
 import { createWhatsAppService } from '../services/whatsapp-service.mjs';
@@ -307,6 +307,8 @@ export const invitationService = createInvitationService({
   notify: (userId, message) => notificationService.notify(userId, message),
   activateDirectMembership: args => memberManagement.activateDirectMembership(args),
   createPersona: args => identityLinkService.createPersona(args),
+  vendorStaffRoles: [...VENDOR_STAFF_ROLES], vendorStaffPermissions: [...VENDOR_STAFF_PERMISSIONS],
+  ensureVendor: vendorUserId => orgMembershipService.syncUser(vendorUserId),
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.
