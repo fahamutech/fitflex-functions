@@ -126,8 +126,8 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       // Idempotency: re-entering the SAME gym on the same EAT day returns the
       // existing record. A different gym still goes through validation, so
       // Basic's one-gym-per-day rule applies and that gym gets its own
-      // check-in row (its payout depends on it). Whether that second gym
-      // consumes a visit is decided by classifyVisit (currently: it does not).
+      // check-in row (its payout depends on it). A second gym the same day
+      // consumes a second visit (classifyVisit), so it needs one left.
       const existingToday = todays.find(c => c.gymId === gymId);
       if (existingToday) {
         return {

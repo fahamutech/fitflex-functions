@@ -28,6 +28,7 @@ export const SETTLEMENT_ENGINE_VERSION = 'settlement-engine/1';
 //   b2b_benefit    a visit funded by a company benefit (decided 1 Oct 2026):
 //                  the same brackets and cap, per beneficiary per EAT month,
 //                  capped against what was charged for those visits.
+// Either way a visit is one gym on one EAT day.
 // A cycle only ever settles visits of its own type.
 export const SETTLEABLE_SUBSCRIPTION_TYPES = Object.freeze(['platform_pass', 'b2b_benefit']);
 
@@ -47,7 +48,7 @@ export const VISIT_ELIGIBILITY = Object.freeze({
   OUTSIDE_MEMBER_CYCLE:    'outside_member_cycle',
   WRONG_SUBSCRIPTION_TYPE: 'wrong_subscription_type',
   VOIDED:                  'voided',
-  SECOND_GYM_SAME_DAY:     'second_gym_same_day',   // DR-13
+  SECOND_GYM_SAME_DAY:     'second_gym_same_day',   // retired 1 Oct 2026 (a second gym now consumes a visit and is paid); kept for stored rows
   DUPLICATE_SAME_DAY:      'duplicate_same_day',    // same gym again that EAT day
   NOT_CONSUMED:            'not_consumed',          // visitConsumed was false
   OVER_ALLOWANCE:          'over_allowance',        // DR-01
@@ -228,11 +229,12 @@ export function allocateNetworkCap(preliminaries, capTzs) {
  *     timestamp lies within the cycle plus the existing 24 h grace)
  *  2. subscription type (DR-03): the cycle's own type only
  *  3. VOIDED never counts (DR-14)
- *  4. one visit per EAT day: the day's first remaining visit keeps the day;
- *     a second gym that day is not payable (DR-13). A cycle with
- *     oneGymPerDay false (company-funded visits, each charged on its own)
- *     counts one visit per gym per day instead.
- *  5. the day's visit must have been consumed (visitConsumed, BL-010/011)
+ *  4. one visit per gym per EAT day: a repeat at the same gym that day is a
+ *     duplicate. A second gym the same day is its own visit (DR-13 as
+ *     revised 1 Oct 2026: it consumes a second visit and is paid).
+ *  5. the visit must have been consumed (visitConsumed, BL-010/011): a
+ *     second-gym check-in recorded before that change, which took no visit,
+ *     stays unpaid.
  *  6. allowance, chronologically (DR-01). DISPUTED/FLAGGED visits occupy
  *     allowance slots so resolving them can never push payable visits past
  *     the allowance.
@@ -243,7 +245,6 @@ export function classifyVisits({ cycle, visits, gymIdsWithRates }) {
   const cycleStartMs = instant(cycle.cycleStart, 'cycle.cycleStart');
   const graceEndMs = instant(cycle.cycleEnd, 'cycle.cycleEnd') + SUBSCRIPTION_GRACE_HOURS * HOUR_MS;
   const cycleSettleable = SETTLEABLE_SUBSCRIPTION_TYPES.includes(cycle.subscriptionType);
-  const oneGymPerDay = cycle.oneGymPerDay !== false;
 
   const ordered = [...visits].sort((a, b) => {
     const d = instant(a.timestamp, `visit ${a.checkinId} timestamp`) - instant(b.timestamp, `visit ${b.checkinId} timestamp`);
@@ -252,7 +253,7 @@ export function classifyVisits({ cycle, visits, gymIdsWithRates }) {
 
   const ids = new Set();
   const results = [];
-  const dayOwner = new Map();   // EAT day → the visit that holds that day
+  const dayOwner = new Map();   // "EAT day:gym" → the visit that holds it
   let slot = 0;
 
   for (const v of ordered) {
@@ -274,11 +275,9 @@ export function classifyVisits({ cycle, visits, gymIdsWithRates }) {
     if (v.status === CHECKIN_STATUS.VOIDED) {
       out(VISIT_OUTCOME.EXCLUDED, VISIT_ELIGIBILITY.VOIDED); continue;
     }
-    const dayKey = oneGymPerDay ? businessDate : `${businessDate}:${v.gymId}`;
-    const owner = dayOwner.get(dayKey);
-    if (owner) {
-      out(VISIT_OUTCOME.EXCLUDED, owner.gymId === v.gymId ? VISIT_ELIGIBILITY.DUPLICATE_SAME_DAY : VISIT_ELIGIBILITY.SECOND_GYM_SAME_DAY);
-      continue;
+    const dayKey = `${businessDate}:${v.gymId}`;
+    if (dayOwner.has(dayKey)) {
+      out(VISIT_OUTCOME.EXCLUDED, VISIT_ELIGIBILITY.DUPLICATE_SAME_DAY); continue;
     }
     dayOwner.set(dayKey, v);
     if (v.visitConsumed !== true) {
@@ -334,7 +333,7 @@ function snapshotOf(s, rates) {
  *   resolved as of the cycle start (see settlement-config.mjs):
  *   { memberId, cycleId, subscriptionId?, subscriptionType, passTier,
  *     cycleStart, cycleEnd (ISO instants), collectedApprovedAmountTzs,
- *     networkPayoutBps, visitAllowance, oneGymPerDay? (default true) }
+ *     networkPayoutBps, visitAllowance }
  * @param {Array}  args.visits  check-ins assigned by the caller, each
  *   { checkinId, memberId, cycleId, gymId, timestamp, status, visitConsumed,
  *     subscriptionType, passTier?, gymTier? }

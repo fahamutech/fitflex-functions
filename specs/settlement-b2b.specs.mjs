@@ -4,8 +4,7 @@
 //    and network cap as a member's own pass, per beneficiary per EAT month.
 // 2. A pass's visit count and its "already visited today" rule look only at
 //    that pass's own check-ins, so a company-funded visit (or a visit on
-//    another membership) no longer uses up a pass visit or makes a pass visit
-//    elsewhere that day an unpaid "second gym".
+//    another membership) no longer uses up a pass visit.
 //
 // Database tests run in a transaction that is rolled back.
 import { test, describe } from 'node:test';
@@ -80,12 +79,13 @@ describe('a pass counts only its own check-ins', () => {
     assert.equal(r.checkin.visitNumberInCycle, 1);
   });
 
-  test('two gyms on one day on the same pass: the second is still not consumed (unchanged)', async () => {
+  test('two gyms on one day on the same pass: the second uses a second visit', async () => {
     const { svc } = setup();
     const first = await svc.perform({ memberId: 'm1', gymId: 'g1', now: at(6) });
     const second = await svc.perform({ memberId: 'm1', gymId: 'g2', now: at(12) });
     assert.equal(first.checkin.visitConsumed, true);
-    assert.equal(second.checkin.visitConsumed, false);
+    assert.equal(second.checkin.visitConsumed, true);
+    assert.equal(second.checkin.visitNumberInCycle, 2);
   });
 });
 
@@ -99,7 +99,7 @@ describe('the engine settles company-funded visits with the same brackets and ca
   const cycle = (extra = {}) => ({
     memberId: 'emp-1', cycleId: 'b2b:ben-1:2026-10', subscriptionType: 'b2b_benefit', passTier: 'b2b_benefit',
     cycleStart: '2026-09-30T21:00:00.000Z', cycleEnd: '2026-10-31T21:00:00.000Z',   // October in EAT
-    collectedApprovedAmountTzs: 100000, networkPayoutBps: 7500, visitAllowance: 100, oneGymPerDay: false, ...extra,
+    collectedApprovedAmountTzs: 100000, networkPayoutBps: 7500, visitAllowance: 100, ...extra,
   });
   const rates = [ceilingSnapshot('gym-A', 'standard'), ceilingSnapshot('gym-B', 'standard')];
 
@@ -112,15 +112,10 @@ describe('the engine settles company-funded visits with the same brackets and ca
     assert.equal(r.gyms[0].finalTzs, 12000);
     assert.equal(r.member.settleable, true);
   });
-  test('two gyms on one day both count (each visit was charged on its own)', () => {
+  test('two gyms on one day both count', () => {
     const r = calculateMemberSettlement({ cycle: cycle(), visits: [visit('a', 'gym-A', 5, 6), visit('b', 'gym-B', 5, 15)], gymRates: rates });
     assert.equal(r.member.payableVisitCount, 2);
     assert.deepEqual(r.gyms.map((g) => [g.gymId, g.finalTzs]), [['gym-A', 3500], ['gym-B', 3500]]);
-    // …while a pass cycle still pays one gym a day.
-    const pass = calculateMemberSettlement({
-      cycle: cycle({ subscriptionType: 'platform_pass', oneGymPerDay: undefined }),
-      visits: [visit('a', 'gym-A', 5, 6, 'platform_pass'), visit('b', 'gym-B', 5, 15, 'platform_pass')], gymRates: rates });
-    assert.equal(pass.visits[1].eligibility, VISIT_ELIGIBILITY.SECOND_GYM_SAME_DAY);
   });
   test('the cap is 75% of what was charged for the visits, shared by payout', () => {
     // 8 visits at each gym: 24,000 + 24,000 preliminary against 75% of 40,000 charged.
