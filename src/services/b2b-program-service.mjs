@@ -28,6 +28,8 @@ function page(rows, query = {}) {
 
 export function createB2BProgramService({
   programs, benefits, gyms, trainers, users, challenges, auditLog, b2bService,
+  // Phase 3 ledger reads: { allowanceFor, sponsorSpentForProgram }. Optional.
+  usage = null,
   now = () => new Date(),
 }) {
   const stamp = () => now().toISOString();
@@ -211,6 +213,16 @@ export function createB2BProgramService({
     if (!allowed.includes(status)) return fail('invalid_transition', 409, { from: current, to: status, allowed });
     if (status === 'active' && current === 'pending' && !access.platformAdmin) {
       return fail('forbidden', 403, { requiredRole: 'platform_admin' });
+    }
+    // A programme paused because its budget ran out is resumed by FitFlex only,
+    // with a remark saying why, and only once there is budget to spend again.
+    if (status === 'active' && current === 'paused' && p.statusReason === 'budget_exhausted') {
+      if (!access.platformAdmin) return fail('forbidden', 403, { requiredRole: 'platform_admin', pausedFor: 'budget_exhausted' });
+      if (!text(reason, 500)) return fail('remark_required', 400);
+      if (usage && p.budgetTzs !== null && p.budgetTzs !== undefined) {
+        const spentTzs = await usage.sponsorSpentForProgram(p.id);
+        if (spentTzs >= p.budgetTzs) return fail('budget_still_exhausted', 409, { budgetTzs: p.budgetTzs, spentTzs });
+      }
     }
     if (status === 'active') {
       if (access.org.status !== 'active') return fail('organization_not_active', 409, { organizationStatus: access.org.status });
@@ -441,7 +453,10 @@ export function createB2BProgramService({
               providerRules: b.providerRules, validity: benefitValidity(b, p),
             },
             window: usageWindow({ benefit: b, program: p, day }),
-            remaining: null, // Phase 3
+            // Counted from the consumption ledger; null remaining = no count limit.
+            ...(usage
+              ? await usage.allowanceFor({ benefit: b, program: p, beneficiaryId: beneficiary.id, day })
+              : { used: null, remaining: null }),
           });
         }
       }
