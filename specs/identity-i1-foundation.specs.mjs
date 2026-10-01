@@ -16,10 +16,11 @@ import { identityFlag } from '../src/shared/feature-flags.mjs';
 import { toSessionUser } from '../src/shared/session-user.mjs';
 import foundation from '../db/migrations/20261030090000-identity-foundation.cjs';
 import linking from '../db/migrations/20261101090000-identity-linking.cjs';
+import onePersonaPerType from '../db/migrations/20261103090000-identity-one-persona-per-type.cjs';
 
 // Later identity migrations depend on Person, so a rollback runs newest first.
 // Add each new identity migration here.
-const LATER_IDENTITY_MIGRATIONS = [linking];
+const LATER_IDENTITY_MIGRATIONS = [linking, onePersonaPerType];
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
 const now = () => new Date().toISOString();
