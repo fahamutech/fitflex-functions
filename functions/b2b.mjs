@@ -7,7 +7,7 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -369,4 +369,98 @@ export const getB2BProgramUsage = {
   onRequest: (req, res) => inOrganization(req, res, access => usage.programUsage({
     access, programId: req.params.programId, query: req.query || {},
   })),
+};
+
+// ── Sponsor billing ────────────────────────────────────────────────────────
+// What organisations and their beneficiaries are charged: flat fees for
+// sponsored passes (in advance) and the sponsor's share of per-use benefits
+// (after the month). Invoices are raised and settled by FitFlex; organisations
+// read their own. Nothing here pays a provider.
+
+const billing = b2bBillingService;
+
+export const adminPrepareB2BInvoice = {
+  created, method: 'post', path: '/admin/b2b/programs/:programId/invoices/prepare',
+  description: 'Admin: add what is not yet invoiced to the programme\'s draft invoice. kind "prepaid": everyone nominated for a sponsored pass in this or next month. kind "usage": the sponsor\'s share of approved per-use consumption in a month that has ended, plus credits for usage reversed since. Safe to repeat.',
+  requestSample: { kind: 'prepaid', period: '2026-11' },
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => {
+    const args = { programId: req.params.programId, period: req.body?.period, actorId: req.user.sub };
+    if (req.body?.kind === 'prepaid') return send(res, await billing.preparePrepaid(args));
+    if (req.body?.kind === 'usage') return send(res, await billing.prepareUsage(args));
+    return res.status(400).json({ error: 'invalid_kind', allowed: ['prepaid', 'usage'] });
+  },
+};
+
+export const adminListB2BInvoices = {
+  created, method: 'get', path: '/admin/b2b/invoices',
+  description: 'Admin: sponsor invoices across organisations. Query: ?organizationId=&programId=&period=&kind=&status=&limit=&cursor=.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await billing.adminListInvoices({ query: req.query || {} })),
+};
+
+export const adminGetB2BInvoice = {
+  created, method: 'get', path: '/admin/b2b/invoices/:invoiceId',
+  description: 'Admin: one sponsor invoice with every line.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await billing.getInvoice({ invoiceId: req.params.invoiceId })),
+};
+
+export const adminIssueB2BInvoice = {
+  created, method: 'post', path: '/admin/b2b/invoices/:invoiceId/issue',
+  description: 'Admin: issue a draft invoice. Its figures freeze. Amounts are VAT-inclusive; state the VAT rate in basis points (1800 = 18%, 0 = none).',
+  requestSample: { vatRateBps: 1800 },
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await billing.issueInvoice({ invoiceId: req.params.invoiceId, vatRateBps: req.body?.vatRateBps, actorId: req.user.sub })),
+};
+
+export const adminMarkB2BInvoicePaid = {
+  created, method: 'post', path: '/admin/b2b/invoices/:invoiceId/paid',
+  description: 'Admin: record the sponsor\'s payment against a reference. Paying a prepaid invoice starts fully sponsored passes and lets members unlock the rest.',
+  requestSample: { paymentReference: 'BANK-TRF-00123' },
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await billing.markPaid({ invoiceId: req.params.invoiceId, paymentReference: req.body?.paymentReference, actorId: req.user.sub })),
+};
+
+export const adminVoidB2BInvoice = {
+  created, method: 'post', path: '/admin/b2b/invoices/:invoiceId/void',
+  description: 'Admin: void a draft or issued invoice, with a reason. It is kept; what was on it can be invoiced again.',
+  requestSample: { reason: 'Raised for the wrong month' },
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await billing.voidInvoice({ invoiceId: req.params.invoiceId, reason: req.body?.reason, actorId: req.user.sub })),
+};
+
+export const adminListB2BEntitlements = {
+  created, method: 'get', path: '/admin/b2b/programs/:programId/entitlements',
+  description: 'Admin: who is covered by a sponsored pass for a month (?period=YYYY-MM, default this month) and where each pass stands.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await billing.listEntitlements({ programId: req.params.programId, period: req.query?.period || undefined })),
+};
+
+export const adminConvertCorporateToProgram = {
+  created, method: 'post', path: '/admin/b2b/corporate/:corporateId/convert',
+  description: 'Admin: express a company\'s seat arrangement as a draft programme with one sponsored pass (its pass tier and subsidy split). Once that programme is live, seat bills for the company are refused.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await billing.convertCorporate({ corporateId: req.params.corporateId, actorId: req.user.sub }), 201),
+};
+
+export const listB2BOrganizationInvoices = {
+  created, method: 'get', path: '/b2b/organizations/:id/invoices',
+  description: 'An organisation\'s issued, paid and voided invoices (usage.read). Query: ?programId=&period=&kind=&status=.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => billing.listInvoices({ access, query: req.query || {} })),
+};
+
+export const getB2BOrganizationInvoice = {
+  created, method: 'get', path: '/b2b/organizations/:id/invoices/:invoiceId',
+  description: 'One of the organisation\'s invoices (usage.read): pass lines per person, usage as totals per benefit and person.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => billing.getInvoice({ access, invoiceId: req.params.invoiceId })),
+};
+
+export const unlockMyB2BPass = {
+  created, method: 'post', path: '/b2b/me/passes/:entitlementId/unlock',
+  description: 'Member: ask to pay your share of a sponsored pass for this month. Returns a payment request; the pass starts when the payment is approved.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await billing.unlock({ userId: req.user.sub, entitlementId: req.params.entitlementId }), 201),
 };

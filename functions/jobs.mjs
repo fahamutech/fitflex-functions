@@ -1,6 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, settlementService, settlementClawbackService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, settlementService, settlementClawbackService } from '../src/bootstrap/services.mjs';
+import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
 
@@ -74,5 +75,31 @@ export const settlementCloser = {
     if (r.run?.mode === 'live' && !r.alreadyRun) await settlementClawbackService.sweepQuietly();
     if (r.run && !r.alreadyRun) console.log(`[settlement] ${r.run.mode} ${r.run.periodStartDate} cycles=${r.stats.settledCycles} skipped=${r.stats.skippedCycles} statements=${r.stats.statements} final=${r.stats.totalFinalTzs}`);
     else if (r.error) console.error(`[settlement] ${r.error}${r.message ? `: ${r.message}` : ''}`);
+  }
+};
+
+export const b2bSponsorBilling = {
+  created, rule: '20 21 * * *', // every day 21:20 UTC = 00:20 EAT
+  description: 'B2B sponsor billing: start sponsored passes that can start (sponsor paid, member linked, month begun), and keep draft invoices current — flat fees for this month (and next, from the 25th) and last month\'s per-use charges. Drafts only: FitFlex issues them. Idempotent.',
+  onJob: async () => {
+    const passes = await b2bBillingService.runDaily();
+    const today = new Date(Date.now() + 3 * 3_600_000).toISOString().slice(0, 10);   // EAT day
+    const [y, m] = today.split('-').map(Number);
+    const month = (yy, mm) => `${mm < 1 ? yy - 1 : mm > 12 ? yy + 1 : yy}-${String(mm < 1 ? 12 : mm > 12 ? 1 : mm).padStart(2, '0')}`;
+    let drafts = 0;
+    for (const p of await b2bPrograms.filterByColumnAsync('status', 'active')) {
+      const periods = [['prepaid', month(y, m)], ...(Number(today.slice(8)) >= 25 ? [['prepaid', month(y, m + 1)]] : []), ['usage', month(y, m - 1)]];
+      for (const [kind, period] of periods) {
+        try {
+          const r = kind === 'prepaid'
+            ? await b2bBillingService.preparePrepaid({ programId: p.id, period, actorId: 'system:b2b-billing' })
+            : await b2bBillingService.prepareUsage({ programId: p.id, period, actorId: 'system:b2b-billing' });
+          if (r.invoice && (r.added || r.credited)) drafts += 1;
+        } catch (err) {
+          console.warn(`[b2b-billing] ${kind} ${period} for ${p.id} failed:`, err?.message);
+        }
+      }
+    }
+    if (drafts || passes.started || passes.repaired) console.log(`[b2b-billing] drafts=${drafts} started=${passes.started} repaired=${passes.repaired} awaitingMember=${passes.awaitingMember} awaitingLink=${passes.awaitingLink}`);
   }
 };
