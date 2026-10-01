@@ -2,6 +2,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { shopService } from '../src/bootstrap/services.mjs';
+import { identityFlag } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
 
@@ -273,6 +274,14 @@ export const vendorCreateStaff = {
   created, method: 'post', path: '/vendor/staff', description: 'Vendor: create permission-scoped staff.',
   onGuard: requireAuth('vendor', 'admin'),
   onRequest: async (req, res) => {
+    // Identity V2 · I6: with invitations on, a vendor no longer sets a password for someone else.
+    if (identityFlag('V2_INVITES')) {
+      return res.status(400).json({
+        error: 'credentials_not_accepted',
+        message: 'Staff are now invited instead of being given a password. Update the app and use Invite.',
+        use: 'POST /orgs/vendor/:vendorId/invitations',
+      });
+    }
     const result = await shopService.createVendorStaff({ vendorId: req.user.sub, body: req.body || {} });
     if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing });
     res.status(201).json(result.staff);

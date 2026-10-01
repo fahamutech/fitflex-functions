@@ -75,6 +75,7 @@ A decision under the membership model therefore considers Person + persona + org
 | Communications (`functions/communications.mjs`) | owner routes | `requireGymAcl('communications')` + row `gymIds` |
 | Gym sharing, reviews, challenges, social groups | 5 | `requireGymAcl('members' \| 'gyms')` |
 | Vendor (`functions/shop.mjs`) | all | `requireVendorPermission` (JWT) and `req.user.vendorId \|\| req.user.sub` |
+| Vendor invitations (`functions/invitations.mjs`, I6 slice C) | 5 | `requireAuth('vendor')` and `:vendorId` = the caller's own id (the vendor persona is the owner; staff cannot invite) |
 | Corporate / B2B | all | The B2B module's own organisation-user rules (not `OrgMembership`) |
 | Platform admin | all | `requireAcl` (portal staff ACL in the JWT) |
 
