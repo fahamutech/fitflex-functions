@@ -1,7 +1,7 @@
 // Check-in service: orchestrates BL-012 validation + BL-010/011 visit counting + logging.
 // Pure DI: receives repos via constructor.
 
-import { validateCheckIn, pickSubscriptionForGym, subscriptionCoversGym, validateTrainerHomeEntry } from '../shared/check-in-rules.mjs';
+import { validateCheckIn, pickSubscriptionForGym, subscriptionCoversGym, validateTrainerHomeEntry, fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { CHECKIN_STATUS, sourceForMethod } from '../shared/checkin-status.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 import { randomUUID } from 'node:crypto';
@@ -26,7 +26,8 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
   async function visitsUsedInCycle(memberId, sub) {
     if (!sub) return 0;
     const since = +new Date(sub.cycleStartedAt || sub.startedAt);
-    const rows = await checkins.filterAsync(c => c.memberId === memberId && +new Date(c.timestamp) >= since && c.visitConsumed);
+    const own = fundedBySubscription(sub);
+    const rows = await checkins.filterAsync(c => c.memberId === memberId && +new Date(c.timestamp) >= since && c.visitConsumed && own(c));
     return rows.length;
   }
 
@@ -153,7 +154,10 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         : validateCheckIn({
           subscription: sub,
           gym,
-          todaysCheckins: todays,
+          // Only this subscription's visits today: a company-funded visit or a
+          // visit on another membership earlier in the day doesn't make this
+          // one a "second gym".
+          todaysCheckins: todays.filter(fundedBySubscription(sub)),
           cycleUsage,
           now,
           tierConfig: getTierConfig?.(sub?.tier),

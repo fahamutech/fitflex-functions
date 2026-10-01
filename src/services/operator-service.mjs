@@ -2,7 +2,7 @@
 // consuming a visit, the actual scan-to-checkin flow, recent activity, and
 // analytics for the owner/operator Home dashboard.
 import { resolveOperatorGymSelection, operatorGymIds } from '../shared/operator-gym-selection.mjs';
-import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry } from '../shared/check-in-rules.mjs';
+import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry, fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { calculatePayout } from '../shared/payout-engine.mjs';
 import { issue as issueQr, verify as verifyQrToken, issueGymQr, verifyGymQr } from '../auth/qr-token.mjs';
 
@@ -67,11 +67,12 @@ export function createOperatorService({
       reason = 'sponsor_benefit';
     } else if (sub) {
       const since = +new Date(sub.cycleStartedAt);
-      const allCheckins = await checkins.filterAsync(c => c.memberId === member.id && c.visitConsumed && +new Date(c.timestamp) >= since);
+      const own = fundedBySubscription(sub);
+      const allCheckins = await checkins.filterAsync(c => c.memberId === member.id && c.visitConsumed && +new Date(c.timestamp) >= since && own(c));
       visitsUsed = allCheckins.length;
       visitCap = settingsService.visitCapForTier(sub.tier);
       const now = new Date();
-      const allTodaysCheckins = await checkins.filterAsync(c => c.memberId === member.id && sameEatDate(c.timestamp, now));
+      const allTodaysCheckins = await checkins.filterAsync(c => c.memberId === member.id && sameEatDate(c.timestamp, now) && own(c));
       const validation = validateCheckIn({
         subscription: sub,
         gym,

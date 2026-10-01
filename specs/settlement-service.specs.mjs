@@ -42,6 +42,7 @@ async function world(trx) {
   // Other specs leave subscriptions behind in the shared CI database; take
   // them out of play for this (rolled-back) transaction.
   await trx('Subscription').update({ status: 'payment_cancelled' });
+  await trx('B2BBenefitConsumption').whereIn('status', ['approved', 'pending']).update({ status: 'cancelled' });
   const { configService } = services(trx);
   const activate = (kind, id) => configService.activate({ kind, id, effectiveFrom: '2026-10-01', actorId: 'checker' }, { trx });
   const gym = async (tier, retail) => {
@@ -119,7 +120,7 @@ test('a finished cycle becomes a locked settlement: member cycle, statements, li
 
   assert.equal(out.run.status, 'locked');
   assert.match(out.run.inputsHash, /^sha256:[0-9a-f]{64}$/);
-  assert.deepEqual(out.stats, { candidateCycles: 1, settledCycles: 1, skippedCycles: 0, statements: 2, payableVisits: 20, totalPreliminaryTzs: 203000, totalFinalTzs: 187500 });
+  assert.deepEqual(out.stats, { candidateCycles: 1, settledCycles: 1, skippedCycles: 0, statements: 2, b2bCycles: 0, payableVisits: 20, totalPreliminaryTzs: 203000, totalFinalTzs: 187500 });
   assert.deepEqual(out.exceptions, []);
 
   const mcs = await trx('MemberCycleSettlement').where({ runId: out.run.id }).first();

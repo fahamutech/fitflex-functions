@@ -5,6 +5,7 @@ import { PASS_TIERS } from '../shared/constants.mjs';
 import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 import { trainerPassOptions, trainerGymAccess, hideTrainerPass } from '../shared/trainer-access.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
+import { fundedBySubscription } from '../shared/check-in-rules.mjs';
 
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
@@ -255,7 +256,8 @@ export function createSubscriptionService({
     let visitsUsed = 0, visitCap = null;
     if (sub) {
       const since = +new Date(sub.cycleStartedAt);
-      const visitCheckins = await checkins.filterAsync(c => c.memberId === uid && c.visitConsumed && +new Date(c.timestamp) >= since);
+      const own = fundedBySubscription(sub);
+      const visitCheckins = await checkins.filterAsync(c => c.memberId === uid && c.visitConsumed && +new Date(c.timestamp) >= since && own(c));
       visitsUsed = visitCheckins.length;
       visitCap = settingsService.visitCapForTier(sub.tier);
     }

@@ -15,6 +15,12 @@
 //   rule_missing          no network % rule in force
 //   held_visits           a disputed or flagged visit, or a gym with no rate card
 //
+// Company-funded (B2B) gym visits are settled the same way (decided 1 Oct
+// 2026): the same brackets and network cap, but one cycle per beneficiary per
+// EAT month, capped against what was charged for those visits (the approved
+// B2B consumptions' gross value). A company-funded visit is charged on its
+// own, so two gyms on one day both count.
+//
 // Safety: an advisory lock (one server at a time), everything in one
 // transaction (a failure stores nothing), the run locked at the end with a
 // hash of its inputs. LIVE: one run per period. SHADOW: stored the same way
@@ -23,8 +29,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { db as defaultDb } from '../infra/knex-store.mjs';
 import { SUBSCRIPTION_GRACE_HOURS } from '../shared/constants.mjs';
 import { localDay } from '../shared/member-progress.mjs';
-import { resolveMemberCycleTerms, resolveGymRateSnapshot, resolutionDateForCycle } from '../shared/settlement-config.mjs';
-import { calculateMemberSettlement, SETTLEMENT_ENGINE_VERSION, SETTLEMENT_DISPUTE_WINDOW_DAYS, SETTLEABLE_SUBSCRIPTION_TYPES } from '../shared/settlement-engine.mjs';
+import { resolveMemberCycleTerms, resolveGymRateSnapshot, resolutionDateForCycle, resolveNetworkPayoutBps } from '../shared/settlement-config.mjs';
+import { calculateMemberSettlement, SETTLEMENT_ENGINE_VERSION, SETTLEMENT_DISPUTE_WINDOW_DAYS } from '../shared/settlement-engine.mjs';
 import { settlementRowsFromResult, gymStatementTotals } from '../shared/settlement-rows.mjs';
 
 export const SETTLEMENT_LOCK_KEY = 7_203_915; // one settlement run at a time, across servers
@@ -35,6 +41,10 @@ const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const EAT_OFFSET_MS = 3 * 3_600_000;
 const FINAL_AFTER_MS = SUBSCRIPTION_GRACE_HOURS * 3_600_000 + SETTLEMENT_DISPUTE_WINDOW_DAYS * 86_400_000;
 const CYCLE_STATUSES = ['active', 'expired', 'suspended'];   // a cycle that was paid for and ran
+const PASS = 'platform_pass';
+const B2B = 'b2b_benefit';
+/** The settlement key of a beneficiary's B2B visits in one EAT month. */
+export const b2bCycleKey = (beneficiaryId, month) => `b2b:${beneficiaryId}:${month}`;
 
 const iso = (v) => (v instanceof Date ? v.toISOString() : new Date(v).toISOString());
 const fail = (error, status = 400, extra = {}) => ({ error, status, ...extra });
@@ -84,7 +94,7 @@ export function createSettlementService({ db = defaultDb, configService, now = (
       const config = await configService.activeConfiguration({ trx: q });
       const settled = q('MemberCycleSettlement').where({ mode: 'live', active: true }).select('subscriptionId');
       const cycles = await q('Subscription')
-        .whereIn('type', SETTLEABLE_SUBSCRIPTION_TYPES).whereIn('status', CYCLE_STATUSES)
+        .where({ type: PASS }).whereIn('status', CYCLE_STATUSES)
         .whereNot({ tier: 'online_free' })
         .where('expiresAt', '<=', new Date(+periodEnd - FINAL_AFTER_MS))
         .whereNotIn('id', settled)
@@ -101,6 +111,28 @@ export function createSettlementService({ db = defaultDb, configService, now = (
       const exceptions = [];
       const settledCycles = [];
       const inputs = [];
+      const rateCache = new Map();
+      const ratesFor = (gymIds, date) => {
+        const out = [];
+        for (const gymId of [...new Set(gymIds)].sort()) {
+          const key = `${gymId}@${date}`;
+          if (!rateCache.has(key)) rateCache.set(key, resolveGymRateSnapshot({ rateCards: config.rateCards, gymId, date }).snapshot || null);
+          if (rateCache.get(key)) out.push(rateCache.get(key));   // a gym without one is held by the engine (no_rate_card)
+        }
+        return out;
+      };
+      /** Run the engine; a cycle with anything held is deferred whole. */
+      const settle = (input, { terms = {}, explanation = {}, skip }) => {
+        const result = calculateMemberSettlement(input);
+        if (result.member.heldVisitCount > 0) {
+          const held = result.visits.filter((v) => v.outcome === 'held');
+          skip('held_visits', { held: Object.fromEntries([...new Set(held.map((v) => v.eligibility))].map((e) => [e, held.filter((v) => v.eligibility === e).length])) });
+          return;
+        }
+        inputs.push(input);
+        settledCycles.push({ result, terms, explanation });
+      };
+
       for (const sub of cycles) {
         const skip = (reason, extra = {}) => exceptions.push({ subscriptionId: sub.id, memberId: sub.memberId, reason, ...extra });
         if (!collectedBy.has(sub.id)) { skip('no_approved_payment'); continue; }
@@ -109,13 +141,8 @@ export function createSettlementService({ db = defaultDb, configService, now = (
         const terms = resolveMemberCycleTerms({ passTierVersions: config.passTierVersions, rules: config.rules, passTier: sub.tier, cycleStart, collectedApprovedAmountTzs });
         if (terms.error) { skip(terms.error, { missing: terms.missing }); continue; }
 
-        const date = resolutionDateForCycle(cycleStart);
         const subVisits = visitsBy.get(sub.id) || [];
-        const gymRates = [];
-        for (const gymId of [...new Set(subVisits.map((v) => v.gymId))].sort()) {
-          const r = resolveGymRateSnapshot({ rateCards: config.rateCards, gymId, date });
-          if (r.snapshot) gymRates.push(r.snapshot);   // a gym without one is held by the engine (no_rate_card)
-        }
+        const gymRates = ratesFor(subVisits.map((v) => v.gymId), resolutionDateForCycle(cycleStart));
         const input = {
           cycle: {
             memberId: sub.memberId, cycleId: sub.id, subscriptionId: sub.id, subscriptionType: sub.type, passTier: sub.tier,
@@ -128,14 +155,64 @@ export function createSettlementService({ db = defaultDb, configService, now = (
           })),
           gymRates,
         };
-        const result = calculateMemberSettlement(input);
-        if (result.member.heldVisitCount > 0) {
-          const held = result.visits.filter((v) => v.outcome === 'held');
-          skip('held_visits', { held: Object.fromEntries([...new Set(held.map((v) => v.eligibility))].map((e) => [e, held.filter((v) => v.eligibility === e).length])) });
-          continue;
-        }
-        inputs.push(input);
-        settledCycles.push({ result, terms: terms.terms });
+        settle(input, { terms: terms.terms, skip });
+      }
+
+      // ── company-funded (B2B) visits: one cycle per beneficiary per EAT month ──
+      // A month is final once its end + the grace + the dispute window has
+      // passed, exactly like a pass cycle.
+      const finalDay = localDay(new Date(+periodEnd - FINAL_AFTER_MS));
+      const consumptions = await q('B2BBenefitConsumption')
+        .where({ sourceType: 'gym_checkin', providerType: 'gym', status: 'approved' })
+        .where('businessDate', '<', `${finalDay.slice(0, 7)}-01`)
+        .orderBy(['businessDate', 'id']);
+      const b2bGroups = new Map();
+      for (const c of consumptions) {
+        const key = b2bCycleKey(c.beneficiaryId, c.businessDate.slice(0, 7));
+        (b2bGroups.get(key) || b2bGroups.set(key, []).get(key)).push(c);
+      }
+      const b2bKeys = [...b2bGroups.keys()].sort();
+      const b2bSettled = new Set(b2bKeys.length
+        ? (await q('MemberCycleSettlement').where({ mode: 'live', active: true }).whereIn('subscriptionId', b2bKeys).select('subscriptionId')).map((r) => r.subscriptionId)
+        : []);
+      const b2bCheckins = new Map(consumptions.length
+        ? (await q('Checkin').whereIn('id', consumptions.map((c) => c.sourceId))).map((c) => [c.id, c])
+        : []);
+      let b2bCandidates = 0;
+      for (const key of b2bKeys) {
+        if (b2bSettled.has(key)) continue;
+        b2bCandidates += 1;
+        const rows = b2bGroups.get(key).filter((c) => b2bCheckins.has(c.sourceId));   // the visit itself must still exist
+        const month = key.slice(-7);
+        const { periodStartDate: monthStart, periodEndDate: monthEnd } = periodForMonth(month);
+        const beneficiaryId = b2bGroups.get(key)[0].beneficiaryId;
+        const memberId = rows.find((c) => c.userId)?.userId ?? beneficiaryId;
+        const skip = (reason, extra = {}) => exceptions.push({ subscriptionId: key, memberId, reason, ...extra });
+        const net = resolveNetworkPayoutBps({ rules: config.rules, date: monthStart, passTier: null });
+        if (net.missing.length) { skip('rule_missing', { missing: net.missing }); continue; }
+        const sum = (f) => rows.reduce((t, c) => t + c[f], 0);
+        const input = {
+          cycle: {
+            memberId, cycleId: key, subscriptionId: key, subscriptionType: B2B, passTier: B2B,
+            cycleStart: iso(eatDayStart(monthStart)), cycleEnd: iso(eatDayStart(monthEnd)),
+            collectedApprovedAmountTzs: sum('grossTzs'), networkPayoutBps: net.networkPayoutBps,
+            visitAllowance: rows.length,   // the benefit's own allowance was enforced at check-in
+            oneGymPerDay: false,           // each company-funded visit was charged on its own
+          },
+          visits: rows.map((c) => {
+            const chk = b2bCheckins.get(c.sourceId);
+            return {
+              checkinId: chk.id, memberId, cycleId: key, gymId: chk.gymId, timestamp: iso(chk.timestamp),
+              status: chk.status, visitConsumed: true,   // an approved consumption is a verified, charged visit
+              subscriptionType: chk.subscriptionType, gymTier: chk.gymTier,
+            };
+          }),
+          gymRates: ratesFor(rows.map((c) => c.providerId), monthStart),
+        };
+        settle(input, {
+          skip,
+          explanation: { b2b: { beneficiaryId, month, organizationIds: [...new Set(rows.map((c) => c.organizationId))].sort(), sponsorTzs: sum('sponsorTzs'), beneficiaryTzs: sum('beneficiaryTzs') } },
+        });
       }
 
       // ── store ────────────────────────────────────────────────────────────
@@ -156,11 +233,12 @@ export function createSettlementService({ db = defaultDb, configService, now = (
       }
 
       const allLines = [];
-      for (const { result, terms } of settledCycles) {
+      for (const { result, terms, explanation } of settledCycles) {
         const rows = settlementRowsFromResult(result, {
           runId: runRow.id, mode, newId: () => `srow_${randomUUID().slice(0, 16)}`,
           gymSettlementIdFor: (gymId) => statementIds.get(gymId),
           terms: { passTierVersion: terms.passTierVersion, catalogPriceTzs: terms.catalogPriceTzs },
+          explanation,
         });
         await q('MemberCycleSettlement').insert({ ...rows.memberCycle, explanation: jsonb(rows.memberCycle.explanation), createdAt: at });
         if (rows.lines.length) {
@@ -176,7 +254,8 @@ export function createSettlementService({ db = defaultDb, configService, now = (
 
       const sum = (f) => settledCycles.reduce((s, c) => s + c.result.member[f], 0);
       const stats = {
-        candidateCycles: cycles.length, settledCycles: settledCycles.length, skippedCycles: exceptions.length, statements: gymIds.length,
+        candidateCycles: cycles.length + b2bCandidates, settledCycles: settledCycles.length, skippedCycles: exceptions.length, statements: gymIds.length,
+        b2bCycles: settledCycles.filter((c) => c.result.member.subscriptionType === B2B).length,
         payableVisits: sum('payableVisitCount'), totalPreliminaryTzs: sum('totalPreliminaryTzs'), totalFinalTzs: sum('totalFinalTzs'),
       };
       const inputsHash = `sha256:${createHash('sha256').update(JSON.stringify(inputs)).digest('hex')}`;
