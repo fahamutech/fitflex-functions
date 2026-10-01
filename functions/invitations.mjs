@@ -1,4 +1,4 @@
-// Identity V2 · I6 (slice A) — invitations REST surface.
+// Identity V2 · I6 — invitations REST surface (gyms: slices A and B; vendors: slice C).
 // Every route answers 404 unless IDENTITY_V2 + V2_INVITES are on.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
@@ -115,6 +115,73 @@ export const gymMarkInvitationRefunded = {
   onRequest: async (req, res) => {
     const ctx = await gymOwnerContext(req, res);
     if (ctx) send(res, await invitationService.markRefunded({ ...ctx, invitationId: req.params.invitationId, note: req.body?.note }));
+  },
+};
+
+// ── Vendor side (slice C): the vendor invites its staff ─────────────────────
+
+/** Flag, then the vendor persona, which is the organisation's owner (Vendor.id = its User id). */
+async function vendorOwnerContext(req, res) {
+  if (!identityFlag('V2_INVITES')) { res.status(404).json({ error: 'not_found' }); return null; }
+  const actor = await users.findByIdAsync(req.user.sub);
+  if (!actor) { res.status(404).json({ error: 'user_not_found' }); return null; }
+  if (actor.userType !== 'vendor' || actor.id !== req.params.vendorId) { res.status(403).json({ error: 'not_your_vendor' }); return null; }
+  return { actor, orgType: 'vendor', orgId: actor.id };
+}
+const vendorGuard = requireAuth('vendor');
+
+export const vendorPeopleLookup = {
+  created, method: 'post', path: '/orgs/vendor/:vendorId/people/lookup',
+  description: 'Vendor: does this exact phone or email belong to a FitFlex person? Answers { found, maskedName } only, for verified identifiers only. Rate-limited and logged.',
+  requestSample: { email: 'person@example.com' },
+  responseSample: { found: true, maskedName: 'N**** A*******' },
+  onGuard: vendorGuard,
+  onRequest: async (req, res) => {
+    const ctx = await vendorOwnerContext(req, res);
+    if (ctx) send(res, await invitationService.lookup({ ...ctx, body: req.body || {} }));
+  },
+};
+
+export const vendorCreateInvitation = {
+  created, method: 'post', path: '/orgs/vendor/:vendorId/invitations',
+  description: 'Vendor: invite a person (by one phone or email) to join the shop as staff, with a staff role and its permissions. No account or password is created. Returns the link token once.',
+  requestSample: { role: 'staff', email: 'person@example.com', vendorRole: 'orders_manager', permissions: ['orders', 'customers'] },
+  onGuard: vendorGuard,
+  onRequest: async (req, res) => {
+    const ctx = await vendorOwnerContext(req, res);
+    if (!ctx) return;
+    const result = await invitationService.create({ ...ctx, body: req.body || {} });
+    send(res, result, result.created ? 201 : 200);
+  },
+};
+
+export const vendorListInvitations = {
+  created, method: 'get', path: '/orgs/vendor/:vendorId/invitations',
+  description: 'Vendor: invitations sent by this shop, newest first.',
+  onGuard: vendorGuard,
+  onRequest: async (req, res) => {
+    const ctx = await vendorOwnerContext(req, res);
+    if (ctx) send(res, await invitationService.listForOrg(ctx));
+  },
+};
+
+export const vendorCancelInvitation = {
+  created, method: 'post', path: '/orgs/vendor/:vendorId/invitations/:invitationId/cancel',
+  description: 'Vendor: cancel an open invitation.',
+  onGuard: vendorGuard,
+  onRequest: async (req, res) => {
+    const ctx = await vendorOwnerContext(req, res);
+    if (ctx) send(res, await invitationService.cancel({ ...ctx, invitationId: req.params.invitationId }));
+  },
+};
+
+export const vendorResendInvitation = {
+  created, method: 'post', path: '/orgs/vendor/:vendorId/invitations/:invitationId/resend',
+  description: 'Vendor: issue a fresh link for an open invitation (the old link stops working). Limited per invitation.',
+  onGuard: vendorGuard,
+  onRequest: async (req, res) => {
+    const ctx = await vendorOwnerContext(req, res);
+    if (ctx) send(res, await invitationService.resend({ ...ctx, invitationId: req.params.invitationId }));
   },
 };
 
