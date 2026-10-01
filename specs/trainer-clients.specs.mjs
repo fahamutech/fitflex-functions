@@ -49,6 +49,13 @@ async function connect(s, permissions = {}) {
   return connection.id;
 }
 
+/** Every { key, value } in a response, at any depth. */
+function leaves(value, key = null) {
+  if (value === null || typeof value !== 'object') return [{ key, value }];
+  const entries = Array.isArray(value) ? value.map(v => [key, v]) : Object.entries(value);
+  return [{ key, value }, ...entries.flatMap(([k, v]) => leaves(v, k))];
+}
+
 test('permissions default to off and ignore unknown keys', () => {
   const p = normalizePermissions({ steps: true, workoutDetails: true, bankBalance: true, goals: 'yes' });
   assert.deepEqual(Object.keys(p), PERMISSIONS);
@@ -104,7 +111,16 @@ test('a client with nothing shared shows the trainer nothing but their own assig
   for (const key of ['activity', 'goals', 'streaks', 'challenges']) assert.equal(key in o, false, key);
   assert.deepEqual(o.workouts.map(w => w.name), ['Legs']);
   assert.equal('status' in o.workouts[0], false, 'completion needs workoutHistory');
-  assert.equal(JSON.stringify(o).includes('6000'), false, 'no raw steps leak');
+  assert.deepEqual(o.summary.week, {}, 'no activity numbers in the summary');
+  // Walk the fields rather than searching the JSON text: ids are random and
+  // can contain any digits.
+  const fields = leaves(o);
+  for (const key of ['steps', 'distanceKm', 'activeMinutes']) {
+    // The permission flags share these names; only a number is activity data.
+    assert.equal(fields.some(f => f.key === key && typeof f.value === 'number'), false, `no ${key} numbers`);
+  }
+  const stepCounts = new Set(s.activities.rows.map(a => a.steps).filter(Boolean));
+  assert.equal(fields.some(f => stepCounts.has(f.value)), false, 'no raw steps leak');
 });
 
 test('each permission reveals exactly its own data', async () => {
