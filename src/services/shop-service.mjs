@@ -11,8 +11,8 @@ const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'busi
 // for the vendor's marketplace requirements. Anything else in the body is ignored.
 const PROFILE_OPTIONAL = ['productCategories', 'returnsPolicy'];
 const PROFILE_FIELDS = new Set([...PROFILE_REQUIRED, ...PROFILE_OPTIONAL]);
-const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
-const STAFF_PERMISSIONS = new Set(['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
+export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
+export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
 const PRODUCT_REVIEW_FIELDS = new Set(['name', 'description', 'category', 'brand', 'priceTzs', 'discountPriceTzs', 'images', 'variants']);
 const PUBLIC_PROFILE_FIELDS = ['vendorId', 'businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'status'];
 const publicProfile = profile => profile?.status === 'published'
