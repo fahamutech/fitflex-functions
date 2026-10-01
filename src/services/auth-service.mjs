@@ -41,10 +41,14 @@ export function approvalStatusForRole(role) {
 // header (decision C3b). Everyone else keeps legacy session behaviour.
 export const IDENTITY_V2_CLIENT = 'identity-v2';
 
+// Personas a signed-in person may add for themselves (I3). Staff, HR and
+// admin roles are organisation or platform roles and are never self-added.
+export const ADDABLE_PERSONA_TYPES = ['member', 'trainer', 'gym_operator', 'vendor'];
+
 export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
-  identityLink = null,
+  identityLink = null, auditLog = null,
 }) {
   /** JWT claims for a persona row. `sub` stays the persona (User) id. */
   function sessionClaims(user) {
@@ -69,10 +73,14 @@ export function createAuthService({
     const [person, personas] = await Promise.all([
       identityLink.personOf(user.personId), identityLink.personasOf(user.personId),
     ]);
+    const held = new Set(personas.map(p => p.userType));
     return {
       person: person ? { id: person.id, status: person.status } : null,
       personas,
       activePersonaId: user.id,
+      // I3: what this person could still add; empty while V2_ADD_PERSONA is off.
+      addablePersonaTypes: identityFlag('V2_ADD_PERSONA')
+        ? ADDABLE_PERSONA_TYPES.filter(t => !held.has(t)) : [],
       ...extra,
     };
   }
@@ -423,5 +431,43 @@ export function createAuthService({
     };
   }
 
-  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona };
+  /**
+   * Identity V2 · I3: add a persona to the caller's own Person. No second
+   * Person, no second Firebase account, no duplicated identifiers: the new
+   * User row is created under the caller's personId and goes through the
+   * role's normal onboarding and approval. Idempotent per type.
+   */
+  async function addPersona({ claims, userType }) {
+    if (!identityFlag('V2_ADD_PERSONA') || !identityLink) return { error: 'not_found', status: 404 };
+    const type = userType === 'gym_owner' ? 'gym_operator' : userType;
+    if (!ADDABLE_PERSONA_TYPES.includes(type)) {
+      return { error: 'persona_type_not_allowed', status: 400, allowed: ADDABLE_PERSONA_TYPES };
+    }
+    const caller = await users.findByIdAsync(claims.sub);
+    if (!caller?.personId) return { error: 'user_not_found', status: 404 };
+    const person = await identityLink.personOf(caller.personId);
+    if (person?.status !== 'active') return { error: 'person_not_active', status: 403 };
+
+    const existing = (await identityLink.personasOf(caller.personId)).find(p => p.userType === type);
+    if (existing) return { created: false, persona: existing, ...(await personaPayload(caller)) };
+
+    const result = await identityLink.createPersona({
+      person, source: caller, userType: type, approvalStatus: approvalStatusForRole(type),
+    });
+    if (result.error) {
+      // Another profile of this role already uses the email (for example one a
+      // gym created); verifying the email at sign-in links it instead.
+      return { error: 'persona_identifier_in_use', status: 409 };
+    }
+    if (auditLog) {
+      await auditLog.insertAsync({
+        id: randomUUID(), at: new Date().toISOString(), actor: caller.id, action: 'persona_added',
+        target: result.row.id, before: null, after: { personId: caller.personId, userType: type },
+      });
+    }
+    const payload = await personaPayload(caller);
+    return { created: true, persona: payload.personas.find(p => p.id === result.row.id), ...payload };
+  }
+
+  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona };
 }

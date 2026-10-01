@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { CHECKIN_STATUS, STATUS_AUDIT_ACTION, checkStatusChange, currentStatus } from '../shared/checkin-status.mjs';
 
-export function createCheckinStatusService({ checkins, auditLog }) {
+export function createCheckinStatusService({ checkins, auditLog, onVoided = null }) {
   /**
    * @param {{ checkinId: string, status: string, reason: string, actorId: string, now?: Date }} args
    */
@@ -26,6 +26,15 @@ export function createCheckinStatusService({ checkins, auditLog }) {
       before: { status: from, statusReason: checkin.statusReason ?? null },
       after: { status, statusReason: check.reason }
     });
+    // A voided visit gives back whatever it used (a B2B allowance). The void
+    // itself has already happened; a failing hook must not undo it.
+    if (status === CHECKIN_STATUS.VOIDED && onVoided) {
+      try {
+        await onVoided({ checkin: updated, reason: check.reason, actorId });
+      } catch (err) {
+        console.warn('[check-in] onVoided failed:', err?.message);
+      }
+    }
     return { checkin: updated };
   }
 
