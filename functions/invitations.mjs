@@ -2,7 +2,7 @@
 // Every route answers 404 unless IDENTITY_V2 + V2_INVITES are on.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { requireGymOwner, effectiveOperator } from '../src/auth/org-authz.mjs';
+import { requireGymAccess, effectiveOperator } from '../src/auth/org-authz.mjs';
 import { invitationService, resolveRequestUser, users } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 
@@ -34,13 +34,15 @@ async function personContext(req, res) {
   return user;
 }
 
-const ownerGuard = route => [requireAuth('gym_operator'), requireGymOwner(route)];
+// Owners, and staff holding the members scope (they may invite members only:
+// the service keeps staff and trainer invitations to the owner).
+const ownerGuard = route => [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', route)];
 
-// ── Organisation side (gym owners) ─────────────────────────────────────────
+// ── Organisation side (gym owners; staff with the members scope for members) ──
 
 export const gymPeopleLookup = {
   created, method: 'post', path: '/orgs/gym/:gymId/people/lookup',
-  description: 'Gym owner: does this exact phone or email belong to a FitFlex person? Answers { found, maskedName } only, for verified identifiers only. Rate-limited and logged.',
+  description: 'Gym owner or members-scope staff: does this exact phone or email belong to a FitFlex person? Answers { found, maskedName } only, for verified identifiers only. Rate-limited and logged.',
   requestSample: { phone: '0712345678' },
   responseSample: { found: true, maskedName: 'N**** A*******' },
   onGuard: ownerGuard('POST /orgs/gym/:gymId/people/lookup'),
@@ -52,8 +54,8 @@ export const gymPeopleLookup = {
 
 export const gymCreateInvitation = {
   created, method: 'post', path: '/orgs/gym/:gymId/invitations',
-  description: 'Gym owner: invite a person (by one phone or email) to join as staff or trainer. No account or credentials are created. Returns the link token once.',
-  requestSample: { role: 'staff', email: 'reception@example.com', aclPermissions: ['members', 'checkins'] },
+  description: 'Invite a person (by one phone or email) to join the gym. Owner: staff, trainer or member. Members-scope staff: member only. A member invitation carries the plan (durationUnit D|W|M, startDate = payment date, endDate, tier) and an optional desk payment (paidAmount); the plan is created when the person accepts. No account or credentials are created. Returns the link token once.',
+  requestSample: { role: 'member', phone: '0712345678', durationUnit: 'M', startDate: '2026-10-01', endDate: '2026-10-31', tier: 'basic', paidAmount: 50000 },
   onGuard: ownerGuard('POST /orgs/gym/:gymId/invitations'),
   onRequest: async (req, res) => {
     const ctx = await gymOwnerContext(req, res);
@@ -65,11 +67,11 @@ export const gymCreateInvitation = {
 
 export const gymListInvitations = {
   created, method: 'get', path: '/orgs/gym/:gymId/invitations',
-  description: 'Gym owner: invitations sent by this gym, newest first.',
+  description: 'Invitations sent by this gym, newest first (staff see member invitations only). ?needsResolution=1 lists paid invitations that expired unaccepted and still need re-issuing or refunding.',
   onGuard: ownerGuard('GET /orgs/gym/:gymId/invitations'),
   onRequest: async (req, res) => {
     const ctx = await gymOwnerContext(req, res);
-    if (ctx) send(res, await invitationService.listForOrg(ctx));
+    if (ctx) send(res, await invitationService.listForOrg({ ...ctx, onlyNeedsResolution: ['1', 'true'].includes(String(req.query?.needsResolution ?? '')) }));
   },
 };
 
@@ -90,6 +92,29 @@ export const gymResendInvitation = {
   onRequest: async (req, res) => {
     const ctx = await gymOwnerContext(req, res);
     if (ctx) send(res, await invitationService.resend({ ...ctx, invitationId: req.params.invitationId }));
+  },
+};
+
+export const gymReissueInvitation = {
+  created, method: 'post', path: '/orgs/gym/:gymId/invitations/:invitationId/reissue',
+  description: 'A paid member invitation expired unaccepted: send it again. The payment and its original date carry over.',
+  onGuard: ownerGuard('POST /orgs/gym/:gymId/invitations/:invitationId/reissue'),
+  onRequest: async (req, res) => {
+    const ctx = await gymOwnerContext(req, res);
+    if (!ctx) return;
+    const result = await invitationService.reissue({ ...ctx, invitationId: req.params.invitationId });
+    send(res, result, result.error ? 200 : 201);
+  },
+};
+
+export const gymMarkInvitationRefunded = {
+  created, method: 'post', path: '/orgs/gym/:gymId/invitations/:invitationId/refunded',
+  description: 'A paid member invitation expired unaccepted: record that the gym refunded the desk payment itself. No money is moved by FitFlex.',
+  requestSample: { note: 'Cash returned at the desk' },
+  onGuard: ownerGuard('POST /orgs/gym/:gymId/invitations/:invitationId/refunded'),
+  onRequest: async (req, res) => {
+    const ctx = await gymOwnerContext(req, res);
+    if (ctx) send(res, await invitationService.markRefunded({ ...ctx, invitationId: req.params.invitationId, note: req.body?.note }));
   },
 };
 

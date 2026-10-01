@@ -3,6 +3,7 @@ import '../src/bootstrap/init.mjs';
 import { randomUUID } from 'node:crypto';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { requireGymAccess, effectiveOperator } from '../src/auth/org-authz.mjs';
+import { identityFlag } from '../src/shared/feature-flags.mjs';
 import { memberManagement, resolveRequestUser, auditLog } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -12,6 +13,15 @@ export const ownerCreateMember = {
   description: 'Owner: register a new member under their gym with payment info and create a gym-linked subscription.',
   onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'POST /owner/members')],
   onRequest: async (req, res) => {
+    // With invitations on, a gym no longer creates accounts or sets credentials
+    // for people: it invites them, and the plan starts when they accept.
+    if (identityFlag('V2_INVITES')) {
+      return res.status(400).json({
+        error: 'use_invitation',
+        message: 'Members are now invited instead of being created at the desk. Update the app and use Invite.',
+        use: 'POST /orgs/gym/:gymId/invitations',
+      });
+    }
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
     const result = await memberManagement.createMember({ owner, body: req.body || {} });

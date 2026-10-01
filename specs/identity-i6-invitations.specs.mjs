@@ -313,7 +313,7 @@ test('input rules: role, ACL scopes, and staff at another organisation', async (
   await on(async () => {
     const o = await makeOwner();
     const p = await verifiedPerson();
-    assert.equal((await invite(o, { role: 'member', email: p.email })).body.error, 'role_not_invitable');
+    assert.equal((await invite(o, { role: 'member', email: p.email })).body.error, 'durationUnit_must_be_D_W_or_M', 'a member invitation needs its plan');
     assert.equal((await invite(o, { role: 'owner', email: p.email })).body.error, 'role_not_invitable');
     assert.equal((await invite(o, { role: 'staff', email: p.email, aclPermissions: ['everything'] })).body.error, 'invalid_acl_scopes');
 

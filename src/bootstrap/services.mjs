@@ -305,6 +305,8 @@ export const notificationService = createNotificationService({
 export const invitationService = createInvitationService({
   db, users, trainers, auditLog, ownerStaffAclScopes: GYM_STAFF_ACL_SCOPES,
   notify: (userId, message) => notificationService.notify(userId, message),
+  activateDirectMembership: args => memberManagement.activateDirectMembership(args),
+  createPersona: args => identityLinkService.createPersona(args),
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.

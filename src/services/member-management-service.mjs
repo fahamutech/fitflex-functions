@@ -226,12 +226,26 @@ export function createMemberManagementService({
     };
     await users.upsertAsync((u) => u.id === memberId, member);
 
+    const { subscription: sub, payment } = await activateDirectMembership({
+      memberId, gymId: assignedGymId, tier, startDate, endDate, paidAmount,
+    });
+
+    return { member: toSessionUser(member), subscription: sub, payment, credentialCreated };
+  }
+
+  /**
+   * A direct plan for `memberId` at `gymId`, with its desk payment if one was
+   * taken. Shared by the desk sale above and by an accepted member invitation
+   * (Identity V2 · I6), so both create exactly the same records.
+   */
+  async function activateDirectMembership({ memberId, gymId, tier, startDate, endDate, paidAmount, paidAt = null }) {
+    const nowIso = new Date().toISOString();
     const startIso = toIso(startDate);
     const endIso = toIso(endDate);
     const sub = {
       id: `sub_${randomUUID().slice(0, 8)}`,
       memberId,
-      homeGymId: assignedGymId,
+      homeGymId: gymId,
       tier: tier || 'basic',
       type: 'direct_sub',
       status: 'active',
@@ -246,6 +260,7 @@ export function createMemberManagementService({
 
     let payment = null;
     if (paidAmount && Number(paidAmount) > 0) {
+      const paidIso = paidAt ? toIso(paidAt) : nowIso;
       payment = {
         id: `pay_${randomUUID().slice(0, 8)}`,
         memberId,
@@ -254,13 +269,12 @@ export function createMemberManagementService({
         amountTzs: Number(paidAmount),
         status: 'approved',
         provider: 'admin_manual',
-        requestedAt: nowIso,
-        decidedAt: nowIso,
+        requestedAt: paidIso,
+        decidedAt: paidIso,
       };
       await paymentRequests.insertAsync(payment);
     }
-
-    return { member: toSessionUser(member), subscription: sub, payment, credentialCreated };
+    return { subscription: sub, payment };
   }
 
   // Resolves the effective gym scope for a members/stats query: a single
@@ -632,6 +646,7 @@ export function createMemberManagementService({
 
   return {
     createMember,
+    activateDirectMembership,
     listMembers,
     getMemberStats,
     getMemberDetail,
