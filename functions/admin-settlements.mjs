@@ -123,3 +123,33 @@ export const adminPayStatement = {
   onGuard: [requireAuth('admin'), requireAcl('settlements_pay')],
   onRequest: async (req, res) => respond(res, await settlementWorkflowService.pay({ id: req.params.id, paymentReference: req.body?.paymentReference, receiptUrl: req.body?.receiptUrl, actorId: req.user?.sub }))
 };
+
+// ── adjustments (DR-20) ─────────────────────────────────────────────────────
+
+export const adminProposeAdjustment = {
+  created, method: 'post', path: '/admin/settlements/statements/:id/adjustments',
+  description: 'Admin: propose a signed adjustment on a draft statement (type correction, clawback or manual; a clawback is negative). It changes nothing until someone else applies it.',
+  requestSample: { amountTzs: -3500, type: 'clawback', reason: 'Visit voided after last month was paid', sourceCheckinId: 'chk_123' },
+  onGuard: [requireAuth('admin'), requireAcl('settlements_prepare')],
+  onRequest: async (req, res) => {
+    const { amountTzs, type, reason, sourceCheckinId, sourceSettlementId } = req.body || {};
+    const result = await settlementWorkflowService.proposeAdjustment({ statementId: req.params.id, amountTzs, type, reason, sourceCheckinId, sourceSettlementId, actorId: req.user?.sub });
+    if (result.error) return respond(res, result);
+    res.status(201).json(result);
+  }
+};
+
+export const adminApplyAdjustment = {
+  created, method: 'post', path: '/admin/settlements/adjustments/:id/apply',
+  description: 'Admin: apply a proposed adjustment to its draft statement. The approver must not be the person who proposed it. The statement\'s net never goes below zero: a shortfall is carried forward.',
+  onGuard: [requireAuth('admin'), requireAcl('settlements_approve')],
+  onRequest: async (req, res) => respond(res, await settlementWorkflowService.decideAdjustment({ id: req.params.id, decision: 'apply', actorId: req.user?.sub }))
+};
+
+export const adminRejectAdjustment = {
+  created, method: 'post', path: '/admin/settlements/adjustments/:id/reject',
+  description: 'Admin: reject a proposed adjustment, with a reason.',
+  requestSample: { reason: 'Already corrected last month' },
+  onGuard: [requireAuth('admin'), requireAcl('settlements_approve')],
+  onRequest: async (req, res) => respond(res, await settlementWorkflowService.decideAdjustment({ id: req.params.id, decision: 'reject', reason: req.body?.reason, actorId: req.user?.sub }))
+};
