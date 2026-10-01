@@ -308,6 +308,23 @@ export function createFinanceService({ gyms, checkins, invoices, users, gymPayou
       });
     }
 
+    // Payouts made through the settlement workflow (a legacy invoice's payout
+    // is already counted above through its invoice).
+    const settlementPayouts = await gymPayouts.filterAsync(p => p.gymSettlementId && p.status === 'paid');
+    for (const p of settlementPayouts) {
+      const gym = gyms.find(g => g.id === p.gymId);
+      entries.push({
+        id: p.id,
+        date: p.paidAt || p.createdAt,
+        type: 'expense',
+        category: 'gym_payout',
+        description: `Gym settlement — ${gym?.name || p.gymId}${p.periodStart ? ` (${p.periodStart} – ${p.periodEnd})` : ''}`,
+        amount: p.amount || 0,
+        reference: p.reference || null,
+        gymId: p.gymId
+      });
+    }
+
     entries.sort((a, b) => +new Date(b.date) - +new Date(a.date));
     return entries;
   }
