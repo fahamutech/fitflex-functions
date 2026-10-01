@@ -16,14 +16,23 @@ function sameEatDate(a, b) {
 
 export function createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
+  b2bFunding = null,
 }) {
-  /** Member self-service QR issuance — requires an active subscription. */
+  // B2B lookups must never break scanning: on any error, behave as before.
+  const sponsored = async (fn) => {
+    if (!b2bFunding) return false;
+    try { return !!(await fn(b2bFunding)); } catch (err) { console.warn('[operator] B2B benefit lookup failed:', err?.message); return false; }
+  };
+
+  /** Member self-service QR issuance — requires an active subscription, or a sponsor's gym benefit. */
   async function issueMemberQr(memberId) {
     const allSubs = await subscriptions.filterAsync(s => s.memberId === memberId && s.status === 'active');
     const active = allSubs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0];
     // T5: trainers linked to a gym get in free, so they need a QR without a pass.
     const homeTrainer = (checkInService.homeGymIds?.(memberId) || []).length > 0;
-    if (!active && !homeTrainer) return { error: 'active_subscription_required', status: 403 };
+    if (!active && !homeTrainer && !(await sponsored(b => b.hasBenefit({ userId: memberId, serviceType: 'gym_access' })))) {
+      return { error: 'active_subscription_required', status: 403 };
+    }
     return { qr: issueQr(memberId) };
   }
 
@@ -52,6 +61,10 @@ export function createOperatorService({
       const validation = validateTrainerHomeEntry({ gym });
       eligible = validation.ok;
       reason = validation.ok ? 'trainer_home_gym' : validation.failure;
+    } else if (validateTrainerHomeEntry({ gym }).ok && await sponsored(b => b.wouldCoverGymVisit({ memberId: member.id, gym }))) {
+      // Same order as the check-in itself: a sponsor's benefit before the member's own pass.
+      eligible = true;
+      reason = 'sponsor_benefit';
     } else if (sub) {
       const since = +new Date(sub.cycleStartedAt);
       const allCheckins = await checkins.filterAsync(c => c.memberId === member.id && c.visitConsumed && +new Date(c.timestamp) >= since);
@@ -99,12 +112,14 @@ export function createOperatorService({
     const gym = gymSelection.ok ? gyms.find(g => g.id === gymSelection.gymId) || null : null;
     if (!gym) return { status: 400, body: { error: 'operator_not_assigned_to_gym' } };
 
-    const result = await checkInService.perform({ memberId: claim.userId, gymId: gym.id, method: 'gym_scanned' });
+    const { b2b, ...result } = await checkInService.perform({ memberId: claim.userId, gymId: gym.id, method: 'gym_scanned' });
     if (!result.ok) return { status: 409, body: result };
     return {
       status: 200,
       body: {
         ...result,
+        // Gym staff learn that a sponsor covers the visit, not who the sponsor is or what it pays.
+        ...(b2b ? { b2b: { covered: true } } : {}),
         checkin: result.checkin
           ? { ...result.checkin, memberPublicId: await publicUserId(claim.userId, 'member') }
           : result.checkin,
@@ -156,7 +171,7 @@ export function createOperatorService({
       const t = +new Date(c.timestamp);
       return t >= +periodStart && t <= +periodEnd;
     };
-    const isFitFlexVisit = c => ['platform_pass', 'roaming_topup'].includes(c.subscriptionType);
+    const isFitFlexVisit = c => ['platform_pass', 'roaming_topup', 'b2b_benefit'].includes(c.subscriptionType);
     const isDirectVisit = c => !isFitFlexVisit(c);
     const matchesMemberType = c => memberType === 'all' || (memberType === 'fitflex' ? isFitFlexVisit(c) : isDirectVisit(c));
     const allCheckins = await checkins.allAsync();
