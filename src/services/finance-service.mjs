@@ -1,8 +1,8 @@
-// Finance service — gym usage/billing summaries, period-based distribution
-// with auto-generated invoices, and simple book-keeping (money in vs out).
-import { randomUUID } from 'node:crypto';
+// Finance service — legacy gym usage/billing summaries, the legacy
+// period-based distribution report (read-only: it no longer creates
+// invoices), and simple book-keeping (money in vs out).
 
-export function createFinanceService({ gyms, checkins, invoices, users, gymPayouts, gymOwners, settingsService }) {
+export function createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService }) {
   /**
    * Smart billing rate logic:
    * - Count consecutive day streaks per member per gym
@@ -228,31 +228,12 @@ export function createFinanceService({ gyms, checkins, invoices, users, gymPayou
           });
         }
 
-        let invoice = allInvoices.find(i =>
+        const invoice = allInvoices.find(i =>
           i.gymId === gym.id && i.periodStart === period.start && i.periodEnd === period.end
         );
-        if (!invoice && gymOwed > 0) {
-          const owner = gymOwners.find(o => o.gymId === gym.id || (o.gymIds && o.gymIds.includes(gym.id)));
-          invoice = {
-            id: randomUUID(),
-            gymId: gym.id,
-            gymName: gym.name,
-            ownerId: owner?.id || null,
-            ownerName: owner?.displayName || owner?.email || null,
-            amount: Math.round(gymOwed),
-            status: 'unpaid',
-            note: `Auto-generated for period ${period.start} — ${period.end}`,
-            periodStart: period.start,
-            periodEnd: period.end,
-            receiptUrl: null,
-            paymentReference: null,
-            createdAt: new Date().toISOString(),
-            createdBy: 'system',
-            paidAt: null,
-          };
-          await invoices.insertAsync(invoice);
-          allInvoices.push(invoice);
-        }
+        // Legacy invoices are frozen (settlement Phase 3): this report no
+        // longer creates one when it is read. New amounts owed to gyms come
+        // from the settlement service; existing invoices are still shown.
 
         const invoicePaid = invoice && invoice.status === 'paid';
         const paid = invoicePaid ? Math.round(gymOwed) : 0;

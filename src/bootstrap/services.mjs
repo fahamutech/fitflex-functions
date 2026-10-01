@@ -5,6 +5,7 @@ import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
 import { createSettlementConfigService } from '../services/settlement-config-service.mjs';
+import { createSettlementService } from '../services/settlement-service.mjs';
 import { createCheckinStatusService } from '../services/checkin-status-service.mjs';
 import { createMemberManagementService } from '../services/member-management-service.mjs';
 import { createIdentityService } from '../services/identity-service.mjs';
@@ -180,6 +181,8 @@ export const checkInService = createCheckInService({
 });
 // Gym settlement configuration (settlement Phase 2): not used by any payout flow yet.
 export const settlementConfigService = createSettlementConfigService();
+// Calculates and stores settlements (settlement Phase 3). It never approves or pays.
+export const settlementService = createSettlementService({ configService: settlementConfigService });
 export const checkinStatusService = createCheckinStatusService({
   checkins, auditLog,
   // Voiding a visit gives its B2B allowance back.
@@ -220,7 +223,7 @@ export const adminPaymentService = createAdminPaymentService({
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
-export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, gymOwners, settingsService });
+export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
 export const invoiceService = createInvoiceService({
   invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
 });

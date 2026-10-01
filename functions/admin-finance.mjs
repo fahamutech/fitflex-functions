@@ -25,7 +25,7 @@ export const adminGymVisitDetails = {
 
 export const adminPeriodDistribution = {
   created, method: 'get', path: '/admin/distributions/periods',
-  description: 'Admin: period-based distribution — usage per gym per period with auto-generated invoices.',
+  description: 'Admin: legacy period-based distribution — usage per gym per period with any existing legacy invoice. Read-only: it no longer creates invoices.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => res.json(await financeService.periodDistribution())
 };
