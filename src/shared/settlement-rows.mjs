@@ -18,13 +18,15 @@
  * @param {(gymId: string) => string} ctx.gymSettlementIdFor  the gym's statement in this run
  * @param {() => string} ctx.newId
  * @param {{ passTierVersion?: number|null, catalogPriceTzs?: number|null }} [ctx.terms]  pass snapshot (resolveMemberCycleTerms)
+ * @param {Object} [ctx.explanation]  extra facts to keep with the member cycle (e.g. the B2B month)
  */
-export function settlementRowsFromResult(result, { runId, mode, gymSettlementIdFor, newId, terms = {} }) {
+export function settlementRowsFromResult(result, { runId, mode, gymSettlementIdFor, newId, terms = {}, explanation = {} }) {
   const m = result.member;
   const memberCycle = {
     id: newId(), runId, mode,
     memberId: m.memberId,
     subscriptionId: m.subscriptionId ?? m.cycleId,
+    fundingType: m.subscriptionType,
     cycleStart: m.cycleStart,
     cycleEnd: m.cycleEnd,
     passTier: m.passTier,
@@ -44,7 +46,8 @@ export function settlementRowsFromResult(result, { runId, mode, gymSettlementIdF
     engineVersion: result.engineVersion,
     explanation: {
       cycleStartDate: m.cycleStartDate, cycleEndDate: m.cycleEndDate, finalizableAt: m.finalizableAt,
-      retainedHeadroomTzs: m.retainedHeadroomTzs, settleable: m.settleable, warnings: result.warnings
+      retainedHeadroomTzs: m.retainedHeadroomTzs, settleable: m.settleable, warnings: result.warnings,
+      ...explanation
     },
     active: true
   };

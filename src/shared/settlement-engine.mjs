@@ -22,9 +22,14 @@ import { CHECKIN_STATUS } from './checkin-status.mjs';
 
 export const SETTLEMENT_ENGINE_VERSION = 'settlement-engine/1';
 
-// DR-03: only Platform Pass visits enter visit-based gym settlement in MVP.
-// Values are the Checkin.subscriptionType strings the check-in service writes.
-export const SETTLEABLE_SUBSCRIPTION_TYPES = Object.freeze(['platform_pass']);
+// What enters visit-based gym settlement. Values are the
+// Checkin.subscriptionType strings the check-in service writes.
+//   platform_pass  DR-03: a member's own pass; one settlement per pass cycle.
+//   b2b_benefit    a visit funded by a company benefit (decided 1 Oct 2026):
+//                  the same brackets and cap, per beneficiary per EAT month,
+//                  capped against what was charged for those visits.
+// A cycle only ever settles visits of its own type.
+export const SETTLEABLE_SUBSCRIPTION_TYPES = Object.freeze(['platform_pass', 'b2b_benefit']);
 
 // DR-14: the check-in lifecycle, as stored on Checkin (one definition).
 export { CHECKIN_STATUS };
@@ -221,9 +226,12 @@ export function allocateNetworkCap(preliminaries, capTzs) {
  *  1. cycle assignment (DR-15: the caller assigns grace-period visits to the
  *     expiring cycle; the engine only checks the assignment and that the
  *     timestamp lies within the cycle plus the existing 24 h grace)
- *  2. subscription type (DR-03)            3. VOIDED never counts (DR-14)
+ *  2. subscription type (DR-03): the cycle's own type only
+ *  3. VOIDED never counts (DR-14)
  *  4. one visit per EAT day: the day's first remaining visit keeps the day;
- *     a second gym that day is not payable (DR-13)
+ *     a second gym that day is not payable (DR-13). A cycle with
+ *     oneGymPerDay false (company-funded visits, each charged on its own)
+ *     counts one visit per gym per day instead.
  *  5. the day's visit must have been consumed (visitConsumed, BL-010/011)
  *  6. allowance, chronologically (DR-01). DISPUTED/FLAGGED visits occupy
  *     allowance slots so resolving them can never push payable visits past
@@ -235,6 +243,7 @@ export function classifyVisits({ cycle, visits, gymIdsWithRates }) {
   const cycleStartMs = instant(cycle.cycleStart, 'cycle.cycleStart');
   const graceEndMs = instant(cycle.cycleEnd, 'cycle.cycleEnd') + SUBSCRIPTION_GRACE_HOURS * HOUR_MS;
   const cycleSettleable = SETTLEABLE_SUBSCRIPTION_TYPES.includes(cycle.subscriptionType);
+  const oneGymPerDay = cycle.oneGymPerDay !== false;
 
   const ordered = [...visits].sort((a, b) => {
     const d = instant(a.timestamp, `visit ${a.checkinId} timestamp`) - instant(b.timestamp, `visit ${b.checkinId} timestamp`);
@@ -259,18 +268,19 @@ export function classifyVisits({ cycle, visits, gymIdsWithRates }) {
     if (v.cycleId !== cycle.cycleId || ts < cycleStartMs || ts >= graceEndMs) {
       out(VISIT_OUTCOME.EXCLUDED, VISIT_ELIGIBILITY.OUTSIDE_MEMBER_CYCLE); continue;
     }
-    if (!cycleSettleable || !SETTLEABLE_SUBSCRIPTION_TYPES.includes(v.subscriptionType)) {
+    if (!cycleSettleable || v.subscriptionType !== cycle.subscriptionType) {
       out(VISIT_OUTCOME.EXCLUDED, VISIT_ELIGIBILITY.WRONG_SUBSCRIPTION_TYPE); continue;
     }
     if (v.status === CHECKIN_STATUS.VOIDED) {
       out(VISIT_OUTCOME.EXCLUDED, VISIT_ELIGIBILITY.VOIDED); continue;
     }
-    const owner = dayOwner.get(businessDate);
+    const dayKey = oneGymPerDay ? businessDate : `${businessDate}:${v.gymId}`;
+    const owner = dayOwner.get(dayKey);
     if (owner) {
       out(VISIT_OUTCOME.EXCLUDED, owner.gymId === v.gymId ? VISIT_ELIGIBILITY.DUPLICATE_SAME_DAY : VISIT_ELIGIBILITY.SECOND_GYM_SAME_DAY);
       continue;
     }
-    dayOwner.set(businessDate, v);
+    dayOwner.set(dayKey, v);
     if (v.visitConsumed !== true) {
       out(VISIT_OUTCOME.EXCLUDED, VISIT_ELIGIBILITY.NOT_CONSUMED); continue;
     }
@@ -324,7 +334,7 @@ function snapshotOf(s, rates) {
  *   resolved as of the cycle start (see settlement-config.mjs):
  *   { memberId, cycleId, subscriptionId?, subscriptionType, passTier,
  *     cycleStart, cycleEnd (ISO instants), collectedApprovedAmountTzs,
- *     networkPayoutBps, visitAllowance }
+ *     networkPayoutBps, visitAllowance, oneGymPerDay? (default true) }
  * @param {Array}  args.visits  check-ins assigned by the caller, each
  *   { checkinId, memberId, cycleId, gymId, timestamp, status, visitConsumed,
  *     subscriptionType, passTier?, gymTier? }

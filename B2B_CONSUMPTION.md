@@ -201,10 +201,13 @@ Phase 4 will use these to decide:
 
 - **Sponsor invoicing:** the sum of `sponsorTzs` per organisation and period. `CorporateBill` is the existing pattern.
 - **Beneficiary collection:** `beneficiaryTzs` for gym visits isn't collected today. For trainer sessions the member already paid in full, so the sponsor's share is owed back to them or netted off.
-- **Provider settlement and payout:** from verified usage, the provider's rate card and agreement, and the funding source, through the settlement engine (`src/shared/settlement-*`). That engine currently settles only `platform_pass` check-ins, so `b2b_benefit` check-ins aren't in any payout until Phase 4 adds them.
+- **Provider settlement and payout:** from verified usage, the provider's rate card and agreement, and the funding source, through the settlement engine (`src/shared/settlement-*`).
+  - **Gym visits are settled (decided 1 Oct 2026).** `settlement-service` settles approved `gym_checkin` consumptions with the same visit brackets and network cap as a member's own pass: one cycle per beneficiary per EAT month, capped at the network % of the month's `grossTzs` for that beneficiary's gym visits. Each company-funded visit counts on its own, so two gyms on one day both count. A month is settled once its end + 24 h + the 7-day dispute window has passed. Reversed, cancelled and pending rows are left out; a disputed or flagged check-in holds the whole month.
+  - The cap is computed on what was **charged** (`grossTzs`), which isn't yet collected: sponsor invoicing is still to do.
+  - Trainer sessions are not settled by that engine.
 - **Settlement cycles, adjustments and reconciliation**, including what a reversal after settlement means.
 
-Nothing in Phase 3 stores or computes a provider payout.
+The consumption ledger itself still stores no provider payout: the gym's amount lives in the settlement tables (`MemberCycleSettlement` with `fundingType = 'b2b_benefit'`, `GymSettlementLine`, `SettlementVisit`).
 
 ## 11. Known limitations
 

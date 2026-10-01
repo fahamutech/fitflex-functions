@@ -165,22 +165,19 @@ export function createSettlementConfigService({ db = defaultDb, now = () => new 
    */
   async function activeConfiguration({ trx } = {}) {
     const q = trx || db;
-    const [passTierVersions, rules, rateCards] = await Promise.all([
-      q('PassTierVersion').where({ status: 'active' }).orderBy(['tierKey', 'effectiveFrom']),
-      q('SettlementRule').where({ status: 'active' }).orderBy(['scopeType', 'scopeId', 'effectiveFrom']),
-      q('GymRateCard').where({ status: 'active' }).orderBy(['gymId', 'effectiveFrom']),
-    ]);
+    // One after another: inside a caller's transaction they share one connection.
+    const passTierVersions = await q('PassTierVersion').where({ status: 'active' }).orderBy(['tierKey', 'effectiveFrom']);
+    const rules = await q('SettlementRule').where({ status: 'active' }).orderBy(['scopeType', 'scopeId', 'effectiveFrom']);
+    const rateCards = await q('GymRateCard').where({ status: 'active' }).orderBy(['gymId', 'effectiveFrom']);
     return { passTierVersions, rules, rateCards };
   }
 
   /** Everything, for the admin screens: drafts, active (including closed) and rejected. */
   async function listConfiguration({ status } = {}) {
     const where = status && status !== 'all' ? { status } : {};
-    const [passTierVersions, rules, rateCards] = await Promise.all([
-      db('PassTierVersion').where(where).orderBy([{ column: 'tierKey' }, { column: 'version', order: 'desc' }]),
-      db('SettlementRule').where(where).orderBy([{ column: 'scopeType' }, { column: 'scopeId' }, { column: 'version', order: 'desc' }]),
-      db('GymRateCard').where(where).orderBy([{ column: 'gymId' }, { column: 'version', order: 'desc' }]),
-    ]);
+    const passTierVersions = await db('PassTierVersion').where(where).orderBy([{ column: 'tierKey' }, { column: 'version', order: 'desc' }]);
+    const rules = await db('SettlementRule').where(where).orderBy([{ column: 'scopeType' }, { column: 'scopeId' }, { column: 'version', order: 'desc' }]);
+    const rateCards = await db('GymRateCard').where(where).orderBy([{ column: 'gymId' }, { column: 'version', order: 'desc' }]);
     return { passTierVersions, rules, rateCards };
   }
 

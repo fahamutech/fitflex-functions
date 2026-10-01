@@ -28,6 +28,22 @@ export function subscriptionCoversGym(subscription, gym) {
 }
 
 /**
+ * Was this check-in made on this subscription? A pass's visit count and its
+ * "already visited today" rule look only at its own check-ins: a visit funded
+ * by a company benefit, or made on another membership (a direct plan at some
+ * gym), doesn't use up a pass visit or block the pass that day. Check-ins
+ * recorded before they carried the subscription link fall back to the
+ * subscription type (and count if they have no type either).
+ */
+export function fundedBySubscription(subscription) {
+  return (checkin) => {
+    if (!subscription) return false;
+    if (checkin.subscriptionId != null) return checkin.subscriptionId === subscription.id;
+    return checkin.subscriptionType == null || checkin.subscriptionType === subscription.type;
+  };
+}
+
+/**
  * Pick the subscription to validate a check-in against: the newest one that
  * covers this gym, else the newest overall (so the failure reason is still
  * meaningful, e.g. wrong_gym).
