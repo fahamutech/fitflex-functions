@@ -149,7 +149,7 @@ export const identityLinkService = createIdentityLinkService({ db });
 export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
-  identityLink: identityLinkService,
+  identityLink: identityLinkService, auditLog,
 });
 
 export const subscriptionService = createSubscriptionService({ subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId });

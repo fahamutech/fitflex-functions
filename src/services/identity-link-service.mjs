@@ -220,5 +220,36 @@ export function createIdentityLinkService({ db }) {
     await db('Person').where({ id: personId }).update({ lastPersonaId: userId, updatedAt: db.fn.now() });
   }
 
-  return { linkOnVerifiedSignIn, personasOf, personOf, rememberPersona };
+  /**
+   * Identity V2 · I3: a new persona (User row) for an existing Person. The
+   * row is inserted with personId set explicitly, so it can never land on a
+   * new Person. Returns { row } or { error } when another profile already
+   * holds the email for that role (the per-role unique indexes).
+   */
+  async function createPersona({ person, source, userType, approvalStatus }) {
+    const id = `usr_${randomUUID().slice(0, 8)}`;
+    const now = new Date();
+    // A phone already used by another profile of this role is left off rather
+    // than blocking the persona; it is only a display copy here.
+    const phoneTaken = source.phone
+      ? await db('User').where({ phone: source.phone, userType }).first('id') : null;
+    try {
+      await db('User').insert({
+        id, personId: person.id, userType,
+        firebaseUid: source.firebaseUid ?? null,
+        email: source.email ?? null,
+        phone: phoneTaken ? null : source.phone ?? null,
+        displayName: source.displayName ?? null,
+        photoUrl: source.photoUrl ?? null,
+        accountStatus: 'active', approvalStatus, onboardingCompleted: false,
+        createdAt: now, updatedAt: now,
+      });
+    } catch (err) {
+      if (err?.code === '23505') return { error: 'unique_violation', constraint: err.constraint ?? null };
+      throw err;
+    }
+    return { row: await db('User').where({ id }).first() };
+  }
+
+  return { linkOnVerifiedSignIn, personasOf, personOf, rememberPersona, createPersona };
 }

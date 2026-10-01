@@ -97,6 +97,21 @@ export const myPersonas = {
   onRequest: async (req, res) => sendResult(res, await authService.myPersonas({ claims: req.user })),
 };
 
+export const addMyPersona = {
+  created, method: 'post', path: '/me/personas',
+  description: 'Identity V2: add a persona (member, trainer, gym_operator, vendor) to the caller\'s own Person. 404 unless V2_ADD_PERSONA is on.',
+  requestSample: { userType: 'trainer' },
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => {
+    const result = await authService.addPersona({ claims: req.user, userType: req.body?.userType });
+    if (result.error) {
+      const { error, status, allowed } = result;
+      return res.status(status).json({ error, ...(allowed ? { allowed } : {}) });
+    }
+    res.status(result.created ? 201 : 200).json(result);
+  },
+};
+
 export const authSwitchPersona = {
   created, method: 'post', path: '/auth/switch-persona',
   description: 'Identity V2: mint a session for another persona of the same Person.',
