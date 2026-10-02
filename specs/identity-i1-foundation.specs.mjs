@@ -19,7 +19,7 @@ import linking from '../db/migrations/20261101090000-identity-linking.cjs';
 import onePersonaPerType from '../db/migrations/20261103090000-identity-one-persona-per-type.cjs';
 import orgMembership from '../db/migrations/20261105090000-org-membership.cjs';
 import invitations from '../db/migrations/20261106090000-identity-invitations.cjs';
-import verificationCodes from '../db/migrations/20261108090000-identity-verification-codes.cjs';
+import verificationCodes from '../db/migrations/20261112090000-identity-verification-codes.cjs';
 
 // Later identity migrations depend on Person, so a rollback runs newest first.
 // Add each new identity migration here.
