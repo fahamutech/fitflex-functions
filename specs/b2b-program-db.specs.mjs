@@ -156,7 +156,7 @@ test('programme and benefit routes: full flow, roles, FitFlex activation and a m
   const programId = created.body.program.id;
   assert.equal((await call(createB2BProgram, { claims: analyst, params: { id }, body: { name: 'x', startDate: `${year}-01-01` } })).statusCode, 403);
 
-  const ben = await call(createB2BBenefit, { claims: owner, params: { id, programId }, body: { name: '8 visits', benefitType: 'gym_access', fundingType: 'sponsor_percentage', sponsorShareBps: 6000, usageLimit: 8, usagePeriod: 'month' } });
+  const ben = await call(createB2BBenefit, { claims: owner, params: { id, programId }, body: { name: '8 visits', benefitType: 'gym_access', fundingType: 'full', usageLimit: 8, usagePeriod: 'month' } });
   assert.equal(ben.statusCode, 201, JSON.stringify(ben.body));
   const benefitId = ben.body.benefit.id;
   assert.equal((await call(setB2BBenefitStatus, { claims: owner, params: { id, programId, benefitId }, body: { status: 'active' } })).body.benefit.status, 'active');
@@ -178,7 +178,7 @@ test('programme and benefit routes: full flow, roles, FitFlex activation and a m
   assert.equal((await call(adminListB2BPrograms, { claims: staff })).body.requiredScope, 'b2b');
 
   const mine = await call(myB2BBenefits, { claims: { sub: memberId, userType: 'member' } });
-  assert.deepEqual(mine.body.benefits.map(b => [b.benefit.name, b.benefit.fundingSummary]), [['8 visits', 'Sponsor pays 60%; beneficiary pays the rest']]);
+  assert.deepEqual(mine.body.benefits.map(b => [b.benefit.name, b.benefit.fundingSummary]), [['8 visits', 'Sponsor pays 100%']]);
   assert.equal((await call(myB2BBenefits, {})).statusCode, 401);
 });
 

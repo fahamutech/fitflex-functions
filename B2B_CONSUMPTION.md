@@ -93,7 +93,9 @@ Integer TZS and basis points, with no floating-point money.
 | Percentage 60% with a per-use cap of 2,500 | 2,500 / 2,500 |
 | Benefit covers up to 4,000 | 4,000 / 1,000 |
 | Copay 2,000 | 3,000 / 2,000 |
-| Per-period sponsor cap partly used | the sponsor pays what is left of the cap, and the member pays the rest |
+| Per-period sponsor cap partly used | not covered unless what is left of the cap pays the whole use |
+
+Only full sponsorship applies to a use (decided 3 Oct 2026): a member can't pay a share at the door, so a split is offered as a sponsored pass. The split rows above are how `calculateResponsibility` divides a sponsored pass's fee, and how a split benefit created before the rule is recognised and refused (`member_share_not_collectable`).
 
 ## 4. One sponsor per usage (decided 2026-10-01)
 
@@ -216,7 +218,7 @@ The consumption ledger itself still stores no provider payout: the gym's amount 
 
 ## 11. Known limitations
 
-- The member's share of a subsidised gym visit is recorded but not collected.
+- A per-use benefit never leaves the member a share: it is fully sponsored (decided 3 Oct 2026). A split benefit created before that no longer covers a use (`member_share_not_collectable`, kept on the ledger as a rejection); the member's own pass applies instead. A per-period sponsor cap covers whole uses only.
 - A benefit applies before the member's own pass even when the pass would have made the visit free for them and the benefit has a copay. That is the decided order.
 - The legacy admin finance summaries (`finance-service`) count every check-in at a gym's rate, including `b2b_benefit` ones. They are dashboards, not the settlement engine.
 - A gym owner's suspension of a direct member doesn't stop that member checking in on a sponsor's benefit.

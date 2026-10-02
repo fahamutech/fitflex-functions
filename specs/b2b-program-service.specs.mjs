@@ -190,15 +190,17 @@ test('benefits: create each type, validate providers and dates, retrieve, list',
 
   const created = [
     await add({ ...GYM, name: '8 visits/month at chosen gyms', usageLimit: 8, providerRules: { scope: 'selected', gymIds: ['gym_a'], gymTiers: ['standard'] } }),
-    await add({ name: '2 trainer sessions/month at 50%', benefitType: 'trainer_session', fundingType: 'sponsor_percentage', sponsorShareBps: 5000, usageLimit: 2, usagePeriod: 'month', providerRules: { scope: 'selected', trainerIds: ['tp_1'] } }),
+    await add({ name: '2 trainer sessions/month', benefitType: 'trainer_session', fundingType: 'full', usageLimit: 2, usagePeriod: 'month', providerRules: { scope: 'selected', trainerIds: ['tp_1'] } }),
     await add({ name: 'Monthly challenge', benefitType: 'challenge', fundingType: 'none', providerRules: { scope: 'selected', challengeIds: ['ch_fitflex'] } }),
-    await add({ name: '20% off supplements', benefitType: 'marketplace', fundingType: 'sponsor_percentage', sponsorShareBps: 2000, usagePeriod: 'month', periodSponsorCapTzs: 50000, providerRules: { scope: 'selected', vendorIds: ['vendor1'], productCategories: ['supplements'] } }),
-    await add({ name: 'Wellness workshop', benefitType: 'wellness_activity', fundingType: 'beneficiary_fixed', beneficiaryAmountTzs: 2000, usageLimit: 1, usagePeriod: 'quarter', startDate: '2027-04-01', endDate: '2027-06-30' }),
-    await add({ name: 'Custom perk', benefitType: 'custom', fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000, usagePeriod: 'program', usageLimit: 20, terms: 'Once per quarter' }),
+    await add({ name: 'Supplements, up to 50,000 a month', benefitType: 'marketplace', fundingType: 'full', usagePeriod: 'month', periodSponsorCapTzs: 50000, providerRules: { scope: 'selected', vendorIds: ['vendor1'], productCategories: ['supplements'] } }),
+    await add({ name: 'Wellness workshop', benefitType: 'wellness_activity', fundingType: 'none', usageLimit: 1, usagePeriod: 'quarter', startDate: '2027-04-01', endDate: '2027-06-30' }),
+    await add({ name: 'Custom perk', benefitType: 'custom', fundingType: 'full', usagePeriod: 'program', usageLimit: 20, terms: 'Once per quarter' }),
   ];
   for (const c of created) assert.equal(c.benefit?.status, 'draft', JSON.stringify(c));
   assert.equal(created[4].benefit.validity.startDate, '2027-04-01');
-  assert.equal(created[1].benefit.fundingSummary, 'Sponsor pays 50%; beneficiary pays the rest');
+  assert.equal(created[1].benefit.fundingSummary, 'Sponsor pays 100%');
+  // A per-use benefit leaves the member nothing to pay: a split is a sponsored pass (decided 3 Oct 2026).
+  assert.equal((await add({ name: 'Half-price sessions', benefitType: 'trainer_session', fundingType: 'sponsor_percentage', sponsorShareBps: 5000, usageLimit: 2, usagePeriod: 'month' })).error, 'member_share_needs_pass');
   assert.equal((await s.prog.listBenefits({ access: owner, programId: program.id })).benefits.length, 6);
   const one = await s.prog.getBenefit({ access: owner, programId: program.id, benefitId: created[0].benefit.id });
   assert.deepEqual([one.window.start, one.window.end, one.window.usageLimit], ['2027-03-01', '2027-03-31', 8]);
@@ -221,9 +223,10 @@ test('benefit updates, activation and the live lock', async () => {
   await status(second.id, 'active');
   assert.equal((await status(benefitId, 'inactive')).benefit.status, 'inactive');
   // Once inactive, funding and limits may change; partial updates validate as a whole.
-  const changed = await update({ fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000, usageLimit: 6 });
-  assert.deepEqual([changed.benefit.fundingType, changed.benefit.sponsorAmountTzs, changed.benefit.usageLimit, changed.benefit.usagePeriod], ['sponsor_fixed', 3000, 6, 'month']);
-  assert.equal((await update({ sponsorAmountTzs: -5 })).error, 'invalid_sponsor_amount');
+  const changed = await update({ usageLimit: 6, periodSponsorCapTzs: 30000 });
+  assert.deepEqual([changed.benefit.fundingType, changed.benefit.periodSponsorCapTzs, changed.benefit.usageLimit, changed.benefit.usagePeriod], ['full', 30000, 6, 'month']);
+  assert.equal((await update({ periodSponsorCapTzs: -5 })).error, 'invalid_period_sponsor_cap');
+  assert.equal((await update({ fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000 })).error, 'member_share_needs_pass');
   assert.equal((await status(benefitId, 'draft')).error, 'invalid_transition');   // never back to draft
   assert.equal((await status(benefitId, 'active')).benefit.status, 'active');
 });
@@ -297,7 +300,7 @@ test('a member sees every benefit they hold today, across organisations and prog
   const s = setup();
   const insurerId = await insurer(s);
   await enrol(s, insurerId, 'm3', { groupName: 'Gold' });
-  await liveProgram(s, insurerId, OWNER_A, PROGRAM, { ...GYM, fundingType: 'sponsor_percentage', sponsorShareBps: 6000 });
+  await liveProgram(s, insurerId, OWNER_A, PROGRAM, GYM);
   // m3 is also an employee of a mapped company with its own programme.
   const employer = (await s.b2b.ensureOrganizationForCorporate({ corporateId: 'corp_1' })).organization.id;
   await liveProgram(s, employer, ADMIN, { ...PROGRAM, name: 'NMB Wellness', eligibility: { scope: 'groups', groups: ['Finance'] } }, { ...GYM, name: '8 visits', usageLimit: 8 });
@@ -307,7 +310,7 @@ test('a member sees every benefit they hold today, across organisations and prog
     ['Jubilee', 'ActiveLife Member Wellness', '4 gym visits a month', 4, null],
     ['NMB Bank', 'NMB Wellness', '8 visits', 8, null],
   ]);
-  assert.equal(benefits.find(b => b.organization.name === 'Jubilee').benefit.fundingSummary, 'Sponsor pays 60%; beneficiary pays the rest');
+  assert.equal(benefits.find(b => b.organization.name === 'Jubilee').benefit.fundingSummary, 'Sponsor pays 100%');
   assert.deepEqual((await s.prog.myBenefits({ userId: 'm1' })).benefits, []);
   // Suspending the company (through Corporate) removes its benefits.
   s.corporateAccounts.rows[0].status = 'suspended';
