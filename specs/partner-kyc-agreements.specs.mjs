@@ -54,11 +54,23 @@ test('gym owners, trainers and vendors each accept partner terms and the verific
   }
   assert.deepEqual(requiredAgreements('corporate'), []);
   assert.equal(agreementText(requiredAgreements('trainer')[0].text, 'fr').lang, 'en');
-  // The gym terms carry the decisions: rates-based payouts, verified payout account, reminders instead of suspension.
-  const gym = JSON.stringify(agreementText(requiredAgreements('gym_owner')[0].text, 'en'));
-  for (const phrase of ['daily, weekly and monthly rates', 'forty-eight (48) hours', 'FitFlex will remind you', 'non-exclusive']) {
+  // The gym terms mirror the Gym Partner Agreement v2.0: step-model payouts on
+  // the gym's own rates with no commission on Pass visits, commission only on
+  // its own plans, verified payout account, messaging limits, 90-day pilot.
+  const gymTerms = agreementText(requiredAgreements('gym_owner')[0].text, 'en');
+  assert.equal(gymTerms.reference, 'FFA-GPA-001 (online) v2.0');
+  const gym = JSON.stringify(gymTerms);
+  for (const phrase of [
+    'daily, weekly and monthly rates', '8 to 14 visit-days at two weekly rates', 'never exceeds your monthly rate',
+    'No commission is deducted from Pass payouts', 'by the 5th day of the following month',
+    'between 10% and 15% of the price', 'makes no payout for their visits',
+    'forty-eight (48) hours', 'FitFlex will remind you', 'non-exclusive',
+    'cannot choose or change your own classification', 'no more than two promotional messages a week',
+    'ninety (90) days',
+  ]) {
     assert.ok(gym.includes(phrase), phrase);
   }
+  assert.ok(!gym.includes('less the platform commission shown in your payout statement'), 'Pass payouts carry no commission');
 });
 
 // ── Accepting ───────────────────────────────────────────────────────────────

@@ -9,6 +9,8 @@ export const PORTAL_ACL_SCOPES = [
   'gyms', 'owners', 'trainers', 'members', 'shop', 'payments', 'approvals', 'settings', 'users',
   'analytics', 'challenges', 'rewards', 'social', 'corporate', 'vendors', 'communications',
   'kyc', 'b2b',
+  // Gym settlement workflow (DR-09): preparing, approving and paying are separate grants.
+  'settlements_prepare', 'settlements_approve', 'settlements_pay',
 ];
 
 export function createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail }) {

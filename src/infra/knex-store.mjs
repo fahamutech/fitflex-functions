@@ -636,8 +636,8 @@ const ALLOWED_FIELDS = {
   b2b_organizations:      new Set(['id','organizationType','legalName','tradingName','industrySector','registrationNumber','taxIdentificationNumber','email','phone','address','status','statusReason','statusChangedAt','legacyCorporateId','createdBy','createdAt','updatedAt']),
   b2b_organization_users: new Set(['id','organizationId','userId','role','permissions','status','removedAt','createdBy','createdAt','updatedAt']),
   b2b_beneficiaries:      new Set(['id','organizationId','userId','externalReference','beneficiaryType','groupName','status','enrolledAt','statusChangedAt','createdBy','createdAt','updatedAt']),
-  b2b_programs:           new Set(['id','organizationId','name','description','programType','status','statusReason','statusChangedAt','startDate','endDate','eligibility','budgetTzs','activatedAt','activatedBy','createdBy','createdAt','updatedAt']),
-  b2b_benefits:           new Set(['id','programId','name','description','benefitType','status','fundingType','sponsorAmountTzs','sponsorShareBps','sponsorCapTzs','beneficiaryAmountTzs','usageLimit','usagePeriod','periodSponsorCapTzs','eligibility','providerRules','startDate','endDate','terms','createdBy','createdAt','updatedAt']),
+  b2b_programs:           new Set(['id','organizationId','name','description','programType','status','statusReason','statusChangedAt','startDate','endDate','eligibility','budgetTzs','discountBps','activatedAt','activatedBy','createdBy','createdAt','updatedAt']),
+  b2b_benefits:           new Set(['id','programId','name','description','benefitType','status','fundingType','sponsorAmountTzs','sponsorShareBps','sponsorCapTzs','beneficiaryAmountTzs','usageLimit','usagePeriod','periodSponsorCapTzs','eligibility','providerRules','startDate','endDate','terms','passTier','createdBy','createdAt','updatedAt']),
   communication_campaigns:   new Set(['id','senderType','gymId','name','purpose','category','status','audience','content','channels','templateId','scheduledAt','sendRequestId','counts','createdBy','sentAt','cancelledAt','createdAt','updatedAt']),
   communication_messages:    new Set(['id','campaignId','automationRunId','senderType','gymId','memberId','channel','category','messageType','title','body','locale','deepLink','notificationId','status','skipReason','providerMessageId','payload','attempts','nextAttemptAt','sentAt','deliveredAt','openedAt','clickedAt','failedAt','failureReason','failurePermanent','createdAt','updatedAt']),
   communication_templates:   new Set(['id','gymId','key','name','category','purpose','channels','bodies','variables','whatsappTemplateId','status','createdBy','createdAt','updatedAt','group','deepLink','basedOn']),
@@ -657,10 +657,10 @@ const ALLOWED_FIELDS = {
   gym_rate_cards:              new Set(['id','gymId','version','gymTier','retailDailyTzs','retailWeeklyTzs','retailMonthlyTzs','dailyDiscountBps','weeklyDiscountBps','monthlyDiscountBps','dailyCeilingTzs','weeklyCeilingTzs','monthlyCeilingTzs','ruleSources','status','effectiveFrom','effectiveTo','reason','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
   settlement_runs:             new Set(['id','mode','periodStartDate','periodEndDate','status','engineVersion','inputsHash','configurationSnapshot','jobRunId','error','createdBy','lockedBy','lockedAt','createdAt','updatedAt']),
   member_cycle_settlements:    new Set(['id','runId','mode','memberId','subscriptionId','cycleStart','cycleEnd','passTier','passTierVersion','catalogPriceTzs','visitAllowance','collectedApprovedAmountTzs','networkPayoutBps','networkCapTzs','totalPreliminaryTzs','totalFinalTzs','networkAdjustmentTzs','capApplied','payableVisitCount','heldVisitCount','excludedVisitCount','engineVersion','explanation','active','createdAt','fundingType']),
-  gym_settlements:             new Set(['id','runId','mode','gymId','periodStartDate','periodEndDate','memberCycleCount','qualifyingVisitCount','heldVisitCount','preliminaryTzs','networkAdjustmentTzs','adjustmentsTzs','carryForwardTzs','finalNetTzs','status','holdReason','destinationSnapshot','submittedBy','submittedAt','approvedBy','approvedAt','paidBy','paidAt','paymentReference','receiptUrl','voidedBy','voidedAt','voidReason','createdAt','updatedAt']),
+  gym_settlements:             new Set(['id','runId','mode','gymId','periodStartDate','periodEndDate','memberCycleCount','qualifyingVisitCount','heldVisitCount','preliminaryTzs','networkAdjustmentTzs','adjustmentsTzs','carryForwardTzs','finalNetTzs','status','holdReason','destinationSnapshot','submittedBy','submittedAt','approvedBy','approvedAt','paidBy','paidAt','paymentReference','receiptUrl','voidedBy','voidedAt','voidReason','createdAt','updatedAt','heldBy','heldAt','rejectedBy','rejectedAt','rejectReason','payableAt']),
   gym_settlement_lines:        new Set(['id','runId','mode','gymSettlementId','memberCycleSettlementId','memberId','gymId','qualifyingVisitCount','heldVisitCount','bracket','rawPreliminaryTzs','preliminaryTzs','monotonicGuardApplied','networkAdjustmentTzs','finalTzs','rateCardSnapshot','calculationBasis','createdAt']),
   settlement_visits:           new Set(['id','runId','mode','memberCycleSettlementId','lineId','checkinId','gymId','businessDate','outcome','eligibility','allowanceSlot','active','createdAt']),
-  settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt']),
+  settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt','appliedAt','rejectedBy','rejectReason','sourceMemberCycleSettlementId']),
   partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
 };
 
@@ -742,7 +742,8 @@ function prepareForKnex(name, data, isUpdate = false) {
     'submittedAt', 'decidedAt', 'reverifyAt', 'verifiedAt', 'cooldownUntil', 'disabledAt', 'reviewedAt',
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
     'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'statusChangedAt', 'voidedAt',
-    'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt', 'enrolledAt', 'removedAt'];
+    'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt', 'enrolledAt', 'removedAt',
+    'heldAt', 'rejectedAt', 'payableAt'];
   for (const f of DATE_FIELDS) {
     if (CALENDAR_DATE_COLLECTIONS.has(name) && CALENDAR_DATE_FIELDS.has(f)) continue;
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {

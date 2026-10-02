@@ -6,6 +6,10 @@ import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
 import { createSettlementConfigService } from '../services/settlement-config-service.mjs';
 import { createSettlementService } from '../services/settlement-service.mjs';
+import { createSettlementWorkflowService } from '../services/settlement-workflow-service.mjs';
+import { createPayoutEligibility } from '../services/payout-eligibility.mjs';
+import { createSettlementViewService } from '../services/settlement-view-service.mjs';
+import { createSettlementClawbackService } from '../services/settlement-clawback-service.mjs';
 import { createCheckinStatusService } from '../services/checkin-status-service.mjs';
 import { createMemberManagementService } from '../services/member-management-service.mjs';
 import { createIdentityService } from '../services/identity-service.mjs';
@@ -56,6 +60,7 @@ import { createCorporateService } from '../services/corporate-service.mjs';
 import { createB2BService } from '../services/b2b-service.mjs';
 import { createB2BProgramService } from '../services/b2b-program-service.mjs';
 import { createB2BConsumptionService } from '../services/b2b-consumption-service.mjs';
+import { createB2BBillingService } from '../services/b2b-billing-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -148,6 +153,8 @@ export const corporateService = createCorporateService({
   // Every new company gets its employer B2B organisation. b2bService is defined
   // below; the hook only runs later, at onboarding.
   onAccountCreated: (account, actorId) => b2bService.ensureOrganizationForCorporate({ corporateId: account.id, actorId }),
+  // A company moved onto a programme is invoiced there, not by seat bills.
+  billedByProgramme: corporateId => b2bBillingService.billedByProgramme(corporateId),
 });
 // B2B Foundation V1: generalised organisations next to Corporate (which it reads through).
 export const b2bService = createB2BService({
@@ -163,10 +170,17 @@ export const b2bProgramService = createB2BProgramService({
     allowanceFor: args => b2bConsumptionService.allowanceFor(args),
     sponsorSpentForProgram: id => b2bConsumptionService.sponsorSpentForProgram(id),
   },
+  // Sponsored passes (b2bBillingService is defined below; this only runs later).
+  passes: { passFor: args => b2bBillingService.passFor(args) },
 });
 // B2B Phase 3: benefit evaluation and the consumption ledger (no payouts).
 export const b2bConsumptionService = createB2BConsumptionService({
   db, programs: b2bPrograms, benefits: b2bBenefits, users, gyms, trainers, checkins, trainerBookings, auditLog, b2bService,
+});
+// B2B sponsor billing: flat-fee sponsored passes, sponsor invoices, member unlock (no provider payouts).
+export const b2bBillingService = createB2BBillingService({
+  db, programs: b2bPrograms, benefits: b2bBenefits, users, subscriptions, paymentRequests, corporateAccounts, auditLog,
+  b2bService, b2bProgramService, settingsService,
 });
 
 export const identityLinkService = createIdentityLinkService({ db });
@@ -202,14 +216,30 @@ export const settlementService = createSettlementService({ configService: settle
 export const checkinStatusService = createCheckinStatusService({
   checkins, auditLog,
   // Voiding a visit gives its B2B allowance back.
-  onVoided: ({ checkin, reason, actorId }) => b2bConsumptionService.releaseForSource({
-    sourceType: 'gym_checkin', sourceId: checkin.id, reason: `check-in voided: ${reason}`, actorId,
-  }),
+  onVoided: async ({ checkin, reason, actorId }) => {
+    await b2bConsumptionService.releaseForSource({
+      sourceType: 'gym_checkin', sourceId: checkin.id, reason: `check-in voided: ${reason}`, actorId,
+    });
+    // If the visit was already settled, raise what the gyms were overpaid.
+    await settlementClawbackService.sweepQuietly({ checkinId: checkin.id, actorId });
+  },
 });
 // Lifecycle events for gym automations. automationService is defined further
 // down; these only run later, and never throw.
+// A pass that becomes active may be a sponsored one waiting on the member's
+// share: finish it first. Never let that stop the usual activation events.
+async function finishSponsoredPass(sub) {
+  try {
+    await b2bBillingService.onSubscriptionActivated(sub);
+  } catch (err) {
+    console.warn('[b2b-billing] could not finish a sponsored pass (the daily job retries):', err?.message);
+  }
+}
 const lifecycle = {
-  activated: (sub) => automationService.handleEvent({ type: 'membership_activated', subscription: sub }),
+  activated: async (sub) => {
+    await finishSponsoredPass(sub);
+    return automationService.handleEvent({ type: 'membership_activated', subscription: sub });
+  },
   paymentFailed: (sub, extra) => automationService.handleEvent({ type: 'payment_failed', subscription: sub, ...extra }),
 };
 export const memberManagement = createMemberManagementService({
@@ -230,6 +260,7 @@ export const adminMemberService = createAdminMemberService({
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog, gyms,
   onSubscriptionActivated: async (sub) => {
+    await finishSponsoredPass(sub);
     await notificationService.notifySubscriptionActivated(sub);
     await lifecycle.activated(sub);
   },
@@ -240,6 +271,13 @@ export const adminPaymentService = createAdminPaymentService({
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
+// Gym settlement workflow (settlement Phase 4): submit, approve, hold, pay.
+export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts });
+export const settlementWorkflowService = createSettlementWorkflowService({ payoutEligibility });
+export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId });
+// Recalculates a settled member cycle when one of its check-ins is voided and
+// raises each gym's difference as an adjustment (settlement Phase 6).
+export const settlementClawbackService = createSettlementClawbackService({ configService: settlementConfigService, workflow: settlementWorkflowService });
 export const invoiceService = createInvoiceService({
   invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
 });

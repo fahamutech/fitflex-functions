@@ -12,7 +12,9 @@ import {
   BENEFIT_TYPES, BENEFIT_TRANSITIONS, LIVE_BENEFIT_FIELDS, FUNDING_TYPES, USAGE_PERIODS, ELIGIBILITY_SCOPES,
   isDay, readEligibility, readBenefitEligibility, readFunding, readUsage, readProviderRules,
   programEffectiveStatus, benefitValidity, evaluateEligibility, matchesPopulation, usageWindow, describeFunding,
+  FLAT_FEE_BENEFIT,
 } from '../shared/b2b-programs.mjs';
+import { PASS_TIERS } from '../shared/constants.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -30,6 +32,8 @@ export function createB2BProgramService({
   programs, benefits, gyms, trainers, users, challenges, auditLog, b2bService,
   // Phase 3 ledger reads: { allowanceFor, sponsorSpentForProgram }. Optional.
   usage = null,
+  // Sponsor billing reads: { passFor }. Optional.
+  passes = null,
   now = () => new Date(),
 }) {
   const stamp = () => now().toISOString();
@@ -102,6 +106,12 @@ export function createB2BProgramService({
     if (body.budgetTzs !== undefined) {
       if (body.budgetTzs !== null && (!Number.isInteger(body.budgetTzs) || body.budgetTzs < 0)) return fail('invalid_budget', 400);
       patch.budgetTzs = body.budgetTzs;
+    }
+    // A discount on the pass tier's price is a commercial concession: FitFlex sets it.
+    if (body.discountBps !== undefined) {
+      if (!access.platformAdmin) return fail('forbidden', 403, { requiredRole: 'platform_admin', field: 'discountBps' });
+      if (!Number.isInteger(body.discountBps) || body.discountBps < 0 || body.discountBps > 9999) return fail('invalid_discount', 400, { min: 0, max: 9999 });
+      patch.discountBps = body.discountBps;
     }
     return { patch };
   }
@@ -275,9 +285,16 @@ export function createB2BProgramService({
     const name = text(body.name, 120);
     if (!name) return fail('name_required', 400);
     if (!BENEFIT_TYPES[body.benefitType]) return fail('invalid_benefit_type', 400, { allowed: Object.keys(BENEFIT_TYPES) });
+    const flatFee = body.benefitType === FLAT_FEE_BENEFIT;
+    if (flatFee) {
+      // The pass itself sets how often and where it can be used.
+      const tier = PASS_TIERS[body.passTier];
+      if (!tier || tier.accessMode === 'free_online') return fail('invalid_pass_tier', 400, { allowed: Object.keys(PASS_TIERS).filter(k => PASS_TIERS[k].accessMode !== 'free_online') });
+      if (body.fundingType === 'none') return fail('pass_needs_funding', 400);
+    }
     const funding = readFunding(body);
     if (funding.error) return funding;
-    const usage = readUsage(body, body.fundingType);
+    const usage = readUsage(flatFee ? { usagePeriod: 'unlimited' } : body, body.fundingType);
     if (usage.error) return usage;
     const eligibility = readBenefitEligibility(body.eligibility);
     if (eligibility.error) return eligibility;
@@ -303,6 +320,7 @@ export function createB2BProgramService({
         ...funding.patch, ...usage.patch,
         eligibility: eligibility.value, providerRules: providers.value,
         startDate, endDate, terms: text(body.terms, 4000),
+        passTier: flatFee ? body.passTier : null,
       },
     };
   }
@@ -450,13 +468,17 @@ export function createB2BProgramService({
               fundingType: b.fundingType, fundingSummary: describeFunding(b),
               sponsorAmountTzs: b.sponsorAmountTzs, sponsorShareBps: b.sponsorShareBps, sponsorCapTzs: b.sponsorCapTzs,
               beneficiaryAmountTzs: b.beneficiaryAmountTzs, usageLimit: b.usageLimit, usagePeriod: b.usagePeriod,
-              providerRules: b.providerRules, validity: benefitValidity(b, p),
+              providerRules: b.providerRules, validity: benefitValidity(b, p), passTier: b.passTier ?? null,
             },
             window: usageWindow({ benefit: b, program: p, day }),
             // Counted from the consumption ledger; null remaining = no count limit.
             ...(usage
               ? await usage.allowanceFor({ benefit: b, program: p, beneficiaryId: beneficiary.id, day })
               : { used: null, remaining: null }),
+            // A sponsored pass: whether this month's pass is running, or what the member must pay to unlock it.
+            pass: b.benefitType === FLAT_FEE_BENEFIT && passes
+              ? await passes.passFor({ benefitId: b.id, beneficiaryId: beneficiary.id, period: day.slice(0, 7) })
+              : null,
           });
         }
       }

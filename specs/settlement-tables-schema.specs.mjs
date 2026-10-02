@@ -250,7 +250,8 @@ test('a statement moves only along the workflow, freezes once submitted, and a p
   await rejects(trx, (t) => t('GymSettlement').where({ id: gs.id }).update({ preliminaryTzs: 50000, finalNetTzs: 50000 }), 'P0001');
   await rejects(trx, (t) => t('GymSettlement').where({ id: gs.id }).update({ status: 'approved', approvedBy: 'maker', approvedAt: new Date() }), '23514');
   await move({ status: 'approved', approvedBy: 'checker', approvedAt: new Date() });
-  await move({ status: 'payable' });
+  await rejects(trx, (t) => t('GymSettlement').where({ id: gs.id }).update({ status: 'payable' }), '23514');   // needs the payout destination it was cleared for
+  await move({ status: 'payable', destinationSnapshot: JSON.stringify({ kind: 'verified_account', accountLast4: '5678' }) });
   await rejects(trx, (t) => t('GymSettlement').where({ id: gs.id }).update({ status: 'paid', paidAt: new Date(), paidBy: 'payer' }), '23514'); // needs a reference
   await move({ status: 'paid', paidAt: new Date(), paidBy: 'payer', paymentReference: 'MPESA-123' });
   await rejects(trx, (t) => t('GymSettlement').where({ id: gs.id }).update({ receiptUrl: 'x' }), 'P0001');
