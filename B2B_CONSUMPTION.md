@@ -110,6 +110,8 @@ Integer TZS and basis points, with no floating-point money.
 
 - **Idempotency key:** the source event, `(sourceType, sourceId)`, for example the check-in ID. A unique index on it for live rows (`pending`, `approved`) means a usage event consumes at most once, however often or however concurrently it is submitted. It's not a random ID.
 - **Concurrency:** each consumption runs in one database transaction that takes `SELECT … FOR UPDATE` on the programme row and the benefit row, re-reads usage from the ledger, then inserts. Two simultaneous requests for the last allowance are serialised: one is approved and the other is refused. The same lock protects the programme budget.
+- **One visit per member, gym and day:** a unique index on `Checkin (memberId, gymId, businessDate)` for live visits (`checkin_one_visit_per_day_uq`). Two scans a few milliseconds apart used to record two visits and charge the sponsor twice. Now the database refuses the second; its hold is cancelled (`duplicate_scan`) and the first visit is returned.
+- **Ledger and audit together:** every change of a ledger row and its `AuditLog` entry are written in one transaction.
 
 ## 6. Integration points
 
@@ -125,7 +127,7 @@ Integer TZS and basis points, with no floating-point money.
 Both QR directions (staff scans the member, or the member scans the gym) go through `checkInService.perform`. The benefit path sits **in front of** the existing validation:
 
 1. The existing "already checked in here today" rule returns the same visit. Nothing more is consumed.
-2. If a benefit covers this gym and the gym is open: reserve the allowance (`pending`), write the `Checkin` with `subscriptionType = 'b2b_benefit'`, `visitConsumed = false` and `subscriptionId = null`, then confirm (`approved`). If writing the check-in fails, the reservation is cancelled.
+2. If a benefit covers this gym and the gym is open: reserve the allowance (`pending`), write the `Checkin` with `subscriptionType = 'b2b_benefit'`, `visitConsumed = false` and `subscriptionId = null`, then confirm (`approved`). If writing the check-in fails, the reservation is cancelled. If the confirmation fails the member is still let in, because the visit is recorded.
 3. Otherwise the existing personal validation runs unchanged. Any error while evaluating a benefit also falls through to it, so a B2B problem can never block a member who could check in before.
 
 Other details:
@@ -135,6 +137,7 @@ Other details:
 - **Benefit-only members:** a member whose only gym access is a benefit can now get their QR code. The staff "verify" preview shows `reason: sponsor_benefit` and consumes nothing.
 - **Privacy at the gym:** gym staff see `b2b: { covered: true }` only. The member's own scan returns the sponsor, the split and what's left.
 - **Voiding:** voiding a check-in (`checkinStatusService`) reverses its consumption.
+- **Holds left behind:** the three steps are separate writes, so a check-in interrupted half-way can leave a `pending` hold. The `b2bHoldReconciler` job runs every 5 minutes: a hold older than two minutes is approved when its visit exists and cancelled when it doesn't (`reconcileHolds`). No allowance stays blocked, and no recorded visit goes uncharged or unpaid.
 - **Gym dashboards:** `b2b_benefit` visits count as FitFlex visits.
 
 ### Trainer sessions
@@ -162,7 +165,7 @@ Not done here: converting Corporate seat billing into a programme with a "sponso
 
 | Who | Sees |
 |---|---|
-| FitFlex admin (`b2b` scope) | The whole ledger: every row, its source event, the rules snapshot and the settlement candidate. Can reverse. |
+| FitFlex admin (`b2b` scope) | The whole ledger: every row, its source event, the rules snapshot and the settlement candidate. Can reverse. Reversing a gym visit also needs the `payments` scope, because it voids the visit. |
 | Organisation users with `usage.read` (owner, admin, manager, finance, analyst) | Their own programmes' **aggregates**: totals, budget, and breakdowns by benefit, provider and beneficiary (uses and amounts). |
 | Member | Their own benefits with used and remaining (`GET /b2b/me/benefits`). |
 | Gym staff | That a sponsor covers the visit, nothing else. |
@@ -177,7 +180,7 @@ A programme of another organisation is a 404, as in Phases 1 and 2.
 |---|---|
 | `GET /admin/b2b/consumptions?organizationId&programId&benefitId&beneficiaryId&userId&providerType&providerId&serviceType&sourceType&sourceId&status&from&to` | FitFlex admin |
 | `GET /admin/b2b/consumptions/:consumptionId` | FitFlex admin |
-| `POST /admin/b2b/consumptions/:consumptionId/reverse` `{ reason }` | FitFlex admin |
+| `POST /admin/b2b/consumptions/:consumptionId/reverse` `{ reason }` | FitFlex admin. For a gym visit this voids the check-in too and returns `checkinVoided: true`; portal staff without `payments` get `403 acl_forbidden`. |
 | `POST /admin/b2b/evaluate-usage` `{ userId, serviceType, providerId }` | FitFlex admin. A dry run that writes nothing; the value comes from the gym or trainer record. |
 | `GET /b2b/organizations/:id/programs/:programId/usage?from&to` | `usage.read` |
 | `GET /b2b/me/benefits` | Member. Now includes `used`, `remaining`, `sponsorUsedTzs`, `sponsorRemainingTzs`. |
@@ -207,7 +210,7 @@ Phase 4 will use these to decide:
   - **Gym visits are settled (decided 1 Oct 2026).** `settlement-service` settles approved `gym_checkin` consumptions with the same visit brackets and network cap as a member's own pass: one cycle per beneficiary per EAT month, capped at the network % of the month's `grossTzs` for that beneficiary's gym visits. Each company-funded visit counts on its own, so two gyms on one day both count. A month is settled once its end + 24 h + the 7-day dispute window has passed. Reversed, cancelled and pending rows are left out; a disputed or flagged check-in holds the whole month.
   - The cap is computed on what was **charged** (`grossTzs`), which isn't yet collected: sponsor invoicing is still to do.
   - Trainer sessions are not settled by that engine.
-- **Settlement cycles, adjustments and reconciliation**, including what a reversal after settlement means.
+- **A reversal after settlement:** a gym visit is undone as a whole. Reversing its consumption voids the check-in, and the void raises the gym's clawback on its next statement (`settlement-clawback-service`). A sponsor is never credited for a visit the gym keeps being paid for.
 
 The consumption ledger itself still stores no provider payout: the gym's amount lives in the settlement tables (`MemberCycleSettlement` with `fundingType = 'b2b_benefit'`, `GymSettlementLine`, `SettlementVisit`).
 

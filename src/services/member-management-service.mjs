@@ -9,7 +9,7 @@ import {
 } from '../shared/member-status.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
-import { CHECKIN_STATUS, CHECKIN_SOURCE } from '../shared/checkin-status.mjs';
+import { CHECKIN_STATUS, CHECKIN_SOURCE, isDuplicateVisit } from '../shared/checkin-status.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 
 export function createMemberManagementService({
@@ -550,7 +550,17 @@ export function createMemberManagementService({
       businessDate: today,
       source: CHECKIN_SOURCE.OWNER_MANUAL,
     };
-    await checkins.insertAsync(row);
+    try {
+      await checkins.insertAsync(row);
+    } catch (err) {
+      // Recorded a moment ago by another request: return that visit.
+      if (!isDuplicateVisit(err)) throw err;
+      const first = await checkins.findAsync(
+        (c) => c.memberId === memberId && c.gymId === targetGymId && (c.businessDate || localDay(c.timestamp)) === today && c.status !== CHECKIN_STATUS.VOIDED,
+      );
+      if (!first) throw err;
+      return { ok: true, checkin: first, idempotent: true };
+    }
     return { ok: true, checkin: row };
   }
 

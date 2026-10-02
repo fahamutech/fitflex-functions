@@ -17,10 +17,11 @@ import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import {
-  gyms, b2bService, b2bProgramService, b2bConsumptionService as usage,
+  gyms, trainers, b2bService, b2bProgramService, b2bConsumptionService as usage,
   checkInService, checkinStatusService, settingsService,
 } from '../src/bootstrap/services.mjs';
-import { b2bPrograms, b2bBenefits, users, subscriptions, paymentRequests, corporateAccounts, auditLog } from '../src/bootstrap/collections.mjs';
+import { b2bPrograms, b2bBenefits, users, subscriptions, paymentRequests, corporateAccounts, auditLog, checkins, trainerBookings } from '../src/bootstrap/collections.mjs';
+import { createB2BConsumptionService } from '../src/services/b2b-consumption-service.mjs';
 import { createB2BBillingService } from '../src/services/b2b-billing-service.mjs';
 import { createSettlementConfigService } from '../src/services/settlement-config-service.mjs';
 import { createSettlementService, periodForMonth, b2bCycleKey } from '../src/services/settlement-service.mjs';
@@ -404,12 +405,25 @@ test('golden 10 — a statement is approved by a second person, paid once, and a
   assert.equal((await s.workflow.proposeAdjustment({ statementId: id, amountTzs: -3500, type: 'clawback', reason: 'late void', actorId: 'maker' })).error, 'invalid_status');
   assert.equal((await s.workflow.voidStatement({ id, reason: 'mistake', actorId: 'checker' })).error, 'invalid_status');
 
-  // A visit on it is voided afterwards: the paid statement is untouched, and the
-  // overpayment waits as a clawback for the gym's next statement.
+  // The sponsor's charge for a visit on it is reversed afterwards. That voids
+  // the visit: the sponsor is credited, the paid statement is untouched, and
+  // what the gym was overpaid waits as a clawback for its next statement.
   const c = w.sponsored;
-  await trx('Checkin').where({ id: c.first.checkin.id }).update({ status: 'voided', statusReason: 'x', voidedAt: new Date(), voidedBy: 'voider', voidReason: 'x' });
-  await trx('B2BBenefitConsumption').where({ sourceId: c.first.checkin.id }).update({ status: 'reversed', reversedAt: new Date(), reversedBy: 'voider', reversalReason: 'check-in voided' });
-  const sweep = await s.clawback.sweep({ actorId: 'voider' });
+  let sweep = null;
+  const usageInTrx = createB2BConsumptionService({
+    db: trx, programs: b2bPrograms, benefits: b2bBenefits, users, gyms, trainers, checkins, trainerBookings, auditLog, b2bService,
+    // What checkinStatusService does on a void, inside this transaction.
+    voidCheckin: async ({ checkinId, reason, actorId }) => {
+      await trx('Checkin').where({ id: checkinId }).update({ status: 'voided', statusReason: reason, voidedAt: new Date(), voidedBy: actorId, voidReason: reason });
+      await usageInTrx.releaseForSource({ sourceType: 'gym_checkin', sourceId: checkinId, reason: `check-in voided: ${reason}`, actorId });
+      sweep = await s.clawback.sweep({ checkinId, actorId });
+      return { checkin: { id: checkinId } };
+    },
+  });
+  const [charge] = await trx('B2BBenefitConsumption').where({ sourceId: c.first.checkin.id });
+  const reversed = await usageInTrx.reverse({ consumptionId: charge.id, reason: 'Sponsor disputes the visit', actorId: 'voider' });
+  assert.deepEqual([reversed.consumption.status, reversed.checkinVoided], ['reversed', true]);
+  assert.equal((await trx('Checkin').where({ id: c.first.checkin.id }).first()).status, 'voided');
   assert.deepEqual(sweep.pending.filter(p => p.gymId === w.gymA.id).map(p => p.amountTzs), [-3500]);
   assert.deepEqual([(await trx('GymSettlement').where({ id }).first()).finalNetTzs, (await trx('GymPayout').where({ gymSettlementId: id })).length], [paid.statement.finalNetTzs, 1]);
 
@@ -497,17 +511,80 @@ test('golden — a suspended organisation or an inactive beneficiary is no longe
   assert.deepEqual((await ledger({ benefitId: c.benefitId, status: 'approved' })).map(r => r.sponsorTzs), [5000, 5000]);
 });
 
-// ── known gaps (failing today; each becomes a plain test when it is fixed) ──
+// ── a scan that arrives twice ────────────────────────────────────────────────
 
-test('gap — the same scan arriving twice at the same moment is one visit and one consumption', { todo: 'check-in idempotency is read-then-insert; needs a unique visit per member, gym and day' }, async () => {
+test('golden — the same scan arriving twice a few milliseconds apart is one visit and one charge', async () => {
+  // A double tap, or two desks scanning the same code.
+  const scan = (memberId, day, ms) => checkInService.perform({ memberId, gymId: w.gymA.id, method: 'member_scanned', now: new Date(+oct(day) + ms) });
   const c = await covered({ fundingType: 'full', usageLimit: 8 });
-  // Two requests a few milliseconds apart (a double tap, or two desks scanning the same code).
-  const scan = ms => checkInService.perform({ memberId: c.memberId, gymId: w.gymA.id, method: 'member_scanned', now: new Date(+oct(23) + ms) });
-  const results = await Promise.all([scan(0), scan(7)]);
-  assert.equal(new Set(results.map(r => r.checkin?.id)).size, 1);
+  const results = await Promise.all([scan(c.memberId, 23, 0), scan(c.memberId, 23, 7), scan(c.memberId, 23, 11)]);
+  assert.deepEqual(results.map(r => r.ok), [true, true, true]);
+  assert.equal(new Set(results.map(r => r.checkin.id)).size, 1);
   assert.equal((await db('Checkin').where({ memberId: c.memberId })).length, 1);
-  assert.equal((await ledger({ benefitId: c.benefitId, status: 'approved' })).length, 1);
+  assert.deepEqual((await ledger({ benefitId: c.benefitId })).map(r => r.status).sort(), ['approved', 'cancelled', 'cancelled']);   // the losers' holds were released
+  // A member on their own pass: one visit, one pass visit used.
+  const memberId = await user('member');
+  await ownPass(memberId);
+  const own = await Promise.all([scan(memberId, 23, 0), scan(memberId, 23, 7)]);
+  assert.equal(new Set(own.map(r => r.checkin.id)).size, 1);
+  assert.deepEqual((await db('Checkin').where({ memberId })).map(r => [r.visitConsumed, r.visitNumberInCycle]), [[true, 1]]);
+  // The database refuses a second live visit for the same member, gym and day.
+  const [row] = await db('Checkin').where({ memberId });
+  await assert.rejects(db('Checkin').insert({ ...row, id: randomUUID(), timestamp: new Date(+new Date(row.timestamp) + 60_000) }), err => err.code === '23505');
 });
+
+// ── a check-in interrupted half-way ──────────────────────────────────────────
+
+test('golden — a hold left behind by an interrupted check-in is settled: approved if the visit exists, cancelled if not', async () => {
+  const c = await covered({ fundingType: 'full', usageLimit: 2 });
+  const hold = (checkinId, day) => usage.holdGymVisit({ memberId: c.memberId, gym: w.gymA, checkinId, now: oct(day), method: 'member_scanned' });
+  // The visit was recorded but never confirmed (the process stopped after the insert).
+  const recorded = randomUUID();
+  const first = await hold(recorded, 24);
+  await db('Checkin').insert({ id: recorded, memberId: c.memberId, gymId: w.gymA.id, timestamp: oct(24), method: 'member_scanned', subscriptionType: 'b2b_benefit',
+    gymTier: 'standard', creditsDeductedTzs: 0, visitConsumed: false, status: 'valid', businessDate: '2026-10-24', source: 'gym_qr_by_member' });
+  // The visit was never recorded at all.
+  const second = await hold(randomUUID(), 25);
+  assert.deepEqual([first.consumption.status, second.consumption.status], ['pending', 'pending']);
+  // Both holds count against the allowance until they are settled.
+  assert.equal((await usage.evaluate({ userId: c.memberId, serviceType: 'gym_access', provider: { type: 'gym', id: w.gymA.id, tier: 'standard' }, grossTzs: 5000, at: oct(26) })).covered, false);
+
+  // Too recent to touch.
+  await usage.reconcileHolds();
+  assert.equal((await ledger({ benefitId: c.benefitId, status: 'pending' })).length, 2);
+  const stats = await usage.reconcileHolds({ olderThanMs: -60_000 });
+  assert.ok(stats.approved >= 1 && stats.cancelled >= 1, JSON.stringify(stats));
+  const rows = Object.fromEntries((await ledger({ benefitId: c.benefitId })).map(r => [r.id, r]));
+  assert.deepEqual([rows[first.consumption.id].status, rows[second.consumption.id].status], ['approved', 'cancelled']);
+  assert.ok(rows[first.consumption.id].verifiedAt);
+  assert.equal(rows[second.consumption.id].metadata.cancelReason, 'checkin_not_recorded');
+  assert.ok(await db('AuditLog').where({ target: first.consumption.id, action: 'b2b.consumption.approve', actor: 'system:b2b-reconciler' }).first());
+  // The cancelled hold's visit is free again.
+  assert.equal((await usage.evaluate({ userId: c.memberId, serviceType: 'gym_access', provider: { type: 'gym', id: w.gymA.id, tier: 'standard' }, grossTzs: 5000, at: oct(26) })).covered, true);
+  assert.equal((await usage.reconcileHolds({ olderThanMs: -60_000 })).found, 0);   // nothing left; safe to repeat
+});
+
+// ── reversing a gym visit ────────────────────────────────────────────────────
+
+test('golden — reversing a gym visit\'s charge voids the visit, with one audit trail; without the payments permission it is refused', async () => {
+  const c = await covered({ fundingType: 'full', usageLimit: 8 });
+  const { checkin } = await checkIn(c.memberId, w.gymA, 26);
+  const [charge] = await ledger({ sourceId: checkin.id });
+
+  const refused = await usage.reverse({ consumptionId: charge.id, reason: 'Sponsor disputes the visit', actorId: ADMIN.userId, mayVoidCheckin: false });
+  assert.deepEqual([refused.error, refused.status, refused.requiredScope], ['acl_forbidden', 403, 'payments']);
+  assert.deepEqual([(await db('Checkin').where({ id: checkin.id }).first()).status, (await ledger({ id: charge.id }))[0].status], ['valid', 'approved']);
+
+  const done = await usage.reverse({ consumptionId: charge.id, reason: 'Sponsor disputes the visit', actorId: ADMIN.userId });
+  assert.deepEqual([done.consumption.status, done.checkinVoided, done.consumption.reversedBy], ['reversed', true, ADMIN.userId]);
+  const voided = await db('Checkin').where({ id: checkin.id }).first();
+  assert.deepEqual([voided.status, voided.voidedBy, voided.voidReason], ['voided', ADMIN.userId, 'Sponsor disputes the visit']);
+  assert.ok(await db('AuditLog').where({ target: checkin.id, action: 'checkin_voided' }).first());
+  assert.ok(await db('AuditLog').where({ target: charge.id, action: 'b2b.consumption.reverse' }).first());
+  assert.equal((await usage.reverse({ consumptionId: charge.id, reason: 'again', actorId: ADMIN.userId })).unchanged, true);
+});
+
+// ── known gaps (failing today; each becomes a plain test when it is fixed) ──
 
 test('gap — a ledger row cannot be deleted, even directly in the database', { todo: 'updates are guarded by a trigger; deletes are not' }, async () => {
   const [row] = await ledger({ sourceId: w.sponsored.first.checkin.id });

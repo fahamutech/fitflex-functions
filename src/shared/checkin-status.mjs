@@ -64,3 +64,11 @@ export function checkStatusChange({ from, to, reason }) {
   if (!canTransition(from, to)) return { ok: false, error: 'invalid_status_transition', status: 409 };
   return { ok: true, reason: text };
 }
+
+/**
+ * The database refused a check-in because the member already has a live one
+ * at this gym today (two scans racing each other). The caller returns the
+ * existing visit instead.
+ */
+export const isDuplicateVisit = (err) => err?.code === '23505'
+  && /checkin_one_visit_per_day_uq|checkin_memberid_gymid_timestamp_unique/.test(`${err.constraint || ''} ${err.message || ''}`);

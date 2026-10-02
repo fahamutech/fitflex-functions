@@ -2,7 +2,7 @@
 // Pure DI: receives repos via constructor.
 
 import { validateCheckIn, pickSubscriptionForGym, subscriptionCoversGym, validateTrainerHomeEntry, fundedBySubscription } from '../shared/check-in-rules.mjs';
-import { CHECKIN_STATUS, sourceForMethod } from '../shared/checkin-status.mjs';
+import { CHECKIN_STATUS, sourceForMethod, isDuplicateVisit } from '../shared/checkin-status.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -40,10 +40,21 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
     );
   }
 
+  /** The member's live visit at this gym today, after the database refused a second one. */
+  async function visitAlreadyRecorded(memberId, gymId, now) {
+    const existing = (await todaysCheckins(memberId, now)).find(c => c.gymId === gymId && c.status !== CHECKIN_STATUS.VOIDED);
+    return existing ? { ok: true, checkin: existing, visitNumberInCycle: existing.visitNumberInCycle, idempotent: true } : null;
+  }
+
   /**
    * Check in on a B2B benefit: reserve the allowance, record the visit, then
    * confirm. Returns null when no benefit covers the visit. The member's own
    * pass is not consulted and no pass visit is used.
+   *
+   * The three steps are separate writes. Whatever fails, the ledger ends up
+   * right: a hold whose visit was never recorded is cancelled, and a hold
+   * whose visit exists is approved, here or by the reconciler
+   * (b2bFunding.reconcileHolds) a few minutes later.
    */
   async function performWithBenefit({ memberId, gym, method, now }) {
     const checkinId = randomUUID();
@@ -76,10 +87,21 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
     try {
       await checkins.insertAsync(row);
     } catch (err) {
-      await b2bFunding.cancel({ consumptionId: hold.consumption.id, reason: 'checkin_not_recorded' }).catch(() => {});
+      const duplicate = isDuplicateVisit(err);
+      await b2bFunding.cancel({ consumptionId: hold.consumption.id, reason: duplicate ? 'duplicate_scan' : 'checkin_not_recorded' })
+        .catch(e => console.warn('[check-in] could not release a B2B hold (the reconciler will):', e?.message));
+      // Another scan recorded this visit a moment ago: one visit, one charge.
+      const existing = duplicate ? await visitAlreadyRecorded(memberId, gym.id, now) : null;
+      if (existing) return existing;
       throw err;
     }
-    await b2bFunding.confirm({ consumptionId: hold.consumption.id });
+    // The visit is recorded, so the member is in. A confirmation that fails
+    // must not turn that into an error; the reconciler approves the hold.
+    try {
+      await b2bFunding.confirm({ consumptionId: hold.consumption.id });
+    } catch (err) {
+      console.warn('[check-in] B2B hold not confirmed yet (the reconciler will):', err?.message);
+    }
     const c = hold.consumption;
     return {
       ok: true,
@@ -188,7 +210,14 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         businessDate: localDay(now),
         source: sourceForMethod(method)
       };
-      await checkins.insertAsync(row);
+      try {
+        await checkins.insertAsync(row);
+      } catch (err) {
+        // Another scan recorded this visit a moment ago: return that one.
+        const existing = isDuplicateVisit(err) ? await visitAlreadyRecorded(memberId, gymId, now) : null;
+        if (existing) return existing;
+        throw err;
+      }
       return { ok: true, checkin: row, visitNumberInCycle: row.visitNumberInCycle };
     }
   };

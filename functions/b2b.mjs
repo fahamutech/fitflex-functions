@@ -346,11 +346,12 @@ export const adminGetB2BConsumption = {
 
 export const adminReverseB2BConsumption = {
   created, method: 'post', path: '/admin/b2b/consumptions/:consumptionId/reverse',
-  description: 'Admin: reverse an approved consumption. The row is kept and marked reversed with who, when and why; the allowance and budget get it back.',
+  description: 'Admin: reverse an approved consumption. The row is kept and marked reversed with who, when and why; the allowance and budget get it back. Reversing a gym visit also voids its check-in (response: checkinVoided), so a gym already paid for it is clawed back on its next statement; portal staff need the payments scope for that as well.',
   requestSample: { reason: 'Checked in at the wrong gym' },
   onGuard: requireAdmin,
   onRequest: async (req, res) => send(res, await usage.reverse({
     consumptionId: req.params.consumptionId, reason: req.body?.reason, actorId: req.user.sub,
+    mayVoidCheckin: !req.user.portalUser || (req.user.aclPermissions || []).includes('payments'),
   })),
 };
 
