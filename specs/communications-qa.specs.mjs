@@ -26,7 +26,8 @@ import { createAutomationService } from '../src/services/automation-service.mjs'
 import { createWhatsAppChannelService } from '../src/services/whatsapp-channel-service.mjs';
 import { createFakeWhatsAppProvider } from '../src/integrations/whatsapp/fake-provider.mjs';
 import { systemTemplateId } from '../src/shared/communication-templates.mjs';
-import { DEEP_LINKS } from '../src/shared/communications.mjs';
+import { DEEP_LINKS, labelText } from '../src/shared/communications.mjs';
+import campaignNamesMigration from '../db/migrations/20261113090000-communication-campaign-names.cjs';
 import { updateMemberProfile } from '../functions/subscriptions.mjs';
 import { ownerCreateGym } from '../functions/owner-gyms.mjs';
 import { ownerCreateMember, ownerListMembers } from '../functions/owner-members.mjs';
@@ -280,6 +281,55 @@ test('campaign — pressing Send twice, or sending a copy, never messages a memb
   assert.equal((await rowsOf(campaign.id)).length, 1);
   assert.equal((await campaigns.send(S, campaign.id, { sendRequestId: uid('req') })).error, 'invalid_state', 'a sent campaign cannot be sent again');
   assert.equal((await db('CommunicationMessage').where({ memberId: m.id })).length, 1);
+});
+
+test('campaign — lists, history and results show a readable name, never {{placeholders}}', async () => {
+  assert.equal(labelText('{{discount}} off: {{offer_name}}', { discount: '20%', offerName: 'Ramadan special' }), '20% off: Ramadan special');
+  assert.equal(labelText('We miss you, {{member_name}}', {}), 'We miss you');
+  assert.equal(labelText('Hi {{member_name}}, renew at {{gym_name}}', {}, { gymName: 'Kilele Gym' }), 'Hi, renew at Kilele Gym');
+  assert.equal(labelText('{{discount}} off: {{offer_name}}', {}), '… off: …', 'values not typed yet');
+  assert.equal(labelText('Pay {{amount}} today', { amountTzs: 45000 }), 'Pay TZS 45,000 today');
+
+  const g = await gym('Label Gym');
+  const owner = await user({ userType: 'gym_operator', gymIds: [g] });
+  const S = gymSender(owner, [g]);
+  const m = await member(g, 'Zawadi');
+  const title = '{{discount}} off: {{offer_name}}';
+  const content = { title, body: 'Hi {{member_name}}, get {{discount}} off with {{offer_name}} at {{gym_name}}.', offerName: 'KULA TIZI', discount: '50%' };
+  // The apps send the raw title as the name.
+  const { campaign } = await campaigns.create(S, { name: title, purpose: 'promotion', audience: { preset: 'all' }, channels: ['in_app'], content });
+  assert.equal(campaign.name, '50% off: KULA TIZI');
+  assert.equal(campaign.content.title, title, 'the message itself keeps its variables');
+
+  // Changing the offer changes the name with it; a name the owner chose stays.
+  const edited = await campaigns.update(S, campaign.id, { content: { ...content, discount: '70%' } });
+  assert.equal(edited.campaign.name, '70% off: KULA TIZI');
+  const named = await campaigns.update(S, campaign.id, { name: 'October push' });
+  assert.equal(named.campaign.name, 'October push');
+  assert.equal((await campaigns.update(S, campaign.id, { content: { ...content, discount: '80%' } })).campaign.name, 'October push');
+  await campaigns.update(S, campaign.id, { name: title });
+
+  const listed = (await campaigns.list(S, {})).campaigns.find(c => c.id === campaign.id);
+  assert.deepEqual([listed.name, listed.title], ['80% off: KULA TIZI', '80% off: KULA TIZI']);
+  assert.equal((await campaigns.get(S, campaign.id)).campaign.title, '80% off: KULA TIZI', 'the heading on the campaign page too');
+  const greeting = await campaigns.create(S, { purpose: 'engagement', content: { title: 'We miss you, {{member_name}}', body: 'Come back to {{gym_name}}.' } });
+  assert.equal(greeting.campaign.name, 'We miss you');
+  assert.equal((await campaigns.duplicate(S, campaign.id)).campaign.name, '80% off: KULA TIZI (copy)');
+
+  // Each member still gets their own text.
+  await campaigns.send(S, campaign.id, { sendRequestId: uid('req') });
+  const [row] = await rowsOf(campaign.id);
+  assert.equal(row.memberId, m.id);
+  assert.deepEqual([row.title, row.body], ['80% off: KULA TIZI', 'Hi Zawadi, get 80% off with KULA TIZI at Label Gym.']);
+
+  // Campaigns saved before this fix are renamed by the migration.
+  await db('CommunicationCampaign').where({ id: greeting.campaign.id }).update({ name: 'We miss you, {{member_name}}' });
+  await db('CommunicationCampaign').where({ id: campaign.id }).update({ name: title });
+  await campaignNamesMigration.up(db);
+  const after = await db('CommunicationCampaign').whereIn('id', [campaign.id, greeting.campaign.id]).select('id', 'name');
+  assert.equal(after.find(r => r.id === campaign.id).name, '80% off: KULA TIZI');
+  assert.equal(after.find(r => r.id === greeting.campaign.id).name, 'We miss you');
+  assert.equal(Number((await db('CommunicationCampaign').whereIn('gymId', made.gyms).where('name', 'like', '%{{%').count({ n: '*' }))[0].n), 0);
 });
 
 // ══ In-app ═════════════════════════════════════════════════════════════════

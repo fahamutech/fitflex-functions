@@ -252,6 +252,29 @@ export function messageValues(content, member, { gymName = '', renewalLink = '',
   };
 }
 
+/**
+ * A message title as a label for lists, history and results — where there
+ * is no one member to fill it in for. The sender's own values (offer,
+ * discount, amount, gym) are filled in; per-member ones ({{member_name}},
+ * {{plan_name}}, …) are left out; a sender value not typed yet shows as "…".
+ * "{{discount}} off: {{offer_name}}" → "20% off: Ramadan special";
+ * "We miss you, {{member_name}}" → "We miss you".
+ */
+export function labelText(text, content = {}, { gymName = '' } = {}) {
+  const known = {
+    gym_name: gymName || 'FitFlex',
+    amount: content?.amountTzs != null ? formatTzs(content.amountTzs) : '…',
+    discount: content?.discount || '…',
+    offer_name: content?.offerName || '…',
+  };
+  return String(text || '')
+    .replace(VARIABLE_RE, (_, name) => known[name] ?? '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/ ([,.!?:;])/g, '$1')
+    .replace(/^[\s,;:–—-]+|[\s,;:–—-]+$/g, '')
+    .trim();
+}
+
 /** Fills {{variables}}; tidies the spaces an empty value leaves behind. */
 export function renderText(text, values) {
   return String(text || '')

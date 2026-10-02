@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   CHANNELS, PURPOSES, CAMPAIGN_STATUSES, categoryForPurpose, canTransitionCampaign,
-  validateContent,
+  validateContent, labelText,
 } from '../shared/communications.mjs';
 import { buildAudienceFilter, audienceScope } from '../shared/audience.mjs';
 import { renderMessage, whatsappMessage } from '../shared/message-render.mjs';
@@ -158,6 +158,9 @@ export function createCampaignService({
     };
   }
 
+  /** A campaign name fit for lists: see labelText. */
+  const label = (text, content, gym) => (labelText(text, content || {}, { gymName: gym }) || 'Untitled message').slice(0, NAME_MAX);
+
   function audienceSender(sender, campaign) {
     return campaign.senderType === 'gym'
       ? { senderType: 'gym', owner: sender.owner, gymId: campaign.gymId }
@@ -268,11 +271,12 @@ export function createCampaignService({
     const at = now().toISOString();
     const row = {
       id: id('cmp'), senderType: scope, gymId: gym.gymId,
-      name: f.patch.name || f.patch.content?.title || 'Untitled message',
       status: 'draft', channels: [], createdBy: sender.actorId || null, createdAt: at, updatedAt: at,
       ...f.patch,
     };
-    row.name = row.name.slice(0, NAME_MAX);
+    // Apps send the message title as the name; either way it is stored as
+    // a readable label, never with {{placeholders}} in it.
+    row.name = label(f.patch.name || f.patch.content?.title, f.patch.content, await gymName(row));
     await campaigns.insertAsync(row);
     return { campaign: view(await campaigns.findByIdAsync(row.id)) };
   }
@@ -317,6 +321,13 @@ export function createCampaignService({
     const f = await draftFields(body, c.senderType, sender);
     if (f.error) return f;
     if (!Object.keys(f.patch).length) return { campaign: view(c) };
+    const content = f.patch.content ?? c.content;
+    const gym = await gymName(c);
+    if (f.patch.name !== undefined) f.patch.name = label(f.patch.name, content, gym);
+    // A name that came from the title follows the title (and its values).
+    else if (f.patch.content && [c.content?.title, label(c.content?.title, c.content, gym)].includes(c.name)) {
+      f.patch.name = label(content.title, content, gym);
+    }
     return { campaign: view(await campaigns.updateByIdAsync(c.id, f.patch)) };
   }
 
@@ -530,7 +541,7 @@ export function createCampaignService({
    */
   async function list(sender, { gymId = null, status = null, purpose = null, channel = null, from = null, to = null, search = null, cursor = null, limit = LIST_LIMIT } = {}) {
     const size = Math.min(Math.max(Number(limit) || LIST_LIMIT, 1), 100);
-    const q = db('CommunicationCampaign as c').leftJoin('User as u', 'u.id', 'c.createdBy');
+    const q = db('CommunicationCampaign as c').leftJoin('User as u', 'u.id', 'c.createdBy').leftJoin('Gym as g', 'g.id', 'c.gymId');
     if (sender.senderType === 'platform') q.where('c.senderType', 'platform');
     else {
       const mine = ownerGymIds(sender.owner);
@@ -568,14 +579,14 @@ export function createCampaignService({
       q.whereRaw(`(date_trunc('milliseconds', c."createdAt"), c.id) < (?::timestamptz, ?)`, [c?.a, c?.i]);
     }
     const rows = await q.orderBy([{ column: db.raw(`date_trunc('milliseconds', c."createdAt")`), order: 'desc' }, { column: 'c.id', order: 'desc' }])
-      .limit(size + 1).select('c.*', 'u.displayName as createdByName');
+      .limit(size + 1).select('c.*', 'u.displayName as createdByName', 'g.name as gymName');
     const page = rows.slice(0, size);
     const stats = historyService ? await historyService.campaignStats(page.map(r => r.id)) : new Map();
     const last = page.at(-1);
     return {
       campaigns: page.map(r => {
         const { content, audience, ...rest } = view(r);
-        return { ...rest, title: content?.title ?? null, preset: audience?.preset ?? null, recipients: audience?.recipients || 'members', createdByName: r.createdByName ?? null, stats: stats.get(r.id) ?? null };
+        return { ...rest, title: content?.title ? label(content.title, content, r.senderType === 'gym' ? r.gymName : 'FitFlex') : null, preset: audience?.preset ?? null, recipients: audience?.recipients || 'members', createdByName: r.createdByName ?? null, stats: stats.get(r.id) ?? null };
       }),
       nextCursor: rows.length > size ? Buffer.from(JSON.stringify({ a: new Date(last.createdAt).toISOString(), i: last.id })).toString('base64url') : null,
     };
@@ -600,6 +611,8 @@ export function createCampaignService({
     return {
       campaign: {
         ...view(c),
+        // The title as a heading: values filled in, no {{placeholders}}.
+        title: c.content?.title ? label(c.content.title, c.content, await gymName(c)) : null,
         createdByName: creator?.displayName ?? null,
         template: template ? { id: template.id, key: template.key, name: template.name, system: template.gymId == null } : null,
       },
