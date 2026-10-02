@@ -30,7 +30,7 @@ import { localDay } from '../shared/member-progress.mjs';
 const TABLE = 'B2BBenefitConsumption';
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 // Allowance-type refusals are worth keeping for support; "not eligible at all" is not.
-const RECORDED_REJECTIONS = new Set(['usage_limit_reached', 'period_sponsor_cap_reached', 'program_budget_exhausted']);
+const RECORDED_REJECTIONS = new Set(['usage_limit_reached', 'period_sponsor_cap_reached', 'program_budget_exhausted', 'member_share_not_collectable']);
 
 export function createB2BConsumptionService({
   db, programs, benefits, users, gyms, trainers, checkins, trainerBookings, auditLog, b2bService,

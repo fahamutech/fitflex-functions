@@ -314,6 +314,19 @@ export const USAGE_SOURCES = Object.freeze({
   trainer_booking: { serviceType: 'trainer_session', providerType: 'trainer', table: 'TrainerBooking' },
 });
 
+/**
+ * How a per-use benefit may be funded (decided 3 Oct 2026). A member pays
+ * their share before they use a benefit, and only the sponsored pass has a
+ * way to collect it (the member unlocks the month). So a per-use benefit is
+ * fully sponsored: a sponsor/member split is offered as a sponsored pass.
+ * Benefits used through FitFlex (gym visits, trainer sessions) must be paid
+ * by the sponsor; the others may also carry no money at all.
+ */
+const CONSUMED_SERVICE_TYPES = new Set(Object.values(USAGE_SOURCES).map(s => s.serviceType));
+export function perUseFundingTypes(benefitType) {
+  return CONSUMED_SERVICE_TYPES.has(benefitType) ? ['full'] : ['full', 'none'];
+}
+
 /** Retail value of one gym visit: the gym's day rate (never a payout figure). */
 export function gymVisitValueTzs(gym) {
   const value = Math.round(Number(gym?.ratePerDay ?? gym?.perVisitRate ?? 0));
@@ -353,18 +366,22 @@ export function orderCandidates(candidates) {
 /**
  * Apply the allowance to one use, given what the ledger already holds in the
  * benefit's window. Returns { ok, sponsorTzs, beneficiaryTzs, remaining } or
- * { ok: false, reason }. A per-period sponsor cap covers what is left of it
- * (the member pays the rest); a count limit is all-or-nothing.
+ * { ok: false, reason }. Both limits are all-or-nothing: a use the sponsor's
+ * money for the period can't cover in full is not covered at all, because the
+ * member has no way to pay the difference at the door.
  */
 export function applyAllowance({ benefit, split, quantity = 1, used }) {
+  // A share the member would owe can't be collected at the door: a split
+  // benefit (set up before 3 Oct 2026) doesn't cover the use, and the
+  // member's own pass applies instead.
+  if (split.beneficiaryTzs > 0) return { ok: false, reason: 'member_share_not_collectable' };
   const limit = benefit.usageLimit ?? null;
   if (limit !== null && used.quantity + quantity > limit) return { ok: false, reason: 'usage_limit_reached' };
-  let sponsorTzs = split.sponsorTzs;
+  const sponsorTzs = split.sponsorTzs;
   const cap = benefit.periodSponsorCapTzs ?? null;
   if (cap !== null) {
     const left = Math.max(0, cap - used.sponsorTzs);
-    if (left === 0 && sponsorTzs > 0) return { ok: false, reason: 'period_sponsor_cap_reached' };
-    sponsorTzs = Math.min(sponsorTzs, left);
+    if (sponsorTzs > left) return { ok: false, reason: 'period_sponsor_cap_reached' };
   }
   return {
     ok: true,

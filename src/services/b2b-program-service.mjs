@@ -12,7 +12,7 @@ import {
   BENEFIT_TYPES, BENEFIT_TRANSITIONS, LIVE_BENEFIT_FIELDS, FUNDING_TYPES, USAGE_PERIODS, ELIGIBILITY_SCOPES,
   isDay, readEligibility, readBenefitEligibility, readFunding, readUsage, readProviderRules,
   programEffectiveStatus, benefitValidity, evaluateEligibility, matchesPopulation, usageWindow, describeFunding,
-  FLAT_FEE_BENEFIT,
+  FLAT_FEE_BENEFIT, perUseFundingTypes,
 } from '../shared/b2b-programs.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
 import { localDay } from '../shared/member-progress.mjs';
@@ -53,6 +53,9 @@ export function createB2BProgramService({
       benefitTypes: BENEFIT_TYPES,
       benefitStatuses: BENEFIT_TRANSITIONS,
       fundingTypes: FUNDING_TYPES,
+      // Funding each benefit type may have: a per-use benefit is fully sponsored (a split is a sponsored pass).
+      fundingByBenefitType: Object.fromEntries(Object.keys(BENEFIT_TYPES).map(t => [t,
+        t === FLAT_FEE_BENEFIT ? Object.keys(FUNDING_TYPES).filter(f => f !== 'none') : perUseFundingTypes(t)])),
       usagePeriods: USAGE_PERIODS,
       eligibilityScopes: ELIGIBILITY_SCOPES,
     };
@@ -294,6 +297,12 @@ export function createB2BProgramService({
     }
     const funding = readFunding(body);
     if (funding.error) return funding;
+    if (!flatFee && !perUseFundingTypes(body.benefitType).includes(funding.patch.fundingType)) {
+      return fail('member_share_needs_pass', 400, {
+        allowed: perUseFundingTypes(body.benefitType),
+        hint: 'A per-use benefit is fully sponsored. To split the cost with the member, offer a sponsored pass: the member unlocks it by paying their share.',
+      });
+    }
     const usage = readUsage(flatFee ? { usagePeriod: 'unlimited' } : body, body.fundingType);
     if (usage.error) return usage;
     const eligibility = readBenefitEligibility(body.eligibility);
