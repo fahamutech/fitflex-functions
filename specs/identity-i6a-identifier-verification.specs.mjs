@@ -9,7 +9,7 @@ import { gymCreateInvitation, myInvitations, acceptMyInvitation } from '../funct
 import { users } from '../src/bootstrap/services.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
-import { fakeOutbox, smsSender } from '../src/infra/verification-senders.mjs';
+import { fakeOutbox, smsSender, emailSender } from '../src/infra/verification-senders.mjs';
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
 const localPhone = () => `07${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
@@ -317,4 +317,82 @@ test('other profiles are linked by the proved phone only when linking is on', as
     const event = await db('IdentityEvent').where({ personId: p.user.personId, kind: 'link' }).first();
     assert.equal(event.trigger, 'identifier_verify');
   }, { V2_LINKING: 'true' });
+});
+
+// ── Providers (decision of 2 Oct 2026: Beem for SMS, Mailgun for email) ────
+
+/** Run with fetch replaced; returns the requests that were made. */
+async function withFetch(reply, fn) {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init) => { calls.push({ url: String(url), ...init }); return reply(calls.length); };
+  try { await fn(calls); } finally { globalThis.fetch = original; }
+}
+const json = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+
+test('Beem SMS: needs its credentials and a sender name, and sends the number without "+"', async () => {
+  const env = { VERIFICATION_SMS_PROVIDER: 'beem', BEEM_API_KEY: 'key', BEEM_SECRET_KEY: 'secret', VERIFICATION_SMS_SENDER_ID: 'FITFLEX', BEEM_SMS_API_URL: null, NODE_ENV: 'production' };
+  await withEnv({ ...env, VERIFICATION_SMS_SENDER_ID: null }, async () => assert.equal(smsSender().configured, false));
+  await withEnv({ ...env, BEEM_SECRET_KEY: null }, async () => assert.equal(smsSender().configured, false));
+  await withEnv(env, async () => {
+    await withFetch(() => json(200, { successful: true, request_id: 1, code: 100, valid: 1, invalid: 0 }), async calls => {
+      assert.deepEqual(await smsSender().send('+255712345678', { text: 'code 123456' }), { ok: true });
+      assert.equal(calls[0].url, 'https://apisms.beem.africa/v1/send');
+      assert.equal(calls[0].headers.Authorization, `Basic ${Buffer.from('key:secret').toString('base64')}`);
+      const body = JSON.parse(calls[0].body);
+      assert.equal(body.source_addr, 'FITFLEX');
+      assert.equal(body.message, 'code 123456');
+      assert.deepEqual(body.recipients, [{ recipient_id: 1, dest_addr: '255712345678' }]);
+    });
+    await withFetch(() => json(200, { successful: true, valid: 0, invalid: 1 }), async () => {
+      assert.equal((await smsSender().send('+255712345678', { text: 'x' })).ok, false, 'a number Beem calls invalid is not a send');
+    });
+    await withFetch(() => json(401, { code: 120, message: 'Invalid Authentication Parameters' }), async () => {
+      assert.deepEqual(await smsSender().send('+255712345678', { text: 'x' }), { ok: false, error: 'provider_rejected' });
+    });
+    await withFetch(() => { throw new Error('network down'); }, async () => {
+      assert.deepEqual(await smsSender().send('+255712345678', { text: 'x' }), { ok: false, error: 'provider_unreachable' });
+    });
+  });
+});
+
+test('Mailgun email: needs a key and a domain, and sends subject and text', async () => {
+  const env = { VERIFICATION_EMAIL_PROVIDER: 'mailgun', MAILGUN_API_KEY: 'key', MAILGUN_DOMAIN: 'mg.example.com', MAILGUN_API_URL: null, VERIFICATION_EMAIL_FROM: null, NODE_ENV: 'production' };
+  await withEnv({ ...env, MAILGUN_DOMAIN: null }, async () => assert.equal(emailSender().configured, false));
+  await withEnv(env, async () => {
+    await withFetch(() => json(200, { id: '<1@mg>', message: 'Queued. Thank you.' }), async calls => {
+      assert.deepEqual(await emailSender().send('person@example.com', { subject: 'Your FitFlex verification code', text: 'code 123456' }), { ok: true });
+      assert.equal(calls[0].url, 'https://api.mailgun.net/v3/mg.example.com/messages');
+      assert.equal(calls[0].headers.Authorization, `Basic ${Buffer.from('api:key').toString('base64')}`);
+      const form = new URLSearchParams(calls[0].body);
+      assert.equal(form.get('from'), 'FitFlex <no-reply@mg.example.com>');
+      assert.equal(form.get('to'), 'person@example.com');
+      assert.equal(form.get('subject'), 'Your FitFlex verification code');
+      assert.equal(form.get('text'), 'code 123456');
+    });
+    await withFetch(() => json(401, {}), async () => {
+      assert.deepEqual(await emailSender().send('person@example.com', { subject: 's', text: 't' }), { ok: false, error: 'provider_rejected' });
+    });
+  });
+  await withEnv({ ...env, MAILGUN_API_URL: 'https://api.eu.mailgun.net/' }, async () => {
+    await withFetch(() => json(200, {}), async calls => {
+      await emailSender().send('person@example.com', { subject: 's', text: 't' });
+      assert.equal(calls[0].url, 'https://api.eu.mailgun.net/v3/mg.example.com/messages');
+    });
+  });
+});
+
+test('a provider failure sends no code and tells the person to try again', async () => {
+  await on(async () => {
+    const p = await person();
+    const phone = e164(localPhone());
+    await withFetch(() => json(500, {}), async () => {
+      const out = await request(p, { phone });
+      assert.equal(out.statusCode, 502);
+      assert.equal(out.body.error, 'code_not_sent');
+    });
+    const row = await db('VerificationCode').where({ personId: p.user.personId }).first();
+    assert.equal(row.outcome, 'send_failed');
+    assert.equal(row.codeHash, null);
+  }, { VERIFICATION_SMS_PROVIDER: 'beem', BEEM_API_KEY: 'key', BEEM_SECRET_KEY: 'secret', VERIFICATION_SMS_SENDER_ID: 'FITFLEX' });
 });
