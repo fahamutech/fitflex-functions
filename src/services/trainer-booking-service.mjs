@@ -4,6 +4,7 @@ import { priceBooking, passDiscountPct, trainerCommissionPct } from '../shared/t
 import { effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 import {
   normalizeAvailability, normalizeSlot, weekdayOf, addDays, isPastSlot, buildTrainerSchedule, hideTrainerPass,
+  memberCancellation,
 } from '../shared/trainer-access.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 
@@ -33,6 +34,8 @@ export function createTrainerBookingService({
   subscriptions, paymentRequests, notify = async () => {},
   partnerGate = OPEN_GATE,
   onStatusChanged = null,
+  // A paid session was cancelled and the money is owed back: ({ booking, reasonCode, actorId, role }) → refund.
+  onRefundDue = async () => null,
 }) {
   // Side effects of a status change (B2B benefit consumption). The change has
   // already happened; a failing hook must never undo or fail it.
@@ -247,14 +250,21 @@ export function createTrainerBookingService({
     if (!['confirmed', 'completed', 'cancelled'].includes(status)) return { error: 'invalid_status', status: 400 };
     const prior = await trainerBookings.findAsync(b => b.id === id);
     if (!prior) return { error: 'not_found', status: 404 };
-    const updated = await trainerBookings.updateByIdAsync(prior.id, { status, updatedAt: new Date().toISOString() });
+    const at = new Date().toISOString();
+    const cancelling = status === 'cancelled' && prior.status !== 'cancelled';
+    const updated = await trainerBookings.updateByIdAsync(prior.id, {
+      status, updatedAt: at, ...(cancelling ? { cancelledAt: at, cancelledBy: 'admin' } : {}),
+    });
     await auditLog.insertAsync({
-      id: randomUUID(), at: new Date().toISOString(),
+      id: randomUUID(), at,
       actor: actorId, action: `trainer_booking_${status}`,
       target: prior.id, before: prior, after: updated
     });
     await statusChanged(updated, prior.status, actorId);
-    return { booking: await hydrateBooking(updated) };
+    // FitFlex cancelling a session the member paid for owes them the money back.
+    const refund = cancelling && wasPaid(prior)
+      ? await refundFor(updated, 'cancelled_by_fitflex', actorId, 'admin') : null;
+    return { booking: await hydrateBooking(updated), refund };
   }
 
   async function trainerMyBookings(userId) {
@@ -282,11 +292,85 @@ export function createTrainerBookingService({
 
   async function memberMyBookings(memberId) {
     const allBookings = await trainerBookings.filterAsync(b => b.memberId === memberId);
+    const now = new Date();
     return Promise.all(
       allBookings
         .sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0))
-        .map(b => hydrateBooking(b))
+        // What the member can still do with each booking, so the app needn't guess.
+        .map(async b => ({ ...(await hydrateBooking(b)), cancellation: memberCancellation(b, now) }))
     );
+  }
+
+  // ── Cancellations ───────────────────────────────────────────────────
+
+  /** The member paid for this session (it was confirmed by a payment, not free). */
+  const wasPaid = b => ['confirmed', 'completed'].includes(b.status) && Number(b.amountTzs) > 0;
+
+  async function refundFor(booking, reasonCode, actorId, role) {
+    try {
+      return await onRefundDue({ booking, reasonCode, actorId, role });
+    } catch (err) {
+      console.warn('[trainer-booking] refund not raised:', err?.message);
+      return null;
+    }
+  }
+
+  /** A slot still waiting on payment was dropped: shrink or withdraw the group's payment request. */
+  async function releaseUnpaidSlot(booking, at, actorId) {
+    if (!paymentRequests || !booking.paymentRequestId) return;
+    const request = await paymentRequests.findByIdAsync(booking.paymentRequestId);
+    if (!request || request.status !== 'pending') return;
+    const left = (await trainerBookings.filterAsync(b => b.groupId === booking.groupId && b.status === 'payment_pending'));
+    if (!left.length) {
+      await paymentRequests.updateByIdAsync(request.id, { status: 'cancelled', decidedAt: at, decidedBy: actorId });
+    } else {
+      await paymentRequests.updateByIdAsync(request.id, {
+        amountTzs: left.reduce((sum, b) => sum + Number(b.amountTzs || 0), 0),
+        note: `${left.length} session(s) (one cancelled before payment)`,
+      });
+    }
+  }
+
+  async function cancel(booking, { by, actorId, reasonCode }) {
+    const at = new Date().toISOString();
+    const paid = wasPaid(booking);
+    const updated = await trainerBookings.updateByIdAsync(booking.id, { status: 'cancelled', cancelledAt: at, cancelledBy: by, updatedAt: at });
+    if (booking.status === 'payment_pending') await releaseUnpaidSlot(booking, at, actorId);
+    await auditLog.insertAsync({
+      id: randomUUID(), at, actor: actorId, action: `trainer_booking_cancelled_by_${by}`,
+      target: booking.id, before: booking, after: updated,
+    });
+    await statusChanged(updated, booking.status, actorId);
+    const refund = paid ? await refundFor(updated, reasonCode, actorId, by) : null;
+    const trainer = trainers.find(t => t.id === booking.trainerId);
+    await notify(`trainer_booking_cancelled_by_${by}`, { trainer, memberId: booking.memberId, bookings: [updated] });
+    return { booking: { ...(await hydrateBooking(updated)), cancellation: memberCancellation(updated) }, refund };
+  }
+
+  /**
+   * Member: cancel one session. Unpaid: any time before it starts. Paid: up
+   * to the notice period before it, with a full refund; after that the
+   * session stands.
+   */
+  async function memberCancelBooking({ memberId, bookingId }) {
+    const booking = await trainerBookings.findAsync(b => b.id === bookingId && b.memberId === memberId);
+    if (!booking) return { error: 'booking_not_found', status: 404 };
+    if (!['payment_pending', 'confirmed'].includes(booking.status)) return { error: 'booking_not_cancellable', status: 409 };
+    if (isPastSlot(booking.date, booking.slot)) return { error: 'session_already_started', status: 409 };
+    const rule = memberCancellation(booking);
+    if (!rule.canCancel) return { error: 'cancellation_window_passed', status: 409, cancelBy: rule.cancelBy };
+    return cancel(booking, { by: 'member', actorId: memberId, reasonCode: 'member_cancelled' });
+  }
+
+  /** Trainer: cancel a session they can't take, any time before it starts. A paid one is refunded in full. */
+  async function trainerCancelBooking({ userId, bookingId }) {
+    const profile = trainerService.findProfileByUser(userId);
+    if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
+    const booking = await trainerBookings.findAsync(b => b.id === bookingId && b.trainerId === profile.id);
+    if (!booking) return { error: 'booking_not_found', status: 404 };
+    if (!['payment_pending', 'confirmed'].includes(booking.status)) return { error: 'booking_not_cancellable', status: 409 };
+    if (isPastSlot(booking.date, booking.slot)) return { error: 'session_already_started', status: 409 };
+    return cancel(booking, { by: 'trainer', actorId: userId, reasonCode: 'trainer_cancelled' });
   }
 
   // ── C3: sessions (bookings + manual entries) ────────────────────────
@@ -475,6 +559,7 @@ export function createTrainerBookingService({
     publicSchedule, trainerSchedule,
     hydrateBooking, quoteBooking, createBooking, applyPaymentToGroup, adminList, adminUpdateStatus,
     trainerMyBookings, trainerCompleteBooking, memberMyBookings,
+    memberCancelBooking, trainerCancelBooking,
     createManualSession, trainerSessionsForDate, trainerEarnings,
   };
 }

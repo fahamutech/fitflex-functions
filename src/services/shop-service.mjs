@@ -25,7 +25,9 @@ const bool = value => value === true || value === 'true' || value === '1' ? true
 const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0) ? Number(product.discountPriceTzs) : Number(product.priceTzs || 0);
 const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
 
-export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null }) {
+export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null,
+  // A paid order was cancelled and the money is owed back: ({ order, reasonCode, actorId, role }) → refund.
+  onRefundDue = async () => null }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -308,7 +310,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     await notify(order.buyerId, 'order_cancelled', { orderId, reason: 'payment_not_confirmed' });
   }
   async function myOrders(buyerId) {
-    return (await shopOrders.filterAsync(order => order.buyerId === buyerId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
+    return (await shopOrders.filterAsync(order => order.buyerId === buyerId))
+      .sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0))
+      // Whether the buyer can still cancel it themselves (before it is on its way).
+      .map(order => ({ ...order, canCancel: CANCELLABLE.has(order.status) }));
   }
   async function vendorOrders(vendorId) {
     const direct = await shopOrders.filterAsync(order => (order.items || []).some(item => item.vendorId === vendorId));
@@ -327,23 +332,67 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     }
     // Vendors fulfil paid orders only; an unpaid order can only be cancelled.
     if (order.paymentStatus && order.paymentStatus !== 'paid' && status !== 'cancelled') return { error: 'order_not_paid', status: 409 };
-    if (status === 'cancelled' && order.status !== 'cancelled') {
-      await restock(order);
-      if (order.paymentStatus === 'pending' && paymentRequests) {
-        for (const r of await paymentRequests.filterAsync(p => p.orderId === orderId && p.status === 'pending')) {
-          await paymentRequests.updateByIdAsync(r.id, { status: 'cancelled', decidedAt: nowIso(), decidedBy: actorId });
-        }
-      }
-    }
+    if (status === 'cancelled') return cancelOrder(order, { actorId, role: actorRole === 'admin' ? 'admin' : 'vendor', reasonCode: actorRole === 'admin' ? 'cancelled_by_fitflex' : 'vendor_cancelled' });
+    if (order.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
     const at = nowIso();
     const timeline = Array.isArray(order.timeline) ? order.timeline : [];
     timeline.push({ status, at });
     const normalized = status === 'fulfilled' ? 'delivered' : status;
-    const paymentPatch = normalized === 'cancelled' && order.paymentStatus === 'pending' ? { paymentStatus: 'cancelled' } : {};
-    const updated = await shopOrders.updateByIdAsync(orderId, { status: normalized, timeline, ...paymentPatch, updatedAt: at });
+    const updated = await shopOrders.updateByIdAsync(orderId, { status: normalized, timeline, updatedAt: at });
     await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: `shop_order_${normalized}`, target: orderId, before: { status: order.status }, after: { status: normalized } });
     await notify(order.buyerId, `order_${normalized}`, { orderId });
     return { order: updated };
+  }
+
+  // An order can be cancelled until it is on its way: once dispatched, ready
+  // for pickup or delivered it is a return, handled under the vendor's policy.
+  const CANCELLABLE = new Set(['pending', 'confirmed', 'accepted', 'processing', 'packed']);
+
+  /**
+   * Cancel an order: release its stock, withdraw a payment still waiting, and
+   * raise a refund when it was already paid.
+   */
+  async function cancelOrder(order, { actorId, role, reasonCode }) {
+    if (order.status === 'cancelled') return { order };
+    if (['delivered', 'fulfilled'].includes(order.status)) return { error: 'order_already_delivered', status: 409 };
+    if (role === 'buyer' && !CANCELLABLE.has(order.status)) return { error: 'order_already_dispatched', status: 409 };
+    await restock(order);
+    const at = nowIso();
+    const wasPaid = order.paymentStatus === 'paid' && Number(order.totalTzs) > 0;
+    if (order.paymentStatus === 'pending' && paymentRequests) {
+      for (const r of await paymentRequests.filterAsync(p => p.orderId === order.id && p.status === 'pending')) {
+        await paymentRequests.updateByIdAsync(r.id, { status: 'cancelled', decidedAt: at, decidedBy: actorId });
+      }
+    }
+    const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, by: role }];
+    const paymentStatus = wasPaid ? 'refund_pending' : order.paymentStatus === 'pending' ? 'cancelled' : order.paymentStatus;
+    const updated = await shopOrders.updateByIdAsync(order.id, { status: 'cancelled', paymentStatus, timeline, updatedAt: at });
+    await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: `shop_order_cancelled_by_${role}`, target: order.id, before: { status: order.status, paymentStatus: order.paymentStatus }, after: { status: 'cancelled', paymentStatus } });
+    let refund = null;
+    if (wasPaid) {
+      try { refund = await onRefundDue({ order: updated, reasonCode, actorId, role }); } catch (err) { console.warn('[shop] refund not raised:', err?.message); }
+    }
+    if (role === 'buyer') {
+      for (const vendorId of new Set((order.items || []).map(item => item.vendorId).filter(Boolean))) await notify(vendorId, 'order_cancelled', { orderId: order.id, by: 'buyer' });
+    } else {
+      await notify(order.buyerId, 'order_cancelled', { orderId: order.id, by: role });
+    }
+    return { order: updated, refund };
+  }
+
+  /** Buyer: cancel my order before it is dispatched or ready for pickup. A paid one is refunded in full. */
+  async function buyerCancelOrder({ buyerId, orderId }) {
+    const order = await shopOrders.findByIdAsync(orderId);
+    if (!order || order.buyerId !== buyerId) return { error: 'order_not_found', status: 404 };
+    if (order.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
+    return cancelOrder(order, { actorId: buyerId, role: 'buyer', reasonCode: 'member_cancelled' });
+  }
+
+  /** The refund for a cancelled order was sent. */
+  async function markOrderRefunded(orderId) {
+    const order = await shopOrders.findByIdAsync(orderId);
+    if (!order) return null;
+    return shopOrders.updateByIdAsync(orderId, { paymentStatus: 'refunded', updatedAt: nowIso() });
   }
 
   async function vendorPayments(vendorId) {
@@ -446,5 +495,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
+  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, buyerCancelOrder, markOrderRefunded, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
 }

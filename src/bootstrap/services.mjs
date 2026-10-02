@@ -72,9 +72,11 @@ import { createCommunicationAccess } from '../services/communication-access.mjs'
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
+import { createRefundService } from '../services/refund-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
+  refunds,
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
   trainerEngagements, trainerSessions, products, shopOrders,
@@ -127,6 +129,12 @@ export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
+  // refundService is defined below; this only runs later.
+  onRefundDue: ({ booking, reasonCode, actorId, role }) => refundService.raise({
+    memberId: booking.memberId, kind: 'trainer_booking', sourceId: booking.id, paymentRequestId: booking.paymentRequestId,
+    amountTzs: booking.amountTzs, currency: booking.currency || 'TZS', reasonCode,
+    requestedBy: actorId, requestedRole: role, approved: true,
+  }).then(out => out.refund || null),
   // A completed session may use a B2B trainer benefit; un-completing it gives the benefit back.
   // b2bConsumptionService is defined below; this only runs later.
   onStatusChanged: ({ booking, from, actorId }) => (booking.status === 'completed'
@@ -142,6 +150,10 @@ export const trainerEngagementService = createTrainerEngagementService({
 });
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
+  onRefundDue: ({ order, reasonCode, actorId, role }) => refundService.raise({
+    memberId: order.buyerId, kind: 'shop_order', sourceId: order.id,
+    amountTzs: order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,
+  }).then(out => out.refund || null),
   marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases,
 });
 export const whatsAppNotifier = createWhatsAppNotifier();
@@ -337,6 +349,13 @@ export const notificationService = createNotificationService({
   // deliveryService is defined further down; these only run later.
   onOpened: (rows) => deliveryService.onOpened(rows),
   onClicked: (row, opts) => deliveryService.onClicked(row, opts),
+});
+
+// Refunds: raised by cancellations the terms allow or by request; paid by FitFlex staff.
+export const refundService = createRefundService({
+  refunds, paymentRequests, subscriptions, users, auditLog,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  onPaid: refund => (refund.kind === 'shop_order' ? shopService.markOrderRefunded(refund.orderId) : null),
 });
 
 // Identity V2 · I6: invitations (gym staff and trainers; no credentials set by organisations).
