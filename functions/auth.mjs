@@ -62,13 +62,13 @@ export const authLogin = {
 
 export const authFirebaseSession = {
   created, method: 'post', path: '/auth/firebase/session',
-  description: 'Exchange a Firebase ID token for a FitFlex session. Firebase is identity only; FitFlex stores roles.',
+  description: 'Exchange a Firebase ID token for a FitFlex session. Firebase is identity only; FitFlex stores roles. With existingOnly: true nothing is ever created: 404 profile_not_found when this identity has no profile of the requested role (the portal uses it to sign in gym owners and staff).',
   requestSample: { idToken: 'firebase-id-token', requestedRole: 'member' },
   responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'member' } },
   onRequest: async (req, res) => {
-    const { idToken, requestedRole } = req.body || {};
+    const { idToken, requestedRole, existingOnly } = req.body || {};
     const client = req.headers?.['x-fitflex-client'] || null;
-    const result = await authService.firebaseSession({ idToken, requestedRole, client });
+    const result = await authService.firebaseSession({ idToken, requestedRole, client, existingOnly: existingOnly === true });
     if (result.error) {
       const body = { error: result.error };
       if (result.existingRole) { body.existingRole = result.existingRole; body.requestedRole = result.requestedRole; }

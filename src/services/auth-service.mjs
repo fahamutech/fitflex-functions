@@ -152,7 +152,7 @@ export function createAuthService({
     return { token, user: toSessionUser(user) };
   }
 
-  async function firebaseSession({ idToken, requestedRole, client = null }) {
+  async function firebaseSession({ idToken, requestedRole, client = null, existingOnly = false }) {
     const fb = await verifyFirebaseIdToken(idToken);
     if (!fb) return { error: 'invalid_firebase_token', status: 401 };
 
@@ -219,6 +219,9 @@ export function createAuthService({
       };
       user = await users.upsertAsync(u => u.id === user.id, { ...user, ...patch, updatedAt: new Date().toISOString() });
     } else {
+      // A sign-in that must never register anyone (the portal has no
+      // self-registration): no profile of that role means no session.
+      if (existingOnly) return { error: 'profile_not_found', status: 404 };
       const newUserRole = selfRole || 'member';
       // New user: only allow creation if NOT requesting admin.
       if (newUserRole === 'admin' && !isAdminEmail) return { error: 'admin_self_registration_not_allowed', status: 403 };
