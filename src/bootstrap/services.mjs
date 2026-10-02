@@ -19,6 +19,7 @@ import { createOrgMembershipService } from '../services/org-membership-service.m
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
 import { identityFlag } from '../shared/feature-flags.mjs';
+import { smsSender, emailSender } from '../infra/verification-senders.mjs';
 import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
 import { registerOrgMembershipLookup } from '../auth/org-authz.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
@@ -312,9 +313,12 @@ export const invitationService = createInvitationService({
   vendorStaffRoles: [...VENDOR_STAFF_ROLES], vendorStaffPermissions: [...VENDOR_STAFF_PERMISSIONS],
   ensureVendor: vendorUserId => orgMembershipService.syncUser(vendorUserId),
 });
-// Identity V2 · I6a: a person proves an email or phone through Firebase.
+// Identity V2 · I6a: a person proves an email or phone with a code FitFlex sends.
 export const identifierService = createIdentifierService({
-  db, users, verifyFirebaseIdToken, identityLink: identityLinkService, auditLog,
+  db, users, identityLink: identityLinkService, auditLog,
+  senders: { sms: smsSender, email: emailSender },
+  // Codes are stored as a keyed hash; the key is the server's signing secret.
+  secret: process.env.JWT_SECRET || 'fitflex-dev-secret-change-me',
   claimInvitations: personId => invitationService.claimFor(personId),
   linkingEnabled: () => identityFlag('V2_LINKING'),
 });

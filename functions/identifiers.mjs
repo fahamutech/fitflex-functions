@@ -33,13 +33,25 @@ export const myIdentifiers = {
   },
 };
 
-export const verifyMyIdentifier = {
-  created, method: 'post', path: '/me/identifiers/verify',
-  description: 'Record what Firebase has verified for the caller. The app verifies the phone (Firebase Phone Authentication, linked to the signed-in Firebase account) or the email, then sends a fresh ID token. Open invitations addressed to a newly verified identifier are claimed. 409 identifier_in_use when another person has already verified that value.',
-  requestSample: { idToken: '<fresh Firebase ID token>' },
+export const requestIdentifierCode = {
+  created, method: 'post', path: '/me/identifiers/verify/request',
+  description: 'Send a FitFlex verification code to one phone (by SMS) or email (by email) the caller wants to prove is theirs. Limited per identifier and per person. 409 identifier_in_use when another person has already verified that value; 503 sms_not_configured / email_not_configured until a provider is set. Optional locale: en | sw.',
+  requestSample: { phone: '0712345678', locale: 'sw' },
+  responseSample: { sent: true, channel: 'sms', identifierType: 'phone', identifierValue: '+255712345678', expiresInSeconds: 600, resendAfterSeconds: 60 },
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     const user = await caller(req, res);
-    if (user) send(res, await identifierService.verify({ user, idToken: req.body?.idToken }));
+    if (user) send(res, await identifierService.requestCode({ user, body: req.body || {} }));
+  },
+};
+
+export const confirmIdentifierCode = {
+  created, method: 'post', path: '/me/identifiers/verify/confirm',
+  description: 'Check the code. On success the phone or email is verified on the caller\'s Person and open invitations addressed to it are claimed. A code expires, and stops working after a few wrong tries.',
+  requestSample: { phone: '0712345678', code: '123456' },
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => {
+    const user = await caller(req, res);
+    if (user) send(res, await identifierService.confirmCode({ user, body: req.body || {} }));
   },
 };

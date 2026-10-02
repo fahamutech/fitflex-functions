@@ -1,17 +1,17 @@
-// Identity V2 · I6a — proving a phone or email through Firebase.
-// The backend sends no code: it records what a fresh Firebase ID token proves
-// for the Firebase account the caller already signs in with.
+// Identity V2 · I6a — proving a phone or email with a code FitFlex sends.
+// The code goes by SMS to a phone and by email to an email; only its keyed
+// hash is stored; it expires, dies after wrong tries, and requests are limited.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { myIdentifiers, verifyMyIdentifier } from '../functions/identifiers.mjs';
+import { myIdentifiers, requestIdentifierCode, confirmIdentifierCode } from '../functions/identifiers.mjs';
 import { gymCreateInvitation, myInvitations, acceptMyInvitation } from '../functions/invitations.mjs';
 import { users } from '../src/bootstrap/services.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
+import { fakeOutbox, smsSender } from '../src/infra/verification-senders.mjs';
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
-const devToken = payload => `dev:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
 const localPhone = () => `07${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
 const e164 = local => `+255${local.slice(1)}`;
 
@@ -33,17 +33,17 @@ async function call(route, claims, { params = {}, body = {}, query = {} } = {}) 
   await route.onRequest(req, out);
   return out;
 }
-async function withFlags(flags, fn) {
-  const names = ['IDENTITY_V2', 'V2_IDENTIFIERS', 'V2_INVITES', 'V2_LINKING'];
+async function withEnv(env, fn) {
+  const names = ['IDENTITY_V2', 'V2_IDENTIFIERS', 'V2_INVITES', 'V2_LINKING', 'VERIFICATION_SMS_PROVIDER', 'VERIFICATION_EMAIL_PROVIDER', 'NODE_ENV', ...Object.keys(env)];
   const saved = Object.fromEntries(names.map(n => [n, process.env[n]]));
-  for (const n of names) delete process.env[n];
-  for (const f of flags) process.env[f] = 'true';
-  if (flags.length) process.env.IDENTITY_V2 = 'true';
+  Object.assign(process.env, env);
+  for (const [k, v] of Object.entries(env)) if (v === null) delete process.env[k];
   try { return await fn(); } finally {
     for (const n of names) { if (saved[n] === undefined) delete process.env[n]; else process.env[n] = saved[n]; }
   }
 }
-const on = fn => withFlags(['V2_IDENTIFIERS', 'V2_INVITES'], fn);
+const ON = { IDENTITY_V2: 'true', V2_IDENTIFIERS: 'true', V2_INVITES: 'true', V2_LINKING: null, VERIFICATION_SMS_PROVIDER: 'fake', VERIFICATION_EMAIL_PROVIDER: 'fake' };
+const on = (fn, extra = {}) => withEnv({ ...ON, ...extra }, fn);
 
 async function makeUser(overrides = {}) {
   const row = {
@@ -53,104 +53,205 @@ async function makeUser(overrides = {}) {
   await users.upsertAsync(u => u.id === row.id, row);
   return db('User').where({ id: row.id }).first();
 }
-/** A signed-in person with a Firebase account. */
 async function person(overrides = {}) {
-  const uid = uniq('fb');
-  const user = await makeUser({ firebaseUid: uid, email: `${uniq('p')}@example.com`, displayName: 'Neema Abdallah', ...overrides });
-  return { user, uid, claims: { sub: user.id, userType: user.userType } };
+  const user = await makeUser({ firebaseUid: uniq('fb'), email: `${uniq('p')}@example.com`, displayName: 'Neema Abdallah', ...overrides });
+  return { user, claims: { sub: user.id, userType: user.userType } };
 }
-const verify = (p, token) => call(verifyMyIdentifier, p.claims, { body: { idToken: devToken(token) } });
+const request = (p, body) => call(requestIdentifierCode, p.claims, { body });
+const confirm = (p, body) => call(confirmIdentifierCode, p.claims, { body });
+/** The code in the last message "sent" to this address. */
+const codeFor = to => fakeOutbox.filter(m => m.to === to).at(-1)?.text.match(/\b(\d{6})\b/)?.[1];
+const wrongCode = code => String((Number(code) + 1) % 1000000).padStart(6, '0');
 const identifiersOf = personId => db('LoginIdentifier').where({ personId, status: 'active' }).whereIn('type', ['email', 'phone']);
+/** Let the next request through the resend wait. */
+const skipResendWait = value => db('VerificationCode').where({ identifierValue: value }).update({ createdAt: new Date(Date.now() - 120e3) });
 
 test('flag off: the identifier routes do not exist', async () => {
-  await withFlags([], async () => {
+  await withEnv({ IDENTITY_V2: null, V2_IDENTIFIERS: null }, async () => {
     const p = await person();
     assert.equal((await call(myIdentifiers, p.claims)).statusCode, 404);
-    assert.equal((await verify(p, { uid: p.uid, phone_number: '+255712345678' })).statusCode, 404);
+    assert.equal((await request(p, { phone: localPhone() })).statusCode, 404);
+    assert.equal((await confirm(p, { phone: localPhone(), code: '123456' })).statusCode, 404);
   });
 });
 
-test('a phone verified by Firebase is recorded on the Person, in E.164', async () => {
+test('no provider configured: nothing is sent and nothing is recorded', async () => {
+  await on(async () => {
+    const p = await person();
+    const sms = await request(p, { phone: localPhone() });
+    assert.equal(sms.statusCode, 503);
+    assert.equal(sms.body.error, 'sms_not_configured');
+    const email = await request(p, { email: p.user.email });
+    assert.equal(email.body.error, 'email_not_configured');
+    assert.equal(await db('VerificationCode').where({ personId: p.user.personId }).first(), undefined);
+  }, { VERIFICATION_SMS_PROVIDER: null, VERIFICATION_EMAIL_PROVIDER: null });
+  // The fake providers can never be selected in production.
+  await withEnv({ NODE_ENV: 'production', VERIFICATION_SMS_PROVIDER: 'fake' }, async () => {
+    assert.equal(smsSender().configured, false);
+  });
+});
+
+test('a phone is proved by an SMS code and recorded on the Person in E.164', async () => {
   await on(async () => {
     const local = localPhone();
     const p = await person({ phone: local });
-
     const before = await call(myIdentifiers, p.claims);
     assert.deepEqual(before.body.identifiers, []);
     assert.deepEqual(before.body.unverified.find(u => u.type === 'phone'), { type: 'phone', value: e164(local) });
 
-    const done = await verify(p, { uid: p.uid, email: p.user.email, email_verified: false, phone_number: e164(local), sign_in_provider: 'phone' });
+    const sent = await request(p, { phone: local, locale: 'sw' });
+    assert.equal(sent.statusCode, 200, JSON.stringify(sent.body));
+    assert.deepEqual({ ...sent.body }, { sent: true, channel: 'sms', identifierType: 'phone', identifierValue: e164(local), expiresInSeconds: 600, resendAfterSeconds: 60 });
+    const message = fakeOutbox.filter(m => m.to === e164(local)).at(-1);
+    assert.equal(message.channel, 'sms');
+    assert.match(message.text, /namba yako ya uthibitisho/);
+    const code = codeFor(e164(local));
+    assert.match(code, /^\d{6}$/);
+
+    const row = await db('VerificationCode').where({ personId: p.user.personId }).first();
+    assert.equal(JSON.stringify(row).includes(code), false, 'the code itself is never stored');
+    assert.equal(JSON.stringify(sent.body).includes(code), false, 'and never returned');
+
+    const done = await confirm(p, { phone: `0${local.slice(1)}`, code });
     assert.equal(done.statusCode, 200, JSON.stringify(done.body));
-    assert.equal(done.body.identifiers.length, 1);
-    assert.equal(done.body.identifiers[0].type, 'phone');
-    assert.equal(done.body.identifiers[0].value, e164(local));
-    assert.equal(done.body.identifiers[0].verified, true);
-    assert.ok(done.body.unverified.some(u => u.type === 'email'), 'the unverified email stays unverified');
+    assert.equal(done.body.verified, true);
+    assert.deepEqual(done.body.identifiers.map(i => [i.type, i.value, i.verified]), [['phone', e164(local), true]]);
 
-    const rows = await identifiersOf(p.user.personId);
-    const phone = rows.find(r => r.type === 'phone');
-    assert.equal(phone.normalizedValue, e164(local));
+    const phone = (await identifiersOf(p.user.personId)).find(r => r.type === 'phone');
     assert.ok(phone.verifiedAt);
-    assert.equal(phone.provider, 'phone');
-    assert.equal(rows.some(r => r.type === 'email' && r.verifiedAt), false);
+    assert.equal(phone.provider, 'fitflex_sms');
+    assert.equal((await identifiersOf(p.user.personId)).some(r => r.type === 'email' && r.verifiedAt), false, 'the email is not proved by this');
 
-    // Idempotent.
-    assert.equal((await verify(p, { uid: p.uid, phone_number: e164(local) })).statusCode, 200);
-    assert.equal((await identifiersOf(p.user.personId)).filter(r => r.type === 'phone').length, 1);
+    // A used code is spent; asking again says it is already verified and sends nothing.
+    assert.equal((await confirm(p, { phone: local, code })).body.error, 'code_not_found_or_expired');
+    const outbox = fakeOutbox.length;
+    assert.equal((await request(p, { phone: local })).body.alreadyVerified, true);
+    assert.equal(fakeOutbox.length, outbox);
   });
 });
 
-test('a verified email is recorded the same way', async () => {
+test('an email is proved by a code sent to that email', async () => {
   await on(async () => {
     const p = await person();
-    const done = await verify(p, { uid: p.uid, email: p.user.email.toUpperCase(), email_verified: true });
+    const sent = await request(p, { email: p.user.email.toUpperCase() });
+    assert.equal(sent.body.channel, 'email');
+    const message = fakeOutbox.filter(m => m.to === p.user.email).at(-1);
+    assert.equal(message.subject, 'Your FitFlex verification code');
+    const done = await confirm(p, { email: p.user.email, code: codeFor(p.user.email) });
     assert.equal(done.statusCode, 200);
-    assert.deepEqual(done.body.identifiers.map(i => [i.type, i.value]), [['email', p.user.email]]);
+    const email = (await identifiersOf(p.user.personId)).find(r => r.type === 'email');
+    assert.ok(email.verifiedAt);
+    assert.equal(email.provider, 'fitflex_email');
   });
 });
 
-test('the token must be valid, fresh evidence for the caller\'s own Firebase account', async () => {
+test('wrong codes are counted, and the code dies after too many', async () => {
+  await on(async () => {
+    const phone = e164(localPhone());
+    const p = await person();
+    await request(p, { phone });
+    const code = codeFor(phone);
+
+    const first = await confirm(p, { phone, code: wrongCode(code) });
+    assert.equal(first.statusCode, 400);
+    assert.equal(first.body.error, 'code_incorrect');
+    assert.equal(first.body.attemptsLeft, 2);
+    assert.equal((await confirm(p, { phone, code: wrongCode(code) })).body.attemptsLeft, 1);
+    const dead = await confirm(p, { phone, code: wrongCode(code) });
+    assert.equal(dead.statusCode, 429);
+    assert.equal(dead.body.error, 'code_attempts_exceeded');
+    assert.equal((await confirm(p, { phone, code })).statusCode, 429, 'even the right code no longer works');
+    assert.deepEqual(await identifiersOf(p.user.personId), []);
+
+    // Another person cannot confirm a code that was sent for someone else's request.
+    const other = await person();
+    assert.equal((await confirm(other, { phone, code })).body.error, 'code_not_found_or_expired');
+    assert.equal((await confirm(p, { phone })).body.error, 'code_required');
+    assert.equal((await confirm(p, { code })).body.error, 'one_phone_or_email_required');
+  }, { VERIFY_CODE_MAX_ATTEMPTS: '3' });
+});
+
+test('codes expire, and a new code replaces the old one', async () => {
+  await on(async () => {
+    const phone = e164(localPhone());
+    const p = await person();
+    await request(p, { phone });
+    const old = codeFor(phone);
+
+    const soon = await request(p, { phone });
+    assert.equal(soon.statusCode, 429);
+    assert.equal(soon.body.error, 'code_resend_too_soon');
+    assert.ok(soon.body.retryAfterSeconds > 0);
+
+    await skipResendWait(phone);
+    assert.equal((await request(p, { phone })).statusCode, 200);
+    const fresh = codeFor(phone);
+    if (old !== fresh) assert.equal((await confirm(p, { phone, code: old })).body.error, 'code_incorrect', 'the old code stops working');
+
+    await db('VerificationCode').where({ identifierValue: phone }).update({ expiresAt: new Date(Date.now() - 1000) });
+    assert.equal((await confirm(p, { phone, code: fresh })).body.error, 'code_not_found_or_expired');
+    assert.deepEqual(await identifiersOf(p.user.personId), []);
+  });
+});
+
+test('requests are limited per identifier and per person', async () => {
+  await on(async () => {
+    const phone = e164(localPhone());
+    const p = await person();
+    for (let i = 0; i < 2; i += 1) {
+      assert.equal((await request(p, { phone })).statusCode, 200);
+      await skipResendWait(phone);
+    }
+    const limited = await request(p, { phone });
+    assert.equal(limited.statusCode, 429);
+    assert.equal(limited.body.error, 'code_rate_limited');
+  }, { VERIFY_CODE_PER_IDENTIFIER_PER_HOUR: '2' });
   await on(async () => {
     const p = await person();
-    const other = await person();
-    const phone = e164(localPhone());
-
-    assert.equal((await call(verifyMyIdentifier, p.claims, { body: {} })).body.error, 'idToken_required');
-    assert.equal((await call(verifyMyIdentifier, p.claims, { body: { idToken: 'not-a-token' } })).statusCode, 401);
-
-    const stolen = await verify(p, { uid: other.uid, phone_number: phone });
-    assert.equal(stolen.statusCode, 403);
-    assert.equal(stolen.body.error, 'token_not_yours');
-    assert.deepEqual(await identifiersOf(p.user.personId), []);
-    assert.deepEqual(await identifiersOf(other.user.personId), []);
-
-    const nothing = await verify(p, { uid: p.uid, email: p.user.email, email_verified: false });
-    assert.equal(nothing.statusCode, 409);
-    assert.equal(nothing.body.error, 'nothing_verified');
-
-    // A persona with no Firebase account (legacy password sign-in) cannot verify.
-    const legacy = await makeUser({ userType: 'vendor_staff' });
-    const refused = await call(verifyMyIdentifier, { sub: legacy.id, userType: 'vendor_staff' }, { body: { idToken: devToken({ uid: uniq('fb'), phone_number: phone }) } });
-    assert.equal(refused.statusCode, 403);
-  });
+    for (let i = 0; i < 2; i += 1) assert.equal((await request(p, { phone: localPhone() })).statusCode, 200);
+    const outbox = fakeOutbox.length;
+    const limited = await request(p, { phone: localPhone() });
+    assert.equal(limited.body.error, 'code_rate_limited');
+    assert.equal(fakeOutbox.length, outbox, 'nothing is sent once limited');
+  }, { VERIFY_CODE_PER_PERSON_PER_DAY: '2' });
 });
 
-test('a phone another person has verified is refused, never moved', async () => {
+test('a phone another person has verified is refused, never moved, and no SMS is sent', async () => {
   await on(async () => {
     const phone = e164(localPhone());
     const first = await person();
     const second = await person();
-    assert.equal((await verify(first, { uid: first.uid, phone_number: phone })).statusCode, 200);
+    await request(first, { phone });
+    assert.equal((await confirm(first, { phone, code: codeFor(phone) })).statusCode, 200);
 
-    const clash = await verify(second, { uid: second.uid, phone_number: phone });
-    assert.equal(clash.statusCode, 409);
-    assert.equal(clash.body.error, 'identifier_in_use');
-    assert.deepEqual(clash.body.identifierTypes, ['phone']);
+    const outbox = fakeOutbox.length;
+    const refused = await request(second, { phone });
+    assert.equal(refused.statusCode, 409);
+    assert.equal(refused.body.error, 'identifier_in_use');
+    assert.equal(fakeOutbox.length, outbox);
+    assert.equal((await db('VerificationCode').where({ personId: second.user.personId }).first()).outcome, 'refused', 'counted against the limits');
     assert.equal((await identifiersOf(second.user.personId)).some(r => r.type === 'phone'), false);
+  });
+});
+
+test('two people racing for one phone: the second confirmation is refused and left for review', async () => {
+  await on(async () => {
+    const phone = e164(localPhone());
+    const first = await person();
+    const second = await person();
+    await request(first, { phone });
+    const firstCode = codeFor(phone);
+    await skipResendWait(phone);
+    await request(second, { phone });
+    const secondCode = codeFor(phone);
+
+    assert.equal((await confirm(first, { phone, code: firstCode })).statusCode, 200);
+    const late = await confirm(second, { phone, code: secondCode });
+    assert.equal(late.statusCode, 409);
+    assert.equal(late.body.error, 'identifier_in_use');
     assert.equal((await identifiersOf(first.user.personId)).filter(r => r.type === 'phone').length, 1);
-    const conflict = await db('IdentityConflict').where({ kind: 'verified_identifier_collision', normalizedValue: phone, status: 'open' }).first();
-    assert.ok(conflict, 'left for review');
-    assert.deepEqual([...conflict.personIds].sort(), [first.user.personId, second.user.personId].sort());
+    assert.equal((await identifiersOf(second.user.personId)).some(r => r.type === 'phone'), false);
+    assert.ok(await db('IdentityConflict').where({ kind: 'verified_identifier_collision', normalizedValue: phone, status: 'open' }).first());
   });
 });
 
@@ -166,37 +267,54 @@ test('verifying the phone claims an invitation that was sent to it', async () =>
     assert.equal(sent.statusCode, 201);
     assert.deepEqual((await call(myInvitations, p.claims)).body.invitations, [], 'not theirs until the phone is proved');
 
-    assert.equal((await verify(p, { uid: p.uid, phone_number: e164(local) })).statusCode, 200);
+    await request(p, { phone: local });
+    assert.equal((await confirm(p, { phone: local, code: codeFor(e164(local)) })).statusCode, 200);
     const inv = await db('Invitation').where({ id: sent.body.invitation.id }).first();
     assert.equal(inv.status, 'claimed');
     assert.equal(inv.targetPersonId, p.user.personId);
-
-    const mine = await call(myInvitations, p.claims);
-    assert.equal(mine.body.invitations.length, 1);
     const accepted = await call(acceptMyInvitation, p.claims, { params: { invitationId: inv.id } });
     assert.equal(accepted.statusCode, 200);
     assert.equal((await db('User').where({ id: accepted.body.personaId }).first()).userType, 'gym_staff');
   });
 });
 
+test('a person with no Firebase account can verify, and their own rows are not a conflict', async () => {
+  await on(async () => {
+    const p = await person({ firebaseUid: null });
+    await request(p, { email: p.user.email });
+    const done = await confirm(p, { email: p.user.email, code: codeFor(p.user.email) });
+    assert.equal(done.statusCode, 200);
+    assert.equal(await db('IdentityConflict').where({ normalizedValue: p.user.email }).first(), undefined);
+
+    const q = await person();
+    await request(q, { email: q.user.email });
+    assert.equal((await confirm(q, { email: q.user.email, code: codeFor(q.user.email) })).statusCode, 200);
+    assert.equal(await db('IdentityConflict').where({ normalizedValue: q.user.email }).first(), undefined);
+  }, { V2_LINKING: 'true' });
+});
+
 test('other profiles are linked by the proved phone only when linking is on', async () => {
-  const setup = async () => {
+  const run = async () => {
     const local = localPhone();
     // A profile a gym created at the desk: a phone, no Firebase account.
     const deskRow = await makeUser({ userType: 'trainer', phone: local, displayName: 'Desk Created' });
+    // Someone else's profile with its own Firebase account and the same phone typed in.
+    const stranger = await makeUser({ userType: 'vendor', phone: local, firebaseUid: uniq('fb') });
     const p = await person();
-    return { local, deskRow, p };
+    await request(p, { phone: local });
+    assert.equal((await confirm(p, { phone: local, code: codeFor(e164(local)) })).statusCode, 200);
+    const personOf = async id => (await db('User').where({ id }).first()).personId;
+    return { p, desk: await personOf(deskRow.id), stranger: await personOf(stranger.id) };
   };
   await on(async () => {
-    const { local, deskRow, p } = await setup();
-    assert.equal((await verify(p, { uid: p.uid, phone_number: e164(local) })).statusCode, 200);
-    assert.notEqual((await db('User').where({ id: deskRow.id }).first()).personId, p.user.personId, 'V2_LINKING off: nothing moves');
+    const { p, desk } = await run();
+    assert.notEqual(desk, p.user.personId, 'V2_LINKING off: nothing moves');
   });
-  await withFlags(['V2_IDENTIFIERS', 'V2_LINKING'], async () => {
-    const { local, deskRow, p } = await setup();
-    assert.equal((await verify(p, { uid: p.uid, phone_number: e164(local) })).statusCode, 200);
-    assert.equal((await db('User').where({ id: deskRow.id }).first()).personId, p.user.personId, 'D1: linked on verified evidence');
+  await on(async () => {
+    const { p, desk, stranger } = await run();
+    assert.equal(desk, p.user.personId, 'D1: linked on verified evidence');
+    assert.notEqual(stranger, p.user.personId, 'a row with its own Firebase account is never moved');
     const event = await db('IdentityEvent').where({ personId: p.user.personId, kind: 'link' }).first();
     assert.equal(event.trigger, 'identifier_verify');
-  });
+  }, { V2_LINKING: 'true' });
 });

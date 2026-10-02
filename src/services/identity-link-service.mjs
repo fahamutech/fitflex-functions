@@ -64,7 +64,8 @@ export function createIdentityLinkService({ db }) {
   /**
    * @param {object} p
    * @param {string} p.anchorUserId  the User row this sign-in resolved to
-   * @param {string} p.uid           Firebase uid (verified by definition)
+   * @param {string|null} p.uid      Firebase uid (verified by definition); null when the
+   *   evidence is a code FitFlex sent itself (I6a), which proves only the email or phone
    * @param {string|null} [p.email]  only when Firebase verified it
    * @param {string|null} [p.phone]  only when Firebase verified it
    * @param {string|null} [p.provider] Firebase sign-in provider
@@ -82,12 +83,12 @@ export function createIdentityLinkService({ db }) {
 
       const anchor = await trx('User').where({ id: anchorUserId }).first();
       if (!anchor?.personId) return { personId: null, linkedUserIds: [], mergedPersonIds: [], conflicts };
-      const uidOwner = await trx('LoginIdentifier')
-        .where({ type: 'firebase_uid', normalizedValue: uid, status: 'active' }).first('personId');
+      const uidOwner = uid ? await trx('LoginIdentifier')
+        .where({ type: 'firebase_uid', normalizedValue: uid, status: 'active' }).first('personId') : null;
       const personId = uidOwner?.personId ?? anchor.personId;
 
       // Rows the verified evidence points at.
-      const byUid = attachOnly ? [] : await trx('User').where({ firebaseUid: uid });
+      const byUid = attachOnly || !uid ? [] : await trx('User').where({ firebaseUid: uid });
       const byEmail = verifiedEmail && !attachOnly
         ? await trx('User').whereRaw('lower(btrim(email)) = ?', [verifiedEmail]) : [];
       const byPhone = verifiedPhone && !attachOnly
@@ -100,7 +101,8 @@ export function createIdentityLinkService({ db }) {
       const candidates = new Map([[anchor.id, anchor]]);
       for (const u of byUid) candidates.set(u.id, u);
       for (const [type, value, rows] of [['email', verifiedEmail, byEmail], ['phone', verifiedPhone, byPhone]]) {
-        const otherAccounts = rows.filter(u => u.firebaseUid && u.firebaseUid !== uid);
+        // Without a uid (a FitFlex code), the person's own rows are not "another account".
+        const otherAccounts = rows.filter(u => u.firebaseUid && u.firebaseUid !== uid && (uid || u.personId !== personId));
         if (otherAccounts.length) {
           // Case D/E: same value, a different Firebase account. Never merged silently.
           conflicts.push({
@@ -130,7 +132,7 @@ export function createIdentityLinkService({ db }) {
       const fromPersons = new Map();
       for (const u of candidates.values()) {
         if (u.personId === personId) continue;
-        if (protectedPersons.has(u.personId) && u.firebaseUid !== uid) continue;
+        if (protectedPersons.has(u.personId) && (!uid || u.firebaseUid !== uid)) continue;
         const existing = liveTypes.get(u.userType);
         if (existing && existing !== u.id && LIVE(u)) {
           // Case F: the Person would hold two live personas of one type.
@@ -183,12 +185,12 @@ export function createIdentityLinkService({ db }) {
       }
 
       // Record what this sign-in proved on the Person.
-      await attachVerified(trx, { personId, type: 'firebase_uid', value: uid, normalizedValue: uid, provider: provider || 'firebase', firebaseUid: uid }, conflicts);
+      if (uid) await attachVerified(trx, { personId, type: 'firebase_uid', value: uid, normalizedValue: uid, provider: provider || 'firebase', firebaseUid: uid }, conflicts);
       if (verifiedEmail) {
         await attachVerified(trx, { personId, type: 'email', value: email, normalizedValue: verifiedEmail, provider: provider || 'firebase', firebaseUid: uid }, conflicts);
       }
       if (verifiedPhone) {
-        await attachVerified(trx, { personId, type: 'phone', value: phone, normalizedValue: verifiedPhone, provider: 'phone', firebaseUid: uid }, conflicts);
+        await attachVerified(trx, { personId, type: 'phone', value: phone, normalizedValue: verifiedPhone, provider: uid ? 'phone' : provider || 'phone', firebaseUid: uid }, conflicts);
       }
 
       for (const conflict of conflicts) await recordConflict(trx, conflict);
