@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
+import { withLedgerDelete } from './fixtures/ledger-cleanup.mjs';
 import {
   gyms, trainers, b2bService, b2bProgramService, b2bConsumptionService as usage,
   checkInService, checkinStatusService, trainerBookingService, corporateService,
@@ -82,11 +83,11 @@ after(async () => {
   if (made.orgs.length) {
     const ids = await db('B2BBenefitConsumption').whereIn('organizationId', made.orgs).pluck('id');
     await db('AuditLog').whereIn('target', ids).del();
-    await db('B2BBenefitConsumption').whereIn('organizationId', made.orgs).del();
+    await withLedgerDelete(db, trx => trx('B2BBenefitConsumption').whereIn('organizationId', made.orgs).del());
     await db('B2BOrganization').whereIn('id', made.orgs).del();
   }
   if (made.corporates.length) {
-    await db('B2BBenefitConsumption').whereIn('organizationId', db('B2BOrganization').whereIn('legacyCorporateId', made.corporates).select('id')).del();
+    await withLedgerDelete(db, trx => trx('B2BBenefitConsumption').whereIn('organizationId', trx('B2BOrganization').whereIn('legacyCorporateId', made.corporates).select('id')).del());
     await db('B2BOrganization').whereIn('legacyCorporateId', made.corporates).del();
     await db('CorporateEmployee').whereIn('corporateId', made.corporates).del();
     await db('CorporateAccount').whereIn('id', made.corporates).del();

@@ -71,6 +71,8 @@ One row per benefit, beneficiary and month. It snapshots the list price, discoun
 | `active` | The pass is running. |
 | `void` | Its invoice was voided. |
 
+**Started once.** The pass and the sponsor's payment take their ids from the entitlement (`sub_<entitlementId>`, `pay_<entitlementId>`), and the member's request is `pay_<entitlementId>_m<attempt>`. Starting a pass again, at the same moment or after a failure half-way, finds what was written the first time: one pass, one sponsor payment, one open request.
+
 `advanceEntitlements` moves paid-for entitlements as far as they can go. It runs when an invoice is marked paid and again daily, so an employee linked later or a month that begins later is picked up.
 
 **Unlock.** `POST /b2b/me/passes/:entitlementId/unlock` creates the pass as `payment_pending` with a payment request for the member's share. FitFlex approves that payment the usual way. A hook on subscription activation then finishes the pass: it runs to month end and the sponsor's share is recorded. If the hook is missed, the daily job finishes it. A rejected payment leaves the pass locked and the member can ask again.
@@ -86,7 +88,7 @@ draft ──► issued ──► paid
 |---|---|---|
 | Prepare | FitFlex admin, or the daily job | Adds what is not yet invoiced to the programme's open draft for that month and kind. Safe to repeat. |
 | Issue | FitFlex admin | Figures freeze. The VAT rate is stated and the VAT contained in the total is stored. |
-| Mark paid | FitFlex admin | Needs the sponsor's payment reference. Paying a `prepaid` invoice advances its entitlements. |
+| Mark paid | A **second** FitFlex admin | Needs the sponsor's payment reference. Paying a `prepaid` invoice advances its entitlements. The person who issued the invoice gets `403 cannot_settle_own_invoice`, whoever they are; the database refuses it too (`b2b_invoice_maker_checker_ck`). |
 | Void | FitFlex admin | Needs a reason. The invoice and its lines are kept; what was on it can be invoiced again. A paid invoice can't be voided. |
 
 **Prepaid invoices** take one `pass` line per nominated person, for the sponsor's share. Nominated means: an active beneficiary who matches the programme's (and the benefit's) population rule. Someone enrolled after an invoice was issued goes on a new draft for the same month.
@@ -99,7 +101,8 @@ draft ──► issued ──► paid
 - an entitlement, a consumption and a credit each appear on one live invoice only;
 - one open draft per programme, month and kind;
 - an issued invoice's figures can't change, its status only moves forward, and paid and void are final (trigger);
-- rows are never deleted.
+- the person who issued an invoice is not the person who recorded it paid;
+- rows are never deleted: a `BEFORE DELETE` trigger on consumptions, invoices, lines and entitlements refuses it. Maintenance opts in for one transaction with `SET LOCAL fitflex.allow_ledger_delete = 'on'`.
 
 **VAT.** Amounts are VAT-inclusive whole TZS. On issue, `vatRateBps` is recorded and `vatTzs = total × rate / (10000 + rate)`, rounded. The rate must be given explicitly (0 for none); there is no default. Whether the settlement cap is taken on the VAT-inclusive or net amount is the settlement engine's open decision (DR-05), not decided here.
 
@@ -110,6 +113,8 @@ draft ──► issued ──► paid
 FitFlex reviews, submits and activates it like any programme. Once it is pending, active or paused with an active sponsored pass, `corporateService.generateBill` refuses with `billed_by_programme`, so the company is never charged twice. Existing `CorporateBill` rows are untouched.
 
 Employees are nominated and invoiced even if not yet linked to a FitFlex account (`awaiting_link`). Linking them (`POST /corporate/staff/:id/link`) lets the daily job move them on.
+
+**No month is charged twice.** Before conversion goes live a company may already hold a seat bill for a month. `preparePrepaid` refuses that month with `409 period_seat_billed` (and the bill's id and status), so the company is not invoiced for it again as a programme. Later months are invoiced normally.
 
 ## 7. API
 
