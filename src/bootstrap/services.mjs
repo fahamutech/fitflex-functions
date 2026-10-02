@@ -188,6 +188,8 @@ export const b2bProgramService = createB2BProgramService({
 // B2B Phase 3: benefit evaluation and the consumption ledger (no payouts).
 export const b2bConsumptionService = createB2BConsumptionService({
   db, programs: b2bPrograms, benefits: b2bBenefits, users, gyms, trainers, checkins, trainerBookings, auditLog, b2bService,
+  // Reversing a gym visit voids its check-in (checkinStatusService is defined below; this only runs later).
+  voidCheckin: ({ checkinId, reason, actorId }) => checkinStatusService.setStatus({ checkinId, status: 'voided', reason, actorId }),
 });
 // B2B sponsor billing: flat-fee sponsored passes, sponsor invoices, member unlock (no provider payouts).
 export const b2bBillingService = createB2BBillingService({

@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, settlementService, settlementClawbackService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, settlementService, settlementClawbackService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -63,6 +63,15 @@ export const b2bProgramExpiry = {
   onJob: async () => {
     const r = await b2bProgramService.expireDue();
     if (r.expired) console.log(`[b2b-programs] expired=${r.expired}`);
+  }
+};
+
+export const b2bHoldReconciler = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'B2B: settle benefit holds a gym check-in left behind (the hold is written before the visit and approved after it). A hold older than two minutes is approved when its visit exists and cancelled when it does not, so no allowance stays blocked and no recorded visit goes uncharged. Idempotent.',
+  onJob: async () => {
+    const r = await b2bConsumptionService.reconcileHolds();
+    if (r.found) console.warn(`[b2b-usage] stale holds=${r.found} approved=${r.approved} cancelled=${r.cancelled} failed=${r.failed}`);
   }
 };
 

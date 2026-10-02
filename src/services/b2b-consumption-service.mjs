@@ -15,6 +15,10 @@
 // programme and benefit rows, re-reads usage from the ledger and inserts. The
 // unique index on (sourceType, sourceId) for live rows makes a usage event
 // consume at most once, whatever the callers do.
+//
+// Every change of a ledger row and its audit entry are written in the same
+// transaction: there is no ledger change without its audit, and no audit
+// failure after the fact.
 import { randomUUID } from 'node:crypto';
 import {
   LIVE_CONSUMPTION_STATUSES, USAGE_SOURCES, programEffectiveStatus, evaluateEligibility, calculateResponsibility,
@@ -30,13 +34,25 @@ const RECORDED_REJECTIONS = new Set(['usage_limit_reached', 'period_sponsor_cap_
 
 export function createB2BConsumptionService({
   db, programs, benefits, users, gyms, trainers, checkins, trainerBookings, auditLog, b2bService,
+  // Voids a gym check-in (and so releases what it used and claws back what a gym was paid for it).
+  voidCheckin = null,
   now = () => new Date(),
 }) {
   const stamp = () => now().toISOString();
 
+  /** An audit entry that must not fail the caller (the change it describes is already stored). */
   async function audit({ actor, action, target, before = null, after = null }) {
-    await auditLog.insertAsync({ id: `aud_${randomUUID().slice(0, 8)}`, at: stamp(), actor, action, target, before, after });
+    try {
+      await auditLog.insertAsync({ id: randomUUID(), at: stamp(), actor, action, target, before, after });
+    } catch (err) {
+      console.warn(`[b2b-usage] audit ${action} for ${target} not written:`, err?.message);
+    }
   }
+  /** An audit entry written in the same transaction as the ledger change it describes. */
+  const auditIn = (trx, { actor, action, target, before = null, after = null }) => trx('AuditLog').insert({
+    id: randomUUID(), at: new Date(stamp()), actor, action, target,
+    before: before == null ? null : JSON.stringify(before), after: after == null ? null : JSON.stringify(after),
+  });
 
   // ── Ledger reads ──────────────────────────────────────────────────────────
 
@@ -237,6 +253,7 @@ export function createB2BConsumptionService({
             }),
           };
           const [inserted] = await trx(TABLE).insert(row).returning('*');
+          await auditIn(trx, { actor, action: hold ? 'b2b.consumption.hold' : 'b2b.consumption.approve', target: inserted.id, after: inserted });
           return { row: inserted, remaining: applied.remaining };
         });
       } catch (err) {
@@ -248,9 +265,6 @@ export function createB2BConsumptionService({
       }
 
       if (outcome.row) {
-        if (!outcome.idempotent) {
-          await audit({ actor, action: hold ? 'b2b.consumption.hold' : 'b2b.consumption.approve', target: outcome.row.id, after: outcome.row });
-        }
         return { consumed: true, consumption: outcome.row, remaining: outcome.remaining ?? null, idempotent: !!outcome.idempotent, ...summary(c) };
       }
       if (outcome.paused) {
@@ -269,8 +283,12 @@ export function createB2BConsumptionService({
     if (row.status === 'approved') return { consumption: row, unchanged: true };
     if (row.status !== 'pending') return fail('invalid_transition', 409, { from: row.status, to: 'approved' });
     const at = new Date(stamp());
-    const [updated] = await db(TABLE).where({ id: row.id, status: 'pending' }).update({ status: 'approved', verifiedAt: at, updatedAt: at }).returning('*');
-    await audit({ actor, action: 'b2b.consumption.approve', target: row.id, before: { status: 'pending' }, after: { status: 'approved' } });
+    const updated = await db.transaction(async (trx) => {
+      const [u] = await trx(TABLE).where({ id: row.id, status: 'pending' }).update({ status: 'approved', verifiedAt: at, updatedAt: at }).returning('*');
+      if (u) await auditIn(trx, { actor, action: 'b2b.consumption.approve', target: row.id, before: { status: 'pending' }, after: { status: 'approved' } });
+      return u;
+    });
+    if (!updated) return fail('invalid_transition', 409, { to: 'approved' });
     return { consumption: updated };
   }
 
@@ -281,9 +299,13 @@ export function createB2BConsumptionService({
     if (row.status === 'cancelled') return { consumption: row, unchanged: true };
     if (row.status !== 'pending') return fail('invalid_transition', 409, { from: row.status, to: 'cancelled' });
     const at = new Date(stamp());
-    const [updated] = await db(TABLE).where({ id: row.id, status: 'pending' })
-      .update({ status: 'cancelled', metadata: JSON.stringify({ ...(row.metadata || {}), cancelReason: reason ?? null }), updatedAt: at }).returning('*');
-    await audit({ actor, action: 'b2b.consumption.cancel', target: row.id, before: { status: 'pending' }, after: { status: 'cancelled', reason } });
+    const updated = await db.transaction(async (trx) => {
+      const [u] = await trx(TABLE).where({ id: row.id, status: 'pending' })
+        .update({ status: 'cancelled', metadata: JSON.stringify({ ...(row.metadata || {}), cancelReason: reason ?? null }), updatedAt: at }).returning('*');
+      if (u) await auditIn(trx, { actor, action: 'b2b.consumption.cancel', target: row.id, before: { status: 'pending' }, after: { status: 'cancelled', reason } });
+      return u;
+    });
+    if (!updated) return fail('invalid_transition', 409, { to: 'cancelled' });
     return { consumption: updated };
   }
 
@@ -291,20 +313,71 @@ export function createB2BConsumptionService({
    * Undo an approved consumption. The row stays, marked reversed with who,
    * when and why; it stops counting, so the allowance and the programme's
    * budget get it back. (A programme paused for budget stays paused.)
+   *
+   * A gym visit is undone as a whole: its check-in is voided, which reverses
+   * this row and, if a gym was already paid for the visit, raises the
+   * clawback. Reversing only the sponsor's charge would leave a visit nobody
+   * pays for, or a gym paid for a visit the sponsor was refunded.
+   * `mayVoidCheckin: false` refuses that for a caller without the permission.
    */
-  async function reverse({ consumptionId, reason, actorId }) {
+  async function reverse({ consumptionId, reason, actorId, mayVoidCheckin = true }) {
     const why = typeof reason === 'string' ? reason.trim().slice(0, 500) : '';
     if (!why) return fail('reason_required', 400);
     const row = await db(TABLE).where({ id: consumptionId }).first();
     if (!row) return fail('consumption_not_found', 404);
     if (row.status === 'reversed') return { consumption: row, unchanged: true };
     if (row.status !== 'approved') return fail('invalid_transition', 409, { from: row.status, to: 'reversed' });
+
+    if (row.sourceType === 'gym_checkin') {
+      const checkin = await db('Checkin').where({ id: row.sourceId }).first();
+      if (checkin && checkin.status !== 'voided') {
+        if (!voidCheckin) return fail('checkin_must_be_voided', 409, { checkinId: checkin.id });
+        // Voiding a visit can take money back from a gym: it needs the same permission as voiding it directly.
+        if (!mayVoidCheckin) return fail('acl_forbidden', 403, { requiredScope: 'payments', checkinId: checkin.id });
+        const voided = await voidCheckin({ checkinId: checkin.id, reason: why, actorId });
+        if (voided?.error) return fail('checkin_not_voided', voided.status || 409, { checkinId: checkin.id, reason: voided.error });
+        // Voiding released the visit's consumption; make sure of it.
+        const after = await db(TABLE).where({ id: row.id }).first();
+        if (after.status === 'reversed') return { consumption: after, checkinVoided: true };
+      }
+    }
     const at = new Date(stamp());
-    const [updated] = await db(TABLE).where({ id: row.id, status: 'approved' })
-      .update({ status: 'reversed', reversedAt: at, reversedBy: actorId, reversalReason: why, updatedAt: at }).returning('*');
+    const updated = await db.transaction(async (trx) => {
+      const [u] = await trx(TABLE).where({ id: row.id, status: 'approved' })
+        .update({ status: 'reversed', reversedAt: at, reversedBy: actorId, reversalReason: why, updatedAt: at }).returning('*');
+      if (u) await auditIn(trx, { actor: actorId, action: 'b2b.consumption.reverse', target: row.id, before: row, after: u });
+      return u;
+    });
     if (!updated) return fail('invalid_transition', 409, { to: 'reversed' });
-    await audit({ actor: actorId, action: 'b2b.consumption.reverse', target: row.id, before: row, after: updated });
     return { consumption: updated };
+  }
+
+  /**
+   * Settle holds a check-in left behind. A hold is written before the visit
+   * and approved after it; if the process stopped in between, the hold would
+   * keep an allowance without ever being charged or paid to the gym. A hold
+   * older than a couple of minutes is approved when its visit exists, and
+   * cancelled when it doesn't. Idempotent.
+   */
+  async function reconcileHolds({ olderThanMs = 120_000, limit = 500 } = {}) {
+    const stale = await db(TABLE).where({ status: 'pending', sourceType: 'gym_checkin' })
+      .where('createdAt', '<', new Date(+now() - olderThanMs)).orderBy('createdAt').limit(limit);
+    const stats = { found: stale.length, approved: 0, cancelled: 0, failed: 0 };
+    for (const row of stale) {
+      try {
+        const checkin = await db('Checkin').where({ id: row.sourceId }).first();
+        const r = checkin && checkin.status !== 'voided'
+          ? await confirm({ consumptionId: row.id, actor: 'system:b2b-reconciler' })
+          : await cancel({ consumptionId: row.id, reason: checkin ? 'checkin_voided' : 'checkin_not_recorded', actor: 'system:b2b-reconciler' });
+        if (r.error) stats.failed += 1;
+        else if (r.consumption.status === 'approved') stats.approved += 1;
+        else stats.cancelled += 1;
+      } catch (err) {
+        stats.failed += 1;
+        console.warn(`[b2b-usage] could not reconcile hold ${row.id}:`, err?.message);
+      }
+    }
+    return stats;
   }
 
   /** Reverse (or cancel) whatever covers a usage event that was voided. Never throws. */
@@ -484,7 +557,7 @@ export function createB2BConsumptionService({
   }
 
   return {
-    evaluate, adminEvaluate, consume, confirm, cancel, reverse, releaseForSource,
+    evaluate, adminEvaluate, consume, confirm, cancel, reverse, releaseForSource, reconcileHolds,
     hasBenefit, wouldCoverGymVisit, holdGymVisit, consumeTrainerSession,
     adminList, adminGet, programUsage, allowanceFor, sponsorSpentForProgram,
   };
