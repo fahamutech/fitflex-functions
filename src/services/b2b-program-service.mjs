@@ -40,7 +40,7 @@ export function createB2BProgramService({
   const today = () => localDay(now());
 
   async function audit({ actor, action, target, before = null, after = null }) {
-    await auditLog.insertAsync({ id: `aud_${randomUUID().slice(0, 8)}`, at: stamp(), actor, action, target, before, after });
+    await auditLog.insertAsync({ id: randomUUID(), at: stamp(), actor, action, target, before, after });
   }
 
   const can = (access, permission) => access.permissions.includes(permission);

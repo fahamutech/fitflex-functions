@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
+import { withLedgerDelete } from './fixtures/ledger-cleanup.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { gyms, b2bConsumptionService as usage } from '../src/bootstrap/services.mjs';
 import * as b2bRoutes from '../functions/b2b.mjs';
@@ -47,7 +48,7 @@ after(async () => {
   const orgIds = [...made.orgs, ...(made.corporates.length ? await db('B2BOrganization').whereIn('legacyCorporateId', made.corporates).pluck('id') : [])];
   if (orgIds.length) {
     await db('AuditLog').whereIn('target', db('B2BBenefitConsumption').whereIn('organizationId', orgIds).select('id')).del();
-    await db('B2BBenefitConsumption').whereIn('organizationId', orgIds).del();
+    await withLedgerDelete(db, trx => trx('B2BBenefitConsumption').whereIn('organizationId', orgIds).del());
     await db('B2BOrganization').whereIn('id', orgIds).del();
   }
   if (made.corporates.length) {

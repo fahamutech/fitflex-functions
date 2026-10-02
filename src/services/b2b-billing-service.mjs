@@ -42,7 +42,7 @@ export function createB2BBillingService({
   const currentPeriod = () => localDay(now()).slice(0, 7);
 
   async function audit({ actor, action, target, before = null, after = null }) {
-    await auditLog.insertAsync({ id: `aud_${randomUUID().slice(0, 8)}`, at: stamp(), actor, action, target, before, after });
+    await auditLog.insertAsync({ id: randomUUID(), at: stamp(), actor, action, target, before, after });
   }
 
   /** A programme's sponsor fee for one person on a tier: tier price less the discount, split by the benefit's funding. */
@@ -88,6 +88,13 @@ export function createB2BBillingService({
    * programme's prepaid draft invoice. Safe to run again: only people added
    * since the last run are picked up.
    */
+  /** The Corporate seat bill, if any, already raised for this organisation's company and month. */
+  async function seatBillFor(organizationId, period) {
+    const org = await db('B2BOrganization').where({ id: organizationId }).first('legacyCorporateId');
+    if (!org?.legacyCorporateId) return null;
+    return (await db('CorporateBill').where({ corporateId: org.legacyCorporateId, period }).first()) ?? null;
+  }
+
   async function preparePrepaid({ programId, period, actorId }) {
     if (!isMonth(period)) return fail('invalid_period', 400);
     const here = currentPeriod();
@@ -103,6 +110,9 @@ export function createB2BBillingService({
       return v.startDate <= endDate && (v.endDate === null || v.endDate >= startDate);   // valid at some point in the month
     });
     if (!passBenefits.length) return fail('no_sponsored_pass', 409);
+    // A month the company was already sent a seat bill for is not invoiced here as well.
+    const seatBill = await seatBillFor(program.organizationId, period);
+    if (seatBill) return fail('period_seat_billed', 409, { billId: seatBill.id, billStatus: seatBill.status, period });
     const people = (await b2bService.allBeneficiaries(org)).filter(b => b.status === 'active');
 
     const result = await db.transaction(async (trx) => {
@@ -197,28 +207,44 @@ export function createB2BBillingService({
    */
   async function issueInvoice({ invoiceId, vatRateBps, actorId }) {
     if (!Number.isInteger(vatRateBps) || vatRateBps < 0 || vatRateBps > 10000) return fail('vat_rate_required', 400, { hint: 'basis points, e.g. 1800 for 18%; 0 for none' });
-    const invoice = await db(INVOICE).where({ id: invoiceId }).first();
-    if (!invoice) return fail('invoice_not_found', 404);
-    if (invoice.status !== 'draft') return fail('invalid_transition', 409, { from: invoice.status, to: 'issued' });
+    if (!actorId) return fail('actor_required', 403);
     const at = new Date(stamp());
-    const [updated] = await db(INVOICE).where({ id: invoiceId, status: 'draft' }).update({
-      status: 'issued', vatRateBps, vatTzs: vatContainedTzs(invoice.totalTzs, vatRateBps), issuedAt: at, issuedBy: actorId, updatedAt: at,
-    }).returning('*');
-    await audit({ actor: actorId, action: 'b2b.invoice.issue', target: invoiceId, before: invoice, after: updated });
-    return { invoice: updated };
+    // The row is locked so the VAT is worked out on the total that is frozen, not one a concurrent preparation is still changing.
+    const result = await db.transaction(async (trx) => {
+      const invoice = await trx(INVOICE).where({ id: invoiceId }).forUpdate().first();
+      if (!invoice) return fail('invoice_not_found', 404);
+      if (invoice.status !== 'draft') return fail('invalid_transition', 409, { from: invoice.status, to: 'issued' });
+      const [updated] = await trx(INVOICE).where({ id: invoiceId }).update({
+        status: 'issued', vatRateBps, vatTzs: vatContainedTzs(invoice.totalTzs, vatRateBps), issuedAt: at, issuedBy: actorId, updatedAt: at,
+      }).returning('*');
+      return { invoice, updated };
+    });
+    if (result.error) return result;
+    await audit({ actor: actorId, action: 'b2b.invoice.issue', target: invoiceId, before: result.invoice, after: result.updated });
+    return { invoice: result.updated };
   }
 
-  /** issued → paid, against the sponsor's payment reference. Paying a prepaid invoice starts the passes it covers. */
+  /**
+   * issued → paid, against the sponsor's payment reference. Paying a prepaid
+   * invoice starts the passes it covers.
+   *
+   * Maker-checker: the person who issued the invoice cannot record it as paid,
+   * whoever they are. Recording a payment starts passes and counts as money
+   * collected, so it takes a second person. The database refuses it as well.
+   */
   async function markPaid({ invoiceId, paymentReference, actorId }) {
+    if (!actorId) return fail('actor_required', 403);
     const reference = typeof paymentReference === 'string' ? paymentReference.trim().slice(0, 200) : '';
     if (!reference) return fail('payment_reference_required', 400);
     const invoice = await db(INVOICE).where({ id: invoiceId }).first();
     if (!invoice) return fail('invoice_not_found', 404);
     if (invoice.status === 'paid') return { invoice, unchanged: true };
     if (invoice.status !== 'issued') return fail('invalid_transition', 409, { from: invoice.status, to: 'paid' });
+    if (invoice.issuedBy === actorId) return fail('cannot_settle_own_invoice', 403);
     const at = new Date(stamp());
     const [updated] = await db(INVOICE).where({ id: invoiceId, status: 'issued' })
       .update({ status: 'paid', paidAt: at, paidBy: actorId, paymentReference: reference, updatedAt: at }).returning('*');
+    if (!updated) return fail('invalid_transition', 409, { to: 'paid' });   // someone else settled or voided it meanwhile
     await audit({ actor: actorId, action: 'b2b.invoice.paid', target: invoiceId, before: invoice, after: updated });
     const activation = invoice.kind === 'prepaid' ? await advanceEntitlements({ invoiceId, actorId }) : null;
     return { invoice: updated, activation };
@@ -246,7 +272,29 @@ export function createB2BBillingService({
 
   // ── Passes ────────────────────────────────────────────────────────────────
 
-  /** A member's sponsored pass for the month: an ordinary platform pass, paid for in part or in full by the sponsor. */
+  /** Insert a row whose id is derived from what it stands for; if it is already there, return that one. */
+  async function insertOnce(collection, row) {
+    try {
+      await collection.insertAsync(row);
+      return row;
+    } catch (err) {
+      if (err?.code !== '23505') throw err;
+      const existing = await collection.findByIdAsync(row.id);
+      if (!existing) throw err;
+      return existing;
+    }
+  }
+
+  /**
+   * A member's sponsored pass for the month: an ordinary platform pass, paid
+   * for in part or in full by the sponsor.
+   *
+   * One pass and one sponsor payment per entitlement, however often and
+   * however concurrently it is started (a payment recorded while the daily job
+   * runs, or a retry after a failure half-way): the pass and the payment take
+   * their ids from the entitlement, so a second start finds what the first
+   * one wrote instead of writing it again.
+   */
   async function startPass({ entitlement, invoice, subscription = null, actorId }) {
     const { startDate, nextStartDate } = monthBounds(entitlement.period);
     const periodEnd = eatDayStart(nextStartDate).toISOString();
@@ -257,23 +305,23 @@ export function createB2BBillingService({
       // Unlocked by the member: keep the month as the pass's length, whenever the payment was approved.
       sub = await subscriptions.updateByIdAsync(sub.id, { renewsAt: periodEnd, expiresAt: periodEnd });
     } else {
-      sub = {
-        id: `sub_${randomUUID().slice(0, 8)}`, memberId: entitlement.userId, type: 'platform_pass', tier: entitlement.passTier,
+      sub = await insertOnce(subscriptions, {
+        id: `sub_${entitlement.id}`, memberId: entitlement.userId, type: 'platform_pass', tier: entitlement.passTier,
         status: 'active', startedAt: from, cycleStartedAt: from, renewsAt: periodEnd, expiresAt: periodEnd,
         homeGymId: null, paymentRef: `B2B_${invoice.number}`,
-      };
-      await subscriptions.insertAsync(sub);
+      });
     }
     // The sponsor's share, recorded against the pass so settlement sees the whole fee as collected.
     if (entitlement.sponsorTzs > 0) {
-      await paymentRequests.insertAsync({
-        id: `pay_${randomUUID().slice(0, 8)}`, memberId: entitlement.userId, subscriptionId: sub.id, tier: entitlement.passTier,
+      await insertOnce(paymentRequests, {
+        id: `pay_${entitlement.id}`, memberId: entitlement.userId, subscriptionId: sub.id, tier: entitlement.passTier,
         amountTzs: entitlement.sponsorTzs, status: 'approved', provider: 'sponsor_invoice', reference: invoice.number,
         requestedAt: at, decidedAt: at, decidedBy: actorId ?? 'system:b2b-billing', note: `Sponsor share, ${invoice.number}`,
       });
     }
-    const [updated] = await db(ENTITLEMENT).where({ id: entitlement.id })
+    const [updated] = await db(ENTITLEMENT).where({ id: entitlement.id }).whereNotIn('status', ['active', 'void'])
       .update({ status: 'active', subscriptionId: sub.id, activatedAt: new Date(at), updatedAt: new Date(at) }).returning('*');
+    if (!updated) return db(ENTITLEMENT).where({ id: entitlement.id }).first();   // another start finished it first
     await audit({ actor: actorId ?? 'system:b2b-billing', action: 'b2b.pass.start', target: entitlement.id, after: { subscriptionId: sub.id, period: entitlement.period, passTier: entitlement.passTier } });
     return updated;
   }
@@ -330,13 +378,19 @@ export function createB2BBillingService({
     }
     const at = stamp();
     const periodEnd = eatDayStart(nextStartDate).toISOString();
-    const sub = {
-      id: `sub_${randomUUID().slice(0, 8)}`, memberId: userId, type: 'platform_pass', tier: e.passTier, status: 'payment_pending',
+    // One pass per entitlement, and one request per attempt: both take their
+    // ids from the entitlement, so two taps at once make one request.
+    let sub = await insertOnce(subscriptions, {
+      id: `sub_${e.id}`, memberId: userId, type: 'platform_pass', tier: e.passTier, status: 'payment_pending',
       startedAt: at, cycleStartedAt: at, renewsAt: periodEnd, expiresAt: periodEnd, homeGymId: null, paymentRef: null,
-    };
-    await subscriptions.insertAsync(sub);
-    const paymentRequest = await paymentRequests.insertAsync({
-      id: `pay_${randomUUID().slice(0, 8)}`, memberId: userId, subscriptionId: sub.id, tier: e.passTier, amountTzs: e.memberTzs,
+    });
+    if (sub.status === 'active') return fail('already_unlocked', 409);
+    // Asking again after a rejected payment reopens the same pass.
+    if (sub.status !== 'payment_pending') sub = await subscriptions.updateByIdAsync(sub.id, { status: 'payment_pending', startedAt: at, cycleStartedAt: at });
+    const earlier = (await paymentRequests.filterByColumnAsync('subscriptionId', sub.id)).filter(p => p.provider !== 'sponsor_invoice');
+    const open = earlier.find(p => p.status === 'pending');
+    const paymentRequest = open ?? await insertOnce(paymentRequests, {
+      id: `pay_${e.id}_m${earlier.length + 1}`, memberId: userId, subscriptionId: sub.id, tier: e.passTier, amountTzs: e.memberTzs,
       status: 'pending', provider: 'admin_approved', reference: null, requestedAt: at, decidedAt: null, decidedBy: null,
       note: 'Your share of a sponsored pass',
     });

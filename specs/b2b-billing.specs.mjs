@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
+import { withLedgerDelete } from './fixtures/ledger-cleanup.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import {
   gyms, b2bService, b2bProgramService, b2bConsumptionService as usage, b2bBillingService as billing,
@@ -37,6 +38,8 @@ async function user(userType = 'member') {
   return id;
 }
 ADMIN.userId = await user('admin');
+// Invoices are issued by one person and settled by another.
+const FINANCE = { userType: 'admin', userId: await user('admin') };
 const access = (organizationId, who = ADMIN) => b2bService.resolveAccess({ organizationId, ...who });
 
 async function gym() {
@@ -77,7 +80,7 @@ async function paidPrepaid(programId, vatRateBps = 1800) {
   const prepared = await billing.preparePrepaid({ programId, period: PERIOD, actorId: ADMIN.userId });
   assert.ok(prepared.invoice, JSON.stringify(prepared));
   await billing.issueInvoice({ invoiceId: prepared.invoice.id, vatRateBps, actorId: ADMIN.userId });
-  return billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-TRF-1', actorId: ADMIN.userId });
+  return billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-TRF-1', actorId: FINANCE.userId });
 }
 const entitlements = where => db('B2BPassEntitlement').where(where).orderBy('createdAt');
 const payments = subscriptionId => db('PaymentRequest').where({ subscriptionId }).orderBy('requestedAt');
@@ -99,10 +102,12 @@ after(async () => {
   const orgIds = [...made.orgs, ...(made.corporates.length ? await db('B2BOrganization').whereIn('legacyCorporateId', made.corporates).pluck('id') : [])];
   if (orgIds.length) {
     const invoiceIds = await db('B2BSponsorInvoice').whereIn('organizationId', orgIds).pluck('id');
-    await db('B2BSponsorInvoiceLine').whereIn('invoiceId', invoiceIds).del();
-    await db('B2BPassEntitlement').whereIn('organizationId', orgIds).del();
-    await db('B2BSponsorInvoice').whereIn('id', invoiceIds).del();
-    await db('B2BBenefitConsumption').whereIn('organizationId', orgIds).del();
+    await withLedgerDelete(db, async (trx) => {
+      await trx('B2BSponsorInvoiceLine').whereIn('invoiceId', invoiceIds).del();
+      await trx('B2BPassEntitlement').whereIn('organizationId', orgIds).del();
+      await trx('B2BSponsorInvoice').whereIn('id', invoiceIds).del();
+      await trx('B2BBenefitConsumption').whereIn('organizationId', orgIds).del();
+    });
     await db('B2BOrganization').whereIn('id', orgIds).del();
   }
   if (made.corporates.length) {
@@ -153,9 +158,14 @@ test('a fully sponsored pass: everyone nominated is invoiced in advance; paying 
   assert.equal(supplementary.invoice.totalTzs, PRO);
 
   assert.equal((await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: ' ', actorId: ADMIN.userId })).error, 'payment_reference_required');
-  const paid = await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-TRF-77', actorId: ADMIN.userId });
+  // Maker-checker: the issuer can't settle it, whoever they are; the database refuses it too.
+  assert.deepEqual(await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-TRF-77', actorId: ADMIN.userId }), { error: 'cannot_settle_own_invoice', status: 403 });
+  assert.equal((await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-TRF-77' })).error, 'actor_required');
+  await assert.rejects(db('B2BSponsorInvoice').where({ id: prepared.invoice.id }).update({ status: 'paid', paidAt: new Date(), paidBy: ADMIN.userId, paymentReference: 'BANK-TRF-77' }), err => err.code === '23514');
+  assert.equal((await db('B2BSponsorInvoice').where({ id: prepared.invoice.id }).first()).status, 'issued');
+  const paid = await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-TRF-77', actorId: FINANCE.userId });
   assert.deepEqual([paid.invoice.status, paid.invoice.paymentReference, paid.activation.started], ['paid', 'BANK-TRF-77', 3]);
-  assert.equal((await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'again', actorId: ADMIN.userId })).unchanged, true);
+  assert.equal((await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'again', actorId: FINANCE.userId })).unchanged, true);
 
   // Each covered member now holds an ordinary platform pass to the end of the month…
   const [e] = await entitlements({ benefitId, userId: a.userId });
@@ -174,6 +184,46 @@ test('a fully sponsored pass: everyone nominated is invoiced in advance; paying 
   // A member who never visits was still invoiced (the sponsor pays for everyone it nominates).
   assert.equal((await db('B2BSponsorInvoiceLine').where({ invoiceId: prepared.invoice.id, kind: 'pass' })).length, 3);
   assert.equal((await billing.listEntitlements({ programId, period: PERIOD })).counts.active, 3);
+});
+
+test('a pass is started once, however often and however concurrently it is started', async () => {
+  const orgId = await sponsor('employer');
+  const m = await enrol(orgId);
+  const { programId, benefitId } = await programme(orgId);
+  const prepared = await billing.preparePrepaid({ programId, period: PERIOD, actorId: ADMIN.userId });
+  await billing.issueInvoice({ invoiceId: prepared.invoice.id, vatRateBps: 0, actorId: ADMIN.userId });
+  // The sponsor's payment is recorded while the daily run is going.
+  const [paid] = await Promise.all([
+    billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-RACE', actorId: FINANCE.userId }),
+    db('B2BSponsorInvoice').where({ id: prepared.invoice.id }).then(() => billing.runDaily()),
+    billing.runDaily(),
+  ]);
+  assert.equal(paid.invoice.status, 'paid');
+  await billing.runDaily();
+  const one = async () => {
+    const [e] = await entitlements({ benefitId });
+    const subs = await db('Subscription').where({ memberId: m.userId });
+    const pays = await db('PaymentRequest').where({ memberId: m.userId });
+    return [e.status, subs.length, subs[0]?.id === e.subscriptionId, pays.map(p => [p.provider, p.status, p.amountTzs])];
+  };
+  assert.deepEqual(await one(), ['active', 1, true, [['sponsor_invoice', 'approved', PRO]]]);
+
+  // A start that failed half-way (the pass and payment were written, the entitlement was not) is finished, not repeated.
+  await db('B2BPassEntitlement').where({ benefitId }).update({ status: 'invoiced', subscriptionId: null, activatedAt: null });
+  await Promise.all([billing.advanceEntitlements({ invoiceId: prepared.invoice.id }), billing.advanceEntitlements({ invoiceId: prepared.invoice.id })]);
+  assert.deepEqual(await one(), ['active', 1, true, [['sponsor_invoice', 'approved', PRO]]]);
+});
+
+test('unlocking twice at once makes one pass and one payment request', async () => {
+  const orgId = await sponsor('employer');
+  const m = await enrol(orgId);
+  const { programId, benefitId } = await programme(orgId, { ...PASS, fundingType: 'sponsor_percentage', sponsorShareBps: 7000 });
+  await paidPrepaid(programId);
+  const [e] = await entitlements({ benefitId });
+  const asked = await Promise.all([1, 2, 3].map(() => billing.unlock({ userId: m.userId, entitlementId: e.id })));
+  assert.equal(new Set(asked.map(a => a.paymentRequest.id)).size, 1, JSON.stringify(asked.map(a => a.error ?? a.paymentRequest.id)));
+  assert.equal((await db('Subscription').where({ memberId: m.userId })).length, 1);
+  assert.deepEqual((await db('PaymentRequest').where({ memberId: m.userId })).map(p => [p.status, p.amountTzs]), [['pending', PRO - Math.round(PRO * 0.7)]]);
 });
 
 // ── Flat fee with a member share ─────────────────────────────────────────────
@@ -287,7 +337,7 @@ test('per-use benefits are invoiced after the month; a later reversal comes back
   assert.deepEqual(await billing.prepareUsage({ programId, period: LAST, actorId: ADMIN.userId }).then(r => [r.added, r.invoice]), [0, null]);
   const issued = await billing.issueInvoice({ invoiceId: prepared.invoice.id, vatRateBps: 0, actorId: ADMIN.userId });
   assert.deepEqual([issued.invoice.vatRateBps, issued.invoice.vatTzs], [0, 0]);
-  await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-2', actorId: ADMIN.userId });
+  await billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-2', actorId: FINANCE.userId });
 
   // A visit already invoiced is reversed: the sponsor is credited on the next invoice.
   await usage.reverse({ consumptionId: v1.consumption.id, reason: 'Wrong gym', actorId: ADMIN.userId });
@@ -316,7 +366,7 @@ test('a voided invoice is kept, and what was on it can be invoiced again; a paid
   const second = await billing.preparePrepaid({ programId, period: PERIOD, actorId: ADMIN.userId });
   assert.deepEqual([second.added, second.invoice.id !== first.invoice.id], [1, true]);
   await billing.issueInvoice({ invoiceId: second.invoice.id, vatRateBps: 1800, actorId: ADMIN.userId });
-  await billing.markPaid({ invoiceId: second.invoice.id, paymentReference: 'BANK-3', actorId: ADMIN.userId });
+  await billing.markPaid({ invoiceId: second.invoice.id, paymentReference: 'BANK-3', actorId: FINANCE.userId });
   assert.equal((await billing.voidInvoice({ invoiceId: second.invoice.id, reason: 'too late', actorId: ADMIN.userId })).error, 'invalid_transition');
   await assert.rejects(db('B2BSponsorInvoice').where({ id: second.invoice.id }).update({ status: 'issued', paidAt: null, paidBy: null, paymentReference: null }), /not allowed/);
 
@@ -372,7 +422,10 @@ test('routes: FitFlex raises and settles invoices; an organisation reads only it
   assert.equal((await call(listB2BOrganizationInvoices, { claims: ownerA, params: { id: orgB } })).statusCode, 404);
   assert.equal((await call(listB2BOrganizationInvoices, { claims: viewerA, params: { id: orgA } })).statusCode, 403);
 
-  assert.equal((await call(adminMarkB2BInvoicePaid, { claims: admin, params: { invoiceId }, body: { paymentReference: 'BANK-9' } })).body.invoice.status, 'paid');
+  // The admin who issued it can't also record it as paid; a second admin does.
+  const own = await call(adminMarkB2BInvoicePaid, { claims: admin, params: { invoiceId }, body: { paymentReference: 'BANK-9' } });
+  assert.deepEqual([own.statusCode, own.body.error], [403, 'cannot_settle_own_invoice']);
+  assert.equal((await call(adminMarkB2BInvoicePaid, { claims: { sub: FINANCE.userId, userType: 'admin' }, params: { invoiceId }, body: { paymentReference: 'BANK-9' } })).body.invoice.status, 'paid');
   const covered = await call(adminListB2BEntitlements, { claims: admin, params: { programId: a.programId } });
   assert.deepEqual(covered.body.counts, { awaiting_member: 1 });
   const entitlementId = covered.body.entitlements[0].id;
@@ -404,13 +457,17 @@ test('a company\'s seats become a programme: same tier and split, real passes, a
   assert.equal((await billing.convertCorporate({ corporateId: account.id, actorId: ADMIN.userId })).error, 'already_converted');
   assert.equal((await billing.convertCorporate({ corporateId: 'corp_missing', actorId: ADMIN.userId })).status, 404);
   // Still a draft: seat bills continue until FitFlex makes the programme live.
-  assert.ok((await corporateService.generateBill({ corporateId: account.id, period: PERIOD, actorId: ADMIN.userId })).bill);
+  const nextMonth = monthBounds(PERIOD).nextPeriod;
+  assert.ok((await corporateService.generateBill({ corporateId: account.id, period: nextMonth, actorId: ADMIN.userId })).bill);
 
   const a = await access(converted.organizationId);
   await b2bProgramService.setProgramStatus({ access: a, programId: converted.program.id, status: 'pending', actorId: ADMIN.userId });
   await b2bProgramService.setProgramStatus({ access: a, programId: converted.program.id, status: 'active', actorId: ADMIN.userId });
-  const nextMonth = monthBounds(PERIOD).nextPeriod;
-  assert.deepEqual(await corporateService.generateBill({ corporateId: account.id, period: nextMonth, actorId: ADMIN.userId }), { error: 'billed_by_programme', status: 409 });
+  assert.deepEqual(await corporateService.generateBill({ corporateId: account.id, period: PERIOD, actorId: ADMIN.userId }), { error: 'billed_by_programme', status: 409 });
+  // A month the company already has a seat bill for is not invoiced a second time as a programme.
+  const clash = await billing.preparePrepaid({ programId: converted.program.id, period: nextMonth, actorId: ADMIN.userId });
+  assert.deepEqual([clash.error, clash.status, clash.billStatus, clash.period], ['period_seat_billed', 409, 'unpaid', nextMonth]);
+  assert.equal((await db('B2BSponsorInvoice').where({ programId: converted.program.id })).length, 0);
 
   // The employee is nominated and invoiced even before being linked to a member account…
   const paid = await paidPrepaid(converted.program.id);

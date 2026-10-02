@@ -52,7 +52,7 @@ export function createB2BService({
 
   async function audit({ actor, action, target, before = null, after = null }) {
     await auditLog.insertAsync({
-      id: `aud_${randomUUID().slice(0, 8)}`, at: stamp(), actor, action, target, before, after,
+      id: randomUUID(), at: stamp(), actor, action, target, before, after,
     });
   }
 

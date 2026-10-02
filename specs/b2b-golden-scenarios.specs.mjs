@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
+import { withLedgerDelete } from './fixtures/ledger-cleanup.mjs';
 import {
   gyms, trainers, b2bService, b2bProgramService, b2bConsumptionService as usage,
   checkInService, checkinStatusService, settingsService,
@@ -144,7 +145,7 @@ after(async () => {
   if (made.orgs.length) {
     const ids = await db('B2BBenefitConsumption').whereIn('organizationId', made.orgs).pluck('id');
     await db('AuditLog').whereIn('target', ids).del();
-    await db('B2BBenefitConsumption').whereIn('organizationId', made.orgs).del();
+    await withLedgerDelete(db, trx => trx('B2BBenefitConsumption').whereIn('organizationId', made.orgs).del());
     await db('B2BOrganization').whereIn('id', made.orgs).del();
   }
   const checkinIds = await db('Checkin').whereIn('memberId', made.users).pluck('id');
@@ -584,11 +585,26 @@ test('golden — reversing a gym visit\'s charge voids the visit, with one audit
   assert.equal((await usage.reverse({ consumptionId: charge.id, reason: 'again', actorId: ADMIN.userId })).unchanged, true);
 });
 
-// ── known gaps (failing today; each becomes a plain test when it is fixed) ──
+// ── the ledgers are append-only ──────────────────────────────────────────────
 
-test('gap — a ledger row cannot be deleted, even directly in the database', { todo: 'updates are guarded by a trigger; deletes are not' }, async () => {
+test('golden — ledger rows cannot be deleted, even directly in the database; maintenance has to opt in', async () => {
   const [row] = await ledger({ sourceId: w.sponsored.first.checkin.id });
+  await assert.rejects(db('B2BBenefitConsumption').where({ id: row.id }).del(), err => err.code === 'P0001' && /never deleted/.test(err.message));
+  assert.equal((await ledger({ id: row.id })).length, 1);
   await inRollback(async (trx) => {
-    await assert.rejects(trx.transaction(t => t('B2BBenefitConsumption').where({ id: row.id }).del()));
+    const billing = createB2BBillingService({
+      db: trx, programs: b2bPrograms, benefits: b2bBenefits, users, subscriptions, paymentRequests, corporateAccounts, auditLog,
+      b2bService, b2bProgramService, settingsService, now: () => new Date('2026-11-02T09:00:00.000Z'),
+    });
+    const { invoice } = await billing.prepareUsage({ programId: w.sponsored.programId, period: OCTOBER, actorId: ADMIN.userId });
+    await rejects(trx, t => t('B2BSponsorInvoiceLine').where({ invoiceId: invoice.id }).del(), 'P0001');
+    await rejects(trx, t => t('B2BSponsorInvoice').where({ id: invoice.id }).del(), 'P0001');
+    // Maintenance opts in, for the transaction it is in.
+    await trx.raw("SET LOCAL fitflex.allow_ledger_delete = 'on'");
+    await trx('B2BSponsorInvoiceLine').where({ invoiceId: invoice.id }).del();
+    await trx('B2BSponsorInvoice').where({ id: invoice.id }).del();
   });
+  // The opt-in ended with that transaction: the next one is refused again.
+  await db.transaction(trx => trx.raw("SET LOCAL fitflex.allow_ledger_delete = 'on'"));
+  await assert.rejects(db('B2BBenefitConsumption').where({ id: row.id }).del(), err => err.code === 'P0001');
 });
