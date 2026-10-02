@@ -109,6 +109,7 @@ const TABLE_MAP = {
   gym_settlement_lines:        { table: 'GymSettlementLine' },
   settlement_visits:           { table: 'SettlementVisit' },
   settlement_adjustments:      { table: 'SettlementAdjustment' },
+  refunds:                     { table: 'Refund' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -159,6 +160,7 @@ const AUTO_UPDATED_AT = new Set([
   'partner_checks', 'partner_agreements',
   'pass_tier_versions', 'settlement_rules', 'gym_rate_cards',
   'settlement_runs', 'gym_settlements', 'settlement_adjustments',
+  'refunds',
 ]);
 
 // Collections retained for legacy synchronous service call sites. New service
@@ -593,7 +595,7 @@ const ALLOWED_FIELDS = {
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
   trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','availability','socialLinks','createdAt','updatedAt']),
-  trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','paymentRequestId','status','createdAt','updatedAt']),
+  trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','paymentRequestId','status','cancelledAt','cancelledBy','createdAt','updatedAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','updatedAt']),
   webhook_seen:     new Set(['id','at']),
@@ -661,6 +663,7 @@ const ALLOWED_FIELDS = {
   gym_settlement_lines:        new Set(['id','runId','mode','gymSettlementId','memberCycleSettlementId','memberId','gymId','qualifyingVisitCount','heldVisitCount','bracket','rawPreliminaryTzs','preliminaryTzs','monotonicGuardApplied','networkAdjustmentTzs','finalTzs','rateCardSnapshot','calculationBasis','createdAt']),
   settlement_visits:           new Set(['id','runId','mode','memberCycleSettlementId','lineId','checkinId','gymId','businessDate','outcome','eligibility','allowanceSlot','active','createdAt']),
   settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt','appliedAt','rejectedBy','rejectReason','sourceMemberCycleSettlementId']),
+  refunds:                     new Set(['id','memberId','kind','subscriptionId','bookingId','orderId','paymentRequestId','amountTzs','currency','reasonCode','note','status','requestedBy','requestedRole','decidedBy','decidedAt','decisionNote','paidBy','paidAt','paymentReference','paidTo','createdAt','updatedAt']),
   partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
 };
 

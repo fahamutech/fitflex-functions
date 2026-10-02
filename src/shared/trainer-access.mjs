@@ -155,6 +155,26 @@ export function weekdayOf(isoDate) {
   return WEEKDAYS[new Date(`${isoDate}T00:00:00.000Z`).getUTCDay()];
 }
 
+/** How long before a session a member may still cancel it for a refund (Member Terms 6). */
+export const MEMBER_CANCEL_NOTICE_HOURS = 24;
+
+/** When the slot `HH:MM` on `date` (EAT) starts, in epoch ms (NaN if malformed). */
+export const slotStartMs = (date, slot) => Date.parse(`${date}T${slot}:00.000+03:00`);
+
+/**
+ * Whether a member can still cancel this booking, and until when. A booking
+ * not yet paid for can be cancelled until it starts; a paid one until the
+ * notice period before it, and is then refunded in full.
+ */
+export function memberCancellation(booking, now = new Date()) {
+  const start = slotStartMs(booking.date, booking.slot);
+  const open = ['payment_pending', 'confirmed'].includes(booking.status) && !Number.isNaN(start) && start > +now;
+  if (!open) return { canCancel: false, refundable: false, cancelBy: null };
+  if (booking.status === 'payment_pending') return { canCancel: true, refundable: false, cancelBy: new Date(start).toISOString() };
+  const deadline = start - MEMBER_CANCEL_NOTICE_HOURS * 3_600_000;
+  return { canCancel: deadline >= +now, refundable: Number(booking.amountTzs) > 0, cancelBy: new Date(deadline).toISOString() };
+}
+
 /** The slot `HH:MM` on `date` (EAT) has already started. */
 export function isPastSlot(date, slot, now = new Date()) {
   const start = Date.parse(`${date}T${slot}:00.000+03:00`);

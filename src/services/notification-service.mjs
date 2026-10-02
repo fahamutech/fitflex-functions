@@ -218,6 +218,18 @@ export function createNotificationService({
           title: 'Trainer session confirmed',
           body: `Your ${bookings.length} session(s) with ${trainer?.displayName || 'your trainer'} are confirmed: ${fmtSlots(bookings)}.`,
         });
+      } else if (event === 'trainer_booking_cancelled_by_member') {
+        await notify(trainer?.userId, {
+          type: 'trainer_booking_cancelled', data,
+          title: 'Session cancelled',
+          body: `${memberName} cancelled: ${fmtSlots(bookings)}. The slot is free again.`,
+        });
+      } else if (event === 'trainer_booking_cancelled_by_trainer') {
+        await notify(memberId, {
+          type: 'trainer_booking_cancelled', data,
+          title: 'Trainer session cancelled',
+          body: `${trainer?.displayName || 'Your trainer'} cancelled your session: ${fmtSlots(bookings)}. Anything you paid for it will be refunded.`,
+        });
       }
     } catch (err) {
       logger.warn?.(`[notify] ${event} failed: ${err.message}`);

@@ -80,3 +80,4 @@ export const gymSettlements = collection('gym_settlements');
 export const gymSettlementLines = collection('gym_settlement_lines');
 export const settlementVisits = collection('settlement_visits');
 export const settlementAdjustments = collection('settlement_adjustments');
+export const refunds = collection('refunds');
