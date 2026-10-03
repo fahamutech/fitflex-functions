@@ -171,6 +171,7 @@ export function createTrainerBookingService({
         commissionPct: per.commissionPct,
         commissionTzs: per.commission,
         trainerPayoutTzs: per.trainerPayout,
+        discountFundedBy: per.discountFundedBy,
         paymentRequestId,
         status: needsPayment ? 'payment_pending' : 'confirmed',
         createdAt: now,

@@ -79,6 +79,7 @@ import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
+import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
@@ -305,7 +306,13 @@ export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
 // Gym settlement workflow (settlement Phase 4): submit, approve, hold, pay.
-export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts });
+export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts, trainers });
+// Trainer payouts: a weekly statement per trainer on the same path as a gym statement.
+export const trainerSettlementService = createTrainerSettlementService({
+  trainers, users, payoutEligibility,
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
 export const settlementWorkflowService = createSettlementWorkflowService({ payoutEligibility });
 export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId });
 // Recalculates a settled member cycle when one of its check-ins is voided and
