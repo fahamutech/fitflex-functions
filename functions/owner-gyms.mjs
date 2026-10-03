@@ -20,7 +20,7 @@ export const gymOwnerRegister = {
           id: req.user.sub,
           userType: req.user.userType || 'gym_operator',
           accountStatus: 'active',
-          approvalStatus: 'pending_approval',
+          approvalStatus: 'approved',
           onboardingCompleted: false,
           createdAt: new Date().toISOString(),
         });

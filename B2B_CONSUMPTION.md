@@ -93,7 +93,9 @@ Integer TZS and basis points, with no floating-point money.
 | Percentage 60% with a per-use cap of 2,500 | 2,500 / 2,500 |
 | Benefit covers up to 4,000 | 4,000 / 1,000 |
 | Copay 2,000 | 3,000 / 2,000 |
-| Per-period sponsor cap partly used | the sponsor pays what is left of the cap, and the member pays the rest |
+| Per-period sponsor cap partly used | not covered unless what is left of the cap pays the whole use |
+
+Only full sponsorship applies to a use (decided 3 Oct 2026): a member can't pay a share at the door, so a split is offered as a sponsored pass. The split rows above are how `calculateResponsibility` divides a sponsored pass's fee, and how a split benefit created before the rule is recognised and refused (`member_share_not_collectable`).
 
 ## 4. One sponsor per usage (decided 2026-10-01)
 
@@ -144,7 +146,13 @@ Other details:
 
 A booking that is only created or paid consumes nothing. When it becomes `completed` (by the trainer or by an admin), a `trainer_session` benefit that covers that trainer is consumed. The gross value is the booking's `amountTzs`, and the provider is the `TrainerProfile` ID. If an admin later moves a completed booking to another status, the consumption is reversed.
 
-The member has already paid the booking in full when it was confirmed (`metadata.memberPaidTzs`). The ledger records what the sponsor owes; returning that share to the member, or charging less at booking time, is payment collection and belongs to Phase 4.
+The member has already paid the booking in full when it was confirmed (`metadata.memberPaidTzs`). The ledger records what the sponsor owes.
+
+**No double charge.** The member pays a booking in full when they book it; nobody knows yet whether a benefit will cover it. When the completed session is consumed on a benefit, the sponsor is charged and a refund is raised to the member for the same money, up to what they paid (`Refund`, kind `trainer_booking`, reason `sponsor_paid`, approved by policy). FitFlex staff pay it from **Admin → Refunds**.
+
+- One live refund per booking: a session cancelled after it was covered uses the refund already raised, not a second one.
+- If the session is un-completed without being cancelled, the sponsor's charge is reversed and a refund not yet paid is withdrawn. One already paid is left alone and logged.
+- The daily B2B job raises any refund a covered session of the last 7 days is missing.
 
 ### Deferred
 
@@ -205,7 +213,7 @@ status, verifiedAt, settleable   (settleable = status is approved)
 Phase 4 will use these to decide:
 
 - **Sponsor invoicing:** the sum of `sponsorTzs` per organisation and period. `CorporateBill` is the existing pattern.
-- **Beneficiary collection:** `beneficiaryTzs` for gym visits isn't collected today. For trainer sessions the member already paid in full, so the sponsor's share is owed back to them or netted off.
+- **Beneficiary collection:** per-use benefits are fully sponsored, so there is no member share to collect. For trainer sessions the member already paid in full, so what the sponsor covers is refunded to them (see Trainer sessions).
 - **Provider settlement and payout:** from verified usage, the provider's rate card and agreement, and the funding source, through the settlement engine (`src/shared/settlement-*`).
   - **Gym visits are settled (decided 1 Oct 2026).** `settlement-service` settles approved `gym_checkin` consumptions with the same visit brackets and network cap as a member's own pass: one cycle per beneficiary per EAT month, capped at the network % of the month's `grossTzs` for that beneficiary's gym visits. Each company-funded visit counts on its own, so two gyms on one day both count. A month is settled once its end + 24 h + the 7-day dispute window has passed. Reversed, cancelled and pending rows are left out; a disputed or flagged check-in holds the whole month.
   - The cap is computed on what was **charged** (`grossTzs`), which isn't yet collected: sponsor invoicing is still to do.
@@ -216,7 +224,7 @@ The consumption ledger itself still stores no provider payout: the gym's amount 
 
 ## 11. Known limitations
 
-- The member's share of a subsidised gym visit is recorded but not collected.
+- A per-use benefit never leaves the member a share: it is fully sponsored (decided 3 Oct 2026). A split benefit created before that no longer covers a use (`member_share_not_collectable`, kept on the ledger as a rejection); the member's own pass applies instead. A per-period sponsor cap covers whole uses only.
 - A benefit applies before the member's own pass even when the pass would have made the visit free for them and the benefit has a copay. That is the decided order.
 - The legacy admin finance summaries (`finance-service`) count every check-in at a gym's rate, including `b2b_benefit` ones. They are dashboards, not the settlement engine.
 - A gym owner's suspension of a direct member doesn't stop that member checking in on a sponsor's benefit.

@@ -48,7 +48,7 @@ test('Firebase session maps the configured Google account to FitFlex admin', asy
   assert.ok(out.body.user.firebaseUid);
 });
 
-test('Firebase session creates owner, trainer and vendor profiles pending admin approval', async () => {
+test('Firebase session creates owner and trainer profiles active at once; a vendor waits for approval', async () => {
   const owner = res();
   await authFirebaseSession.onRequest({
     body: {
@@ -59,7 +59,10 @@ test('Firebase session creates owner, trainer and vendor profiles pending admin 
 
   assert.equal(owner.statusCode, 200);
   assert.equal(owner.body.user.userType, 'gym_operator');
-  assert.equal(owner.body.user.approvalStatus, 'pending_approval');
+  assert.equal(owner.body.user.approvalStatus, 'approved');
+  assert.equal(owner.body.pendingApproval, false);
+  // Whether they are verified yet rides along (always true here: the suite runs with KYC enforcement off).
+  assert.equal(typeof owner.body.partnerVerified, 'boolean');
 
   const trainer = res();
   await authFirebaseSession.onRequest({
@@ -71,7 +74,8 @@ test('Firebase session creates owner, trainer and vendor profiles pending admin 
 
   assert.equal(trainer.statusCode, 200);
   assert.equal(trainer.body.user.userType, 'trainer');
-  assert.equal(trainer.body.user.approvalStatus, 'pending_approval');
+  assert.equal(trainer.body.user.approvalStatus, 'approved');
+  assert.equal(typeof trainer.body.partnerVerified, 'boolean');
 
   const vendor = res();
   await authFirebaseSession.onRequest({
@@ -84,6 +88,7 @@ test('Firebase session creates owner, trainer and vendor profiles pending admin 
   assert.equal(vendor.statusCode, 200);
   assert.equal(vendor.body.user.userType, 'vendor');
   assert.equal(vendor.body.user.approvalStatus, 'pending_approval');
+  assert.equal(vendor.body.partnerVerified, undefined);
 });
 
 test('sign-in automatically resolves existing owner, trainer and vendor roles', async () => {

@@ -25,7 +25,11 @@ export const listGyms = {
   // to WebP and capping dimensions at upload time (see image-upload.tsx /
   // gym_form_page.dart), not by trimming the array server-side.
   // verified: the owner's KYC outcome (D4); profileComplete: the old automatic check.
-  onRequest: async (req, res) => res.json((await partnerGate.badgeGyms(await gymService.listActiveAsync())).map(g => forViewer(req, g)))
+  // Verified gyms first, each group in its usual order.
+  onRequest: async (req, res) => {
+    const shown = await partnerGate.badgeGyms(await gymService.listActiveAsync());
+    res.json([...shown.filter(g => g.verified === true), ...shown.filter(g => g.verified !== true)].map(g => forViewer(req, g)));
+  }
 };
 
 export const getGym = {
@@ -34,11 +38,6 @@ export const getGym = {
   onRequest: async (req, res) => {
     const g = gymService.findById(req.params.id);
     if (!g) return res.status(404).json({ error: 'not_found' });
-    // A new owner's gym waiting for KYC isn't public yet; admins still see it.
-    if (g.status === 'pending_verification') {
-      const token = bearerFrom(req);
-      if (verify(token || '')?.userType !== 'admin') return res.status(404).json({ error: 'not_found' });
-    }
     const [shown] = await partnerGate.badgeGyms([g]);
     res.json(forViewer(req, shown));
   }

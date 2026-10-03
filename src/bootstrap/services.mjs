@@ -1,6 +1,8 @@
 // Composition root — every service is instantiated exactly once here with its
 // dependencies injected, then imported by the thin REST modules in functions/.
-import { sign as signJwt, registerAccountStatusLookup } from '../auth/jwt.mjs';
+import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose } from '../auth/jwt.mjs';
+import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
+import { createPinAuthService } from '../services/pin-auth-service.mjs';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
@@ -77,6 +79,7 @@ import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
+import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
@@ -115,8 +118,10 @@ registerAccountStatusLookup(async id => {
   if (!user) return null;
   if (user.accountStatus === 'suspended') return 'suspended';
   if (user.personId) {
-    const person = await db('Person').where({ id: user.personId }).first('status');
+    const person = await db('Person').where({ id: user.personId }).first();
     if (person?.status === 'suspended') return 'suspended';
+    // I7a: sessions issued before a PIN reset or change are over.
+    if (person?.sessionsValidAfter) return { status: user.accountStatus ?? null, sessionsValidAfter: person.sessionsValidAfter };
   }
   return user.accountStatus ?? null;
 });
@@ -124,6 +129,10 @@ registerAccountStatusLookup(async id => {
 export const identityService = createIdentityService({ users });
 // KYC enforcement for partners created from the enforcement start; existing ones are exempt.
 export const partnerGate = createPartnerGate({ users, partnerKycCases });
+/** For a trainer or gym owner: is their own verification approved? Undefined for other roles. */
+export const partnerVerifiedFor = async user => (
+  ['trainer', 'gym_operator'].includes(user?.userType) ? partnerGate.isOperational(user.id) : undefined
+);
 const { resolveRequestUser, publicUserId } = identityService;
 
 export const settingsService = createSettingsService({ platformSettings, auditLog });
@@ -141,11 +150,18 @@ export const trainerBookingService = createTrainerBookingService({
   }).then(out => out.refund || null),
   // A completed session may use a B2B trainer benefit; un-completing it gives the benefit back.
   // b2bConsumptionService is defined below; this only runs later.
-  onStatusChanged: ({ booking, from, actorId }) => (booking.status === 'completed'
-    ? b2bConsumptionService.consumeTrainerSession({ booking })
-    : from === 'completed'
-      ? b2bConsumptionService.releaseForSource({ sourceType: 'trainer_booking', sourceId: booking.id, reason: `booking ${booking.status}`, actorId })
-      : null),
+  // The member paid the booking in full; once a sponsor covers it, that money goes back to the member.
+  onStatusChanged: async ({ booking, from, actorId }) => {
+    if (booking.status === 'completed') {
+      const used = await b2bConsumptionService.consumeTrainerSession({ booking });
+      if (used.consumed) await b2bSponsorRefundService.onSessionConsumed({ booking, consumption: used.consumption });
+      return used;
+    }
+    if (from !== 'completed') return null;
+    const released = await b2bConsumptionService.releaseForSource({ sourceType: 'trainer_booking', sourceId: booking.id, reason: `booking ${booking.status}`, actorId });
+    if (released.released) await b2bSponsorRefundService.onSessionReleased({ booking, actorId });
+    return released;
+  },
 });
 export const trainerEngagementService = createTrainerEngagementService({
   trainerEngagements, trainers, users, trainerService,
@@ -223,6 +239,8 @@ export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
+  // Until a gym's owner is verified, only the gym's own members check in there.
+  gymOpenToPass: gymId => partnerGate.isGymOperational(gymId),
 });
 // Gym settlement configuration (settlement Phase 2): not used by any payout flow yet.
 export const settlementConfigService = createSettlementConfigService();
@@ -369,6 +387,8 @@ export const refundService = createRefundService({
   notify: (userId, message) => notificationService.notify(userId, message),
   onPaid: refund => (refund.kind === 'shop_order' ? shopService.markOrderRefunded(refund.orderId) : null),
 });
+// A sponsor-covered trainer session returns what the member paid for it (no double charge).
+export const b2bSponsorRefundService = createB2BSponsorRefundService({ db, refundService, trainerBookings });
 
 // Identity V2 · I6: invitations (gym staff and trainers; no credentials set by organisations).
 export const invitationService = createInvitationService({
@@ -387,6 +407,18 @@ export const identifierService = createIdentifierService({
   secret: process.env.JWT_SECRET || 'fitflex-dev-secret-change-me',
   claimInvitations: personId => invitationService.claimFor(personId),
   linkingEnabled: () => identityFlag('V2_LINKING'),
+});
+// Identity V2 · I7a: number or email + PIN, checked by FitFlex.
+// Replaceable, so specs can stand in for Firebase.
+export const firebasePasswordCheck = { verify: verifyFirebasePassword };
+export const pinAuthService = createPinAuthService({
+  db, users, codes: identifierService, identityLink: identityLinkService, auditLog,
+  sessionForPerson: personId => authService.sessionForPerson(personId),
+  verifyFirebasePassword: (...args) => firebasePasswordCheck.verify(...args), signPurpose, verifyPurpose,
+  linkingEnabled: () => identityFlag('V2_LINKING'),
+  // The key the PIN is mixed with before hashing. It must be set in production
+  // and never change afterwards, or every stored PIN stops matching.
+  pepper: () => process.env.PIN_PEPPER || (process.env.NODE_ENV === 'production' ? null : 'fitflex-dev-pin-pepper'),
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.
@@ -446,7 +478,7 @@ export const challengeRewardService = createChallengeRewardService({
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const trainerClientService = createTrainerClientService({
-  relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals,
+  relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals, partnerGate,
   notify: (userId, message) => notificationService.notify(userId, message),
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
   challenges, participants: challengeParticipants,

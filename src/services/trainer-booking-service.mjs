@@ -89,7 +89,9 @@ export function createTrainerBookingService({
   async function planBooking({ memberId, body }) {
     const { trainerId, gymId } = body || {};
     const trainer = trainers.find(t => t.id === trainerId && t.status === 'active');
-    if (!trainer || !(await partnerGate.isOperational(trainer.userId))) return { error: 'trainer_not_found', status: 404 };
+    if (!trainer) return { error: 'trainer_not_found', status: 404 };
+    // An unverified trainer is listed but cannot be booked yet.
+    if (!(await partnerGate.isOperational(trainer.userId))) return { error: 'trainer_not_verified', status: 403 };
     if (!trainer.gymIds?.includes(gymId)) return { error: 'trainer_not_available_at_gym', status: 400 };
     const slots = requestedSlots(body);
     if (!slots.length || slots.some(s => !s.date || !s.slot)) return { error: 'date_and_slot_required', status: 400 };
@@ -520,7 +522,8 @@ export function createTrainerBookingService({
    */
   async function publicSchedule({ trainerId, from, days, gymId }) {
     const trainer = trainers.find(t => t.id === trainerId && t.status === 'active');
-    if (!trainer || !(await partnerGate.isOperational(trainer.userId))) return { error: 'trainer_not_found', status: 404 };
+    if (!trainer) return { error: 'trainer_not_found', status: 404 };
+    if (!(await partnerGate.isOperational(trainer.userId))) return { error: 'trainer_not_verified', status: 403 };
     const base = buildTrainerSchedule({ availability: trainer.availability, from, days, gymId });
     const start = base[0]?.date;
     const bookings = start ? await heldBookings(trainer.id, start, base.length) : [];

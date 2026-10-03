@@ -332,6 +332,43 @@ test('campaign — lists, history and results show a readable name, never {{plac
   assert.equal(Number((await db('CommunicationCampaign').whereIn('gymId', made.gyms).where('name', 'like', '%{{%').count({ n: '*' }))[0].n), 0);
 });
 
+test('campaign — the preview warns when a placeholder will be blank for some of the audience', async () => {
+  const g = await gym('Blank Gym');
+  const owner = await user({ userType: 'gym_operator', gymIds: [g] });
+  const S = gymSender(owner, [g]);
+  await member(g, 'Named Member');
+  await member(g, null);
+  const draft = (content) => ({ body: { purpose: 'announcement', audience: { preset: 'all' }, channels: ['in_app'], content } });
+  const warningsOf = async (sender, d) => {
+    const p = await campaigns.preview(sender, d);
+    assert.ok(p.warnings, JSON.stringify(p));
+    return p.warnings.filter(x => ['empty_value', 'gym_name_is_fitflex'].includes(x.code));
+  };
+
+  // Everyone has an end date and the gym has a name: nothing to warn about.
+  assert.deepEqual(await warningsOf(S, draft({ title: 'Hello', body: 'Your plan at {{gym_name}} ends {{expiry_date}}.' })), []);
+  // One of the two has no name on their account.
+  assert.deepEqual(await warningsOf(S, draft({ title: 'Hi {{member_name}}', body: 'See you at {{gym_name}}.' })),
+    [{ code: 'empty_value', variable: 'member_name', count: 1, of: 2 }]);
+  // A Swahili version counts too, once.
+  assert.deepEqual(await warningsOf(S, draft({ title: 'Hello', body: 'Welcome.', translations: { sw: { title: 'Habari {{member_name}}', body: 'Karibu {{member_name}}.' } } })),
+    [{ code: 'empty_value', variable: 'member_name', count: 1, of: 2 }]);
+
+  // FitFlex to trainers: no trainer has a membership end date, and
+  // {{gym_name}} reads "FitFlex" — the "JOB OFFER … Last Date to Apply" case.
+  const trainer = await user({ userType: 'trainer', displayName: 'Coach QA' });
+  await db('TrainerProfile').insert({ id: uid('trn'), userId: trainer, displayName: 'Coach QA', status: 'active', approvalStatus: 'approved', updatedAt: new Date() });
+  const w2 = await warningsOf({ senderType: 'platform', actorId: null }, { body: {
+    purpose: 'general', audience: { recipients: 'trainers', preset: 'all' }, channels: ['in_app'],
+    content: { title: 'JOB OFFER', body: 'TRAINER NEEDED at {{gym_name}}. Last date to apply {{expiry_date}}' },
+  } });
+  const date = w2.find(x => x.variable === 'expiry_date');
+  assert.ok(date && date.count === date.of && date.of >= 1, JSON.stringify(w2));
+  assert.ok(w2.some(x => x.code === 'gym_name_is_fitflex'));
+  assert.equal(w2.some(x => x.variable === 'gym_name'), false, 'it is not blank — it says FitFlex');
+  await db('TrainerProfile').where({ userId: trainer }).del();
+});
+
 // ══ In-app ═════════════════════════════════════════════════════════════════
 
 test('in-app — delivered, unread, read, CTA tapped and the deep link, through the member\'s own endpoints', async () => {

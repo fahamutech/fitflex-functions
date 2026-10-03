@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   CHANNELS, PURPOSES, CAMPAIGN_STATUSES, categoryForPurpose, canTransitionCampaign,
-  validateContent, labelText,
+  validateContent, labelText, messageValues, variablesIn,
 } from '../shared/communications.mjs';
 import { buildAudienceFilter, audienceScope } from '../shared/audience.mjs';
 import { renderMessage, whatsappMessage } from '../shared/message-render.mjs';
@@ -413,6 +413,7 @@ export function createCampaignService({
     if (p.counts.skipped.marketing_cap) warnings.push({ code: 'marketing_cap', count: p.counts.skipped.marketing_cap });
     for (const ch of c.channels) if (!p.counts.byChannel[ch]?.queued) warnings.push({ code: 'channel_reaches_no_one', channel: ch });
     if (p.counts.targeted && !p.counts.queued) warnings.push({ code: 'nobody_reachable' });
+    warnings.push(...emptyValueWarnings(c, p.members, name));
     return {
       category: c.category,
       counts: p.counts,
@@ -420,6 +421,29 @@ export function createCampaignService({
       warnings,
       largeSendThreshold,
     };
+  }
+
+  /**
+   * Placeholders that would come out blank. A value like {{expiry_date}} is
+   * the member's own (their membership's end date), so in a message to
+   * people without one — trainers, or members who never had a membership —
+   * it leaves a gap: "Last date to apply " with no date. One warning per
+   * placeholder, with how many recipients it is blank for. And when FitFlex
+   * (not a gym) uses {{gym_name}}, it reads "FitFlex" for everyone.
+   */
+  function emptyValueWarnings(campaign, members, name) {
+    const content = campaign.content;
+    const texts = [content, ...Object.values(content.translations || {})];
+    const used = [...new Set(texts.flatMap(t => variablesIn(`${t?.title || ''} ${t?.body || ''}`)))];
+    if (!used.length || !members.length) return [];
+    const blank = Object.fromEntries(used.map(v => [v, 0]));
+    for (const m of members) {
+      const values = messageValues(content, m, { gymName: name, renewalLink: renewalLink || '' });
+      for (const v of used) if (!String(values[v] ?? '').trim()) blank[v] += 1;
+    }
+    const out = used.filter(v => blank[v] > 0).map(v => ({ code: 'empty_value', variable: v, count: blank[v], of: members.length }));
+    if (campaign.senderType === 'platform' && used.includes('gym_name')) out.push({ code: 'gym_name_is_fitflex' });
+    return out;
   }
 
   async function send(sender, campaignId, { sendRequestId, confirmLargeSend = false } = {}) {

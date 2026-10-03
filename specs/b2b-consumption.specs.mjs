@@ -9,7 +9,7 @@ import { db } from '../src/infra/knex-store.mjs';
 import { withLedgerDelete } from './fixtures/ledger-cleanup.mjs';
 import {
   gyms, trainers, b2bService, b2bProgramService, b2bConsumptionService as usage,
-  checkInService, checkinStatusService, trainerBookingService, corporateService,
+  checkInService, checkinStatusService, trainerBookingService, corporateService, b2bSponsorRefundService, refundService,
 } from '../src/bootstrap/services.mjs';
 
 await ensureInit();
@@ -92,6 +92,8 @@ after(async () => {
     await db('CorporateEmployee').whereIn('corporateId', made.corporates).del();
     await db('CorporateAccount').whereIn('id', made.corporates).del();
   }
+  await db('AuditLog').whereIn('target', db('Refund').whereIn('memberId', made.users).select('id')).del();
+  await db('Refund').whereIn('memberId', made.users).del();
   await db('TrainerBooking').whereIn('memberId', made.users).del();
   await db('Checkin').whereIn('memberId', made.users).del();
   await db('Subscription').whereIn('memberId', made.users).del();
@@ -229,24 +231,34 @@ test('a programme-lifetime limit never resets; unlimited never runs out', async 
 
 // ── Funding ──────────────────────────────────────────────────────────────────
 
-test('sponsor and member responsibility for each funding type, in whole TZS', async () => {
+test('a per-use benefit is fully sponsored: a split is refused when set up, and one set up earlier no longer covers a visit', async () => {
   const g = await gym();
-  const split = async (funding, grossTzs = 5000) => {
-    const c = await covered({ ...GYM_BENEFIT, usageLimit: null, ...funding });
-    const r = await visit(c.memberId, g, { grossTzs });
-    assert.equal(r.consumption.sponsorTzs + r.consumption.beneficiaryTzs, grossTzs);
-    return [r.consumption.sponsorTzs, r.consumption.beneficiaryTzs];
-  };
-  assert.deepEqual(await split({ fundingType: 'full' }), [5000, 0]);
-  assert.deepEqual(await split({ fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000 }), [3000, 2000]);
-  assert.deepEqual(await split({ fundingType: 'sponsor_fixed', sponsorAmountTzs: 4000 }), [4000, 1000]);      // benefit covers less than the price
-  assert.deepEqual(await split({ fundingType: 'sponsor_percentage', sponsorShareBps: 6000 }), [3000, 2000]);
-  assert.deepEqual(await split({ fundingType: 'sponsor_percentage', sponsorShareBps: 6000, sponsorCapTzs: 2500 }), [2500, 2500]);
-  assert.deepEqual(await split({ fundingType: 'beneficiary_fixed', beneficiaryAmountTzs: 2000 }), [3000, 2000]);
-  assert.deepEqual(await split({ fundingType: 'sponsor_percentage', sponsorShareBps: 3333 }, 1001), [334, 667]);
+  const c = await covered({ ...GYM_BENEFIT, usageLimit: null });
+  const r = await visit(c.memberId, g);
+  assert.deepEqual([r.consumption.sponsorTzs, r.consumption.beneficiaryTzs], [5000, 0]);
+
+  // Decided 3 Oct 2026: the member pays their share before using a benefit, and only a sponsored pass can collect it.
+  const a = await access(c.orgId);
+  const add = body => b2bProgramService.createBenefit({ access: a, programId: c.programId, body: { name: 'Split', usagePeriod: 'month', usageLimit: 4, ...body }, actorId: ADMIN.userId });
+  for (const benefitType of ['gym_access', 'trainer_session']) {
+    for (const funding of [{ fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000 }, { fundingType: 'sponsor_percentage', sponsorShareBps: 6000 }, { fundingType: 'beneficiary_fixed', beneficiaryAmountTzs: 2000 }, { fundingType: 'none' }]) {
+      const refused = await add({ benefitType, ...funding });
+      assert.deepEqual([refused.error, refused.allowed], ['member_share_needs_pass', ['full']], `${benefitType} ${funding.fundingType}`);
+    }
+  }
+  // Benefits not used through FitFlex may also carry no money.
+  assert.ok((await add({ benefitType: 'custom', fundingType: 'none', terms: 'A free workshop' })).benefit);
+  assert.equal((await add({ benefitType: 'custom', fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000 })).error, 'member_share_needs_pass');
+
+  // A split benefit from before the rule: the visit isn't covered (the member's own pass applies), and the refusal is kept.
+  await db('B2BBenefit').where({ id: c.benefitId }).update({ fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000 });
+  const legacy = await visit(c.memberId, g, { at: new Date(Date.now() + 60_000) });
+  assert.deepEqual([legacy.consumed, legacy.reason], [false, 'member_share_not_collectable']);
+  assert.deepEqual((await ledger({ benefitId: c.benefitId, status: 'rejected' })).map(x => x.rejectionReason), ['member_share_not_collectable']);
+  assert.equal((await usage.evaluate({ userId: c.memberId, serviceType: 'gym_access', provider: { type: 'gym', id: g.id, tier: g.tier }, grossTzs: 5000 })).covered, false);
 });
 
-test('a per-period sponsor cap pays what is left of it, then stops', async () => {
+test('a per-period sponsor cap covers whole visits only, then stops', async () => {
   const g = await gym();
   const c = await covered({ ...GYM_BENEFIT, usageLimit: null, periodSponsorCapTzs: 8000 });
   const r = [];
@@ -254,27 +266,28 @@ test('a per-period sponsor cap pays what is left of it, then stops', async () =>
     const v = await visit(c.memberId, g, { at: on('2026-10-05') });
     r.push(v.consumed ? [v.consumption.sponsorTzs, v.consumption.beneficiaryTzs] : v.reason);
   }
-  assert.deepEqual(r, [[5000, 0], [3000, 2000], 'period_sponsor_cap_reached']);
+  // 3,000 is left after the first visit: not enough for a whole one, and the member can't pay the rest at the door.
+  assert.deepEqual(r, [[5000, 0], 'period_sponsor_cap_reached', 'period_sponsor_cap_reached']);
 });
 
 // ── One sponsor per visit ────────────────────────────────────────────────────
 
-test('with several sponsors one benefit is applied: least for the member, then the employer, never two', async () => {
+test('with several sponsors one benefit is applied: the employer first, then the next, never two', async () => {
   const g = await gym();
   const memberId = await user('member');
   const insurer = await sponsor('insurer');
   const employer = await sponsor('employer');
   await enrol(insurer, memberId);
   await enrol(employer, memberId);
-  // Insurer: fully sponsored, 1 a month. Employer: 60%, 1 a month.
-  const full = await programme(insurer, { ...GYM_BENEFIT, usageLimit: 1 });
-  const partial = await programme(employer, { ...GYM_BENEFIT, usageLimit: 1, fundingType: 'sponsor_percentage', sponsorShareBps: 6000 });
+  // Both fully sponsored, 1 a month each.
+  const fromInsurer = await programme(insurer, { ...GYM_BENEFIT, usageLimit: 1 });
+  const fromEmployer = await programme(employer, { ...GYM_BENEFIT, usageLimit: 1 });
 
   const first = await visit(memberId, g, { at: on('2026-10-05') });
-  assert.deepEqual([first.consumption.benefitId, first.consumption.beneficiaryTzs], [full.benefitId, 0]);      // cheapest for the member
-  assert.deepEqual(first.consumption.rulesSnapshot.alternatives, [partial.benefitId]);
+  assert.deepEqual([first.consumption.benefitId, first.consumption.beneficiaryTzs], [fromEmployer.benefitId, 0]);   // equal for the member: the employer's
+  assert.deepEqual(first.consumption.rulesSnapshot.alternatives, [fromInsurer.benefitId]);
   const second = await visit(memberId, g, { at: on('2026-10-06') });
-  assert.deepEqual([second.consumption.benefitId, second.consumption.sponsorTzs], [partial.benefitId, 3000]);   // the other sponsor, alone
+  assert.deepEqual([second.consumption.benefitId, second.consumption.sponsorTzs], [fromInsurer.benefitId, 5000]);   // the other sponsor, alone
   assert.equal((await visit(memberId, g, { at: on('2026-10-07') })).consumed, false);
   for (const r of await ledger({ userId: memberId, status: 'approved' })) {
     assert.equal((await ledger({ sourceType: r.sourceType, sourceId: r.sourceId, status: 'approved' })).length, 1);
@@ -393,7 +406,7 @@ test('a trainer benefit is consumed when the session is completed, not when it i
   const trainerId = uid('trn');
   await trainers.insertAsync({ id: trainerId, userId: trainerUser, displayName: 'Usage Trainer', status: 'active', approvalStatus: 'approved', gymIds: [g.id], hourlyRateTzs: 30000 });
   made.trainers.push(trainerId);
-  const c = await covered({ name: '2 trainer sessions a month at 50%', benefitType: 'trainer_session', fundingType: 'sponsor_percentage', sponsorShareBps: 5000, usageLimit: 2, usagePeriod: 'month', providerRules: { scope: 'selected', trainerIds: [trainerId] } });
+  const c = await covered({ name: '2 trainer sessions a month', benefitType: 'trainer_session', fundingType: 'full', usageLimit: 2, usagePeriod: 'month', providerRules: { scope: 'selected', trainerIds: [trainerId] } });
 
   const booking = async (status = 'confirmed') => {
     const id = uid('tb');
@@ -407,7 +420,14 @@ test('a trainer benefit is consumed when the session is completed, not when it i
   assert.equal(done.booking.status, 'completed');
   const [row] = await ledger({ sourceType: 'trainer_booking', sourceId: b1 });
   assert.deepEqual([row.status, row.providerType, row.providerId, row.grossTzs, row.sponsorTzs, row.beneficiaryTzs, row.metadata.memberPaidTzs],
-    ['approved', 'trainer', trainerId, 30000, 15000, 15000, 30000]);
+    ['approved', 'trainer', trainerId, 30000, 30000, 0, 30000]);
+  // The member paid the booking in full and the sponsor now covers it: the member's money goes back, once.
+  const refundsFor = id => db('Refund').where({ bookingId: id }).orderBy('createdAt');
+  const [refund] = await refundsFor(b1);
+  assert.deepEqual([refund.status, refund.amountTzs, refund.reasonCode, refund.memberId, refund.decidedBy], ['approved', 30000, 'sponsor_paid', c.memberId, 'policy']);
+  await b2bSponsorRefundService.onSessionConsumed({ booking: done.booking, consumption: row });
+  assert.equal((await b2bSponsorRefundService.repair()).raised, 0);
+  assert.equal((await refundsFor(b1)).length, 1);
 
   // Completed by an admin instead; then un-completed, which gives the benefit back.
   const b2 = await booking();
@@ -415,6 +435,25 @@ test('a trainer benefit is consumed when the session is completed, not when it i
   assert.equal((await ledger({ sourceId: b2 }))[0].status, 'approved');
   await trainerBookingService.adminUpdateStatus({ id: b2, status: 'cancelled', actorId: ADMIN.userId });
   assert.equal((await ledger({ sourceId: b2 }))[0].status, 'reversed');
+  // Cancelled after it was covered: the member is still owed the money, through the one refund already raised.
+  assert.deepEqual((await refundsFor(b2)).map(r => [r.status, r.amountTzs]), [['approved', 30000]]);
+
+  // If the refund was not raised when the session completed, the daily run raises it.
+  const b4 = await booking();
+  await trainerBookingService.adminUpdateStatus({ id: b4, status: 'completed', actorId: ADMIN.userId });
+  await db('AuditLog').whereIn('target', db('Refund').where({ bookingId: b4 }).select('id')).del();
+  await db('Refund').where({ bookingId: b4 }).del();
+  const repaired = await b2bSponsorRefundService.repair();
+  assert.ok(repaired.raised >= 1, JSON.stringify(repaired));
+  assert.deepEqual((await refundsFor(b4)).map(r => [r.status, r.amountTzs, r.reasonCode]), [['approved', 30000, 'sponsor_paid']]);
+  // The session is no longer covered (the charge to the sponsor was taken back): an unpaid refund is withdrawn, a paid one is left alone.
+  const [r4] = await refundsFor(b4);
+  await b2bSponsorRefundService.onSessionReleased({ booking: { id: b4, status: 'confirmed' }, actorId: ADMIN.userId });
+  const [withdrawn] = await refundsFor(b4);
+  assert.deepEqual([withdrawn.id, withdrawn.status, withdrawn.decidedBy], [r4.id, 'rejected', ADMIN.userId]);
+  await refundService.markPaid({ id: refund.id, body: { paymentReference: 'MPESA-REFUND-1' }, actorId: ADMIN.userId });
+  const kept = await b2bSponsorRefundService.onSessionReleased({ booking: { id: b1, status: 'confirmed' }, actorId: ADMIN.userId });
+  assert.deepEqual([kept.alreadyPaid, (await refundsFor(b1))[0].status], [true, 'paid']);
   // Another trainer isn't covered; the booking still completes normally.
   const otherTrainer = uid('trn');
   await trainers.insertAsync({ id: otherTrainer, userId: await user('trainer'), displayName: 'Other Trainer', status: 'active', gymIds: [g.id] });
@@ -436,7 +475,7 @@ test('a company employee uses the company programme once linked to their member 
   const { employee } = await corporateService.provisionStaff({ corporateId: account.id, body: { displayName: 'Usage Employee', department: 'Finance' }, actorId: ADMIN.userId });
   await corporateService.setEmployeeStatus({ corporateId: account.id, employeeId: employee.id, status: 'active', actorId: ADMIN.userId });
   const orgId = (await b2bService.organizationForCorporate({ corporateId: account.id })).organization.id;
-  const { benefitId } = await programme(orgId, { ...GYM_BENEFIT, fundingType: 'sponsor_percentage', sponsorShareBps: 7000 }, { eligibility: { scope: 'groups', groups: ['Finance'] } });
+  const { benefitId } = await programme(orgId, GYM_BENEFIT, { eligibility: { scope: 'groups', groups: ['Finance'] } });
 
   const memberId = await user('member');
   assert.deepEqual(await checkInService.perform({ memberId, gymId: g.id }), { ok: false, failure: 'subscription_inactive' });   // not linked yet
@@ -447,7 +486,7 @@ test('a company employee uses the company programme once linked to their member 
   assert.deepEqual([linked.employee.userId, linked.employee.pinHash], [memberId, undefined]);
 
   const result = await checkInService.perform({ memberId, gymId: g.id });
-  assert.deepEqual([result.ok, result.b2b.sponsorTzs, result.b2b.beneficiaryTzs], [true, 3500, 1500]);
+  assert.deepEqual([result.ok, result.b2b.sponsorTzs, result.b2b.beneficiaryTzs], [true, 5000, 0]);
   const [row] = await ledger({ benefitId });
   assert.deepEqual([row.beneficiaryId, row.beneficiarySource, row.organizationId], [employee.id, 'corporate_employee', orgId]);
   // Corporate's own numbers are untouched by the visit.
@@ -459,7 +498,7 @@ test('a company employee uses the company programme once linked to their member 
 
 test('organisations see their own usage as aggregates; another organisation sees nothing', async () => {
   const g = await gym();
-  const a = await covered({ ...GYM_BENEFIT, fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000 });
+  const a = await covered();
   const b = await covered();
   await visit(a.memberId, g, { at: on('2026-10-05') });
   await visit(a.memberId, g, { at: on('2026-10-06') });
@@ -471,10 +510,10 @@ test('organisations see their own usage as aggregates; another organisation sees
   const analyst = await access(a.orgId, { userId: analystId, userType: 'member' });
 
   const report = await usage.programUsage({ access: analyst, programId: a.programId });
-  assert.deepEqual(report.totals, { uses: 2, grossTzs: 10000, sponsorTzs: 6000, beneficiaryTzs: 4000 });
-  assert.deepEqual(report.byBenefit.map(r => [r.benefitId, r.uses, r.sponsorTzs]), [[a.benefitId, 2, 6000]]);
+  assert.deepEqual(report.totals, { uses: 2, grossTzs: 10000, sponsorTzs: 10000, beneficiaryTzs: 0 });
+  assert.deepEqual(report.byBenefit.map(r => [r.benefitId, r.uses, r.sponsorTzs]), [[a.benefitId, 2, 10000]]);
   assert.deepEqual(report.byProvider.map(r => [r.providerId, r.providerName, r.uses]), [[g.id, g.name, 2]]);
-  assert.deepEqual(report.byBeneficiary.map(r => [r.beneficiaryId, r.uses, r.beneficiaryTzs]), [[a.beneficiary.id, 2, 4000]]);
+  assert.deepEqual(report.byBeneficiary.map(r => [r.beneficiaryId, r.uses, r.beneficiaryTzs]), [[a.beneficiary.id, 2, 0]]);
   assert.deepEqual(report.byStatus, { approved: 2 });
   // Aggregates only: no individual events, dates or check-in ids.
   assert.equal(JSON.stringify(report).includes('gym_checkin'), false);
@@ -486,10 +525,10 @@ test('organisations see their own usage as aggregates; another organisation sees
 
   // FitFlex sees every row, filterable, with the source event and the settlement candidate.
   const list = await usage.adminList({ query: { organizationId: a.orgId, status: 'approved' } });
-  assert.deepEqual([list.total, list.totals.sponsorTzs, list.items[0].providerName, list.items[0].organizationName != null], [2, 6000, g.name, true]);
+  assert.deepEqual([list.total, list.totals.sponsorTzs, list.items[0].providerName, list.items[0].organizationName != null], [2, 10000, g.name, true]);
   assert.equal((await usage.adminList({ query: { providerId: g.id, userId: b.memberId } })).total, 1);
   assert.equal((await usage.adminList({ query: { benefitId: a.benefitId, from: '2026-10-06', to: '2026-10-06' } })).total, 1);
   const detail = await usage.adminGet({ consumptionId: list.items[0].id });
   assert.deepEqual(Object.keys(detail.settlementCandidate).filter(k => /payout|commission/i.test(k)), []);   // no payout figures
-  assert.deepEqual([detail.settlementCandidate.settleable, detail.settlementCandidate.sponsorTzs, detail.settlementCandidate.currency], [true, 3000, 'TZS']);
+  assert.deepEqual([detail.settlementCandidate.settleable, detail.settlementCandidate.sponsorTzs, detail.settlementCandidate.currency], [true, 5000, 'TZS']);
 });

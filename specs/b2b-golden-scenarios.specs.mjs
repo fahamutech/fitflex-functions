@@ -110,8 +110,13 @@ before(async () => {
   // 8. A different gym, with a different agreement.
   w.sponsored.atB = await checkIn(w.sponsored.memberId, w.gymB, 7);
 
-  // 2. Subsidised: the sponsor pays 3,000 of the visit, the member the rest.
-  w.subsidised = await covered({ fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000, usageLimit: 8 });
+  // 2. Subsidised: a per-use benefit set up (before 3 Oct 2026) to pay 3,000
+  // of a visit and leave the rest to the member. The member's share can't be
+  // collected at the door, so it no longer covers visits; the member's own
+  // pass does. A split is offered as a sponsored pass instead.
+  w.subsidised = await covered({ fundingType: 'full', usageLimit: 8 });
+  await db('B2BBenefit').where({ id: w.subsidised.benefitId }).update({ fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000 });
+  w.subsidised.passId = await ownPass(w.subsidised.memberId);
   w.subsidised.first = await checkIn(w.subsidised.memberId, w.gymA, 5);
 
   // 3 + 4. One visit a month, then the member's own pass carries on.
@@ -214,19 +219,23 @@ test('golden 1 — sponsored gym visit: the sponsor covers it, and the gym is pa
 
 // ── 2. Subsidised gym visit ──────────────────────────────────────────────────
 
-test('golden 2 — subsidised visit: sponsor share + member share = the visit\'s value, and the gym\'s payout is its own agreed rate', () => inRollback(async (trx) => {
+test('golden 2 — subsidised: a per-use benefit is fully sponsored; a split is a sponsored pass the member unlocks', () => inRollback(async (trx) => {
+  // A per-use benefit can't leave a share for the member to pay.
   const c = w.subsidised;
-  const [row] = await ledger({ sourceId: c.first.checkin.id });
-  assert.deepEqual([row.grossTzs, row.sponsorTzs, row.beneficiaryTzs], [5000, 3000, 2000]);
-  assert.equal(row.sponsorTzs + row.beneficiaryTzs, row.grossTzs);
+  const a = await access(c.orgId);
+  for (const funding of [{ fundingType: 'sponsor_fixed', sponsorAmountTzs: 3000 }, { fundingType: 'sponsor_percentage', sponsorShareBps: 6000 }, { fundingType: 'beneficiary_fixed', beneficiaryAmountTzs: 2000 }, { fundingType: 'none' }]) {
+    const r = await b2bProgramService.createBenefit({ access: a, programId: c.programId, body: { name: 'Split visits', benefitType: 'gym_access', usagePeriod: 'month', usageLimit: 8, ...funding }, actorId: ADMIN.userId });
+    assert.deepEqual([r.error, r.allowed], ['member_share_needs_pass', ['full']], JSON.stringify(funding));
+  }
+  // The split is offered as a sponsored pass, which the member unlocks by paying their share (b2b-billing specs).
+  assert.ok((await b2bProgramService.createBenefit({ access: a, programId: c.programId, body: { name: 'Pro pass, 70% sponsored', benefitType: 'sponsored_pass', passTier: 'pro', fundingType: 'sponsor_percentage', sponsorShareBps: 7000 }, actorId: ADMIN.userId })).benefit);
 
+  // A split benefit set up earlier no longer covers a visit: the refusal is on the ledger, and the member's own pass paid for it.
+  assert.deepEqual([c.first.checkin.subscriptionType, c.first.checkin.subscriptionId], ['platform_pass', c.passId]);
+  assert.deepEqual((await ledger({ benefitId: c.benefitId })).map(r => [r.status, r.rejectionReason, r.sponsorTzs, r.beneficiaryTzs]), [['rejected', 'member_share_not_collectable', 0, 5000]]);
   const s = await settled(trx);
-  const l = await s.line(b2bKey(c), w.gymA);
-  assert.equal(l.finalTzs, 3500);                       // the gym's rate, whoever paid
-  const cyc = await s.cycle(b2bKey(c));
-  assert.deepEqual(cyc.explanation.b2b, { beneficiaryId: c.beneficiaryId, month: OCTOBER, organizationIds: [c.orgId], sponsorTzs: 3000, beneficiaryTzs: 2000 });
-  // What is left for FitFlex if both shares are collected.
-  assert.equal(row.grossTzs - l.finalTzs, 1500);
+  assert.equal(await s.cycle(b2bKey(c)), undefined);
+  assert.equal((await s.line(c.passId, w.gymA)).finalTzs, 3500);
 }));
 
 // ── 3 + 4. Benefit exhausted, then the personal pass ─────────────────────────
@@ -447,7 +456,7 @@ test('golden — reconciliation: every shilling on a paid statement traces back 
   const visits = await trx('SettlementVisit').whereIn('lineId', lines.map(l => l.id)).where({ outcome: 'payable' });
   assert.equal(visits.length, st.qualifyingVisitCount);
 
-  // Gym A in October: sponsored 1, subsidised 1, exhausted 1 + own pass 1,
+  // Gym A in October: sponsored 1, subsidised 1 (on its own pass), exhausted 1 + own pass 1,
   // reversed 1 (the voided one is out), personal 1, heavy 15, and the racing
   // member's single visit if it landed here.
   const racedAtA = w.racing.results.some(r => r.ok && r.checkin.gymId === w.gymA.id);
@@ -464,7 +473,7 @@ test('golden — reconciliation: every shilling on a paid statement traces back 
   const sponsor = sum(usageRows, 'sponsorTzs');
   const member = sum(usageRows, 'beneficiaryTzs');
   assert.equal(sponsor + member, gross);
-  assert.equal(member, 2000);                                   // only the subsidised visit has a member share
+  assert.equal(member, 0);                                      // a per-use benefit never leaves the member a share
 
   // The gyms never get more than 75% of what was charged for a sponsored member's month.
   for (const m of await trx('MemberCycleSettlement').where({ runId: s.out.run.id, fundingType: 'b2b_benefit' }).whereIn('memberId', made.users)) {
@@ -485,14 +494,14 @@ test('golden — reconciliation: every shilling on a paid statement traces back 
     db: trx, programs: b2bPrograms, benefits: b2bBenefits, users, subscriptions, paymentRequests, corporateAccounts, auditLog,
     b2bService, b2bProgramService, settingsService, now: () => new Date('2026-11-02T09:00:00.000Z'),
   });
-  for (const c of [w.sponsored, w.subsidised, w.heavy]) {
+  for (const c of [w.sponsored, w.heavy]) {
     const prepared = await billing.prepareUsage({ programId: c.programId, period: OCTOBER, actorId: ADMIN.userId });
     const charged = sum(await trx('B2BBenefitConsumption').where({ programId: c.programId, status: 'approved' }), 'sponsorTzs');
     assert.equal(prepared.invoice.totalTzs, charged);
     // Prepared twice: nothing is invoiced twice.
     assert.deepEqual([(await billing.prepareUsage({ programId: c.programId, period: OCTOBER, actorId: ADMIN.userId })).added], [0]);
   }
-  assert.equal((await trx('B2BSponsorInvoice').where({ programId: w.subsidised.programId }).first()).totalTzs, 3000);
+  assert.equal((await billing.prepareUsage({ programId: w.subsidised.programId, period: OCTOBER, actorId: ADMIN.userId })).invoice, null);   // it covered nothing
 }));
 
 // ── the sponsor stops paying when it should ──────────────────────────────────

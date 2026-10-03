@@ -34,7 +34,9 @@ export function normalizeRequestedRole(role) {
 const SCRYPT_PASSWORD_ROLES = new Set(['vendor_staff', 'corporate_hr']);
 
 export function approvalStatusForRole(role) {
-  return ['gym_operator', 'trainer', 'vendor'].includes(role) ? 'pending_approval' : 'approved';
+  // Trainers and gym owners are active at once and shown as not verified
+  // until their KYC is approved (3 Oct 2026). Vendors still wait for approval.
+  return role === 'vendor' ? 'pending_approval' : 'approved';
 }
 
 // Clients that understand persons and personas identify themselves with this
@@ -84,6 +86,30 @@ export function createAuthService({
       ...extra,
     };
   }
+  /**
+   * Identity V2 · I7a: a session for a Person who has just proved who they are
+   * without Firebase (number or email + PIN). Opens the persona they used
+   * last; otherwise their only working profile, or asks when it is ambiguous.
+   */
+  async function sessionForPerson(personId) {
+    if (!identityLink) return { error: 'not_found', status: 404 };
+    const [person, personas] = await Promise.all([identityLink.personOf(personId), identityLink.personasOf(personId)]);
+    if (person?.status !== 'active') return { error: 'person_not_active', status: 403 };
+    const usable = personas.filter(p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected');
+    if (!usable.length) return { error: 'no_profile', status: 409 };
+    const operational = usable.filter(p => p.userType !== 'member');
+    const last = usable.find(p => p.id === person.lastPersonaId);
+    const chosen = last || (operational.length === 1 ? operational[0] : usable[0]);
+    const user = await users.findByIdAsync(chosen.id);
+    if (!user) return { error: 'no_profile', status: 409 };
+    await identityLink.rememberPersona(personId, user.id);
+    return {
+      token: signJwt(sessionClaims(user)), user: toSessionUser(user),
+      pendingApproval: user.approvalStatus === 'pending_approval',
+      ...(await personaPayload(user, { personaChoiceRequired: !last && operational.length > 1 })),
+    };
+  }
+
   async function requestOtp({ phone, userType = 'member' }) {
     if (!phone) return { error: 'phone_required', status: 400 };
     if (!['member', 'trainer', 'gym_operator', 'vendor', 'admin'].includes(userType)) {
@@ -483,5 +509,5 @@ export function createAuthService({
     return { memberships: await orgMemberships.membershipsOfPerson(user.personId, { includeEnded }) };
   }
 
-  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships };
+  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships, sessionForPerson };
 }

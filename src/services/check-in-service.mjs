@@ -6,7 +6,7 @@ import { CHECKIN_STATUS, sourceForMethod, isDuplicateVisit } from '../shared/che
 import { localDay } from '../shared/member-progress.mjs';
 import { randomUUID } from 'node:crypto';
 
-export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null, b2bFunding = null }) {
+export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null, b2bFunding = null, gymOpenToPass = null }) {
   /** T5: the user is an active trainer linked to this gym (trains there free). */
   function homeGymIds(userId) {
     const t = trainers?.find?.(r => (r.userId === userId || r.id === userId) && r.status !== 'inactive' && r.status !== 'suspended');
@@ -133,8 +133,6 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       if (!member) return { ok: false, failure: 'member_not_found' };
       const gym = gyms.find(g => g.id === gymId);
       if (!gym) return { ok: false, failure: 'gym_not_found' };
-      // A new owner's gym opens once their KYC is approved.
-      if (gym.status === 'pending_verification') return { ok: false, failure: 'gym_not_verified' };
 
       const subs = await subscriptions.filterAsync(s => s.memberId === memberId);
       const sub  = pickSubscriptionForGym(
@@ -161,6 +159,14 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       }
 
       const homeTrainer = isHomeGymTrainer(memberId, gymId);
+
+      // Until the gym's owner is verified, only the gym's own people get in:
+      // its direct members and its home trainers. FitFlex Pass members, and
+      // visits a sponsor would pay for through FitFlex, wait for verification.
+      const gymsOwnMember = sub?.type === 'direct_sub' && subscriptionCoversGym(sub, gym);
+      if (gymOpenToPass && !homeTrainer && !gymsOwnMember && !(await gymOpenToPass(gymId))) {
+        return { ok: false, failure: 'gym_not_verified' };
+      }
 
       // A sponsor's B2B benefit pays for the visit before the member's own
       // pass is touched. When none applies (no benefit, wrong gym, allowance

@@ -4,6 +4,8 @@
 //   - by a cancellation the terms allow (a trainer session cancelled at least
 //     24 hours ahead or by the trainer; a shop order cancelled before
 //     dispatch): it is approved by policy and waits to be paid;
+//   - by a sponsor covering a trainer session the member already paid for
+//     (b2b-sponsor-refund-service): approved by policy as well;
 //   - by a request (a member asking about a pass or plan payment, or an admin
 //     raising one): it waits for a decision first.
 // FitFlex staff then pay it outside the app and record the payment reference.
@@ -17,7 +19,7 @@ export const REFUND_STATUSES = ['requested', 'approved', 'paid', 'rejected'];
 /** Reasons a member may give when asking for a pass or plan refund. */
 export const MEMBER_REASONS = ['charged_twice', 'not_activated', 'other'];
 const REASONS = new Set([
-  ...MEMBER_REASONS, 'member_cancelled', 'trainer_cancelled', 'vendor_cancelled', 'cancelled_by_fitflex', 'payment_error',
+  ...MEMBER_REASONS, 'member_cancelled', 'trainer_cancelled', 'vendor_cancelled', 'cancelled_by_fitflex', 'payment_error', 'sponsor_paid',
 ]);
 const SOURCE_FIELD = { subscription: 'paymentRequestId', trainer_booking: 'bookingId', shop_order: 'orderId' };
 const fail = (error, status = 400, extra = {}) => ({ error, status, ...extra });
@@ -161,6 +163,24 @@ export function createRefundService({
     return { refund };
   }
 
+  /**
+   * Withdraw a refund that is no longer owed (for example the sponsor stopped
+   * covering the session it was raised for). Only one not yet paid, and only
+   * one raised for that reason: a paid refund is returned as it is.
+   */
+  async function withdraw({ kind, sourceId, reasonCode, note, actorId = null }) {
+    const prior = await liveFor(kind, sourceId);
+    if (!prior || prior.reasonCode !== reasonCode) return { refund: null, withdrawn: false };
+    if (prior.status === 'paid') return { refund: prior, withdrawn: false, alreadyPaid: true };
+    const at = nowIso();
+    const refund = await refunds.updateByIdAsync(prior.id, {
+      status: 'rejected', decidedBy: actorId || 'policy', decidedAt: at, decisionNote: text(note) || 'No longer owed', updatedAt: at,
+    });
+    await audit('refund_withdrawn', actorId, prior, refund);
+    await tell(refund, 'refund_rejected', 'Refund withdrawn', refund.decisionNote);
+    return { refund, withdrawn: true };
+  }
+
   /** Admin: record that an approved refund was sent, with the payment reference. */
   async function markPaid({ id, body = {}, actorId }) {
     const prior = await refunds.findByIdAsync(id);
@@ -199,5 +219,5 @@ export function createRefundService({
     };
   }
 
-  return { raise, liveFor, requestForPayment, adminRaise, decide, markPaid, listMine, adminList };
+  return { raise, withdraw, liveFor, requestForPayment, adminRaise, decide, markPaid, listMine, adminList };
 }

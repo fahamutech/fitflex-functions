@@ -323,7 +323,7 @@ test('per-use benefits are invoiced after the month; a later reversal comes back
   const g = await gym();
   const orgId = await sponsor();
   const m = await enrol(orgId);
-  const { programId } = await programme(orgId, { name: 'Gym visits at 60%', benefitType: 'gym_access', fundingType: 'sponsor_percentage', sponsorShareBps: 6000, usagePeriod: 'unlimited' });
+  const { programId } = await programme(orgId, { name: 'Gym visits', benefitType: 'gym_access', fundingType: 'full', usagePeriod: 'unlimited' });
   const lastMonth = monthBounds(LAST);
   const at = d => new Date(`${d}T09:00:00.000Z`);
   const visit = extra => usage.consume({ userId: m.userId, sourceType: 'gym_checkin', sourceId: uid('chk'), provider: { type: 'gym', id: g.id, tier: g.tier }, grossTzs: 5000, ...extra });
@@ -333,7 +333,7 @@ test('per-use benefits are invoiced after the month; a later reversal comes back
 
   assert.equal((await billing.prepareUsage({ programId, period: PERIOD, actorId: ADMIN.userId })).error, 'period_not_ended');
   const prepared = await billing.prepareUsage({ programId, period: LAST, actorId: ADMIN.userId });
-  assert.deepEqual([prepared.added, prepared.credited, prepared.invoice.kind, prepared.invoice.totalTzs], [2, 0, 'usage', 6000]);
+  assert.deepEqual([prepared.added, prepared.credited, prepared.invoice.kind, prepared.invoice.totalTzs], [2, 0, 'usage', 10000]);
   assert.deepEqual(await billing.prepareUsage({ programId, period: LAST, actorId: ADMIN.userId }).then(r => [r.added, r.invoice]), [0, null]);
   const issued = await billing.issueInvoice({ invoiceId: prepared.invoice.id, vatRateBps: 0, actorId: ADMIN.userId });
   assert.deepEqual([issued.invoice.vatRateBps, issued.invoice.vatTzs], [0, 0]);
@@ -342,7 +342,7 @@ test('per-use benefits are invoiced after the month; a later reversal comes back
   // A visit already invoiced is reversed: the sponsor is credited on the next invoice.
   await usage.reverse({ consumptionId: v1.consumption.id, reason: 'Wrong gym', actorId: ADMIN.userId });
   const credit = await billing.prepareUsage({ programId, period: LAST, actorId: ADMIN.userId });
-  assert.deepEqual([credit.added, credit.credited, credit.invoice.totalTzs], [0, 1, -3000]);
+  assert.deepEqual([credit.added, credit.credited, credit.invoice.totalTzs], [0, 1, -5000]);
   assert.equal((await billing.prepareUsage({ programId, period: LAST, actorId: ADMIN.userId })).credited, 0);   // credited once
   // The database refuses to invoice one consumption twice.
   const [line] = await db('B2BSponsorInvoiceLine').where({ invoiceId: prepared.invoice.id, kind: 'usage' });

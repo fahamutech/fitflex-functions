@@ -145,8 +145,8 @@ It only creates drafts. FitFlex issues and settles them.
 
 ## 9. Known limitations
 
-- **Per-use member share.** The member's share of a subsidised per-use gym visit is still recorded, not collected. Gym access is meant to use the flat fee, where the member pays upfront.
-- **Trainer sessions.** The member pays the booking in full; the sponsor's share goes on the usage invoice. Returning that share to the member is not built.
+- **Per-use benefits are fully sponsored** (decided 3 Oct 2026). A member pays their share before using a benefit, and only the sponsored pass can collect it, so a sponsor/member split is offered as a sponsored pass. See [B2B_PROGRAMS.md](B2B_PROGRAMS.md).
+- **Trainer sessions.** The member pays the booking in full when they book. When the session is completed and a sponsor covers it, the sponsor is charged on the usage invoice and the member is refunded what they paid, through the refunds queue (`b2b-sponsor-refund-service`, reason `sponsor_paid`). Staff pay refunds by hand, so the member waits for that.
 - **Sponsor paid, member never unlocks.** The sponsor's share stays with FitFlex (S-07). No pass exists, so gyms are owed nothing for that person.
 - **Budget.** A programme's `budgetTzs` pauses per-use consumption only. Flat fees are not checked against it.
 - **Mid-month changes.** A member suspended or removed mid-month keeps the pass to month end; they are not nominated the following month.

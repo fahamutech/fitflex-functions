@@ -141,7 +141,8 @@ test('asking for more information lets the partner fix and resubmit', async () =
     decision: 'request_info', reasonCode: 'document_unreadable', reasonNote: 'Your certificate number is not readable.',
   }, admin);
   assert.deepEqual([asked.case.status, asked.case.reasonCode], ['info_requested', 'document_unreadable']);
-  assert.equal((await userRow(t.id)).approvalStatus, 'pending_approval');
+  // A trainer stays active while the case is open; they are simply not verified yet.
+  assert.equal((await userRow(t.id)).approvalStatus, 'approved');
   const notice = await db('Notification').where({ userId: t.id, type: 'kyc_info_requested' }).first();
   assert.equal(notice.body, 'Your certificate number is not readable.');
 
@@ -164,7 +165,7 @@ test('rejection closes the role; reopening starts a new round', async () => {
 
   const reopened = await svc.decide(t.caseId, { decision: 'reopen' }, admin);
   assert.deepEqual([reopened.case.status, reopened.case.round], ['draft', 2]);
-  assert.equal((await userRow(t.id)).approvalStatus, 'pending_approval');
+  assert.equal((await userRow(t.id)).approvalStatus, 'approved', 'reopening makes the trainer active again, still not verified');
   assert.deepEqual((await inbox(t.id)).slice(-2), ['kyc_rejected', 'kyc_reopened']);
 });
 

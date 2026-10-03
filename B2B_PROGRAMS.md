@@ -105,6 +105,16 @@ Money is whole TZS (`*Tzs`) and shares are basis points (`*Bps`), the settlement
 | `beneficiary_fixed` | `beneficiaryAmountTzs` 2,000 (copay) | 3,000 / 2,000 |
 | `none` | none, for access-only benefits such as challenges | 0 / 0 |
 
+**Which benefit may use which funding (decided 3 Oct 2026).** A member pays their share *before* using a benefit, and only the sponsored pass can collect it: the member unlocks the month by paying ([B2B_BILLING.md](B2B_BILLING.md)). So the split types are for the **sponsored pass** only. A per-use benefit is fully sponsored:
+
+| Benefit type | Allowed `fundingType` |
+|---|---|
+| `sponsored_pass` | `full`, `sponsor_fixed`, `sponsor_percentage`, `beneficiary_fixed` |
+| `gym_access`, `trainer_session` (used through FitFlex) | `full` |
+| `challenge`, `marketplace`, `wellness_activity`, `custom` | `full`, `none` |
+
+Anything else is refused with `400 member_share_needs_pass` and the allowed list; `GET /b2b/programs/reference` returns it as `fundingByBenefitType`. A split per-use benefit created before the rule no longer covers a use (`member_share_not_collectable`).
+
 `calculateResponsibility({ benefit, priceTzs })` returns `{ sponsorTzs, beneficiaryTzs }`. The two always add up to the price and neither is negative. The **price** comes from the service at the moment of use (a gym visit value, a booking amount, an order total). Phase 2 stores no prices.
 
 ## 6. Usage-limit model
