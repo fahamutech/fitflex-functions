@@ -2,7 +2,8 @@
 // And (I7b) register with a number or email: a code, then a PIN.
 // Every route answers 404 unless IDENTITY_V2 + V2_PIN_LOGIN are on.
 import '../src/bootstrap/init.mjs';
-import { pinAuthService, registrationService, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
+import { requireAuth } from '../src/auth/jwt.mjs';
+import { pinAuthService, registrationService, partnerVerifiedFor, users } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
@@ -72,5 +73,52 @@ export const registerComplete = {
   onRequest: async (req, res) => {
     if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
     await send(res, await registrationService.complete({ body: req.body || {} }));
+  },
+};
+
+// ── Forgot PIN and change PIN (I7c) ─────────────────────────────────────────
+// Forgot PIN answers 404 unless IDENTITY_V2 + V2_RECOVERY are on; change PIN
+// follows V2_PIN_LOGIN.
+
+export const pinResetStart = {
+  created, method: 'post', path: '/auth/pin/reset/start',
+  description: 'Forgot PIN: send a code to the mobile number or email the person signs in with. The answer is the same whether or not an account uses it. Limited per network address.',
+  requestSample: { phone: '0712345678', locale: 'sw' },
+  responseSample: { sent: true, channel: 'sms', identifierType: 'phone', identifierValue: '+255712345678', expiresInSeconds: 600, resendAfterSeconds: 60 },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_RECOVERY')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await pinAuthService.resetStart({ body: req.body || {}, ip: addressOf(req) }));
+  },
+};
+
+export const pinResetConfirm = {
+  created, method: 'post', path: '/auth/pin/reset/confirm',
+  description: 'Forgot PIN: check the code. Returns a reset token (15 minutes) that sets the new PIN once.',
+  requestSample: { phone: '0712345678', code: '123456' },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_RECOVERY')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await pinAuthService.resetConfirm({ body: req.body || {} }));
+  },
+};
+
+export const pinResetComplete = {
+  created, method: 'post', path: '/auth/pin/reset/complete',
+  description: 'Forgot PIN: set the new four-digit PIN. Clears any lockout, signs every other device out, and signs the person in.',
+  requestSample: { resetToken: '…', pin: '1234' },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_RECOVERY')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await pinAuthService.resetComplete({ body: req.body || {} }));
+  },
+};
+
+export const changeMyPin = {
+  created, method: 'post', path: '/me/pin',
+  description: 'Change the PIN: the current one and a new four-digit one. Wrong current PINs count toward the sign-in lockout. Every earlier session ends; the response carries a new one for this device.',
+  requestSample: { currentPin: '1234', newPin: '5678' },
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
+    const user = await users.findByIdAsync(req.user.sub);
+    await send(res, await pinAuthService.changePin({ user, body: req.body || {}, ip: addressOf(req) }));
   },
 };
