@@ -13,6 +13,7 @@
 //   they were done needs `workoutHistory`, and the logged sets need
 //   `workoutDetails`.
 import { randomUUID } from 'node:crypto';
+import { OPEN_GATE } from './partner-gate.mjs';
 import { validateWorkoutDefinition, newWorkoutRow, isWorkoutDate } from './workout-service.mjs';
 import {
   dailyTotals, goalProgress, localDay, addDays, weekStart, isWorkout, activeMinutesOf,
@@ -56,6 +57,8 @@ export function createTrainerClientService({
   // (creatorType, creatorId, memberId) → the member's progress on that
   // creator's challenges. Injected to avoid a circular dependency.
   challengeProgressFor = async () => [],
+  // A new trainer takes clients only once their KYC is approved.
+  partnerGate = OPEN_GATE,
 }) {
   const stamp = () => now().toISOString();
 
@@ -92,6 +95,8 @@ export function createTrainerClientService({
   async function request(memberId, trainerId, body = {}) {
     const trainer = await trainers.findByIdAsync(trainerId);
     if (!trainer || trainer.status === 'inactive') return { error: 'trainer_not_found', status: 404 };
+    // An unverified trainer is listed but cannot take clients yet.
+    if (!(await partnerGate.isOperational(trainer.userId))) return { error: 'trainer_not_verified', status: 403 };
     const mine = await relationships.filterByColumnAsync('memberId', memberId);
     const existing = mine.find(r => r.trainerId === trainerId && OPEN.has(r.status));
     if (existing) {

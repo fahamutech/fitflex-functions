@@ -12,8 +12,9 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     'paymentBank', 'paymentNumber', 'paymentNotes', 'tinNumber'];
   const ownerInput = (body = {}) => Object.fromEntries(Object.entries(body).filter(([key]) => !ADMIN_ONLY_FIELDS.includes(key)));
 
-  // Gyms of new owners wait for their KYC; existing and verified owners' gyms open at once.
-  const newGymStatus = async (owner) => (await partnerGate.isOperational(owner?.id) ? 'active' : 'pending_verification');
+  // A new gym is active at once. Until its owner's KYC is approved it shows as
+  // not verified and FitFlex Pass members cannot check in (see partner-gate).
+  const newGymStatus = async () => 'active';
 
   const ownerGymIdsOf = (owner) => owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
 

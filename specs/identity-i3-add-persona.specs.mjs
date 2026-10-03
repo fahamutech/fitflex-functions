@@ -89,7 +89,7 @@ test('adding a persona creates a new User under the same Person, nothing else', 
     assert.notEqual(trainer.id, member.id, 'a new persona row');
     assert.equal(trainer.personId, member.personId, 'explicitly on the same Person');
     assert.equal(trainer.userType, 'trainer');
-    assert.equal(trainer.approvalStatus, 'pending_approval', 'normal approval for the role');
+    assert.equal(trainer.approvalStatus, 'approved', 'a trainer is active at once (not verified until KYC)');
     assert.equal(trainer.onboardingCompleted, false);
     // Same identifier across personas: display copies on the row, one identifier on the Person.
     assert.equal(trainer.firebaseUid, uid);

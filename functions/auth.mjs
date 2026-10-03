@@ -1,6 +1,6 @@
 // Auth REST surface — thin controllers delegating to authService.
 import '../src/bootstrap/init.mjs';
-import { authService } from '../src/bootstrap/services.mjs';
+import { authService, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { orgAuthzStats } from '../src/auth/org-authz.mjs';
 
@@ -76,7 +76,8 @@ export const authFirebaseSession = {
       if (result.approvalNote !== undefined) body.approvalNote = result.approvalNote;
       return res.status(result.status).json(body);
     }
-    res.json(result);
+    // A trainer or gym owner learns at sign-in whether they are verified yet.
+    res.json({ ...result, partnerVerified: await partnerVerifiedFor(result.user) });
   }
 };
 

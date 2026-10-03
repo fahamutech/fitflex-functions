@@ -622,7 +622,7 @@ export function createPartnerKycService({
   /** Keep the approval flags every app reads in step with the case. */
   async function syncApproval(kycCase, status, note) {
     if (!kycCase.userId) return;
-    const approvalStatus = approvalStatusForCase(status);
+    const approvalStatus = approvalStatusForCase(status, kycCase.partnerType);
     const user = await users.findByIdAsync(kycCase.userId);
     if (user && (user.approvalStatus !== approvalStatus || (note !== undefined && user.approvalNote !== note))) {
       await users.updateByIdAsync(user.id, { approvalStatus, ...(note !== undefined ? { approvalNote: note } : {}) });
