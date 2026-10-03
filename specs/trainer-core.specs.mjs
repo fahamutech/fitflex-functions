@@ -315,9 +315,11 @@ test('booking several slots creates one payment request and holds them payment_p
   assert.ok(!out.error, JSON.stringify(out));
   assert.equal(trainerBookings.rows.length, 2);
   assert.ok(trainerBookings.rows.every(b => b.status === 'payment_pending' && b.groupId === out.bookingGroupId));
-  // Pro: 20,000 − 10% = 18,000 per session; 15% commission = 2,700; trainer gets 15,300.
+  // Pro: the member pays 20,000 − 10% = 18,000. FitFlex funds the discount, so
+  // the trainer earns on the full 20,000: 15% commission = 3,000, payout 17,000.
   assert.equal(trainerBookings.rows[0].amountTzs, 18_000);
-  assert.equal(trainerBookings.rows[0].trainerPayoutTzs, 15_300);
+  assert.equal(trainerBookings.rows[0].trainerPayoutTzs, 17_000);
+  assert.equal(trainerBookings.rows[0].discountFundedBy, 'fitflex');
   assert.equal(paymentRequests.rows.length, 1);
   assert.equal(paymentRequests.rows[0].amountTzs, 36_000);
   assert.equal(paymentRequests.rows[0].bookingGroupId, out.bookingGroupId);

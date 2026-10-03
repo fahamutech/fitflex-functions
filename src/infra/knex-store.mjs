@@ -595,7 +595,7 @@ const ALLOWED_FIELDS = {
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
   trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','availability','socialLinks','createdAt','updatedAt']),
-  trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','paymentRequestId','status','cancelledAt','cancelledBy','createdAt','updatedAt']),
+  trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','discountFundedBy','paymentRequestId','status','cancelledAt','cancelledBy','createdAt','updatedAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','updatedAt']),
   webhook_seen:     new Set(['id','at']),
