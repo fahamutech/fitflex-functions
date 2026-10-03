@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, settlementService, settlementClawbackService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, settlementService, settlementClawbackService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -92,6 +92,9 @@ export const b2bSponsorBilling = {
   description: 'B2B sponsor billing: start sponsored passes that can start (sponsor paid, member linked, month begun), and keep draft invoices current — flat fees for this month (and next, from the 25th) and last month\'s per-use charges. Drafts only: FitFlex issues them. Idempotent.',
   onJob: async () => {
     const passes = await b2bBillingService.runDaily();
+    // Sponsor-covered trainer sessions whose refund to the member was not raised when the session completed.
+    const refunds = await b2bSponsorRefundService.repair();
+    if (refunds.raised) console.warn(`[b2b-refund] raised ${refunds.raised} missing sponsor refund(s)`);
     const today = new Date(Date.now() + 3 * 3_600_000).toISOString().slice(0, 10);   // EAT day
     const [y, m] = today.split('-').map(Number);
     const month = (yy, mm) => `${mm < 1 ? yy - 1 : mm > 12 ? yy + 1 : yy}-${String(mm < 1 ? 12 : mm > 12 ? 1 : mm).padStart(2, '0')}`;
