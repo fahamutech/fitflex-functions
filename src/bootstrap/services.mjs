@@ -80,6 +80,7 @@ import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
+import { createVendorSettlementService } from '../services/vendor-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
@@ -311,6 +312,11 @@ export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerG
 export const trainerSettlementService = createTrainerSettlementService({
   trainers, users, payoutEligibility,
   // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Vendor payouts: a weekly statement per vendor for delivered orders, on the same path.
+export const vendorSettlementService = createVendorSettlementService({
+  users, payoutEligibility,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const settlementWorkflowService = createSettlementWorkflowService({ payoutEligibility });
