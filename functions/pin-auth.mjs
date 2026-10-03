@@ -1,7 +1,8 @@
 // Identity V2 · I7a — sign in with a mobile number or email and a PIN.
-// Both routes answer 404 unless IDENTITY_V2 + V2_PIN_LOGIN are on.
+// And (I7b) register with a number or email: a code, then a PIN.
+// Every route answers 404 unless IDENTITY_V2 + V2_PIN_LOGIN are on.
 import '../src/bootstrap/init.mjs';
-import { pinAuthService, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
+import { pinAuthService, registrationService, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
@@ -38,5 +39,38 @@ export const pinSetup = {
   onRequest: async (req, res) => {
     if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
     await send(res, await pinAuthService.setup({ body: req.body || {} }));
+  },
+};
+
+// ── Registration (I7b) ──────────────────────────────────────────────────────
+
+export const registerStart = {
+  created, method: 'post', path: '/auth/register/start',
+  description: 'Start registering with one mobile number or email: FitFlex sends it a code (SMS or email). 409 already_registered when someone already signs in with it. Limited per network address and capped per day.',
+  requestSample: { phone: '0712345678', locale: 'sw' },
+  responseSample: { sent: true, channel: 'sms', identifierType: 'phone', identifierValue: '+255712345678', expiresInSeconds: 600, resendAfterSeconds: 60 },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await registrationService.start({ body: req.body || {}, ip: addressOf(req) }));
+  },
+};
+
+export const registerConfirm = {
+  created, method: 'post', path: '/auth/register/confirm',
+  description: 'Check the code. Returns a registration token (15 minutes) that completes the registration.',
+  requestSample: { phone: '0712345678', code: '123456' },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await registrationService.confirm({ body: req.body || {} }));
+  },
+};
+
+export const registerComplete = {
+  created, method: 'post', path: '/auth/register/complete',
+  description: 'Finish registering: the registration token, the role (member, trainer, gym_owner or vendor) and a four-digit PIN. Creates the account with the verified number or email and signs the person in.',
+  requestSample: { registrationToken: '…', role: 'member', pin: '1234', displayName: 'Neema Abdallah' },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await registrationService.complete({ body: req.body || {} }));
   },
 };
