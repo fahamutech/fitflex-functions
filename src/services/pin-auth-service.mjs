@@ -32,17 +32,21 @@ export const pinLimits = () => ({
   windowMinutes: num('PIN_ATTEMPT_WINDOW_MINUTES', 15),
   failuresPerIdentifier: num('PIN_FAILURES_PER_IDENTIFIER', 10),
   failuresPerAddress: num('PIN_FAILURES_PER_ADDRESS', 30),
+  resetStartsPerAddressPerHour: num('PIN_RESET_STARTS_PER_ADDRESS_PER_HOUR', 10),
 });
 
 export const isPin = pin => /^\d{4}$/.test(String(pin ?? ''));
 const SETUP = 'pin_setup';
 const ADOPT_CODE = 'pin_adopt';
+const RESET = 'pin_reset';
 const sha256 = v => createHash('sha256').update(String(v)).digest('hex');
 const INVALID = { error: 'invalid_credentials', status: 401 };
 
 export function createPinAuthService({
   db, users, codes, identityLink, sessionForPerson, verifyFirebasePassword,
   signPurpose, verifyPurpose, pepper, linkingEnabled = () => false, auditLog = null,
+  // Drop cached session checks for a profile, so an ended session stops at once.
+  forgetSession = () => {},
 }) {
   const keyed = (personId, pin) => createHmac('sha256', String(pepper())).update(`${personId}:${pin}`).digest('hex');
   const configured = () => Boolean(pepper());
@@ -196,10 +200,138 @@ export function createPinAuthService({
     return sessionForPerson(person.id);
   }
 
-  /** End every session of this person issued before now (for PIN reset and change, I7c). */
+  /**
+   * End every session of this person issued before now. A session's issue
+   * time has whole seconds, so the cut-off is the start of this second: a
+   * session minted straight after stays valid.
+   */
   async function endSessions(personId) {
-    await db('Person').where({ id: personId }).update({ sessionsValidAfter: db.fn.now(), updatedAt: db.fn.now() });
+    await db('Person').where({ id: personId })
+      .update({ sessionsValidAfter: db.raw("date_trunc('second', now())"), updatedAt: db.fn.now() });
+    for (const row of await db('User').where({ personId }).select('id')) forgetSession(row.id);
   }
 
-  return { login, setup, setPin, endSessions, configured };
+  // ── Forgot PIN (I7c) ──────────────────────────────────────────────────────
+
+  /**
+   * Who may reset a PIN through this identifier: the person who has verified
+   * it, or, for an email, the one existing account that still signs in
+   * through Firebase and has not moved its PIN to FitFlex yet (proving the
+   * email by code is then what moves it).
+   */
+  async function resettable(identifier) {
+    const person = await verifiedPerson(identifier);
+    if (person) return person.status === 'active' ? { personId: person.id, anchor: null, uid: null } : null;
+    if (identifier.type !== 'email') return null;
+    const rows = (await db('User').whereRaw('lower(btrim(email)) = ?', [identifier.value]).whereNotNull('firebaseUid').whereNotNull('personId'))
+      .filter(u => u.accountStatus !== 'closed');
+    const personIds = [...new Set(rows.map(u => u.personId))];
+    if (personIds.length !== 1) return null;
+    const owner = await db('Person').where({ id: personIds[0] }).first('id', 'status', 'pinHash');
+    if (!owner || owner.status !== 'active' || owner.pinHash) return null;
+    return { personId: owner.id, anchor: rows[0].id, uid: rows[0].firebaseUid };
+  }
+
+  /**
+   * Send the reset code. The answer is the same whether or not anyone signs
+   * in with this number or email, so it cannot be used to find accounts.
+   */
+  async function resetStart({ body = {}, ip = null }) {
+    if (!configured()) return { error: 'pin_not_configured', status: 503 };
+    const identifier = parseIdentifier(body);
+    if (!identifier) return { error: 'one_phone_or_email_required', status: 400 };
+    const limits = pinLimits();
+    if (ip) {
+      const recent = Number((await db('AuthAttempt').where({ kind: 'pin_reset_start', ip })
+        .where('createdAt', '>', new Date(Date.now() - 3600e3)).count({ n: '*' }).first()).n);
+      if (recent >= limits.resetStartsPerAddressPerHour) return tooMany(3600);
+    }
+    await db('AuthAttempt').insert({
+      id: `aat_${randomUUID().replace(/-/g, '').slice(0, 12)}`, kind: 'pin_reset_start',
+      identifierHash: sha256(`${identifier.type}:${identifier.value}`), ip: ip || null, outcome: 'ok',
+    });
+    const channel = identifier.type === 'phone' ? 'sms' : 'email';
+    const generic = { sent: true, channel, identifierType: identifier.type, identifierValue: identifier.value, expiresInSeconds: 600, resendAfterSeconds: 60 };
+    const target = await resettable(identifier);
+    if (!target) return generic;
+    const sent = await codes.sendCode({ purpose: RESET, personId: target.personId, requestedBy: target.anchor, identifier, locale: body.locale });
+    // Only "we cannot send at all" is reported; limits look like a normal send.
+    if (sent.error && ['sms_not_configured', 'email_not_configured', 'code_not_sent'].includes(sent.error)) return sent;
+    return sent.error ? { ...generic, ...(sent.retryAfterSeconds ? { resendAfterSeconds: sent.retryAfterSeconds } : {}) } : sent;
+  }
+
+  /** Check the reset code; the token it returns is what sets the new PIN. */
+  async function resetConfirm({ body = {} }) {
+    if (!configured()) return { error: 'pin_not_configured', status: 503 };
+    const identifier = parseIdentifier(body);
+    if (!identifier) return { error: 'one_phone_or_email_required', status: 400 };
+    const target = await resettable(identifier);
+    // No account: the same answer as a wrong or expired code.
+    if (!target) return { error: 'code_not_found_or_expired', status: 400 };
+    const checked = await codes.consumeCode({ purpose: RESET, personId: target.personId, identifier, code: body.code });
+    if (checked.error) return checked;
+    const person = await db('Person').where({ id: target.personId }).first('pinSetAt');
+    return {
+      verified: true, expiresInSeconds: 15 * 60,
+      resetToken: signPurpose(RESET, {
+        pid: target.personId, type: identifier.type, value: identifier.value, channel: checked.channel,
+        anchor: target.anchor, uid: target.uid,
+        // Ties the token to the PIN as it is now, so it sets a new PIN only once.
+        was: person?.pinSetAt ? +new Date(person.pinSetAt) : 0,
+      }),
+    };
+  }
+
+  /** The new PIN. Clears the lockout, ends every other session, and signs in. */
+  async function resetComplete({ body = {} }) {
+    if (!configured()) return { error: 'pin_not_configured', status: 503 };
+    const claims = verifyPurpose(body.resetToken, RESET);
+    if (!claims) return { error: 'reset_token_invalid', status: 401 };
+    if (!isPin(body.pin)) return { error: 'pin_must_be_4_digits', status: 400 };
+    const person = await db('Person').where({ id: claims.pid }).first('id', 'status', 'pinSetAt');
+    if (!person || person.status !== 'active') return { error: 'reset_token_invalid', status: 401 };
+    if ((person.pinSetAt ? +new Date(person.pinSetAt) : 0) !== claims.was) return { error: 'reset_token_invalid', status: 401 };
+    if (claims.anchor) {
+      // An account moving off Firebase: the code just proved its email.
+      const linked = await identityLink.linkOnVerifiedSignIn({
+        anchorUserId: claims.anchor, uid: claims.uid, email: claims.value,
+        provider: `fitflex_${claims.channel}`, trigger: 'pin_reset', attachOnly: !linkingEnabled(),
+      });
+      if (linked.conflicts.some(c => c.kind === 'verified_identifier_collision' && c.identifierType === 'email')) {
+        return { error: 'identifier_in_use', status: 409 };
+      }
+    }
+    await setPin(person.id, String(body.pin));
+    await endSessions(person.id);
+    if (auditLog) {
+      await auditLog.insertAsync({ id: randomUUID(), at: new Date().toISOString(), actor: null, action: 'pin_reset', target: person.id, before: null, after: { identifierType: claims.type } });
+    }
+    return sessionForPerson(person.id);
+  }
+
+  // ── Change PIN (I7c) ──────────────────────────────────────────────────────
+
+  /** A signed-in person changes their PIN: the current one, then the new one. */
+  async function changePin({ user, body = {}, ip = null }) {
+    if (!configured()) return { error: 'pin_not_configured', status: 503 };
+    if (!user?.personId) return { error: 'user_not_found', status: 404 };
+    if (!isPin(body.newPin)) return { error: 'pin_must_be_4_digits', status: 400 };
+    const person = await db('Person').where({ id: user.personId })
+      .first('id', 'status', 'pinHash', 'pinFailedCount', 'pinLockedUntil');
+    // Signed in another way (Google, or a PIN still held by Firebase): there is no PIN to change yet.
+    if (!person?.pinHash) return { error: 'pin_not_set', status: 409 };
+    const checked = await checkHeldPin(person, String(body.currentPin ?? ''), { type: 'person', value: person.id }, ip);
+    if (!checked.ok) return checked.error === 'invalid_credentials' ? { error: 'current_pin_incorrect', status: 400 } : checked;
+    if (String(body.newPin) === String(body.currentPin)) return { error: 'pin_unchanged', status: 400 };
+    await setPin(person.id, String(body.newPin));
+    await endSessions(person.id);
+    if (auditLog) {
+      await auditLog.insertAsync({ id: randomUUID(), at: new Date().toISOString(), actor: user.id, action: 'pin_changed', target: person.id, before: null, after: null });
+    }
+    // Every earlier session is over, including this one: hand back a new one.
+    await identityLink.rememberPersona(person.id, user.id);
+    return sessionForPerson(person.id);
+  }
+
+  return { login, setup, setPin, endSessions, configured, resetStart, resetConfirm, resetComplete, changePin };
 }

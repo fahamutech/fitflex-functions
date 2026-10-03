@@ -1,6 +1,6 @@
 // Composition root — every service is instantiated exactly once here with its
 // dependencies injected, then imported by the thin REST modules in functions/.
-import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose } from '../auth/jwt.mjs';
+import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose, invalidateAccountStatus } from '../auth/jwt.mjs';
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
 import { createPinAuthService } from '../services/pin-auth-service.mjs';
 import { createRegistrationService } from '../services/registration-service.mjs';
@@ -416,6 +416,7 @@ export const pinAuthService = createPinAuthService({
   db, users, codes: identifierService, identityLink: identityLinkService, auditLog,
   sessionForPerson: personId => authService.sessionForPerson(personId),
   verifyFirebasePassword: (...args) => firebasePasswordCheck.verify(...args), signPurpose, verifyPurpose,
+  forgetSession: invalidateAccountStatus,
   linkingEnabled: () => identityFlag('V2_LINKING'),
   // The key the PIN is mixed with before hashing. It must be set in production
   // and never change afterwards, or every stored PIN stops matching.
