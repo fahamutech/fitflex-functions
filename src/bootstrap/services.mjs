@@ -76,6 +76,7 @@ import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
+import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
@@ -144,11 +145,18 @@ export const trainerBookingService = createTrainerBookingService({
   }).then(out => out.refund || null),
   // A completed session may use a B2B trainer benefit; un-completing it gives the benefit back.
   // b2bConsumptionService is defined below; this only runs later.
-  onStatusChanged: ({ booking, from, actorId }) => (booking.status === 'completed'
-    ? b2bConsumptionService.consumeTrainerSession({ booking })
-    : from === 'completed'
-      ? b2bConsumptionService.releaseForSource({ sourceType: 'trainer_booking', sourceId: booking.id, reason: `booking ${booking.status}`, actorId })
-      : null),
+  // The member paid the booking in full; once a sponsor covers it, that money goes back to the member.
+  onStatusChanged: async ({ booking, from, actorId }) => {
+    if (booking.status === 'completed') {
+      const used = await b2bConsumptionService.consumeTrainerSession({ booking });
+      if (used.consumed) await b2bSponsorRefundService.onSessionConsumed({ booking, consumption: used.consumption });
+      return used;
+    }
+    if (from !== 'completed') return null;
+    const released = await b2bConsumptionService.releaseForSource({ sourceType: 'trainer_booking', sourceId: booking.id, reason: `booking ${booking.status}`, actorId });
+    if (released.released) await b2bSponsorRefundService.onSessionReleased({ booking, actorId });
+    return released;
+  },
 });
 export const trainerEngagementService = createTrainerEngagementService({
   trainerEngagements, trainers, users, trainerService,
@@ -368,6 +376,8 @@ export const refundService = createRefundService({
   notify: (userId, message) => notificationService.notify(userId, message),
   onPaid: refund => (refund.kind === 'shop_order' ? shopService.markOrderRefunded(refund.orderId) : null),
 });
+// A sponsor-covered trainer session returns what the member paid for it (no double charge).
+export const b2bSponsorRefundService = createB2BSponsorRefundService({ db, refundService, trainerBookings });
 
 // Identity V2 · I6: invitations (gym staff and trainers; no credentials set by organisations).
 export const invitationService = createInvitationService({

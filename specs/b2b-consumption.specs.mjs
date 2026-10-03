@@ -9,7 +9,7 @@ import { db } from '../src/infra/knex-store.mjs';
 import { withLedgerDelete } from './fixtures/ledger-cleanup.mjs';
 import {
   gyms, trainers, b2bService, b2bProgramService, b2bConsumptionService as usage,
-  checkInService, checkinStatusService, trainerBookingService, corporateService,
+  checkInService, checkinStatusService, trainerBookingService, corporateService, b2bSponsorRefundService, refundService,
 } from '../src/bootstrap/services.mjs';
 
 await ensureInit();
@@ -92,6 +92,8 @@ after(async () => {
     await db('CorporateEmployee').whereIn('corporateId', made.corporates).del();
     await db('CorporateAccount').whereIn('id', made.corporates).del();
   }
+  await db('AuditLog').whereIn('target', db('Refund').whereIn('memberId', made.users).select('id')).del();
+  await db('Refund').whereIn('memberId', made.users).del();
   await db('TrainerBooking').whereIn('memberId', made.users).del();
   await db('Checkin').whereIn('memberId', made.users).del();
   await db('Subscription').whereIn('memberId', made.users).del();
@@ -419,6 +421,13 @@ test('a trainer benefit is consumed when the session is completed, not when it i
   const [row] = await ledger({ sourceType: 'trainer_booking', sourceId: b1 });
   assert.deepEqual([row.status, row.providerType, row.providerId, row.grossTzs, row.sponsorTzs, row.beneficiaryTzs, row.metadata.memberPaidTzs],
     ['approved', 'trainer', trainerId, 30000, 30000, 0, 30000]);
+  // The member paid the booking in full and the sponsor now covers it: the member's money goes back, once.
+  const refundsFor = id => db('Refund').where({ bookingId: id }).orderBy('createdAt');
+  const [refund] = await refundsFor(b1);
+  assert.deepEqual([refund.status, refund.amountTzs, refund.reasonCode, refund.memberId, refund.decidedBy], ['approved', 30000, 'sponsor_paid', c.memberId, 'policy']);
+  await b2bSponsorRefundService.onSessionConsumed({ booking: done.booking, consumption: row });
+  assert.equal((await b2bSponsorRefundService.repair()).raised, 0);
+  assert.equal((await refundsFor(b1)).length, 1);
 
   // Completed by an admin instead; then un-completed, which gives the benefit back.
   const b2 = await booking();
@@ -426,6 +435,25 @@ test('a trainer benefit is consumed when the session is completed, not when it i
   assert.equal((await ledger({ sourceId: b2 }))[0].status, 'approved');
   await trainerBookingService.adminUpdateStatus({ id: b2, status: 'cancelled', actorId: ADMIN.userId });
   assert.equal((await ledger({ sourceId: b2 }))[0].status, 'reversed');
+  // Cancelled after it was covered: the member is still owed the money, through the one refund already raised.
+  assert.deepEqual((await refundsFor(b2)).map(r => [r.status, r.amountTzs]), [['approved', 30000]]);
+
+  // If the refund was not raised when the session completed, the daily run raises it.
+  const b4 = await booking();
+  await trainerBookingService.adminUpdateStatus({ id: b4, status: 'completed', actorId: ADMIN.userId });
+  await db('AuditLog').whereIn('target', db('Refund').where({ bookingId: b4 }).select('id')).del();
+  await db('Refund').where({ bookingId: b4 }).del();
+  const repaired = await b2bSponsorRefundService.repair();
+  assert.ok(repaired.raised >= 1, JSON.stringify(repaired));
+  assert.deepEqual((await refundsFor(b4)).map(r => [r.status, r.amountTzs, r.reasonCode]), [['approved', 30000, 'sponsor_paid']]);
+  // The session is no longer covered (the charge to the sponsor was taken back): an unpaid refund is withdrawn, a paid one is left alone.
+  const [r4] = await refundsFor(b4);
+  await b2bSponsorRefundService.onSessionReleased({ booking: { id: b4, status: 'confirmed' }, actorId: ADMIN.userId });
+  const [withdrawn] = await refundsFor(b4);
+  assert.deepEqual([withdrawn.id, withdrawn.status, withdrawn.decidedBy], [r4.id, 'rejected', ADMIN.userId]);
+  await refundService.markPaid({ id: refund.id, body: { paymentReference: 'MPESA-REFUND-1' }, actorId: ADMIN.userId });
+  const kept = await b2bSponsorRefundService.onSessionReleased({ booking: { id: b1, status: 'confirmed' }, actorId: ADMIN.userId });
+  assert.deepEqual([kept.alreadyPaid, (await refundsFor(b1))[0].status], [true, 'paid']);
   // Another trainer isn't covered; the booking still completes normally.
   const otherTrainer = uid('trn');
   await trainers.insertAsync({ id: otherTrainer, userId: await user('trainer'), displayName: 'Other Trainer', status: 'active', gymIds: [g.id] });
