@@ -303,19 +303,22 @@ test('/me does not expose the Person link', async () => {
 
 test('the frozen public id is read only when IDENTITY_V2 and V2_FOUNDATION are on', async () => {
   const user = await makeUser();
-  await db('User').where({ id: user.id }).update({ publicId: 'FM999' });
+  // Unique per run: a fixed code collides with a member already holding it in
+  // a database that isn't fresh. Never the computed FM<digits> form either.
+  const frozen = uniq('FMX');
+  await db('User').where({ id: user.id }).update({ publicId: frozen });
   const row = await db('User').where({ id: user.id }).first();
   const saved = { a: process.env.IDENTITY_V2, b: process.env.V2_FOUNDATION };
   try {
     delete process.env.IDENTITY_V2; delete process.env.V2_FOUNDATION;
     assert.equal(identityFlag('V2_FOUNDATION'), false);
-    assert.notEqual(await identityService.publicUserId(row), 'FM999');
+    assert.notEqual(await identityService.publicUserId(row), frozen);
     process.env.V2_FOUNDATION = 'true';
     assert.equal(identityFlag('V2_FOUNDATION'), false, 'needs the umbrella flag too');
     process.env.IDENTITY_V2 = 'true';
     assert.equal(identityFlag('V2_FOUNDATION'), true);
-    assert.equal(await identityService.publicUserId(row), 'FM999');
-    assert.notEqual(await identityService.publicUserId(row, 'trainer'), 'FM999', 'only for the row\'s own role');
+    assert.equal(await identityService.publicUserId(row), frozen);
+    assert.notEqual(await identityService.publicUserId(row, 'trainer'), frozen, 'only for the row\'s own role');
   } finally {
     if (saved.a === undefined) delete process.env.IDENTITY_V2; else process.env.IDENTITY_V2 = saved.a;
     if (saved.b === undefined) delete process.env.V2_FOUNDATION; else process.env.V2_FOUNDATION = saved.b;
