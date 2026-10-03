@@ -36,7 +36,7 @@ const MESSAGES = {
 const SUBJECTS = { en: 'Your FitFlex verification code', sw: 'Namba yako ya uthibitisho ya FitFlex' };
 
 /** { type, value } for exactly one phone or email, or null. */
-function parseIdentifier({ email, phone } = {}) {
+export function parseIdentifier({ email, phone } = {}) {
   if (email && phone) return null;
   if (email) {
     const value = normalizeEmail(email);
@@ -57,7 +57,7 @@ export function createIdentifierService({
   const sameHash = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
   const verifiedOwner = ({ type, value }) => db('LoginIdentifier')
     .where({ type, normalizedValue: value, status: 'active' }).whereNotNull('verifiedAt').first('personId');
-  const record = row => db('VerificationCode').insert({ id: `vrc_${randomUUID().replace(/-/g, '').slice(0, 12)}`, purpose: PURPOSE, ...row });
+  const record = (row, purpose = PURPOSE) => db('VerificationCode').insert({ id: `vrc_${randomUUID().replace(/-/g, '').slice(0, 12)}`, purpose, ...row });
 
   /** The Person's verified emails and phones, plus profile values not verified yet. */
   async function list({ user }) {
@@ -112,56 +112,68 @@ export function createIdentifierService({
     if (owner?.personId === user.personId) return { alreadyVerified: true, ...(await list({ user })) };
     const tooMany = await personLimited(user);
     if (tooMany) return tooMany;
-    const limits = verificationLimits();
-    const base = {
-      personId: user.personId, requestedBy: user.id, identifierType: identifier.type, identifierValue: identifier.value,
-      channel, expiresAt: new Date(Date.now() + limits.expiryMinutes * 60e3),
-    };
-
     if (owner) {
       // Counted against the limits, so this cannot be used to test many numbers.
-      await record({ ...base, outcome: 'refused' });
+      await record({
+        personId: user.personId, requestedBy: user.id, identifierType: identifier.type, identifierValue: identifier.value,
+        channel, expiresAt: new Date(Date.now() + verificationLimits().expiryMinutes * 60e3), outcome: 'refused',
+      });
       return { error: 'identifier_in_use', status: 409 };
     }
+    return sendCode({ purpose: PURPOSE, personId: user.personId, requestedBy: user.id, identifier, locale: body.locale });
+  }
+
+  /**
+   * Generate a code and send it to one identifier, for any flow (`purpose`).
+   * Limited per identifier; only its keyed hash is kept. Used here for a
+   * signed-in person, and by sign-in flows that start before there is a
+   * session (PIN adoption today; registration and PIN reset later).
+   */
+  async function sendCode({ purpose, personId = null, requestedBy = null, identifier, locale }) {
+    const channel = identifier.type === 'phone' ? 'sms' : 'email';
+    const sender = identifier.type === 'phone' ? senders.sms() : senders.email();
+    if (!sender.configured) return { error: `${channel}_not_configured`, status: 503 };
     const blocked = await identifierLimited(identifier);
     if (blocked) return blocked;
-
+    const limits = verificationLimits();
+    const base = {
+      personId, requestedBy, identifierType: identifier.type, identifierValue: identifier.value,
+      channel, expiresAt: new Date(Date.now() + limits.expiryMinutes * 60e3),
+    };
     const rowId = `vrc_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
     const code = String(randomInt(0, 10 ** limits.codeLength)).padStart(limits.codeLength, '0');
-    const locale = body.locale === 'sw' ? 'sw' : 'en';
+    const lang = locale === 'sw' ? 'sw' : 'en';
     const sent = await sender.send(identifier.value, {
-      text: MESSAGES[locale](code, limits.expiryMinutes), subject: SUBJECTS[locale],
+      text: MESSAGES[lang](code, limits.expiryMinutes), subject: SUBJECTS[lang],
     });
     if (!sent.ok) {
-      await record({ ...base, outcome: 'send_failed' });
+      await record({ ...base, outcome: 'send_failed' }, purpose);
       return { error: 'code_not_sent', status: 502 };
     }
-    // A new code replaces any earlier one for this identifier.
+    // A new code replaces any earlier one for this purpose and identifier.
     await db('VerificationCode')
-      .where({ personId: user.personId, identifierType: identifier.type, identifierValue: identifier.value, outcome: 'sent' })
+      .where({ purpose, identifierType: identifier.type, identifierValue: identifier.value, outcome: 'sent' })
+      .where(q => (personId ? q.where({ personId }) : q.whereNull('personId')))
       .whereNull('consumedAt').update({ consumedAt: db.fn.now() });
-    await db('VerificationCode').insert({ id: rowId, purpose: PURPOSE, ...base, outcome: 'sent', codeHash: hashOf(rowId, code) });
+    await db('VerificationCode').insert({ id: rowId, purpose, ...base, outcome: 'sent', codeHash: hashOf(rowId, code) });
     return {
       sent: true, channel, identifierType: identifier.type, identifierValue: identifier.value,
       expiresInSeconds: limits.expiryMinutes * 60, resendAfterSeconds: limits.resendSeconds,
     };
   }
 
-  /** Check the code; on success the identifier is verified on the caller's Person. */
-  async function confirmCode({ user, body = {} }) {
-    if (!user?.personId) return { error: 'user_not_found', status: 404 };
-    const identifier = parseIdentifier(body);
-    if (!identifier) return { error: 'one_phone_or_email_required', status: 400 };
-    const code = String(body.code ?? '').trim();
-    if (!code) return { error: 'code_required', status: 400 };
-
+  /** Check a code sent with sendCode. Returns { ok, channel } or { error, status }. */
+  async function consumeCode({ purpose, personId = null, identifier, code }) {
+    const value = String(code ?? '').trim();
+    if (!value) return { error: 'code_required', status: 400 };
     const row = await db('VerificationCode')
-      .where({ personId: user.personId, identifierType: identifier.type, identifierValue: identifier.value, outcome: 'sent' })
+      .where({ purpose, identifierType: identifier.type, identifierValue: identifier.value, outcome: 'sent' })
+      .where(q => (personId ? q.where({ personId }) : q.whereNull('personId')))
       .whereNull('consumedAt').where('expiresAt', '>', db.fn.now()).orderBy('createdAt', 'desc').first();
     if (!row) return { error: 'code_not_found_or_expired', status: 400 };
     const limits = verificationLimits();
     if (row.attempts >= limits.maxAttempts) return { error: 'code_attempts_exceeded', status: 429 };
-    if (!sameHash(hashOf(row.id, code), row.codeHash)) {
+    if (!sameHash(hashOf(row.id, value), row.codeHash)) {
       const attempts = row.attempts + 1;
       await db('VerificationCode').where({ id: row.id }).update({ attempts });
       return attempts >= limits.maxAttempts
@@ -169,6 +181,17 @@ export function createIdentifierService({
         : { error: 'code_incorrect', status: 400, attemptsLeft: limits.maxAttempts - attempts };
     }
     await db('VerificationCode').where({ id: row.id }).update({ consumedAt: db.fn.now() });
+    return { ok: true, channel: row.channel };
+  }
+
+  /** Check the code; on success the identifier is verified on the caller's Person. */
+  async function confirmCode({ user, body = {} }) {
+    if (!user?.personId) return { error: 'user_not_found', status: 404 };
+    const identifier = parseIdentifier(body);
+    if (!identifier) return { error: 'one_phone_or_email_required', status: 400 };
+    const checked = await consumeCode({ purpose: PURPOSE, personId: user.personId, identifier, code: body.code });
+    if (checked.error) return checked;
+    const row = checked;
 
     const result = await identityLink.linkOnVerifiedSignIn({
       anchorUserId: user.id, uid: null,
@@ -190,5 +213,5 @@ export function createIdentifierService({
     return { verified: true, ...(await list({ user: fresh })) };
   }
 
-  return { list, requestCode, confirmCode };
+  return { list, requestCode, confirmCode, sendCode, consumeCode };
 }

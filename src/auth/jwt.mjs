@@ -8,6 +8,17 @@ const TTL    = IS_PROD ? '7d' : '30d';
 export function sign(payload)   { return jwt.sign(payload, SECRET, { expiresIn: TTL, issuer: 'fitflex' }); }
 export function verify(token)   { try { return jwt.verify(token, SECRET, { issuer: 'fitflex' }); } catch { return null; } }
 
+// Short-lived tokens for one step of a flow (for example "this person proved
+// their old PIN; let them set a new one"). They carry `purpose` and are never
+// accepted as a session: requireAuth rejects any token that has one.
+export function signPurpose(purpose, payload, ttl = '15m') {
+  return jwt.sign({ ...payload, purpose }, SECRET, { expiresIn: ttl, issuer: 'fitflex' });
+}
+export function verifyPurpose(token, purpose) {
+  const claims = token ? verify(token) : null;
+  return claims && claims.purpose === purpose ? claims : null;
+}
+
 export function bearerFrom(req) {
   const h = req.headers?.authorization || '';
   return h.startsWith('Bearer ') ? h.slice(7) : null;
@@ -21,7 +32,10 @@ const STATUS_CACHE_MAX = 10_000;
 let accountStatusLookup = null;
 const statusCache = new Map();
 
-/** Register `async (userId) => accountStatus | null`. */
+/**
+ * Register `async (userId) => accountStatus | null`, or an object
+ * `{ status, sessionsValidAfter }` when sessions can also be ended early.
+ */
 export function registerAccountStatusLookup(fn) {
   accountStatusLookup = fn;
   statusCache.clear();
@@ -35,18 +49,21 @@ export function invalidateAccountStatus(userId) {
 async function accountStatusOf(userId) {
   if (!accountStatusLookup || !userId) return null;
   const hit = statusCache.get(userId);
-  if (hit && Date.now() - hit.at < STATUS_CACHE_MS) return hit.status;
-  let status = null;
+  if (hit && Date.now() - hit.at < STATUS_CACHE_MS) return hit;
+  let found = null;
   try {
-    status = await accountStatusLookup(userId);
+    found = await accountStatusLookup(userId);
   } catch (err) {
     // Fail open: a lookup outage must not sign every user out.
     console.warn('[auth] account status lookup failed:', err?.message);
     return null;
   }
+  const entry = found && typeof found === 'object'
+    ? { status: found.status ?? null, validAfter: found.sessionsValidAfter ? +new Date(found.sessionsValidAfter) : null, at: Date.now() }
+    : { status: found, validAfter: null, at: Date.now() };
   if (statusCache.size >= STATUS_CACHE_MAX) statusCache.clear();
-  statusCache.set(userId, { status, at: Date.now() });
-  return status;
+  statusCache.set(userId, entry);
+  return entry;
 }
 
 /** Express middleware factory. Pass allowed user_type roles. Empty = any authenticated. */
@@ -54,12 +71,18 @@ export function requireAuth(...roles) {
   return async (req, res, next) => {
     const token = bearerFrom(req);
     const claims = token && verify(token);
-    if (!claims) return res.status(401).json({ error: 'unauthenticated' });
+    // A single-step token (signPurpose) is never a session.
+    if (!claims || claims.purpose) return res.status(401).json({ error: 'unauthenticated' });
     if (roles.length && !roles.includes(claims.userType)) {
       return res.status(403).json({ error: 'forbidden', requiredRoles: roles });
     }
-    if (await accountStatusOf(claims.sub) === 'suspended') {
+    const account = await accountStatusOf(claims.sub);
+    if (account?.status === 'suspended') {
       return res.status(403).json({ error: 'account_suspended' });
+    }
+    // Sessions issued before the person reset or changed their PIN are over.
+    if (account?.validAfter && Number(claims.iat) * 1000 < account.validAfter) {
+      return res.status(401).json({ error: 'session_ended' });
     }
     req.user = claims;
     next();

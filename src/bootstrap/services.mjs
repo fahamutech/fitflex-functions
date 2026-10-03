@@ -1,6 +1,8 @@
 // Composition root — every service is instantiated exactly once here with its
 // dependencies injected, then imported by the thin REST modules in functions/.
-import { sign as signJwt, registerAccountStatusLookup } from '../auth/jwt.mjs';
+import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose } from '../auth/jwt.mjs';
+import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
+import { createPinAuthService } from '../services/pin-auth-service.mjs';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
@@ -114,8 +116,10 @@ registerAccountStatusLookup(async id => {
   if (!user) return null;
   if (user.accountStatus === 'suspended') return 'suspended';
   if (user.personId) {
-    const person = await db('Person').where({ id: user.personId }).first('status');
+    const person = await db('Person').where({ id: user.personId }).first();
     if (person?.status === 'suspended') return 'suspended';
+    // I7a: sessions issued before a PIN reset or change are over.
+    if (person?.sessionsValidAfter) return { status: user.accountStatus ?? null, sessionsValidAfter: person.sessionsValidAfter };
   }
   return user.accountStatus ?? null;
 });
@@ -386,6 +390,18 @@ export const identifierService = createIdentifierService({
   secret: process.env.JWT_SECRET || 'fitflex-dev-secret-change-me',
   claimInvitations: personId => invitationService.claimFor(personId),
   linkingEnabled: () => identityFlag('V2_LINKING'),
+});
+// Identity V2 · I7a: number or email + PIN, checked by FitFlex.
+// Replaceable, so specs can stand in for Firebase.
+export const firebasePasswordCheck = { verify: verifyFirebasePassword };
+export const pinAuthService = createPinAuthService({
+  db, users, codes: identifierService, identityLink: identityLinkService, auditLog,
+  sessionForPerson: personId => authService.sessionForPerson(personId),
+  verifyFirebasePassword: (...args) => firebasePasswordCheck.verify(...args), signPurpose, verifyPurpose,
+  linkingEnabled: () => identityFlag('V2_LINKING'),
+  // The key the PIN is mixed with before hashing. It must be set in production
+  // and never change afterwards, or every stored PIN stops matching.
+  pepper: () => process.env.PIN_PEPPER || (process.env.NODE_ENV === 'production' ? null : 'fitflex-dev-pin-pepper'),
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.
