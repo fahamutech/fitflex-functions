@@ -3,6 +3,7 @@
 import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose } from '../auth/jwt.mjs';
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
 import { createPinAuthService } from '../services/pin-auth-service.mjs';
+import { createRegistrationService } from '../services/registration-service.mjs';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
@@ -412,6 +413,14 @@ export const pinAuthService = createPinAuthService({
   // The key the PIN is mixed with before hashing. It must be set in production
   // and never change afterwards, or every stored PIN stops matching.
   pepper: () => process.env.PIN_PEPPER || (process.env.NODE_ENV === 'production' ? null : 'fitflex-dev-pin-pepper'),
+});
+// Identity V2 · I7b: register with a number or email, a code, then a PIN.
+export const registrationService = createRegistrationService({
+  db, users, codes: identifierService, identityLink: identityLinkService, pinAuth: pinAuthService, auditLog,
+  sessionForPerson: personId => authService.sessionForPerson(personId),
+  approvalStatusForRole, signPurpose, verifyPurpose,
+  claimInvitations: personId => invitationService.claimFor(personId),
+  linkingEnabled: () => identityFlag('V2_LINKING'),
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.

@@ -201,5 +201,5 @@ export function createPinAuthService({
     await db('Person').where({ id: personId }).update({ sessionsValidAfter: db.fn.now(), updatedAt: db.fn.now() });
   }
 
-  return { login, setup, setPin, endSessions };
+  return { login, setup, setPin, endSessions, configured };
 }
