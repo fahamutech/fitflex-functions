@@ -5,6 +5,8 @@
 export const IDENTITY_V2_FLAGS = [
   'V2_FOUNDATION', 'V2_LINKING', 'V2_PERSONAS', 'V2_ADD_PERSONA',
   'V2_ORG_WRITE', 'V2_ORG_AUTHZ', 'V2_IDENTIFIERS', 'V2_INVITES', 'V2_RECOVERY',
+  // I7 (design confirmed 2 Oct 2026): FitFlex keeps the PIN; sign-in with number or email + PIN.
+  'V2_PIN_LOGIN',
 ];
 
 const TRUE_VALUES = new Set(['1', 'true', 'on', 'yes']);
