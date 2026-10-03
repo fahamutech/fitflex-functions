@@ -12,10 +12,11 @@ import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import {
   partnerGate, trainerService, trainerBookingService, ownerGymService, gymService, shopService,
-  checkInService, adminApprovalService, partnerKycService, trainers, gyms,
+  checkInService, adminApprovalService, partnerKycService, trainers, gyms, trainerClientService, memberManagement,
+  partnerVerifiedFor,
 } from '../src/bootstrap/services.mjs';
 import { createPartnerGate, OPEN_GATE, ENFORCEMENT_START } from '../src/services/partner-gate.mjs';
-import { getGym } from '../functions/gyms.mjs';
+import { getGym, listGyms } from '../functions/gyms.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 
 await ensureInit();
@@ -108,19 +109,51 @@ test('existing partners are exempt; new ones need an approved or suspended case'
 
 // ── Trainers ────────────────────────────────────────────────────────────────
 
-test('a new trainer is hidden, unbookable and can\'t apply to gyms until verified', async () => {
+test('a new trainer is listed as not verified, after verified ones, and cannot be booked, connected with or apply to gyms', async () => {
   const t = await makeTrainer();
-  const listed = async () => (await trainerService.listPublic({})).some(r => r.id === t.trainerId);
-  assert.equal(await listed(), false);
-  assert.equal(await trainerService.getPublic(t.trainerId), null);
-  assert.equal((await trainerBookingService.publicSchedule({ trainerId: t.trainerId, days: 7 })).error, 'trainer_not_found');
+  const verifiedTrainer = await makeTrainer();
+  await approveCase(verifiedTrainer.userId, 'trainer');
+  const memberId = await makeUser('member', { approvalStatus: 'approved' });
+
+  const list = await trainerService.listPublic({});
+  const mine = list.find(r => r.id === t.trainerId);
+  assert.ok(mine, 'an unverified trainer is listed');
+  assert.equal(mine.verified, false);
+  assert.equal(mine.bookable, false);
+  const other = list.find(r => r.id === verifiedTrainer.trainerId);
+  assert.equal(other.verified, true);
+  assert.equal(other.bookable, true);
+  assert.ok(list.indexOf(other) < list.indexOf(mine), 'verified trainers come first');
+  const lastVerified = list.map(r => r.verified === true).lastIndexOf(true);
+  const firstUnverified = list.findIndex(r => r.verified !== true);
+  assert.ok(lastVerified < firstUnverified, 'no unverified trainer is listed above a verified one');
+
+  const shown = await trainerService.getPublic(t.trainerId);
+  assert.equal(shown.verified, false);
+  assert.equal(shown.bookable, false);
+  // What the trainer's own session and /me report.
+  assert.equal(await partnerVerifiedFor({ id: t.userId, userType: 'trainer' }), false);
+  assert.equal(await partnerVerifiedFor({ id: memberId, userType: 'member' }), undefined);
+
+  const schedule = await trainerBookingService.publicSchedule({ trainerId: t.trainerId, days: 7 });
+  assert.deepEqual([schedule.error, schedule.status], ['trainer_not_verified', 403]);
+  const quote = await trainerBookingService.quoteBooking({ memberId, body: { trainerId: t.trainerId, gymId: t.gymId, date: '2030-01-07', slot: '09:00' } });
+  assert.deepEqual([quote.error, quote.status], ['trainer_not_verified', 403]);
+  const connect = await trainerClientService.request(memberId, t.trainerId, {});
+  assert.deepEqual([connect.error, connect.status], ['trainer_not_verified', 403]);
+  assert.equal(await db('TrainerMemberRelationship').where({ trainerId: t.trainerId }).first(), undefined);
   const apply = await trainerService.applyToGym({ userId: t.userId, gymId: await makeGym() });
   assert.deepEqual([apply.error, apply.status], ['verification_required', 403]);
 
   await approveCase(t.userId, 'trainer');
-  assert.equal(await listed(), true);
-  assert.ok(await trainerService.getPublic(t.trainerId));
+  assert.equal(await partnerVerifiedFor({ id: t.userId, userType: 'trainer' }), true);
+  const after = await trainerService.getPublic(t.trainerId);
+  assert.equal(after.verified, true);
+  assert.equal(after.bookable, true);
   assert.ok(!(await trainerBookingService.publicSchedule({ trainerId: t.trainerId, days: 7 })).error);
+  const connected = await trainerClientService.request(memberId, t.trainerId, {});
+  assert.ok(!connected.error, JSON.stringify(connected));
+  await db('TrainerMemberRelationship').where({ trainerId: t.trainerId }).del();
   assert.ok(!(await trainerService.applyToGym({ userId: t.userId, gymId: await makeGym() })).error);
 });
 
@@ -133,42 +166,63 @@ test('an existing trainer keeps working even while still pending approval', asyn
 
 // ── Gym owners ──────────────────────────────────────────────────────────────
 
-test('a new owner\'s gyms wait for KYC: hidden, no check-ins, then open on approval', async () => {
+test('a new owner\'s gym is active and listed as not verified; only its own members check in until the owner is verified', async () => {
   const ownerId = await makeUser('gym_operator');
   const owner = await db('User').where('id', ownerId).first();
   const reg = await ownerGymService.registerOwner({ user: owner, body: { gyms: [{ name: 'Waiting Gym', tier: 'standard', location: 'Sinza' }] } });
   const gymId = reg.gymIds[0];
   created.gyms.push(gymId);
-  assert.equal(reg.gyms[0].status, 'pending_verification');
+  assert.equal(reg.gyms[0].status, 'active', 'active at once');
 
-  assert.equal((await gymService.listActiveAsync()).some(g => g.id === gymId), false);
-  const call = async (claims) => {
+  // Public, and marked not verified.
+  assert.equal((await gymService.listActiveAsync()).some(g => g.id === gymId), true);
+  const view = async () => {
     const out = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
-    await getGym.onRequest({ params: { id: gymId }, headers: claims ? { authorization: `Bearer ${sign(claims)}` } : {} }, out);
-    return out.statusCode;
+    await getGym.onRequest({ params: { id: gymId }, headers: {} }, out);
+    return out;
   };
-  assert.equal(await call(null), 404);
-  assert.equal(await call({ sub: 'm', userType: 'member' }), 404);
-  assert.equal(await call({ sub: 'a', userType: 'admin' }), 200);
+  assert.equal((await view()).statusCode, 200);
+  assert.equal((await view()).body.verified, false);
+  assert.equal(await partnerGate.isGymOperational(gymId), false);
 
-  const memberId = await makeUser('member', { approvalStatus: 'approved' });
-  assert.deepEqual(await checkInService.perform({ memberId, gymId }), { ok: false, failure: 'gym_not_verified' });
+  // The public list puts verified gyms first.
+  const listed = { body: null, status() { return this; }, json(b) { this.body = b; return this; } };
+  await listGyms.onRequest({ headers: {} }, listed);
+  const lastVerified = listed.body.map(g => g.verified === true).lastIndexOf(true);
+  const firstUnverified = listed.body.findIndex(g => g.verified !== true);
+  assert.ok(firstUnverified >= 0 && lastVerified < firstUnverified, 'no unverified gym is listed above a verified one');
 
-  // Approval (here by a super-admin override) opens the gym.
+  // A FitFlex Pass member (here, anyone who is not this gym's own member) is refused.
+  const passMember = await makeUser('member', { approvalStatus: 'approved' });
+  assert.deepEqual(await checkInService.perform({ memberId: passMember, gymId }), { ok: false, failure: 'gym_not_verified' });
+  const now = new Date();
+  await db('Subscription').insert({
+    id: uid('sub'), memberId: passMember, tier: 'standard', type: 'platform_pass', status: 'active',
+    startedAt: now, cycleStartedAt: now, renewsAt: new Date(+now + 30 * 86400e3), expiresAt: new Date(+now + 30 * 86400e3), createdAt: now,
+  });
+  assert.deepEqual(await checkInService.perform({ memberId: passMember, gymId }), { ok: false, failure: 'gym_not_verified' });
+
+  // The gym's own direct member still gets in.
+  const ownMember = await makeUser('member', { approvalStatus: 'approved' });
+  await memberManagement.activateDirectMembership({
+    memberId: ownMember, gymId, tier: 'standard', startDate: now.toISOString(),
+    endDate: new Date(+now + 30 * 86400e3).toISOString(), paidAmount: 0,
+  });
+  const own = await checkInService.perform({ memberId: ownMember, gymId });
+  assert.notEqual(own.failure, 'gym_not_verified', JSON.stringify(own));
+
+  // Approval (here by a super-admin override) opens the gym to pass members.
   const caseId = uid('kyc');
   await db('PartnerKycCase').insert({ id: caseId, partnerType: 'gym_owner', userId: ownerId, status: 'in_review', tier: 3, updatedAt: new Date() });
   const approved = await partnerKycService.decide(caseId, { decision: 'approve', override: true, reasonNote: 'Pilot gym seen in person.' }, superAdmin);
   assert.equal(approved.case.status, 'approved');
-  assert.equal((await gyms.findByIdAsync(gymId)).status, 'active');
-  assert.equal((await gymService.listActiveAsync()).some(g => g.id === gymId), true);
-  assert.equal(await call(null), 200);
+  assert.equal(await partnerGate.isGymOperational(gymId), true);
+  assert.equal((await view()).body.verified, true);
+  const pass = await checkInService.perform({ memberId: passMember, gymId });
+  assert.notEqual(pass.failure, 'gym_not_verified', JSON.stringify(pass));
 
-  // A verified owner's next gym opens at once.
-  const again = await db('User').where('id', ownerId).first();
-  await ownerGymService.createGym({ owner: again, body: { name: 'Second Gym', tier: 'standard', location: 'Mbezi' } });
-  const second = (await db('User').where('id', ownerId).first()).gymIds.find(id => id !== gymId);
-  created.gyms.push(second);
-  assert.equal((await gyms.findByIdAsync(second)).status, 'active');
+  await db('Checkin').whereIn('memberId', [passMember, ownMember]).del();
+  await db('Subscription').whereIn('memberId', [passMember, ownMember]).del();
 });
 
 test('an existing owner\'s new gym opens at once', async () => {

@@ -34,7 +34,9 @@ export function normalizeRequestedRole(role) {
 const SCRYPT_PASSWORD_ROLES = new Set(['vendor_staff', 'corporate_hr']);
 
 export function approvalStatusForRole(role) {
-  return ['gym_operator', 'trainer', 'vendor'].includes(role) ? 'pending_approval' : 'approved';
+  // Trainers and gym owners are active at once and shown as not verified
+  // until their KYC is approved (3 Oct 2026). Vendors still wait for approval.
+  return role === 'vendor' ? 'pending_approval' : 'approved';
 }
 
 // Clients that understand persons and personas identify themselves with this

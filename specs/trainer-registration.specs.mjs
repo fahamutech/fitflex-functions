@@ -92,7 +92,7 @@ test('trainerRegister: succeeds with photoUrl and gender present', async () => {
   assert.equal(out.body.displayName, 'Baraka Kocha');
   assert.equal(out.body.photoUrl, 'https://example.com/baraka.jpg');
   assert.equal(out.body.gender, 'male');
-  assert.equal(out.body.approvalStatus, 'pending_approval');
+  assert.equal(out.body.approvalStatus, 'approved');
 });
 
 test('trainerRegister: stores gender in profile and returns it', async () => {

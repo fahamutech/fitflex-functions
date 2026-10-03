@@ -44,7 +44,8 @@ test('B.2: a self-registering trainer can sign in via Firebase email/PIN and get
   assert.equal(sessionRes.statusCode, 200, `firebase session should succeed for trainer email, got: ${JSON.stringify(sessionRes.body)}`);
   assert.equal(sessionRes.body.user.userType, 'trainer');
   assert.equal(sessionRes.body.user.email, trainerEmail);
-  assert.equal(sessionRes.body.user.approvalStatus, 'pending_approval', 'new trainers await admin approval before onboarding');
+  assert.equal(sessionRes.body.user.approvalStatus, 'approved', 'a new trainer is active at once');
+  assert.equal(typeof sessionRes.body.partnerVerified, 'boolean', 'whether they are verified yet rides along');
   assert.ok(sessionRes.body.token, 'should return a JWT token');
 });
 

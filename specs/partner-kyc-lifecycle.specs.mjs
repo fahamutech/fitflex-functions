@@ -136,7 +136,7 @@ test('trainers: existing ones keep their badge, new ones get it from KYC', async
   const byId = Object.fromEntries((await trainerService.listPublic({})).map(t => [t.id, t.verified]));
   assert.equal(byId[old.id], true);
   assert.equal(byId[fresh.id], true);
-  assert.equal(byId[plain.id], undefined); // not approved yet: not listed at all
+  assert.equal(byId[plain.id], false); // not approved yet: listed, without the badge
   assert.equal((await trainerService.getPublic(fresh.id)).verified, true);
 });
 

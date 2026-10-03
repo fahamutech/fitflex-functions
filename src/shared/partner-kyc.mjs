@@ -81,10 +81,12 @@ export const REASON_CODES = [
 // The existing coarse gate every app already reads (User.approvalStatus),
 // derived from the case so the two never disagree. Suspension is expressed
 // through accountStatus/payout holds, not by un-approving the role.
-export function approvalStatusForCase(caseStatus) {
+// Trainers and gym owners are active while their case is still open (they
+// show as not verified); only vendors wait for approval (3 Oct 2026).
+export function approvalStatusForCase(caseStatus, partnerType = null) {
   if (caseStatus === 'approved' || caseStatus === 'suspended') return 'approved';
   if (caseStatus === 'rejected') return 'rejected';
-  return 'pending_approval';
+  return partnerType === 'trainer' || partnerType === 'gym_owner' ? 'approved' : 'pending_approval';
 }
 
 // ── People (identity, beneficial owners, representatives) ──────────────────

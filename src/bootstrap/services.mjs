@@ -123,6 +123,10 @@ registerAccountStatusLookup(async id => {
 export const identityService = createIdentityService({ users });
 // KYC enforcement for partners created from the enforcement start; existing ones are exempt.
 export const partnerGate = createPartnerGate({ users, partnerKycCases });
+/** For a trainer or gym owner: is their own verification approved? Undefined for other roles. */
+export const partnerVerifiedFor = async user => (
+  ['trainer', 'gym_operator'].includes(user?.userType) ? partnerGate.isOperational(user.id) : undefined
+);
 const { resolveRequestUser, publicUserId } = identityService;
 
 export const settingsService = createSettingsService({ platformSettings, auditLog });
@@ -222,6 +226,8 @@ export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
+  // Until a gym's owner is verified, only the gym's own members check in there.
+  gymOpenToPass: gymId => partnerGate.isGymOperational(gymId),
 });
 // Gym settlement configuration (settlement Phase 2): not used by any payout flow yet.
 export const settlementConfigService = createSettlementConfigService();
@@ -439,7 +445,7 @@ export const challengeRewardService = createChallengeRewardService({
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const trainerClientService = createTrainerClientService({
-  relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals,
+  relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals, partnerGate,
   notify: (userId, message) => notificationService.notify(userId, message),
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
   challenges, participants: challengeParticipants,

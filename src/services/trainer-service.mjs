@@ -76,18 +76,24 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       .sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0));
   }
 
-  /** Trainers members can see: new trainers only once their KYC is approved. */
+  /**
+   * Trainers members can see. Every active trainer is listed; `verified` is
+   * the badge and `bookable` says whether they can be booked or connected
+   * with yet (a new trainer cannot until their KYC is approved). Verified
+   * trainers come first, each group in its usual order.
+   */
   async function listPublic(query) {
     const rows = list(query);
     const ok = await partnerGate.operationalUserIds(rows.map(t => t.userId));
-    return partnerGate.badgeTrainers(rows.filter(t => !t.userId || ok.has(t.userId)));
+    const shown = (await partnerGate.badgeTrainers(rows)).map(t => ({ ...t, bookable: !t.userId || ok.has(t.userId) }));
+    return [...shown.filter(t => t.verified === true), ...shown.filter(t => t.verified !== true)];
   }
 
   async function getPublic(id) {
     const trainer = getActive(id);
-    if (!trainer || !(await partnerGate.isOperational(trainer.userId))) return null;
+    if (!trainer) return null;
     const [shown] = await partnerGate.badgeTrainers([trainer]);
-    return shown;
+    return { ...shown, bookable: await partnerGate.isOperational(trainer.userId) };
   }
 
   function getActive(id) {
@@ -187,7 +193,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       displayName: body.displayName || user.displayName,
       photoUrl: body.photoUrl || user.photoUrl,
       status: 'active',
-      approvalStatus: 'pending_approval',
+      // The profile is active at once; verification is the trainer's KYC (3 Oct 2026).
+      approvalStatus: 'approved',
     }, profile || {});
     await trainers.upsertAsync(t => t.id === row.id, row);
     return { trainer: hydrateTrainer(row), displayName: body.displayName || user.displayName };
@@ -202,7 +209,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
   async function applyToGym({ userId, gymId }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
-    // A trainer is verified before applying; the gym owner then approves.
+    // Only a verified trainer may apply; the gym owner then approves.
     if (!(await partnerGate.isOperational(userId))) return { error: 'verification_required', status: 403 };
     const gym = gyms.find(g => g.id === gymId && g.status === 'active');
     if (!gym) return { error: 'gym_not_found', status: 404 };

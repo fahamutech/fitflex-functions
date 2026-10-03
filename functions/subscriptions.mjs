@@ -1,7 +1,7 @@
 // Member-facing subscription + self-account REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { subscriptionService, accountService, resolveRequestUser } from '../src/bootstrap/services.mjs';
+import { subscriptionService, accountService, resolveRequestUser, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -31,7 +31,8 @@ export const me = {
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
-    res.json(await subscriptionService.me(user));
+    // partnerVerified: a trainer or gym owner sees whether they are verified yet.
+    res.json({ ...(await subscriptionService.me(user)), partnerVerified: await partnerVerifiedFor(user) });
   }
 };
 

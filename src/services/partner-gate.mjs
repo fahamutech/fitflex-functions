@@ -1,11 +1,18 @@
 // Partner gate — server-side KYC enforcement.
 //
 // A partner (gym owner, trainer, vendor) created on or after the enforcement
-// start must have an approved KYC case before they go live: trainers are
-// listed, bookable and can apply to gyms; gyms accept members; vendors'
-// products and store are visible. Partners who already existed before the
-// start are exempt and keep working exactly as before (ongoing usability
-// testing), whatever their approval status.
+// start is "operational" only once their KYC case is approved. Partners who
+// already existed before the start are exempt and keep working exactly as
+// before (ongoing usability testing), whatever their approval status.
+//
+// What "not operational" means differs by partner (owner decision, 3 Oct 2026):
+//   vendors   not live at all: products and store are hidden.
+//   trainers  the profile is active and listed, shown as not verified and
+//             after verified trainers, but they cannot be booked, connected
+//             with as a client, or apply to a gym.
+//   gyms      the gym is active and listed, shown as not verified and after
+//             verified gyms, but FitFlex Pass members cannot check in there
+//             (the gym's own direct members still can).
 //
 //   KYC_ENFORCEMENT=off        turns enforcement off entirely
 //   KYC_ENFORCEMENT_FROM=ISO   partners created before this are exempt
@@ -30,6 +37,7 @@ export const OPEN_GATE = Object.freeze({
   exempt: () => true,
   operationalUserIds: async ids => new Set((ids || []).filter(Boolean)),
   isOperational: async () => true,
+  isGymOperational: async () => true,
   verifiedUserIds: async () => new Set(),
   badgeGyms: async rows => rows.map(withProfile),
   badgeTrainers: async rows => rows,
@@ -71,6 +79,17 @@ export function createPartnerGate({ users, partnerKycCases, env = process.env })
   async function isOperational(userId) {
     if (!userId) return true;
     return (await operationalUserIds([userId])).has(userId);
+  }
+
+  const ownedGymIds = o => (o.gymIds?.length ? o.gymIds : [o.gymId]).filter(Boolean);
+
+  /** A gym is operational when its owner is. A gym with no owner account is left alone. */
+  async function isGymOperational(gymId) {
+    if (!gymId || !enabled()) return true;
+    const owners = (await users.filterByColumnAsync('userType', 'gym_operator')).filter(o => ownedGymIds(o).includes(gymId));
+    if (!owners.length) return true;
+    const ok = await operationalUserIds(owners.map(o => o.id));
+    return owners.some(o => ok.has(o.id));
   }
 
   /** Partners whose KYC is approved (or suspended). */
@@ -115,7 +134,7 @@ export function createPartnerGate({ users, partnerKycCases, env = process.env })
   }
 
   return {
-    enabled, start, exempt, operationalUserIds, isOperational,
+    enabled, start, exempt, operationalUserIds, isOperational, isGymOperational,
     verifiedUserIds, badgeGyms, badgeTrainers, kycCaseFor,
   };
 }
