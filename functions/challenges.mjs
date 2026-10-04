@@ -3,7 +3,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
 import {
-  challengeService as svc, corporateService, resolveRequestUser, trainers,
+  challengeService as svc, corporateService, resolveRequestUser, trainers, b2bEngagementAccess,
 } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -86,6 +86,12 @@ async function corporateCreator(req) {
     userId: req.user.sub, userType: req.user.userType, corporateIdParam: req.query?.corporateId,
   });
   return actor.error ? actor : { creatorType: 'corporate', creatorId: actor.corporateId, createdBy: req.user.sub };
+}
+
+/** A B2B organisation's own users (engagement.manage; engagement.read to look). */
+async function organizationCreator(req) {
+  const who = await b2bEngagementAccess.resolve(req);
+  return who.error ? who : { creatorType: who.type, creatorId: who.id, createdBy: req.user.sub };
 }
 
 const fitflexCreator = async req => ({ creatorType: 'fitflex', creatorId: null, createdBy: req.user.sub });
@@ -189,3 +195,16 @@ export const corporateUpdateChallenge = corpR.update;
 export const corporateCloseChallenge = corpR.close;
 export const corporateArchiveChallenge = corpR.archive;
 export const corporateChallengeLeaderboard = corpR.leaderboard;
+
+// A B2B organisation runs challenges for its own people, the same way a
+// company's HR does. A company that came from Companies shares its challenges
+// between its HR login and its organisation users.
+const orgR = creatorRoutes('/b2b/organizations/:organizationId', [requireAuth(), requireAcl('b2b')], organizationCreator, 'Organisation');
+export const organizationChallenges = orgR.list;
+export const organizationCreateChallenge = orgR.create;
+export const organizationCancelChallenge = orgR.cancel;
+export const organizationChallengeParticipants = orgR.participants;
+export const organizationUpdateChallenge = orgR.update;
+export const organizationCloseChallenge = orgR.close;
+export const organizationArchiveChallenge = orgR.archive;
+export const organizationChallengeLeaderboard = orgR.leaderboard;

@@ -2,7 +2,7 @@
 // Earned → pending → approved → issued (or rejected, with a reason).
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { challengeRewardService as svc, corporateService } from '../src/bootstrap/services.mjs';
+import { challengeRewardService as svc, corporateService, b2bEngagementAccess } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -61,6 +61,36 @@ export const corporateRewardStatus = {
   onGuard: [requireAuth('corporate_hr', 'admin'), requireAcl('corporate')],
   onRequest: async (req, res) => {
     const scope = await corporateScope(req);
+    if (scope.error) return send(res, scope);
+    send(res, await svc.setStatus(scope, req.user.sub, req.params.id, req.body || {}));
+  }
+};
+
+/** A B2B organisation's own users: the company-funded rewards their people earned. */
+async function organizationScope(req) {
+  const who = await b2bEngagementAccess.resolve(req);
+  if (who.error) return who;
+  return who.type === 'corporate' ? { kind: 'corporate', corporateId: who.id } : { kind: 'organization', organizationId: who.id };
+}
+
+export const organizationRewards = {
+  created, method: 'get', path: '/b2b/organizations/:organizationId/rewards',
+  description: 'Organisation (engagement.read): rewards its people earned in its own challenges and that it funds, to hand out. Names and reward only, never activity. ?status=&challengeId=',
+  onGuard: [requireAuth(), requireAcl('b2b')],
+  onRequest: async (req, res) => {
+    const scope = await organizationScope(req);
+    if (scope.error) return send(res, scope);
+    send(res, await svc.queue(scope, filters(req.query)));
+  }
+};
+
+export const organizationRewardStatus = {
+  created, method: 'post', path: '/b2b/organizations/:organizationId/rewards/:id/status',
+  description: 'Organisation (engagement.manage): approve, issue, reject (reason required) or reopen a reward it funds.',
+  requestSample: STATUS_SAMPLE,
+  onGuard: [requireAuth(), requireAcl('b2b')],
+  onRequest: async (req, res) => {
+    const scope = await organizationScope(req);
     if (scope.error) return send(res, scope);
     send(res, await svc.setStatus(scope, req.user.sub, req.params.id, req.body || {}));
   }

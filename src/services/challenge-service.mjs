@@ -31,14 +31,17 @@ import { normalizePermissions } from './trainer-client-service.mjs';
 import { shortName } from '../shared/public-name.mjs';
 import { normalizeGymPermissions } from './gym-sharing-service.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
+import { createCompanyDirectory, isCompanyType } from './company-directory.mjs';
 
 export const CHALLENGE_TYPES = ['steps', 'distance_km', 'workouts', 'active_minutes', 'consistency', 'gym_attendance'];
-export const CREATOR_TYPES = ['fitflex', 'trainer', 'gym', 'corporate', 'partner'];
+// `corporate` is a company from the Corporate module; `organization` is a B2B
+// organisation that never was one. They behave the same (company-directory).
+export const CREATOR_TYPES = ['fitflex', 'trainer', 'gym', 'corporate', 'organization', 'partner'];
 const VISIBILITY = ['public', 'audience'];
 // individual | teams (creator-named) | gym_vs_gym (team = member's gym,
 // FitFlex only) | department (team = employee's department, companies only)
 export const MODES = ['individual', 'teams', 'gym_vs_gym', 'department'];
-const MODE_CREATORS = { gym_vs_gym: ['fitflex'], department: ['corporate'] };
+const MODE_CREATORS = { gym_vs_gym: ['fitflex'], department: ['corporate', 'organization'] };
 const MAX_TEAMS = 20;
 export const MIN_TEAM_SIZE = 3;
 // Per-day caps keep targets plausible for the challenge length.
@@ -58,9 +61,9 @@ const MAX_TOP_N = 100;
 const REWARD_FUNDERS = {
   fitflex: ['fitflex', 'partner'],
   corporate: ['company', 'fitflex', 'partner'],
+  organization: ['company', 'fitflex', 'partner'],
 };
 const MAX_ELIGIBLE_EMPLOYEES = 2000;
-const EMPLOYEE_ELIGIBLE_STATUSES = new Set(['active', 'pending']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const isDate = s => typeof s === 'string' && DATE_RE.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
@@ -89,8 +92,16 @@ export function challengePhase(c, now) {
 export function createChallengeService({
   challenges, participants, users, trainers, gyms, relationships, gymMemberSharing, gymMemberIds,
   activities, checkins, teams = null, corporateEmployees = null, subscriptions = null, rewardAwards = null,
+  // Who belongs to a company or organisation. Built from the collections given when not passed in.
+  directory = createCompanyDirectory({ users, corporateEmployees }),
   now = () => new Date(),
 }) {
+  /** The member's person row at the challenge's company or organisation, if they have one. */
+  async function personAt(c, memberId, ctx = {}) {
+    ctx.memberships ??= await directory.membershipsOf(memberId, { membersOnly: false });
+    return ctx.memberships.find(m => m.type === c.creatorType && m.id === c.creatorId && m.person)?.person ?? null;
+  }
+
   // ── Audience ──────────────────────────────────────────────────────────────
 
   /** Can this member see (and join) the challenge? */
@@ -111,9 +122,8 @@ export function createChallengeService({
       return subs.some(sub => sub.status === 'active' && e.tiers.includes(sub.tier)
         && (!sub.expiresAt || new Date(sub.expiresAt) > today));
     }
-    if (!corporateEmployees) return false;
-    ctx.staff ??= await corporateEmployees.filterByColumnAsync('userId', memberId);
-    const me = ctx.staff.find(x => x.corporateId === c.creatorId && EMPLOYEE_ELIGIBLE_STATUSES.has(x.status));
+    if (!isCompanyType(c.creatorType)) return false;
+    const me = await personAt(c, memberId, ctx);
     if (!me) return false;
     if (e.kind === 'departments') {
       const want = new Set(e.departments.map(d => d.toLowerCase()));
@@ -134,9 +144,11 @@ export function createChallengeService({
         ctx.gyms ??= await gymMemberIds(memberId);
         return ctx.gyms.has(c.creatorId);
       }
-      case 'corporate': {
-        ctx.user ??= await users.findByIdAsync(memberId);
-        return !!ctx.user?.corporateId && ctx.user.corporateId === c.creatorId;
+      case 'corporate':
+      case 'organization': {
+        // Anyone on the company's or organisation's list, linked to their account.
+        ctx.memberships ??= await directory.membershipsOf(memberId, { membersOnly: false });
+        return ctx.memberships.some(m => m.type === c.creatorType && m.id === c.creatorId);
       }
       default: return false;
     }
@@ -202,7 +214,8 @@ export function createChallengeService({
       const g = await gyms.findByIdAsync(c.creatorId);
       return { type: 'gym', id: c.creatorId, name: g?.name ?? null };
     }
-    return { type: c.creatorType, id: c.creatorId ?? null, name: null };
+    // To a member a company and an organisation read the same: "by your company".
+    return { type: isCompanyType(c.creatorType) ? 'corporate' : c.creatorType, id: c.creatorId ?? null, name: null };
   }
 
   async function memberChallenge(memberId, id) {
@@ -242,9 +255,8 @@ export function createChallengeService({
       const gym = await gyms.findByIdAsync(gymId);
       return create({ name: gym?.name ?? 'Gym', gymId });
     }
-    // department — from the employee record at the challenge's company.
-    const staff = corporateEmployees ? await corporateEmployees.filterByColumnAsync('userId', memberId) : [];
-    const me = staff.find(e => e.corporateId === c.creatorId);
+    // department — from the member's record at the challenge's company or organisation.
+    const me = await personAt(c, memberId);
     const department = me?.department?.trim() || 'Other';
     const existing = list.find(x => x.department === department);
     return existing ? { teamId: existing.id } : create({ name: department, department });
@@ -482,9 +494,8 @@ export function createChallengeService({
       if (!tiers.length || !tiers.every(t => t in PASS_TIERS)) return { error: 'invalid_eligibility', status: 400 };
       return { eligibility: { kind: 'tiers', tiers } };
     }
-    if (creator.creatorType === 'corporate' && corporateEmployees) {
-      const staff = (await corporateEmployees.filterByColumnAsync('corporateId', creator.creatorId))
-        .filter(x => EMPLOYEE_ELIGIBLE_STATUSES.has(x.status));
+    if (isCompanyType(creator.creatorType)) {
+      const staff = await directory.peopleOf(creator.creatorType, creator.creatorId);
       if (raw.kind === 'departments') {
         const known = new Map(staff.filter(x => x.department).map(x => [x.department.toLowerCase(), x.department]));
         const wanted = Array.isArray(raw.departments) ? raw.departments.map(d => text(d, 60)).filter(Boolean) : [];
@@ -658,7 +669,7 @@ export function createChallengeService({
       }
       return (await users.filterByColumnAsync('userType', 'member')).length;
     }
-    if (c.creatorType === 'corporate' && corporateEmployees) {
+    if (isCompanyType(c.creatorType)) {
       return (await eligibleStaff(c)).length;
     }
     return null;
@@ -666,8 +677,7 @@ export function createChallengeService({
 
   async function eligibleStaff(c) {
     const e = c.eligibility;
-    const staff = (await corporateEmployees.filterByColumnAsync('corporateId', c.creatorId))
-      .filter(x => EMPLOYEE_ELIGIBLE_STATUSES.has(x.status));
+    const staff = await directory.peopleOf(c.creatorType, c.creatorId);
     if (e?.kind === 'departments') {
       const want = new Set(e.departments.map(d => d.toLowerCase()));
       return staff.filter(x => x.department && want.has(x.department.toLowerCase()));
@@ -706,7 +716,7 @@ export function createChallengeService({
     const c = await owned(creator, id);
     if (!c) return { error: 'not_found', status: 404 };
     const joined = (await participants.filterByColumnAsync('challengeId', id)).filter(p => p.status === 'joined');
-    if (creator.creatorType === 'fitflex' || creator.creatorType === 'corporate') {
+    if (creator.creatorType === 'fitflex' || isCompanyType(creator.creatorType)) {
       let completed = 0, sum = 0;
       const fractions = new Map();
       for (const p of joined) {
@@ -726,7 +736,7 @@ export function createChallengeService({
         completionRate: pct(completed, joined.length),
         averageProgress: joined.length ? Math.round((sum / joined.length) * 100) / 100 : 0,
       };
-      if (c.creatorType !== 'corporate' || !corporateEmployees) return { summary };
+      if (!isCompanyType(c.creatorType)) return { summary };
       // By department, for HR. Groups smaller than MIN_TEAM_SIZE are folded
       // together so no one person's numbers show.
       const staff = await eligibleStaff(c);

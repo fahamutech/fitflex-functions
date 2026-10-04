@@ -83,6 +83,8 @@ import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
+import { createCompanyDirectory } from '../services/company-directory.mjs';
+import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
@@ -230,6 +232,8 @@ export const b2bBillingService = createB2BBillingService({
   },
   settlementsOf: invoiceId => b2bFinanceService.settlementsOf(invoiceId),
 });
+// Challenges, rewards and groups run by a B2B organisation's own users.
+export const b2bEngagementAccess = createB2BEngagementAccess({ b2bService });
 // B2B billing and financial management (Phase 5): agreements, payments and allocation, notes, statements, reconciliation.
 export const b2bFinanceService = createB2BFinanceService({ db, users, b2bService, billing: b2bBillingService });
 
@@ -357,7 +361,10 @@ export const whatsAppService = createWhatsAppService({
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
 export const favoriteService = createFavoriteService({ users, gyms });
 // Sharing activities between members (mutual follows, groups, company).
+// Who belongs to a company or organisation: one lookup for challenges, rewards and groups.
+export const companyDirectory = createCompanyDirectory({ users, corporateEmployees, beneficiaries: b2bBeneficiaries });
 export const socialService = createSocialService({
+  directory: companyDirectory,
   users, activities, follows, blocks, profiles: socialProfiles, groups: socialGroups,
   groupMembers: socialGroupMembers, kudos: activityKudos, comments: activityComments, views: activityViews, reports: socialReports,
   auditLog,
@@ -381,6 +388,7 @@ export const challengeService = createChallengeService({
   relationships: trainerMemberRelationships, gymMemberSharing,
   gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
   activities, checkins, teams: challengeTeams, corporateEmployees, subscriptions, rewardAwards: challengeRewards,
+  directory: companyDirectory,
 });
 
 // Internal product analytics (admin portal only).
@@ -534,7 +542,7 @@ export const communicationPreferenceService = createCommunicationPreferenceServi
 });
 export const challengeRewardService = createChallengeRewardService({
   challenges, participants: challengeParticipants, awards: challengeRewards, users, corporateEmployees,
-  challengeService, auditLog,
+  challengeService, auditLog, directory: companyDirectory,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const trainerClientService = createTrainerClientService({
