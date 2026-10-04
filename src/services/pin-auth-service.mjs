@@ -390,5 +390,19 @@ export function createPinAuthService({
     return sessionForPerson(person.id);
   }
 
-  return { login, setup, setPin, endSessions, configured, resetStart, resetConfirm, resetComplete, changePin, startPinHash, onboarding, enter };
+  /**
+   * Check a signed-in person's PIN before something sensitive (changing the
+   * number or email they sign in with). Wrong PINs count toward the lockout.
+   */
+  async function verifyPin({ personId, pin, ip = null }) {
+    if (!configured()) return { error: 'pin_not_configured', status: 503 };
+    const person = await db('Person').where({ id: personId })
+      .first('id', 'status', 'pinHash', 'pinFailedCount', 'pinLockedUntil');
+    if (!person?.pinHash) return { error: 'pin_not_set', status: 409 };
+    const checked = await checkHeldPin(person, String(pin ?? ''), { type: 'person', value: person.id }, ip);
+    if (checked.ok) return { ok: true };
+    return checked.error === 'invalid_credentials' ? { error: 'pin_incorrect', status: 400 } : checked;
+  }
+
+  return { login, setup, setPin, endSessions, configured, resetStart, resetConfirm, resetComplete, changePin, startPinHash, onboarding, enter, verifyPin };
 }
