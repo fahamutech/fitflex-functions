@@ -266,8 +266,23 @@ export function createFinanceService({ gyms, checkins, invoices, users, gymPayou
     return result.reverse(); // newest first
   }
 
-  async function bookKeeping({ paymentRequests }) {
+  /**
+   * @param sponsorPayments optional `async () => rows` of money received from
+   *   B2B organisations ({ id, number, amountTzs, reference, receivedAt,
+   *   organizationName }). When given, those are the income entries for
+   *   sponsors, and the `sponsor_invoice` payment rows that mirror them on a
+   *   sponsored pass are left out so the same money is not counted twice.
+   */
+  async function bookKeeping({ paymentRequests, sponsorPayments = null }) {
     const entries = [];
+    const fromSponsors = sponsorPayments ? await sponsorPayments() : null;
+    for (const p of fromSponsors ?? []) {
+      entries.push({
+        id: p.id, date: p.receivedAt, type: 'income', category: 'b2b',
+        description: `B2B payment ${p.number} — ${p.organizationName || 'organisation'}`,
+        amount: p.amountTzs || 0, reference: p.reference,
+      });
+    }
 
     // Batch-fetch approved payments and their members in parallel instead of
     // one findByIdAsync per row (was N+1: ~150 approved payments = ~150
@@ -282,6 +297,7 @@ export function createFinanceService({ gyms, checkins, invoices, users, gymPayou
     const memberById = new Map(memberRows.map(u => [u.id, u]));
 
     for (const p of approvedPayments) {
+      if (fromSponsors && p.provider === 'sponsor_invoice') continue;   // counted above, as the organisation's payment
       const member = memberById.get(p.memberId) || null;
       entries.push({
         id: p.id,

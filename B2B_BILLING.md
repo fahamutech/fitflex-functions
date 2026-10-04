@@ -1,6 +1,6 @@
 # B2B Sponsor Billing
 
-What organisations and their beneficiaries are charged. It builds on [programmes and benefits](B2B_PROGRAMS.md) and the [consumption ledger](B2B_CONSUMPTION.md).
+What organisations and their beneficiaries are charged: the invoice engine. Agreements, payment terms, payments and allocation, credit and debit notes, statements and reconciliation are in [B2B_FINANCE.md](B2B_FINANCE.md) (Phase 5). It builds on [programmes and benefits](B2B_PROGRAMS.md) and the [consumption ledger](B2B_CONSUMPTION.md).
 
 This is the **sponsor side** only. What gyms are paid is the gym settlement engine's job (`src/shared/settlement-*`, `src/services/settlement-*`), which this does not change. Trainer and vendor settlement are not built.
 
@@ -80,9 +80,11 @@ One row per benefit, beneficiary and month. It snapshots the list price, discoun
 ## 5. Invoices: `B2BSponsorInvoice` and `B2BSponsorInvoiceLine`
 
 ```
-draft ──► issued ──► paid
+draft ──► issued ──► partially_paid ──► paid
    └────────┴──────► void
 ```
+
+Since Phase 5 an invoice gets its number and due date on issue, is settled by payments allocated to it (in part or in full), and is corrected by credit and debit notes. See [B2B_FINANCE.md](B2B_FINANCE.md).
 
 | Step | Who | Effect |
 |---|---|---|
@@ -104,7 +106,7 @@ draft ──► issued ──► paid
 - the person who issued an invoice is not the person who recorded it paid;
 - rows are never deleted: a `BEFORE DELETE` trigger on consumptions, invoices, lines and entitlements refuses it. Maintenance opts in for one transaction with `SET LOCAL fitflex.allow_ledger_delete = 'on'`.
 
-**VAT.** Amounts are VAT-inclusive whole TZS. On issue, `vatRateBps` is recorded and `vatTzs = total × rate / (10000 + rate)`, rounded. The rate must be given explicitly (0 for none); there is no default. Whether the settlement cap is taken on the VAT-inclusive or net amount is the settlement engine's open decision (DR-05), not decided here.
+**VAT.** Amounts are VAT-inclusive whole TZS. On issue, `vatRateBps` is recorded and `vatTzs = total × rate / (10000 + rate)`, rounded. The rate must be given explicitly (0 for none), unless the organisation's commercial agreement carries one. A credit carries VAT of the opposite sign. Whether the settlement cap is taken on the VAT-inclusive or net amount is the settlement engine's open decision (DR-05), not decided here.
 
 ## 6. Corporate seats
 

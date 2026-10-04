@@ -7,11 +7,18 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
 const requireAdmin = [requireAuth('admin'), requireAcl('b2b')];
+// B2B billing (Phase 5). Three separate grants for portal staff: raising and
+// issuing invoices; approving corrections and reversals; recording payments.
+const requireBilling = [requireAuth('admin'), requireAcl('b2b_billing')];
+const requireBillingApproval = [requireAuth('admin'), requireAcl('b2b_billing_approve')];
+const requirePayments = [requireAuth('admin'), requireAcl('b2b_payments')];
+// Reading billing: any of the B2B grants.
+const requireBillingRead = [requireAuth('admin'), requireAcl('b2b_billing', 'b2b', 'b2b_billing_approve', 'b2b_payments')];
 // Any signed-in user; the organisation membership check happens per request.
 const requireOrgAccess = [requireAuth(), requireAcl('b2b')];
 
@@ -384,7 +391,7 @@ export const adminPrepareB2BInvoice = {
   created, method: 'post', path: '/admin/b2b/programs/:programId/invoices/prepare',
   description: 'Admin: add what is not yet invoiced to the programme\'s draft invoice. kind "prepaid": everyone nominated for a sponsored pass in this or next month. kind "usage": the sponsor\'s share of approved per-use consumption in a month that has ended, plus credits for usage reversed since. Safe to repeat.',
   requestSample: { kind: 'prepaid', period: '2026-11' },
-  onGuard: requireAdmin,
+  onGuard: requireBilling,
   onRequest: async (req, res) => {
     const args = { programId: req.params.programId, period: req.body?.period, actorId: req.user.sub };
     if (req.body?.kind === 'prepaid') return send(res, await billing.preparePrepaid(args));
@@ -396,30 +403,30 @@ export const adminPrepareB2BInvoice = {
 export const adminListB2BInvoices = {
   created, method: 'get', path: '/admin/b2b/invoices',
   description: 'Admin: sponsor invoices across organisations. Query: ?organizationId=&programId=&period=&kind=&status=&limit=&cursor=.',
-  onGuard: requireAdmin,
+  onGuard: requireBillingRead,
   onRequest: async (req, res) => send(res, await billing.adminListInvoices({ query: req.query || {} })),
 };
 
 export const adminGetB2BInvoice = {
   created, method: 'get', path: '/admin/b2b/invoices/:invoiceId',
   description: 'Admin: one sponsor invoice with every line.',
-  onGuard: requireAdmin,
+  onGuard: requireBillingRead,
   onRequest: async (req, res) => send(res, await billing.getInvoice({ invoiceId: req.params.invoiceId })),
 };
 
 export const adminIssueB2BInvoice = {
   created, method: 'post', path: '/admin/b2b/invoices/:invoiceId/issue',
-  description: 'Admin: issue a draft invoice. Its figures freeze. Amounts are VAT-inclusive; state the VAT rate in basis points (1800 = 18%, 0 = none).',
+  description: 'Admin (b2b_billing): issue a draft invoice. Its figures freeze, it gets its number (FF-INV-YYYY-NNNNNN) and its due date from the organisation\'s agreement, and the terms in force are kept on it. Amounts are VAT-inclusive; state the VAT rate in basis points (1800 = 18%, 0 = none), or leave it out to use the agreement\'s rate. A credit or debit note is issued with POST /admin/b2b/notes/:noteId/issue.',
   requestSample: { vatRateBps: 1800 },
-  onGuard: requireAdmin,
+  onGuard: requireBilling,
   onRequest: async (req, res) => send(res, await billing.issueInvoice({ invoiceId: req.params.invoiceId, vatRateBps: req.body?.vatRateBps, actorId: req.user.sub })),
 };
 
 export const adminMarkB2BInvoicePaid = {
   created, method: 'post', path: '/admin/b2b/invoices/:invoiceId/paid',
-  description: 'Admin: record the sponsor\'s payment against a reference. Paying a prepaid invoice starts fully sponsored passes and lets members unlock the rest.',
+  description: 'Admin (b2b_payments): settle an invoice in full against one payment reference. A shortcut for recording a payment for what is owed and allocating it; use POST /admin/b2b/organizations/:id/payments for part payments or one payment covering several invoices. The person who issued the invoice cannot do this. Paying a prepaid invoice starts fully sponsored passes and lets members unlock the rest.',
   requestSample: { paymentReference: 'BANK-TRF-00123' },
-  onGuard: requireAdmin,
+  onGuard: requirePayments,
   onRequest: async (req, res) => send(res, await billing.markPaid({ invoiceId: req.params.invoiceId, paymentReference: req.body?.paymentReference, actorId: req.user.sub })),
 };
 
@@ -427,14 +434,14 @@ export const adminVoidB2BInvoice = {
   created, method: 'post', path: '/admin/b2b/invoices/:invoiceId/void',
   description: 'Admin: void a draft or issued invoice, with a reason. It is kept; what was on it can be invoiced again.',
   requestSample: { reason: 'Raised for the wrong month' },
-  onGuard: requireAdmin,
+  onGuard: requireBilling,
   onRequest: async (req, res) => send(res, await billing.voidInvoice({ invoiceId: req.params.invoiceId, reason: req.body?.reason, actorId: req.user.sub })),
 };
 
 export const adminListB2BEntitlements = {
   created, method: 'get', path: '/admin/b2b/programs/:programId/entitlements',
   description: 'Admin: who is covered by a sponsored pass for a month (?period=YYYY-MM, default this month) and where each pass stands.',
-  onGuard: requireAdmin,
+  onGuard: requireBillingRead,
   onRequest: async (req, res) => send(res, await billing.listEntitlements({ programId: req.params.programId, period: req.query?.period || undefined })),
 };
 
@@ -447,14 +454,14 @@ export const adminConvertCorporateToProgram = {
 
 export const listB2BOrganizationInvoices = {
   created, method: 'get', path: '/b2b/organizations/:id/invoices',
-  description: 'An organisation\'s issued, paid and voided invoices (usage.read). Query: ?programId=&period=&kind=&status=.',
+  description: 'An organisation\'s issued, paid and voided invoices and notes (billing.read: owner, admin, finance), each with what is still owed. Query: ?programId=&period=&kind=&status=.',
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => billing.listInvoices({ access, query: req.query || {} })),
 };
 
 export const getB2BOrganizationInvoice = {
   created, method: 'get', path: '/b2b/organizations/:id/invoices/:invoiceId',
-  description: 'One of the organisation\'s invoices (usage.read): pass lines per person, usage as totals per benefit and person.',
+  description: 'One of the organisation\'s invoices (billing.read): pass lines per person, usage as totals per benefit and person, fees and notes as they are, with the payments and credits applied to it.',
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => billing.getInvoice({ access, invoiceId: req.params.invoiceId })),
 };
@@ -464,4 +471,179 @@ export const unlockMyB2BPass = {
   description: 'Member: ask to pay your share of a sponsored pass for this month. Returns a payment request; the pass starts when the payment is approved.',
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await billing.unlock({ userId: req.user.sub, entitlementId: req.params.entitlementId }), 201),
+};
+
+// ── Billing and financial management (Phase 5) ─────────────────────────────
+// Commercial agreements, the billing account, payments and their allocation,
+// credit and debit notes, statements, aging and reconciliation. Customer
+// billing only: provider settlement is a separate process and is only read
+// here, to show the two side by side.
+
+const finance = b2bFinanceService;
+const actor = req => req.user.sub;
+
+export const adminB2BBillingDashboard = {
+  created, method: 'get', path: '/admin/b2b/billing',
+  description: 'Admin: receivables across organisations: invoiced, collected, outstanding, overdue, credit on account and aging (current, 1-30, 31-60, 61-90, 90+ days overdue), per organisation and in total; draft invoices of the month; and for ?period=YYYY-MM (default this month) what was billed next to what gyms and trainers are owed for the same activity. That difference is not revenue or profit.',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await finance.dashboard({ query: req.query || {} })),
+};
+
+export const adminListB2BAgreements = {
+  created, method: 'get', path: '/admin/b2b/organizations/:id/agreements',
+  description: 'Admin: an organisation\'s commercial agreements, newest first, and the one in force today.',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await finance.listAgreements({ organizationId: req.params.id })),
+};
+
+export const adminCreateB2BAgreement = {
+  created, method: 'post', path: '/admin/b2b/organizations/:id/agreements',
+  description: 'Admin (b2b_billing): draft a commercial agreement: how FitFlex charges this organisation. Payment terms in days for invoices raised in advance (default 0) and after the month (default 14), an optional monthly platform fee (VAT-inclusive TZS) and an optional default VAT rate. Monthly billing in TZS.',
+  requestSample: { effectiveFrom: '2026-11-01', prepaidTermsDays: 0, usageTermsDays: 14, platformFeeTzs: 500000, vatRateBps: 1800, contractReference: 'CRDB/FF/2026/01' },
+  onGuard: requireBilling,
+  onRequest: async (req, res) => send(res, await finance.createAgreement({ organizationId: req.params.id, body: req.body || {}, actorId: actor(req) }), 201),
+};
+
+export const adminUpdateB2BAgreement = {
+  created, method: 'patch', path: '/admin/b2b/agreements/:agreementId',
+  description: 'Admin (b2b_billing): change a draft agreement. One in force cannot be edited: end it and activate a new one.',
+  onGuard: requireBilling,
+  onRequest: async (req, res) => send(res, await finance.updateAgreement({ agreementId: req.params.agreementId, body: req.body || {}, actorId: actor(req) })),
+};
+
+export const adminActivateB2BAgreement = {
+  created, method: 'post', path: '/admin/b2b/agreements/:agreementId/activate',
+  description: 'Admin (b2b_billing): put a draft agreement in force from its start date. The agreement it replaces is closed the day before. Invoices already issued keep the terms they were issued under.',
+  onGuard: requireBilling,
+  onRequest: async (req, res) => send(res, await finance.activateAgreement({ agreementId: req.params.agreementId, actorId: actor(req) })),
+};
+
+export const adminEndB2BAgreement = {
+  created, method: 'post', path: '/admin/b2b/agreements/:agreementId/end',
+  description: 'Admin (b2b_billing): end an agreement in force on a day (default today).',
+  requestSample: { effectiveTo: '2026-12-31' },
+  onGuard: requireBilling,
+  onRequest: async (req, res) => send(res, await finance.endAgreement({ agreementId: req.params.agreementId, effectiveTo: req.body?.effectiveTo, actorId: actor(req) })),
+};
+
+export const adminGetB2BBillingAccount = {
+  created, method: 'get', path: '/admin/b2b/organizations/:id/billing-account',
+  description: 'Admin: who the organisation\'s invoices go to. Falls back to the Corporate billing contact, then the organisation\'s own contact.',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await finance.getBillingAccount({ organizationId: req.params.id })),
+};
+
+export const adminSetB2BBillingAccount = {
+  created, method: 'put', path: '/admin/b2b/organizations/:id/billing-account',
+  description: 'Admin (b2b_billing): set the billing contact, email, phone and address.',
+  requestSample: { contactName: 'Asha Mushi', email: 'accounts@example.co.tz', phone: '+255700000000' },
+  onGuard: requireBilling,
+  onRequest: async (req, res) => send(res, await finance.setBillingAccount({ organizationId: req.params.id, body: req.body || {}, actorId: actor(req) })),
+};
+
+export const adminPrepareB2BFeeInvoice = {
+  created, method: 'post', path: '/admin/b2b/organizations/:id/invoices/prepare-fee',
+  description: 'Admin (b2b_billing): draft the month\'s platform-fee invoice, when the agreement in force on the first of the month carries a fee. One per organisation and month; safe to repeat.',
+  requestSample: { period: '2026-11' },
+  onGuard: requireBilling,
+  onRequest: async (req, res) => send(res, await finance.prepareFee({ organizationId: req.params.id, period: req.body?.period, actorId: actor(req) })),
+};
+
+export const adminB2BOrganizationStatement = {
+  created, method: 'get', path: '/admin/b2b/organizations/:id/statement',
+  description: 'Admin: the organisation\'s account: invoices, notes, payments, reversals and (read only) Corporate seat bills in date order with a running balance, plus what is outstanding, overdue, on account as credit, and aging. Query: ?from=&to= (EAT days).',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await finance.statement({ organizationId: req.params.id, query: req.query || {} })),
+};
+
+export const adminListB2BPayments = {
+  created, method: 'get', path: '/admin/b2b/payments',
+  description: 'Admin: payments received from organisations. Query: ?organizationId=&status=&limit=&cursor=.',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await finance.listPayments({ organizationId: req.query?.organizationId || null, query: req.query || {} })),
+};
+
+export const adminGetB2BPayment = {
+  created, method: 'get', path: '/admin/b2b/payments/:paymentId',
+  description: 'Admin: one payment with the invoices it settled.',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await finance.getPayment({ paymentId: req.params.paymentId })),
+};
+
+export const adminRecordB2BPayment = {
+  created, method: 'post', path: '/admin/b2b/organizations/:id/payments',
+  description: 'Admin (b2b_payments): record money received. method: bank_transfer | mobile_money | lipa_namba | cheque | cash | card | other. The same reference by the same method is one payment: recording it again returns the first (409 if the amount differs). `allocations` settles named invoices; `autoAllocate: true` settles the oldest due first; anything left stays on the account as credit. The person who issued an invoice cannot record its payment.',
+  requestSample: { amountTzs: 1200000, method: 'bank_transfer', reference: 'CRDB-TRF-00917', receivedAt: '2026-11-03T09:00:00Z', allocations: [{ invoiceId: 'b2bi_…', amountTzs: 1000000 }, { invoiceId: 'b2bi_…', amountTzs: 200000 }] },
+  onGuard: requirePayments,
+  onRequest: async (req, res) => {
+    const out = await finance.recordPayment({ organizationId: req.params.id, body: req.body || {}, actorId: actor(req) });
+    return send(res, out, out.existing ? 200 : 201);
+  },
+};
+
+export const adminAllocateB2BPayment = {
+  created, method: 'post', path: '/admin/b2b/payments/:paymentId/allocate',
+  description: 'Admin (b2b_payments): settle invoices from a payment already recorded. Each amount is checked against what is left on the payment and on the invoice, so sending it twice allocates once; an optional requestId makes that explicit.',
+  requestSample: { allocations: [{ invoiceId: 'b2bi_…', amountTzs: 200000 }], requestId: 'alloc-2026-11-03-1' },
+  onGuard: requirePayments,
+  onRequest: async (req, res) => send(res, await finance.allocate({ paymentId: req.params.paymentId, body: req.body || {}, actorId: actor(req) })),
+};
+
+export const adminReverseB2BPayment = {
+  created, method: 'post', path: '/admin/b2b/payments/:paymentId/reverse',
+  description: 'Admin (b2b_billing_approve): reverse a payment that did not arrive, with a reason. The invoices it part-settled are opened again. A payment that completed an invoice is not reversed (a paid invoice is final): raise a debit note instead.',
+  requestSample: { reason: 'Cheque returned unpaid' },
+  onGuard: requireBillingApproval,
+  onRequest: async (req, res) => send(res, await finance.reversePayment({ paymentId: req.params.paymentId, reason: req.body?.reason, actorId: actor(req) })),
+};
+
+export const adminCreateB2BNote = {
+  created, method: 'post', path: '/admin/b2b/invoices/:invoiceId/notes',
+  description: 'Admin (b2b_billing): draft a credit note (takes an amount off an issued invoice) or a debit note (adds to it), with a reason. The invoice itself is never edited. A credit cannot exceed the invoice less the credits already raised on it.',
+  requestSample: { type: 'credit', amountTzs: 60000, reason: 'One employee left before the month began' },
+  onGuard: requireBilling,
+  onRequest: async (req, res) => send(res, await finance.createNote({ invoiceId: req.params.invoiceId, body: req.body || {}, actorId: actor(req) }), 201),
+};
+
+export const adminIssueB2BNote = {
+  created, method: 'post', path: '/admin/b2b/notes/:noteId/issue',
+  description: 'Admin (b2b_billing_approve): issue a credit or debit note. It must be someone other than the person who drafted it. A credit note is applied at once to the invoice it corrects, up to what is owed on it; the rest stays on the account as credit.',
+  onGuard: requireBillingApproval,
+  onRequest: async (req, res) => send(res, await finance.issueNote({ noteId: req.params.noteId, body: req.body || {}, actorId: actor(req) })),
+};
+
+export const adminApplyB2BCredit = {
+  created, method: 'post', path: '/admin/b2b/notes/:noteId/apply',
+  description: 'Admin (b2b_payments): apply what is left of an issued credit note (or a credit for reversed usage) to other open invoices of the same organisation.',
+  requestSample: { allocations: [{ invoiceId: 'b2bi_…', amountTzs: 60000 }] },
+  onGuard: requirePayments,
+  onRequest: async (req, res) => send(res, await finance.allocate({ creditInvoiceId: req.params.noteId, body: req.body || {}, actorId: actor(req) })),
+};
+
+export const adminB2BInvoiceReconciliation = {
+  created, method: 'get', path: '/admin/b2b/invoices/:invoiceId/reconciliation',
+  description: 'Admin: trace an invoice to what it charges for. Each usage line to its consumption and the check-in or session behind it; each pass line to the person\'s entitlement and pass; the payments applied; and, separately, where the provider side of the same activity stands in settlement. Includes checks that the lines add up and that each usage line equals the sponsor share on the ledger.',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await finance.reconciliation({ invoiceId: req.params.invoiceId })),
+};
+
+export const getB2BOrganizationBilling = {
+  created, method: 'get', path: '/b2b/organizations/:id/billing',
+  description: 'An organisation\'s billing overview (billing.read: owner, admin, finance): what is outstanding, overdue and on account as credit, aging, the billing contact, the payment terms in force and the latest invoices.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => finance.organizationOverview({ access })),
+};
+
+export const listB2BOrganizationPayments = {
+  created, method: 'get', path: '/b2b/organizations/:id/payments',
+  description: 'The payments FitFlex has recorded from the organisation (billing.read), newest first.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => finance.organizationPayments({ access, query: req.query || {} })),
+};
+
+export const getB2BOrganizationStatement = {
+  created, method: 'get', path: '/b2b/organizations/:id/statement',
+  description: 'The organisation\'s account statement (billing.read): invoices, notes, payments and seat bills in date order with a running balance. Query: ?from=&to= (EAT days).',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => finance.organizationStatement({ access, query: req.query || {} })),
 };
