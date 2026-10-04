@@ -130,8 +130,8 @@ export const listB2BOrganizationUsers = {
 
 export const addB2BOrganizationUser = {
   created, method: 'post', path: '/b2b/organizations/:id/users',
-  description: 'Add an existing FitFlex user to the organisation (users.manage). Roles: owner, admin, manager, finance, hr, analyst, viewer.',
-  requestSample: { userId: 'usr_…', role: 'manager', permissions: [] },
+  description: 'Add someone who already has a FitFlex account to the organisation (users.manage). Name them by the email or the mobile number of their account, or by userId (one of the three). When several accounts share that email or number, the member account is used. Roles: owner, admin, manager, finance, hr, analyst, viewer.',
+  requestSample: { email: 'grace@example.co.tz', role: 'finance', permissions: [] },
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.addOrganizationUser({
     access, body: req.body || {}, actorId: req.user.sub,
@@ -177,8 +177,8 @@ export const getB2BBeneficiary = {
 
 export const enrollB2BBeneficiary = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries',
-  description: 'Enrol a FitFlex member (beneficiaries.manage). The organisation must be active. A mapped company enrols staff through /corporate/staff.',
-  requestSample: { userId: 'usr_…', beneficiaryType: 'policyholder', externalReference: 'POL-00123', groupName: 'Gold scheme', status: 'active' },
+  description: 'Enrol a FitFlex member (beneficiaries.manage), named by the email or mobile number of their member account, or by userId (one of the three). The organisation must be active. A mapped company enrols staff through /corporate/staff.',
+  requestSample: { phone: '0712 345 678', beneficiaryType: 'policyholder', externalReference: 'POL-00123', groupName: 'Gold scheme', status: 'active' },
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.enrollBeneficiary({
     access, body: req.body || {}, actorId: req.user.sub,

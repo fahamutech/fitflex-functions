@@ -171,11 +171,11 @@ export const corporateSetStaffStatus = {
 
 export const corporateLinkStaffUser = {
   created, method: 'post', path: '/corporate/staff/:id/link',
-  description: 'Corporate HR: link an employee to their FitFlex member account so they can use the company\'s benefits. Send userId null to unlink.',
-  requestSample: { userId: 'usr_…' },
+  description: 'Corporate HR: link an employee to their FitFlex member account so they can use the company\'s benefits. Give the account\'s email, its mobile number or its userId (one of them). Send userId null to unlink.',
+  requestSample: { email: 'asha@nmbtz.com' },
   onGuard: requireHr,
   onRequest: (req, res) => scoped(req, res, corporateId => corporateService.linkEmployeeUser({
-    corporateId, employeeId: req.params.id, userId: req.body?.userId, actorId: req.user.sub,
+    corporateId, employeeId: req.params.id, userId: req.body?.userId, email: req.body?.email, phone: req.body?.phone, actorId: req.user.sub,
   }))
 };
 

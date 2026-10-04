@@ -9,6 +9,7 @@
 // rows appear as `employee` beneficiaries. Those read-through rows are
 // read-only here; they change through the existing corporate routes, so seat
 // limits and billing can't be bypassed.
+import { findUserByContact } from '../shared/user-contact.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   ORGANIZATION_TYPES, ORGANIZATION_TRANSITIONS, ORGANIZATION_USER_ROLES, ORGANIZATION_USER_STATUS,
@@ -438,8 +439,11 @@ export function createB2BService({
     const refused = checkGrant(access, { role: body.role, permissions });
     if (refused) return refused;
 
-    const user = body.userId ? await users.findByIdAsync(body.userId) : null;
-    if (!user) return fail('user_not_found', 404);
+    // By user id, or by the email or mobile number of their FitFlex account. An
+    // organisation user signs in to the portal with their member account.
+    const found = await findUserByContact(users, body, { prefer: 'member' });
+    if (found.error) return found;
+    const { user } = found;
     const live = (await organizationUsers.filterByColumnAsync('userId', user.id))
       .find(m => m.organizationId === access.org.id && m.status !== 'removed');
     if (live) return fail('already_organization_user', 409, { organizationUserId: live.id });
@@ -620,8 +624,10 @@ export function createB2BService({
     const status = body.status ?? 'pending';
     if (!['pending', 'active'].includes(status)) return fail('invalid_status', 400, { allowed: ['pending', 'active'] });
 
-    const user = body.userId ? await users.findByIdAsync(body.userId) : null;
-    if (!user) return fail('user_not_found', 404);
+    // By user id, or by the email or mobile number of their member account.
+    const found = await findUserByContact(users, body, { require: body.userId ? null : 'member' });
+    if (found.error) return found.error === 'member_account_required' ? fail('beneficiary_must_be_member', 400) : found;
+    const { user } = found;
     if (user.userType !== 'member') return fail('beneficiary_must_be_member', 400);
 
     const existing = (await beneficiaries.filterByColumnAsync('userId', user.id)).find(b => b.organizationId === access.org.id);
