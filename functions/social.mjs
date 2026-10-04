@@ -3,7 +3,7 @@
 // shares is checked by socialService.canView on every read.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
-import { socialService as svc, corporateService, resolveRequestUser, trainers } from '../src/bootstrap/services.mjs';
+import { socialService as svc, corporateService, resolveRequestUser, trainers, b2bEngagementAccess } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 const member = requireAuth('member');
@@ -93,6 +93,15 @@ export const ownerUpdateGroup = gy.update; export const ownerArchiveGroup = gy.a
 const co = ownerRoutes('/corporate', [requireAuth('corporate_hr', 'admin'), requireAcl('corporate')], companyOwner, 'Company HR');
 export const corporateGroups = co.list; export const corporateCreateGroup = co.create; export const corporateGroupDetail = co.detail;
 export const corporateUpdateGroup = co.update; export const corporateArchiveGroup = co.archive; export const corporateGroupMember = co.member;
+
+// A B2B organisation's own users run groups for its people, as a company's HR does.
+async function organizationOwner(req) {
+  const who = await b2bEngagementAccess.resolve(req);
+  return who.error ? who : { ownerType: who.type, ownerId: who.id, createdBy: req.user.sub };
+}
+const og = ownerRoutes('/b2b/organizations/:organizationId', [requireAuth(), requireAcl('b2b')], organizationOwner, 'Organisation');
+export const organizationGroups = og.list; export const organizationCreateGroup = og.create; export const organizationGroupDetail = og.detail;
+export const organizationUpdateGroup = og.update; export const organizationArchiveGroup = og.archive; export const organizationGroupMember = og.member;
 
 // ── Moderation (admin) ──────────────────────────────────────────────────
 const adminGuard = [requireAuth('admin'), requireAcl('social')];

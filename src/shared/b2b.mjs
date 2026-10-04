@@ -56,15 +56,18 @@ export const PERMISSIONS = Object.freeze([
   'usage.read',
   // Invoices, payments, balances and statements (Phase 5).
   'billing.read',
+  // Challenges, their rewards, and groups for the organisation's people.
+  'engagement.read',
+  'engagement.manage',
 ]);
 
 export const ROLE_PERMISSIONS = Object.freeze({
   owner: PERMISSIONS,
   admin: PERMISSIONS,
-  manager: ['organization.read', 'users.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'programs.manage', 'usage.read'],
-  hr: ['organization.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read'],
+  manager: ['organization.read', 'users.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'programs.manage', 'usage.read', 'engagement.read', 'engagement.manage'],
+  hr: ['organization.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'engagement.read', 'engagement.manage'],
   finance: ['organization.read', 'programs.read', 'usage.read', 'billing.read'],
-  analyst: ['organization.read', 'beneficiaries.read', 'programs.read', 'usage.read'],
+  analyst: ['organization.read', 'beneficiaries.read', 'programs.read', 'usage.read', 'engagement.read'],
   viewer: ['organization.read', 'programs.read'],
 });
 export const ORGANIZATION_USER_ROLES = Object.freeze(Object.keys(ROLE_PERMISSIONS));

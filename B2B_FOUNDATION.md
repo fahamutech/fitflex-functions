@@ -124,3 +124,57 @@ Usage events (check-ins, bookings, activities) ──► usage ledger ──► 
 ```
 
 Corporate's subsidy model and seat billing become the first programme template ("employer seat programme"). The settlement engine (`settlement-*`) provides provider payouts.
+
+## 8. Challenges, rewards and groups
+
+An organisation runs wellness challenges and groups for its own people, the
+same way a company's HR does. One engine serves both; nothing is duplicated.
+
+**Who belongs.** `src/services/company-directory.mjs` answers "who are this
+company's people" and "which companies does this member belong to" for both
+kinds of company:
+
+| Kind | People list | Counts as a member when |
+|---|---|---|
+| `corporate` | `CorporateEmployee` | linked to a FitFlex account (`userId`), status `active` or `pending` |
+| `organization` | `B2BBeneficiary` | linked to a FitFlex account, status `active` |
+
+Before this, belonging was read from `User.corporateId`, which is set for HR
+staff accounts only and never for members. So company-only challenges,
+company groups and the "company" sharing audience matched no one. They now
+follow the people list. `User.corporateId` is still honoured where it is set.
+
+**Which owner a route acts for.** `src/services/b2b-engagement-access.mjs`
+resolves `/b2b/organizations/:organizationId/...`:
+
+- an organisation that mirrors a Company (`legacyCorporateId` set) acts as
+  that Company (`corporate`), so its HR portal and its organisation users
+  manage the same challenges and groups;
+- any other organisation acts as itself (`organization`).
+
+Reads need `engagement.read`; changes need `engagement.manage`.
+
+| Role | engagement |
+|---|---|
+| owner, admin, manager, hr | read + manage |
+| analyst | read |
+| finance, viewer | none |
+
+**Routes** (all under `/b2b/organizations/:organizationId`, same request and
+response shapes as the `/corporate/...` ones):
+
+- `GET|POST /challenges`, `PATCH /challenges/:id`, `POST /challenges/:id/cancel|close|archive`,
+  `GET /challenges/:id/participants|leaderboard`
+- `GET /rewards`, `POST /rewards/:id/status`
+- `GET|POST /groups`, `GET|PATCH /groups/:id`, `POST /groups/:id/archive`,
+  `POST /groups/:id/members/:userId/:action`
+
+**What carries over unchanged.** The organisation sees totals only (groups
+under three people are folded together), never a person's activity. A
+beneficiary's `groupName` plays the part of a department: "chosen
+departments" eligibility and the department format use it. Members see an
+organisation's challenge exactly as they see a company one, so the app needs
+no change. Rewards an organisation funds (`rewardFunding: company`) are
+approved and issued by the organisation; FitFlex-funded ones by FitFlex.
+
+No migration: `creatorType` and `ownerType` are free text columns.

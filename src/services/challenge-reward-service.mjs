@@ -30,6 +30,10 @@
 import { randomUUID } from 'node:crypto';
 import { challengePhase, rewardItemsOf } from './challenge-service.mjs';
 import { localDay } from '../shared/member-progress.mjs';
+import { createCompanyDirectory, isCompanyType } from './company-directory.mjs';
+
+/** The company or organisation a scope is for: { kind: 'corporate', corporateId } or { kind: 'organization', organizationId }. */
+const companyIdOf = scope => (scope.kind === 'corporate' ? scope.corporateId : scope.organizationId);
 
 export const REWARD_STATUSES = ['pending', 'approved', 'issued', 'rejected'];
 const TRANSITIONS = {
@@ -43,18 +47,20 @@ const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 
 
 /** Who pays: the challenge's funder, else its creator (trainer / gym). */
 function funderOf(c) {
-  return c.rewardFunding ?? (c.creatorType === 'corporate' ? 'company' : c.creatorType);
+  return c.rewardFunding ?? (isCompanyType(c.creatorType) ? 'company' : c.creatorType);
 }
 
 /** Does this queue handle the reward? */
 function inScope(scope, a) {
   if (scope.kind === 'admin') return a.funder !== 'company';
-  if (scope.kind === 'corporate') return a.creatorType === 'corporate' && a.creatorId === scope.corporateId && a.funder === 'company';
+  // A company's HR, or an organisation's own users: their company-funded rewards only.
+  if (isCompanyType(scope.kind)) return a.creatorType === scope.kind && a.creatorId === companyIdOf(scope) && a.funder === 'company';
   return false;
 }
 
 export function createChallengeRewardService({
   challenges, participants, awards, users, corporateEmployees = null, challengeService, auditLog = null,
+  directory = createCompanyDirectory({ users, corporateEmployees }),
   notify = async () => {}, now = () => new Date(),
 }) {
   const isEnded = c => challengePhase(c, now()) === 'ended';
@@ -204,8 +210,8 @@ export function createChallengeRewardService({
   /** Fulfilment queue for FitFlex admin or one company's HR. */
   async function queue(scope, { status = null, challengeId = null } = {}) {
     if (status && !REWARD_STATUSES.includes(status)) return { error: 'invalid_status', status: 400 };
-    const mine = scope.kind === 'corporate'
-      ? x => x.creatorType === 'corporate' && x.creatorId === scope.corporateId
+    const mine = isCompanyType(scope.kind)
+      ? x => x.creatorType === scope.kind && x.creatorId === companyIdOf(scope)
       : x => funderOf(x) !== 'company';
     for (const c of await unsettled(mine)) await evaluate(c);
 
@@ -213,8 +219,8 @@ export function createChallengeRewardService({
     const counts = Object.fromEntries(REWARD_STATUSES.map(s => [s, 0]));
     for (const a of all) counts[a.status] = (counts[a.status] ?? 0) + 1;
 
-    const staff = scope.kind === 'corporate' && corporateEmployees
-      ? new Map((await corporateEmployees.filterByColumnAsync('corporateId', scope.corporateId)).map(e => [e.userId, e]))
+    const staff = isCompanyType(scope.kind)
+      ? new Map((await directory.peopleOf(scope.kind, companyIdOf(scope))).filter(e => e.userId).map(e => [e.userId, e]))
       : new Map();
     const cache = new Map();
     const out = [];
@@ -226,7 +232,7 @@ export function createChallengeRewardService({
         member: {
           id: a.memberId,
           displayName: staff.get(a.memberId)?.displayName ?? u?.displayName ?? null,
-          ...(scope.kind === 'corporate' && { department: staff.get(a.memberId)?.department ?? null }),
+          ...(isCompanyType(scope.kind) && { department: staff.get(a.memberId)?.department ?? null }),
         },
         funder: a.funder,
         history: await named(a.history ?? []),
