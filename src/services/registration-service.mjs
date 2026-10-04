@@ -168,5 +168,5 @@ export function createRegistrationService({
     return sessionForPerson(fresh.personId);
   }
 
-  return { start, confirm, complete };
+  return { start, confirm, complete, alreadyRegistered };
 }

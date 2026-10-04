@@ -39,6 +39,9 @@ export const isPin = pin => /^\d{4}$/.test(String(pin ?? ''));
 const SETUP = 'pin_setup';
 const ADOPT_CODE = 'pin_adopt';
 const RESET = 'pin_reset';
+export const INVITE_START = 'invite_start';
+export const ONBOARDING = 'onboarding';
+const START_PIN_TRIES = 5;
 const sha256 = v => createHash('sha256').update(String(v)).digest('hex');
 const INVALID = { error: 'invalid_credentials', status: 401 };
 
@@ -47,9 +50,57 @@ export function createPinAuthService({
   signPurpose, verifyPurpose, pepper, linkingEnabled = () => false, auditLog = null,
   // Drop cached session checks for a profile, so an ended session stops at once.
   forgetSession = () => {},
+  // For a person who has no profile yet: their open invitations (I6 start PIN).
+  invitationsFor = async () => [],
 }) {
   const keyed = (personId, pin) => createHmac('sha256', String(pepper())).update(`${personId}:${pin}`).digest('hex');
   const configured = () => Boolean(pepper());
+  /** The start PIN sent with an invitation: short-lived and try-limited, so a keyed digest is enough. */
+  const startPinHash = (invitationId, pin) => createHmac('sha256', String(pepper())).update(`start:${invitationId}:${pin}`).digest('hex');
+
+  /** What a signed-in person with no profile yet gets instead of a session. */
+  async function onboarding(personId) {
+    return {
+      onboarding: true,
+      onboardingToken: signPurpose(ONBOARDING, { pid: personId }, '30m'),
+      invitations: await invitationsFor(personId),
+    };
+  }
+  /** A session, or the onboarding step when the person has no profile to open. */
+  async function enter(personId) {
+    const session = await sessionForPerson(personId);
+    return session.error === 'no_profile' ? onboarding(personId) : session;
+  }
+
+  /**
+   * Someone new to FitFlex signing in with the start PIN from an invitation.
+   * A match hands back a token for the next step (their name and their own
+   * PIN); nothing exists for them yet. A miss counts against every open
+   * start PIN for that identifier, and five misses switch it off.
+   */
+  async function startPinLogin(identifier, pin, ip) {
+    if (!isPin(pin)) return null;
+    const open = await db('Invitation')
+      .where({ identifierType: identifier.type, identifierValue: identifier.value, status: 'pending' })
+      .whereNull('targetPersonId').whereNotNull('startPinHash').whereNull('startPinUsedAt')
+      .where('expiresAt', '>', db.fn.now()).orderBy('createdAt', 'desc');
+    if (!open.length) return null;
+    const match = open.find(inv => inv.startPinHash === startPinHash(inv.id, pin));
+    if (!match) {
+      for (const inv of open) {
+        const tries = inv.startPinAttempts + 1;
+        await db('Invitation').where({ id: inv.id })
+          .update({ startPinAttempts: tries, ...(tries >= START_PIN_TRIES ? { startPinHash: null } : {}) });
+      }
+      return null;
+    }
+    await attempt(identifier, ip, null, 'ok');
+    return {
+      startPin: true,
+      startToken: signPurpose(INVITE_START, { inv: match.id, type: identifier.type, value: identifier.value }, '30m'),
+      invitation: { orgType: match.orgType, role: match.role },
+    };
+  }
 
   async function setPin(personId, pin) {
     await db('Person').where({ id: personId }).update({
@@ -161,10 +212,12 @@ export function createPinAuthService({
     if (person?.pinHash) {
       if (person.status !== 'active') { await attempt(identifier, ip, person.id, 'fail'); return INVALID; }
       const checked = await checkHeldPin(person, pin, identifier, ip);
-      return checked.ok ? sessionForPerson(person.id) : checked;
+      return checked.ok ? enter(person.id) : checked;
     }
     const adopted = await adopt(identifier, pin, ip, body.locale);
     if (adopted) return adopted.session ?? adopted.response;
+    const invited = await startPinLogin(identifier, pin, ip);
+    if (invited) return invited;
     await attempt(identifier, ip, person?.id ?? null, 'fail');
     return INVALID;
   }
@@ -333,5 +386,5 @@ export function createPinAuthService({
     return sessionForPerson(person.id);
   }
 
-  return { login, setup, setPin, endSessions, configured, resetStart, resetConfirm, resetComplete, changePin };
+  return { login, setup, setPin, endSessions, configured, resetStart, resetConfirm, resetComplete, changePin, startPinHash, onboarding, enter };
 }

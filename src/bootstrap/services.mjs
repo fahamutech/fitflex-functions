@@ -4,6 +4,8 @@ import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpos
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
 import { createPinAuthService } from '../services/pin-auth-service.mjs';
 import { createRegistrationService } from '../services/registration-service.mjs';
+import { createOnboardingService } from '../services/onboarding-service.mjs';
+import { randomUUID } from 'node:crypto';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
@@ -414,6 +416,24 @@ export const invitationService = createInvitationService({
   createPersona: args => identityLinkService.createPersona(args),
   vendorStaffRoles: [...VENDOR_STAFF_ROLES], vendorStaffPermissions: [...VENDOR_STAFF_PERMISSIONS],
   ensureVendor: vendorUserId => orgMembershipService.syncUser(vendorUserId),
+  // The invited person is told directly; someone new to FitFlex gets a start
+  // PIN (only while FitFlex keeps PINs). Declared below, so reached lazily.
+  senders: { sms: () => smsSender(), email: () => emailSender() },
+  startPin: {
+    enabled: () => identityFlag('V2_PIN_LOGIN') && pinAuthService.configured(),
+    hash: (invitationId, pin) => pinAuthService.startPinHash(invitationId, pin),
+  },
+  isRegistered: identifier => registrationService.alreadyRegistered(identifier),
+  // Placeholder until the app is in the stores: the web app.
+  appLink: () => process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
+  newTrainerProfile: async ({ userId, displayName, email, phone }) => {
+    const row = trainerService.normalizeTrainerPayload({
+      id: `trn_${randomUUID().slice(0, 8)}`, userId, displayName: displayName || email || phone || 'Trainer',
+      email, phone, gymIds: [], status: 'active', approvalStatus: 'approved',
+    }, {});
+    await trainers.upsertAsync(t => t.id === row.id, row);
+    return trainers.find(t => t.id === row.id) || row;
+  },
 });
 // Identity V2 · I6a: a person proves an email or phone with a code FitFlex sends.
 export const identifierService = createIdentifierService({
@@ -432,6 +452,7 @@ export const pinAuthService = createPinAuthService({
   sessionForPerson: personId => authService.sessionForPerson(personId),
   verifyFirebasePassword: (...args) => firebasePasswordCheck.verify(...args), signPurpose, verifyPurpose,
   forgetSession: invalidateAccountStatus,
+  invitationsFor: async personId => (await invitationService.listMine({ personId })).invitations,
   linkingEnabled: () => identityFlag('V2_LINKING'),
   // The key the PIN is mixed with before hashing. It must be set in production
   // and never change afterwards, or every stored PIN stops matching.
@@ -444,6 +465,13 @@ export const registrationService = createRegistrationService({
   approvalStatusForRole, signPurpose, verifyPurpose,
   claimInvitations: personId => invitationService.claimFor(personId),
   linkingEnabled: () => identityFlag('V2_LINKING'),
+});
+// A person with no profile yet: invited with a start PIN, or still to choose a role.
+export const onboardingService = createOnboardingService({
+  db, users, pinAuth: pinAuthService, invitations: invitationService, identityLink: identityLinkService, auditLog,
+  sessionForPerson: personId => authService.sessionForPerson(personId),
+  isRegistered: identifier => registrationService.alreadyRegistered(identifier),
+  approvalStatusForRole, verifyPurpose,
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.
