@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, settlementService, settlementClawbackService, trainerSettlementService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, settlementService, settlementClawbackService, trainerSettlementService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -127,4 +127,13 @@ export const b2bSponsorBilling = {
     }
     if (drafts || passes.started || passes.repaired) console.log(`[b2b-billing] drafts=${drafts} started=${passes.started} repaired=${passes.repaired} awaitingMember=${passes.awaitingMember} awaitingLink=${passes.awaitingLink}`);
   }
+};
+
+export const b2bCollections = {
+  created, rule: '0 6 * * *', // every day 06:00 UTC = 09:00 EAT
+  description: 'B2B collections: payment reminders for issued invoices — 3 days before the due day, on it, and 7, 14 and 30 days after. Each is sent once per invoice, to the organisation\'s owners and finance users (in the app) and its billing email. Reminders only: nothing is suspended and no charge is added. Safe to rerun.',
+  onJob: async () => {
+    const stats = await b2bCollectionsService.runReminders();
+    if (stats.sent || stats.failed) console.log(`[b2b-collections] reminders sent=${stats.sent} failed=${stats.failed} of ${stats.checked} open invoice(s)`);
+  },
 };

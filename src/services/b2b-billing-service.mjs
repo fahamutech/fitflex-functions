@@ -115,6 +115,9 @@ export function createB2BBillingService({
     if (live.error) return live;
     const { program, org } = live;
     const { startDate, endDate } = monthBounds(period);
+    // On hold for late payment: no new passes are invoiced. Passes already paid for carry on.
+    const hold = await db('B2BBillingAccount').where({ organizationId: program.organizationId, onHold: true }).first('holdReason');
+    if (hold) return fail('organization_on_hold', 409, { reason: hold.holdReason });
 
     const passBenefits = (await benefits.filterByColumnAsync('programId', program.id)).filter((b) => {
       if (b.benefitType !== FLAT_FEE_BENEFIT || b.status !== 'active') return false;

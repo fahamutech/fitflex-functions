@@ -173,6 +173,7 @@ export function createB2BFinanceService({
       registrationNumber: org.registrationNumber ?? null,
       currency: 'TZS',
       notes: stored?.notes ?? null,
+      onHold: stored?.onHold === true, holdReason: stored?.onHold ? stored.holdReason : null, holdAt: stored?.onHold ? stored.holdAt : null,
       source: stored ? 'billing_account' : corporate ? 'corporate_account' : 'organization',
     };
     return { account };

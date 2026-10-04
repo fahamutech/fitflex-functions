@@ -15,6 +15,8 @@ export async function purgeB2BBilling(db, organizationIds) {
     const invoiceIds = await trx('B2BSponsorInvoice').whereIn('organizationId', organizationIds).pluck('id');
     const paymentIds = await trx('B2BPayment').whereIn('organizationId', organizationIds).pluck('id');
     await trx('AuditLog').whereIn('target', [...invoiceIds, ...paymentIds]).del();
+    await trx('B2BInvoiceReminder').whereIn('organizationId', organizationIds).del();
+    await trx('B2BPaymentNotice').whereIn('organizationId', organizationIds).del();
     await trx('B2BPaymentAllocation').whereIn('organizationId', organizationIds).del();
     await trx('B2BPayment').whereIn('organizationId', organizationIds).del();
     await trx('B2BSponsorInvoiceLine').whereIn('invoiceId', invoiceIds).del();
