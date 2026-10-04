@@ -433,8 +433,9 @@ export function discountedFeeTzs(listPriceTzs, discountBps = 0) {
 
 /** VAT contained in a VAT-inclusive total at `rateBps` (1800 = 18%). */
 export function vatContainedTzs(totalTzs, rateBps) {
-  if (!rateBps || totalTzs <= 0) return 0;
-  return Math.round((totalTzs * rateBps) / (10000 + rateBps));
+  if (!rateBps || !totalTzs) return 0;
+  // A credit (negative total) reverses VAT: same size, opposite sign.
+  return Math.sign(totalTzs) * Math.round((Math.abs(totalTzs) * rateBps) / (10000 + rateBps));
 }
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;

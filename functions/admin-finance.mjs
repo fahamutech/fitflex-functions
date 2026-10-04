@@ -1,7 +1,7 @@
 // Admin finance REST surface — gym usage/billing, period distribution, book-keeping.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { financeService, paymentRequests } from '../src/bootstrap/services.mjs';
+import { financeService, paymentRequests, b2bFinanceService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -34,5 +34,5 @@ export const adminBookKeeping = {
   created, method: 'get', path: '/admin/book-keeping',
   description: 'Admin: book keeping — money in (subscriptions) vs money out (gym payouts).',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
-  onRequest: async (req, res) => res.json(await financeService.bookKeeping({ paymentRequests }))
+  onRequest: async (req, res) => res.json(await financeService.bookKeeping({ paymentRequests, sponsorPayments: () => b2bFinanceService.paymentsForBooks() }))
 };

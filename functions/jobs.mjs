@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, settlementService, settlementClawbackService, trainerSettlementService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, settlementService, settlementClawbackService, trainerSettlementService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -102,6 +102,9 @@ export const b2bSponsorBilling = {
   description: 'B2B sponsor billing: start sponsored passes that can start (sponsor paid, member linked, month begun), and keep draft invoices current — flat fees for this month (and next, from the 25th) and last month\'s per-use charges. Drafts only: FitFlex issues them. Idempotent.',
   onJob: async () => {
     const passes = await b2bBillingService.runDaily();
+    // Platform fees under the organisations' commercial agreements (drafts, like the rest).
+    const fees = await b2bFinanceService.prepareFeesDue();
+    if (fees.drafted || fees.failed) console.log(`[b2b-billing] platform fee drafts=${fees.drafted} failed=${fees.failed}`);
     // Sponsor-covered trainer sessions whose refund to the member was not raised when the session completed.
     const refunds = await b2bSponsorRefundService.repair();
     if (refunds.raised) console.warn(`[b2b-refund] raised ${refunds.raised} missing sponsor refund(s)`);

@@ -9,6 +9,8 @@ export const PORTAL_ACL_SCOPES = [
   'gyms', 'owners', 'trainers', 'members', 'shop', 'payments', 'approvals', 'settings', 'users',
   'analytics', 'challenges', 'rewards', 'social', 'corporate', 'vendors', 'communications',
   'kyc', 'b2b',
+  // B2B billing (Phase 5): raising invoices, approving corrections and recording payments are separate grants.
+  'b2b_billing', 'b2b_billing_approve', 'b2b_payments',
   // Gym settlement workflow (DR-09): preparing, approving and paying are separate grants.
   'settlements_prepare', 'settlements_approve', 'settlements_pay',
 ];

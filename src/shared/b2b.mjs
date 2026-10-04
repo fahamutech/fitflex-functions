@@ -54,6 +54,8 @@ export const PERMISSIONS = Object.freeze([
   'programs.read',
   'programs.manage',
   'usage.read',
+  // Invoices, payments, balances and statements (Phase 5).
+  'billing.read',
 ]);
 
 export const ROLE_PERMISSIONS = Object.freeze({
@@ -61,7 +63,7 @@ export const ROLE_PERMISSIONS = Object.freeze({
   admin: PERMISSIONS,
   manager: ['organization.read', 'users.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'programs.manage', 'usage.read'],
   hr: ['organization.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read'],
-  finance: ['organization.read', 'programs.read', 'usage.read'],
+  finance: ['organization.read', 'programs.read', 'usage.read', 'billing.read'],
   analyst: ['organization.read', 'beneficiaries.read', 'programs.read', 'usage.read'],
   viewer: ['organization.read', 'programs.read'],
 });

@@ -18,6 +18,11 @@
 //
 // Invoices are raised and settled by FitFlex admins. Amounts are VAT-inclusive
 // whole TZS; the VAT rate is stated when an invoice is issued.
+//
+// Phase 5 (b2b-finance-service) surrounds this engine: an invoice gets its
+// number, due date and the commercial terms in force when it is issued; it is
+// settled by payments allocated to it, in part or in full; and it is corrected
+// by credit and debit notes, never edited.
 import { randomUUID } from 'node:crypto';
 import {
   FLAT_FEE_BENEFIT, programEffectiveStatus, matchesPopulation, benefitValidity, calculateResponsibility,
@@ -26,6 +31,8 @@ import {
 import { SUBSIDY_MODELS } from '../shared/corporate-constants.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
 import { localDay } from '../shared/member-progress.mjs';
+import { dueDateFor, termsSnapshot, outstandingTzs, NOTE_KINDS, DOCUMENT_SERIES } from '../shared/b2b-billing.mjs';
+import { nextDocumentNumber, agreementInForce } from './b2b-finance-service.mjs';
 
 const INVOICE = 'B2BSponsorInvoice';
 const LINE = 'B2BSponsorInvoiceLine';
@@ -36,6 +43,10 @@ const newId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)
 export function createB2BBillingService({
   db, programs, benefits, users, subscriptions, paymentRequests, corporateAccounts, auditLog,
   b2bService, b2bProgramService, settingsService,
+  // Phase 5: records a payment for what is owed on an invoice and allocates it ({ invoice, reference, actorId }).
+  settleInFull = null,
+  // Phase 5: the payments and credits applied to an invoice (invoiceId → rows).
+  settlementsOf = async () => [],
   now = () => new Date(),
 }) {
   const stamp = () => now().toISOString();
@@ -60,7 +71,8 @@ export function createB2BBillingService({
     if (open) return open;
     const id = newId('b2bi');
     const [row] = await trx(INVOICE).insert({
-      id, number: `SI-${period.replace('-', '')}-${id.slice(-6).toUpperCase()}`,
+      // A working reference: the invoice gets its number when it is issued.
+      id, number: `DRAFT-${id.slice(-8).toUpperCase()}`,
       organizationId: program.organizationId, programId: program.id, period, kind, status: 'draft', createdBy: actorId ?? null,
     }).returning('*');
     return row;
@@ -206,16 +218,27 @@ export function createB2BBillingService({
    * and settled the same way.
    */
   async function issueInvoice({ invoiceId, vatRateBps, actorId }) {
-    if (!Number.isInteger(vatRateBps) || vatRateBps < 0 || vatRateBps > 10000) return fail('vat_rate_required', 400, { hint: 'basis points, e.g. 1800 for 18%; 0 for none' });
     if (!actorId) return fail('actor_required', 403);
     const at = new Date(stamp());
+    const day = localDay(at);
     // The row is locked so the VAT is worked out on the total that is frozen, not one a concurrent preparation is still changing.
     const result = await db.transaction(async (trx) => {
       const invoice = await trx(INVOICE).where({ id: invoiceId }).forUpdate().first();
       if (!invoice) return fail('invoice_not_found', 404);
       if (invoice.status !== 'draft') return fail('invalid_transition', 409, { from: invoice.status, to: 'issued' });
+      // A credit or debit note is raised by one person and issued by another.
+      if (NOTE_KINDS.includes(invoice.kind) && invoice.createdBy === actorId) return fail('cannot_issue_own_note', 403);
+      // The commercial terms in force today are kept on the invoice: a later agreement does not change it.
+      const agreement = await agreementInForce(trx, invoice.organizationId, day);
+      const terms = termsSnapshot(agreement);
+      const rate = vatRateBps ?? terms.vatRateBps;
+      if (!Number.isInteger(rate) || rate < 0 || rate > 10000) return fail('vat_rate_required', 400, { hint: 'basis points, e.g. 1800 for 18%; 0 for none' });
+      const number = await nextDocumentNumber(trx, DOCUMENT_SERIES[invoice.kind] ?? 'INV', Number(day.slice(0, 4)));
       const [updated] = await trx(INVOICE).where({ id: invoiceId }).update({
-        status: 'issued', vatRateBps, vatTzs: vatContainedTzs(invoice.totalTzs, vatRateBps), issuedAt: at, issuedBy: actorId, updatedAt: at,
+        status: 'issued', number, vatRateBps: rate, vatTzs: vatContainedTzs(invoice.totalTzs, rate), issuedAt: at, issuedBy: actorId,
+        // A credit is not owed to FitFlex, so it has no due date.
+        dueDate: invoice.totalTzs > 0 ? dueDateFor({ kind: invoice.kind, issuedDay: day, terms }) : null,
+        agreementId: invoice.agreementId ?? agreement?.id ?? null, terms: JSON.stringify(terms), updatedAt: at,
       }).returning('*');
       return { invoice, updated };
     });
@@ -225,8 +248,10 @@ export function createB2BBillingService({
   }
 
   /**
-   * issued → paid, against the sponsor's payment reference. Paying a prepaid
-   * invoice starts the passes it covers.
+   * Settle an issued invoice in full against one payment reference. A
+   * shortcut for "record a payment for what is owed and allocate it": the
+   * payment is recorded like any other, so it shows on the statement.
+   * Paying a prepaid invoice starts the passes it covers.
    *
    * Maker-checker: the person who issued the invoice cannot record it as paid,
    * whoever they are. Recording a payment starts passes and counts as money
@@ -239,11 +264,20 @@ export function createB2BBillingService({
     const invoice = await db(INVOICE).where({ id: invoiceId }).first();
     if (!invoice) return fail('invoice_not_found', 404);
     if (invoice.status === 'paid') return { invoice, unchanged: true };
-    if (invoice.status !== 'issued') return fail('invalid_transition', 409, { from: invoice.status, to: 'paid' });
+    if (!['issued', 'partially_paid'].includes(invoice.status)) return fail('invalid_transition', 409, { from: invoice.status, to: 'paid' });
     if (invoice.issuedBy === actorId) return fail('cannot_settle_own_invoice', 403);
+
+    if (invoice.totalTzs > 0 && settleInFull) {
+      const out = await settleInFull({ invoice, reference, actorId });
+      if (out.error) return out;
+      const updated = await db(INVOICE).where({ id: invoiceId }).first();
+      await audit({ actor: actorId, action: 'b2b.invoice.paid', target: invoiceId, before: invoice, after: updated });
+      return { invoice: updated, payment: out.payment, activation: out.activation?.[invoiceId] ?? (invoice.kind === 'prepaid' ? await advanceEntitlements({ invoiceId, actorId }) : null) };
+    }
+    // A credit (or a nil invoice): recorded as settled with the reference of the refund or of where it was applied.
     const at = new Date(stamp());
-    const [updated] = await db(INVOICE).where({ id: invoiceId, status: 'issued' })
-      .update({ status: 'paid', paidAt: at, paidBy: actorId, paymentReference: reference, updatedAt: at }).returning('*');
+    const [updated] = await db(INVOICE).where({ id: invoiceId }).whereIn('status', ['issued', 'partially_paid'])
+      .update({ status: 'paid', amountPaidTzs: Math.abs(invoice.totalTzs), paidAt: at, paidBy: actorId, paymentReference: reference, updatedAt: at }).returning('*');
     if (!updated) return fail('invalid_transition', 409, { to: 'paid' });   // someone else settled or voided it meanwhile
     await audit({ actor: actorId, action: 'b2b.invoice.paid', target: invoiceId, before: invoice, after: updated });
     const activation = invoice.kind === 'prepaid' ? await advanceEntitlements({ invoiceId, actorId }) : null;
@@ -257,6 +291,8 @@ export function createB2BBillingService({
     const invoice = await db(INVOICE).where({ id: invoiceId }).first();
     if (!invoice) return fail('invoice_not_found', 404);
     if (!['draft', 'issued'].includes(invoice.status)) return fail('invalid_transition', 409, { from: invoice.status, to: 'void' });
+    // Money or a credit already applied to it has to be taken off first (reverse the payment), or corrected with a note.
+    if (invoice.amountPaidTzs > 0) return fail('invoice_has_payments', 409, { amountPaidTzs: invoice.amountPaidTzs });
     const at = new Date(stamp());
     const updated = await db.transaction(async (trx) => {
       const [row] = await trx(INVOICE).where({ id: invoiceId }).whereIn('status', ['draft', 'issued'])
@@ -455,13 +491,23 @@ export function createB2BBillingService({
   }
 
   /** FitFlex back office: sponsor invoices across organisations. */
-  const adminListInvoices = ({ query = {} } = {}) => page(() => invoiceFilter(query), query);
+  const adminListInvoices = async ({ query = {} } = {}) => {
+    const out = await page(() => invoiceFilter(query), query);
+    return { ...out, items: out.items.map(i => ({ ...i, outstandingTzs: outstandingTzs(i), overdue: outstandingTzs(i) > 0 && !!i.dueDate && i.dueDate < localDay(now()) })) };
+  };
 
-  /** An organisation's own invoices (usage.read). Drafts are FitFlex working papers and stay hidden. */
+  /** What a reader needs beside the stored row: what is still owed, and whether it is late. */
+  const withBalance = (i) => {
+    const owed = outstandingTzs(i);
+    return { ...i, outstandingTzs: owed, overdue: owed > 0 && !!i.dueDate && i.dueDate < localDay(now()) };
+  };
+
+  /** An organisation's own invoices (billing.read). Drafts are FitFlex working papers and stay hidden. */
   async function listInvoices({ access, query = {} }) {
-    if (!access.permissions.includes('usage.read')) return fail('forbidden', 403, { requiredPermission: 'usage.read' });
+    if (!access.permissions.includes('billing.read')) return fail('forbidden', 403, { requiredPermission: 'billing.read' });
     const mine = { ...query, organizationId: access.org.id };
-    return page(() => (access.platformAdmin ? invoiceFilter(mine) : invoiceFilter(mine).whereNot({ status: 'draft' })), query);
+    const out = await page(() => (access.platformAdmin ? invoiceFilter(mine) : invoiceFilter(mine).whereNot({ status: 'draft' })), query);
+    return { ...out, items: out.items.map(withBalance) };
   }
 
   /**
@@ -473,22 +519,34 @@ export function createB2BBillingService({
     const invoice = await db(INVOICE).where({ id: invoiceId }).first();
     const admin = !access || access.platformAdmin;
     if (!invoice || (access && invoice.organizationId !== access.org.id)) return fail('invoice_not_found', 404);
-    if (access && !access.permissions.includes('usage.read')) return fail('forbidden', 403, { requiredPermission: 'usage.read' });
+    if (access && !access.permissions.includes('billing.read')) return fail('forbidden', 403, { requiredPermission: 'billing.read' });
     if (!admin && invoice.status === 'draft') return fail('invoice_not_found', 404);
     const lines = await db(LINE).where({ invoiceId }).orderBy('createdAt');
+    // What has been paid or credited against it, and the notes raised on it.
+    const settlements = await settlementsOf(invoiceId);
+    const related = invoice.relatedInvoiceId ? await db(INVOICE).where({ id: invoice.relatedInvoiceId }).first('id', 'number') : null;
+    const notes = (await db(INVOICE).where({ relatedInvoiceId: invoiceId }).whereNot({ status: 'void' }).orderBy('createdAt'))
+      .filter(n => admin || n.status !== 'draft').map(n => ({ id: n.id, number: n.number, kind: n.kind, status: n.status, totalTzs: n.totalTzs, reason: n.reason }));
+    const extra = { settlements, relatedInvoice: related, notes };
+    invoice.outstandingTzs = outstandingTzs(invoice);
+    invoice.overdue = invoice.outstandingTzs > 0 && !!invoice.dueDate && invoice.dueDate < localDay(now());
     const people = lines.length ? await users.filterByColumnInAsync('id', [...new Set(lines.map(l => l.userId).filter(Boolean))]) : [];
     const nameOf = new Map(people.map(u => [u.id, u.displayName ?? null]));
-    if (admin) return { invoice, lines: lines.map(l => ({ ...l, beneficiaryName: nameOf.get(l.userId) ?? null })) };
+    if (admin) return { invoice, lines: lines.map(l => ({ ...l, beneficiaryName: nameOf.get(l.userId) ?? null })), ...extra };
 
     const grouped = new Map();
     for (const l of lines) {
-      const key = l.kind === 'pass' ? l.id : `${l.benefitId}:${l.beneficiaryId}`;
-      const g = grouped.get(key) ?? { kind: l.kind === 'pass' ? 'pass' : 'usage', benefitId: l.benefitId, beneficiaryId: l.beneficiaryId, beneficiaryName: nameOf.get(l.userId) ?? null, quantity: 0, amountTzs: 0 };
+      // Fees and notes are shown as they are; usage is totalled per benefit and person.
+      const own = ['pass', 'fee', 'note'].includes(l.kind);
+      const key = own ? l.id : `${l.benefitId}:${l.beneficiaryId}`;
+      const g = grouped.get(key) ?? { kind: own ? l.kind : 'usage', description: own ? l.description : null, benefitId: l.benefitId, beneficiaryId: l.beneficiaryId, beneficiaryName: nameOf.get(l.userId) ?? null, quantity: 0, amountTzs: 0 };
       g.quantity += l.kind === 'credit' ? 0 : l.quantity;
       g.amountTzs += l.amountTzs;
       grouped.set(key, g);
     }
-    return { invoice, lines: [...grouped.values()] };
+    // The organisation does not see who at FitFlex raised, issued or settled it.
+    const { createdBy, issuedBy, paidBy, voidedBy, ...mine } = invoice;
+    return { invoice: mine, lines: [...grouped.values()], ...extra };
   }
 
   /** Who is covered for a month under a programme, and where each pass stands. */

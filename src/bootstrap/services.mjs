@@ -79,6 +79,7 @@ import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
+import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
@@ -213,7 +214,21 @@ export const b2bConsumptionService = createB2BConsumptionService({
 export const b2bBillingService = createB2BBillingService({
   db, programs: b2bPrograms, benefits: b2bBenefits, users, subscriptions, paymentRequests, corporateAccounts, auditLog,
   b2bService, b2bProgramService, settingsService,
+  // "Mark paid" records a payment for what is owed and allocates it (b2bFinanceService is defined below; these only run later).
+  settleInFull: async ({ invoice, reference, actorId }) => {
+    const owed = invoice.totalTzs - (invoice.amountPaidTzs || 0);
+    const out = await b2bFinanceService.recordPayment({
+      organizationId: invoice.organizationId, actorId,
+      body: { amountTzs: owed, method: 'other', reference, allocations: [{ invoiceId: invoice.id, amountTzs: owed }] },
+    });
+    // The reference is already a recorded payment: it is allocated from there, not recorded twice.
+    if (out.existing) return { error: 'payment_reference_in_use', status: 409, paymentId: out.payment.id, hint: 'Allocate that payment to this invoice.' };
+    return out;
+  },
+  settlementsOf: invoiceId => b2bFinanceService.settlementsOf(invoiceId),
 });
+// B2B billing and financial management (Phase 5): agreements, payments and allocation, notes, statements, reconciliation.
+export const b2bFinanceService = createB2BFinanceService({ db, users, b2bService, billing: b2bBillingService });
 
 export const identityLinkService = createIdentityLinkService({ db });
 
