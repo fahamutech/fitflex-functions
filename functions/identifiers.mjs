@@ -2,7 +2,7 @@
 // Every route answers 404 unless IDENTITY_V2 + V2_IDENTIFIERS are on.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { identifierService, users } from '../src/bootstrap/services.mjs';
+import { identifierService, identifierChangeService, users } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
@@ -53,5 +53,38 @@ export const confirmIdentifierCode = {
   onRequest: async (req, res) => {
     const user = await caller(req, res);
     if (user) send(res, await identifierService.confirmCode({ user, body: req.body || {} }));
+  },
+};
+
+// ── Changing an identifier (I7e) — 404 unless IDENTITY_V2 + V2_RECOVERY ─────
+
+const addressOf = req => String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
+
+async function changer(req, res) {
+  if (!identityFlag('V2_RECOVERY')) { res.status(404).json({ error: 'not_found' }); return null; }
+  const user = await users.findByIdAsync(req.user.sub);
+  if (!user?.personId) { res.status(404).json({ error: 'user_not_found' }); return null; }
+  return user;
+}
+
+export const requestIdentifierChange = {
+  created, method: 'post', path: '/me/identifiers/change/request',
+  description: 'Replace the mobile number or email the caller signs in with: their PIN and the new value. FitFlex sends a code to the new value. A wrong PIN counts toward the sign-in lockout. 409 identifier_in_use when someone else signs in with it; 409 nothing_to_change when the caller has none of that kind yet (use the verify routes to add one).',
+  requestSample: { phone: '0712345678', pin: '1234', locale: 'sw' },
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => {
+    const user = await changer(req, res);
+    if (user) send(res, await identifierChangeService.request({ user, body: req.body || {}, ip: addressOf(req) }));
+  },
+};
+
+export const confirmIdentifierChange = {
+  created, method: 'post', path: '/me/identifiers/change/confirm',
+  description: 'Check the code sent to the new mobile number or email. It replaces the old one of the same kind, which stops signing in at once and is told about the change.',
+  requestSample: { phone: '0712345678', code: '123456', locale: 'sw' },
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => {
+    const user = await changer(req, res);
+    if (user) send(res, await identifierChangeService.confirm({ user, body: req.body || {} }));
   },
 };
