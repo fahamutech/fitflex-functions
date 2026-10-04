@@ -66,7 +66,11 @@ export function createPinAuthService({
       invitations: await invitationsFor(personId),
     };
   }
-  /** A session, or the onboarding step when the person has no profile to open. */
+  /**
+   * A session, or the onboarding step when the person has no profile to open
+   * (someone who declined an invitation and has not chosen a role yet). Every
+   * flow that ends by signing the person in goes through this.
+   */
   async function enter(personId) {
     const session = await sessionForPerson(personId);
     return session.error === 'no_profile' ? onboarding(personId) : session;
@@ -178,7 +182,7 @@ export function createPinAuthService({
     await attempt(identifier, ip, person.id, 'ok');
     if (emailVerified && isPin(pin)) {
       await setPin(person.id, pin);
-      return { session: await sessionForPerson(person.id) };
+      return { session: await enter(person.id) };
     }
     let sent = null;
     if (!emailVerified) {
@@ -250,7 +254,7 @@ export function createPinAuthService({
     if (auditLog) {
       await auditLog.insertAsync({ id: randomUUID(), at: new Date().toISOString(), actor: claims.anchor, action: 'pin_adopted', target: person.id, before: null, after: { emailVerifiedNow: Boolean(claims.needsCode) } });
     }
-    return sessionForPerson(person.id);
+    return enter(person.id);
   }
 
   /**
@@ -359,7 +363,7 @@ export function createPinAuthService({
     if (auditLog) {
       await auditLog.insertAsync({ id: randomUUID(), at: new Date().toISOString(), actor: null, action: 'pin_reset', target: person.id, before: null, after: { identifierType: claims.type } });
     }
-    return sessionForPerson(person.id);
+    return enter(person.id);
   }
 
   // ── Change PIN (I7c) ──────────────────────────────────────────────────────
