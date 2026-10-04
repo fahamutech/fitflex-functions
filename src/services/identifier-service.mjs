@@ -31,9 +31,9 @@ export const verificationLimits = () => ({
 
 const MESSAGES = {
   en: (code, minutes) => `FitFlex: your verification code is ${code}. It expires in ${minutes} minutes. Do not share it with anyone.`,
-  sw: (code, minutes) => `FitFlex: namba yako ya uthibitisho ni ${code}. Inaisha baada ya dakika ${minutes}. Usimpe mtu yeyote.`,
+  sw: (code, minutes) => `FitFlex: msimbo wako wa uthibitisho ni ${code}. Unaisha baada ya dakika ${minutes}. Usimpe mtu yeyote.`,
 };
-const SUBJECTS = { en: 'Your FitFlex verification code', sw: 'Namba yako ya uthibitisho ya FitFlex' };
+const SUBJECTS = { en: 'Your FitFlex verification code', sw: 'Msimbo wako wa uthibitisho wa FitFlex' };
 
 /** { type, value } for exactly one phone or email, or null. */
 export function parseIdentifier({ email, phone } = {}) {

@@ -29,11 +29,11 @@ export const START_WORDS = ['START', 'ANZA', 'UNSTOP'];
 const REPLIES = {
   stop: {
     en: 'You won\'t get WhatsApp messages from FitFlex or your gym any more. Reply START to hear from us again.',
-    sw: 'Hutapokea tena ujumbe wa WhatsApp kutoka FitFlex au jimu yako. Jibu ANZA ili upokee tena.',
+    sw: 'Hutapokea tena ujumbe wa WhatsApp kutoka FitFlex au gym yako. Jibu ANZA ili upokee tena.',
   },
   start: {
     en: 'You\'ll get service messages from FitFlex and your gym on WhatsApp again. Offers stay off unless you turn them on in the app.',
-    sw: 'Utapokea tena ujumbe wa huduma kutoka FitFlex na jimu yako kwenye WhatsApp. Ofa zitabaki zimezimwa hadi uziwashe kwenye programu.',
+    sw: 'Utapokea tena ujumbe wa huduma kutoka FitFlex na gym yako kwenye WhatsApp. Ofa zitabaki zimezimwa hadi uziwashe kwenye app.',
   },
 };
 
