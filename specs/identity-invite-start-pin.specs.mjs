@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { gymCreateInvitation, gymResendInvitation, vendorCreateInvitation } from '../functions/invitations.mjs';
-import { pinLogin } from '../functions/pin-auth.mjs';
+import { pinLogin, pinResetStart, pinResetConfirm, pinResetComplete } from '../functions/pin-auth.mjs';
 import { inviteBegin, onboardingAccept, onboardingDecline, onboardingRole } from '../functions/onboarding.mjs';
 import { users, trainers, pinAuthService } from '../src/bootstrap/services.mjs';
 import { db } from '../src/infra/knex-store.mjs';
@@ -42,7 +42,7 @@ async function asOrg(route, claims, { params = {}, body = {} } = {}) {
   return out;
 }
 async function withEnv(env, fn) {
-  const names = ['IDENTITY_V2', 'V2_PIN_LOGIN', 'V2_INVITES', 'V2_PERSONAS', 'V2_LINKING', 'VERIFICATION_EMAIL_PROVIDER', 'VERIFICATION_SMS_PROVIDER', ...Object.keys(env)];
+  const names = ['IDENTITY_V2', 'V2_PIN_LOGIN', 'V2_INVITES', 'V2_PERSONAS', 'V2_LINKING', 'V2_RECOVERY', 'VERIFICATION_EMAIL_PROVIDER', 'VERIFICATION_SMS_PROVIDER', ...Object.keys(env)];
   const saved = Object.fromEntries(names.map(n => [n, process.env[n]]));
   Object.assign(process.env, env);
   for (const [k, v] of Object.entries(env)) if (v === null) delete process.env[k];
@@ -301,4 +301,34 @@ test('with FitFlex PINs off, the invitation is announced without a start PIN and
       assert.equal((await post(route, {})).statusCode, 404);
     }
   }, { V2_PIN_LOGIN: null });
+});
+
+test('someone with no profile yet who resets their PIN lands on the choice, not an error', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const local = localPhone();
+    const phone = e164(local);
+    await invite(o, { role: 'staff', phone: local, aclPermissions: [] });
+    const started = await post(pinLogin, { phone: local, pin: startPinIn(lastMessage(phone)) });
+    const begun = await post(inviteBegin, { startToken: started.body.startToken, displayName: 'Zawadi Omari', pin: '4821' });
+    await post(onboardingDecline, { onboardingToken: begun.body.onboardingToken, invitationId: begun.body.invitations[0].id });
+
+    // Forgot PIN, with no profile to sign in to.
+    assert.equal((await post(pinResetStart, { phone: local })).statusCode, 200);
+    const code = lastMessage(phone).text.match(/\b(\d{6})\b/)[1];
+    const confirmed = await post(pinResetConfirm, { phone: local, code });
+    assert.equal(confirmed.statusCode, 200, JSON.stringify(confirmed.body));
+    const done = await post(pinResetComplete, { resetToken: confirmed.body.resetToken, pin: '7310' });
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body));
+    assert.equal(done.body.onboarding, true);
+    assert.equal(done.body.token, undefined);
+    assert.deepEqual(done.body.invitations, []);
+
+    // The new PIN is the one that works, and the choice still leads to a session.
+    assert.equal((await post(pinLogin, { phone: local, pin: '4821' })).statusCode, 401);
+    const chosen = await post(onboardingRole, { onboardingToken: done.body.onboardingToken, role: 'member' });
+    assert.equal(chosen.statusCode, 200, JSON.stringify(chosen.body));
+    assert.equal(chosen.body.user.displayName, 'Zawadi Omari');
+    assert.equal((await post(pinLogin, { phone: local, pin: '7310' })).body.user.id, chosen.body.user.id);
+  }, { V2_RECOVERY: 'true' });
 });
