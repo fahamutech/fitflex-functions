@@ -6,6 +6,7 @@ import { createPinAuthService } from '../services/pin-auth-service.mjs';
 import { createRegistrationService } from '../services/registration-service.mjs';
 import { createOnboardingService } from '../services/onboarding-service.mjs';
 import { createIdentifierChangeService } from '../services/identifier-change-service.mjs';
+import { createAccountRecoveryService } from '../services/account-recovery-service.mjs';
 import { randomUUID } from 'node:crypto';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
@@ -493,6 +494,12 @@ export const onboardingService = createOnboardingService({
 export const identifierChangeService = createIdentifierChangeService({
   db, users, codes: identifierService, pinAuth: pinAuthService, identityLink: identityLinkService, auditLog,
   senders: { sms: smsSender, email: emailSender },
+  linkingEnabled: () => identityFlag('V2_LINKING'),
+});
+// Identity V2 · account recovery for someone who lost every verified number and email (member path).
+export const accountRecoveryService = createAccountRecoveryService({
+  db, users, codes: identifierService, pinAuth: pinAuthService, identityLink: identityLinkService,
+  senders: { sms: smsSender, email: emailSender }, signPurpose, verifyPurpose, partnerGate, auditLog,
   linkingEnabled: () => identityFlag('V2_LINKING'),
 });
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
