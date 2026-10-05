@@ -24,8 +24,8 @@ async function caller(req, res) {
 
 export const myIdentifiers = {
   created, method: 'get', path: '/me/identifiers',
-  description: 'The caller\'s verified emails and phone numbers, and the profile values not verified yet.',
-  responseSample: { identifiers: [{ type: 'email', value: 'person@example.com', verified: true }], unverified: [{ type: 'phone', value: '+255712345678' }] },
+  description: 'The caller\'s verified emails and phone numbers, and the profile values not verified yet. secondContact says which kind to suggest adding when only one is verified (so losing it never locks them out), else null.',
+  responseSample: { identifiers: [{ type: 'email', value: 'person@example.com', verified: true }], unverified: [{ type: 'phone', value: '+255712345678' }], secondContact: { missing: 'phone' } },
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     const user = await caller(req, res);

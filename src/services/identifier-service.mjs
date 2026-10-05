@@ -75,7 +75,11 @@ export function createIdentifierService({
         if (value && !verified.has(`${type}:${value}`)) unverified.set(`${type}:${value}`, { type, value });
       }
     }
-    return { identifiers, unverified: [...unverified.values()] };
+    // With only one of the two kinds verified, losing it would lock the person out of
+    // self-service recovery: the app gently suggests adding the other (confirmed 5 Oct 2026).
+    const kinds = new Set(identifiers.map(i => i.type));
+    const secondContact = kinds.size === 1 ? { missing: kinds.has('email') ? 'phone' : 'email' } : null;
+    return { identifiers, unverified: [...unverified.values()], secondContact };
   }
 
   /** Each person may ask only so often, whatever they ask about. */
