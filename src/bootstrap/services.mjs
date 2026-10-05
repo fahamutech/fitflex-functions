@@ -69,6 +69,7 @@ import { createB2BProgramService } from '../services/b2b-program-service.mjs';
 import { createB2BConsumptionService } from '../services/b2b-consumption-service.mjs';
 import { createB2BBillingService } from '../services/b2b-billing-service.mjs';
 import { createB2BCollectionsService } from '../services/b2b-collections-service.mjs';
+import { createB2BAnalyticsService } from '../services/b2b-analytics-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -242,6 +243,13 @@ export const b2bFinanceService = createB2BFinanceService({ db, users, b2bService
 export const b2bCollectionsService = createB2BCollectionsService({
   db, finance: b2bFinanceService, email: emailSender(),
   // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+// B2B analytics and reporting: a read layer over the ledgers; stores nothing.
+export const b2bAnalyticsService = createB2BAnalyticsService({
+  db, b2bService, finance: b2bFinanceService, programs: b2bPrograms, benefits: b2bBenefits, gyms, trainers,
+  // challengeService and notificationService are created further down; these only run later.
+  challengeProgress: (creatorType, creatorId, memberId) => challengeService.memberProgressForCreator(creatorType, creatorId, memberId),
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 

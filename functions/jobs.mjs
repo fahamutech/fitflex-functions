@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, settlementService, settlementClawbackService, trainerSettlementService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, settlementService, settlementClawbackService, trainerSettlementService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -135,5 +135,14 @@ export const b2bCollections = {
   onJob: async () => {
     const stats = await b2bCollectionsService.runReminders();
     if (stats.sent || stats.failed) console.log(`[b2b-collections] reminders sent=${stats.sent} failed=${stats.failed} of ${stats.checked} open invoice(s)`);
+  },
+};
+
+export const b2bSponsorVisibilityNotice = {
+  created, rule: '0 7 * * *', // every day 07:00 UTC = 10:00 EAT
+  description: 'B2B: tell each person an organisation covers, once, that the organisation can see their FitFlex activity (and what it cannot see). New beneficiaries are picked up by the next run. Safe to rerun.',
+  onJob: async () => {
+    const stats = await b2bAnalyticsService.notifyVisibility();
+    if (stats.sent || stats.failed) console.log(`[b2b-analytics] visibility notices sent=${stats.sent} failed=${stats.failed} of ${stats.covered} covered`);
   },
 };

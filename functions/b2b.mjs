@@ -7,7 +7,7 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -737,4 +737,84 @@ export const withdrawB2BPaymentNotice = {
   description: 'Take back a payment notice FitFlex has not decided yet (billing.pay).',
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => collections.withdrawNotice({ access, noticeId: req.params.noticeId, actorId: actor(req) })),
+};
+
+// ── Analytics and reporting (Phase 6 analytics) ─────────────────────────────
+//
+// A read layer over the ledgers. Periods: ?period=today|yesterday|last_7_days|
+// last_30_days|this_month|last_month|this_quarter|last_quarter|year_to_date|
+// last_year, or ?from=&to= (East Africa Time days). FitFlex staff use the same
+// organisation routes; the cross-organisation ones are theirs alone.
+
+const analytics = b2bAnalyticsService;
+const PERIOD_HELP = 'Period: ?period= (default this_month) or ?from=&to= as EAT days.';
+
+export const getB2BOrganizationDashboard = {
+  created, method: 'get', path: '/b2b/organizations/:id/analytics/dashboard',
+  description: `An organisation's wellness programme at a glance (analytics.read): people, how many used a sponsored benefit, usage, spend, benefits, top providers, engagement and a trend, beside the comparable period before. Billing figures are included for roles with billing.read. ${PERIOD_HELP} Filters: programId, benefitId, providerId, group.`,
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => analytics.dashboard({ access, query: req.query || {} })),
+};
+
+export const listB2BOrganizationPeopleAnalytics = {
+  created, method: 'get', path: '/b2b/organizations/:id/analytics/people',
+  description: `Each person on the organisation's list with what they used and did in the period (analytics.people: owner, admin, manager, hr). ${PERIOD_HELP} ?search=&group=&status=&activity=active|inactive&sort=name|uses|spend|last_active&limit=&cursor=.`,
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => analytics.people({ access, query: req.query || {} })),
+};
+
+export const getB2BOrganizationPersonAnalytics = {
+  created, method: 'get', path: '/b2b/organizations/:id/analytics/people/:beneficiaryId',
+  description: `One person in the period (analytics.people): sponsored visits and sessions with date and provider, pass check-ins, other gym visits, activities logged and progress in the organisation's own challenges. Never included: weight, height, calories, notes, routes, or anything another organisation funds or runs. ${PERIOD_HELP}`,
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => analytics.person({ access, beneficiaryId: req.params.beneficiaryId, query: req.query || {} })),
+};
+
+export const getB2BOrganizationProgramAnalytics = {
+  created, method: 'get', path: '/b2b/organizations/:id/analytics/programs',
+  description: `Every programme side by side (analytics.read): eligible people, participation, usage, sponsor and member spend, budget used. ${PERIOD_HELP}`,
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => analytics.programAnalytics({ access, query: req.query || {} })),
+};
+
+export const getB2BOrganizationBenefitAnalytics = {
+  created, method: 'get', path: '/b2b/organizations/:id/analytics/benefits',
+  description: `Every benefit (analytics.read): eligible, used it, reach, uses, value and each side's share; for a benefit with a limit, the allowance used in the window in force today. ${PERIOD_HELP} ?programId=.`,
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => analytics.benefitAnalytics({ access, query: req.query || {} })),
+};
+
+export const getB2BOrganizationProviderAnalytics = {
+  created, method: 'get', path: '/b2b/organizations/:id/analytics/providers',
+  description: `Where the organisation's people went (analytics.read): each gym and trainer with visits, people, repeat users and service value. FitFlex staff also see how far settlement of those visits has got. ${PERIOD_HELP} Filters: programId, benefitId.`,
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => analytics.providerAnalytics({ access, query: req.query || {} })),
+};
+
+export const getB2BOrganizationFinanceAnalytics = {
+  created, method: 'get', path: '/b2b/organizations/:id/analytics/finance',
+  description: `Billing over time (billing.read): invoiced and collected by month, what is owed now with aging, and sponsor usage beside it. ${PERIOD_HELP}`,
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => analytics.financeAnalytics({ access, query: req.query || {} })),
+};
+
+export const exportB2BOrganizationReport = {
+  created, method: 'get', path: '/b2b/organizations/:id/analytics/export/:report',
+  description: `A report as CSV: beneficiaries, usage, activity (analytics.people); benefits, programs, providers (analytics.read); invoices, payments (billing.read). Returns { filename, rows, csv }. Every export is audited. ${PERIOD_HELP}`,
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => analytics.exportCsv({ access, report: req.params.report, query: req.query || {}, actorId: actor(req) })),
+};
+
+export const adminB2BAnalyticsOverview = {
+  created, method: 'get', path: '/admin/b2b/analytics',
+  description: `Admin (b2b): the whole B2B book for a period — organisations, people, usage, invoiced and collected, top organisations and providers, and a trend. ${PERIOD_HELP}`,
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await analytics.overview({ query: req.query || {} })),
+};
+
+export const adminB2BDataQuality = {
+  created, method: 'get', path: '/admin/b2b/analytics/data-quality',
+  description: 'Admin (b2b or any billing scope): records that should not exist or are missing their other half — usage without a visit, shares that do not add up, usage on no invoice, invoices and payments that do not add up. Reports a count and examples; repairs nothing.',
+  onGuard: requireBillingRead,
+  onRequest: async (_req, res) => send(res, await analytics.dataQuality()),
 };
