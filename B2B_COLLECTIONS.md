@@ -5,7 +5,7 @@ late. It sits on top of Phase 5 (`B2B_FINANCE.md`): invoices, payments,
 allocation and the two-person rules are unchanged.
 
 Code: `src/services/b2b-collections-service.mjs`, routes in `functions/b2b.mjs`,
-job in `functions/jobs.mjs`, migration `20261122090000-b2b-collections.cjs`,
+job in `functions/jobs.mjs`, migration `20261123090000-b2b-collections.cjs`,
 tests `specs/b2b-collections.specs.mjs`.
 
 ## 1. Decisions this implements (product owner, 4 Oct 2026)
