@@ -246,7 +246,7 @@ export function createInvitationService({
   const DELIVERED_ROLES = ['staff', 'trainer'];
   const ROLE_WORDS = {
     en: { staff: 'staff', trainer: 'a trainer' },
-    sw: { staff: 'mfanyakazi', trainer: 'mkufunzi' },
+    sw: { staff: 'mfanyakazi', trainer: 'trainer' },
   };
   const INVITE_TEXT = {
     en: {
