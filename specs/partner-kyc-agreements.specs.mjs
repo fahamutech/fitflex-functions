@@ -149,7 +149,7 @@ test('routes: the partner reads the texts in their language and accepts; the IP 
   };
   const listed = await call(myKycAgreements, { query: { lang: 'sw' } });
   assert.equal(listed.statusCode, 200);
-  assert.equal(listed.body.agreements[0].title, 'Masharti ya Wakufunzi Washirika wa FitFlex');
+  assert.equal(listed.body.agreements[0].title, 'Masharti ya Ma-trainer Washirika wa FitFlex');
 
   const consent = listed.body.agreements[1];
   const accepted = await call(myKycAcceptAgreement, {
