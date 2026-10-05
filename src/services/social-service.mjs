@@ -20,6 +20,7 @@
 // shows its type, date, duration, distance, pace, splits and climb.
 import { createCompanyDirectory, companyKey } from './company-directory.mjs';
 import { randomUUID } from 'node:crypto';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 // `corporate` is a company from the Corporate module; `organization` is a B2B
 // organisation that never was one. Their groups behave the same.
@@ -253,10 +254,10 @@ export function createSocialService({
         if (!/unique|duplicate/i.test(err.message ?? '')) throw err;
       }
       const back = (await following(targetId)).has(userId);
-      const name = (await nameOf(userId)) ?? 'Someone';
+      const name = (await nameOf(userId)) ?? null;
       await notify(targetId, back
-        ? { type: 'social_friends', title: 'You\'re friends', body: `${name} followed you back.`, data: { userId } }
-        : { type: 'social_follow', title: 'New follower', body: `${name} started following you.`, data: { userId } });
+        ? { type: 'social_friends', ...notificationText('social_friends', { name }), data: { userId } }
+        : { type: 'social_follow', ...notificationText('social_follow', { name }), data: { userId } });
     }
     return { person: await person(userId, targetId) };
   }
@@ -520,7 +521,7 @@ export function createSocialService({
         if (!/unique|duplicate/i.test(err.message ?? '')) throw err;
       }
       if (a.userId !== viewerId) {
-        await notify(a.userId, { type: 'social_kudos', title: 'Kudos', body: `${(await nameOf(viewerId)) ?? 'Someone'} gave you kudos.`, data: { activityId } });
+        await notify(a.userId, { type: 'social_kudos', ...notificationText('social_kudos', { name: (await nameOf(viewerId)) ?? null }), data: { activityId } });
       }
     }
     if (!on) for (const k of mine) await kudos.removeByIdAsync(k.id);
@@ -554,7 +555,7 @@ export function createSocialService({
     const row = { id: id('cmt'), activityId, userId: viewerId, text: t, createdAt: now().toISOString(), deletedAt: null };
     await comments.insertAsync(row);
     if (a.userId !== viewerId) {
-      await notify(a.userId, { type: 'social_comment', title: 'New comment', body: `${(await nameOf(viewerId)) ?? 'Someone'}: ${t.slice(0, 80)}`, data: { activityId } });
+      await notify(a.userId, { type: 'social_comment', ...notificationText('social_comment', { name: (await nameOf(viewerId)) ?? null, preview: t.slice(0, 80) }), data: { activityId } });
     }
     return { comment: { id: row.id, text: t, createdAt: row.createdAt, author: { id: viewerId, displayName: await nameOf(viewerId) }, canDelete: true } };
   }

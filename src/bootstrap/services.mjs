@@ -417,6 +417,8 @@ export const analyticsService = createAnalyticsService({
 // Push is off unless PUSH_NOTIFICATIONS=on, so local dev and tests never call FCM.
 export const notificationService = createNotificationService({
   users, deviceTokens, notifications, whatsApp: whatsAppService,
+  // Each person's app language, so the texts the server writes follow it.
+  preferences: communicationPreferences,
   getMessaging: process.env.PUSH_NOTIFICATIONS === 'on' ? () => { initFirebaseAdmin(); return getMessaging(); } : null,
   // Opens and taps of campaign messages update the communications ledger.
   // deliveryService is defined further down; these only run later.

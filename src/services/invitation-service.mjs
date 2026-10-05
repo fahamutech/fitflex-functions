@@ -21,6 +21,7 @@
 //                Only the vendor (owner) invites.
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 const OPEN = ['pending', 'claimed'];
 const INVITABLE_ROLES = { gym: ['staff', 'trainer', 'member'], vendor: ['staff'] };
@@ -311,8 +312,7 @@ export function createInvitationService({
       for (const p of personas) {
         await notify(p.id, {
           id: `ntf_${inv.id}_${p.id}`.slice(0, 60), type: 'org_invitation',
-          title: 'You have an invitation',
-          body: `${org?.name || (inv.orgType === 'vendor' ? 'A shop' : 'A gym')} invited you to join as ${inv.role}.`,
+          ...notificationText('org_invitation', { orgName: org?.name || null, orgType: inv.orgType, role: inv.role }),
           data: { invitationId: inv.id, orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role },
         });
       }

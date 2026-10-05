@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSocialService } from '../src/services/social-service.mjs';
 import { createActivityService } from '../src/services/activity-service.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 function store(rows = []) {
   const clone = (r) => JSON.parse(JSON.stringify(r));
@@ -27,9 +28,9 @@ function setup() {
   const s = {
     users: store([u('star', 'Neema Star'), u('fan', 'Juma Fan'), u('fan2', 'Asha Fan'), u('stranger', 'Baraka Stranger')]),
     activities: store(), follows: store(), blocks: store(), profiles: store(), groups: store(), groupMembers: store(),
-    kudos: store(), comments: store(), reports: store(), views: store(), sent: [],
+    kudos: store(), comments: store(), reports: store(), views: store(), sent: [], messages: [],
   };
-  s.svc = createSocialService({ ...s, notify: async (to, m) => s.sent.push({ to, type: m.type }), now: () => NOW });
+  s.svc = createSocialService({ ...s, notify: async (to, m) => { s.messages.push(m); s.sent.push({ to, type: m.type }); }, now: () => NOW });
   s.acts = createActivityService({ activities: s.activities, resolveShare: (m, raw) => s.svc.resolveShare(m, raw), now: () => NOW });
   s.post = async (who, shareWith, hours = 2) => (await s.acts.log(who, { type: 'running', startedAt: ago(hours), distanceKm: 8, durationMinutes: 40, notes: 'Hill repeats', shareWith })).activity;
   s.sees = async (viewer, a) => s.svc.canView(viewer, await s.activities.findByIdAsync(a.id));
@@ -43,6 +44,13 @@ test('Followers: a one-way follow sees it — no follow-back needed; Friends sti
   assert.equal(await s.sees('fan', forFollowers), false, 'not following yet');
   await s.svc.follow('fan', 'star');
   assert.deepEqual(s.sent.pop(), { to: 'star', type: 'social_follow' });
+  // The notice follows the reader's language: Swahili if they chose it, English otherwise.
+  const notice = s.messages.at(-1);
+  assert.deepEqual(notice.data, { userId: 'fan' });
+  const sw = await deliveredTo(notice, 'sw');
+  assert.deepEqual([sw.title, sw.body, sw.push.body], ['Mfuasi mpya', 'Juma Fan ameanza kukufuata.', 'Juma Fan ameanza kukufuata.']);
+  const en = await deliveredTo(notice, null);
+  assert.deepEqual([en.title, en.body], ['New follower', 'Juma Fan started following you.']);
   assert.equal(await s.sees('fan', forFollowers), true);
   assert.equal(await s.sees('fan', forFriends), false, 'friends means mutual');
   assert.equal((await s.svc.feed('fan')).items.map(i => i.activity.id).join(), forFollowers.id);

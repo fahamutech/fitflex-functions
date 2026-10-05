@@ -32,6 +32,7 @@ import {
 import { GYM_TIERS } from '../shared/constants.mjs';
 import { requiredAgreements, agreementText } from '../shared/partner-agreements.mjs';
 import { prepareDocumentFile, displayFileName, sha256 } from '../infra/document-file.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -45,13 +46,6 @@ const ADMIN_EDITABLE = new Set(['draft', 'info_requested', 'submitted', 'in_revi
 // expire or already expired) without reopening the case; a reviewer then
 // accepts or rejects the new document on its own (owner decision, 28 Sep).
 const RENEWABLE = new Set(['approved', 'suspended']);
-
-const REQUIREMENT_NAMES = {
-  owner_id: 'ID', trainer_id: 'ID', representative_id: 'representative ID',
-  business_registration: 'business registration certificate', tin_certificate: 'TIN certificate',
-  business_licence: 'business licence', certification: 'certification', liability_insurance: 'liability cover',
-  representative_authority: 'proof of authority',
-};
 
 // Expiry reminders go out this many days before a document expires, and on the day.
 export const EXPIRY_REMINDER_DAYS = [30, 7, 0];
@@ -591,21 +585,18 @@ export function createPartnerKycService({
 
   // ── Status changes ────────────────────────────────────────────────────────
 
-  // What the partner is told at each step.
-  const MESSAGES = {
-    submitted: () => ({ title: 'Verification details received', body: 'Thank you. FitFlex will review your details and let you know the outcome.' }),
-    info_requested: note => ({ title: 'More information needed', body: note || 'FitFlex needs more information to finish verifying you. Open your verification to see what to update.' }),
-    approved: () => ({ title: 'You are verified', body: 'Your FitFlex partner verification is approved.' }),
-    rejected: note => ({ title: 'Verification not approved', body: note || 'Your FitFlex partner verification was not approved.' }),
-    suspended: note => ({ title: 'Verification suspended', body: note || 'Your FitFlex partner verification has been suspended.' }),
-    reinstated: () => ({ title: 'Verification restored', body: 'Your FitFlex partner verification is active again.' }),
-    reopened: () => ({ title: 'Verification reopened', body: 'You can update your details and submit them again.' }),
-  };
+  // What the partner is told at each step (texts: shared/notification-texts.mjs).
+  // Only these steps carry the reviewer's note; it is sent in their own words.
+  const TOLD = new Set(['submitted', 'info_requested', 'approved', 'rejected', 'suspended', 'reinstated', 'reopened']);
+  const WITH_NOTE = new Set(['info_requested', 'rejected', 'suspended']);
 
   async function tell(kycCase, key, note) {
-    if (!kycCase.userId || !MESSAGES[key]) return;
+    if (!kycCase.userId || !TOLD.has(key)) return;
     try {
-      await notify(kycCase.userId, { type: `kyc_${key}`, data: { caseId: kycCase.id }, ...MESSAGES[key](note) });
+      await notify(kycCase.userId, {
+        type: `kyc_${key}`, data: { caseId: kycCase.id },
+        ...notificationText(`kyc_${key}`, { note: WITH_NOTE.has(key) ? note || null : null }),
+      });
     } catch { /* a failed notification never fails the decision */ }
   }
 
@@ -856,15 +847,13 @@ export function createPartnerKycService({
         const window = EXPIRY_REMINDER_DAYS.filter(d => daysLeft <= d).pop();
         if (window === undefined) continue;
         if (reminded.has(`${doc.id}:${window}`)) { already += 1; continue; }
-        const name = REQUIREMENT_NAMES[requirementKey] || 'document';
-        const body = daysLeft > 0
-          ? `Your ${name} expires on ${doc.expiresOn}. Upload the renewed one in Verification.`
-          : `Your ${name} expired on ${doc.expiresOn}. Upload the renewed one in Verification.`;
+        const message = notificationText('kyc_document_expiring', { requirementKey, daysLeft, expiresOn: doc.expiresOn });
+        // The case history keeps the English wording, whatever language the partner reads.
+        const body = message.body;
         try {
           await notify(kycCase.userId, {
             type: 'kyc_document_expiring',
-            title: daysLeft > 0 ? `Your ${name} expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}` : `Your ${name} has expired`,
-            body,
+            ...message,
             data: { caseId: kycCase.id, requirementKey, expiresOn: doc.expiresOn },
           });
         } catch { /* a failed notification is retried on the next run */ continue; }

@@ -23,6 +23,7 @@ import {
   getB2BOrganizationDashboard, listB2BOrganizationPeopleAnalytics, getB2BOrganizationPersonAnalytics, getB2BOrganizationFinanceAnalytics,
   getB2BOrganizationBenefitAnalytics, exportB2BOrganizationReport, adminB2BAnalyticsOverview, adminB2BDataQuality,
 } from '../functions/b2b.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 await ensureInit();
 
@@ -459,6 +460,13 @@ test('the visibility notice reaches each covered person once', async () => {
   const mine = () => sent.filter(s => [m1.userId, m2.userId].includes(s.userId));
   assert.deepEqual(mine().map(s => s.type), ['b2b_sponsor_visibility', 'b2b_sponsor_visibility']);
   assert.match(mine()[0].body, /can see your FitFlex activity.*cannot see your weight, height/);
+  // A covered person who reads Swahili is told in Swahili.
+  const sw = await deliveredTo(mine()[0], 'sw');
+  assert.match(sw.title, /^Kile .+ inaweza kuona$/);
+  assert.match(sw.body, /inaweza kuona shughuli zako za FitFlex: ziara za gym, mazoezi, hatua na maendeleo ya challenge\. Haiwezi kuona uzito wako, urefu wako/);
+  const en = await deliveredTo(mine()[0], null);
+  assert.deepEqual([en.title, en.body], [mine()[0].title, mine()[0].body]);
+  assert.match(en.title, /^What .+ can see$/);
   const m3 = await enrol(orgId);
   await svc.notifyVisibility({ limit: 100000 });
   assert.deepEqual(mine().length, 2);

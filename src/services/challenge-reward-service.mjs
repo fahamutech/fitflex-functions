@@ -31,6 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { challengePhase, rewardItemsOf } from './challenge-service.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 import { createCompanyDirectory, isCompanyType } from './company-directory.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 /** The company or organisation a scope is for: { kind: 'corporate', corporateId } or { kind: 'organization', organizationId }. */
 const companyIdOf = scope => (scope.kind === 'corporate' ? scope.corporateId : scope.organizationId);
@@ -94,8 +95,7 @@ export function createChallengeRewardService({
     }
     await notify(memberId, {
       type: 'challenge_reward_earned',
-      title: 'Reward earned',
-      body: `${c.name}: ${item.label}. Pending fulfilment.`,
+      ...notificationText('challenge_reward_earned', { challengeName: c.name, label: item.label }),
       data: { challengeId: c.id, rewardAwardId: row.id },
     });
     return row;
@@ -275,14 +275,14 @@ export function createChallengeRewardService({
     const c = await challenges.findByIdAsync(a.challengeId);
     if (next === 'issued') {
       await notify(a.memberId, {
-        type: 'challenge_reward_issued', title: 'Reward on its way',
-        body: `${a.label} from ${c?.name ?? 'your challenge'} has been handed out.${patch.reference ? ` Reference: ${patch.reference}` : ''}`,
+        type: 'challenge_reward_issued',
+        ...notificationText('challenge_reward_issued', { label: a.label, challengeName: c?.name ?? null, reference: patch.reference || null }),
         data: { challengeId: a.challengeId, rewardAwardId: id },
       });
     } else if (next === 'rejected') {
       await notify(a.memberId, {
-        type: 'challenge_reward_rejected', title: 'Reward not approved',
-        body: `${a.label} from ${c?.name ?? 'your challenge'}: ${note}`,
+        type: 'challenge_reward_rejected',
+        ...notificationText('challenge_reward_rejected', { label: a.label, challengeName: c?.name ?? null, note }),
         data: { challengeId: a.challengeId, rewardAwardId: id },
       });
     }

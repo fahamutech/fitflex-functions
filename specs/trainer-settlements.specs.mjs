@@ -12,6 +12,7 @@ import { createPayoutEligibility } from '../src/services/payout-eligibility.mjs'
 import {
   createTrainerSettlementService, weekOf, lastEndedWeek, payableBasis, eatToday, TOOK_PLACE_AFTER_HOURS,
 } from '../src/services/trainer-settlement-service.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 await ensureInit();
 
@@ -165,6 +166,12 @@ test('prepare, submit, approve by a second person, clear and pay; the trainer is
   const note = inbox.find(n => n.userId === a.userId);
   assert.equal(note.type, 'trainer_payout_paid');
   assert.match(note.body, /TZS 34,000 for 2 session\(s\).*MPESA-TR1/);
+  // A trainer who reads Swahili gets it in Swahili; without a chosen language, the English above.
+  const sw = await deliveredTo(note, 'sw');
+  assert.equal(sw.title, 'Malipo yako yametumwa');
+  assert.match(sw.body, /^FitFlex imekutumia TZS 34,000 kwa vipindi 2, \d{4}-\d\d-\d\d hadi \d{4}-\d\d-\d\d\. Kumbukumbu: MPESA-TR1\.$/);
+  const en = await deliveredTo(note, null);
+  assert.deepEqual([en.title, en.body], ['Payout sent', note.body]);
 
   // The trainer sees it, without staff ids, and with where it went.
   const view = await svc.listMine({ trainerId: a.id });

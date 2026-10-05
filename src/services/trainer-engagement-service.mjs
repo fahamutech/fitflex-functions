@@ -4,6 +4,7 @@
 // inbox (and by push) when the other writes.
 // Pure DI: receives store collections via the factory.
 import { randomUUID } from 'node:crypto';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 export const ENQUIRY_TEXT_MAX = 1000;
 
@@ -81,10 +82,10 @@ export function createTrainerEngagementService({
       updatedAt: at,
     });
     const member = await users.findByIdAsync(memberId);
-    const name = member?.displayName || 'A member';
+    const memberName = member?.displayName || null;
     await tell(trainer.userId, type === 'enquiry'
-      ? { type: 'trainer_enquiry', title: `New enquiry from ${name}`, body: preview(text), data: { engagementId: engagement.id } }
-      : { type: 'trainer_interest', title: `${name} is interested in training with you`, body: 'Say hello and tell them how you work.', data: { engagementId: engagement.id } });
+      ? { type: 'trainer_enquiry', ...notificationText('trainer_enquiry', { memberName, preview: preview(text) }), data: { engagementId: engagement.id } }
+      : { type: 'trainer_interest', ...notificationText('trainer_interest', { memberName }), data: { engagementId: engagement.id } });
     return { engagement };
   }
 
@@ -163,8 +164,7 @@ export function createTrainerEngagementService({
     const updated = await append(r.e, 'trainer', c.text, { status: 'replied' });
     await tell(r.e.memberId, {
       type: 'trainer_enquiry_reply',
-      title: `${r.profile.displayName || 'Your trainer'} replied`,
-      body: preview(c.text),
+      ...notificationText('trainer_enquiry_reply', { trainerName: r.profile.displayName || null, preview: preview(c.text) }),
       data: { engagementId: r.e.id, trainerId: r.profile.id },
     });
     return { engagement: forTrainer(updated, await users.findByIdAsync(r.e.memberId)) };
@@ -199,8 +199,7 @@ export function createTrainerEngagementService({
     const member = await users.findByIdAsync(memberId);
     await tell(trainer?.userId, {
       type: 'trainer_enquiry',
-      title: `${member?.displayName || 'A member'} replied`,
-      body: preview(c.text),
+      ...notificationText('trainer_enquiry_member_reply', { memberName: member?.displayName || null, preview: preview(c.text) }),
       data: { engagementId: r.e.id },
     });
     return { engagement: forMember(updated, trainer) };

@@ -27,6 +27,7 @@ import { resolvePeriod, bucketOf, bucketsBetween, changePct, ratePct, perUnit, t
 import { eatDayStart, matchesPopulation, programEffectiveStatus, benefitValidity, usageWindow, FLAT_FEE_BENEFIT } from '../shared/b2b-programs.mjs';
 import { BILLED_STATUSES } from '../shared/b2b-billing.mjs';
 import { localDay, addDays } from '../shared/member-progress.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 const USAGE = 'B2BBenefitConsumption';
 const ENTITLEMENT = 'B2BPassEntitlement';
@@ -847,8 +848,7 @@ export function createB2BAnalyticsService({
       const name = r.tradingName || r.legalName;
       try {
         await notify(r.userId, {
-          id: idOf(r), type: 'b2b_sponsor_visibility', title: `What ${name} can see`,
-          body: `${name} gives you benefits through FitFlex and can see your FitFlex activity: gym visits, workouts, steps and challenge progress. It cannot see your weight, height or anything from another sponsor. See Benefits for details.`,
+          id: idOf(r), type: 'b2b_sponsor_visibility', ...notificationText('b2b_sponsor_visibility', { name }),
           data: { organizationId: r.organizationId },
         });
         stats.sent += 1;

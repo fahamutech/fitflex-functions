@@ -20,6 +20,7 @@ import {
   streaks as computeStreaks,
 } from '../shared/member-progress.mjs';
 import { validateGoalDefinition, GOAL_TYPES } from './goal-service.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 export const PERMISSIONS = [
   'steps', 'distance', 'activeMinutes', 'workoutHistory',
@@ -124,8 +125,7 @@ export function createTrainerClientService({
     if (trainer.userId) {
       await safeNotify(trainer.userId, {
         type: 'trainer_client_request',
-        title: 'New client request',
-        body: `${member?.displayName || 'A member'} would like to train with you.`,
+        ...notificationText('trainer_client_request', { memberName: member?.displayName || null }),
         data: { relationshipId: row.id },
       });
     }
@@ -258,8 +258,8 @@ export function createTrainerClientService({
       : { status: 'declined', updatedAt: stamp() };
     await relationships.updateByIdAsync(relId, patch);
     await safeNotify(r.memberId, accept
-      ? { type: 'trainer_connected', title: 'Trainer connected', body: `${trainer.displayName || 'Your trainer'} accepted your request.`, data: { relationshipId: r.id } }
-      : { type: 'trainer_declined', title: 'Trainer request', body: `${trainer.displayName || 'The trainer'} isn't taking new clients right now.`, data: { relationshipId: r.id } });
+      ? { type: 'trainer_connected', ...notificationText('trainer_connected', { trainerName: trainer.displayName || null }), data: { relationshipId: r.id } }
+      : { type: 'trainer_declined', ...notificationText('trainer_declined', { trainerName: trainer.displayName || null }), data: { relationshipId: r.id } });
     return { client: { ...r, ...patch, member: await memberCard(r.memberId) } };
   }
 
@@ -426,8 +426,7 @@ export function createTrainerClientService({
     await goals.insertAsync(row);
     await safeNotify(r.memberId, {
       type: 'trainer_goal_assigned',
-      title: 'New goal from your trainer',
-      body: `${trainer.displayName || 'Your trainer'} set you a goal${row.title ? `: ${row.title}` : ''}.`,
+      ...notificationText('trainer_goal_assigned', { trainerName: trainer.displayName || null, goalTitle: row.title || null }),
       data: { goalId: row.id },
     });
     return { goal: assignedGoalView(row) };
@@ -536,8 +535,7 @@ export function createTrainerClientService({
     }
     await safeNotify(r.memberId, {
       type: 'trainer_workout_assigned',
-      title: 'New workout from your trainer',
-      body: `${trainer.displayName || 'Your trainer'} planned "${base.name}" for you${dates.length > 1 ? ` on ${dates.length} days` : ''}.`,
+      ...notificationText('trainer_workout_assigned', { trainerName: trainer.displayName || null, workoutName: base.name, days: dates.length }),
       data: { workoutIds: created.map(w => w.id) },
     });
     return { workouts: created.map(w => workoutSummary(w, trainer.id, normalizePermissions(r.permissions))) };

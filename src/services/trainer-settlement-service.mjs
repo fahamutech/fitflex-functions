@@ -26,6 +26,7 @@
 // Each step is one transaction with the row locked, and is audited.
 import { randomUUID } from 'node:crypto';
 import { db as defaultDb } from '../infra/knex-store.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 /** Hours after a session's start before an unmarked session counts as having taken place. */
 export const TOOK_PLACE_AFTER_HOURS = 48;
@@ -239,8 +240,11 @@ export function createTrainerSettlementService({
       const trainer = trainerOf(out.statement.trainerId);
       try {
         await notify(trainer?.userId, {
-          id: `ntf_trainer_payout_${out.statement.id}`, type: 'trainer_payout_paid', title: 'Payout sent',
-          body: `FitFlex sent you ${money(out.statement.finalNetTzs)} for ${out.statement.sessionCount} session(s), ${out.statement.periodStartDate} to ${out.statement.periodEndDate}. Reference: ${out.statement.paymentReference}.`,
+          id: `ntf_trainer_payout_${out.statement.id}`, type: 'trainer_payout_paid',
+          ...notificationText('trainer_payout_paid', {
+            amount: money(out.statement.finalNetTzs), sessionCount: out.statement.sessionCount,
+            from: out.statement.periodStartDate, to: out.statement.periodEndDate, reference: out.statement.paymentReference,
+          }),
           data: { statementId: out.statement.id },
         });
       } catch { /* the payment itself is recorded */ }

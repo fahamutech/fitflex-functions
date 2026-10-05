@@ -13,6 +13,7 @@
 //   requested ──approve──▶ approved ──paid──▶ paid
 //       └──────reject────▶ rejected
 import { randomUUID } from 'node:crypto';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order'];
 export const REFUND_STATUSES = ['requested', 'approved', 'paid', 'rejected'];
@@ -33,9 +34,10 @@ export function createRefundService({
 }) {
   const money = n => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
 
-  async function tell(refund, type, title, body) {
+  // `textKey` names the wording (shared/notification-texts.mjs); several share one `type`.
+  async function tell(refund, type, textKey, params) {
     try {
-      await notify(refund.memberId, { id: `ntf_${type}_${refund.id}`, type, title, body, data: { refundId: refund.id, kind: refund.kind } });
+      await notify(refund.memberId, { id: `ntf_${type}_${refund.id}`, type, ...notificationText(textKey, params), data: { refundId: refund.id, kind: refund.kind } });
     } catch { /* a notification never blocks a refund */ }
   }
 
@@ -84,9 +86,9 @@ export function createRefundService({
     }
     await audit('refund_raised', requestedBy, null, refund);
     if (approved) {
-      await tell(refund, 'refund_approved', 'Refund on its way', `Your refund of ${money(amount)} is approved. FitFlex will send it to the account you paid from.`);
+      await tell(refund, 'refund_approved', 'refund_on_its_way', { amount: money(amount) });
     } else {
-      await tell(refund, 'refund_requested', 'Refund request received', `We have your request for ${money(amount)} and will reply soon.`);
+      await tell(refund, 'refund_requested', 'refund_requested', { amount: money(amount) });
     }
     return { refund };
   }
@@ -156,9 +158,9 @@ export function createRefundService({
     }
     await audit(`refund_${refund.status}`, actorId, prior, refund);
     if (refund.status === 'approved') {
-      await tell(refund, 'refund_approved', 'Refund approved', `Your refund of ${money(refund.amountTzs)} is approved. FitFlex will send it to the account you paid from.`);
+      await tell(refund, 'refund_approved', 'refund_approved', { amount: money(refund.amountTzs) });
     } else {
-      await tell(refund, 'refund_rejected', 'Refund not approved', note);
+      await tell(refund, 'refund_rejected', 'refund_rejected', { note });
     }
     return { refund };
   }
@@ -177,7 +179,7 @@ export function createRefundService({
       status: 'rejected', decidedBy: actorId || 'policy', decidedAt: at, decisionNote: text(note) || 'No longer owed', updatedAt: at,
     });
     await audit('refund_withdrawn', actorId, prior, refund);
-    await tell(refund, 'refund_rejected', 'Refund withdrawn', refund.decisionNote);
+    await tell(refund, 'refund_rejected', 'refund_withdrawn', { note: refund.decisionNote });
     return { refund, withdrawn: true };
   }
 
@@ -194,7 +196,7 @@ export function createRefundService({
     });
     await audit('refund_paid', actorId, prior, refund);
     try { await onPaid(refund); } catch { /* the refund itself is recorded */ }
-    await tell(refund, 'refund_paid', 'Refund sent', `We sent ${money(refund.amountTzs)} back to you. Reference: ${reference}.`);
+    await tell(refund, 'refund_paid', 'refund_paid', { amount: money(refund.amountTzs), reference });
     return { refund };
   }
 
