@@ -14,6 +14,7 @@ import { memberCancellation, MEMBER_CANCEL_NOTICE_HOURS } from '../src/shared/tr
 import { db } from '../src/infra/knex-store.mjs';
 import { refundService as liveRefunds } from '../src/bootstrap/services.mjs';
 import { ensureInit } from '../functions/index.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 await ensureInit();
 
@@ -115,6 +116,11 @@ test('member cancels a paid session in time: the slot is freed and a full refund
     ['trainer_booking', 'approved', 20000, 'member_cancelled', 'policy']);
   assert.deepEqual(f.events, ['trainer_booking_cancelled_by_member']);
   assert.equal(f.inbox.at(-1).type, 'refund_approved');
+  // The refund notice follows the member's language.
+  const sw = await deliveredTo(f.inbox.at(-1), 'sw');
+  assert.deepEqual([sw.title, sw.body], ['Marejesho yako yanakuja', 'Marejesho yako ya TZS 20,000 yameidhinishwa. FitFlex itayatuma kwenye akaunti uliyolipia.']);
+  const en = await deliveredTo(f.inbox.at(-1), null);
+  assert.deepEqual([en.title, en.body], ['Refund on its way', 'Your refund of TZS 20,000 is approved. FitFlex will send it to the account you paid from.']);
   // The member's list tells the app what can still be cancelled.
   const mine = await f.bookings.memberMyBookings('m1');
   assert.equal(mine[0].cancellation.canCancel, false);
@@ -186,6 +192,10 @@ test('a buyer cancels a paid order before dispatch: stock returns and the refund
   assert.deepEqual([paid.refund.status, paid.refund.paymentReference, paid.refund.paidBy], ['paid', 'MPESA-QX12', 'adm']);
   assert.equal(f.shopOrders.rows[0].paymentStatus, 'refunded');
   assert.equal(f.inbox.at(-1).type, 'refund_paid');
+  assert.match(f.inbox.at(-1).body, /^We sent TZS [\d,]+ back to you\. Reference: MPESA-QX12\.$/);
+  const sw = await deliveredTo(f.inbox.at(-1), 'sw');
+  assert.equal(sw.title, 'Marejesho yametumwa');
+  assert.match(sw.body, /^Tumekurejeshea TZS [\d,]+\. Kumbukumbu: MPESA-QX12\.$/);
 });
 
 test('an unpaid order is simply cancelled; a dispatched one can no longer be cancelled by the buyer', async () => {

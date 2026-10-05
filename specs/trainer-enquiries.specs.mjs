@@ -14,6 +14,7 @@ import {
   trainerMyEngagements, trainerReplyEngagement, trainerReadEngagement, trainerCloseEngagement,
 } from '../functions/trainer-engagements.mjs';
 import { myNotifications } from '../functions/notifications.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 function memStore(rows = []) {
   return {
@@ -51,6 +52,11 @@ test('an enquiry notifies the trainer and starts a conversation', async () => {
   assert.equal(engagement.message, 'Morning slots?');
   assert.deepEqual(engagement.messages.map(m => [m.from, m.text]), [['member', 'Morning slots?']]);
   assert.deepEqual(sent.map(s => [s.userId, s.type, s.title, s.body]), [['usr_trn', 'trainer_enquiry', 'New enquiry from Neema', 'Morning slots?']]);
+  // In Swahili for a trainer who chose it; the member's own words are not translated.
+  const sw = await deliveredTo(sent[0], 'sw');
+  assert.deepEqual([sw.title, sw.body], ['Ulizo jipya kutoka kwa Neema', 'Morning slots?']);
+  const en = await deliveredTo(sent[0], null);
+  assert.deepEqual([en.title, en.body], ['New enquiry from Neema', 'Morning slots?']);
 
   const { engagements } = await service.listForTrainer({ userId: 'usr_trn' });
   assert.equal(engagements[0].unread, true);
@@ -70,6 +76,7 @@ test('the trainer reads, replies and closes; the member follows up and reopens',
   assert.deepEqual(reply.engagement.messages.map(m => m.from), ['member', 'trainer']);
   const toMember = sent.at(-1);
   assert.deepEqual([toMember.userId, toMember.type, toMember.title], ['usr_m', 'trainer_enquiry_reply', 'Coach Asha replied']);
+  assert.equal((await deliveredTo(toMember, 'sw')).title, 'Coach Asha amejibu');
   assert.equal(toMember.data.trainerId, 'trn_1');
 
   let mine = (await service.listForMember({ memberId: 'usr_m' })).engagements[0];

@@ -6,7 +6,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
-import { partnerKycService as svc, adminApprovalService, trainers } from '../src/bootstrap/services.mjs';
+import { partnerKycService as svc, adminApprovalService, trainers, communicationPreferenceService } from '../src/bootstrap/services.mjs';
 import { ensureInit } from '../functions/index.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { myKycSubmit, adminKycDecision } from '../functions/partner-kyc.mjs';
@@ -118,6 +118,34 @@ test('the full path: submit, claim, review documents and payout account, approve
   assert.deepEqual(await inbox(t.id), ['kyc_submitted', 'kyc_approved']);
   const statuses = approved.events.filter(e => e.eventType === 'status_changed').map(e => e.toStatus).reverse();
   assert.deepEqual(statuses, ['draft', 'submitted', 'in_review', 'approved']);
+});
+
+test('a partner who chose Swahili hears each step in Swahili; one who chose nothing, in English', async () => {
+  const texts = async userId => (await db('Notification').where('userId', userId).orderBy('createdAt')).map(n => [n.type, n.title, n.body]);
+  const sw = await readyTrainer();
+  const en = await readyTrainer();
+  assert.equal((await communicationPreferenceService.update(sw.id, { locale: 'sw' })).preferences.locale, 'sw');
+  try {
+    for (const t of [sw, en]) {
+      const admin = await reviewer();
+      await svc.submit(t.partner, t.actor);
+      await svc.claim(t.caseId, admin);
+      const out = await svc.decide(t.caseId, { decision: 'reject', reasonCode: 'suspected_fraud', reasonNote: 'The ID number does not match.' }, admin);
+      assert.equal(out.error, undefined, JSON.stringify(out));
+    }
+    assert.deepEqual(await texts(sw.id), [
+      ['kyc_submitted', 'Taarifa za uthibitisho zimepokelewa', 'Asante. FitFlex itakagua taarifa zako na kukujulisha matokeo.'],
+      // The reviewer's note is passed on in the reviewer's own words.
+      ['kyc_rejected', 'Uthibitisho haujaidhinishwa', 'The ID number does not match.'],
+    ]);
+    assert.deepEqual(await texts(en.id), [
+      ['kyc_submitted', 'Verification details received', 'Thank you. FitFlex will review your details and let you know the outcome.'],
+      ['kyc_rejected', 'Verification not approved', 'The ID number does not match.'],
+    ]);
+    assert.deepEqual((await db('Notification').where('userId', sw.id).orderBy('createdAt'))[0].data, { caseId: sw.caseId, type: 'kyc_submitted' });
+  } finally {
+    await db('CommunicationPreference').where('id', sw.id).del();
+  }
 });
 
 test('a partner can take a submitted case back until a reviewer claims it', async () => {

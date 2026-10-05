@@ -19,6 +19,7 @@ import {
   adminB2BCollections, adminSetB2BPaymentInstructions, adminConfirmB2BPaymentNotice, adminRejectB2BPaymentNotice, adminRemindB2BInvoice,
   adminSetB2BBillingHold, getB2BOrganizationPaying, submitB2BPaymentNotice, withdrawB2BPaymentNotice,
 } from '../functions/b2b.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 await ensureInit();
 
@@ -188,6 +189,11 @@ test('payment notice: the statement shows another amount, a notice is rejected w
     .rejectNotice({ noticeId: wrong.notice.id, reason: 'Not on our statement', actorId: CASHIER });
   assert.deepEqual([rejected.notice.status, rejected.notice.decisionNote, rejected.notice.paymentId], ['rejected', 'Not on our statement', null]);
   assert.match(sent.inbox[0].body, /Not on our statement/);
+  // The organisation's people read it in their own language; the reason stays as staff wrote it.
+  const swNo = await deliveredTo(sent.inbox[0], 'sw');
+  assert.equal(swNo.title, 'Malipo hayajathibitishwa');
+  assert.match(swNo.body, /^FitFlex haikuweza kuthibitisha malipo yako ya TZS .*: Not on our statement$/);
+  assert.equal((await deliveredTo(sent.inbox[0], null)).title, 'Payment not confirmed');
   assert.equal((await collections.confirmNotice({ noticeId: wrong.notice.id, actorId: CASHIER })).error, 'notice_already_decided');
   assert.deepEqual(await invoiceRow(inv.id).then(i => i.amountPaidTzs), 450000);
   // A rejected reference can be sent again, corrected.
@@ -218,6 +224,14 @@ test('reminders: each stage once, to owners and finance and the billing email, a
   await before.svc.runReminders();
   assert.deepEqual(mine(before.sent).map(m => [m.userId, m.title]).sort(), [[fin.sub, 'Invoice due soon'], [owner.sub, 'Invoice due soon']].sort());
   assert.deepEqual(before.sent.email.filter(e => e.subject.includes(inv.number)).map(e => e.to), ['accounts@collections.test']);
+  // In the app the reminder follows the reader's language; the email stays English.
+  const swSoon = await deliveredTo(mine(before.sent)[0], 'sw');
+  assert.equal(swSoon.title, 'Ankara inakaribia kulipwa');
+  assert.match(swSoon.body, new RegExp(`^Ankara ${inv.number} \\(TZS [\\d,]+\\) inapaswa kulipwa tarehe \\d{4}-\\d\\d-\\d\\d\\.$`));
+  const enSoon = await deliveredTo(mine(before.sent)[0], null);
+  assert.equal(enSoon.title, 'Invoice due soon');
+  assert.match(enSoon.body, new RegExp(`^Invoice ${inv.number} \\(TZS [\\d,]+\\) is due on \\d{4}-\\d\\d-\\d\\d\\.$`));
+  assert.match(before.sent.email.find(e => e.subject.includes(inv.number)).subject, /^Invoice due soon: /);
   await before.svc.runReminders();   // a rerun sends nothing more
   assert.equal(mine(before.sent).length, 2);
 

@@ -23,6 +23,7 @@
 import { randomUUID } from 'node:crypto';
 import { PAYMENT_METHODS, OPEN_STATUSES, outstandingTzs, daysOverdue, isDay } from '../shared/b2b-billing.mjs';
 import { localDay, addDays } from '../shared/member-progress.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 const INSTRUCTION = 'B2BPaymentInstruction';
 const NOTICE = 'B2BPaymentNotice';
@@ -55,12 +56,13 @@ export function reminderStage(dueDate, today) {
   return 'due';
 }
 
+// `title` and `body` are English (the email uses them); `text` lets the app
+// notification follow each reader's language.
 function reminderMessage({ stage, invoice, owed, today }) {
-  const late = daysOverdue(invoice.dueDate, today);
-  const what = `Invoice ${invoice.number} (${tzs(owed)})`;
-  if (stage === 'before3') return { title: 'Invoice due soon', body: `${what} is due on ${invoice.dueDate}.` };
-  if (late === 0) return { title: 'Invoice due today', body: `${what} is due today.` };
-  return { title: 'Invoice overdue', body: `${what} was due on ${invoice.dueDate} and is ${late} day${late === 1 ? '' : 's'} overdue.` };
+  return notificationText('b2b_invoice_reminder', {
+    soon: stage === 'before3', invoiceNumber: invoice.number, amount: tzs(owed),
+    dueDate: invoice.dueDate, daysLate: daysOverdue(invoice.dueDate, today),
+  });
 }
 
 export function createB2BCollectionsService({
@@ -257,8 +259,8 @@ export function createB2BCollectionsService({
     if (!row) return { notice: noticeView(await db(NOTICE).where({ id: n.id }).first()), unchanged: true };   // a colleague confirmed it first; the payment is the same one
     await audit(db, { actor: actorId, action: 'b2b.payment_notice.confirm', target: n.id, before: { status: 'submitted' }, after: { status: 'confirmed', paymentId: paid.payment.id, amountTzs } });
     await tellOrganization(n.organizationId, () => ({
-      id: `b2bpn_ok_${n.id}`, type: 'b2b_payment_confirmed', title: 'Payment received',
-      body: `FitFlex has confirmed your payment of ${tzs(amountTzs)} (${n.reference}). Receipt ${paid.payment.number}.`,
+      id: `b2bpn_ok_${n.id}`, type: 'b2b_payment_confirmed',
+      ...notificationText('b2b_payment_confirmed', { amount: tzs(amountTzs), reference: n.reference, receiptNumber: paid.payment.number }),
       data: { organizationId: n.organizationId, noticeId: n.id, paymentId: paid.payment.id },
     }));
     return { notice: noticeView(row), payment: paid.payment, allocations: paid.allocations ?? [], settled: paid.settled ?? [], skipped: [...skipped, ...(paid.skipped ?? [])] };
@@ -281,8 +283,8 @@ export function createB2BCollectionsService({
     });
     if (out.error || out.unchanged) return out;
     await tellOrganization(out.notice.organizationId, () => ({
-      id: `b2bpn_no_${out.notice.id}`, type: 'b2b_payment_not_found', title: 'Payment not confirmed',
-      body: `FitFlex could not confirm your payment of ${tzs(out.notice.amountTzs)} (${out.notice.reference}): ${why}`,
+      id: `b2bpn_no_${out.notice.id}`, type: 'b2b_payment_not_found',
+      ...notificationText('b2b_payment_not_found', { amount: tzs(out.notice.amountTzs), reference: out.notice.reference, reason: why }),
       data: { organizationId: out.notice.organizationId, noticeId: out.notice.id },
     }));
     return out;

@@ -144,6 +144,20 @@ test('a known person accepts a staff invitation: persona and membership, no cred
     const sent = await invite(o, { role: 'staff', email: p.email, aclPermissions: ['members', 'checkins'], message: 'Welcome' });
     assert.equal(sent.statusCode, 201);
     assert.ok(sent.body.token, 'the link token is returned once');
+    // The in-app notice is in English for someone who never chose a language…
+    const notice = await db('Notification').where({ userId: p.user.id, type: 'org_invitation' }).first();
+    assert.deepEqual([notice.title, notice.body], ['You have an invitation', 'Iron Paradise invited you to join as staff.']);
+    // …and in Swahili for someone who chose it.
+    const q = await verifiedPerson();
+    await db('CommunicationPreference').insert({ id: q.user.id, locale: 'sw', createdAt: new Date(), updatedAt: new Date() });
+    try {
+      assert.equal((await invite(o, { role: 'staff', email: q.email })).statusCode, 201);
+      const inSw = await db('Notification').where({ userId: q.user.id, type: 'org_invitation' }).first();
+      assert.deepEqual([inSw.title, inSw.body], ['Una mwaliko', 'Iron Paradise imekualika kujiunga kama mfanyakazi.']);
+      assert.equal(inSw.data.role, 'staff');
+    } finally {
+      await db('CommunicationPreference').where('id', q.user.id).del();
+    }
     const stored = await db('Invitation').where({ id: sent.body.invitation.id }).first();
     assert.equal(stored.targetPersonId, p.user.personId);
     assert.notEqual(stored.tokenHash, sent.body.token, 'only the hash is stored');

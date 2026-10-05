@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTrainerClientService, normalizePermissions, PERMISSIONS } from '../src/services/trainer-client-service.mjs';
 import { streaks, goalProgress, localDay } from '../src/shared/member-progress.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 function store(rows = []) {
   const clone = (r) => JSON.parse(JSON.stringify(r));
@@ -72,6 +73,12 @@ test('member requests, trainer is notified and accepts', async () => {
   assert.ok(Object.values(connection.permissions).every(v => v === false));
   assert.equal(s.sent[0].userId, 'usr_t1');
   assert.equal(s.sent[0].type, 'trainer_client_request');
+  // A trainer who reads Swahili is told in Swahili; one who never chose a language, in English.
+  const sw = await deliveredTo(s.sent[0], 'sw');
+  assert.deepEqual([sw.title, sw.body], ['Ombi jipya la mteja', 'Amina angependa kufanya mazoezi nawe.']);
+  const en = await deliveredTo(s.sent[0], null);
+  assert.deepEqual([en.title, en.body], ['New client request', 'Amina would like to train with you.']);
+  assert.deepEqual([s.sent[0].title, s.sent[0].body], [en.title, en.body]);
 
   assert.equal((await s.svc.request('m1', 'trn_1', {})).error, 'already_requested');
   assert.equal((await s.svc.clients('usr_t2')).clients.length, 0, 'other trainers see nothing');
@@ -82,6 +89,8 @@ test('member requests, trainer is notified and accepts', async () => {
   assert.equal(accepted.client.status, 'active');
   assert.ok(accepted.client.connectedAt);
   assert.equal(s.sent.at(-1).userId, 'm1');
+  assert.equal((await deliveredTo(s.sent.at(-1), 'sw')).title, 'Umeunganishwa na trainer');
+  assert.equal((await deliveredTo(s.sent.at(-1), null)).title, 'Trainer connected');
   assert.equal((await s.svc.request('m1', 'trn_1', {})).error, 'already_connected');
   assert.equal((await s.svc.accept('usr_t1', connection.id)).error, 'not_pending');
   assert.equal((await s.svc.accept('usr_t2', connection.id)).status, 404, 'not their request');
