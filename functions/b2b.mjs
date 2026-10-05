@@ -7,7 +7,7 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -646,4 +646,95 @@ export const getB2BOrganizationStatement = {
   description: 'The organisation\'s account statement (billing.read): invoices, notes, payments and seat bills in date order with a running balance. Query: ?from=&to= (EAT days).',
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => finance.organizationStatement({ access, query: req.query || {} })),
+};
+
+// ── Collections (Phase 6): paying an invoice and chasing a late one ──────────
+
+const collections = b2bCollectionsService;
+
+export const adminB2BPaymentInstructions = {
+  created, method: 'get', path: '/admin/b2b/payment-instructions',
+  description: 'Admin (any billing scope): where organisations pay FitFlex — bank account and Lipa Namba — as shown on their invoices.',
+  onGuard: requireBillingRead,
+  onRequest: async (_req, res) => send(res, await collections.getInstructions()),
+};
+
+export const adminSetB2BPaymentInstructions = {
+  created, method: 'put', path: '/admin/b2b/payment-instructions',
+  description: 'Admin (b2b_billing_approve): set where organisations pay FitFlex. Every field is optional; send them all, a missing one is cleared.',
+  requestSample: { bankName: 'CRDB Bank', accountName: 'FitFlex Africa Ltd', accountNumber: '0150000000000', branch: 'Mlimani City', swiftCode: 'CORUTZTZ', lipaNamba: '5550000', lipaNambaName: 'FITFLEX AFRICA', notes: 'Quote the invoice number as the reference.' },
+  onGuard: requireBillingApproval,
+  onRequest: async (req, res) => send(res, await collections.setInstructions({ body: req.body || {}, actorId: actor(req) })),
+};
+
+export const adminB2BCollections = {
+  created, method: 'get', path: '/admin/b2b/collections',
+  description: 'Admin (any billing scope): the collections queue — payment notices waiting to be checked, invoices past due with the last reminder sent, and organisations on hold.',
+  onGuard: requireBillingRead,
+  onRequest: async (_req, res) => send(res, await collections.queue()),
+};
+
+export const adminListB2BPaymentNotices = {
+  created, method: 'get', path: '/admin/b2b/payment-notices',
+  description: 'Admin (any billing scope): payment notices from organisations, newest first. Query: ?status=submitted|confirmed|rejected|withdrawn.',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await collections.listNotices({ query: req.query || {} })),
+};
+
+export const adminConfirmB2BPaymentNotice = {
+  created, method: 'post', path: '/admin/b2b/payment-notices/:noticeId/confirm',
+  description: 'Admin (b2b_payments): the money is on the statement — record the payment. `amountTzs` overrides the amount the organisation gave. The invoices the notice names are settled first (oldest due first), otherwise the oldest open ones; the rest stays on the account as credit. Invoices you issued yourself are left for a colleague. Confirming twice records one payment.',
+  requestSample: { amountTzs: 1200000, note: 'Seen on CRDB statement 4 Nov' },
+  onGuard: requirePayments,
+  onRequest: async (req, res) => send(res, await collections.confirmNotice({ noticeId: req.params.noticeId, body: req.body || {}, actorId: actor(req) })),
+};
+
+export const adminRejectB2BPaymentNotice = {
+  created, method: 'post', path: '/admin/b2b/payment-notices/:noticeId/reject',
+  description: 'Admin (b2b_payments): the money cannot be found or the notice is wrong. The reason is shown to the organisation.',
+  requestSample: { reason: 'No transfer with this reference on our statement up to 5 Nov.' },
+  onGuard: requirePayments,
+  onRequest: async (req, res) => send(res, await collections.rejectNotice({ noticeId: req.params.noticeId, reason: req.body?.reason, actorId: actor(req) })),
+};
+
+export const adminRemindB2BInvoice = {
+  created, method: 'post', path: '/admin/b2b/invoices/:invoiceId/remind',
+  description: 'Admin (b2b_billing): send a payment reminder for an issued invoice now, to the organisation\'s owners and finance users and its billing email. The scheduled reminders (3 days before due, on the day, +7, +14, +30) are unaffected.',
+  onGuard: requireBilling,
+  onRequest: async (req, res) => send(res, await collections.remindNow({ invoiceId: req.params.invoiceId, actorId: actor(req) })),
+};
+
+export const adminSetB2BBillingHold = {
+  created, method: 'post', path: '/admin/b2b/organizations/:id/billing-hold',
+  description: 'Admin (b2b_billing_approve): put an organisation on hold for late payment, or lift it. On hold, no new sponsored-pass invoice is prepared and per-use benefits are not funded; passes already paid for carry on. Never automatic.',
+  requestSample: { onHold: true, reason: 'FF-INV-2026-000041 is 45 days overdue.' },
+  onGuard: requireBillingApproval,
+  onRequest: async (req, res) => send(res, await collections.setHold({ organizationId: req.params.id, body: req.body || {}, actorId: actor(req) })),
+};
+
+export const getB2BOrganizationPaying = {
+  created, method: 'get', path: '/b2b/organizations/:id/paying',
+  description: 'How the organisation pays (billing.read): FitFlex\'s payment details, whether the account is on hold, whether you may send a payment notice, and the notices sent so far.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => collections.organizationPaying({ access })),
+};
+
+export const submitB2BPaymentNotice = {
+  created, method: 'post', path: '/b2b/organizations/:id/payment-notices',
+  description: 'Tell FitFlex a payment has been made (billing.pay: owner, admin, finance). Nothing is settled until FitFlex confirms it. The same reference by the same method is one notice: sending it again returns the first (409 if the amount differs).',
+  requestSample: { amountTzs: 1200000, method: 'bank_transfer', reference: 'CRDB-TRF-00917', paidOn: '2026-11-03', invoiceIds: ['b2bi_…'], note: 'October passes', proofUrl: 'https://…' },
+  onGuard: requireOrgAccess,
+  onRequest: async (req, res) => {
+    const access = await b2bService.resolveAccess({ organizationId: req.params.id, userId: req.user.sub, userType: req.user.userType });
+    if (access.error) return send(res, access);
+    const out = await collections.submitNotice({ access, body: req.body || {}, actorId: actor(req) });
+    return send(res, out, out.existing ? 200 : 201);
+  },
+};
+
+export const withdrawB2BPaymentNotice = {
+  created, method: 'post', path: '/b2b/organizations/:id/payment-notices/:noticeId/withdraw',
+  description: 'Take back a payment notice FitFlex has not decided yet (billing.pay).',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => collections.withdrawNotice({ access, noticeId: req.params.noticeId, actorId: actor(req) })),
 };

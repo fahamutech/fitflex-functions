@@ -67,6 +67,7 @@ import { createB2BService } from '../services/b2b-service.mjs';
 import { createB2BProgramService } from '../services/b2b-program-service.mjs';
 import { createB2BConsumptionService } from '../services/b2b-consumption-service.mjs';
 import { createB2BBillingService } from '../services/b2b-billing-service.mjs';
+import { createB2BCollectionsService } from '../services/b2b-collections-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -236,6 +237,12 @@ export const b2bBillingService = createB2BBillingService({
 export const b2bEngagementAccess = createB2BEngagementAccess({ b2bService });
 // B2B billing and financial management (Phase 5): agreements, payments and allocation, notes, statements, reconciliation.
 export const b2bFinanceService = createB2BFinanceService({ db, users, b2bService, billing: b2bBillingService });
+// B2B collections: payment details, "we have paid" notices, overdue reminders and the late-payment hold.
+export const b2bCollectionsService = createB2BCollectionsService({
+  db, finance: b2bFinanceService, email: emailSender(),
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
 
 export const identityLinkService = createIdentityLinkService({ db });
 

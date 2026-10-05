@@ -252,7 +252,7 @@ Organisation (`billing.read`): `GET /b2b/organizations/:id/billing`, `…/invoic
 
 ## 15. Known limitations
 
-- **No payment gateway.** Payments are recorded by hand. Selcom, bank and mobile-money integration are not built.
+- **No payment gateway.** Payments are recorded by hand, or by confirming an organisation's payment notice (Phase 6, `B2B_COLLECTIONS.md`). Selcom, bank and mobile-money integration are not built.
 - **No PDF.** The portal has a print view of an invoice and of the statement.
 - **Tax.** VAT-inclusive amounts with a stated rate only. No withholding tax, no EFD/TRA receipt, no tax-exclusive pricing. The rate and the document numbering format are for the accountant to confirm.
 - **Monthly only.** Weekly or contract-specific billing periods are not built.

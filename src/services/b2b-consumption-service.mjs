@@ -84,8 +84,12 @@ export function createB2BConsumptionService({
    * number of organisations.
    */
   async function candidatesFor({ userId, serviceType, provider, day }) {
-    const relationships = (await b2bService.beneficiaryRelationshipsForUser(userId))
+    const active = (await b2bService.beneficiaryRelationshipsForUser(userId))
       .filter(r => r.organization.status === 'active');
+    if (!active.length) return [];
+    // An organisation FitFlex has put on hold for late payment funds nothing until the hold is lifted.
+    const held = new Set((await db('B2BBillingAccount').where({ onHold: true }).whereIn('organizationId', active.map(r => r.organization.id)).select('organizationId')).map(r => r.organizationId));
+    const relationships = active.filter(r => !held.has(r.organization.id));
     if (!relationships.length) return [];
     const byOrg = new Map(relationships.map(r => [r.organization.id, r]));
     const orgPrograms = await programs.filterByColumnInAsync('organizationId', [...byOrg.keys()]);
