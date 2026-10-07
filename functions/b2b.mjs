@@ -7,7 +7,7 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -817,4 +817,90 @@ export const adminB2BDataQuality = {
   description: 'Admin (b2b or any billing scope): records that should not exist or are missing their other half — usage without a visit, shares that do not add up, usage on no invoice, invoices and payments that do not add up. Reports a count and examples; repairs nothing.',
   onGuard: requireBillingRead,
   onRequest: async (_req, res) => send(res, await analytics.dataQuality()),
+};
+
+// ── Operations (Phase 7): jobs, exceptions and work waiting on a person ─────
+
+const ops = opsService;
+/** An exception raised by a finance job, or about money, is closed by someone who may approve billing. */
+const FINANCE_JOBS = new Set(['b2b-sponsor-billing', 'b2b-collections', 'b2b-integrity-check']);
+/**
+ * A job run's own `status` (ok / failed) and `error` text are the answer, not
+ * an HTTP outcome: a run that failed is still a request that worked.
+ */
+const runView = r => (r && typeof r.status === 'string' ? { ...r, status: undefined, error: undefined, outcome: r.status, failure: r.error ?? null } : r);
+function sendRun(res, result) {
+  if (result?.error && Number.isInteger(result.status)) return send(res, result);
+  return res.status(200).json(runView(result));
+}
+
+export const adminB2BOpsOverview = {
+  created, method: 'get', path: '/admin/b2b/ops',
+  description: 'Admin (b2b or any billing scope): the operations page in one call — every recurring B2B job with its state (ok, running, delayed, retrying, failed, paused), last run and next due time; live exceptions by severity with the most urgent; and counts of work waiting on a person (draft invoices, payment notices, overdue invoices, stale holds, passes waiting, people not yet linked).',
+  onGuard: requireBillingRead,
+  onRequest: async (_req, res) => send(res, await b2bOps.overview()),
+};
+
+export const adminB2BJobRuns = {
+  created, method: 'get', path: '/admin/b2b/ops/jobs/:job/runs',
+  description: 'Admin (b2b or any billing scope): a job\'s recent runs, newest first: slot, trigger (schedule, catch_up, retry, manual), attempt, status, items processed / succeeded / failed, error. ?limit=',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await ops.jobRuns({ name: req.params.job, query: req.query || {} })),
+};
+
+export const adminRunB2BJob = {
+  created, method: 'post', path: '/admin/b2b/ops/jobs/:job/run',
+  description: 'Admin (b2b): run a job now. Jobs are safe to repeat: a run does only what is still missing. Takes the job\'s lock, so it never overlaps a scheduled run. Returns { outcome: ok | failed, failure, processed, succeeded, failed } or { skipped }. Audited.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => sendRun(res, await ops.runJob(req.params.job, { trigger: 'manual', actorId: actor(req) })),
+};
+
+export const adminPauseB2BJob = {
+  created, method: 'post', path: '/admin/b2b/ops/jobs/:job/pause',
+  description: 'Admin (b2b): pause a job (reason required) or resume it. A paused job is skipped by the scheduler and the catch-up sweeper; it can still be run by hand. Audited.',
+  requestSample: { paused: true, reason: 'Investigating duplicate reminders' },
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => send(res, await ops.setPaused({ name: req.params.job, paused: req.body?.paused === true, reason: req.body?.reason, actorId: actor(req) })),
+};
+
+export const adminListB2BExceptions = {
+  created, method: 'get', path: '/admin/b2b/ops/exceptions',
+  description: 'Admin (b2b or any billing scope): operations exceptions, most severe and oldest first. ?status=live (default) | all | open | investigating | retrying | resolved | ignored | permanently_failed, ?severity=, ?type=job_failed|job_item_failed|data_quality, ?job=, ?organizationId=, ?limit=&cursor=',
+  onGuard: requireBillingRead,
+  onRequest: async (req, res) => send(res, await ops.listExceptions({ query: req.query || {} })),
+};
+
+async function mayClose(req, res, id) {
+  const found = await ops.getException({ id });
+  if (found.error) { send(res, found); return null; }
+  const finance = FINANCE_JOBS.has(found.exception.job) || found.exception.type === 'data_quality';
+  const scopes = req.user?.aclPermissions;
+  // Super-admins hold every scope; portal staff are checked against theirs.
+  if (finance && req.user?.portalUser && !(scopes || []).includes('b2b_billing_approve')) {
+    res.status(403).json({ error: 'acl_forbidden', requiredScope: 'b2b_billing_approve' });
+    return null;
+  }
+  return found.exception;
+}
+
+export const adminSetB2BExceptionStatus = {
+  created, method: 'post', path: '/admin/b2b/ops/exceptions/:exceptionId/status',
+  description: 'Admin (b2b; b2b_billing_approve for a finance exception): move an exception on — investigating, resolved (say what was done), ignored (say why), or back to open. Changes nothing about the records it is about. Audited.',
+  requestSample: { status: 'resolved', resolution: 'Check-in restored by support; the check now passes.' },
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => {
+    if (!(await mayClose(req, res, req.params.exceptionId))) return undefined;
+    return send(res, await ops.setExceptionStatus({ id: req.params.exceptionId, status: req.body?.status, resolution: req.body?.resolution, actorId: actor(req) }));
+  },
+};
+
+export const adminRetryB2BException = {
+  created, method: 'post', path: '/admin/b2b/ops/exceptions/:exceptionId/retry',
+  description: 'Admin (b2b; b2b_billing_approve for a finance exception): try again by running the job the exception came from. At most five times per exception. The exception clears itself if the retry gets through. Audited.',
+  onGuard: requireAdmin,
+  onRequest: async (req, res) => {
+    if (!(await mayClose(req, res, req.params.exceptionId))) return undefined;
+    const out = await ops.retryException({ id: req.params.exceptionId, actorId: actor(req) });
+    return out.error ? send(res, out) : res.status(200).json({ exception: out.exception, run: runView(out.run) });
+  },
 };

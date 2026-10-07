@@ -70,6 +70,8 @@ import { createB2BConsumptionService } from '../services/b2b-consumption-service
 import { createB2BBillingService } from '../services/b2b-billing-service.mjs';
 import { createB2BCollectionsService } from '../services/b2b-collections-service.mjs';
 import { createB2BAnalyticsService } from '../services/b2b-analytics-service.mjs';
+import { createOpsService } from '../services/ops-service.mjs';
+import { registerB2BJobs } from '../services/b2b-jobs.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -251,6 +253,14 @@ export const b2bAnalyticsService = createB2BAnalyticsService({
   // challengeService and notificationService are created further down; these only run later.
   challengeProgress: (creatorType, creatorId, memberId) => challengeService.memberProgressForCreator(creatorType, creatorId, memberId),
   notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Operations: job runs, locks, catch-up and exception records; and the recurring B2B jobs it runs.
+export const opsService = createOpsService({ db });
+export const b2bOps = registerB2BJobs({
+  ops: opsService, db, programs: b2bPrograms,
+  b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService,
+  // Defined further down; only called when the billing job runs.
+  b2bSponsorRefundService: { repair: () => b2bSponsorRefundService.repair() },
 });
 
 export const identityLinkService = createIdentityLinkService({ db });
