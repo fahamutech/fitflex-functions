@@ -74,6 +74,14 @@ test('rejects bad activities', async () => {
   }
 });
 
+test('an activity can be logged up to 90 days back, no further', async () => {
+  const svc = createActivityService({ activities: store(), now });
+  const daysAgo = n => new Date(+NOW - n * 86_400_000).toISOString();
+  assert.ok((await svc.log('m1', { type: 'walking', startedAt: daysAgo(90), steps: 100 })).activity);
+  assert.equal((await svc.log('m1', { type: 'walking', startedAt: daysAgo(92), steps: 100 })).error, 'started_too_long_ago');
+  assert.equal((await svc.log('m1', { type: 'walking', startedAt: '2020-01-01T08:00:00Z', steps: 100 })).error, 'started_too_long_ago');
+});
+
 test('list rejects inverted or oversized ranges', async () => {
   const svc = createActivityService({ activities: store(), now });
   assert.equal((await svc.list('m1', { from: '2026-09-24T00:00:00Z', to: '2026-09-01T00:00:00Z' })).error, 'invalid_range');
