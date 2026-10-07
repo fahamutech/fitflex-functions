@@ -182,7 +182,8 @@ test('FitFlex and employers only ever see totals', async () => {
     assert.equal('participants' in r, false);
     const expected = creator === FITFLEX
       ? { joined: 2, completed: 1, averageProgress: 0.91, completionRate: 0.5 }
-      : { joined: 1, completed: 0, averageProgress: 0.81, completionRate: 0 };
+      // One employee taking part: their result isn't shown to the employer.
+      : { joined: 1, completed: null, averageProgress: null, completionRate: null, resultsHidden: true };
     const { eligible, participationRate, ...core } = r.summary;
     assert.deepEqual(core, expected, creator.creatorType);
     assert.ok(eligible === null || typeof eligible === 'number');

@@ -737,6 +737,12 @@ export function createChallengeService({
         averageProgress: joined.length ? Math.round((sum / joined.length) * 100) / 100 : 0,
       };
       if (!isCompanyType(c.creatorType)) return { summary };
+      // With fewer than MIN_TEAM_SIZE taking part, completion and progress
+      // would be one or two people's own results, so the company sees only
+      // how many joined until the group is big enough.
+      if (joined.length < MIN_TEAM_SIZE) {
+        Object.assign(summary, { completed: null, completionRate: null, averageProgress: null, resultsHidden: true });
+      }
       // By department, for HR. Groups smaller than MIN_TEAM_SIZE are folded
       // together so no one person's numbers show.
       const staff = await eligibleStaff(c);
