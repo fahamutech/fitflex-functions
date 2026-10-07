@@ -1,7 +1,8 @@
 # B2B automation and operations (Phase 7)
 
 How the recurring B2B work is run reliably, what happens when it goes wrong,
-and how an operator recovers. This is slice 1 of Phase 7: the foundation.
+and how an operator recovers. Slice 1 is the foundation (§1–§10); slice 2
+adds bulk import and invitations (§11).
 
 Code: `src/services/ops-service.mjs` (runs, locks, catch-up, exceptions),
 `src/services/b2b-jobs.mjs` (the jobs), scheduler entries in
@@ -85,6 +86,7 @@ Times are East Africa Time.
 | `b2b-integrity-check` | 01:00 | runs the data-quality checks; one exception per failing check | finance |
 | `b2b-collections` | 09:00 | payment reminders | finance |
 | `b2b-sponsor-visibility-notice` | 10:00 | tells newly covered people what their sponsor sees | operations |
+| `b2b-beneficiary-invites` | every 10 min | enrols invited people who have joined; sends invitation emails that are due | operations |
 | `opsSweeper` | every 10 min | catch-up and retries (not itself recorded) | — |
 
 Not run through this layer, and unchanged: member renewals, gym
@@ -201,6 +203,96 @@ been set; that is a business decision.
 - **The scheduler is still in-process.** If the server is down for a whole
   day, that day's slot is not run later; the next day's is.
 - **Only B2B jobs** go through this layer. The other jobs are unchanged.
-- **Not yet built (later slices):** bulk beneficiary import and invitations;
-  benefit and programme lifecycle notices and renewal drafts; alerts when
+- **Not yet built (later slices):** benefit and programme lifecycle notices and renewal drafts; alerts when
   drafts sit unissued; exceptions for the provider side of reconciliation.
+
+## 11. Bulk import and invitations (slice 2)
+
+Code: `src/services/b2b-beneficiary-import-service.mjs`, routes in
+`functions/b2b.mjs`, migration `20261126090000-b2b-beneficiary-invites.cjs`,
+tests `specs/b2b-beneficiary-import.specs.mjs`.
+
+**Decision (P7-03, default taken 7 Oct 2026):** invitations go by email only.
+No SMS is sent. A person listed by mobile number alone gets no message from
+FitFlex; their organisation tells them.
+
+### Import
+
+`POST /b2b/organizations/:id/beneficiaries/import` with `rawText` (CSV) or
+`rows`. Up to 2,000 people. `dryRun: true` checks without changing anything.
+
+| A row for… | Becomes |
+|---|---|
+| someone with a member account (matched by email, else mobile number) | enrolled now, through the same service a single "add person" uses |
+| someone already on the list, or already invited | left as is (an invite's name, group and reference are updated) |
+| someone who has not joined FitFlex | an invite (`B2BBeneficiaryInvite`) |
+| no email or number, a bad email or number, an unknown type, the same person twice in the file | rejected, with the line and the reason |
+
+Each import is recorded (`B2BBeneficiaryImport`: counts and rejected rows) and
+audited. Uploading the same list twice, or two uploads at once, adds nobody
+twice (unique indexes on a live invite's email and number per organisation).
+A company managed under Corporate is refused here and keeps
+`/corporate/staff/bulk`.
+
+### Joining
+
+An invite waits for a **member** account with its email or number. Matching
+runs every 10 minutes, and at once when a member opens their benefits. The
+person is enrolled as active with the group, reference and type the
+organisation listed, the invite is closed, and they get one in-app message.
+Enrolment goes through `b2bService.enrollBeneficiary`, so "already on the
+list" closes the invite without a second row. A cancelled invite enrols nobody.
+
+Matching trusts the email or number on the account, exactly as adding a
+person by email or number already does.
+
+### Emails
+
+| Email | When |
+|---|---|
+| Invitation | within 10 minutes of the import |
+| Reminder | 3 days after the invitation |
+| Reminder | 10 days after the invitation |
+
+Then no more. None after the person joins or the invite is cancelled. Each
+email is claimed before it is sent, so overlapping runs send one. Three
+failures in a row stop the emails for that invite. "Send again" starts them
+over: not within an hour of the last, six emails per invite at most.
+
+The email says who added the person, to sign up as a member with that
+address, a link to the app when `FITFLEX_APP_LINK` is set (none is invented),
+and what the organisation will be able to see of their activity. English only.
+
+With no email sender configured, invites still work (people are enrolled when
+they join); the emails wait, the People page says so, and the job raises one
+low-severity exception until a sender is set up.
+
+### Permissions
+
+Import, cancel and send again need `beneficiaries.manage` (owner, admin,
+manager, hr). Seeing invites and past imports needs `beneficiaries.read`.
+An invite belongs to one organisation; another organisation cannot see or
+change it. The same person invited by two organisations is enrolled in both.
+
+### Runbook
+
+**"N invitation email(s) are waiting: the email sender is not set up."** Set
+`VERIFICATION_EMAIL_PROVIDER=mailgun` with its key and domain. The next run
+sends what is waiting and the exception clears.
+
+**"N invitation email(s) were not accepted."** The provider refused them
+(often a mistyped address). Each is retried hourly, three times. The
+organisation sees "Email not delivered" on the invite and can correct the
+address by cancelling and re-adding the person.
+
+**"N invited people could not be enrolled after joining."** Enrolment was
+refused for a reason in the detail (for example the organisation is no longer
+active). Nothing is lost: the invite stays and is tried again every run.
+
+### Limitations
+
+- No SMS, by decision.
+- An account whose email was saved in mixed case before emails were
+  normalised is matched when its owner opens Benefits, not by the 10-minute run.
+- Invited people are not counted in analytics until they join.
+- The invitation email has no Swahili version.
