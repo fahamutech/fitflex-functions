@@ -181,6 +181,25 @@ test('HR sees aggregate progress by department; small groups folded', async () =
   assert.equal((await s.svc.creatorParticipants(OTHER_CORP, c.id)).status, 404, 'another company');
 });
 
+test('HR totals: no completion or progress until 3 people are taking part', async () => {
+  const s = setup();
+  const c = (await s.svc.create(CORP, base)).challenge;
+  // m1 alone, and they've finished: showing "completed 1 · 100%" would be their result.
+  await s.svc.join('m1', c.id);
+  const one = (await s.svc.creatorParticipants(CORP, c.id)).summary;
+  assert.deepEqual(one, { eligible: 4, joined: 1, participationRate: 0.25, completed: null, completionRate: null, averageProgress: null, resultsHidden: true });
+  await s.svc.join('m2', c.id);
+  assert.equal((await s.svc.creatorParticipants(CORP, c.id)).summary.resultsHidden, true, 'still only two');
+  await s.svc.join('m3', c.id);
+  const three = (await s.svc.creatorParticipants(CORP, c.id)).summary;
+  assert.equal(three.completed, 2);
+  assert.ok(!('resultsHidden' in three));
+  // A FitFlex challenge's totals are unchanged.
+  const ff = (await s.svc.create(FITFLEX, base)).challenge;
+  await s.svc.join('m1', ff.id);
+  assert.equal((await s.svc.creatorParticipants(FITFLEX, ff.id)).summary.completed, 1);
+});
+
 test('HR logins: created by admin, password hashed, can be suspended', async () => {
   const users = store([]);
   const corp = createCorporateService({
