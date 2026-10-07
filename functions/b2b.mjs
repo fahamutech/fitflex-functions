@@ -7,7 +7,7 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps, b2bBeneficiaryImportService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -226,7 +226,11 @@ export const myB2BBenefits = {
   created, method: 'get', path: '/b2b/me/benefits',
   description: 'The caller\'s B2B wellness benefits today, across every organisation that sponsors them (read-only; remaining allowance comes with usage tracking).',
   onGuard: requireAuth(),
-  onRequest: async (req, res) => send(res, await programs.myBenefits({ userId: req.user.sub })),
+  onRequest: async (req, res) => {
+    // Someone invited before they joined is enrolled now, rather than at the next run of the matching job.
+    await b2bBeneficiaryImportService.matchInvites({ userId: req.user.sub }).catch(() => null);
+    return send(res, await programs.myBenefits({ userId: req.user.sub }));
+  },
 };
 
 export const listB2BPrograms = {
@@ -903,4 +907,44 @@ export const adminRetryB2BException = {
     const out = await ops.retryException({ id: req.params.exceptionId, actorId: actor(req) });
     return out.error ? send(res, out) : res.status(200).json({ exception: out.exception, run: runView(out.run) });
   },
+};
+
+// ── Bulk import and invites (Phase 7, slice 2) ──────────────────────────────
+
+const people = b2bBeneficiaryImportService;
+
+export const importB2BBeneficiaries = {
+  created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/import',
+  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account is enrolled; someone who has not joined yet is invited and enrolled when they join. Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason.',
+  requestSample: { rawText: 'name,email,phone,group\nAsha Mollel,asha@example.com,0712345678,Finance', dryRun: true },
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => people.importPeople({ access, body: req.body || {}, actorId: actor(req) })),
+};
+
+export const listB2BBeneficiaryImports = {
+  created, method: 'get', path: '/b2b/organizations/:id/beneficiary-imports',
+  description: 'The last 20 imports (beneficiaries.read): counts and the rows that could not be used.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => people.listImports({ access })),
+};
+
+export const listB2BBeneficiaryInvites = {
+  created, method: 'get', path: '/b2b/organizations/:id/beneficiary-invites',
+  description: 'People invited who have not joined yet (beneficiaries.read). ?status=invited (default) | enrolled | cancelled | all. Says whether invitation emails can be sent at all.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => people.listInvites({ access, query: req.query || {} })),
+};
+
+export const cancelB2BBeneficiaryInvite = {
+  created, method: 'post', path: '/b2b/organizations/:id/beneficiary-invites/:inviteId/cancel',
+  description: 'Cancel an invite (beneficiaries.manage): no more emails, and the person is not enrolled if they join.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => people.cancelInvite({ access, inviteId: req.params.inviteId, actorId: actor(req) })),
+};
+
+export const resendB2BBeneficiaryInvite = {
+  created, method: 'post', path: '/b2b/organizations/:id/beneficiary-invites/:inviteId/resend',
+  description: 'Send the invitation email again now (beneficiaries.manage). Not within an hour of the last one, and at most six emails per invite.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => people.resendInvite({ access, inviteId: req.params.inviteId, actorId: actor(req) })),
 };

@@ -15,6 +15,7 @@ const month = (y, m) => { const i = y * 12 + (m - 1); return `${Math.floor(i / 1
 export function registerB2BJobs({
   ops, db, programs,
   b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bSponsorRefundService, b2bCollectionsService, b2bAnalyticsService,
+  b2bBeneficiaryImportService = null,
   now = () => new Date(),
 }) {
   ops.register({
@@ -114,6 +115,24 @@ export function registerB2BJobs({
     },
   });
 
+  if (b2bBeneficiaryImportService) {
+    ops.register({
+      name: 'b2b-beneficiary-invites', title: 'Beneficiary invites', schedule: { type: 'every', minutes: 10 }, quiet: true,
+      description: 'Enrols invited people who have since joined FitFlex, and sends the invitation emails that are due (the invitation, then reminders after 3 and 10 days).',
+      run: async (ctx) => {
+        const matched = await b2bBeneficiaryImportService.matchInvites();
+        const emails = await b2bBeneficiaryImportService.sendDue();
+        if (matched.failed) await ctx.raise({ type: 'job_item_failed', severity: 'medium', title: `${matched.failed} invited ${matched.failed === 1 ? 'person' : 'people'} could not be enrolled after joining`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:enrol`, detail: matched });
+        else if (matched.matched) await ctx.clear(`item:${ctx.job}:enrol`, 'Enrolled.');
+        if (emails.notConfigured) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${emails.due} invitation email(s) are waiting: the email sender is not set up`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email-setup`, detail: emails });
+        else if (emails.due) await ctx.clear(`item:${ctx.job}:email-setup`, 'The email sender is set up.');
+        if (emails.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${emails.failed} invitation email(s) were not accepted`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email`, detail: emails });
+        else if (emails.sent) await ctx.clear(`item:${ctx.job}:email`, 'Emails sent.');
+        return { processed: matched.matched + emails.sent + emails.failed, succeeded: matched.enrolled + emails.sent, failed: matched.failed + emails.failed, enrolled: matched.enrolled, emailsSent: emails.sent, emailsWaiting: emails.notConfigured ? emails.due : 0 };
+      },
+    });
+  }
+
   /** Work waiting on a person, for the operations page. Counts only. */
   async function pendingWork() {
     const day = localDay(now());
@@ -131,10 +150,11 @@ export function registerB2BJobs({
       count(db('CorporateEmployee as e').join('B2BOrganization as o', 'o.legacyCorporateId', 'e.corporateId').whereIn('e.status', ['active', 'pending']).whereNull('e.userId')),
     ]);
     const unpaidCredit = await count(db('B2BPayment').where({ status: 'received' }).whereRaw('"amountTzs" > "allocatedTzs"'));
+    const invites = b2bBeneficiaryImportService ? await b2bBeneficiaryImportService.pending() : { invitesWaiting: 0, invitesEmailFailed: 0, importsWithRejectedRowsLast7Days: 0 };
     return {
       billing: { draftInvoices: drafts, draftsOlderThan7Days: toIssueOld, paymentNoticesToCheck: notices, overdueInvoices: overdue, organizationsOnHold: onHold, paymentsNotFullyApplied: unpaidCredit },
       usage: { holdsOlderThan1Hour: staleHolds, passesAwaitingMemberPayment: awaitingMember, passesAwaitingAccountLink: awaitingLink },
-      people: { beneficiariesPending: pendingPeople, employeesNotLinked: unlinkedStaff },
+      people: { beneficiariesPending: pendingPeople, employeesNotLinked: unlinkedStaff, ...invites },
     };
   }
 
