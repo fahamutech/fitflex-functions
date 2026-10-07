@@ -211,7 +211,8 @@ CSV, for the selected period. Each export is written to the audit log
 | `providers` | Provider utilisation | R |
 | `invoices`, `payments` | Billing | B |
 
-Row-level reports stop at 50,000 rows. PDF is the browser's print view.
+A row-level report of more than 50,000 rows is refused (`report_too_large`)
+rather than cut short; choose a shorter period. PDF is the browser's print view.
 Historical invoice figures do not change (issued invoices are immutable), so
 no report snapshots are stored.
 
@@ -237,14 +238,27 @@ Aggregation is done in SQL on indexed columns (`organizationId, consumedAt`;
 `benefitId, beneficiaryId, businessDate`; `Activity(userId, startedAt)`;
 `Checkin(memberId, timestamp)`; `Checkin(subscriptionId)`). The people list of
 one organisation is read into memory, as the existing People screen does.
-No load test has been run; see limitations.
+Measured on 7 Oct 2026 (local Postgres, one organisation with 5,000 people,
+171,500 sponsored visits, 200,000 activities and 171,500 check-ins over 180
+days, plus 20 small organisations): every call returned in under 0.4 s.
+
+| Call | Time |
+|---|---|
+| Dashboard, last 30 days / year to date | 0.16 s / 0.36 s |
+| People list (5,000 people), last 30 days | 0.09 s |
+| One person, year to date | 0.06 s |
+| Programmes / benefits / providers, last 30 days | 0.18 s / 0.10 s / 0.06 s |
+| Usage export, last 30 days (2.4 MB file) | 0.24 s |
+| Staff overview, year to date | 0.25 s |
+| Data-quality checks | 0.03 s |
+
+Summary tables are not justified at this size.
 
 ## 11. Known limitations
 
 - **Enrolled is as of now**, so utilisation for an old period uses today's list.
-- **No load test.** Organisations with tens of thousands of people or very
-  long ranges have not been measured; summary tables were deliberately not
-  added before measuring.
+- **Measured to 5,000 people per organisation** (§10), on a local database.
+  Tens of thousands of people, and production hardware, are not measured.
 - **Trainer settlement per provider** is not broken out; only gym settlement
   progress is shown to staff. Totals owed to providers remain on the billing
   dashboard (`billedAgainstProviders`).

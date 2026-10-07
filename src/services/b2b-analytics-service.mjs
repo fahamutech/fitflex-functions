@@ -36,6 +36,8 @@ const READ = 'analytics.read';
 const PEOPLE = 'analytics.people';
 const BILLING = 'billing.read';
 const TZ = 'Africa/Dar_es_Salaam';
+/** What a service type is called in a report. */
+const SERVICE_LABEL = Object.freeze({ gym_access: 'Gym visit', trainer_session: 'Trainer session' });
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const n = v => Number(v) || 0;
 /** The app's own rule (shared/member-progress isWorkout): passive device step counts are not workouts. */
@@ -49,6 +51,8 @@ export function createB2BAnalyticsService({
   challengeProgress = async () => [],
   // Tell one person in the app: (userId, { id, type, title, body, data })
   notify = async () => null,
+  // The most rows a row-level report may hold.
+  maxExportRows = 50000,
   now = () => new Date(),
 }) {
   const today = () => localDay(now());
@@ -778,10 +782,10 @@ export function createB2BAnalyticsService({
     } else if (report === 'usage') {
       const list = await peopleOf(org);
       const name = new Map(list.map(x => [x.id, x]));
-      const usage = await verified(org.id, p.from, p.to).orderBy('businessDate').limit(50000)
+      const usage = await verified(org.id, p.from, p.to).orderBy('businessDate').limit(maxExportRows + 1)
         .select('businessDate', 'beneficiaryId', 'benefitId', 'serviceType', 'providerType', 'providerId', 'quantity', 'grossTzs', 'sponsorTzs', 'beneficiaryTzs');
       const named = new Map((await benefits.filterByColumnInAsync('id', [...new Set(usage.map(r => r.benefitId))])).map(b => [b.id, b.name]));
-      rows = usage.map(r => ({ day: r.businessDate, name: name.get(r.beneficiaryId)?.displayName ?? '', group: name.get(r.beneficiaryId)?.groupName ?? '', benefit: named.get(r.benefitId) ?? '', service: r.serviceType,
+      rows = usage.map(r => ({ day: r.businessDate, name: name.get(r.beneficiaryId)?.displayName ?? '', group: name.get(r.beneficiaryId)?.groupName ?? '', benefit: named.get(r.benefitId) ?? '', service: SERVICE_LABEL[r.serviceType] ?? r.serviceType,
         provider: providerName(r.providerType, r.providerId) ?? '', quantity: r.quantity, value: r.grossTzs, sponsor: r.sponsorTzs, member: r.beneficiaryTzs }));
       columns = [col('day', 'Date'), col('name', 'Name'), col('group', 'Group'), col('benefit', 'Benefit'), col('service', 'Service'), col('provider', 'Provider'), col('quantity', 'Quantity'),
         col('value', 'Service value (TZS)'), col('sponsor', 'Sponsor paid (TZS)'), col('member', 'Member paid (TZS)')];
@@ -789,7 +793,7 @@ export function createB2BAnalyticsService({
       const list = (await peopleOf(org)).filter(x => x.userId);
       const name = new Map(list.map(x => [x.userId, x]));
       const [start, end] = instants(p.from, p.to);
-      const acts = list.length ? await db('Activity').whereIn('userId', list.map(x => x.userId)).where('startedAt', '>=', start).where('startedAt', '<', end).orderBy('startedAt').limit(50000)
+      const acts = list.length ? await db('Activity').whereIn('userId', list.map(x => x.userId)).where('startedAt', '>=', start).where('startedAt', '<', end).orderBy('startedAt').limit(maxExportRows + 1)
         .select('userId', 'type', 'source', 'startedAt', 'durationMinutes', 'distanceKm', 'steps', 'activeMinutes') : [];
       rows = acts.map(a => ({ day: localDay(a.startedAt), name: name.get(a.userId)?.displayName ?? '', group: name.get(a.userId)?.groupName ?? '', type: a.type, source: a.source,
         minutes: a.durationMinutes, km: a.distanceKm, steps: a.steps, activeMinutes: a.activeMinutes }));
@@ -821,6 +825,8 @@ export function createB2BAnalyticsService({
       rows = list.map(x => ({ number: x.number, received: localDay(x.receivedAt), method: x.method, reference: x.reference, amount: x.amountTzs, applied: x.allocatedTzs, status: x.status }));
       columns = [col('number', 'Receipt'), col('received', 'Received'), col('method', 'How'), col('reference', 'Reference'), col('amount', 'Amount (TZS)'), col('applied', 'Applied (TZS)'), col('status', 'Status')];
     }
+    // A report is whole or it is refused: a file cut short would pass for the full picture.
+    if (rows.length > maxExportRows) return fail('report_too_large', 422, { maxRows: maxExportRows, hint: 'Choose a shorter period, or one programme or group at a time.' });
     await audit({ actor: actorId, action: 'b2b.analytics.export', target: org.id, after: { report, from: p.from, to: p.to, rows: rows.length } });
     return { filename: `fitflex-${report}-${p.from}-to-${p.to}.csv`, title: spec.title, rows: rows.length, csv: toCsv(columns, rows) };
   }
