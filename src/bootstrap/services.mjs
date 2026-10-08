@@ -92,9 +92,11 @@ import { createCompanyDirectory } from '../services/company-directory.mjs';
 import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
+import { createModerationGate } from '../services/moderation-gate.mjs';
 import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
+import { createDiscoveryService } from '../services/discovery-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
@@ -145,6 +147,8 @@ registerAccountStatusLookup(async id => {
 export const identityService = createIdentityService({ users });
 // KYC enforcement for partners created from the enforcement start; existing ones are exempt.
 export const partnerGate = createPartnerGate({ users, partnerKycCases });
+/** What moderation keeps out of public lists (pending, rejected, suspended, hidden). */
+export const moderationGate = createModerationGate({ states: moderationStates });
 /** For a trainer or gym owner: is their own verification approved? Undefined for other roles. */
 export const partnerVerifiedFor = async user => (
   ['trainer', 'gym_operator'].includes(user?.userType) ? partnerGate.isOperational(user.id) : undefined
@@ -190,7 +194,7 @@ export const shopService = createShopService({
     memberId: order.buyerId, kind: 'shop_order', sourceId: order.id,
     amountTzs: order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,
   }).then(out => out.refund || null),
-  marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases,
+  marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases, publicGate: moderationGate,
 });
 export const whatsAppNotifier = createWhatsAppNotifier();
 export const corporateService = createCorporateService({
@@ -611,4 +615,7 @@ export const moderationService = createModerationService({
 export const promotionService = createPromotionService({
   promotions, placements: promotionPlacements, campaigns: promotionCampaigns, configs: placementConfigs,
   geoAreas, entities: entityResolver, moderation: moderationService, auditLog, organizations: b2bOrganizations,
+});
+export const discoveryService = createDiscoveryService({
+  gymService, trainerService, shopService, partnerGate, moderationGate, promotionService, configs: placementConfigs, geoAreas,
 });
