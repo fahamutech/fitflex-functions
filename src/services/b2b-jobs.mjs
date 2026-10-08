@@ -14,7 +14,7 @@ const month = (y, m) => { const i = y * 12 + (m - 1); return `${Math.floor(i / 1
 
 export function registerB2BJobs({
   ops, db, programs,
-  promotionService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bSponsorRefundService, b2bCollectionsService, b2bAnalyticsService,
+  promotionService, promotionEventsService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bSponsorRefundService, b2bCollectionsService, b2bAnalyticsService,
   now = () => new Date(),
 }) {
   ops.register({
@@ -34,6 +34,15 @@ export function registerB2BJobs({
       if (r.failed) await ctx.raise({ type: 'job_item_failed', severity: 'medium', title: `${r.failed} promotion(s) could not be moved on`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:items`, detail: r });
       else await ctx.clear(`item:${ctx.job}:items`, 'Promotions moved on.');
       return { processed: r.processed, succeeded: r.processed - r.failed, failed: r.failed, ...r };
+    },
+  });
+
+  ops.register({
+    name: 'promotion-events-retention', title: 'Promotion events retention', schedule: { type: 'daily', utc: '21:40' }, quiet: true,
+    description: 'Deletes raw promotion events older than 13 months.',
+    run: async () => {
+      const r = await promotionEventsService.purge();
+      return { processed: r.deleted, deleted: r.deleted };
     },
   });
 

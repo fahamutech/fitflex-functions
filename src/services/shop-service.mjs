@@ -30,7 +30,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // Moderation: pending, rejected, suspended and hidden products and vendors are not shown to buyers.
   publicGate = OPEN_PUBLIC_GATE,
   // A paid order was cancelled and the money is owed back: ({ order, reasonCode, actorId, role }) → refund.
-  onRefundDue = async () => null }) {
+  onRefundDue = async () => null,
+  // A paid order, for promotion analytics: (order) → void. Never allowed to fail the order.
+  onOrderPaid = async () => null }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -282,6 +284,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   async function orderPaid(order) {
+    try { await onOrderPaid(order); } catch (err) { console.warn('[shop] order not credited to a promotion:', err?.message); }
     for (const vendorId of new Set((order.items || []).map(item => item.vendorId))) await notify(vendorId, 'new_order', { orderId: order.id });
     await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
   }

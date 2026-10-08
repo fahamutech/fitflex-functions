@@ -99,6 +99,8 @@ import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
+import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
+import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
@@ -197,6 +199,8 @@ export const shopService = createShopService({
     amountTzs: order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,
   }).then(out => out.refund || null),
   marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases, publicGate: moderationGate,
+  // A paid order is credited to the promotion the buyer opened (promotionEventsService is defined below; this only runs later).
+  onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
 });
 export const whatsAppNotifier = createWhatsAppNotifier();
 export const corporateService = createCorporateService({
@@ -270,6 +274,7 @@ export const b2bOps = registerB2BJobs({
   ops: opsService, db, programs: b2bPrograms,
   // Defined at the end of this file; only called when the job runs.
   promotionService: { runLifecycle: args => promotionService.runLifecycle(args) },
+  promotionEventsService: { purge: args => promotionEventsService.purge(args) },
   b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService,
   // Defined further down; only called when the billing job runs.
   b2bSponsorRefundService: { repair: () => b2bSponsorRefundService.repair() },
@@ -634,4 +639,10 @@ export const promotionService = createPromotionService({
 });
 export const discoveryService = createDiscoveryService({
   gymService, trainerService, shopService, partnerGate, moderationGate, promotionService, configs: placementConfigs, geoAreas,
+});
+
+// Promotion analytics: events from the apps, purchases the server can verify, and what they add up to.
+export const promotionEventsService = createPromotionEventsService({ db, promotions });
+export const promotionAnalyticsService = createPromotionAnalyticsService({
+  db, promotions, campaigns: promotionCampaigns, entities: entityResolver,
 });
