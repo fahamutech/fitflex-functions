@@ -9,7 +9,7 @@ import { db } from '../src/infra/knex-store.mjs';
 import { purgeB2BBilling } from './fixtures/ledger-cleanup.mjs';
 import { b2bService, b2bProgramService, corporateService, signJwt as sign } from '../src/bootstrap/services.mjs';
 import {
-  createB2BBeneficiaryImportService, parseImportText, readImportRow, MAX_IMPORT_ROWS, MAX_EMAILS_PER_INVITE,
+  createB2BBeneficiaryImportService, parseImportText, readImportRow, MAX_IMPORT_ROWS, MAX_EMAILS_PER_INVITE, MAX_SMS_PER_INVITE, SMS_MAX_LENGTH,
 } from '../src/services/b2b-beneficiary-import-service.mjs';
 import { createOpsService } from '../src/services/ops-service.mjs';
 import { registerB2BJobs } from '../src/services/b2b-jobs.mjs';
@@ -50,11 +50,12 @@ async function orgUser(orgId, role) {
 }
 
 /** The service on a clock the test moves, with the emails and notices it sent kept. */
-function harness({ configured = true, at = new Date() } = {}) {
+function harness({ configured = true, sms = true, smsEnabled = true, at = new Date(), appLink = 'https://example.test/get-fitflex' } = {}) {
   const clock = { now: new Date(at) };
-  const sent = { email: [], inbox: [], failNext: 0 };
+  const sent = { email: [], sms: [], inbox: [], failNext: 0, smsFailNext: 0 };
   const svc = createB2BBeneficiaryImportService({
-    db, b2bService, now: () => clock.now, appLink: () => 'https://example.test/get-fitflex',
+    db, b2bService, now: () => clock.now, appLink: () => appLink, smsEnabled: () => smsEnabled,
+    smsSender: () => (sms ? { configured: true, send: async (to, m) => { if (sent.smsFailNext > 0) { sent.smsFailNext -= 1; return { ok: false, error: 'provider_rejected' }; } sent.sms.push({ to, ...m }); return { ok: true }; } } : { configured: false }),
     emailSender: () => (configured ? { configured: true, send: async (to, m) => { if (sent.failNext > 0) { sent.failNext -= 1; return { ok: false, error: 'provider_rejected' }; } sent.email.push({ to, ...m }); return { ok: true }; } } : { configured: false }),
     notify: async (userId, m) => { sent.inbox.push({ userId, ...m }); },
   });
@@ -148,7 +149,7 @@ test('import: members are enrolled, people who have not joined are invited, bad 
 
   // A dry run says what would happen and changes nothing.
   const dry = await h.svc.importPeople({ access: a, body: { rawText, dryRun: true }, actorId: OPERATOR });
-  assert.deepEqual([dry.dryRun, dry.total, dry.enrolled, dry.invited, dry.unchanged, dry.rejected, dry.withoutEmail], [true, 9, 2, 3, 1, 3, 2]);
+  assert.deepEqual([dry.dryRun, dry.total, dry.enrolled, dry.invited, dry.unchanged, dry.rejected, dry.withoutEmail, dry.emailConfigured, dry.smsConfigured], [true, 9, 2, 3, 1, 3, 2, true, true]);
   assert.deepEqual([(await peopleOf(orgId)).length, (await invitesOf(orgId)).length, (await db('B2BBeneficiaryImport').where({ organizationId: orgId })).length], [1, 0, 0]);
 
   const done = await h.svc.importPeople({ access: a, body: { rawText }, actorId: OPERATOR });
@@ -158,8 +159,8 @@ test('import: members are enrolled, people who have not joined are invited, bad 
   assert.deepEqual(list.map(b => [b.displayName, b.groupName, b.externalReference, b.beneficiaryType, b.status]).sort((x, y) => String(x[0]).localeCompare(String(y[0]))).slice(0, 2),
     [['Asha Mollel', 'Finance', 'EMP-1', 'employee', 'active'], ['Baraka Juma', 'Ops', 'EMP-2', 'employee', 'active']]);
   const invites = await invitesOf(orgId);
-  assert.deepEqual(invites.map(i => [i.displayName, i.email, !!i.phone, i.groupName, i.externalReference, !!i.nextEmailAt]).sort((x, y) => x[0].localeCompare(y[0])),
-    [['Coach', mail('trainer'), false, 'Ops', null, true], ['Juma Omari', null, true, 'Ops', null, false], ['Neema Said', mail('neema'), false, 'Finance', 'EMP-3', true]]);
+  assert.deepEqual(invites.map(i => [i.displayName, i.email, !!i.phone, i.groupName, i.externalReference, !!i.nextEmailAt, !!i.nextSmsAt]).sort((x, y) => x[0].localeCompare(y[0])),
+    [['Coach', mail('trainer'), false, 'Ops', null, true, false], ['Juma Omari', null, true, 'Ops', null, false, true], ['Neema Said', mail('neema'), false, 'Finance', 'EMP-3', true, false]]);
   const [record] = await db('B2BBeneficiaryImport').where({ organizationId: orgId });
   assert.deepEqual([record.total, record.enrolled, record.invited, record.unchanged, record.rejected, record.problems.length, record.createdBy], [9, 2, 3, 1, 3, 3, OPERATOR]);
   assert.equal((await db('AuditLog').where({ action: 'b2b.beneficiaries.import', target: orgId })).length, 1);
@@ -314,28 +315,30 @@ test('emails: failures stop after three in a row; "send again" has its limits; w
   h.sent.failNext = 3;
   for (let i = 1; i <= 3; i += 1) {
     const r = await h.svc.sendDue({ limit: 1000 });
-    assert.equal(r.failed >= 1, true);
+    assert.equal(r.email.failed >= 1, true);
     const row = await invite();
     assert.deepEqual([row.emailFailures, row.lastEmailError, row.emailsSent, !!row.nextEmailAt], [i, 'provider_rejected', 0, i < 3]);
     h.days(0.05);                                                                     // just over an hour
   }
   h.days(5); await h.svc.sendDue({ limit: 1000 });
   assert.equal(h.sent.email.filter(e => e.to === mail('f1')).length, 0);                // it stopped
-  assert.equal((await h.svc.pending()).invitesEmailFailed >= 1, true);
+  assert.equal((await h.svc.pending()).invitesNotDelivered >= 1, true);
 
   // "Send again" starts it over.
   const id = (await invite()).id;
   const again = await h.svc.resendInvite({ access: a, inviteId: id, actorId: OPERATOR });
-  assert.deepEqual([again.sent, again.invite.emailsSent, again.invite.emailFailures, h.sent.email.filter(e => e.to === mail('f1')).length], [true, 1, 0, 1]);
+  assert.deepEqual([again.sent, again.invite.emailsSent, again.invite.emailFailures, h.sent.email.filter(e => e.to === mail('f1')).length], [{ email: true, sms: false }, 1, 0, 1]);
   assert.equal((await h.svc.resendInvite({ access: a, inviteId: id, actorId: OPERATOR })).error, 'sent_recently');
   for (let i = 2; i <= MAX_EMAILS_PER_INVITE; i += 1) {
     h.days(0.05);
     assert.equal((await h.svc.resendInvite({ access: a, inviteId: id, actorId: OPERATOR })).invite.emailsSent, i);
   }
   h.days(0.05);
-  assert.deepEqual([(await h.svc.resendInvite({ access: a, inviteId: id, actorId: OPERATOR })).error, h.sent.email.filter(e => e.to === mail('f1')).length], ['email_limit_reached', 6]);
+  assert.deepEqual([(await h.svc.resendInvite({ access: a, inviteId: id, actorId: OPERATOR })).error, h.sent.email.filter(e => e.to === mail('f1')).length], ['message_limit_reached', 6]);
+  // Someone listed by number only, when FitFlex cannot send SMS: there is nothing to send again.
+  const noSms = harness({ sms: false });
   const phoneOnly = (await db('B2BBeneficiaryInvite').where({ organizationId: orgId }).whereNull('email').first());
-  assert.equal((await h.svc.resendInvite({ access: a, inviteId: phoneOnly.id, actorId: OPERATOR })).error, 'invite_has_no_email');
+  assert.equal((await noSms.svc.resendInvite({ access: a, inviteId: phoneOnly.id, actorId: OPERATOR })).error, 'sms_not_available');
   assert.equal((await h.svc.resendInvite({ access: a, inviteId: 'b2bbi_none', actorId: OPERATOR })).error, 'invite_not_found');
 
   // No email sender: nothing is sent, nothing is lost, and the job says so.
@@ -343,7 +346,7 @@ test('emails: failures stop after three in a row; "send again" has its limits; w
   const org2 = await sponsor('Mail3');
   await off.svc.importPeople({ access: await access(org2), body: { rows: [{ email: mail('w1') }] }, actorId: OPERATOR });
   const waiting = await off.svc.sendDue({ limit: 1000 });
-  assert.deepEqual([waiting.notConfigured, waiting.sent, waiting.due >= 1, !!(await invitesOf(org2))[0].nextEmailAt], [true, 0, true, true]);
+  assert.deepEqual([waiting.email.notConfigured, waiting.sent, waiting.email.due >= 1, !!(await invitesOf(org2))[0].nextEmailAt], [true, 0, true, true]);
   assert.equal((await off.svc.listInvites({ access: await access(org2) })).emailConfigured, false);
   const ops = createOpsService({ db, logger: { warn() {}, error() {}, log() {} } });
   const stub = { expireDue: async () => ({}) };
@@ -353,6 +356,84 @@ test('emails: failures stop after three in a row; "send again" has its limits; w
   const [x] = await db('OpsException').where({ dedupeKey: 'item:b2b-beneficiary-invites:email-setup' }).whereIn('status', ['open', 'investigating']);
   assert.deepEqual([x.severity, /email sender is not set up/.test(x.title)], ['low', true]);
   await db('OpsException').where({ id: x.id }).del();
+});
+
+test('SMS: people listed with a mobile number get the invitation and one reminder; both ways when both are listed; never more than three', async () => {
+  const orgId = await sponsor('Kilimanjaro Breweries & Sons Ltd');
+  const h = harness();
+  const a = await access(orgId);
+  const [p1, p2] = [phone(), phone()];
+  await h.svc.importPeople({ access: a, body: { rows: [{ name: 'Phone Only', phone: p1 }, { name: 'Both', phone: p2, email: mail('both') }, { name: 'Email Only', email: mail('eonly') }] }, actorId: OPERATOR });
+  const texts = to => h.sent.sms.filter(m => m.to === to);
+  const run = () => h.svc.sendDue({ limit: 1000 });
+
+  await run();
+  assert.deepEqual([texts(p1).length, texts(p2).length, h.sent.email.filter(e => e.to === mail('both')).length, h.sent.email.filter(e => e.to === mail('eonly')).length, h.sent.sms.length], [1, 1, 1, 1, 2]);
+  const first = texts(p1)[0].text;
+  assert.equal(first, 'Import Kilimanjaro Breweries & added you to its wellness programme on FitFlex. Join as a member with this number: https://example.test/get-fitflex');
+  assert.ok(first.length <= SMS_MAX_LENGTH && /^[\x20-\x7E]+$/.test(first), first);
+  await run();
+  assert.equal(h.sent.sms.length, 2);                                                 // nothing due again yet
+  h.days(3.1); await run();
+  assert.deepEqual([texts(p1).length, /^Reminder: /.test(texts(p1)[1].text), texts(p1)[1].text.length <= SMS_MAX_LENGTH], [2, true, true]);
+  h.days(8); await run();
+  h.days(60); await run();
+  assert.deepEqual([texts(p1).length, texts(p2).length, h.sent.email.filter(e => e.to === mail('both')).length], [2, 2, 3]);   // SMS: invitation + one reminder; email: invitation + two
+  const row = await db('B2BBeneficiaryInvite').where({ organizationId: orgId, phone: p1 }).first();
+  assert.deepEqual([row.smsSent, row.nextSmsAt, row.emailsSent], [2, null, 0]);
+
+  // "Send again" reaches a phone-only person by SMS, up to three SMS in all.
+  const again = await h.svc.resendInvite({ access: a, inviteId: row.id, actorId: OPERATOR });
+  assert.deepEqual([again.sent, again.invite.smsSent, again.invite.canResend, MAX_SMS_PER_INVITE], [{ email: false, sms: true }, 3, false, 3]);
+  h.days(1);
+  assert.deepEqual([(await h.svc.resendInvite({ access: a, inviteId: row.id, actorId: OPERATOR })).error, texts(p1).length], ['message_limit_reached', 3]);
+  // Someone with both is sent both.
+  const both = await db('B2BBeneficiaryInvite').where({ organizationId: orgId, phone: p2 }).first();
+  assert.deepEqual((await h.svc.resendInvite({ access: a, inviteId: both.id, actorId: OPERATOR })).sent, { email: true, sms: true });
+
+  // Three refusals in a row stop the SMS for that person.
+  const p3 = phone();
+  await h.svc.importPeople({ access: a, body: { rows: [{ phone: p3 }] }, actorId: OPERATOR });
+  h.sent.smsFailNext = 3;
+  for (let i = 0; i < 3; i += 1) { await run(); h.days(0.05); }
+  h.days(5); await run();
+  const stuck = await db('B2BBeneficiaryInvite').where({ organizationId: orgId, phone: p3 }).first();
+  assert.deepEqual([texts(p3).length, stuck.smsFailures, stuck.lastSmsError, stuck.nextSmsAt], [0, 3, 'provider_rejected', null]);
+
+  // Joined or cancelled: no more SMS. Two runs at once: one SMS.
+  const p4 = phone();
+  await h.svc.importPeople({ access: a, body: { rows: [{ phone: p4 }] }, actorId: OPERATOR });
+  await Promise.all([run(), run(), run()]);
+  assert.equal(texts(p4).length, 1);
+  const joined = await user({ phone: p4 });
+  await h.svc.matchInvites({ userId: joined });
+  h.days(4); await run();
+  assert.equal(texts(p4).length, 1);
+});
+
+test('SMS: switched off or not set up, nothing is sent by SMS and nothing else changes; without a link the text still fits', async () => {
+  const orgId = await sponsor('Quiet');
+  const a = await access(orgId);
+  for (const h of [harness({ smsEnabled: false }), harness({ sms: false })]) {
+    const p = phone();
+    const out = await h.svc.importPeople({ access: a, body: { rows: [{ phone: p, email: mail(`q${p.slice(-4)}`) }] }, actorId: OPERATOR });
+    assert.deepEqual([out.invited, out.smsConfigured, out.emailConfigured], [1, false, true]);
+    const r = await h.svc.sendDue({ limit: 1000 });
+    assert.deepEqual([h.sent.sms.length, r.sms.notConfigured, r.sms.sent, r.email.sent >= 1], [0, true, 0, true]);
+    assert.equal((await h.svc.listInvites({ access: a })).smsConfigured, false);
+  }
+  const bare = harness({ appLink: null });
+  const p = phone();
+  await bare.svc.importPeople({ access: a, body: { rows: [{ phone: p }] }, actorId: OPERATOR });
+  await bare.svc.sendDue({ limit: 1000 });
+  const [m] = bare.sent.sms.filter(x => x.to === p);
+  assert.deepEqual([/https?:/.test(m.text), m.text.length <= SMS_MAX_LENGTH, /Get the FitFlex app and join as a member with this number\.$/.test(m.text)], [false, true, true]);
+  // A long link that would not fit is left out rather than cut in half.
+  const long = harness({ appLink: `https://example.test/${'x'.repeat(120)}` });
+  const p2 = phone();
+  await long.svc.importPeople({ access: a, body: { rows: [{ phone: p2 }] }, actorId: OPERATOR });
+  await long.svc.sendDue({ limit: 1000 });
+  assert.equal(/https?:/.test(long.sent.sms.find(x => x.to === p2).text), false);
 });
 
 // ── Security ─────────────────────────────────────────────────────────────────

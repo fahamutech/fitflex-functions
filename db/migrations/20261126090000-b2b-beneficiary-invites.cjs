@@ -4,8 +4,9 @@
 //   B2BBeneficiaryInvite   someone an organisation has listed by email or
 //                          mobile number who has no member account yet. When
 //                          they join with that email or number they are
-//                          enrolled and the invite is closed. Holds the email
-//                          schedule: the invitation and up to two reminders.
+//                          enrolled and the invite is closed. Holds the message
+//                          schedule: by email the invitation and two reminders,
+//                          by SMS the invitation and one reminder.
 //   B2BBeneficiaryImport   one upload: who did it, how many rows went where,
 //                          and the rows that could not be used.
 //
@@ -59,6 +60,12 @@ exports.up = async function up(knex) {
       ts(t, 'nextEmailAt');
       t.integer('emailFailures').notNullable().defaultTo(0);
       t.text('lastEmailError');
+      // SMS: the same, for people listed with a mobile number.
+      t.integer('smsSent').notNullable().defaultTo(0);
+      ts(t, 'lastSmsAt');
+      ts(t, 'nextSmsAt');
+      t.integer('smsFailures').notNullable().defaultTo(0);
+      t.text('lastSmsError');
       ts(t, 'enrolledAt');
       t.text('beneficiaryId');
       ts(t, 'cancelledAt');
@@ -66,6 +73,7 @@ exports.up = async function up(knex) {
       stamps(t);
       t.index(['organizationId', 'status']);
       t.index(['status', 'nextEmailAt']);
+      t.index(['status', 'nextSmsAt']);
     });
     await knex.raw(`ALTER TABLE "B2BBeneficiaryInvite" ADD CONSTRAINT b2b_invite_status_chk CHECK ("status" IN (${list(INVITE_STATUSES)}))`);
     await knex.raw(`ALTER TABLE "B2BBeneficiaryInvite" ADD CONSTRAINT b2b_invite_contact_chk CHECK ("email" IS NOT NULL OR "phone" IS NOT NULL)`);

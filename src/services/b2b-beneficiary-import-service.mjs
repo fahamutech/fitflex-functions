@@ -9,10 +9,12 @@
 //              email or number they are enrolled and the invite is closed.
 //              Matching runs every few minutes, and at once when a member
 //              opens their benefits.
-//   email      the invitation, then a reminder after 3 days and another after
-//              10, to people listed with an email address. Email only, by
-//              decision (P7-03): a person listed by number alone is told by
-//              their organisation.
+//   messages   by email: the invitation, then a reminder after 3 days and
+//              another after 10. By SMS, to people listed with a mobile
+//              number: the invitation and one reminder after 3 days (each SMS
+//              is paid for). Someone listed with both gets both (product
+//              owner, 8 Oct 2026). WhatsApp is not sent: there is no WhatsApp
+//              Business account or approved template yet.
 //
 // Uploading the same list twice adds nobody twice: a person already on the
 // list, or already invited, is left as they are (their group and reference
@@ -34,6 +36,12 @@ export const MAX_SCHEDULED_EMAILS = 3;
 export const REMINDER_DAYS = Object.freeze([3, 10]);
 /** However often someone presses "send again". */
 export const MAX_EMAILS_PER_INVITE = 6;
+/** The SMS invitation and one reminder, after this many days. */
+export const SMS_REMINDER_DAYS = Object.freeze([3]);
+/** SMS is paid for per message: three per invite at most, "send again" included. */
+export const MAX_SMS_PER_INVITE = 3;
+/** One SMS segment, plain characters only. */
+export const SMS_MAX_LENGTH = 160;
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const COLUMNS = ['name', 'email', 'phone', 'group', 'reference', 'type'];
 const HEADER_ALIASES = { name: 'name', 'full name': 'name', displayname: 'name', email: 'email', 'email address': 'email', phone: 'phone', mobile: 'phone', 'mobile number': 'phone', 'phone number': 'phone',
@@ -96,7 +104,10 @@ export function createB2BBeneficiaryImportService({
   emailSender = () => ({ configured: false }),
   // Tell one person in the app: (userId, { id, type, title, body, data })
   notify = async () => null,
-  // A link to get the app, put in the email when set. None is invented.
+  // { configured, send(to, { text }) }. Invitation SMS can be switched off with B2B_INVITE_SMS=off.
+  smsSender = () => ({ configured: false }),
+  smsEnabled = () => process.env.B2B_INVITE_SMS !== 'off',
+  // A link to get the app, put in the messages when set. None is invented.
   appLink = () => process.env.FITFLEX_APP_LINK || null,
   now = () => new Date(),
 }) {
@@ -107,7 +118,8 @@ export function createB2BBeneficiaryImportService({
     id: randomUUID(), at: stamp(), actor: actor ?? null, action, target, before: null, after: after == null ? null : JSON.stringify(after),
   });
   const orgName = org => org.tradingName || org.legalName;
-  const inviteView = ({ invitedBy, cancelledBy, ...i }) => ({ ...i, canResend: i.status === 'invited' && !!i.email && i.emailsSent < MAX_EMAILS_PER_INVITE });
+  const sms = () => (smsEnabled() ? smsSender() : { configured: false });
+  const inviteView = ({ invitedBy, cancelledBy, ...i }) => ({ ...i, canResend: i.status === 'invited' && ((!!i.email && i.emailsSent < MAX_EMAILS_PER_INVITE) || (!!i.phone && i.smsSent < MAX_SMS_PER_INVITE)) });
 
   /** Member accounts behind a set of emails and numbers: two queries, whatever the size of the list. */
   async function accountsFor(emails, phones) {
@@ -182,7 +194,7 @@ export function createB2BBeneficiaryImportService({
       try {
         await db(INVITE).insert({
           id: newId('b2bbi'), organizationId: org.id, email: p.email, phone: p.phone, displayName: p.displayName, externalReference: p.externalReference, groupName: p.groupName,
-          beneficiaryType: p.beneficiaryType, status: 'invited', importId, invitedBy: actorId, invitedAt: at, nextEmailAt: p.email ? at : null, createdAt: at, updatedAt: at,
+          beneficiaryType: p.beneficiaryType, status: 'invited', importId, invitedBy: actorId, invitedAt: at, nextEmailAt: p.email ? at : null, nextSmsAt: p.phone ? at : null, createdAt: at, updatedAt: at,
         });
         if (p.email) invitedEmail.set(p.email, true);
         if (p.phone) invitedPhone.set(p.phone, true);
@@ -191,7 +203,8 @@ export function createB2BBeneficiaryImportService({
         counts.invited -= 1; counts.unchanged += 1;
       }
     }
-    const summary = { ...counts, problems: problems.sort((a, b) => a.line - b.line), withoutEmail: people.filter(p => !p.email).length };
+    const summary = { ...counts, problems: problems.sort((a, b) => a.line - b.line), withoutEmail: people.filter(p => !p.email).length, withoutPhone: people.filter(p => !p.phone).length,
+      emailConfigured: emailSender().configured === true, smsConfigured: sms().configured === true };
     if (dryRun) return { dryRun: true, ...summary };
     await db(IMPORT).insert({ id: importId, organizationId: org.id, createdBy: actorId, total: counts.total, enrolled: counts.enrolled, invited: counts.invited, unchanged: counts.unchanged, rejected: counts.rejected,
       problems: JSON.stringify(summary.problems.slice(0, 500)), createdAt: at, updatedAt: at });
@@ -214,7 +227,7 @@ export function createB2BBeneficiaryImportService({
     if (status !== 'all') q = q.where({ status });
     const rows = await q.orderBy('invitedAt', 'desc').limit(Math.min(Math.max(parseInt(query.limit, 10) || 500, 1), 2000));
     const [{ c }] = await db(INVITE).where({ organizationId: access.org.id, status: 'invited' }).count({ c: '*' });
-    return { items: rows.map(inviteView), invited: Number(c), emailConfigured: emailSender().configured === true };
+    return { items: rows.map(inviteView), invited: Number(c), emailConfigured: emailSender().configured === true, smsConfigured: sms().configured === true };
   }
 
   async function ownInvite(access, inviteId, trx = db) {
@@ -228,24 +241,36 @@ export function createB2BBeneficiaryImportService({
     if (invite.status === 'cancelled') return { invite: inviteView(invite), unchanged: true };
     if (invite.status !== 'invited') return fail('invite_already_used', 409, { inviteStatus: invite.status });
     const at = stamp();
-    const [row] = await db(INVITE).where({ id: invite.id, status: 'invited' }).update({ status: 'cancelled', cancelledAt: at, cancelledBy: actorId, nextEmailAt: null, updatedAt: at }).returning('*');
+    const [row] = await db(INVITE).where({ id: invite.id, status: 'invited' }).update({ status: 'cancelled', cancelledAt: at, cancelledBy: actorId, nextEmailAt: null, nextSmsAt: null, updatedAt: at }).returning('*');
     await audit({ actor: actorId, action: 'b2b.beneficiary_invite.cancel', target: invite.id, after: { organizationId: access.org.id } });
     return { invite: inviteView(row ?? await ownInvite(access, inviteId)) };
   }
 
-  /** Send the invitation email again now. At most six emails per invite, and not within an hour of the last. */
+  /**
+   * Send the invitation again now, by every way the person can be reached:
+   * email (six per invite at most) and SMS (three at most). Not within an
+   * hour of the last message of that kind.
+   */
   async function resendInvite({ access, inviteId, actorId }) {
     if (!can(access, MANAGE)) return refuse(MANAGE);
     const invite = await ownInvite(access, inviteId);
     if (!invite) return fail('invite_not_found', 404);
     if (invite.status !== 'invited') return fail('invite_already_used', 409, { inviteStatus: invite.status });
-    if (!invite.email) return fail('invite_has_no_email', 409, { hint: 'This person was listed by mobile number only. Tell them to join FitFlex with that number.' });
-    if (invite.emailsSent >= MAX_EMAILS_PER_INVITE) return fail('email_limit_reached', 409, { maxEmails: MAX_EMAILS_PER_INVITE });
-    if (invite.lastEmailAt && +stamp() - +new Date(invite.lastEmailAt) < 3_600_000) return fail('sent_recently', 409, { lastEmailAt: invite.lastEmailAt });
-    await db(INVITE).where({ id: invite.id }).update({ nextEmailAt: stamp(), emailFailures: 0, lastEmailError: null, updatedAt: stamp() });
-    await audit({ actor: actorId, action: 'b2b.beneficiary_invite.resend', target: invite.id, after: { organizationId: access.org.id } });
-    const sent = await sendDue({ inviteIds: [invite.id] });
-    return { invite: inviteView(await ownInvite(access, inviteId)), sent: sent.sent === 1, emailConfigured: !sent.notConfigured };
+    const at = stamp();
+    const recent = last => last && +at - +new Date(last) < 3_600_000;
+    const byEmail = !!invite.email && invite.emailsSent < MAX_EMAILS_PER_INVITE && !recent(invite.lastEmailAt);
+    const bySms = !!invite.phone && invite.smsSent < MAX_SMS_PER_INVITE && !recent(invite.lastSmsAt) && sms().configured === true;
+    if (!byEmail && !bySms) {
+      if (!invite.email && sms().configured !== true) return fail('sms_not_available', 409, { hint: 'This person was listed by mobile number only and FitFlex cannot send SMS at the moment. Tell them to join FitFlex with that number.' });
+      if (recent(invite.lastEmailAt) || recent(invite.lastSmsAt)) return fail('sent_recently', 409, { lastEmailAt: invite.lastEmailAt, lastSmsAt: invite.lastSmsAt });
+      return fail('message_limit_reached', 409, { maxEmails: MAX_EMAILS_PER_INVITE, maxSms: MAX_SMS_PER_INVITE });
+    }
+    await db(INVITE).where({ id: invite.id }).update({
+      ...(byEmail ? { nextEmailAt: at, emailFailures: 0, lastEmailError: null } : {}), ...(bySms ? { nextSmsAt: at, smsFailures: 0, lastSmsError: null } : {}), updatedAt: at,
+    });
+    await audit({ actor: actorId, action: 'b2b.beneficiary_invite.resend', target: invite.id, after: { organizationId: access.org.id, email: byEmail, sms: bySms } });
+    const out = await sendDue({ inviteIds: [invite.id] });
+    return { invite: inviteView(await ownInvite(access, inviteId)), sent: { email: out.email.sent === 1, sms: out.sms.sent === 1 }, emailConfigured: !out.email.notConfigured, smsConfigured: sms().configured === true };
   }
 
   // ── Matching: the person has joined ───────────────────────────────────────
@@ -264,7 +289,7 @@ export function createB2BBeneficiaryImportService({
       beneficiaryId = again.beneficiary?.id ?? again.beneficiaryId ?? null;
     } else if (out.error) return { failed: out.error };
     const at = stamp();
-    const closed = await db(INVITE).where({ id: invite.id, status: 'invited' }).update({ status: 'enrolled', enrolledAt: at, beneficiaryId, nextEmailAt: null, updatedAt: at });
+    const closed = await db(INVITE).where({ id: invite.id, status: 'invited' }).update({ status: 'enrolled', enrolledAt: at, beneficiaryId, nextEmailAt: null, nextSmsAt: null, updatedAt: at });
     if (closed && out.beneficiary) {
       await notify(userId, {
         id: `b2b_enrolled_${invite.id}`.slice(0, 120), type: 'b2b_beneficiary_enrolled', title: `${orgName(access.org)} added you`,
@@ -333,55 +358,79 @@ export function createB2BBeneficiaryImportService({
     return { subject: count === 0 ? `${name} has added you to FitFlex` : `Reminder: your FitFlex benefits from ${name}`, text: lines.join('\n') };
   }
 
-  /** Send the emails that are due: the invitation, then the reminders. Each is sent once. */
-  async function sendDue({ limit = 200, inviteIds = null } = {}) {
+  /** One SMS segment in plain characters: who added them, what to do, and the link when there is one. */
+  function smsFor(invite, org, count) {
+    const link = appLink();
+    const name = orgName(org).replace(/[^\x20-\x7E]/g, '').trim().slice(0, 30) || 'Your organisation';
+    const lead = count === 0 ? `${name} added you to its wellness programme on FitFlex.` : `Reminder: ${name} added you to FitFlex.`;
+    const plain = `${lead} Get the FitFlex app and join as a member with this number.`;
+    const withLink = link ? `${lead} Join as a member with this number: ${link}` : null;
+    // A link that does not fit is left out, never cut in half.
+    const text = withLink && withLink.length <= SMS_MAX_LENGTH ? withLink : plain;
+    return { text: text.slice(0, SMS_MAX_LENGTH) };
+  }
+
+  const CHANNELS = Object.freeze({
+    email: { contact: 'email', sent: 'emailsSent', last: 'lastEmailAt', next: 'nextEmailAt', failures: 'emailFailures', error: 'lastEmailError', reminders: REMINDER_DAYS, sender: () => emailSender(), compose: emailFor },
+    sms: { contact: 'phone', sent: 'smsSent', last: 'lastSmsAt', next: 'nextSmsAt', failures: 'smsFailures', error: 'lastSmsError', reminders: SMS_REMINDER_DAYS, sender: () => sms(), compose: smsFor },
+  });
+
+  async function sendChannel(channel, { limit, inviteIds }) {
+    const c = CHANNELS[channel];
     const stats = { due: 0, sent: 0, failed: 0, notConfigured: false };
     const at = stamp();
-    let q = db(INVITE).where({ status: 'invited' }).whereNotNull('email').whereNotNull('nextEmailAt').where('nextEmailAt', '<=', at).orderBy('nextEmailAt').limit(limit);
+    let q = db(INVITE).where({ status: 'invited' }).whereNotNull(c.contact).whereNotNull(c.next).where(c.next, '<=', at).orderBy(c.next).limit(limit);
     if (inviteIds) q = q.whereIn('id', inviteIds);
     const due = await q;
     stats.due = due.length;
     if (!due.length) return stats;
-    const sender = emailSender();
+    const sender = c.sender();
     if (!sender.configured) { stats.notConfigured = true; return stats; }
     const orgs = new Map((await db('B2BOrganization').whereIn('id', [...new Set(due.map(i => i.organizationId))])).map(o => [o.id, o]));
     for (const invite of due) {
       const org = orgs.get(invite.organizationId);
       if (!org || org.status !== 'active') continue;
-      // Claim it first, so two runs at once send one email.
-      const claimed = await db(INVITE).where({ id: invite.id, status: 'invited', emailsSent: invite.emailsSent }).whereNotNull('nextEmailAt').update({ nextEmailAt: null, updatedAt: at });
+      // Claim it first, so two runs at once send one message.
+      const claimed = await db(INVITE).where({ id: invite.id, status: 'invited', [c.sent]: invite[c.sent] }).whereNotNull(c.next).update({ [c.next]: null, updatedAt: at });
       if (!claimed) continue;
       let ok = false;
       let error = null;
       try {
-        const out = await sender.send(invite.email, emailFor(invite, org, invite.emailsSent));
+        const out = await sender.send(invite[c.contact], c.compose(invite, org, invite[c.sent]));
         ok = out?.ok === true;
         error = ok ? null : out?.error ?? 'not_accepted';
       } catch (err) {
         error = String(err?.message ?? err).slice(0, 200);
       }
       if (ok) {
-        const sentCount = invite.emailsSent + 1;
-        const reminder = sentCount <= REMINDER_DAYS.length && sentCount < MAX_SCHEDULED_EMAILS ? new Date(+new Date(invite.invitedAt) + REMINDER_DAYS[sentCount - 1] * 86_400_000) : null;
-        await db(INVITE).where({ id: invite.id }).update({ emailsSent: sentCount, lastEmailAt: at, emailFailures: 0, lastEmailError: null,
-          nextEmailAt: reminder && reminder > at ? reminder : reminder ? new Date(+at + 86_400_000) : null, updatedAt: at });
+        const sentCount = invite[c.sent] + 1;
+        const reminder = sentCount <= c.reminders.length ? new Date(+new Date(invite.invitedAt) + c.reminders[sentCount - 1] * 86_400_000) : null;
+        await db(INVITE).where({ id: invite.id }).update({ [c.sent]: sentCount, [c.last]: at, [c.failures]: 0, [c.error]: null,
+          [c.next]: reminder && reminder > at ? reminder : reminder ? new Date(+at + 86_400_000) : null, updatedAt: at });
         stats.sent += 1;
       } else {
-        const failures = invite.emailFailures + 1;
+        const failures = invite[c.failures] + 1;
         // Three failures in a row and it stops; "send again" starts it over.
-        await db(INVITE).where({ id: invite.id }).update({ emailFailures: failures, lastEmailError: error, nextEmailAt: failures >= 3 ? null : new Date(+at + 3_600_000), updatedAt: at });
+        await db(INVITE).where({ id: invite.id }).update({ [c.failures]: failures, [c.error]: error, [c.next]: failures >= 3 ? null : new Date(+at + 3_600_000), updatedAt: at });
         stats.failed += 1;
       }
     }
     return stats;
   }
 
+  /** Send the messages that are due, by email and by SMS: the invitation, then the reminders. Each is sent once. */
+  async function sendDue({ limit = 200, inviteIds = null } = {}) {
+    const email = await sendChannel('email', { limit, inviteIds });
+    const text = await sendChannel('sms', { limit, inviteIds });
+    return { email, sms: text, sent: email.sent + text.sent, failed: email.failed + text.failed };
+  }
+
   /** For the operations page. */
   async function pending() {
     const [{ invited }] = await db(INVITE).where({ status: 'invited' }).count({ invited: '*' });
-    const [{ stuck }] = await db(INVITE).where({ status: 'invited' }).where('emailFailures', '>=', 3).count({ stuck: '*' });
+    const [{ stuck }] = await db(INVITE).where({ status: 'invited' }).where(b => b.where('emailFailures', '>=', 3).orWhere('smsFailures', '>=', 3)).count({ stuck: '*' });
     const [{ withProblems }] = await db(IMPORT).where('rejected', '>', 0).where('createdAt', '>', new Date(+stamp() - 7 * 86_400_000)).count({ withProblems: '*' });
-    return { invitesWaiting: Number(invited), invitesEmailFailed: Number(stuck), importsWithRejectedRowsLast7Days: Number(withProblems) };
+    return { invitesWaiting: Number(invited), invitesNotDelivered: Number(stuck), importsWithRejectedRowsLast7Days: Number(withProblems) };
   }
 
   return { importPeople, listImports, listInvites, cancelInvite, resendInvite, matchInvites, sendDue, pending };

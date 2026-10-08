@@ -915,7 +915,7 @@ const people = b2bBeneficiaryImportService;
 
 export const importB2BBeneficiaries = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/import',
-  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account is enrolled; someone who has not joined yet is invited and enrolled when they join. Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason.',
+  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account is enrolled; someone who has not joined yet is invited (by email, and by SMS when listed with a mobile number) and enrolled when they join. Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason.',
   requestSample: { rawText: 'name,email,phone,group\nAsha Mollel,asha@example.com,0712345678,Finance', dryRun: true },
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => people.importPeople({ access, body: req.body || {}, actorId: actor(req) })),
@@ -930,7 +930,7 @@ export const listB2BBeneficiaryImports = {
 
 export const listB2BBeneficiaryInvites = {
   created, method: 'get', path: '/b2b/organizations/:id/beneficiary-invites',
-  description: 'People invited who have not joined yet (beneficiaries.read). ?status=invited (default) | enrolled | cancelled | all. Says whether invitation emails can be sent at all.',
+  description: 'People invited who have not joined yet (beneficiaries.read). ?status=invited (default) | enrolled | cancelled | all. Says whether invitation emails and SMS can be sent at all.',
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => people.listInvites({ access, query: req.query || {} })),
 };
@@ -944,7 +944,7 @@ export const cancelB2BBeneficiaryInvite = {
 
 export const resendB2BBeneficiaryInvite = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiary-invites/:inviteId/resend',
-  description: 'Send the invitation email again now (beneficiaries.manage). Not within an hour of the last one, and at most six emails per invite.',
+  description: 'Send the invitation again now, by email and by SMS where the person can be reached that way (beneficiaries.manage). Not within an hour of the last one; at most six emails and three SMS per invite. Returns sent: { email, sms }.',
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => people.resendInvite({ access, inviteId: req.params.inviteId, actorId: actor(req) })),
 };

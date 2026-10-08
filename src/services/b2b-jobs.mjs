@@ -118,17 +118,21 @@ export function registerB2BJobs({
   if (b2bBeneficiaryImportService) {
     ops.register({
       name: 'b2b-beneficiary-invites', title: 'Beneficiary invites', schedule: { type: 'every', minutes: 10 }, quiet: true,
-      description: 'Enrols invited people who have since joined FitFlex, and sends the invitation emails that are due (the invitation, then reminders after 3 and 10 days).',
+      description: 'Enrols invited people who have since joined FitFlex, and sends the invitation messages that are due: by email the invitation and reminders after 3 and 10 days, by SMS the invitation and one reminder after 3 days.',
       run: async (ctx) => {
         const matched = await b2bBeneficiaryImportService.matchInvites();
         const emails = await b2bBeneficiaryImportService.sendDue();
         if (matched.failed) await ctx.raise({ type: 'job_item_failed', severity: 'medium', title: `${matched.failed} invited ${matched.failed === 1 ? 'person' : 'people'} could not be enrolled after joining`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:enrol`, detail: matched });
         else if (matched.matched) await ctx.clear(`item:${ctx.job}:enrol`, 'Enrolled.');
-        if (emails.notConfigured) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${emails.due} invitation email(s) are waiting: the email sender is not set up`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email-setup`, detail: emails });
-        else if (emails.due) await ctx.clear(`item:${ctx.job}:email-setup`, 'The email sender is set up.');
-        if (emails.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${emails.failed} invitation email(s) were not accepted`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email`, detail: emails });
-        else if (emails.sent) await ctx.clear(`item:${ctx.job}:email`, 'Emails sent.');
-        return { processed: matched.matched + emails.sent + emails.failed, succeeded: matched.enrolled + emails.sent, failed: matched.failed + emails.failed, enrolled: matched.enrolled, emailsSent: emails.sent, emailsWaiting: emails.notConfigured ? emails.due : 0 };
+        const { email, sms } = emails;
+        if (email.notConfigured) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${email.due} invitation email(s) are waiting: the email sender is not set up`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email-setup`, detail: email });
+        else if (email.due) await ctx.clear(`item:${ctx.job}:email-setup`, 'The email sender is set up.');
+        if (email.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${email.failed} invitation email(s) were not accepted`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email`, detail: email });
+        else if (email.sent) await ctx.clear(`item:${ctx.job}:email`, 'Emails sent.');
+        // SMS that is switched off or not set up is not a fault: those invites simply get no SMS.
+        if (sms.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${sms.failed} invitation SMS were not accepted`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:sms`, detail: sms });
+        else if (sms.sent) await ctx.clear(`item:${ctx.job}:sms`, 'SMS sent.');
+        return { processed: matched.matched + emails.sent + emails.failed, succeeded: matched.enrolled + emails.sent, failed: matched.failed + emails.failed, enrolled: matched.enrolled, emailsSent: email.sent, smsSent: sms.sent, emailsWaiting: email.notConfigured ? email.due : 0, smsWaiting: sms.notConfigured ? sms.due : 0 };
       },
     });
   }
@@ -150,7 +154,7 @@ export function registerB2BJobs({
       count(db('CorporateEmployee as e').join('B2BOrganization as o', 'o.legacyCorporateId', 'e.corporateId').whereIn('e.status', ['active', 'pending']).whereNull('e.userId')),
     ]);
     const unpaidCredit = await count(db('B2BPayment').where({ status: 'received' }).whereRaw('"amountTzs" > "allocatedTzs"'));
-    const invites = b2bBeneficiaryImportService ? await b2bBeneficiaryImportService.pending() : { invitesWaiting: 0, invitesEmailFailed: 0, importsWithRejectedRowsLast7Days: 0 };
+    const invites = b2bBeneficiaryImportService ? await b2bBeneficiaryImportService.pending() : { invitesWaiting: 0, invitesNotDelivered: 0, importsWithRejectedRowsLast7Days: 0 };
     return {
       billing: { draftInvoices: drafts, draftsOlderThan7Days: toIssueOld, paymentNoticesToCheck: notices, overdueInvoices: overdue, organizationsOnHold: onHold, paymentsNotFullyApplied: unpaidCredit },
       usage: { holdsOlderThan1Hour: staleHolds, passesAwaitingMemberPayment: awaitingMember, passesAwaitingAccountLink: awaitingLink },

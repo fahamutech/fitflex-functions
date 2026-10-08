@@ -259,7 +259,7 @@ export const b2bAnalyticsService = createB2BAnalyticsService({
 export const opsService = createOpsService({ db });
 // Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
 export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
-  db, b2bService, emailSender: () => emailSender(),
+  db, b2bService, emailSender: () => emailSender(), smsSender: () => smsSender(),
   // notificationService is created further down; this only runs later.
   notify: (userId, message) => notificationService.notify(userId, message),
 });

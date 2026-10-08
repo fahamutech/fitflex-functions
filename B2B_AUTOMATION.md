@@ -212,9 +212,11 @@ Code: `src/services/b2b-beneficiary-import-service.mjs`, routes in
 `functions/b2b.mjs`, migration `20261126090000-b2b-beneficiary-invites.cjs`,
 tests `specs/b2b-beneficiary-import.specs.mjs`.
 
-**Decision (P7-03, default taken 7 Oct 2026):** invitations go by email only.
-No SMS is sent. A person listed by mobile number alone gets no message from
-FitFlex; their organisation tells them.
+**Decision (P7-03, product owner, 8 Oct 2026):** invitations go by email and
+by SMS. Someone listed with an email address gets the email; someone listed
+with a mobile number gets the SMS; someone listed with both gets both.
+WhatsApp is not sent: there is no WhatsApp Business account, provider or
+approved template yet (see `src/integrations/whatsapp/provider.mjs`).
 
 ### Import
 
@@ -246,26 +248,33 @@ list" closes the invite without a second row. A cancelled invite enrols nobody.
 Matching trusts the email or number on the account, exactly as adding a
 person by email or number already does.
 
-### Emails
+### Messages
 
-| Email | When |
-|---|---|
-| Invitation | within 10 minutes of the import |
-| Reminder | 3 days after the invitation |
-| Reminder | 10 days after the invitation |
+| Channel | Invitation | Reminders | Most per invite ("send again" included) |
+|---|---|---|---|
+| Email | within 10 minutes of the import | 3 and 10 days after | 6 |
+| SMS | within 10 minutes of the import | 3 days after | 3 |
 
 Then no more. None after the person joins or the invite is cancelled. Each
-email is claimed before it is sent, so overlapping runs send one. Three
-failures in a row stop the emails for that invite. "Send again" starts them
-over: not within an hour of the last, six emails per invite at most.
+message is claimed before it is sent, so overlapping runs send one. Three
+failures in a row stop that channel for that invite. "Send again" starts it
+over, not within an hour of the last message of that kind.
 
-The email says who added the person, to sign up as a member with that
+**Email** says who added the person, to sign up as a member with that
 address, a link to the app when `FITFLEX_APP_LINK` is set (none is invented),
 and what the organisation will be able to see of their activity. English only.
 
+**SMS** is one segment (160 plain characters): who added them and to join as a
+member with that number, with the app link when it fits. It has no room for
+the visibility statement; the person gets that in the app once they join.
+SMS uses the same Beem sender as sign-in codes (`VERIFICATION_SMS_PROVIDER`)
+and **each SMS is paid for**. `B2B_INVITE_SMS=off` turns invitation SMS off
+without touching sign-in codes.
+
 With no email sender configured, invites still work (people are enrolled when
 they join); the emails wait, the People page says so, and the job raises one
-low-severity exception until a sender is set up.
+low-severity exception until a sender is set up. With SMS switched off or not
+set up, no SMS is sent and nothing is raised: that is a choice, not a fault.
 
 ### Permissions
 
@@ -280,6 +289,10 @@ change it. The same person invited by two organisations is enrolled in both.
 `VERIFICATION_EMAIL_PROVIDER=mailgun` with its key and domain. The next run
 sends what is waiting and the exception clears.
 
+**"N invitation SMS were not accepted."** Beem refused them (a wrong number,
+no credit on the account, or the sender name not approved for this kind of
+message). Each is retried hourly, three times. Check the Beem account.
+
 **"N invitation email(s) were not accepted."** The provider refused them
 (often a mistyped address). Each is retried hourly, three times. The
 organisation sees "Email not delivered" on the invite and can correct the
@@ -291,7 +304,9 @@ active). Nothing is lost: the invite stays and is tried again every run.
 
 ### Limitations
 
-- No SMS, by decision.
+- No WhatsApp (no account or approved template). SMS is sent to the number the
+  organisation supplied; whether that needs the person's prior consent under
+  Tanzanian rules is a question for counsel.
 - An account whose email was saved in mixed case before emails were
   normalised is matched when its owner opens Benefits, not by the 10-minute run.
 - Invited people are not counted in analytics until they join.

@@ -131,6 +131,6 @@ export const opsSweeper = {
 
 export const b2bBeneficiaryInvites = {
   created, rule: '*/10 * * * *', // every 10 minutes
-  description: 'B2B: enrol invited people who have since joined FitFlex with the email or number their organisation listed, and send the invitation emails that are due (the invitation, then reminders after 3 and 10 days; email only). Safe to overlap and to rerun: an invite is enrolled once and each email is claimed before it is sent.',
+  description: 'B2B: enrol invited people who have since joined FitFlex with the email or number their organisation listed, and send the invitation messages that are due (email: the invitation, then reminders after 3 and 10 days; SMS to people listed with a mobile number: the invitation and one reminder after 3 days, unless B2B_INVITE_SMS=off). Safe to overlap and to rerun: an invite is enrolled once and each message is claimed before it is sent.',
   onJob: () => opsService.runJob('b2b-beneficiary-invites'),
 };
