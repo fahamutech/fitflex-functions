@@ -632,6 +632,38 @@ export function createPromotionService({
     return { campaign: c, promotions: items };
   }
 
+
+  // ── Lookups for the admin wizard ──────────────────────────────────────────
+
+  /** Entities of a type matching a name, with whether each can be promoted right now. */
+  async function searchEntities({ entityType, q, limit } = {}) {
+    if (!ENTITY_TYPES[entityType]) return fail('invalid_entity_type', 400);
+    const needle = text(q, 100)?.toLowerCase();
+    const max = Math.min(Math.max(parseInt(limit, 10) || 15, 1), 50);
+    const out = [];
+    for (const e of await entities.listAll(entityType)) {
+      const summary = entities.summary(entityType, e);
+      if (needle && !`${summary.name} ${summary.subtitle || ''}`.toLowerCase().includes(needle)) continue;
+      const mod = await moderation.statusOf(entityType, e.id);
+      const el = await entities.eligibility(entityType, e, mod);
+      out.push({ entityType, ...summary, moderationStatus: mod, promotable: el.ok, reasons: el.reasons, placements: placementsFor(entityType) });
+    }
+    // Promotable first, then by name; the page is cut after sorting so the best matches are never lost.
+    out.sort((a, b) => Number(b.promotable) - Number(a.promotable) || a.name.localeCompare(b.name));
+    return { items: out.slice(0, max), total: out.length };
+  }
+
+  /** Partner organisations a commercial promotion can be attached to. */
+  async function searchPartners({ q, limit } = {}) {
+    if (!organizations) return { items: [], total: 0 };
+    const needle = text(q, 100)?.toLowerCase();
+    const max = Math.min(Math.max(parseInt(limit, 10) || 15, 1), 50);
+    const rows = (await organizations.allAsync())
+      .filter(o => !needle || `${o.legalName || ''} ${o.tradingName || ''}`.toLowerCase().includes(needle))
+      .sort((a, b) => String(a.legalName).localeCompare(String(b.legalName)));
+    return { items: rows.slice(0, max).map(o => ({ id: o.id, name: o.tradingName || o.legalName, legalName: o.legalName, type: o.organizationType, status: o.status })), total: rows.length };
+  }
+
   // ── Geography ──────────────────────────────────────────────────────────────
 
   async function listAreas() {
@@ -661,6 +693,6 @@ export function createPromotionService({
     reference, list, get, create, update, submit, approve, reject, reopen, schedule, activate, pause, resume, cancel, complete,
     preview, runLifecycle, holdForEntity, listLive, overview, limits, setLimit,
     createCampaign, updateCampaign, setCampaignStatus, listCampaigns, getCampaign, listAreas, createArea,
-    placementsFor,
+    placementsFor, searchEntities, searchPartners,
   };
 }

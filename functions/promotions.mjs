@@ -138,6 +138,22 @@ export const startCampaign = campaignStatus('start', 'active', 'Admin (campaigns
 export const endCampaign = campaignStatus('end', 'ended', 'Admin (campaigns): end an active campaign.');
 export const cancelCampaign = campaignStatus('cancel', 'cancelled', 'Admin (campaigns): cancel a campaign. A reason is required. Its promotions are not changed; they are listed in the answer so each can be dealt with.');
 
+// ── Lookups for the create wizard ───────────────────────────────────────────
+
+export const searchPromotionEntities = {
+  created, method: 'get', path: '/admin/promotion-entities',
+  description: 'Admin (promotions): find entities to promote (?entityType=gym|trainer|vendor|product, ?q= name). Each says whether it can be promoted right now and why not, and which placements suit it.',
+  onGuard: canManage,
+  onRequest: async (req, res) => send(res, await promotionService.searchEntities({ entityType: req.query?.entityType, q: req.query?.q, limit: req.query?.limit })),
+};
+
+export const searchPromotionPartners = {
+  created, method: 'get', path: '/admin/promotion-partners',
+  description: 'Admin (promotions): find partner organisations (?q= name) to attach to a commercial promotion.',
+  onGuard: canManage,
+  onRequest: async (req, res) => res.json(await promotionService.searchPartners({ q: req.query?.q, limit: req.query?.limit })),
+};
+
 // ── Geography ───────────────────────────────────────────────────────────────
 
 export const listGeoAreas = {
