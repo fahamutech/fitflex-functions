@@ -15,7 +15,7 @@ import { createDeliveryService } from '../src/services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../src/services/communication-preference-service.mjs';
 import { createSmsService, smsText, SMS_MAX_LENGTH, REMINDER_MAX_ATTEMPTS } from '../src/services/sms-service.mjs';
 import { createSmsProvider, createFakeSmsProvider, createBeemSmsProvider } from '../src/integrations/sms/provider.mjs';
-import { beemSend, BEEM_SEND_URL } from '../src/integrations/sms/beem.mjs';
+import { beemSend, beemSettings, beemCredentialShape, BEEM_SEND_URL } from '../src/integrations/sms/beem.mjs';
 import { channelAllowed, CHANNELS } from '../src/shared/communications.mjs';
 
 const uid = (p) => `${p}_${randomUUID().slice(0, 8)}`;
@@ -102,6 +102,29 @@ test('Beem: one request per send, Basic auth, numbers without the "+", and its a
   assert.equal((await beemSend({ ...creds, fetchImpl: stubFetch(503, {}) })).retryable, true);
   const down = await beemSend({ ...creds, fetchImpl: async () => { throw new Error('ECONNRESET'); } });
   assert.deepEqual({ error: down.error, retryable: down.retryable }, { error: 'provider_unreachable', retryable: true });
+});
+
+test('a key or secret pasted with spaces, a line break or quotes is cleaned before use, and its shape can be checked', () => {
+  const key = '0123456789abcdef';
+  const secret = `${'Ab3+/'.repeat(17)}Yg==`;
+  for (const env of [
+    { BEEM_API_KEY: key, BEEM_SECRET_KEY: secret },
+    { BEEM_API_KEY: ` ${key}\n`, BEEM_SECRET_KEY: `"${secret}"` },
+    { BEEM_API_KEY: `'${key}'`, BEEM_SECRET_KEY: `\t${secret} \r\n` },
+  ]) {
+    const s = beemSettings(env);
+    assert.deepEqual([s.apiKey, s.secretKey], [key, secret]);
+  }
+  assert.equal(beemSettings({ BEEM_API_KEY: '""', BEEM_SECRET_KEY: secret }), null);
+
+  const good = beemCredentialShape({ BEEM_API_KEY: key, BEEM_SECRET_KEY: secret });
+  assert.deepEqual(good.apiKey, { set: true, length: 16, hadPadding: false, spaceInside: false, looksRight: true });
+  assert.deepEqual(good.secretKey, { set: true, length: 89, hadPadding: false, spaceInside: false, looksRight: true });
+  const odd = beemCredentialShape({ BEEM_API_KEY: `"${key}" `, BEEM_SECRET_KEY: `${secret}${secret}` });
+  assert.deepEqual([odd.apiKey.hadPadding, odd.apiKey.looksRight, odd.secretKey.looksRight], [true, true, false], 'a secret pasted twice does not look right');
+  assert.equal(beemCredentialShape({ BEEM_API_KEY: 'xxx' }).apiKey.looksRight, false);
+  assert.deepEqual(beemCredentialShape({}).secretKey, { set: false, length: 0, hadPadding: false, spaceInside: false, looksRight: false });
+  assert.ok(!JSON.stringify(good).includes(key) && !JSON.stringify(good).includes(secret), 'never the values');
 });
 
 test('the provider comes from SMS_PROVIDER; anything unknown, incomplete or dev-only in production stays off', () => {

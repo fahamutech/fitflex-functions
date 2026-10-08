@@ -8,12 +8,40 @@ export const BEEM_SEND_URL = 'https://apisms.beem.africa/v1/send';
 /** Beem takes up to this many recipients in one request. */
 export const BEEM_MAX_RECIPIENTS = 100;
 
+// A value pasted into a server's settings often arrives with spaces, a line
+// break or quotes around it; Beem then answers 120 "Invalid Authentication
+// Parameters" for a pair that is in fact right.
+const clean = (value) => String(value ?? '').trim().replace(/^(["'])(.*)\1$/s, '$2').trim();
+
 /** Beem's settings from the environment, or null when a credential is missing. */
 export function beemSettings(env = process.env) {
-  const apiKey = env.BEEM_API_KEY;
-  const secretKey = env.BEEM_SECRET_KEY;
+  const apiKey = clean(env.BEEM_API_KEY);
+  const secretKey = clean(env.BEEM_SECRET_KEY);
   if (!apiKey || !secretKey) return null;
   return { apiKey, secretKey, apiUrl: env.BEEM_SMS_API_URL || BEEM_SEND_URL };
+}
+
+/**
+ * What the stored credentials look like, never what they are: for telling a
+ * mis-pasted value from a wrong one. Beem's API key is 16 hex characters and
+ * its secret key a long base64 string.
+ */
+export function beemCredentialShape(env = process.env) {
+  const shape = (raw, looksRight) => {
+    const value = clean(raw);
+    return {
+      set: Boolean(value),
+      length: value.length,
+      // Spaces, line breaks or quotes around the stored value (removed before use).
+      hadPadding: String(raw ?? '') !== value,
+      spaceInside: /\s/.test(value),
+      looksRight: looksRight.test(value),
+    };
+  };
+  return {
+    apiKey: shape(env.BEEM_API_KEY, /^[0-9a-f]{16}$/i),
+    secretKey: shape(env.BEEM_SECRET_KEY, /^[A-Za-z0-9+/]{40,}={0,2}$/),
+  };
 }
 
 /**
