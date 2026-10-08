@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
+import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set(['pending', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup', 'delivered', 'cancelled', 'confirmed', 'fulfilled']);
@@ -26,6 +27,8 @@ const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(p
 const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
 
 export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null,
+  // Moderation: pending, rejected, suspended and hidden products and vendors are not shown to buyers.
+  publicGate = OPEN_PUBLIC_GATE,
   // A paid order was cancelled and the money is owed back: ({ order, reasonCode, actorId, role }) → refund.
   onRefundDue = async () => null }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
@@ -61,6 +64,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
 
   async function getVendorStore(vendorId) {
     if (!(await partnerGate.isOperational(vendorId))) return null;
+    if (await publicGate.isBlocked('vendor', vendorId)) return null;
     const profile = publicProfile(await getVendorProfile(vendorId));
     if (!profile) return null;
     const storeProducts = await listProducts({ vendorId });
@@ -79,7 +83,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     // Buyers only see products from vendors who may sell (new vendors: once verified).
     if (!includeArchived) {
       const ok = await partnerGate.operationalUserIds(rows.map(product => product.vendorId));
-      rows = rows.filter(product => ok.has(product.vendorId));
+      const [blockedProducts, blockedVendors] = await Promise.all([publicGate.blocked('product'), publicGate.blocked('vendor')]);
+      rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId));
     }
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());

@@ -2,7 +2,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, bearerFrom, verify } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
-import { gymService, partnerGate } from '../src/bootstrap/services.mjs';
+import { gymService, partnerGate, moderationGate } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -27,7 +27,8 @@ export const listGyms = {
   // verified: the owner's KYC outcome (D4); profileComplete: the old automatic check.
   // Verified gyms first, each group in its usual order.
   onRequest: async (req, res) => {
-    const shown = await partnerGate.badgeGyms(await gymService.listActiveAsync());
+    const blocked = await moderationGate.blocked('gym');             // pending, rejected, suspended or hidden in moderation
+    const shown = await partnerGate.badgeGyms((await gymService.listActiveAsync()).filter(g => !blocked.has(g.id)));
     res.json([...shown.filter(g => g.verified === true), ...shown.filter(g => g.verified !== true)].map(g => forViewer(req, g)));
   }
 };

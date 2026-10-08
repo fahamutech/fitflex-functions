@@ -303,8 +303,10 @@ export function capacityCheck(promotion, others, configs, areasById = new Map())
 // ── Ranking: a bounded, explainable boost (used by discovery in a later phase) ──
 
 /** Per-placement caps: a configured row, else the default share of the score range. */
-export function boostCap(configs, placement) {
-  const row = (configs || []).find(c => c.placement === placement && c.maxBoostFraction != null);
+export function boostCap(configs, placement, type = null) {
+  const rows = (configs || []).filter(c => c.placement === placement && c.maxBoostFraction != null);
+  // A setting for this promotion type wins; else any setting for the placement; else the platform default.
+  const row = (type && rows.find(c => c.promotionType === type)) || rows[0];
   return row ? Number(row.maxBoostFraction) : DEFAULT_MAX_BOOST_FRACTION;
 }
 
@@ -323,6 +325,8 @@ export function boostCap(configs, placement) {
  */
 export function applyBoosts(items, promotions, { scoreRange, cap = DEFAULT_MAX_BOOST_FRACTION, slice = 0 } = {}) {
   const spread = Math.max((scoreRange?.max ?? 0) - (scoreRange?.min ?? 0), 0) || 1;
+  // `cap` may be a number, or a function of the promotion (a cap per promotion type).
+  const capFor = typeof cap === 'function' ? cap : () => cap;
   const byKey = new Map();
   for (const p of promotions || []) {
     const cur = byKey.get(p.entityKey);
@@ -336,7 +340,8 @@ export function applyBoosts(items, promotions, { scoreRange, cap = DEFAULT_MAX_B
     if (promo) {
       // Priority 1 gets the full cap, MAX_PRIORITY almost none; boostWeight scales it down further.
       const priorityShare = (maxPriority - promo.priority + 1) / maxPriority;
-      boost = Math.min(cap, cap * priorityShare * (promo.boostWeight ?? 1)) * spread;
+      const c = capFor(promo);
+      boost = Math.min(c, c * priorityShare * (promo.boostWeight ?? 1)) * spread;
       reasons.push(`promotion:${promo.id}`, `boost:${boost.toFixed(4)}`);
     }
     return { ...item, boost, promotion: promo || null, finalScore: item.baseScore + boost, reasons };
