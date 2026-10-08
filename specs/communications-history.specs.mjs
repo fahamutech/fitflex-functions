@@ -106,7 +106,7 @@ after(async () => {
 // ── rules ─────────────────────────────────────────────────────────────────
 
 test('filters are checked, and outcomes summarise every channel of a message', () => {
-  assert.equal(parseFilters({ channel: 'sms' }).detail, 'channel');
+  assert.equal(parseFilters({ channel: 'fax' }).detail, 'channel');
   assert.equal(parseFilters({ status: 'lost' }).detail, 'status');
   assert.equal(parseFilters({ messageType: 'spam' }).detail, 'messageType');
   assert.equal(parseFilters({ from: 'yesterday' }).detail, 'from');
