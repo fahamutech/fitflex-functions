@@ -210,6 +210,22 @@ test('the persona used last opens; a suspended or closed person cannot sign in',
   });
 });
 
+test('PIN sign-in: a pending role used last is skipped for a role that is ready', async () => {
+  await on(async () => {
+    const p = await personWithPin();
+    const vendor = await makeUser({ userType: 'vendor', email: p.email, approvalStatus: 'pending_approval' });
+    await db.transaction(async trx => {
+      await trx.raw("SET LOCAL fitflex.identity_relink = 'on'");
+      await trx('User').where({ id: vendor.id }).update({ personId: p.user.personId });
+    });
+    await db('Person').where({ id: p.user.personId }).update({ lastPersonaId: vendor.id });
+    const out = await post(pinLogin, { phone: p.local, pin: p.pin });
+    assert.equal(out.body.user.id, p.user.id, 'the member opens while the vendor waits');
+    assert.equal(out.body.pendingApproval, false);
+    assert.ok(out.body.personas.some(x => x.id === vendor.id));
+  });
+});
+
 test('sessions issued before sessionsValidAfter are refused; single-step tokens are never sessions', async () => {
   await on(async () => {
     const p = await personWithPin();
