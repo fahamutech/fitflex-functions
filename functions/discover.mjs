@@ -5,6 +5,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, bearerFrom, verify } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
+import { isTokenSession } from '../src/auth/promotion-token.mjs';
 import { discoveryService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -21,6 +22,8 @@ async function run(entityType, req, res, shape) {
     lat: number(req.query?.lat), lng: number(req.query?.lng), areaId: req.query?.areaId,
     sort: req.query?.sort || 'relevance', placement: req.query?.placement, limit: req.query?.limit, cursor: req.query?.cursor,
     rotation: Number.isInteger(number(req.query?.rotation)) ? number(req.query.rotation) : undefined,
+    // The app's session id: with it, each promoted card comes with a token proving it was served to that session.
+    session: isTokenSession(req.query?.session) ? req.query.session : undefined,
     explain: claims?.userType === 'admin' && req.query?.explain === 'true',
     shape,
   });
@@ -28,7 +31,7 @@ async function run(entityType, req, res, shape) {
   return res.json(out);
 }
 
-const QUERY_DOC = 'Query: ?q= search, ?lat=&lng= or ?areaId= for nearness and local promotions, ?sort=relevance|distance|rating|popularity|name (default relevance: promotions apply; any other sort turns them off), ?limit=&cursor= paging (send back the `rotation` of the first page with the cursor so equal results keep their order), and the filters. ?placement= overrides where promotions are read from.';
+const QUERY_DOC = 'Query: ?q= search, ?lat=&lng= or ?areaId= for nearness and local promotions, ?sort=relevance|distance|rating|popularity|name (default relevance: promotions apply; any other sort turns them off), ?limit=&cursor= paging (send back the `rotation` of the first page with the cursor so equal results keep their order), ?session= (8-64 chars of A-Z a-z 0-9 _ -: each promoted card then carries promotion.token, which the app sends back with its events), and the filters. ?placement= overrides where promotions are read from.';
 
 export const discoverGyms = {
   created, method: 'get', path: '/discover/gyms',

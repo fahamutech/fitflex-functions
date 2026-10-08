@@ -61,7 +61,7 @@ async function livePromotion(entityType, entityId, over = {}) {
 const rows = promotionId => db('PromotionEvent').where({ promotionId }).orderBy('at');
 /** Put an event straight into the table, at a chosen time. */
 async function seed(promotionId, entityType, entityId, event, atMs, over = {}) {
-  await db('PromotionEvent').insert({ id: randomUUID(), at: new Date(atMs), event, entityType, entityId, promotionId, placement: 'gym_discovery', sessionId: session(), source: 'mobile', ...over });
+  await db('PromotionEvent').insert({ id: randomUUID(), at: new Date(atMs), event, entityType, entityId, promotionId, placement: 'gym_discovery', sessionId: session(), source: 'mobile', verified: true, ...over });
 }
 
 // These specs run many live promotions side by side; the placement limits (5 featured, 10 promoted) are
