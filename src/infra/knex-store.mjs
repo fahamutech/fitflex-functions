@@ -81,6 +81,13 @@ const TABLE_MAP = {
   b2b_beneficiaries:      { table: 'B2BBeneficiary' },
   b2b_programs:           { table: 'B2BWellnessProgram' },
   b2b_benefits:           { table: 'B2BBenefit' },
+  moderation_states:      { table: 'ModerationState' },
+  moderation_events:      { table: 'ModerationEvent' },
+  geo_areas:              { table: 'GeoArea' },
+  promotion_campaigns:    { table: 'PromotionCampaign' },
+  promotions:             { table: 'Promotion' },
+  promotion_placements:   { table: 'PromotionPlacement' },
+  placement_configs:      { table: 'PlacementConfig' },
   communication_campaigns:   { table: 'CommunicationCampaign' },
   communication_messages:    { table: 'CommunicationMessage' },
   communication_templates:   { table: 'CommunicationTemplate' },
@@ -587,14 +594,14 @@ export function collection(name) {
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
   users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','createdAt','updatedAt']),
-  gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','paymentBank','paymentNumber','paymentNotes','tinNumber','rating','reviewCount','createdAt','updatedAt']),
+  gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','regionId','cityId','paymentBank','paymentNumber','paymentNotes','tinNumber','rating','reviewCount','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed',
                               'status','statusReason','statusChangedBy','statusChangedAt','voidedAt','voidedBy','voidReason','subscriptionId','businessDate','source']),
   payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','orderId','currency','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
-  trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','availability','socialLinks','createdAt','updatedAt']),
+  trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','regionId','cityId','availability','socialLinks','createdAt','updatedAt']),
   trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','discountFundedBy','paymentRequestId','status','cancelledAt','cancelledBy','createdAt','updatedAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','updatedAt']),
@@ -639,6 +646,13 @@ const ALLOWED_FIELDS = {
   b2b_organization_users: new Set(['id','organizationId','userId','role','permissions','status','removedAt','createdBy','createdAt','updatedAt']),
   b2b_beneficiaries:      new Set(['id','organizationId','userId','externalReference','beneficiaryType','groupName','status','enrolledAt','statusChangedAt','createdBy','createdAt','updatedAt']),
   b2b_programs:           new Set(['id','organizationId','name','description','programType','status','statusReason','statusChangedAt','startDate','endDate','eligibility','budgetTzs','discountBps','activatedAt','activatedBy','createdBy','createdAt','updatedAt']),
+  moderation_states:    new Set(['id','entityType','entityId','status','reason','decidedBy','decidedAt','createdAt','updatedAt']),
+  moderation_events:    new Set(['id','entityType','entityId','action','fromStatus','toStatus','reason','actor','at']),
+  geo_areas:            new Set(['id','level','name','parentId','lat','lng','radiusKm','active','createdAt','updatedAt']),
+  promotion_campaigns:  new Set(['id','name','description','status','statusReason','startsAt','endsAt','geoScope','createdBy','createdAt','updatedAt']),
+  promotions:           new Set(['id','entityType','entityId','type','status','statusReason','statusChangedAt','campaignId','partnerRef','startsAt','endsAt','priority','boostWeight','geoScope','audience','categories','isCommercial','relationshipType','commercialRef','disclosureLabel','notes','createdBy','submittedBy','submittedAt','approvedBy','approvedAt','activatedAt','pausedAt','createdAt','updatedAt']),
+  promotion_placements: new Set(['id','promotionId','placement']),
+  placement_configs:    new Set(['id','placement','promotionType','maxSlots','maxBoostFraction','rotationMode','rotationWindowMinutes','updatedBy','updatedAt']),
   b2b_benefits:           new Set(['id','programId','name','description','benefitType','status','fundingType','sponsorAmountTzs','sponsorShareBps','sponsorCapTzs','beneficiaryAmountTzs','usageLimit','usagePeriod','periodSponsorCapTzs','eligibility','providerRules','startDate','endDate','terms','passTier','createdBy','createdAt','updatedAt']),
   communication_campaigns:   new Set(['id','senderType','gymId','name','purpose','category','status','audience','content','channels','templateId','scheduledAt','sendRequestId','counts','createdBy','sentAt','cancelledAt','createdAt','updatedAt']),
   communication_messages:    new Set(['id','campaignId','automationRunId','senderType','gymId','memberId','channel','category','messageType','title','body','locale','deepLink','notificationId','status','skipReason','providerMessageId','payload','attempts','nextAttemptAt','sentAt','deliveredAt','openedAt','clickedAt','failedAt','failureReason','failurePermanent','createdAt','updatedAt']),
@@ -712,6 +726,8 @@ const JSON_FIELDS = {
   gym_settlement_lines: ['rateCardSnapshot', 'calculationBasis'],
   b2b_organizations: ['address'],
   b2b_programs: ['eligibility'],
+  promotion_campaigns: ['geoScope'],
+  promotions: ['geoScope', 'audience', 'categories'],
   b2b_benefits: ['eligibility', 'providerRules'],
 };
 
@@ -746,7 +762,7 @@ function prepareForKnex(name, data, isUpdate = false) {
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
     'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'statusChangedAt', 'voidedAt',
     'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt', 'enrolledAt', 'removedAt',
-    'heldAt', 'rejectedAt', 'payableAt'];
+    'heldAt', 'rejectedAt', 'payableAt', 'startsAt', 'endsAt', 'pausedAt', 'activatedAt', 'submittedAt'];
   for (const f of DATE_FIELDS) {
     if (CALENDAR_DATE_COLLECTIONS.has(name) && CALENDAR_DATE_FIELDS.has(f)) continue;
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
