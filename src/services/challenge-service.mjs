@@ -78,9 +78,15 @@ export function rewardItemsOf(c) {
   }));
 }
 
-/** upcoming | active | ended | cancelled, by the member's local date. */
+/**
+ * draft | upcoming | active | ended | cancelled, by the member's local date.
+ * A paused challenge keeps its dates, so it is upcoming, active or ended
+ * like any other; only joining is switched off.
+ */
 export function challengePhase(c, now) {
   if (c.status === 'cancelled') return 'cancelled';
+  // A draft is only ever seen by whoever is preparing it.
+  if (c.status === 'draft') return 'draft';
   // An archived challenge is finished: shown as ended to those who took part.
   if (c.status === 'archived' || c.status === 'closed') return 'ended';
   const today = localDay(now);
@@ -106,7 +112,13 @@ export function createChallengeService({
 
   /** Can this member see (and join) the challenge? */
   async function visibleTo(c, memberId, ctx = {}) {
-    if (c.status === 'cancelled' || c.status === 'archived') return false;
+    // Drafts aren't published yet; a paused challenge takes no new people.
+    if (['cancelled', 'archived', 'draft', 'paused'].includes(c.status)) return false;
+    return couldJoin(c, memberId, ctx);
+  }
+
+  /** In the audience and eligible, whatever state the challenge is in. */
+  async function couldJoin(c, memberId, ctx = {}) {
     if (!(await inAudience(c, memberId, ctx))) return false;
     return eligible(c, memberId, ctx);
   }
@@ -196,6 +208,7 @@ export function createChallengeService({
     for (const c of all) {
       const phase = challengePhase(c, now());
       const joined = joinedIds.has(c.id);
+      if (phase === 'draft') continue;
       if ((phase === 'cancelled' || c.status === 'archived') && !joined) continue;
       if (!joined && (phase === 'ended' || !(await visibleTo(c, memberId, ctx)))) continue;
       const rows = await participants.filterByColumnAsync('challengeId', c.id);
@@ -220,7 +233,7 @@ export function createChallengeService({
 
   async function memberChallenge(memberId, id) {
     const c = await challenges.findByIdAsync(id);
-    if (!c) return { error: 'not_found', status: 404 };
+    if (!c || c.status === 'draft') return { error: 'not_found', status: 404 };
     const rows = await participants.filterByColumnAsync('challengeId', id);
     const joined = rows.some(p => p.memberId === memberId && p.status === 'joined');
     if (!joined && !(await visibleTo(c, memberId))) return { error: 'not_found', status: 404 };
@@ -264,6 +277,8 @@ export function createChallengeService({
 
   async function join(memberId, id, body = {}) {
     const c = await challenges.findByIdAsync(id);
+    // Someone who had it on screen when it was paused is told why they can't join.
+    if (c?.status === 'paused' && (await couldJoin(c, memberId))) return { error: 'challenge_paused', status: 409 };
     if (!c || !(await visibleTo(c, memberId))) return { error: 'not_found', status: 404 };
     const phase = challengePhase(c, now());
     if (phase === 'ended' || phase === 'cancelled') return { error: 'challenge_closed', status: 409 };
@@ -548,7 +563,8 @@ export function createChallengeService({
       creatorType,
       creatorId: creatorId ?? null,
       createdBy: createdBy ?? null,
-      status: 'active',
+      // A draft is saved for later: nobody sees it until it is published.
+      status: body.draft === true ? 'draft' : 'active',
       createdAt: stamp,
       updatedAt: stamp,
     };
@@ -593,8 +609,9 @@ export function createChallengeService({
   async function update(creator, id, body = {}) {
     const c = await owned(creator, id);
     if (!c) return { error: 'not_found', status: 404 };
-    if (c.status !== 'active') return { error: 'not_editable', status: 409 };
-    const started = localDay(now()) >= c.startDate;
+    if (!['active', 'draft', 'paused'].includes(c.status)) return { error: 'not_editable', status: 409 };
+    // A draft hasn't gone out to anyone, so nothing about it is locked yet.
+    const started = c.status !== 'draft' && localDay(now()) >= c.startDate;
     const joined = (await participants.filterByColumnAsync('challengeId', id)).some(p => p.status === 'joined');
     if ((started || joined) && ((body.type && body.type !== c.type) || (body.mode && body.mode !== (c.mode ?? 'individual')))) {
       return { error: 'measure_locked', status: 409 };
@@ -639,7 +656,7 @@ export function createChallengeService({
   async function close(creator, id) {
     const c = await owned(creator, id);
     if (!c) return { error: 'not_found', status: 404 };
-    if (c.status !== 'active') return { error: 'not_running', status: 409 };
+    if (c.status !== 'active' && c.status !== 'paused') return { error: 'not_running', status: 409 };
     const today = localDay(now());
     if (today < c.startDate) return { error: 'not_started_cancel_instead', status: 409 };
     if (today > c.endDate) return { error: 'already_ended', status: 409 };
@@ -647,12 +664,47 @@ export function createChallengeService({
     return { challenge: { ...c, status: 'closed', endDate: today, phase: 'ended' } };
   }
 
+  async function setStatus(c, status) {
+    const updated = await challenges.updateByIdAsync(c.id, { status, updatedAt: now().toISOString() });
+    const row = updated ?? { ...c, status };
+    return { challenge: { ...withCounts(row, await participants.filterByColumnAsync('challengeId', c.id)), phase: challengePhase(row, now()), teams: await teamList(c.id) } };
+  }
+
+  /** Publish a draft: from now on its audience can see and join it. */
+  async function publish(creator, id) {
+    const c = await owned(creator, id);
+    if (!c) return { error: 'not_found', status: 404 };
+    if (c.status !== 'draft') return { error: 'not_draft', status: 409 };
+    if (c.endDate < localDay(now())) return { error: 'ends_in_past', status: 400 };
+    return setStatus(c, 'active');
+  }
+
+  /**
+   * Stop new people joining. Those already in keep the challenge and their
+   * activity keeps counting; the dates and rewards are untouched.
+   */
+  async function pause(creator, id) {
+    const c = await owned(creator, id);
+    if (!c) return { error: 'not_found', status: 404 };
+    if (c.status === 'paused') return { error: 'already_paused', status: 409 };
+    if (c.status !== 'active' || localDay(now()) > c.endDate) return { error: 'not_running', status: 409 };
+    return setStatus(c, 'paused');
+  }
+
+  /** Open a paused challenge to new people again. */
+  async function resume(creator, id) {
+    const c = await owned(creator, id);
+    if (!c) return { error: 'not_found', status: 404 };
+    if (c.status !== 'paused') return { error: 'not_paused', status: 409 };
+    return setStatus(c, 'active');
+  }
+
   /** Put a finished (ended or cancelled) challenge away. */
   async function archive(creator, id) {
     const c = await owned(creator, id);
     if (!c) return { error: 'not_found', status: 404 };
     if (c.status === 'archived') return { error: 'already_archived', status: 409 };
-    if (c.status === 'active' && localDay(now()) <= c.endDate) return { error: 'still_running', status: 409 };
+    if (['active', 'paused', 'draft'].includes(c.status) && localDay(now()) <= c.endDate) return { error: 'still_running', status: 409 };
     await challenges.updateByIdAsync(id, { status: 'archived', updatedAt: now().toISOString() });
     return { challenge: { ...c, status: 'archived', phase: 'ended' } };
   }
@@ -847,7 +899,7 @@ export function createChallengeService({
   return {
     memberChallenges, memberChallenge, join, leave, memberProgressForCreator,
     setLeaderboardOptIn, leaderboard,
-    create, creatorList, cancel, update, close, archive, creatorParticipants,
+    create, creatorList, cancel, update, close, archive, publish, pause, resume, creatorParticipants,
     scoreboard, progressFor,
   };
 }

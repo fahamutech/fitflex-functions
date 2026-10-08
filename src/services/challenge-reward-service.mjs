@@ -107,7 +107,7 @@ export function createChallengeRewardService({
    * settling pass (which also covers that member).
    */
   async function evaluate(c, { memberId = null } = {}) {
-    if (!c || c.status === 'cancelled' || c.rewardsSettledAt) return { earned: 0 };
+    if (!c || c.status === 'cancelled' || c.status === 'draft' || c.rewardsSettledAt) return { earned: 0 };
     const items = rewardItemsOf(c);
     const phase = challengePhase(c, now());
     if (!items.length || phase === 'upcoming') return { earned: 0 };
@@ -151,7 +151,7 @@ export function createChallengeRewardService({
   /** Challenges still earning rewards (started, not settled, not cancelled). */
   async function unsettled(pred = () => true) {
     const today = localDay(now());
-    return (await challenges.allAsync()).filter(c => c.status !== 'cancelled' && !c.rewardsSettledAt
+    return (await challenges.allAsync()).filter(c => c.status !== 'cancelled' && c.status !== 'draft' && !c.rewardsSettledAt
       && c.startDate <= today && rewardItemsOf(c).length && pred(c));
   }
 
