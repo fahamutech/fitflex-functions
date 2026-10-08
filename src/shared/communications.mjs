@@ -3,7 +3,7 @@
 // segment/dispatch code build on these so every path applies the same rules.
 
 export const SENDER_TYPES = ['gym', 'platform'];
-export const CHANNELS = ['in_app', 'push', 'whatsapp'];
+export const CHANNELS = ['in_app', 'push', 'whatsapp', 'sms'];
 export const CATEGORIES = ['transactional', 'marketing'];
 
 // What a campaign is for. Promotions and engagement nudges are marketing;
@@ -65,14 +65,17 @@ export function validSender(senderType, gymId) {
   return false;
 }
 
-// Defaults for a member with no preference row. WhatsApp marketing stays off
-// until the member opts in; everything else is on.
+// Defaults for a member with no preference row. WhatsApp and SMS marketing
+// stay off until the member opts in; everything else is on.
 export const DEFAULT_PREFERENCES = Object.freeze({
   inAppMarketing: true,
   pushMarketing: true,
   whatsappTransactional: true,
   whatsappMarketing: false,
   whatsappOptedOutAt: null,
+  smsTransactional: true,
+  smsMarketing: false,
+  smsOptedOutAt: null,
   locale: null,
 });
 
@@ -88,7 +91,8 @@ export function effectivePreferences(row) {
 /**
  * Whether a member's preferences let a message go out on a channel.
  * Transactional in-app and push can't be switched off. Opting out of
- * WhatsApp (STOP) blocks every WhatsApp message.
+ * WhatsApp (STOP) blocks every WhatsApp message; SMS follows the same rules
+ * with its own switches.
  * @returns {{ allowed: boolean, reason?: string }}
  */
 export function channelAllowed(prefsRow, channel, category) {
@@ -102,11 +106,12 @@ export function channelAllowed(prefsRow, channel, category) {
   if (channel === 'push') {
     return !marketing || p.pushMarketing ? { allowed: true } : { allowed: false, reason: 'push_marketing_off' };
   }
-  if (p.whatsappOptedOutAt) return { allowed: false, reason: 'whatsapp_opted_out' };
+  // WhatsApp and SMS: the same three switches each, under their own names.
+  if (p[`${channel}OptedOutAt`]) return { allowed: false, reason: `${channel}_opted_out` };
   if (marketing) {
-    return p.whatsappMarketing ? { allowed: true } : { allowed: false, reason: 'whatsapp_marketing_not_opted_in' };
+    return p[`${channel}Marketing`] ? { allowed: true } : { allowed: false, reason: `${channel}_marketing_not_opted_in` };
   }
-  return p.whatsappTransactional ? { allowed: true } : { allowed: false, reason: 'whatsapp_transactional_off' };
+  return p[`${channel}Transactional`] ? { allowed: true } : { allowed: false, reason: `${channel}_transactional_off` };
 }
 
 // ── Message content ────────────────────────────────────────────────────────

@@ -92,7 +92,7 @@ test('one campaign messages a member at most once per channel', async () => {
   await communicationMessages.insertAsync({ id: uid('msg'), ...msg, channel: 'in_app' });
   await communicationMessages.insertAsync({ id: uid('msg'), ...msg, channel: 'push' });
   await rejects(communicationMessages.insertAsync({ id: uid('msg'), ...msg, channel: 'in_app' }), '23505');
-  await rejects(communicationMessages.insertAsync({ id: uid('msg'), ...msg, channel: 'sms' }), '23514');
+  await rejects(communicationMessages.insertAsync({ id: uid('msg'), ...msg, channel: 'fax' }), '23514');
 
   const rows = await communicationMessages.filterByColumnAsync('campaignId', campaignId);
   assert.equal(rows.length, 2);

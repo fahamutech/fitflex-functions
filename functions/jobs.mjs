@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, smsService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -27,6 +27,16 @@ export const communicationAutomations = {
   onJob: async () => {
     const r = await automationService.runDue();
     if (r.fired || r.paused || r.errors) console.log(`[automations] gyms=${r.gyms} fired=${r.fired} already=${r.already} deferred=${r.deferred} paused=${r.paused} errors=${r.errors}`);
+  }
+};
+
+export const smsReminders = {
+  created, rule: '20 * * * *', // hourly
+  description: 'SMS reminders: a confirmed trainer session starting within 3 hours, and a pass ending in 3 days (a gym membership whose gym sends its own expiry reminders is left to the gym). Only to members who have not switched SMS service messages off. Nothing is sent unless SMS_PROVIDER is set. Safe to rerun: each reminder is sent once, and one that failed is tried again by the next runs.',
+  onJob: async () => {
+    const r = await smsService.sendDueReminders();
+    const n = (x) => x.sent + x.failed;
+    if (n(r.bookings) || n(r.renewals)) console.log(`[sms] bookings sent=${r.bookings.sent} failed=${r.bookings.failed} · renewals sent=${r.renewals.sent} failed=${r.renewals.failed}`);
   }
 };
 

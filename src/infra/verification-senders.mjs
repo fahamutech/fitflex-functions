@@ -5,6 +5,7 @@
 //   VERIFICATION_SMS_PROVIDER    'beem' | 'fake' (never in production)
 //   VERIFICATION_EMAIL_PROVIDER  'mailgun' | 'fake' (never in production)
 // Credentials come from the environment only.
+import { beemSend, beemSettings } from '../integrations/sms/beem.mjs';
 
 const IS_PROD = () => process.env.NODE_ENV === 'production';
 
@@ -18,39 +19,22 @@ const fake = channel => ({
 const notConfigured = { configured: false, send: async () => ({ ok: false, error: 'not_configured' }) };
 
 /**
- * Beem Africa SMS (decision of 2 Oct 2026). BEEM_API_KEY / BEEM_SECRET_KEY,
- * and the sender name registered with Beem in VERIFICATION_SMS_SENDER_ID.
+ * Beem Africa SMS (decision of 2 Oct 2026), through the shared Beem client
+ * (src/integrations/sms/beem.mjs). BEEM_API_KEY / BEEM_SECRET_KEY, and the
+ * sender name registered with Beem in VERIFICATION_SMS_SENDER_ID (or
+ * BEEM_SENDER_ID, the one reminders and campaigns use).
  */
 function beemSms() {
-  const apiKey = process.env.BEEM_API_KEY;
-  const secretKey = process.env.BEEM_SECRET_KEY;
-  const sender = process.env.VERIFICATION_SMS_SENDER_ID;
-  if (!apiKey || !secretKey || !sender) return notConfigured;
-  const apiUrl = process.env.BEEM_SMS_API_URL || 'https://apisms.beem.africa/v1/send';
+  const settings = beemSettings();
+  const sender = process.env.VERIFICATION_SMS_SENDER_ID || process.env.BEEM_SENDER_ID;
+  if (!settings || !sender) return notConfigured;
   return {
     configured: true,
     send: async (to, { text }) => {
-      try {
-        const response = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Basic ${Buffer.from(`${apiKey}:${secretKey}`).toString('base64')}`,
-          },
-          body: JSON.stringify({
-            source_addr: sender, encoding: 0, schedule_time: '', message: text,
-            // Beem takes the number without the leading "+".
-            recipients: [{ recipient_id: 1, dest_addr: String(to).replace(/^\+/, '') }],
-          }),
-        });
-        const body = await response.json().catch(() => null);
-        const accepted = response.ok && body?.successful === true && Number(body?.valid ?? 1) > 0;
-        if (!accepted) console.warn('[verification] SMS not accepted:', response.status, body?.code ?? '', body?.message ?? '');
-        return accepted ? { ok: true } : { ok: false, error: 'provider_rejected' };
-      } catch (err) {
-        console.warn('[verification] SMS send failed:', err?.message);
-        return { ok: false, error: 'provider_unreachable' };
-      }
+      const r = await beemSend({ ...settings, sender, text, to: [to] });
+      if (r.ok) return { ok: true };
+      console.warn('[verification] SMS not sent:', r.error, r.code ?? '', r.message ?? '');
+      return { ok: false, error: r.error };
     },
   };
 }

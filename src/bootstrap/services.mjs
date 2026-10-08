@@ -30,7 +30,9 @@ import { createOrgMembershipService } from '../services/org-membership-service.m
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
 import { identityFlag } from '../shared/feature-flags.mjs';
-import { smsSender, emailSender } from '../infra/verification-senders.mjs';
+import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
+import { createSmsProvider } from '../integrations/sms/provider.mjs';
+import { createSmsService } from '../services/sms-service.mjs';
 import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
 import { registerOrgMembershipLookup } from '../auth/org-authz.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
@@ -526,6 +528,18 @@ export const accountRecoveryService = createAccountRecoveryService({
   senders: { sms: smsSender, email: emailSender }, signPurpose, verifyPurpose, partnerGate, auditLog,
   linkingEnabled: () => identityFlag('V2_LINKING'),
 });
+// SMS for communications and reminders: the provider named by SMS_PROVIDER
+// (credentials from the environment only), "not configured" by default.
+export const smsProvider = createSmsProvider();
+export const smsService = createSmsService({
+  db, provider: smsProvider, auditLog,
+  // automationService is defined further down; this only runs later.
+  gymsWithReminders: () => automationService.gymsWithReminders(),
+});
+// Verification codes keep their own sender (VERIFICATION_SMS_PROVIDER); each
+// send is also written, redacted, to the SMS log. Hoisted: the identity
+// services above take it as `senders.sms`.
+function smsSender() { return smsService.verificationSender(plainSmsSender()); }
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.
 // Available when a provider is configured and the admin kill switch is on.
@@ -538,6 +552,7 @@ export const segmentService = createSegmentService({
   db, communicationPreferences, deviceTokens,
   pushAvailable: () => process.env.PUSH_NOTIFICATIONS === 'on',
   whatsappAvailable: () => whatsappChannelService.available(),
+  smsAvailable: () => smsService.available(),
 });
 const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
 // FitFlex system templates and each gym's own.
@@ -569,14 +584,15 @@ export const campaignService = createCampaignService({
   marketingWeeklyCap: positiveInt(process.env.COMMS_MARKETING_WEEKLY_CAP, 2),
   renewalLink: process.env.COMMS_RENEWAL_URL || null,
 });
-// Delivers queued campaign messages through the inbox, FCM and WhatsApp above.
+// Delivers queued campaign messages through the inbox, FCM, WhatsApp and SMS above.
 export const deliveryService = createDeliveryService({
-  db, notificationService, campaignService, whatsappChannel: whatsappChannelService,
+  db, notificationService, campaignService, whatsappChannel: whatsappChannelService, smsChannel: smsService,
   batchSize: positiveInt(process.env.COMMS_DISPATCH_BATCH, 200),
 });
 export const communicationPreferenceService = createCommunicationPreferenceService({
   preferences: communicationPreferences,
   whatsappAvailable: () => whatsappChannelService.available(),
+  smsAvailable: () => smsService.available(),
 });
 export const challengeRewardService = createChallengeRewardService({
   challenges, participants: challengeParticipants, awards: challengeRewards, users, corporateEmployees,

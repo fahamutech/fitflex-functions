@@ -1,12 +1,13 @@
 // A member's choices about messages from gyms and FitFlex.
 // Service messages (renewals, payments, announcements) in the app and by
-// push can't be switched off; offers can. WhatsApp offers are opt-in, and
-// turning them on records when and where the member agreed.
+// push can't be switched off; offers can. WhatsApp and SMS offers are opt-in,
+// and turning them on records when and where the member agreed.
 import { effectivePreferences, LOCALES } from '../shared/communications.mjs';
 
-const SWITCHES = ['inAppMarketing', 'pushMarketing', 'whatsappTransactional', 'whatsappMarketing'];
+const SWITCHES = ['inAppMarketing', 'pushMarketing', 'whatsappTransactional', 'whatsappMarketing', 'smsTransactional', 'smsMarketing'];
+const OPT_IN_CHANNELS = ['whatsapp', 'sms'];
 
-export function createCommunicationPreferenceService({ preferences, now = () => new Date(), whatsappAvailable = () => false }) {
+export function createCommunicationPreferenceService({ preferences, now = () => new Date(), whatsappAvailable = () => false, smsAvailable = () => false }) {
   function view(row) {
     const p = effectivePreferences(row);
     return {
@@ -15,10 +16,14 @@ export function createCommunicationPreferenceService({ preferences, now = () => 
       whatsappTransactional: p.whatsappTransactional,
       whatsappMarketing: p.whatsappMarketing,
       whatsappOptedOut: Boolean(p.whatsappOptedOutAt),
+      smsTransactional: p.smsTransactional,
+      smsMarketing: p.smsMarketing,
+      smsOptedOut: Boolean(p.smsOptedOutAt),
       locale: p.locale,
       // What can never be switched off, so the app can say so.
       alwaysOn: ['in_app_transactional', 'push_transactional'],
       whatsappAvailable: Boolean(whatsappAvailable()),
+      smsAvailable: Boolean(smsAvailable()),
     };
   }
 
@@ -39,13 +44,15 @@ export function createCommunicationPreferenceService({ preferences, now = () => 
     }
     const current = await preferences.findByIdAsync(userId);
     const at = now().toISOString();
-    if (patch.whatsappMarketing === true && !effectivePreferences(current).whatsappMarketing) {
-      patch.whatsappMarketingConsentAt = at;
-      patch.whatsappMarketingConsentSource = body.consentSource === 'portal' ? 'portal' : 'app_settings';
-    }
-    // Choosing to hear from WhatsApp again lifts an earlier STOP.
-    if ((patch.whatsappMarketing === true || patch.whatsappTransactional === true) && current?.whatsappOptedOutAt) {
-      patch.whatsappOptedOutAt = null;
+    for (const ch of OPT_IN_CHANNELS) {
+      if (patch[`${ch}Marketing`] === true && !effectivePreferences(current)[`${ch}Marketing`]) {
+        patch[`${ch}MarketingConsentAt`] = at;
+        patch[`${ch}MarketingConsentSource`] = body.consentSource === 'portal' ? 'portal' : 'app_settings';
+      }
+      // Choosing to hear from the channel again lifts an earlier opt-out (STOP).
+      if ((patch[`${ch}Marketing`] === true || patch[`${ch}Transactional`] === true) && current?.[`${ch}OptedOutAt`]) {
+        patch[`${ch}OptedOutAt`] = null;
+      }
     }
     if (!Object.keys(patch).length) return { preferences: view(current) };
     const row = current

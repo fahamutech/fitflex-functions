@@ -122,7 +122,7 @@ test('drafts reject bad audiences, content and channels', async () => {
   assert.equal((await campaigns.create(w.A, renewal({ audience: { preset: 'pass_holders' } }))).detail, 'unknown_preset:pass_holders');
   assert.equal((await campaigns.create(w.A, renewal({ audience: { filter: { all: [{ field: 'area', op: 'contains', value: 'x' }] } } }))).detail, 'field_not_allowed:area');
   assert.equal((await campaigns.create(w.A, renewal({ channels: ['whatsapp'] }))).error, 'channel_unavailable');
-  assert.equal((await campaigns.create(w.A, renewal({ channels: ['sms'] }))).error, 'invalid_channels');
+  assert.equal((await campaigns.create(w.A, renewal({ channels: ['fax'] }))).error, 'invalid_channels');
   assert.equal((await campaigns.create(w.A, renewal({ channels: [] }))).error, 'invalid_channels');
 });
 
@@ -304,7 +304,7 @@ test('overview: reachable members, campaigns by status, channels', async () => {
   const o = await campaigns.overview(w.A);
   assert.equal(o.members, 3);
   assert.ok(o.campaigns.draft >= 1 && o.campaigns.sending >= 1);
-  assert.deepEqual(o.channels, { in_app: true, push: true, whatsapp: false });
+  assert.deepEqual(o.channels, { in_app: true, push: true, whatsapp: false, sms: false });
   assert.ok(o.recent.length <= 5 && o.recent.every(c => c.gymId === w.gymA));
   assert.equal((await campaigns.overview(w.A, { gymId: w.gymB })).error, 'not_your_gym');
 });
