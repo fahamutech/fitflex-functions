@@ -90,6 +90,12 @@ export const promotionLifecycle = {
   onJob: () => opsService.runJob('promotion-lifecycle'),
 };
 
+export const promotionEventsRetention = {
+  created, rule: '40 21 * * *', // every day 21:40 UTC = 00:40 EAT
+  description: 'Promotions: delete raw analytics events older than 13 months (the retention the owner decided). Idempotent.',
+  onJob: () => opsService.runJob('promotion-events-retention'),
+};
+
 export const b2bHoldReconciler = {
   created, rule: '*/5 * * * *', // every 5 minutes
   description: 'B2B: settle benefit holds a gym check-in left behind (the hold is written before the visit and approved after it). A hold older than two minutes is approved when its visit exists and cancelled when it does not, so no allowance stays blocked and no recorded visit goes uncharged. Idempotent.',
