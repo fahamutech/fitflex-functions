@@ -118,7 +118,7 @@ function creatorRoutes(prefix, guard, resolve, label) {
     },
     create: {
       created, method: 'post', path: `${prefix}/challenges`,
-      description: `${label}: create a challenge. type steps|distance_km|workouts|active_minutes|consistency|gym_attendance; mode individual|teams (with teams: [names])${label === 'FitFlex admin' ? '|gym_vs_gym' : ''}${label === 'Corporate HR' ? '|department' : ''}.`,
+      description: `${label}: create a challenge. type steps|distance_km|workouts|active_minutes|consistency|gym_attendance; Add draft: true to save it without publishing. mode individual|teams (with teams: [names])${label === 'FitFlex admin' ? '|gym_vs_gym' : ''}${label === 'Corporate HR' ? '|department' : ''}.`,
       requestSample: CREATE_SAMPLE,
       onGuard: guard,
       onRequest: withCreator(async (creator, req, res) => send(res, await svc.create(creator, req.body || {}), 201)),
@@ -140,6 +140,24 @@ function creatorRoutes(prefix, guard, resolve, label) {
       description: `${label}: end a running challenge today, keeping results.`,
       onGuard: guard,
       onRequest: withCreator(async (creator, req, res) => send(res, await svc.close(creator, req.params.id))),
+    },
+    publish: {
+      created, method: 'post', path: `${prefix}/challenges/:id/publish`,
+      description: `${label}: publish a draft (created with { draft: true }) so its audience can see and join it.`,
+      onGuard: guard,
+      onRequest: withCreator(async (creator, req, res) => send(res, await svc.publish(creator, req.params.id))),
+    },
+    pause: {
+      created, method: 'post', path: `${prefix}/challenges/:id/pause`,
+      description: `${label}: stop new people joining. Those already in keep it and their activity keeps counting; dates and rewards do not change.`,
+      onGuard: guard,
+      onRequest: withCreator(async (creator, req, res) => send(res, await svc.pause(creator, req.params.id))),
+    },
+    resume: {
+      created, method: 'post', path: `${prefix}/challenges/:id/resume`,
+      description: `${label}: open a paused challenge to new people again.`,
+      onGuard: guard,
+      onRequest: withCreator(async (creator, req, res) => send(res, await svc.resume(creator, req.params.id))),
     },
     archive: {
       created, method: 'post', path: `${prefix}/challenges/:id/archive`,
@@ -165,6 +183,9 @@ export const trainerChallengeLeaderboard = trainerR.leaderboard;
 export const trainerUpdateChallenge = trainerR.update;
 export const trainerCloseChallenge = trainerR.close;
 export const trainerArchiveChallenge = trainerR.archive;
+export const trainerPublishChallenge = trainerR.publish;
+export const trainerPauseChallenge = trainerR.pause;
+export const trainerResumeChallenge = trainerR.resume;
 
 const gymR = creatorRoutes('/owner', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')], gymCreator, 'Gym');
 export const ownerChallenges = gymR.list;
@@ -175,6 +196,9 @@ export const ownerChallengeLeaderboard = gymR.leaderboard;
 export const ownerUpdateChallenge = gymR.update;
 export const ownerCloseChallenge = gymR.close;
 export const ownerArchiveChallenge = gymR.archive;
+export const ownerPublishChallenge = gymR.publish;
+export const ownerPauseChallenge = gymR.pause;
+export const ownerResumeChallenge = gymR.resume;
 
 const adminR = creatorRoutes('/admin', [requireAuth('admin'), requireAcl('challenges')], fitflexCreator, 'FitFlex admin');
 export const adminChallenges = adminR.list;
@@ -185,6 +209,9 @@ export const adminChallengeLeaderboard = adminR.leaderboard;
 export const adminUpdateChallenge = adminR.update;
 export const adminCloseChallenge = adminR.close;
 export const adminArchiveChallenge = adminR.archive;
+export const adminPublishChallenge = adminR.publish;
+export const adminPauseChallenge = adminR.pause;
+export const adminResumeChallenge = adminR.resume;
 
 const corpR = creatorRoutes('/corporate', [requireAuth('corporate_hr', 'admin'), requireAcl('corporate')], corporateCreator, 'Corporate HR');
 export const corporateChallenges = corpR.list;
@@ -194,6 +221,9 @@ export const corporateChallengeParticipants = corpR.participants;
 export const corporateUpdateChallenge = corpR.update;
 export const corporateCloseChallenge = corpR.close;
 export const corporateArchiveChallenge = corpR.archive;
+export const corporatePublishChallenge = corpR.publish;
+export const corporatePauseChallenge = corpR.pause;
+export const corporateResumeChallenge = corpR.resume;
 export const corporateChallengeLeaderboard = corpR.leaderboard;
 
 // A B2B organisation runs challenges for its own people, the same way a
@@ -207,4 +237,7 @@ export const organizationChallengeParticipants = orgR.participants;
 export const organizationUpdateChallenge = orgR.update;
 export const organizationCloseChallenge = orgR.close;
 export const organizationArchiveChallenge = orgR.archive;
+export const organizationPublishChallenge = orgR.publish;
+export const organizationPauseChallenge = orgR.pause;
+export const organizationResumeChallenge = orgR.resume;
 export const organizationChallengeLeaderboard = orgR.leaderboard;
