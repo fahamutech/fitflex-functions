@@ -38,6 +38,8 @@ const nearest = (viewer, points) => {
 
 export function createDiscoveryService({
   gymService, trainerService, shopService, partnerGate, moderationGate, promotionService, configs, geoAreas,
+  // (promotion, entityType, entityId, sessionId) => signed proof that this card was served to that session.
+  signToken = null,
   now = () => new Date(),
 }) {
   /** What the signals need from each kind of listing. `load` returns what is publicly listable already. */
@@ -123,7 +125,7 @@ export function createDiscoveryService({
    * One page of ranked results. `shape(row)` lets the caller trim a row for the
    * viewer (a gym's trainer-pass pricing is for trainers only).
    */
-  async function discover({ entityType, q, filters = {}, lat, lng, areaId, sort = 'relevance', placement, limit, cursor, rotation, explain = false, shape = r => r }) {
+  async function discover({ entityType, q, filters = {}, lat, lng, areaId, sort = 'relevance', placement, limit, cursor, rotation, session, explain = false, shape = r => r }) {
     if (!DISCOVERABLE.includes(entityType)) return fail('invalid_entity_type', 400);
     if (!SORTS.includes(sort)) return fail('invalid_sort', 400);
     if (placement !== undefined && !(PLACEMENTS[placement]?.entityTypes || []).includes(entityType)) return fail('invalid_placement', 400);
@@ -166,6 +168,11 @@ export function createDiscoveryService({
       s.baseScore = baseScore(signals, mode);
     });
 
+    // What the card says about its promotion; with a session, also the proof that it was served to that session.
+    const tagOf = p => ({
+      id: p.id, type: p.type, label: p.label, commercial: p.commercial,
+      ...(signToken && session ? { token: signToken({ promotionId: p.id, entityType: p.entityType, entityId: p.entityId, sessionId: session, now: now() }) } : {}),
+    });
     const pageSize = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
     const offset = Math.max(parseInt(cursor, 10) || 0, 0);
     // A typed search reads the search placement; filters alone still browse the discovery placement (and still decide who may be Featured).
@@ -193,7 +200,7 @@ export function createDiscoveryService({
       const featuredKeys = new Set(featured.map(p => p.entityKey));
       featuredCards = featured.map(p => {
         const s = byKey.get(p.entityKey);
-        return { ...shape(s.row), promotion: { id: p.id, type: p.type, label: p.label, commercial: p.commercial }, ...(explain ? { ranking: { baseScore: s.baseScore, boost: 0, placement: placementUsed } } : {}) };
+        return { ...shape(s.row), promotion: tagOf(p), ...(explain ? { ranking: { baseScore: s.baseScore, boost: 0, placement: placementUsed } } : {}) };
       });
       const rest = scored.filter(s => !featuredKeys.has(s.key));
       const ranked = applyBoosts(rest.map(s => ({ key: s.key, baseScore: s.baseScore, _s: s })), live.filter(p => p.type !== 'featured'),
@@ -209,7 +216,7 @@ export function createDiscoveryService({
     for (const s of ordered.slice(offset, offset + pageSize)) {
       cards.push({
         ...shape(s.row),
-        ...(s.promo ? { promotion: { id: s.promo.id, type: s.promo.type, label: s.promo.label, commercial: s.promo.commercial } } : {}),
+        ...(s.promo ? { promotion: tagOf(s.promo) } : {}),
         ...(explain ? { ranking: { baseScore: s.baseScore, boost: Math.round(s.boost * 100) / 100, placement: placementUsed } } : {}),
       });
     }

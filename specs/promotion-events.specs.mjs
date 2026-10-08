@@ -12,8 +12,15 @@ const good = (over = {}) => ({ type: 'impression', entityType: 'gym', entityId: 
 test('a well-formed event is accepted and normalised', () => {
   const out = validateClientEvent(good({ entityId: '  g1  ' }), NOW);
   assert.equal(out.error, undefined);
-  assert.deepEqual({ ...out.value, at: undefined }, { event: 'impression', entityType: 'gym', entityId: 'g1', placement: 'gym_discovery', promotionId: 'p1', sessionId: 'session-abc-123', at: undefined });
+  assert.deepEqual({ ...out.value, at: undefined }, { event: 'impression', entityType: 'gym', entityId: 'g1', placement: 'gym_discovery', promotionId: 'p1', sessionId: 'session-abc-123', token: null, at: undefined });
   assert.equal(out.value.at.getTime(), NOW.getTime());
+});
+
+test('a token is read as a trimmed string, and anything else is no token', () => {
+  const t = raw => validateClientEvent(good(raw), NOW).value.token;
+  assert.equal(t({ token: '  v1.a.b  ' }), 'v1.a.b');
+  for (const bad of [undefined, null, '', '   ', 42, {}, ['x']]) assert.equal(t({ token: bad }), null, JSON.stringify(bad));
+  assert.equal(t({ token: 'x'.repeat(2000) }).length, 700);                                      // bounded; the service will refuse it
 });
 
 test('each kind of mistake is named', () => {

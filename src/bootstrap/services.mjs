@@ -99,6 +99,7 @@ import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
+import { signServedToken } from '../auth/promotion-token.mjs';
 import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
 import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
@@ -657,6 +658,7 @@ export const promotionService = createPromotionService({
 });
 export const discoveryService = createDiscoveryService({
   gymService, trainerService, shopService, partnerGate, moderationGate, promotionService, configs: placementConfigs, geoAreas,
+  signToken: signServedToken,
 });
 
 // Promotion analytics: events from the apps, purchases the server can verify, and what they add up to.

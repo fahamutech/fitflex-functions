@@ -68,7 +68,9 @@ export function validateClientEvent(raw, now = new Date()) {
     const t = new Date(raw.at);
     if (!Number.isNaN(t.getTime()) && t.getTime() >= now.getTime() - PAST_SLACK_MS && t.getTime() <= now.getTime() + FUTURE_SLACK_MS) at = t;
   }
-  return { value: { event: raw.type, entityType: raw.entityType, entityId, placement, promotionId, sessionId, at } };
+  // The proof that this card was served; checked by the service, which holds the key.
+  const token = typeof raw.token === 'string' && raw.token.trim() ? raw.token.trim().slice(0, 700) : null;
+  return { value: { event: raw.type, entityType: raw.entityType, entityId, placement, promotionId, sessionId, at, token } };
 }
 
 /**

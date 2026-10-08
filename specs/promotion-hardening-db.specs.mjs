@@ -185,7 +185,7 @@ test('a cancelled order takes its purchase credit back, and the revenue with it'
   const pr = await product(0);
   const p = await livePromotion('product', pr.id);
   const buyer = await admin(); const g = await gym();
-  await db('PromotionEvent').insert({ id: randomUUID(), at: new Date(Date.now() - HOUR), event: 'click', entityType: 'product', entityId: pr.id, promotionId: p.id, placement: 'marketplace', userId: buyer, sessionId: 'sess-reversal-1', source: 'mobile' });
+  await db('PromotionEvent').insert({ id: randomUUID(), at: new Date(Date.now() - HOUR), event: 'click', entityType: 'product', entityId: pr.id, promotionId: p.id, placement: 'marketplace', userId: buyer, sessionId: 'sess-reversal-1', source: 'mobile', verified: true });
   const placed = await order(buyer, pr.id, g);
   assert.ok(placed.order, JSON.stringify(placed)); made.orders.push(placed.order.id);
   const credited = () => db('PromotionEvent').where({ promotionId: p.id, event: 'purchase' });
@@ -228,7 +228,7 @@ test('retention counts calendar months back and never reaches further than that'
 test('analytics: a very large revenue total is a number, not an overflow; a bad placement is refused, not a server error', async () => {
   const g = await gym();
   const p = await livePromotion('gym', g);
-  await db('PromotionEvent').insert([1, 2].map(() => ({ id: randomUUID(), at: new Date(), event: 'purchase', entityType: 'gym', entityId: g, promotionId: p.id, sessionId: 'server:x', source: 'server', valueTzs: 2_000_000_000 })));
+  await db('PromotionEvent').insert([1, 2].map(() => ({ id: randomUUID(), at: new Date(), event: 'purchase', entityType: 'gym', entityId: g, promotionId: p.id, sessionId: 'server:x', source: 'server', verified: true, valueTzs: 2_000_000_000 })));
   const d = await promotionAnalyticsService.detail(p.id, {});
   assert.equal(d.totals.purchaseValueTzs, 4_000_000_000);
   assert.equal(typeof d.totals.purchaseValueTzs, 'number');

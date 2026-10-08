@@ -48,7 +48,7 @@ const callerKey = (req, claims) => claims?.sub || String(req.headers?.['x-forwar
 
 export const postPromotionEvents = {
   created, method: 'post', path: '/events',
-  description: 'Apps: report what customers did with promoted listings, in a batch of up to 50. Body: { source?: "mobile"|"web", events: [{ type: impression|click|detail_view|save|booking_click|subscription_click, entityType, entityId, promotionId, placement?, sessionId, at? }] }. Each event is checked on its own; the answer lists what was kept, what repeated an impression or view already counted, and what was refused and why. Open to signed-in and anonymous sessions.',
+  description: 'Apps: report what customers did with promoted listings, in a batch of up to 50. Body: { source?: "mobile"|"web", events: [{ type: impression|click|detail_view|save|booking_click|subscription_click, entityType, entityId, promotionId, placement?, sessionId, token, at? }] }. `token` is the promotion.token the card came with from /discover?session=<sessionId>; it must match the promotion, the listing and the session, and is good for 24 hours. An event with no token is kept but counted as unverified (older app builds) or, when the server runs with PROMOTION_EVENT_TOKENS=required, refused (token_required); a wrong token is always refused (invalid_token). Each event is checked on its own; the answer lists what was kept, what repeated an impression or view already counted, what was kept unverified, and what was refused and why. Open to signed-in and anonymous sessions.',
   onRequest: async (req, res) => {
     const token = bearerFrom(req);
     const claims = token ? verify(token) : null;

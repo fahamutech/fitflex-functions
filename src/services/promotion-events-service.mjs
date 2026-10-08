@@ -3,6 +3,7 @@
 // stored only if a client sent it (and it passes the checks) or the server saw
 // it happen.
 import { randomUUID } from 'node:crypto';
+import { verifyServedToken, tokenMode } from '../auth/promotion-token.mjs';
 import {
   validateClientEvent, dedupeKey, MAX_BATCH, ATTRIBUTION_WINDOW_DAYS, RETENTION_MONTHS, SESSION_EVENT_CAPS, SESSION_HOURLY_CAP,
 } from '../shared/promotion-events.mjs';
@@ -43,12 +44,25 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
       if (!SERVED.has(p.status)) return rejected.push({ index, error: 'promotion_not_served' });
       // An event is about a time the promotion was running (a little before its start for the scheduler's lag, a while after its end for offline phones).
       if (v.at < new Date(new Date(p.startsAt).getTime() - START_SLACK_MS) || v.at > new Date(new Date(p.endsAt).getTime() + END_SLACK_MS)) return rejected.push({ index, error: 'outside_promotion_period' });
+      // Proof that the card was really served to this session. A token that is present must be right (a bad one is
+      // a forgery or a bug, never kept). With none, an older app build is still kept, but as unverified: it is not
+      // counted anywhere, so nothing can be added to a promotion's numbers without having been served it.
+      let verified = false;
+      if (v.token) {
+        const check = verifyServedToken(v.token, { promotionId: p.id, entityType: v.entityType, entityId: v.entityId, sessionId: v.sessionId, at: v.at, now: at });
+        if (!check.ok) return rejected.push({ index, error: 'invalid_token' });
+        verified = true;
+      } else if (tokenMode() === 'required') {
+        return rejected.push({ index, error: 'token_required' });
+      }
       rows.push({
         index,
+        verified,
         id: randomUUID(), at: v.at, event: v.event, entityType: v.entityType, entityId: v.entityId, promotionId: p.id,
         campaignId: p.campaignId || null, placement: v.placement, userId, sessionId: v.sessionId, source, valueTzs: null,
         // The repeat window is counted on our clock, not the phone's, so a client cannot mint a new window by changing its time.
-        dedupeKey: dedupeKey({ ...v, at }),
+        // Unverified events get their own keys, so one can never use up a verified event's repeat window.
+        dedupeKey: (k => (k && !verified ? `u:${k}` : k))(dedupeKey({ ...v, at })),
       });
     });
 
@@ -59,7 +73,11 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
       const out = await db(TABLE).insert(allowed.map(({ index, ...row }) => row)).onConflict('dedupeKey').ignore().returning('id');
       inserted = out.length;
     }
-    return { accepted: inserted, duplicates: allowed.length - inserted, rejected: rejected.sort((a, b) => a.index - b.index) };
+    return {
+      accepted: inserted, duplicates: allowed.length - inserted, rejected: rejected.sort((a, b) => a.index - b.index),
+      // Kept but not counted (older builds): the app can see it is not sending proof.
+      unverified: allowed.filter(r => !r.verified).length,
+    };
   }
 
   /**
@@ -108,7 +126,7 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
       for (const item of order.items) {
         const touch = await db(TABLE)
           .where({ userId: order.buyerId, entityType: 'product', entityId: item.productId })
-          .where('event', 'click')
+          .where('event', 'click').where('verified', true)
           .whereNotNull('promotionId').where('at', '>=', since)
           .orderBy('at', 'desc').first('promotionId', 'campaignId', 'placement');
         if (!touch) continue;
@@ -116,7 +134,7 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
         const out = await db(TABLE).insert({
           id: randomUUID(), at: now(), event: 'purchase', entityType: 'product', entityId: item.productId, promotionId: touch.promotionId,
           campaignId: touch.campaignId, placement: touch.placement, userId: order.buyerId, sessionId: `server:${order.id}`, source: 'server',
-          valueTzs: value, dedupeKey: `purchase:${order.id}:${item.productId}`,
+          valueTzs: value, verified: true, dedupeKey: `purchase:${order.id}:${item.productId}`,
         }).onConflict('dedupeKey').ignore().returning('id');
         credited += out.length;
       }
