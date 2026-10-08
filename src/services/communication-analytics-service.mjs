@@ -25,7 +25,7 @@ import { ownerGymIds } from '../shared/member-status.mjs';
 export const ATTRIBUTION = Object.freeze({ model: 'last_touch', clickWindowDays: 7, openWindowDays: 3 });
 const DAY = 86_400_000;
 const REACHED = ['sent', 'delivered', 'read', 'clicked'];
-const CHANNELS = ['in_app', 'push', 'whatsapp'];
+const CHANNELS = ['in_app', 'push', 'whatsapp', 'sms'];
 // Where a button leads, and what finishing it means.
 const PAYMENT_GOALS = ['renewal', 'membership', 'payment'];
 const CONVERSION_LIST_MAX = 50;

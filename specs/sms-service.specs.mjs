@@ -13,6 +13,7 @@ import { createCampaignService } from '../src/services/campaign-service.mjs';
 import { createTemplateService } from '../src/services/template-service.mjs';
 import { createDeliveryService } from '../src/services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../src/services/communication-preference-service.mjs';
+import { createCommunicationHistoryService } from '../src/services/communication-history-service.mjs';
 import { createSmsService, smsText, SMS_MAX_LENGTH, REMINDER_MAX_ATTEMPTS } from '../src/services/sms-service.mjs';
 import { createSmsProvider, createFakeSmsProvider, createBeemSmsProvider } from '../src/integrations/sms/provider.mjs';
 import { beemSend, beemSettings, beemCredentialShape, BEEM_SEND_URL } from '../src/integrations/sms/beem.mjs';
@@ -281,6 +282,11 @@ test('a gym offer by SMS reaches only members who opted in, with the gym named a
   assert.ok(done.providerMessageId);
   const [log] = await logsOf(optedIn);
   assert.deepEqual({ category: log.category, status: log.status, dedupeKey: log.dedupeKey }, { category: 'campaign', status: 'accepted', dedupeKey: `cmm:${of(optedIn).id}` });
+
+  // The campaign's history names SMS as the way it went, with the provider's reference.
+  const history = await createCommunicationHistoryService({ db }).recipients(w.A, c.campaign.id, {});
+  const mine = history.recipients.find(r => r.memberId === optedIn).channels[0];
+  assert.deepEqual([mine.channel, mine.status, mine.provider], ['sms', 'sent', { name: 'sms', messageId: done.providerMessageId }]);
 
   // The dispatcher taking the same row again (a crash before the ledger update) does not text twice.
   assert.equal(await dispatch(of(optedIn)), 'sent');
