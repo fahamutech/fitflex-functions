@@ -74,6 +74,12 @@ export const b2bProgramExpiry = {
   onJob: () => opsService.runJob('b2b-program-expiry'),
 };
 
+export const promotionLifecycle = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Promotions: start scheduled promotions whose start has arrived and expire those whose end has passed (a promotion whose entity was blocked in moderation is held instead of started). Ranking also reads the time window itself, so a late run never lets an expired promotion count. Idempotent.',
+  onJob: () => opsService.runJob('promotion-lifecycle'),
+};
+
 export const b2bHoldReconciler = {
   created, rule: '*/5 * * * *', // every 5 minutes
   description: 'B2B: settle benefit holds a gym check-in left behind (the hold is written before the visit and approved after it). A hold older than two minutes is approved when its visit exists and cancelled when it does not, so no allowance stays blocked and no recorded visit goes uncharged. Idempotent.',

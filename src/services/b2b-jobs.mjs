@@ -14,7 +14,7 @@ const month = (y, m) => { const i = y * 12 + (m - 1); return `${Math.floor(i / 1
 
 export function registerB2BJobs({
   ops, db, programs,
-  b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bSponsorRefundService, b2bCollectionsService, b2bAnalyticsService,
+  promotionService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bSponsorRefundService, b2bCollectionsService, b2bAnalyticsService,
   now = () => new Date(),
 }) {
   ops.register({
@@ -23,6 +23,17 @@ export function registerB2BJobs({
     run: async () => {
       const r = await b2bProgramService.expireDue();
       return { processed: r.expired ?? 0, expired: r.expired ?? 0 };
+    },
+  });
+
+  ops.register({
+    name: 'promotion-lifecycle', title: 'Promotion lifecycle', schedule: { type: 'every', minutes: 5 }, quiet: true,
+    description: 'Starts scheduled promotions whose start has arrived and expires those whose end has passed.',
+    run: async (ctx) => {
+      const r = await promotionService.runLifecycle({ actor: ctx.actor });
+      if (r.failed) await ctx.raise({ type: 'job_item_failed', severity: 'medium', title: `${r.failed} promotion(s) could not be moved on`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:items`, detail: r });
+      else await ctx.clear(`item:${ctx.job}:items`, 'Promotions moved on.');
+      return { processed: r.processed, succeeded: r.processed - r.failed, failed: r.failed, ...r };
     },
   });
 

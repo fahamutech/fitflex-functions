@@ -92,9 +92,13 @@ import { createCompanyDirectory } from '../services/company-directory.mjs';
 import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
+import { createEntityResolver } from '../services/promotion-entities.mjs';
+import { createModerationService } from '../services/moderation-service.mjs';
+import { createPromotionService } from '../services/promotion-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
+  moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
@@ -258,6 +262,8 @@ export const b2bAnalyticsService = createB2BAnalyticsService({
 export const opsService = createOpsService({ db });
 export const b2bOps = registerB2BJobs({
   ops: opsService, db, programs: b2bPrograms,
+  // Defined at the end of this file; only called when the job runs.
+  promotionService: { runLifecycle: args => promotionService.runLifecycle(args) },
   b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService,
   // Defined further down; only called when the billing job runs.
   b2bSponsorRefundService: { repair: () => b2bSponsorRefundService.repair() },
@@ -592,4 +598,17 @@ export const partnerKycService = createPartnerKycService({
   notify: (userId, message) => notificationService.notify(userId, message),
   // KYC documents stay private on Zebra; the API streams them after its own checks.
   documentStore: createZebraDocumentStore(),
+});
+
+// Moderation & Promotion. Moderation decides what may be shown; promotions decide
+// what is highlighted among what may be shown. Neither changes discovery yet.
+export const entityResolver = createEntityResolver({ gyms, trainers, users, products, partnerGate });
+export const moderationService = createModerationService({
+  states: moderationStates, events: moderationEvents, entities: entityResolver, auditLog,
+  // promotionService is defined below; this only runs later, per decision.
+  onEntityBlocked: (...args) => promotionService.holdForEntity(...args),
+});
+export const promotionService = createPromotionService({
+  promotions, placements: promotionPlacements, campaigns: promotionCampaigns, configs: placementConfigs,
+  geoAreas, entities: entityResolver, moderation: moderationService, auditLog, organizations: b2bOrganizations,
 });
