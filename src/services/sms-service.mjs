@@ -23,6 +23,7 @@ import { channelAllowed } from '../shared/communications.mjs';
 import { maskPhone } from '../shared/phone.mjs';
 import { addDays, eatToday, slotStartMs } from '../shared/trainer-access.mjs';
 import { ERRORS, validateRecipient } from '../integrations/sms/provider.mjs';
+import { beemCredentialShape } from '../integrations/sms/beem.mjs';
 
 /** Two SMS parts. Longer messages are cut, never split into a third. */
 export const SMS_MAX_LENGTH = 306;
@@ -35,6 +36,8 @@ export const SMS_STATUSES = ['queued', 'accepted', 'failed'];
 
 const OPT_OUT = { en: ' Opt out: App > Settings.', sw: ' Kujiondoa: App > Settings.' };
 const EAT = 'Africa/Dar_es_Salaam';
+// When this server process started: settings are read then, so a change needs a restart after it.
+const STARTED_AT = new Date().toISOString();
 const id = (p) => `${p}_${randomUUID().slice(0, 12)}`;
 const oneLine = (text) => String(text ?? '').replace(/\s+/g, ' ').trim();
 const firstName = (name, fallback) => oneLine(name).split(' ')[0] || fallback;
@@ -279,6 +282,9 @@ export function createSmsService({
       sender: provider.sender ?? null,
       ...(provider.setup ? { setup: provider.setup } : {}),
       verificationProvider: String(env.VERIFICATION_SMS_PROVIDER || '').trim().toLowerCase() || null,
+      serverStartedAt: STARTED_AT,
+      // The shape of the stored Beem pair (lengths, stray spaces or quotes) — never the values.
+      beemCredentials: beemCredentialShape(env),
       last24h: Object.fromEntries(SMS_STATUSES.map(s => [s, Number(rows.find(r => r.status === s)?.n || 0)])),
     };
   }
