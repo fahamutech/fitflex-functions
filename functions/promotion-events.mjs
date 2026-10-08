@@ -16,16 +16,27 @@ function send(res, result, okStatus = 200) {
   return res.status(okStatus).json(payload);
 }
 
-// A simple per-caller allowance so one device cannot flood the table: events per minute.
-const LIMIT_PER_MINUTE = 1200;
+// Allowances so one device cannot flood the table, and the table cannot be flooded from many addresses at
+// once: events per minute and per hour for each caller, and a ceiling for everyone together. In memory per
+// server, so with several servers the real allowance is the number of servers times these.
+const LIMITS = { perMinute: 1200, perHour: 6000, allCallersPerMinute: 30000 };
 const buckets = new Map();
+const everyone = { count: 0, resetAt: 0 };
+function take(bucket, n, windowMs, limit, nowMs) {
+  if (bucket.resetAt <= nowMs) { bucket.count = 0; bucket.resetAt = nowMs + windowMs; }
+  if (bucket.count + n > limit) return false;
+  bucket.count += n;
+  return true;
+}
 function allow(key, n) {
   const nowMs = Date.now();
-  let b = buckets.get(key);
-  if (!b || b.resetAt <= nowMs) { b = { count: 0, resetAt: nowMs + 60_000 }; buckets.set(key, b); }
-  if (b.count + n > LIMIT_PER_MINUTE) return false;
-  b.count += n;
-  if (buckets.size > 5000) for (const [k, v] of buckets) if (v.resetAt <= nowMs) buckets.delete(k);
+  const mine = buckets.get(key) || { minute: { count: 0, resetAt: 0 }, hour: { count: 0, resetAt: 0 } };
+  buckets.set(key, mine);
+  // Check every window before counting in any, so a refused request uses up nothing.
+  const probe = (b, windowMs, limit) => (b.resetAt <= nowMs ? n <= limit : b.count + n <= limit);
+  if (!probe(mine.minute, 60_000, LIMITS.perMinute) || !probe(mine.hour, 3_600_000, LIMITS.perHour) || !probe(everyone, 60_000, LIMITS.allCallersPerMinute)) return false;
+  take(mine.minute, n, 60_000, LIMITS.perMinute, nowMs); take(mine.hour, n, 3_600_000, LIMITS.perHour, nowMs); take(everyone, n, 60_000, LIMITS.allCallersPerMinute, nowMs);
+  if (buckets.size > 5000) for (const [k, v] of buckets) if (v.hour.resetAt <= nowMs) buckets.delete(k);
   return true;
 }
 const callerKey = (req, claims) => claims?.sub || String(req.headers?.['x-forwarded-for'] || req.ip || 'anon').split(',')[0].trim();

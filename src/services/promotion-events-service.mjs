@@ -3,7 +3,9 @@
 // stored only if a client sent it (and it passes the checks) or the server saw
 // it happen.
 import { randomUUID } from 'node:crypto';
-import { validateClientEvent, dedupeKey, MAX_BATCH, ATTRIBUTION_WINDOW_DAYS, RETENTION_MONTHS } from '../shared/promotion-events.mjs';
+import {
+  validateClientEvent, dedupeKey, MAX_BATCH, ATTRIBUTION_WINDOW_DAYS, RETENTION_MONTHS, SESSION_EVENT_CAPS, SESSION_HOURLY_CAP,
+} from '../shared/promotion-events.mjs';
 
 const TABLE = 'PromotionEvent';
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -37,18 +39,54 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
       if (p.entityType !== v.entityType || p.entityId !== v.entityId) return rejected.push({ index, error: 'promotion_mismatch' });
       if (!SERVED.has(p.status)) return rejected.push({ index, error: 'promotion_not_served' });
       rows.push({
+        index,
         id: randomUUID(), at: v.at, event: v.event, entityType: v.entityType, entityId: v.entityId, promotionId: p.id,
         campaignId: p.campaignId || null, placement: v.placement, userId, sessionId: v.sessionId, source, valueTzs: null,
         dedupeKey: dedupeKey(v),
       });
     });
 
+    // One session cannot pile up taps or saves on a promotion without limit.
+    const allowed = await withinSessionLimits(rows, rejected, at);
     let inserted = 0;
-    if (rows.length) {
-      const out = await db(TABLE).insert(rows).onConflict('dedupeKey').ignore().returning('id');
+    if (allowed.length) {
+      const out = await db(TABLE).insert(allowed.map(({ index, ...row }) => row)).onConflict('dedupeKey').ignore().returning('id');
       inserted = out.length;
     }
-    return { accepted: inserted, duplicates: rows.length - inserted, rejected };
+    return { accepted: inserted, duplicates: allowed.length - inserted, rejected: rejected.sort((a, b) => a.index - b.index) };
+  }
+
+  /**
+   * Drop events beyond what one session may credit in an hour (see SESSION_EVENT_CAPS and
+   * SESSION_HOURLY_CAP), counting what it already sent as well as what is in this batch.
+   * Refused ones are added to `rejected` with the reason 'session_limit'.
+   */
+  async function withinSessionLimits(rows, rejected, at) {
+    if (!rows.length) return rows;
+    const since = new Date(at.getTime() - 3_600_000);
+    const sessions = [...new Set(rows.map(r => r.sessionId))];
+    const capped = Object.keys(SESSION_EVENT_CAPS);
+    const per = new Map();
+    const total = new Map();
+    const { rows: perRows } = await db.raw(
+      `select "sessionId", "promotionId", "event", count(*)::int as c from "${TABLE}" where "sessionId" = any(?) and "at" >= ? and "event" = any(?) group by 1, 2, 3`,
+      [sessions, since, capped]);
+    for (const r of perRows) per.set(`${r.sessionId}|${r.promotionId}|${r.event}`, r.c);
+    const { rows: totalRows } = await db.raw(`select "sessionId", count(*)::int as c from "${TABLE}" where "sessionId" = any(?) and "at" >= ? group by 1`, [sessions, since]);
+    for (const r of totalRows) total.set(r.sessionId, r.c);
+    const kept = [];
+    for (const r of rows) {
+      const key = `${r.sessionId}|${r.promotionId}|${r.event}`;
+      const cap = SESSION_EVENT_CAPS[r.event];
+      if ((cap !== undefined && (per.get(key) || 0) >= cap) || (total.get(r.sessionId) || 0) >= SESSION_HOURLY_CAP) {
+        rejected.push({ index: r.index, error: 'session_limit' });
+        continue;
+      }
+      per.set(key, (per.get(key) || 0) + 1);
+      total.set(r.sessionId, (total.get(r.sessionId) || 0) + 1);
+      kept.push(r);
+    }
+    return kept;
   }
 
   /**

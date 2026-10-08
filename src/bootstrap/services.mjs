@@ -636,6 +636,11 @@ export const moderationService = createModerationService({
 export const promotionService = createPromotionService({
   promotions, placements: promotionPlacements, campaigns: promotionCampaigns, configs: placementConfigs,
   geoAreas, entities: entityResolver, moderation: moderationService, auditLog, organizations: b2bOrganizations,
+  // Capacity decisions are taken one at a time across servers (same technique as the job locks in ops-service).
+  withLock: (key, fn) => db.transaction(async (trx) => {
+    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [key]);
+    return fn();
+  }),
 });
 export const discoveryService = createDiscoveryService({
   gymService, trainerService, shopService, partnerGate, moderationGate, promotionService, configs: placementConfigs, geoAreas,

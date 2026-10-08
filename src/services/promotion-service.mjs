@@ -25,6 +25,8 @@ const text = (v, max = 200) => (typeof v === 'string' && v.trim() ? v.trim().sli
 const newId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const ms = v => new Date(v).getTime();
 const DAY = 86_400_000;
+/** One lock for all capacity decisions: they are rare admin actions, so simple beats clever. */
+const CAPACITY_LOCK = 'promotion-capacity';
 const AREA_PARENT_LEVEL = { region: 'country', city: 'region', district: 'city' };
 
 function page(rows, query = {}) {
@@ -36,6 +38,9 @@ function page(rows, query = {}) {
 export function createPromotionService({
   promotions, placements, campaigns, configs, geoAreas, entities, moderation, auditLog,
   organizations = null,
+  // Serialises the steps that claim placement capacity, across servers: (key, fn) => fn's result. The default
+  // runs fn at once, which is right for one process and for unit specs.
+  withLock = (_key, fn) => fn(),
   now = () => new Date(),
 }) {
   const stamp = () => now().toISOString();
@@ -269,7 +274,10 @@ export function createPromotionService({
     partnerRef: p.partnerRef, isCommercial: p.isCommercial, relationshipType: p.relationshipType, commercialRef: p.commercialRef,
   });
 
-  async function update({ id, body, actorId }) {
+  /** Moving the end date of a held promotion can take a slot in a later period, so it takes the capacity lock too. */
+  const update = args => (args?.body?.endsAt !== undefined ? withLock(CAPACITY_LOCK, () => updateUnlocked(args)) : updateUnlocked(args));
+
+  async function updateUnlocked({ id, body, actorId }) {
     if (!actorId) return fail('actor_required', 403);
     const current = await load(id);
     if (!current) return fail('promotion_not_found', 404);
@@ -319,11 +327,15 @@ export function createPromotionService({
     return { promotion: view(saved, await summaryFor(saved)) };
   }
 
-  async function act(id, actorId, fn) {
+  async function act(id, actorId, fn, { capacity = false } = {}) {
     if (!actorId) return fail('actor_required', 403);
-    const p = await load(id);
-    if (!p) return fail('promotion_not_found', 404);
-    return fn(p);
+    const run = async () => {
+      const p = await load(id);
+      if (!p) return fail('promotion_not_found', 404);
+      return fn(p);
+    };
+    // Whatever claims a slot checks the room and then takes it; two at once must not both see the last slot free.
+    return capacity ? withLock(CAPACITY_LOCK, run) : run();
   }
 
   const invalid = (p, to) => fail('invalid_transition', 409, { from: p.status, to });
@@ -353,7 +365,7 @@ export function createPromotionService({
     const cap = await capacityFor(p);
     if (!cap.ok) return fail('placement_full', 409, { capacity: cap.results.filter(r => r.full) });
     return move(p, 'approved', { actorId, action: 'approved', extra: { approvedBy: actorId, approvedAt: stamp() } });
-  });
+  }, { capacity: true });
 
   const reject = ({ id, actorId, reason }) => act(id, actorId, async (p) => {
     if (!canTransition(p.status, 'rejected')) return invalid(p, 'rejected');
@@ -383,14 +395,14 @@ export function createPromotionService({
     const problem = await guardLive(p, { needsWindow: 'future' });
     if (problem) return problem;
     return move(p, 'scheduled', { actorId, action: 'scheduled' });
-  });
+  }, { capacity: true });
 
   const activate = ({ id, actorId }) => act(id, actorId, async (p) => {
     if (!['approved', 'scheduled'].includes(p.status)) return invalid(p, 'active');
     const problem = await guardLive(p, { needsWindow: 'open' });
     if (problem) return problem;
     return move(p, 'active', { actorId, action: 'activated', extra: { activatedAt: stamp(), pausedAt: null } });
-  });
+  }, { capacity: true });
 
   const pause = ({ id, actorId, reason }) => act(id, actorId, async (p) => {
     if (!['active', 'scheduled'].includes(p.status)) return invalid(p, 'paused');
@@ -409,7 +421,7 @@ export function createPromotionService({
     // Before its start it goes back to being scheduled; otherwise it is live again.
     const to = ms(p.startsAt) > now().getTime() ? 'scheduled' : 'active';
     return move(p, to, { actorId, action: 'resumed', extra: { pausedAt: null, ...(to === 'active' ? { activatedAt: stamp() } : {}) } });
-  });
+  }, { capacity: true });
 
   const cancel = ({ id, actorId, reason }) => act(id, actorId, async (p) => {
     if (!canTransition(p.status, 'cancelled')) return invalid(p, 'cancelled');
@@ -505,7 +517,7 @@ export function createPromotionService({
    * entity that is still approved and eligible, reaching this viewer. This is
    * the only thing discovery should ask; ranking applies the (bounded) boost.
    */
-  async function listLive({ placement, entityType, viewer = {}, type } = {}) {
+  async function listLive({ placement, entityType, viewer = {}, type, checkEntities = true } = {}) {
     const areas = await areasById();
     const rows = (await withPlacements(await promotions.allAsync())).filter(p => p.status === 'scheduled' || p.status === 'active');
     const out = [];
@@ -515,10 +527,13 @@ export function createPromotionService({
       if (entityType && p.entityType !== entityType) continue;
       if (type && p.type !== type) continue;
       if (!geoMatches(p.geoScope, viewer, areas)) continue;
-      const entity = await entities.get(p.entityType, p.entityId);
-      const mod = await moderation.statusOf(p.entityType, p.entityId);
-      const el = await entities.eligibility(p.entityType, entity, mod);
-      if (!el.ok) continue;
+      // Discovery already holds the listings it may show, so it checks them itself and skips these lookups.
+      if (checkEntities) {
+        const entity = await entities.get(p.entityType, p.entityId);
+        const mod = await moderation.statusOf(p.entityType, p.entityId);
+        const el = await entities.eligibility(p.entityType, entity, mod);
+        if (!el.ok) continue;
+      }
       out.push({ ...p, entityKey: `${p.entityType}:${p.entityId}`, label: disclosureLabel(p), commercial: p.isCommercial });
     }
     return out.sort((a, b) => a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
