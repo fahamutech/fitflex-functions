@@ -5,7 +5,7 @@
 // promotable entity type is one more entry in `resolvers` (and ENTITY_TYPES).
 import { entityEligibility } from '../shared/promotion-rules.mjs';
 
-export function createEntityResolver({ gyms, trainers, users, products, partnerGate }) {
+export function createEntityResolver({ gyms, trainers, users, products, partnerGate, listVendors = null }) {
   const resolvers = {
     gym: {
       get: id => gyms.findByIdAsync(id),
@@ -24,7 +24,8 @@ export function createEntityResolver({ gyms, trainers, users, products, partnerG
         const u = await users.findByIdAsync(id);
         return u && u.userType === 'vendor' ? u : null;
       },
-      all: () => users.filterAsync(u => u.userType === 'vendor'),
+      // `listVendors` reads only the vendor rows; the fallback reads every user, which only unit specs rely on.
+      all: () => (listVendors ? listVendors() : users.filterAsync(u => u.userType === 'vendor')),
       summary: v => ({ id: v.id, name: v.vendorProfile?.businessName || v.displayName || v.id, subtitle: v.vendorProfile?.businessCategory || null, status: v.accountStatus || 'active' }),
       ownerUserId: v => v.id,
     },

@@ -291,7 +291,9 @@ test('routes: viewing, managing, approving and moderating are separate grants', 
   const list = await call(promotionRoutes.listPromotions, { claims: staff(checker, 'promotions_approve'), query: { status: 'approved' } });
   assert.equal(list.statusCode, 200);
   assert.ok(list.body.items.some(p => p.id === id));
-  const detail = await call(promotionRoutes.getPromotion, { claims: staff(checker, 'promotion_analytics'), params: { id } });
+  // Analytics-only staff have their own read routes; they cannot open a promotion's notes, references and history.
+  assert.equal((await call(promotionRoutes.getPromotion, { claims: staff(checker, 'promotion_analytics'), params: { id } })).statusCode, 403);
+  const detail = await call(promotionRoutes.getPromotion, { claims: staff(checker, 'promotions_approve'), params: { id } });
   assert.equal(detail.statusCode, 200);
   assert.ok(detail.body.history.length >= 3);
   assert.ok(detail.body.allowedActions.includes('schedule'));

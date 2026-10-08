@@ -201,6 +201,7 @@ export const shopService = createShopService({
   marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases, publicGate: moderationGate,
   // A paid order is credited to the promotion the buyer opened (promotionEventsService is defined below; this only runs later).
   onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
+  onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
 });
 export const whatsAppNotifier = createWhatsAppNotifier();
 export const corporateService = createCorporateService({
@@ -299,6 +300,8 @@ export const authService = createAuthService({
 export const subscriptionService = createSubscriptionService({ subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId });
 export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
+  // promotionEventsService is defined at the end of this file; this only runs later.
+  onAccountDeleted: userId => promotionEventsService.forgetUser(userId),
 });
 
 export const checkInService = createCheckInService({
@@ -627,15 +630,30 @@ export const partnerKycService = createPartnerKycService({
 
 // Moderation & Promotion. Moderation decides what may be shown; promotions decide
 // what is highlighted among what may be shown. Neither changes discovery yet.
-export const entityResolver = createEntityResolver({ gyms, trainers, users, products, partnerGate });
+/**
+ * Changes to promotions and moderation decisions are made one at a time across servers: a Postgres advisory lock
+ * held for the length of the change (the same technique as the job locks in ops-service). Admin traffic is low,
+ * so one lock for all of it is the simple and safe choice.
+ */
+const withPromotionLock = (key, fn) => db.transaction(async (trx) => {
+  await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [key]);
+  return fn();
+});
+export const entityResolver = createEntityResolver({
+  gyms, trainers, users, products, partnerGate,
+  // Vendors are Users: read only those rows, not every member.
+  listVendors: () => db('User').where({ userType: 'vendor' }),
+});
 export const moderationService = createModerationService({
   states: moderationStates, events: moderationEvents, entities: entityResolver, auditLog,
   // promotionService is defined below; this only runs later, per decision.
   onEntityBlocked: (...args) => promotionService.holdForEntity(...args),
+  withLock: withPromotionLock,
 });
 export const promotionService = createPromotionService({
   promotions, placements: promotionPlacements, campaigns: promotionCampaigns, configs: placementConfigs,
   geoAreas, entities: entityResolver, moderation: moderationService, auditLog, organizations: b2bOrganizations,
+  withLock: withPromotionLock,
 });
 export const discoveryService = createDiscoveryService({
   gymService, trainerService, shopService, partnerGate, moderationGate, promotionService, configs: placementConfigs, geoAreas,

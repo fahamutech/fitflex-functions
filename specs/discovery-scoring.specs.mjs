@@ -69,11 +69,11 @@ test('minMax: scaled to 0..1; a lone or all-equal list is neutral', () => {
   assert.deepEqual(minMax([2, 2]), [0.5, 0.5]);
 });
 
-test('boosts: a cap per promotion type, falling back to the placement and then the default', () => {
+test('boosts: a cap per promotion type, else the platform default (never another type\'s)', () => {
   const cfg = [{ placement: 'home', promotionType: 'sponsored', maxBoostFraction: 0.05 }, { placement: 'home', promotionType: 'promoted', maxBoostFraction: 0.4 }];
   assert.equal(boostCap(cfg, 'home', 'sponsored'), 0.05);
   assert.equal(boostCap(cfg, 'home', 'promoted'), 0.4);
-  assert.equal(boostCap(cfg, 'home', 'campaign'), 0.05);                                  // another type's setting for this placement
+  assert.equal(boostCap(cfg, 'home', 'campaign'), 0.25);                                  // another type's setting never applies: the platform default
   assert.equal(boostCap(cfg, 'search_results', 'promoted'), 0.25);
   const items = [{ key: 'a', baseScore: 50 }];
   const spread = { min: 0, max: 100 };

@@ -12,7 +12,10 @@ import { promotionService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
-const canView = [requireAuth('admin'), requireAcl('promotions', 'promotions_approve', 'campaigns', 'promotion_analytics')];
+// Analytics has its own read routes (functions/promotion-events.mjs); it does not open promotion notes, references or history.
+const canView = [requireAuth('admin'), requireAcl('promotions', 'promotions_approve', 'campaigns')];
+const seesActivity = req => !req.user?.portalUser || ['promotions', 'promotions_approve', 'moderation', 'moderation_decide'].some(s => (req.user.aclPermissions || []).includes(s));
+const isApprover = req => !req.user?.portalUser || (req.user.aclPermissions || []).includes('promotions_approve');
 const canManage = [requireAuth('admin'), requireAcl('promotions')];
 const canApprove = [requireAuth('admin'), requireAcl('promotions_approve')];
 const canCampaign = [requireAuth('admin'), requireAcl('campaigns')];
@@ -33,7 +36,7 @@ export const promotionReference = {
 export const promotionOverview = {
   created, method: 'get', path: '/admin/promotion-overview',
   description: 'Admin (promotions): active, scheduled, pending-approval and expiring-soon promotions, moderation counts and recent activity.',
-  onGuard: canView, onRequest: async (req, res) => res.json(await promotionService.overview()),
+  onGuard: canView, onRequest: async (req, res) => res.json(await promotionService.overview({ includeActivity: seesActivity(req) })),
 };
 
 export const promotionLimits = {
@@ -85,9 +88,9 @@ export const getPromotion = {
 
 export const updatePromotion = {
   created, method: 'patch', path: '/admin/promotions/:id',
-  description: 'Admin (promotions): edit a draft freely. Once approved, only priority, boostWeight, endsAt, commercialRef and notes can change. A submitted promotion must be reopened first. Audited with before and after.',
+  description: 'Admin (promotions): edit a draft freely. Once approved, only priority, boostWeight, endsAt, commercialRef and notes can change, and changing priority or boostWeight (how strongly it ranks) needs the promotions_approve scope. A submitted promotion must be reopened first. Audited with before and after.',
   onGuard: canManage,
-  onRequest: async (req, res) => send(res, await promotionService.update({ id: req.params.id, body: req.body || {}, actorId: actor(req) })),
+  onRequest: async (req, res) => send(res, await promotionService.update({ id: req.params.id, body: req.body || {}, actorId: actor(req), canRank: isApprover(req) })),
 };
 
 const transition = (name, guard, description, build) => ({

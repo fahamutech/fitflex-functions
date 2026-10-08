@@ -26,6 +26,14 @@ export const ALL_EVENTS = Object.freeze([...CLIENT_EVENTS, ...SERVER_EVENTS]);
 export const CONVERSION_EVENTS = Object.freeze(['booking', 'subscription', 'purchase']);
 
 export const MAX_BATCH = 50;
+/**
+ * The most one app session can credit to one promotion in an hour, for events that are not de-duplicated.
+ * Far above what a person does and well below what a script does; analytics are not fraud-proof, only
+ * proportionately hard to inflate from a single device.
+ */
+export const SESSION_EVENT_CAPS = Object.freeze({ click: 30, save: 10, booking_click: 10, subscription_click: 10 });
+/** The most events one session may record in an hour, across everything. */
+export const SESSION_HOURLY_CAP = 600;
 /** A purchase is credited to a promotion the buyer opened within this many days. */
 export const ATTRIBUTION_WINDOW_DAYS = 7;
 /** Raw events are kept this long; the owner decided 13 months. */

@@ -32,7 +32,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // A paid order was cancelled and the money is owed back: ({ order, reasonCode, actorId, role }) → refund.
   onRefundDue = async () => null,
   // A paid order, for promotion analytics: (order) → void. Never allowed to fail the order.
-  onOrderPaid = async () => null }) {
+  onOrderPaid = async () => null,
+  // A cancelled order, for promotion analytics: (order) → void; takes back what the paid order was credited for.
+  onOrderCancelled = async () => null }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -261,6 +263,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const product = await products.findByIdAsync(item.productId);
       if (!product || product.deletedAt || product.status !== 'active' || ['pending', 'rejected'].includes(product.approvalStatus)) return { error: 'product_not_found', status: 404, productId: item.productId };
       if (!(await partnerGate.isOperational(product.vendorId))) return { error: 'product_not_found', status: 404, productId: item.productId };
+      // Hidden or suspended in moderation: it is not sold, even to someone with an old link.
+      if (await publicGate.isBlocked('product', product.id) || await publicGate.isBlocked('vendor', product.vendorId)) return { error: 'product_not_found', status: 404, productId: item.productId };
       if (Number(product.stock) < qty) return { error: 'insufficient_stock', status: 409, productId: product.id };
       resolved.push({ product, qty });
     }
@@ -375,6 +379,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, by: role }];
     const paymentStatus = wasPaid ? 'refund_pending' : order.paymentStatus === 'pending' ? 'cancelled' : order.paymentStatus;
     const updated = await shopOrders.updateByIdAsync(order.id, { status: 'cancelled', paymentStatus, timeline, updatedAt: at });
+    try { await onOrderCancelled(order); } catch (err) { console.warn('[shop] cancelled order not taken back from a promotion:', err?.message); }
     await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: `shop_order_cancelled_by_${role}`, target: order.id, before: { status: order.status, paymentStatus: order.paymentStatus }, after: { status: 'cancelled', paymentStatus } });
     let refund = null;
     if (wasPaid) {

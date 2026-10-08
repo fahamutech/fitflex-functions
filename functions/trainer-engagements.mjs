@@ -1,7 +1,7 @@
 // A4/C2/C3 — trainer engagement + sessions + earnings REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { trainerEngagementService, trainerBookingService, subscriptionService, trainerService } from '../src/bootstrap/services.mjs';
+import { trainerEngagementService, trainerBookingService, subscriptionService, trainerService, moderationGate } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -13,6 +13,8 @@ export const memberEngageTrainer = {
   requestSample: { type: 'enquiry', message: 'Do you offer morning sessions?' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
+    // A trainer who is hidden or suspended in moderation cannot be newly engaged.
+    if (await moderationGate.isBlocked('trainer', req.params.id)) return res.status(409).json({ error: 'trainer_unavailable' });
     const { type, message, gymId } = req.body || {};
     const result = await trainerEngagementService.create({
       memberId: req.user.sub, trainerId: req.params.id, type, message, gymId,

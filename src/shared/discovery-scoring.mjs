@@ -28,6 +28,8 @@ export function textRelevance(query, primary, secondary = []) {
   if (!q) return 0;
   const name = norm(primary);
   const tokens = words(q);
+  // A search with nothing to match on (only punctuation or symbols) matches nothing, rather than everything.
+  if (!tokens.length) return 0;
   const others = secondary.map(norm).filter(Boolean);
   const nameWords = words(name);
   const hay = [name, ...others];
