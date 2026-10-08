@@ -38,7 +38,7 @@ export const getGym = {
   description: 'Get a single gym',
   onRequest: async (req, res) => {
     const g = gymService.findById(req.params.id);
-    if (!g) return res.status(404).json({ error: 'not_found' });
+    if (!g || await moderationGate.isBlocked('gym', g.id)) return res.status(404).json({ error: 'not_found' });
     const [shown] = await partnerGate.badgeGyms([g]);
     res.json(forViewer(req, shown));
   }

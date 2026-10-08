@@ -52,7 +52,8 @@ export function createPromotionService({
   const areasById = async () => new Map((await geoAreas.allAsync()).map(a => [a.id, a]));
 
   async function withPlacements(rows) {
-    const links = await placements.filterAsync(l => rows.some(r => r.id === l.promotionId));
+    const wanted = new Set(rows.map(r => r.id));
+    const links = await placements.filterAsync(l => wanted.has(l.promotionId));
     const by = new Map();
     for (const l of links) by.set(l.promotionId, [...(by.get(l.promotionId) || []), l.placement]);
     return rows.map(r => ({ ...r, placements: (by.get(r.id) || []).sort() }));
@@ -111,12 +112,20 @@ export function createPromotionService({
     if (type) rows = rows.filter(r => r.type === type);
     if (placement) rows = rows.filter(r => r.placements.includes(placement));
     if (campaignId) rows = rows.filter(r => r.campaignId === campaignId);
-    rows.sort((a, b) => a.priority - b.priority || ms(b.createdAt) - ms(a.createdAt));
+    // A search is applied before paging, so the total and the next page are those of the matches.
+    const needle = text(q, 100)?.toLowerCase();
+    if (needle) {
+      const names = new Map();
+      for (const type of new Set(rows.map(r => r.entityType))) {
+        for (const e of await entities.listAll(type)) names.set(`${type}:${e.id}`, entities.summary(type, e).name || '');
+      }
+      rows = rows.filter(r => `${names.get(`${r.entityType}:${r.entityId}`) || ''} ${r.commercialRef || ''}`.toLowerCase().includes(needle));
+    }
+    rows.sort((a, b) => a.priority - b.priority || ms(b.createdAt) - ms(a.createdAt) || String(a.id).localeCompare(String(b.id)));
     const pageOut = page(rows, { limit, cursor });
     const items = [];
     for (const p of pageOut.items) items.push(view(p, await summaryFor(p)));
-    const needle = text(q, 100)?.toLowerCase();
-    return { ...pageOut, items: needle ? items.filter(i => `${i.entity?.name || ''} ${i.commercialRef || ''}`.toLowerCase().includes(needle)) : items };
+    return { ...pageOut, items };
   }
 
   async function history(id) {
@@ -192,7 +201,8 @@ export function createPromotionService({
     const before = await configs.findByIdAsync(id);
     const row = {
       id, placement, promotionType, maxSlots,
-      maxBoostFraction: maxBoostFraction == null ? null : Number(maxBoostFraction),
+      // Left out keeps the configured cap; an explicit null clears it back to the platform default.
+      maxBoostFraction: maxBoostFraction === undefined ? (before?.maxBoostFraction ?? null) : maxBoostFraction === null ? null : Number(maxBoostFraction),
       rotationMode: rotationMode ?? before?.rotationMode ?? DEFAULT_ROTATION.mode,
       rotationWindowMinutes: rotationWindowMinutes ?? before?.rotationWindowMinutes ?? DEFAULT_ROTATION.windowMinutes,
       updatedBy: actorId, updatedAt: stamp(),
@@ -274,10 +284,10 @@ export function createPromotionService({
     partnerRef: p.partnerRef, isCommercial: p.isCommercial, relationshipType: p.relationshipType, commercialRef: p.commercialRef,
   });
 
-  /** Moving the end date of a held promotion can take a slot in a later period, so it takes the capacity lock too. */
-  const update = args => (args?.body?.endsAt !== undefined ? withLock(CAPACITY_LOCK, () => updateUnlocked(args)) : updateUnlocked(args));
+  /** Edits are made alone too (moving an end date can take a slot in a later period). */
+  const update = args => withLock(CAPACITY_LOCK, () => updateUnlocked(args));
 
-  async function updateUnlocked({ id, body, actorId }) {
+  async function updateUnlocked({ id, body, actorId, canRank = true }) {
     if (!actorId) return fail('actor_required', 403);
     const current = await load(id);
     if (!current) return fail('promotion_not_found', 404);
@@ -288,6 +298,8 @@ export function createPromotionService({
       }
       const locked = sent.filter(k => !LIVE_EDITABLE_FIELDS.includes(k));
       if (locked.length) return fail('field_locked', 409, { fields: locked, editable: LIVE_EDITABLE_FIELDS });
+      // How strongly an approved promotion ranks was decided by the approver; changing it is theirs to do.
+      if (!canRank && sent.some(k => k === 'priority' || k === 'boostWeight')) return fail('ranking_change_requires_approver', 403, { requiredScope: 'promotions_approve' });
     }
     const v = validatePromotionInput(body, { partial: true, now: now() });
     if (v.error) return fail(v.error, 422, { field: v.field });
@@ -327,15 +339,16 @@ export function createPromotionService({
     return { promotion: view(saved, await summaryFor(saved)) };
   }
 
-  async function act(id, actorId, fn, { capacity = false } = {}) {
+  async function act(id, actorId, fn) {
     if (!actorId) return fail('actor_required', 403);
-    const run = async () => {
+    // Every change of state is made alone: it reads the promotion, decides and writes, and nothing else changes it
+    // in between. Whatever claims a slot checks the room and then takes it, so two at once cannot both see the last
+    // slot free, and two people cannot both approve (or one approve while another rejects) the same promotion.
+    return withLock(CAPACITY_LOCK, async () => {
       const p = await load(id);
       if (!p) return fail('promotion_not_found', 404);
       return fn(p);
-    };
-    // Whatever claims a slot checks the room and then takes it; two at once must not both see the last slot free.
-    return capacity ? withLock(CAPACITY_LOCK, run) : run();
+    });
   }
 
   const invalid = (p, to) => fail('invalid_transition', 409, { from: p.status, to });
@@ -365,7 +378,7 @@ export function createPromotionService({
     const cap = await capacityFor(p);
     if (!cap.ok) return fail('placement_full', 409, { capacity: cap.results.filter(r => r.full) });
     return move(p, 'approved', { actorId, action: 'approved', extra: { approvedBy: actorId, approvedAt: stamp() } });
-  }, { capacity: true });
+  });
 
   const reject = ({ id, actorId, reason }) => act(id, actorId, async (p) => {
     if (!canTransition(p.status, 'rejected')) return invalid(p, 'rejected');
@@ -395,14 +408,14 @@ export function createPromotionService({
     const problem = await guardLive(p, { needsWindow: 'future' });
     if (problem) return problem;
     return move(p, 'scheduled', { actorId, action: 'scheduled' });
-  }, { capacity: true });
+  });
 
   const activate = ({ id, actorId }) => act(id, actorId, async (p) => {
     if (!['approved', 'scheduled'].includes(p.status)) return invalid(p, 'active');
     const problem = await guardLive(p, { needsWindow: 'open' });
     if (problem) return problem;
     return move(p, 'active', { actorId, action: 'activated', extra: { activatedAt: stamp(), pausedAt: null } });
-  }, { capacity: true });
+  });
 
   const pause = ({ id, actorId, reason }) => act(id, actorId, async (p) => {
     if (!['active', 'scheduled'].includes(p.status)) return invalid(p, 'paused');
@@ -421,7 +434,7 @@ export function createPromotionService({
     // Before its start it goes back to being scheduled; otherwise it is live again.
     const to = ms(p.startsAt) > now().getTime() ? 'scheduled' : 'active';
     return move(p, to, { actorId, action: 'resumed', extra: { pausedAt: null, ...(to === 'active' ? { activatedAt: stamp() } : {}) } });
-  }, { capacity: true });
+  });
 
   const cancel = ({ id, actorId, reason }) => act(id, actorId, async (p) => {
     if (!canTransition(p.status, 'cancelled')) return invalid(p, 'cancelled');
@@ -476,21 +489,26 @@ export function createPromotionService({
     for (const row of rows) {
       out.processed += 1;
       try {
-        const p = await load(row.id);
-        const eff = effectiveStatus(p, now());
-        if (eff === 'expired') {
-          await move(p, 'expired', { actorId: actor, action: 'expired', reason: 'End date passed' });
-          out.expired += 1;
-        } else if (p.status === 'scheduled' && eff === 'active') {
-          const mod = await moderation.statusOf(p.entityType, p.entityId);
-          if (isModerationBlocking(mod)) {
-            await move(p, 'paused', { actorId: actor, action: 'paused', reason: `Entity ${mod} in moderation`, extra: { pausedAt: stamp() } });
-            out.held += 1;
-          } else {
-            await move(p, 'active', { actorId: actor, action: 'activated', reason: 'Scheduled start reached', extra: { activatedAt: stamp() } });
-            out.activated += 1;
+        // Each promotion is moved on alone and from its current state: an admin who paused or cancelled it a moment
+        // ago is not overwritten by what this run read earlier.
+        await withLock(CAPACITY_LOCK, async () => {
+          const p = await load(row.id);
+          if (!p || p.status !== row.status) return;
+          const eff = effectiveStatus(p, now());
+          if (eff === 'expired') {
+            await move(p, 'expired', { actorId: actor, action: 'expired', reason: 'End date passed' });
+            out.expired += 1;
+          } else if (p.status === 'scheduled' && eff === 'active') {
+            const mod = await moderation.statusOf(p.entityType, p.entityId);
+            if (isModerationBlocking(mod)) {
+              await move(p, 'paused', { actorId: actor, action: 'paused', reason: `Entity ${mod} in moderation`, extra: { pausedAt: stamp() } });
+              out.held += 1;
+            } else {
+              await move(p, 'active', { actorId: actor, action: 'activated', reason: 'Scheduled start reached', extra: { activatedAt: stamp() } });
+              out.activated += 1;
+            }
           }
-        }
+        });
       } catch (err) {
         out.failed += 1;
         console.error(`[promotion-lifecycle] ${row.id}:`, err.message);
@@ -499,7 +517,11 @@ export function createPromotionService({
     return out;
   }
 
-  /** An entity was suspended, hidden, rejected or sent back for review: stop its running promotions. */
+  /**
+   * An entity was suspended, hidden, rejected or sent back for review: stop its running promotions.
+   * Called from the moderation decision, which already holds the capacity lock (it is not re-entrant
+   * across connections, so this must not take it again).
+   */
   async function holdForEntity(entityType, entityId, { actor, reason }) {
     const rows = (await promotions.allAsync())
       .filter(p => p.entityType === entityType && p.entityId === entityId && ['scheduled', 'active'].includes(p.status));
@@ -539,13 +561,15 @@ export function createPromotionService({
     return out.sort((a, b) => a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
   }
 
-  async function overview() {
+  async function overview({ includeActivity = true } = {}) {
     const all = await withPlacements(await promotions.allAsync());
     const eff = p => effectiveStatus(p, now());
     const t = now().getTime();
     const mod = await moderation.counts();
-    const recent = (await auditLog.filterAsync(a => /^(promotion|moderation|campaign)\./.test(String(a.action))))
-      .sort((a, b) => ms(b.at) - ms(a.at)).slice(0, 15);
+    // Who did what, with reasons, is only for those who run promotions or moderation, not for analytics-only staff.
+    const recent = includeActivity
+      ? (await auditLog.filterAsync(a => /^(promotion|moderation|campaign)\./.test(String(a.action)))).sort((a, b) => ms(b.at) - ms(a.at)).slice(0, 15)
+      : [];
     return {
       active: all.filter(p => eff(p) === 'active').length,
       scheduled: all.filter(p => eff(p) === 'scheduled').length,
@@ -695,6 +719,7 @@ export function createPromotionService({
     if (!parent || parent.level !== AREA_PARENT_LEVEL[level]) return fail('invalid_parent', 422, { field: 'parentId', expectedLevel: AREA_PARENT_LEVEL[level] });
     const coords = ['lat', 'lng', 'radiusKm'].map(k => (body?.[k] == null ? null : Number(body[k])));
     if (coords.some(c => c !== null && !Number.isFinite(c))) return fail('invalid_coordinates', 422);
+    if ((coords[0] !== null && Math.abs(coords[0]) > 90) || (coords[1] !== null && Math.abs(coords[1]) > 180) || (coords[2] !== null && coords[2] <= 0)) return fail('invalid_coordinates', 422);
     const id = text(body?.id, 80) || `${parent.id}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
     if (await geoAreas.findByIdAsync(id)) return fail('area_exists', 409);
     const at = stamp();

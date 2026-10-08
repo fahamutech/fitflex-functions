@@ -144,6 +144,7 @@ export function validatePromotionInput(input = {}, { partial = false, now = new 
     out.priority = p;
   }
   if (has('boostWeight')) {
+    if (input.boostWeight === null || input.boostWeight === '' || typeof input.boostWeight === 'boolean') return bad('invalid_boost_weight', 'boostWeight');
     const w = Number(input.boostWeight);
     if (!Number.isFinite(w) || w < 0 || w > 1) return bad('invalid_boost_weight', 'boostWeight');
     out.boostWeight = w;
@@ -154,11 +155,16 @@ export function validatePromotionInput(input = {}, { partial = false, now = new 
     if (g.error) return bad(g.error, 'geoScope');
     out.geoScope = g.value;
   }
-  if (has('audience')) out.audience = input.audience && typeof input.audience === 'object' ? input.audience : {};
+  if (has('audience')) {
+    const a = input.audience && typeof input.audience === 'object' && !Array.isArray(input.audience) ? input.audience : {};
+    if (JSON.stringify(a).length > 2000) return bad('audience_too_large', 'audience');
+    out.audience = a;
+  }
   else if (!partial) out.audience = {};
   if (has('categories')) {
     if (!Array.isArray(input.categories)) return bad('invalid_categories', 'categories');
     out.categories = [...new Set(input.categories.map(c => text(c, 60)).filter(Boolean))];
+    if (out.categories.length > 20) return bad('too_many_categories', 'categories');
   } else if (!partial) out.categories = [];
 
   if (has('campaignId')) out.campaignId = text(input.campaignId, 120);
@@ -196,9 +202,9 @@ export function checkPromotionRules(p, { now = new Date(), requireFuture = false
 
 /** The label shown to users. A commercially influenced placement is always labelled. */
 export function disclosureLabel(p) {
-  if (p.disclosureLabel) return p.disclosureLabel;
-  const base = PROMOTION_TYPES[p.type]?.disclosure || 'Promoted';
-  // Paid featured/promoted placements say "Sponsored" only if no explicit label is set; the type label otherwise.
+  const base = p.disclosureLabel || PROMOTION_TYPES[p.type]?.disclosure || 'Promoted';
+  // A paid placement always says so, whatever wording was chosen: "Top pick" alone could not be told from an organic one.
+  if (p.isCommercial && !/sponsor|advert|\bad\b/i.test(base)) return `${base} · Sponsored`;
   return base;
 }
 
@@ -210,6 +216,7 @@ export function normaliseGeoScope(scope) {
   if (scope == null) return { value: { areaIds: [] } };
   if (typeof scope !== 'object' || Array.isArray(scope)) return { error: 'invalid_geo_scope' };
   const areaIds = Array.isArray(scope.areaIds) ? [...new Set(scope.areaIds.filter(a => typeof a === 'string' && a))] : [];
+  if (areaIds.length > 50) return { error: 'too_many_areas' };
   const value = { areaIds };
   if (scope.radius != null) {
     const { lat, lng, km } = scope.radius;
@@ -305,8 +312,9 @@ export function capacityCheck(promotion, others, configs, areasById = new Map())
 /** Per-placement caps: a configured row, else the default share of the score range. */
 export function boostCap(configs, placement, type = null) {
   const rows = (configs || []).filter(c => c.placement === placement && c.maxBoostFraction != null);
-  // A setting for this promotion type wins; else any setting for the placement; else the platform default.
-  const row = (type && rows.find(c => c.promotionType === type)) || rows[0];
+  // The setting for this promotion type, else the platform default: one type's cap never applies to another.
+  // (With no type named, any setting for the placement.)
+  const row = type ? rows.find(c => c.promotionType === type) : rows[0];
   return row ? Number(row.maxBoostFraction) : DEFAULT_MAX_BOOST_FRACTION;
 }
 

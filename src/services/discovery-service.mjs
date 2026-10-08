@@ -123,7 +123,7 @@ export function createDiscoveryService({
    * One page of ranked results. `shape(row)` lets the caller trim a row for the
    * viewer (a gym's trainer-pass pricing is for trainers only).
    */
-  async function discover({ entityType, q, filters = {}, lat, lng, areaId, sort = 'relevance', placement, limit, cursor, explain = false, shape = r => r }) {
+  async function discover({ entityType, q, filters = {}, lat, lng, areaId, sort = 'relevance', placement, limit, cursor, rotation, explain = false, shape = r => r }) {
     if (!DISCOVERABLE.includes(entityType)) return fail('invalid_entity_type', 400);
     if (!SORTS.includes(sort)) return fail('invalid_sort', 400);
     if (placement !== undefined && !(PLACEMENTS[placement]?.entityTypes || []).includes(entityType)) return fail('invalid_placement', 400);
@@ -174,6 +174,7 @@ export function createDiscoveryService({
     let featuredCards = [];
     let ordered;
     let promotionsApplied = false;
+    let rotationUsed = 0;
 
     if (sort === 'relevance') {
       // 4: promotions, by place and viewer, only for results still in the list.
@@ -185,7 +186,9 @@ export function createDiscoveryService({
         .filter(p => { const s = byKey.get(p.entityKey); return !!s && entityEligibility(entityType, s.row, 'approved').ok; });
       const cfg = await configs.allAsync();
       const featuredRow = cfg.find(c => c.placement === placementUsed && c.promotionType === 'featured');
-      const slice = featuredRow?.rotationMode === 'none' ? 0 : rotationSlice(now(), featuredRow?.rotationWindowMinutes ?? DEFAULT_ROTATION.windowMinutes);
+      // A later page sends back the rotation turn it was given, so ties are not shuffled between pages.
+      const slice = Number.isInteger(rotation) ? rotation : (featuredRow?.rotationMode === 'none' ? 0 : rotationSlice(now(), featuredRow?.rotationWindowMinutes ?? DEFAULT_ROTATION.windowMinutes));
+      rotationUsed = slice;
       const featured = pickFeatured(live.filter(p => p.type === 'featured'), scored.map(s => s.key), { max: slotLimit(cfg, placementUsed, 'featured'), slice });
       const featuredKeys = new Set(featured.map(p => p.entityKey));
       featuredCards = featured.map(p => {
@@ -198,7 +201,8 @@ export function createDiscoveryService({
       ordered = ranked.map(r => ({ ...r._s, boost: r.boost, promo: r.boost > 0 ? r.promotion : null }));
       promotionsApplied = true;
     } else {
-      ordered = [...scored].sort(compare[sort] || (() => 0)).map(s => ({ ...s, boost: 0, promo: null }));
+      // The key is the last tie-break of every sort, so the same request always gives the same order.
+      ordered = [...scored].sort((a, b) => (compare[sort] ? compare[sort](a, b) : 0) || String(a.key).localeCompare(String(b.key))).map(s => ({ ...s, boost: 0, promo: null }));
     }
 
     const total = ordered.length;
@@ -214,7 +218,7 @@ export function createDiscoveryService({
       // The Featured section is only on the first page; it is never repeated in the list below it.
       featured: offset === 0 ? featuredCards : [],
       total, nextCursor: offset + pageSize < total ? offset + pageSize : null,
-      placement: placementUsed, sort, promotionsApplied,
+      placement: placementUsed, sort, promotionsApplied, rotation: rotationUsed,
       filters: Object.fromEntries(Object.entries({ q: query || undefined, ...f }).filter(([, v]) => v !== undefined)),
     };
   }

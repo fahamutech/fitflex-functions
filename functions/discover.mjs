@@ -20,6 +20,7 @@ async function run(entityType, req, res, shape) {
     filters: Object.fromEntries(FILTERS.filter(k => req.query?.[k] !== undefined).map(k => [k, req.query[k]])),
     lat: number(req.query?.lat), lng: number(req.query?.lng), areaId: req.query?.areaId,
     sort: req.query?.sort || 'relevance', placement: req.query?.placement, limit: req.query?.limit, cursor: req.query?.cursor,
+    rotation: Number.isInteger(number(req.query?.rotation)) ? number(req.query.rotation) : undefined,
     explain: claims?.userType === 'admin' && req.query?.explain === 'true',
     shape,
   });
@@ -27,7 +28,7 @@ async function run(entityType, req, res, shape) {
   return res.json(out);
 }
 
-const QUERY_DOC = 'Query: ?q= search, ?lat=&lng= or ?areaId= for nearness and local promotions, ?sort=relevance|distance|rating|popularity|name (default relevance: promotions apply; any other sort turns them off), ?limit=&cursor= paging, and the filters. ?placement= overrides where promotions are read from.';
+const QUERY_DOC = 'Query: ?q= search, ?lat=&lng= or ?areaId= for nearness and local promotions, ?sort=relevance|distance|rating|popularity|name (default relevance: promotions apply; any other sort turns them off), ?limit=&cursor= paging (send back the `rotation` of the first page with the cursor so equal results keep their order), and the filters. ?placement= overrides where promotions are read from.';
 
 export const discoverGyms = {
   created, method: 'get', path: '/discover/gyms',

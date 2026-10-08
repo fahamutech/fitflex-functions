@@ -3,7 +3,7 @@
 // only what a member has switched on.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { trainerClientService as svc } from '../src/bootstrap/services.mjs';
+import { trainerClientService as svc, moderationGate } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -26,7 +26,11 @@ export const requestTrainerConnection = {
   description: 'Member: ask a trainer to connect. { permissions: { steps, distance, activeMinutes, workoutHistory, workoutDetails, goals, streaks, challenges } } — all default to false.',
   requestSample: { permissions: { workoutHistory: true, goals: true } },
   onGuard: requireAuth('member'),
-  onRequest: async (req, res) => send(res, await svc.request(req.user.sub, req.params.id, req.body || {}), 201)
+  onRequest: async (req, res) => {
+    // A trainer who is hidden or suspended in moderation cannot be newly connected with.
+    if (await moderationGate.isBlocked('trainer', req.params.id)) return res.status(409).json({ error: 'trainer_unavailable' });
+    return send(res, await svc.request(req.user.sub, req.params.id, req.body || {}), 201);
+  }
 };
 
 export const updateTrainerConnection = {

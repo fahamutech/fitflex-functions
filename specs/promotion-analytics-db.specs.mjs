@@ -161,9 +161,9 @@ test('ingest: a client clock that is plausible is used, an implausible one is re
   const g = await gym();
   const p = await livePromotion('gym', g);
   const ev = (at, type = 'click') => ({ type, entityType: 'gym', entityId: g, promotionId: p, placement: 'gym_discovery', sessionId: session(), at });
-  await call(postPromotionEvents, { body: { events: [ev(iso(-2 * HOUR)), ev(iso(-30 * DAY)), ev(iso(2 * DAY)), ev('garbage')] } });
+  await call(postPromotionEvents, { body: { events: [ev(iso(-HOUR / 2)), ev(iso(-30 * DAY)), ev(iso(2 * DAY)), ev('garbage')] } });
   const times = (await rows(p)).map(r => Date.now() - new Date(r.at).getTime());
-  assert.equal(times.filter(t => t > 1.9 * HOUR && t < 2.1 * HOUR).length, 1);          // the believable one is kept
+  assert.equal(times.filter(t => t > 0.45 * HOUR && t < 0.55 * HOUR).length, 1);          // the believable one is kept
   assert.equal(times.filter(t => t < 60_000).length, 3);                                  // the rest are "now"
 });
 
@@ -225,7 +225,7 @@ test('purchase: a paid shop order is credited through the real order path, and a
   const pr = await product(0);                                                                       // a free item: the order is paid at once
   const p = await livePromotion('product', pr.id, { placements: ['marketplace'] });
   const buyer = await admin();
-  await seed(p, 'product', pr.id, 'detail_view', Date.now() - HOUR, { userId: buyer, placement: 'marketplace' });
+  await seed(p, 'product', pr.id, 'click', Date.now() - HOUR, { userId: buyer, placement: 'marketplace' });
   const gymId = await gym();
   const placed = await shopService.createOrder({ buyerId: buyer, body: { items: [{ productId: pr.id, qty: 1 }], deliveryMethod: 'gym_pickup', pickupGymId: gymId, paymentMethod: 'mpesa' } });
   assert.ok(placed.order, JSON.stringify(placed));

@@ -2,6 +2,7 @@
 // only, from real rows; a step the apps cannot observe yet (completed bookings
 // and subscriptions) is reported as not tracked, never as zero.
 import { rates, emptyTotals } from '../shared/promotion-events.mjs';
+import { PLACEMENTS } from '../shared/promotion-config.mjs';
 
 const TABLE = 'PromotionEvent';
 const EAT = 'Africa/Dar_es_Salaam';
@@ -22,14 +23,15 @@ const COUNTS = `
   count(*) filter (where "event" = 'booking')::int as "bookings",
   count(*) filter (where "event" = 'subscription')::int as "subscriptions",
   count(*) filter (where "event" = 'purchase')::int as "purchases",
-  coalesce(sum("valueTzs") filter (where "event" = 'purchase'), 0)::int as "purchaseValueTzs",
+  coalesce(sum("valueTzs") filter (where "event" = 'purchase'), 0)::bigint as "purchaseValueTzs",
   count(distinct coalesce("userId", "sessionId")) filter (where "event" = 'impression')::int as "uniqueViewers"`;
 
 /** What the apps cannot observe yet, so the dashboard can say so. */
 export const NOT_TRACKED = Object.freeze(['booking_conversions', 'subscription_conversions']);
 
 const withRates = t => ({ ...t, ...rates(t) });
-const fromRow = r => ({ ...emptyTotals(), ...Object.fromEntries(Object.entries(r || {}).filter(([k]) => k in emptyTotals())) });
+// bigint sums arrive as text; every total is a plain number.
+const fromRow = r => ({ ...emptyTotals(), ...Object.fromEntries(Object.entries(r || {}).filter(([k]) => k in emptyTotals()).map(([k, v]) => [k, Number(v)])) });
 
 export function createPromotionAnalyticsService({ db, promotions, campaigns, entities, now = () => new Date() }) {
   const eatDay = d => new Date(d.getTime() + 3 * 3_600_000).toISOString().slice(0, 10);
@@ -68,6 +70,7 @@ export function createPromotionAnalyticsService({ db, promotions, campaigns, ent
   async function summary(q = {}) {
     const r = range(q);
     if (r.error) return r;
+    if (q.placement !== undefined && !(typeof q.placement === 'string' && PLACEMENTS[q.placement])) return fail('invalid_placement', 400);
     let list = (await promotions.allAsync()).filter(p => p.status !== 'draft' && p.status !== 'pending_approval' && p.status !== 'rejected');
     if (q.type) list = list.filter(p => p.type === q.type);
     if (q.entityType) list = list.filter(p => p.entityType === q.entityType);

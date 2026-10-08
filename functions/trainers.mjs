@@ -19,7 +19,7 @@ export const getTrainer = {
   description: 'Public trainer profile detail.',
   onRequest: async (req, res) => {
     const trainer = await trainerService.getPublic(req.params.id);
-    if (!trainer) return res.status(404).json({ error: 'not_found' });
+    if (!trainer || await moderationGate.isBlocked('trainer', trainer.id)) return res.status(404).json({ error: 'not_found' });
     res.json(trainer);
   }
 };

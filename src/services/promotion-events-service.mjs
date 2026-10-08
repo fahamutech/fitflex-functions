@@ -10,6 +10,8 @@ import {
 const TABLE = 'PromotionEvent';
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 /** Promotions that have actually been shown to customers; a draft or rejected one has no audience. */
+const START_SLACK_MS = 15 * 60_000;
+const END_SLACK_MS = 6 * 3_600_000;
 const SERVED = new Set(['approved', 'scheduled', 'active', 'paused', 'expired', 'completed', 'cancelled']);
 
 export function createPromotionEventsService({ db, promotions, now = () => new Date() }) {
@@ -26,7 +28,8 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
     const at = now();
     const checked = events.map(raw => validateClientEvent(raw, at));
     const ids = [...new Set(checked.filter(c => c.value?.promotionId).map(c => c.value.promotionId))];
-    const known = new Map((ids.length ? await promotions.filterAsync(p => ids.includes(p.id)) : []).map(p => [p.id, p]));
+    // Only the promotions named, by id: this is called on every scroll of every app, so it must not read the whole table.
+    const known = new Map((ids.length ? await db('Promotion').whereIn('id', ids).select('id', 'entityType', 'entityId', 'status', 'campaignId', 'startsAt', 'endsAt') : []).map(p => [p.id, p]));
 
     const rows = [];
     const rejected = [];
@@ -38,11 +41,14 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
       if (!p) return rejected.push({ index, error: 'promotion_not_found' });
       if (p.entityType !== v.entityType || p.entityId !== v.entityId) return rejected.push({ index, error: 'promotion_mismatch' });
       if (!SERVED.has(p.status)) return rejected.push({ index, error: 'promotion_not_served' });
+      // An event is about a time the promotion was running (a little before its start for the scheduler's lag, a while after its end for offline phones).
+      if (v.at < new Date(new Date(p.startsAt).getTime() - START_SLACK_MS) || v.at > new Date(new Date(p.endsAt).getTime() + END_SLACK_MS)) return rejected.push({ index, error: 'outside_promotion_period' });
       rows.push({
         index,
         id: randomUUID(), at: v.at, event: v.event, entityType: v.entityType, entityId: v.entityId, promotionId: p.id,
         campaignId: p.campaignId || null, placement: v.placement, userId, sessionId: v.sessionId, source, valueTzs: null,
-        dedupeKey: dedupeKey(v),
+        // The repeat window is counted on our clock, not the phone's, so a client cannot mint a new window by changing its time.
+        dedupeKey: dedupeKey({ ...v, at }),
       });
     });
 
@@ -91,7 +97,7 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
 
   /**
    * A shop order was paid: credit each product to the promotion the buyer
-   * opened (a click or a product page) in the last week, if there was one.
+   * tapped in the last week, if there was one.
    * Safe to call twice for an order; it never throws into the order.
    */
   async function recordPaidOrder(order) {
@@ -102,7 +108,7 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
       for (const item of order.items) {
         const touch = await db(TABLE)
           .where({ userId: order.buyerId, entityType: 'product', entityId: item.productId })
-          .whereIn('event', ['click', 'detail_view'])
+          .where('event', 'click')
           .whereNotNull('promotionId').where('at', '>=', since)
           .orderBy('at', 'desc').first('promotionId', 'campaignId', 'placement');
         if (!touch) continue;
@@ -121,13 +127,34 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
     }
   }
 
-  /** Delete raw events older than the retention period. Idempotent. */
+  /** An order was cancelled or refunded: what it was credited for is taken back, so purchases and revenue are not overstated. */
+  async function reversePaidOrder(order) {
+    try {
+      if (!order?.id) return { reversed: 0 };
+      const reversed = await db(TABLE).where('dedupeKey', 'like', `purchase:${order.id}:%`).del();
+      return { reversed };
+    } catch (err) {
+      console.warn('[promotion-events] purchase not reversed:', err?.message);
+      return { reversed: 0 };
+    }
+  }
+
+  /** The customer deleted their account: their events stay as counts but no longer say who. */
+  async function forgetUser(userId) {
+    if (!userId) return { cleared: 0 };
+    return { cleared: await db(TABLE).where({ userId }).update({ userId: null }) };
+  }
+
+  /** Delete raw events older than the retention period (calendar months back, clamped to the month's length). Idempotent. */
   async function purge({ months = RETENTION_MONTHS } = {}) {
     const cutoff = new Date(now());
+    const day = cutoff.getUTCDate();
+    cutoff.setUTCDate(1);
     cutoff.setUTCMonth(cutoff.getUTCMonth() - months);
+    cutoff.setUTCDate(Math.min(day, new Date(Date.UTC(cutoff.getUTCFullYear(), cutoff.getUTCMonth() + 1, 0)).getUTCDate()));
     const deleted = await db(TABLE).where('at', '<', cutoff).del();
     return { deleted, cutoff: cutoff.toISOString() };
   }
 
-  return { ingest, recordPaidOrder, purge };
+  return { ingest, recordPaidOrder, reversePaidOrder, forgetUser, purge };
 }

@@ -22,6 +22,7 @@ function send(res, result, okStatus = 200) {
 const LIMITS = { perMinute: 1200, perHour: 6000, allCallersPerMinute: 30000 };
 const buckets = new Map();
 const everyone = { count: 0, resetAt: 0 };
+let lastSweep = 0;
 function take(bucket, n, windowMs, limit, nowMs) {
   if (bucket.resetAt <= nowMs) { bucket.count = 0; bucket.resetAt = nowMs + windowMs; }
   if (bucket.count + n > limit) return false;
@@ -36,7 +37,11 @@ function allow(key, n) {
   const probe = (b, windowMs, limit) => (b.resetAt <= nowMs ? n <= limit : b.count + n <= limit);
   if (!probe(mine.minute, 60_000, LIMITS.perMinute) || !probe(mine.hour, 3_600_000, LIMITS.perHour) || !probe(everyone, 60_000, LIMITS.allCallersPerMinute)) return false;
   take(mine.minute, n, 60_000, LIMITS.perMinute, nowMs); take(mine.hour, n, 3_600_000, LIMITS.perHour, nowMs); take(everyone, n, 60_000, LIMITS.allCallersPerMinute, nowMs);
-  if (buckets.size > 5000) for (const [k, v] of buckets) if (v.hour.resetAt <= nowMs) buckets.delete(k);
+  // Forget callers whose hour is over, at most once a minute, so a flood of made-up keys cannot make every call slow.
+  if (buckets.size > 5000 && nowMs - lastSweep > 60_000) {
+    lastSweep = nowMs;
+    for (const [k, v] of buckets) if (v.hour.resetAt <= nowMs) buckets.delete(k);
+  }
   return true;
 }
 const callerKey = (req, claims) => claims?.sub || String(req.headers?.['x-forwarded-for'] || req.ip || 'anon').split(',')[0].trim();

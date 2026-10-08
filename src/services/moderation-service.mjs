@@ -22,6 +22,8 @@ export function createModerationService({
   states, events, entities, auditLog,
   // Called after an entity becomes blocked, so live promotions on it are held: (type, id, { actor, reason }).
   onEntityBlocked = null,
+  // Serialises decisions with promotion changes, across servers: (key, fn) => fn's result. Default: run at once.
+  withLock = (_key, fn) => fn(),
   now = () => new Date(),
 }) {
   const stamp = () => now().toISOString();
@@ -70,7 +72,8 @@ export function createModerationService({
       out.push({ entityType, ...summary, moderationStatus: s, reason: row?.reason || null, decidedBy: row?.decidedBy || null, decidedAt: row?.decidedAt || null });
     }
     // Pending first, then by name, so the queue reads oldest-decision-last.
-    out.sort((a, b) => a.name.localeCompare(b.name));
+    const order = { pending: 0, suspended: 1, rejected: 2, hidden: 3, approved: 4 };
+    out.sort((a, b) => (order[a.moderationStatus] - order[b.moderationStatus]) || a.name.localeCompare(b.name) || String(a.id).localeCompare(String(b.id)));
     return { ...page(out, { limit, cursor }), counts: await counts({ entityType }) };
   }
 
@@ -95,8 +98,14 @@ export function createModerationService({
     };
   }
 
-  /** Run one moderation action. Validates the transition server-side; the UI only offers what is allowed. */
-  async function decide({ entityType, entityId, action, reason, actorId }) {
+  /**
+   * Run one moderation action. Validates the transition server-side; the UI only offers what is allowed.
+   * It is made alone, under the same lock as promotion changes, so a suspension cannot interleave with
+   * an activation and leave a live promotion on a suspended listing.
+   */
+  const decide = args => withLock('promotion-capacity', () => decideUnlocked(args));
+
+  async function decideUnlocked({ entityType, entityId, action, reason, actorId }) {
     if (!ENTITY_TYPES[entityType]) return fail('invalid_entity_type', 400);
     if (!actorId) return fail('actor_required', 403);
     const entity = await entities.get(entityType, entityId);
