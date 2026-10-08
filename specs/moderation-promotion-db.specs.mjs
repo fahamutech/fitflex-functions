@@ -363,6 +363,20 @@ test('routes: limits, campaigns and geography need the campaigns scope', async (
   assert.equal(prev.statusCode, 404);
 });
 
+test('routes: the wizard lookups need the promotions scope and answer from the real tables', async () => {
+  const admin = await makeAdmin();
+  const gymId = await makeGym({ name: 'Lookup Gym Zanzibar' });
+  assert.equal((await call(promotionRoutes.searchPromotionEntities, { claims: staff(admin, 'moderation'), query: { entityType: 'gym' } })).statusCode, 403);
+  const found = await call(promotionRoutes.searchPromotionEntities, { claims: staff(admin, 'promotions'), query: { entityType: 'gym', q: 'lookup gym zanzibar' } });
+  assert.equal(found.statusCode, 200);
+  assert.deepEqual(found.body.items.map(i => [i.id, i.promotable]), [[gymId, true]]);
+  assert.equal((await call(promotionRoutes.searchPromotionEntities, { claims: staff(admin, 'promotions'), query: { entityType: 'nope' } })).statusCode, 400);
+  const partners = await call(promotionRoutes.searchPromotionPartners, { claims: staff(admin, 'promotions'), query: { q: 'zzz-no-such-organisation' } });
+  assert.equal(partners.statusCode, 200);
+  assert.deepEqual(partners.body.items, []);
+  assert.equal((await call(promotionRoutes.searchPromotionPartners, { claims: staff(admin, 'campaigns') })).statusCode, 403);
+});
+
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
 test('wiring: new scopes are grantable, and the lifecycle job is registered and runnable', async () => {

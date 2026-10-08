@@ -549,3 +549,31 @@ test('reference: placements, types and defaults are exposed for the admin UI', (
   assert.equal(ref.defaultLimits.featured, 5);
   assert.deepEqual(w.moderationService.reference().statuses, ['pending', 'approved', 'rejected', 'suspended', 'hidden']);
 });
+
+// ── Lookups for the wizard ──────────────────────────────────────────────────
+
+test('lookup: entities are found by name, promotable ones first, with the reason when not', async () => {
+  const w = makeWorld();
+  await w.moderationService.decide({ entityType: 'gym', entityId: 'gym_b', action: 'suspend', reason: 'x', actorId: 'm' });
+  const all = ok(await w.promotionService.searchEntities({ entityType: 'gym' }));
+  assert.equal(all.total, 4);
+  const names = all.items.map(i => i.name);
+  assert.deepEqual(names.slice(0, 2).sort(), ['Gym A', 'Gym C']);                          // promotable first
+  const b = all.items.find(i => i.id === 'gym_b');
+  assert.deepEqual([b.promotable, b.reasons, b.moderationStatus], [false, ['moderation_suspended'], 'suspended']);
+  assert.ok(all.items[0].placements.includes('gym_discovery') && !all.items[0].placements.includes('trainer_discovery'));
+  assert.deepEqual(ok(await w.promotionService.searchEntities({ entityType: 'gym', q: 'closed' })).items.map(i => i.id), ['gym_off']);
+  assert.equal(ok(await w.promotionService.searchEntities({ entityType: 'gym', limit: 1 })).items.length, 1);
+  assert.equal(ok(await w.promotionService.searchEntities({ entityType: 'vendor', q: 'one' })).items[0].name, 'Vendor One');
+  assert.equal(ok(await w.promotionService.searchEntities({ entityType: 'vendor' })).items.find(i => i.id === 'usr_v_draft').promotable, false);
+  err(await w.promotionService.searchEntities({ entityType: 'robot' }), 'invalid_entity_type', 400);
+});
+
+test('lookup: partner organisations are found by name', async () => {
+  const w = makeWorld();
+  assert.deepEqual((await w.promotionService.searchPartners({})).items.map(o => o.id), ['org_2', 'org_1']);
+  const hit = await w.promotionService.searchPartners({ q: 'safari' });
+  assert.deepEqual(hit.items.map(o => [o.id, o.name, o.legalName]), [['org_1', 'Safari Cover', 'Safari Insurance Ltd']]);
+  ok(await w.promotionService.create({ body: promoBody(w.clock, { partnerRef: 'org_1' }), actorId: 'a' }));
+  err(await w.promotionService.create({ body: promoBody(w.clock, { partnerRef: 'org_missing' }), actorId: 'a' }), 'partner_not_found', 404);
+});

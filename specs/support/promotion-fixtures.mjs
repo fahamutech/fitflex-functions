@@ -58,6 +58,10 @@ export function makeWorld({ operational = () => true } = {}) {
       { id: 'tz-znz-city', level: 'city', name: 'Zanzibar City', parentId: 'tz-znz' },
       { id: 'tz-znz-stone-town', level: 'district', name: 'Stone Town', parentId: 'tz-znz-city' },
     ]),
+    organizations: memStore([
+      { id: 'org_1', legalName: 'Safari Insurance Ltd', tradingName: 'Safari Cover', organizationType: 'insurer', status: 'active' },
+      { id: 'org_2', legalName: 'Kilimo Bank', tradingName: null, organizationType: 'employer', status: 'active' },
+    ]),
     campaigns: memStore(),
     promotions: memStore(),
     placements: memStore(),
@@ -74,7 +78,7 @@ export function makeWorld({ operational = () => true } = {}) {
   });
   promotionService = createPromotionService({
     promotions: stores.promotions, placements: stores.placements, campaigns: stores.campaigns, configs: stores.configs,
-    geoAreas: stores.geoAreas, entities, moderation: moderationService, auditLog, now: clock.now,
+    geoAreas: stores.geoAreas, entities, moderation: moderationService, auditLog, organizations: stores.organizations, now: clock.now,
   });
   return { clock, stores, entities, moderationService, promotionService };
 }
