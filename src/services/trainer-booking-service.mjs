@@ -7,6 +7,7 @@ import {
   memberCancellation,
 } from '../shared/trainer-access.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
+import { publicGym } from './gym-service.mjs';
 
 // A booking holds its slots from the moment it is requested; one that was
 // rejected or cancelled frees them again.
@@ -70,7 +71,7 @@ export function createTrainerBookingService({
       ...row,
       member: await users.findByIdAsync(row.memberId),
       trainer: row.trainerId ? trainerService.hydrateTrainer(trainers.find(t => t.id === row.trainerId) || {}) : null,
-      gym: hideTrainerPass(gyms.find(g => g.id === row.gymId) || null)
+      gym: hideTrainerPass(publicGym(gyms.find(g => g.id === row.gymId) || null))
     };
   }
 
@@ -469,7 +470,7 @@ export function createTrainerBookingService({
         date: b.date,
         slot: b.slot,
         gymId: b.gymId,
-        gym: gyms.find(g => g.id === b.gymId) || null,
+        gym: publicGym(gyms.find(g => g.id === b.gymId) || null),
         amountTzs: b.trainerPayoutTzs ?? b.amountTzs ?? 0,
         status: b.status,
         member: await users.findByIdAsync(b.memberId),
@@ -481,7 +482,7 @@ export function createTrainerBookingService({
         date: s.date,
         slot: s.slot,
         gymId: s.gymId,
-        gym: gyms.find(g => g.id === s.gymId) || null,
+        gym: publicGym(gyms.find(g => g.id === s.gymId) || null),
         locationType: s.locationType || 'my_gym',
         locationLabel: s.locationLabel || null,
         amountTzs: s.amountTzs || 0,

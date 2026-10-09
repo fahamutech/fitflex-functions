@@ -16,7 +16,7 @@ export const trainerGyms = {
     const passes = await subscriptionService.trainerPasses({ trainerUserId: req.user.sub });
     const current = (gymId) => passes.find(p => p.homeGymId === gymId && ['active', 'payment_pending'].includes(p.status)) || null;
     const gyms = await partnerGate.badgeGyms(await gymService.listActiveAsync());
-    res.json(gyms.map(gym => ({ ...gym, trainerAccess: trainerGymAccess({ trainer, gym }), currentPass: current(gym.id) })));
+    res.json(gyms.map(gym => ({ ...gymService.publicGym(gym), trainerAccess: trainerGymAccess({ trainer, gym }), currentPass: current(gym.id) })));
   }
 };
 
