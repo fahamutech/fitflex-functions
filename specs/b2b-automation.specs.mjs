@@ -381,14 +381,14 @@ test('the integrity check turns each data-quality problem into one exception and
 // ── Scheduler wiring and security ────────────────────────────────────────────
 
 test('the scheduler entries run through the operations service, and only staff with the right grant can act', async () => {
-  for (const [fn, rule] of [['b2bProgramExpiry', '5 21 * * *'], ['b2bHoldReconciler', '*/5 * * * *'], ['b2bSponsorBilling', '20 21 * * *'], ['b2bCollections', '0 6 * * *'], ['b2bSponsorVisibilityNotice', '0 7 * * *'], ['b2bIntegrityCheck', '0 22 * * *'], ['opsSweeper', '*/10 * * * *']]) {
+  for (const [fn, rule] of [['b2bProgramExpiry', '5 21 * * *'], ['b2bHoldReconciler', '*/5 * * * *'], ['b2bSponsorBilling', '20 21 * * *'], ['b2bCollections', '0 6 * * *'], ['b2bSponsorVisibilityNotice', '0 7 * * *'], ['b2bIntegrityCheck', '0 22 * * *'], ['b2bBeneficiaryInvites', '*/10 * * * *'], ['opsSweeper', '*/10 * * * *']]) {
     assert.deepEqual([jobFunctions[fn].rule, typeof jobFunctions[fn].onJob], [rule, 'function'], fn);
   }
   // The schedule the operations service believes matches the scheduler's own rule.
   const overview = await call(adminB2BOpsOverview, { claims: { sub: OPERATOR, userType: 'admin' } });
   assert.equal(overview.statusCode, 200);
   const byName = Object.fromEntries(overview.body.jobs.items.map(j => [j.name, j]));
-  assert.deepEqual(Object.keys(byName).sort(), ['b2b-collections', 'b2b-hold-reconciler', 'b2b-integrity-check', 'b2b-program-expiry', 'b2b-sponsor-billing', 'b2b-sponsor-visibility-notice', 'promotion-events-retention', 'promotion-lifecycle']);
+  assert.deepEqual(Object.keys(byName).sort(), ['b2b-beneficiary-invites', 'b2b-collections', 'b2b-hold-reconciler', 'b2b-integrity-check', 'b2b-program-expiry', 'b2b-sponsor-billing', 'b2b-sponsor-visibility-notice', 'promotion-events-retention', 'promotion-lifecycle']);
   assert.deepEqual([byName['b2b-sponsor-billing'].schedule, byName['b2b-sponsor-billing'].domain, byName['b2b-hold-reconciler'].schedule], [{ type: 'daily', utc: '21:20' }, 'finance', { type: 'every', minutes: 5 }]);
   assert.deepEqual(Object.keys(overview.body.pending).sort(), ['billing', 'people', 'usage']);
   assert.ok(Number.isInteger(overview.body.pending.billing.draftInvoices) && Number.isInteger(overview.body.exceptions.live));

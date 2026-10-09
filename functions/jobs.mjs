@@ -150,3 +150,9 @@ export const opsSweeper = {
     if (r.ran.length || r.gaveUp.length) console.log(`[ops] caught up: ${r.ran.map(x => `${x.job}=${x.status}`).join(', ') || 'none'}; gave up: ${r.gaveUp.join(', ') || 'none'}`);
   },
 };
+
+export const b2bBeneficiaryInvites = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'B2B: enrol invited people who have since joined FitFlex with the email or number their organisation listed, and send the invitation messages that are due (email: the invitation, then reminders after 3 and 10 days; SMS to people listed with a mobile number: the invitation and one reminder after 3 days, unless B2B_INVITE_SMS=off). Safe to overlap and to rerun: an invite is enrolled once and each message is claimed before it is sent.',
+  onJob: () => opsService.runJob('b2b-beneficiary-invites'),
+};

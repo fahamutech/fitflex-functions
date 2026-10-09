@@ -31,7 +31,7 @@ export const SMS_MAX_LENGTH = 306;
 export const REMINDER_MAX_ATTEMPTS = 3;
 export const BOOKING_REMINDER_HOURS = 3;
 export const RENEWAL_REMINDER_DAYS = 3;
-export const SMS_CATEGORIES = ['otp', 'reminder', 'campaign', 'test'];
+export const SMS_CATEGORIES = ['otp', 'reminder', 'campaign', 'invitation', 'test'];
 export const SMS_STATUSES = ['queued', 'accepted', 'failed'];
 
 const OPT_OUT = { en: ' Opt out: App > Settings.', sw: ' Kujiondoa: App > Settings.' };
