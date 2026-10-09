@@ -62,7 +62,7 @@ test('a malformed exercise is caught', () => {
 test('the library filters by area, equipment, environment and experience', () => {
   const ids = f => listExercises(f).map(e => e.id);
   const chestAtHome = ids({ area: 'chest', environment: 'home', equipment: ['none'] });
-  assert.deepEqual(chestAtHome, ['ex_push_up'], 'no equipment: bodyweight only');
+  assert.deepEqual(chestAtHome, ['ex_push_up', 'ex_incline_push_up'], 'no equipment: bodyweight only');
   assert.ok(ids({ area: 'chest', equipment: ['full_gym'] }).includes('ex_bench_press'));
   assert.ok(!ids({ area: 'chest', equipment: ['full_gym'], experience: 'beginner' }).includes('ex_bench_press'), 'too hard for a beginner');
   assert.ok(!ids({ environment: 'outdoor', equipment: ['full_gym'] }).includes('ex_lat_pulldown'), 'gym only');
@@ -73,7 +73,7 @@ test('the library filters by area, equipment, environment and experience', () =>
 
 test('alternatives keep the intent and respect what the member has', () => {
   const all = alternativesFor('ex_bench_press', { equipment: ['full_gym'] }).map(e => e.id);
-  assert.deepEqual(all, ['ex_dumbbell_bench_press', 'ex_push_up']);
+  assert.deepEqual(all, ['ex_dumbbell_bench_press', 'ex_machine_chest_press', 'ex_push_up']);
   for (const id of all) assert.ok(exerciseById(id).targetAreas.includes('chest'), `${id} is still a chest exercise`);
   assert.deepEqual(alternativesFor('ex_bench_press', { equipment: ['none'] }).map(e => e.id), ['ex_push_up']);
   assert.deepEqual(alternativesFor('ex_unknown'), []);
@@ -172,7 +172,7 @@ test('a plan draft is checked whoever produced it', () => {
   assert.equal(planDraftProblem(three, input), 'too_many_sessions');
 });
 
-test('the engine runs a provider and refuses a bad draft; no provider is wired yet', async () => {
+test('the engine runs a provider and refuses a bad draft', async () => {
   const input = buildRecommendationInput({ profile: {}, startDate: '2026-10-12', durationWeeks: 1 });
   const none = createRecommendationEngine();
   assert.deepEqual(none.available(), []);
