@@ -9,6 +9,7 @@ import { authFirebaseSession, myPersonas, authSwitchPersona } from '../functions
 import { users, identityLinkService } from '../src/bootstrap/services.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { requireAuth, sign } from '../src/auth/jwt.mjs';
+import { openingPool } from '../src/services/auth-service.mjs';
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
 const devToken = payload => `dev:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
@@ -333,4 +334,74 @@ test('a suspended Person is refused on every persona; a suspended persona is not
   const other = await makeUser({ firebaseUid: uniq('fb') });
   await db('Person').where({ id: other.personId }).update({ status: 'suspended' });
   assert.equal(await run(other.id, 'member'), false, 'Person-level suspension');
+});
+
+// ── Opening an approved role instead of one still waiting for approval ─────
+
+test('openingPool: the last role, unless it is pending and another is ready', () => {
+  const m = { id: 'm', userType: 'member', approvalStatus: 'approved' };
+  const v = { id: 'v', userType: 'vendor', approvalStatus: 'pending_approval' };
+  const t = { id: 't', userType: 'trainer', approvalStatus: 'approved' };
+  assert.equal(openingPool([m, v], 'm').last.id, 'm');
+  assert.equal(openingPool([m, v], 'v').last, null, 'pending last: not opened');
+  assert.deepEqual(openingPool([m, v], 'v').pool.map(p => p.id), ['m']);
+  assert.equal(openingPool([m, v], 'v').switchedAway, true);
+  assert.equal(openingPool([v], 'v').last.id, 'v', 'nothing else ready: stays');
+  assert.equal(openingPool([m, t], 't').last.id, 't', 'an approved last role is kept');
+  assert.equal(openingPool([m, v], null).last, undefined);
+});
+
+test('V2 sign-in: a member who applied as a vendor lands as a member while the vendor waits', async () => {
+  await withFlags(['V2_PERSONAS'], async () => {
+    const uid = uniq('fb');
+    const member = await makeUser({ firebaseUid: uid });
+    const vendor = await makeUser({ firebaseUid: uid, userType: 'vendor', approvalStatus: 'pending_approval' });
+    await db('Person').where({ id: member.personId }).update({ lastPersonaId: vendor.id });
+
+    const again = await signIn({ uid }, { client: V2 });
+    assert.equal(again.statusCode, 200);
+    assert.equal(again.body.user.id, member.id, 'the approved role opens');
+    assert.equal(again.body.pendingApproval, false);
+    assert.equal(again.body.personaChoiceRequired, false);
+    assert.ok(again.body.personas.some(p => p.id === vendor.id), 'the pending role is still switchable');
+    assert.equal((await db('Person').where({ id: member.personId }).first()).lastPersonaId, member.id);
+
+    // Switching to the pending role is still allowed; it is then the one remembered.
+    const switched = res();
+    await authSwitchPersona.onRequest({ user: jwt.decode(again.body.token), body: { personaId: vendor.id } }, switched);
+    assert.equal(switched.statusCode, 200);
+    assert.equal(switched.body.pendingApproval, true);
+  });
+});
+
+test('V2 sign-in: once the vendor is approved, the role used last opens again; only pending roles stay put', async () => {
+  await withFlags(['V2_PERSONAS'], async () => {
+    const uid = uniq('fb');
+    const member = await makeUser({ firebaseUid: uid });
+    const vendor = await makeUser({ firebaseUid: uid, userType: 'vendor', approvalStatus: 'pending_approval' });
+    await db('Person').where({ id: member.personId }).update({ lastPersonaId: vendor.id });
+    await db('User').where({ id: vendor.id }).update({ approvalStatus: 'approved' });
+    assert.equal((await signIn({ uid }, { client: V2 })).body.user.id, vendor.id);
+
+    // Both waiting: nothing better to open, so the last one stays.
+    await db('User').where({ id: vendor.id }).update({ approvalStatus: 'pending_approval' });
+    await db('User').where({ id: member.id }).update({ approvalStatus: 'pending_approval' });
+    const both = await signIn({ uid }, { client: V2 });
+    assert.equal(both.body.user.id, vendor.id);
+    assert.equal(both.body.pendingApproval, true);
+  });
+});
+
+test('V2 sign-in: pending last role and two ready operational roles: the person is asked', async () => {
+  await withFlags(['V2_PERSONAS'], async () => {
+    const uid = uniq('fb');
+    const trainer = await makeUser({ firebaseUid: uid, userType: 'trainer' });
+    const owner = await makeUser({ firebaseUid: uid, userType: 'gym_operator' });
+    const vendor = await makeUser({ firebaseUid: uid, userType: 'vendor', approvalStatus: 'pending_approval' });
+    await db('Person').where({ id: trainer.personId }).update({ lastPersonaId: vendor.id });
+    const out = await signIn({ uid }, { client: V2 });
+    assert.equal(out.body.personaChoiceRequired, true);
+    assert.notEqual(out.body.user.id, vendor.id);
+    assert.ok([trainer.id, owner.id].includes(out.body.user.id));
+  });
 });

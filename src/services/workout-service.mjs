@@ -25,6 +25,8 @@ function buildExercise(workoutId, ex) {
     id: exerciseId,
     workoutId,
     exerciseName: ex.exerciseName,
+    // The exercise-library entry this came from, when it came from one.
+    ...(ex.libraryId ? { libraryId: ex.libraryId } : {}),
     muscleGroup: ex.muscleGroup ?? null,
     sets: count,
     reps,
@@ -108,6 +110,7 @@ export function validateWorkoutDefinition(body = {}) {
       estimatedDuration: est ?? null,
       exercises: body.exercises.map(e => ({
         exerciseName: text(e.exerciseName, 80),
+        ...(text(e.libraryId, 60) ? { libraryId: text(e.libraryId, 60) } : {}),
         muscleGroup: text(e.muscleGroup, 40),
         sets: e.sets ?? 1,
         reps: e.reps ?? null,
@@ -120,7 +123,7 @@ export function validateWorkoutDefinition(body = {}) {
 }
 
 /** A new planned workout row for a member from a definition/template. */
-export function newWorkoutRow({ memberId, base, scheduledDate, gymId = null, trainerId = null, source, now }) {
+export function newWorkoutRow({ memberId, base, scheduledDate, gymId = null, trainerId = null, trainingPlanId = null, source, now }) {
   const workoutId = id('wkt');
   const stamp = now.toISOString();
   return {
@@ -141,6 +144,8 @@ export function newWorkoutRow({ memberId, base, scheduledDate, gymId = null, tra
     startedAt: null,
     completedAt: null,
     activityId: null,
+    // Set when the workout is a session of a training plan.
+    trainingPlanId,
     createdAt: stamp,
     updatedAt: stamp,
   };

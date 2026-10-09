@@ -6,6 +6,8 @@ import { toSessionUser } from '../shared/session-user.mjs';
 export function createAccountService({
   users, trainers, trainerBookings, checkins, auditLog,
   initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
+  // Called once the account is gone, e.g. to stop promotion analytics saying who a customer was: (userId) => void.
+  onAccountDeleted = async () => {},
 }) {
   async function deleteMyAccount(user) {
     if (user.userType === 'gym_operator') {
@@ -44,6 +46,7 @@ export function createAccountService({
 
     if (trainerProfile) await trainers.removeAsync(t => t.id === trainerProfile.id);
     await users.removeAsync(u => u.id === user.id);
+    try { await onAccountDeleted(user.id); } catch (err) { console.warn('[account-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: user.id, action: 'self_account_deleted',

@@ -15,6 +15,8 @@ export const PORTAL_ACL_SCOPES = [
   'b2b_billing', 'b2b_billing_approve', 'b2b_payments',
   // Gym settlement workflow (DR-09): preparing, approving and paying are separate grants.
   'settlements_prepare', 'settlements_approve', 'settlements_pay',
+  // Moderation & Promotion: seeing and deciding moderation are separate, as are running promotions and approving them.
+  'moderation', 'moderation_decide', 'promotions', 'promotions_approve', 'campaigns', 'promotion_analytics',
 ];
 
 export function createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail }) {

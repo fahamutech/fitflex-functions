@@ -5,6 +5,7 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { pinAuthService, registrationService, partnerVerifiedFor, users } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
+import { smsSender, emailSender } from '../src/infra/verification-senders.mjs';
 
 const created = new Date().toISOString();
 
@@ -120,5 +121,21 @@ export const changeMyPin = {
     if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
     const user = await users.findByIdAsync(req.user.sub);
     await send(res, await pinAuthService.changePin({ user, body: req.body || {}, ip: addressOf(req) }));
+  },
+};
+
+export const signInOptions = {
+  created, method: 'get', path: '/auth/options',
+  description: 'What the sign-in screens may offer, in one call and without signing in: pinLogin (number or email + PIN), pinReset (Forgot PIN), recovery (lost every number and email), and which kinds of code FitFlex can send right now (smsCodes, emailCodes). When emailCodes is false the app keeps email accounts on Firebase (its verification link and its own sign-in) and uses FitFlex codes for mobile numbers only. Nothing secret is returned.',
+  responseSample: { pinLogin: true, pinReset: true, recovery: true, smsCodes: true, emailCodes: false },
+  onRequest: async (req, res) => {
+    const ready = pinAuthService.configured();
+    res.json({
+      pinLogin: identityFlag('V2_PIN_LOGIN') && ready,
+      pinReset: identityFlag('V2_RECOVERY') && ready,
+      recovery: identityFlag('V2_RECOVERY') && ready,
+      smsCodes: smsSender().configured,
+      emailCodes: emailSender().configured,
+    });
   },
 };

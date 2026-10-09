@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, smsService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -27,6 +27,16 @@ export const communicationAutomations = {
   onJob: async () => {
     const r = await automationService.runDue();
     if (r.fired || r.paused || r.errors) console.log(`[automations] gyms=${r.gyms} fired=${r.fired} already=${r.already} deferred=${r.deferred} paused=${r.paused} errors=${r.errors}`);
+  }
+};
+
+export const smsReminders = {
+  created, rule: '20 * * * *', // hourly
+  description: 'SMS reminders: a confirmed trainer session starting within 3 hours, and a pass ending in 3 days (a gym membership whose gym sends its own expiry reminders is left to the gym). Only to members who have not switched SMS service messages off. Nothing is sent unless SMS_PROVIDER is set. Safe to rerun: each reminder is sent once, and one that failed is tried again by the next runs.',
+  onJob: async () => {
+    const r = await smsService.sendDueReminders();
+    const n = (x) => x.sent + x.failed;
+    if (n(r.bookings) || n(r.renewals)) console.log(`[sms] bookings sent=${r.bookings.sent} failed=${r.bookings.failed} · renewals sent=${r.renewals.sent} failed=${r.renewals.failed}`);
   }
 };
 
@@ -72,6 +82,18 @@ export const b2bProgramExpiry = {
   description: 'B2B: mark active or paused wellness programmes whose end date has passed as expired. Idempotent.',
   // The work, its run record, lock and failure handling are in src/services/b2b-jobs.mjs and ops-service.mjs.
   onJob: () => opsService.runJob('b2b-program-expiry'),
+};
+
+export const promotionLifecycle = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Promotions: start scheduled promotions whose start has arrived and expire those whose end has passed (a promotion whose entity was blocked in moderation is held instead of started). Ranking also reads the time window itself, so a late run never lets an expired promotion count. Idempotent.',
+  onJob: () => opsService.runJob('promotion-lifecycle'),
+};
+
+export const promotionEventsRetention = {
+  created, rule: '40 21 * * *', // every day 21:40 UTC = 00:40 EAT
+  description: 'Promotions: delete raw analytics events older than 13 months (the retention the owner decided). Idempotent.',
+  onJob: () => opsService.runJob('promotion-events-retention'),
 };
 
 export const b2bHoldReconciler = {

@@ -46,6 +46,7 @@ export function createSegmentService({
   now = () => new Date(),
   pushAvailable = () => false,
   whatsappAvailable = () => false,
+  smsAvailable = () => false,
 }) {
   async function inChunks(ids, fetch) {
     const out = [];
@@ -294,13 +295,13 @@ export function createSegmentService({
 
   /** Channels this server can send on right now. */
   function channelAvailability() {
-    return { in_app: true, push: Boolean(pushAvailable()), whatsapp: Boolean(whatsappAvailable()) };
+    return { in_app: true, push: Boolean(pushAvailable()), whatsapp: Boolean(whatsappAvailable()), sms: Boolean(smsAvailable()) };
   }
 
   /**
    * Per member and channel: may a message of `category` go out, and if not,
    * why. Checks what the server has set up, the member's preferences, and
-   * whether the member has a device (push) or phone (WhatsApp).
+   * whether the member has a device (push) or phone (WhatsApp, SMS).
    * @returns {Promise<Map<string, Record<string, string|null>>>} memberId → { channel: null | reason }
    */
   async function reachByMember(members, category, channels = CHANNELS) {
@@ -317,13 +318,14 @@ export function createSegmentService({
       const decision = {};
       for (const ch of channels) {
         let reason = null;
-        if (!available[ch]) reason = ch === 'push' ? 'push_disabled' : 'whatsapp_not_configured';
+        const byPhone = ch === 'whatsapp' || ch === 'sms';
+        if (!available[ch]) reason = ch === 'push' ? 'push_disabled' : `${ch}_not_configured`;
         else {
           const allowed = channelAllowed(prefById.get(m.memberId), ch, category);
           if (!allowed.allowed) reason = allowed.reason;
           else if (ch === 'push' && !withDevice.has(m.memberId)) reason = 'no_device';
-          else if (ch === 'whatsapp' && !m.phone) reason = 'no_phone';
-          else if (ch === 'whatsapp' && !toE164(m.phone)) reason = 'invalid_phone';
+          else if (byPhone && !m.phone) reason = 'no_phone';
+          else if (byPhone && !toE164(m.phone)) reason = 'invalid_phone';
         }
         decision[ch] = reason;
       }

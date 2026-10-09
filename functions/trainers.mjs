@@ -1,14 +1,17 @@
 // Trainer catalogue + self-service REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { trainerService, resolveRequestUser, users } from '../src/bootstrap/services.mjs';
+import { trainerService, resolveRequestUser, users, moderationGate } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
 export const listTrainers = {
   created, method: 'get', path: '/trainers',
   description: 'Public trainer discovery list.',
-  onRequest: async (req, res) => res.json(await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty }))
+  onRequest: async (req, res) => {
+    const blocked = await moderationGate.blocked('trainer');          // pending, rejected, suspended or hidden in moderation
+    res.json((await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty })).filter(t => !blocked.has(t.id)));
+  }
 };
 
 export const getTrainer = {
@@ -16,7 +19,7 @@ export const getTrainer = {
   description: 'Public trainer profile detail.',
   onRequest: async (req, res) => {
     const trainer = await trainerService.getPublic(req.params.id);
-    if (!trainer) return res.status(404).json({ error: 'not_found' });
+    if (!trainer || await moderationGate.isBlocked('trainer', trainer.id)) return res.status(404).json({ error: 'not_found' });
     res.json(trainer);
   }
 };

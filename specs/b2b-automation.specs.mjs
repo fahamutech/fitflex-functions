@@ -388,7 +388,7 @@ test('the scheduler entries run through the operations service, and only staff w
   const overview = await call(adminB2BOpsOverview, { claims: { sub: OPERATOR, userType: 'admin' } });
   assert.equal(overview.statusCode, 200);
   const byName = Object.fromEntries(overview.body.jobs.items.map(j => [j.name, j]));
-  assert.deepEqual(Object.keys(byName).sort(), ['b2b-beneficiary-invites', 'b2b-collections', 'b2b-hold-reconciler', 'b2b-integrity-check', 'b2b-program-expiry', 'b2b-sponsor-billing', 'b2b-sponsor-visibility-notice']);
+  assert.deepEqual(Object.keys(byName).sort(), ['b2b-beneficiary-invites', 'b2b-collections', 'b2b-hold-reconciler', 'b2b-integrity-check', 'b2b-program-expiry', 'b2b-sponsor-billing', 'b2b-sponsor-visibility-notice', 'promotion-events-retention', 'promotion-lifecycle']);
   assert.deepEqual([byName['b2b-sponsor-billing'].schedule, byName['b2b-sponsor-billing'].domain, byName['b2b-hold-reconciler'].schedule], [{ type: 'daily', utc: '21:20' }, 'finance', { type: 'every', minutes: 5 }]);
   assert.deepEqual(Object.keys(overview.body.pending).sort(), ['billing', 'people', 'usage']);
   assert.ok(Number.isInteger(overview.body.pending.billing.draftInvoices) && Number.isInteger(overview.body.exceptions.live));

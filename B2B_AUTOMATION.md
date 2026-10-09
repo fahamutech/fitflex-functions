@@ -209,7 +209,7 @@ been set; that is a business decision.
 ## 11. Bulk import and invitations (slice 2)
 
 Code: `src/services/b2b-beneficiary-import-service.mjs`, routes in
-`functions/b2b.mjs`, migration `20261126090000-b2b-beneficiary-invites.cjs`,
+`functions/b2b.mjs`, migration `20261202090000-b2b-beneficiary-invites.cjs`,
 tests `specs/b2b-beneficiary-import.specs.mjs`.
 
 **Decision (P7-03, product owner, 8 Oct 2026):** invitations go by email and
@@ -267,9 +267,10 @@ and what the organisation will be able to see of their activity. English only.
 **SMS** is one segment (160 plain characters): who added them and to join as a
 member with that number, with the app link when it fits. It has no room for
 the visibility statement; the person gets that in the app once they join.
-SMS uses the same Beem sender as sign-in codes (`VERIFICATION_SMS_PROVIDER`)
-and **each SMS is paid for**. `B2B_INVITE_SMS=off` turns invitation SMS off
-without touching sign-in codes.
+SMS goes through the shared SMS service (`SMS.md`): it is sent only when
+`SMS_PROVIDER` is set, is written to `SmsLog` as kind `invitation`, and
+**each SMS is paid for**. `B2B_INVITE_SMS=off` turns invitation SMS off
+without touching reminders, campaigns or sign-in codes.
 
 With no email sender configured, invites still work (people are enrolled when
 they join); the emails wait, the People page says so, and the job raises one

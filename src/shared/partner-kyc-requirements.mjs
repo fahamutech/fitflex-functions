@@ -43,9 +43,11 @@ export const DOCUMENT_REQUIREMENTS = Object.freeze({
   representative_id: { types: ['national_id', 'passport'], fields: ['documentNumber'], expires: true },
   business_registration: { types: ['business_registration'], fields: ['documentNumber'] },
   tin_certificate: { types: ['tin_certificate'], fields: ['documentNumber'] },
-  business_licence: { types: ['business_licence'], fields: ['documentNumber', 'issuer', 'expiresOn'], expires: true },
-  certification: { types: ['certification'], fields: ['issuer', 'documentNumber', 'issuedOn', 'expiresOn'], expires: true },
-  liability_insurance: { types: ['liability_insurance'], fields: ['issuer', 'documentNumber', 'expiresOn'], expires: true },
+  // Expiry dates are optional (product owner, 9 Oct 2026). When given they still drive reminders and expiry;
+  // a document with none never expires and gets no reminder.
+  business_licence: { types: ['business_licence'], fields: ['documentNumber', 'issuer'], expires: true },
+  certification: { types: ['certification'], fields: ['issuer', 'documentNumber', 'issuedOn'], expires: true },
+  liability_insurance: { types: ['liability_insurance'], fields: ['issuer', 'documentNumber'], expires: true },
   representative_authority: { types: ['letter_of_authority', 'board_resolution'], fields: [] },
 });
 
