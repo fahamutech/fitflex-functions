@@ -398,7 +398,7 @@ export const invoiceService = createInvoiceService({
 });
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
 export const webhookService = createWebhookService({
-  subscriptions, webhookSeen,
+  subscriptions, webhookSeen, paymentRequests,
   onSubscriptionActivated: lifecycle.activated,
   onPaymentFailed: (sub, paymentId) => lifecycle.paymentFailed(sub, { reference: `selcom:${paymentId}` }),
 });

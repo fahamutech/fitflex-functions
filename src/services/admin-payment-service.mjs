@@ -3,6 +3,7 @@
 // with memberProfile/aclPermissions) to keep the list endpoint's payload small.
 import { randomUUID } from 'node:crypto';
 import { activationDates } from '../shared/subscription-status.mjs';
+import { productTypeOfPayment } from '../shared/payment-product.mjs';
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
@@ -92,6 +93,7 @@ export function createAdminPaymentService({
       ...p,
       member: slimMember(memberById.get(p.memberId) || null),
       subscription: slimSub(subById.get(p.subscriptionId) || null),
+      productType: productTypeOfPayment(p, subById.get(p.subscriptionId) || null),
       gym: slimGym(p.gymId),
     }));
   }
