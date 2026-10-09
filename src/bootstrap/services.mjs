@@ -49,6 +49,7 @@ import { createInvoiceService } from '../services/invoice-service.mjs';
 import { createPortalUserService } from '../services/portal-user-service.mjs';
 import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
+import { createTermsService } from '../services/terms-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -635,6 +636,7 @@ export const partnerKycService = createPartnerKycService({
   // KYC documents stay private on Zebra; the API streams them after its own checks.
   documentStore: createZebraDocumentStore(),
 });
+export const termsService = createTermsService({ users, partnerKycService, auditLog });
 
 // Moderation & Promotion. Moderation decides what may be shown; promotions decide
 // what is highlighted among what may be shown. Neither changes discovery yet.

@@ -4,6 +4,9 @@ import { OPEN_GATE } from './partner-gate.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
 import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
 
+/** Limits on what a trainer can put on their own profile. */
+export const PROFILE_LIMITS = Object.freeze({ name: 80, bio: 2000, specialties: 20, images: 8 });
+
 export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate = OPEN_GATE }) {
   function normalizeTrainerPayload(body = {}, prior = {}) {
     const gymIds = parseStringList(body.gymIds, prior.gymIds || []);
@@ -63,6 +66,28 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
 
   function findProfileByUser(userId) {
     return trainers.find(t => t.userId === userId || t.id === userId) || null;
+  }
+
+  /**
+   * The signed-in trainer's profile, claiming it first when it has no account
+   * yet. A profile created from the admin portal carries only an email; when
+   * the trainer signs in with that (verified) email, it becomes theirs — until
+   * then every self-service call answered trainer_profile_not_found.
+   * Only an unlinked profile is ever claimed, and only when exactly one matches.
+   */
+  async function claimProfileForUser({ userId, email }) {
+    const mine = findProfileByUser(userId);
+    if (mine) return mine;
+    const wanted = String(email || '').trim().toLowerCase();
+    if (!wanted) return null;
+    const unlinked = trainers.filter(t => !t.userId && String(t.email || '').trim().toLowerCase() === wanted);
+    if (unlinked.length !== 1) return null;
+    const claimed = await trainers.updateAsync(t => t.id === unlinked[0].id, { userId, updatedAt: new Date().toISOString() });
+    await auditLog?.insertAsync?.({
+      id: randomUUID(), at: new Date().toISOString(), actor: userId, action: 'trainer_profile_claimed',
+      target: unlinked[0].id, before: { userId: null }, after: { userId },
+    });
+    return claimed || findProfileByUser(userId);
   }
 
   function list({ q, specialty }) {
@@ -177,7 +202,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     if (!body.gender || !validGenders.includes(body.gender)) {
       return { error: 'gender_required', status: 400, validValues: validGenders };
     }
-    const profile = findProfileByUser(userId);
+    const profile = await claimProfileForUser({ userId, email: user?.email });
     // Gym links need the owner's approval (and a linked trainer trains there
     // free), so a self-registration can only *request* gyms.
     const linked = profile?.gymIds || [];
@@ -200,8 +225,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     return { trainer: hydrateTrainer(row), displayName: body.displayName || user.displayName };
   }
 
-  function myProfile(userId) {
-    const profile = findProfileByUser(userId);
+  async function myProfile(userId, { email } = {}) {
+    const profile = await claimProfileForUser({ userId, email });
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     return { trainer: hydrateTrainer(profile) };
   }
@@ -232,36 +257,60 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     return { trainer: hydrateTrainer(updated) };
   }
 
-  async function updateProfile({ userId, body }) {
+  const fail = (error) => ({ error, status: 400 });
+
+  /**
+   * Trainer edits their own professional details. Every field is optional
+   * (null counts as "not sent"); each one sent is checked before anything is
+   * saved, so a bad value is a clear 400 rather than a failed write.
+   */
+  async function updateProfile({ userId, body = {} }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     const socialError = socialLinksError(body);
     if (socialError) return socialError;
-    const allowed = [
-      'displayName',
-      'bio',
-      'specialties',
-      'hourlyRateTzs',
-      'sessionRateCurrency',
-      'experienceYears',
-      'availability',
-      'photoUrl',
-      'images',
-      'imageThumbnails',
-    ];
+    const sent = (k) => body[k] !== undefined && body[k] !== null;
     const updates = {};
-    for (const k of allowed) {
-      if (body[k] !== undefined) updates[k] = body[k];
+
+    if (sent('displayName')) {
+      const name = String(body.displayName).trim();
+      if (!name) return fail('displayName_required');
+      updates.displayName = name.slice(0, PROFILE_LIMITS.name);
     }
-    if (body.specialties) updates.specialties = parseStringList(body.specialties, profile.specialties);
-    if (updates.displayName !== undefined) {
-      const name = String(updates.displayName || '').trim();
-      if (!name) return { error: 'displayName_required', status: 400 };
-      updates.displayName = name;
+    if (sent('bio')) updates.bio = String(body.bio).trim().slice(0, PROFILE_LIMITS.bio);
+    if (sent('phone')) {
+      const phone = String(body.phone).trim();
+      if (phone && !/^\+?[0-9 ()-]{7,20}$/.test(phone)) return fail('invalid_phone');
+      updates.phone = phone || null;
     }
-    if (body.availability !== undefined) {
-      if (!Array.isArray(body.availability)) return { error: 'invalid_availability', status: 400 };
+    if (sent('specialties')) {
+      updates.specialties = parseStringList(body.specialties, []).slice(0, PROFILE_LIMITS.specialties);
+    }
+    for (const k of ['hourlyRateTzs', 'experienceYears']) {
+      if (!sent(k)) continue;
+      const n = Number(body[k]);
+      if (!Number.isFinite(n) || n < 0) return fail(k === 'hourlyRateTzs' ? 'invalid_rate' : 'invalid_experience');
+      updates[k] = Math.round(n);
+    }
+    if (sent('sessionRateCurrency')) {
+      if (!['TZS', 'USD'].includes(body.sessionRateCurrency)) return fail('invalid_currency');
+      updates.sessionRateCurrency = body.sessionRateCurrency;
+    }
+    if (sent('availability')) {
+      if (!Array.isArray(body.availability)) return fail('invalid_availability');
       updates.availability = normalizeAvailability(body.availability);
+    }
+    // Photos: `images` is the trainer's gallery (first = profile picture).
+    if (sent('images')) {
+      const images = parseStringList(body.images, []);
+      if (images.length > PROFILE_LIMITS.images) return { ...fail('too_many_images'), max: PROFILE_LIMITS.images };
+      updates.images = images;
+      updates.imageThumbnails = sent('imageThumbnails') ? parseStringList(body.imageThumbnails, []).slice(0, images.length) : [];
+    }
+    if (sent('photoUrl') && String(body.photoUrl).trim()) updates.photoUrl = String(body.photoUrl).trim();
+    else if (updates.images?.length) updates.photoUrl = updates.images[0];
+    if (updates.photoUrl && !updates.images && !(profile.images || []).length) {
+      updates.images = [updates.photoUrl];
     }
     if (body.socialLinks !== undefined) updates.socialLinks = normalizeSocialLinks(body.socialLinks).links;
     updates.updatedAt = new Date().toISOString();
@@ -274,6 +323,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     hydrateTrainer,
     parseStringList,
     findProfileByUser,
+    claimProfileForUser,
     list,
     getActive,
     adminList,
