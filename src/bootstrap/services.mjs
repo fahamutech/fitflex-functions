@@ -57,6 +57,7 @@ import { createFavoriteService } from '../services/favorite-service.mjs';
 import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
+import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createSocialService } from '../services/social-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
@@ -426,6 +427,7 @@ export const goalService = createGoalService({ goals, trainers });
 export const workoutService = createWorkoutService({
   workouts, activities, defaultShare: memberId => socialService.defaultShareFor(memberId),
 });
+export const trainingPreferenceService = createTrainingPreferenceService({ users });
 export const gymSharingService = createGymSharingService({
   sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
