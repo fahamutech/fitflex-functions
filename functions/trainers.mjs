@@ -7,20 +7,20 @@ const created = new Date().toISOString();
 
 export const listTrainers = {
   created, method: 'get', path: '/trainers',
-  description: 'Public trainer discovery list.',
+  description: 'Public trainer discovery list. Public fields only: no email, phone, account id or pending gym applications.',
   onRequest: async (req, res) => {
     const blocked = await moderationGate.blocked('trainer');          // pending, rejected, suspended or hidden in moderation
-    res.json((await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty })).filter(t => !blocked.has(t.id)));
+    res.json((await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty })).filter(t => !blocked.has(t.id)).map(trainerService.publicTrainer));
   }
 };
 
 export const getTrainer = {
   created, method: 'get', path: '/trainers/:id',
-  description: 'Public trainer profile detail.',
+  description: 'Public trainer profile detail. Public fields only: no email, phone, account id or pending gym applications.',
   onRequest: async (req, res) => {
     const trainer = await trainerService.getPublic(req.params.id);
     if (!trainer || await moderationGate.isBlocked('trainer', trainer.id)) return res.status(404).json({ error: 'not_found' });
-    res.json(trainer);
+    res.json(trainerService.publicTrainer(trainer));
   }
 };
 
@@ -81,8 +81,10 @@ export const trainerMyProfile = {
   created, method: 'get', path: '/trainer/me',
   description: 'Trainer: get own profile, linked gyms and pending gym applications.',
   onGuard: requireAuth('trainer'),
-  onRequest: (req, res) => {
-    const result = trainerService.myProfile(req.user.sub);
+  onRequest: async (req, res) => {
+    // A profile FitFlex created for this trainer's email becomes theirs here.
+    const user = await resolveRequestUser(req);
+    const result = await trainerService.myProfile(req.user.sub, { email: user?.email });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.trainer);
   }

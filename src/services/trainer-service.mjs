@@ -4,6 +4,32 @@ import { OPEN_GATE } from './partner-gate.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
 import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
 
+/**
+ * What anyone may see of a trainer (GET /trainers, GET /trainers/:id and
+ * trainer discovery are open to the world). A list of what is shown, so a new
+ * column stays private until it is added here. Contact details, the account
+ * id, pending gym applications and listing controls are never in it.
+ */
+const PUBLIC_TRAINER_FIELDS = Object.freeze([
+  'id', 'displayName', 'photoUrl', 'images', 'imageThumbnails', 'gender', 'specialties', 'bio',
+  'rating', 'reviewCount', 'hourlyRateTzs', 'sessionRateCurrency', 'experienceYears',
+  'gymIds', 'gyms', 'status', 'verified', 'bookable', 'availability', 'socialLinks',
+]);
+/** A gym's business details, which a trainer's public card must not carry. */
+const PRIVATE_GYM_FIELDS = Object.freeze([
+  'commissionRate', 'paymentBank', 'paymentNumber', 'paymentNotes', 'tinNumber', 'homepageVisible', 'homepagePriority',
+]);
+
+export function publicTrainer(trainer) {
+  if (!trainer) return trainer;
+  const out = {};
+  for (const k of PUBLIC_TRAINER_FIELDS) if (trainer[k] !== undefined) out[k] = trainer[k];
+  if (Array.isArray(out.gyms)) {
+    out.gyms = out.gyms.map(g => Object.fromEntries(Object.entries(g || {}).filter(([k]) => !PRIVATE_GYM_FIELDS.includes(k))));
+  }
+  return out;
+}
+
 export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate = OPEN_GATE }) {
   function normalizeTrainerPayload(body = {}, prior = {}) {
     const gymIds = parseStringList(body.gymIds, prior.gymIds || []);
@@ -81,6 +107,9 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
    * the badge and `bookable` says whether they can be booked or connected
    * with yet (a new trainer cannot until their KYC is approved). Verified
    * trainers come first, each group in its usual order.
+   *
+   * These are full rows (ranking and eligibility need them): anything sent to
+   * a caller goes through `publicTrainer` first.
    */
   async function listPublic(query) {
     const rows = list(query);
@@ -200,8 +229,21 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     return { trainer: hydrateTrainer(row), displayName: body.displayName || user.displayName };
   }
 
-  function myProfile(userId) {
-    const profile = findProfileByUser(userId);
+  /**
+   * A profile created from the admin portal has an email but no account yet.
+   * The trainer who signs in with that email still sees it as theirs (the app
+   * used to find it by email in the public list, which no longer has emails).
+   * Only an unlinked profile, and only when exactly one matches.
+   */
+  function findUnlinkedByEmail(email) {
+    const wanted = String(email || '').trim().toLowerCase();
+    if (!wanted) return null;
+    const unlinked = trainers.filter(t => !t.userId && String(t.email || '').trim().toLowerCase() === wanted);
+    return unlinked.length === 1 ? unlinked[0] : null;
+  }
+
+  async function myProfile(userId, { email } = {}) {
+    const profile = findProfileByUser(userId) || findUnlinkedByEmail(email);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     return { trainer: hydrateTrainer(profile) };
   }
@@ -272,6 +314,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
   return {
     normalizeTrainerPayload,
     hydrateTrainer,
+    publicTrainer,
     parseStringList,
     findProfileByUser,
     list,
