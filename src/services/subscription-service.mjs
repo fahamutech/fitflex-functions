@@ -6,6 +6,7 @@ import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subs
 import { trainerPassOptions, trainerGymAccess, hideTrainerPass } from '../shared/trainer-access.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { fundedBySubscription } from '../shared/check-in-rules.mjs';
+import { PRODUCT_TYPES, MEMBER_ACCESS_PRODUCTS, productTypeOfPayment } from '../shared/payment-product.mjs';
 
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
@@ -28,16 +29,37 @@ export function createSubscriptionService({
     monthly: Number(gym.ratePerMonth || 0),
   })[plan];
 
+  const positiveTzs = (v) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  /** A subscription of this kind (and gym) still waiting on its payment. */
+  async function pendingSubscription(memberId, type, gymId = null) {
+    const rows = await subscriptions.filterAsync(s =>
+      s.memberId === memberId && s.type === type && s.status === 'payment_pending'
+      && (type !== 'direct_sub' || s.homeGymId === gymId));
+    return rows[0] || null;
+  }
+
   async function subscribeDirect({ memberId, homeGymId, plan }) {
     if (!homeGymId) return { error: 'homeGymId_required', status: 400 };
     const gym = gyms.find(g => g.id === homeGymId);
     if (!gym) return { error: 'gym_not_found', status: 404 };
+    // A gym that is not live (pending, suspended, ...) sells nothing.
+    if (gym.status && gym.status !== 'active') return { error: 'gym_not_available', status: 409 };
     const days = DIRECT_PLAN_DAYS[plan];
     if (!days) return { error: 'invalid_plan', status: 400 };
+    // The price is the gym's own configured rate, never the client's. A period
+    // the gym has not priced is not for sale — and never falls back to a pass tier.
+    const amountTzs = positiveTzs(directPlanAmount(gym, plan));
+    if (!amountTzs) return { error: 'plan_not_offered', status: 400 };
+    // One open request per gym: a repeated tap or a retry must not charge twice.
+    const open = await pendingSubscription(memberId, 'direct_sub', homeGymId);
+    if (open) return { error: 'payment_already_pending', status: 409 };
 
     const now = new Date();
     const expiresAt = new Date(+now + days * 86_400_000);
-    const amountTzs = directPlanAmount(gym, plan);
     const sub = {
       id: `sub_${randomUUID().slice(0, 8)}`,
       memberId,
@@ -190,21 +212,29 @@ export function createSubscriptionService({
 
   async function subscribe({ memberId, tier, type = 'platform_pass', homeGymId, plan }) {
     if (type === 'direct_sub') return subscribeDirect({ memberId, homeGymId, plan });
-    if (type === 'platform_pass' && !PASS_TIERS[tier]) return { error: 'invalid_tier', status: 400 };
+    // Only the two member products are bought here (trainer passes and sessions have their own routes).
+    if (type !== 'platform_pass') return { error: 'invalid_type', status: 400 };
+    // The tier must be one the platform sells today: the configured catalogue
+    // (admin settings), else the built-in one.
+    const configured = settingsService.publicTiers?.().map(t => t.key);
+    const sellable = configured ? configured.includes(tier) || PASS_TIERS[tier]?.accessMode === 'free_online' : Boolean(PASS_TIERS[tier]);
+    if (!tier || !sellable) return { error: 'invalid_tier', status: 400 };
+    const amountTzs = Number(settingsService.priceForTier(tier));
+    const isFreeOnline = amountTzs === 0 && PASS_TIERS[tier]?.accessMode === 'free_online';
+    if (!isFreeOnline && !positiveTzs(amountTzs)) return { error: 'tier_not_available', status: 400 };
+    if (await pendingSubscription(memberId, 'platform_pass')) return { error: 'payment_already_pending', status: 409 };
     const now = new Date();
     const renewsAt = new Date(+now + 30 * 86_400_000);
-    const amountTzs = settingsService.priceForTier(tier);
-    const isFreeOnline = amountTzs === 0 && PASS_TIERS[tier]?.accessMode === 'free_online';
     const sub = {
       id: `sub_${randomUUID().slice(0, 8)}`,
       memberId,
-      type, tier: type === 'platform_pass' ? tier : null,
+      type, tier,
       status: isFreeOnline ? 'active' : 'payment_pending',
       startedAt: now.toISOString(),
       cycleStartedAt: now.toISOString(),
       renewsAt: renewsAt.toISOString(),
       expiresAt: renewsAt.toISOString(),
-      homeGymId: homeGymId ?? null,
+      homeGymId: null, // a FitFlex Pass roams; it is never bound to one gym
       paymentRef: isFreeOnline ? 'FREE_ONLINE' : null,
       pilotPayment: true
     };
@@ -226,6 +256,18 @@ export function createSubscriptionService({
       note: null
     });
     return { status: 202, subscription: sub, paymentRequest };
+  }
+
+  /** A payment request with what it buys: product type, and the gym / tier / period behind it. */
+  function describePayment(p, sub = null) {
+    const productType = productTypeOfPayment(p, sub);
+    const gym = p.gymId ? gyms.find(g => g.id === p.gymId) : null;
+    return {
+      ...p,
+      productType,
+      gym: gym ? { id: gym.id, name: gym.name } : null,
+      subscriptionType: sub?.type ?? null,
+    };
   }
 
   async function me(user) {
@@ -250,9 +292,30 @@ export function createSubscriptionService({
           : null,
       };
     }
+    // Every open request, labelled by what it buys. Only the member's access
+    // products (FitFlex Pass, a gym plan) hold the single `pendingPayment`
+    // slot: a pending trainer session or shop order must not block, or be
+    // shown as, a pass or gym plan.
     const allPendingPayments = await paymentRequests.filterAsync(p => p.memberId === uid && p.status === 'pending');
-    const pendingPayment = allPendingPayments
-      .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))[0] || null;
+    const subIds = [...new Set(allPendingPayments.map(p => p.subscriptionId).filter(Boolean))];
+    const subRows = subIds.length ? await subscriptions.filterAsync(s => subIds.includes(s.id)) : [];
+    const pendingPayments = allPendingPayments
+      .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))
+      .map(p => describePayment(p, subRows.find(s => s.id === p.subscriptionId) || null));
+    const pendingPayment = pendingPayments.find(p => MEMBER_ACCESS_PRODUCTS.includes(p.productType)) || null;
+    // The two access products side by side: a gym plan never hides the member's FitFlex Pass.
+    const paidSubs = subs.filter(s => ['active', 'expired', 'suspended'].includes(s.status));
+    const passSub = currentSubscription(paidSubs.filter(s => s.type === 'platform_pass'));
+    const entitlements = {
+      fitflexPass: passSub ? { ...passSub, status: effectiveSubscriptionStatus(passSub), productType: PRODUCT_TYPES.FITFLEX_PASS } : null,
+      gymSubscriptions: paidSubs
+        .filter(s => s.type === 'direct_sub' && effectiveSubscriptionStatus(s) === 'active')
+        .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))
+        .map(s => {
+          const g = gyms.find(x => x.id === s.homeGymId);
+          return { ...s, status: 'active', productType: PRODUCT_TYPES.GYM_SUBSCRIPTION, homeGym: g ? { id: g.id, name: g.name, location: g.location || null } : null };
+        }),
+    };
     let visitsUsed = 0, visitCap = null;
     if (sub) {
       const since = +new Date(sub.cycleStartedAt);
@@ -262,7 +325,7 @@ export function createSubscriptionService({
       visitCap = settingsService.visitCapForTier(sub.tier);
     }
     const pubId = await publicUserId(user);
-    return { user: { ...toSessionUser(user), publicId: pubId, userCode: pubId }, subscription: sub, pendingPayment, visitsUsed, visitCap };
+    return { user: { ...toSessionUser(user), publicId: pubId, userCode: pubId }, subscription: sub, pendingPayment, pendingPayments, entitlements, visitsUsed, visitCap };
   }
 
   async function memberCheckIns(memberId) {
@@ -273,8 +336,11 @@ export function createSubscriptionService({
   }
 
   async function memberPaymentHistory(memberId) {
-    return (await paymentRequests.filterAsync(p => p.memberId === memberId))
+    const rows = (await paymentRequests.filterAsync(p => p.memberId === memberId))
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt));
+    const subIds = new Set(rows.map(p => p.subscriptionId).filter(Boolean));
+    const subRows = subIds.size ? await subscriptions.filterAsync(s => subIds.has(s.id)) : [];
+    return rows.map(p => describePayment(p, subRows.find(s => s.id === p.subscriptionId) || null));
   }
 
   return {
