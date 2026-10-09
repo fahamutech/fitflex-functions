@@ -75,6 +75,7 @@ import { createB2BCollectionsService } from '../services/b2b-collections-service
 import { createB2BAnalyticsService } from '../services/b2b-analytics-service.mjs';
 import { createOpsService } from '../services/ops-service.mjs';
 import { registerB2BJobs } from '../services/b2b-jobs.mjs';
+import { createB2BBeneficiaryImportService } from '../services/b2b-beneficiary-import-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -275,8 +276,24 @@ export const b2bAnalyticsService = createB2BAnalyticsService({
 });
 // Operations: job runs, locks, catch-up and exception records; and the recurring B2B jobs it runs.
 export const opsService = createOpsService({ db });
+// Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
+export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
+  db, b2bService, emailSender: () => emailSender(),
+  // Invitation SMS goes through the shared SMS service (SMS_PROVIDER), so it is logged in SmsLog like every other SMS.
+  // smsProvider and smsService are defined further down; this only runs later.
+  smsSender: () => ({
+    configured: smsProvider.configured === true,
+    send: async (to, { text }) => {
+      const out = await smsService.send({ category: 'invitation', text, recipients: [{ phone: to }], maxAttempts: 1 });
+      const r = out.results[0] ?? {};
+      return r.outcome === 'sent' ? { ok: true } : { ok: false, error: r.reason ?? r.error ?? 'not_accepted' };
+    },
+  }),
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
 export const b2bOps = registerB2BJobs({
-  ops: opsService, db, programs: b2bPrograms,
+  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService,
   // Defined at the end of this file; only called when the job runs.
   promotionService: { runLifecycle: args => promotionService.runLifecycle(args) },
   promotionEventsService: { purge: args => promotionEventsService.purge(args) },
