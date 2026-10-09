@@ -6,7 +6,7 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth, bearerFrom, verify } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
 import { isTokenSession } from '../src/auth/promotion-token.mjs';
-import { discoveryService } from '../src/bootstrap/services.mjs';
+import { discoveryService, trainerService } from '../src/bootstrap/services.mjs';
 import { publicGym } from '../src/services/gym-service.mjs';
 
 const created = new Date().toISOString();
@@ -46,7 +46,7 @@ export const discoverGyms = {
 export const discoverTrainers = {
   created, method: 'get', path: '/discover/trainers',
   description: `Public: trainers ranked for the viewer, with a Featured section and labelled promotions. Filters: ?specialty= &verified=true. ${QUERY_DOC}`,
-  onRequest: async (req, res) => run('trainer', req, res, t => t),
+  onRequest: async (req, res) => run('trainer', req, res, trainerService.publicTrainer),
 };
 
 export const discoverProducts = {
