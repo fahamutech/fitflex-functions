@@ -99,5 +99,5 @@ export function rates(t) {
 
 export const emptyTotals = () => ({
   impressions: 0, searchAppearances: 0, clicks: 0, detailViews: 0, saves: 0, bookingClicks: 0, subscriptionClicks: 0,
-  bookings: 0, subscriptions: 0, purchases: 0, purchaseValueTzs: 0, uniqueViewers: 0,
+  bookings: 0, subscriptions: 0, purchases: 0, purchaseValueTzs: 0, bookingValueTzs: 0, subscriptionValueTzs: 0, uniqueViewers: 0,
 });

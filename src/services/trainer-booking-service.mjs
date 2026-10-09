@@ -34,9 +34,26 @@ export function createTrainerBookingService({
   subscriptions, paymentRequests, notify = async () => {},
   partnerGate = OPEN_GATE,
   onStatusChanged = null,
+  // A booking request counts, or stops counting, as a conversion for the promotion that led to it: ({ action, groupId, bookings }).
+  onBookingConversion = null,
   // A paid session was cancelled and the money is owed back: ({ booking, reasonCode, actorId, role }) → refund.
   onRefundDue = async () => null,
 }) {
+  /**
+   * Keep promotion analytics in step with a booking request: while any session in it is confirmed or done it counts
+   * as a conversion; when none is (rejected, cancelled, refunded) the conversion is taken back. Never throws.
+   */
+  async function syncConversion(groupId) {
+    if (!groupId || !onBookingConversion) return;
+    try {
+      const group = await trainerBookings.filterAsync(b => b.groupId === groupId);
+      const live = group.filter(b => ['confirmed', 'completed'].includes(b.status));
+      await onBookingConversion(live.length ? { action: 'credit', groupId, bookings: live } : { action: 'reverse', groupId, bookings: group });
+    } catch (err) {
+      console.warn('[trainer-booking] conversion not synced:', err?.message);
+    }
+  }
+
   // Side effects of a status change (B2B benefit consumption). The change has
   // already happened; a failing hook must never undo or fail it.
   async function statusChanged(booking, from, actorId) {
@@ -179,6 +196,9 @@ export function createTrainerBookingService({
       }));
     }
 
+    // A session that needs no payment is confirmed at once, and that is when the booking counts.
+    if (!needsPayment) await syncConversion(groupId);
+
     let paymentRequest = null;
     if (needsPayment) {
       paymentRequest = await paymentRequests.insertAsync({
@@ -237,6 +257,7 @@ export function createTrainerBookingService({
       const trainer = trainers.find(t => t.id === updated[0].trainerId);
       await notify('trainer_booking_confirmed', { trainer, memberId: updated[0].memberId, bookings: updated });
     }
+    await syncConversion(groupId);
     return updated;
   }
 
@@ -264,6 +285,7 @@ export function createTrainerBookingService({
       target: prior.id, before: prior, after: updated
     });
     await statusChanged(updated, prior.status, actorId);
+    await syncConversion(prior.groupId);
     // FitFlex cancelling a session the member paid for owes them the money back.
     const refund = cancelling && wasPaid(prior)
       ? await refundFor(updated, 'cancelled_by_fitflex', actorId, 'admin') : null;
@@ -344,6 +366,7 @@ export function createTrainerBookingService({
       target: booking.id, before: booking, after: updated,
     });
     await statusChanged(updated, booking.status, actorId);
+    await syncConversion(booking.groupId);
     const refund = paid ? await refundFor(updated, reasonCode, actorId, by) : null;
     const trainer = trainers.find(t => t.id === booking.trainerId);
     await notify(`trainer_booking_cancelled_by_${by}`, { trainer, memberId: booking.memberId, bookings: [updated] });
