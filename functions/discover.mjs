@@ -7,6 +7,7 @@ import { requireAuth, bearerFrom, verify } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
 import { isTokenSession } from '../src/auth/promotion-token.mjs';
 import { discoveryService } from '../src/bootstrap/services.mjs';
+import { publicGym } from '../src/services/gym-service.mjs';
 
 const created = new Date().toISOString();
 
@@ -38,7 +39,7 @@ export const discoverGyms = {
   description: `Public: gyms ranked for the viewer, with a Featured section and labelled promotions. Filters: ?tier=standard,premium &verified=true &maxDistanceKm= (needs lat/lng). ${QUERY_DOC}`,
   onRequest: async (req, res) => {
     const trainerPassVisible = canSeeTrainerPass(claimsOf(req)?.userType);
-    return run('gym', req, res, g => (trainerPassVisible ? g : hideTrainerPass(g)));
+    return run('gym', req, res, g => (trainerPassVisible ? publicGym(g) : hideTrainerPass(publicGym(g))));
   },
 };
 
