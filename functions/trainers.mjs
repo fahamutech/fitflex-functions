@@ -114,11 +114,16 @@ export const trainerCancelGymApplication = {
 
 export const trainerUpdateProfile = {
   created, method: 'put', path: '/trainer/me',
-  description: 'Trainer: update own displayName, bio, specialties, hourly rate, availability, photos and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL).',
+  description: 'Trainer: update own professional details — displayName, phone, bio, specialties, hourlyRateTzs, sessionRateCurrency (TZS|USD), experienceYears, availability, images (gallery, max 8; first is the profile picture) with imageThumbnails, photoUrl, and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL). Only the fields sent are changed.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
+    const user = await resolveRequestUser(req);
+    await trainerService.claimProfileForUser({ userId: req.user.sub, email: user?.email });
     const result = await trainerService.updateProfile({ userId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.platforms ? { platforms: result.platforms } : {}) });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
     res.json(result.trainer);
   }
 };
