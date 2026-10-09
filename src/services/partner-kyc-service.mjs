@@ -217,9 +217,89 @@ export function createPartnerKycService({
     return { corporate: partner.corporate };
   }
 
+  // ── Details given once, shown everywhere ─────────────────────────────────
+  // The same number is asked for in more than one place: the ID number on the
+  // person and on the ID document, the registration number and TIN on the
+  // business and on their certificates. Whichever is filled first fills the
+  // others while they are blank (and a change follows into a place that was
+  // still holding the old value), so nobody types it twice.
+
+  /** Which case/person field holds the number a document repeats. */
+  const sharedSource = (partnerType, requirementKey) => {
+    if (requirementKey === PERSON_REQUIREMENTS[partnerType]?.idDocument) return { kind: 'person', field: 'idNumber', role: PERSON_REQUIREMENTS[partnerType].role };
+    if (requirementKey === 'business_registration') return { kind: 'case', field: 'registrationNumber' };
+    if (requirementKey === 'tin_certificate') return { kind: 'case', field: 'tin' };
+    return null;
+  };
+  const sharedKeys = partnerType => ['business_registration', 'tin_certificate', PERSON_REQUIREMENTS[partnerType]?.idDocument].filter(Boolean);
+
+  /** The case, people and documents with blanks filled from where the number was given (not stored). */
+  function shareDetails(partnerType, kycCase, rows) {
+    if (!kycCase) return { kycCase, rows };
+    let nextCase = kycCase;
+    let people = rows.people;
+    const documents = rows.documents.map(d => ({ ...d }));
+    for (const key of sharedKeys(partnerType)) {
+      const source = sharedSource(partnerType, key);
+      if (!source) continue;
+      const doc = currentDocument(documents, key);
+      if (source.kind === 'case') {
+        const held = String(nextCase[source.field] ?? '').trim();
+        if (!held && doc?.documentNumber) nextCase = { ...nextCase, [source.field]: doc.documentNumber };
+        else if (held && doc && !String(doc.documentNumber ?? '').trim()) doc.documentNumber = held;
+      } else {
+        const person = people.find(p => p.role === source.role);
+        const held = String(person?.idNumber ?? '').trim();
+        if (person && !held && doc?.documentNumber) people = people.map(p => (p === person ? { ...p, idNumber: doc.documentNumber } : p));
+        else if (held && doc && !String(doc.documentNumber ?? '').trim()) doc.documentNumber = held;
+      }
+    }
+    return { kycCase: nextCase, rows: { ...rows, people, documents } };
+  }
+
+  /** The number already given for a document's requirement, if any (used when its document starts). */
+  async function sharedNumberFor(partnerType, kycCase, requirementKey) {
+    const source = sharedSource(partnerType, requirementKey);
+    if (!source) return null;
+    if (source.kind === 'case') return String(kycCase[source.field] ?? '').trim() || null;
+    const person = (await partnerPeople.filterByColumnAsync('caseId', kycCase.id)).find(p => p.role === source.role);
+    return String(person?.idNumber ?? '').trim() || null;
+  }
+
+  /**
+   * After one place changed, bring the other along: a pending document (or the
+   * case / person) that was blank or still held the old value takes the new one.
+   */
+  async function followSharedNumber(partnerType, kycCase, requirementKey, oldValue, newValue) {
+    const source = sharedSource(partnerType, requirementKey);
+    if (!source || !newValue) return;
+    const follows = held => !String(held ?? '').trim() || String(held).trim() === String(oldValue ?? '').trim();
+    const doc = currentDocument(await partnerDocuments.filterByColumnAsync('caseId', kycCase.id), requirementKey);
+    if (doc && doc.status === 'pending' && follows(doc.documentNumber) && doc.documentNumber !== newValue) {
+      await partnerDocuments.updateByIdAsync(doc.id, { documentNumber: newValue, updatedAt: nowIso() });
+    }
+  }
+
+  async function followFromDocument(partnerType, kycCase, requirementKey, oldValue, newValue) {
+    const source = sharedSource(partnerType, requirementKey);
+    if (!source || !newValue) return;
+    const follows = held => !String(held ?? '').trim() || String(held).trim() === String(oldValue ?? '').trim();
+    if (source.kind === 'case') {
+      if (follows(kycCase[source.field]) && kycCase[source.field] !== newValue) {
+        await partnerKycCases.updateByIdAsync(kycCase.id, { [source.field]: newValue, updatedAt: nowIso() });
+      }
+      return;
+    }
+    const person = (await partnerPeople.filterByColumnAsync('caseId', kycCase.id)).find(p => p.role === source.role);
+    if (person && follows(person.idNumber) && person.idNumber !== newValue) {
+      await partnerPeople.updateByIdAsync(person.id, { idNumber: newValue, updatedAt: nowIso() });
+    }
+  }
+
   async function evaluate(partner, kycCase) {
-    const [rows, records] = await Promise.all([caseRows(kycCase), partnerRecords(partner)]);
-    return { rows, checklist: evaluateKyc(partner.partnerType, { case: kycCase, ...rows, ...records }) };
+    const [loaded, records] = await Promise.all([caseRows(kycCase), partnerRecords(partner)]);
+    const { kycCase: shownCase, rows } = shareDetails(partner.partnerType, kycCase, loaded);
+    return { rows, shownCase, checklist: evaluateKyc(partner.partnerType, { case: shownCase, ...rows, ...records }) };
   }
 
   const settlementView = a => ({
@@ -233,10 +313,10 @@ export function createPartnerKycService({
   /** A partner's (or an admin's view of a partner's) KYC: case, details and checklist. */
   async function overview(partner) {
     const kycCase = await findCase(partner);
-    const { rows, checklist } = await evaluate(partner, kycCase);
+    const { rows, shownCase, checklist } = await evaluate(partner, kycCase);
     return {
       partnerType: partner.partnerType,
-      case: kycCase,
+      case: shownCase,
       people: rows.people,
       documents: rows.documents.map(documentView),
       settlementAccounts: rows.settlementAccounts.map(settlementView),
@@ -255,6 +335,10 @@ export function createPartnerKycService({
     if (!editable(existing, actor)) return fail('case_locked', 409, { caseStatus: existing.status });
     const kycCase = await ensureCase(partner, actor);
     await partnerKycCases.updateByIdAsync(kycCase.id, { ...patch, updatedAt: nowIso() });
+    // The registration number and TIN are repeated on their certificates: carry a change over.
+    for (const [field, requirementKey] of [['registrationNumber', 'business_registration'], ['tin', 'tin_certificate']]) {
+      if (field in patch) await followSharedNumber(partner.partnerType, kycCase, requirementKey, kycCase[field], patch[field]);
+    }
     await record(kycCase, { eventType: 'profile_updated', targetType: 'case', data: { fields: Object.keys(patch) } }, actor);
     return overview(partner);
   }
@@ -281,6 +365,10 @@ export function createPartnerKycService({
       await partnerPeople.insertAsync({
         id: personId, caseId: kycCase.id, role, ...patch, createdAt: nowIso(), updatedAt: nowIso(),
       });
+    }
+    // The ID number is repeated on the ID document: carry a change over.
+    if ('idNumber' in patch) {
+      await followSharedNumber(partner.partnerType, kycCase, spec.idDocument, current?.idNumber, patch.idNumber);
     }
     await record(kycCase, { eventType: 'person_updated', targetType: 'person', targetId: personId, data: { role, fields: Object.keys(patch) } }, actor);
     return overview(partner);
@@ -410,7 +498,17 @@ export function createPartnerKycService({
     const existingCase = await findCase(partner);
     if (!documentEditable(existingCase, actor)) return fail('case_locked', 409, { caseStatus: existingCase.status });
     const kycCase = await ensureCase(partner, actor);
+    // A number already given elsewhere (ID number, registration number, TIN) is not asked again.
+    const standing = currentDocument(await partnerDocuments.filterByColumnAsync('caseId', kycCase.id), requirementKey);
+    const heldByDocument = standing && standing.status === 'pending' ? standing.documentNumber : null;
+    if (!('documentNumber' in patch) && !String(heldByDocument ?? '').trim()) {
+      const shared = await sharedNumberFor(partner.partnerType, kycCase, requirementKey);
+      if (shared) patch.documentNumber = shared;
+    }
     const docId = await writeDocument(kycCase, requirementKey, { docType, ...patch, ...(details ? { details } : {}) }, actor);
+    if (patch.documentNumber) {
+      await followFromDocument(partner.partnerType, kycCase, requirementKey, heldByDocument, patch.documentNumber);
+    }
     await record(kycCase, {
       eventType: 'document_updated', targetType: 'document', targetId: docId,
       data: { requirementKey, docType, fields: Object.keys(patch) },
