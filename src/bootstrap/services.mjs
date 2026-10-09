@@ -168,6 +168,8 @@ export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
+  // promotionEventsService is defined at the end of this file; this only runs later.
+  onBookingConversion: ({ action, groupId, bookings }) => (action === 'credit' ? promotionEventsService.recordBooking(bookings) : promotionEventsService.reverseBooking(groupId)),
   // refundService is defined below; this only runs later.
   onRefundDue: ({ booking, reasonCode, actorId, role }) => refundService.raise({
     memberId: booking.memberId, kind: 'trainer_booking', sourceId: booking.id, paymentRequestId: booking.paymentRequestId,
@@ -340,8 +342,10 @@ async function finishSponsoredPass(sub) {
   }
 }
 const lifecycle = {
-  activated: async (sub) => {
+  activated: async (sub, ctx) => {
     await finishSponsoredPass(sub);
+    // A gym membership that was paid for counts for the gym promotion the member tapped (never throws).
+    await promotionEventsService.recordSubscription(sub, ctx);
     return automationService.handleEvent({ type: 'membership_activated', subscription: sub });
   },
   paymentFailed: (sub, extra) => automationService.handleEvent({ type: 'payment_failed', subscription: sub, ...extra }),
@@ -363,11 +367,12 @@ export const adminMemberService = createAdminMemberService({
 });
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog, gyms,
-  onSubscriptionActivated: async (sub) => {
+  onSubscriptionActivated: async (sub, ctx) => {
     await finishSponsoredPass(sub);
     await notificationService.notifySubscriptionActivated(sub);
-    await lifecycle.activated(sub);
+    await lifecycle.activated(sub, ctx);
   },
+  onSubscriptionPaymentReversed: sub => promotionEventsService.reverseSubscription(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
