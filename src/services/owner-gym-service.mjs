@@ -4,6 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 
+// What a gym owner may set when they add a trainer (the trainer edits it after).
+const OWNER_TRAINER_FIELDS = Object.freeze([
+  'phone', 'photoUrl', 'images', 'imageThumbnails', 'gender', 'specialties', 'bio',
+  'hourlyRateTzs', 'sessionRateCurrency', 'experienceYears', 'availability', 'socialLinks',
+]);
+
 export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE }) {
   // Set by FitFlex, never by the owner: the verified badge, commission,
   // homepage placement, status and payout/tax details. Payout details for new
@@ -156,15 +162,19 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     return { ok: true };
   }
 
-  async function updateTrainer({ owner, trainerId, body }) {
+  /**
+   * A trainer's profile belongs to the trainer: contact details, specialties,
+   * bio, rate, availability, photos and social handles are edited only by
+   * them. A gym owner adds a trainer, approves or rejects a join request, and
+   * removes the trainer from the gym — never edits the profile.
+   */
+  async function updateTrainer({ owner, trainerId }) {
     const ownerGymIds = ownerGymIdsOf(owner);
     const trainer = trainers.find(t => t.id === trainerId);
     if (!trainer) return { error: 'trainer_not_found', status: 404 };
     const tGymIds = trainer.gymIds || [];
     if (!tGymIds.some(id => ownerGymIds.includes(id))) return { error: 'trainer_not_at_your_gym', status: 403 };
-    const row = trainerService.normalizeTrainerPayload({ ...body, id: trainer.id, userId: trainer.userId, email: trainer.email }, trainer);
-    await trainers.upsertAsync(t => t.id === row.id, row);
-    return { trainer: trainerService.hydrateTrainer(row) };
+    return { error: 'trainer_profile_not_editable', status: 403 };
   }
 
   async function createTrainer({ owner, body }) {
@@ -194,8 +204,13 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       approvalStatus: 'approved', onboardingCompleted: true, gymId, gymIds: [gymId],
       createdAt: now, updatedAt: now,
     };
+    // Only the starting details an owner may give; never verification,
+    // ratings, listing position or links to other gyms.
+    const starting = Object.fromEntries(
+      OWNER_TRAINER_FIELDS.filter(k => body[k] !== undefined).map(k => [k, body[k]]),
+    );
     const trainer = trainerService.normalizeTrainerPayload({
-      ...body, id: trainerId, userId, email, displayName, gymIds: [gymId],
+      ...starting, id: trainerId, userId, email, displayName, gymIds: [gymId],
       status: 'active', approvalStatus: 'approved',
     }, {});
     await users.upsertAsync(u => u.id === userId, user);
