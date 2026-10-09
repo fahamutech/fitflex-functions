@@ -275,3 +275,63 @@ test('admins list and open cases; the kyc scope can be granted to portal staff',
   assert.equal((await svc.resolvePartner('trainer', p.subjectId)).error, 'partner_not_found');
   assert.ok(PORTAL_ACL_SCOPES.includes('kyc'));
 });
+
+// ── Details given once ────────────────────────────────────────────────────
+
+test('an ID number given on the person is not asked again on the ID document, and a change follows', async () => {
+  const p = await partner('trainer');
+  await svc.upsertPerson(p, 'principal', { fullName: 'Neema Said', idType: 'nida', idNumber: '19950505-11111-00002-21' }, p.actor);
+  // The document is filled in without a number: it takes the one already given.
+  const view = await svc.upsertDocumentDetails(p, 'trainer_id', { docType: 'national_id' }, p.actor);
+  const idDoc = view.documents.find(d => d.requirementKey === 'trainer_id');
+  assert.equal(idDoc.documentNumber, '19950505111110000221', 'the number as FitFlex stores it');
+  assert.notEqual(item(view, 'identity.id_document').status, 'incomplete');
+  // The person corrects a typo: the pending document follows.
+  const fixed = await svc.upsertPerson(p, 'principal', { idNumber: '19950505-11111-00002-22' }, p.actor);
+  assert.equal(fixed.documents.find(d => d.requirementKey === 'trainer_id').documentNumber, '19950505111110000222');
+});
+
+test('an ID number given on the document fills the person while it is blank', async () => {
+  const p = await partner('trainer');
+  await svc.upsertPerson(p, 'principal', { fullName: 'Juma Ally', idType: 'nida' }, p.actor);
+  const view = await svc.upsertDocumentDetails(p, 'trainer_id', { docType: 'national_id', documentNumber: '19900101-22222-00003-11' }, p.actor);
+  assert.equal(view.people.find(x => x.role === 'principal').idNumber, '19900101222220000311');
+  assert.equal(item(view, 'identity.idNumber').status, 'complete');
+});
+
+test('registration number and TIN are given once for the business and their certificates', async () => {
+  const p = await partner('vendor');
+  await svc.updateBusiness(p, { legalName: 'Mwanga Ltd', registrationNumber: '123456', tin: '111-222-333' }, p.actor);
+  const view = await svc.upsertDocumentDetails(p, 'tin_certificate', { docType: 'tin_certificate' }, p.actor);
+  assert.equal(view.documents.find(d => d.requirementKey === 'tin_certificate').documentNumber, '111222333', 'stored without dashes');
+  const reg = await svc.upsertDocumentDetails(p, 'business_registration', { docType: 'business_registration' }, p.actor);
+  assert.equal(reg.documents.find(d => d.requirementKey === 'business_registration').documentNumber, '123456');
+  // The other way: a TIN given on its certificate while the business has none.
+  const q = await partner('vendor');
+  const certFirst = await svc.upsertDocumentDetails(q, 'tin_certificate', { docType: 'tin_certificate', documentNumber: '999-888-777' }, q.actor);
+  assert.equal(certFirst.case.tin, '999888777');
+  // A number the person already holds is not overwritten by a different one on the document.
+  const kept = await svc.updateBusiness(q, { tin: '555-444-333' }, q.actor);
+  assert.equal(kept.case.tin, '555444333');
+  assert.equal(kept.documents.find(d => d.requirementKey === 'tin_certificate').documentNumber, '555444333', 'the pending certificate follows');
+});
+
+test('a reviewed document is never rewritten by a later change', async () => {
+  const p = await partner('vendor');
+  await svc.updateBusiness(p, { registrationNumber: 'AAA-1' }, p.actor);
+  await svc.upsertDocumentDetails(p, 'business_registration', { docType: 'business_registration' }, p.actor);
+  const row = await db('PartnerDocument').where({ caseId: (await svc.overview(p)).case.id, requirementKey: 'business_registration' }).first();
+  await db('PartnerDocument').where({ id: row.id }).update({ status: 'rejected', reviewNote: 'unreadable' });
+  const after = await svc.updateBusiness(p, { registrationNumber: 'BBB-2' }, p.actor);
+  assert.equal(after.documents.find(d => d.requirementKey === 'business_registration').documentNumber, 'AAA1');
+});
+
+test('licence, certification and insurance can be saved without an expiry date', async () => {
+  const p = await partner('trainer');
+  const view = await svc.upsertDocumentDetails(p, 'liability_insurance', { docType: 'liability_insurance', issuer: 'Jubilee', documentNumber: 'POL-1' }, p.actor);
+  const status = item(view, 'professional.liability_cover');
+  assert.notEqual(status.status, 'incomplete');
+  assert.deepEqual(status.missingFields ?? [], []);
+  const dated = await svc.upsertDocumentDetails(p, 'liability_insurance', { docType: 'liability_insurance', expiresOn: '2031-01-01' }, p.actor);
+  assert.equal(dated.documents.find(d => d.requirementKey === 'liability_insurance').expiresOn?.toString().slice(0, 10), '2031-01-01', 'an expiry given is still kept');
+});

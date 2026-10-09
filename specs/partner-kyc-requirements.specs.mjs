@@ -182,12 +182,17 @@ test('a trainer needs a NIDA number if Tanzanian and a passport otherwise', () =
   assert.equal(item(foreign, 'identity.idNumber').status, 'complete');
 });
 
-test('a certification needs its body, number, issue and expiry dates', () => {
+test('a certification needs its body, number and issue date; the expiry date is optional', () => {
   const c = evaluateKyc('trainer', {
     documents: [doc('certification', { issuer: 'ACE', documentNumber: 'ACE-1', issuedOn: null, expiresOn: null })],
     trainer: { specialties: ['strength'] }, now: NOW,
   });
-  assert.deepEqual(item(c, 'professional.certification').missingFields, ['issuedOn', 'expiresOn']);
+  assert.deepEqual(item(c, 'professional.certification').missingFields, ['issuedOn']);
+  const noExpiry = evaluateKyc('trainer', {
+    documents: [{ ...doc('certification', { issuer: 'ACE', documentNumber: 'ACE-1', issuedOn: '2025-01-01', expiresOn: null }) }],
+    trainer: { specialties: ['strength'] }, now: NOW,
+  });
+  assert.notEqual(item(noExpiry, 'professional.certification').status, 'incomplete', 'no expiry date is not a gap');
   assert.equal(item(c, 'professional.specialisation').status, 'complete');
   assert.equal(item(c, 'professional.liability_cover').status, 'missing');
 });
