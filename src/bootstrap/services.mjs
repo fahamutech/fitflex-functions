@@ -96,6 +96,7 @@ import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createCompanyDirectory } from '../services/company-directory.mjs';
 import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
+import { createVendorSettlementService } from '../services/vendor-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createModerationGate } from '../services/moderation-gate.mjs';
 import { createEntityResolver } from '../services/promotion-entities.mjs';
@@ -404,6 +405,11 @@ export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerG
 export const trainerSettlementService = createTrainerSettlementService({
   trainers, users, payoutEligibility,
   // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Vendor payouts: a weekly statement per vendor for delivered orders, on the same path.
+export const vendorSettlementService = createVendorSettlementService({
+  users, payoutEligibility,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const settlementWorkflowService = createSettlementWorkflowService({ payoutEligibility });
