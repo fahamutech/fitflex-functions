@@ -441,7 +441,7 @@ export const favoriteService = createFavoriteService({ users, gyms });
 // Who belongs to a company or organisation: one lookup for challenges, rewards and groups.
 export const companyDirectory = createCompanyDirectory({ users, corporateEmployees, beneficiaries: b2bBeneficiaries });
 export const socialService = createSocialService({
-  directory: companyDirectory,
+  directory: companyDirectory, trainers,
   users, activities, follows, blocks, profiles: socialProfiles, groups: socialGroups,
   groupMembers: socialGroupMembers, kudos: activityKudos, comments: activityComments, views: activityViews, reports: socialReports,
   auditLog,

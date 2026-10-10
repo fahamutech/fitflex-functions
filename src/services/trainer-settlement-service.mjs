@@ -145,7 +145,15 @@ export function createTrainerSettlementService({
 
   const withTrainer = (s) => {
     const t = trainerOf(s.trainerId);
-    return { ...s, trainer: t ? { id: t.id, displayName: t.displayName || null, userId: t.userId || null } : null };
+    // A statement is paid to a person: it carries the trainer's own name as
+    // well as the name clients see (the nickname, when there is one).
+    return {
+      ...s,
+      trainer: t ? {
+        id: t.id, displayName: t.displayName || null, fullName: t.fullName || t.displayName || null,
+        nickname: t.nickname || null, userId: t.userId || null,
+      } : null,
+    };
   };
 
   /** Admin: statements, newest week first. */
