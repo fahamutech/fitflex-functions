@@ -156,3 +156,15 @@ export const b2bBeneficiaryInvites = {
   description: 'B2B: enrol invited people who have since joined FitFlex with the email or number their organisation listed, and send the invitation messages that are due (email: the invitation, then reminders after 3 and 10 days; SMS to people listed with a mobile number: the invitation and one reminder after 3 days, unless B2B_INVITE_SMS=off). Safe to overlap and to rerun: an invite is enrolled once and each message is claimed before it is sent.',
   onJob: () => opsService.runJob('b2b-beneficiary-invites'),
 };
+
+export const b2bLifecycleNotices = {
+  created, rule: '0 5 * * *', // every day 05:00 UTC = 08:00 EAT
+  description: 'B2B: tell members when a benefit starts tomorrow, ends within 7 days or has ended, and tell an organisation (in the app and at its contact email) when a programme ends within 30 days, within 7, or has ended. Each notice is written once, so reruns and a missed day are safe.',
+  onJob: () => opsService.runJob('b2b-lifecycle-notices'),
+};
+
+export const b2bAllowanceNotices = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'B2B: tell a member when they have used 80% of a benefit\'s allowance and when they have used all of it. Once each per person, benefit and allowance window.',
+  onJob: () => opsService.runJob('b2b-allowance-notices'),
+};

@@ -77,6 +77,7 @@ import { createB2BAnalyticsService } from '../services/b2b-analytics-service.mjs
 import { createOpsService } from '../services/ops-service.mjs';
 import { registerB2BJobs } from '../services/b2b-jobs.mjs';
 import { createB2BBeneficiaryImportService } from '../services/b2b-beneficiary-import-service.mjs';
+import { createB2BLifecycleService } from '../services/b2b-lifecycle-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -293,8 +294,14 @@ export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
   // notificationService is created further down; this only runs later.
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Benefit and programme lifecycle: notices to members and organisations, and renewal drafts.
+export const b2bLifecycleService = createB2BLifecycleService({
+  db, b2bService, programs: b2bPrograms, benefits: b2bBenefits, b2bProgramService, usage: b2bConsumptionService, emailSender: () => emailSender(),
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
 export const b2bOps = registerB2BJobs({
-  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService,
+  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService, b2bLifecycleService,
   // Defined at the end of this file; only called when the job runs.
   promotionService: { runLifecycle: args => promotionService.runLifecycle(args) },
   promotionEventsService: { purge: args => promotionEventsService.purge(args) },
