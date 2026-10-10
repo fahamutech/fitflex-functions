@@ -5,7 +5,35 @@ import { parseStringList } from '../shared/parse-list.mjs';
 import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
 
 /** Limits on what a trainer can put on their own profile. */
-export const PROFILE_LIMITS = Object.freeze({ name: 80, bio: 2000, specialties: 20, images: 8 });
+export const PROFILE_LIMITS = Object.freeze({ name: 80, bio: 2000, specialties: 20, images: 8, nickname: 30 });
+
+/**
+ * The optional name a trainer chooses for clients to see. Returns the cleaned
+ * value (null = none) or `false` when it cannot be used: 2 to 30 characters,
+ * starting with a letter or number; letters, numbers, spaces and . _ ' -.
+ */
+export function cleanNickname(value) {
+  const v = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (!v) return null;
+  if (v.length < 2 || v.length > PROFILE_LIMITS.nickname) return false;
+  return /^[\p{L}\p{N}][\p{L}\p{N} ._'-]*$/u.test(v) ? v : false;
+}
+
+/**
+ * A trainer's names. `displayName` is what everyone sees: the nickname when
+ * there is one, otherwise the trainer's own name (`fullName`). A `displayName`
+ * sent by a caller is the trainer's own name — unless it is just the nickname
+ * being echoed back by a form that loaded it.
+ */
+export function trainerNames(body = {}, prior = {}) {
+  const priorFull = prior.fullName ?? prior.displayName ?? null;
+  const echoed = prior.nickname && body.displayName === prior.displayName;
+  const given = body.fullName ?? (echoed ? null : body.displayName);
+  const fullName = (given != null && String(given).trim()) ? String(given).trim().slice(0, PROFILE_LIMITS.name) : priorFull;
+  const cleaned = body.nickname !== undefined ? cleanNickname(body.nickname) : (prior.nickname ?? null);
+  const nickname = cleaned === false ? (prior.nickname ?? null) : cleaned;
+  return { fullName, nickname, displayName: nickname || fullName };
+}
 /**
  * What anyone may see of a trainer (GET /trainers, GET /trainers/:id and
  * trainer discovery are open to the world). A list of what is shown, so a new
@@ -44,7 +72,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       userId: body.userId ?? prior.userId ?? null,
       email: body.email ?? prior.email ?? null,
       phone: body.phone ?? prior.phone ?? null,
-      displayName: body.displayName ?? prior.displayName,
+      ...trainerNames(body, prior),
       photoUrl: body.photoUrl ?? images[0] ?? prior.photoUrl ?? null,
       images,
       imageThumbnails,
@@ -180,6 +208,9 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       .map(row => ({
         id: row.id,
         displayName: row.displayName || null,
+        // Staff see both: the name clients see and the trainer's own name.
+        fullName: row.fullName || row.displayName || null,
+        nickname: row.nickname || null,
         email: row.email || null,
         gymIds: row.gymIds || [],
       }))
@@ -229,6 +260,9 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const validGenders = ['male', 'female', 'other'];
     if (!body.gender || !validGenders.includes(body.gender)) {
       return { error: 'gender_required', status: 400, validValues: validGenders };
+    }
+    if (body.nickname !== undefined && cleanNickname(body.nickname) === false) {
+      return { error: 'invalid_nickname', status: 400, min: 2, max: PROFILE_LIMITS.nickname };
     }
     const profile = await claimProfileForUser({ userId, email: user?.email });
     // Gym links need the owner's approval (and a linked trainer trains there
@@ -300,10 +334,13 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const sent = (k) => body[k] !== undefined && body[k] !== null;
     const updates = {};
 
-    if (sent('displayName')) {
-      const name = String(body.displayName).trim();
-      if (!name) return fail('displayName_required');
-      updates.displayName = name.slice(0, PROFILE_LIMITS.name);
+    if (sent('displayName') && !String(body.displayName).trim()) return fail('displayName_required');
+    // null or '' removes the nickname, so clients see the trainer's own name again.
+    if (body.nickname !== undefined && cleanNickname(body.nickname) === false) {
+      return { ...fail('invalid_nickname'), min: 2, max: PROFILE_LIMITS.nickname };
+    }
+    if (sent('displayName') || sent('fullName') || body.nickname !== undefined) {
+      Object.assign(updates, trainerNames(body, profile));
     }
     if (sent('bio')) updates.bio = String(body.bio).trim().slice(0, PROFILE_LIMITS.bio);
     if (sent('phone')) {

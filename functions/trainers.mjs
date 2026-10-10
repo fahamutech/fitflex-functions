@@ -55,7 +55,7 @@ export const adminDeleteTrainer = {
 
 export const trainerRegister = {
   created, method: 'post', path: '/trainer/register',
-  description: 'Trainer: self-register full profile (displayName, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing.',
+  description: 'Trainer: self-register full profile (displayName, optional nickname clients see instead, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
@@ -114,7 +114,7 @@ export const trainerCancelGymApplication = {
 
 export const trainerUpdateProfile = {
   created, method: 'put', path: '/trainer/me',
-  description: 'Trainer: update own professional details — displayName, phone, bio, specialties, hourlyRateTzs, sessionRateCurrency (TZS|USD), experienceYears, availability, images (gallery, max 8; first is the profile picture) with imageThumbnails, photoUrl, and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL). Only the fields sent are changed.',
+  description: 'Trainer: update own professional details — displayName (the own name of the trainer), nickname (optional name clients see instead; 2–30 characters, null or an empty string removes it; the displayName of the profile then reads as the nickname and fullName keeps the own name), phone, bio, specialties, hourlyRateTzs, sessionRateCurrency (TZS|USD), experienceYears, availability, images (gallery, max 8; first is the profile picture) with imageThumbnails, photoUrl, and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL). Only the fields sent are changed.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);

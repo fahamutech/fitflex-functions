@@ -59,6 +59,8 @@ export function publicActivity(a) {
 export function createSocialService({
   users, activities, follows, blocks, profiles, groups, groupMembers, kudos, comments, reports, views = null,
   notify = async () => {}, auditLog = null, now = () => new Date(),
+  // Trainer profiles, for the name a trainer is known by (optional).
+  trainers = null,
   // Who belongs to a company or organisation (colleagues, company-only groups).
   directory = createCompanyDirectory({ users }),
 }) {
@@ -123,6 +125,12 @@ export function createSocialService({
 
   async function nameOf(userId) {
     const u = await users.findByIdAsync(userId);
+    // A trainer is known by the name on their trainer profile (their nickname
+    // when they chose one), wherever they post, comment or join a group.
+    if (u?.userType === 'trainer' && trainers) {
+      const t = trainers.find(p => p.userId === userId);
+      if (t?.displayName) return t.displayName;
+    }
     return u?.displayName ?? null;
   }
 
@@ -815,5 +823,6 @@ export function createSocialService({
     createGroup, updateGroup, archiveGroup, myGroups, ownedGroups, discoverGroups, joinGroup, leaveGroup,
     groupDetail, setMember,
     report, listReports, resolveReport,
+    nameOf,
   };
 }
