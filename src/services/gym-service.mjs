@@ -120,7 +120,7 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
    */
   function slimGym(g) {
     if (!g) return g;
-    const { images, thumbnails, operatingHours, trainerPass, ...rest } = g;
+    const { images, thumbnails, operatingHours, trainerPass, ...rest } = publicGym(g);
     return { ...rest, thumbnail: (thumbnails && thumbnails[0]) || null };
   }
 

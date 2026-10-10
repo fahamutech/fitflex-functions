@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { PASS_TIERS } from '../shared/constants.mjs';
 import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 import { trainerPassOptions, trainerGymAccess, hideTrainerPass } from '../shared/trainer-access.mjs';
+import { publicGym } from './gym-service.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { PRODUCT_TYPES, MEMBER_ACCESS_PRODUCTS, productTypeOfPayment } from '../shared/payment-product.mjs';
@@ -332,7 +333,7 @@ export function createSubscriptionService({
     return (await checkins.filterAsync(c => c.memberId === memberId))
       .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
       .slice(0, 50)
-      .map(c => ({ ...c, gym: hideTrainerPass(gyms.find(g => g.id === c.gymId) || null) }));
+      .map(c => ({ ...c, gym: hideTrainerPass(publicGym(gyms.find(g => g.id === c.gymId) || null)) }));
   }
 
   async function memberPaymentHistory(memberId) {
