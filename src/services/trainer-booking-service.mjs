@@ -8,11 +8,28 @@ import {
 } from '../shared/trainer-access.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { publicGym } from './gym-service.mjs';
+import { publicTrainer } from './trainer-service.mjs';
 
 // A booking holds its slots from the moment it is requested; one that was
 // rejected or cancelled frees them again.
 const SLOT_RELEASING = new Set(['cancelled', 'payment_rejected']);
 const MAX_SLOTS_PER_BOOKING = 12;
+
+/**
+ * What a trainer may see of the member who booked them (and what the member's
+ * own booking carries back): a name and a face. A list of what is shown, so a
+ * new account column stays private until it is added here.
+ */
+export function memberCard(user) {
+  if (!user) return null;
+  return { id: user.id, displayName: user.displayName || null, photoUrl: user.photoUrl || null };
+}
+
+/** The same, with the contact details FitFlex staff need to reach the member. Never the rest of the account. */
+export function adminMemberCard(user) {
+  if (!user) return null;
+  return { ...memberCard(user), email: user.email || null, phone: user.phone || null };
+}
 
 /**
  * C1: does the trainer's configured availability cover this date+slot (+gym)?
@@ -66,10 +83,30 @@ export function createTrainerBookingService({
     }
   }
 
+  /** The trainer as members see them anywhere else: the public card, badged from their own KYC. */
+  async function publicTrainerCard(row) {
+    const [shown] = await partnerGate.badgeTrainers([trainerService.hydrateTrainer(row)]);
+    return publicTrainer(shown);
+  }
+
+  /**
+   * A booking as the member or the trainer reads it: the other party is a
+   * card, never their account or their full profile.
+   */
   async function hydrateBooking(row) {
     return {
       ...row,
-      member: await users.findByIdAsync(row.memberId),
+      member: memberCard(await users.findByIdAsync(row.memberId)),
+      trainer: row.trainerId ? await publicTrainerCard(trainers.find(t => t.id === row.trainerId) || {}) : null,
+      gym: hideTrainerPass(publicGym(gyms.find(g => g.id === row.gymId) || null))
+    };
+  }
+
+  /** A booking as FitFlex staff read it: the trainer's full profile, and how to reach the member. */
+  async function adminHydrateBooking(row) {
+    return {
+      ...row,
+      member: adminMemberCard(await users.findByIdAsync(row.memberId)),
       trainer: row.trainerId ? trainerService.hydrateTrainer(trainers.find(t => t.id === row.trainerId) || {}) : null,
       gym: hideTrainerPass(publicGym(gyms.find(g => g.id === row.gymId) || null))
     };
@@ -234,7 +271,7 @@ export function createTrainerBookingService({
       bookings,
       summary,
       paymentRequest,
-      trainer: trainerService.hydrateTrainer(trainer),
+      trainer: await publicTrainerCard(trainer),
     };
   }
 
@@ -267,7 +304,7 @@ export function createTrainerBookingService({
     return Promise.all(
       allBookings
         .sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0))
-        .map(b => hydrateBooking(b))
+        .map(b => adminHydrateBooking(b))
     );
   }
 
@@ -290,7 +327,7 @@ export function createTrainerBookingService({
     // FitFlex cancelling a session the member paid for owes them the money back.
     const refund = cancelling && wasPaid(prior)
       ? await refundFor(updated, 'cancelled_by_fitflex', actorId, 'admin') : null;
-    return { booking: await hydrateBooking(updated), refund };
+    return { booking: await adminHydrateBooking(updated), refund };
   }
 
   async function trainerMyBookings(userId) {
@@ -473,7 +510,7 @@ export function createTrainerBookingService({
         gym: publicGym(gyms.find(g => g.id === b.gymId) || null),
         amountTzs: b.trainerPayoutTzs ?? b.amountTzs ?? 0,
         status: b.status,
-        member: await users.findByIdAsync(b.memberId),
+        member: memberCard(await users.findByIdAsync(b.memberId)),
         customerName: null,
       }))),
       ...manualSessions.map((s) => ({
@@ -572,7 +609,7 @@ export function createTrainerBookingService({
       const m = members.get(b.memberId);
       return {
         id: b.id, status: b.status, gymId: b.gymId,
-        member: m ? { id: m.id, displayName: m.displayName || null, photoUrl: m.photoUrl || null } : null,
+        member: memberCard(m),
       };
     };
     return {
