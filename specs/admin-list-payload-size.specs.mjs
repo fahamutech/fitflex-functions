@@ -190,8 +190,8 @@ test('adminListTrainers ?refs=true returns a lightweight id/displayName/email/gy
   assert.ok(trainer, 'seeded trainer should appear in refs list');
   assert.deepEqual(
     Object.keys(trainer).sort(),
-    ['displayName', 'email', 'gymIds', 'id'],
-    'refs projection should only contain id/displayName/email/gymIds'
+    ['displayName', 'email', 'fullName', 'gymIds', 'id', 'nickname'],
+    'refs projection should only contain id, the names, email and gymIds'
   );
 
   // Default (non-refs) list should still return the full profile shape.

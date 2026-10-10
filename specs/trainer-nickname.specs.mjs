@@ -6,7 +6,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
-import { adminUpsertTrainer, trainerMyProfile, trainerUpdateProfile, getTrainer } from '../functions/trainers.mjs';
+import { adminListTrainers, adminUpsertTrainer, trainerMyProfile, trainerUpdateProfile, getTrainer } from '../functions/trainers.mjs';
 import { cleanNickname, trainerNames } from '../src/services/trainer-service.mjs';
 import { createSocialService } from '../src/services/social-service.mjs';
 
@@ -98,6 +98,11 @@ test('a trainer sets, changes and removes their nickname; the public sees only t
   // An admin saving the profile as the portal shows it does not lose the own name.
   const adminSave = await call(adminUpsertTrainer, { user: admin, body: { id: trainerId, displayName: 'Coach Asha', bio: 'By admin' } });
   assert.deepEqual([adminSave.body.displayName, adminSave.body.fullName, adminSave.body.nickname], ['Coach Asha', 'Asha Mushi', 'Coach Asha']);
+
+  // Staff lists carry both names.
+  const refs = await call(adminListTrainers, { user: admin, query: { refs: 'true' } });
+  const ref = refs.body.find(t => t.id === trainerId);
+  assert.deepEqual([ref.displayName, ref.fullName, ref.nickname], ['Coach Asha', 'Asha Mushi', 'Coach Asha']);
 
   const stored = await db('TrainerProfile').where({ id: trainerId }).first('displayName', 'fullName', 'nickname');
   assert.deepEqual({ ...stored }, { displayName: 'Coach Asha', fullName: 'Asha Mushi', nickname: 'Coach Asha' });

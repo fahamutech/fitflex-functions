@@ -208,6 +208,9 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       .map(row => ({
         id: row.id,
         displayName: row.displayName || null,
+        // Staff see both: the name clients see and the trainer's own name.
+        fullName: row.fullName || row.displayName || null,
+        nickname: row.nickname || null,
         email: row.email || null,
         gymIds: row.gymIds || [],
       }))
