@@ -54,15 +54,26 @@ export const PERMISSIONS = Object.freeze([
   'programs.read',
   'programs.manage',
   'usage.read',
+  // Invoices, payments, balances and statements (Phase 5).
+  'billing.read',
+  // Tell FitFlex a payment has been made (Phase 6).
+  'billing.pay',
+  // Dashboards and reports: totals for the organisation, its programmes, benefits and providers.
+  'analytics.read',
+  // Each person on the organisation's list with what they used and did.
+  'analytics.people',
+  // Challenges, their rewards, and groups for the organisation's people.
+  'engagement.read',
+  'engagement.manage',
 ]);
 
 export const ROLE_PERMISSIONS = Object.freeze({
   owner: PERMISSIONS,
   admin: PERMISSIONS,
-  manager: ['organization.read', 'users.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'programs.manage', 'usage.read'],
-  hr: ['organization.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read'],
-  finance: ['organization.read', 'programs.read', 'usage.read'],
-  analyst: ['organization.read', 'beneficiaries.read', 'programs.read', 'usage.read'],
+  manager: ['organization.read', 'users.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'programs.manage', 'usage.read', 'engagement.read', 'engagement.manage', 'analytics.read', 'analytics.people'],
+  hr: ['organization.read', 'beneficiaries.read', 'beneficiaries.manage', 'programs.read', 'engagement.read', 'engagement.manage', 'analytics.read', 'analytics.people'],
+  finance: ['organization.read', 'programs.read', 'usage.read', 'billing.read', 'billing.pay', 'analytics.read'],
+  analyst: ['organization.read', 'beneficiaries.read', 'programs.read', 'usage.read', 'engagement.read', 'analytics.read'],
   viewer: ['organization.read', 'programs.read'],
 });
 export const ORGANIZATION_USER_ROLES = Object.freeze(Object.keys(ROLE_PERMISSIONS));

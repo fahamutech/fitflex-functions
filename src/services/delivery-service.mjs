@@ -1,7 +1,7 @@
 // Delivery — turns queued CommunicationMessage rows into real messages
 // through the existing notification service: in-app via its inbox,
 // push via its FCM fan-out, WhatsApp through the WhatsApp channel service
-// (and its provider).
+// (and its provider), SMS through the SMS service (and its provider).
 //
 // Each run (a cron tick, every minute):
 //   1. releases scheduled campaigns whose time has come (campaign service);
@@ -37,6 +37,7 @@ export function createDeliveryService({
   notificationService,
   campaignService,
   whatsappChannel = null,
+  smsChannel = null,
   now = () => new Date(),
   batchSize = 200,
   logger = console,
@@ -147,6 +148,7 @@ export function createDeliveryService({
     in_app: deliverInApp,
     push: deliverPush,
     whatsapp: (msg) => whatsappChannel ? whatsappChannel.deliver(msg) : { skipped: 'whatsapp_not_configured' },
+    sms: (msg) => smsChannel ? smsChannel.deliver(msg) : { skipped: 'sms_not_configured' },
   };
 
   // Checked again just before sending (M11): the account may have been

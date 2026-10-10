@@ -1,5 +1,6 @@
 // Corporate wellness (B2B) — account onboarding, seat provisioning, telemetry
 // dashboard and seat billing. Pure DI: receives store collections via the factory.
+import { findUserByContact } from '../shared/user-contact.mjs';
 import { randomUUID, randomInt } from 'node:crypto';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import {
@@ -285,17 +286,21 @@ export function createCorporateService({
    * Link an employee to their FitFlex member account (or unlink with a null
    * userId). The link is what lets the employee use the company's benefits.
    */
-  async function linkEmployeeUser({ corporateId, employeeId, userId, actorId }) {
+  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId }) {
     const employee = await corporateEmployees.findByIdAsync(employeeId);
     if (!employee || employee.corporateId !== corporateId) return { error: 'employee_not_found', status: 404 };
-    if (userId === null || userId === undefined || userId === '') {
+    const unlink = [givenUserId, email, phone].every(v => v === null || v === undefined || v === '');
+    if (unlink) {
       const updated = await corporateEmployees.updateByIdAsync(employeeId, { userId: null, updatedAt: now() });
       await audit({ actor: actorId, action: 'corporate.staff.unlink', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId: null } });
       return { employee: (({ pinHash, ...rest }) => rest)(updated) };
     }
-    const user = await users.findByIdAsync(userId);
-    if (!user) return { error: 'user_not_found', status: 404 };
+    // By user id, or by the email or mobile number of their member account.
+    const found = await findUserByContact(users, { userId: givenUserId, email, phone }, { require: givenUserId ? null : 'member' });
+    if (found.error) return found.error === 'member_account_required' ? { error: 'user_must_be_member', status: 400 } : found;
+    const { user } = found;
     if (user.userType !== 'member') return { error: 'user_must_be_member', status: 400 };
+    const userId = user.id;
     const taken = (await corporateEmployees.filterByColumnAsync('userId', userId))
       .find(e => e.corporateId === corporateId && e.id !== employeeId && e.status !== 'exited');
     if (taken) return { error: 'user_already_linked', status: 409, employeeId: taken.id };

@@ -28,7 +28,7 @@ const privacyPolicyHtml = `<!doctype html>
 <body>
   <main>
     <h1>FitFlex Privacy Policy</h1>
-    <p class="muted">Last updated: July 4, 2026</p>
+    <p class="muted">Last updated: October 5, 2026</p>
 
     <p>FitFlex provides fitness membership, gym access, trainer booking, payment, and check-in services. This Privacy Policy explains how FitFlex collects, uses, shares, and protects information when you use the FitFlex mobile app, portals, websites, and related services.</p>
 
@@ -52,6 +52,9 @@ const privacyPolicyHtml = `<!doctype html>
 
     <h2>Sharing Information</h2>
     <p>We do not sell personal information. We may share information with gyms, trainers, payment processors, authentication providers, hosting providers, analytics or crash reporting providers, support tools, professional advisers, regulators, or law enforcement when needed to operate FitFlex, process transactions, protect rights and safety, or comply with law. Gym operators receive only the information needed to provide access and manage memberships. QR scan flows are designed to use masked member identifiers where possible.</p>
+
+    <h2>Employers, Insurers and Other Sponsors</h2>
+    <p>An employer, insurer, club or other organisation (a "sponsor") may give you benefits through FitFlex. While you are on a sponsor's list, that sponsor can see your FitFlex activity: your name and status on its list, the benefits you hold and how much of them you have used, your gym check-ins and trainer sessions with the date and place, the workouts and activities you record (type, date, duration, distance, steps and active minutes), and your progress in challenges and groups the sponsor runs. A sponsor cannot see your weight, height, calories, notes, recorded routes, payment details, or any benefit, challenge or group that another sponsor gives you. FitFlex tells you in the app when a sponsor adds you, and the Benefits screen lists what your sponsor can see. If you do not want a sponsor to see this information, ask the sponsor to remove you from its list or write to privacy@fitflex.af; you will stop receiving that sponsor's benefits.</p>
 
     <h2>Payments</h2>
     <p>FitFlex may use third-party payment partners to process subscriptions, payouts, credits, refunds, and related financial transactions. Payment partners may collect and process payment details under their own terms and privacy notices. FitFlex stores transaction references, statuses, amounts, and related account records needed to operate the service.</p>
@@ -82,9 +85,10 @@ const privacyPolicyHtml = `<!doctype html>
 
     <section class="section-divider" lang="sw">
       <h1>Sera ya Faragha ya FitFlex</h1>
-      <p class="muted">Ilisasishwa mwisho: Julai 4, 2026</p>
-      <p>FitFlex hukusanya na kutumia taarifa zinazohitajika kutoa huduma za uanachama wa mazoezi, kuingia gym kwa QR, malipo, miadi na wakufunzi, usaidizi kwa wateja, usalama, na uboreshaji wa huduma.</p>
-      <p>Hatuiuzi taarifa binafsi. Tunaweza kushiriki taarifa zinazohitajika na gym, wakufunzi, watoa huduma za malipo, uthibitishaji, hosting, usaidizi, au mamlaka pale inapohitajika kuendesha huduma, kulinda watumiaji, au kutimiza matakwa ya kisheria.</p>
+      <p class="muted">Ilisasishwa mwisho: Oktoba 5, 2026</p>
+      <p>FitFlex hukusanya na kutumia taarifa zinazohitajika kutoa huduma za uanachama wa mazoezi, kuingia gym kwa QR, malipo, vipindi na ma-trainer, usaidizi kwa wateja, usalama, na uboreshaji wa huduma.</p>
+      <p>Hatuiuzi taarifa binafsi. Tunaweza kushiriki taarifa zinazohitajika na gym, ma-trainer, watoa huduma za malipo, uthibitisho, hosting, usaidizi, au mamlaka pale inapohitajika kuendesha huduma, kulinda watumiaji, au kutimiza matakwa ya kisheria.</p>
+      <p>Mwajiri, kampuni ya bima, klabu au taasisi nyingine ("mdhamini") inaweza kukupa benefits kupitia FitFlex. Ukiwa kwenye orodha ya mdhamini, mdhamini huyo anaweza kuona shughuli zako za FitFlex: jina na hali yako kwenye orodha yake, benefits ulizonazo na kiasi ulichotumia, kuingia kwako gym na vipindi vya ma-trainer pamoja na tarehe na mahali, mazoezi na shughuli unazorekodi, na maendeleo yako kwenye challenge na vikundi vya mdhamini. Mdhamini hawezi kuona uzito wako, urefu wako, kalori, maelezo, njia ulizorekodi, taarifa za malipo, wala benefits, challenge au kikundi cha mdhamini mwingine. Usipotaka mdhamini aone taarifa hizi, mwombe akuondoe kwenye orodha yake au tuandikie kupitia privacy@fitflex.af; utaacha kupata benefits za mdhamini huyo.</p>
       <p>Unaweza kuomba kusahihisha au kufuta taarifa zako kwa kutuandikia kupitia privacy@fitflex.af. Baadhi ya kumbukumbu zinaweza kuhifadhiwa kwa muda unaohitajika kwa sheria, uhasibu, usalama, kuzuia udanganyifu, au kutatua migogoro.</p>
     </section>
   </main>
@@ -157,22 +161,22 @@ const deleteAccountHtml = `<!doctype html>
     <section class="section-divider" lang="sw">
       <h1>Futa Akaunti Yako ya FitFlex</h1>
       <p class="muted">Ilisasishwa mwisho: Julai 10, 2026</p>
-      <p>Ukurasa huu unaelezea jinsi ya kuomba kufutwa kwa akaunti yako ya FitFlex na taarifa zako binafsi, kwa wanachama, wamiliki wa gym, na wakufunzi.</p>
+      <p>Ukurasa huu unaelezea jinsi ya kuomba kufutwa kwa akaunti yako ya FitFlex na taarifa zako binafsi, kwa wanachama, wamiliki wa gym, na ma-trainer.</p>
 
-      <h2>Jinsi ya Kuomba Ndani ya Programu</h2>
+      <h2>Jinsi ya Kuomba Ndani ya App</h2>
       <ol>
-        <li>Fungua programu ya FitFlex na ingia.</li>
-        <li>Fungua kichupo cha <strong>Profile</strong>.</li>
-        <li>Chini ya <strong>Account Settings</strong>, bonyeza <strong>Help</strong> kuwasiliana na Usaidizi wa FitFlex kupitia WhatsApp.</li>
+        <li>Fungua app ya FitFlex na uingie.</li>
+        <li>Fungua kichupo cha <strong>Wasifu</strong>.</li>
+        <li>Chini ya <strong>Mipangilio ya akaunti</strong>, gusa <strong>Msaada</strong> kuwasiliana na Usaidizi wa FitFlex kupitia WhatsApp.</li>
         <li>Tuma ujumbe ukieleza unataka akaunti yako ya FitFlex ifutwe, ukijumuisha namba ya simu au barua pepe iliyotumika kwenye akaunti.</li>
         <li>Timu ya usaidizi itathibitisha utambulisho wako na kukujulisha baada ya akaunti na taarifa zako kufutwa.</li>
       </ol>
 
       <h2>Njia Nyingine: Ombi kwa Barua Pepe</h2>
-      <p>Unaweza pia kuomba kufutwa bila kutumia programu kwa kutuma barua pepe kwa <strong>privacy@fitflex.af</strong> kutoka anwani iliyounganishwa na akaunti yako, ukiandika "Delete My Account" kwenye kichwa cha ujumbe.</p>
+      <p>Unaweza pia kuomba kufutwa bila kutumia app kwa kutuma barua pepe kwa <strong>privacy@fitflex.af</strong> kutoka anwani iliyounganishwa na akaunti yako, ukiandika "Delete My Account" kwenye kichwa cha ujumbe.</p>
 
       <h2>Taarifa Zinazofutwa</h2>
-      <p>Taarifa za wasifu wako, historia ya uanachama na malipo, na taarifa za wakufunzi au wamiliki wa gym zinazohusiana na akaunti yako.</p>
+      <p>Taarifa za wasifu wako, historia ya uanachama na malipo, na taarifa za ma-trainer au wamiliki wa gym zinazohusiana na akaunti yako.</p>
 
       <h2>Taarifa Zinazoweza Kuhifadhiwa</h2>
       <p>Tunaweza kuhifadhi kumbukumbu chache, kama historia ya malipo na mawasiliano ya usaidizi, pale inapohitajika kisheria, kwa uhasibu, kuzuia udanganyifu, au kutatua migogoro, kwa muda unaohitajika tu.</p>

@@ -107,7 +107,7 @@ test('owners switch automations on and off, and change channels or template — 
   const id = auto(w.gym, 'expiring_3');
   assert.equal((await automations.update(w.S, id, { status: 'enabled', channels: ['in_app', 'whatsapp'] })).automation.status, 'enabled');
   assert.equal((await automations.update(w.S, id, { status: 'paused' })).error, 'invalid_status', 'only the engine pauses');
-  assert.equal((await automations.update(w.S, id, { channels: ['sms'] })).error, 'invalid_channels');
+  assert.equal((await automations.update(w.S, id, { channels: ['fax'] })).error, 'invalid_channels');
   assert.equal((await automations.update(w.S, id, { channels: [] })).error, 'invalid_channels');
   assert.equal((await automations.update(w.S, id, { templateId: 'tpl_sys_discount_offer' })).error, 'template_needs_values', 'offers need someone to type them');
   assert.equal((await automations.update(w.S, auto(w.gym, 'payment_failed'), { templateId: 'tpl_sys_payment_failed' })).automation.template.key, 'payment_failed', 'the payment amount is known');

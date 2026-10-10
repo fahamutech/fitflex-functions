@@ -233,10 +233,6 @@ test('a trainer invitation adds the gym to an existing trainer profile, after ac
     const sent = await invite(o, { role: 'trainer', email: p.email });
     const invitationId = sent.body.invitation.id;
 
-    const noProfile = await call(acceptMyInvitation, p.claims, { params: { invitationId } });
-    assert.equal(noProfile.statusCode, 409);
-    assert.equal(noProfile.body.error, 'trainer_persona_required');
-
     const trainer = await makeUser({ firebaseUid: p.user.firebaseUid, userType: 'trainer' });
     const profileId = uniq('trn');
     await trainers.upsertAsync(t => t.id === profileId, { id: profileId, userId: trainer.id, displayName: 'Coach', gymIds: [] });
@@ -247,6 +243,26 @@ test('a trainer invitation adds the gym to an existing trainer profile, after ac
     assert.deepEqual((await db('TrainerProfileGym').where({ trainerId: profileId })).map(r => r.gymId), [o.gymId]);
     const m = await db('OrgMembership').where({ id: accepted.body.membershipId }).first();
     assert.deepEqual([m.role, m.status, m.personaId], ['trainer', 'active', trainer.id]);
+  });
+});
+
+test('a person with no trainer profile gets one at that gym when they accept a trainer invitation', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const sent = await invite(o, { role: 'trainer', email: p.email });
+    assert.equal(await db('User').where({ personId: p.user.personId, userType: 'trainer' }).first(), undefined, 'nothing before acceptance');
+
+    const accepted = await call(acceptMyInvitation, p.claims, { params: { invitationId: sent.body.invitation.id } });
+    assert.equal(accepted.statusCode, 200, JSON.stringify(accepted.body));
+    const persona = await db('User').where({ id: accepted.body.personaId }).first();
+    assert.equal(persona.userType, 'trainer');
+    assert.equal(persona.personId, p.user.personId, 'under the same Person');
+    assert.equal(persona.approvalStatus, 'approved');
+    const profile = trainers.find(t => t.userId === persona.id);
+    assert.equal(profile.displayName, 'Neema Abdallah');
+    assert.deepEqual(profile.gymIds, [o.gymId]);
+    assert.equal((await db('User').where({ personId: p.user.personId })).length, 2, 'their member profile is untouched');
   });
 });
 

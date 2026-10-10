@@ -95,11 +95,13 @@ export function requireAuth(...roles) {
  * Portal staff (portalUser: true) must have the scope in their aclPermissions JWT claim.
  * Always call AFTER requireAuth.
  */
-export function requireAcl(scope) {
+export function requireAcl(scope, ...alternatives) {
+  // `alternatives`: other scopes that also open the route (for reads shared by several grants).
+  const accepted = [scope, ...alternatives];
   return (req, res, next) => {
     const { portalUser, aclPermissions } = req.user || {};
     if (!portalUser) return next(); // super-admin — unrestricted
-    if (Array.isArray(aclPermissions) && aclPermissions.includes(scope)) return next();
+    if (Array.isArray(aclPermissions) && accepted.some(s => aclPermissions.includes(s))) return next();
     return res.status(403).json({ error: 'acl_forbidden', requiredScope: scope });
   };
 }

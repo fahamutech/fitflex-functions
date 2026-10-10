@@ -87,7 +87,7 @@ test('a WhatsApp opt-out (STOP) blocks every WhatsApp message but not in-app or 
 
 test('null columns fall back to defaults; unknown channels and categories are refused', () => {
   assert.equal(effectivePreferences({ inAppMarketing: null }).inAppMarketing, true);
-  assert.equal(channelAllowed(null, 'sms', 'marketing').reason, 'unknown_channel');
+  assert.equal(channelAllowed(null, 'fax', 'marketing').reason, 'unknown_channel');
   assert.equal(channelAllowed(null, 'in_app', 'urgent').reason, 'unknown_category');
 });
 

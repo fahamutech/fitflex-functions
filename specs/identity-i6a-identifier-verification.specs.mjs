@@ -104,7 +104,7 @@ test('a phone is proved by an SMS code and recorded on the Person in E.164', asy
     assert.deepEqual({ ...sent.body }, { sent: true, channel: 'sms', identifierType: 'phone', identifierValue: e164(local), expiresInSeconds: 600, resendAfterSeconds: 60 });
     const message = fakeOutbox.filter(m => m.to === e164(local)).at(-1);
     assert.equal(message.channel, 'sms');
-    assert.match(message.text, /namba yako ya uthibitisho/);
+    assert.match(message.text, /msimbo wako wa uthibitisho/);
     const code = codeFor(e164(local));
     assert.match(code, /^\d{6}$/);
 

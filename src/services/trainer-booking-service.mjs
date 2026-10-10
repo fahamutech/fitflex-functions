@@ -7,11 +7,29 @@ import {
   memberCancellation,
 } from '../shared/trainer-access.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
+import { publicGym } from './gym-service.mjs';
+import { publicTrainer } from './trainer-service.mjs';
 
 // A booking holds its slots from the moment it is requested; one that was
 // rejected or cancelled frees them again.
 const SLOT_RELEASING = new Set(['cancelled', 'payment_rejected']);
 const MAX_SLOTS_PER_BOOKING = 12;
+
+/**
+ * What a trainer may see of the member who booked them (and what the member's
+ * own booking carries back): a name and a face. A list of what is shown, so a
+ * new account column stays private until it is added here.
+ */
+export function memberCard(user) {
+  if (!user) return null;
+  return { id: user.id, displayName: user.displayName || null, photoUrl: user.photoUrl || null };
+}
+
+/** The same, with the contact details FitFlex staff need to reach the member. Never the rest of the account. */
+export function adminMemberCard(user) {
+  if (!user) return null;
+  return { ...memberCard(user), email: user.email || null, phone: user.phone || null };
+}
 
 /**
  * C1: does the trainer's configured availability cover this date+slot (+gym)?
@@ -34,9 +52,26 @@ export function createTrainerBookingService({
   subscriptions, paymentRequests, notify = async () => {},
   partnerGate = OPEN_GATE,
   onStatusChanged = null,
+  // A booking request counts, or stops counting, as a conversion for the promotion that led to it: ({ action, groupId, bookings }).
+  onBookingConversion = null,
   // A paid session was cancelled and the money is owed back: ({ booking, reasonCode, actorId, role }) → refund.
   onRefundDue = async () => null,
 }) {
+  /**
+   * Keep promotion analytics in step with a booking request: while any session in it is confirmed or done it counts
+   * as a conversion; when none is (rejected, cancelled, refunded) the conversion is taken back. Never throws.
+   */
+  async function syncConversion(groupId) {
+    if (!groupId || !onBookingConversion) return;
+    try {
+      const group = await trainerBookings.filterAsync(b => b.groupId === groupId);
+      const live = group.filter(b => ['confirmed', 'completed'].includes(b.status));
+      await onBookingConversion(live.length ? { action: 'credit', groupId, bookings: live } : { action: 'reverse', groupId, bookings: group });
+    } catch (err) {
+      console.warn('[trainer-booking] conversion not synced:', err?.message);
+    }
+  }
+
   // Side effects of a status change (B2B benefit consumption). The change has
   // already happened; a failing hook must never undo or fail it.
   async function statusChanged(booking, from, actorId) {
@@ -48,12 +83,32 @@ export function createTrainerBookingService({
     }
   }
 
+  /** The trainer as members see them anywhere else: the public card, badged from their own KYC. */
+  async function publicTrainerCard(row) {
+    const [shown] = await partnerGate.badgeTrainers([trainerService.hydrateTrainer(row)]);
+    return publicTrainer(shown);
+  }
+
+  /**
+   * A booking as the member or the trainer reads it: the other party is a
+   * card, never their account or their full profile.
+   */
   async function hydrateBooking(row) {
     return {
       ...row,
-      member: await users.findByIdAsync(row.memberId),
+      member: memberCard(await users.findByIdAsync(row.memberId)),
+      trainer: row.trainerId ? await publicTrainerCard(trainers.find(t => t.id === row.trainerId) || {}) : null,
+      gym: hideTrainerPass(publicGym(gyms.find(g => g.id === row.gymId) || null))
+    };
+  }
+
+  /** A booking as FitFlex staff read it: the trainer's full profile, and how to reach the member. */
+  async function adminHydrateBooking(row) {
+    return {
+      ...row,
+      member: adminMemberCard(await users.findByIdAsync(row.memberId)),
       trainer: row.trainerId ? trainerService.hydrateTrainer(trainers.find(t => t.id === row.trainerId) || {}) : null,
-      gym: hideTrainerPass(gyms.find(g => g.id === row.gymId) || null)
+      gym: hideTrainerPass(publicGym(gyms.find(g => g.id === row.gymId) || null))
     };
   }
 
@@ -179,6 +234,9 @@ export function createTrainerBookingService({
       }));
     }
 
+    // A session that needs no payment is confirmed at once, and that is when the booking counts.
+    if (!needsPayment) await syncConversion(groupId);
+
     let paymentRequest = null;
     if (needsPayment) {
       paymentRequest = await paymentRequests.insertAsync({
@@ -213,7 +271,7 @@ export function createTrainerBookingService({
       bookings,
       summary,
       paymentRequest,
-      trainer: trainerService.hydrateTrainer(trainer),
+      trainer: await publicTrainerCard(trainer),
     };
   }
 
@@ -237,6 +295,7 @@ export function createTrainerBookingService({
       const trainer = trainers.find(t => t.id === updated[0].trainerId);
       await notify('trainer_booking_confirmed', { trainer, memberId: updated[0].memberId, bookings: updated });
     }
+    await syncConversion(groupId);
     return updated;
   }
 
@@ -245,7 +304,7 @@ export function createTrainerBookingService({
     return Promise.all(
       allBookings
         .sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0))
-        .map(b => hydrateBooking(b))
+        .map(b => adminHydrateBooking(b))
     );
   }
 
@@ -264,10 +323,11 @@ export function createTrainerBookingService({
       target: prior.id, before: prior, after: updated
     });
     await statusChanged(updated, prior.status, actorId);
+    await syncConversion(prior.groupId);
     // FitFlex cancelling a session the member paid for owes them the money back.
     const refund = cancelling && wasPaid(prior)
       ? await refundFor(updated, 'cancelled_by_fitflex', actorId, 'admin') : null;
-    return { booking: await hydrateBooking(updated), refund };
+    return { booking: await adminHydrateBooking(updated), refund };
   }
 
   async function trainerMyBookings(userId) {
@@ -344,6 +404,7 @@ export function createTrainerBookingService({
       target: booking.id, before: booking, after: updated,
     });
     await statusChanged(updated, booking.status, actorId);
+    await syncConversion(booking.groupId);
     const refund = paid ? await refundFor(updated, reasonCode, actorId, by) : null;
     const trainer = trainers.find(t => t.id === booking.trainerId);
     await notify(`trainer_booking_cancelled_by_${by}`, { trainer, memberId: booking.memberId, bookings: [updated] });
@@ -446,10 +507,10 @@ export function createTrainerBookingService({
         date: b.date,
         slot: b.slot,
         gymId: b.gymId,
-        gym: gyms.find(g => g.id === b.gymId) || null,
+        gym: publicGym(gyms.find(g => g.id === b.gymId) || null),
         amountTzs: b.trainerPayoutTzs ?? b.amountTzs ?? 0,
         status: b.status,
-        member: await users.findByIdAsync(b.memberId),
+        member: memberCard(await users.findByIdAsync(b.memberId)),
         customerName: null,
       }))),
       ...manualSessions.map((s) => ({
@@ -458,7 +519,7 @@ export function createTrainerBookingService({
         date: s.date,
         slot: s.slot,
         gymId: s.gymId,
-        gym: gyms.find(g => g.id === s.gymId) || null,
+        gym: publicGym(gyms.find(g => g.id === s.gymId) || null),
         locationType: s.locationType || 'my_gym',
         locationLabel: s.locationLabel || null,
         amountTzs: s.amountTzs || 0,
@@ -548,7 +609,7 @@ export function createTrainerBookingService({
       const m = members.get(b.memberId);
       return {
         id: b.id, status: b.status, gymId: b.gymId,
-        member: m ? { id: m.id, displayName: m.displayName || null, photoUrl: m.photoUrl || null } : null,
+        member: memberCard(m),
       };
     };
     return {

@@ -149,6 +149,86 @@ test('close ends it now; archive only once it is over', async () => {
   assert.equal((await s.svc.close(FITFLEX, future.id)).error, 'not_started_cancel_instead');
 });
 
+test('draft: saved out of sight, freely editable, live once published', async () => {
+  const s = setup();
+  const d = (await s.svc.create(FITFLEX, { ...base, draft: true })).challenge;
+  assert.equal(d.status, 'draft');
+  assert.equal(d.phase, 'draft');
+  assert.deepEqual(await visibleIds(s, 'm1'), [], 'members never see a draft');
+  assert.equal((await s.svc.memberChallenge('m1', d.id)).status, 404);
+  assert.equal((await s.svc.join('m1', d.id)).status, 404);
+  assert.equal((await s.svc.creatorList(FITFLEX)).challenges[0].phase, 'draft', 'its maker does');
+
+  // The start date has passed, but nothing is locked while it is a draft.
+  const edited = await s.svc.update(FITFLEX, d.id, { type: 'workouts', target: 10, startDate: '2026-09-22' });
+  assert.equal(edited.challenge.type, 'workouts');
+  assert.equal(edited.challenge.status, 'draft', 'editing does not publish');
+
+  assert.equal((await s.svc.pause(FITFLEX, d.id)).error, 'not_running');
+  assert.equal((await s.svc.close(FITFLEX, d.id)).error, 'not_running');
+  assert.equal((await s.svc.publish(CORP, d.id)).status, 404, 'someone else');
+
+  const live = await s.svc.publish(FITFLEX, d.id);
+  assert.equal(live.challenge.status, 'active');
+  assert.equal(live.challenge.phase, 'active');
+  assert.deepEqual(await visibleIds(s, 'm1'), [d.id]);
+  assert.equal((await s.svc.publish(FITFLEX, d.id)).error, 'not_draft');
+
+  const old = (await s.svc.create(FITFLEX, { ...base, name: 'Late', draft: true })).challenge;
+  NOW = new Date('2026-10-02T06:00:00.000Z');
+  assert.equal((await s.svc.publish(FITFLEX, old.id)).error, 'ends_in_past');
+  assert.equal((await s.svc.cancel(FITFLEX, old.id)).challenge.status, 'cancelled', 'a draft can be thrown away');
+});
+
+test('pause: no new joins, those already in carry on; resume re-opens', async () => {
+  const s = setup();
+  const c = (await s.svc.create(FITFLEX, base)).challenge;
+  await s.svc.join('m1', c.id);
+  assert.equal((await s.svc.resume(FITFLEX, c.id)).error, 'not_paused');
+
+  const paused = await s.svc.pause(FITFLEX, c.id);
+  assert.equal(paused.challenge.status, 'paused');
+  assert.equal(paused.challenge.phase, 'active', 'dates are untouched');
+  assert.equal(paused.challenge.endDate, base.endDate);
+  assert.equal(paused.challenge.participantCount, 1);
+  assert.equal((await s.svc.pause(FITFLEX, c.id)).error, 'already_paused');
+
+  // Hidden from people who have not joined, and not joinable.
+  assert.deepEqual(await visibleIds(s, 'm2'), []);
+  assert.equal((await s.svc.memberChallenge('m2', c.id)).status, 404);
+  const refused = await s.svc.join('m2', c.id);
+  assert.equal(refused.error, 'challenge_paused');
+  assert.equal(refused.status, 409);
+
+  // The person already in still has it, with their progress and ranking.
+  const mine = (await s.svc.memberChallenges('m1')).challenges;
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].joined, true);
+  assert.equal(mine[0].status, 'paused');
+  assert.equal(mine[0].phase, 'active');
+  assert.equal((await s.svc.creatorParticipants(FITFLEX, c.id)).summary.completed, 1, 'activity keeps counting');
+  assert.equal((await s.svc.update(FITFLEX, c.id, { name: 'Renamed' })).challenge.status, 'paused', 'editable while paused');
+
+  const back = await s.svc.resume(FITFLEX, c.id);
+  assert.equal(back.challenge.status, 'active');
+  assert.equal((await s.svc.join('m2', c.id)).challenge.joined, true);
+
+  // A paused challenge still ends on its end date, and can be closed early.
+  await s.svc.pause(FITFLEX, c.id);
+  assert.equal((await s.svc.archive(FITFLEX, c.id)).error, 'still_running');
+  assert.equal((await s.svc.close(FITFLEX, c.id)).challenge.status, 'closed');
+  assert.equal((await s.svc.pause(FITFLEX, c.id)).error, 'not_running');
+});
+
+test('pause: only the audience learns a challenge is paused', async () => {
+  const s = setup();
+  const c = (await s.svc.create(CORP, { ...base, name: 'Staff steps' })).challenge;
+  await s.svc.pause(CORP, c.id);
+  assert.equal((await s.svc.join('m1', c.id)).error, 'challenge_paused', 'on the staff list');
+  assert.equal((await s.svc.join('m6', c.id)).status, 404, 'another company');
+  assert.equal((await s.svc.pause(OTHER_CORP, c.id)).status, 404);
+});
+
 test('admin monitoring: participation and completion, totals only', async () => {
   const s = setup();
   const c = (await s.svc.create(FITFLEX, base)).challenge;
@@ -179,6 +259,25 @@ test('HR sees aggregate progress by department; small groups folded', async () =
   const json = JSON.stringify(r);
   for (const leak of ['m1', 'M1', 'e_m1', 'steps', '60000']) assert.equal(json.includes(leak), false, leak);
   assert.equal((await s.svc.creatorParticipants(OTHER_CORP, c.id)).status, 404, 'another company');
+});
+
+test('HR totals: no completion or progress until 3 people are taking part', async () => {
+  const s = setup();
+  const c = (await s.svc.create(CORP, base)).challenge;
+  // m1 alone, and they've finished: showing "completed 1 · 100%" would be their result.
+  await s.svc.join('m1', c.id);
+  const one = (await s.svc.creatorParticipants(CORP, c.id)).summary;
+  assert.deepEqual(one, { eligible: 4, joined: 1, participationRate: 0.25, completed: null, completionRate: null, averageProgress: null, resultsHidden: true });
+  await s.svc.join('m2', c.id);
+  assert.equal((await s.svc.creatorParticipants(CORP, c.id)).summary.resultsHidden, true, 'still only two');
+  await s.svc.join('m3', c.id);
+  const three = (await s.svc.creatorParticipants(CORP, c.id)).summary;
+  assert.equal(three.completed, 2);
+  assert.ok(!('resultsHidden' in three));
+  // A FitFlex challenge's totals are unchanged.
+  const ff = (await s.svc.create(FITFLEX, base)).challenge;
+  await s.svc.join('m1', ff.id);
+  assert.equal((await s.svc.creatorParticipants(FITFLEX, ff.id)).summary.completed, 1);
 });
 
 test('HR logins: created by admin, password hashed, can be suspended', async () => {

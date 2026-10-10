@@ -2,8 +2,10 @@
 // And (I7b) register with a number or email: a code, then a PIN.
 // Every route answers 404 unless IDENTITY_V2 + V2_PIN_LOGIN are on.
 import '../src/bootstrap/init.mjs';
-import { pinAuthService, registrationService, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
+import { requireAuth } from '../src/auth/jwt.mjs';
+import { pinAuthService, registrationService, partnerVerifiedFor, users } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
+import { smsSender, emailSender } from '../src/infra/verification-senders.mjs';
 
 const created = new Date().toISOString();
 
@@ -72,5 +74,68 @@ export const registerComplete = {
   onRequest: async (req, res) => {
     if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
     await send(res, await registrationService.complete({ body: req.body || {} }));
+  },
+};
+
+// ── Forgot PIN and change PIN (I7c) ─────────────────────────────────────────
+// Forgot PIN answers 404 unless IDENTITY_V2 + V2_RECOVERY are on; change PIN
+// follows V2_PIN_LOGIN.
+
+export const pinResetStart = {
+  created, method: 'post', path: '/auth/pin/reset/start',
+  description: 'Forgot PIN: send a code to the mobile number or email the person signs in with. The answer is the same whether or not an account uses it. Limited per network address.',
+  requestSample: { phone: '0712345678', locale: 'sw' },
+  responseSample: { sent: true, channel: 'sms', identifierType: 'phone', identifierValue: '+255712345678', expiresInSeconds: 600, resendAfterSeconds: 60 },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_RECOVERY')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await pinAuthService.resetStart({ body: req.body || {}, ip: addressOf(req) }));
+  },
+};
+
+export const pinResetConfirm = {
+  created, method: 'post', path: '/auth/pin/reset/confirm',
+  description: 'Forgot PIN: check the code. Returns a reset token (15 minutes) that sets the new PIN once.',
+  requestSample: { phone: '0712345678', code: '123456' },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_RECOVERY')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await pinAuthService.resetConfirm({ body: req.body || {} }));
+  },
+};
+
+export const pinResetComplete = {
+  created, method: 'post', path: '/auth/pin/reset/complete',
+  description: 'Forgot PIN: set the new four-digit PIN. Clears any lockout, signs every other device out, and signs the person in.',
+  requestSample: { resetToken: '…', pin: '1234' },
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_RECOVERY')) return res.status(404).json({ error: 'not_found' });
+    await send(res, await pinAuthService.resetComplete({ body: req.body || {} }));
+  },
+};
+
+export const changeMyPin = {
+  created, method: 'post', path: '/me/pin',
+  description: 'Change the PIN: the current one and a new four-digit one. Wrong current PINs count toward the sign-in lockout. Every earlier session ends; the response carries a new one for this device.',
+  requestSample: { currentPin: '1234', newPin: '5678' },
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => {
+    if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
+    const user = await users.findByIdAsync(req.user.sub);
+    await send(res, await pinAuthService.changePin({ user, body: req.body || {}, ip: addressOf(req) }));
+  },
+};
+
+export const signInOptions = {
+  created, method: 'get', path: '/auth/options',
+  description: 'What the sign-in screens may offer, in one call and without signing in: pinLogin (number or email + PIN), pinReset (Forgot PIN), recovery (lost every number and email), and which kinds of code FitFlex can send right now (smsCodes, emailCodes). When emailCodes is false the app keeps email accounts on Firebase (its verification link and its own sign-in) and uses FitFlex codes for mobile numbers only. Nothing secret is returned.',
+  responseSample: { pinLogin: true, pinReset: true, recovery: true, smsCodes: true, emailCodes: false },
+  onRequest: async (req, res) => {
+    const ready = pinAuthService.configured();
+    res.json({
+      pinLogin: identityFlag('V2_PIN_LOGIN') && ready,
+      pinReset: identityFlag('V2_RECOVERY') && ready,
+      recovery: identityFlag('V2_RECOVERY') && ready,
+      smsCodes: smsSender().configured,
+      emailCodes: emailSender().configured,
+    });
   },
 };

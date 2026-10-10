@@ -19,7 +19,7 @@
 //   vendor staff (slice C) a vendor_staff persona for that Person at the
 //                inviting vendor, with the invitation's role and permissions.
 //                Only the vendor (owner) invites.
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 
 const OPEN = ['pending', 'claimed'];
@@ -72,6 +72,10 @@ export function createInvitationService({
   db, users, trainers, notify = null, auditLog = null, ownerStaffAclScopes = [],
   activateDirectMembership = null, createPersona = null,
   vendorStaffRoles = [], vendorStaffPermissions = [], ensureVendor = null,
+  // Telling the invited person directly, and the start PIN for someone new
+  // to FitFlex (agreed 3 Oct 2026). All optional: without them an invitation
+  // behaves as before (the organisation shares the link).
+  senders = null, startPin = null, isRegistered = null, appLink = () => null, newTrainerProfile = null,
 }) {
   const gymOf = gymId => (gymId ? db('Gym').where({ id: gymId }).first('id', 'name') : null);
   // An invitation or membership points at its organisation through gymId or vendorId.
@@ -233,9 +237,69 @@ export function createInvitationService({
     await db('Invitation').insert(row);
     await audit(actor.id, 'invitation_created', row.id, { orgType, orgId, role, identifierType: identifier.type, knownPerson: Boolean(targetPersonId) });
     await tellPerson(row);
+    const delivery = await deliver(row, body.locale);
     // The token is returned once so the organisation can share the link. It
     // only opens the invitation; accepting needs the invited person's own session.
-    return { created: true, invitation: view(await db('Invitation').where({ id: row.id }).first()), token };
+    return { created: true, invitation: view(await db('Invitation').where({ id: row.id }).first()), token, delivery };
+  }
+
+  const DELIVERED_ROLES = ['staff', 'trainer'];
+  const ROLE_WORDS = {
+    en: { staff: 'staff', trainer: 'a trainer' },
+    sw: { staff: 'mfanyakazi', trainer: 'trainer' },
+  };
+  const INVITE_TEXT = {
+    en: {
+      subject: 'You are invited on FitFlex',
+      fresh: (org, role, link, pin, how) => `FitFlex: ${org} invited you to join as ${role}. Get the app: ${link} Sign in with this ${how} and start PIN ${pin}. You will then choose your own PIN.`,
+      known: (org, role, link) => `FitFlex: ${org} invited you to join as ${role}. Open the FitFlex app to accept: ${link}`,
+      how: { phone: 'number', email: 'email' },
+    },
+    sw: {
+      subject: 'Umealikwa kwenye FitFlex',
+      fresh: (org, role, link, pin, how) => `FitFlex: ${org} imekualika kujiunga kama ${role}. Pata app: ${link} Ingia kwa ${how} hii na PIN ya kuanzia ${pin}. Kisha utachagua PIN yako mwenyewe.`,
+      known: (org, role, link) => `FitFlex: ${org} imekualika kujiunga kama ${role}. Fungua app ya FitFlex ili ukubali: ${link}`,
+      how: { phone: 'namba', email: 'barua pepe' },
+    },
+  };
+
+  /**
+   * Tell the invited staff member or trainer directly, by SMS or email.
+   * Someone new to FitFlex also gets a four-digit start PIN to sign in with
+   * once; someone who already has an account gets the notice only. The
+   * organisation never sees the PIN. Best effort: with no provider configured
+   * nothing is sent and the organisation shares the link as before.
+   */
+  async function deliver(inv, locale) {
+    if (!senders || !DELIVERED_ROLES.includes(inv.role)) return { sent: false };
+    const channel = inv.identifierType === 'phone' ? 'sms' : 'email';
+    const sender = inv.identifierType === 'phone' ? senders.sms() : senders.email();
+    if (!sender.configured) return { sent: false, reason: `${channel}_not_configured` };
+    try {
+      const identifier = { type: inv.identifierType, value: inv.identifierValue };
+      const fresh = Boolean(startPin?.enabled()) && !inv.targetPersonId
+        && !(isRegistered && await isRegistered(identifier));
+      const lang = locale === 'sw' ? 'sw' : 'en';
+      const text = INVITE_TEXT[lang];
+      const org = (await orgOf(inv))?.name || 'FitFlex';
+      const role = ROLE_WORDS[lang][inv.role];
+      const link = appLink() || '';
+      let body;
+      if (fresh) {
+        const pin = String(randomInt(0, 10000)).padStart(4, '0');
+        await db('Invitation').where({ id: inv.id }).update({
+          startPinHash: startPin.hash(inv.id, pin), startPinAttempts: 0, startPinUsedAt: null, updatedAt: db.fn.now(),
+        });
+        body = text.fresh(org, role, link, pin, text.how[inv.identifierType]);
+      } else {
+        body = text.known(org, role, link);
+      }
+      const sent = await sender.send(inv.identifierValue, { text: body, subject: text.subject });
+      return sent.ok ? { sent: true, channel, startPin: fresh } : { sent: false, reason: 'not_sent' };
+    } catch (err) {
+      console.warn('[invitation] delivery skipped:', err?.message);
+      return { sent: false, reason: 'not_sent' };
+    }
   }
 
   /** In-app notice to a known Person's personas (best effort). */
@@ -295,7 +359,8 @@ export function createInvitationService({
     });
     await audit(actor.id, 'invitation_resent', inv.id, { orgType, orgId });
     await tellPerson(inv);
-    return { invitation: view(inv), token };
+    const delivery = await deliver(inv, null);
+    return { invitation: view(inv), token, delivery };
   }
 
   // ── A paid invitation that lapsed (decision 1 Oct: held for the gym) ──────
@@ -512,10 +577,24 @@ export function createInvitationService({
     return { personaId: member.id };
   }
 
-  /** The gym joins the Person's existing trainer profile. */
+  /**
+   * The gym joins the Person's trainer profile. Someone with no trainer
+   * profile yet gets one on acceptance, attached to this gym: active at once,
+   * and not bookable until FitFlex verifies them (rule of 3 Oct 2026).
+   */
   async function acceptTrainer(user, inv) {
-    const persona = await db('User').where({ personId: user.personId, userType: 'trainer' }).first('id');
-    const profile = persona ? trainers.find(t => t.userId === persona.id) : null;
+    let persona = await db('User').where({ personId: user.personId, userType: 'trainer' }).first('id');
+    let profile = persona ? trainers.find(t => t.userId === persona.id) : null;
+    if (!profile && newTrainerProfile && createPersona) {
+      if (!persona) {
+        const made = await createPersona({ person: { id: user.personId }, source: user, userType: 'trainer', approvalStatus: 'approved' });
+        if (made.error) return { error: 'persona_identifier_in_use', status: 409 };
+        await db('User').where({ id: made.row.id }).update({ onboardingCompleted: true });
+        await users.updateByIdAsync(made.row.id, { updatedAt: new Date().toISOString() });
+        persona = { id: made.row.id };
+      }
+      profile = await newTrainerProfile({ userId: persona.id, displayName: user.displayName, email: user.email ?? null, phone: user.phone ?? null });
+    }
     if (!profile) return { error: 'trainer_persona_required', status: 409 };
     const gymIds = [...new Set([...(profile.gymIds || []), inv.gymId])];
     const pendingGymIds = (profile.pendingGymIds || []).filter(g => g !== inv.gymId);

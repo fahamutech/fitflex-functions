@@ -31,9 +31,9 @@ export const verificationLimits = () => ({
 
 const MESSAGES = {
   en: (code, minutes) => `FitFlex: your verification code is ${code}. It expires in ${minutes} minutes. Do not share it with anyone.`,
-  sw: (code, minutes) => `FitFlex: namba yako ya uthibitisho ni ${code}. Inaisha baada ya dakika ${minutes}. Usimpe mtu yeyote.`,
+  sw: (code, minutes) => `FitFlex: msimbo wako wa uthibitisho ni ${code}. Unaisha baada ya dakika ${minutes}. Usimpe mtu yeyote.`,
 };
-const SUBJECTS = { en: 'Your FitFlex verification code', sw: 'Namba yako ya uthibitisho ya FitFlex' };
+const SUBJECTS = { en: 'Your FitFlex verification code', sw: 'Msimbo wako wa uthibitisho wa FitFlex' };
 
 /** { type, value } for exactly one phone or email, or null. */
 export function parseIdentifier({ email, phone } = {}) {
@@ -75,7 +75,11 @@ export function createIdentifierService({
         if (value && !verified.has(`${type}:${value}`)) unverified.set(`${type}:${value}`, { type, value });
       }
     }
-    return { identifiers, unverified: [...unverified.values()] };
+    // With only one of the two kinds verified, losing it would lock the person out of
+    // self-service recovery: the app gently suggests adding the other (confirmed 5 Oct 2026).
+    const kinds = new Set(identifiers.map(i => i.type));
+    const secondContact = kinds.size === 1 ? { missing: kinds.has('email') ? 'phone' : 'email' } : null;
+    return { identifiers, unverified: [...unverified.values()], secondContact };
   }
 
   /** Each person may ask only so often, whatever they ask about. */

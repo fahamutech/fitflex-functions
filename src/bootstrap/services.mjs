@@ -1,9 +1,13 @@
 // Composition root — every service is instantiated exactly once here with its
 // dependencies injected, then imported by the thin REST modules in functions/.
-import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose } from '../auth/jwt.mjs';
+import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose, invalidateAccountStatus } from '../auth/jwt.mjs';
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
 import { createPinAuthService } from '../services/pin-auth-service.mjs';
 import { createRegistrationService } from '../services/registration-service.mjs';
+import { createOnboardingService } from '../services/onboarding-service.mjs';
+import { createIdentifierChangeService } from '../services/identifier-change-service.mjs';
+import { createAccountRecoveryService } from '../services/account-recovery-service.mjs';
+import { randomUUID } from 'node:crypto';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
@@ -26,7 +30,9 @@ import { createOrgMembershipService } from '../services/org-membership-service.m
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
 import { identityFlag } from '../shared/feature-flags.mjs';
-import { smsSender, emailSender } from '../infra/verification-senders.mjs';
+import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
+import { createSmsProvider } from '../integrations/sms/provider.mjs';
+import { createSmsService } from '../services/sms-service.mjs';
 import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
 import { registerOrgMembershipLookup } from '../auth/org-authz.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
@@ -43,6 +49,7 @@ import { createInvoiceService } from '../services/invoice-service.mjs';
 import { createPortalUserService } from '../services/portal-user-service.mjs';
 import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
+import { createTermsService } from '../services/terms-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -51,6 +58,7 @@ import { createFavoriteService } from '../services/favorite-service.mjs';
 import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
+import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createSocialService } from '../services/social-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
@@ -64,6 +72,11 @@ import { createB2BService } from '../services/b2b-service.mjs';
 import { createB2BProgramService } from '../services/b2b-program-service.mjs';
 import { createB2BConsumptionService } from '../services/b2b-consumption-service.mjs';
 import { createB2BBillingService } from '../services/b2b-billing-service.mjs';
+import { createB2BCollectionsService } from '../services/b2b-collections-service.mjs';
+import { createB2BAnalyticsService } from '../services/b2b-analytics-service.mjs';
+import { createOpsService } from '../services/ops-service.mjs';
+import { registerB2BJobs } from '../services/b2b-jobs.mjs';
+import { createB2BBeneficiaryImportService } from '../services/b2b-beneficiary-import-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -79,12 +92,24 @@ import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
+import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
+import { createCompanyDirectory } from '../services/company-directory.mjs';
+import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createVendorSettlementService } from '../services/vendor-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
+import { createModerationGate } from '../services/moderation-gate.mjs';
+import { createEntityResolver } from '../services/promotion-entities.mjs';
+import { createModerationService } from '../services/moderation-service.mjs';
+import { createPromotionService } from '../services/promotion-service.mjs';
+import { createDiscoveryService } from '../services/discovery-service.mjs';
+import { signServedToken } from '../auth/promotion-token.mjs';
+import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
+import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
 import { createZebraDocumentStore } from '../infra/storage-client.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
+  moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
   users, gyms, subscriptions, checkins, otps, auditLog, paymentRequests,
   trainers, trainerBookings, platformSettings, invoices, gymPayouts, gymOwners, webhookSeen,
@@ -131,6 +156,8 @@ registerAccountStatusLookup(async id => {
 export const identityService = createIdentityService({ users });
 // KYC enforcement for partners created from the enforcement start; existing ones are exempt.
 export const partnerGate = createPartnerGate({ users, partnerKycCases });
+/** What moderation keeps out of public lists (pending, rejected, suspended, hidden). */
+export const moderationGate = createModerationGate({ states: moderationStates });
 /** For a trainer or gym owner: is their own verification approved? Undefined for other roles. */
 export const partnerVerifiedFor = async user => (
   ['trainer', 'gym_operator'].includes(user?.userType) ? partnerGate.isOperational(user.id) : undefined
@@ -144,6 +171,8 @@ export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
+  // promotionEventsService is defined at the end of this file; this only runs later.
+  onBookingConversion: ({ action, groupId, bookings }) => (action === 'credit' ? promotionEventsService.recordBooking(bookings) : promotionEventsService.reverseBooking(groupId)),
   // refundService is defined below; this only runs later.
   onRefundDue: ({ booking, reasonCode, actorId, role }) => refundService.raise({
     memberId: booking.memberId, kind: 'trainer_booking', sourceId: booking.id, paymentRequestId: booking.paymentRequestId,
@@ -176,7 +205,10 @@ export const shopService = createShopService({
     memberId: order.buyerId, kind: 'shop_order', sourceId: order.id,
     amountTzs: order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,
   }).then(out => out.refund || null),
-  marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases,
+  marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases, publicGate: moderationGate,
+  // A paid order is credited to the promotion the buyer opened (promotionEventsService is defined below; this only runs later).
+  onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
+  onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
 });
 export const whatsAppNotifier = createWhatsAppNotifier();
 export const corporateService = createCorporateService({
@@ -214,6 +246,62 @@ export const b2bConsumptionService = createB2BConsumptionService({
 export const b2bBillingService = createB2BBillingService({
   db, programs: b2bPrograms, benefits: b2bBenefits, users, subscriptions, paymentRequests, corporateAccounts, auditLog,
   b2bService, b2bProgramService, settingsService,
+  // "Mark paid" records a payment for what is owed and allocates it (b2bFinanceService is defined below; these only run later).
+  settleInFull: async ({ invoice, reference, actorId }) => {
+    const owed = invoice.totalTzs - (invoice.amountPaidTzs || 0);
+    const out = await b2bFinanceService.recordPayment({
+      organizationId: invoice.organizationId, actorId,
+      body: { amountTzs: owed, method: 'other', reference, allocations: [{ invoiceId: invoice.id, amountTzs: owed }] },
+    });
+    // The reference is already a recorded payment: it is allocated from there, not recorded twice.
+    if (out.existing) return { error: 'payment_reference_in_use', status: 409, paymentId: out.payment.id, hint: 'Allocate that payment to this invoice.' };
+    return out;
+  },
+  settlementsOf: invoiceId => b2bFinanceService.settlementsOf(invoiceId),
+});
+// Challenges, rewards and groups run by a B2B organisation's own users.
+export const b2bEngagementAccess = createB2BEngagementAccess({ b2bService });
+// B2B billing and financial management (Phase 5): agreements, payments and allocation, notes, statements, reconciliation.
+export const b2bFinanceService = createB2BFinanceService({ db, users, b2bService, billing: b2bBillingService });
+// B2B collections: payment details, "we have paid" notices, overdue reminders and the late-payment hold.
+export const b2bCollectionsService = createB2BCollectionsService({
+  db, finance: b2bFinanceService, email: emailSender(),
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+// B2B analytics and reporting: a read layer over the ledgers; stores nothing.
+export const b2bAnalyticsService = createB2BAnalyticsService({
+  db, b2bService, finance: b2bFinanceService, programs: b2bPrograms, benefits: b2bBenefits, gyms, trainers,
+  // challengeService and notificationService are created further down; these only run later.
+  challengeProgress: (creatorType, creatorId, memberId) => challengeService.memberProgressForCreator(creatorType, creatorId, memberId),
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Operations: job runs, locks, catch-up and exception records; and the recurring B2B jobs it runs.
+export const opsService = createOpsService({ db });
+// Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
+export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
+  db, b2bService, emailSender: () => emailSender(),
+  // Invitation SMS goes through the shared SMS service (SMS_PROVIDER), so it is logged in SmsLog like every other SMS.
+  // smsProvider and smsService are defined further down; this only runs later.
+  smsSender: () => ({
+    configured: smsProvider.configured === true,
+    send: async (to, { text }) => {
+      const out = await smsService.send({ category: 'invitation', text, recipients: [{ phone: to }], maxAttempts: 1 });
+      const r = out.results[0] ?? {};
+      return r.outcome === 'sent' ? { ok: true } : { ok: false, error: r.reason ?? r.error ?? 'not_accepted' };
+    },
+  }),
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+export const b2bOps = registerB2BJobs({
+  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService,
+  // Defined at the end of this file; only called when the job runs.
+  promotionService: { runLifecycle: args => promotionService.runLifecycle(args) },
+  promotionEventsService: { purge: args => promotionEventsService.purge(args) },
+  b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService,
+  // Defined further down; only called when the billing job runs.
+  b2bSponsorRefundService: { repair: () => b2bSponsorRefundService.repair() },
 });
 
 export const identityLinkService = createIdentityLinkService({ db });
@@ -235,6 +323,8 @@ export const authService = createAuthService({
 export const subscriptionService = createSubscriptionService({ subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId });
 export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
+  // promotionEventsService is defined at the end of this file; this only runs later.
+  onAccountDeleted: userId => promotionEventsService.forgetUser(userId),
 });
 
 export const checkInService = createCheckInService({
@@ -271,8 +361,10 @@ async function finishSponsoredPass(sub) {
   }
 }
 const lifecycle = {
-  activated: async (sub) => {
+  activated: async (sub, ctx) => {
     await finishSponsoredPass(sub);
+    // A gym membership that was paid for counts for the gym promotion the member tapped (never throws).
+    await promotionEventsService.recordSubscription(sub, ctx);
     return automationService.handleEvent({ type: 'membership_activated', subscription: sub });
   },
   paymentFailed: (sub, extra) => automationService.handleEvent({ type: 'payment_failed', subscription: sub, ...extra }),
@@ -294,11 +386,12 @@ export const adminMemberService = createAdminMemberService({
 });
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog, gyms,
-  onSubscriptionActivated: async (sub) => {
+  onSubscriptionActivated: async (sub, ctx) => {
     await finishSponsoredPass(sub);
     await notificationService.notifySubscriptionActivated(sub);
-    await lifecycle.activated(sub);
+    await lifecycle.activated(sub, ctx);
   },
+  onSubscriptionPaymentReversed: sub => promotionEventsService.reverseSubscription(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
@@ -329,7 +422,7 @@ export const invoiceService = createInvoiceService({
 });
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
 export const webhookService = createWebhookService({
-  subscriptions, webhookSeen,
+  subscriptions, webhookSeen, paymentRequests,
   onSubscriptionActivated: lifecycle.activated,
   onPaymentFailed: (sub, paymentId) => lifecycle.paymentFailed(sub, { reference: `selcom:${paymentId}` }),
 });
@@ -345,7 +438,10 @@ export const whatsAppService = createWhatsAppService({
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };
 export const favoriteService = createFavoriteService({ users, gyms });
 // Sharing activities between members (mutual follows, groups, company).
+// Who belongs to a company or organisation: one lookup for challenges, rewards and groups.
+export const companyDirectory = createCompanyDirectory({ users, corporateEmployees, beneficiaries: b2bBeneficiaries });
 export const socialService = createSocialService({
+  directory: companyDirectory,
   users, activities, follows, blocks, profiles: socialProfiles, groups: socialGroups,
   groupMembers: socialGroupMembers, kudos: activityKudos, comments: activityComments, views: activityViews, reports: socialReports,
   auditLog,
@@ -360,6 +456,7 @@ export const goalService = createGoalService({ goals, trainers });
 export const workoutService = createWorkoutService({
   workouts, activities, defaultShare: memberId => socialService.defaultShareFor(memberId),
 });
+export const trainingPreferenceService = createTrainingPreferenceService({ users });
 export const gymSharingService = createGymSharingService({
   sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
@@ -369,6 +466,7 @@ export const challengeService = createChallengeService({
   relationships: trainerMemberRelationships, gymMemberSharing,
   gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
   activities, checkins, teams: challengeTeams, corporateEmployees, subscriptions, rewardAwards: challengeRewards,
+  directory: companyDirectory,
 });
 
 // Internal product analytics (admin portal only).
@@ -405,6 +503,24 @@ export const invitationService = createInvitationService({
   createPersona: args => identityLinkService.createPersona(args),
   vendorStaffRoles: [...VENDOR_STAFF_ROLES], vendorStaffPermissions: [...VENDOR_STAFF_PERMISSIONS],
   ensureVendor: vendorUserId => orgMembershipService.syncUser(vendorUserId),
+  // The invited person is told directly; someone new to FitFlex gets a start
+  // PIN (only while FitFlex keeps PINs). Declared below, so reached lazily.
+  senders: { sms: () => smsSender(), email: () => emailSender() },
+  startPin: {
+    enabled: () => identityFlag('V2_PIN_LOGIN') && pinAuthService.configured(),
+    hash: (invitationId, pin) => pinAuthService.startPinHash(invitationId, pin),
+  },
+  isRegistered: identifier => registrationService.alreadyRegistered(identifier),
+  // Placeholder until the app is in the stores: the web app.
+  appLink: () => process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
+  newTrainerProfile: async ({ userId, displayName, email, phone }) => {
+    const row = trainerService.normalizeTrainerPayload({
+      id: `trn_${randomUUID().slice(0, 8)}`, userId, displayName: displayName || email || phone || 'Trainer',
+      email, phone, gymIds: [], status: 'active', approvalStatus: 'approved',
+    }, {});
+    await trainers.upsertAsync(t => t.id === row.id, row);
+    return trainers.find(t => t.id === row.id) || row;
+  },
 });
 // Identity V2 · I6a: a person proves an email or phone with a code FitFlex sends.
 export const identifierService = createIdentifierService({
@@ -422,6 +538,8 @@ export const pinAuthService = createPinAuthService({
   db, users, codes: identifierService, identityLink: identityLinkService, auditLog,
   sessionForPerson: personId => authService.sessionForPerson(personId),
   verifyFirebasePassword: (...args) => firebasePasswordCheck.verify(...args), signPurpose, verifyPurpose,
+  forgetSession: invalidateAccountStatus,
+  invitationsFor: async personId => (await invitationService.listMine({ personId })).invitations,
   linkingEnabled: () => identityFlag('V2_LINKING'),
   // The key the PIN is mixed with before hashing. It must be set in production
   // and never change afterwards, or every stored PIN stops matching.
@@ -435,6 +553,37 @@ export const registrationService = createRegistrationService({
   claimInvitations: personId => invitationService.claimFor(personId),
   linkingEnabled: () => identityFlag('V2_LINKING'),
 });
+// A person with no profile yet: invited with a start PIN, or still to choose a role.
+export const onboardingService = createOnboardingService({
+  db, users, pinAuth: pinAuthService, invitations: invitationService, identityLink: identityLinkService, auditLog,
+  sessionForPerson: personId => authService.sessionForPerson(personId),
+  isRegistered: identifier => registrationService.alreadyRegistered(identifier),
+  approvalStatusForRole, verifyPurpose,
+});
+// Identity V2 · I7e: replace the number or email a person signs in with.
+export const identifierChangeService = createIdentifierChangeService({
+  db, users, codes: identifierService, pinAuth: pinAuthService, identityLink: identityLinkService, auditLog,
+  senders: { sms: smsSender, email: emailSender },
+  linkingEnabled: () => identityFlag('V2_LINKING'),
+});
+// Identity V2 · account recovery for someone who lost every verified number and email (member path).
+export const accountRecoveryService = createAccountRecoveryService({
+  db, users, codes: identifierService, pinAuth: pinAuthService, identityLink: identityLinkService,
+  senders: { sms: smsSender, email: emailSender }, signPurpose, verifyPurpose, partnerGate, auditLog,
+  linkingEnabled: () => identityFlag('V2_LINKING'),
+});
+// SMS for communications and reminders: the provider named by SMS_PROVIDER
+// (credentials from the environment only), "not configured" by default.
+export const smsProvider = createSmsProvider();
+export const smsService = createSmsService({
+  db, provider: smsProvider, auditLog,
+  // automationService is defined further down; this only runs later.
+  gymsWithReminders: () => automationService.gymsWithReminders(),
+});
+// Verification codes keep their own sender (VERIFICATION_SMS_PROVIDER); each
+// send is also written, redacted, to the SMS log. Hoisted: the identity
+// services above take it as `senders.sms`.
+function smsSender() { return smsService.verificationSender(plainSmsSender()); }
 // WhatsApp for communications: the provider named by WHATSAPP_PROVIDER
 // (credentials from the environment only), "not configured" by default.
 // Available when a provider is configured and the admin kill switch is on.
@@ -447,6 +596,7 @@ export const segmentService = createSegmentService({
   db, communicationPreferences, deviceTokens,
   pushAvailable: () => process.env.PUSH_NOTIFICATIONS === 'on',
   whatsappAvailable: () => whatsappChannelService.available(),
+  smsAvailable: () => smsService.available(),
 });
 const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
 // FitFlex system templates and each gym's own.
@@ -478,18 +628,19 @@ export const campaignService = createCampaignService({
   marketingWeeklyCap: positiveInt(process.env.COMMS_MARKETING_WEEKLY_CAP, 2),
   renewalLink: process.env.COMMS_RENEWAL_URL || null,
 });
-// Delivers queued campaign messages through the inbox, FCM and WhatsApp above.
+// Delivers queued campaign messages through the inbox, FCM, WhatsApp and SMS above.
 export const deliveryService = createDeliveryService({
-  db, notificationService, campaignService, whatsappChannel: whatsappChannelService,
+  db, notificationService, campaignService, whatsappChannel: whatsappChannelService, smsChannel: smsService,
   batchSize: positiveInt(process.env.COMMS_DISPATCH_BATCH, 200),
 });
 export const communicationPreferenceService = createCommunicationPreferenceService({
   preferences: communicationPreferences,
   whatsappAvailable: () => whatsappChannelService.available(),
+  smsAvailable: () => smsService.available(),
 });
 export const challengeRewardService = createChallengeRewardService({
   challenges, participants: challengeParticipants, awards: challengeRewards, users, corporateEmployees,
-  challengeService, auditLog,
+  challengeService, auditLog, directory: companyDirectory,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const trainerClientService = createTrainerClientService({
@@ -507,4 +658,43 @@ export const partnerKycService = createPartnerKycService({
   notify: (userId, message) => notificationService.notify(userId, message),
   // KYC documents stay private on Zebra; the API streams them after its own checks.
   documentStore: createZebraDocumentStore(),
+});
+export const termsService = createTermsService({ users, partnerKycService, auditLog });
+
+// Moderation & Promotion. Moderation decides what may be shown; promotions decide
+// what is highlighted among what may be shown. Neither changes discovery yet.
+/**
+ * Changes to promotions and moderation decisions are made one at a time across servers: a Postgres advisory lock
+ * held for the length of the change (the same technique as the job locks in ops-service). Admin traffic is low,
+ * so one lock for all of it is the simple and safe choice.
+ */
+const withPromotionLock = (key, fn) => db.transaction(async (trx) => {
+  await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [key]);
+  return fn();
+});
+export const entityResolver = createEntityResolver({
+  gyms, trainers, users, products, partnerGate,
+  // Vendors are Users: read only those rows, not every member.
+  listVendors: () => db('User').where({ userType: 'vendor' }),
+});
+export const moderationService = createModerationService({
+  states: moderationStates, events: moderationEvents, entities: entityResolver, auditLog,
+  // promotionService is defined below; this only runs later, per decision.
+  onEntityBlocked: (...args) => promotionService.holdForEntity(...args),
+  withLock: withPromotionLock,
+});
+export const promotionService = createPromotionService({
+  promotions, placements: promotionPlacements, campaigns: promotionCampaigns, configs: placementConfigs,
+  geoAreas, entities: entityResolver, moderation: moderationService, auditLog, organizations: b2bOrganizations,
+  withLock: withPromotionLock,
+});
+export const discoveryService = createDiscoveryService({
+  gymService, trainerService, shopService, partnerGate, moderationGate, promotionService, configs: placementConfigs, geoAreas,
+  signToken: signServedToken,
+});
+
+// Promotion analytics: events from the apps, purchases the server can verify, and what they add up to.
+export const promotionEventsService = createPromotionEventsService({ db, promotions });
+export const promotionAnalyticsService = createPromotionAnalyticsService({
+  db, promotions, campaigns: promotionCampaigns, entities: entityResolver,
 });

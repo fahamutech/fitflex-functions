@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
-import { withLedgerDelete } from './fixtures/ledger-cleanup.mjs';
+import { purgeB2BBilling } from './fixtures/ledger-cleanup.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import {
   gyms, b2bService, b2bProgramService, b2bConsumptionService as usage, b2bBillingService as billing,
@@ -80,7 +80,7 @@ async function paidPrepaid(programId, vatRateBps = 1800) {
   const prepared = await billing.preparePrepaid({ programId, period: PERIOD, actorId: ADMIN.userId });
   assert.ok(prepared.invoice, JSON.stringify(prepared));
   await billing.issueInvoice({ invoiceId: prepared.invoice.id, vatRateBps, actorId: ADMIN.userId });
-  return billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: 'BANK-TRF-1', actorId: FINANCE.userId });
+  return billing.markPaid({ invoiceId: prepared.invoice.id, paymentReference: `BANK-TRF-${uid('r')}`, actorId: FINANCE.userId });
 }
 const entitlements = where => db('B2BPassEntitlement').where(where).orderBy('createdAt');
 const payments = subscriptionId => db('PaymentRequest').where({ subscriptionId }).orderBy('requestedAt');
@@ -101,13 +101,7 @@ async function call(route, { claims, params = {}, body = {}, query = {} }) {
 after(async () => {
   const orgIds = [...made.orgs, ...(made.corporates.length ? await db('B2BOrganization').whereIn('legacyCorporateId', made.corporates).pluck('id') : [])];
   if (orgIds.length) {
-    const invoiceIds = await db('B2BSponsorInvoice').whereIn('organizationId', orgIds).pluck('id');
-    await withLedgerDelete(db, async (trx) => {
-      await trx('B2BSponsorInvoiceLine').whereIn('invoiceId', invoiceIds).del();
-      await trx('B2BPassEntitlement').whereIn('organizationId', orgIds).del();
-      await trx('B2BSponsorInvoice').whereIn('id', invoiceIds).del();
-      await trx('B2BBenefitConsumption').whereIn('organizationId', orgIds).del();
-    });
+    await purgeB2BBilling(db, orgIds);
     await db('B2BOrganization').whereIn('id', orgIds).del();
   }
   if (made.corporates.length) {
@@ -400,7 +394,11 @@ test('routes: FitFlex raises and settles invoices; an organisation reads only it
     [adminMarkB2BInvoicePaid, { invoiceId: 'x' }], [adminVoidB2BInvoice, { invoiceId: 'x' }], [adminListB2BEntitlements, { programId: a.programId }], [adminConvertCorporateToProgram, { corporateId: 'x' }]]) {
     assert.equal((await call(route, { claims: ownerA, params, body: { kind: 'prepaid', period: PERIOD } })).statusCode, 403, route.path);
   }
-  assert.equal((await call(adminListB2BInvoices, { claims: { ...admin, portalUser: true, aclPermissions: ['corporate'] } })).body.requiredScope, 'b2b');
+  assert.equal((await call(adminListB2BInvoices, { claims: { ...admin, portalUser: true, aclPermissions: ['corporate'] } })).body.requiredScope, 'b2b_billing');
+  // Any B2B grant can read invoices; raising, issuing and recording payment each need their own.
+  assert.equal((await call(adminListB2BInvoices, { claims: { ...admin, portalUser: true, aclPermissions: ['b2b'] } })).statusCode, 200);
+  assert.equal((await call(adminIssueB2BInvoice, { claims: { ...admin, portalUser: true, aclPermissions: ['b2b', 'b2b_payments'] }, params: { invoiceId: 'x' } })).body.requiredScope, 'b2b_billing');
+  assert.equal((await call(adminMarkB2BInvoicePaid, { claims: { ...admin, portalUser: true, aclPermissions: ['b2b', 'b2b_billing'] }, params: { invoiceId: 'x' } })).body.requiredScope, 'b2b_payments');
   assert.equal((await call(adminPrepareB2BInvoice, { claims: admin, params: { programId: a.programId }, body: { kind: 'weekly', period: PERIOD } })).body.error, 'invalid_kind');
 
   const prepared = await call(adminPrepareB2BInvoice, { claims: admin, params: { programId: a.programId }, body: { kind: 'prepaid', period: PERIOD } });

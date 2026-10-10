@@ -47,6 +47,22 @@ export const IDENTITY_V2_CLIENT = 'identity-v2';
 // admin roles are organisation or platform roles and are never self-added.
 export const ADDABLE_PERSONA_TYPES = ['member', 'trainer', 'gym_operator', 'vendor'];
 
+/**
+ * Which profiles a sign-in chooses from. The one used last is opened, unless it
+ * is still waiting for approval and the person has another role that is ready
+ * to use: then they land in that one (decision 9 Oct 2026), so a member who
+ * applied as a vendor is not sent to a "waiting" page every time. They can
+ * still switch to the pending role from the app.
+ */
+export function openingPool(usable, lastId) {
+  const last = usable.find(p => p.id === lastId);
+  if (last?.approvalStatus === 'pending_approval') {
+    const ready = usable.filter(p => p.approvalStatus !== 'pending_approval');
+    if (ready.length) return { pool: ready, last: null, switchedAway: true };
+  }
+  return { pool: usable, last, switchedAway: false };
+}
+
 export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
@@ -97,9 +113,9 @@ export function createAuthService({
     if (person?.status !== 'active') return { error: 'person_not_active', status: 403 };
     const usable = personas.filter(p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected');
     if (!usable.length) return { error: 'no_profile', status: 409 };
-    const operational = usable.filter(p => p.userType !== 'member');
-    const last = usable.find(p => p.id === person.lastPersonaId);
-    const chosen = last || (operational.length === 1 ? operational[0] : usable[0]);
+    const { pool, last } = openingPool(usable, person.lastPersonaId);
+    const operational = pool.filter(p => p.userType !== 'member');
+    const chosen = last || (operational.length === 1 ? operational[0] : pool[0]);
     const user = await users.findByIdAsync(chosen.id);
     if (!user) return { error: 'no_profile', status: 409 };
     await identityLink.rememberPersona(personId, user.id);
@@ -291,9 +307,15 @@ export function createAuthService({
         identityLink.personOf(user.personId), identityLink.personasOf(user.personId),
       ]);
       const usable = personas.filter(p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected');
-      const last = usable.find(p => p.id === person?.lastPersonaId);
+      const { pool, last, switchedAway } = openingPool(usable, person?.lastPersonaId);
       if (last && last.id !== user.id) user = (await users.findByIdAsync(last.id)) || user;
-      personaChoiceRequired = !last && usable.filter(p => p.userType !== 'member').length > 1;
+      if (switchedAway) {
+        // The role used last is still waiting for approval: open one that is ready.
+        const ready = pool.filter(p => p.userType !== 'member');
+        const pick = ready.length === 1 ? ready[0] : pool[0];
+        if (pick.id !== user.id) user = (await users.findByIdAsync(pick.id)) || user;
+      }
+      personaChoiceRequired = !last && pool.filter(p => p.userType !== 'member').length > 1;
     }
 
     // Block portal-only staff from logging in via the app's Firebase session

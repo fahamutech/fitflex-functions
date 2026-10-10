@@ -44,11 +44,11 @@ const activeFields = (from = '2026-01-01', to = null) => ({ status: 'active', ef
 
 // ── seeds ────────────────────────────────────────────────────────────────────
 
-test('the approved Dar values are seeded and active from 1 Oct 2026', async () => {
+test('the approved Dar values are seeded and active from 1 Jun 2026 (moved back from 1 Oct for the test data)', async () => {
   const passes = await db('PassTierVersion').whereIn('id', ['ptv-basic-1', 'ptv-pro-1', 'ptv-premium-1', 'ptv-executive-1']).orderBy('priceTzs');
   assert.deepEqual(passes.map((p) => [p.tierKey, p.priceTzs, p.visitAllowance, p.status, p.effectiveFrom]), [
-    ['basic', 60000, 16, 'active', '2026-10-01'], ['pro', 150000, 18, 'active', '2026-10-01'],
-    ['premium', 250000, 20, 'active', '2026-10-01'], ['executive', 400000, 24, 'active', '2026-10-01'],
+    ['basic', 60000, 16, 'active', '2026-06-01'], ['pro', 150000, 18, 'active', '2026-06-01'],
+    ['premium', 250000, 20, 'active', '2026-06-01'], ['executive', 400000, 24, 'active', '2026-06-01'],
   ]);
   assert.ok(passes.every((p) => p.approvedBy && p.approvedBy !== p.createdBy && p.effectiveTo === null));
   const global = await db('SettlementRule').where({ id: 'rule-global-1' }).first();
@@ -179,7 +179,7 @@ test('a rate card copies the rules in force on its start date; missing rules blo
   // And before the rules start there is nothing to copy either.
   const gymId = await makeGym(trx, 'standard');
   const early = (await service.createRateCard({ gymId, retailDailyTzs: 5000, retailWeeklyTzs: 15000, retailMonthlyTzs: 50000, actorId: 'maker' }, { trx })).rateCard;
-  assert.equal((await service.activate({ kind: 'rate_card', id: early.id, effectiveFrom: '2026-09-01', actorId: 'checker' }, { trx })).error, 'rule_missing');
+  assert.equal((await service.activate({ kind: 'rate_card', id: early.id, effectiveFrom: '2026-05-01', actorId: 'checker' }, { trx })).error, 'rule_missing');
 
   const card = early;
   assert.equal(card.gymTier, 'standard');

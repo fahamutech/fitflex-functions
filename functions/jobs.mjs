@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -27,6 +27,16 @@ export const communicationAutomations = {
   onJob: async () => {
     const r = await automationService.runDue();
     if (r.fired || r.paused || r.errors) console.log(`[automations] gyms=${r.gyms} fired=${r.fired} already=${r.already} deferred=${r.deferred} paused=${r.paused} errors=${r.errors}`);
+  }
+};
+
+export const smsReminders = {
+  created, rule: '20 * * * *', // hourly
+  description: 'SMS reminders: a confirmed trainer session starting within 3 hours, and a pass ending in 3 days (a gym membership whose gym sends its own expiry reminders is left to the gym). Only to members who have not switched SMS service messages off. Nothing is sent unless SMS_PROVIDER is set. Safe to rerun: each reminder is sent once, and one that failed is tried again by the next runs.',
+  onJob: async () => {
+    const r = await smsService.sendDueReminders();
+    const n = (x) => x.sent + x.failed;
+    if (n(r.bookings) || n(r.renewals)) console.log(`[sms] bookings sent=${r.bookings.sent} failed=${r.bookings.failed} · renewals sent=${r.renewals.sent} failed=${r.renewals.failed}`);
   }
 };
 
@@ -80,19 +90,27 @@ export const vendorSettlementDrafts = {
 export const b2bProgramExpiry = {
   created, rule: '5 21 * * *', // every day 21:05 UTC = 00:05 EAT, the first minute of a new EAT day
   description: 'B2B: mark active or paused wellness programmes whose end date has passed as expired. Idempotent.',
-  onJob: async () => {
-    const r = await b2bProgramService.expireDue();
-    if (r.expired) console.log(`[b2b-programs] expired=${r.expired}`);
-  }
+  // The work, its run record, lock and failure handling are in src/services/b2b-jobs.mjs and ops-service.mjs.
+  onJob: () => opsService.runJob('b2b-program-expiry'),
+};
+
+export const promotionLifecycle = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Promotions: start scheduled promotions whose start has arrived and expire those whose end has passed (a promotion whose entity was blocked in moderation is held instead of started). Ranking also reads the time window itself, so a late run never lets an expired promotion count. Idempotent.',
+  onJob: () => opsService.runJob('promotion-lifecycle'),
+};
+
+export const promotionEventsRetention = {
+  created, rule: '40 21 * * *', // every day 21:40 UTC = 00:40 EAT
+  description: 'Promotions: delete raw analytics events older than 13 months (the retention the owner decided). Idempotent.',
+  onJob: () => opsService.runJob('promotion-events-retention'),
 };
 
 export const b2bHoldReconciler = {
   created, rule: '*/5 * * * *', // every 5 minutes
   description: 'B2B: settle benefit holds a gym check-in left behind (the hold is written before the visit and approved after it). A hold older than two minutes is approved when its visit exists and cancelled when it does not, so no allowance stays blocked and no recorded visit goes uncharged. Idempotent.',
-  onJob: async () => {
-    const r = await b2bConsumptionService.reconcileHolds();
-    if (r.found) console.warn(`[b2b-usage] stale holds=${r.found} approved=${r.approved} cancelled=${r.cancelled} failed=${r.failed}`);
-  }
+  // The work, its run record, lock and failure handling are in src/services/b2b-jobs.mjs and ops-service.mjs.
+  onJob: () => opsService.runJob('b2b-hold-reconciler'),
 };
 
 export const settlementCloser = {
@@ -110,28 +128,41 @@ export const settlementCloser = {
 export const b2bSponsorBilling = {
   created, rule: '20 21 * * *', // every day 21:20 UTC = 00:20 EAT
   description: 'B2B sponsor billing: start sponsored passes that can start (sponsor paid, member linked, month begun), and keep draft invoices current — flat fees for this month (and next, from the 25th) and last month\'s per-use charges. Drafts only: FitFlex issues them. Idempotent.',
+  // The work, its run record, lock and failure handling are in src/services/b2b-jobs.mjs and ops-service.mjs.
+  onJob: () => opsService.runJob('b2b-sponsor-billing'),
+};
+
+export const b2bCollections = {
+  created, rule: '0 6 * * *', // every day 06:00 UTC = 09:00 EAT
+  description: 'B2B collections: payment reminders for issued invoices — 3 days before the due day, on it, and 7, 14 and 30 days after. Each is sent once per invoice, to the organisation\'s owners and finance users (in the app) and its billing email. Reminders only: nothing is suspended and no charge is added. Safe to rerun.',
+  // The work, its run record, lock and failure handling are in src/services/b2b-jobs.mjs and ops-service.mjs.
+  onJob: () => opsService.runJob('b2b-collections'),
+};
+
+export const b2bSponsorVisibilityNotice = {
+  created, rule: '0 7 * * *', // every day 07:00 UTC = 10:00 EAT
+  description: 'B2B: tell each person an organisation covers, once, that the organisation can see their FitFlex activity (and what it cannot see). New beneficiaries are picked up by the next run. Safe to rerun.',
+  // The work, its run record, lock and failure handling are in src/services/b2b-jobs.mjs and ops-service.mjs.
+  onJob: () => opsService.runJob('b2b-sponsor-visibility-notice'),
+};
+
+export const b2bIntegrityCheck = {
+  created, rule: '0 22 * * *', // every day 22:00 UTC = 01:00 EAT
+  description: 'B2B: run the financial data-quality checks. Each check that finds something raises one operations exception (count and examples) and clears itself when the check comes back clean. Nothing is repaired.',
+  onJob: () => opsService.runJob('b2b-integrity-check'),
+};
+
+export const opsSweeper = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'Operations: catch up. A daily B2B job whose run was missed (the server was restarting) or failed is run again, at most three times and further apart each time; after that its exception is left for a person. Safe to overlap: each job takes its own lock.',
   onJob: async () => {
-    const passes = await b2bBillingService.runDaily();
-    // Sponsor-covered trainer sessions whose refund to the member was not raised when the session completed.
-    const refunds = await b2bSponsorRefundService.repair();
-    if (refunds.raised) console.warn(`[b2b-refund] raised ${refunds.raised} missing sponsor refund(s)`);
-    const today = new Date(Date.now() + 3 * 3_600_000).toISOString().slice(0, 10);   // EAT day
-    const [y, m] = today.split('-').map(Number);
-    const month = (yy, mm) => `${mm < 1 ? yy - 1 : mm > 12 ? yy + 1 : yy}-${String(mm < 1 ? 12 : mm > 12 ? 1 : mm).padStart(2, '0')}`;
-    let drafts = 0;
-    for (const p of await b2bPrograms.filterByColumnAsync('status', 'active')) {
-      const periods = [['prepaid', month(y, m)], ...(Number(today.slice(8)) >= 25 ? [['prepaid', month(y, m + 1)]] : []), ['usage', month(y, m - 1)]];
-      for (const [kind, period] of periods) {
-        try {
-          const r = kind === 'prepaid'
-            ? await b2bBillingService.preparePrepaid({ programId: p.id, period, actorId: 'system:b2b-billing' })
-            : await b2bBillingService.prepareUsage({ programId: p.id, period, actorId: 'system:b2b-billing' });
-          if (r.invoice && (r.added || r.credited)) drafts += 1;
-        } catch (err) {
-          console.warn(`[b2b-billing] ${kind} ${period} for ${p.id} failed:`, err?.message);
-        }
-      }
-    }
-    if (drafts || passes.started || passes.repaired) console.log(`[b2b-billing] drafts=${drafts} started=${passes.started} repaired=${passes.repaired} awaitingMember=${passes.awaitingMember} awaitingLink=${passes.awaitingLink}`);
-  }
+    const r = await opsService.sweep();
+    if (r.ran.length || r.gaveUp.length) console.log(`[ops] caught up: ${r.ran.map(x => `${x.job}=${x.status}`).join(', ') || 'none'}; gave up: ${r.gaveUp.join(', ') || 'none'}`);
+  },
+};
+
+export const b2bBeneficiaryInvites = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'B2B: enrol invited people who have since joined FitFlex with the email or number their organisation listed, and send the invitation messages that are due (email: the invitation, then reminders after 3 and 10 days; SMS to people listed with a mobile number: the invitation and one reminder after 3 days, unless B2B_INVITE_SMS=off). Safe to overlap and to rerun: an invite is enrolled once and each message is claimed before it is sent.',
+  onJob: () => opsService.runJob('b2b-beneficiary-invites'),
 };

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
+import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set(['pending', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup', 'delivered', 'cancelled', 'confirmed', 'fulfilled']);
@@ -27,8 +28,14 @@ const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(p
 const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
 
 export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null,
+  // Moderation: pending, rejected, suspended and hidden products and vendors are not shown to buyers.
+  publicGate = OPEN_PUBLIC_GATE,
   // A paid order was cancelled and the money is owed back: ({ order, reasonCode, actorId, role }) → refund.
-  onRefundDue = async () => null }) {
+  onRefundDue = async () => null,
+  // A paid order, for promotion analytics: (order) → void. Never allowed to fail the order.
+  onOrderPaid = async () => null,
+  // A cancelled order, for promotion analytics: (order) → void; takes back what the paid order was credited for.
+  onOrderCancelled = async () => null }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -62,6 +69,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
 
   async function getVendorStore(vendorId) {
     if (!(await partnerGate.isOperational(vendorId))) return null;
+    if (await publicGate.isBlocked('vendor', vendorId)) return null;
     const profile = publicProfile(await getVendorProfile(vendorId));
     if (!profile) return null;
     const storeProducts = await listProducts({ vendorId });
@@ -80,7 +88,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     // Buyers only see products from vendors who may sell (new vendors: once verified).
     if (!includeArchived) {
       const ok = await partnerGate.operationalUserIds(rows.map(product => product.vendorId));
-      rows = rows.filter(product => ok.has(product.vendorId));
+      const [blockedProducts, blockedVendors] = await Promise.all([publicGate.blocked('product'), publicGate.blocked('vendor')]);
+      rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId));
     }
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
@@ -264,6 +273,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const product = await products.findByIdAsync(item.productId);
       if (!product || product.deletedAt || product.status !== 'active' || ['pending', 'rejected'].includes(product.approvalStatus)) return { error: 'product_not_found', status: 404, productId: item.productId };
       if (!(await partnerGate.isOperational(product.vendorId))) return { error: 'product_not_found', status: 404, productId: item.productId };
+      // Hidden or suspended in moderation: it is not sold, even to someone with an old link.
+      if (await publicGate.isBlocked('product', product.id) || await publicGate.isBlocked('vendor', product.vendorId)) return { error: 'product_not_found', status: 404, productId: item.productId };
       if (Number(product.stock) < qty) return { error: 'insufficient_stock', status: 409, productId: product.id };
       resolved.push({ product, qty });
     }
@@ -296,6 +307,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   async function orderPaid(order) {
+    try { await onOrderPaid(order); } catch (err) { console.warn('[shop] order not credited to a promotion:', err?.message); }
     for (const vendorId of new Set((order.items || []).map(item => item.vendorId))) await notify(vendorId, 'new_order', { orderId: order.id });
     await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
   }
@@ -386,6 +398,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, by: role }];
     const paymentStatus = wasPaid ? 'refund_pending' : order.paymentStatus === 'pending' ? 'cancelled' : order.paymentStatus;
     const updated = await shopOrders.updateByIdAsync(order.id, { status: 'cancelled', paymentStatus, timeline, updatedAt: at });
+    try { await onOrderCancelled(order); } catch (err) { console.warn('[shop] cancelled order not taken back from a promotion:', err?.message); }
     await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: `shop_order_cancelled_by_${role}`, target: order.id, before: { status: order.status, paymentStatus: order.paymentStatus }, after: { status: 'cancelled', paymentStatus } });
     let refund = null;
     if (wasPaid) {

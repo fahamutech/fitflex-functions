@@ -86,7 +86,9 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
       gender: body.memberProfile?.gender ?? priorProfile.gender ?? null,
       preferredWorkoutTimes: Array.isArray(body.memberProfile?.preferredWorkoutTimes)
         ? body.memberProfile.preferredWorkoutTimes
-        : (priorProfile.preferredWorkoutTimes || [])
+        : (priorProfile.preferredWorkoutTimes || []),
+      // Set by the member in the app; an admin edit must not wipe it.
+      ...(priorProfile.trainingPreferences ? { trainingPreferences: priorProfile.trainingPreferences } : {})
     };
     const row = {
       id,

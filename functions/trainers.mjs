@@ -1,23 +1,26 @@
 // Trainer catalogue + self-service REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { trainerService, resolveRequestUser, users } from '../src/bootstrap/services.mjs';
+import { trainerService, resolveRequestUser, users, moderationGate } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
 export const listTrainers = {
   created, method: 'get', path: '/trainers',
-  description: 'Public trainer discovery list.',
-  onRequest: async (req, res) => res.json(await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty }))
+  description: 'Public trainer discovery list. Public fields only: no email, phone, account id or pending gym applications.',
+  onRequest: async (req, res) => {
+    const blocked = await moderationGate.blocked('trainer');          // pending, rejected, suspended or hidden in moderation
+    res.json((await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty })).filter(t => !blocked.has(t.id)).map(trainerService.publicTrainer));
+  }
 };
 
 export const getTrainer = {
   created, method: 'get', path: '/trainers/:id',
-  description: 'Public trainer profile detail.',
+  description: 'Public trainer profile detail. Public fields only: no email, phone, account id or pending gym applications.',
   onRequest: async (req, res) => {
     const trainer = await trainerService.getPublic(req.params.id);
-    if (!trainer) return res.status(404).json({ error: 'not_found' });
-    res.json(trainer);
+    if (!trainer || await moderationGate.isBlocked('trainer', trainer.id)) return res.status(404).json({ error: 'not_found' });
+    res.json(trainerService.publicTrainer(trainer));
   }
 };
 
@@ -78,8 +81,10 @@ export const trainerMyProfile = {
   created, method: 'get', path: '/trainer/me',
   description: 'Trainer: get own profile, linked gyms and pending gym applications.',
   onGuard: requireAuth('trainer'),
-  onRequest: (req, res) => {
-    const result = trainerService.myProfile(req.user.sub);
+  onRequest: async (req, res) => {
+    // A profile FitFlex created for this trainer's email becomes theirs here.
+    const user = await resolveRequestUser(req);
+    const result = await trainerService.myProfile(req.user.sub, { email: user?.email });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.trainer);
   }
@@ -109,11 +114,16 @@ export const trainerCancelGymApplication = {
 
 export const trainerUpdateProfile = {
   created, method: 'put', path: '/trainer/me',
-  description: 'Trainer: update own displayName, bio, specialties, hourly rate, availability, photos and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL).',
+  description: 'Trainer: update own professional details — displayName, phone, bio, specialties, hourlyRateTzs, sessionRateCurrency (TZS|USD), experienceYears, availability, images (gallery, max 8; first is the profile picture) with imageThumbnails, photoUrl, and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL). Only the fields sent are changed.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
+    const user = await resolveRequestUser(req);
+    await trainerService.claimProfileForUser({ userId: req.user.sub, email: user?.email });
     const result = await trainerService.updateProfile({ userId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.platforms ? { platforms: result.platforms } : {}) });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
     res.json(result.trainer);
   }
 };

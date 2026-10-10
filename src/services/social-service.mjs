@@ -18,9 +18,12 @@
 //
 // Never shared: the route, calories, notes about health — a shared activity
 // shows its type, date, duration, distance, pace, splits and climb.
+import { createCompanyDirectory, companyKey } from './company-directory.mjs';
 import { randomUUID } from 'node:crypto';
 
-export const GROUP_OWNER_TYPES = ['member', 'trainer', 'gym', 'corporate'];
+// `corporate` is a company from the Corporate module; `organization` is a B2B
+// organisation that never was one. Their groups behave the same.
+export const GROUP_OWNER_TYPES = ['member', 'trainer', 'gym', 'corporate', 'organization'];
 const JOIN_POLICIES = ['open', 'approval'];
 const MAX_GROUP_MEMBERS = 5000;
 const MAX_COMMENT = 500;
@@ -56,6 +59,8 @@ export function publicActivity(a) {
 export function createSocialService({
   users, activities, follows, blocks, profiles, groups, groupMembers, kudos, comments, reports, views = null,
   notify = async () => {}, auditLog = null, now = () => new Date(),
+  // Who belongs to a company or organisation (colleagues, company-only groups).
+  directory = createCompanyDirectory({ users }),
 }) {
   // ── Relationships ──────────────────────────────────────────────────────
 
@@ -85,10 +90,11 @@ export function createSocialService({
       .filter(m => m.status === 'active').map(m => m.groupId));
   }
 
-  async function companyOf(userId) {
-    const u = await users.findByIdAsync(userId);
-    return u?.userType === 'member' ? u.corporateId ?? null : null;
-  }
+  /** The companies and organisations a member belongs to, as keys. Empty for anyone who isn't a member. */
+  const companiesOf = userId => directory.keysOf(userId);
+  const shareCompany = (a, b) => [...a].some(k => b.has(k));
+  /** The company or organisation a group is only for, as a key; null for an open group. */
+  const groupCompany = g => (g.corporateId ? companyKey('corporate', g.corporateId) : g.ownerType === 'organization' ? companyKey('organization', g.ownerId) : null);
 
   /** Can [viewerId] see [activity]? The one check every read goes through. */
   async function canView(viewerId, activity) {
@@ -105,8 +111,8 @@ export function createSocialService({
       if (share.groups.some(g => mine.has(g) && theirs.has(g))) return true;
     }
     if (share.company) {
-      const [a, b] = await Promise.all([companyOf(viewerId), companyOf(activity.userId)]);
-      if (a && a === b) return true;
+      const [a, b] = await Promise.all([companiesOf(viewerId), companiesOf(activity.userId)]);
+      if (shareCompany(a, b)) return true;
     }
     return false;
   }
@@ -166,7 +172,7 @@ export function createSocialService({
     const mine = await activeGroupIds(userId);
     if (wanted.some(g => !mine.has(g))) return { error: 'not_in_group', status: 400 };
     const company = raw.company === true;
-    if (company && !(await companyOf(userId))) return { error: 'no_company', status: 400 };
+    if (company && !(await companiesOf(userId)).size) return { error: 'no_company', status: 400 };
     if (!friendsOn && !followersOn && !publicOn && !wanted.length && !company) return { share: null };
     return { share: { friends: friendsOn, followers: followersOn, public: publicOn, groups: wanted, company } };
   }
@@ -177,7 +183,7 @@ export function createSocialService({
       defaultShare: p.defaultShare ?? null,
       publicProfile: p.publicProfile === true,
       inviteCode: p.inviteCode,
-      hasCompany: !!(await companyOf(userId)),
+      hasCompany: (await companiesOf(userId)).size > 0,
       blocked: await Promise.all((await blocks.filterByColumnAsync('blockerId', userId))
         .map(async b => ({ id: b.blockedId, displayName: await nameOf(b.blockedId) }))),
     };
@@ -214,7 +220,7 @@ export function createSocialService({
       followers: p.defaultShare.followers === true,
       public: p.defaultShare.public === true && (await isPublic(userId)),
       groups: (p.defaultShare.groups ?? []).filter(g => mine.has(g)),
-      company: p.defaultShare.company === true && !!(await companyOf(userId)),
+      company: p.defaultShare.company === true && (await companiesOf(userId)).size > 0,
     });
     return n.error ? null : n.share;
   }
@@ -317,8 +323,7 @@ export function createSocialService({
     for (const g of await activeGroupIds(userId)) {
       for (const m of await groupMembers.filterByColumnAsync('groupId', g)) if (m.status === 'active') pool.add(m.userId);
     }
-    const corp = await companyOf(userId);
-    if (corp) for (const u of await users.filterByColumnAsync('corporateId', corp)) if (u.userType === 'member') pool.add(u.id);
+    for (const id of await directory.colleaguesOf(userId)) pool.add(id);
     pool.delete(userId);
     for (const uid of pool) {
       if (out.size >= 30) break;
@@ -372,8 +377,7 @@ export function createSocialService({
     for (const g of await activeGroupIds(viewerId)) {
       for (const m of await groupMembers.filterByColumnAsync('groupId', g)) if (m.status === 'active') circle.add(m.userId);
     }
-    const corp = await companyOf(viewerId);
-    if (corp) for (const u of await users.filterByColumnAsync('corporateId', corp)) if (u.userType === 'member') circle.add(u.id);
+    for (const id of await directory.colleaguesOf(viewerId)) circle.add(id);
     circle.add(viewerId);
 
     const since = +now() - FEED_DAYS * DAY_MS;
@@ -482,8 +486,8 @@ export function createSocialService({
       reachable = [...mine].some(g => theirs.has(g));
     }
     if (!reachable) {
-      const [a, b] = await Promise.all([companyOf(viewerId), companyOf(userId)]);
-      reachable = !!a && a === b;
+      const [a, b] = await Promise.all([companiesOf(viewerId), companiesOf(userId)]);
+      reachable = shareCompany(a, b);
     }
     if (!reachable) return { error: 'not_found', status: 404 };
     const cutoff = before ? Date.parse(before) : Infinity;
@@ -667,12 +671,12 @@ export function createSocialService({
   /** Discoverable groups a member could join (company groups: their company only). */
   async function discoverGroups(userId, { q = '' } = {}) {
     const query = String(q).trim().toLowerCase();
-    const corp = await companyOf(userId);
+    const companies = await companiesOf(userId);
     const mine = new Set((await groupMembers.filterByColumnAsync('userId', userId)).map(m => m.groupId));
     const out = [];
     for (const g of await groups.allAsync()) {
       if (g.status !== 'active' || !g.discoverable || mine.has(g.id)) continue;
-      if (g.corporateId && g.corporateId !== corp) continue;
+      if (groupCompany(g) && !companies.has(groupCompany(g))) continue;
       if (query && !g.name.toLowerCase().includes(query)) continue;
       out.push(groupView(g, null, await memberCount(g.id)));
       if (out.length >= 30) break;
@@ -689,7 +693,7 @@ export function createSocialService({
     if (!g || g.status !== 'active') return { error: 'not_found', status: 404 };
     // Without the code, only discoverable groups can be joined.
     if (!inviteCode && !g.discoverable) return { error: 'not_found', status: 404 };
-    if (g.corporateId && g.corporateId !== (await companyOf(userId))) return { error: 'company_only', status: 403 };
+    if (groupCompany(g) && !(await companiesOf(userId)).has(groupCompany(g))) return { error: 'company_only', status: 403 };
     const members = await groupMembers.filterByColumnAsync('groupId', g.id);
     const existing = members.find(m => m.userId === userId);
     if (existing) return { group: groupView(g, existing, members.filter(m => m.status === 'active').length) };

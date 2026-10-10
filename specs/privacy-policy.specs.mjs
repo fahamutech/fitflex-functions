@@ -30,4 +30,8 @@ test('privacy policy is exposed as a public Play Store HTML endpoint', async () 
   assert.match(out.body, /Information We Collect/);
   assert.match(out.body, /Data Deletion/);
   assert.match(out.body, /Sera ya Faragha ya FitFlex/);
+  // What a sponsor (employer, insurer, club) can and cannot see.
+  assert.match(out.body, /Employers, Insurers and Other Sponsors/);
+  assert.match(out.body, /cannot see your weight, height/);
+  assert.match(out.body, /mdhamini/);
 });

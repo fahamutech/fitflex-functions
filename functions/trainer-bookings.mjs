@@ -1,7 +1,10 @@
 // Trainer booking REST surface — member creation, admin oversight, trainer session mgmt.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { trainerBookingService } from '../src/bootstrap/services.mjs';
+import { trainerBookingService, moderationGate } from '../src/bootstrap/services.mjs';
+
+/** A trainer who is hidden or suspended in moderation cannot be newly booked. Existing bookings carry on. */
+const trainerUnavailable = async req => !!req.body?.trainerId && await moderationGate.isBlocked('trainer', req.body.trainerId);
 
 const created = new Date().toISOString();
 
@@ -10,6 +13,7 @@ export const quoteTrainerBooking = {
   description: 'Member: price one or more slots before booking. POST { trainerId, gymId, slots:[{date,slot}] } → summary (Pass discount applied).',
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
+    if (await trainerUnavailable(req)) return res.status(409).json({ error: 'trainer_unavailable' });
     const result = await trainerBookingService.quoteBooking({ memberId: req.user.sub, body: req.body || {} });
     if (result.error) return res.status(result.status).json({ error: result.error, slot: result.slot });
     res.json(result);
@@ -21,6 +25,7 @@ export const createTrainerBooking = {
   description: 'Member: book one or more trainer slots. POST { trainerId, gymId, slots:[{date,slot}] } (legacy { date, slot } still accepted). Bookings stay payment_pending until the payment request is approved.',
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
+    if (await trainerUnavailable(req)) return res.status(409).json({ error: 'trainer_unavailable' });
     const result = await trainerBookingService.createBooking({ memberId: req.user.sub, body: req.body || {} });
     if (result.error) return res.status(result.status).json({ error: result.error, slot: result.slot });
     res.status(201).json(result);

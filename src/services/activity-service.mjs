@@ -27,6 +27,9 @@ const MEMBER_SOURCES = new Set(['device', 'fitflex', 'manual']);
 // FitFlex itself (e.g. completing a workout), so neither can be typed in:
 // FitFlex never shows fabricated numbers as device or tracked data.
 const LOGGABLE_SOURCES = new Set(['manual']);
+// How far back an activity can be logged by hand: the app offers 90 days
+// (manualMaxDaysBack); one more allows for the member's time zone.
+const MAX_LOG_AGE_DAYS = 91;
 const INTENSITIES = ['low', 'moderate', 'high'];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -98,6 +101,7 @@ export function createActivityService({ activities, users = null, routes = null,
     const startedAt = parseDate(body.startedAt);
     if (!startedAt) return { error: 'invalid_started_at', status: 400 };
     if (+startedAt > +now() + FUTURE_SLACK_MS) return { error: 'started_in_future', status: 400 };
+    if (+now() - +startedAt > MAX_LOG_AGE_DAYS * DAY_MS) return { error: 'started_too_long_ago', status: 400 };
     if (body.intensity != null && !INTENSITIES.includes(body.intensity)) {
       return { error: 'invalid_intensity', status: 400 };
     }

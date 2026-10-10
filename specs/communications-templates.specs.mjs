@@ -139,12 +139,12 @@ test('FitFlex templates are read-only; copying one makes a gym template to adapt
   assert.equal((await templates.archive(w.A, sys)).error, 'system_template_read_only');
   const copy = (await templates.duplicate(w.A, sys)).template;
   assert.deepEqual([copy.system, copy.gymId, copy.basedOn, copy.group, copy.purpose], [false, w.gymA, sys, 'engagement', 'engagement']);
-  assert.equal(copy.bodies.sw.title, 'Tumekukumbuka, {{member_name}}');
+  assert.equal(copy.bodies.sw.title, 'Tumekumiss, {{member_name}}');
   assert.equal(copy.name, 'We miss you', 'a readable name when the app sends none');
   assert.equal((await templates.duplicate(w.A, sys, { name: 'Tunakukumbuka' })).template.name, 'Tunakukumbuka');
   const edited = (await templates.update(w.A, copy.id, { bodies: { ...copy.bodies, en: { title: 'Come back, {{member_name}}', body: 'We saved your spot at {{gym_name}}.' } } })).template;
   assert.equal(edited.bodies.en.title, 'Come back, {{member_name}}');
-  assert.equal(edited.bodies.sw.title, 'Tumekukumbuka, {{member_name}}');
+  assert.equal(edited.bodies.sw.title, 'Tumekumiss, {{member_name}}');
   assert.equal((await templates.update(w.B, copy.id, { name: 'hijack' })).error, 'not_found');
   assert.deepEqual(await templates.archive(w.A, copy.id), { ok: true });
   assert.ok(!(await templates.list(w.A)).templates.some(t => t.id === copy.id));
@@ -158,7 +158,7 @@ test('preview shows each channel in each language for a sample member at the gym
   assert.equal(p.senderName, 'Simba Gym');
   assert.match(p.byLocale.en.in_app.body, /^Hi Amina, your Monthly plan at Simba Gym ends on \d\d\/\d\d\/\d{4}\./);
   assert.match(p.byLocale.sw.in_app.body, /^Habari Amina, mpango wako wa Kila mwezi katika Simba Gym unaisha tarehe/);
-  assert.deepEqual([p.byLocale.en.in_app.ctaLabel, p.byLocale.sw.in_app.ctaLabel, p.byLocale.en.in_app.deepLink], ['Renew now', 'Huisha sasa', 'renewal']);
+  assert.deepEqual([p.byLocale.en.in_app.ctaLabel, p.byLocale.sw.in_app.ctaLabel, p.byLocale.en.in_app.deepLink], ['Renew now', 'Lipia tena', 'renewal']);
   assert.equal(p.byLocale.en.push.title, 'Your plan ends soon');
   assert.deepEqual(p.whatsapp, { ready: false, byLocale: { en: { ready: false, reason: 'not_registered' }, sw: { ready: false, reason: 'not_registered' } } });
 });
@@ -201,7 +201,7 @@ test('a campaign started from a template reaches each member in their language',
   for (const r of rows) await delivery.deliver({ ...r, attempts: 1 });
   const inbox = async (m) => (await notificationService.inbox({ userId: m })).notifications.find(n => n.campaignId === campaign.id);
   assert.equal((await inbox(w.english)).data.ctaLabel, 'Renew now');
-  assert.equal((await inbox(w.swahili)).data.ctaLabel, 'Huisha sasa');
+  assert.equal((await inbox(w.swahili)).data.ctaLabel, 'Lipia tena');
 });
 
 test('a campaign can\'t use another gym\'s template; a template needs its offer values', async () => {

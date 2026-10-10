@@ -121,6 +121,7 @@ function providerOf(r, { detail }) {
       ...(detail && p?.fcm ? { failedDevices: p.fcm.failed ?? 0, errors: p.fcm.errors || [] } : {}),
     };
   }
+  if (r.channel === 'sms') return { name: 'sms', messageId: r.providerMessageId || null };
   return { name: 'inbox', messageId: r.notificationId || null };
 }
 
