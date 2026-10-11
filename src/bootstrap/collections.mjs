@@ -46,6 +46,7 @@ export const notifications = collection('notifications');
 export const activities = collection('activities');
 export const activityRoutes = collection('activity_routes');
 export const follows = collection('follows');
+export const friendInvitations = collection('friend_invitations');
 export const blocks = collection('blocks');
 export const socialProfiles = collection('social_profiles');
 export const socialGroups = collection('social_groups');
