@@ -30,6 +30,7 @@ import {
   DOCUMENTS_FOR, DOCUMENT_REQUIREMENTS, SETTLEMENT_REQUIRED, currentDocument,
 } from '../shared/partner-kyc-requirements.mjs';
 import { GYM_TIERS } from '../shared/constants.mjs';
+import { VENDOR_POSITIONS } from '../shared/product-categories.mjs';
 import { requiredAgreements, agreementText } from '../shared/partner-agreements.mjs';
 import { prepareDocumentFile, displayFileName, sha256 } from '../infra/document-file.mjs';
 
@@ -350,6 +351,10 @@ export function createPartnerKycService({
     if (role !== spec.role) return fail('invalid_role', 400, { allowed: [spec.role] });
     const { patch, error, allowed } = cleanFields(body, PERSON_FIELDS, PERSON_RULES);
     if (error) return fail(error, 400, allowed ? { allowed } : {});
+    // A vendor's person is the owner, a co-owner or an employee.
+    if (partner.partnerType === 'vendor' && patch.position && !VENDOR_POSITIONS.includes(patch.position)) {
+      return fail('invalid_position', 400, { allowed: VENDOR_POSITIONS });
+    }
     const existingCase = await findCase(partner);
     if (!editable(existingCase, actor)) return fail('case_locked', 409, { caseStatus: existingCase.status });
     const kycCase = await ensureCase(partner, actor);

@@ -1,4 +1,5 @@
 // D1 — Shop / vendor e-commerce REST surface (phase 1: catalogue + orders).
+import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { shopService, vendorSettlementService } from '../src/bootstrap/services.mjs';
@@ -61,6 +62,13 @@ export const vendorMyProducts = {
   }
 };
 
+export const shopCategories = {
+  created, method: 'get', path: '/shop/categories',
+  description: 'The product categories a vendor chooses from (for the business and for each product), with English and Swahili names.',
+  responseSample: { categories: [{ key: 'supplements_nutrition', en: 'Supplements & nutrition', sw: 'Virutubisho na lishe' }] },
+  onRequest: async (_req, res) => res.json({ categories: PRODUCT_CATEGORIES }),
+};
+
 export const vendorCreateProduct = {
   created, method: 'post', path: '/vendor/products',
   description: 'Vendor: create a product.',
@@ -68,7 +76,7 @@ export const vendorCreateProduct = {
   onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
   onRequest: async (req, res) => {
     const result = await shopService.upsertProduct({ vendorId: req.user.vendorId || req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) return res.status(result.status).json({ error: result.error, allowed: result.allowed });
     res.status(201).json(result.product);
   }
 };
@@ -118,7 +126,7 @@ export const vendorSaveProfile = {
   onGuard: requireAuth('vendor', 'admin'),
   onRequest: async (req, res) => {
     const result = await shopService.saveVendorProfile({ vendorId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing });
+    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing, allowed: result.allowed });
     res.json(result.profile);
   },
 };

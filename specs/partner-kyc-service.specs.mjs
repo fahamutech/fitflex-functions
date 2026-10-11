@@ -94,8 +94,12 @@ test('each partner type names only its own person', async () => {
   assert.deepEqual([wrong.error, wrong.allowed], ['invalid_role', ['authorised_representative']]);
   const bad = await svc.upsertPerson(vendor, 'authorised_representative', { fullName: 'John', authority: 'king' }, vendor.actor);
   assert.equal(bad.error, 'invalid_authority');
-  const noName = await svc.upsertPerson(vendor, 'authorised_representative', { position: 'Director' }, vendor.actor);
+  const noName = await svc.upsertPerson(vendor, 'authorised_representative', { position: 'owner' }, vendor.actor);
   assert.equal(noName.error, 'fullName_required');
+  const badPosition = await svc.upsertPerson(vendor, 'authorised_representative', { fullName: 'John', position: 'Director' }, vendor.actor);
+  assert.deepEqual([badPosition.error, badPosition.allowed], ['invalid_position', ['owner', 'co_owner', 'employee']]);
+  const ok = await svc.upsertPerson(vendor, 'authorised_representative', { fullName: 'John Kimaro', nationality: 'TZ', position: 'employee' }, vendor.actor);
+  assert.equal(ok.people[0].position, 'employee');
 });
 
 test('a gym owner fills in business details; the checklist reads their gyms', async () => {
@@ -244,20 +248,28 @@ test('corporate KYB is filled in by an admin, reading commercial terms from the 
   assert.deepEqual(contracts.map(c => c.status), ['superseded', 'accepted']);
 });
 
-test('vendor returns policy and categories save on the vendor profile; unknown keys are dropped', async () => {
+test('vendor categories are chosen from the list and save on the vendor profile; unknown keys are dropped', async () => {
   const p = await partner('vendor');
-  await shopService.saveVendorProfile({
+  const saved = await shopService.saveVendorProfile({
     vendorId: p.subjectId,
-    body: { contactNumber: '+255700000000', email: 'shop@example.com', productCategories: ['Supplements'], deliveryRegions: ['Arusha'],
+    body: { contactNumber: '+255700000000', productCategories: ['supplements_nutrition', 'events'],
       returnsPolicy: '7 days, unopened', approvalStatus: 'approved', accountStatus: 'active' },
   });
+  assert.ok(saved.profile, JSON.stringify(saved));
   const user = await db('User').where('id', p.subjectId).first();
-  assert.equal(user.vendorProfile.returnsPolicy, '7 days, unopened');
+  assert.equal(user.vendorProfile.returnsPolicy, '7 days, unopened', 'still kept when given');
   assert.equal(user.vendorProfile.approvalStatus, undefined);
+  assert.deepEqual(user.vendorProfile.productCategories, ['supplements_nutrition', 'events']);
   const view = await svc.overview(await svc.partnerForUser(p.subjectId));
-  for (const key of ['business.contact', 'marketplace.product_categories', 'marketplace.delivery', 'marketplace.returns']) {
+  for (const key of ['business.contact', 'marketplace.product_categories']) {
     assert.equal(item(view, key).status, 'complete', key);
   }
+  assert.equal(item(view, 'marketplace.delivery'), undefined);
+  assert.equal(item(view, 'marketplace.returns'), undefined);
+
+  const bad = await shopService.saveVendorProfile({ vendorId: p.subjectId, body: { productCategories: ['Supplements'] } });
+  assert.deepEqual([bad.error, bad.status], ['invalid_product_category', 400]);
+  assert.ok(bad.allowed.includes('events'));
 });
 
 test('admins list and open cases; the kyc scope can be granted to portal staff', async () => {
