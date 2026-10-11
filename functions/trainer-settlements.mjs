@@ -86,9 +86,23 @@ export const adminPayTrainerSettlement = {
   onGuard: pay, onRequest: act(svc.pay),
 };
 
+const prepareOrApprove = [requireAuth('admin'), requireAcl('settlements_prepare', 'settlements_approve')];
+
+export const adminRequestTrainerSettlementVoid = {
+  created, method: 'post', path: '/admin/trainer-settlements/:id/void-request',
+  description: 'Admin: ask for an unpaid statement (draft, submitted or approved) to be voided. Body { reason }. Nothing is voided until a different admin confirms; meanwhile it can\'t be submitted, approved or cleared for payment.',
+  onGuard: prepareOrApprove, onRequest: act(svc.requestVoid),
+};
+
+export const adminCancelTrainerSettlementVoidRequest = {
+  created, method: 'post', path: '/admin/trainer-settlements/:id/void-request/cancel',
+  description: 'Admin: withdraw or decline a void request. Body { reason? }. The statement carries on as it was.',
+  onGuard: prepareOrApprove, onRequest: act(svc.cancelVoidRequest),
+};
+
 export const adminVoidTrainerSettlement = {
   created, method: 'post', path: '/admin/trainer-settlements/:id/void',
-  description: 'Admin: void an unpaid statement. Body { reason }. Its sessions are released for the next statement.',
+  description: 'Admin: confirm a requested void. The confirmer must not be the person who asked. Its sessions are released for the next statement.',
   onGuard: approve, onRequest: act(svc.voidStatement),
 };
 

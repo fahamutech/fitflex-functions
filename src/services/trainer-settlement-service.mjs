@@ -196,6 +196,6 @@ export function createTrainerSettlementService({
     return { statement: partnerView(statement), lines: await linesOf(id) };
   }
 
-  const { submit, reject, approve, hold, release, markPayable, voidStatement } = workflow;
-  return { prepare, submit, reject, approve, hold, release, markPayable, pay, voidStatement, list, get, listMine, getMine };
+  const { submit, reject, approve, hold, release, markPayable, requestVoid, cancelVoidRequest, voidStatement } = workflow;
+  return { prepare, submit, reject, approve, hold, release, markPayable, pay, requestVoid, cancelVoidRequest, voidStatement, list, get, listMine, getMine };
 }
