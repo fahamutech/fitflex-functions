@@ -15,6 +15,9 @@ const month = (y, m) => { const i = y * 12 + (m - 1); return `${Math.floor(i / 1
 export function registerB2BJobs({
   ops, db, programs,
   promotionService, promotionEventsService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bSponsorRefundService, b2bCollectionsService, b2bAnalyticsService,
+  b2bBeneficiaryImportService = null,
+  b2bLifecycleService = null,
+  b2bWatchService = null,
   now = () => new Date(),
 }) {
   ops.register({
@@ -120,8 +123,10 @@ export function registerB2BJobs({
     description: 'Runs the data-quality checks across usage, invoices, payments and passes. Each check that finds something raises one exception with the count and examples; it clears itself when the check comes back clean. Nothing is repaired.',
     run: async (ctx) => {
       const q = await b2bAnalyticsService.dataQuality();
+      // The provider side (settlement and trainer statements), read only.
+      const checks = [...q.checks, ...(b2bWatchService ? await b2bWatchService.providerChecks() : [])];
       let issues = 0;
-      for (const c of q.checks) {
+      for (const c of checks) {
         const key = `dq:${c.key}`;
         if (c.count > 0) {
           issues += 1;
@@ -130,9 +135,94 @@ export function registerB2BJobs({
           await ctx.clear(key, 'The check came back clean.');
         }
       }
-      return { processed: q.checks.length, succeeded: q.checks.length, failed: 0, issues };
+      return { processed: checks.length, succeeded: checks.length, failed: 0, issues };
     },
   });
+
+  if (b2bBeneficiaryImportService) {
+    ops.register({
+      name: 'b2b-beneficiary-invites', title: 'Beneficiary invites', schedule: { type: 'every', minutes: 10 }, quiet: true,
+      description: 'Enrols invited people who have since joined FitFlex, and sends the invitation messages that are due: by email the invitation and reminders after 3 and 10 days, by SMS the invitation and one reminder after 3 days.',
+      run: async (ctx) => {
+        const matched = await b2bBeneficiaryImportService.matchInvites();
+        const emails = await b2bBeneficiaryImportService.sendDue();
+        if (matched.failed) await ctx.raise({ type: 'job_item_failed', severity: 'medium', title: `${matched.failed} invited ${matched.failed === 1 ? 'person' : 'people'} could not be enrolled after joining`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:enrol`, detail: matched });
+        else if (matched.matched) await ctx.clear(`item:${ctx.job}:enrol`, 'Enrolled.');
+        const { email, sms } = emails;
+        if (email.notConfigured) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${email.due} invitation email(s) are waiting: the email sender is not set up`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email-setup`, detail: email });
+        else if (email.due) await ctx.clear(`item:${ctx.job}:email-setup`, 'The email sender is set up.');
+        if (email.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${email.failed} invitation email(s) were not accepted`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email`, detail: email });
+        else if (email.sent) await ctx.clear(`item:${ctx.job}:email`, 'Emails sent.');
+        // SMS that is switched off or not set up is not a fault: those invites simply get no SMS.
+        if (sms.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${sms.failed} invitation SMS were not accepted`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:sms`, detail: sms });
+        else if (sms.sent) await ctx.clear(`item:${ctx.job}:sms`, 'SMS sent.');
+        return { processed: matched.matched + emails.sent + emails.failed, succeeded: matched.enrolled + emails.sent, failed: matched.failed + emails.failed, enrolled: matched.enrolled, emailsSent: email.sent, smsSent: sms.sent, emailsWaiting: email.notConfigured ? email.due : 0, smsWaiting: sms.notConfigured ? sms.due : 0 };
+      },
+    });
+  }
+
+  if (b2bLifecycleService) {
+    const report = async (ctx, key, label, r) => {
+      if (r.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${r.failed} ${label} could not be sent`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:${key}`, detail: r });
+      else if (r.sent) await ctx.clear(`item:${ctx.job}:${key}`, 'Sent.');
+    };
+    ops.register({
+      name: 'b2b-lifecycle-notices', title: 'Benefit and programme notices', schedule: { type: 'daily', utc: '05:00' },
+      description: 'Tells members when a benefit starts tomorrow, ends within 7 days or has ended, and tells an organisation when a programme ends within 30 days, within 7, or has ended. Each notice once.',
+      run: async (ctx) => {
+        const members = await b2bLifecycleService.benefitNotices();
+        const orgs = await b2bLifecycleService.programNotices();
+        await report(ctx, 'members', 'benefit notice(s)', members);
+        await report(ctx, 'organisations', 'programme notice(s)', orgs);
+        return { processed: members.due + orgs.due, succeeded: members.sent + orgs.sent, failed: members.failed + orgs.failed, memberNotices: members.sent, organisationNotices: orgs.sent, emails: orgs.emailed ?? 0 };
+      },
+    });
+    ops.register({
+      name: 'b2b-allowance-notices', title: 'Allowance notices', schedule: { type: 'every', minutes: 10 }, quiet: true,
+      description: 'Tells a member when they have used 80% of a benefit\'s allowance, and when they have used all of it. Once each per allowance window.',
+      run: async (ctx) => {
+        const r = await b2bLifecycleService.allowanceNotices();
+        await report(ctx, 'allowance', 'allowance notice(s)', r);
+        return { processed: r.sent + r.failed, succeeded: r.sent, failed: r.failed };
+      },
+    });
+  }
+
+  if (b2bWatchService) {
+    ops.register({
+      name: 'b2b-billing-watch', title: 'Billing watch', schedule: { type: 'daily', utc: '04:30' }, domain: 'finance',
+      description: 'Raises an exception for billing work that has waited too long: draft invoices not issued, payment notices not checked, invoices long overdue, money received but not applied, an agreement about to end, an organisation long on hold. Each clears itself when the work is done. Nothing is changed.',
+      run: async (ctx) => {
+        const found = await b2bWatchService.billingWatch();
+        for (const f of found) {
+          await ctx.raise({ type: 'billing_watch', severity: f.severity, title: f.title, entityType: f.entityType, entityId: f.entityId, organizationId: f.organizationId, dedupeKey: f.key, detail: { kind: f.kind, ...f.detail } });
+        }
+        // Whatever was raised before and is no longer found has been dealt with.
+        const keys = new Set(found.map(f => f.key));
+        const stale = (await db('OpsException').where({ type: 'billing_watch' }).whereIn('status', LIVE_STATUSES).pluck('dedupeKey')).filter(k => !keys.has(k));
+        for (const key of stale) await ctx.clear(key, 'No longer waiting.');
+        return { processed: found.length + stale.length, succeeded: found.length + stale.length, failed: 0, waiting: found.length, cleared: stale.length };
+      },
+    });
+
+    ops.register({
+      name: 'ops-alerts', title: 'Staff alerts', schedule: { type: 'every', minutes: 10 }, quiet: true,
+      description: 'Emails the addresses in OPS_ALERT_EMAILS when a high-severity exception appears or retrying is given up. Each exception is announced once. With no addresses set, nothing is sent.',
+      run: async () => {
+        const r = await b2bWatchService.sendAlerts();
+        return { processed: r.due, succeeded: r.sent, failed: 0, ...r };
+      },
+    });
+
+    ops.register({
+      name: 'ops-daily-summary', title: 'Daily summary', schedule: { type: 'daily', utc: '05:30' },
+      description: 'Emails the addresses in OPS_ALERT_EMAILS a summary of the exceptions still waiting. Sent only when there is something waiting.',
+      run: async () => {
+        const r = await b2bWatchService.sendDigest({ pending: await pendingWork() });
+        return { processed: r.live, succeeded: r.sent ? r.live : 0, failed: 0, ...r };
+      },
+    });
+  }
 
   /** Work waiting on a person, for the operations page. Counts only. */
   async function pendingWork() {
@@ -151,10 +241,12 @@ export function registerB2BJobs({
       count(db('CorporateEmployee as e').join('B2BOrganization as o', 'o.legacyCorporateId', 'e.corporateId').whereIn('e.status', ['active', 'pending']).whereNull('e.userId')),
     ]);
     const unpaidCredit = await count(db('B2BPayment').where({ status: 'received' }).whereRaw('"amountTzs" > "allocatedTzs"'));
+    const invites = b2bBeneficiaryImportService ? await b2bBeneficiaryImportService.pending() : { invitesWaiting: 0, invitesNotDelivered: 0, importsWithRejectedRowsLast7Days: 0 };
     return {
       billing: { draftInvoices: drafts, draftsOlderThan7Days: toIssueOld, paymentNoticesToCheck: notices, overdueInvoices: overdue, organizationsOnHold: onHold, paymentsNotFullyApplied: unpaidCredit },
       usage: { holdsOlderThan1Hour: staleHolds, passesAwaitingMemberPayment: awaitingMember, passesAwaitingAccountLink: awaitingLink },
-      people: { beneficiariesPending: pendingPeople, employeesNotLinked: unlinkedStaff },
+      people: { beneficiariesPending: pendingPeople, employeesNotLinked: unlinkedStaff, ...invites },
+      programmes: { renewalDraftsToReview: await count(db('B2BWellnessProgram').where({ status: 'draft' }).whereNotNull('renewedFromProgramId')), endingWithin30Days: await count(db('B2BWellnessProgram').where({ status: 'active' }).whereNotNull('endDate').where('endDate', '>=', day).where('endDate', '<=', localDay(new Date(+now() + 30 * 86_400_000)))) },
     };
   }
 
@@ -169,6 +261,7 @@ export function registerB2BJobs({
       generatedAt: new Date(now()).toISOString(),
       jobs: { total: jobs.length, ok: by('ok'), running: by('running'), delayed: by('delayed'), retrying: by('retrying'), failed: by('failed'), paused: by('paused'), items: jobs },
       exceptions: { ...exceptions, mostUrgent: recent },
+      alerts: b2bWatchService ? b2bWatchService.alertStatus() : null,
       pending,
     };
   }

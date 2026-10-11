@@ -56,6 +56,7 @@ const TABLE_MAP = {
   activities:        { table: 'Activity' },
   activity_routes:   { table: 'ActivityRoute' },
   follows:           { table: 'Follow' },
+  friend_invitations: { table: 'FriendInvitation' },
   blocks:            { table: 'Block' },
   social_profiles:   { table: 'SocialProfile' },
   social_groups:     { table: 'SocialGroup' },
@@ -594,7 +595,7 @@ export function collection(name) {
 // Known scalar columns per model — only these are written to PG.
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
-  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','createdAt','updatedAt']),
+  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','termsVersion','termsAcceptedAt','createdAt','updatedAt']),
   gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','regionId','cityId','paymentBank','paymentNumber','paymentNotes','tinNumber','rating','reviewCount','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed',
@@ -602,7 +603,7 @@ const ALLOWED_FIELDS = {
   payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','orderId','currency','tier','plan','gymId','amountTzs','status','provider','reference','note','requestedAt','decidedAt','decidedBy']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
-  trainers:         new Set(['id','userId','email','phone','displayName','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','regionId','cityId','availability','socialLinks','createdAt','updatedAt']),
+  trainers:         new Set(['id','userId','email','phone','displayName','fullName','nickname','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','regionId','cityId','availability','socialLinks','createdAt','updatedAt']),
   trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','discountFundedBy','paymentRequestId','status','cancelledAt','cancelledBy','createdAt','updatedAt']),
   audit_log:        new Set(['id','at','actor','action','target','before','after']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','updatedAt']),
@@ -623,6 +624,7 @@ const ALLOWED_FIELDS = {
   activities:       new Set(['id','userId','type','source','startedAt','durationMinutes','distanceKm','steps','activeMinutes','calories','intensity','workoutId','gymId','trainerId','notes','devicePlatform','externalId','deviceName','movingSeconds','elevationGainM','splits','hasRoute','shareWith','createdAt']),
   activity_routes:  new Set(['id','userId','segments','createdAt']),
   follows:          new Set(['id','followerId','followeeId','createdAt']),
+  friend_invitations: new Set(['id','inviterId','recipientUserId','identifierType','identifierValue','tokenHash','status','notificationId','expiresAt','respondedAt','createdAt','updatedAt']),
   blocks:           new Set(['id','blockerId','blockedId','createdAt']),
   social_profiles:  new Set(['id','defaultShare','inviteCode','publicProfile','createdAt','updatedAt']),
   activity_views:   new Set(['id','activityId','userId','createdAt']),
@@ -763,7 +765,7 @@ function prepareForKnex(name, data, isUpdate = false) {
     'lastSyncedAt', 'whatsappMarketingConsentAt', 'whatsappOptedOutAt', 'finishedAt',
     'submittedAt', 'decidedAt', 'reverifyAt', 'verifiedAt', 'cooldownUntil', 'disabledAt', 'reviewedAt',
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
-    'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'statusChangedAt', 'voidedAt',
+    'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'termsAcceptedAt', 'statusChangedAt', 'voidedAt',
     'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt', 'enrolledAt', 'removedAt',
     'heldAt', 'rejectedAt', 'payableAt', 'startsAt', 'endsAt', 'pausedAt', 'activatedAt', 'submittedAt'];
   for (const f of DATE_FIELDS) {

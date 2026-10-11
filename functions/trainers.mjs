@@ -7,20 +7,20 @@ const created = new Date().toISOString();
 
 export const listTrainers = {
   created, method: 'get', path: '/trainers',
-  description: 'Public trainer discovery list.',
+  description: 'Public trainer discovery list. Public fields only: no email, phone, account id or pending gym applications.',
   onRequest: async (req, res) => {
     const blocked = await moderationGate.blocked('trainer');          // pending, rejected, suspended or hidden in moderation
-    res.json((await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty })).filter(t => !blocked.has(t.id)));
+    res.json((await trainerService.listPublic({ q: req.query?.q, specialty: req.query?.specialty })).filter(t => !blocked.has(t.id)).map(trainerService.publicTrainer));
   }
 };
 
 export const getTrainer = {
   created, method: 'get', path: '/trainers/:id',
-  description: 'Public trainer profile detail.',
+  description: 'Public trainer profile detail. Public fields only: no email, phone, account id or pending gym applications.',
   onRequest: async (req, res) => {
     const trainer = await trainerService.getPublic(req.params.id);
     if (!trainer || await moderationGate.isBlocked('trainer', trainer.id)) return res.status(404).json({ error: 'not_found' });
-    res.json(trainer);
+    res.json(trainerService.publicTrainer(trainer));
   }
 };
 
@@ -55,7 +55,7 @@ export const adminDeleteTrainer = {
 
 export const trainerRegister = {
   created, method: 'post', path: '/trainer/register',
-  description: 'Trainer: self-register full profile (displayName, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing.',
+  description: 'Trainer: self-register full profile (displayName, optional nickname clients see instead, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
@@ -81,8 +81,10 @@ export const trainerMyProfile = {
   created, method: 'get', path: '/trainer/me',
   description: 'Trainer: get own profile, linked gyms and pending gym applications.',
   onGuard: requireAuth('trainer'),
-  onRequest: (req, res) => {
-    const result = trainerService.myProfile(req.user.sub);
+  onRequest: async (req, res) => {
+    // A profile FitFlex created for this trainer's email becomes theirs here.
+    const user = await resolveRequestUser(req);
+    const result = await trainerService.myProfile(req.user.sub, { email: user?.email });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.trainer);
   }
@@ -112,11 +114,16 @@ export const trainerCancelGymApplication = {
 
 export const trainerUpdateProfile = {
   created, method: 'put', path: '/trainer/me',
-  description: 'Trainer: update own displayName, bio, specialties, hourly rate, availability, photos and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL).',
+  description: 'Trainer: update own professional details — displayName (the own name of the trainer), nickname (optional name clients see instead; 2–30 characters, null or an empty string removes it; the displayName of the profile then reads as the nickname and fullName keeps the own name), phone, bio, specialties, hourlyRateTzs, sessionRateCurrency (TZS|USD), experienceYears, availability, images (gallery, max 8; first is the profile picture) with imageThumbnails, photoUrl, and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL). Only the fields sent are changed.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
+    const user = await resolveRequestUser(req);
+    await trainerService.claimProfileForUser({ userId: req.user.sub, email: user?.email });
     const result = await trainerService.updateProfile({ userId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.platforms ? { platforms: result.platforms } : {}) });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
     res.json(result.trainer);
   }
 };

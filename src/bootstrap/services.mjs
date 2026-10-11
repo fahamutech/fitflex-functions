@@ -49,6 +49,7 @@ import { createInvoiceService } from '../services/invoice-service.mjs';
 import { createPortalUserService } from '../services/portal-user-service.mjs';
 import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
+import { createTermsService } from '../services/terms-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -62,6 +63,7 @@ import { createRecommendationEngine } from '../services/training/recommendation-
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
 import { createTrainingPlanService } from '../services/training/training-plan-service.mjs';
 import { createSocialService } from '../services/social-service.mjs';
+import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createChallengeService } from '../services/challenge-service.mjs';
@@ -78,6 +80,9 @@ import { createB2BCollectionsService } from '../services/b2b-collections-service
 import { createB2BAnalyticsService } from '../services/b2b-analytics-service.mjs';
 import { createOpsService } from '../services/ops-service.mjs';
 import { registerB2BJobs } from '../services/b2b-jobs.mjs';
+import { createB2BWatchService } from '../services/b2b-watch-service.mjs';
+import { createB2BBeneficiaryImportService } from '../services/b2b-beneficiary-import-service.mjs';
+import { createB2BLifecycleService } from '../services/b2b-lifecycle-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
@@ -97,6 +102,7 @@ import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createCompanyDirectory } from '../services/company-directory.mjs';
 import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
+import { createVendorSettlementService } from '../services/vendor-settlement-service.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createModerationGate } from '../services/moderation-gate.mjs';
 import { createEntityResolver } from '../services/promotion-entities.mjs';
@@ -119,7 +125,7 @@ import {
   corporateAccounts, corporateEmployees, corporateBills,
   b2bOrganizations, b2bOrganizationUsers, b2bBeneficiaries, b2bPrograms, b2bBenefits,
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
-  follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
+  follows, friendInvitations, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   trainerMemberRelationships, workoutPlans, trainingPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
@@ -171,6 +177,8 @@ export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
+  // promotionEventsService is defined at the end of this file; this only runs later.
+  onBookingConversion: ({ action, groupId, bookings }) => (action === 'credit' ? promotionEventsService.recordBooking(bookings) : promotionEventsService.reverseBooking(groupId)),
   // refundService is defined below; this only runs later.
   onRefundDue: ({ booking, reasonCode, actorId, role }) => refundService.raise({
     memberId: booking.memberId, kind: 'trainer_booking', sourceId: booking.id, paymentRequestId: booking.paymentRequestId,
@@ -276,8 +284,32 @@ export const b2bAnalyticsService = createB2BAnalyticsService({
 });
 // Operations: job runs, locks, catch-up and exception records; and the recurring B2B jobs it runs.
 export const opsService = createOpsService({ db });
+// Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
+export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
+  db, b2bService, emailSender: () => emailSender(),
+  // Invitation SMS goes through the shared SMS service (SMS_PROVIDER), so it is logged in SmsLog like every other SMS.
+  // smsProvider and smsService are defined further down; this only runs later.
+  smsSender: () => ({
+    configured: smsProvider.configured === true,
+    send: async (to, { text }) => {
+      const out = await smsService.send({ category: 'invitation', text, recipients: [{ phone: to }], maxAttempts: 1 });
+      const r = out.results[0] ?? {};
+      return r.outcome === 'sent' ? { ok: true } : { ok: false, error: r.reason ?? r.error ?? 'not_accepted' };
+    },
+  }),
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Benefit and programme lifecycle: notices to members and organisations, and renewal drafts.
+export const b2bLifecycleService = createB2BLifecycleService({
+  db, b2bService, programs: b2bPrograms, benefits: b2bBenefits, b2bProgramService, usage: b2bConsumptionService, emailSender: () => emailSender(),
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Billing work that has waited too long, the provider-side checks, and alert emails to staff.
+export const b2bWatchService = createB2BWatchService({ db, emailSender: () => emailSender() });
 export const b2bOps = registerB2BJobs({
-  ops: opsService, db, programs: b2bPrograms,
+  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService, b2bLifecycleService, b2bWatchService,
   // Defined at the end of this file; only called when the job runs.
   promotionService: { runLifecycle: args => promotionService.runLifecycle(args) },
   promotionEventsService: { purge: args => promotionEventsService.purge(args) },
@@ -343,8 +375,10 @@ async function finishSponsoredPass(sub) {
   }
 }
 const lifecycle = {
-  activated: async (sub) => {
+  activated: async (sub, ctx) => {
     await finishSponsoredPass(sub);
+    // A gym membership that was paid for counts for the gym promotion the member tapped (never throws).
+    await promotionEventsService.recordSubscription(sub, ctx);
     return automationService.handleEvent({ type: 'membership_activated', subscription: sub });
   },
   paymentFailed: (sub, extra) => automationService.handleEvent({ type: 'payment_failed', subscription: sub, ...extra }),
@@ -366,11 +400,12 @@ export const adminMemberService = createAdminMemberService({
 });
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog, gyms,
-  onSubscriptionActivated: async (sub) => {
+  onSubscriptionActivated: async (sub, ctx) => {
     await finishSponsoredPass(sub);
     await notificationService.notifySubscriptionActivated(sub);
-    await lifecycle.activated(sub);
+    await lifecycle.activated(sub, ctx);
   },
+  onSubscriptionPaymentReversed: sub => promotionEventsService.reverseSubscription(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
@@ -386,6 +421,11 @@ export const trainerSettlementService = createTrainerSettlementService({
   // notificationService is created further down; this only runs later.
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Vendor payouts: a weekly statement per vendor for delivered orders, on the same path.
+export const vendorSettlementService = createVendorSettlementService({
+  users, payoutEligibility,
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
 export const settlementWorkflowService = createSettlementWorkflowService({ payoutEligibility });
 export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId });
 // Recalculates a settled member cycle when one of its check-ins is voided and
@@ -396,7 +436,7 @@ export const invoiceService = createInvoiceService({
 });
 export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
 export const webhookService = createWebhookService({
-  subscriptions, webhookSeen,
+  subscriptions, webhookSeen, paymentRequests,
   onSubscriptionActivated: lifecycle.activated,
   onPaymentFailed: (sub, paymentId) => lifecycle.paymentFailed(sub, { reference: `selcom:${paymentId}` }),
 });
@@ -415,12 +455,31 @@ export const favoriteService = createFavoriteService({ users, gyms });
 // Who belongs to a company or organisation: one lookup for challenges, rewards and groups.
 export const companyDirectory = createCompanyDirectory({ users, corporateEmployees, beneficiaries: b2bBeneficiaries });
 export const socialService = createSocialService({
-  directory: companyDirectory,
+  directory: companyDirectory, trainers,
   users, activities, follows, blocks, profiles: socialProfiles, groups: socialGroups,
   groupMembers: socialGroupMembers, kudos: activityKudos, comments: activityComments, views: activityViews, reports: socialReports,
   auditLog,
   // notificationService is defined further down; it's only called later.
   notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Friend invitations by email / phone (Friends & Groups → People).
+export const friendInvitationService = createFriendInvitationService({
+  users, follows, blocks, invites: friendInvitations, notifications,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  findMember: async ({ type, value }) => {
+    const q = db('User').where({ userType: 'member' }).whereNot('accountStatus', 'suspended');
+    if (type === 'email') q.whereRaw('lower("email") = ?', [value]);
+    else {
+      const digits = value.replace('+', '');
+      q.whereIn('phone', [value, digits, `0${digits.slice(3)}`]);
+    }
+    return (await q.first('id', 'displayName')) ?? null;
+  },
+  transition: async (id, from, patch, opts = {}) => {
+    const q = db('FriendInvitation').where({ id, status: from });
+    if (opts.whereRecipientNull) q.whereNull('recipientUserId');
+    return (await q.update(patch)) === 1;
+  },
 });
 export const activityService = createActivityService({
   activities, users, routes: activityRoutes,
@@ -640,6 +699,7 @@ export const partnerKycService = createPartnerKycService({
   // KYC documents stay private on Zebra; the API streams them after its own checks.
   documentStore: createZebraDocumentStore(),
 });
+export const termsService = createTermsService({ users, partnerKycService, auditLog });
 
 // Moderation & Promotion. Moderation decides what may be shown; promotions decide
 // what is highlighted among what may be shown. Neither changes discovery yet.

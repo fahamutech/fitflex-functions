@@ -137,7 +137,7 @@ export const ownerDeleteGym = {
 
 export const ownerUpdateTrainer = {
   created, method: 'post', path: '/owner/trainers/:trainerId',
-  description: 'Owner: update a trainer assigned to their gym(s).',
+  description: 'Retired: a trainer\'s profile is edited only by the trainer. Always answers 403 trainer_profile_not_editable (404/403 first if the trainer is unknown or not at the owner\'s gym). Owners add, approve/reject and remove trainers.',
   onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);

@@ -1,7 +1,8 @@
 // D1 — Shop / vendor e-commerce REST surface (phase 1: catalogue + orders).
+import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopService } from '../src/bootstrap/services.mjs';
+import { shopService, vendorSettlementService } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
@@ -61,6 +62,13 @@ export const vendorMyProducts = {
   }
 };
 
+export const shopCategories = {
+  created, method: 'get', path: '/shop/categories',
+  description: 'The product categories a vendor chooses from (for the business and for each product), with English and Swahili names.',
+  responseSample: { categories: [{ key: 'supplements_nutrition', en: 'Supplements & nutrition', sw: 'Virutubisho na lishe' }] },
+  onRequest: async (_req, res) => res.json({ categories: PRODUCT_CATEGORIES }),
+};
+
 export const vendorCreateProduct = {
   created, method: 'post', path: '/vendor/products',
   description: 'Vendor: create a product.',
@@ -68,7 +76,7 @@ export const vendorCreateProduct = {
   onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
   onRequest: async (req, res) => {
     const result = await shopService.upsertProduct({ vendorId: req.user.vendorId || req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) return res.status(result.status).json({ error: result.error, allowed: result.allowed });
     res.status(201).json(result.product);
   }
 };
@@ -118,7 +126,7 @@ export const vendorSaveProfile = {
   onGuard: requireAuth('vendor', 'admin'),
   onRequest: async (req, res) => {
     const result = await shopService.saveVendorProfile({ vendorId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing });
+    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing, allowed: result.allowed });
     res.json(result.profile);
   },
 };
@@ -165,11 +173,14 @@ export const adminListVendors = {
 
 export const adminUpdateVendor = {
   created, method: 'put', path: '/admin/vendors/:id',
-  description: 'Admin: approve, verify, suspend or reactivate a marketplace vendor.',
+  description: 'Admin: approve, verify, suspend or reactivate a marketplace vendor, or set the commission FitFlex takes on their sales (commissionPct, 0–30; applies from their next order).',
   onGuard: [requireAuth('admin'), requireAcl('shop')],
   onRequest: async (req, res) => {
     const result = await shopService.adminUpdateVendor({ vendorId: req.params.id, body: req.body || {}, actorId: req.user.sub });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
     res.json(result.vendor);
   },
 };
@@ -230,6 +241,23 @@ export const vendorStatement = {
   created, method: 'get', path: '/vendor/payments/statement', description: 'Vendor: download CSV statement.',
   onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('reports')],
   onRequest: async (req, res) => { res.type('text/csv').send(await shopService.vendorStatement(req.user.vendorId || req.user.sub)); },
+};
+
+export const vendorStatements = {
+  created, method: 'get', path: '/vendor/statements',
+  description: 'Vendor: my weekly payout statements (from the moment they are sent for approval), and whether my payout account is ready.',
+  onGuard: [requireAuth('vendor', 'vendor_staff'), requireVendorPermission('payments')],
+  onRequest: async (req, res) => res.json(await vendorSettlementService.listMine({ vendorId: req.user.vendorId || req.user.sub })),
+};
+export const vendorPayoutStatement = {
+  created, method: 'get', path: '/vendor/statements/:id',
+  description: 'Vendor: one of my payout statements with the delivered orders it pays for.',
+  onGuard: [requireAuth('vendor', 'vendor_staff'), requireVendorPermission('payments')],
+  onRequest: async (req, res) => {
+    const result = await vendorSettlementService.getMine({ vendorId: req.user.vendorId || req.user.sub, id: req.params.id });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  },
 };
 
 export const sendMarketplaceEnquiry = {

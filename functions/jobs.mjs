@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, smsService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -77,6 +77,16 @@ export const trainerSettlementDrafts = {
   }
 };
 
+export const vendorSettlementDrafts = {
+  created, rule: '0 3 * * 1', // every Monday 03:00 UTC = 06:00 EAT, once the week has ended
+  description: 'Vendor payouts: prepare draft statements for the week that ended on Sunday. Drafts only; staff submit, approve and pay. Safe to rerun: drafts are rebuilt, submitted statements are left alone.',
+  onJob: async () => {
+    const r = await vendorSettlementService.prepare({ actorId: 'system:weekly-vendor-statements' });
+    if (r.error) console.warn(`[vendor-settlements] ${r.error}`);
+    else if (r.prepared || r.rebuilt) console.log(`[vendor-settlements] ${r.periodStartDate}: prepared=${r.prepared} rebuilt=${r.rebuilt} skipped=${r.skipped}`);
+  }
+};
+
 export const b2bProgramExpiry = {
   created, rule: '5 21 * * *', // every day 21:05 UTC = 00:05 EAT, the first minute of a new EAT day
   description: 'B2B: mark active or paused wellness programmes whose end date has passed as expired. Idempotent.',
@@ -149,4 +159,40 @@ export const opsSweeper = {
     const r = await opsService.sweep();
     if (r.ran.length || r.gaveUp.length) console.log(`[ops] caught up: ${r.ran.map(x => `${x.job}=${x.status}`).join(', ') || 'none'}; gave up: ${r.gaveUp.join(', ') || 'none'}`);
   },
+};
+
+export const b2bBeneficiaryInvites = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'B2B: enrol invited people who have since joined FitFlex with the email or number their organisation listed, and send the invitation messages that are due (email: the invitation, then reminders after 3 and 10 days; SMS to people listed with a mobile number: the invitation and one reminder after 3 days, unless B2B_INVITE_SMS=off). Safe to overlap and to rerun: an invite is enrolled once and each message is claimed before it is sent.',
+  onJob: () => opsService.runJob('b2b-beneficiary-invites'),
+};
+
+export const b2bLifecycleNotices = {
+  created, rule: '0 5 * * *', // every day 05:00 UTC = 08:00 EAT
+  description: 'B2B: tell members when a benefit starts tomorrow, ends within 7 days or has ended, and tell an organisation (in the app and at its contact email) when a programme ends within 30 days, within 7, or has ended. Each notice is written once, so reruns and a missed day are safe.',
+  onJob: () => opsService.runJob('b2b-lifecycle-notices'),
+};
+
+export const b2bAllowanceNotices = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'B2B: tell a member when they have used 80% of a benefit\'s allowance and when they have used all of it. Once each per person, benefit and allowance window.',
+  onJob: () => opsService.runJob('b2b-allowance-notices'),
+};
+
+export const b2bBillingWatch = {
+  created, rule: '30 4 * * *', // every day 04:30 UTC = 07:30 EAT
+  description: 'B2B: raise an operations exception for billing work that has waited too long (draft invoices not issued, payment notices not checked, invoices long overdue, money received but not applied, an agreement about to end, an organisation long on hold). Each clears itself when the work is done. Nothing is changed.',
+  onJob: () => opsService.runJob('b2b-billing-watch'),
+};
+
+export const opsAlerts = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'Operations: email the addresses in OPS_ALERT_EMAILS about high-severity exceptions and ones where retrying was given up. Each is announced once. Nothing is sent when no addresses are set.',
+  onJob: () => opsService.runJob('ops-alerts'),
+};
+
+export const opsDailySummary = {
+  created, rule: '30 5 * * *', // every day 05:30 UTC = 08:30 EAT
+  description: 'Operations: email the addresses in OPS_ALERT_EMAILS a summary of the exceptions still waiting. Sent only when something is waiting.',
+  onJob: () => opsService.runJob('ops-daily-summary'),
 };

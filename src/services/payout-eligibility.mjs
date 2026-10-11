@@ -1,5 +1,5 @@
-// Payout eligibility for gym and trainer settlement: may this partner be
-// paid right now, and to which account?
+// Payout eligibility for gym, trainer and vendor settlement: may this
+// partner be paid right now, and to which account?
 //
 // DR-08: every payout needs the owner's KYC approved and a verified primary
 // settlement account past its 48 h cooling-off. A legacy partner (one the KYC
@@ -58,16 +58,9 @@ export function createPayoutEligibility({
     return { ok: false, reason: kyc ? `kyc_${kyc.status}` : 'kyc_not_started' };
   }
 
-  /**
-   * A trainer is paid to their own verified payout account. Trainers have no
-   * payout details outside KYC, so there is no legacy route: one who signed
-   * up before KYC still needs approval and a verified account to be paid.
-   * @returns {{ ok: true, destination: Object } | { ok: false, reason: string, until?: string }}
-   */
-  async function forTrainer(trainerId, { at = new Date() } = {}) {
-    const trainer = trainers?.find((t) => t.id === trainerId);
-    if (!trainer?.userId) return { ok: false, reason: 'no_trainer_account' };
-    const kyc = await partnerGate.kycCaseFor(trainer.userId, 'trainer');
+  /** A partner paid only through KYC: approved case and a verified account past its hold. */
+  async function forKycPartner(userId, partnerType, at) {
+    const kyc = await partnerGate.kycCaseFor(userId, partnerType);
     if (kyc?.status !== 'approved') return { ok: false, reason: kyc ? `kyc_${kyc.status}` : 'kyc_not_started' };
     const accounts = partnerSettlementAccounts ? await partnerSettlementAccounts.filterByColumnAsync('caseId', kyc.id) : [];
     const account = accounts.find((a) => isPayable(a, at));
@@ -75,7 +68,7 @@ export function createPayoutEligibility({
       return {
         ok: true,
         destination: {
-          kind: 'verified_account', ownerId: trainer.userId, kycCaseId: kyc.id, accountId: account.id, method: account.method,
+          kind: 'verified_account', ownerId: userId, kycCaseId: kyc.id, accountId: account.id, method: account.method,
           provider: account.provider ?? null, accountName: account.accountName ?? null, accountLast4: last4(account.accountNumber),
         },
       };
@@ -86,5 +79,24 @@ export function createPayoutEligibility({
       : { ok: false, reason: 'payout_account_not_verified' };
   }
 
-  return { forGym, forTrainer };
+  /**
+   * A trainer is paid to their own verified payout account. Trainers have no
+   * payout details outside KYC, so there is no legacy route: one who signed
+   * up before KYC still needs approval and a verified account to be paid.
+   * @returns {{ ok: true, destination: Object } | { ok: false, reason: string, until?: string }}
+   */
+  async function forTrainer(trainerId, { at = new Date() } = {}) {
+    const trainer = trainers?.find((t) => t.id === trainerId);
+    if (!trainer?.userId) return { ok: false, reason: 'no_trainer_account' };
+    return forKycPartner(trainer.userId, 'trainer', at);
+  }
+
+  /** A vendor (the vendor's user id) is paid to their own verified payout account; no legacy route either. */
+  async function forVendor(vendorId, { at = new Date() } = {}) {
+    const vendor = await users.findByIdAsync(vendorId);
+    if (!vendor || vendor.userType !== 'vendor') return { ok: false, reason: 'no_vendor_account' };
+    return forKycPartner(vendorId, 'vendor', at);
+  }
+
+  return { forGym, forTrainer, forVendor };
 }

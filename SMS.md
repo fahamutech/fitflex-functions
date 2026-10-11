@@ -32,10 +32,14 @@ Credentials come from the environment only.
 - **Campaigns and automations** that include the `sms` channel. The text is
   `FitFlex: <body>` or `FitFlex x <gym>: <body>`, on one line, cut to two SMS
   parts (306 characters); offers end with how to stop them.
+- **Invitations** to people an organisation has listed by mobile number who
+  have not joined yet (B2B bulk import): the invitation and one reminder after
+  3 days, one SMS part each. `B2B_INVITE_SMS=off` turns these off on their
+  own. See `B2B_AUTOMATION.md` §11.
 - **Verification codes** (identity).
 
 Each SMS is one row in `SmsLog`: number, kind (`otp`, `reminder`, `campaign`,
-`test`), text (codes are stored as "Verification code [redacted]"), status
+`invitation`, `test`), text (codes are stored as "Verification code [redacted]"), status
 (`queued`, `accepted`, `failed`) and what the provider answered. A reminder's
 `dedupeKey` makes it go out once however often the job runs; one that failed
 is tried again by the next runs, three times in all, instead of being lost.

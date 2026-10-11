@@ -257,7 +257,7 @@ test('analytics: exact totals, ratios, search appearances, unique viewers and th
   assert.deepEqual([T.clickThroughRate, T.viewRate, T.conversions, T.conversionRate], [0.4, 0.3, 0, 0]);
   assert.deepEqual(d.funnel, [{ step: 'impressions', count: 10 }, { step: 'clicks', count: 4 }, { step: 'detailViews', count: 3 }, { step: 'actionClicks', count: 3 }, { step: 'conversions', count: 0 }]);
   assert.deepEqual(d.byPlacement.filter(x => x.impressions > 0).map(x => [x.placement, x.impressions]).sort(), [['gym_discovery', 3], ['search_results', 7]]);
-  assert.deepEqual(d.notTracked, ['booking_conversions', 'subscription_conversions']);
+  assert.deepEqual(d.notTracked, []);                                                      // bookings and subscriptions are tracked now
 });
 
 test('analytics: the day-by-day series is in East Africa Time, covers every day, and fills the empty ones', async () => {
@@ -340,7 +340,7 @@ test('routes: analytics needs its own scope; a full admin needs none; draft prom
   assert.deepEqual([forbidden.statusCode, forbidden.body.requiredScope], [403, 'promotion_analytics']);
   const ok = await call(promotionAnalyticsSummary, { claims: staff('s2', 'promotion_analytics') });
   assert.equal(ok.statusCode, 200);
-  assert.deepEqual(ok.body.notTracked, ['booking_conversions', 'subscription_conversions']);
+  assert.deepEqual(ok.body.notTracked, []);
   assert.equal((await call(promotionAnalyticsDetail, { claims: { sub: 'a', userType: 'admin' }, params: { id: p } })).statusCode, 200);
   assert.equal((await call(promotionAnalyticsDetail, { claims: staff('s3', 'promotion_analytics'), params: { id: 'nope' } })).statusCode, 404);
   assert.equal((await call(promotionAnalyticsSummary, { claims: staff('s2', 'promotion_analytics'), query: { from: 'x' } })).statusCode, 400);

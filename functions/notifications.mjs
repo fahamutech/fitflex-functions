@@ -1,7 +1,7 @@
 // Notifications REST surface — device registration for push and the in-app inbox.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { notificationService, deliveryService, communicationPreferenceService } from '../src/bootstrap/services.mjs';
+import { notificationService, deliveryService, communicationPreferenceService, friendInvitationService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -31,7 +31,11 @@ export const myNotifications = {
   created, method: 'get', path: '/me/notifications',
   description: 'Any signed-in user: newest-first inbox plus unread count. ?limit=50',
   onGuard: requireAuth(),
-  onRequest: async (req, res) => res.json(await notificationService.inbox({ userId: req.user.sub, limit: req.query?.limit }))
+  onRequest: async (req, res) => {
+    // Friend invitations made for this member's verified email / phone appear here.
+    try { await friendInvitationService.attachFor(req.user.sub); } catch (err) { console.warn('[friend-invitations] attach skipped:', err?.message); }
+    res.json(await notificationService.inbox({ userId: req.user.sub, limit: req.query?.limit }));
+  }
 };
 
 export const markNotificationRead = {

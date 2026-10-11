@@ -7,6 +7,27 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeTrainerPassConfig, TRAINER_PASS_PERIODS } from '../shared/trainer-access.mjs';
 
+/**
+ * What anyone may see of a gym (GET /gyms, GET /gyms/:id and gym discovery are
+ * open to the world). A list of what is shown, so a new column stays private
+ * until it is added here. The commission rate, payout details, TIN and listing
+ * controls are never in it: owners read those from /owner/gyms and admins from
+ * /admin/gyms.
+ */
+const PUBLIC_GYM_FIELDS = Object.freeze([
+  'id', 'name', 'tier', 'location', 'venueType', 'accessMode', 'status', 'coordinates', 'regionId', 'cityId',
+  'perVisitRate', 'ratePerDay', 'ratePerWeek', 'ratePerMonth',
+  'images', 'thumbnails', 'thumbnail', 'operatingHours', 'amenities', 'equipment', 'classes', 'trainerPass',
+  'verified', 'profileComplete', 'rating', 'reviewCount', 'createdAt', 'updatedAt',
+]);
+
+export function publicGym(gym) {
+  if (!gym) return gym;
+  const out = {};
+  for (const k of PUBLIC_GYM_FIELDS) if (gym[k] !== undefined) out[k] = gym[k];
+  return out;
+}
+
 export function createGymService({ gyms, users, checkins, auditLog }) {
   function normalizeGymPayload(body = {}, prior) {
     prior = prior || {};
@@ -99,7 +120,7 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
    */
   function slimGym(g) {
     if (!g) return g;
-    const { images, thumbnails, operatingHours, trainerPass, ...rest } = g;
+    const { images, thumbnails, operatingHours, trainerPass, ...rest } = publicGym(g);
     return { ...rest, thumbnail: (thumbnails && thumbnails[0]) || null };
   }
 
@@ -143,6 +164,8 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     return gyms.find(g => g.id === id) || null;
   }
 
+  // Full rows (ranking and the listing controls need them): anything sent to a
+  // caller on an open route goes through `publicGym` first.
   function listActive() {
     return gyms
       .filter(g => g.status === 'active' && g.homepageVisible !== false)
@@ -196,5 +219,5 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     return { gym: removed };
   }
 
-  return { normalizeGymPayload, slimGym, slimGymRef, findById, listActive, listActiveAsync, listAdmin, upsert, remove };
+  return { normalizeGymPayload, slimGym, slimGymRef, publicGym, findById, listActive, listActiveAsync, listAdmin, upsert, remove };
 }

@@ -43,9 +43,11 @@ export const DOCUMENT_REQUIREMENTS = Object.freeze({
   representative_id: { types: ['national_id', 'passport'], fields: ['documentNumber'], expires: true },
   business_registration: { types: ['business_registration'], fields: ['documentNumber'] },
   tin_certificate: { types: ['tin_certificate'], fields: ['documentNumber'] },
-  business_licence: { types: ['business_licence'], fields: ['documentNumber', 'issuer', 'expiresOn'], expires: true },
-  certification: { types: ['certification'], fields: ['issuer', 'documentNumber', 'issuedOn', 'expiresOn'], expires: true },
-  liability_insurance: { types: ['liability_insurance'], fields: ['issuer', 'documentNumber', 'expiresOn'], expires: true },
+  // Expiry dates are optional (product owner, 9 Oct 2026). When given they still drive reminders and expiry;
+  // a document with none never expires and gets no reminder.
+  business_licence: { types: ['business_licence'], fields: ['documentNumber', 'issuer'], expires: true },
+  certification: { types: ['certification'], fields: ['issuer', 'documentNumber', 'issuedOn'], expires: true },
+  liability_insurance: { types: ['liability_insurance'], fields: ['issuer', 'documentNumber'], expires: true },
   representative_authority: { types: ['letter_of_authority', 'board_resolution'], fields: [] },
 });
 
@@ -54,7 +56,9 @@ export const DOCUMENT_REQUIREMENTS = Object.freeze({
 export const PERSON_REQUIREMENTS = Object.freeze({
   gym_owner: { role: 'principal', fields: ['fullName', 'idNumber', 'phone', 'email', 'address', 'relationship'], idDocument: 'owner_id' },
   trainer: { role: 'principal', fields: ['fullName', 'idNumber', 'phone', 'email', 'address'], idDocument: 'trainer_id', nationalId: true },
-  vendor: { role: 'authorised_representative', fields: ['fullName', 'idNumber', 'position', 'authority'], idDocument: 'representative_id' },
+  // 11 Oct 2026: the person who applies is the vendor's own person (their account details prefilled), with
+  // name, ID number, nationality, position (owner, co-owner or employee) and ID document, all mandatory.
+  vendor: { role: 'authorised_representative', fields: ['fullName', 'idNumber', 'nationality', 'position'], idDocument: 'representative_id' },
   corporate: { role: 'authorised_representative', fields: ['fullName', 'idNumber', 'position', 'phone', 'email'], idDocument: 'representative_id' },
 });
 
@@ -72,7 +76,7 @@ export const KYC_TIERS = Object.freeze({ gym_owner: 3, trainer: 2, vendor: 3, co
 export const DOCUMENTS_FOR = Object.freeze({
   gym_owner: ['owner_id', 'business_registration', 'tin_certificate', 'business_licence'],
   trainer: ['trainer_id', 'certification', 'liability_insurance'],
-  vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id', 'representative_authority'],
+  vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
   corporate: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
 });
 
@@ -84,7 +88,6 @@ export const OPTIONAL_ITEMS = Object.freeze({
   vendor: new Set([
     'business.legalName', 'business.tradingName', 'business.registrationNumber', 'business.registeredAddress',
     'business.registration_certificate', 'business.tin_certificate', 'business.licence',
-    'representative.position', 'representative.authority', 'representative.authority_document',
   ]),
   corporate: new Set([
     'company.legalName', 'company.registrationNumber', 'company.registeredAddress', 'company.businessActivity',
@@ -261,17 +264,14 @@ function vendorSections(s) {
     { key: 'business', items: [
       ...businessItems('business', 'vendor', s.case, s.documents, s.now),
       documentItem('business.licence', s.documents, 'business_licence', s.now),
-      { key: 'business.contact', by: BY_PARTNER,
-        status: filled(profile.contactNumber) && filled(profile.email) ? 'complete' : 'missing' },
+      // Email is optional (11 Oct 2026): a contact number is enough.
+      { key: 'business.contact', by: BY_PARTNER, status: filled(profile.contactNumber) ? 'complete' : 'missing' },
     ] },
-    { key: 'representative', items: [
-      ...personItems('representative', 'vendor', s.people, s.documents, s.now),
-      documentItem('representative.authority_document', s.documents, 'representative_authority', s.now),
-    ] },
+    { key: 'representative', items: personItems('representative', 'vendor', s.people, s.documents, s.now) },
     { key: 'marketplace', items: [
       fieldItem('marketplace.product_categories', filled(profile.productCategories) ? profile.productCategories : profile.businessCategory),
-      fieldItem('marketplace.delivery', profile.deliveryRegions),
-      fieldItem('marketplace.returns', profile.returnsPolicy),
+      // Delivery areas and the returns policy are not asked for now (11 Oct 2026); delivery areas come
+      // back when vendors can serve more than one country.
       { ...settlementItem(s.settlementAccounts), key: 'marketplace.settlement' },
     ] },
     { key: 'agreements', items: agreementItems('vendor', s.agreements) },

@@ -3,6 +3,7 @@
 // with memberProfile/aclPermissions) to keep the list endpoint's payload small.
 import { randomUUID } from 'node:crypto';
 import { activationDates } from '../shared/subscription-status.mjs';
+import { productTypeOfPayment } from '../shared/payment-product.mjs';
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
@@ -12,6 +13,8 @@ export function createAdminPaymentService({
   onSubscriptionActivated = async () => {},
   // A rejected payment for a membership (lifecycle automations).
   onPaymentRejected = async () => {},
+  // A membership's payment was rejected, cancelled or put back to pending: (subscription) => void. Promotion analytics takes the conversion back.
+  onSubscriptionPaymentReversed = async () => {},
 }) {
   function slimMember(u) {
     if (!u) return null;
@@ -58,7 +61,11 @@ export function createAdminPaymentService({
     }
     const updated = await subscriptions.updateByIdAsync(request.subscriptionId, patch);
     if (subStatus === 'active' && updated) {
-      try { await onSubscriptionActivated(updated); } catch { /* notification is best-effort */ }
+      // The request says when the member asked and what they paid, which is what promotion analytics needs.
+      try { await onSubscriptionActivated(updated, { requestedAt: request.requestedAt, amountTzs: request.amountTzs }); } catch { /* notification is best-effort */ }
+    }
+    if (subStatus !== 'active' && updated) {
+      try { await onSubscriptionPaymentReversed(updated); } catch { /* best-effort */ }
     }
     if (subStatus === 'payment_rejected' && updated) {
       try { await onPaymentRejected(updated, request); } catch { /* best-effort */ }
@@ -86,6 +93,7 @@ export function createAdminPaymentService({
       ...p,
       member: slimMember(memberById.get(p.memberId) || null),
       subscription: slimSub(subById.get(p.subscriptionId) || null),
+      productType: productTypeOfPayment(p, subById.get(p.subscriptionId) || null),
       gym: slimGym(p.gymId),
     }));
   }

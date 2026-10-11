@@ -6,17 +6,20 @@ import { gymService, partnerGate, moderationGate } from '../src/bootstrap/servic
 
 const created = new Date().toISOString();
 
+// These routes are open, so a gym goes out with its public fields only.
 // Trainer-pass pricing is for trainers only: anonymous callers and members
-// get gyms without it. (Owners read their gyms via /owner/gyms.)
+// get gyms without it. (Owners read their gyms via /owner/gyms, admins via
+// /admin/gyms.)
 function forViewer(req, gym) {
   const token = bearerFrom(req);
   const claims = token ? verify(token) : null;
-  return canSeeTrainerPass(claims?.userType) ? gym : hideTrainerPass(gym);
+  const shown = gymService.publicGym(gym);
+  return canSeeTrainerPass(claims?.userType) ? shown : hideTrainerPass(shown);
 }
 
 export const listGyms = {
   created, method: 'get', path: '/gyms',
-  description: 'Public list of active gyms.',
+  description: 'Public list of active gyms. Public fields only: no commission rate, payout details, TIN or listing controls.',
   responseSample: [{ id: 'gym_001', name: 'Iron Paradise Masaki', tier: 'standard' }],
   // Note: the mobile app fetches this list once and reuses it for both the
   // gym grid (thumbnails) and the gym detail carousel (full images) — there
@@ -35,7 +38,7 @@ export const listGyms = {
 
 export const getGym = {
   created, method: 'get', path: '/gyms/:id',
-  description: 'Get a single gym',
+  description: 'Get a single gym. Public fields only: no commission rate, payout details, TIN or listing controls.',
   onRequest: async (req, res) => {
     const g = gymService.findById(req.params.id);
     if (!g || await moderationGate.isBlocked('gym', g.id)) return res.status(404).json({ error: 'not_found' });

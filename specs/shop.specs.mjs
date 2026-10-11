@@ -35,7 +35,7 @@ function makeService() {
 async function seedProduct(service, { name = 'Whey Protein', priceTzs = 85000, stock = 10 } = {}) {
   const out = await service.upsertProduct({
     vendorId: 'usr_vendor_1',
-    body: { name, category: 'supplements', priceTzs, stock },
+    body: { name, category: 'supplements_nutrition', priceTzs, stock },
   });
   assert.ok(!out.error, JSON.stringify(out));
   await service.adminUpdateProductListing({
@@ -199,4 +199,35 @@ test('D1: a vendor cannot update an order belonging to another vendor', async ()
   });
   assert.equal(out.status, 403);
   assert.equal(out.error, 'order_not_owned_by_vendor');
+});
+
+// ── categories (11 Oct 2026) ───────────────────────────────
+
+test('a product category comes from the list; an existing free-text one is left alone; events are a category', async () => {
+  const { service, products } = makeService();
+  const bad = await service.upsertProduct({ vendorId: 'v', body: { name: 'X', priceTzs: 100, category: 'Supplements' } });
+  assert.deepEqual([bad.error, bad.status], ['invalid_category', 400]);
+  assert.ok(bad.allowed.includes('events'));
+  const event = await service.upsertProduct({ vendorId: 'v', body: { name: 'City Marathon ticket', priceTzs: 25000, stock: 500, category: 'events' } });
+  assert.ok(!event.error, JSON.stringify(event));
+  assert.equal(event.product.category, 'events');
+
+  // A product made before the list kept its text; saving other fields does not trip over it.
+  products.rows.push({ id: 'prd_old', vendorId: 'v', name: 'Old', category: 'Gear', priceTzs: 100, stock: 1, status: 'active', approvalStatus: 'approved' });
+  const renamed = await service.upsertProduct({ vendorId: 'v', productId: 'prd_old', body: { name: 'Old renamed', category: 'Gear' } });
+  assert.ok(!renamed.error, JSON.stringify(renamed));
+  const changed = await service.upsertProduct({ vendorId: 'v', productId: 'prd_old', body: { category: 'Shoes' } });
+  assert.equal(changed.error, 'invalid_category');
+  const moved = await service.upsertProduct({ vendorId: 'v', productId: 'prd_old', body: { category: 'accessories_gear' } });
+  assert.equal(moved.product.category, 'accessories_gear');
+  const copy = await service.duplicateProduct({ vendorId: 'v', productId: 'prd_old' });
+  assert.ok(!copy.error);
+});
+
+test('a vendor waiting for approval can create products; they start in review, hidden from the catalogue', async () => {
+  const { service } = makeService();
+  const made = await service.upsertProduct({ vendorId: 'usr_pending_vendor', body: { name: 'Shaker', priceTzs: 8000, stock: 20, category: 'accessories_gear' } });
+  assert.ok(!made.error, JSON.stringify(made));
+  assert.equal(made.product.approvalStatus, 'pending');
+  assert.equal((await service.listProducts({})).length, 0, 'not listed until an admin approves it');
 });

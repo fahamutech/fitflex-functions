@@ -1,5 +1,7 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
+import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
 import { randomUUID } from 'node:crypto';
+import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
@@ -7,10 +9,11 @@ import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set(['pending', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup', 'delivered', 'cancelled', 'confirmed', 'fulfilled']);
 const PAYMENT_METHODS = new Set(['mpesa', 'airtel_money', 'mixx', 'card', 'bank']);
-const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'settlementAccount'];
+// Email and delivery regions are not mandatory (11 Oct 2026); they are still stored and shown when given.
+const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'address', 'businessHours', 'settlementAccount'];
 // Optional profile fields. Partner KYC reads productCategories and returnsPolicy
 // for the vendor's marketplace requirements. Anything else in the body is ignored.
-const PROFILE_OPTIONAL = ['productCategories', 'returnsPolicy'];
+const PROFILE_OPTIONAL = ['productCategories', 'returnsPolicy', 'email', 'deliveryRegions'];
 const PROFILE_FIELDS = new Set([...PROFILE_REQUIRED, ...PROFILE_OPTIONAL]);
 export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
 export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
@@ -51,6 +54,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const current = await users.findByIdAsync(vendorId);
     const prior = current?.vendorProfile || {};
     const publish = body?.publish === true;
+    if (body?.productCategories !== undefined) {
+      const picked = Array.isArray(body.productCategories) ? body.productCategories : [];
+      const unknown = picked.filter(key => !PRODUCT_CATEGORY_KEYS.has(key));
+      if (unknown.length || !Array.isArray(body.productCategories)) {
+        return { error: 'invalid_product_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
+      }
+    }
     const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
     const missing = PROFILE_REQUIRED.filter(key => {
       const value = profile[key];
@@ -116,7 +126,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { ...product, vendor: publicProfile(await getVendorProfile(product.vendorId)), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
   }
 
-  async function upsertProduct({ vendorId, body, productId }) {
+  async function upsertProduct({ vendorId, body, productId, keepCategory = false }) {
     const input = body || {};
     if (productId) {
       const prior = await products.findByIdAsync(productId);
@@ -125,6 +135,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (input.name !== undefined && !String(input.name).trim()) return { error: 'name_required', status: 400 };
       if (input.priceTzs !== undefined && Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
       if (input.stock !== undefined && Number(input.stock) < 0) return { error: 'invalid_stock', status: 400 };
+      // A category must come from the list when it is changed; an existing free-text one is left alone.
+      if (input.category && input.category !== prior.category && !PRODUCT_CATEGORY_KEYS.has(input.category)) {
+        return { error: 'invalid_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
+      }
       const patch = { updatedAt: nowIso() };
       if (input.name !== undefined) patch.name = String(input.name).trim();
       for (const field of ['description', 'category', 'brand', 'sku', 'visibility', 'deliveryAvailable']) if (input[field] !== undefined) patch[field] = input[field];
@@ -138,6 +152,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       return { product: await products.updateByIdAsync(productId, patch) };
     }
     if (!input.name?.trim()) return { error: 'name_required', status: 400 };
+    if (input.category && !keepCategory && !PRODUCT_CATEGORY_KEYS.has(input.category)) {
+      return { error: 'invalid_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
+    }
     if (input.priceTzs == null || Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
     if (Number(input.stock ?? 0) < 0) return { error: 'invalid_stock', status: 400 };
     const at = nowIso();
@@ -156,7 +173,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
     if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
-    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null } });
+    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true });
   }
   async function deleteProduct({ vendorId, productId }) {
     const prior = await products.findByIdAsync(productId);
@@ -215,6 +232,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         ...vendor,
         vendorProfile: vendor.vendorProfile || null,
         kycStatus: kycStatus.get(vendor.id) || null,
+        commissionPct: vendorCommissionPct(vendor),
         kycExempt: partnerGate.exempt(vendor),
         productCount: allProducts.filter(product => product.vendorId === vendor.id).length,
         pendingProductCount: allProducts.filter(product => product.vendorId === vendor.id && (product.approvalStatus || 'pending') === 'pending').length,
@@ -233,12 +251,20 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       patch.approvalNote = body.approvalNote == null ? vendor.approvalNote || null : String(body.approvalNote).trim() || null;
     }
     if (['active', 'suspended'].includes(body?.accountStatus)) patch.accountStatus = body.accountStatus;
+    // The marketplace commission FitFlex takes on this vendor's sales, from their next order on.
+    if (body?.commissionPct != null) {
+      const pct = Number(body.commissionPct);
+      if (!Number.isFinite(pct) || pct < VENDOR_COMMISSION_PCT.min || pct > VENDOR_COMMISSION_PCT.max) {
+        return { error: 'invalid_commission', status: 400, min: VENDOR_COMMISSION_PCT.min, max: VENDOR_COMMISSION_PCT.max };
+      }
+      patch.vendorProfile = { ...(vendor.vendorProfile || {}), vendorId, commissionPct: pct };
+    }
     const updated = await users.updateByIdAsync(vendorId, patch);
     await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'vendor_management_updated',
       target: vendorId,
-      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus },
-      after: patch,
+      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor) },
+      after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined, commissionPct: patch.vendorProfile.commissionPct } : {}) },
     });
     if (patch.approvalStatus) await notify(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
     return { vendor: updated };
@@ -269,7 +295,16 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       resolved.push({ product, qty });
     }
     for (const { product, qty } of resolved) await products.updateByIdAsync(product.id, { stock: Number(product.stock) - qty, soldCount: Number(product.soldCount || 0) + qty, updatedAt: nowIso() });
-    const orderItems = resolved.map(({ product, qty }) => ({ productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs: priceOf(product), image: product.images?.[0] || null }));
+    // Each line carries the commission at its vendor's rate today, so a later rate change never alters this order.
+    const rates = new Map();
+    for (const vendorId of new Set(resolved.map(({ product }) => product.vendorId).filter(Boolean))) {
+      rates.set(vendorId, vendorCommissionPct(await users.findByIdAsync(vendorId)));
+    }
+    const orderItems = resolved.map(({ product, qty }) => {
+      const priceTzs = priceOf(product);
+      const { commissionPct, commissionTzs, vendorPayoutTzs } = priceOrderLine({ priceTzs, qty, commissionPct: rates.get(product.vendorId) ?? VENDOR_COMMISSION_PCT.default });
+      return { productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs, image: product.images?.[0] || null, commissionPct, commissionTzs, vendorPayoutTzs };
+    });
     const totalTzs = orderItems.reduce((sum, item) => sum + item.priceTzs * item.qty, 0);
     const at = nowIso();
     const free = totalTzs === 0 || !paymentRequests;

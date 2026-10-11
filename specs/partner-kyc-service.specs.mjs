@@ -94,8 +94,12 @@ test('each partner type names only its own person', async () => {
   assert.deepEqual([wrong.error, wrong.allowed], ['invalid_role', ['authorised_representative']]);
   const bad = await svc.upsertPerson(vendor, 'authorised_representative', { fullName: 'John', authority: 'king' }, vendor.actor);
   assert.equal(bad.error, 'invalid_authority');
-  const noName = await svc.upsertPerson(vendor, 'authorised_representative', { position: 'Director' }, vendor.actor);
+  const noName = await svc.upsertPerson(vendor, 'authorised_representative', { position: 'owner' }, vendor.actor);
   assert.equal(noName.error, 'fullName_required');
+  const badPosition = await svc.upsertPerson(vendor, 'authorised_representative', { fullName: 'John', position: 'Director' }, vendor.actor);
+  assert.deepEqual([badPosition.error, badPosition.allowed], ['invalid_position', ['owner', 'co_owner', 'employee']]);
+  const ok = await svc.upsertPerson(vendor, 'authorised_representative', { fullName: 'John Kimaro', nationality: 'TZ', position: 'employee' }, vendor.actor);
+  assert.equal(ok.people[0].position, 'employee');
 });
 
 test('a gym owner fills in business details; the checklist reads their gyms', async () => {
@@ -244,20 +248,28 @@ test('corporate KYB is filled in by an admin, reading commercial terms from the 
   assert.deepEqual(contracts.map(c => c.status), ['superseded', 'accepted']);
 });
 
-test('vendor returns policy and categories save on the vendor profile; unknown keys are dropped', async () => {
+test('vendor categories are chosen from the list and save on the vendor profile; unknown keys are dropped', async () => {
   const p = await partner('vendor');
-  await shopService.saveVendorProfile({
+  const saved = await shopService.saveVendorProfile({
     vendorId: p.subjectId,
-    body: { contactNumber: '+255700000000', email: 'shop@example.com', productCategories: ['Supplements'], deliveryRegions: ['Arusha'],
+    body: { contactNumber: '+255700000000', productCategories: ['supplements_nutrition', 'events'],
       returnsPolicy: '7 days, unopened', approvalStatus: 'approved', accountStatus: 'active' },
   });
+  assert.ok(saved.profile, JSON.stringify(saved));
   const user = await db('User').where('id', p.subjectId).first();
-  assert.equal(user.vendorProfile.returnsPolicy, '7 days, unopened');
+  assert.equal(user.vendorProfile.returnsPolicy, '7 days, unopened', 'still kept when given');
   assert.equal(user.vendorProfile.approvalStatus, undefined);
+  assert.deepEqual(user.vendorProfile.productCategories, ['supplements_nutrition', 'events']);
   const view = await svc.overview(await svc.partnerForUser(p.subjectId));
-  for (const key of ['business.contact', 'marketplace.product_categories', 'marketplace.delivery', 'marketplace.returns']) {
+  for (const key of ['business.contact', 'marketplace.product_categories']) {
     assert.equal(item(view, key).status, 'complete', key);
   }
+  assert.equal(item(view, 'marketplace.delivery'), undefined);
+  assert.equal(item(view, 'marketplace.returns'), undefined);
+
+  const bad = await shopService.saveVendorProfile({ vendorId: p.subjectId, body: { productCategories: ['Supplements'] } });
+  assert.deepEqual([bad.error, bad.status], ['invalid_product_category', 400]);
+  assert.ok(bad.allowed.includes('events'));
 });
 
 test('admins list and open cases; the kyc scope can be granted to portal staff', async () => {
@@ -274,4 +286,64 @@ test('admins list and open cases; the kyc scope can be granted to portal staff',
   assert.equal((await svc.caseDetail('kyc_missing')).error, 'case_not_found');
   assert.equal((await svc.resolvePartner('trainer', p.subjectId)).error, 'partner_not_found');
   assert.ok(PORTAL_ACL_SCOPES.includes('kyc'));
+});
+
+// ── Details given once ────────────────────────────────────────────────────
+
+test('an ID number given on the person is not asked again on the ID document, and a change follows', async () => {
+  const p = await partner('trainer');
+  await svc.upsertPerson(p, 'principal', { fullName: 'Neema Said', idType: 'nida', idNumber: '19950505-11111-00002-21' }, p.actor);
+  // The document is filled in without a number: it takes the one already given.
+  const view = await svc.upsertDocumentDetails(p, 'trainer_id', { docType: 'national_id' }, p.actor);
+  const idDoc = view.documents.find(d => d.requirementKey === 'trainer_id');
+  assert.equal(idDoc.documentNumber, '19950505111110000221', 'the number as FitFlex stores it');
+  assert.notEqual(item(view, 'identity.id_document').status, 'incomplete');
+  // The person corrects a typo: the pending document follows.
+  const fixed = await svc.upsertPerson(p, 'principal', { idNumber: '19950505-11111-00002-22' }, p.actor);
+  assert.equal(fixed.documents.find(d => d.requirementKey === 'trainer_id').documentNumber, '19950505111110000222');
+});
+
+test('an ID number given on the document fills the person while it is blank', async () => {
+  const p = await partner('trainer');
+  await svc.upsertPerson(p, 'principal', { fullName: 'Juma Ally', idType: 'nida' }, p.actor);
+  const view = await svc.upsertDocumentDetails(p, 'trainer_id', { docType: 'national_id', documentNumber: '19900101-22222-00003-11' }, p.actor);
+  assert.equal(view.people.find(x => x.role === 'principal').idNumber, '19900101222220000311');
+  assert.equal(item(view, 'identity.idNumber').status, 'complete');
+});
+
+test('registration number and TIN are given once for the business and their certificates', async () => {
+  const p = await partner('vendor');
+  await svc.updateBusiness(p, { legalName: 'Mwanga Ltd', registrationNumber: '123456', tin: '111-222-333' }, p.actor);
+  const view = await svc.upsertDocumentDetails(p, 'tin_certificate', { docType: 'tin_certificate' }, p.actor);
+  assert.equal(view.documents.find(d => d.requirementKey === 'tin_certificate').documentNumber, '111222333', 'stored without dashes');
+  const reg = await svc.upsertDocumentDetails(p, 'business_registration', { docType: 'business_registration' }, p.actor);
+  assert.equal(reg.documents.find(d => d.requirementKey === 'business_registration').documentNumber, '123456');
+  // The other way: a TIN given on its certificate while the business has none.
+  const q = await partner('vendor');
+  const certFirst = await svc.upsertDocumentDetails(q, 'tin_certificate', { docType: 'tin_certificate', documentNumber: '999-888-777' }, q.actor);
+  assert.equal(certFirst.case.tin, '999888777');
+  // A number the person already holds is not overwritten by a different one on the document.
+  const kept = await svc.updateBusiness(q, { tin: '555-444-333' }, q.actor);
+  assert.equal(kept.case.tin, '555444333');
+  assert.equal(kept.documents.find(d => d.requirementKey === 'tin_certificate').documentNumber, '555444333', 'the pending certificate follows');
+});
+
+test('a reviewed document is never rewritten by a later change', async () => {
+  const p = await partner('vendor');
+  await svc.updateBusiness(p, { registrationNumber: 'AAA-1' }, p.actor);
+  await svc.upsertDocumentDetails(p, 'business_registration', { docType: 'business_registration' }, p.actor);
+  const row = await db('PartnerDocument').where({ caseId: (await svc.overview(p)).case.id, requirementKey: 'business_registration' }).first();
+  await db('PartnerDocument').where({ id: row.id }).update({ status: 'rejected', reviewNote: 'unreadable' });
+  const after = await svc.updateBusiness(p, { registrationNumber: 'BBB-2' }, p.actor);
+  assert.equal(after.documents.find(d => d.requirementKey === 'business_registration').documentNumber, 'AAA1');
+});
+
+test('licence, certification and insurance can be saved without an expiry date', async () => {
+  const p = await partner('trainer');
+  const view = await svc.upsertDocumentDetails(p, 'liability_insurance', { docType: 'liability_insurance', issuer: 'Jubilee', documentNumber: 'POL-1' }, p.actor);
+  const status = item(view, 'professional.liability_cover');
+  assert.notEqual(status.status, 'incomplete');
+  assert.deepEqual(status.missingFields ?? [], []);
+  const dated = await svc.upsertDocumentDetails(p, 'liability_insurance', { docType: 'liability_insurance', expiresOn: '2031-01-01' }, p.actor);
+  assert.equal(dated.documents.find(d => d.requirementKey === 'liability_insurance').expiresOn?.toString().slice(0, 10), '2031-01-01', 'an expiry given is still kept');
 });

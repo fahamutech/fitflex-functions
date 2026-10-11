@@ -71,9 +71,9 @@ test('a vendor is checked on business, representative and marketplace', () => {
   assert.deepEqual(keys(c), [
     ['business', ['business.legalName', 'business.tradingName', 'business.registrationNumber', 'business.tin', 'business.registeredAddress',
       'business.registration_certificate', 'business.tin_certificate', 'business.licence', 'business.contact']],
-    ['representative', ['representative.fullName', 'representative.idNumber', 'representative.position', 'representative.authority',
-      'representative.id_document', 'representative.authority_document']],
-    ['marketplace', ['marketplace.product_categories', 'marketplace.delivery', 'marketplace.returns', 'marketplace.settlement']],
+    ['representative', ['representative.fullName', 'representative.idNumber', 'representative.nationality', 'representative.position',
+      'representative.id_document']],
+    ['marketplace', ['marketplace.product_categories', 'marketplace.settlement']],
     AGREEMENTS,
   ]);
 });
@@ -182,12 +182,17 @@ test('a trainer needs a NIDA number if Tanzanian and a passport otherwise', () =
   assert.equal(item(foreign, 'identity.idNumber').status, 'complete');
 });
 
-test('a certification needs its body, number, issue and expiry dates', () => {
+test('a certification needs its body, number and issue date; the expiry date is optional', () => {
   const c = evaluateKyc('trainer', {
     documents: [doc('certification', { issuer: 'ACE', documentNumber: 'ACE-1', issuedOn: null, expiresOn: null })],
     trainer: { specialties: ['strength'] }, now: NOW,
   });
-  assert.deepEqual(item(c, 'professional.certification').missingFields, ['issuedOn', 'expiresOn']);
+  assert.deepEqual(item(c, 'professional.certification').missingFields, ['issuedOn']);
+  const noExpiry = evaluateKyc('trainer', {
+    documents: [{ ...doc('certification', { issuer: 'ACE', documentNumber: 'ACE-1', issuedOn: '2025-01-01', expiresOn: null }) }],
+    trainer: { specialties: ['strength'] }, now: NOW,
+  });
+  assert.notEqual(item(noExpiry, 'professional.certification').status, 'incomplete', 'no expiry date is not a gap');
   assert.equal(item(c, 'professional.specialisation').status, 'complete');
   assert.equal(item(c, 'professional.liability_cover').status, 'missing');
 });
@@ -235,24 +240,33 @@ test('a document waiting for its file keeps the partner from submitting', () => 
 
 test('vendor contact and marketplace details come from the existing vendor profile', () => {
   const c = evaluateKyc('vendor', {
-    vendorProfile: { contactNumber: '+255700000000', email: 'shop@example.com', businessCategory: 'Supplements', deliveryRegions: ['Dar es Salaam'] },
+    vendorProfile: { contactNumber: '+255700000000', businessCategory: 'Supplements' },
     settlementAccounts: [{ status: 'pending_verification' }], now: NOW,
   });
-  assert.equal(item(c, 'business.contact').status, 'complete');
+  assert.equal(item(c, 'business.contact').status, 'complete', 'a contact number is enough; email is optional');
   assert.equal(item(c, 'marketplace.product_categories').status, 'complete');
-  assert.equal(item(c, 'marketplace.delivery').status, 'complete');
-  assert.equal(item(c, 'marketplace.returns').status, 'missing');
   assert.equal(item(c, 'marketplace.settlement').status, 'submitted');
+  assert.equal(item(c, 'marketplace.delivery'), undefined, 'delivery areas are not asked for');
+  assert.equal(item(c, 'marketplace.returns'), undefined, 'a returns policy is not asked for');
+  const noContact = evaluateKyc('vendor', { vendorProfile: { email: 'shop@example.com' }, now: NOW });
+  assert.equal(item(noContact, 'business.contact').status, 'missing');
+  const picked = evaluateKyc('vendor', { vendorProfile: { productCategories: ['equipment', 'events'] }, now: NOW });
+  assert.equal(item(picked, 'marketplace.product_categories').status, 'complete');
 });
 
-test('a vendor representative needs a position, signing authority and proof of it', () => {
-  const rep = { role: 'authorised_representative', fullName: 'John Kimaro', idType: 'nida', idNumber: '1', position: 'Director' };
-  const c = evaluateKyc('vendor', { people: [rep], now: NOW });
-  assert.equal(item(c, 'representative.authority').status, 'missing');
-  assert.equal(item(c, 'representative.authority_document').status, 'missing');
-  const withAuthority = evaluateKyc('vendor', { people: [{ ...rep, authority: 'sole_signatory' }], documents: [doc('representative_authority')], now: NOW });
-  assert.equal(item(withAuthority, 'representative.authority').status, 'complete');
-  assert.equal(item(withAuthority, 'representative.authority_document').status, 'complete');
+test('a vendor\'s person needs name, ID number, nationality, position and ID document, all mandatory', () => {
+  const rep = { role: 'authorised_representative', fullName: 'John Kimaro', idType: 'nida', idNumber: '1', nationality: 'TZ', position: 'owner' };
+  const c = evaluateKyc('vendor', { people: [rep], documents: [doc('representative_id')], now: NOW });
+  for (const key of ['fullName', 'idNumber', 'nationality', 'position', 'id_document']) {
+    assert.equal(item(c, `representative.${key}`).status, 'complete', key);
+    assert.notEqual(item(c, `representative.${key}`).optional, true, `${key} is not optional`);
+  }
+  const partial = evaluateKyc('vendor', { people: [{ ...rep, nationality: null, position: null }], now: NOW });
+  assert.equal(item(partial, 'representative.nationality').status, 'missing');
+  assert.equal(item(partial, 'representative.position').status, 'missing');
+  assert.equal(partial.readyToSubmit, false);
+  assert.equal(item(c, 'representative.authority'), undefined, 'no signing authority is asked for');
+  assert.equal(item(c, 'representative.authority_document'), undefined);
 });
 
 // ── Corporate ───────────────────────────────────────────────────────────────
@@ -273,11 +287,11 @@ test('corporate commercial terms come from the corporate account, plus a signed 
 
 // ── D6: for vendors and companies only the TIN and representative ID are required ──
 
-test('a vendor with just the TIN, representative ID and marketplace details can submit', () => {
-  const rep = { role: 'authorised_representative', fullName: 'John Kimaro', idType: 'nida', idNumber: '1' };
+test('a vendor with the TIN, their own details and ID, and marketplace details can submit', () => {
+  const rep = { role: 'authorised_representative', fullName: 'John Kimaro', idType: 'nida', idNumber: '1', nationality: 'TZ', position: 'co_owner' };
   const c = evaluateKyc('vendor', {
     case: { tin: '123456789' }, people: [rep], documents: [doc('representative_id')],
-    vendorProfile: { contactNumber: '+255700000000', email: 'shop@example.com', businessCategory: 'Gear', deliveryRegions: ['Dar'], returnsPolicy: '7 days' },
+    vendorProfile: { contactNumber: '+255700000000', businessCategory: 'Gear', productCategories: ['accessories_gear'] },
     settlementAccounts: [verifiedAccount], agreements: signed('vendor'), now: NOW,
   });
   assert.deepEqual(c.missing, []);
@@ -287,7 +301,6 @@ test('a vendor with just the TIN, representative ID and marketplace details can 
   assert.deepEqual(optional.sort(), [
     'business.legalName', 'business.licence', 'business.registeredAddress', 'business.registrationNumber',
     'business.registration_certificate', 'business.tin_certificate', 'business.tradingName',
-    'representative.authority', 'representative.authority_document', 'representative.position',
   ]);
   assert.equal(item(c, 'business.licence').status, 'missing'); // collected if given, never required
 });

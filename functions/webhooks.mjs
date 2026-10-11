@@ -25,8 +25,8 @@ export const selcomWebhook = {
   requestSample: { payment_id: 'sel_x', status: 'success', subscription_id: 'sub_x' },
   onRequest: async (req, res) => {
     if (!hasWebhookToken(req)) return res.status(403).json({ error: 'forbidden' });
-    const { payment_id, status, subscription_id } = req.body || {};
-    const result = await webhookService.handleSelcom({ payment_id, status, subscription_id });
+    const { payment_id, status, subscription_id, amount } = req.body || {};
+    const result = await webhookService.handleSelcom({ payment_id, status, subscription_id, amount });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result);
   }

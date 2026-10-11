@@ -24,10 +24,12 @@ const COUNTS = `
   count(*) filter (where "event" = 'subscription')::int as "subscriptions",
   count(*) filter (where "event" = 'purchase')::int as "purchases",
   coalesce(sum("valueTzs") filter (where "event" = 'purchase'), 0)::bigint as "purchaseValueTzs",
+  coalesce(sum("valueTzs") filter (where "event" = 'booking'), 0)::bigint as "bookingValueTzs",
+  coalesce(sum("valueTzs") filter (where "event" = 'subscription'), 0)::bigint as "subscriptionValueTzs",
   count(distinct coalesce("userId", "sessionId")) filter (where "event" = 'impression')::int as "uniqueViewers"`;
 
 /** What the apps cannot observe yet, so the dashboard can say so. */
-export const NOT_TRACKED = Object.freeze(['booking_conversions', 'subscription_conversions']);
+export const NOT_TRACKED = Object.freeze([]);
 
 const withRates = t => ({ ...t, ...rates(t) });
 // bigint sums arrive as text; every total is a plain number.

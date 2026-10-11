@@ -138,6 +138,9 @@ test('prepare, submit, approve by a second person, clear and pay; the trainer is
 
   const detail = await svc.get(draft.id);
   assert.deepEqual([detail.statement.status, detail.statement.listTzs, detail.statement.commissionTzs, detail.statement.trainer.id], ['draft', 40000, 6000, a.id]);
+  // Staff see the trainer's own name as well as the name clients see.
+  assert.equal(detail.statement.trainer.fullName, detail.statement.trainer.displayName);
+  assert.equal(detail.statement.trainer.nickname, null);
   assert.deepEqual(detail.lines.map(l => [l.bookingId, l.basis, l.payoutTzs]).sort(), [[done, 'completed', 17000], [tookPlace, 'took_place', 17000]].sort());
   assert.equal(detail.payout.ok, true);
   // A draft is not shown to the trainer yet.

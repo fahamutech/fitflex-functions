@@ -145,6 +145,77 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
     }
   }
 
+  /**
+   * The promotion a customer opened (a verified tap on its card) for this listing in the week before a purchase,
+   * request or booking, or null. `at` is the moment the customer asked (not when staff confirmed the payment), so a
+   * slow approval does not lose the credit; a tap after that moment cannot have caused it.
+   */
+  async function lastTap({ userId, entityType, entityId, at }) {
+    const until = new Date(at.getTime() + 5 * 60_000);
+    const since = new Date(at.getTime() - ATTRIBUTION_WINDOW_DAYS * 86_400_000);
+    return db(TABLE)
+      .where({ userId, entityType, entityId, event: 'click', verified: true }).whereNotNull('promotionId')
+      .where('at', '>=', since).where('at', '<=', until)
+      .orderBy('at', 'desc').first('promotionId', 'campaignId', 'placement');
+  }
+
+  /** Record one conversion for the promotion that was tapped, once (`key` makes it idempotent). Never throws. */
+  async function credit({ event, key, userId, entityType, entityId, requestedAt, valueTzs = null, sessionId }) {
+    try {
+      if (!userId || !entityId) return { credited: 0 };
+      const at = requestedAt ? new Date(requestedAt) : now();
+      const touch = await lastTap({ userId, entityType, entityId, at: Number.isNaN(at.getTime()) ? now() : at });
+      if (!touch) return { credited: 0 };
+      const out = await db(TABLE).insert({
+        id: randomUUID(), at: now(), event, entityType, entityId, promotionId: touch.promotionId, campaignId: touch.campaignId,
+        placement: touch.placement, userId, sessionId, source: 'server', valueTzs, verified: true, dedupeKey: key,
+      }).onConflict('dedupeKey').ignore().returning('id');
+      return { credited: out.length };
+    } catch (err) {
+      console.warn(`[promotion-events] ${event} not credited:`, err?.message);
+      return { credited: 0 };
+    }
+  }
+
+  /** Take a conversion back (a refund, a rejected or cancelled payment). Idempotent; never throws. */
+  async function takeBack(key) {
+    try { return { reversed: await db(TABLE).where({ dedupeKey: key, source: 'server' }).del() }; }
+    catch (err) { console.warn('[promotion-events] conversion not taken back:', err?.message); return { reversed: 0 }; }
+  }
+
+  /**
+   * A trainer booking (one request, however many sessions) is confirmed: free, or its payment approved.
+   * Credited to the trainer promotion the member tapped in the week before they asked.
+   */
+  const recordBooking = bookings => {
+    const first = bookings?.[0];
+    if (!first) return { credited: 0 };
+    const groupId = first.groupId || first.id;
+    const earliest = bookings.map(b => b.createdAt).filter(Boolean).sort()[0];
+    const tzs = bookings.every(b => !b.currency || b.currency === 'TZS');
+    return credit({
+      event: 'booking', key: `booking:${groupId}`, userId: first.memberId, entityType: 'trainer', entityId: first.trainerId,
+      requestedAt: earliest, sessionId: `server:booking:${groupId}`,
+      valueTzs: tzs ? Math.max(Math.round(bookings.reduce((n, b) => n + Number(b.amountTzs || 0), 0)), 0) : null,
+    });
+  };
+  const reverseBooking = groupId => takeBack(`booking:${groupId}`);
+
+  /**
+   * A gym membership (a direct plan at that gym, or a pass with a home gym) became active because it was paid for.
+   * Credited to the gym promotion the member tapped in the week before they asked for it. A pass with no home gym
+   * is not about any one gym, so it is credited to none.
+   */
+  const recordSubscription = (sub, ctx = {}) => {
+    if (!sub?.id || !sub.homeGymId || !['direct_sub', 'platform_pass'].includes(sub.type)) return { credited: 0 };
+    return credit({
+      event: 'subscription', key: `subscription:${sub.id}`, userId: sub.memberId, entityType: 'gym', entityId: sub.homeGymId,
+      requestedAt: ctx.requestedAt, sessionId: `server:subscription:${sub.id}`,
+      valueTzs: Number.isFinite(Number(ctx.amountTzs)) ? Math.max(Math.round(Number(ctx.amountTzs)), 0) : null,
+    });
+  };
+  const reverseSubscription = sub => takeBack(`subscription:${sub?.id}`);
+
   /** An order was cancelled or refunded: what it was credited for is taken back, so purchases and revenue are not overstated. */
   async function reversePaidOrder(order) {
     try {
@@ -174,5 +245,5 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
     return { deleted, cutoff: cutoff.toISOString() };
   }
 
-  return { ingest, recordPaidOrder, reversePaidOrder, forgetUser, purge };
+  return { ingest, recordPaidOrder, reversePaidOrder, recordBooking, reverseBooking, recordSubscription, reverseSubscription, forgetUser, purge };
 }
