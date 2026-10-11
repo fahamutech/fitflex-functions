@@ -178,3 +178,21 @@ export const b2bAllowanceNotices = {
   description: 'B2B: tell a member when they have used 80% of a benefit\'s allowance and when they have used all of it. Once each per person, benefit and allowance window.',
   onJob: () => opsService.runJob('b2b-allowance-notices'),
 };
+
+export const b2bBillingWatch = {
+  created, rule: '30 4 * * *', // every day 04:30 UTC = 07:30 EAT
+  description: 'B2B: raise an operations exception for billing work that has waited too long (draft invoices not issued, payment notices not checked, invoices long overdue, money received but not applied, an agreement about to end, an organisation long on hold). Each clears itself when the work is done. Nothing is changed.',
+  onJob: () => opsService.runJob('b2b-billing-watch'),
+};
+
+export const opsAlerts = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'Operations: email the addresses in OPS_ALERT_EMAILS about high-severity exceptions and ones where retrying was given up. Each is announced once. Nothing is sent when no addresses are set.',
+  onJob: () => opsService.runJob('ops-alerts'),
+};
+
+export const opsDailySummary = {
+  created, rule: '30 5 * * *', // every day 05:30 UTC = 08:30 EAT
+  description: 'Operations: email the addresses in OPS_ALERT_EMAILS a summary of the exceptions still waiting. Sent only when something is waiting.',
+  onJob: () => opsService.runJob('ops-daily-summary'),
+};
