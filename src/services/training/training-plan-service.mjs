@@ -68,8 +68,25 @@ export function exerciseHistory(workoutRows) {
   };
 }
 
-export function createTrainingPlanService({ plans, workouts, users, engine, now = () => new Date() }) {
+export function createTrainingPlanService({
+  plans, workouts, users, engine,
+  // For plans a trainer makes: who they are, whether the member still trains with them, and telling them the answer.
+  trainers = null, relationships = null, notify = async () => {},
+  now = () => new Date(),
+}) {
   const today = () => localDay(now());
+
+  async function safeNotify(userId, message) {
+    try { if (userId) await notify(userId, message); } catch { /* best effort */ }
+  }
+
+  /** The trainer who made a plan, as the member sees them. */
+  async function trainerOf(plan) {
+    if (!plan.trainerId || !trainers) return null;
+    const t = await trainers.findByIdAsync(plan.trainerId);
+    return t ? { id: t.id, displayName: t.displayName ?? null, photoUrl: t.photoUrl ?? null, userId: t.userId ?? null } : null;
+  }
+  const publicTrainer = t => (t ? { id: t.id, displayName: t.displayName, photoUrl: t.photoUrl } : null);
 
   async function sessionsOf(plan) {
     return (await workouts.filterByColumnAsync('userId', plan.userId)).filter(w => w.trainingPlanId === plan.id);
@@ -82,7 +99,7 @@ export function createTrainingPlanService({ plans, workouts, users, engine, now 
     const day = today();
     const weeks = plan.weeks.map(w => ({
       week: w.week,
-      days: w.days.map(d => {
+      days: w.days.map(({ workout: _pending, ...d }) => {
         const workout = byId.get(d.workoutId);
         return {
           ...d,
@@ -104,6 +121,7 @@ export function createTrainingPlanService({ plans, workouts, users, engine, now 
     return {
       ...plan,
       weeks,
+      trainer: publicTrainer(await trainerOf(plan)),
       progress: {
         sessions: all.length,
         completed,
@@ -245,7 +263,10 @@ export function createTrainingPlanService({ plans, workouts, users, engine, now 
   /** Every plan the member has had, newest first (outline only). */
   async function list(memberId) {
     const rows = [];
-    for (const p of await plans.filterByColumnAsync('userId', memberId)) rows.push(await settle(p));
+    for (const p of await plans.filterByColumnAsync('userId', memberId)) {
+      // An offer isn't a plan the member has had until they take it.
+      if (p.status !== 'offered' && p.status !== 'declined') rows.push(await settle(p));
+    }
     rows.sort((a, b) => b.startDate.localeCompare(a.startDate) || +new Date(b.createdAt) - +new Date(a.createdAt));
     return { plans: rows.map(({ weeks, ...p }) => ({ ...p, sessions: weeks.reduce((n, w) => n + w.days.length, 0) })) };
   }
@@ -265,8 +286,126 @@ export function createTrainingPlanService({ plans, workouts, users, engine, now 
     const plan = await own(memberId, id);
     if (!plan) return { error: 'not_found', status: 404 };
     if (plan.status !== 'active') return { error: 'not_active', status: 409 };
-    return { plan: await view(await end(plan, 'cancelled')) };
+    const ended = await end(plan, 'cancelled');
+    const trainer = await trainerOf(plan);
+    if (trainer) {
+      await safeNotify(trainer.userId, {
+        type: 'training_plan_stopped', title: 'A client stopped your plan',
+        body: `Your client stopped "${plan.name}".`, data: { planId: plan.id },
+      });
+    }
+    return { plan: await view(ended) };
   }
 
-  return { generate, current, list, get, cancel };
+  // ── Plans offered by a trainer ────────────────────────────────────────────
+
+  /** A waiting offer as the member sees it: who, what, and each session in outline. */
+  async function offerView(plan) {
+    return {
+      id: plan.id, name: plan.name, note: plan.note ?? null, status: plan.status,
+      durationWeeks: plan.durationWeeks, daysPerWeek: plan.daysPerWeek, sessionMinutes: plan.sessionMinutes,
+      startDate: plan.startDate, endDate: plan.endDate, createdAt: plan.createdAt,
+      trainer: publicTrainer(await trainerOf(plan)),
+      weeks: plan.weeks.map(w => ({
+        week: w.week,
+        days: w.days.map(d => ({
+          day: d.day, date: d.date, focusAreas: d.focusAreas ?? [], name: d.name,
+          estimatedDuration: d.workout?.estimatedDuration ?? null,
+          exercises: (d.workout?.exercises ?? []).map(e => ({ exerciseName: e.exerciseName, sets: e.sets ?? 1, reps: e.reps ?? null, duration: e.duration ?? null })),
+        })),
+      })),
+    };
+  }
+
+  /** Plans trainers have made for the member that they haven't answered yet. */
+  async function offers(memberId) {
+    const rows = (await plans.filterByColumnAsync('userId', memberId)).filter(p => p.status === 'offered')
+      .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
+    const out = [];
+    for (const p of rows) out.push(await offerView(p));
+    return { offers: out };
+  }
+
+  async function ownOffer(memberId, id) {
+    const plan = await own(memberId, id);
+    if (!plan) return { error: 'not_found', status: 404 };
+    if (plan.status !== 'offered') return { error: 'not_offered', status: 409 };
+    return { plan };
+  }
+
+  /**
+   * Take a trainer's plan. It becomes the member's plan — replacing the one
+   * they are on — and its sessions become their workouts. If its start has
+   * passed, it moves forward by whole weeks so the weekdays stay as planned.
+   */
+  async function accept(memberId, id) {
+    const found = await ownOffer(memberId, id);
+    if (found.error) return found;
+    const { plan } = found;
+    const trainer = await trainerOf(plan);
+    const rels = relationships ? await relationships.filterByColumnAsync('memberId', memberId) : [];
+    // An offer from a trainer the member no longer trains with has lapsed.
+    if (!trainer || !rels.some(r => r.trainerId === plan.trainerId && r.status === 'active')) {
+      await plans.updateByIdAsync(plan.id, { status: 'cancelled', updatedAt: now().toISOString() });
+      return { error: 'offer_expired', status: 409 };
+    }
+
+    const day = today();
+    const first = plan.weeks.flatMap(w => w.days).map(d => d.date).sort()[0] ?? plan.startDate;
+    const lateDays = Math.max(0, Math.round((Date.parse(`${day}T00:00:00Z`) - Date.parse(`${first}T00:00:00Z`)) / 86_400_000));
+    const shift = Math.ceil(lateDays / 7) * 7;
+
+    const current = await activePlan(memberId);
+    if (current) await end(current, 'cancelled');
+
+    const stamp = now();
+    const rows = [];
+    const weeks = plan.weeks.map(w => ({
+      week: w.week,
+      days: w.days.map(({ workout, ...d }) => {
+        const date = addPlanDays(d.date, shift);
+        const row = newWorkoutRow({
+          memberId, base: { id: null, ...workout }, scheduledDate: date, trainerId: plan.trainerId,
+          trainingPlanId: plan.id, source: 'trainer', now: stamp,
+        });
+        rows.push(row);
+        return { ...d, date, workoutId: row.id };
+      }),
+    }));
+    const patch = {
+      status: 'active', weeks,
+      startDate: addPlanDays(plan.startDate, shift), endDate: addPlanDays(plan.endDate, shift),
+      updatedAt: stamp.toISOString(),
+    };
+    try {
+      for (const row of rows) await workouts.insertAsync(row);
+      await plans.updateByIdAsync(plan.id, patch);
+    } catch (err) {
+      for (const row of rows) await workouts.removeByIdAsync(row.id).catch(() => {});
+      throw err;
+    }
+    await safeNotify(trainer.userId, {
+      type: 'training_plan_accepted', title: 'Your plan was accepted',
+      body: `Your client accepted "${plan.name}".`, data: { planId: plan.id },
+    });
+    return { plan: await view({ ...plan, ...patch }) };
+  }
+
+  /** Say no to a trainer's plan. Nothing of the member's changes. */
+  async function decline(memberId, id) {
+    const found = await ownOffer(memberId, id);
+    if (found.error) return found;
+    const { plan } = found;
+    await plans.updateByIdAsync(plan.id, { status: 'declined', updatedAt: now().toISOString() });
+    const trainer = await trainerOf(plan);
+    if (trainer) {
+      await safeNotify(trainer.userId, {
+        type: 'training_plan_declined', title: 'Your plan was declined',
+        body: `Your client declined "${plan.name}".`, data: { planId: plan.id },
+      });
+    }
+    return { declined: true };
+  }
+
+  return { generate, current, list, get, cancel, offers, accept, decline, viewPlan: view, endPlan: end };
 }

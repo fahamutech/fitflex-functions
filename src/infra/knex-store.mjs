@@ -635,7 +635,7 @@ const ALLOWED_FIELDS = {
   social_reports:   new Set(['id','reporterId','targetType','targetId','reason','status','resolvedBy','resolvedAt','createdAt']),
   goals:            new Set(['id','userId','type','period','target','startDate','endDate','source','trainerId','challengeId','status','createdByType','createdById','title','completions','createdAt','updatedAt']),
   workouts:         new Set(['id','userId','trainerId','gymId','templateId','source','name','description','activityType','scheduledDate','estimatedDuration','status','exercises','notes','startedAt','completedAt','activityId','trainingPlanId','feedback','createdAt','updatedAt']),
-  training_plans:   new Set(['id','userId','name','goal','targetAreas','experience','environment','equipment','style','durationWeeks','daysPerWeek','sessionMinutes','status','createdByType','createdById','trainerId','engine','startDate','endDate','weeks','createdAt','updatedAt']),
+  training_plans:   new Set(['id','userId','name','goal','targetAreas','experience','environment','equipment','style','durationWeeks','daysPerWeek','sessionMinutes','status','createdByType','createdById','trainerId','engine','startDate','endDate','weeks','note','createdAt','updatedAt']),
   trainer_member_relationships: new Set(['id','trainerId','memberId','status','permissions','requestedAt','connectedAt','endedAt','endedBy','createdAt','updatedAt']),
   workout_plans:    new Set(['id','trainerId','name','description','activityType','estimatedDuration','exercises','createdAt','updatedAt']),
   gym_member_sharing: new Set(['id','gymId','memberId','permissions','createdAt','updatedAt']),

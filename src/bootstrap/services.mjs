@@ -63,6 +63,7 @@ import { createRecommendationEngine } from '../services/training/recommendation-
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
 import { createTrainingPlanService } from '../services/training/training-plan-service.mjs';
 import { createWorkoutExerciseService } from '../services/training/workout-exercise-service.mjs';
+import { createTrainerPlanService } from '../services/training/trainer-plan-service.mjs';
 import { createSocialService } from '../services/social-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
@@ -499,6 +500,13 @@ export const trainingRecommendationEngine = createRecommendationEngine({
 export const workoutExerciseService = createWorkoutExerciseService({ workouts, plans: trainingPlans, users });
 export const trainingPlanService = createTrainingPlanService({
   plans: trainingPlans, workouts, users, engine: trainingRecommendationEngine,
+  trainers, relationships: trainerMemberRelationships,
+  notify: (userId, message) => notificationService.notify(userId, message),
+});
+export const trainerPlanService = createTrainerPlanService({
+  plans: trainingPlans, workouts, users, relationships: trainerMemberRelationships, trainers, workoutPlans,
+  engine: trainingRecommendationEngine,
+  notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const gymSharingService = createGymSharingService({
   sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
