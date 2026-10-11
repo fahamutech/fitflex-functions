@@ -1,9 +1,8 @@
-// Training Plans REST surface — the vocabulary, the exercise library and a
-// member's training preferences. Plans themselves arrive with the
-// recommendation engine.
+// Training Plans REST surface — the vocabulary, the exercise library, a
+// member's training preferences and their plans.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { trainingPreferenceService } from '../src/bootstrap/services.mjs';
+import { trainingPlanService, trainingPreferenceService } from '../src/bootstrap/services.mjs';
 import { trainingOptions } from '../src/shared/training-taxonomy.mjs';
 import { alternativesFor, exerciseById, listExercises, localizedExercise } from '../src/shared/exercise-library.mjs';
 
@@ -63,4 +62,47 @@ export const updateMyTrainingPreferences = {
   requestSample: { goal: 'gain_muscle', targetAreas: ['chest', 'shoulders', 'triceps'], environment: 'gym', sessionMinutes: 45, daysPerWeek: 4 },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await trainingPreferenceService.update(req.user.sub, req.body || {}))
+};
+
+export const createMyTrainingPlan = {
+  created, method: 'post', path: '/me/training-plans',
+  description: 'Member: have FitFlex make a training plan from their goal and preferences. All optional: preferences (for this plan only), durationWeeks (1–12, default 4), startDate (YYYY-MM-DD, default today), replace (true ends the plan they are on). Each session becomes a planned workout.',
+  requestSample: { durationWeeks: 4, replace: false },
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => {
+    const result = await trainingPlanService.generate(req.user.sub, req.body || {});
+    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.planId ? { planId: result.planId } : {}) });
+    res.status(201).json(result);
+  }
+};
+
+export const myCurrentTrainingPlan = {
+  created, method: 'get', path: '/me/training-plans/current',
+  description: 'Member: the plan they are on (or plan: null), week by week, with progress, today\'s session and the next one.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await trainingPlanService.current(req.user.sub))
+};
+
+export const myTrainingPlans = {
+  created, method: 'get', path: '/me/training-plans',
+  description: 'Member: every plan they have had, newest first.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await trainingPlanService.list(req.user.sub))
+};
+
+export const myTrainingPlan = {
+  created, method: 'get', path: '/me/training-plans/:id',
+  description: 'Member: one of their plans, week by week.',
+  onGuard: requireAuth('member'),
+  // Whichever of the two routes the router matches first, 'current' means the plan they are on.
+  onRequest: async (req, res) => send(res, req.params.id === 'current'
+    ? await trainingPlanService.current(req.user.sub)
+    : await trainingPlanService.get(req.user.sub, req.params.id))
+};
+
+export const cancelMyTrainingPlan = {
+  created, method: 'post', path: '/me/training-plans/:id/cancel',
+  description: 'Member: stop a plan. Sessions not yet started are removed; ones done or under way stay in their history.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await trainingPlanService.cancel(req.user.sub, req.params.id))
 };
