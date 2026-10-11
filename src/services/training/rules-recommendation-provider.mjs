@@ -127,6 +127,9 @@ export function createRulesRecommendationProvider({ library } = {}) {
 
     const skipped = new Set(input.history?.skippedExerciseIds ?? []);
     const done = new Set(input.history?.completedExerciseIds ?? []);
+    // Ones they said they didn't enjoy are still possible, just a last choice.
+    const disliked = new Set((input.history?.feedback ?? []).filter(f => f.reason === 'didnt_enjoy').map(f => f.exerciseId));
+    const effort = input.history?.effort ?? null;
     // Exercises the member said they couldn't do or had no equipment for are left out.
     const avoid = new Set((input.history?.feedback ?? [])
       .filter(f => ['couldnt_perform', 'equipment_unavailable'].includes(f.reason) && f.exerciseId).map(f => f.exerciseId));
@@ -147,7 +150,8 @@ export function createRulesRecommendationProvider({ library } = {}) {
         + (equipped && style === 'strength' && !e.equipment.includes('none') ? 2 : 0)
         + (usedThisWeek.has(e.id) ? -5 : 0)
         + (done.has(e.id) ? 0.5 : 0)
-        + (skipped.has(e.id) ? -6 : 0);
+        + (skipped.has(e.id) ? -6 : 0)
+        + (disliked.has(e.id) ? -6 : 0);
     }
 
     function pick(kind, week, slot, usedThisWeek) {
@@ -195,8 +199,11 @@ export function createRulesRecommendationProvider({ library } = {}) {
 
     function prescribe(e, week) {
       // Experienced members take an extra set; later weeks ask a little more.
-      const sets = Math.min(e.defaultSets + (level === 2 && e.defaultSets < 5 && !e.defaultDuration ? 1 : 0), 5);
-      const step = Math.min(week - 1, 4);
+      let sets = Math.min(e.defaultSets + (level === 2 && e.defaultSets < 5 && !e.defaultDuration ? 1 : 0), 5);
+      // Recent sessions felt too hard: one set fewer and no weekly increase.
+      // Too easy: start two steps further on.
+      if (effort === 'easier' && sets > 2) sets -= 1;
+      const step = effort === 'easier' ? 0 : Math.min(week - 1, 4) + (effort === 'harder' ? 2 : 0);
       const long = (e.defaultDuration ?? 0) >= 300;
       return {
         libraryId: e.id,

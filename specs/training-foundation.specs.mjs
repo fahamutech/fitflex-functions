@@ -155,7 +155,7 @@ test('engine input gathers preferences, dates and history', () => {
   const input = buildRecommendationInput({ profile: { fitnessGoals: ['lose_weight'] }, startDate: '2026-10-12' });
   assert.equal(input.goal, 'lose_weight');
   assert.equal(input.durationWeeks, 4);
-  assert.deepEqual(input.history, { completedExerciseIds: [], skippedExerciseIds: [], feedback: [] });
+  assert.deepEqual(input.history, { completedExerciseIds: [], skippedExerciseIds: [], feedback: [], effort: null });
 });
 
 test('a plan draft is checked whoever produced it', () => {

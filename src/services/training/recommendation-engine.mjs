@@ -11,7 +11,8 @@
 // input  (see buildRecommendationInput)
 //   goal, targetAreas[], experience, environment, equipment[],
 //   sessionMinutes, daysPerWeek, style, durationWeeks, startDate,
-//   history: { completedExerciseIds[], skippedExerciseIds[], feedback[] }
+//   history: { completedExerciseIds[], skippedExerciseIds[],
+//     feedback[{ exerciseId, reason }], effort: 'easier' | 'harder' | null }
 //
 // draft
 //   { name, durationWeeks, weeks: [{ week, days: [{ day (1 = Monday … 7),
@@ -44,6 +45,8 @@ export function buildRecommendationInput({ profile = {}, preferences, durationWe
       completedExerciseIds: history.completedExerciseIds ?? [],
       skippedExerciseIds: history.skippedExerciseIds ?? [],
       feedback: history.feedback ?? [],
+      // 'easier' | 'harder' | null — how recent sessions felt.
+      effort: history.effort ?? null,
     },
   };
 }

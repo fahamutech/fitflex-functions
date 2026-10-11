@@ -489,7 +489,7 @@ export const activityService = createActivityService({
 });
 export const goalService = createGoalService({ goals, trainers });
 export const workoutService = createWorkoutService({
-  workouts, activities, defaultShare: memberId => socialService.defaultShareFor(memberId),
+  workouts, activities, users, defaultShare: memberId => socialService.defaultShareFor(memberId),
 });
 export const trainingPreferenceService = createTrainingPreferenceService({ users });
 // Plans come from rules today; an 'ai' provider can be added beside it later.

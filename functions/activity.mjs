@@ -160,6 +160,14 @@ export const completeMyWorkout = {
   onRequest: async (req, res) => send(res, await workoutService.complete(req.user.sub, req.params.id, req.body || {}))
 };
 
+export const myWorkoutFeedback = {
+  created, method: 'post', path: '/me/workouts/:id/feedback',
+  description: 'Member: how a finished workout went. { rating?: too_easy|just_right|too_hard, exercises?: [{ id, reason: didnt_enjoy|couldnt_perform|equipment_unavailable|null }] }. Used to shape their next plan.',
+  requestSample: { rating: 'just_right' },
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await workoutService.feedback(req.user.sub, req.params.id, req.body || {}))
+};
+
 export const skipMyWorkout = {
   created, method: 'post', path: '/me/workouts/:id/skip',
   description: 'Member: skip a workout that has not been completed.',
