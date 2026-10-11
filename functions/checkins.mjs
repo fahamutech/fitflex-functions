@@ -98,11 +98,14 @@ export const operatorRecentCheckIns = {
 
 export const operatorDashboard = {
   created, method: 'get', path: '/operator/dashboard',
-  description: 'Owner/operator analytics across owned gyms with configurable period and direct/FitFlex split. Basic cross-feature context — visible to any gym_staff regardless of their ACL scopes.',
+  description: 'Owner/operator analytics across owned gyms with configurable period and direct/FitFlex split. Basic cross-feature context — visible to any gym_staff regardless of their ACL scopes. "settlement" (the rates FitFlex pays the gym, its latest statement, what is approved and unpaid, the last payment) is filled only for the owner or staff with the payments permission; otherwise null.',
   onGuard: requireAuth('gym_operator', 'gym_staff'),
   onRequest: async (req, res) => {
     const operator = await resolveRequestUser(req);
-    const result = await operatorService.dashboard({ operator, query: req.query || {} });
+    // Amounts FitFlex pays are for the owner, or staff with the payments permission.
+    const { userType, aclPermissions } = req.user || {};
+    const includeSettlement = userType === 'gym_operator' || (Array.isArray(aclPermissions) && aclPermissions.includes('payments'));
+    const result = await operatorService.dashboard({ operator, query: req.query || {}, includeSettlement });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result);
   }
