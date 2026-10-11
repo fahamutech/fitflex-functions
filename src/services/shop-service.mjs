@@ -1,5 +1,6 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
 import { randomUUID } from 'node:crypto';
+import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
@@ -215,6 +216,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         ...vendor,
         vendorProfile: vendor.vendorProfile || null,
         kycStatus: kycStatus.get(vendor.id) || null,
+        commissionPct: vendorCommissionPct(vendor),
         kycExempt: partnerGate.exempt(vendor),
         productCount: allProducts.filter(product => product.vendorId === vendor.id).length,
         pendingProductCount: allProducts.filter(product => product.vendorId === vendor.id && (product.approvalStatus || 'pending') === 'pending').length,
@@ -233,12 +235,20 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       patch.approvalNote = body.approvalNote == null ? vendor.approvalNote || null : String(body.approvalNote).trim() || null;
     }
     if (['active', 'suspended'].includes(body?.accountStatus)) patch.accountStatus = body.accountStatus;
+    // The marketplace commission FitFlex takes on this vendor's sales, from their next order on.
+    if (body?.commissionPct != null) {
+      const pct = Number(body.commissionPct);
+      if (!Number.isFinite(pct) || pct < VENDOR_COMMISSION_PCT.min || pct > VENDOR_COMMISSION_PCT.max) {
+        return { error: 'invalid_commission', status: 400, min: VENDOR_COMMISSION_PCT.min, max: VENDOR_COMMISSION_PCT.max };
+      }
+      patch.vendorProfile = { ...(vendor.vendorProfile || {}), vendorId, commissionPct: pct };
+    }
     const updated = await users.updateByIdAsync(vendorId, patch);
     await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'vendor_management_updated',
       target: vendorId,
-      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus },
-      after: patch,
+      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor) },
+      after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined, commissionPct: patch.vendorProfile.commissionPct } : {}) },
     });
     if (patch.approvalStatus) await notify(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
     return { vendor: updated };
@@ -269,7 +279,16 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       resolved.push({ product, qty });
     }
     for (const { product, qty } of resolved) await products.updateByIdAsync(product.id, { stock: Number(product.stock) - qty, soldCount: Number(product.soldCount || 0) + qty, updatedAt: nowIso() });
-    const orderItems = resolved.map(({ product, qty }) => ({ productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs: priceOf(product), image: product.images?.[0] || null }));
+    // Each line carries the commission at its vendor's rate today, so a later rate change never alters this order.
+    const rates = new Map();
+    for (const vendorId of new Set(resolved.map(({ product }) => product.vendorId).filter(Boolean))) {
+      rates.set(vendorId, vendorCommissionPct(await users.findByIdAsync(vendorId)));
+    }
+    const orderItems = resolved.map(({ product, qty }) => {
+      const priceTzs = priceOf(product);
+      const { commissionPct, commissionTzs, vendorPayoutTzs } = priceOrderLine({ priceTzs, qty, commissionPct: rates.get(product.vendorId) ?? VENDOR_COMMISSION_PCT.default });
+      return { productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs, image: product.images?.[0] || null, commissionPct, commissionTzs, vendorPayoutTzs };
+    });
     const totalTzs = orderItems.reduce((sum, item) => sum + item.priceTzs * item.qty, 0);
     const at = nowIso();
     const free = totalTzs === 0 || !paymentRequests;
