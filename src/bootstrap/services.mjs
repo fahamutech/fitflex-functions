@@ -62,6 +62,7 @@ import { createTrainingPreferenceService } from '../services/training/training-p
 import { createRecommendationEngine } from '../services/training/recommendation-engine.mjs';
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
 import { createTrainingPlanService } from '../services/training/training-plan-service.mjs';
+import { createWorkoutExerciseService } from '../services/training/workout-exercise-service.mjs';
 import { createSocialService } from '../services/social-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
@@ -495,6 +496,7 @@ export const trainingPreferenceService = createTrainingPreferenceService({ users
 export const trainingRecommendationEngine = createRecommendationEngine({
   providers: { rules: createRulesRecommendationProvider() },
 });
+export const workoutExerciseService = createWorkoutExerciseService({ workouts, plans: trainingPlans, users });
 export const trainingPlanService = createTrainingPlanService({
   plans: trainingPlans, workouts, users, engine: trainingRecommendationEngine,
 });

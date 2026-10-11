@@ -41,6 +41,8 @@ export function exerciseHistory(workoutRows) {
       // In a finished workout, an exercise with no set done was passed over.
       if ((e.workoutSets ?? []).some(s => s.completed)) completed.add(e.libraryId);
       else skipped.add(e.libraryId);
+      // One swapped out for another was passed over too.
+      if (e.replacedFrom) skipped.add(e.replacedFrom);
     }
   }
   for (const id of completed) skipped.delete(id);

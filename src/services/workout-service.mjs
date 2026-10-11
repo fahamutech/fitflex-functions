@@ -16,7 +16,7 @@ const id = (prefix) => `${prefix}_${randomUUID().slice(0, 12)}`;
 const isDate = (s) => typeof s === 'string' && DATE_RE.test(s) && !Number.isNaN(+new Date(`${s}T00:00:00Z`));
 const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
 
-function buildExercise(workoutId, ex) {
+export function buildExercise(workoutId, ex) {
   const exerciseId = id('wex');
   const count = Math.min(Math.max(Math.round(ex.sets ?? 1), 1), MAX_SETS);
   const reps = Number.isFinite(ex.reps) ? Math.round(ex.reps) : null;
@@ -63,6 +63,15 @@ function applyProgress(workout, body) {
     const ex = workout.exercises.find(e => e.id === patch?.id);
     if (!ex) return 'unknown_exercise';
     if (patch.notes !== undefined) ex.notes = text(patch.notes, 500);
+    if (patch.skipped !== undefined) {
+      if (typeof patch.skipped !== 'boolean') return 'invalid_skipped';
+      ex.skipped = patch.skipped;
+    }
+    // A skipped exercise has no sets done, whatever else was sent.
+    if (ex.skipped) {
+      for (const set of ex.workoutSets) set.completed = false;
+      continue;
+    }
     if (!Array.isArray(patch.workoutSets)) continue;
     for (const sp of patch.workoutSets) {
       const set = ex.workoutSets.find(s => s.id === sp?.id);

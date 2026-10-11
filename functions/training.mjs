@@ -2,7 +2,7 @@
 // member's training preferences and their plans.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { trainingPlanService, trainingPreferenceService } from '../src/bootstrap/services.mjs';
+import { trainingPlanService, trainingPreferenceService, workoutExerciseService } from '../src/bootstrap/services.mjs';
 import { trainingOptions } from '../src/shared/training-taxonomy.mjs';
 import { alternativesFor, exerciseById, listExercises, localizedExercise } from '../src/shared/exercise-library.mjs';
 
@@ -105,4 +105,23 @@ export const cancelMyTrainingPlan = {
   description: 'Member: stop a plan. Sessions not yet started are removed; ones done or under way stay in their history.',
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await trainingPlanService.cancel(req.user.sub, req.params.id))
+};
+
+export const workoutExerciseAlternatives = {
+  created, method: 'get', path: '/me/workouts/:id/exercises/:exerciseId/alternatives',
+  description: 'Member: exercises that could stand in for one in their workout — same main area, and doable with their equipment, place and experience. Optional lang (en|sw).',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => {
+    const result = await workoutExerciseService.alternatives(req.user.sub, req.params.id, req.params.exerciseId);
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json({ alternatives: result.alternatives.map(e => localizedExercise(e, req.query?.lang)) });
+  }
+};
+
+export const replaceWorkoutExercise = {
+  created, method: 'post', path: '/me/workouts/:id/exercises/:exerciseId/replace',
+  description: 'Member: swap an exercise they have not started for one of its alternatives. { libraryId }',
+  requestSample: { libraryId: 'ex_push_up' },
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await workoutExerciseService.replace(req.user.sub, req.params.id, req.params.exerciseId, req.body || {}))
 };
