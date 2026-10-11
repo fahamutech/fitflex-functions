@@ -216,8 +216,15 @@ test('voiding releases the orders for the next statement; the database keeps a s
   const late = await order({ buyerId, lines: [[c, 10000, 1]], deliveredAt: '2026-10-09T10:00:00Z' });
   assert.equal(mine((await svc.prepare({ actorId: maker })).statements, c).length, 0);
 
-  assert.equal((await svc.voidStatement({ id: draft.id, actorId: checker })).error, 'reason_required');
-  assert.equal((await svc.voidStatement({ id: draft.id, reason: 'Wrong orders', actorId: checker })).statement.status, 'voided');
+  // Voiding takes two people: one asks with a reason, another confirms.
+  assert.equal((await svc.voidStatement({ id: draft.id, actorId: checker })).error, 'void_not_requested');
+  assert.equal((await svc.requestVoid({ id: draft.id, actorId: maker })).error, 'reason_required');
+  assert.equal((await svc.requestVoid({ id: draft.id, reason: 'Wrong orders', actorId: maker })).statement.voidRequestedBy, maker);
+  assert.equal((await svc.approve({ id: draft.id, actorId: checker })).error, 'void_requested');
+  assert.equal((await svc.voidStatement({ id: draft.id, actorId: maker })).error, 'cannot_void_own_request');
+  await assert.rejects(db('VendorSettlement').where({ id: draft.id }).update({ status: 'voided', voidedBy: maker, voidedAt: new Date(), voidReason: 'x' }), /vendor_settlement_void_request_ck/);
+  const voided = await svc.voidStatement({ id: draft.id, actorId: checker });
+  assert.deepEqual([voided.statement.status, voided.statement.voidReason], ['voided', 'Wrong orders']);
   const [fresh] = mine((await svc.prepare({ actorId: maker })).statements, c);
   assert.deepEqual([fresh.orderCount, fresh.finalNetTzs], [2, 36000]);
 

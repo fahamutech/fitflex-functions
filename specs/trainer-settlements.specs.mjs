@@ -178,7 +178,8 @@ test('prepare, submit, approve by a second person, clear and pay; the trainer is
   assert.equal((await svc.getMine({ trainerId: 'trn_other', id: draft.id })).error, 'statement_not_found');
 
   // Paid is final, in the service and in the database.
-  assert.equal((await svc.voidStatement({ id: draft.id, reason: 'x', actorId: checker })).error, 'invalid_status');
+  assert.equal((await svc.requestVoid({ id: draft.id, reason: 'x', actorId: checker })).error, 'invalid_status');
+  assert.equal((await svc.voidStatement({ id: draft.id, actorId: checker })).error, 'invalid_status');
   await assert.rejects(db('TrainerSettlement').where({ id: draft.id }).update({ finalNetTzs: 1 }), /final/);
 
   // Next week: the paid sessions are not paid again; the 13 Oct session now is.
@@ -235,9 +236,24 @@ test('voiding a statement releases its sessions for the next one; a submitted st
   assert.equal((await db('TrainerSettlementLine').where({ trainerSettlementId: draft.id })).length, 1);
 
   assert.equal((await svc.reject({ id: draft.id, actorId: checker })).error, 'reason_required');
-  assert.equal((await svc.voidStatement({ id: draft.id, actorId: checker })).error, 'reason_required');
-  const voided = await svc.voidStatement({ id: draft.id, reason: 'Prepared with the wrong sessions', actorId: checker });
-  assert.equal(voided.statement.status, 'voided');
+  // Voiding takes two people: one asks with a reason, another confirms.
+  assert.equal((await svc.voidStatement({ id: draft.id, actorId: checker })).error, 'void_not_requested');
+  await assert.rejects(db('TrainerSettlement').where({ id: draft.id }).update({ status: 'voided', voidedBy: checker, voidedAt: new Date(), voidReason: 'x' }), /requested by one person/);
+  assert.equal((await svc.requestVoid({ id: draft.id, actorId: maker })).error, 'reason_required');
+  const asked = await svc.requestVoid({ id: draft.id, reason: 'Prepared with the wrong sessions', actorId: maker });
+  assert.deepEqual([asked.statement.status, asked.statement.voidRequestedBy], ['submitted', maker]);
+  assert.equal((await svc.requestVoid({ id: draft.id, reason: 'again', actorId: checker })).error, 'void_already_requested');
+  assert.equal((await svc.approve({ id: draft.id, actorId: checker })).error, 'void_requested');
+  assert.equal((await svc.voidStatement({ id: draft.id, actorId: maker })).error, 'cannot_void_own_request');
+  // The trainer sees nothing of the request.
+  const seen = (await svc.getMine({ trainerId: c.id, id: draft.id })).statement;
+  assert.ok(!('voidRequestedBy' in seen) && !('voidRequestReason' in seen));
+  // Withdrawn, the statement carries on; asked again, a second person confirms.
+  assert.equal((await svc.cancelVoidRequest({ id: draft.id, actorId: checker })).statement.voidRequestedBy, null);
+  assert.equal((await svc.cancelVoidRequest({ id: draft.id, actorId: checker })).error, 'void_not_requested');
+  await svc.requestVoid({ id: draft.id, reason: 'Prepared with the wrong sessions', actorId: maker });
+  const voided = await svc.voidStatement({ id: draft.id, actorId: checker });
+  assert.deepEqual([voided.statement.status, voided.statement.voidReason, voided.statement.voidedBy], ['voided', 'Prepared with the wrong sessions', checker]);
 
   const redo = await svc.prepare({ actorId: maker });
   const [fresh] = mine(redo.statements, c.id);

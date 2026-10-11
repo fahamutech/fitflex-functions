@@ -13,7 +13,10 @@
 // - The payout check runs when a statement is marked payable and again when
 //   it is paid.
 // - Voiding an unpaid statement releases its lines, so the next statement
-//   prepared picks them up.
+//   prepared picks them up. It takes two people: one asks for it with a
+//   reason, a different one confirms (or the request is cancelled). While a
+//   void is requested the statement can't be submitted, approved or cleared
+//   for payment.
 //
 // Each step is one transaction with the row locked, and is audited.
 import { randomUUID } from 'node:crypto';
@@ -63,6 +66,7 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
   /** draft → submitted: the amounts are frozen. */
   const submit = ({ id, actorId }) => step(id, 'submitted', actorId, async (s) => {
     if (s.status !== 'draft') return wrongStatus(s, 'draft');
+    if (s.voidRequestedBy) return fail('void_requested');
     if (!(s.finalNetTzs > 0)) return fail('nothing_to_pay');
     return { patch: { status: 'submitted', submittedBy: actorId, submittedAt: now(), rejectedBy: null, rejectedAt: null, rejectReason: null } };
   });
@@ -77,6 +81,7 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
   /** submitted → approved, by someone other than the submitter. */
   const approve = ({ id, actorId }) => step(id, 'approved', actorId, async (s) => {
     if (s.status !== 'submitted') return wrongStatus(s, 'submitted');
+    if (s.voidRequestedBy) return fail('void_requested');
     if (s.submittedBy === actorId) return fail('cannot_approve_own_submission', 403);
     return { patch: { status: 'approved', approvedBy: actorId, approvedAt: now() } };
   });
@@ -99,6 +104,7 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
   /** approved → payable, when nothing holds it and the partner can be paid. */
   const markPayable = ({ id, actorId }) => step(id, 'payable', actorId, async (s) => {
     if (s.status !== 'approved') return wrongStatus(s, 'approved');
+    if (s.voidRequestedBy) return fail('void_requested');
     if (s.holdReason) return fail('on_hold', 409, { holdReason: s.holdReason });
     const check = await payoutCheck(s, now());
     if (!check.ok) return notPayable(check);
@@ -119,15 +125,40 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
     };
   });
 
-  /** draft | submitted | approved → voided: this statement will not be paid; its lines are released. */
-  const voidStatement = ({ id, reason, actorId }) => step(id, 'voided', actorId, async (s, q) => {
+  /** Ask for a draft, submitted or approved statement to be voided, with a reason. Someone else has to confirm. */
+  const requestVoid = ({ id, reason, actorId }) => step(id, 'void_requested', actorId, async (s) => {
     if (!VOIDABLE.includes(s.status)) return wrongStatus(s, VOIDABLE.join('|'));
+    if (s.voidRequestedBy) return fail('void_already_requested');
     if (!text(reason)) return fail('reason_required', 400);
-    const released = await q(lineTable).where({ [lineKey]: id, voided: false }).update({ voided: true });
-    return { patch: { status: 'voided', voidedBy: actorId, voidedAt: now(), voidReason: text(reason) }, audit: { reason: text(reason), finalNetTzs: s.finalNetTzs, released } };
+    return { patch: { voidRequestedBy: actorId, voidRequestedAt: now(), voidRequestReason: text(reason) }, audit: { reason: text(reason) } };
   });
 
-  return { audit, submit, reject, approve, hold, release, markPayable, pay, voidStatement };
+  /** Withdraw or decline a void request. The statement carries on as it was. */
+  const cancelVoidRequest = ({ id, reason, actorId }) => step(id, 'void_request_cancelled', actorId, async (s) => {
+    if (!s.voidRequestedBy || s.status === 'voided') return fail('void_not_requested');
+    return {
+      patch: { voidRequestedBy: null, voidRequestedAt: null, voidRequestReason: null },
+      audit: { requestedBy: s.voidRequestedBy, requestReason: s.voidRequestReason, ...(text(reason) ? { reason: text(reason) } : {}) },
+    };
+  });
+
+  /**
+   * Confirm a requested void: draft | submitted | approved → voided, by
+   * someone other than the person who asked. This statement will not be
+   * paid; its lines are released.
+   */
+  const voidStatement = ({ id, actorId }) => step(id, 'voided', actorId, async (s, q) => {
+    if (!VOIDABLE.includes(s.status)) return wrongStatus(s, VOIDABLE.join('|'));
+    if (!s.voidRequestedBy) return fail('void_not_requested');
+    if (s.voidRequestedBy === actorId) return fail('cannot_void_own_request', 403);
+    const released = await q(lineTable).where({ [lineKey]: id, voided: false }).update({ voided: true });
+    return {
+      patch: { status: 'voided', voidedBy: actorId, voidedAt: now(), voidReason: s.voidRequestReason },
+      audit: { reason: s.voidRequestReason, requestedBy: s.voidRequestedBy, finalNetTzs: s.finalNetTzs, released },
+    };
+  });
+
+  return { audit, submit, reject, approve, hold, release, markPayable, pay, requestVoid, cancelVoidRequest, voidStatement };
 }
 
 // ── Weeks (East Africa Time) ──────────────────────────────────────────────────
@@ -163,7 +194,8 @@ export function weekToPrepare(periodStart, at) {
 
 /** What a partner may see of their own statement: no staff ids, and only where it was paid. */
 export function partnerView(statement) {
-  const { preparedBy, submittedBy, approvedBy, rejectedBy, heldBy, paidBy, voidedBy, destinationSnapshot, ...rest } = statement;
+  // A pending void request is staff business: the partner sees none of it.
+  const { preparedBy, submittedBy, approvedBy, rejectedBy, heldBy, paidBy, voidedBy, voidRequestedBy, voidRequestedAt, voidRequestReason, destinationSnapshot, ...rest } = statement;
   const dest = typeof destinationSnapshot === 'string' ? JSON.parse(destinationSnapshot) : destinationSnapshot;
   return { ...rest, onHold: Boolean(statement.holdReason), paidTo: dest ? { method: dest.method ?? null, provider: dest.provider ?? null, accountLast4: dest.accountLast4 ?? null } : null };
 }
