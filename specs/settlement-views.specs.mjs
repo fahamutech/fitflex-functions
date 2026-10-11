@@ -96,7 +96,7 @@ test('an owner sees only their own gyms; shadow and voided statements don\'t exi
   const staff = { id: 'staff-1', userType: 'gym_staff', gymId: 'gym-C' };
   assert.deepEqual((await views.ownerStatements({ owner: staff })).map((s) => s.gymId), ['gym-C']);
 
-  await trx('GymSettlement').where({ id: ids['gym-D'] }).update({ status: 'voided', voidedAt: new Date(), voidedBy: 'admin', voidReason: 'recalculated' });
+  await trx('GymSettlement').where({ id: ids['gym-D'] }).update({ status: 'voided', voidedAt: new Date(), voidedBy: 'admin', voidReason: 'recalculated', voidRequestedBy: 'maker', voidRequestedAt: new Date(), voidRequestReason: 'recalculated' });
   assert.deepEqual(await views.ownerStatements({ owner: ownerOfD }), []);
   assert.equal((await views.ownerStatement({ owner: ownerOfD, id: ids['gym-D'] })).error, 'statement_not_found');
 

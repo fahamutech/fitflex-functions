@@ -91,7 +91,14 @@ async function pay(workflow, id) {
 
 // ── voiding a statement ──────────────────────────────────────────────────────
 
-test('void: an unpaid statement is cancelled for good, with a reason, and is audited', () => inRollback(async (trx) => {
+/** One person asks for the void, another confirms it. */
+async function voidByTwo(workflow, id, reason, { requester = 'maker', confirmer = 'checker' } = {}) {
+  const asked = await workflow.requestVoid({ id, reason, actorId: requester });
+  if (asked.error) return asked;
+  return workflow.voidStatement({ id, actorId: confirmer });
+}
+
+test('void: one person asks with a reason, another confirms; then the statement is cancelled for good', () => inRollback(async (trx) => {
   const w = await world(trx);
   const m = await memberCycle(trx);
   await visits(trx, m, w.gymD, 15);
@@ -99,21 +106,55 @@ test('void: an unpaid statement is cancelled for good, with a reason, and is aud
   await settlement.run({ ...NOVEMBER, mode: 'live', actorId: 'admin-1' });
   const s = await statementOf(trx, w.gymD, NOVEMBER);
 
-  assert.deepEqual(await workflow.voidStatement({ id: s.id, reason: ' ', actorId: 'checker' }), { error: 'reason_required', status: 400 });
-  assert.equal((await workflow.voidStatement({ id: s.id, reason: 'x' })).error, 'actor_required');
-  const out = await workflow.voidStatement({ id: s.id, reason: ' Gym left the network ', actorId: 'checker' });
-  assert.deepEqual([out.statement.status, out.statement.voidReason, out.statement.voidedBy, out.cancelledAdjustments], ['voided', 'Gym left the network', 'checker', 0]);
+  // Nobody can void alone: without a request there is nothing to confirm.
+  assert.equal((await workflow.voidStatement({ id: s.id, actorId: 'checker' })).error, 'void_not_requested');
+  assert.deepEqual(await workflow.requestVoid({ id: s.id, reason: ' ', actorId: 'maker' }), { error: 'reason_required', status: 400 });
+  assert.equal((await workflow.requestVoid({ id: s.id, reason: 'x' })).error, 'actor_required');
+  const asked = await workflow.requestVoid({ id: s.id, reason: ' Gym left the network ', actorId: 'maker' });
+  assert.deepEqual([asked.statement.status, asked.statement.voidRequestedBy, asked.statement.voidRequestReason], ['draft', 'maker', 'Gym left the network']);
+  assert.equal((await workflow.requestVoid({ id: s.id, reason: 'again', actorId: 'other' })).error, 'void_already_requested');
+  // While it is requested the statement stands still.
+  assert.equal((await workflow.submit({ id: s.id, actorId: 'maker' })).error, 'void_requested');
+  // The person who asked can't confirm, and the database agrees.
+  assert.deepEqual(await workflow.voidStatement({ id: s.id, actorId: 'maker' }), { error: 'cannot_void_own_request', status: 403 });
+  await assert.rejects(trx.transaction((t) => t('GymSettlement').where({ id: s.id }).update({ status: 'voided', voidedBy: 'maker', voidedAt: new Date(), voidReason: 'x' })), (err) => err.code === '23514');
+
+  const out = await workflow.voidStatement({ id: s.id, actorId: 'checker' });
+  assert.deepEqual([out.statement.status, out.statement.voidReason, out.statement.voidedBy, out.statement.voidRequestedBy, out.cancelledAdjustments], ['voided', 'Gym left the network', 'checker', 'maker', 0]);
   assert.ok(out.statement.voidedAt);
 
   // Final: no step works on it, and it can't be voided twice.
-  for (const stepName of ['submit', 'approve', 'markPayable', 'voidStatement']) {
+  for (const stepName of ['submit', 'approve', 'markPayable', 'requestVoid', 'voidStatement']) {
     assert.equal((await workflow[stepName]({ id: s.id, reason: 'again', actorId: 'other' })).error, 'invalid_status', stepName);
   }
   // Its visits stay settled: a later run does not pay them again.
   const again = await services(trx, '2027-01-02T09:00:00.000Z').settlement.run({ ...DECEMBER, mode: 'live', actorId: 'admin-1' });
   assert.equal(again.stats.settledCycles, 0);
-  const audit = await trx('AuditLog').where({ target: s.id, action: 'settlement_voided' }).first();
-  assert.equal(audit.actor, 'checker');
+  const audit = await trx('AuditLog').where({ target: s.id }).whereIn('action', ['settlement_void_requested', 'settlement_voided']).orderBy('at');
+  assert.deepEqual(audit.map((a) => [a.action, a.actor]).sort(), [['settlement_void_requested', 'maker'], ['settlement_voided', 'checker']]);
+}));
+
+test('void: a request can be withdrawn, and the statement carries on; the database refuses a void nobody asked for', () => inRollback(async (trx) => {
+  const w = await world(trx);
+  const m = await memberCycle(trx);
+  await visits(trx, m, w.gymD, 4);
+  const { settlement, workflow } = services(trx);
+  await settlement.run({ ...NOVEMBER, mode: 'live', actorId: 'admin-1' });
+  const s = await statementOf(trx, w.gymD, NOVEMBER);
+
+  assert.equal((await workflow.cancelVoidRequest({ id: s.id, actorId: 'checker' })).error, 'void_not_requested');
+  await workflow.requestVoid({ id: s.id, reason: 'Gym may be leaving', actorId: 'maker' });
+  const cancelled = await workflow.cancelVoidRequest({ id: s.id, reason: 'Gym is staying', actorId: 'checker' });
+  assert.deepEqual([cancelled.statement.status, cancelled.statement.voidRequestedBy, cancelled.statement.voidRequestReason], ['draft', null, null]);
+  assert.equal((await workflow.voidStatement({ id: s.id, actorId: 'checker' })).error, 'void_not_requested');
+  assert.equal((await workflow.submit({ id: s.id, actorId: 'maker' })).statement.status, 'submitted');
+
+  // Straight in the database, a void without a request is refused.
+  await assert.rejects(trx.transaction((t) => t('GymSettlement').where({ id: s.id }).update({ status: 'voided', voidedBy: 'checker', voidedAt: new Date(), voidReason: 'x' })), (err) => err.code === 'P0001');
+  // An approved statement with a request can't be cleared for payment.
+  await workflow.approve({ id: s.id, actorId: 'checker' });
+  await workflow.requestVoid({ id: s.id, reason: 'Hold on', actorId: 'payer' });
+  assert.equal((await workflow.markPayable({ id: s.id, actorId: 'payer' })).error, 'void_requested');
 }));
 
 test('void: allowed from draft, submitted and approved; a payable statement must be held first; a paid one is final', () => inRollback(async (trx) => {
@@ -129,12 +170,12 @@ test('void: allowed from draft, submitted and approved; a payable statement must
   await workflow.submit({ id: d.id, actorId: 'maker' });
   await workflow.approve({ id: d.id, actorId: 'checker' });
   await workflow.markPayable({ id: d.id, actorId: 'payer' });
-  assert.deepEqual(await workflow.voidStatement({ id: d.id, reason: 'Stop', actorId: 'checker' }), { error: 'invalid_status', status: 409, currentStatus: 'payable', expected: 'draft|submitted|approved' });
+  assert.deepEqual(await workflow.requestVoid({ id: d.id, reason: 'Stop', actorId: 'maker' }), { error: 'invalid_status', status: 409, currentStatus: 'payable', expected: 'draft|submitted|approved' });
   await workflow.hold({ id: d.id, reason: 'Stop payment', actorId: 'maker' });   // payable → approved
-  assert.equal((await workflow.voidStatement({ id: d.id, reason: 'Stop', actorId: 'checker' })).statement.status, 'voided');
+  assert.equal((await voidByTwo(workflow, d.id, 'Stop')).statement.status, 'voided');
 
   await pay(workflow, c.id);
-  assert.equal((await workflow.voidStatement({ id: c.id, reason: 'Too late', actorId: 'checker' })).error, 'invalid_status');
+  assert.equal((await voidByTwo(workflow, c.id, 'Too late')).error, 'invalid_status');
   // A shadow statement is never part of the workflow.
   const shadow = await settlement.run({ ...DECEMBER, mode: 'shadow', actorId: 'admin-1' });
   assert.equal(shadow.error, undefined);
@@ -162,7 +203,7 @@ test('void: a carried-forward shortfall on the voided statement is carried again
   assert.equal((await adjustmentsOn(trx, dec.id)).filter((x) => x.type === 'carry_forward' && x.status === 'applied').length, 1);
 
   // December is voided: its carry-forward is cancelled with it …
-  const voided = await later.workflow.voidStatement({ id: dec.id, reason: 'Recalculate', actorId: 'checker' });
+  const voided = await voidByTwo(later.workflow, dec.id, 'Recalculate', { requester: 'other', confirmer: 'checker' });
   assert.equal(voided.cancelledAdjustments, 1);
   assert.deepEqual((await adjustmentsOn(trx, dec.id)).map((x) => x.status), ['voided']);
 
@@ -303,7 +344,7 @@ test('clawback: a draft statement takes it directly; a submitted one is put on h
 async function inVoided(trx, x) {
   const d = await trx('GymSettlement').where({ id: x.d.id }).first();
   assert.equal(d.status, 'draft');
-  const voided = await x.workflow.voidStatement({ id: x.d.id, reason: 'Gym left', actorId: 'checker' });
+  const voided = await voidByTwo(x.workflow, x.d.id, 'Gym left');
   assert.equal(voided.cancelledAdjustments, 1);
   await voidCheckin(trx, x.atD[0].id);
   const out = await x.clawback.sweep();
