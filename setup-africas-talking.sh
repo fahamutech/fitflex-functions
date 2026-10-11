@@ -83,24 +83,10 @@ Category: TRANSACTIONAL
 Body: Payment {{amount}} TZS received for order #{{orderId}}. Thank you for shopping at FitFlex!
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-8. VENDOR RE-ENGAGEMENT
-Name: fitflex_vendor_reengagement
-Category: MARKETING
-Body: Hey {{name}}, you haven't had sales in 7 days. Check your FitFlex dashboard for optimization tips or contact support.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-9. MEMBER RE-ENGAGEMENT
-Name: fitflex_member_reengagement
-Category: MARKETING
-Body: {{name}}, your favorite trainers have new availability! Book a session now and get 20% off your first booking. Visit FitFlex app.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TEMPLATES
 
 echo ""
-echo "Action: Register all 9 templates in Africa's Talking Dashboard"
+echo "Action: Register all 7 templates in Africa's Talking Dashboard"
 read -p "Press Enter once you've registered all templates..."
 echo ""
 

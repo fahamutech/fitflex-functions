@@ -25,16 +25,17 @@ function store(seed = []) {
   };
 }
 
-function setup({ mockResponses = {}, userRows = [] } = {}) {
+function setup({ mockResponses = {}, userRows = [], prefRows = [] } = {}) {
   global.fetch = mockFetch(mockResponses);
   const users = store(userRows.length ? userRows : [
-    { id: 'u1', displayName: 'Aisha', phoneNumber: '+255712345678' },
-    { id: 'u2', displayName: 'Trainer Mike', phoneNumber: '+256701234567' },
+    { id: 'u1', displayName: 'Aisha', phone: '+255712345678' },
+    { id: 'u2', displayName: 'Trainer Mike', phone: '+256701234567' },
   ]);
   const svc = createWhatsAppService({
     apiKey: 'test_key_123',
     users,
     auditLog: { insertAsync: () => {} },
+    preferences: store(prefRows),
   });
   return { svc, users };
 }
@@ -137,20 +138,6 @@ test('sendPaymentReceived: success', async () => {
   assert.equal(result.status, 'sent');
 });
 
-test('sendVendorReengagement: success', async () => {
-  const { svc } = setup();
-  const result = await svc.sendVendorReengagement('u1');
-  assert.ok(!result.error);
-  assert.equal(result.status, 'sent');
-});
-
-test('sendMemberReengagement: success', async () => {
-  const { svc } = setup();
-  const result = await svc.sendMemberReengagement('u1');
-  assert.ok(!result.error);
-  assert.equal(result.status, 'sent');
-});
-
 test('handleInboundMessage: success', async () => {
   const { svc } = setup();
   const result = await svc.handleInboundMessage({
@@ -194,8 +181,6 @@ test('TEMPLATES constant defined', () => {
   assert.ok(svc.TEMPLATES.otp);
   assert.ok(svc.TEMPLATES.booking_confirmed);
   assert.ok(svc.TEMPLATES.order_placed);
-  assert.ok(svc.TEMPLATES.vendor_reengagement);
-  assert.ok(svc.TEMPLATES.member_reengagement);
 });
 
 test('missing API key: service builds without throwing and sends are disabled', async () => {
@@ -203,11 +188,35 @@ test('missing API key: service builds without throwing and sends are disabled', 
   global.fetch = async () => { called = true; throw new Error('must not call the network'); };
   const svc = createWhatsAppService({
     apiKey: undefined,
-    users: store([{ id: 'u1', displayName: 'Aisha', phoneNumber: '+255712345678' }]),
+    users: store([{ id: 'u1', displayName: 'Aisha', phone: '+255712345678' }]),
     auditLog: { insertAsync: () => {} },
   });
   assert.equal(svc.enabled, false);
   const result = await svc.sendOtp('u1', '1234');
   assert.deepEqual(result, { error: 'whatsapp_not_configured', status: 503 });
   assert.equal(called, false);
+});
+
+test('the account\'s real phone field is used (not the phoneNumber that never existed)', async () => {
+  const { svc } = setup({ userRows: [{ id: 'u9', displayName: 'Old Fixture', phoneNumber: '+255712345678' }] });
+  assert.equal((await svc.sendOtp('u9', '123456')).error, 'user_no_phone');
+});
+
+test('a member who sent STOP, or switched WhatsApp updates off, gets no service messages — but still gets a sign-in code', async () => {
+  const { svc } = setup({ prefRows: [
+    { id: 'u1', whatsappOptedOutAt: new Date().toISOString() },
+    { id: 'u2', whatsappTransactional: false },
+  ] });
+  const stopped = await svc.sendBookingReminder('u1', 'Coach');
+  assert.deepEqual([stopped.error, stopped.status], ['whatsapp_opted_out', 409]);
+  const off = await svc.sendBookingConfirmed('u2', 'Aisha', '2026-10-12', '09:00');
+  assert.deepEqual([off.error, off.status], ['whatsapp_transactional_off', 409]);
+  assert.equal((await svc.sendOtp('u1', '123456')).ok, true, 'they asked for the code');
+});
+
+test('there are no re-engagement sends here: marketing goes through the Communication Center', () => {
+  const { svc } = setup();
+  assert.equal(svc.sendMemberReengagement, undefined);
+  assert.equal(svc.sendVendorReengagement, undefined);
+  assert.equal(svc.TEMPLATES.member_reengagement, undefined);
 });

@@ -48,7 +48,8 @@ export function createNotificationService({
 
   async function sendPush(userId, { title, body, data }) {
     if (!getMessaging) return { sent: 0, skipped: 'push_disabled' };
-    const tokens = (await deviceTokens.filterAsync(d => d.userId === userId)).map(d => d.token);
+    // This member's phones only (indexed on userId) — not the whole table.
+    const tokens = (await deviceTokens.filterByColumnAsync('userId', userId)).map(d => d.token);
     if (!tokens.length) return { sent: 0 };
     let messaging;
     try {

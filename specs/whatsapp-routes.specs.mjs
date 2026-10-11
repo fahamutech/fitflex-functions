@@ -39,9 +39,12 @@ test('with the secret, the webhook is handled (as a header or ?token=)', async (
 
 test('the routes that let anyone WhatsApp any user are gone', () => {
   for (const name of ['sendTrainerMessage', 'sendBookingReminder', 'sendOrderConfirmation', 'sendOrderReady',
-    'sendPaymentNotification', 'adminSendBulkReengagement', 'testSendWhatsApp']) {
+    'sendPaymentNotification', 'adminSendBulkReengagement', 'testSendWhatsApp',
+    // Re-engagement is marketing: it goes through the Communication Center
+    // (consent, history), not a direct send.
+    'adminSendReengagementVendor', 'adminSendReengagementMember']) {
     assert.equal(routes[name], undefined, name);
   }
   const paths = Object.values(routes).map(r => r.path);
-  assert.ok(!paths.some(p => p.startsWith('/trainer/') || p.startsWith('/vendor/') || p.startsWith('/operator/') || p === '/test/whatsapp'));
+  assert.ok(!paths.some(p => p.startsWith('/trainer/') || p.startsWith('/vendor/') || p.startsWith('/operator/') || p === '/test/whatsapp' || p.includes('send-reengagement')));
 });

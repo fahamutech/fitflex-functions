@@ -1,5 +1,18 @@
-// Africa's Talking WhatsApp Integration Setup Guide
-// FitFlex platform
+# Africa's Talking — direct WhatsApp sends (setup)
+
+> **Scope.** This covers only the direct, one-off service messages in
+> `src/services/whatsapp-service.mjs`: sign-in codes and booking or order
+> updates. It is off unless `AFRICAS_TALKING_API_KEY` is set.
+>
+> Messages to an audience — campaigns, automations, offers, re-engagement —
+> are **not** sent this way. They go through the Communications module
+> (`src/services/whatsapp-channel-service.mjs`), which checks consent,
+> records every message and has a kill switch; see
+> `COMMUNICATION_ARCHITECTURE.md` §11 in the main FitFlex repo. That module
+> has no provider yet.
+>
+> The direct sends honour a member's WhatsApp opt-out (STOP) and their
+> "service updates" switch. A sign-in code is always sent.
 
 ## Setup Steps
 
@@ -45,14 +58,6 @@ Body: {{memberName}}, order #{{orderId}} is ready at {{gymName}}. Pick up by {{d
 Template Name: fitflex_payment_received
 Category: TRANSACTIONAL
 Body: Payment {{amount}} TZS received for order #{{orderId}}. Thank you for shopping at FitFlex!
-
-Template Name: fitflex_vendor_reengagement
-Category: MARKETING
-Body: Hey {{name}}, you haven't had sales in 7 days. Check your FitFlex dashboard for optimization tips or contact support.
-
-Template Name: fitflex_member_reengagement
-Category: MARKETING
-Body: {{name}}, your favorite trainers have new availability! Book a session now and get 20% off your first booking. Visit FitFlex app.
 ```
 
 ### 4. Set Up Webhook for Inbound Messages

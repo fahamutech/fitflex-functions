@@ -1,9 +1,17 @@
-// WhatsApp integration service via Africa's Talking (https://africastalking.com).
-// Sends OTP, notifications, trainer-member chat, marketplace commerce messages,
-// and re-engagement campaigns via WhatsApp Business API.
+// Direct WhatsApp sends via Africa's Talking (https://africastalking.com):
+// one-off service messages tied to something the person did — a sign-in
+// code, a booking, an order. Off unless AFRICAS_TALKING_API_KEY is set.
+//
+// Messages to an audience (campaigns, automations, offers, re-engagement)
+// do NOT belong here: they go through the Communications module
+// (whatsapp-channel-service.mjs), which checks consent, records every
+// message in the ledger and has the kill switch. This service only honours
+// the member's WhatsApp opt-out (STOP) and "service updates" switch; a
+// sign-in code is always sent, since the person just asked for it.
 // Async (Knex/PostgreSQL), DI-injected.
 
 import { randomUUID } from 'node:crypto';
+import { channelAllowed } from '../shared/communications.mjs';
 
 const nowIso = () => new Date().toISOString();
 const makeId = (prefix) => `${prefix}_${randomUUID().slice(0, 8)}`;
@@ -18,8 +26,6 @@ const TEMPLATES = {
   order_placed: 'fitflex_order_placed',           // {{memberName}}, order #{{orderId}} placed. Total: {{amount}} TZS.
   order_ready: 'fitflex_order_ready',             // {{memberName}}, order #{{orderId}} is ready at {{gymName}}. Pick up by {{date}}.
   payment_received: 'fitflex_payment_received',   // Payment {{amount}} TZS received for order #{{orderId}}.
-  vendor_reengagement: 'fitflex_vendor_reengagement', // Hey {{name}}, you haven't had sales in 7 days. Check your FitFlex dashboard!
-  member_reengagement: 'fitflex_member_reengagement', // {{name}}, your favorite trainers have new availability. Book now!
 };
 
 // Validate phone number format (East African: +255, +256, +254, etc.)
@@ -31,7 +37,7 @@ function normalizePhone(phone) {
   return /^\+\d{10,15}$/.test(phone) ? phone : null;
 }
 
-export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.africastalking.com', username = 'sandbox', users, auditLog }) {
+export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.africastalking.com', username = 'sandbox', users, auditLog, preferences = null }) {
   // WhatsApp is optional. This service is built when services.mjs is imported,
   // which every function file does, so throwing here took the whole server down
   // (and into a restart loop) whenever AFRICAS_TALKING_API_KEY was unset.
@@ -85,12 +91,31 @@ export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.af
     }
   }
 
-  async function sendOtp(userId, code, name = null) {
+  /**
+   * Who to send to: the account's phone. (This used to read a `phoneNumber`
+   * field that accounts don't have, so nothing was ever sent.) Except for
+   * sign-in codes, a member who sent STOP or switched WhatsApp service
+   * updates off is left alone.
+   */
+  async function recipient(userId, noPhone, { always = false } = {}) {
     const user = await users.findByIdAsync(userId);
-    if (!user?.phoneNumber) return { error: 'user_no_phone', status: 400 };
+    const phone = user?.phone;
+    if (!phone) return { error: noPhone, status: 400 };
+    if (!always && preferences) {
+      const prefs = await preferences.findByIdAsync(userId);
+      const allowed = channelAllowed(prefs, 'whatsapp', 'transactional');
+      if (!allowed.allowed) return { error: allowed.reason, status: 409 };
+    }
+    return { user, phone };
+  }
+
+  async function sendOtp(userId, code, name = null) {
+    const to = await recipient(userId, 'user_no_phone', { always: true });
+    if (to.error) return to;
+    const user = to.user;
 
     const u = name || user.displayName || 'Member';
-    const result = await sendTemplate(user.phoneNumber, TEMPLATES.otp, { name: u, code });
+    const result = await sendTemplate(to.phone, TEMPLATES.otp, { name: u, code });
     if (result.ok) {
       auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_otp_sent', target: userId });
     }
@@ -98,75 +123,63 @@ export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.af
   }
 
   async function sendBookingConfirmed(trainerId, memberName, date, time) {
-    const trainer = await users.findByIdAsync(trainerId);
-    if (!trainer?.phoneNumber) return { error: 'trainer_no_phone', status: 400 };
+    const to = await recipient(trainerId, 'trainer_no_phone');
+    if (to.error) return to;
+    const trainer = to.user;
 
-    const result = await sendTemplate(trainer.phoneNumber, TEMPLATES.booking_confirmed, { trainerName: trainer.displayName || 'Trainer', memberName, date, time });
+    const result = await sendTemplate(to.phone, TEMPLATES.booking_confirmed, { trainerName: trainer.displayName || 'Trainer', memberName, date, time });
     if (result.ok) auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_booking_confirmed', target: trainerId });
     return result;
   }
 
   async function sendBookingReminder(userId, trainerName, minutesUntil = 60) {
-    const user = await users.findByIdAsync(userId);
-    if (!user?.phoneNumber) return { error: 'user_no_phone', status: 400 };
+    const to = await recipient(userId, 'user_no_phone');
+    if (to.error) return to;
+    const user = to.user;
 
-    const result = await sendTemplate(user.phoneNumber, TEMPLATES.booking_reminder, { name: user.displayName || 'Member', trainer: trainerName });
+    const result = await sendTemplate(to.phone, TEMPLATES.booking_reminder, { name: user.displayName || 'Member', trainer: trainerName });
     if (result.ok) auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_booking_reminder', target: userId });
     return result;
   }
 
   async function sendTrainerMessage(memberId, trainerName, message) {
-    const member = await users.findByIdAsync(memberId);
-    if (!member?.phoneNumber) return { error: 'member_no_phone', status: 400 };
+    const to = await recipient(memberId, 'member_no_phone');
+    if (to.error) return to;
+    const member = to.user;
     if (!message || message.length > 100) return { error: 'message_too_long', status: 400 };
 
-    const result = await sendTemplate(member.phoneNumber, TEMPLATES.trainer_message, { memberName: member.displayName || 'Member', trainerName, message });
+    const result = await sendTemplate(to.phone, TEMPLATES.trainer_message, { memberName: member.displayName || 'Member', trainerName, message });
     if (result.ok) auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_trainer_message', target: memberId });
     return result;
   }
 
   async function sendOrderPlaced(memberId, orderId, amount) {
-    const member = await users.findByIdAsync(memberId);
-    if (!member?.phoneNumber) return { error: 'member_no_phone', status: 400 };
+    const to = await recipient(memberId, 'member_no_phone');
+    if (to.error) return to;
+    const member = to.user;
 
-    const result = await sendTemplate(member.phoneNumber, TEMPLATES.order_placed, { memberName: member.displayName || 'Member', orderId, amount: Math.floor(amount) });
+    const result = await sendTemplate(to.phone, TEMPLATES.order_placed, { memberName: member.displayName || 'Member', orderId, amount: Math.floor(amount) });
     if (result.ok) auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_order_placed', target: memberId });
     return result;
   }
 
   async function sendOrderReady(memberId, orderId, gymName, readyBy) {
-    const member = await users.findByIdAsync(memberId);
-    if (!member?.phoneNumber) return { error: 'member_no_phone', status: 400 };
+    const to = await recipient(memberId, 'member_no_phone');
+    if (to.error) return to;
+    const member = to.user;
 
-    const result = await sendTemplate(member.phoneNumber, TEMPLATES.order_ready, { memberName: member.displayName || 'Member', orderId, gymName, date: readyBy });
+    const result = await sendTemplate(to.phone, TEMPLATES.order_ready, { memberName: member.displayName || 'Member', orderId, gymName, date: readyBy });
     if (result.ok) auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_order_ready', target: memberId });
     return result;
   }
 
   async function sendPaymentReceived(userId, amount, orderId) {
-    const user = await users.findByIdAsync(userId);
-    if (!user?.phoneNumber) return { error: 'user_no_phone', status: 400 };
+    const to = await recipient(userId, 'user_no_phone');
+    if (to.error) return to;
+    const user = to.user;
 
-    const result = await sendTemplate(user.phoneNumber, TEMPLATES.payment_received, { amount: Math.floor(amount), orderId });
+    const result = await sendTemplate(to.phone, TEMPLATES.payment_received, { amount: Math.floor(amount), orderId });
     if (result.ok) auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_payment_received', target: userId });
-    return result;
-  }
-
-  async function sendVendorReengagement(vendorId) {
-    const vendor = await users.findByIdAsync(vendorId);
-    if (!vendor?.phoneNumber) return { error: 'vendor_no_phone', status: 400 };
-
-    const result = await sendTemplate(vendor.phoneNumber, TEMPLATES.vendor_reengagement, { name: vendor.displayName || 'Vendor' });
-    if (result.ok) auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_vendor_reengagement', target: vendorId });
-    return result;
-  }
-
-  async function sendMemberReengagement(memberId) {
-    const member = await users.findByIdAsync(memberId);
-    if (!member?.phoneNumber) return { error: 'member_no_phone', status: 400 };
-
-    const result = await sendTemplate(member.phoneNumber, TEMPLATES.member_reengagement, { name: member.displayName || 'Member' });
-    if (result.ok) auditLog?.insertAsync?.({ id: makeId('wa_log'), at: nowIso(), actor: 'system', action: 'whatsapp_member_reengagement', target: memberId });
     return result;
   }
 
@@ -177,7 +190,7 @@ export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.af
     if (!phone) return { error: 'invalid_from', status: 400 };
 
     // Find user by phone number
-    const users_list = await users.filterAsync(u => normalizePhone(u.phoneNumber) === phone);
+    const users_list = await users.filterAsync(u => normalizePhone(u.phone) === phone);
     if (!users_list.length) return { error: 'user_not_found', status: 404 };
 
     const user = users_list[0];
@@ -203,8 +216,6 @@ export function createWhatsAppService({ apiKey, apiUrl = 'https://api.sandbox.af
     sendOrderPlaced,
     sendOrderReady,
     sendPaymentReceived,
-    sendVendorReengagement,
-    sendMemberReengagement,
     handleInboundMessage,
     normalizePhone,
     TEMPLATES,
