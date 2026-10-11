@@ -60,6 +60,7 @@ import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
 import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createSocialService } from '../services/social-service.mjs';
+import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createChallengeService } from '../services/challenge-service.mjs';
@@ -119,7 +120,7 @@ import {
   corporateAccounts, corporateEmployees, corporateBills,
   b2bOrganizations, b2bOrganizationUsers, b2bBeneficiaries, b2bPrograms, b2bBenefits,
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
-  follows, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
+  follows, friendInvitations, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   trainerMemberRelationships, workoutPlans, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
@@ -447,6 +448,25 @@ export const socialService = createSocialService({
   auditLog,
   // notificationService is defined further down; it's only called later.
   notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Friend invitations by email / phone (Friends & Groups → People).
+export const friendInvitationService = createFriendInvitationService({
+  users, follows, blocks, invites: friendInvitations, notifications,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  findMember: async ({ type, value }) => {
+    const q = db('User').where({ userType: 'member' }).whereNot('accountStatus', 'suspended');
+    if (type === 'email') q.whereRaw('lower("email") = ?', [value]);
+    else {
+      const digits = value.replace('+', '');
+      q.whereIn('phone', [value, digits, `0${digits.slice(3)}`]);
+    }
+    return (await q.first('id', 'displayName')) ?? null;
+  },
+  transition: async (id, from, patch, opts = {}) => {
+    const q = db('FriendInvitation').where({ id, status: from });
+    if (opts.whereRecipientNull) q.whereNull('recipientUserId');
+    return (await q.update(patch)) === 1;
+  },
 });
 export const activityService = createActivityService({
   activities, users, routes: activityRoutes,
