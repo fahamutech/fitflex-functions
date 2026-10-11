@@ -27,10 +27,18 @@ export function planDate(startDate, week, day) {
   return weekStart;
 }
 
-/** Exercises the member has completed and skipped recently, by library id. */
+// How many recent ratings decide whether the next plan eases off or asks more.
+const EFFORT_WINDOW = 3;
+
+/**
+ * What the member's finished workouts say: exercises completed and skipped
+ * (by library id), what they said about individual exercises, and whether
+ * recent sessions felt too easy or too hard.
+ */
 export function exerciseHistory(workoutRows) {
   const completed = new Set();
   const skipped = new Set();
+  const feedback = new Map();
   const recent = workoutRows
     .filter(w => w.status === 'completed')
     .sort((a, b) => String(b.scheduledDate).localeCompare(String(a.scheduledDate)))
@@ -43,10 +51,21 @@ export function exerciseHistory(workoutRows) {
       else skipped.add(e.libraryId);
       // One swapped out for another was passed over too.
       if (e.replacedFrom) skipped.add(e.replacedFrom);
+      // The newest word on an exercise is the one that counts.
+      if (e.feedback && !feedback.has(e.libraryId)) feedback.set(e.libraryId, e.feedback);
     }
   }
   for (const id of completed) skipped.delete(id);
-  return { completedExerciseIds: [...completed], skippedExerciseIds: [...skipped], feedback: [] };
+  // Two of the last three rated sessions agreeing is a pattern, one is a bad day.
+  const ratings = recent.map(w => w.feedback?.rating).filter(Boolean).slice(0, EFFORT_WINDOW);
+  const count = r => ratings.filter(x => x === r).length;
+  const effort = count('too_hard') >= 2 ? 'easier' : count('too_easy') >= 2 ? 'harder' : null;
+  return {
+    completedExerciseIds: [...completed],
+    skippedExerciseIds: [...skipped],
+    feedback: [...feedback].map(([exerciseId, reason]) => ({ exerciseId, reason })),
+    effort,
+  };
 }
 
 export function createTrainingPlanService({ plans, workouts, users, engine, now = () => new Date() }) {

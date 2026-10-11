@@ -12,6 +12,25 @@ const MAX_PLANNED_PER_DAY = 5;
 const LIMITS = { reps: 1000, weight: 1000, duration: 7200 };
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// How hard each kind of session is, as multiples of resting energy use
+// (MET, from the Compendium of Physical Activities, rounded).
+const WORKOUT_MET = { strength: 3.5, hiit: 8, functional: 4, mobility: 2.5, stretching: 2.3, sports: 6, other: 3.5 };
+
+/**
+ * Estimated energy for a workout from its kind, length and the member's
+ * weight. An estimate, like the one for runs — and like it, no weight
+ * means no number.
+ */
+export function workoutCalories({ activityType, minutes, weightKg }) {
+  const w = Number(weightKg);
+  if (!Number.isFinite(w) || w < 25 || w > 300 || !(minutes > 0)) return null;
+  return Math.round((WORKOUT_MET[activityType] ?? WORKOUT_MET.other) * w * (minutes / 60));
+}
+
+/** How a finished workout felt, and what got in the way of an exercise. */
+export const WORKOUT_RATINGS = ['too_easy', 'just_right', 'too_hard'];
+export const EXERCISE_FEEDBACK = ['didnt_enjoy', 'couldnt_perform', 'equipment_unavailable'];
+
 const id = (prefix) => `${prefix}_${randomUUID().slice(0, 12)}`;
 const isDate = (s) => typeof s === 'string' && DATE_RE.test(s) && !Number.isNaN(+new Date(`${s}T00:00:00Z`));
 const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
@@ -162,7 +181,7 @@ export function newWorkoutRow({ memberId, base, scheduledDate, gymId = null, tra
 
 export { isDate as isWorkoutDate };
 
-export function createWorkoutService({ workouts, activities, defaultShare = null, now = () => new Date() }) {
+export function createWorkoutService({ workouts, activities, users = null, defaultShare = null, now = () => new Date() }) {
   function templates() {
     return { templates: WORKOUT_TEMPLATES };
   }
@@ -266,6 +285,7 @@ export function createWorkoutService({ workouts, activities, defaultShare = null
       minutes = Math.min(Math.max(minutes, 1), 600);
     }
     const startedAt = new Date(+end - minutes * 60000).toISOString();
+    const weightKg = users ? (await users.findByIdAsync(memberId))?.memberProfile?.weightKg : null;
 
     const activity = {
       id: `act_${randomUUID().slice(0, 12)}`,
@@ -275,6 +295,7 @@ export function createWorkoutService({ workouts, activities, defaultShare = null
       startedAt: w.startedAt ?? startedAt,
       durationMinutes: minutes,
       activeMinutes: minutes,
+      calories: workoutCalories({ activityType: w.activityType, minutes, weightKg }),
       intensity: w.activityType === 'hiit' ? 'high' : w.activityType === 'mobility' ? 'low' : 'moderate',
       workoutId: w.id,
       gymId: w.gymId ?? null,
@@ -304,6 +325,38 @@ export function createWorkoutService({ workouts, activities, defaultShare = null
     return { workout: { ...w, ...patch }, activity };
   }
 
+  /**
+   * How a finished workout went: `rating` for the session as a whole, and
+   * `exercises: [{ id, reason }]` for any that didn't work (reason null
+   * clears it). Either part alone is fine, and it can be changed later.
+   * The next plan is built with this in mind.
+   */
+  async function feedback(memberId, workoutId, body = {}) {
+    const w = await ownWorkout(memberId, workoutId);
+    if (!w) return { error: 'not_found', status: 404 };
+    if (w.status !== 'completed') return { error: 'not_completed', status: 409 };
+    const stamp = now().toISOString();
+    const patch = { updatedAt: stamp };
+    if (body.rating !== undefined) {
+      if (body.rating !== null && !WORKOUT_RATINGS.includes(body.rating)) return { error: 'invalid_rating', status: 400 };
+      patch.feedback = body.rating === null ? null : { rating: body.rating, at: stamp };
+    }
+    if (body.exercises !== undefined) {
+      if (!Array.isArray(body.exercises)) return { error: 'invalid_exercises', status: 400 };
+      for (const item of body.exercises) {
+        const ex = w.exercises.find(e => e.id === item?.id);
+        if (!ex) return { error: 'unknown_exercise', status: 400 };
+        if (item.reason != null && !EXERCISE_FEEDBACK.includes(item.reason)) return { error: 'invalid_reason', status: 400 };
+        if (item.reason == null) delete ex.feedback;
+        else ex.feedback = item.reason;
+      }
+      patch.exercises = w.exercises;
+    }
+    if (patch.feedback === undefined && !patch.exercises) return { error: 'nothing_to_save', status: 400 };
+    await workouts.updateByIdAsync(workoutId, patch);
+    return { workout: { ...w, ...patch } };
+  }
+
   /** Skip or delete a workout that hasn't been done. */
   async function skip(memberId, workoutId) {
     const w = await ownWorkout(memberId, workoutId);
@@ -314,5 +367,5 @@ export function createWorkoutService({ workouts, activities, defaultShare = null
     return { workout: { ...w, ...patch } };
   }
 
-  return { templates, list, get, create, start, saveProgress, complete, skip };
+  return { templates, list, get, create, start, saveProgress, complete, skip, feedback };
 }
