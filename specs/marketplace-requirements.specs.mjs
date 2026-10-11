@@ -57,7 +57,7 @@ async function approvedProduct(service, overrides = {}) {
   const created = await service.upsertProduct({
     vendorId: 'vendor-1',
     body: {
-      name: 'Whey Protein', description: 'One kilogram tub', category: 'Supplements',
+      name: 'Whey Protein', description: 'One kilogram tub', category: 'supplements_nutrition',
       brand: 'Fit Fuel', priceTzs: 85000, discountPriceTzs: 75000, stock: 10,
       sku: 'FF-WHEY-1', weightKg: 1, variants: [{ name: 'Vanilla', stock: 4 }],
       images: ['one.jpg', 'two.jpg'], visibility: 'visible', deliveryAvailable: true,
@@ -106,12 +106,12 @@ test('marketplace: rich products are approval gated, filterable and sortable', a
   const { service } = makeService();
   const productId = await approvedProduct(service);
   await approvedProduct(service, {
-    name: 'Yoga Mat', category: 'Equipment', brand: 'Zen', priceTzs: 30000,
+    name: 'Yoga Mat', category: 'equipment', brand: 'Zen', priceTzs: 30000,
     discountPriceTzs: null, soldCount: 50, rating: 4.9,
   });
 
   const filtered = await service.listProducts({
-    category: 'supplements', brand: 'fit fuel', minPrice: 70000, maxPrice: 80000,
+    category: 'supplements_nutrition', brand: 'fit fuel', minPrice: 70000, maxPrice: 80000,
     vendorId: 'vendor-1', delivery: true, maxDistanceKm: 5, promotions: true,
   });
   assert.equal(filtered.length, 1);

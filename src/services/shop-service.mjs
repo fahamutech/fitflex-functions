@@ -1,4 +1,5 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
+import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
 import { randomUUID } from 'node:crypto';
 import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
@@ -8,10 +9,11 @@ import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set(['pending', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup', 'delivered', 'cancelled', 'confirmed', 'fulfilled']);
 const PAYMENT_METHODS = new Set(['mpesa', 'airtel_money', 'mixx', 'card', 'bank']);
-const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'settlementAccount'];
+// Email and delivery regions are not mandatory (11 Oct 2026); they are still stored and shown when given.
+const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'address', 'businessHours', 'settlementAccount'];
 // Optional profile fields. Partner KYC reads productCategories and returnsPolicy
 // for the vendor's marketplace requirements. Anything else in the body is ignored.
-const PROFILE_OPTIONAL = ['productCategories', 'returnsPolicy'];
+const PROFILE_OPTIONAL = ['productCategories', 'returnsPolicy', 'email', 'deliveryRegions'];
 const PROFILE_FIELDS = new Set([...PROFILE_REQUIRED, ...PROFILE_OPTIONAL]);
 export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
 export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
@@ -52,6 +54,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const current = await users.findByIdAsync(vendorId);
     const prior = current?.vendorProfile || {};
     const publish = body?.publish === true;
+    if (body?.productCategories !== undefined) {
+      const picked = Array.isArray(body.productCategories) ? body.productCategories : [];
+      const unknown = picked.filter(key => !PRODUCT_CATEGORY_KEYS.has(key));
+      if (unknown.length || !Array.isArray(body.productCategories)) {
+        return { error: 'invalid_product_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
+      }
+    }
     const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
     const missing = PROFILE_REQUIRED.filter(key => {
       const value = profile[key];
@@ -117,7 +126,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { ...product, vendor: publicProfile(await getVendorProfile(product.vendorId)), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
   }
 
-  async function upsertProduct({ vendorId, body, productId }) {
+  async function upsertProduct({ vendorId, body, productId, keepCategory = false }) {
     const input = body || {};
     if (productId) {
       const prior = await products.findByIdAsync(productId);
@@ -126,6 +135,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (input.name !== undefined && !String(input.name).trim()) return { error: 'name_required', status: 400 };
       if (input.priceTzs !== undefined && Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
       if (input.stock !== undefined && Number(input.stock) < 0) return { error: 'invalid_stock', status: 400 };
+      // A category must come from the list when it is changed; an existing free-text one is left alone.
+      if (input.category && input.category !== prior.category && !PRODUCT_CATEGORY_KEYS.has(input.category)) {
+        return { error: 'invalid_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
+      }
       const patch = { updatedAt: nowIso() };
       if (input.name !== undefined) patch.name = String(input.name).trim();
       for (const field of ['description', 'category', 'brand', 'sku', 'visibility', 'deliveryAvailable']) if (input[field] !== undefined) patch[field] = input[field];
@@ -139,6 +152,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       return { product: await products.updateByIdAsync(productId, patch) };
     }
     if (!input.name?.trim()) return { error: 'name_required', status: 400 };
+    if (input.category && !keepCategory && !PRODUCT_CATEGORY_KEYS.has(input.category)) {
+      return { error: 'invalid_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
+    }
     if (input.priceTzs == null || Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
     if (Number(input.stock ?? 0) < 0) return { error: 'invalid_stock', status: 400 };
     const at = nowIso();
@@ -157,7 +173,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
     if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
-    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null } });
+    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true });
   }
   async function deleteProduct({ vendorId, productId }) {
     const prior = await products.findByIdAsync(productId);
