@@ -66,7 +66,8 @@ export const EXERCISE_ENVIRONMENTS = ENVIRONMENTS.filter(e => e !== 'any');
 
 /** Who made a training plan. Trainers come later; the model is ready for them. */
 export const PLAN_CREATORS = ['member', 'fitflex', 'trainer'];
-export const PLAN_STATUSES = ['active', 'completed', 'cancelled'];
+// `offered` is a trainer's plan waiting for the member's answer; `declined` is their no.
+export const PLAN_STATUSES = ['offered', 'active', 'completed', 'cancelled', 'declined'];
 
 /** The vocabulary as the apps need it to draw the choices. */
 export function trainingOptions() {

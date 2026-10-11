@@ -2,7 +2,7 @@
 // member's training preferences and their plans.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { trainingPlanService, trainingPreferenceService, workoutExerciseService } from '../src/bootstrap/services.mjs';
+import { trainerPlanService, trainingPlanService, trainingPreferenceService, workoutExerciseService } from '../src/bootstrap/services.mjs';
 import { trainingOptions } from '../src/shared/training-taxonomy.mjs';
 import { alternativesFor, exerciseById, listExercises, localizedExercise } from '../src/shared/exercise-library.mjs';
 
@@ -94,10 +94,12 @@ export const myTrainingPlan = {
   created, method: 'get', path: '/me/training-plans/:id',
   description: 'Member: one of their plans, week by week.',
   onGuard: requireAuth('member'),
-  // Whichever of the two routes the router matches first, 'current' means the plan they are on.
+  // Whichever route the router matches first, the fixed words mean what they say.
   onRequest: async (req, res) => send(res, req.params.id === 'current'
     ? await trainingPlanService.current(req.user.sub)
-    : await trainingPlanService.get(req.user.sub, req.params.id))
+    : req.params.id === 'offers'
+      ? await trainingPlanService.offers(req.user.sub)
+      : await trainingPlanService.get(req.user.sub, req.params.id))
 };
 
 export const cancelMyTrainingPlan = {
@@ -124,4 +126,61 @@ export const replaceWorkoutExercise = {
   requestSample: { libraryId: 'ex_push_up' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await workoutExerciseService.replace(req.user.sub, req.params.id, req.params.exerciseId, req.body || {}))
+};
+
+// ── Plans a trainer makes for a client ──────────────────────────────────────
+
+export const myTrainingPlanOffers = {
+  created, method: 'get', path: '/me/training-plans/offers',
+  description: 'Member: plans their trainers have made for them that they have not answered yet, each with its sessions in outline.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await trainingPlanService.offers(req.user.sub))
+};
+
+export const acceptMyTrainingPlan = {
+  created, method: 'post', path: '/me/training-plans/:id/accept',
+  description: 'Member: take a trainer\'s plan. It replaces the plan they are on and its sessions become their workouts.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await trainingPlanService.accept(req.user.sub, req.params.id))
+};
+
+export const declineMyTrainingPlan = {
+  created, method: 'post', path: '/me/training-plans/:id/decline',
+  description: 'Member: say no to a trainer\'s plan. Nothing of theirs changes.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => send(res, await trainingPlanService.decline(req.user.sub, req.params.id))
+};
+
+export const trainerSuggestTrainingPlan = {
+  created, method: 'post', path: '/trainer/clients/:id/training-plans/suggestion',
+  description: 'Trainer: what FitFlex would suggest for this client — the first week, session by session. { durationWeeks?, startDate?, preferences?, lang? }. Uses the client\'s own goal and preferences only if they share goals with the trainer.',
+  requestSample: { durationWeeks: 4, preferences: { daysPerWeek: 3, environment: 'gym' } },
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => send(res, await trainerPlanService.suggest(req.user.sub, req.params.id, req.body || {}))
+};
+
+export const trainerOfferTrainingPlan = {
+  created, method: 'post', path: '/trainer/clients/:id/training-plans',
+  description: 'Trainer: offer a client a plan. { name?, note?, durationWeeks?, startDate?, days: [{ day (1 = Monday … 7), planId } | { day, suggested: true }], preferences?, lang? }. The client must accept it.',
+  requestSample: { name: 'Strength block', durationWeeks: 4, days: [{ day: 1, planId: 'wpl_x' }, { day: 3, suggested: true }] },
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => {
+    const result = await trainerPlanService.offer(req.user.sub, req.params.id, req.body || {});
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(201).json(result);
+  }
+};
+
+export const trainerClientTrainingPlans = {
+  created, method: 'get', path: '/trainer/clients/:id/training-plans',
+  description: 'Trainer: the plans they have made for this client and where each stands. Session progress only if the client shares workout history.',
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => send(res, await trainerPlanService.list(req.user.sub, req.params.id))
+};
+
+export const trainerWithdrawTrainingPlan = {
+  created, method: 'post', path: '/trainer/training-plans/:id/cancel',
+  description: 'Trainer: take back an offer, or stop a plan the client is on (workouts they have done stay theirs).',
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => send(res, await trainerPlanService.withdraw(req.user.sub, req.params.id))
 };
