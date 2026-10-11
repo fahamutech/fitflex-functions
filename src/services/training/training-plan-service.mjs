@@ -148,7 +148,7 @@ export function createTrainingPlanService({ plans, workouts, users, engine, now 
   /**
    * Make a plan for the member. Body (all optional): `preferences` to use
    * for this plan only, `durationWeeks`, `startDate`, `replace` (end the
-   * plan they are on).
+   * plan they are on), `lang` (en|sw: the language its names are written in).
    */
   async function generate(memberId, body = {}) {
     const user = await users.findByIdAsync(memberId);
@@ -175,7 +175,7 @@ export function createTrainingPlanService({ plans, workouts, users, engine, now 
 
     const mine = await workouts.filterByColumnAsync('userId', memberId);
     const input = buildRecommendationInput({
-      profile: user.memberProfile ?? {}, preferences, durationWeeks, startDate, history: exerciseHistory(mine),
+      profile: user.memberProfile ?? {}, preferences, durationWeeks, startDate, history: exerciseHistory(mine), lang: body.lang,
     });
     const result = await engine.recommend(input);
     if (result.error) return result;

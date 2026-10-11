@@ -330,3 +330,27 @@ test('history is read from finished workouts', () => {
   assert.deepEqual(h.completedExerciseIds.sort(), ['ex_plank', 'ex_push_up']);
   assert.deepEqual(h.skippedExerciseIds, [], 'done later, so not counted as skipped; a skipped workout says nothing about its exercises');
 });
+
+test('a plan can be written in Swahili: session names, with exercises as the library has them', async () => {
+  const sw = (await draftFor({ fitnessGoals: ['lose_weight'], trainingPreferences: { daysPerWeek: 4 } }, { lang: 'sw' })).draft;
+  const en = (await draftFor({ fitnessGoals: ['lose_weight'], trainingPreferences: { daysPerWeek: 4 } })).draft;
+  assert.equal(sw.name, 'Mpango wa Afya wa Wiki 4');
+  assert.deepEqual(sw.weeks[0].days.map(d => d.workout.name), ['Sehemu ya Juu ya Mwili', 'Pumzi na Moyo', 'Sehemu ya Chini ya Mwili', 'Stamina']);
+  assert.deepEqual(en.weeks[0].days.map(d => d.workout.name), ['Upper Body', 'Cardio', 'Lower Body', 'Conditioning']);
+  // Only the words differ: the same exercises, sets and days.
+  const shape = d => d.weeks.map(w => w.days.map(x => [x.day, x.workout.exercises.map(e => [e.libraryId, e.sets, e.reps, e.duration])]));
+  assert.deepEqual(shape(sw), shape(en));
+
+  const focused = (await draftFor({ fitnessGoals: ['gain_muscle'], trainingPreferences: { targetAreas: ['chest', 'glutes'] } }, { lang: 'sw' })).draft;
+  assert.equal(focused.weeks[0].days[0].workout.name, 'Kifua + Makalio');
+  // An unknown language falls back to English rather than failing.
+  assert.equal((await draftFor({}, { lang: 'fr' })).draft.name, '4-Week Fitness Plan');
+});
+
+test('the plan service passes the member\'s language through', async () => {
+  const s = setup({ fitnessGoals: ['improve_flexibility'] });
+  const { plan } = await s.svc.generate('m1', { lang: 'sw', durationWeeks: 1 });
+  assert.equal(plan.name, 'Mpango wa Unyumbufu wa Wiki 1');
+  assert.ok(plan.weeks[0].days.some(d => d.name === 'Unyumbufu'));
+  assert.ok(s.workouts.rows.some(w => w.name === 'Unyumbufu'));
+});

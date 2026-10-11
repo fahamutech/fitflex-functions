@@ -10,7 +10,7 @@
 //   3. For each session, the best exercise for each area in turn, from
 //      what the member can actually do (equipment, place, experience).
 //   4. Sets and reps from the library, nudged by experience and by week.
-import { listExercises } from '../../shared/exercise-library.mjs';
+import { listExercises, localizedExercise } from '../../shared/exercise-library.mjs';
 import { EXPERIENCE_LEVELS } from '../../shared/training-taxonomy.mjs';
 
 const UPPER = ['chest', 'back', 'shoulders', 'biceps', 'triceps'];
@@ -80,6 +80,22 @@ const LEVEL = Object.fromEntries(EXPERIENCE_LEVELS.map((l, i) => [l, i]));
 const AREA_LABEL = a => a.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
 const STYLE_LABEL = { strength: 'Strength', mixed: 'Fitness', cardio: 'Endurance', hiit: 'HIIT', functional: 'Functional', mobility: 'Mobility' };
 
+// Session and area names in Swahili, for members who use the app in it.
+// The area words match the app's own (training.area.*). Exercise names stay
+// as they are known in gyms; their instructions follow the library's i18n.
+const SW = {
+  sessions: {
+    full: 'Mwili Mzima', upper: 'Sehemu ya Juu ya Mwili', lower: 'Sehemu ya Chini ya Mwili', push: 'Kusukuma', pull: 'Kuvuta',
+    core: 'Kiwiliwili', cardio: 'Pumzi na Moyo', conditioning: 'Stamina', mobility: 'Unyumbufu', functional: 'Mazoezi Mchanganyiko',
+  },
+  areas: {
+    chest: 'Kifua', back: 'Mgongo', shoulders: 'Mabega', biceps: 'Misuli ya mbele ya mkono', triceps: 'Misuli ya nyuma ya mkono',
+    glutes: 'Makalio', quadriceps: 'Mapaja (mbele)', hamstrings: 'Mapaja (nyuma)', calves: 'Ndama',
+    abs: 'Tumbo', obliques: 'Pembeni mwa tumbo', lower_back: 'Kiuno',
+  },
+  styles: { strength: 'Nguvu', mixed: 'Afya', cardio: 'Ustahimilivu', hiit: 'HIIT', functional: 'Mazoezi Mchanganyiko', mobility: 'Unyumbufu' },
+};
+
 const weekday = date => ((new Date(`${date}T00:00:00Z`).getUTCDay() + 6) % 7) + 1; // 1 = Monday
 const addDays = (date, n) => new Date(Date.parse(`${date}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
@@ -95,8 +111,11 @@ function focusFor(kind, chosen, turn = 0) {
 }
 
 /** "Chest + Triceps" when the member's areas shape the session, else the kind's name. */
-function sessionName(kind, mine) {
-  return mine.length ? mine.slice(0, 2).map(AREA_LABEL).join(' + ') : SESSIONS[kind].name;
+function sessionName(kind, mine, lang) {
+  const sw = lang === 'sw';
+  const area = a => (sw ? SW.areas[a] ?? AREA_LABEL(a) : AREA_LABEL(a));
+  if (mine.length) return mine.slice(0, 2).map(area).join(' + ');
+  return sw ? SW.sessions[kind] ?? SESSIONS[kind].name : SESSIONS[kind].name;
 }
 
 export function createRulesRecommendationProvider({ library } = {}) {
@@ -207,12 +226,13 @@ export function createRulesRecommendationProvider({ library } = {}) {
       const long = (e.defaultDuration ?? 0) >= 300;
       return {
         libraryId: e.id,
-        exerciseName: e.name,
+        // The exercise in the member's language where the library has it.
+        exerciseName: localizedExercise(e, input.lang).name,
         muscleGroup: e.targetAreas[0],
         sets,
         reps: e.defaultReps ? e.defaultReps + step : null,
         duration: e.defaultDuration ? e.defaultDuration + step * (long ? 60 : 5) : null,
-        instructions: e.instructions.join(' '),
+        instructions: localizedExercise(e, input.lang).instructions.join(' '),
         tracksWeight: e.tracksWeight,
       };
     }
@@ -230,7 +250,7 @@ export function createRulesRecommendationProvider({ library } = {}) {
           day: weekday(addDays(weekStart, offsets[slot])),
           focusAreas: [...new Set(picked.map(p => p.area))],
           workout: {
-            name: sessionName(kind, mine),
+            name: sessionName(kind, mine, input.lang),
             activityType: SESSIONS[kind].activityType,
             estimatedDuration: input.sessionMinutes,
             exercises: picked.map(p => prescribe(p.e, week)),
@@ -242,7 +262,9 @@ export function createRulesRecommendationProvider({ library } = {}) {
     }
 
     return {
-      name: `${input.durationWeeks}-Week ${STYLE_LABEL[style]} Plan`,
+      name: input.lang === 'sw'
+        ? `Mpango wa ${SW.styles[style]} wa Wiki ${input.durationWeeks}`
+        : `${input.durationWeeks}-Week ${STYLE_LABEL[style]} Plan`,
       durationWeeks: input.durationWeeks,
       weeks,
     };
