@@ -85,7 +85,6 @@ import { registerB2BJobs } from '../services/b2b-jobs.mjs';
 import { createB2BWatchService } from '../services/b2b-watch-service.mjs';
 import { createB2BBeneficiaryImportService } from '../services/b2b-beneficiary-import-service.mjs';
 import { createB2BLifecycleService } from '../services/b2b-lifecycle-service.mjs';
-import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
 import { createSegmentService } from '../services/segment-service.mjs';
 import { createCampaignService } from '../services/campaign-service.mjs';
 import { createTemplateService } from '../services/template-service.mjs';
@@ -218,7 +217,6 @@ export const shopService = createShopService({
   onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
 });
-export const whatsAppNotifier = createWhatsAppNotifier();
 export const corporateService = createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
   // Every new company gets its employer B2B organisation. b2bService is defined
@@ -449,7 +447,7 @@ export const whatsAppService = createWhatsAppService({
   apiKey: process.env.AFRICAS_TALKING_API_KEY,
   apiUrl: process.env.AFRICAS_TALKING_API_URL || undefined,
   username: process.env.AFRICAS_TALKING_USERNAME || undefined,
-  users, auditLog,
+  users, auditLog, preferences: communicationPreferences,
 });
 
 export { resolveRequestUser, publicUserId, signJwt, initFirebaseAdmin, getAdminAuth };

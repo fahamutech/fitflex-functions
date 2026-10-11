@@ -10,7 +10,6 @@
 // they had anything to do with them, and no app called them. Business
 // messages to members go through the Communication Center instead.
 import '../src/bootstrap/init.mjs';
-import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { timingSafeEqual } from 'node:crypto';
 import { whatsAppService, whatsappChannelService } from '../src/bootstrap/services.mjs';
 
@@ -38,29 +37,6 @@ export const sendOtp = {
     const { userId, code } = req.body || {};
     if (!userId || !code) return res.status(400).json({ error: 'userId_code_required' });
     const result = await whatsAppService.sendOtp(userId, code);
-    if (result.error) return res.status(result.status).json({ error: result.error });
-    res.json(result);
-  },
-};
-
-// ── Admin ──
-export const adminSendReengagementVendor = {
-  created, method: 'post', path: '/admin/send-reengagement/vendor/:vendorId',
-  description: 'Admin: send re-engagement campaign to inactive vendor.',
-  onGuard: [requireAuth('admin'), requireAcl('vendors')],
-  onRequest: async (req, res) => {
-    const result = await whatsAppService.sendVendorReengagement(req.params.vendorId);
-    if (result.error) return res.status(result.status).json({ error: result.error });
-    res.json(result);
-  },
-};
-
-export const adminSendReengagementMember = {
-  created, method: 'post', path: '/admin/send-reengagement/member/:memberId',
-  description: 'Admin: send re-engagement campaign to inactive member (highlight trainer availability).',
-  onGuard: [requireAuth('admin'), requireAcl('members')],
-  onRequest: async (req, res) => {
-    const result = await whatsAppService.sendMemberReengagement(req.params.memberId);
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result);
   },

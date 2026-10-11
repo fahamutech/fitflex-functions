@@ -94,3 +94,18 @@ test('markRead cannot touch a notification of another user', async () => {
   const out = await svc.markRead({ userId: 'u2', id: notification.id });
   assert.equal(out.status, 404);
 });
+
+test('a push looks up only that member\'s phones, never the whole token table', async () => {
+  const sent = [];
+  const messaging = { sendEachForMulticast: async ({ tokens }) => { sent.push(tokens); return { successCount: tokens.length, failureCount: 0, responses: tokens.map(() => ({ success: true })) }; } };
+  const { svc, deviceTokens } = setup({ messaging });
+  deviceTokens.rows.push({ id: 'd1', userId: 'u1', token: 'tok-mine' }, { id: 'd2', userId: 'u2', token: 'tok-other' });
+  const lookups = [];
+  deviceTokens.filterAsync = async () => { throw new Error('whole-table scan'); };
+  const byColumn = deviceTokens.filterByColumnAsync;
+  deviceTokens.filterByColumnAsync = async (col, value) => { lookups.push([col, value]); return byColumn(col, value); };
+  const r = await svc.sendPush('u1', { title: 'Hi', body: 'There', data: {} });
+  assert.equal(r.sent, 1);
+  assert.deepEqual(sent, [['tok-mine']]);
+  assert.deepEqual(lookups, [['userId', 'u1']]);
+});
