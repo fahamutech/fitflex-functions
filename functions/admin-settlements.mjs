@@ -131,13 +131,28 @@ export const adminPayStatement = {
   onRequest: async (req, res) => respond(res, await settlementWorkflowService.pay({ id: req.params.id, paymentReference: req.body?.paymentReference, receiptUrl: req.body?.receiptUrl, actorId: req.user?.sub }))
 };
 
+export const adminRequestStatementVoid = {
+  created, method: 'post', path: '/admin/settlements/statements/:id/void-request',
+  description: 'Admin: ask for a draft, submitted or approved statement to be voided, with a reason. Nothing is voided until a different admin confirms. While the request stands the statement can\'t be submitted, approved or cleared for payment. A payable statement must be put on hold first; a paid one is final. To pay later instead, use hold.',
+  requestSample: { reason: 'Gym left the network; nothing is owed for October' },
+  onGuard: [requireAuth('admin'), requireAcl('settlements_prepare', 'settlements_approve')],
+  onRequest: async (req, res) => respond(res, await settlementWorkflowService.requestVoid({ id: req.params.id, reason: req.body?.reason, actorId: req.user?.sub }))
+};
+
+export const adminCancelStatementVoidRequest = {
+  created, method: 'post', path: '/admin/settlements/statements/:id/void-request/cancel',
+  description: 'Admin: withdraw or decline a void request. The statement carries on as it was.',
+  requestSample: { reason: 'Gym is staying; pay as normal' },
+  onGuard: [requireAuth('admin'), requireAcl('settlements_prepare', 'settlements_approve')],
+  onRequest: async (req, res) => respond(res, await settlementWorkflowService.cancelVoidRequest({ id: req.params.id, reason: req.body?.reason, actorId: req.user?.sub }))
+};
+
 export const adminVoidStatement = {
   created, method: 'post', path: '/admin/settlements/statements/:id/void',
-  description: 'Admin: void a draft, submitted or approved statement, with a reason. It will never be paid and its visits are not settled again; its adjustments are cancelled, and a carried-forward shortfall or clawback among them is raised again on the gym\'s next statement. A payable statement must be put on hold first; a paid one is final. To pay later instead, use hold.',
-  requestSample: { reason: 'Gym left the network; nothing is owed for October' },
+  description: 'Admin: confirm a requested void. The confirmer must not be the person who asked. The statement will never be paid and its visits are not settled again; its adjustments are cancelled, and a carried-forward shortfall or clawback among them is raised again on the gym\'s next statement.',
   onGuard: [requireAuth('admin'), requireAcl('settlements_approve')],
   onRequest: async (req, res) => {
-    const result = await settlementWorkflowService.voidStatement({ id: req.params.id, reason: req.body?.reason, actorId: req.user?.sub });
+    const result = await settlementWorkflowService.voidStatement({ id: req.params.id, actorId: req.user?.sub });
     if (!result.error) await settlementClawbackService.sweepQuietly({ actorId: req.user?.sub });
     respond(res, result);
   }

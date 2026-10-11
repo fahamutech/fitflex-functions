@@ -28,7 +28,10 @@
 // carryForwardTzs, and is pulled into the gym's next statement as a
 // carry_forward adjustment when that one is submitted — once.
 //
-// Voiding cancels an unpaid statement for good, with a reason. Its
+// Voiding cancels an unpaid statement for good. It takes two people: one
+// asks for it with a reason, a different one confirms (or the request is
+// cancelled). While a void is requested the statement can't be submitted,
+// approved or cleared for payment. Its
 // adjustments are cancelled with it, so a carried-forward shortfall or a
 // clawback that sat on it is raised again on the gym's next statement. Its
 // visits stay settled: they are never paid by a later run. To pay later
@@ -103,6 +106,7 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
   /** draft → submitted. Pulls in any shortfall carried forward, then freezes the amounts. */
   const submit = ({ id, actorId }, opts) => step(id, 'submitted', actorId, async (s, q) => {
     if (s.status !== 'draft') return wrongStatus(s, 'draft');
+    if (s.voidRequestedBy) return fail('void_requested');
     const run = await q('SettlementRun').where({ id: s.runId }).first('status');
     if (run?.status !== 'locked') return fail('run_not_locked');
     const pending = await q('SettlementAdjustment').where({ gymSettlementId: id, status: 'proposed' }).first('id');
@@ -127,6 +131,7 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
   /** submitted → approved, by someone other than the submitter. */
   const approve = ({ id, actorId }, opts) => step(id, 'approved', actorId, async (s) => {
     if (s.status !== 'submitted') return wrongStatus(s, 'submitted');
+    if (s.voidRequestedBy) return fail('void_requested');
     if (s.submittedBy === actorId) return fail('cannot_approve_own_submission', 403);
     return { patch: { status: 'approved', approvedBy: actorId, approvedAt: now() } };
   }, opts);
@@ -149,6 +154,7 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
   /** approved → payable, when nothing holds it and the gym can be paid. */
   const markPayable = ({ id, actorId }, opts) => step(id, 'payable', actorId, async (s) => {
     if (s.status !== 'approved') return wrongStatus(s, 'approved');
+    if (s.voidRequestedBy) return fail('void_requested');
     if (s.holdReason) return fail('on_hold', 409, { holdReason: s.holdReason });
     if (!(s.finalNetTzs > 0)) return fail('nothing_to_pay');
     const check = await payoutEligibility.forGym(s.gymId, { at: now() });
@@ -177,19 +183,42 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
   }, opts);
 
   /**
-   * draft | submitted | approved → voided: the statement will never be paid.
-   * A payable statement has to be put on hold first (back to approved); a
-   * paid one is final.
+   * Ask for a draft, submitted or approved statement to be voided, with a
+   * reason. Nothing is voided yet: someone else has to confirm. A payable
+   * statement has to be put on hold first (back to approved); a paid one is
+   * final.
    */
-  const voidStatement = ({ id, reason, actorId }, opts) => step(id, 'voided', actorId, async (s, q) => {
+  const requestVoid = ({ id, reason, actorId }, opts) => step(id, 'void_requested', actorId, async (s) => {
     if (!VOIDABLE.includes(s.status)) return wrongStatus(s, VOIDABLE.join('|'));
+    if (s.voidRequestedBy) return fail('void_already_requested');
     if (!text(reason)) return fail('reason_required', 400);
+    return { patch: { voidRequestedBy: actorId, voidRequestedAt: now(), voidRequestReason: text(reason) }, audit: { reason: text(reason) } };
+  }, opts);
+
+  /** Withdraw or decline a void request. The statement carries on as it was. */
+  const cancelVoidRequest = ({ id, reason, actorId }, opts) => step(id, 'void_request_cancelled', actorId, async (s) => {
+    if (!s.voidRequestedBy || s.status === 'voided') return fail('void_not_requested');
+    return {
+      patch: { voidRequestedBy: null, voidRequestedAt: null, voidRequestReason: null },
+      audit: { requestedBy: s.voidRequestedBy, requestReason: s.voidRequestReason, ...(text(reason) ? { reason: text(reason) } : {}) },
+    };
+  }, opts);
+
+  /**
+   * Confirm a requested void: draft | submitted | approved → voided, by
+   * someone other than the person who asked. The statement will never be
+   * paid.
+   */
+  const voidStatement = ({ id, actorId }, opts) => step(id, 'voided', actorId, async (s, q) => {
+    if (!VOIDABLE.includes(s.status)) return wrongStatus(s, VOIDABLE.join('|'));
+    if (!s.voidRequestedBy) return fail('void_not_requested');
+    if (s.voidRequestedBy === actorId) return fail('cannot_void_own_request', 403);
     const at = now();
     const cancelledAdjustments = await q('SettlementAdjustment').where({ gymSettlementId: id }).whereIn('status', ['proposed', 'applied'])
       .update({ status: 'voided', updatedAt: at });
     return {
-      patch: { status: 'voided', voidedBy: actorId, voidedAt: at, voidReason: text(reason) },
-      audit: { reason: text(reason), finalNetTzs: s.finalNetTzs, cancelledAdjustments },
+      patch: { status: 'voided', voidedBy: actorId, voidedAt: at, voidReason: s.voidRequestReason },
+      audit: { reason: s.voidRequestReason, requestedBy: s.voidRequestedBy, finalNetTzs: s.finalNetTzs, cancelledAdjustments },
       extra: { cancelledAdjustments },
     };
   }, opts);
@@ -256,5 +285,5 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
     return query;
   }
 
-  return { submit, reject, approve, hold, release, markPayable, pay, voidStatement, list, proposeAdjustment, decideAdjustment };
+  return { submit, reject, approve, hold, release, markPayable, pay, requestVoid, cancelVoidRequest, voidStatement, list, proposeAdjustment, decideAdjustment };
 }

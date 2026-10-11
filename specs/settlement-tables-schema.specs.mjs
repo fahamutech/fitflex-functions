@@ -173,7 +173,7 @@ test('one live run per period, one live statement per gym and period, one live s
 
   const gs = await makeStatement(trx, run, 'gym-A');
   await rejects(trx, (t) => t('GymSettlement').insert({ id: uid('gs'), runId: run.id, mode: 'live', gymId: 'gym-A', periodStartDate: '2027-03-01', periodEndDate: '2027-04-01' }), '23505');
-  await trx('GymSettlement').where({ id: gs.id }).update({ status: 'voided', voidedAt: new Date(), voidedBy: 'admin', voidReason: 'recalculated' });
+  await trx('GymSettlement').where({ id: gs.id }).update({ status: 'voided', voidedAt: new Date(), voidedBy: 'admin', voidReason: 'recalculated', voidRequestedBy: 'maker', voidRequestedAt: new Date(), voidRequestReason: 'recalculated' });
   await makeStatement(trx, run, 'gym-A');   // a voided statement frees the period
 
   const { rows } = await store(trx, run, example7());
