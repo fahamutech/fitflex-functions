@@ -10,7 +10,7 @@
 //
 // input  (see buildRecommendationInput)
 //   goal, targetAreas[], experience, environment, equipment[],
-//   sessionMinutes, daysPerWeek, style, durationWeeks, startDate,
+//   sessionMinutes, daysPerWeek, style, durationWeeks, startDate, lang,
 //   history: { completedExerciseIds[], skippedExerciseIds[],
 //     feedback[{ exerciseId, reason }], effort: 'easier' | 'harder' | null }
 //
@@ -31,16 +31,19 @@ import { effectiveTrainingPreferences } from './training-preference-service.mjs'
 
 export const RECOMMENDATION_PROVIDERS = ['rules', 'ai'];
 export const DEFAULT_PLAN_WEEKS = 4;
+export const PLAN_LANGUAGES = ['en', 'sw'];
 export const MAX_PLAN_WEEKS = 12;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Everything a provider may use, from the member's profile and history. */
-export function buildRecommendationInput({ profile = {}, preferences, durationWeeks = DEFAULT_PLAN_WEEKS, startDate, history = {} }) {
+export function buildRecommendationInput({ profile = {}, preferences, durationWeeks = DEFAULT_PLAN_WEEKS, startDate, history = {}, lang = 'en' }) {
   return {
     ...effectiveTrainingPreferences(profile, preferences ?? profile?.trainingPreferences),
     durationWeeks,
     startDate,
+    // The language the plan's names and instructions are written in.
+    lang: PLAN_LANGUAGES.includes(lang) ? lang : 'en',
     history: {
       completedExerciseIds: history.completedExerciseIds ?? [],
       skippedExerciseIds: history.skippedExerciseIds ?? [],

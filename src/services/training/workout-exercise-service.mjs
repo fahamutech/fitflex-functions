@@ -5,7 +5,7 @@
 // library knows what each one trains and what can stand in for it. A
 // replacement trains the same main area and is something the member can
 // actually do (their equipment, place and experience).
-import { alternativesFor, exerciseById, listExercises } from '../../shared/exercise-library.mjs';
+import { alternativesFor, exerciseById, listExercises, localizedExercise } from '../../shared/exercise-library.mjs';
 import { buildExercise } from '../workout-service.mjs';
 import { effectiveTrainingPreferences } from './training-preference-service.mjs';
 
@@ -49,6 +49,7 @@ export function createWorkoutExerciseService({ workouts, plans, users, now = () 
 
   /** Swap an exercise the member hasn't started for one of its alternatives. */
   async function replace(memberId, workoutId, exerciseId, body = {}) {
+    const lang = body.lang;
     const found = await find(memberId, workoutId, exerciseId);
     if (found.error) return found;
     const { workout, exercise } = found;
@@ -60,13 +61,13 @@ export function createWorkoutExerciseService({ workouts, plans, users, now = () 
 
     const built = buildExercise(workout.id, {
       libraryId: next.id,
-      exerciseName: next.name,
+      exerciseName: localizedExercise(next, lang).name,
       muscleGroup: next.targetAreas[0],
       // The same number of sets as planned; reps or time as the new exercise is done.
       sets: exercise.sets,
       reps: next.defaultReps ?? null,
       duration: next.defaultDuration ?? null,
-      instructions: next.instructions.join(' '),
+      instructions: localizedExercise(next, lang).instructions.join(' '),
       tracksWeight: next.tracksWeight,
     });
     // Remember what the plan first asked for, however many swaps later.

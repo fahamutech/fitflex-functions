@@ -66,7 +66,7 @@ export const updateMyTrainingPreferences = {
 
 export const createMyTrainingPlan = {
   created, method: 'post', path: '/me/training-plans',
-  description: 'Member: have FitFlex make a training plan from their goal and preferences. All optional: preferences (for this plan only), durationWeeks (1–12, default 4), startDate (YYYY-MM-DD, default today), replace (true ends the plan they are on). Each session becomes a planned workout.',
+  description: 'Member: have FitFlex make a training plan from their goal and preferences. All optional: preferences (for this plan only), durationWeeks (1–12, default 4), startDate (YYYY-MM-DD, default today), replace (true ends the plan they are on), lang (en|sw: the language session names are written in). Each session becomes a planned workout.',
   requestSample: { durationWeeks: 4, replace: false },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
@@ -120,7 +120,7 @@ export const workoutExerciseAlternatives = {
 
 export const replaceWorkoutExercise = {
   created, method: 'post', path: '/me/workouts/:id/exercises/:exerciseId/replace',
-  description: 'Member: swap an exercise they have not started for one of its alternatives. { libraryId }',
+  description: 'Member: swap an exercise they have not started for one of its alternatives. { libraryId, lang? }',
   requestSample: { libraryId: 'ex_push_up' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await workoutExerciseService.replace(req.user.sub, req.params.id, req.params.exerciseId, req.body || {}))
