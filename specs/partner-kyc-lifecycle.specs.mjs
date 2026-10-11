@@ -182,7 +182,7 @@ async function verifiedTrainer({ expiresIn }) {
   const caseId = await makeCase(userId, 'trainer');
   const docId = uid('pdoc');
   await db('PartnerDocument').insert({
-    id: docId, caseId, requirementKey: 'liability_insurance', docType: 'liability_insurance', issuer: 'Jubilee',
+    id: docId, caseId, requirementKey: 'certification', docType: 'certification', issuer: 'ACE', issuedOn: day(-300),
     documentNumber: 'POL1', expiresOn: day(expiresIn), status: 'accepted', ...FILE, createdAt: new Date(Date.now() - 86_400_000), updatedAt: new Date(),
   });
   return { userId, caseId, docId, partner: await svc.partnerForUser(userId) };
@@ -196,7 +196,7 @@ test('reminders go out 30 and 7 days before and on the day, once each, and suspe
   await svc.sendExpiryReminders(); // a rerun sends nothing new
   let sent = await remindersFor(t.userId);
   assert.equal(sent.length, 1);
-  assert.match(sent[0].title, /liability cover expires in 25 days/);
+  assert.match(sent[0].title, /certification expires in 25 days/);
 
   await db('PartnerDocument').where('id', t.docId).update({ expiresOn: day(5) });
   await svc.sendExpiryReminders();
@@ -207,6 +207,17 @@ test('reminders go out 30 and 7 days before and on the day, once each, and suspe
   assert.equal(sent.length, 3);
   assert.match(sent[2].title, /has expired/);
   assert.equal((await db('PartnerKycCase').where('id', t.caseId).first()).status, 'approved');
+});
+
+test('a document that is no longer asked for gets no reminder', async () => {
+  // Liability cover was dropped for trainers (11 Oct 2026); one on file must not nag.
+  const t = await verifiedTrainer({ expiresIn: 90 });
+  await db('PartnerDocument').insert({
+    id: uid('pdoc'), caseId: t.caseId, requirementKey: 'liability_insurance', docType: 'liability_insurance', issuer: 'Jubilee',
+    documentNumber: 'POL1', expiresOn: day(5), status: 'accepted', ...FILE, createdAt: new Date(), updatedAt: new Date(),
+  });
+  await svc.sendExpiryReminders();
+  assert.equal((await remindersFor(t.userId)).length, 0);
 });
 
 test('far-off and long-expired documents get no reminder', async () => {
@@ -222,7 +233,7 @@ test('a verified partner renews a document; a reviewer accepts it without reopen
   const actor = { id: t.userId, role: 'partner' };
   // Identity stays locked once verified; documents can be renewed.
   assert.equal((await svc.upsertPerson(t.partner, 'principal', { fullName: 'Changed' }, actor)).error, 'case_locked');
-  const renewed = await svc.upsertDocumentDetails(t.partner, 'liability_insurance', { issuer: 'Jubilee', documentNumber: 'POL2', expiresOn: day(400) }, actor);
+  const renewed = await svc.upsertDocumentDetails(t.partner, 'certification', { issuer: 'ACE', documentNumber: 'POL2', issuedOn: day(-1), expiresOn: day(400) }, actor);
   assert.equal(renewed.case.status, 'approved');
   const renewal = renewed.documents.find(d => d.id !== t.docId);
   assert.equal(renewal.supersedesId, t.docId);

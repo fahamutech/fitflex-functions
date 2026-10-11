@@ -338,12 +338,12 @@ test('a reviewed document is never rewritten by a later change', async () => {
   assert.equal(after.documents.find(d => d.requirementKey === 'business_registration').documentNumber, 'AAA1');
 });
 
-test('licence, certification and insurance can be saved without an expiry date', async () => {
+test('licence and certification can be saved without an expiry date', async () => {
   const p = await partner('trainer');
-  const view = await svc.upsertDocumentDetails(p, 'liability_insurance', { docType: 'liability_insurance', issuer: 'Jubilee', documentNumber: 'POL-1' }, p.actor);
-  const status = item(view, 'professional.liability_cover');
+  const view = await svc.upsertDocumentDetails(p, 'certification', { docType: 'certification', issuer: 'ACE', documentNumber: 'ACE-1', issuedOn: '2025-01-01' }, p.actor);
+  const status = item(view, 'professional.certification');
   assert.notEqual(status.status, 'incomplete');
   assert.deepEqual(status.missingFields ?? [], []);
-  const dated = await svc.upsertDocumentDetails(p, 'liability_insurance', { docType: 'liability_insurance', expiresOn: '2031-01-01' }, p.actor);
-  assert.equal(dated.documents.find(d => d.requirementKey === 'liability_insurance').expiresOn?.toString().slice(0, 10), '2031-01-01', 'an expiry given is still kept');
+  const dated = await svc.upsertDocumentDetails(p, 'certification', { docType: 'certification', expiresOn: '2031-01-01' }, p.actor);
+  assert.equal(dated.documents.find(d => d.requirementKey === 'certification').expiresOn?.toString().slice(0, 10), '2031-01-01', 'an expiry given is still kept');
 });
