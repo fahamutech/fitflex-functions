@@ -157,11 +157,11 @@ test('an upload attaches the file privately and moves the checklist on', async (
 test('a file can come before its details, and replacing it keeps the same pending document', async () => {
   const svc = kycService(memoryStore());
   const t = await trainer(svc);
-  let view = await svc.attachDocumentFile(t.partner, 'liability_insurance', { buffer: PDF, filename: 'policy.pdf' }, t.actor);
+  let view = await svc.attachDocumentFile(t.partner, 'certification', { buffer: PDF, filename: 'policy.pdf' }, t.actor);
   const first = view.documents[0];
-  assert.equal(view.checklist.sections.flatMap(s => s.items).find(i => i.key === 'professional.liability_cover').status, 'incomplete');
+  assert.equal(view.checklist.sections.flatMap(s => s.items).find(i => i.key === 'professional.certification').status, 'incomplete');
   const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#fff' } }).png().toBuffer();
-  view = await svc.attachDocumentFile(t.partner, 'liability_insurance', { buffer: png, filename: 'policy.png' }, t.actor);
+  view = await svc.attachDocumentFile(t.partner, 'certification', { buffer: png, filename: 'policy.png' }, t.actor);
   assert.equal(view.documents.length, 1);
   assert.equal(view.documents[0].id, first.id);
   assert.equal(view.documents[0].mimeType, 'image/png');

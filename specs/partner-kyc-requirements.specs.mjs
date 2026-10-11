@@ -59,7 +59,7 @@ test('a trainer is checked on identity and professional credentials, not gym aff
   assert.equal(c.tier, 2);
   assert.deepEqual(keys(c), [
     ['identity', ['identity.fullName', 'identity.idNumber', 'identity.phone', 'identity.email', 'identity.address', 'identity.id_document']],
-    ['professional', ['professional.certification', 'professional.specialisation', 'professional.liability_cover']],
+    ['professional', ['professional.certification', 'professional.specialisation']],
     ['settlement', ['settlement.payout_account']],
     AGREEMENTS,
   ]);
@@ -194,7 +194,8 @@ test('a certification needs its body, number and issue date; the expiry date is 
   });
   assert.notEqual(item(noExpiry, 'professional.certification').status, 'incomplete', 'no expiry date is not a gap');
   assert.equal(item(c, 'professional.specialisation').status, 'complete');
-  assert.equal(item(c, 'professional.liability_cover').status, 'missing');
+  // Liability cover is no longer asked of trainers (11 Oct 2026).
+  assert.equal(c.sections.flatMap(s => s.items).some(i => i.key === 'professional.liability_cover'), false);
 });
 
 test('specialisation is read from the trainer profile', () => {
@@ -228,11 +229,11 @@ test('only the newest document for a requirement stands', () => {
 test('a document waiting for its file keeps the partner from submitting', () => {
   const c = evaluateKyc('trainer', {
     people: [principal], trainer: { specialties: ['yoga'] }, settlementAccounts: [verifiedAccount],
-    documents: [doc('trainer_id'), doc('certification', { issuer: 'ACE', issuedOn: '2024-01-01', expiresOn: '2027-01-01' }),
-      doc('liability_insurance', { issuer: 'Jubilee', expiresOn: '2027-01-01', storageKey: null, status: 'pending' })],
+    documents: [doc('trainer_id'),
+      doc('certification', { issuer: 'ACE', issuedOn: '2024-01-01', expiresOn: '2027-01-01', storageKey: null, status: 'pending' })],
     agreements: signed('trainer'), now: NOW,
   });
-  assert.deepEqual(c.missing, ['professional.liability_cover']);
+  assert.deepEqual(c.missing, ['professional.certification']);
   assert.equal(c.readyToSubmit, false);
 });
 

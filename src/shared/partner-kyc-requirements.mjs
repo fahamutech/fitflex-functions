@@ -75,7 +75,8 @@ export const KYC_TIERS = Object.freeze({ gym_owner: 3, trainer: 2, vendor: 3, co
 // Which documents each type needs, by requirement key.
 export const DOCUMENTS_FOR = Object.freeze({
   gym_owner: ['owner_id', 'business_registration', 'tin_certificate', 'business_licence'],
-  trainer: ['trainer_id', 'certification', 'liability_insurance'],
+  // Liability cover is no longer asked of trainers (product owner, 11 Oct 2026).
+  trainer: ['trainer_id', 'certification'],
   vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
   corporate: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
 });
@@ -251,7 +252,6 @@ function trainerSections(s) {
     { key: 'professional', items: [
       documentItem('professional.certification', s.documents, 'certification', s.now),
       fieldItem('professional.specialisation', s.trainer?.specialties),
-      documentItem('professional.liability_cover', s.documents, 'liability_insurance', s.now),
     ] },
     { key: 'settlement', items: [settlementItem(s.settlementAccounts)] },
     { key: 'agreements', items: agreementItems('trainer', s.agreements) },

@@ -40,7 +40,6 @@ async function readyTrainer() {
   }, actor);
   await svc.upsertDocumentDetails(partner, 'trainer_id', { docType: 'national_id', documentNumber: '19900101-12345-00001-12', expiresOn: '2030-01-01' }, actor);
   await svc.upsertDocumentDetails(partner, 'certification', { issuer: 'ACE', documentNumber: 'ACE-1', issuedOn: '2024-01-01', expiresOn: '2027-03-31' }, actor);
-  await svc.upsertDocumentDetails(partner, 'liability_insurance', { issuer: 'Jubilee', documentNumber: 'POL-9', expiresOn: '2027-01-15' }, actor);
   const kycCase = await svc.findCase(partner);
   // Files arrive with private storage (a later phase); attach them directly here.
   await db('PartnerDocument').where('caseId', kycCase.id).update(FILE);
@@ -111,7 +110,7 @@ test('the full path: submit, claim, review documents and payout account, approve
   assert.equal(approved.case.decidedBy, admin.id);
   assert.equal(approved.checklist.complete, true);
   // Review again when the first document expires.
-  assert.equal(approved.case.reverifyAt.slice(0, 10), '2027-01-15');
+  assert.equal(approved.case.reverifyAt.slice(0, 10), '2027-03-31');
 
   assert.equal((await userRow(t.id)).approvalStatus, 'approved');
   assert.equal((await db('TrainerProfile').where('userId', t.id).first()).approvalStatus, 'approved');
@@ -178,14 +177,14 @@ test('suspension keeps the role approved; reinstating needs a complete checklist
   await svc.reviewSettlementAccount(t.caseId, t.accountId, { decision: 'verify' }, admin);
   await svc.decide(t.caseId, { decision: 'approve' }, admin);
 
-  const suspended = await svc.decide(t.caseId, { decision: 'suspend', reasonCode: 'document_expired', reasonNote: 'Insurance lapsed.' }, admin);
+  const suspended = await svc.decide(t.caseId, { decision: 'suspend', reasonCode: 'document_expired', reasonNote: 'Certification lapsed.' }, admin);
   assert.equal(suspended.case.status, 'suspended');
   assert.equal((await userRow(t.id)).approvalStatus, 'approved');
 
-  await db('PartnerDocument').where({ caseId: t.caseId, requirementKey: 'liability_insurance' }).update({ expiresOn: '2020-01-01' });
+  await db('PartnerDocument').where({ caseId: t.caseId, requirementKey: 'certification' }).update({ expiresOn: '2020-01-01' });
   const blocked = await svc.decide(t.caseId, { decision: 'reinstate' }, admin);
-  assert.deepEqual([blocked.error, blocked.outstanding], ['kyc_incomplete', ['professional.liability_cover']]);
-  await db('PartnerDocument').where({ caseId: t.caseId, requirementKey: 'liability_insurance' }).update({ expiresOn: '2028-01-01' });
+  assert.deepEqual([blocked.error, blocked.outstanding], ['kyc_incomplete', ['professional.certification']]);
+  await db('PartnerDocument').where({ caseId: t.caseId, requirementKey: 'certification' }).update({ expiresOn: '2028-01-01' });
   const back = await svc.decide(t.caseId, { decision: 'reinstate' }, admin);
   assert.equal(back.case.status, 'approved');
   assert.equal(back.case.reasonCode, null);

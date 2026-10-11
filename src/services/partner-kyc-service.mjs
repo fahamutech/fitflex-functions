@@ -800,8 +800,11 @@ export function createPartnerKycService({
     return caseDetail(caseId);
   }
 
-  const soonestExpiry = (documents) => documents
-    .filter(d => d.status === 'accepted' && d.expiresOn)
+  /** Still asked of this kind of partner (a requirement that was dropped no longer counts). */
+  const stillRequired = (partnerType, requirementKey) => (DOCUMENTS_FOR[partnerType] || []).includes(requirementKey);
+
+  const soonestExpiry = (documents, partnerType) => documents
+    .filter(d => d.status === 'accepted' && d.expiresOn && stillRequired(partnerType, d.requirementKey))
     .map(d => d.expiresOn).sort()[0] || null;
 
   /**
@@ -838,7 +841,7 @@ export function createPartnerKycService({
         data.override = true;
         data.outstanding = outstanding;
       }
-      const expiry = soonestExpiry(rows.documents);
+      const expiry = soonestExpiry(rows.documents, kycCase.partnerType);
       patch.decidedAt = nowIso();
       patch.decidedBy = actor.id || null;
       // Review again when the first document expires, or in a year.
@@ -886,7 +889,7 @@ export function createPartnerKycService({
         if (old?.status === 'accepted') await partnerDocuments.updateByIdAsync(old.id, { status: 'superseded', updatedAt: nowIso() });
       }
       const standing = (await partnerDocuments.filterByColumnAsync('caseId', caseId)).filter(d => d.status === 'accepted');
-      const expiry = soonestExpiry(standing);
+      const expiry = soonestExpiry(standing, kycCase.partnerType);
       if (expiry) await partnerKycCases.updateByIdAsync(caseId, { reverifyAt: new Date(`${expiry}T00:00:00Z`).toISOString(), updatedAt: nowIso() });
     }
     await record(kycCase, {
@@ -952,6 +955,7 @@ export function createPartnerKycService({
         .filter(e => e.eventType === 'note' && e.data?.kind === 'expiry_reminder')
         .map(e => `${e.targetId}:${e.data.window}`));
       for (const requirementKey of new Set(documents.map(d => d.requirementKey))) {
+        if (!stillRequired(kycCase.partnerType, requirementKey)) continue;
         const doc = currentDocument(documents, requirementKey);
         if (!doc || doc.status !== 'accepted' || !doc.expiresOn) continue; // none, or a renewal is waiting
         const daysLeft = Math.round((+new Date(`${doc.expiresOn}T00:00:00Z`) - +today) / 86_400_000);
