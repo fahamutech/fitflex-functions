@@ -7,7 +7,7 @@
 // routes (/corporate/*, /admin/corporate/*) are unchanged.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps, b2bBeneficiaryImportService } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps, b2bBeneficiaryImportService, b2bLifecycleService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -947,4 +947,25 @@ export const resendB2BBeneficiaryInvite = {
   description: 'Send the invitation again now, by email and by SMS where the person can be reached that way (beneficiaries.manage). Not within an hour of the last one; at most six emails and three SMS per invite. Returns sent: { email, sms }.',
   onGuard: requireOrgAccess,
   onRequest: (req, res) => inOrganization(req, res, access => people.resendInvite({ access, inviteId: req.params.inviteId, actorId: actor(req) })),
+};
+
+// ── Programme lifecycle and renewal (Phase 7, slice 3) ──────────────────────
+
+export const getB2BProgramLifecycle = {
+  created, method: 'get', path: '/b2b/organizations/:id/program-lifecycle',
+  description: 'For each of the organisation\'s programmes (programs.read): its status, days left, whether it is ending soon (within 30 days), whether a renewal can be prepared, and the renewal if there is one.',
+  onGuard: requireOrgAccess,
+  onRequest: (req, res) => inOrganization(req, res, access => b2bLifecycleService.programLifecycle({ access })),
+};
+
+export const prepareB2BProgramRenewal = {
+  created, method: 'post', path: '/b2b/organizations/:id/programs/:programId/renewal',
+  description: 'Prepare a programme\'s renewal (programs.manage): a DRAFT programme for the period that follows, with the same name, people, budget and benefits and the dates moved on. Nothing is charged and nobody is covered until it is submitted and FitFlex activates it, like any new programme. Asking again returns the same draft. A discount FitFlex gave is carried over only when FitFlex staff prepare the renewal. Returns { program, benefits, skipped, discountNotCarriedOver }.',
+  onGuard: requireOrgAccess,
+  onRequest: async (req, res) => {
+    const access = await b2bService.resolveAccess({ organizationId: req.params.id, userId: req.user.sub, userType: req.user.userType });
+    if (access.error) return send(res, access);
+    const out = await b2bLifecycleService.prepareRenewal({ access, programId: req.params.programId, actorId: actor(req) });
+    return send(res, out, out.existing ? 200 : 201);
+  },
 };

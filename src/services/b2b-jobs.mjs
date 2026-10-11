@@ -16,6 +16,7 @@ export function registerB2BJobs({
   ops, db, programs,
   promotionService, promotionEventsService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bSponsorRefundService, b2bCollectionsService, b2bAnalyticsService,
   b2bBeneficiaryImportService = null,
+  b2bLifecycleService = null,
   now = () => new Date(),
 }) {
   ops.register({
@@ -157,6 +158,33 @@ export function registerB2BJobs({
     });
   }
 
+  if (b2bLifecycleService) {
+    const report = async (ctx, key, label, r) => {
+      if (r.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${r.failed} ${label} could not be sent`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:${key}`, detail: r });
+      else if (r.sent) await ctx.clear(`item:${ctx.job}:${key}`, 'Sent.');
+    };
+    ops.register({
+      name: 'b2b-lifecycle-notices', title: 'Benefit and programme notices', schedule: { type: 'daily', utc: '05:00' },
+      description: 'Tells members when a benefit starts tomorrow, ends within 7 days or has ended, and tells an organisation when a programme ends within 30 days, within 7, or has ended. Each notice once.',
+      run: async (ctx) => {
+        const members = await b2bLifecycleService.benefitNotices();
+        const orgs = await b2bLifecycleService.programNotices();
+        await report(ctx, 'members', 'benefit notice(s)', members);
+        await report(ctx, 'organisations', 'programme notice(s)', orgs);
+        return { processed: members.due + orgs.due, succeeded: members.sent + orgs.sent, failed: members.failed + orgs.failed, memberNotices: members.sent, organisationNotices: orgs.sent, emails: orgs.emailed ?? 0 };
+      },
+    });
+    ops.register({
+      name: 'b2b-allowance-notices', title: 'Allowance notices', schedule: { type: 'every', minutes: 10 }, quiet: true,
+      description: 'Tells a member when they have used 80% of a benefit\'s allowance, and when they have used all of it. Once each per allowance window.',
+      run: async (ctx) => {
+        const r = await b2bLifecycleService.allowanceNotices();
+        await report(ctx, 'allowance', 'allowance notice(s)', r);
+        return { processed: r.sent + r.failed, succeeded: r.sent, failed: r.failed };
+      },
+    });
+  }
+
   /** Work waiting on a person, for the operations page. Counts only. */
   async function pendingWork() {
     const day = localDay(now());
@@ -179,6 +207,7 @@ export function registerB2BJobs({
       billing: { draftInvoices: drafts, draftsOlderThan7Days: toIssueOld, paymentNoticesToCheck: notices, overdueInvoices: overdue, organizationsOnHold: onHold, paymentsNotFullyApplied: unpaidCredit },
       usage: { holdsOlderThan1Hour: staleHolds, passesAwaitingMemberPayment: awaitingMember, passesAwaitingAccountLink: awaitingLink },
       people: { beneficiariesPending: pendingPeople, employeesNotLinked: unlinkedStaff, ...invites },
+      programmes: { renewalDraftsToReview: await count(db('B2BWellnessProgram').where({ status: 'draft' }).whereNotNull('renewedFromProgramId')), endingWithin30Days: await count(db('B2BWellnessProgram').where({ status: 'active' }).whereNotNull('endDate').where('endDate', '>=', day).where('endDate', '<=', localDay(new Date(+now() + 30 * 86_400_000)))) },
     };
   }
 

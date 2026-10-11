@@ -2,7 +2,8 @@
 
 How the recurring B2B work is run reliably, what happens when it goes wrong,
 and how an operator recovers. Slice 1 is the foundation (§1–§10); slice 2
-adds bulk import and invitations (§11).
+adds bulk import and invitations (§11); slice 3 adds lifecycle notices and
+programme renewal (§12).
 
 Code: `src/services/ops-service.mjs` (runs, locks, catch-up, exceptions),
 `src/services/b2b-jobs.mjs` (the jobs), scheduler entries in
@@ -86,6 +87,8 @@ Times are East Africa Time.
 | `b2b-integrity-check` | 01:00 | runs the data-quality checks; one exception per failing check | finance |
 | `b2b-collections` | 09:00 | payment reminders | finance |
 | `b2b-sponsor-visibility-notice` | 10:00 | tells newly covered people what their sponsor sees | operations |
+| `b2b-lifecycle-notices` | 08:00 | benefit starting, ending and ended notices to members; programme ending and ended notices to organisations | operations |
+| `b2b-allowance-notices` | every 10 min | allowance nearly used and used up notices to members | operations |
 | `b2b-beneficiary-invites` | every 10 min | enrols invited people who have joined; sends invitation emails that are due | operations |
 | `opsSweeper` | every 10 min | catch-up and retries (not itself recorded) | — |
 
@@ -312,3 +315,85 @@ active). Nothing is lost: the invite stays and is tried again every run.
   normalised is matched when its owner opens Benefits, not by the 10-minute run.
 - Invited people are not counted in analytics until they join.
 - The invitation email has no Swahili version.
+
+## 12. Lifecycle notices and programme renewal (slice 3)
+
+Code: `src/services/b2b-lifecycle-service.mjs`, migration
+`20261207090000-b2b-program-renewal.cjs`, tests `specs/b2b-lifecycle.specs.mjs`.
+
+### Notices
+
+When each goes out is set in one place (`NOTICE` in the service). There is no
+per-organisation setting.
+
+| To | Notice | When |
+|---|---|---|
+| Member | a benefit starts | the day before it starts |
+| Member | a benefit is ending | once, from 7 days before its end |
+| Member | a benefit has ended | the day after (up to 3 days after, if the job was not running) |
+| Member | allowance running low | on reaching 80% of a limit |
+| Member | allowance used | on reaching the limit |
+| Organisation | a programme is ending | once within 30 days of its end, once within 7 |
+| Organisation | a programme has ended | the day after (up to 3 days after) |
+
+- **Members** are told in the app (inbox and push), not by SMS or email.
+  Only people who are active, linked to an account and covered by that
+  benefit's rules. Benefits ending or starting on the same day are one notice.
+- **Organisations** are told in the app (owners, admins and managers) and at
+  the organisation's contact email when the email sender is configured.
+- Every notice has an id built from what it is about (programme, date,
+  person; or benefit, person, allowance window), so it is written once however
+  often the job runs. A missed day is made up by the next run. Old news is not
+  announced: an end more than 3 days past says nothing.
+- An allowance notice is sent once per window, so a monthly allowance can
+  produce one "running low" and one "used" each month. A limit of 1 or 2 goes
+  straight to "used".
+- Nothing here decides eligibility, usage or expiry. It reads the programme
+  and consumption services.
+
+### Renewal
+
+`POST /b2b/organizations/:id/programs/:programId/renewal` (`programs.manage`)
+prepares a **draft** programme for the period that follows:
+
+- **Dates.** Whole calendar months stay whole calendar months (a calendar
+  year is followed by the next calendar year); otherwise the same number of
+  days. A benefit with dates of its own is moved by the same amount.
+- **Copied.** Name, description, type, who it covers, budget, and every
+  benefit that is not archived, as drafts. A benefit that can no longer be set
+  up (its gym has left, say) is left out and named in `skipped`.
+- **Not copied.** A price concession FitFlex gave (`discountBps`), unless
+  FitFlex staff prepare the renewal. An organisation cannot renew its own
+  discount.
+- **Once.** A programme has one live renewal: asking again returns it (an
+  advisory lock and a unique index). Cancel the draft to prepare another.
+- **Nothing happens by itself.** No renewal is created automatically, and a
+  draft changes nothing: nobody is covered and nothing is billed until it is
+  submitted and FitFlex activates it, exactly like a new programme. No
+  commercial agreement is renewed or extended.
+
+`GET /b2b/organizations/:id/program-lifecycle` gives each programme's days
+left, whether it is ending soon, whether it can be renewed, and its renewal.
+The operations page counts renewal drafts waiting for FitFlex to review.
+
+### Runbook
+
+**"N benefit notice(s) could not be sent."** The inbox write failed for some
+people. The next run sends what is missing; nothing is sent twice.
+
+**An organisation says it was not told its programme was ending.** Check it
+has an active owner, admin or manager, and a contact email. The notice ids
+start `b2bn_prog_`; emails that went are in the audit log as
+`b2b.program.notice_emailed`.
+
+**A renewal draft is waiting.** Open the organisation's programmes, check
+the dates, benefits and price, then submit and activate it like any programme.
+
+### Limitations
+
+- Notice timings are fixed in code, not configurable per organisation.
+- Member notices are English only.
+- A paused programme sends no "ending" notices.
+- Nothing tells beneficiaries when their organisation is suspended; there is
+  no policy for that yet.
+- There is no automatic renewal, by design.
