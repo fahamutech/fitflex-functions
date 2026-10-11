@@ -3,7 +3,6 @@
 // analytics for the owner/operator Home dashboard.
 import { resolveOperatorGymSelection, operatorGymIds } from '../shared/operator-gym-selection.mjs';
 import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry, fundedBySubscription } from '../shared/check-in-rules.mjs';
-import { calculatePayout } from '../shared/payout-engine.mjs';
 import { issue as issueQr, verify as verifyQrToken, issueGymQr, verifyGymQr } from '../auth/qr-token.mjs';
 
 function sameEatDate(a, b) {
@@ -17,6 +16,7 @@ function sameEatDate(a, b) {
 export function createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
   b2bFunding = null,
+  settlementSummary = null,
 }) {
   // B2B lookups must never break scanning: on any error, behave as before.
   const sponsored = async (fn) => {
@@ -143,7 +143,12 @@ export function createOperatorService({
     return list;
   }
 
-  async function dashboard({ operator, query }) {
+  /**
+   * @param {{ operator: Object, query?: Object, includeSettlement?: boolean }} args
+   *   includeSettlement: the caller may see what FitFlex pays the gym (the
+   *   owner, or staff with the payments permission).
+   */
+  async function dashboard({ operator, query, includeSettlement = false }) {
     const ownedGymIds = operator?.gymIds || (operator?.gymId ? [operator.gymId] : []);
     const ownedGyms = [];
     for (const id of ownedGymIds) {
@@ -231,9 +236,16 @@ export function createOperatorService({
         fitflexMembers: unique(fitflexRows),
       };
     });
-    const payout = monthVisits >= 500
-      ? { band: 5, note: 'Negotiate flat fee' }
-      : calculatePayout({ visitCount: monthVisits, gymTier: gym.tier, negotiatedPerVisitRate: gym.perVisitRate });
+    // What FitFlex pays this gym, from the settlement engine. A failure
+    // here must not take the dashboard down.
+    let settlement = null;
+    if (includeSettlement && settlementSummary) {
+      try {
+        settlement = await settlementSummary({ owner: operator, gymId: gym.id });
+      } catch (err) {
+        console.warn('[operator] settlement summary failed:', err?.message);
+      }
+    }
 
     // Real registered-member count for the selected gym (independent of the
     // period/date filters above) — backs the Home dashboard "Total Members" card.
@@ -268,7 +280,7 @@ export function createOperatorService({
         fitflexMembers: unique(ownedPeriodCheckins.filter(isFitFlexVisit)),
       },
       gymSummaries,
-      payout,
+      settlement,
       chartSeries,
     };
   }

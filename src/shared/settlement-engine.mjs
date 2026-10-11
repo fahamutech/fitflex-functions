@@ -1,9 +1,8 @@
 // Gym settlement engine — pure logic (Phase 1 of the settlement rebuild).
 //
-// This is the future authoritative calculation for what FitFlex owes gyms for
-// Platform Pass visits. It is NOT wired into any payout flow yet: the legacy
-// payout-engine.mjs (5-band, retired by DR-21) and finance-service.mjs keep
-// running untouched until the cutover phase.
+// This is the authoritative calculation of what FitFlex owes gyms for Platform
+// Pass and company-funded visits. The legacy 5-band payout calculator
+// (retired by DR-21) has been removed.
 //
 // Everything here is deterministic and side-effect free: no database, clock,
 // network or global state. Money is integer TZS; percentages are integer

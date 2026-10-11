@@ -142,3 +142,56 @@ test('admins get gym and member names with a run and a statement', () => inRollb
   assert.equal(s.visits.length, 15);
   assert.equal((await views.adminStatement('nope')).error, 'statement_not_found');
 }));
+
+// ── owner dashboard summary ──────────────────────────────────────────────────
+
+test('the owner dashboard shows the rates FitFlex pays, the latest statement, what is unpaid and the last payment', () => inRollback(async (trx) => {
+  const { createSettlementConfigService } = await import('../src/services/settlement-config-service.mjs');
+  const { createOperatorService } = await import('../src/services/operator-service.mjs');
+  const gymId = uid('gym');
+  await trx('Gym').insert({ id: gymId, name: 'Dashboard Gym', tier: 'standard', location: 'Dar es Salaam', updatedAt: new Date() });
+  const config = createSettlementConfigService({ db: trx, now: () => new Date('2026-09-01T09:00:00Z') });
+  const card = (await config.createRateCard({ gymId, retailDailyTzs: 5000, retailWeeklyTzs: 15000, retailMonthlyTzs: 50000, actorId: 'maker' }, { trx })).rateCard;
+  assert.ok((await config.activate({ kind: 'rate_card', id: card.id, effectiveFrom: '2026-06-01', actorId: 'checker' }, { trx })).rateCard);
+
+  const statement = async (start, end, amount, patch) => {
+    const run = { id: uid('run'), mode: 'live', periodStartDate: start, periodEndDate: end, status: 'draft', engineVersion: 'settlement-engine/1', createdBy: 'system' };
+    await trx('SettlementRun').insert(run);
+    const id = uid('gs');
+    await trx('GymSettlement').insert({ id, runId: run.id, mode: 'live', gymId, periodStartDate: start, periodEndDate: end, preliminaryTzs: amount, finalNetTzs: amount });
+    await trx('SettlementRun').where({ id: run.id }).update({ status: 'locked', lockedAt: new Date(), lockedBy: 'system', inputsHash: 'sha256:test' });
+    for (const step of patch) await trx('GymSettlement').where({ id }).update(step);
+    return id;
+  };
+  const destination = JSON.stringify({ kind: 'verified_account', accountLast4: '4821' });
+  const approved = [{ status: 'submitted', submittedBy: 'maker', submittedAt: new Date() }, { status: 'approved', approvedBy: 'checker', approvedAt: new Date() }];
+  await statement('2026-07-01', '2026-08-01', 30000, [...approved, { status: 'payable', destinationSnapshot: destination },
+    { status: 'paid', paidBy: 'payer', paidAt: new Date('2026-08-06T09:00:00Z'), paymentReference: 'REF-JUL' }]);
+  await statement('2026-08-01', '2026-09-01', 42000, approved);
+  const latest = await statement('2026-09-01', '2026-10-01', 12000, []);
+
+  const owner = { id: 'owner-x', userType: 'gym_operator', gymIds: [gymId] };
+  const views = createSettlementViewService({ db: trx, gyms: { find: (f) => [{ id: gymId, name: 'Dashboard Gym' }].find(f) }, users: {}, publicUserId: async () => null, now: () => new Date('2026-10-11T09:00:00Z') });
+  const summary = await views.ownerDashboard({ owner, gymId });
+  // Retail less the discount, up to the standard ceiling: what the gym is actually paid.
+  assert.deepEqual(summary.rates, { dailyTzs: 3500, weeklyTzs: 12000, monthlyTzs: 40000 });
+  assert.deepEqual([summary.latest.id, summary.latest.status, summary.latest.payableTzs], [latest, 'preparing', 12000]);
+  assert.equal(summary.awaitingPaymentTzs, 42000);
+  assert.deepEqual([summary.lastPaid.periodStartDate, summary.lastPaid.payableTzs], ['2026-07-01', 30000]);
+  // Not their gym: nothing.
+  assert.equal(await views.ownerDashboard({ owner: { id: 'other', gymIds: ['gym-else'] }, gymId }), null);
+
+  // The dashboard carries it only for someone allowed to see payments, and no longer has bands or commission.
+  const operator = createOperatorService({
+    users: {}, subscriptions: {}, checkInService: {}, publicUserId: async () => null, settingsService: {},
+    gyms: { findByIdAsync: async (id) => (id === gymId ? { id: gymId, name: 'Dashboard Gym', tier: 'standard' } : null), find: () => null },
+    checkins: { allAsync: async () => [] },
+    memberManagement: { getMemberStats: async () => ({ totalMembers: 0, activeToday: 0, expiringSoon: 0 }) },
+    settlementSummary: (args) => views.ownerDashboard(args),
+  });
+  const forOwner = await operator.dashboard({ operator: owner, query: {}, includeSettlement: true });
+  assert.equal(forOwner.settlement.awaitingPaymentTzs, 42000);
+  assert.equal('payout' in forOwner, false);
+  const forStaff = await operator.dashboard({ operator: owner, query: {} });
+  assert.equal(forStaff.settlement, null);
+}));

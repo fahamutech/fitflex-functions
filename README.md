@@ -17,7 +17,6 @@ src/
   shared/                  Pure business logic — single source of truth
     constants.mjs          Pass tiers, gym tiers, payout bands, rates
     check-in-rules.mjs     BL-010, BL-011, BL-012 (pure)
-    payout-engine.mjs      5-band payout calc
     credits.mjs            90-day rolling expiry
     parse-list.mjs         Comma/newline string list normalizer
     pagination.mjs         Offset-cursor pagination helper

@@ -10,6 +10,9 @@
 // who prepared or approved it, or the wording of an internal hold.
 import { db as defaultDb } from '../infra/knex-store.mjs';
 import { ownerGymIds } from '../shared/member-status.mjs';
+import { localDay } from '../shared/member-progress.mjs';
+import { resolveGymRateSnapshot } from '../shared/settlement-config.mjs';
+import { calculateWholesaleRates } from '../shared/settlement-engine.mjs';
 
 const fail = (error, status) => ({ error, status });
 
@@ -19,7 +22,7 @@ export const OWNER_STATEMENT_STATUS = Object.freeze({
 });
 const OWNER_VISIBLE = Object.keys(OWNER_STATEMENT_STATUS);
 
-export function createSettlementViewService({ db = defaultDb, gyms, users, publicUserId }) {
+export function createSettlementViewService({ db = defaultDb, gyms, users, publicUserId, now = () => new Date() }) {
   const gymName = (gymId) => gyms.find((g) => g.id === gymId)?.name ?? null;
 
   /** memberId → { publicId, displayName } for the members behind some lines. */
@@ -128,5 +131,25 @@ export function createSettlementViewService({ db = defaultDb, gyms, users, publi
     };
   }
 
-  return { adminRun, adminStatement, withGym, ownerStatements, ownerStatement };
+  /**
+   * What the owner's dashboard shows about FitFlex payments for one gym: the
+   * rates FitFlex pays it today, its latest statement, what is approved and
+   * not yet paid, and the last payment. No estimate for the current month:
+   * a member's visits are priced by bracket once their cycle has ended.
+   */
+  async function ownerDashboard({ owner, gymId }) {
+    if (!ownerGymIds(owner).includes(gymId)) return null;
+    const cards = await db('GymRateCard').where({ gymId, status: 'active' });
+    const snapshot = resolveGymRateSnapshot({ rateCards: cards, gymId, date: localDay(now()) }).snapshot ?? null;
+    const statements = await ownerStatements({ owner, gymId });
+    const lastPaid = statements.find((s) => s.status === 'paid') ?? null;
+    return {
+      rates: snapshot ? calculateWholesaleRates(snapshot) : null,
+      latest: statements[0] ?? null,
+      awaitingPaymentTzs: statements.filter((s) => s.status === 'approved' || s.status === 'payment_due').reduce((t, s) => t + s.payableTzs, 0),
+      lastPaid: lastPaid && { periodStartDate: lastPaid.periodStartDate, payableTzs: lastPaid.payableTzs, paidAt: lastPaid.paidAt },
+    };
+  }
+
+  return { adminRun, adminStatement, withGym, ownerStatements, ownerStatement, ownerDashboard };
 }

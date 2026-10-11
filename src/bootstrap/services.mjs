@@ -390,6 +390,7 @@ export const memberManagement = createMemberManagementService({
 export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
   b2bFunding: b2bConsumptionService,
+  settlementSummary: (args) => settlementViewService.ownerDashboard(args),
 });
 
 export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate });
