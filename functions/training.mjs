@@ -184,3 +184,11 @@ export const trainerWithdrawTrainingPlan = {
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => send(res, await trainerPlanService.withdraw(req.user.sub, req.params.id))
 };
+
+export const trainerEditTrainingPlan = {
+  created, method: 'put', path: '/trainer/training-plans/:id',
+  description: 'Trainer: change a plan they made. { name?, note? } alone, or with { days, durationWeeks?, preferences?, lang? } to lay the week out again. A waiting offer is rewritten; a plan the client is on changes from today forward (sessions done, started or skipped stay) and the client is notified.',
+  requestSample: { name: 'Strength block v2', days: [{ day: 1, planId: 'wpl_x' }, { day: 4, suggested: true }] },
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => send(res, await trainerPlanService.edit(req.user.sub, req.params.id, req.body || {}))
+};

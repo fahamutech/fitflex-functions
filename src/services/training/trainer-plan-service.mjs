@@ -12,7 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import { localDay } from '../../shared/member-progress.mjs';
 import { normalizePermissions } from '../trainer-client-service.mjs';
-import { validateWorkoutDefinition } from '../workout-service.mjs';
+import { newWorkoutRow, validateWorkoutDefinition } from '../workout-service.mjs';
 import { validateTrainingPreferences } from './training-preference-service.mjs';
 import { buildRecommendationInput, DEFAULT_PLAN_WEEKS, MAX_PLAN_WEEKS } from './recommendation-engine.mjs';
 import { addPlanDays } from './rules-recommendation-provider.mjs';
@@ -107,18 +107,11 @@ export function createTrainerPlanService({
   }
 
   /**
-   * Offer a plan to a client. `days` is the weekly layout, one entry per
-   * training day: `{ day (1 = Monday … 7), planId }` for one of the
-   * trainer's saved workouts, or `{ day, suggested: true }` for the
-   * session FitFlex suggests that day (see `suggest`).
+   * The plan's weeks from a weekly layout: each training day's session for
+   * every week, from the trainer's saved workouts and FitFlex's suggestion.
    */
-  async function offer(trainerUserId, relId, body = {}) {
-    const conn = await connection(trainerUserId, relId);
-    if (conn.error) return conn;
-    const { trainer, relationship: r } = conn;
-    const when = schedule(body);
-    if (when.error) return when;
-
+  async function buildWeeks(conn, body, when) {
+    const { trainer } = conn;
     const layout = Array.isArray(body.days) ? body.days : [];
     if (!layout.length || layout.length > MAX_SESSIONS_PER_WEEK) return { error: 'invalid_days', status: 400 };
     const seen = new Set();
@@ -156,10 +149,31 @@ export function createTrainerPlanService({
         return {
           day: d.day, date: planDate(when.startDate, week, d.day),
           focusAreas: s ? s.focusAreas : [], name: workout.name, workout,
+          // Where the session came from, so the plan can be opened again and edited.
+          ...(s ? { suggested: true } : { planId: d.planId }),
         };
       }).sort((a, b) => a.date.localeCompare(b.date));
       weeks.push({ week, days });
     }
+    return { weeks, made, layout };
+  }
+
+  /**
+   * Offer a plan to a client. `days` is the weekly layout, one entry per
+   * training day: `{ day (1 = Monday … 7), planId }` for one of the
+   * trainer's saved workouts, or `{ day, suggested: true }` for the
+   * session FitFlex suggests that day (see `suggest`).
+   */
+  async function offer(trainerUserId, relId, body = {}) {
+    const conn = await connection(trainerUserId, relId);
+    if (conn.error) return conn;
+    const { trainer, relationship: r } = conn;
+    const when = schedule(body);
+    if (when.error) return when;
+
+    const built = await buildWeeks(conn, body, when);
+    if (built.error) return built;
+    const { weeks, made, layout } = built;
 
     // One waiting offer per trainer and client: a new one takes the old one's place.
     const stamp = now().toISOString();
@@ -214,6 +228,10 @@ export function createTrainerPlanService({
       durationWeeks: plan.durationWeeks, daysPerWeek: plan.daysPerWeek,
       startDate: plan.startDate, endDate: plan.endDate, createdAt: plan.createdAt,
       weeks: plan.weeks.map(w => ({ week: w.week, days: w.days.map(d => ({ day: d.day, date: d.date, name: d.name })) })),
+      // The week as it was laid out, to open the plan again for editing.
+      layout: (plan.weeks.at(-1)?.days ?? []).map(d => ({
+        day: d.day, name: d.name, ...(d.suggested ? { suggested: true } : d.planId ? { planId: d.planId } : {}),
+      })).sort((x, y) => x.day - y.day),
     };
     if (plan.status === 'offered' || !perms.workoutHistory) return out;
     const rows = (await workouts.filterByColumnAsync('userId', plan.userId)).filter(w => w.trainingPlanId === plan.id);
@@ -241,6 +259,112 @@ export function createTrainerPlanService({
     return { plans: out };
   }
 
+  /**
+   * Change a plan the trainer made. `name` and `note` alone change just
+   * those. With `days` (and optionally `durationWeeks`) the week is laid
+   * out again:
+   *
+   * - an offer still waiting is simply rewritten;
+   * - a plan the client is on changes from today forward — sessions they
+   *   have finished, started or skipped, and days already past, stay
+   *   exactly as they are — and the client is told.
+   */
+  async function edit(trainerUserId, planId, body = {}) {
+    const trainer = await trainers.findAsync(t => t.userId === trainerUserId);
+    if (!trainer) return { error: 'trainer_profile_not_found', status: 404 };
+    const plan = await plans.findByIdAsync(planId);
+    if (!plan || plan.trainerId !== trainer.id) return { error: 'not_found', status: 404 };
+    if (plan.status !== 'offered' && plan.status !== 'active') return { error: 'not_editable', status: 409 };
+    const rel = (await relationships.filterByColumnAsync('memberId', plan.userId))
+      .find(r => r.trainerId === trainer.id && r.status === 'active');
+    if (!rel) return { error: 'not_active', status: 409 };
+    const conn = { trainer, relationship: rel, perms: normalizePermissions(rel.permissions) };
+
+    const stamp = now().toISOString();
+    const patch = { updatedAt: stamp };
+    if (body.name !== undefined) {
+      const name = text(body.name, 80);
+      if (!name) return { error: 'invalid_name', status: 400 };
+      patch.name = name;
+    }
+    if (body.note !== undefined) patch.note = text(body.note, 500);
+
+    const relaid = body.days !== undefined || body.durationWeeks !== undefined;
+    let added = [];
+    let removed = [];
+    if (relaid) {
+      if (body.days === undefined) return { error: 'invalid_days', status: 400 };
+      const durationWeeks = body.durationWeeks ?? plan.durationWeeks;
+      if (!Number.isInteger(durationWeeks) || durationWeeks < 1 || durationWeeks > MAX_PLAN_WEEKS) {
+        return { error: 'invalid_duration_weeks', status: 400 };
+      }
+      const endDate = addPlanDays(plan.startDate, durationWeeks * 7 - 1);
+      const day = today();
+      // A plan under way can't be cut to end before today.
+      if (plan.status === 'active' && endDate < day) return { error: 'invalid_duration_weeks', status: 400 };
+      // The same start, so every weekday falls where it did.
+      const built = await buildWeeks(conn, body, { durationWeeks, startDate: plan.startDate });
+      if (built.error) return built;
+      Object.assign(patch, { durationWeeks, endDate, daysPerWeek: built.layout.length });
+
+      if (plan.status === 'offered') {
+        patch.weeks = built.weeks;
+      } else {
+        const rows = (await workouts.filterByColumnAsync('userId', plan.userId)).filter(w => w.trainingPlanId === plan.id);
+        const byId = new Map(rows.map(w => [w.id, w]));
+        // What stays: anything past, and anything the client has touched.
+        const stays = d => {
+          const w = byId.get(d.workoutId);
+          return d.date < day || (w && w.status !== 'planned');
+        };
+        const kept = plan.weeks.flatMap(w => w.days).filter(stays);
+        const keptDates = new Set(kept.map(d => d.date));
+        removed = rows.filter(w => w.status === 'planned' && w.scheduledDate >= day);
+        const at = new Date(stamp);
+        const weeks = [];
+        for (const w of built.weeks) {
+          const from = addPlanDays(plan.startDate, (w.week - 1) * 7);
+          const to = addPlanDays(from, 6);
+          const days = kept.filter(d => d.date >= from && d.date <= to);
+          for (const { workout, ...d } of w.days) {
+            // From today on, and never a second session on a day that keeps one.
+            if (d.date < day || keptDates.has(d.date)) continue;
+            const row = newWorkoutRow({
+              memberId: plan.userId, base: { id: null, ...workout }, scheduledDate: d.date,
+              trainerId: trainer.id, trainingPlanId: plan.id, source: 'trainer', now: at,
+            });
+            added.push(row);
+            days.push({ ...d, workoutId: row.id });
+          }
+          weeks.push({ week: w.week, days: days.sort((x, y) => x.date.localeCompare(y.date)) });
+        }
+        patch.weeks = weeks;
+      }
+    }
+    if (Object.keys(patch).length === 1) return { error: 'nothing_to_update', status: 400 };
+
+    // New sessions first, so a failure leaves the plan as it was.
+    try {
+      for (const row of added) await workouts.insertAsync(row);
+      await plans.updateByIdAsync(plan.id, patch);
+    } catch (err) {
+      for (const row of added) await workouts.removeByIdAsync(row.id).catch(() => {});
+      throw err;
+    }
+    for (const w of removed) await workouts.removeByIdAsync(w.id);
+
+    const updated = { ...plan, ...patch };
+    if (plan.status === 'active') {
+      await safeNotify(plan.userId, {
+        type: 'training_plan_updated',
+        title: 'Your trainer updated your plan',
+        body: `${trainer.displayName || 'Your trainer'} made changes to "${updated.name}". Workouts you have done are unchanged.`,
+        data: { planId: plan.id },
+      });
+    }
+    return { plan: await trainerView(updated, conn.perms) };
+  }
+
   /** Take back an offer, or stop a plan the client is on (sessions done stay theirs). */
   async function withdraw(trainerUserId, planId) {
     const trainer = await trainers.findAsync(t => t.userId === trainerUserId);
@@ -262,5 +386,5 @@ export function createTrainerPlanService({
     return { cancelled: true };
   }
 
-  return { suggest, offer, list, withdraw };
+  return { suggest, offer, list, withdraw, edit };
 }
