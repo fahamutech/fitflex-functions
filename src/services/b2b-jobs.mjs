@@ -17,6 +17,7 @@ export function registerB2BJobs({
   promotionService, promotionEventsService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bSponsorRefundService, b2bCollectionsService, b2bAnalyticsService,
   b2bBeneficiaryImportService = null,
   b2bLifecycleService = null,
+  b2bWatchService = null,
   now = () => new Date(),
 }) {
   ops.register({
@@ -122,8 +123,10 @@ export function registerB2BJobs({
     description: 'Runs the data-quality checks across usage, invoices, payments and passes. Each check that finds something raises one exception with the count and examples; it clears itself when the check comes back clean. Nothing is repaired.',
     run: async (ctx) => {
       const q = await b2bAnalyticsService.dataQuality();
+      // The provider side (settlement and trainer statements), read only.
+      const checks = [...q.checks, ...(b2bWatchService ? await b2bWatchService.providerChecks() : [])];
       let issues = 0;
-      for (const c of q.checks) {
+      for (const c of checks) {
         const key = `dq:${c.key}`;
         if (c.count > 0) {
           issues += 1;
@@ -132,7 +135,7 @@ export function registerB2BJobs({
           await ctx.clear(key, 'The check came back clean.');
         }
       }
-      return { processed: q.checks.length, succeeded: q.checks.length, failed: 0, issues };
+      return { processed: checks.length, succeeded: checks.length, failed: 0, issues };
     },
   });
 
@@ -185,6 +188,42 @@ export function registerB2BJobs({
     });
   }
 
+  if (b2bWatchService) {
+    ops.register({
+      name: 'b2b-billing-watch', title: 'Billing watch', schedule: { type: 'daily', utc: '04:30' }, domain: 'finance',
+      description: 'Raises an exception for billing work that has waited too long: draft invoices not issued, payment notices not checked, invoices long overdue, money received but not applied, an agreement about to end, an organisation long on hold. Each clears itself when the work is done. Nothing is changed.',
+      run: async (ctx) => {
+        const found = await b2bWatchService.billingWatch();
+        for (const f of found) {
+          await ctx.raise({ type: 'billing_watch', severity: f.severity, title: f.title, entityType: f.entityType, entityId: f.entityId, organizationId: f.organizationId, dedupeKey: f.key, detail: { kind: f.kind, ...f.detail } });
+        }
+        // Whatever was raised before and is no longer found has been dealt with.
+        const keys = new Set(found.map(f => f.key));
+        const stale = (await db('OpsException').where({ type: 'billing_watch' }).whereIn('status', LIVE_STATUSES).pluck('dedupeKey')).filter(k => !keys.has(k));
+        for (const key of stale) await ctx.clear(key, 'No longer waiting.');
+        return { processed: found.length + stale.length, succeeded: found.length + stale.length, failed: 0, waiting: found.length, cleared: stale.length };
+      },
+    });
+
+    ops.register({
+      name: 'ops-alerts', title: 'Staff alerts', schedule: { type: 'every', minutes: 10 }, quiet: true,
+      description: 'Emails the addresses in OPS_ALERT_EMAILS when a high-severity exception appears or retrying is given up. Each exception is announced once. With no addresses set, nothing is sent.',
+      run: async () => {
+        const r = await b2bWatchService.sendAlerts();
+        return { processed: r.due, succeeded: r.sent, failed: 0, ...r };
+      },
+    });
+
+    ops.register({
+      name: 'ops-daily-summary', title: 'Daily summary', schedule: { type: 'daily', utc: '05:30' },
+      description: 'Emails the addresses in OPS_ALERT_EMAILS a summary of the exceptions still waiting. Sent only when there is something waiting.',
+      run: async () => {
+        const r = await b2bWatchService.sendDigest({ pending: await pendingWork() });
+        return { processed: r.live, succeeded: r.sent ? r.live : 0, failed: 0, ...r };
+      },
+    });
+  }
+
   /** Work waiting on a person, for the operations page. Counts only. */
   async function pendingWork() {
     const day = localDay(now());
@@ -222,6 +261,7 @@ export function registerB2BJobs({
       generatedAt: new Date(now()).toISOString(),
       jobs: { total: jobs.length, ok: by('ok'), running: by('running'), delayed: by('delayed'), retrying: by('retrying'), failed: by('failed'), paused: by('paused'), items: jobs },
       exceptions: { ...exceptions, mostUrgent: recent },
+      alerts: b2bWatchService ? b2bWatchService.alertStatus() : null,
       pending,
     };
   }

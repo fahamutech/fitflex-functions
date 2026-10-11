@@ -77,6 +77,7 @@ import { createB2BCollectionsService } from '../services/b2b-collections-service
 import { createB2BAnalyticsService } from '../services/b2b-analytics-service.mjs';
 import { createOpsService } from '../services/ops-service.mjs';
 import { registerB2BJobs } from '../services/b2b-jobs.mjs';
+import { createB2BWatchService } from '../services/b2b-watch-service.mjs';
 import { createB2BBeneficiaryImportService } from '../services/b2b-beneficiary-import-service.mjs';
 import { createB2BLifecycleService } from '../services/b2b-lifecycle-service.mjs';
 import { createWhatsAppNotifier } from '../integrations/whatsapp-hooks.mjs';
@@ -302,8 +303,10 @@ export const b2bLifecycleService = createB2BLifecycleService({
   // notificationService is created further down; this only runs later.
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Billing work that has waited too long, the provider-side checks, and alert emails to staff.
+export const b2bWatchService = createB2BWatchService({ db, emailSender: () => emailSender() });
 export const b2bOps = registerB2BJobs({
-  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService, b2bLifecycleService,
+  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService, b2bLifecycleService, b2bWatchService,
   // Defined at the end of this file; only called when the job runs.
   promotionService: { runLifecycle: args => promotionService.runLifecycle(args) },
   promotionEventsService: { purge: args => promotionEventsService.purge(args) },

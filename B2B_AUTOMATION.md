@@ -90,6 +90,9 @@ Times are East Africa Time.
 | `b2b-lifecycle-notices` | 08:00 | benefit starting, ending and ended notices to members; programme ending and ended notices to organisations | operations |
 | `b2b-allowance-notices` | every 10 min | allowance nearly used and used up notices to members | operations |
 | `b2b-beneficiary-invites` | every 10 min | enrols invited people who have joined; sends invitation emails that are due | operations |
+| `b2b-billing-watch` | 07:30 | raises an exception for billing work left too long (§13) | finance |
+| `ops-alerts` | every 10 min | emails staff about new high-severity exceptions (§13) | operations |
+| `ops-daily-summary` | 08:30 | emails staff a summary of what is still waiting (§13) | operations |
 | `opsSweeper` | every 10 min | catch-up and retries (not itself recorded) | — |
 
 Not run through this layer, and unchanged: member renewals, gym
@@ -397,3 +400,107 @@ the dates, benefits and price, then submit and activate it like any programme.
 - Nothing tells beneficiaries when their organisation is suspended; there is
   no policy for that yet.
 - There is no automatic renewal, by design.
+
+## 13. Billing watch, provider checks and staff alerts (slice 4)
+
+Three things the earlier slices left to a person looking at the operations
+page: noticing that billing work has been left too long, checking that the
+provider side agrees with what sponsors were charged, and finding out that
+something went wrong without opening the page.
+
+Code: `src/services/b2b-watch-service.mjs`. Nothing in it changes a record,
+approves anything or decides a policy.
+
+### Billing watch (`b2b-billing-watch`, daily 07:30 EAT, finance)
+
+One exception (type `billing_watch`) per organisation and kind. It is raised
+again each day it still applies (the count of occurrences goes up; no
+duplicate), and it resolves itself on the first run where the work is done.
+
+| Kind | Raised when | Severity |
+|---|---|---|
+| `drafts_not_issued` | a non-zero draft invoice is more than 7 days old | medium |
+| `payment_notices_unchecked` | a payment notice has waited more than 3 days | high |
+| `long_overdue` | an issued invoice is more than 30 days past due | high |
+| `payment_not_applied` | money received more than 3 days ago is not fully applied while the organisation has open invoices | medium |
+| `agreement_ending` | the active agreement ends within 30 days and none follows it | medium |
+| `long_on_hold` | an organisation has been on hold more than 30 days | low |
+
+These day counts (`WATCH` in the service) say when something deserves a
+person's attention. They are not credit control: nothing is put on hold,
+charged, released or cancelled. What to do stays with staff.
+
+### Provider checks (part of `b2b-integrity-check`)
+
+The provider side of the chain, read only:
+
+| Check | Meaning | Severity |
+|---|---|---|
+| `gym_usage_missing_from_settlement` | an approved sponsored gym visit falls in a month with a locked live settlement run, and no live settlement visit exists for it | medium |
+| `settled_visit_without_usage` | a sponsored visit settled as payable or held has no approved usage behind it (reversed or cancelled since) | high |
+| `trainer_usage_missing_from_settlement` | an approved sponsored trainer session, completed more than 14 days ago, is on no trainer statement line | medium |
+
+They are raised and cleared as `dq:<check>` exceptions like the other
+integrity checks. The settlement tables are only read; a correction is made in
+the settlement tools by the people who own settlement.
+
+Only locked **live** runs count as settled. While gym settlement runs in
+shadow mode the two gym checks have nothing to compare against and stay at
+zero. Sponsored passes are not checked: a pass nobody used may rightly have
+nothing settled.
+
+### Staff alerts
+
+| Job | When | What |
+|---|---|---|
+| `ops-alerts` | every 10 minutes | one email listing exceptions that are high severity, or where retrying was given up, and that have not been announced before |
+| `ops-daily-summary` | daily 08:30 EAT | one email listing everything still waiting, most severe first, with the counts of work waiting. Not sent when nothing is waiting |
+
+Settings (server environment):
+
+- `OPS_ALERT_EMAILS` — comma-separated addresses. **Unset by default: nobody
+  is emailed**, and the operations page says so. No address is assumed.
+- `OPS_PORTAL_LINK` — optional link to the operations page for the email.
+- The email sender is the platform's existing one (`VERIFICATION_EMAIL_PROVIDER`).
+
+An exception is marked announced (`OpsException.alertedAt`) only once at least
+one address accepted the email, so alerts raised before the addresses are set
+go out when they are. Emails carry the exception titles only: organisation
+names, counts and amounts; no personal details of beneficiaries.
+
+### Runbook
+
+**"Payment notices unchecked".** Open B2B billing → Collections for the
+organisation, compare each notice with the bank or mobile-money statement, and
+confirm or reject it. The exception clears on the next morning's run (or use
+*Run now* on Billing watch).
+
+**"Draft invoices not issued".** Open B2B billing, review the drafts and issue
+or void them.
+
+**"More than 30 days overdue".** Information only. Whether to put the
+organisation on hold, agree a plan or wait is a commercial decision.
+
+**"Received but not applied".** Open the organisation's payments and apply the
+remaining amount to its open invoices.
+
+**"Agreement ends with nothing to follow it".** Agree new terms and put a new
+agreement in force, or leave it: FitFlex's standard terms then apply.
+
+**A provider check found something.** Do not edit settlement rows. Give the
+example ids in the exception to whoever runs settlement; a missed visit is
+normally picked up by a correction or the next run, and a settled visit whose
+usage was reversed by a clawback.
+
+**No alert emails arrive.** The operations page shows why: no addresses, or
+the email sender not set up. Then check the last run of *Staff alerts* in its
+history (`skipped` says `no_recipients`, `email_not_configured` or
+`not_accepted`).
+
+### Limitations
+
+- Alerts are email only; no SMS, push or chat alerts.
+- One list of addresses for everything; no routing by type or severity.
+- The watch thresholds are fixed in code.
+- Vendor (marketplace) settlement is not cross-checked: sponsors do not fund
+  marketplace purchases.
