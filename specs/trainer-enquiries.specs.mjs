@@ -55,6 +55,8 @@ test('an enquiry notifies the trainer and starts a conversation', async () => {
   const { engagements } = await service.listForTrainer({ userId: 'usr_trn' });
   assert.equal(engagements[0].unread, true);
   assert.equal(engagements[0].member.displayName, 'Neema');
+  // The trainer gets a name and photo only: no phone or email to contact the member outside the app.
+  assert.deepEqual(Object.keys(engagements[0].member).sort(), ['displayName', 'id', 'photoUrl']);
 });
 
 test('the trainer reads, replies and closes; the member follows up and reopens', async () => {
