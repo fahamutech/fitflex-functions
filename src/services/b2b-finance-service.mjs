@@ -816,7 +816,7 @@ export function createB2BFinanceService({
       account: (await getBillingAccount({ organizationId: org.id })).account,
       terms: agreement
         ? { reference: agreement.reference, contractReference: agreement.contractReference, effectiveFrom: agreement.effectiveFrom, effectiveTo: agreement.effectiveTo,
-          billingCycle: agreement.billingCycle, prepaidTermsDays: agreement.prepaidTermsDays, usageTermsDays: agreement.usageTermsDays, platformFeeTzs: agreement.platformFeeTzs }
+          billingCycle: agreement.billingCycle, prepaidTermsDays: agreement.prepaidTermsDays, usageTermsDays: agreement.usageTermsDays, platformFeeTzs: agreement.platformFeeTzs, passRates: agreement.passRates ?? null }
         : { reference: null, billingCycle: 'monthly', prepaidTermsDays: DEFAULT_TERMS.prepaidTermsDays, usageTermsDays: DEFAULT_TERMS.usageTermsDays, platformFeeTzs: null },
       recentInvoices: recent.map(i => ({ ...i, outstandingTzs: outstandingTzs(i) })),
     };

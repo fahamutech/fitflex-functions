@@ -296,6 +296,8 @@ export function createB2BLifecycleService({
           sponsorAmountTzs: b.sponsorAmountTzs ?? undefined, sponsorShareBps: b.sponsorShareBps ?? undefined, sponsorCapTzs: b.sponsorCapTzs ?? undefined, beneficiaryAmountTzs: b.beneficiaryAmountTzs ?? undefined,
           usageLimit: b.usageLimit ?? undefined, usagePeriod: b.usagePeriod ?? undefined, periodSponsorCapTzs: b.periodSponsorCapTzs ?? undefined,
           eligibility: b.eligibility ?? undefined, providerRules: b.providerRules ?? undefined, terms: b.terms ?? undefined, passTier: b.passTier ?? undefined,
+          // A custom fee is FitFlex's to set: carried over only when FitFlex prepares the renewal.
+          fixedFeeTzs: access.platformAdmin ? (b.fixedFeeTzs ?? undefined) : undefined,
           // A benefit with dates of its own keeps its place inside the new period, clipped to it.
           startDate: b.startDate ? moved(b.startDate) : undefined,
           endDate: b.endDate ? (moved(b.endDate) > period.endDate ? period.endDate : moved(b.endDate)) : undefined,

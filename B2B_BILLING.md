@@ -49,7 +49,21 @@ A `sponsored_pass` benefit names a pass tier (`passTier`: basic, pro, premium, e
 
 **Discount.** `B2BWellnessProgram.discountBps` (0–9999) is set by FitFlex admins only. It is copied onto each entitlement when a person is nominated, so changing it later affects new months only.
 
-The discount is shared with gyms automatically. The settlement engine caps what gyms receive for a pass at 75% of what was **collected** for it, so a lower fee lowers that cap in step, and FitFlex keeps at least 25% of what it collects.
+**Custom price (2026-10-12).** FitFlex can agree an exact fee instead of a percentage. The fee per person per month is the first of these that is set:
+
+1. `B2BBenefit.fixedFeeTzs` — a fee on that sponsored-pass benefit.
+2. `B2BCommercialAgreement.passRates[tier]` — the organisation's agreed rate for the tier, from the agreement in force on the first day of the month being billed.
+3. The tier's price less the programme's discount, as above.
+
+- Both are set by FitFlex staff only: the benefit fee by a platform admin (an organisation user is refused, and on renewal it is carried over only when FitFlex prepares the draft); the rates with the agreement, which needs billing permission to draft and activate.
+- A custom fee is exact: the programme's discount is not taken off it again.
+- It is never more than the tier's public price. A fee above the price is refused when set, and if the price is later lowered below it, the price is charged.
+- The benefit's funding still splits the fee between sponsor and member.
+- Each entitlement records the fee, the discount it amounts to (`discountBps`) and where it came from (`priceBasis`: `list_price`, `programme_discount`, `agreement_rate`, `benefit_fee`). Changing a fee or rate later affects only months not yet invoiced.
+- An issued invoice's `terms` snapshot includes the agreement's `passRates`.
+- A rate applies to every programme of the organisation; a tier with no rate keeps rule 3.
+
+A lower fee, however it is set, is shared with gyms automatically. The settlement engine caps what gyms receive for a pass at 75% of what was **collected** for it, so a lower fee lowers that cap in step, and FitFlex keeps at least 25% of what it collects.
 
 **The pass is an ordinary platform pass.** When it starts, the member gets a `Subscription` of type `platform_pass` on that tier, valid to the end of the EAT calendar month. Both shares are recorded as approved `PaymentRequest` rows against it:
 

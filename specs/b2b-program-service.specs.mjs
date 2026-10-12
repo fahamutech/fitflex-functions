@@ -216,7 +216,7 @@ test('benefit updates, activation and the live lock', async () => {
   const update = body => s.prog.updateBenefit({ access: owner, programId, benefitId, body });
   const status = (id, st) => s.prog.setBenefitStatus({ access: owner, programId, benefitId: id, status: st });
 
-  assert.deepEqual((await update({ usageLimit: 10 })).editable, ['name', 'description', 'terms']);
+  assert.deepEqual((await update({ usageLimit: 10 })).editable, ['name', 'description', 'terms', 'fixedFeeTzs']);
   assert.equal((await update({ name: '4 visits', terms: 'Standard gyms' })).benefit.terms, 'Standard gyms');
   assert.equal((await status(benefitId, 'inactive')).error, 'last_active_benefit');   // pause the programme instead
   const second = (await s.prog.createBenefit({ access: owner, programId, body: { ...GYM, name: 'Second' } })).benefit;

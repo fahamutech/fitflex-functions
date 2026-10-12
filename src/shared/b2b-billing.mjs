@@ -4,6 +4,7 @@
 // "YYYY-MM-DD"; a due date is a day, and an invoice is overdue from the day
 // after it.
 import { addDays } from './member-progress.mjs';
+import { PASS_TIERS } from './constants.mjs';
 
 export const PAYMENT_METHODS = Object.freeze(['bank_transfer', 'mobile_money', 'lipa_namba', 'cheque', 'cash', 'card', 'other']);
 /** Terms used when an organisation has no agreement in force (decided 4 Oct 2026). */
@@ -68,13 +69,25 @@ export function readAgreement(body = {}) {
   if (fee !== null && !whole(fee)) return fail('invalid_platform_fee');
   const vat = body.vatRateBps ?? null;
   if (vat !== null && (!whole(vat) || vat > 10000)) return fail('invalid_vat_rate', { hint: 'basis points, e.g. 1800 for 18%' });
+  // The organisation's fee per person per month for a sponsored pass, by tier. A tier left out uses the usual price.
+  let passRates = null;
+  if (body.passRates != null) {
+    if (typeof body.passRates !== 'object' || Array.isArray(body.passRates)) return fail('invalid_pass_rates');
+    const tiers = Object.keys(PASS_TIERS).filter(k => PASS_TIERS[k].accessMode !== 'free_online');
+    const set = Object.entries(body.passRates).filter(([, v]) => v !== null && v !== undefined && v !== '');
+    for (const [tier, v] of set) {
+      if (!tiers.includes(tier)) return fail('invalid_pass_rates', { tier, allowed: tiers });
+      if (!whole(v) || v < 1) return fail('invalid_pass_rates', { tier, hint: 'whole TZS, more than zero' });
+    }
+    passRates = set.length ? Object.fromEntries(set) : null;
+  }
   if (body.billingCycle != null && body.billingCycle !== 'monthly') return fail('unsupported_billing_cycle', { allowed: ['monthly'] });
   if (body.currency != null && body.currency !== 'TZS') return fail('unsupported_currency', { allowed: ['TZS'] });
   const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
   return {
     patch: {
       effectiveFrom: body.effectiveFrom, effectiveTo: body.effectiveTo ?? null, billingCycle: 'monthly', currency: 'TZS',
-      prepaidTermsDays, usageTermsDays, platformFeeTzs: fee || null, vatRateBps: vat,
+      prepaidTermsDays, usageTermsDays, platformFeeTzs: fee || null, vatRateBps: vat, passRates,
       contractReference: text(body.contractReference, 120), notes: text(body.notes, 2000),
     },
   };
@@ -87,6 +100,7 @@ export function termsSnapshot(agreement) {
     agreementId: agreement.id, reference: agreement.reference, source: 'agreement',
     prepaidTermsDays: agreement.prepaidTermsDays, usageTermsDays: agreement.usageTermsDays,
     platformFeeTzs: agreement.platformFeeTzs ?? null, vatRateBps: agreement.vatRateBps ?? null,
+    passRates: agreement.passRates ?? null,
   };
 }
 
