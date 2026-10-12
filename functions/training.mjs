@@ -241,3 +241,25 @@ export const adminResetExercise = {
   onGuard: exerciseGuard,
   onRequest: async (req, res) => sendExercise(res, await exerciseAdminService.reset(req.user.sub, req.params.id))
 };
+
+export const adminExportExercises = {
+  created, method: 'get', path: '/admin/exercises/export',
+  description: 'FitFlex admin: the whole exercise library as CSV text — { csv, count }. One row per exercise, every field; lists are ";"-separated, instruction steps " | "-separated.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => {
+    try {
+      res.json(await exerciseAdminService.exportCsv());
+    } catch (err) {
+      console.error('[exercises] could not export the library:', err?.message);
+      res.status(503).json({ error: 'exercise_library_unavailable' });
+    }
+  }
+};
+
+export const adminImportExercises = {
+  created, method: 'post', path: '/admin/exercises/import',
+  description: 'FitFlex admin: read a CSV of exercises (the format export gives) and report what it would change — { summary, rows: [{ line, id, name, action: create|update|unchanged|error, changed?, error?, field? }] }. Send dryRun: false to make the changes. A row with an id changes that exercise; no id adds one; columns left out are kept; rows with a problem are skipped; nothing is ever removed.',
+  requestSample: { csv: 'id,name,sw_name\nex_push_up,Push-up,Pushapu', dryRun: true },
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendExercise(res, await exerciseAdminService.importCsv(req.user.sub, req.body?.csv, { dryRun: req.body?.dryRun !== false }))
+};
