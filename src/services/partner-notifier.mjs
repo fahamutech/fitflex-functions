@@ -11,7 +11,12 @@ const tzs = n => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
 // A membership activated this recently is a new one, not a renewal of an old one.
 const NEW_MEMBERSHIP_MS = 10 * 60 * 1000;
 
-export function createPartnerNotifier({ users, gyms, trainers = null, subscriptions = null, notify, logger = console, now = () => new Date() }) {
+export function createPartnerNotifier({
+  users, gyms, trainers = null, subscriptions = null, paymentRequests = null,
+  // Each person's own message choices (communication preferences): check-in alerts can be switched off.
+  preferences = null,
+  notify, logger = console, now = () => new Date(),
+}) {
   async function send(userId, message) {
     if (!userId) return;
     try {
@@ -34,6 +39,7 @@ export function createPartnerNotifier({ users, gyms, trainers = null, subscripti
     if (!gymId) return;
     try {
       for (const userId of await gymPeople(gymId, opts)) {
+        if (opts?.unless && await opts.unless(userId)) continue;
         // A fixed id makes a message once-only; each person still gets their own copy.
         const id = message.id ? `${message.id}_${String(userId).replace(/[^A-Za-z0-9]/g, '').slice(-10)}` : undefined;
         await send(userId, { ...message, ...(id ? { id } : {}) });
@@ -45,6 +51,16 @@ export function createPartnerNotifier({ users, gyms, trainers = null, subscripti
 
   const nameOf = async (userId, fallback) => (await users.findByIdAsync(userId))?.displayName || fallback;
   const gymName = async gymId => (await gyms.findByIdAsync?.(gymId))?.name || 'your gym';
+
+  /** Has this person switched check-in alerts off? On unless they said so. */
+  async function checkinAlertsOff(userId) {
+    if (!preferences) return false;
+    try {
+      return (await preferences.findByIdAsync(userId))?.gymCheckinAlerts === false;
+    } catch {
+      return false;
+    }
+  }
 
   // ── Gyms ──────────────────────────────────────────────────────────────────
 
@@ -58,34 +74,69 @@ export function createPartnerNotifier({ users, gyms, trainers = null, subscripti
       title: 'Member checked in',
       body: `${await nameOf(checkin.memberId, 'A member')} checked in at ${await gymName(checkin.gymId)}.`,
       data: { gymId: checkin.gymId, memberId: checkin.memberId, checkinId: checkin.id },
-    });
+    }, { unless: checkinAlertsOff });
   }
 
   /**
-   * A member joined the gym: their first membership there was activated.
-   * A renewal, or a second membership after an earlier one, is not news.
+   * A gym membership was paid for and activated.
+   *
+   * - The member's first membership at the gym: "New member", to the owner
+   *   and staff.
+   * - Anything after that — a renewal, or a member coming back: "Membership
+   *   renewed", a payment notice for the owner only, once per period.
    */
   async function gymMemberJoined(sub) {
     const gymId = sub?.homeGymId;
     if (!gymId || sub.type !== 'direct_sub') return;
+    let first = false;
     try {
-      if (+now() - +new Date(sub.createdAt) > NEW_MEMBERSHIP_MS) return;
+      const fresh = +now() - +new Date(sub.createdAt) <= NEW_MEMBERSHIP_MS;
       const earlier = subscriptions
         ? (await subscriptions.filterByColumnAsync('memberId', sub.memberId))
           .some(x => x.id !== sub.id && x.type === 'direct_sub' && x.homeGymId === gymId)
         : false;
-      if (earlier) return;
+      first = fresh && !earlier;
     } catch (err) {
-      logger.warn?.(`[partner-notify] gym_member_joined check failed: ${err?.message}`);
+      logger.warn?.(`[partner-notify] gym membership check failed: ${err?.message}`);
       return;
     }
+    const safe = v => String(v ?? '').replace(/[^A-Za-z0-9]/g, '').slice(0, 40);
+    const who = await nameOf(sub.memberId, 'A member');
+    if (first) {
+      await toGym(gymId, {
+        id: `ntf_join_${safe(sub.id)}`,
+        type: 'gym_member_joined',
+        title: 'New member',
+        body: `${who} now has a membership at ${await gymName(gymId)}.`,
+        data: { gymId, memberId: sub.memberId, subscriptionId: sub.id },
+      });
+      return;
+    }
+    // The period it now runs to names the renewal, so it is told once.
+    const until = sub.renewsAt || sub.expiresAt ? new Date(sub.renewsAt || sub.expiresAt).toISOString().slice(0, 10) : '';
+    const paid = await paidFor(sub);
     await toGym(gymId, {
-      id: `ntf_join_${String(sub.id).slice(0, 40)}`.replace(/[^A-Za-z0-9_]/g, ''),
-      type: 'gym_member_joined',
-      title: 'New member',
-      body: `${await nameOf(sub.memberId, 'A member')} now has a membership at ${await gymName(gymId)}.`,
-      data: { gymId, memberId: sub.memberId, subscriptionId: sub.id },
-    });
+      id: `ntf_rnw_${safe(sub.id)}_${safe(until)}`,
+      type: 'gym_membership_renewed',
+      title: 'Membership renewed',
+      body: `${who} renewed at ${await gymName(gymId)}${paid ? ` and paid ${tzs(paid)}` : ''}${until ? `. It now runs to ${until}.` : '.'}`,
+      data: { gymId, memberId: sub.memberId, subscriptionId: sub.id, ...(paid ? { amountTzs: paid } : {}) },
+    }, { ownersOnly: true });
+  }
+
+  /** What was last paid for this membership, when a payment is on record. */
+  async function paidFor(sub) {
+    if (!paymentRequests) return null;
+    try {
+      const rows = (await paymentRequests.filterByColumnAsync('subscriptionId', sub.id))
+        .filter(p => p.status === 'approved' && Number(p.amountTzs) > 0)
+        .sort((x, y) => +new Date(y.decidedAt || y.requestedAt || 0) - +new Date(x.decidedAt || x.requestedAt || 0));
+      // Only a payment made for this renewal, not one from a period long past.
+      const latest = rows[0];
+      return latest && +now() - +new Date(latest.decidedAt || latest.requestedAt || 0) <= 24 * 60 * 60 * 1000 ? Number(latest.amountTzs) : null;
+    } catch {
+      return null;
+    }
   }
 
   /** A trainer asked to work at the gym. */
