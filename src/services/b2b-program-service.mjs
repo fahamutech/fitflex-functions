@@ -30,6 +30,8 @@ function page(rows, query = {}) {
 
 export function createB2BProgramService({
   programs, benefits, gyms, trainers, users, challenges, auditLog, b2bService,
+  // Pass prices, to check a pass's own fee against: { priceForTier }.
+  settingsService,
   // Phase 3 ledger reads: { allowanceFor, sponsorSpentForProgram }. Optional.
   usage = null,
   // Sponsor billing reads: { passFor }. Optional.
@@ -295,6 +297,13 @@ export function createB2BProgramService({
       if (!tier || tier.accessMode === 'free_online') return fail('invalid_pass_tier', 400, { allowed: Object.keys(PASS_TIERS).filter(k => PASS_TIERS[k].accessMode !== 'free_online') });
       if (body.fundingType === 'none') return fail('pass_needs_funding', 400);
     }
+    // A fee of its own for this pass, instead of the tier's price less the programme's discount.
+    const fixedFeeTzs = body.fixedFeeTzs ?? null;
+    if (fixedFeeTzs !== null) {
+      if (!flatFee) return fail('fixed_fee_needs_pass', 400);
+      const listPriceTzs = settingsService.priceForTier(body.passTier);
+      if (!Number.isInteger(fixedFeeTzs) || fixedFeeTzs < 1 || fixedFeeTzs > listPriceTzs) return fail('invalid_fixed_fee', 400, { min: 1, max: listPriceTzs, hint: 'whole TZS per person per month, no more than the pass price' });
+    }
     const funding = readFunding(body);
     if (funding.error) return funding;
     if (!flatFee && !perUseFundingTypes(body.benefitType).includes(funding.patch.fundingType)) {
@@ -330,6 +339,7 @@ export function createB2BProgramService({
         eligibility: eligibility.value, providerRules: providers.value,
         startDate, endDate, terms: text(body.terms, 4000),
         passTier: flatFee ? body.passTier : null,
+        fixedFeeTzs: flatFee ? fixedFeeTzs : null,
       },
     };
   }
@@ -340,6 +350,7 @@ export function createB2BProgramService({
     if (!p) return fail('program_not_found', 404);
     const status = programEffectiveStatus(p, today());
     if (CLOSED_PROGRAM_STATUSES.includes(status)) return fail('program_closed', 409, { programStatus: status });
+    if (body.fixedFeeTzs != null && !access.platformAdmin) return fail('forbidden', 403, { requiredRole: 'platform_admin', field: 'fixedFeeTzs' });
     const read = await readBenefit(access, p, body);
     if (read.error) return read;
     const at = stamp();
@@ -383,6 +394,10 @@ export function createB2BProgramService({
     if (b.status === 'active' && ['active', 'paused'].includes(status)) {
       const locked = Object.keys(body).filter(k => !LIVE_BENEFIT_FIELDS.includes(k));
       if (locked.length) return fail('benefit_live', 409, { fields: locked, editable: LIVE_BENEFIT_FIELDS });
+    }
+    // Only FitFlex sets or changes a pass's own fee.
+    if (body.fixedFeeTzs !== undefined && (body.fixedFeeTzs ?? null) !== (b.fixedFeeTzs ?? null) && !access.platformAdmin) {
+      return fail('forbidden', 403, { requiredRole: 'platform_admin', field: 'fixedFeeTzs' });
     }
     // Merge over the stored row so partial updates validate as a whole benefit.
     const read = await readBenefit(access, p, { ...b, ...body });

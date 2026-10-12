@@ -243,7 +243,7 @@ export const b2bService = createB2BService({
 });
 // B2B Phase 2: wellness programmes and benefit rules (no usage counting or payouts).
 export const b2bProgramService = createB2BProgramService({
-  programs: b2bPrograms, benefits: b2bBenefits, gyms, trainers, users, challenges, auditLog, b2bService,
+  programs: b2bPrograms, benefits: b2bBenefits, gyms, trainers, users, challenges, auditLog, b2bService, settingsService,
   // b2bConsumptionService is defined below; these only run later, per request.
   usage: {
     allowanceFor: args => b2bConsumptionService.allowanceFor(args),

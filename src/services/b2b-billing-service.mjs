@@ -26,7 +26,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   FLAT_FEE_BENEFIT, programEffectiveStatus, matchesPopulation, benefitValidity, calculateResponsibility,
-  discountedFeeTzs, vatContainedTzs, isMonth, monthBounds, eatDayStart,
+  passFeeTzs, vatContainedTzs, isMonth, monthBounds, eatDayStart,
 } from '../shared/b2b-programs.mjs';
 import { SUBSIDY_MODELS } from '../shared/corporate-constants.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
@@ -56,13 +56,19 @@ export function createB2BBillingService({
     await auditLog.insertAsync({ id: randomUUID(), at: stamp(), actor, action, target, before, after });
   }
 
-  /** A programme's sponsor fee for one person on a tier: tier price less the discount, split by the benefit's funding. */
-  function feeFor(program, benefit) {
+  /**
+   * The fee for one person on a sponsored pass, split by the benefit's funding.
+   * The benefit's own fee comes first, then the organisation's agreed rate for
+   * the tier, then the tier price less the programme's discount.
+   */
+  function feeFor(program, benefit, agreement = null) {
     const listPriceTzs = settingsService.priceForTier(benefit.passTier);
-    const discountBps = program.discountBps || 0;
-    const feeTzs = discountedFeeTzs(listPriceTzs, discountBps);
+    const { feeTzs, discountBps, priceBasis } = passFeeTzs({
+      listPriceTzs, discountBps: program.discountBps || 0,
+      fixedFeeTzs: benefit.fixedFeeTzs ?? null, agreementRateTzs: agreement?.passRates?.[benefit.passTier] ?? null,
+    });
     const split = calculateResponsibility({ benefit, priceTzs: feeTzs });
-    return { listPriceTzs, discountBps, feeTzs, sponsorTzs: split.sponsorTzs, memberTzs: split.beneficiaryTzs };
+    return { listPriceTzs, discountBps, feeTzs, sponsorTzs: split.sponsorTzs, memberTzs: split.beneficiaryTzs, priceBasis };
   }
 
   /** The open draft for a programme, month and kind, creating it if there is none. */
@@ -134,8 +140,10 @@ export function createB2BBillingService({
       await trx('B2BWellnessProgram').where({ id: program.id }).forUpdate().first();   // one preparation at a time
       let invoice = null;
       let added = 0;
+      // The organisation's agreed rates are those in force on the first day of the month being billed.
+      const agreement = await agreementInForce(trx, org.id, startDate);
       for (const benefit of passBenefits) {
-        const fee = feeFor(program, benefit);
+        const fee = feeFor(program, benefit, agreement);
         const covered = new Set(await trx(ENTITLEMENT).where({ benefitId: benefit.id, period }).whereNot({ status: 'void' }).pluck('beneficiaryId'));
         for (const person of people) {
           if (covered.has(person.id) || matchesPopulation({ program, beneficiary: person, benefit })) continue;

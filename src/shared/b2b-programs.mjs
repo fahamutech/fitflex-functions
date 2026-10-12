@@ -46,7 +46,8 @@ export const BENEFIT_TRANSITIONS = Object.freeze({
 export const BENEFIT_STATUS = Object.freeze(Object.keys(BENEFIT_TRANSITIONS));
 // An active benefit of a live programme only changes wording; funding, limits,
 // providers and dates change after deactivating it.
-export const LIVE_BENEFIT_FIELDS = Object.freeze(['name', 'description', 'terms']);
+// `fixedFeeTzs` (FitFlex staff only) applies to months not yet invoiced.
+export const LIVE_BENEFIT_FIELDS = Object.freeze(['name', 'description', 'terms', 'fixedFeeTzs']);
 
 /**
  * Benefit types and the existing FitFlex capability that will fulfil each.
@@ -429,6 +430,24 @@ export const FLAT_FEE_BENEFIT = 'sponsored_pass';
 /** A programme's fee for a tier: the tier's price less the programme's discount, in whole TZS. */
 export function discountedFeeTzs(listPriceTzs, discountBps = 0) {
   return Math.round((listPriceTzs * (10000 - discountBps)) / 10000);
+}
+
+/**
+ * The fee for one person on a sponsored pass, and where it came from. In order:
+ *   1. the benefit's own fixed fee
+ *   2. the organisation's agreed rate for the tier (the agreement in force)
+ *   3. the tier's price less the programme's discount
+ * A custom fee never exceeds the tier's price: the sponsor is not charged more
+ * than the public price. `discountBps` is the discount the fee amounts to.
+ */
+export function passFeeTzs({ listPriceTzs, discountBps = 0, fixedFeeTzs = null, agreementRateTzs = null }) {
+  const custom = fixedFeeTzs ?? agreementRateTzs;
+  if (custom == null) {
+    return { feeTzs: discountedFeeTzs(listPriceTzs, discountBps), discountBps, priceBasis: discountBps ? 'programme_discount' : 'list_price' };
+  }
+  const feeTzs = Math.min(custom, listPriceTzs);
+  const effective = listPriceTzs > 0 ? Math.round(((listPriceTzs - feeTzs) * 10000) / listPriceTzs) : 0;
+  return { feeTzs, discountBps: Math.min(9999, Math.max(0, effective)), priceBasis: fixedFeeTzs != null ? 'benefit_fee' : 'agreement_rate' };
 }
 
 /** VAT contained in a VAT-inclusive total at `rateBps` (1800 = 18%). */

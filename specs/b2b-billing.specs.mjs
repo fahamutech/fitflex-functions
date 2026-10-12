@@ -10,9 +10,9 @@ import { purgeB2BBilling } from './fixtures/ledger-cleanup.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import {
   gyms, b2bService, b2bProgramService, b2bConsumptionService as usage, b2bBillingService as billing,
-  checkInService, adminPaymentService, corporateService, settingsService,
+  checkInService, adminPaymentService, corporateService, settingsService, b2bFinanceService as finance,
 } from '../src/bootstrap/services.mjs';
-import { monthBounds, eatDayStart, vatContainedTzs, discountedFeeTzs } from '../src/shared/b2b-programs.mjs';
+import { monthBounds, eatDayStart, vatContainedTzs, discountedFeeTzs, passFeeTzs } from '../src/shared/b2b-programs.mjs';
 import { localDay } from '../src/shared/member-progress.mjs';
 import {
   adminPrepareB2BInvoice, adminListB2BInvoices, adminIssueB2BInvoice, adminMarkB2BInvoicePaid, adminVoidB2BInvoice,
@@ -309,6 +309,97 @@ test('a programme discount is set by FitFlex only and lowers the fee for both si
   assert.deepEqual([e.listPriceTzs, e.discountBps, e.feeTzs, e.sponsorTzs + e.memberTzs], [PRO, 1000, fee, fee]);
   assert.equal(prepared.invoice.totalTzs, e.sponsorTzs);
   assert.equal(fee, Math.round(PRO * 0.9));
+});
+
+test('rule: a pass fee comes from the benefit, then the agreement, then the price less the discount', () => {
+  assert.deepEqual(passFeeTzs({ listPriceTzs: 120000 }), { feeTzs: 120000, discountBps: 0, priceBasis: 'list_price' });
+  assert.deepEqual(passFeeTzs({ listPriceTzs: 120000, discountBps: 1000 }), { feeTzs: 108000, discountBps: 1000, priceBasis: 'programme_discount' });
+  // A custom fee is exact: the programme's discount is not taken off it again.
+  assert.deepEqual(passFeeTzs({ listPriceTzs: 120000, discountBps: 1000, agreementRateTzs: 90000 }), { feeTzs: 90000, discountBps: 2500, priceBasis: 'agreement_rate' });
+  assert.deepEqual(passFeeTzs({ listPriceTzs: 120000, discountBps: 1000, agreementRateTzs: 90000, fixedFeeTzs: 75000 }), { feeTzs: 75000, discountBps: 3750, priceBasis: 'benefit_fee' });
+  // Never more than the public price (it may have been lowered since the fee was agreed).
+  assert.deepEqual(passFeeTzs({ listPriceTzs: 100000, fixedFeeTzs: 110000 }), { feeTzs: 100000, discountBps: 0, priceBasis: 'benefit_fee' });
+  assert.deepEqual(passFeeTzs({ listPriceTzs: 120000, fixedFeeTzs: 1 }).discountBps, 9999);
+});
+
+test('a fixed fee on a pass benefit: set by FitFlex only, charged exactly and split by the funding', async () => {
+  const orgId = await sponsor('employer');
+  const ownerId = await user('member');
+  await b2bService.addOrganizationUser({ access: await access(orgId), body: { userId: ownerId, role: 'owner' }, actorId: ADMIN.userId });
+  await enrol(orgId);
+  const admin = await access(orgId);
+  const owner = await access(orgId, { userId: ownerId, userType: 'member' });
+  const { program } = await b2bProgramService.createProgram({ access: admin, body: { name: 'Fixed fee', startDate: '2026-01-01', discountBps: 1000 }, actorId: ADMIN.userId });
+  const split = { ...PASS, fundingType: 'sponsor_percentage', sponsorShareBps: 5000 };
+  const FEE = PRO - 20000;   // the agreed fee, whatever the pro price is set to
+
+  // An organisation user cannot set it; FitFlex cannot set nonsense.
+  const refused = await b2bProgramService.createBenefit({ access: owner, programId: program.id, body: { ...split, fixedFeeTzs: FEE }, actorId: ownerId });
+  assert.deepEqual([refused.status, refused.field], [403, 'fixedFeeTzs']);
+  for (const bad of [0, -5, 1.5, PRO + 1]) {
+    assert.equal((await b2bProgramService.createBenefit({ access: admin, programId: program.id, body: { ...split, fixedFeeTzs: bad }, actorId: ADMIN.userId })).error, 'invalid_fixed_fee');
+  }
+  assert.equal((await b2bProgramService.createBenefit({ access: admin, programId: program.id, body: { name: 'Visits', benefitType: 'gym_access', fundingType: 'full', usagePeriod: 'unlimited', fixedFeeTzs: 5000 }, actorId: ADMIN.userId })).error, 'fixed_fee_needs_pass');
+
+  const { benefit } = await b2bProgramService.createBenefit({ access: admin, programId: program.id, body: { ...split, fixedFeeTzs: FEE }, actorId: ADMIN.userId });
+  assert.equal(benefit.fixedFeeTzs, FEE);
+  await b2bProgramService.setBenefitStatus({ access: admin, programId: program.id, benefitId: benefit.id, status: 'active', actorId: ADMIN.userId });
+  await b2bProgramService.setProgramStatus({ access: admin, programId: program.id, status: 'pending', actorId: ADMIN.userId });
+  await b2bProgramService.setProgramStatus({ access: admin, programId: program.id, status: 'active', actorId: ADMIN.userId });
+
+  // Live: the organisation can rename the benefit but not touch its fee; FitFlex can.
+  const renamed = await b2bProgramService.updateBenefit({ access: owner, programId: program.id, benefitId: benefit.id, body: { name: 'Pro pass (staff)' }, actorId: ownerId });
+  assert.equal(renamed.benefit?.fixedFeeTzs, FEE, JSON.stringify(renamed));
+  const tried = await b2bProgramService.updateBenefit({ access: owner, programId: program.id, benefitId: benefit.id, body: { fixedFeeTzs: 1000 }, actorId: ownerId });
+  assert.deepEqual([tried.status, tried.field], [403, 'fixedFeeTzs']);
+
+  const prepared = await billing.preparePrepaid({ programId: program.id, period: PERIOD, actorId: ADMIN.userId });
+  const [e] = await entitlements({ benefitId: benefit.id });
+  // The programme's 10% discount is not taken off a fixed fee.
+  assert.deepEqual([e.listPriceTzs, e.feeTzs, e.sponsorTzs, e.memberTzs, e.priceBasis], [PRO, FEE, FEE / 2, FEE / 2, 'benefit_fee']);
+  assert.equal(prepared.invoice.totalTzs, FEE / 2);
+
+  // Changing the fee later leaves what is already invoiced alone.
+  const changed = await b2bProgramService.updateBenefit({ access: admin, programId: program.id, benefitId: benefit.id, body: { fixedFeeTzs: FEE - 10000 }, actorId: ADMIN.userId });
+  assert.equal(changed.benefit.fixedFeeTzs, FEE - 10000);
+  await billing.preparePrepaid({ programId: program.id, period: PERIOD, actorId: ADMIN.userId });
+  assert.deepEqual((await entitlements({ benefitId: benefit.id })).map(x => x.feeTzs), [FEE]);
+  // Cleared: back to the price less the programme's discount.
+  const cleared = await b2bProgramService.updateBenefit({ access: admin, programId: program.id, benefitId: benefit.id, body: { fixedFeeTzs: null }, actorId: ADMIN.userId });
+  assert.equal(cleared.benefit.fixedFeeTzs, null);
+});
+
+test('an agreed rate per tier on the agreement is the default fee for that organisation', async () => {
+  const orgId = await sponsor('insurer');
+  await enrol(orgId);
+  const RATE = PRO - 15000;
+  for (const bad of [{ gold: 50000 }, { pro: 0 }, { pro: 1.5 }, { online_free: 100 }, [50000]]) {
+    assert.equal((await finance.createAgreement({ organizationId: orgId, body: { effectiveFrom: '2026-01-01', passRates: bad }, actorId: ADMIN.userId })).error, 'invalid_pass_rates', JSON.stringify(bad));
+  }
+  const draft = await finance.createAgreement({ organizationId: orgId, body: { effectiveFrom: '2026-01-01', passRates: { pro: RATE, premium: null } }, actorId: ADMIN.userId });
+  assert.deepEqual(draft.agreement?.passRates, { pro: RATE }, JSON.stringify(draft));
+
+  // A draft agreement changes nothing.
+  const a = await programme(orgId, PASS, { discountBps: 1000 });
+  await billing.preparePrepaid({ programId: a.programId, period: PERIOD, actorId: ADMIN.userId });
+  assert.deepEqual((await entitlements({ benefitId: a.benefitId })).map(e => [e.feeTzs, e.priceBasis]), [[discountedFeeTzs(PRO, 1000), 'programme_discount']]);
+
+  const active = await finance.activateAgreement({ agreementId: draft.agreement.id, actorId: FINANCE.userId });
+  assert.equal(active.agreement?.status, 'active', JSON.stringify(active));
+  // In force: a new programme's pro pass is charged the agreed rate; a tier with no rate keeps the usual price.
+  const b = await programme(orgId, PASS, { discountBps: 1000 });
+  const c = await programme(orgId, { ...PASS, name: 'Basic pass', passTier: 'basic' });
+  const d = await programme(orgId, { ...PASS, name: 'Pro at a special fee', fixedFeeTzs: PRO - 25000 });
+  for (const p of [b, c, d]) await billing.preparePrepaid({ programId: p.programId, period: PERIOD, actorId: ADMIN.userId });
+  const fee = async benefitId => (await entitlements({ benefitId })).map(e => [e.feeTzs, e.priceBasis]);
+  assert.deepEqual(await fee(b.benefitId), [[RATE, 'agreement_rate']]);
+  assert.deepEqual(await fee(c.benefitId), [[settingsService.priceForTier('basic'), 'list_price']]);
+  // The benefit's own fee wins over the agreement's rate.
+  assert.deepEqual(await fee(d.benefitId), [[PRO - 25000, 'benefit_fee']]);
+  // The invoice's terms record the rates it was issued under.
+  const inv = await db('B2BSponsorInvoice').where({ programId: b.programId, period: PERIOD }).first();
+  await billing.issueInvoice({ invoiceId: inv.id, vatRateBps: 1800, actorId: ADMIN.userId });
+  assert.deepEqual((await db('B2BSponsorInvoice').where({ id: inv.id }).first()).terms.passRates, { pro: RATE });
 });
 
 // ── Per use ──────────────────────────────────────────────────────────────────
