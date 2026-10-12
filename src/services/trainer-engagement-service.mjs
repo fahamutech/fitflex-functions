@@ -95,8 +95,9 @@ export function createTrainerEngagementService({
       trainerReadAt: iso(e.trainerReadAt), memberReadAt: iso(e.memberReadAt),
       messages: engagementThread(e),
       unread: unreadFor(e, 'trainer'),
+      // No phone or email: a trainer and a member talk inside the app (product owner, 12 Oct 2026).
       member: member
-        ? { id: member.id, displayName: member.displayName || null, phone: member.phone || null, email: member.email || null, photoUrl: member.photoUrl || null }
+        ? { id: member.id, displayName: member.displayName || null, photoUrl: member.photoUrl || null }
         : null,
     };
   }
