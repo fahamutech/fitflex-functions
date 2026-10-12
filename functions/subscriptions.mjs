@@ -37,14 +37,14 @@ export const upgradeOptions = {
 
 export const upgradePass = {
   created, method: 'post', path: '/me/upgrade',
-  description: 'Upgrade the FitFlex Pass: creates a payment request for the price difference. Approval starts the new tier and retires the old one.',
+  description: 'Upgrade the FitFlex Pass: creates a payment request for the price difference. Approval upgrades the plan in place (same end date, same visits used).',
   requestSample: { tier: 'pro' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
     const { tier } = req.body || {};
     const result = await subscriptionService.upgradePass({ memberId: req.user.sub, tier });
     if (result.error) return res.status(result.status).json({ error: result.error });
-    res.status(result.status).json({ subscription: result.subscription, paymentRequest: result.paymentRequest, upgradeFrom: result.upgradeFrom });
+    res.status(result.status).json({ paymentRequest: result.paymentRequest, upgradeFrom: result.upgradeFrom, endsAt: result.endsAt });
   }
 };
 

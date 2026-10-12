@@ -8,7 +8,7 @@ import { publicGym } from './gym-service.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { PRODUCT_TYPES, MEMBER_ACCESS_PRODUCTS, productTypeOfPayment } from '../shared/payment-product.mjs';
-import { upgradeNote, upgradeDifference, isSponsoredPassId } from '../shared/pass-upgrade.mjs';
+import { upgradeNote, upgradeOf, upgradeDifference, isSponsoredPassId } from '../shared/pass-upgrade.mjs';
 
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
@@ -224,7 +224,7 @@ export function createSubscriptionService({
     const amountTzs = Number(settingsService.priceForTier(tier));
     const isFreeOnline = amountTzs === 0 && PASS_TIERS[tier]?.accessMode === 'free_online';
     if (!isFreeOnline && !positiveTzs(amountTzs)) return { error: 'tier_not_available', status: 400 };
-    if (await pendingSubscription(memberId, 'platform_pass')) return { error: 'payment_already_pending', status: 409 };
+    if (await openPassPayment(memberId)) return { error: 'payment_already_pending', status: 409 };
     const now = new Date();
     const renewsAt = new Date(+now + 30 * 86_400_000);
     const sub = {
@@ -288,11 +288,18 @@ export function createSubscriptionService({
     };
   }
 
+  /** An upgrade or a pass purchase still waiting on its payment. */
+  async function openPassPayment(memberId) {
+    if (await pendingSubscription(memberId, 'platform_pass')) return true;
+    const open = await paymentRequests.filterAsync(p => p.memberId === memberId && p.status === 'pending' && upgradeOf(p));
+    return open.length > 0;
+  }
+
   /**
    * Move up to a higher tier by paying the difference in price — never the
    * full price, and not reduced for the days left on the current plan. The
-   * new tier starts when the payment is approved; the current plan keeps
-   * working until then and is retired at that moment.
+   * plan is upgraded in place when the payment is approved: it keeps its end
+   * date and its visit counter, so an upgrade never extends a plan.
    */
   async function upgradePass({ memberId, tier }) {
     const held = await upgradableCurrentPass(memberId);
@@ -302,39 +309,28 @@ export function createSubscriptionService({
     if (!tier || !sellable || PASS_TIERS[tier]?.accessMode === 'free_online') return { error: 'invalid_tier', status: 400 };
     const amountTzs = upgradeDifference(held.fromPrice, settingsService.priceForTier(tier));
     if (!amountTzs) return { error: 'not_an_upgrade', status: 409 };
-    if (await pendingSubscription(memberId, 'platform_pass')) return { error: 'payment_already_pending', status: 409 };
+    if (await openPassPayment(memberId)) return { error: 'payment_already_pending', status: 409 };
 
-    const now = new Date();
-    const endsAt = new Date(+now + 30 * 86_400_000);
-    const sub = {
-      id: `sub_${randomUUID().slice(0, 8)}`,
-      memberId,
-      type: 'platform_pass', tier,
-      status: 'payment_pending',
-      startedAt: now.toISOString(),
-      cycleStartedAt: now.toISOString(),
-      renewsAt: endsAt.toISOString(),
-      expiresAt: endsAt.toISOString(),
-      homeGymId: null,
-      paymentRef: null,
-      pilotPayment: true
-    };
-    await subscriptions.insertAsync(sub);
     const paymentRequest = await paymentRequests.insertAsync({
       id: `pay_${randomUUID().slice(0, 8)}`,
       memberId,
-      subscriptionId: sub.id,
+      // The payment belongs to the plan it upgrades (settlement sums a plan's collected money by it); the note says it is an upgrade.
+      subscriptionId: held.current.id,
       tier,
       amountTzs,
       status: 'pending',
       provider: 'admin_approved',
       reference: null,
-      requestedAt: now.toISOString(),
+      requestedAt: new Date().toISOString(),
       decidedAt: null,
       decidedBy: null,
-      note: upgradeNote(held.current.id)
+      note: upgradeNote(held.current.id, held.current.tier)
     });
-    return { status: 202, subscription: sub, paymentRequest, upgradeFrom: { subscriptionId: held.current.id, tier: held.current.tier } };
+    return {
+      status: 202, paymentRequest,
+      upgradeFrom: { subscriptionId: held.current.id, tier: held.current.tier },
+      endsAt: held.current.expiresAt,
+    };
   }
 
   /** A payment request with what it buys: product type, and the gym / tier / period behind it. */

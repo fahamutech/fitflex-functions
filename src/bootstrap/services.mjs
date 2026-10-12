@@ -420,6 +420,8 @@ export const adminPaymentService = createAdminPaymentService({
     await lifecycle.activated(sub, ctx);
   },
   onSubscriptionPaymentReversed: sub => promotionEventsService.reverseSubscription(sub),
+  // An upgraded pass is the same plan: tell the member, nothing else (it is no new membership or conversion).
+  onPassUpgraded: sub => notificationService.notifySubscriptionActivated(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),

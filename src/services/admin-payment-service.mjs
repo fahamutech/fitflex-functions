@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { activationDates } from '../shared/subscription-status.mjs';
 import { productTypeOfPayment } from '../shared/payment-product.mjs';
-import { retireUpgradedPass } from '../shared/pass-upgrade.mjs';
+import { upgradeOf, upgradeApprovable, applyUpgradeStatus } from '../shared/pass-upgrade.mjs';
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
@@ -16,6 +16,8 @@ export function createAdminPaymentService({
   onPaymentRejected = async () => {},
   // A membership's payment was rejected, cancelled or put back to pending: (subscription) => void. Promotion analytics takes the conversion back.
   onSubscriptionPaymentReversed = async () => {},
+  // A pass was upgraded in place: (subscription, request) => void. Best-effort.
+  onPassUpgraded = async () => {},
 }) {
   function slimMember(u) {
     if (!u) return null;
@@ -44,6 +46,14 @@ export function createAdminPaymentService({
       await onOrderPayment(request.orderId, status);
       return;
     }
+    // An upgrade changes the plan it upgrades, in place; it has no plan of its own.
+    if (upgradeOf(request)) {
+      const out = await applyUpgradeStatus(subscriptions, request, status);
+      if (out?.upgraded) {
+        try { await onPassUpgraded(out.subscription, request); } catch { /* notification is best-effort */ }
+      }
+      return;
+    }
     if (!request.subscriptionId) return;
     const subStatus = {
       approved: 'active',
@@ -62,8 +72,6 @@ export function createAdminPaymentService({
     }
     const updated = await subscriptions.updateByIdAsync(request.subscriptionId, patch);
     if (subStatus === 'active' && updated) {
-      // An approved upgrade replaces the plan it was bought on top of (the newest plan wins meanwhile).
-      try { await retireUpgradedPass(subscriptions, request, updated.id); } catch { /* best-effort */ }
       // The request says when the member asked and what they paid, which is what promotion analytics needs.
       try { await onSubscriptionActivated(updated, { requestedAt: request.requestedAt, amountTzs: request.amountTzs }); } catch { /* notification is best-effort */ }
     }
@@ -106,13 +114,18 @@ export function createAdminPaymentService({
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
+    if (decision === 'approve') {
+      const can = await upgradeApprovable(subscriptions, request);
+      if (!can.ok) return { error: can.error, status: 409 };
+    }
 
     const now = new Date().toISOString();
     const status = decision === 'approve' ? 'approved' : 'rejected';
     const updated = await paymentRequests.updateByIdAsync(request.id, {
       status,
       reference: reference || request.reference,
-      note: note || null,
+      // An upgrade's note names the plan it upgrades: it stays as it is.
+      note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
       decidedBy: actorId
     });
@@ -130,11 +143,15 @@ export function createAdminPaymentService({
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     const nextStatus = status || request.status;
+    if (nextStatus === 'approved' && request.status !== 'approved') {
+      const can = await upgradeApprovable(subscriptions, request);
+      if (!can.ok) return { error: can.error, status: 409 };
+    }
     const now = new Date().toISOString();
     const updated = await paymentRequests.updateByIdAsync(request.id, {
       status: nextStatus,
       reference: reference ?? request.reference,
-      note: note ?? request.note ?? null,
+      note: upgradeOf(request) ? request.note : (note ?? request.note ?? null),
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
       decidedBy: nextStatus === 'pending' ? null : actorId
     });

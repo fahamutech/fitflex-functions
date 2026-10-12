@@ -1,11 +1,11 @@
 // FitFlex Pass upgrade: a member on a pass pays the difference in price — not
-// the full price, not reduced for days left — and the old plan is retired when
-// the upgrade payment is approved.
+// the full price, not reduced for days left — and the plan is upgraded IN PLACE
+// when the payment is approved: same end date, same visits, only the tier changes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSubscriptionService } from '../src/services/subscription-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
-import { upgradeDifference, upgradedFromOf, isSponsoredPassId } from '../src/shared/pass-upgrade.mjs';
+import { upgradeDifference, upgradeOf, upgradeNote, isSponsoredPassId } from '../src/shared/pass-upgrade.mjs';
 
 function memStore(rows = []) {
   return {
@@ -51,8 +51,8 @@ test('pure rules: difference, note round trip, sponsored ids', () => {
   assert.equal(upgradeDifference(60_000, 120_000), 60_000);
   assert.equal(upgradeDifference(120_000, 120_000), null);
   assert.equal(upgradeDifference(200_000, 120_000), null);
-  assert.equal(upgradedFromOf({ note: 'upgrade:sub_1' }), 'sub_1');
-  assert.equal(upgradedFromOf({ note: 'trainer_pass' }), null);
+  assert.deepEqual(upgradeOf({ note: upgradeNote('sub_1', 'basic') }), { subscriptionId: 'sub_1', fromTier: 'basic' });
+  assert.equal(upgradeOf({ note: 'trainer_pass' }), null);
   assert.equal(isSponsoredPassId('sub_b2be_x'), true);
   assert.equal(isSponsoredPassId('sub_ab12'), false);
 });
@@ -63,8 +63,7 @@ test('the member pays only the difference, whatever is left of the current plan'
     const out = await service.upgradePass({ memberId: 'm1', tier: 'pro' });
     assert.equal(out.status, 202);
     assert.equal(out.paymentRequest.amountTzs, 60_000, `${daysLeft} days left`);
-    assert.equal(out.subscription.status, 'payment_pending');
-    assert.equal(out.subscription.tier, 'pro');
+    assert.equal(out.paymentRequest.tier, 'pro');
   }
 });
 
@@ -74,7 +73,10 @@ test('options list only higher tiers with their difference; the current plan kee
   assert.deepEqual(opts.options.map((o) => [o.tier, o.differenceTzs]), [['premium', 80_000], ['executive', 230_000]]);
   assert.equal(opts.current.tier, 'pro');
   await service.upgradePass({ memberId: 'm1', tier: 'premium' });
-  assert.equal(subscriptions.rows.find((s) => s.id === 'sub_old').status, 'active');
+  // the plan keeps working as it is while the payment waits, and no second plan is created
+  assert.equal(subscriptions.rows.length, 1);
+  assert.equal(subscriptions.rows[0].tier, 'pro');
+  assert.equal(subscriptions.rows[0].status, 'active');
 });
 
 test('not an upgrade, nothing to upgrade, sponsored, or one already pending are refused', async () => {
@@ -95,21 +97,68 @@ test('not an upgrade, nothing to upgrade, sponsored, or one already pending are 
   assert.equal((await free.service.upgradePass({ memberId: 'm1', tier: 'pro' })).error, 'no_paid_pass');
 });
 
-test('approving the upgrade starts the new tier and retires the old plan; rejecting leaves it alone', async () => {
-  const a = setup([active()]);
+test('approving upgrades the plan in place: same row, end date and cycle; only the tier changes', async () => {
+  const before = active();
+  const a = setup([before]);
   const out = await a.service.upgradePass({ memberId: 'm1', tier: 'pro' });
+  assert.equal(out.endsAt, before.expiresAt);
+  assert.equal(out.paymentRequest.subscriptionId, 'sub_old', 'the money counts toward the plan it upgrades');
   await a.admin.decide({ id: out.paymentRequest.id, decision: 'approve', actorId: 'admin' });
-  const byId = (s, id) => s.rows.find((r) => r.id === id);
-  assert.equal(byId(a.subscriptions, out.subscription.id).status, 'active');
-  assert.equal(byId(a.subscriptions, 'sub_old').status, 'upgraded');
-  // the new tier runs a fresh 30 days from approval
-  const left = +new Date(byId(a.subscriptions, out.subscription.id).expiresAt) - Date.now();
-  assert.ok(left > 29 * DAY && left <= 30 * DAY);
+  assert.equal(a.subscriptions.rows.length, 1);
+  const sub = a.subscriptions.rows[0];
+  assert.equal(sub.id, 'sub_old');
+  assert.equal(sub.tier, 'pro');
+  assert.equal(sub.status, 'active');
+  assert.equal(sub.expiresAt, before.expiresAt, 'an upgrade never lengthens a plan');
+  assert.equal(sub.cycleStartedAt, before.cycleStartedAt, 'visits already used still count');
+  assert.equal(sub.startedAt, before.startedAt);
+});
 
+test('the member is told, and the decision can be taken back', async () => {
+  const told = [];
+  const subscriptions = memStore([active()]);
+  const paymentRequests = memStore();
+  const service = createSubscriptionService({
+    subscriptions, paymentRequests, checkins: memStore(), gyms: [],
+    settingsService: { priceForTier: (t) => PRICES[t] ?? 0, visitCapForTier: () => null, publicTiers: () => tiers },
+    publicUserId: async () => 'FF-1',
+  });
+  const admin = createAdminPaymentService({
+    paymentRequests, subscriptions, users: memStore(), auditLog: { async insertAsync() {} },
+    onPassUpgraded: async (sub) => { told.push(sub.tier); },
+  });
+  const { paymentRequest } = await service.upgradePass({ memberId: 'm1', tier: 'premium' });
+  await admin.decide({ id: paymentRequest.id, decision: 'approve', actorId: 'admin' });
+  assert.deepEqual(told, ['premium']);
+  assert.equal(subscriptions.rows[0].tier, 'premium');
+  // approved by mistake: putting it back to pending gives the old tier back
+  await admin.update({ id: paymentRequest.id, status: 'pending', actorId: 'admin' });
+  assert.equal(subscriptions.rows[0].tier, 'basic');
+  assert.equal(upgradeOf(paymentRequests.rows[0])?.subscriptionId, 'sub_old', 'the note still names the plan');
+});
+
+test('rejecting leaves the plan alone and the member can ask again', async () => {
   const b = setup([active()]);
-  const out2 = await b.service.upgradePass({ memberId: 'm1', tier: 'pro' });
-  await b.admin.decide({ id: out2.paymentRequest.id, decision: 'reject', actorId: 'admin' });
-  assert.equal(byId(b.subscriptions, 'sub_old').status, 'active');
-  // and after a rejection the member can ask again
+  const out = await b.service.upgradePass({ memberId: 'm1', tier: 'pro' });
+  await b.admin.decide({ id: out.paymentRequest.id, decision: 'reject', actorId: 'admin' });
+  assert.equal(b.subscriptions.rows[0].tier, 'basic');
+  assert.equal(b.subscriptions.rows[0].status, 'active');
   assert.equal((await b.service.upgradePass({ memberId: 'm1', tier: 'pro' })).status, 202);
+});
+
+test('a plan that ended before approval cannot be upgraded', async () => {
+  const c = setup([active()]);
+  const out = await c.service.upgradePass({ memberId: 'm1', tier: 'pro' });
+  c.subscriptions.rows[0].expiresAt = new Date(Date.now() - DAY).toISOString();
+  const res = await c.admin.decide({ id: out.paymentRequest.id, decision: 'approve', actorId: 'admin' });
+  assert.equal(res.error, 'upgrade_plan_not_active');
+  assert.equal(c.paymentRequests.rows[0].status, 'pending');
+  assert.equal(c.subscriptions.rows[0].tier, 'basic');
+});
+
+test('while an upgrade waits, a second one or a new pass purchase is refused', async () => {
+  const { service } = setup([active()]);
+  await service.upgradePass({ memberId: 'm1', tier: 'pro' });
+  assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'premium' })).error, 'payment_already_pending');
+  assert.equal((await service.subscribe({ memberId: 'm1', tier: 'executive' })).error, 'payment_already_pending');
 });
