@@ -257,3 +257,147 @@ test('an offer from a trainer the client has left can no longer be accepted', as
   assert.deepEqual((await s.member.offers('m1')).offers, []);
   assert.equal(s.workouts.rows.length, 0);
 });
+
+// ── Editing a plan that has been sent ───────────────────────────────────────
+
+const finish = async (s, workoutId) => {
+  await s.workoutSvc.start('m1', workoutId);
+  const w = (await s.workoutSvc.get('m1', workoutId)).workout;
+  return s.workoutSvc.complete('m1', w.id, { exercises: w.exercises.map(e => ({ id: e.id, workoutSets: e.workoutSets.map(x => ({ id: x.id, completed: true })) })) });
+};
+
+test('an offer still waiting is rewritten in place, quietly', async () => {
+  const s = setup();
+  const offered = (await s.trainer.offer('u_t1', 'rel1', fromSaved)).plan;
+  assert.deepEqual(offered.layout, [{ day: 1, name: 'Push day', planId: 'wpl_a' }, { day: 4, name: 'Leg day', planId: 'wpl_b' }]);
+
+  const { plan } = await s.trainer.edit('u_t1', offered.id, {
+    name: 'Strength block v2', note: 'Three days now.', durationWeeks: 3,
+    days: [{ day: 1, planId: 'wpl_b' }, { day: 3, planId: 'wpl_a' }, { day: 5, planId: 'wpl_b' }],
+  });
+  assert.equal(plan.id, offered.id, 'the same offer');
+  assert.equal(plan.status, 'offered');
+  assert.equal(plan.name, 'Strength block v2');
+  assert.equal(plan.durationWeeks, 3);
+  assert.equal(plan.daysPerWeek, 3);
+  assert.equal(plan.endDate, '2026-11-01');
+  assert.deepEqual(plan.weeks[0].days.map(d => [d.date, d.name]), [['2026-10-12', 'Leg day'], ['2026-10-14', 'Push day'], ['2026-10-16', 'Leg day']]);
+  assert.equal(s.workouts.rows.length, 0, 'still nothing scheduled for the client');
+  assert.deepEqual(s.sent, [['m1', 'training_plan_offered']], 'no second notification for an offer');
+
+  const [offer] = (await s.member.offers('m1')).offers;
+  assert.equal(offer.name, 'Strength block v2');
+  assert.equal(offer.note, 'Three days now.');
+  assert.equal(offer.weeks.length, 3);
+  // And what they accept is the edited plan.
+  const accepted = (await s.member.accept('m1', offered.id)).plan;
+  assert.equal(accepted.progress.sessions, 9);
+});
+
+test('name and note alone change nothing else', async () => {
+  const s = setup();
+  const offered = (await s.trainer.offer('u_t1', 'rel1', fromSaved)).plan;
+  const { plan } = await s.member.accept('m1', offered.id);
+  const before = s.workouts.rows.map(w => w.id);
+  const edited = (await s.trainer.edit('u_t1', plan.id, { name: 'Renamed', note: null })).plan;
+  assert.equal(edited.name, 'Renamed');
+  assert.equal(edited.note, null);
+  assert.deepEqual(s.workouts.rows.map(w => w.id), before, 'the same workouts');
+  assert.deepEqual(s.sent.at(-1), ['m1', 'training_plan_updated']);
+  assert.equal((await s.member.current('m1')).plan.name, 'Renamed');
+  assert.equal((await s.trainer.edit('u_t1', plan.id, {})).error, 'nothing_to_update');
+  assert.equal((await s.trainer.edit('u_t1', plan.id, { name: '  ' })).error, 'invalid_name');
+});
+
+test('a plan the client is on changes from today forward; what they have done stays', async () => {
+  const s = setup({ permissions: { workoutHistory: true } });
+  const offered = (await s.trainer.offer('u_t1', 'rel1', fromSaved)).plan; // Mon + Thu, 2 weeks
+  const { plan } = await s.member.accept('m1', offered.id);
+  const monday = plan.today.workoutId;
+  await finish(s, monday);
+
+  // Wednesday of week one: Monday is done, Thursday and next week are ahead.
+  clock = new Date('2026-10-14T06:00:00.000Z');
+  const { plan: edited } = await s.trainer.edit('u_t1', plan.id, {
+    durationWeeks: 3, days: [{ day: 2, planId: 'wpl_b' }, { day: 5, planId: 'wpl_a' }],
+  });
+  assert.equal(edited.status, 'active');
+  assert.equal(edited.durationWeeks, 3);
+  assert.deepEqual(edited.weeks.map(w => w.days.map(d => [d.date, d.name])), [
+    [['2026-10-12', 'Push day'], ['2026-10-16', 'Push day']], // Monday kept; Tuesday already past, so only Friday is new
+    [['2026-10-20', 'Leg day'], ['2026-10-23', 'Push day']],
+    [['2026-10-27', 'Leg day'], ['2026-10-30', 'Push day']],
+  ]);
+  assert.deepEqual(edited.progress, { sessions: 6, completed: 1, skipped: 0, missed: 0 });
+
+  const rows = s.workouts.rows.filter(w => w.trainingPlanId === plan.id);
+  assert.equal(rows.length, 6);
+  const kept = rows.find(w => w.id === monday);
+  assert.equal(kept.status, 'completed', 'the finished workout is untouched');
+  assert.ok(!rows.some(w => w.scheduledDate === '2026-10-15'), 'the old Thursday session is gone');
+  assert.ok(rows.filter(w => w.id !== monday).every(w => w.status === 'planned' && w.trainerId === 't1' && w.scheduledDate >= '2026-10-14'));
+  assert.equal(s.activities.rows.length, 1, 'and so is its Activity');
+  assert.deepEqual(s.sent.at(-1), ['m1', 'training_plan_updated']);
+
+  // The member sees the new plan straight away.
+  const mine = (await s.member.current('m1')).plan;
+  assert.equal(mine.next.date, '2026-10-16');
+  assert.equal(mine.progress.completed, 1);
+  assert.equal(mine.endDate, '2026-11-01');
+});
+
+test('a session the client has started or skipped is never replaced', async () => {
+  const s = setup();
+  const offered = (await s.trainer.offer('u_t1', 'rel1', { durationWeeks: 1, days: [{ day: 1, planId: 'wpl_a' }, { day: 2, planId: 'wpl_b' }, { day: 4, planId: 'wpl_a' }] })).plan;
+  const { plan } = await s.member.accept('m1', offered.id);
+  const [mon, tue] = plan.weeks[0].days;
+  await s.workoutSvc.start('m1', mon.workoutId); // under way today
+  await s.workoutSvc.skip('m1', tue.workoutId);
+
+  const { plan: edited } = await s.trainer.edit('u_t1', plan.id, { days: [{ day: 1, planId: 'wpl_b' }, { day: 2, planId: 'wpl_a' }, { day: 3, planId: 'wpl_b' }] });
+  const rows = s.workouts.rows.filter(w => w.trainingPlanId === plan.id);
+  assert.equal(rows.find(w => w.id === mon.workoutId).status, 'in_progress');
+  assert.equal(rows.find(w => w.id === mon.workoutId).name, 'Push day', 'not swapped under them');
+  assert.equal(rows.find(w => w.id === tue.workoutId).status, 'skipped');
+  assert.equal(rows.filter(w => w.scheduledDate === '2026-10-12').length, 1, 'no second session today');
+  assert.equal(rows.filter(w => w.scheduledDate === '2026-10-13').length, 1);
+  assert.deepEqual(edited.weeks[0].days.map(d => [d.date, d.name]), [['2026-10-12', 'Push day'], ['2026-10-13', 'Leg day'], ['2026-10-14', 'Leg day']]);
+});
+
+test('FitFlex sessions can be kept or swapped when editing', async () => {
+  const s = setup({ permissions: { goals: true } });
+  const idea = await s.trainer.suggest('u_t1', 'rel1', { durationWeeks: 2 });
+  const [first, second] = idea.days;
+  const offered = (await s.trainer.offer('u_t1', 'rel1', { durationWeeks: 2, days: [{ day: first.day, suggested: true }, { day: second.day, suggested: true }] })).plan;
+  assert.deepEqual(offered.layout.map(d => d.suggested), [true, true]);
+  const { plan } = await s.trainer.edit('u_t1', offered.id, { days: [{ day: first.day, suggested: true }, { day: second.day, planId: 'wpl_a' }] });
+  assert.deepEqual(plan.layout, [
+    { day: first.day, name: first.name, suggested: true },
+    { day: second.day, name: 'Push day', planId: 'wpl_a' },
+  ].sort((a, b) => a.day - b.day));
+});
+
+test('editing is refused when it would not make sense', async () => {
+  const s = setup();
+  const offered = (await s.trainer.offer('u_t1', 'rel1', fromSaved)).plan;
+  assert.equal((await s.trainer.edit('u_t2', offered.id, { name: 'Mine now' })).status, 404, 'another trainer');
+  assert.equal((await s.trainer.edit('u_t1', 'tpn_nope', { name: 'x' })).status, 404);
+  assert.equal((await s.trainer.edit('u_t1', offered.id, { durationWeeks: 3 })).error, 'invalid_days', 'a new length needs the week');
+  assert.equal((await s.trainer.edit('u_t1', offered.id, { days: [] })).error, 'invalid_days');
+  assert.equal((await s.trainer.edit('u_t1', offered.id, { days: [{ day: 1, planId: 'wpl_other' }] })).error, 'plan_not_found');
+  assert.equal((await s.trainer.edit('u_t1', offered.id, { days: fromSaved.days, durationWeeks: 13 })).error, 'invalid_duration_weeks');
+
+  const { plan } = await s.member.accept('m1', offered.id);
+  // A plan under way can't be cut to end before today.
+  clock = new Date('2026-10-20T06:00:00.000Z');
+  assert.equal((await s.trainer.edit('u_t1', plan.id, { days: fromSaved.days, durationWeeks: 1 })).error, 'invalid_duration_weeks');
+  const before = JSON.stringify(s.workouts.rows);
+  assert.equal(JSON.stringify(s.workouts.rows), before);
+
+  // Once the client has left, or the plan is over, it is closed.
+  s.relationships.rows[0].status = 'ended';
+  assert.equal((await s.trainer.edit('u_t1', plan.id, { name: 'x' })).error, 'not_active');
+  s.relationships.rows[0].status = 'active';
+  await s.trainer.withdraw('u_t1', plan.id);
+  assert.equal((await s.trainer.edit('u_t1', plan.id, { name: 'x' })).error, 'not_editable');
+});
