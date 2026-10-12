@@ -83,3 +83,16 @@ export function trainingOptions() {
     styles: TRAINING_STYLES,
   };
 }
+
+/** The choices for each field of an exercise, for the admin screen. */
+export function exerciseOptions() {
+  return {
+    categories: EXERCISE_CATEGORIES,
+    targetAreaGroups: TARGET_AREA_GROUPS,
+    movementPatterns: MOVEMENT_PATTERNS,
+    difficulties: EXPERIENCE_LEVELS,
+    equipment: EQUIPMENT,
+    environments: EXERCISE_ENVIRONMENTS,
+    goals: FITNESS_GOAL_IDS,
+  };
+}

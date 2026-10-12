@@ -80,7 +80,11 @@ export function planDraftProblem(draft, input) {
   return null;
 }
 
-export function createRecommendationEngine({ providers = {}, defaultProvider = 'rules' } = {}) {
+export function createRecommendationEngine({
+  providers = {}, defaultProvider = 'rules',
+  // Run before each plan is made — to pick up changes to the exercise library. Must not throw.
+  beforeRecommend = async () => {},
+} = {}) {
   /** A checked plan draft for `input`, or { error, status }. */
   async function recommend(input, { provider = defaultProvider } = {}) {
     if (!RECOMMENDATION_PROVIDERS.includes(provider)) return { error: 'unknown_provider', status: 400 };
@@ -90,6 +94,7 @@ export function createRecommendationEngine({ providers = {}, defaultProvider = '
     }
     const impl = providers[provider];
     if (!impl) return { error: 'provider_unavailable', status: 503 };
+    await beforeRecommend();
     const draft = await impl.recommend(input);
     if (draft?.error) return draft;
     const problem = planDraftProblem(draft, input);

@@ -62,6 +62,9 @@ function ex(id, name, description, o) {
   };
 }
 
+// The library FitFlex ships with. FitFlex staff can edit these, switch them
+// off and add their own from the admin portal; what members and the
+// recommendation engine actually use is the live library further down.
 export const EXERCISES = [
   // ── Chest ───────────────────────────────────────────────────────────────
   ex('push_up', 'Push-up', 'A bodyweight press for the chest, shoulders and arms.', {
@@ -394,7 +397,7 @@ const within = (list, allowed) => Array.isArray(list) && list.every(x => allowed
 const positive = n => Number.isInteger(n) && n > 0;
 
 /** Why an entry is not a valid exercise, or null when it is. */
-export function exerciseProblem(e, ids = new Set(EXERCISES.map(x => x.id))) {
+export function exerciseProblem(e, ids = new Set(liveExercises().map(x => x.id))) {
   if (!e || typeof e !== 'object') return 'not_an_object';
   if (typeof e.id !== 'string' || !/^ex_[a-z0-9_]+$/.test(e.id)) return 'id';
   if (typeof e.name !== 'string' || !e.name.trim() || e.name.length > 80) return 'name';
@@ -416,7 +419,37 @@ export function exerciseProblem(e, ids = new Set(EXERCISES.map(x => x.id))) {
   return null;
 }
 
-const BY_ID = new Map(EXERCISES.map(e => [e.id, e]));
+// ── The live library ────────────────────────────────────────────────────────
+// The built-in exercises with FitFlex's own changes laid over them. It starts
+// as the built-ins and is replaced whenever the admin's changes are loaded
+// (see exercise-admin-service), so everything below reads the current one.
+
+let LIVE = EXERCISES;
+let BY_ID = new Map(LIVE.map(e => [e.id, e]));
+
+/** The exercises in use right now. */
+export const liveExercises = () => LIVE;
+
+/** Replace the live library (rows are full exercises, already checked). */
+export function setLiveLibrary(rows) {
+  LIVE = rows;
+  BY_ID = new Map(rows.map(e => [e.id, e]));
+}
+
+/**
+ * The built-ins with stored rows laid over them: a row with a built-in's id
+ * replaces it, any other row is added. Each result says where it came from:
+ * `builtin` (untouched), `edited` (a built-in that was changed) or `custom`.
+ */
+export function mergeLibrary(stored = [], builtIn = EXERCISES) {
+  const byId = new Map(stored.map(r => [r.id, r]));
+  const builtInIds = new Set(builtIn.map(e => e.id));
+  return [
+    ...builtIn.map(e => (byId.has(e.id) ? { ...byId.get(e.id), source: 'edited' } : { ...e, source: 'builtin' })),
+    ...stored.filter(r => !builtInIds.has(r.id)).map(r => ({ ...r, source: 'custom' })),
+  ];
+}
+
 export const exerciseById = id => BY_ID.get(id) ?? null;
 
 const LEVEL = Object.fromEntries(EXPERIENCE_LEVELS.map((l, i) => [l, i]));
@@ -426,7 +459,7 @@ const LEVEL = Object.fromEntries(EXPERIENCE_LEVELS.map((l, i) => [l, i]));
  * `goal`, `environment` (a place; `any` or nothing means anywhere),
  * `equipment` (what the member has) and `experience` (nothing harder).
  */
-export function listExercises({ area, category, goal, environment, equipment, experience } = {}, library = EXERCISES) {
+export function listExercises({ area, category, goal, environment, equipment, experience } = {}, library = liveExercises()) {
   const have = equipment ? availableEquipment(equipment) : null;
   return library.filter(e => e.active
     && (!area || e.targetAreas.includes(area))
@@ -438,7 +471,7 @@ export function listExercises({ area, category, goal, environment, equipment, ex
 }
 
 /** Active alternatives that keep the exercise's intent, limited to what the member can do. */
-export function alternativesFor(id, filters = {}, library = EXERCISES) {
+export function alternativesFor(id, filters = {}, library = liveExercises()) {
   const e = library.find(x => x.id === id);
   if (!e) return [];
   const usable = new Set(listExercises({ ...filters, area: undefined, category: undefined, goal: undefined }, library).map(x => x.id));

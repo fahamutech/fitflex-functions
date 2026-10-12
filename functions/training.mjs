@@ -1,9 +1,11 @@
 // Training Plans REST surface — the vocabulary, the exercise library, a
 // member's training preferences and their plans.
 import '../src/bootstrap/init.mjs';
-import { requireAuth } from '../src/auth/jwt.mjs';
-import { trainerPlanService, trainingPlanService, trainingPreferenceService, workoutExerciseService } from '../src/bootstrap/services.mjs';
-import { trainingOptions } from '../src/shared/training-taxonomy.mjs';
+import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import {
+  exerciseAdminService, trainerPlanService, trainingPlanService, trainingPreferenceService, workoutExerciseService,
+} from '../src/bootstrap/services.mjs';
+import { exerciseOptions, trainingOptions } from '../src/shared/training-taxonomy.mjs';
 import { alternativesFor, exerciseById, listExercises, localizedExercise } from '../src/shared/exercise-library.mjs';
 
 const created = new Date().toISOString();
@@ -28,6 +30,7 @@ export const trainingExercises = {
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
     const q = req.query || {};
+    await exerciseAdminService.ensureFresh();
     const rows = listExercises({
       area: q.area, category: q.category, goal: q.goal, environment: q.environment,
       equipment: list(q.equipment), experience: q.experience,
@@ -42,6 +45,7 @@ export const trainingExercise = {
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
     const q = req.query || {};
+    await exerciseAdminService.ensureFresh();
     const e = exerciseById(req.params.id);
     if (!e || !e.active) return res.status(404).json({ error: 'not_found' });
     const alternatives = alternativesFor(e.id, { environment: q.environment, equipment: list(q.equipment), experience: q.experience });
@@ -191,4 +195,39 @@ export const trainerEditTrainingPlan = {
   requestSample: { name: 'Strength block v2', days: [{ day: 1, planId: 'wpl_x' }, { day: 4, suggested: true }] },
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => send(res, await trainerPlanService.edit(req.user.sub, req.params.id, req.body || {}))
+};
+
+// ── FitFlex admin: the exercise library ─────────────────────────────────────
+
+const exerciseGuard = [requireAuth('admin'), requireAcl('exercises')];
+const sendExercise = (res, result, ok = 200) => (result.error
+  ? res.status(result.status).json({ error: result.error, ...(result.field ? { field: result.field } : {}) })
+  : res.status(ok).json(result));
+
+export const adminExercises = {
+  created, method: 'get', path: '/admin/exercises',
+  description: 'FitFlex admin: every exercise, on or off, with its source (builtin | edited | custom), plus the choices for each field.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => res.json({ ...(await exerciseAdminService.list()), options: exerciseOptions() })
+};
+
+export const adminCreateExercise = {
+  created, method: 'post', path: '/admin/exercises',
+  description: 'FitFlex admin: add an exercise. name, category, targetAreas, difficulty, equipment, environment, suitableGoals, defaultSets, defaultReps | defaultDuration (seconds), restSeconds, instructions[] are needed; secondaryAreas, movementPattern, tracksWeight, alternatives[], active, i18n.sw { name, description, instructions } are optional.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendExercise(res, await exerciseAdminService.create(req.user.sub, req.body || {}), 201)
+};
+
+export const adminUpdateExercise = {
+  created, method: 'put', path: '/admin/exercises/:id',
+  description: 'FitFlex admin: change an exercise (any of the create fields; the rest are kept). Editing a built-in stores FitFlex\'s version of it. Set active: false to stop it being chosen for new plans — workouts already planned keep it.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendExercise(res, await exerciseAdminService.update(req.user.sub, req.params.id, req.body || {}))
+};
+
+export const adminResetExercise = {
+  created, method: 'post', path: '/admin/exercises/:id/reset',
+  description: 'FitFlex admin: put an edited built-in exercise back to how FitFlex shipped it.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendExercise(res, await exerciseAdminService.reset(req.user.sub, req.params.id))
 };
