@@ -58,6 +58,7 @@ import { createFavoriteService } from '../services/favorite-service.mjs';
 import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
+import { createPartnerNotifier } from '../services/partner-notifier.mjs';
 import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createRecommendationEngine } from '../services/training/recommendation-engine.mjs';
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
@@ -173,7 +174,14 @@ const { resolveRequestUser, publicUserId } = identityService;
 
 export const settingsService = createSettingsService({ platformSettings, auditLog });
 export const gymService = createGymService({ gyms, users, checkins, auditLog });
-export const trainerService = createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate });
+// Tells gym owners, staff and vendors what happens at their gym or shop (inbox + push).
+export const partnerNotifier = createPartnerNotifier({
+  users, gyms, trainers, subscriptions, notify: (userId, message) => notificationService.notify(userId, message),
+});
+export const trainerService = createTrainerService({
+  trainers, gyms, trainerBookings, auditLog, gymService, partnerGate,
+  onGymRequest: request => partnerNotifier.gymTrainerRequest(request),
+});
 export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
@@ -213,6 +221,7 @@ export const shopService = createShopService({
     amountTzs: order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,
   }).then(out => out.refund || null),
   marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases, publicGate: moderationGate,
+  onVendorEvent: (vendorId, event, data) => partnerNotifier.vendorEvent(vendorId, event, data),
   // A paid order is credited to the promotion the buyer opened (promotionEventsService is defined below; this only runs later).
   onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
@@ -343,6 +352,7 @@ export const accountService = createAccountService({
 
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
+  onCheckin: checkin => partnerNotifier.gymCheckin(checkin),
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
   // Until a gym's owner is verified, only the gym's own members check in there.
@@ -379,6 +389,8 @@ const lifecycle = {
     await finishSponsoredPass(sub);
     // A gym membership that was paid for counts for the gym promotion the member tapped (never throws).
     await promotionEventsService.recordSubscription(sub, ctx);
+    // A first membership at a gym is news for that gym (never throws; renewals are not).
+    await partnerNotifier.gymMemberJoined(sub);
     return automationService.handleEvent({ type: 'membership_activated', subscription: sub });
   },
   paymentFailed: (sub, extra) => automationService.handleEvent({ type: 'payment_failed', subscription: sub, ...extra }),
@@ -427,7 +439,9 @@ export const vendorSettlementService = createVendorSettlementService({
   users, payoutEligibility,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
-export const settlementWorkflowService = createSettlementWorkflowService({ payoutEligibility });
+export const settlementWorkflowService = createSettlementWorkflowService({
+  payoutEligibility, onStep: (statement, action) => partnerNotifier.gymStatement(statement, action),
+});
 export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId });
 // Recalculates a settled member cycle when one of its check-ins is voided and
 // raises each gym's difference as an adjustment (settlement Phase 6).
@@ -441,7 +455,10 @@ export const webhookService = createWebhookService({
   onSubscriptionActivated: lifecycle.activated,
   onPaymentFailed: (sub, paymentId) => lifecycle.paymentFailed(sub, { reference: `selcom:${paymentId}` }),
 });
-export const gymReviewService = createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog });
+export const gymReviewService = createGymReviewService({
+  gymReviews, gyms, checkins, subscriptions, users, auditLog,
+  onNewReview: review => partnerNotifier.gymReview(review),
+});
 export const trainerReviewService = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog });
 export const whatsAppService = createWhatsAppService({
   apiKey: process.env.AFRICAS_TALKING_API_KEY,

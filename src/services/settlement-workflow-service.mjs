@@ -49,11 +49,13 @@ const VOIDABLE = ['draft', 'submitted', 'approved'];
 const MANUAL_ADJUSTMENT_TYPES = ['correction', 'clawback', 'manual'];
 const CARRY_FORWARD_ACTOR = 'system:carry-forward';
 
-export function createSettlementWorkflowService({ db = defaultDb, payoutEligibility, now = () => new Date() } = {}) {
+export function createSettlementWorkflowService({ db = defaultDb, payoutEligibility, now = () => new Date(),
+  // A statement moved on: (statement, action) → void, after the change is saved. Told to the gym's owner.
+  onStep = async () => {} } = {}) {
   /** Lock the statement, run `fn`, apply its patch, audit. */
   async function step(id, action, actorId, fn, { trx } = {}) {
     if (!actorId) return fail('actor_required', 403);
-    return (trx || db).transaction(async (q) => {
+    const result = await (trx || db).transaction(async (q) => {
       const statement = await q('GymSettlement').where({ id }).forUpdate().first();
       if (!statement) return fail('statement_not_found', 404);
       if (statement.mode !== 'live') return fail('shadow_statement');
@@ -69,6 +71,11 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
       });
       return { statement: updated, ...(out.extra || {}) };
     });
+    // Only once it is saved — and, inside someone else's transaction, that is theirs to announce.
+    if (!trx && result?.statement) {
+      try { await onStep(result.statement, action); } catch { /* best effort */ }
+    }
+    return result;
   }
 
   const wrongStatus = (statement, expected) => fail('invalid_status', 409, { currentStatus: statement.status, expected });

@@ -6,7 +6,10 @@ import { CHECKIN_STATUS, sourceForMethod, isDuplicateVisit } from '../shared/che
 import { localDay } from '../shared/member-progress.mjs';
 import { randomUUID } from 'node:crypto';
 
-export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null, b2bFunding = null, gymOpenToPass = null }) {
+export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null, b2bFunding = null, gymOpenToPass = null,
+  // A visit was recorded: (checkin) → void. Told to the gym; never allowed to fail the check-in.
+  onCheckin = async () => {} }) {
+  const recorded = row => { Promise.resolve().then(() => onCheckin(row)).catch(() => {}); };
   /** T5: the user is an active trainer linked to this gym (trains there free). */
   function homeGymIds(userId) {
     const t = trainers?.find?.(r => (r.userId === userId || r.id === userId) && r.status !== 'inactive' && r.status !== 'suspended');
@@ -95,6 +98,7 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       if (existing) return existing;
       throw err;
     }
+    recorded(row);
     // The visit is recorded, so the member is in. A confirmation that fails
     // must not turn that into an error; the reconciler approves the hold.
     try {
@@ -224,6 +228,7 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         if (existing) return existing;
         throw err;
       }
+      recorded(row);
       return { ok: true, checkin: row, visitNumberInCycle: row.visitNumberInCycle };
     }
   };

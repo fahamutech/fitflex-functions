@@ -37,13 +37,22 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // A paid order, for promotion analytics: (order) → void. Never allowed to fail the order.
   onOrderPaid = async () => null,
   // A cancelled order, for promotion analytics: (order) → void; takes back what the paid order was credited for.
-  onOrderCancelled = async () => null }) {
+  onOrderCancelled = async () => null,
+  // Something the vendor should hear about now, not only find in their list: (vendorUserId, event, data) → void.
+  onVendorEvent = async () => null }) {
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
 
   async function notify(userId, type, data = {}) {
     return marketplaceNotifications.insertAsync({ id: makeId('ntf'), userId, type, data, read: false, createdAt: nowIso() });
+  }
+
+  /** For the vendor: in their shop list as before, and pushed to their phone. A failed push never fails the sale. */
+  async function notifyVendor(vendorId, type, data = {}) {
+    const row = await notify(vendorId, type, data);
+    try { await onVendorEvent(vendorId, type, data); } catch { /* best effort */ }
+    return row;
   }
 
   async function getVendorProfile(vendorId) {
@@ -206,7 +215,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'admin_product_created',
       target: product.id, before: null, after: { vendorId, approvalStatus: requestedApproval },
     });
-    if (requestedApproval !== 'pending') await notify(vendorId, `product_${requestedApproval}`, { productId: product.id });
+    if (requestedApproval !== 'pending') await notifyVendor(vendorId, `product_${requestedApproval}`, { productId: product.id });
     return { product, status: 201 };
   }
   async function adminUpdateProductListing({ productId, body, actorId }) {
@@ -215,7 +224,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const patch = { ...(typeof body?.homepageVisible === 'boolean' ? { homepageVisible: body.homepageVisible } : {}), ...(body?.homepagePriority !== undefined ? { homepagePriority: Number(body.homepagePriority) || 0 } : {}), ...(['approved', 'pending', 'rejected'].includes(body?.approvalStatus) ? { approvalStatus: body.approvalStatus } : {}), updatedAt: nowIso() };
     const product = await products.updateByIdAsync(productId, patch);
     await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_listing_updated', target: productId, before: { homepageVisible: prior.homepageVisible ?? true, homepagePriority: Number(prior.homepagePriority || 0), approvalStatus: prior.approvalStatus || 'pending' }, after: patch });
-    if (patch.approvalStatus) await notify(prior.vendorId, `product_${patch.approvalStatus}`, { productId });
+    if (patch.approvalStatus) await notifyVendor(prior.vendorId, `product_${patch.approvalStatus}`, { productId });
     return { product };
   }
 
@@ -266,7 +275,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor) },
       after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined, commissionPct: patch.vendorProfile.commissionPct } : {}) },
     });
-    if (patch.approvalStatus) await notify(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
+    if (patch.approvalStatus) await notifyVendor(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
     return { vendor: updated };
   }
 
@@ -324,7 +333,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
 
   async function orderPaid(order) {
     try { await onOrderPaid(order); } catch (err) { console.warn('[shop] order not credited to a promotion:', err?.message); }
-    for (const vendorId of new Set((order.items || []).map(item => item.vendorId))) await notify(vendorId, 'new_order', { orderId: order.id });
+    for (const vendorId of new Set((order.items || []).map(item => item.vendorId))) await notifyVendor(vendorId, 'new_order', { orderId: order.id });
     await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
   }
 
@@ -421,7 +430,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       try { refund = await onRefundDue({ order: updated, reasonCode, actorId, role }); } catch (err) { console.warn('[shop] refund not raised:', err?.message); }
     }
     if (role === 'buyer') {
-      for (const vendorId of new Set((order.items || []).map(item => item.vendorId).filter(Boolean))) await notify(vendorId, 'order_cancelled', { orderId: order.id, by: 'buyer' });
+      for (const vendorId of new Set((order.items || []).map(item => item.vendorId).filter(Boolean))) await notifyVendor(vendorId, 'order_cancelled', { orderId: order.id, by: 'buyer' });
     } else {
       await notify(order.buyerId, 'order_cancelled', { orderId: order.id, by: role });
     }
@@ -467,7 +476,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!String(body?.message || '').trim()) return { error: 'message_required', status: 400 };
     const at = nowIso();
     const enquiry = await marketplaceEnquiries.insertAsync({ id: makeId('enq'), buyerId, vendorId, productId: body.productId || null, subject: body.subject || null, status: 'open', messages: [{ senderId: buyerId, senderRole: 'customer', message: body.message.trim(), at }], createdAt: at, updatedAt: at });
-    await notify(vendorId, 'new_customer_enquiry', { enquiryId: enquiry.id });
+    await notifyVendor(vendorId, 'new_customer_enquiry', { enquiryId: enquiry.id });
     return { enquiry, status: 201 };
   }
   async function vendorEnquiries({ vendorId, search }) {
