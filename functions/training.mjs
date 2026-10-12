@@ -208,7 +208,17 @@ export const adminExercises = {
   created, method: 'get', path: '/admin/exercises',
   description: 'FitFlex admin: every exercise, on or off, with its source (builtin | edited | custom), plus the choices for each field.',
   onGuard: exerciseGuard,
-  onRequest: async (req, res) => res.json({ ...(await exerciseAdminService.list()), options: exerciseOptions() })
+  onRequest: async (req, res) => {
+    // Always the library or a plain error — never a half answer the portal can't read.
+    try {
+      const { exercises } = await exerciseAdminService.list();
+      if (!Array.isArray(exercises)) throw new Error('the library did not come back as a list');
+      res.json({ exercises, options: exerciseOptions() });
+    } catch (err) {
+      console.error('[exercises] could not list the library:', err?.message);
+      res.status(503).json({ error: 'exercise_library_unavailable', detail: String(err?.message ?? err).slice(0, 200) });
+    }
+  }
 };
 
 export const adminCreateExercise = {
