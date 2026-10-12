@@ -26,8 +26,8 @@ export const trainingOptionsRoute = {
 
 export const trainingExercises = {
   created, method: 'get', path: '/training/exercises',
-  description: 'Member: the exercise library. Optional filters: area, category, goal, environment, equipment (comma-separated), experience, lang (en|sw).',
-  onGuard: requireAuth('member'),
+  description: 'Member or trainer: the exercise library (trainers pick from it when writing a workout). Optional filters: area, category, goal, environment, equipment (comma-separated), experience, lang (en|sw).',
+  onGuard: requireAuth('member', 'trainer'),
   onRequest: async (req, res) => {
     const q = req.query || {};
     await exerciseAdminService.ensureFresh();
@@ -41,8 +41,8 @@ export const trainingExercises = {
 
 export const trainingExercise = {
   created, method: 'get', path: '/training/exercises/:id',
-  description: 'Member: one exercise with the alternatives that keep its intent (limited by environment, equipment, experience when given).',
-  onGuard: requireAuth('member'),
+  description: 'Member or trainer: one exercise with the alternatives that keep its intent (limited by environment, equipment, experience when given).',
+  onGuard: requireAuth('member', 'trainer'),
   onRequest: async (req, res) => {
     const q = req.query || {};
     await exerciseAdminService.ensureFresh();

@@ -178,3 +178,33 @@ test('a workout the member wrote themselves has nothing to swap', async () => {
   assert.deepEqual((await s.svc.alternatives('m1', workout.id, e.id)).alternatives, []);
   assert.equal((await s.svc.replace('m1', workout.id, e.id, { libraryId: 'ex_push_up' })).error, 'not_replaceable');
 });
+
+test('an exercise a trainer picked from the library can be swapped by their client', async () => {
+  const { validateWorkoutDefinition, newWorkoutRow } = await import('../src/services/workout-service.mjs');
+  const s = await setup();
+  // What the trainer's saved workout holds: one library exercise, one of their own.
+  const { definition } = validateWorkoutDefinition({
+    name: 'Coach push day',
+    exercises: [
+      { libraryId: 'ex_push_up', exerciseName: 'Push-up', muscleGroup: 'chest', sets: 3, reps: 12 },
+      { exerciseName: 'Coach special', sets: 2, reps: 8 },
+    ],
+  });
+  assert.equal(definition.exercises[0].libraryId, 'ex_push_up', 'the link survives saving');
+  assert.equal(definition.exercises[1].libraryId, undefined);
+  // Assigned to the client as a workout from their trainer.
+  const row = newWorkoutRow({ memberId: 'm1', base: definition, scheduledDate: '2026-10-13', trainerId: 't1', source: 'trainer', now: now() });
+  await s.workouts.insertAsync(row);
+  const [picked, own] = row.exercises;
+
+  const { alternatives } = await s.svc.alternatives('m1', row.id, picked.id);
+  assert.ok(alternatives.length >= 1, 'the library exercise has stand-ins');
+  assert.ok(alternatives.every(a => a.targetAreas.includes('chest')));
+  const swapped = await s.svc.replace('m1', row.id, picked.id, { libraryId: alternatives[0].id });
+  assert.equal(swapped.exercise.replacedFrom, 'ex_push_up');
+  assert.equal(swapped.workout.trainerId, 't1', 'still their trainer\'s workout');
+
+  // The trainer's own exercise has nothing to swap for.
+  assert.deepEqual((await s.svc.alternatives('m1', row.id, own.id)).alternatives, []);
+  assert.equal((await s.svc.replace('m1', row.id, own.id, { libraryId: 'ex_push_up' })).error, 'not_replaceable');
+});
