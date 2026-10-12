@@ -11,7 +11,9 @@ import { effectiveTrainingPreferences } from './training-preference-service.mjs'
 
 const MAX_ALTERNATIVES = 6;
 
-export function createWorkoutExerciseService({ workouts, plans, users, now = () => new Date() }) {
+export function createWorkoutExerciseService({ workouts, plans, users, now = () => new Date(),
+  // Picks up changes to the exercise library before alternatives are offered. Must not throw.
+  ensureLibrary = async () => {} }) {
   /** What the member can do: from the plan the workout belongs to, else their preferences. */
   async function limits(workout) {
     const plan = workout.trainingPlanId ? await plans.findByIdAsync(workout.trainingPlanId) : null;
@@ -28,6 +30,7 @@ export function createWorkoutExerciseService({ workouts, plans, users, now = () 
   }
 
   async function candidates(workout, exercise) {
+    await ensureLibrary();
     const current = exercise.libraryId ? exerciseById(exercise.libraryId) : null;
     if (!current) return [];
     const filters = await limits(workout);

@@ -65,6 +65,7 @@ import { createRulesRecommendationProvider } from '../services/training/rules-re
 import { createTrainingPlanService } from '../services/training/training-plan-service.mjs';
 import { createWorkoutExerciseService } from '../services/training/workout-exercise-service.mjs';
 import { createTrainerPlanService } from '../services/training/trainer-plan-service.mjs';
+import { createExerciseAdminService } from '../services/training/exercise-admin-service.mjs';
 import { createSocialService } from '../services/social-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
@@ -128,7 +129,7 @@ import {
   b2bOrganizations, b2bOrganizationUsers, b2bBeneficiaries, b2bPrograms, b2bBenefits,
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
   follows, friendInvitations, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
-  trainerMemberRelationships, workoutPlans, trainingPlans, gymMemberSharing, challenges, challengeParticipants,
+  trainerMemberRelationships, workoutPlans, trainingPlans, trainingExercises, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
   partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
@@ -510,10 +511,15 @@ export const workoutService = createWorkoutService({
 });
 export const trainingPreferenceService = createTrainingPreferenceService({ users });
 // Plans come from rules today; an 'ai' provider can be added beside it later.
+// FitFlex's own changes to the exercise library, laid over the built-in one.
+export const exerciseAdminService = createExerciseAdminService({ exercises: trainingExercises, auditLog });
 export const trainingRecommendationEngine = createRecommendationEngine({
   providers: { rules: createRulesRecommendationProvider() },
+  beforeRecommend: () => exerciseAdminService.ensureFresh(),
 });
-export const workoutExerciseService = createWorkoutExerciseService({ workouts, plans: trainingPlans, users });
+export const workoutExerciseService = createWorkoutExerciseService({
+  workouts, plans: trainingPlans, users, ensureLibrary: () => exerciseAdminService.ensureFresh(),
+});
 export const trainingPlanService = createTrainingPlanService({
   plans: trainingPlans, workouts, users, engine: trainingRecommendationEngine,
   trainers, relationships: trainerMemberRelationships,
