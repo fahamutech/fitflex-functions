@@ -60,7 +60,12 @@ export function publicTrainer(trainer) {
   return out;
 }
 
-export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate = OPEN_GATE }) {
+export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate = OPEN_GATE,
+  // A trainer asked to work at a gym: ({ gymId, trainer }) → void. Told to the gym's owner.
+  onGymRequest = async () => {} }) {
+  const askedToJoin = async (gymIds, trainer) => {
+    for (const gymId of gymIds) { try { await onGymRequest({ gymId, trainer }); } catch { /* best effort */ } }
+  };
   function normalizeTrainerPayload(body = {}, prior = {}) {
     const gymIds = parseStringList(body.gymIds, prior.gymIds || []);
     const pendingGymIds = parseStringList(body.pendingGymIds, prior.pendingGymIds || []);
@@ -284,6 +289,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       approvalStatus: 'approved',
     }, profile || {});
     await trainers.upsertAsync(t => t.id === row.id, row);
+    // Only the gyms newly asked for, not ones already waiting.
+    await askedToJoin(requested.filter(id => !(profile?.pendingGymIds || []).includes(id)), row);
     return { trainer: hydrateTrainer(row), displayName: body.displayName || user.displayName };
   }
 
@@ -305,6 +312,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const pendingGymIds = profile.pendingGymIds || [];
     if (pendingGymIds.includes(gym.id)) return { error: 'application_already_pending', status: 409 };
     const updated = await trainers.updateAsync(t => t.id === profile.id, { pendingGymIds: [...pendingGymIds, gym.id] });
+    await askedToJoin([gym.id], updated ?? profile);
     return { trainer: hydrateTrainer(updated) };
   }
 

@@ -27,7 +27,9 @@ const TIER_DOWNLIFT_BELOW = {
 const makeId = () => `grev_${randomUUID().slice(0, 8)}`;
 const nowIso = () => new Date().toISOString();
 
-export function createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog }) {
+export function createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog,
+  // A member left a new review: (review) → void. Told to the gym.
+  onNewReview = async () => {} }) {
   function validate(rating, text) {
     if (!Number.isInteger(rating) || rating < MIN_RATING || rating > MAX_RATING) {
       return { error: 'rating_must_be_integer_1_to_5', status: 400 };
@@ -86,6 +88,7 @@ export function createGymReviewService({ gymReviews, gyms, checkins, subscriptio
         status: 'published', createdAt: now, updatedAt: now,
       };
       await gymReviews.insertAsync(review);
+      try { await onNewReview(review); } catch { /* best effort */ }
     }
     const gymRating = await recalcRating(gymId);
     return { review, gymRating, updated: Boolean(existing) };
