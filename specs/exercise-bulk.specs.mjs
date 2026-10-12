@@ -159,7 +159,7 @@ test('files that cannot be read are refused outright', async () => {
   assert.equal((await svc.importCsv('admin', 'id,name\n')).error, 'empty_file');
   assert.equal((await svc.importCsv('admin', 'colour,shape\nred,round')).error, 'missing_header');
   assert.equal((await svc.importCsv('admin', `id,name\n${Array.from({ length: 1001 }, (_, i) => `,Move ${i}`).join('\n')}`)).error, 'too_many_rows');
-  assert.equal((await svc.importCsv('admin', 'x'.repeat(2_000_001))).error, 'file_too_big');
+  assert.equal((await svc.importCsv('admin', 'x'.repeat(1_000_001))).error, 'file_too_big');
   // Unknown columns are named, not silently dropped; the known ones are still used.
   const out = await svc.importCsv('admin', 'id,name,colour\nex_push_up,Press-up,red');
   assert.deepEqual(out.unknownColumns, ['colour']);

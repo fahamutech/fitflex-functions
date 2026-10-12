@@ -21,7 +21,7 @@ const MAX = { name: 80, description: 240, instruction: 240, instructions: 8, alt
 // How long a server trusts its copy before looking for changes made on another.
 const FRESH_MS = 60_000;
 const MAX_IMPORT_ROWS = 1000;
-const MAX_IMPORT_CHARS = 2_000_000;
+const MAX_IMPORT_CHARS = 1_000_000;
 // A mistyped cell is reported under the same name the form uses for that field.
 const FIELD_OF = { defaultReps: 'defaultReps_or_defaultDuration', defaultDuration: 'defaultReps_or_defaultDuration' };
 
