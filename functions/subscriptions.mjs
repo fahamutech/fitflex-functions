@@ -24,6 +24,30 @@ export const subscribe = {
   }
 };
 
+export const upgradeOptions = {
+  created, method: 'get', path: '/me/upgrade-options',
+  description: 'The higher FitFlex Pass tiers the member can move up to, and the difference they would pay for each.',
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => {
+    const result = await subscriptionService.upgradeOptions(req.user.sub);
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json({ current: result.current, options: result.options });
+  }
+};
+
+export const upgradePass = {
+  created, method: 'post', path: '/me/upgrade',
+  description: 'Upgrade the FitFlex Pass: creates a payment request for the price difference. Approval starts the new tier and retires the old one.',
+  requestSample: { tier: 'pro' },
+  onGuard: requireAuth('member'),
+  onRequest: async (req, res) => {
+    const { tier } = req.body || {};
+    const result = await subscriptionService.upgradePass({ memberId: req.user.sub, tier });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(result.status).json({ subscription: result.subscription, paymentRequest: result.paymentRequest, upgradeFrom: result.upgradeFrom });
+  }
+};
+
 export const me = {
   created, method: 'get', path: '/me',
   description: 'Authenticated user profile + active subscription + visit counter.',

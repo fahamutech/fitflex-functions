@@ -8,6 +8,7 @@ import { publicGym } from './gym-service.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { PRODUCT_TYPES, MEMBER_ACCESS_PRODUCTS, productTypeOfPayment } from '../shared/payment-product.mjs';
+import { upgradeNote, upgradeDifference, isSponsoredPassId } from '../shared/pass-upgrade.mjs';
 
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
@@ -259,6 +260,83 @@ export function createSubscriptionService({
     return { status: 202, subscription: sub, paymentRequest };
   }
 
+  /** The paid FitFlex Pass a member is on today, if it is one they can upgrade from. */
+  async function upgradableCurrentPass(memberId) {
+    const subs = await subscriptions.filterAsync(s => s.memberId === memberId && s.type === 'platform_pass');
+    const current = currentSubscription(subs);
+    if (!current || effectiveSubscriptionStatus(current) !== 'active') return { error: 'no_active_pass', status: 409 };
+    if (isSponsoredPassId(current.id)) return { error: 'sponsored_pass', status: 409 };
+    const fromPrice = Number(settingsService.priceForTier(current.tier));
+    if (!(fromPrice > 0)) return { error: 'no_paid_pass', status: 409 };
+    return { current, fromPrice };
+  }
+
+  /** The tiers a member can move up to, each with what the move costs them. */
+  async function upgradeOptions(memberId) {
+    const held = await upgradableCurrentPass(memberId);
+    if (held.error) return held;
+    const catalogue = settingsService.publicTiers?.() ?? [];
+    const options = catalogue
+      .map(t => ({ ...t, differenceTzs: upgradeDifference(held.fromPrice, settingsService.priceForTier(t.key)) }))
+      .filter(t => t.differenceTzs && PASS_TIERS[t.key]?.accessMode !== 'free_online')
+      .map(t => ({ tier: t.key, label: t.label, monthlyPrice: t.monthlyPrice, visits: t.visits, gymAccess: t.gymAccess, differenceTzs: t.differenceTzs }))
+      .sort((a, b) => a.differenceTzs - b.differenceTzs);
+    return {
+      status: 200,
+      current: { subscriptionId: held.current.id, tier: held.current.tier, priceTzs: held.fromPrice, expiresAt: held.current.expiresAt },
+      options,
+    };
+  }
+
+  /**
+   * Move up to a higher tier by paying the difference in price — never the
+   * full price, and not reduced for the days left on the current plan. The
+   * new tier starts when the payment is approved; the current plan keeps
+   * working until then and is retired at that moment.
+   */
+  async function upgradePass({ memberId, tier }) {
+    const held = await upgradableCurrentPass(memberId);
+    if (held.error) return held;
+    const configured = settingsService.publicTiers?.().map(t => t.key);
+    const sellable = configured ? configured.includes(tier) : Boolean(PASS_TIERS[tier]);
+    if (!tier || !sellable || PASS_TIERS[tier]?.accessMode === 'free_online') return { error: 'invalid_tier', status: 400 };
+    const amountTzs = upgradeDifference(held.fromPrice, settingsService.priceForTier(tier));
+    if (!amountTzs) return { error: 'not_an_upgrade', status: 409 };
+    if (await pendingSubscription(memberId, 'platform_pass')) return { error: 'payment_already_pending', status: 409 };
+
+    const now = new Date();
+    const endsAt = new Date(+now + 30 * 86_400_000);
+    const sub = {
+      id: `sub_${randomUUID().slice(0, 8)}`,
+      memberId,
+      type: 'platform_pass', tier,
+      status: 'payment_pending',
+      startedAt: now.toISOString(),
+      cycleStartedAt: now.toISOString(),
+      renewsAt: endsAt.toISOString(),
+      expiresAt: endsAt.toISOString(),
+      homeGymId: null,
+      paymentRef: null,
+      pilotPayment: true
+    };
+    await subscriptions.insertAsync(sub);
+    const paymentRequest = await paymentRequests.insertAsync({
+      id: `pay_${randomUUID().slice(0, 8)}`,
+      memberId,
+      subscriptionId: sub.id,
+      tier,
+      amountTzs,
+      status: 'pending',
+      provider: 'admin_approved',
+      reference: null,
+      requestedAt: now.toISOString(),
+      decidedAt: null,
+      decidedBy: null,
+      note: upgradeNote(held.current.id)
+    });
+    return { status: 202, subscription: sub, paymentRequest, upgradeFrom: { subscriptionId: held.current.id, tier: held.current.tier } };
+  }
+
   /** A payment request with what it buys: product type, and the gym / tier / period behind it. */
   function describePayment(p, sub = null) {
     const productType = productTypeOfPayment(p, sub);
@@ -345,7 +423,7 @@ export function createSubscriptionService({
   }
 
   return {
-    listPasses, subscribe, trainerPassPurchase, trainerMemberPlanPurchase, trainerPasses, cancelTrainerPass,
+    listPasses, subscribe, upgradeOptions, upgradePass, trainerPassPurchase, trainerMemberPlanPurchase, trainerPasses, cancelTrainerPass,
     me, memberCheckIns, memberPaymentHistory,
   };
 }

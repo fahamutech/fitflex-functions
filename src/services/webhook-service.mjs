@@ -1,4 +1,5 @@
 import { activationDates } from '../shared/subscription-status.mjs';
+import { retireUpgradedPass } from '../shared/pass-upgrade.mjs';
 
 // Payment-provider webhook handling — Selcom (idempotent on payment_id).
 export function createWebhookService({
@@ -51,6 +52,7 @@ export function createWebhookService({
           status: 'approved', reference: payment_id, decidedAt: new Date().toISOString(), decidedBy: 'selcom',
         });
       }
+      if (request) { try { await retireUpgradedPass(subscriptions, request, sub.id); } catch { /* best-effort */ } }
       try { await onSubscriptionActivated(updated || { ...sub, status: 'active' }, request ? { requestedAt: request.requestedAt, amountTzs: request.amountTzs } : undefined); } catch { /* best-effort */ }
       return { ok: true };
     }

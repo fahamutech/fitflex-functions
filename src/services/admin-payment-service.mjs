@@ -4,6 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { activationDates } from '../shared/subscription-status.mjs';
 import { productTypeOfPayment } from '../shared/payment-product.mjs';
+import { retireUpgradedPass } from '../shared/pass-upgrade.mjs';
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
@@ -61,6 +62,8 @@ export function createAdminPaymentService({
     }
     const updated = await subscriptions.updateByIdAsync(request.subscriptionId, patch);
     if (subStatus === 'active' && updated) {
+      // An approved upgrade replaces the plan it was bought on top of (the newest plan wins meanwhile).
+      try { await retireUpgradedPass(subscriptions, request, updated.id); } catch { /* best-effort */ }
       // The request says when the member asked and what they paid, which is what promotion analytics needs.
       try { await onSubscriptionActivated(updated, { requestedAt: request.requestedAt, amountTzs: request.amountTzs }); } catch { /* notification is best-effort */ }
     }
