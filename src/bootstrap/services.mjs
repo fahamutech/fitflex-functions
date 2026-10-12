@@ -176,7 +176,8 @@ export const settingsService = createSettingsService({ platformSettings, auditLo
 export const gymService = createGymService({ gyms, users, checkins, auditLog });
 // Tells gym owners, staff and vendors what happens at their gym or shop (inbox + push).
 export const partnerNotifier = createPartnerNotifier({
-  users, gyms, trainers, subscriptions, notify: (userId, message) => notificationService.notify(userId, message),
+  users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
+  notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const trainerService = createTrainerService({
   trainers, gyms, trainerBookings, auditLog, gymService, partnerGate,

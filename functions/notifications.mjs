@@ -80,7 +80,7 @@ export const myCommunicationPreferences = {
 
 export const updateMyCommunicationPreferences = {
   created, method: 'put', path: '/me/communication-preferences',
-  description: 'Any signed-in user: change message choices. PUT { inAppMarketing?, pushMarketing?, whatsappTransactional?, whatsappMarketing?, locale? } — turning WhatsApp offers on records consent.',
+  description: 'Any signed-in user: change message choices. PUT { inAppMarketing?, pushMarketing?, whatsappTransactional?, whatsappMarketing?, gymCheckinAlerts? (gym owners and staff: a notification per member check-in), locale? } — turning WhatsApp offers on records consent.',
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     const result = await communicationPreferenceService.update(req.user.sub, req.body || {});

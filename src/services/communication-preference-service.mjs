@@ -4,7 +4,9 @@
 // and turning them on records when and where the member agreed.
 import { effectivePreferences, LOCALES } from '../shared/communications.mjs';
 
-const SWITCHES = ['inAppMarketing', 'pushMarketing', 'whatsappTransactional', 'whatsappMarketing', 'smsTransactional', 'smsMarketing'];
+const SWITCHES = ['inAppMarketing', 'pushMarketing', 'whatsappTransactional', 'whatsappMarketing', 'smsTransactional', 'smsMarketing',
+  // For gym owners and staff: a notification each time a member checks in. On unless switched off.
+  'gymCheckinAlerts'];
 const OPT_IN_CHANNELS = ['whatsapp', 'sms'];
 
 export function createCommunicationPreferenceService({ preferences, now = () => new Date(), whatsappAvailable = () => false, smsAvailable = () => false }) {
@@ -19,6 +21,7 @@ export function createCommunicationPreferenceService({ preferences, now = () => 
       smsTransactional: p.smsTransactional,
       smsMarketing: p.smsMarketing,
       smsOptedOut: Boolean(p.smsOptedOutAt),
+      gymCheckinAlerts: row?.gymCheckinAlerts !== false,
       locale: p.locale,
       // What can never be switched off, so the app can say so.
       alwaysOn: ['in_app_transactional', 'push_transactional'],
