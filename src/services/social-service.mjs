@@ -57,7 +57,7 @@ export function publicActivity(a) {
 }
 
 export function createSocialService({
-  users, activities, follows, blocks, profiles, groups, groupMembers, kudos, comments, reports, views = null,
+  usernames = null, users, activities, follows, blocks, profiles, groups, groupMembers, kudos, comments, reports, views = null,
   notify = async () => {}, auditLog = null, now = () => new Date(),
   // Trainer profiles, for the name a trainer is known by (optional).
   trainers = null,
@@ -804,14 +804,20 @@ export function createSocialService({
   async function resolveReport(adminId, reportId, { action } = {}) {
     const r = await reports.findByIdAsync(reportId);
     if (!r || r.status !== 'open') return { error: 'not_found', status: 404 };
-    if (!['remove', 'dismiss'].includes(action)) return { error: 'invalid_action', status: 400 };
+    // clear_username: a reported member's username goes (they keep their name).
+    if (action === 'clear_username' && r.targetType !== 'user') return { error: 'invalid_action', status: 400 };
+    if (!['remove', 'dismiss', 'clear_username'].includes(action)) return { error: 'invalid_action', status: 400 };
     const stamp = now().toISOString();
+    if (action === 'clear_username') {
+      if (!usernames) return { error: 'feature_disabled', status: 404 };
+      await usernames.adminClear(adminId, r.targetId, r.reason ?? null);
+    }
     if (action === 'remove') {
       if (r.targetType === 'comment') await comments.updateByIdAsync(r.targetId, { deletedAt: stamp });
       if (r.targetType === 'group') await groups.updateByIdAsync(r.targetId, { status: 'archived', updatedAt: stamp });
       if (r.targetType === 'activity') await activities.updateByIdAsync(r.targetId, { shareWith: null });
     }
-    await reports.updateByIdAsync(reportId, { status: action === 'remove' ? 'actioned' : 'dismissed', resolvedBy: adminId, resolvedAt: stamp });
+    await reports.updateByIdAsync(reportId, { status: action === 'dismiss' ? 'dismissed' : 'actioned', resolvedBy: adminId, resolvedAt: stamp });
     await auditLog?.insertAsync({ id: id('aud'), at: stamp, actor: adminId, action: `social_report.${action}`, target: reportId, before: { status: 'open' }, after: { targetType: r.targetType, targetId: r.targetId } });
     return { resolved: true };
   }

@@ -67,6 +67,7 @@ import { createWorkoutExerciseService } from '../services/training/workout-exerc
 import { createTrainerPlanService } from '../services/training/trainer-plan-service.mjs';
 import { createExerciseAdminService } from '../services/training/exercise-admin-service.mjs';
 import { createSocialService } from '../services/social-service.mjs';
+import { createUsernameService } from '../services/username-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
@@ -129,6 +130,7 @@ import {
   b2bOrganizations, b2bOrganizationUsers, b2bBeneficiaries, b2bPrograms, b2bBenefits,
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
   follows, friendInvitations, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
+  memberUsernames, usernameReleases,
   trainerMemberRelationships, workoutPlans, trainingPlans, trainingExercises, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
@@ -349,7 +351,8 @@ export const subscriptionService = createSubscriptionService({ subscriptions, pa
 export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
   // promotionEventsService is defined at the end of this file; this only runs later.
-  onAccountDeleted: userId => promotionEventsService.forgetUser(userId),
+  // A deleted account lets its username go (held 90 days). usernameService is defined further down.
+  onAccountDeleted: async userId => { await promotionEventsService.forgetUser(userId); await usernameService.forgetUser(userId); },
 });
 
 export const checkInService = createCheckInService({
@@ -476,8 +479,10 @@ export const favoriteService = createFavoriteService({ users, gyms });
 // Sharing activities between members (mutual follows, groups, company).
 // Who belongs to a company or organisation: one lookup for challenges, rewards and groups.
 export const companyDirectory = createCompanyDirectory({ users, corporateEmployees, beneficiaries: b2bBeneficiaries });
+// Member usernames (flag MEMBER_USERNAMES): the endpoints are off until it is set.
+export const usernameService = createUsernameService({ memberUsernames, usernameReleases, users, trainers, gyms, auditLog });
 export const socialService = createSocialService({
-  directory: companyDirectory, trainers,
+  usernames: usernameService, directory: companyDirectory, trainers,
   users, activities, follows, blocks, profiles: socialProfiles, groups: socialGroups,
   groupMembers: socialGroupMembers, kudos: activityKudos, comments: activityComments, views: activityViews, reports: socialReports,
   auditLog,

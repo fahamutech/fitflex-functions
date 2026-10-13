@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { addMyPersona, authSwitchPersona, myPersonas } from '../functions/auth.mjs';
-import { users } from '../src/bootstrap/services.mjs';
+import { users, trainers } from '../src/bootstrap/services.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 
@@ -200,5 +200,51 @@ test('existing history stays on the original persona', async () => {
     assert.equal(out.statusCode, 201);
     assert.equal((await db('Subscription').where({ id: subId }).first()).memberId, member.id);
     assert.equal(await count('Subscription', { memberId: out.body.persona.id }), 0, 'the new persona starts clean');
+  });
+});
+
+// ── A trainer persona is onboarded only once it has a trainer profile ──────
+
+async function switchTo(callerId, callerType, personaId) {
+  const out = res();
+  await authSwitchPersona.onRequest({ user: { sub: callerId, userType: callerType }, body: { personaId } }, out);
+  return out;
+}
+
+test('an added trainer persona with no profile is not onboarded, so the app takes it through registration', async () => {
+  await withFlags(ON, async () => {
+    const member = await makeUser({ firebaseUid: uniq('fb'), email: `${uniq('m')}@example.com`, onboardingCompleted: true });
+    const added = await add({ sub: member.id, userType: 'member' }, 'trainer');
+    const trainerId = added.body.persona.id;
+    // New trainers are approved at once (3 Oct), which is why onboardingCompleted is what tells registered from not.
+    assert.equal(added.body.persona.approvalStatus, 'approved');
+    const switched = await switchTo(member.id, 'member', trainerId);
+    assert.equal(switched.statusCode, 200);
+    assert.equal(switched.body.user.onboardingCompleted, false);
+    assert.ok(!trainers.find(t => t.userId === trainerId), 'no profile was made for it');
+  });
+});
+
+test('a trainer persona that has a profile, or an admin-made one it can claim, is marked onboarded', async () => {
+  await withFlags(ON, async () => {
+    // A profile already linked to the persona.
+    const email = `${uniq('t')}@example.com`;
+    const member = await makeUser({ firebaseUid: uniq('fb'), email, onboardingCompleted: true });
+    const added = await add({ sub: member.id, userType: 'member' }, 'trainer');
+    const trainerId = added.body.persona.id;
+    await trainers.upsertAsync(t => t.id === uniq('trn'), { id: uniq('trn'), userId: trainerId, email, displayName: 'Linked Trainer', specialties: [], status: 'active', approvalStatus: 'approved', createdAt: new Date().toISOString() });
+    const switched = await switchTo(member.id, 'member', trainerId);
+    assert.equal(switched.body.user.onboardingCompleted, true);
+    assert.equal((await db('User').where({ id: trainerId }).first()).onboardingCompleted, true);
+
+    // A profile an admin made for this email, not yet linked to anyone.
+    const email2 = `${uniq('a')}@example.com`;
+    const member2 = await makeUser({ firebaseUid: uniq('fb'), email: email2, onboardingCompleted: true });
+    const added2 = await add({ sub: member2.id, userType: 'member' }, 'trainer');
+    const profileId = uniq('trn');
+    await trainers.upsertAsync(t => t.id === profileId, { id: profileId, userId: null, email: email2, displayName: 'Admin Made', specialties: [], status: 'active', approvalStatus: 'approved', createdAt: new Date().toISOString() });
+    const switched2 = await switchTo(member2.id, 'member', added2.body.persona.id);
+    assert.equal(switched2.body.user.onboardingCompleted, true);
+    assert.equal(trainers.find(t => t.id === profileId).userId, added2.body.persona.id, 'the profile became theirs');
   });
 });

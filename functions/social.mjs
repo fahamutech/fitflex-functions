@@ -106,4 +106,4 @@ export const organizationUpdateGroup = og.update; export const organizationArchi
 // ── Moderation (admin) ──────────────────────────────────────────────────
 const adminGuard = [requireAuth('admin'), requireAcl('social')];
 export const adminSocialReports = route('get', '/admin/social/reports', 'Admin: reports (?status=open|actioned|dismissed).', req => svc.listReports({ status: req.query?.status ?? 'open' }), adminGuard);
-export const adminResolveSocialReport = route('post', '/admin/social/reports/:id/resolve', 'Admin: remove what was reported (hide comment, close group, make activity private) or dismiss. { action: remove|dismiss }', req => svc.resolveReport(me(req), req.params.id, req.body || {}), adminGuard);
+export const adminResolveSocialReport = route('post', '/admin/social/reports/:id/resolve', 'Admin: remove what was reported (hide comment, close group, make activity private) or dismiss. { action: remove|dismiss|clear_username } (clear_username: a reported user\'s username goes; needs MEMBER_USERNAMES)', req => svc.resolveReport(me(req), req.params.id, req.body || {}), adminGuard);

@@ -32,3 +32,23 @@ export function orgAuthzMode() {
   if (value === 'shadow') return 'shadow';
   return TRUE_VALUES.has(value) ? 'enforce' : 'off';
 }
+
+/**
+ * Owner check-in lists show who visited by name (GET /owner/gyms/:id/checkins
+ * adds `displayName`). Off unless CHECKIN_VISITOR_NAMES is set, so a deploy
+ * never changes what owners see on its own.
+ */
+export function checkinVisitorNamesOn() {
+  return on('CHECKIN_VISITOR_NAMES');
+}
+
+/**
+ * Members may choose a username shown in public places (migration
+ * member-usernames, /me/username endpoints, admin clear on reports). Off
+ * unless MEMBER_USERNAMES is set: the endpoints answer 404 feature_disabled
+ * and /me omits the new fields.
+ */
+export function memberUsernamesOn() {
+  return on('MEMBER_USERNAMES');
+}
+

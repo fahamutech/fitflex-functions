@@ -68,6 +68,26 @@ export function createAuthService({
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink = null, auditLog = null, orgMemberships = null,
 }) {
+  /**
+   * A trainer is "onboarded" once they have a trainer profile. Since 3 Oct 2026
+   * a new trainer is approved at once, so the app can no longer tell a trainer
+   * who still has to register from one who has: it reads onboardingCompleted.
+   * Mark it true when the profile exists (or an admin-made one can be claimed
+   * by this email); a trainer without a profile stays false and is taken
+   * through registration. Never blocks a sign-in.
+   */
+  async function settleTrainerOnboarding(user) {
+    if (!user || user.userType !== 'trainer' || user.onboardingCompleted || !trainerService?.claimProfileForUser) return user;
+    try {
+      const profile = await trainerService.claimProfileForUser({ userId: user.id, email: user.email });
+      if (!profile) return user;
+      return (await users.updateByIdAsync(user.id, { onboardingCompleted: true, updatedAt: new Date().toISOString() })) || { ...user, onboardingCompleted: true };
+    } catch (err) {
+      console.warn('[auth] trainer onboarding check skipped:', err?.message);
+      return user;
+    }
+  }
+
   /** JWT claims for a persona row. `sub` stays the persona (User) id. */
   function sessionClaims(user) {
     return {
@@ -116,8 +136,9 @@ export function createAuthService({
     const { pool, last } = openingPool(usable, person.lastPersonaId);
     const operational = pool.filter(p => p.userType !== 'member');
     const chosen = last || (operational.length === 1 ? operational[0] : pool[0]);
-    const user = await users.findByIdAsync(chosen.id);
-    if (!user) return { error: 'no_profile', status: 409 };
+    const found = await users.findByIdAsync(chosen.id);
+    if (!found) return { error: 'no_profile', status: 409 };
+    const user = await settleTrainerOnboarding(found);
     await identityLink.rememberPersona(personId, user.id);
     return {
       token: signJwt(sessionClaims(user)), user: toSessionUser(user),
@@ -323,6 +344,7 @@ export function createAuthService({
     if (user.accountStatus === 'suspended') return { error: 'account_suspended', status: 403 };
     if (user.approvalStatus === 'rejected') return { error: 'profile_rejected', status: 403, approvalNote: user.approvalNote || null };
 
+    user = await settleTrainerOnboarding(user);
     const token = signJwt(sessionClaims(user));
     const session = { token, user: toSessionUser(user), pendingApproval: user.approvalStatus === 'pending_approval' };
     if (!v2Client) return session;
@@ -473,12 +495,13 @@ export function createAuthService({
     if (target.portalUser === true || target.userType === 'admin') return { error: 'portal_persona_not_switchable', status: 403 };
     if (target.accountStatus === 'suspended') return { error: 'account_suspended', status: 403 };
     if (target.approvalStatus === 'rejected') return { error: 'profile_rejected', status: 403, approvalNote: target.approvalNote || null };
-    await identityLink.rememberPersona(target.personId, target.id);
+    const settled = await settleTrainerOnboarding(target);
+    await identityLink.rememberPersona(settled.personId, settled.id);
     return {
-      token: signJwt(sessionClaims(target)),
-      user: toSessionUser(target),
-      pendingApproval: target.approvalStatus === 'pending_approval',
-      ...(await personaPayload(target)),
+      token: signJwt(sessionClaims(settled)),
+      user: toSessionUser(settled),
+      pendingApproval: settled.approvalStatus === 'pending_approval',
+      ...(await personaPayload(settled)),
     };
   }
 

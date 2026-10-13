@@ -1,7 +1,8 @@
 // Member-facing subscription + self-account REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { subscriptionService, accountService, resolveRequestUser, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
+import { subscriptionService, accountService, usernameService, resolveRequestUser, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
+import { memberUsernamesOn } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
 
@@ -56,7 +57,9 @@ export const me = {
     const user = await resolveRequestUser(req);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
     // partnerVerified: a trainer or gym owner sees whether they are verified yet.
-    res.json({ ...(await subscriptionService.me(user)), partnerVerified: await partnerVerifiedFor(user) });
+    // Username fields only when the feature is on (MEMBER_USERNAMES) and for members.
+    const username = memberUsernamesOn() && user.userType === 'member' ? await usernameService.mine(user.id) : {};
+    res.json({ ...(await subscriptionService.me(user)), partnerVerified: await partnerVerifiedFor(user), ...username });
   }
 };
 
