@@ -189,14 +189,17 @@ export const adminUpdateVendor = {
 
 export const createShopOrder = {
   created, method: 'post', path: '/me/shop-orders',
-  description: 'Any signed-in user: place a shop order. Stock is validated and deducted.',
+  description: 'Any signed-in user: place a shop order. Stock is validated and reserved atomically. Send an Idempotency-Key header (8–100 chars) so a retry returns the original order instead of a second one; the order is unpaid (paymentStatus pending) until FitFlex confirms the payment.',
   requestSample: { items: [{ productId: 'prd_x', qty: 2 }], deliveryMethod: 'gym_pickup', pickupGymId: 'gym_x', paymentMethod: 'mpesa', paymentOutcome: 'success' },
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     const result = await shopService.createOrder({
       buyerId: req.user.sub, buyerRole: req.user.userType || 'member', body: req.body || {},
+      // A retried request carries the same key and gets the order it already made.
+      idempotencyKey: req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'] || null,
     });
     if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId });
+    if (result.replayed) res.set?.('Idempotent-Replay', 'true');
     res.status(201).json(result.order);
   }
 };

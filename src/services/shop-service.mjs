@@ -1,6 +1,7 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
 import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
@@ -39,7 +40,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // A cancelled order, for promotion analytics: (order) → void; takes back what the paid order was credited for.
   onOrderCancelled = async () => null,
   // Something the vendor should hear about now, not only find in their list: (vendorUserId, event, data) → void.
-  onVendorEvent = async () => null }) {
+  onVendorEvent = async () => null,
+  // The order store: reserves stock and writes orders atomically. Production passes the Postgres
+  // store; without one the service uses the collections directly (unit specs).
+  orderStore = null,
+  // How long an unpaid order holds its stock. Orders carry their own expiry from the moment they are placed.
+  reservationTtlMinutes = 24 * 60,
+  now = () => new Date() }) {
+  orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -279,9 +287,25 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { vendor: updated };
   }
 
-  async function createOrder({ buyerId, buyerRole = 'member', body }) {
+  const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,100}$/;
+  const MAX_ORDER_LINES = 50;
+  const fingerprintOf = (lines, body, deliveryMethod, paymentMethod) => createHash('sha256').update(JSON.stringify({
+    lines: lines.map(({ productId, qty }) => [productId, qty]), deliveryMethod, paymentMethod,
+    pickupGymId: deliveryMethod === 'gym_pickup' ? body.pickupGymId : null,
+    deliveryAddress: deliveryMethod === 'home_delivery' ? body.deliveryAddress : null,
+  })).digest('hex');
+
+  /**
+   * Place an order. Prices come from the product rows, never from the request.
+   * Stock is reserved, the order written and its payment request created in one
+   * atomic step; a retry with the same idempotencyKey returns the original order.
+   */
+  async function createOrder({ buyerId, buyerRole = 'member', body, idempotencyKey = null }) {
     const items = Array.isArray(body?.items) ? body.items : [];
     if (!items.length) return { error: 'items_required', status: 400 };
+    if (items.length > MAX_ORDER_LINES) return { error: 'too_many_items', status: 400 };
+    const key = idempotencyKey ?? body?.idempotencyKey ?? null;
+    if (key != null && !IDEMPOTENCY_KEY.test(String(key))) return { error: 'invalid_idempotency_key', status: 400 };
     const deliveryMethod = body?.deliveryMethod || 'home_delivery';
     if (!['home_delivery', 'gym_pickup'].includes(deliveryMethod)) return { error: 'invalid_delivery_method', status: 400 };
     if (deliveryMethod === 'gym_pickup' && !body?.pickupGymId) return { error: 'pickup_gym_required', status: 400 };
@@ -291,19 +315,33 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     // The app's own payment result is never trusted: an order is paid only
     // once FitFlex confirms the payment (admin approval of its payment request).
     if (body?.paymentOutcome === 'failed') return { error: 'payment_failed', status: 402 };
-    const resolved = [];
+    // The same product on two lines is one line: stock is checked and reserved for the total.
+    const wanted = new Map();
     for (const item of items) {
-      const qty = Number(item.qty || 0);
-      if (qty <= 0) return { error: 'invalid_quantity', status: 400 };
-      const product = await products.findByIdAsync(item.productId);
-      if (!product || product.deletedAt || product.status !== 'active' || ['pending', 'rejected'].includes(product.approvalStatus)) return { error: 'product_not_found', status: 404, productId: item.productId };
-      if (!(await partnerGate.isOperational(product.vendorId))) return { error: 'product_not_found', status: 404, productId: item.productId };
+      const qty = Number(item?.qty || 0);
+      if (!Number.isSafeInteger(qty) || qty <= 0) return { error: 'invalid_quantity', status: 400 };
+      if (typeof item.productId !== 'string' || !item.productId) return { error: 'product_not_found', status: 404, productId: item?.productId };
+      wanted.set(item.productId, (wanted.get(item.productId) || 0) + qty);
+    }
+    const lines = [...wanted].map(([productId, qty]) => ({ productId, qty }));
+    const fingerprint = fingerprintOf(lines, body, deliveryMethod, paymentMethod);
+    // A retry gets the order it already made, even if stock or the listing has changed since.
+    if (key) {
+      const earlier = await orderStore.findReplay({ buyerId, key: String(key), fingerprint });
+      if (earlier?.error) return { error: earlier.error, status: earlier.status };
+      if (earlier) return earlier.order.paymentStatus === 'paid' ? { order: earlier.order, status: 201, replayed: true } : { order: earlier.order, paymentRequest: earlier.paymentRequest, status: 202, replayed: true };
+    }
+    const resolved = [];
+    for (const { productId, qty } of lines) {
+      const product = await products.findByIdAsync(productId);
+      if (!product || product.deletedAt || product.status !== 'active' || ['pending', 'rejected'].includes(product.approvalStatus)) return { error: 'product_not_found', status: 404, productId };
+      if (!(await partnerGate.isOperational(product.vendorId))) return { error: 'product_not_found', status: 404, productId };
       // Hidden or suspended in moderation: it is not sold, even to someone with an old link.
-      if (await publicGate.isBlocked('product', product.id) || await publicGate.isBlocked('vendor', product.vendorId)) return { error: 'product_not_found', status: 404, productId: item.productId };
+      if (await publicGate.isBlocked('product', product.id) || await publicGate.isBlocked('vendor', product.vendorId)) return { error: 'product_not_found', status: 404, productId };
+      // A quick answer; the store re-checks stock atomically when it reserves.
       if (Number(product.stock) < qty) return { error: 'insufficient_stock', status: 409, productId: product.id };
       resolved.push({ product, qty });
     }
-    for (const { product, qty } of resolved) await products.updateByIdAsync(product.id, { stock: Number(product.stock) - qty, soldCount: Number(product.soldCount || 0) + qty, updatedAt: nowIso() });
     // Each line carries the commission at its vendor's rate today, so a later rate change never alters this order.
     const rates = new Map();
     for (const vendorId of new Set(resolved.map(({ product }) => product.vendorId).filter(Boolean))) {
@@ -315,20 +353,38 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       return { productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs, image: product.images?.[0] || null, commissionPct, commissionTzs, vendorPayoutTzs };
     });
     const totalTzs = orderItems.reduce((sum, item) => sum + item.priceTzs * item.qty, 0);
-    const at = nowIso();
+    const placedAt = now();
+    const at = placedAt.toISOString();
     const free = totalTzs === 0 || !paymentRequests;
-    const order = await shopOrders.insertAsync({ id: makeId('ord'), buyerId, buyerRole, items: orderItems, totalTzs, status: 'pending', deliveryMethod, pickupGymId: deliveryMethod === 'gym_pickup' ? body.pickupGymId : null, deliveryAddress: deliveryMethod === 'home_delivery' ? body.deliveryAddress : null, paymentMethod, paymentStatus: free ? 'paid' : 'pending', paymentReference: body.paymentReference || null, timeline: [{ status: 'pending', at }], note: body?.note || null, settlementStatus: 'pending', createdAt: at, updatedAt: at });
-    if (free) {
-      await orderPaid(order);
-      return { order, status: 201 };
-    }
+    const orderId = makeId('ord');
+    const order = {
+      id: orderId, buyerId, buyerRole, items: orderItems, totalTzs, status: 'pending', deliveryMethod,
+      pickupGymId: deliveryMethod === 'gym_pickup' ? body.pickupGymId : null,
+      deliveryAddress: deliveryMethod === 'home_delivery' ? body.deliveryAddress : null,
+      paymentMethod, paymentStatus: free ? 'paid' : 'pending', paymentReference: body.paymentReference || null,
+      timeline: [{ status: 'pending', at }], note: body?.note || null, settlementStatus: 'pending',
+      reservationExpiresAt: free ? null : new Date(+placedAt + reservationTtlMinutes * 60_000).toISOString(),
+      createdAt: at, updatedAt: at,
+    };
     // Stock stays reserved while the payment is confirmed.
-    const paymentRequest = await paymentRequests.insertAsync({
-      id: makeId('pay'), memberId: buyerId, orderId: order.id, amountTzs: totalTzs, currency: 'TZS',
+    const paymentRequest = free ? null : {
+      id: makeId('pay'), memberId: buyerId, orderId, amountTzs: totalTzs, currency: 'TZS',
       status: 'pending', provider: 'admin_approved', reference: body.paymentReference || null,
       requestedAt: at, decidedAt: null, decidedBy: null, note: null,
+    };
+    const placed = await orderStore.placeOrder({
+      order,
+      lines: resolved.map(({ product, qty }) => ({ productId: product.id, qty, priceTzs: Number(product.priceTzs || 0), discountPriceTzs: Number(product.discountPriceTzs || 0) })),
+      paymentRequest,
+      idempotency: key ? { key: String(key), fingerprint } : null,
     });
-    return { order, paymentRequest, status: 202 };
+    if (placed.error) return { error: placed.error, status: placed.status, productId: placed.productId };
+    if (placed.replayed) return placed.order.paymentStatus === 'paid' ? { order: placed.order, status: 201, replayed: true } : { order: placed.order, paymentRequest: placed.paymentRequest, status: 202, replayed: true };
+    if (free) {
+      await orderPaid(placed.order);
+      return { order: placed.order, status: 201 };
+    }
+    return { order: placed.order, paymentRequest: placed.paymentRequest, status: 202 };
   }
 
   async function orderPaid(order) {
@@ -337,10 +393,16 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
   }
 
-  async function restock(order) {
-    for (const item of order.items || []) {
-      const product = await products.findByIdAsync(item.productId);
-      if (product) await products.updateByIdAsync(product.id, { stock: Number(product.stock) + Number(item.qty || 0), updatedAt: nowIso() });
+  /** Raise the refund for money held for an order. A failure is recorded, never only logged. */
+  async function raiseRefund(order, { reasonCode, actorId, role }) {
+    try {
+      return await onRefundDue({ order, reasonCode, actorId, role });
+    } catch (err) {
+      console.error('[shop] refund not raised:', order.id, err?.message);
+      try {
+        await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId || 'system', action: 'shop_refund_not_raised', target: order.id, before: null, after: { reasonCode, error: String(err?.message || err).slice(0, 300) } });
+      } catch (auditErr) { console.error('[shop] refund failure not recorded:', auditErr?.message); }
+      return null;
     }
   }
 
@@ -354,16 +416,48 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!order || order.paymentStatus === 'paid') return;
     const at = nowIso();
     if (status === 'approved') {
-      if (order.status === 'cancelled') return; // cancelled while waiting: FitFlex refunds it
-      const updated = await shopOrders.updateByIdAsync(orderId, { paymentStatus: 'paid', updatedAt: at });
-      await orderPaid(updated || order);
+      const paid = await orderStore.markPaid(orderId);
+      if (paid.outcome === 'paid') { await orderPaid(paid.order); return; }
+      if (paid.outcome !== 'cancelled') return;
+      // The money arrived after the order was cancelled or its reservation lapsed. The stock is
+      // already back on the shelf, so the order is not revived: the payment is owed back, once.
+      const late = await orderStore.markLatePayment(orderId);
+      if (!late.marked) return;
+      await auditLog.insertAsync({ id: randomUUID(), at, actor: 'system', action: 'shop_order_payment_after_cancellation', target: orderId, before: { status: 'cancelled', paymentStatus: paid.order.paymentStatus }, after: { paymentStatus: 'refund_pending', amountTzs: order.totalTzs } });
+      await raiseRefund(late.order, { reasonCode: 'payment_error', actorId: 'system', role: 'system' });
+      await notify(order.buyerId, 'order_payment_refund_due', { orderId, totalTzs: order.totalTzs });
       return;
     }
-    if (!['rejected', 'cancelled'].includes(status) || order.status === 'cancelled') return;
-    await restock(order);
-    const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at }];
-    await shopOrders.updateByIdAsync(orderId, { status: 'cancelled', paymentStatus: 'failed', timeline, updatedAt: at });
+    if (!['rejected', 'cancelled'].includes(status)) return;
+    const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, reason: 'payment_not_confirmed' }];
+    const out = await orderStore.cancelAndRelease(orderId, { patch: { paymentStatus: 'failed', timeline, updatedAt: at }, paymentStatuses: ['pending', 'failed', 'cancelled', null] });
+    if (!out.changed) return;
     await notify(order.buyerId, 'order_cancelled', { orderId, reason: 'payment_not_confirmed' });
+  }
+
+  /**
+   * Cancel unpaid orders whose reservation has lapsed and give their stock back.
+   * Safe to run repeatedly and from several servers: each order is cancelled once.
+   * A payment that arrives later is handled as a late payment (refund owed).
+   */
+  async function expireStaleReservations({ limit = 100 } = {}) {
+    const due = await orderStore.findExpired({ before: now(), limit });
+    let expired = 0;
+    for (const order of due) {
+      const at = nowIso();
+      const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, by: 'system', reason: 'reservation_expired' }];
+      const out = await orderStore.cancelAndRelease(order.id, { patch: { paymentStatus: 'failed', timeline, updatedAt: at }, fromStatuses: ['pending'], paymentStatuses: ['pending'] });
+      if (!out.changed) continue;
+      expired += 1;
+      if (paymentRequests) {
+        for (const r of await paymentRequests.filterAsync(p => p.orderId === order.id && p.status === 'pending')) {
+          await paymentRequests.updateByIdAsync(r.id, { status: 'cancelled', decidedAt: at, decidedBy: 'system' });
+        }
+      }
+      await auditLog.insertAsync({ id: randomUUID(), at, actor: 'system', action: 'shop_order_reservation_expired', target: order.id, before: { status: 'pending', paymentStatus: 'pending' }, after: { status: 'cancelled', paymentStatus: 'failed' } });
+      await notify(order.buyerId, 'order_cancelled', { orderId: order.id, reason: 'reservation_expired' });
+    }
+    return { due: due.length, expired };
   }
   async function myOrders(buyerId) {
     return (await shopOrders.filterAsync(order => order.buyerId === buyerId))
@@ -412,23 +506,32 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (order.status === 'cancelled') return { order };
     if (['delivered', 'fulfilled'].includes(order.status)) return { error: 'order_already_delivered', status: 409 };
     if (role === 'buyer' && !CANCELLABLE.has(order.status)) return { error: 'order_already_dispatched', status: 409 };
-    await restock(order);
     const at = nowIso();
+    const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, by: role }];
+    // The state change and the stock release are one atomic step; only the request that wins it carries on.
     const wasPaid = order.paymentStatus === 'paid' && Number(order.totalTzs) > 0;
+    const result = await orderStore.cancelAndRelease(order.id, {
+      patch: { paymentStatus: wasPaid ? 'refund_pending' : order.paymentStatus === 'pending' ? 'cancelled' : order.paymentStatus, timeline, updatedAt: at },
+      // The state this decision was made on: if it moved (dispatched, delivered, paid) the caller is told.
+      fromStatuses: role === 'buyer' ? [...CANCELLABLE] : ['pending', 'confirmed', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup'],
+      paymentStatuses: [order.paymentStatus ?? null],
+    });
+    if (result.error) return result;
+    if (!result.changed) {
+      if (result.reason === 'already_cancelled') return { order: result.order };
+      return { error: 'order_changed', status: 409 };
+    }
+    const updated = result.order;
     if (order.paymentStatus === 'pending' && paymentRequests) {
       for (const r of await paymentRequests.filterAsync(p => p.orderId === order.id && p.status === 'pending')) {
         await paymentRequests.updateByIdAsync(r.id, { status: 'cancelled', decidedAt: at, decidedBy: actorId });
       }
     }
-    const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, by: role }];
-    const paymentStatus = wasPaid ? 'refund_pending' : order.paymentStatus === 'pending' ? 'cancelled' : order.paymentStatus;
-    const updated = await shopOrders.updateByIdAsync(order.id, { status: 'cancelled', paymentStatus, timeline, updatedAt: at });
+    const paymentStatus = updated.paymentStatus;
     try { await onOrderCancelled(order); } catch (err) { console.warn('[shop] cancelled order not taken back from a promotion:', err?.message); }
     await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: `shop_order_cancelled_by_${role}`, target: order.id, before: { status: order.status, paymentStatus: order.paymentStatus }, after: { status: 'cancelled', paymentStatus } });
     let refund = null;
-    if (wasPaid) {
-      try { refund = await onRefundDue({ order: updated, reasonCode, actorId, role }); } catch (err) { console.warn('[shop] refund not raised:', err?.message); }
-    }
+    if (wasPaid) refund = await raiseRefund(updated, { reasonCode, actorId, role });
     if (role === 'buyer') {
       for (const vendorId of new Set((order.items || []).map(item => item.vendorId).filter(Boolean))) await notifyVendor(vendorId, 'order_cancelled', { orderId: order.id, by: 'buyer' });
     } else {
@@ -552,5 +655,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, buyerCancelOrder, markOrderRefunded, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
+  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
 }
