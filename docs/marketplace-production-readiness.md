@@ -141,7 +141,7 @@ After PR 1:
 
 | Command | Result |
 |---|---|
-| `specs/shop-checkout-integrity.specs.mjs` (new, real Postgres) | **29 pass, 0 fail** |
+| `specs/shop-checkout-integrity.specs.mjs` (new, real Postgres) | **28 pass, 0 fail** |
 | the five baseline spec files | **53 pass, 0 fail** |
 | `npm test` (full suite, 1875 tests) | **1875 pass, 0 fail, 0 skipped** |
 | migration down → up round trip | ok (`stockState` column removed then restored) |
