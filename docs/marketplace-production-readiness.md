@@ -51,7 +51,7 @@ shop orders in this code path** (see PR 3).
 |---|---|---|---|---|
 | M-01 | P0 | **Overselling.** Stock was read, checked, then written in separate statements with no lock. Reproduced: 10 simultaneous buyers of a 1-unit product → **10 orders created** (old code, same DB). | `createOrder` (before PR 1) | **Fixed PR 1** — conditional `UPDATE … WHERE stock >= qty`; test `ten buyers race for the last unit` |
 | M-02 | P0 | **Not atomic.** Stock deducted line by line, then the order inserted, then the payment request. A failure part-way left stock deducted with no order (or an order with no payment request). | `createOrder` | **Fixed PR 1** — single transaction |
-| M-03 | P0 | **Duplicate orders on retry.** No idempotency; a timeout-and-retry made a second order and a second deduction. | `createOrder`, route | **Fixed server-side PR 1** (`Idempotency-Key`). Mobile does not send a key yet → **PR 4** |
+| M-03 | P0 | **Duplicate orders on retry.** No idempotency; a timeout-and-retry made a second order and a second deduction. | `createOrder`, route | **Fixed PR 1** (server) + **PR 4** (app sends the key; fitflex-mobile#113). Effective for app traffic once both are deployed |
 | M-04 | P1 | Same product on two lines: each line checked against full stock, then updates raced on a stale value (under-deduction). | `createOrder` | **Fixed PR 1** — lines merged per product |
 | M-05 | P1 | Restock was not exactly-once: `restock` ran before the status write, guarded only by a stale read of `status`. Concurrent cancels double-restocked; a crash between restock and status write re-restocked on retry. | `restock`, `cancelOrder`, `applyPaymentToOrder` | **Fixed PR 1** — release is a conditional state change plus a ledger unique key |
 | M-06 | P1 | **Late payment lost.** Approval of a payment for an order already cancelled returned silently ("FitFlex refunds it") — no refund was raised, nothing recorded. | `applyPaymentToOrder` | **Fixed PR 1** (decision D-2) — an order that lapsed on its own is **revived** if its stock can be taken again; otherwise, or if a person cancelled it, it stays cancelled, is marked `refund_pending`, and one refund is raised and audited |
@@ -68,7 +68,10 @@ shop orders in this code path** (see PR 3).
 | M-14 | P2 | `free = totalTzs === 0 || !paymentRequests`: if `paymentRequests` were ever not injected, orders become `paid` with no payment. Production bootstrap injects it; the fallback is a trap. | `createOrder` | **Open** (small; will remove with PR 3 wiring test) |
 | M-15 | P2 | Product `variants` carry their own `stock` but order lines had no variant, so variant stock was never checked or reserved. | `createOrder`, data model | **Fixed PR 1** (decision D-3) — see §5 "Variants" |
 | M-16 | P2 | `createOrder` did not check `visibility === 'hidden'`; the catalogue does. A hidden product could be bought by id. | `createOrder` vs `listProducts` | **Fixed PR 1** (decision D-4) — checked in the service and again in the atomic reserve |
-| M-17 | P2 | `pickupGymId` / `deliveryAddress` are not validated beyond presence (gym existence, ownership). | `createOrder` | **Open → PR 4** |
+| M-17 | P2 | `pickupGymId` / `deliveryAddress` are not validated beyond presence (gym existence, ownership). | `createOrder` | **Open (backend)** — the app now says what is missing; the server still accepts any gym id |
+| M-32 | P1 | **Mobile: a checkout timeout stuck the order button with no message** (only `ApiException` was caught) and the client's automatic POST retry on dropped connections had nothing making it safe. | `shop_browse_page.dart` `_checkout`, `api_client.dart` | **Fixed PR 4** (read in code; pinned by widget tests; not reproduced on a device) |
+| M-33 | P2 | Mobile showed "order placed" for unconfirmed payment; `refund_pending` looked like a finished refund; cancel text said the refund was "on its way". | `shop_browse_page.dart`, i18n | **Fixed PR 4** |
+| M-34 | P2 | Mobile cannot buy two options of one product in one order, and *Reorder* drops options. | cart keyed by product | **Open** — documented limit (decide with `SHOP_REQUIRE_VARIANT`) |
 | M-18 | P2 | `paymentReference` is client-supplied and stored unverified. It is not used to mark anything paid. | `createOrder` | **Mitigated PR 3** — a reference confirms one order only; still unverified against a provider (none exists) |
 | M-22 | P0 | **Double confirmation.** Approving a payment was read-then-write: two staff approving at once both succeeded and the order payment was applied twice. Reproduced: 2 successes, applied 2×. | `adminPaymentService.decide/update` | **Fixed PR 3** — conditional update; `409 already_decided` |
 | M-23 | P1 | **A confirmed order payment could be edited back** to rejected / pending / cancelled while the order stayed paid (records disagree; refund flow bypassed). Reproduced. | `adminPaymentService.update` | **Fixed PR 3** — `409 payment_already_confirmed` |
@@ -228,6 +231,15 @@ Known test limits: concurrency tests run in one Node process against a pooled
 connection set (real row locking, but not multi-process). The service-level
 unit specs still use the in-memory store, which is deliberately not atomic.
 
+**PR 4** (fitflex-mobile#113, base `release-candidate`):
+
+| Command | Result |
+|---|---|
+| `flutter test` on RC (baseline) | **1018 pass** |
+| `flutter test` with PR 4 | **1038 pass, 0 fail** |
+| `flutter analyze` | **no issues** |
+| device / Flutter web UAT | **not run** |
+
 ## 8. Remaining work
 
 | PR | Content | State |
@@ -235,13 +247,13 @@ unit specs still use the in-memory store, which is deliberately not atomic.
 | 1 | transactional inventory, idempotency, expiry, late payment | **done, awaiting review** |
 | 2 | state machine + vendor-scoped fulfilment (M-11, M-12, M-13, M-19–M-21) | **done, awaiting review** (stacked on PR 1) |
 | 3 | payment confirmation, refund reliability, reconciliation (M-08, M-18, M-22–M-29) | **done, awaiting review** (stacked on PR 2). Provider integration (M-30) **blocked**, not done |
-| 4 | mobile idempotency key, resume pending payment, status display (M-03 client half, M-17, variant picker) | not started |
+| 4 | mobile idempotency key, resume pending payment, status display, option picker (M-03 client half, M-32, M-33) | **done, awaiting review** — fitflex-mobile#113 → `release-candidate`. Not run on a device |
 | 5 | settlement controls, security hardening, go-live regression | not started |
 
 Written: `marketplace-order-state-machine.md` (PR 2), `marketplace-payment-and-refund-flows.md` (PR 3).
 Still to write: `marketplace-go-live-checklist.md` (PR 5).
 
-## 9. Deployment prerequisites (PR 1, 2 and 3)
+## 9. Deployment prerequisites (PR 1, 2, 3 and 4)
 
 1. Back up / snapshot the production database (additive migration, but it touches `ShopOrder` and `Product`).
 2. Run the migration **before** deploying the new code (new code needs the columns). Old code keeps working on the new schema.
@@ -249,6 +261,7 @@ Still to write: `marketplace-go-live-checklist.md` (PR 5).
 4. Optional, later and deliberately: `SHOP_RESERVATION_EXPIRY=on` (D-1; TTL default 48 h).
 5. Rollback: redeploy old code; the down-migration is available but loses idempotency keys and the stock ledger.
 6. PR 2 adds `ShopOrder.fulfilments` (nullable jsonb; no backfill, derived lazily). Run its migration before deploying PR 2's code. Rollback drops the column; `status` and `timeline` stay complete.
+10. PR 4 is a mobile build. Ship it **before** setting `SHOP_REQUIRE_VARIANT=on` and before relying on app-side retry protection; the backend works with old and new builds.
 8. PR 3 migration `20261224123000` creates a unique index on confirmed order payment references **only if no duplicates exist**; otherwise it prints them and skips it (resolve, then create the index by hand: statement in the migration output). No downtime either way.
 9. PR 3 adds `GET /admin/marketplace/reconciliation` and two repair endpoints, and an hourly job `shopReconciliation` (read-only). Nothing alerts on it yet (D-12).
 7. PR 2 changes what `GET /vendor/orders` returns for a vendor: their own lines and subtotal, `status` = their own fulfilment's status, plus `orderStatus` and `nextStatuses`. Identical for single-vendor orders. The vendor app needs no change.
