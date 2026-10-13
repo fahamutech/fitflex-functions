@@ -1,8 +1,9 @@
 # Marketplace production readiness
 
-Status as of 2026-10-13, after **PR 1 (checkout and inventory integrity)**.
-Outcome so far: **NOT READY** — payments, vendor-scoped fulfilment and the order
-state machine are not yet reviewed or fixed (PR 2–5). See "Outcome".
+Status as of 2026-10-13, after **PR 1 (checkout and inventory integrity)** and
+**PR 2 (order state machine and vendor-scoped fulfilment)**.
+Outcome so far: **NOT READY** — payments, refunds, reconciliation, the mobile
+client and settlement controls are not yet reviewed or fixed (PR 3–5). See "Outcome".
 
 Evidence rules for this document: a defect is **confirmed** only if it was
 reproduced by a test or read directly in the code at the cited location. Anything
@@ -56,9 +57,12 @@ shop orders in this code path** (see PR 3).
 | M-08 | P1 | A refund that could not be raised was only `console.warn`ed. | `cancelOrder` | **Partly fixed PR 1** — recorded as audit `shop_refund_not_raised`; order stays `refund_pending`. Ops screen for these → PR 3 |
 | M-09 | P2 | Fractional / non-integer quantities accepted (`1.5`). No cap on lines. | `createOrder` | **Fixed PR 1** (integers only, ≤ 50 lines) |
 | M-10 | P2 | `soldCount` rose on reservation and never fell on release. | `restock` | **Fixed PR 1** |
-| M-11 | P1 | **Vendor authorisation is per order, not per line.** `updateOrderStatus` allows any vendor owning *any* item to move the *whole* order (including other vendors' lines) to any status. `vendorOrders` falls back to product ownership. | `updateOrderStatus`, `vendorOrders` | **Open → PR 2** (read in code; not yet reproduced) |
-| M-12 | P1 | **No state machine.** Any status in the set can follow any other (e.g. `pending → delivered`, `delivered → processing`); only "paid first" and "cancelled is final" are enforced. Transition write is an unconditional update. | `updateOrderStatus` | **Open → PR 2** |
-| M-13 | P1 | Paid-order cancellation by a vendor/admin is not limited by fulfilment state beyond `delivered`; dispatched goods can be cancelled and "refunded". | `cancelOrder` | **Open → PR 2/3** (business rule needed) |
+| M-11 | P1 | **Vendor authorisation was per order, not per line.** `updateOrderStatus` let any vendor owning *any* item move the *whole* order (including other vendors' lines) to any status; `vendorOrders` returned every vendor's lines, commissions and payouts. Reproduced: vendor A marked a 2-vendor order `delivered` from `pending`; vendor B never touched it. | `updateOrderStatus`, `vendorOrders` | **Fixed PR 2** — per-vendor fulfilments; vendors see and move only their own |
+| M-12 | P1 | **No state machine.** Any status could follow any other (`pending → delivered`, `delivered → processing`); only "paid first" and "cancelled is final" were enforced, by an unconditional update. | `updateOrderStatus` | **Fixed PR 2** — `docs/marketplace-order-state-machine.md`; decided under a row lock |
+| M-13 | P1 | A vendor/admin can cancel (and refund) a dispatched order. | `cancelOrder` | **Preserved on purpose** — an existing, specified rule ("the vendor can still cancel a dispatched order, which refunds the buyer"). Now refused once any vendor has delivered (`order_partly_delivered`), and vendors cannot cancel a multi-vendor order alone |
+| M-19 | P1 | **Administrators needed no ACL scope to change order status.** The route only required an `admin` token; an admin without the `shop` scope could move any vendor's orders. | `functions/shop.mjs` `vendorUpdateOrderStatus` | **Fixed PR 2** — `shop` scope required (super-admin unrestricted) |
+| M-20 | P2 | A suspended vendor (or one whose staff still held tokens) could keep fulfilling orders. | `updateOrderStatus` | **Fixed PR 2** — `403 vendor_suspended` |
+| M-21 | P1 | The cancel path (expiry, rejected payment) left vendors' fulfilments uncancelled. | PR 2 development | **Fixed PR 2** (found by test) |
 | M-14 | P2 | `free = totalTzs === 0 || !paymentRequests`: if `paymentRequests` were ever not injected, orders become `paid` with no payment. Production bootstrap injects it; the fallback is a trap. | `createOrder` | **Open** (small; will remove with PR 3 wiring test) |
 | M-15 | P2 | Product `variants` carry their own `stock` but order lines had no variant, so variant stock was never checked or reserved. | `createOrder`, data model | **Fixed PR 1** (decision D-3) — see §5 "Variants" |
 | M-16 | P2 | `createOrder` did not check `visibility === 'hidden'`; the catalogue does. A hidden product could be bought by id. | `createOrder` vs `listProducts` | **Fixed PR 1** (decision D-4) — checked in the service and again in the atomic reserve |
@@ -128,6 +132,9 @@ shop orders in this code path** (see PR 3).
 | D-3 | Variants purchasable | **Yes** — see §5. A variant can be named and its own stock is then reserved; choosing is not mandatory until the app can send it (`SHOP_REQUIRE_VARIANT=on`). |
 | D-4 | Block hidden products by id | **Yes.** |
 | D-5 | `VALIDATE CONSTRAINT` on `Product.stock` | **Still open** — needs a data check on production first. |
+| D-6 | Cancelling or returning **one vendor's part** of a multi-vendor order needs a partial refund (the refund model is one per order). Until decided, vendors cannot cancel a mixed order and FitFlex cancels it whole; once any vendor has delivered it cannot be cancelled at all. | **Open — financial-model decision** |
+| D-7 | Per-vendor settlement: today a mixed order is paid out only when **every** vendor has delivered (conservative). Pay each vendor as their own part is delivered? | **Open** (PR 5) |
+| D-8 | Remove the legacy `fulfilled` completion shortcut once no client uses it. | **Open** (low) |
 
 ## 7. Tests
 
@@ -146,6 +153,22 @@ After PR 1:
 | `npm test` (full suite, 1875 tests) | **1875 pass, 0 fail, 0 skipped** |
 | migration down → up round trip | ok (`stockState` column removed then restored) |
 | negative control: old `createOrder`, 10 concurrent buyers, 1 unit | **10 orders created** (defect reproduced) |
+
+**PR 2** (stacked on PR 1; isolated database, 93 migrations):
+
+| Command | Result |
+|---|---|
+| `specs/shop-order-lifecycle.specs.mjs` (hand-written expected matrix, 64 status pairs × 2 delivery methods) | **9 pass, 0 fail** |
+| `specs/shop-fulfilment.specs.mjs` (real Postgres) | **17 pass, 0 fail** |
+| `npm test` (full suite) | **1901 pass, 0 fail, 0 skipped** |
+| migration `20261224113000-shop-order-fulfilments` down → up | ok |
+| negative control: old `updateOrderStatus`, vendor A on a 2-vendor order | **`pending → delivered` accepted** (defect reproduced) |
+
+Existing specs changed by PR 2 (each encoded the removed behaviour): the
+"seven-stage timeline" spec read a timeline array that the old code mutated in
+place — it now reads the stored order; the gym-pickup spec marked
+`ready_for_pickup` straight from `pending`; the refund spec dispatched / delivered
+straight from `pending`. All now accept the order first.
 
 No linter or static-analysis script exists in `package.json`; none was run.
 No mobile or portal build was run (not touched in PR 1).
@@ -171,7 +194,7 @@ unit specs still use the in-memory store, which is deliberately not atomic.
 | PR | Content | State |
 |---|---|---|
 | 1 | transactional inventory, idempotency, expiry, late payment | **done, awaiting review** |
-| 2 | state machine + vendor-scoped fulfilment (M-11, M-12, M-13) | not started |
+| 2 | state machine + vendor-scoped fulfilment (M-11, M-12, M-13, M-19–M-21) | **done, awaiting review** (stacked on PR 1) |
 | 3 | payment confirmation, refund reliability, reconciliation (M-08, M-14, M-18) | not started; provider integration cannot be assumed |
 | 4 | mobile idempotency key, resume pending payment, status display (M-03 client half, M-17, variant picker) | not started |
 | 5 | settlement controls, security hardening, go-live regression | not started |
@@ -179,13 +202,15 @@ unit specs still use the in-memory store, which is deliberately not atomic.
 Also still to write: `marketplace-order-state-machine.md`,
 `marketplace-payment-and-refund-flows.md`, `marketplace-go-live-checklist.md`.
 
-## 9. Deployment prerequisites (PR 1)
+## 9. Deployment prerequisites (PR 1 and PR 2)
 
 1. Back up / snapshot the production database (additive migration, but it touches `ShopOrder` and `Product`).
 2. Run the migration **before** deploying the new code (new code needs the columns). Old code keeps working on the new schema.
 3. Deploy. Nothing changes for customers except the guarantees above. No env var is required.
 4. Optional, later and deliberately: `SHOP_RESERVATION_EXPIRY=on` (D-1; TTL default 48 h).
 5. Rollback: redeploy old code; the down-migration is available but loses idempotency keys and the stock ledger.
+6. PR 2 adds `ShopOrder.fulfilments` (nullable jsonb; no backfill, derived lazily). Run its migration before deploying PR 2's code. Rollback drops the column; `status` and `timeline` stay complete.
+7. PR 2 changes what `GET /vendor/orders` returns for a vendor: their own lines and subtotal, `status` = their own fulfilment's status, plus `orderStatus` and `nextStatuses`. Identical for single-vendor orders. The vendor app needs no change.
 
 ## Outcome
 

@@ -20,6 +20,9 @@ function requireVendorPermission(permission) {
   };
 }
 
+// An administrator acts on marketplace orders only with the `shop` scope (a super-admin has all).
+const requireAdminShopScope = (req, res, next) => (req.user?.userType === 'admin' ? requireAcl('shop')(req, res, next) : next());
+
 // ── catalogue ────────────────────────────────────────────────────────────────
 
 export const listShopProducts = {
@@ -220,17 +223,22 @@ export const vendorOrders = {
 
 export const vendorUpdateOrderStatus = {
   created, method: 'post', path: '/vendor/orders/:id/status',
-  description: 'Vendor/admin: move an order through its lifecycle (pending → confirmed → fulfilled | cancelled). Cancelling restocks items.',
-  requestSample: { status: 'confirmed' },
-  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('orders')],
+  description: 'Vendor/admin: move this vendor\'s part of an order forward: pending → accepted → [processing] → [packed] → dispatched | ready_for_pickup → delivered, or cancelled until delivered. Steps cannot be skipped except processing/packed; repeating the current status changes nothing. A vendor moves only their own lines; an admin (scope `shop`) names `vendorId` when the order has several vendors. Optional `reason` is kept in the audit trail. Legacy: confirmed = accepted, fulfilled = delivered. Cancelling restocks items and refunds a paid order. 409 invalid_transition lists the `allowed` next statuses.',
+  requestSample: { status: 'accepted', vendorId: 'usr_vendor_1', reason: 'optional' },
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('orders'), requireAdminShopScope],
   onRequest: async (req, res) => {
     const result = await shopService.updateOrderStatus({
       orderId: req.params.id,
       status: req.body?.status,
       actorId: req.user.vendorId || req.user.sub,
       actorRole: req.user.userType,
+      vendorId: req.user.userType === 'admin' ? req.body?.vendorId || null : null,
+      reason: req.body?.reason || null,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
     res.json(result.order);
   }
 };

@@ -2,13 +2,14 @@
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
+import { decideTransition, combinedStatus, fulfilmentsOf, anyAtLeast, canonicalStatus, nextStatuses, STATUSES, LEGACY_INPUTS } from '../shared/order-lifecycle.mjs';
 import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
-const ORDER_STATUSES = new Set(['pending', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup', 'delivered', 'cancelled', 'confirmed', 'fulfilled']);
+const ORDER_STATUSES = new Set([...STATUSES, ...LEGACY_INPUTS]);
 const PAYMENT_METHODS = new Set(['mpesa', 'airtel_money', 'mixx', 'card', 'bank']);
 // Email and delivery regions are not mandatory (11 Oct 2026); they are still stored and shown when given.
 const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'address', 'businessHours', 'settlementAccount'];
@@ -385,6 +386,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       deliveryAddress: deliveryMethod === 'home_delivery' ? body.deliveryAddress : null,
       paymentMethod, paymentStatus: free ? 'paid' : 'pending', paymentReference: body.paymentReference || null,
       timeline: [{ status: 'pending', at }], note: body?.note || null, settlementStatus: 'pending',
+      // One fulfilment per vendor: each vendor moves only their own.
+      fulfilments: [...new Set(orderItems.map(item => item.vendorId).filter(Boolean))].map(vendorId => ({ vendorId, status: 'pending', timeline: [{ status: 'pending', at }], updatedAt: at })),
       reservationExpiresAt: free ? null : new Date(+placedAt + reservationTtlMinutes * 60_000).toISOString(),
       createdAt: at, updatedAt: at,
     };
@@ -429,6 +432,20 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   /**
+   * The patch that cancels an order as it stands (locked): its own timeline entry, every vendor's part
+   * cancelled with the same entry. `extra` carries the payment status the cancellation leaves behind.
+   */
+  const cancellationPatch = (entry, at, extra = {}, actorId = null) => (current) => {
+    const own = fulfilmentsOf(current);
+    return {
+      ...extra,
+      timeline: [...(Array.isArray(current.timeline) ? current.timeline : []), entry],
+      ...(own.length ? { fulfilments: own.map(f => ({ ...f, status: 'cancelled', timeline: [...(f.timeline || []), { ...entry, ...(actorId ? { actorId } : {}) }], updatedAt: at })) } : {}),
+      updatedAt: at,
+    };
+  };
+
+  /**
    * An order's payment was decided (admin approval of its payment request).
    * Approved: the order is paid and the vendors hear about it. Rejected or
    * cancelled: the order is cancelled and its stock released.
@@ -449,8 +466,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const byPerson = ['buyer', 'vendor', 'admin'].includes(cancelledBy);
       let revivedReason = byPerson ? 'cancelled_by_person' : null;
       if (!byPerson) {
-        const timeline = [...entries, { status: 'pending', at, by: 'system', reason: 'revived_after_late_payment' }];
-        const revived = await orderStore.reviveOrder(orderId, { patch: { timeline } });
+        const entry = { status: 'pending', at, by: 'system', reason: 'revived_after_late_payment' };
+        const revived = await orderStore.reviveOrder(orderId, {
+          // Every vendor's part starts again from the beginning.
+          patch: (current) => ({
+            timeline: [...(Array.isArray(current.timeline) ? current.timeline : []), entry],
+            ...(fulfilmentsOf(current).length ? { fulfilments: fulfilmentsOf(current).map(f => ({ ...f, status: 'pending', timeline: [...(f.timeline || []), entry], updatedAt: at })) } : {}),
+          }),
+        });
         if (revived.revived) {
           await auditLog.insertAsync({ id: randomUUID(), at, actor: 'system', action: 'shop_order_revived_after_late_payment', target: orderId, before: { status: 'cancelled', paymentStatus: paid.order.paymentStatus }, after: { status: 'pending', paymentStatus: 'paid' } });
           await orderPaid(revived.order);
@@ -467,8 +490,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       return;
     }
     if (!['rejected', 'cancelled'].includes(status)) return;
-    const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, reason: 'payment_not_confirmed' }];
-    const out = await orderStore.cancelAndRelease(orderId, { patch: { paymentStatus: 'failed', timeline, updatedAt: at }, paymentStatuses: ['pending', 'failed', 'cancelled', null] });
+    const out = await orderStore.cancelAndRelease(orderId, {
+      patch: cancellationPatch({ status: 'cancelled', at, by: 'system', reason: 'payment_not_confirmed' }, at, { paymentStatus: 'failed' }),
+      paymentStatuses: ['pending', 'failed', 'cancelled', null],
+    });
     if (!out.changed) return;
     await notify(order.buyerId, 'order_cancelled', { orderId, reason: 'payment_not_confirmed' });
   }
@@ -483,8 +508,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     let expired = 0;
     for (const order of due) {
       const at = nowIso();
-      const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, by: 'system', reason: 'reservation_expired' }];
-      const out = await orderStore.cancelAndRelease(order.id, { patch: { paymentStatus: 'failed', timeline, updatedAt: at }, fromStatuses: ['pending'], paymentStatuses: ['pending'] });
+      const out = await orderStore.cancelAndRelease(order.id, {
+        patch: cancellationPatch({ status: 'cancelled', at, by: 'system', reason: 'reservation_expired' }, at, { paymentStatus: 'failed' }),
+        fromStatuses: ['pending'], paymentStatuses: ['pending'],
+      });
       if (!out.changed) continue;
       expired += 1;
       if (paymentRequests) {
@@ -503,33 +530,114 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // Whether the buyer can still cancel it themselves (before it is on its way).
       .map(order => ({ ...order, canCancel: CANCELLABLE.has(order.status) }));
   }
-  async function vendorOrders(vendorId) {
+  /** Every order with a line of this vendor's (lines carry the vendor; older rows fall back to product ownership). */
+  async function ordersOfVendor(vendorId) {
     const direct = await shopOrders.filterAsync(order => (order.items || []).some(item => item.vendorId === vendorId));
     if (direct.length) return direct.sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
     const ids = new Set((await products.filterAsync(product => product.vendorId === vendorId)).map(product => product.id));
     return (await shopOrders.filterAsync(order => (order.items || []).some(item => ids.has(item.productId)))).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
-  async function updateOrderStatus({ orderId, status, actorId, actorRole = 'vendor' }) {
+
+  /** The vendors an order has lines from; lines without a vendor are resolved through their product. */
+  async function vendorsOfOrder(order) {
+    const ids = new Set();
+    for (const item of order.items || []) {
+      if (item.vendorId) { ids.add(item.vendorId); continue; }
+      const product = item.productId ? await products.findByIdAsync(item.productId) : null;
+      if (product?.vendorId) ids.add(product.vendorId);
+    }
+    return [...ids];
+  }
+
+  /**
+   * What a vendor may see of an order: their own lines, their own subtotal, and their own fulfilment's
+   * status (so their app offers the right next step). Other vendors' lines, commissions and statuses
+   * are not shown; `orderStatus` is the customer-facing combined status.
+   */
+  function vendorView(order, vendorId) {
+    const mine = (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null);
+    const own = fulfilmentsOf(order).find(f => f.vendorId === vendorId);
+    const { fulfilments, idempotencyKey, idempotencyFingerprint, stockState, reservationCycle, reservationExpiresAt, ...rest } = order;
+    const status = own?.status || order.status;
+    return {
+      ...rest, items: mine, totalTzs: mine.reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0),
+      status, orderStatus: order.status, timeline: own?.timeline?.length ? own.timeline : rest.timeline,
+      nextStatuses: order.status === 'cancelled' || order.paymentStatus !== 'paid' ? [] : nextStatuses(status, order.deliveryMethod),
+    };
+  }
+  async function vendorOrders(vendorId) {
+    return (await ordersOfVendor(vendorId)).map(order => vendorView(order, vendorId));
+  }
+
+  /**
+   * Move one vendor's fulfilment of an order to `status`.
+   * - A vendor (or their staff) moves only their own fulfilment, and never while suspended.
+   * - An admin (FitFlex) names the vendor when the order has several; every move follows the same matrix.
+   * - The move is decided under the order's row lock, so two requests cannot both win.
+   */
+  async function updateOrderStatus({ orderId, status, actorId, actorRole = 'vendor', vendorId = null, reason = null }) {
     if (!ORDER_STATUSES.has(status)) return { error: 'invalid_status', status: 400 };
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order) return { error: 'order_not_found', status: 404 };
-    if (actorRole !== 'admin') {
-      const direct = (order.items || []).some(item => item.vendorId === actorId);
-      const ids = new Set((await products.filterAsync(product => product.vendorId === actorId)).map(product => product.id));
-      if (!direct && !(order.items || []).some(item => ids.has(item.productId))) return { error: 'order_not_owned_by_vendor', status: 403 };
+    const isAdmin = actorRole === 'admin';
+    const vendors = await vendorsOfOrder(order);
+    let target;
+    if (!isAdmin) {
+      if (!vendors.includes(actorId)) return { error: 'order_not_owned_by_vendor', status: 403 };
+      const vendor = await users.findByIdAsync(actorId);
+      if (vendor?.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 403 };
+      target = actorId;
+    } else if (vendorId) {
+      if (!vendors.includes(vendorId)) return { error: 'vendor_not_in_order', status: 404 };
+      target = vendorId;
+    } else if (vendors.length === 1) {
+      target = vendors[0];
+    } else if (status !== 'cancelled') {
+      return { error: 'vendor_required', status: 400, vendors };
     }
     // Vendors fulfil paid orders only; an unpaid order can only be cancelled.
     if (order.paymentStatus && order.paymentStatus !== 'paid' && status !== 'cancelled') return { error: 'order_not_paid', status: 409 };
-    if (status === 'cancelled') return cancelOrder(order, { actorId, role: actorRole === 'admin' ? 'admin' : 'vendor', reasonCode: actorRole === 'admin' ? 'cancelled_by_fitflex' : 'vendor_cancelled' });
+    if (status === 'cancelled') {
+      // Several vendors: cancelling one vendor's part would need a partial refund, which is a financial
+      // decision of its own. A vendor cannot do it alone; FitFlex cancels the whole order.
+      if (!isAdmin && vendors.length > 1) return { error: 'multi_vendor_cancel_requires_admin', status: 409 };
+      return cancelOrder(order, { actorId, role: isAdmin ? 'admin' : 'vendor', reasonCode: isAdmin ? 'cancelled_by_fitflex' : 'vendor_cancelled', note: reason });
+    }
     if (order.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
     const at = nowIso();
-    const timeline = Array.isArray(order.timeline) ? order.timeline : [];
-    timeline.push({ status, at });
-    const normalized = status === 'fulfilled' ? 'delivered' : status;
-    const updated = await shopOrders.updateByIdAsync(orderId, { status: normalized, timeline, updatedAt: at });
-    await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: `shop_order_${normalized}`, target: orderId, before: { status: order.status }, after: { status: normalized } });
-    await notify(order.buyerId, `order_${normalized}`, { orderId });
-    return { order: updated };
+    const result = await orderStore.updateWithLock(orderId, (current) => {
+      if (current.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
+      if (current.paymentStatus && current.paymentStatus !== 'paid') return { error: 'order_not_paid', status: 409 };
+      const all = fulfilmentsOf(current, vendors);
+      const mine = all.find(f => f.vendorId === target);
+      if (!mine) return { error: 'order_not_owned_by_vendor', status: 403 };
+      const decision = decideTransition({ from: mine.status, to: status, deliveryMethod: current.deliveryMethod });
+      if (!decision.ok) {
+        return { error: decision.error === 'status_is_final' ? 'order_status_final' : 'invalid_transition', status: 409, from: canonicalStatus(mine.status), to: status, allowed: decision.allowed };
+      }
+      if (decision.noop) return { value: { noop: true, from: mine.status, to: mine.status } };
+      const entry = { status: decision.store, at, by: isAdmin ? 'admin' : 'vendor', actorId, ...(reason ? { reason: String(reason).slice(0, 300) } : {}) };
+      const nextAll = all.map(f => (f.vendorId === target ? { ...f, status: decision.store, timeline: [...(f.timeline || []), entry], updatedAt: at } : f));
+      return {
+        patch: {
+          fulfilments: nextAll,
+          status: combinedStatus(nextAll),
+          // The order's own timeline keeps one entry per move, with the vendor it concerns.
+          timeline: [...(Array.isArray(current.timeline) ? current.timeline : []), { status: decision.store, at, vendorId: target }],
+          updatedAt: at,
+        },
+        value: { from: mine.status, to: decision.store },
+      };
+    });
+    if (result.error) return result;
+    if (result.value?.noop) return { order: isAdmin ? result.order : vendorView(result.order, target), unchanged: true };
+    const { from, to } = result.value;
+    await auditLog.insertAsync({
+      id: randomUUID(), at, actor: actorId, action: `shop_order_${to}`, target: orderId,
+      before: { status: from, vendorId: target }, after: { status: to, vendorId: target, actorRole: isAdmin ? 'admin' : 'vendor', ...(reason ? { reason: String(reason).slice(0, 300) } : {}) },
+    });
+    await notify(order.buyerId, `order_${to}`, { orderId, vendorId: target });
+    return { order: isAdmin ? result.order : vendorView(result.order, target) };
   }
 
   // An order can be cancelled until it is on its way: once dispatched, ready
@@ -540,18 +648,28 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * Cancel an order: release its stock, withdraw a payment still waiting, and
    * raise a refund when it was already paid.
    */
-  async function cancelOrder(order, { actorId, role, reasonCode }) {
+  async function cancelOrder(order, { actorId, role, reasonCode, note = null }) {
     if (order.status === 'cancelled') return { order };
     if (['delivered', 'fulfilled'].includes(order.status)) return { error: 'order_already_delivered', status: 409 };
     if (role === 'buyer' && !CANCELLABLE.has(order.status)) return { error: 'order_already_dispatched', status: 409 };
     const at = nowIso();
-    const timeline = [...(Array.isArray(order.timeline) ? order.timeline : []), { status: 'cancelled', at, by: role }];
+    const reason = note ? String(note).slice(0, 300) : null;
     // The state change and the stock release are one atomic step; only the request that wins it carries on.
     const wasPaid = order.paymentStatus === 'paid' && Number(order.totalTzs) > 0;
     const result = await orderStore.cancelAndRelease(order.id, {
-      patch: { paymentStatus: wasPaid ? 'refund_pending' : order.paymentStatus === 'pending' ? 'cancelled' : order.paymentStatus, timeline, updatedAt: at },
-      // The state this decision was made on: if it moved (dispatched, delivered, paid) the caller is told.
-      fromStatuses: role === 'buyer' ? [...CANCELLABLE] : ['pending', 'confirmed', 'accepted', 'processing', 'packed', 'dispatched', 'ready_for_pickup'],
+      patch: cancellationPatch(
+        { status: 'cancelled', at, by: role, ...(reason ? { reason } : {}) }, at,
+        { paymentStatus: wasPaid ? 'refund_pending' : order.paymentStatus === 'pending' ? 'cancelled' : order.paymentStatus }, actorId,
+      ),
+      // Judged on the order as it is when locked, not as it was read: a vendor may have dispatched meanwhile.
+      refuseIf: (current) => {
+        if (['delivered', 'fulfilled'].includes(current.status)) return { error: 'order_already_delivered', status: 409 };
+        const own = fulfilmentsOf(current);
+        // One vendor's part is already with the customer: a whole-order cancel and refund would be wrong.
+        if (anyAtLeast(own, 'delivered')) return { error: 'order_partly_delivered', status: 409 };
+        if (role === 'buyer' && (!CANCELLABLE.has(current.status) || anyAtLeast(own, 'dispatched'))) return { error: 'order_already_dispatched', status: 409 };
+        return null;
+      },
       paymentStatuses: [order.paymentStatus ?? null],
     });
     if (result.error) return result;
@@ -594,7 +712,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   async function vendorPayments(vendorId) {
-    const orders = await vendorOrders(vendorId);
+    const orders = await ordersOfVendor(vendorId);
     const delivered = orders.filter(order => order.paymentStatus === 'paid' && ['delivered', 'fulfilled'].includes(order.status));
     const value = order => (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
     const current = new Date(), day = current.toISOString().slice(0, 10), week = +current - 7 * 86400000, month = +current - 30 * 86400000;
@@ -603,7 +721,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
   async function vendorStatement(vendorId) {
     const lines = ['order_id,amount_tzs,order_status,payment_status,settlement_status,date'];
-    for (const order of await vendorOrders(vendorId)) {
+    for (const order of await ordersOfVendor(vendorId)) {
       const amount = (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
       lines.push([order.id, amount, order.status, order.paymentStatus || 'unknown', order.settlementStatus || 'pending', order.updatedAt || order.createdAt].map(csv).join(','));
     }
