@@ -614,7 +614,7 @@ const ALLOWED_FIELDS = {
   trainer_engagements: new Set(['id','memberId','trainerId','type','message','gymId','status','messages','lastMessageAt','lastMessageFrom','trainerReadAt','memberReadAt','createdAt','updatedAt']),
   trainer_sessions: new Set(['id','trainerId','memberId','customerName','customerEmail','customerPhone','gymId','locationType','locationLabel','date','slot','source','status','amountTzs','createdAt']),
   products:         new Set(['id','vendorId','name','description','category','brand','priceTzs','discountPriceTzs','stock','sku','weightKg','distanceKm','variants','images','visibility','deliveryAvailable','status','approvalStatus','rating','reviewCount','soldCount','homepageVisible','homepagePriority','deletedAt','createdAt','updatedAt']),
-  shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','deliveryMethod','pickupGymId','deliveryAddress','paymentMethod','paymentStatus','paymentReference','timeline','settlementStatus','note','idempotencyKey','idempotencyFingerprint','stockState','reservationExpiresAt','createdAt','updatedAt']),
+  shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','deliveryMethod','pickupGymId','deliveryAddress','paymentMethod','paymentStatus','paymentReference','timeline','settlementStatus','note','idempotencyKey','idempotencyFingerprint','stockState','reservationExpiresAt','reservationCycle','createdAt','updatedAt']),
   marketplace_enquiries: new Set(['id','buyerId','vendorId','productId','subject','status','messages','createdAt','updatedAt']),
   marketplace_notifications: new Set(['id','userId','type','data','read','createdAt']),
   product_reviews:  new Set(['id','buyerId','orderId','productId','rating','comment','createdAt']),

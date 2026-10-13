@@ -4,10 +4,12 @@
 //   Unique per buyer, only where a key was sent, so existing rows and key-less clients are unaffected.
 // - ShopOrder.stockState: whether the order still holds its reserved units ('reserved') or has
 //   given them back ('released'). Releasing is a conditional update on this column, which is what
-//   makes a release happen exactly once.
+//   makes a release happen exactly once. An unpaid order whose reservation lapsed can be revived
+//   when its payment arrives late; each reservation is a numbered cycle (reservationCycle).
 // - ShopOrder.reservationExpiresAt: when an unpaid order's reservation lapses.
 // - ShopStockMovement: append-only ledger of every reserve / release, one row per order, product
-//   and reason. Its unique key is a second, database-level guard against a double release.
+//   (variant when the product has stock-tracked variants), reason and reservation cycle. Its unique
+//   key is a second, database-level guard against a double release.
 // - Product.stock >= 0: the database refuses to oversell even if application code is wrong.
 //   Added NOT VALID so it cannot fail on rows that already exist; it is enforced for every write.
 //   Validate it once the data is known clean: ALTER TABLE "Product" VALIDATE CONSTRAINT product_stock_non_negative.
@@ -21,6 +23,7 @@ exports.up = async function up(knex) {
     table.text('idempotencyFingerprint');
     table.text('stockState').notNullable().defaultTo('reserved');
     table.timestamp('reservationExpiresAt', { precision: 3 });
+    table.integer('reservationCycle').notNullable().defaultTo(1);
   });
   // Cancelled orders already gave their stock back under the old code.
   await knex('ShopOrder').where({ status: 'cancelled' }).update({ stockState: 'released' });
@@ -33,11 +36,13 @@ exports.up = async function up(knex) {
     table.text('id').primary();
     table.text('orderId').notNullable();
     table.text('productId').notNullable();
+    table.text('variant').notNullable().defaultTo('');
+    table.integer('cycle').notNullable().defaultTo(1);
     table.integer('delta').notNullable(); // negative = reserved, positive = released
     table.text('reason').notNullable(); // reserve | release
     table.integer('stockAfter');
     table.timestamp('createdAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
-    table.unique(['orderId', 'productId', 'reason']);
+    table.unique(['orderId', 'productId', 'variant', 'reason', 'cycle']);
     table.index(['productId', 'createdAt']);
   });
 
@@ -51,6 +56,7 @@ exports.down = async function down(knex) {
   await knex.raw('DROP INDEX IF EXISTS shoporder_reservation_expiry_index');
   await knex.raw('DROP INDEX IF EXISTS shoporder_buyer_idempotency_key_unique');
   await knex.schema.alterTable('ShopOrder', (table) => {
+    table.dropColumn('reservationCycle');
     table.dropColumn('reservationExpiresAt');
     table.dropColumn('stockState');
     table.dropColumn('idempotencyFingerprint');

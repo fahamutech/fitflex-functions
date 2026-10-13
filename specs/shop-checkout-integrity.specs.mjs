@@ -299,7 +299,7 @@ test('an unpaid order expires and its stock is released once; a paid order is le
   assert.equal((await service.expireStaleReservations({})).expired, 0);
 });
 
-test('payment arriving after the reservation expired is not fulfilled and is queued for refund once', async () => {
+test('payment arriving after the reservation expired revives the order when stock is still there', async () => {
   const productId = await product({ stock: 5 });
   const buyer = await user();
   const { order } = await place(buyer, [{ productId, qty: 2 }]);
@@ -309,12 +309,123 @@ test('payment arriving after the reservation expired is not fulfilled and is que
   refunds.length = 0;
   await Promise.all([service.applyPaymentToOrder(order.id, 'approved'), service.applyPaymentToOrder(order.id, 'approved')]);
   const row = await db('ShopOrder').where({ id: order.id }).first();
-  assert.equal(row.status, 'cancelled', 'the order is not revived');
+  assert.equal(row.status, 'pending', 'the order is live again');
+  assert.equal(row.paymentStatus, 'paid');
+  assert.equal(row.stockState, 'reserved');
+  assert.equal(row.reservationCycle, 2);
+  assert.equal(await stockOf(productId), 3, 'stock taken exactly once more');
+  assert.equal(refunds.filter(r => r.orderId === order.id).length, 0);
+  assert.equal((await db('AuditLog').where({ target: order.id, action: 'shop_order_revived_after_late_payment' })).length, 1);
+  assert.deepEqual((await ledger(order.id, productId)).map(r => `${r.reason}#${r.cycle}`).sort(), ['release#1', 'reserve#1', 'reserve#2']);
+  // A revived order can be cancelled and released once more, with its own ledger cycle.
+  await service.buyerCancelOrder({ buyerId: buyer, orderId: order.id });
+  assert.equal(await stockOf(productId), 5);
+  assert.equal((await ledger(order.id, productId)).filter(r => r.reason === 'release').length, 2);
+});
+
+test('payment after expiry is refunded, not revived, when the stock has gone', async () => {
+  const productId = await product({ stock: 2 });
+  const [buyer, other] = await Promise.all([user(), user()]);
+  const { order } = await place(buyer, [{ productId, qty: 2 }]);
+  clock = new Date(+clock + 61 * 60_000);
+  await service.expireStaleReservations({});
+  await place(other, [{ productId, qty: 2 }]); // someone else takes the stock meanwhile
+  refunds.length = 0;
+  await Promise.all([service.applyPaymentToOrder(order.id, 'approved'), service.applyPaymentToOrder(order.id, 'approved')]);
+  const row = await db('ShopOrder').where({ id: order.id }).first();
+  assert.equal(row.status, 'cancelled');
   assert.equal(row.paymentStatus, 'refund_pending');
-  assert.equal(await stockOf(productId), 5, 'stock is not taken again');
+  assert.equal(await stockOf(productId), 0, 'never below zero');
   assert.equal(refunds.filter(r => r.orderId === order.id).length, 1);
   const audit = await db('AuditLog').where({ target: order.id, action: 'shop_order_payment_after_cancellation' });
   assert.equal(audit.length, 1);
+});
+
+test('an order the buyer cancelled is not revived by a later payment: it is refunded', async () => {
+  const productId = await product({ stock: 5 });
+  const buyer = await user();
+  const { order } = await place(buyer, [{ productId, qty: 1 }]);
+  await service.buyerCancelOrder({ buyerId: buyer, orderId: order.id });
+  refunds.length = 0;
+  await service.applyPaymentToOrder(order.id, 'approved');
+  const row = await db('ShopOrder').where({ id: order.id }).first();
+  assert.equal(row.status, 'cancelled');
+  assert.equal(row.paymentStatus, 'refund_pending');
+  assert.equal(await stockOf(productId), 5);
+  assert.equal(refunds.filter(r => r.orderId === order.id).length, 1);
+});
+
+// ── variants and hidden products ─────────────────────────────────────────────
+
+test('a variant that keeps its own stock is reserved and released with the product', async () => {
+  const productId = await product({ stock: 10, variants: JSON.stringify([{ name: 'Vanilla', stock: 3 }, { name: 'Choc', stock: 7 }]) });
+  const buyers = await Promise.all(Array.from({ length: 6 }, () => user()));
+  const results = await Promise.all(buyers.map(b => place(b, [{ productId, variant: 'Vanilla', qty: 1 }])));
+  assert.equal(results.filter(r => r.order).length, 3, 'only 3 Vanilla exist');
+  assert.equal(results.find(r => r.order).order.items[0].variant, 'Vanilla');
+  const row = await db('Product').where({ id: productId }).first();
+  assert.equal(row.stock, 7);
+  assert.deepEqual(row.variants, [{ name: 'Vanilla', stock: 0 }, { name: 'Choc', stock: 7 }]);
+  // Giving one back restores both counts.
+  const won = results.find(r => r.order).order;
+  await service.buyerCancelOrder({ buyerId: won.buyerId, orderId: won.id });
+  const after = await db('Product').where({ id: productId }).first();
+  assert.equal(after.stock, 8);
+  assert.deepEqual(after.variants, [{ name: 'Vanilla', stock: 1 }, { name: 'Choc', stock: 7 }]);
+});
+
+test('variant rules: unknown ones are refused; name-only variants are labels; choosing can be made mandatory', async () => {
+  const tracked = await product({ stock: 5, variants: JSON.stringify([{ name: 'S', stock: 2 }, { name: 'L', stock: 2 }]) });
+  const labels = await product({ stock: 5, variants: JSON.stringify([{ name: 'Vanilla' }, { name: 'Choc' }]) });
+  const buyer = await user();
+  // Until the app can choose, an order naming no variant reserves product stock only.
+  const strict = createShopService({ products, shopOrders, users, auditLog, paymentRequests, orderStore, now: () => clock, requireVariantChoice: true });
+  const missing = await strict.createOrder({ buyerId: buyer, body: cart([{ productId: tracked, qty: 1 }]) });
+  assert.equal(missing.error, 'variant_required');
+  assert.equal(missing.status, 400);
+  const lenient = await place(buyer, [{ productId: tracked, qty: 1 }]);
+  assert.ok(lenient.order);
+  assert.equal(await stockOf(tracked), 4);
+  await service.buyerCancelOrder({ buyerId: buyer, orderId: lenient.order.id });
+  assert.equal(await stockOf(tracked), 5);
+  assert.equal((await place(buyer, [{ productId: tracked, variant: 'XL', qty: 1 }])).error, 'variant_not_found');
+  assert.equal((await place(buyer, [{ productId: tracked, variant: 'S', qty: 3 }])).error, 'insufficient_stock');
+  assert.equal(await stockOf(tracked), 5);
+  // Labels: optional, validated when given, limited by the product's stock.
+  assert.ok((await place(buyer, [{ productId: labels, qty: 1 }])).order);
+  const chosen = await place(buyer, [{ productId: labels, variant: 'Choc', qty: 1 }]);
+  assert.equal(chosen.order.items[0].variant, 'Choc');
+  assert.equal(chosen.order.items[0].variantStockReserved, undefined);
+  assert.equal((await place(buyer, [{ productId: labels, variant: 'Mango', qty: 1 }])).error, 'variant_not_found');
+  assert.equal(await stockOf(labels), 3);
+});
+
+test('two variants of one product are separate lines; the product total still limits', async () => {
+  const productId = await product({ stock: 3, variants: JSON.stringify([{ name: 'S', stock: 5 }, { name: 'L', stock: 5 }]) });
+  const buyer = await user();
+  const over = await place(buyer, [{ productId, variant: 'S', qty: 2 }, { productId, variant: 'L', qty: 2 }]);
+  assert.equal(over.error, 'insufficient_stock');
+  const ok = await place(buyer, [{ productId, variant: 'S', qty: 1 }, { productId, variant: 'L', qty: 2 }]);
+  assert.equal(ok.order.items.length, 2);
+  assert.equal(await stockOf(productId), 0);
+});
+
+test('a product the vendor hid cannot be bought by id', async () => {
+  const productId = await product({ stock: 5, visibility: 'hidden' });
+  const buyer = await user();
+  assert.equal((await place(buyer, [{ productId, qty: 1 }])).error, 'product_not_found');
+  assert.equal(await stockOf(productId), 5);
+  await db('Product').where({ id: productId }).update({ visibility: 'visible' });
+  assert.ok((await place(buyer, [{ productId, qty: 1 }])).order);
+});
+
+test('the default reservation period is 48 hours', async () => {
+  const productId = await product({ stock: 5 });
+  const buyer = await user();
+  const defaults = createShopService({ products, shopOrders, users, auditLog, paymentRequests, orderStore, now: () => clock });
+  const out = await defaults.createOrder({ buyerId: buyer, body: cart([{ productId, qty: 1 }]) });
+  made.orders.push(out.order.id);
+  assert.equal(+new Date(out.order.reservationExpiresAt) - +clock, 48 * 3600_000);
 });
 
 test('a refund that cannot be raised is recorded, not just logged', async () => {

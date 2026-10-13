@@ -45,7 +45,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // store; without one the service uses the collections directly (unit specs).
   orderStore = null,
   // How long an unpaid order holds its stock. Orders carry their own expiry from the moment they are placed.
-  reservationTtlMinutes = 24 * 60,
+  reservationTtlMinutes = 48 * 60,
+  // Off while the app does not yet let a buyer pick a variant: an order that names none reserves
+  // product stock only. Switch on (SHOP_REQUIRE_VARIANT=on) once the app sends `variant`.
+  requireVariantChoice = false,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
@@ -290,7 +293,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,100}$/;
   const MAX_ORDER_LINES = 50;
   const fingerprintOf = (lines, body, deliveryMethod, paymentMethod) => createHash('sha256').update(JSON.stringify({
-    lines: lines.map(({ productId, qty }) => [productId, qty]), deliveryMethod, paymentMethod,
+    lines: lines.map(({ productId, variant, qty }) => [productId, variant || null, qty]), deliveryMethod, paymentMethod,
     pickupGymId: deliveryMethod === 'gym_pickup' ? body.pickupGymId : null,
     deliveryAddress: deliveryMethod === 'home_delivery' ? body.deliveryAddress : null,
   })).digest('hex');
@@ -315,15 +318,20 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     // The app's own payment result is never trusted: an order is paid only
     // once FitFlex confirms the payment (admin approval of its payment request).
     if (body?.paymentOutcome === 'failed') return { error: 'payment_failed', status: 402 };
-    // The same product on two lines is one line: stock is checked and reserved for the total.
+    // The same product (and variant) on two lines is one line: stock is checked and reserved for the total.
     const wanted = new Map();
     for (const item of items) {
       const qty = Number(item?.qty || 0);
       if (!Number.isSafeInteger(qty) || qty <= 0) return { error: 'invalid_quantity', status: 400 };
       if (typeof item.productId !== 'string' || !item.productId) return { error: 'product_not_found', status: 404, productId: item?.productId };
-      wanted.set(item.productId, (wanted.get(item.productId) || 0) + qty);
+      const variant = item.variant == null || item.variant === '' ? null : String(item.variant).trim();
+      if (item.variant != null && typeof item.variant !== 'string') return { error: 'invalid_variant', status: 400, productId: item.productId };
+      const lineKey = `${item.productId}\u0000${variant || ''}`;
+      const line = wanted.get(lineKey) || { productId: item.productId, variant, qty: 0 };
+      line.qty += qty;
+      wanted.set(lineKey, line);
     }
-    const lines = [...wanted].map(([productId, qty]) => ({ productId, qty }));
+    const lines = [...wanted.values()].sort((a, b) => (a.productId + (a.variant || '') < b.productId + (b.variant || '') ? -1 : 1));
     const fingerprint = fingerprintOf(lines, body, deliveryMethod, paymentMethod);
     // A retry gets the order it already made, even if stock or the listing has changed since.
     if (key) {
@@ -332,25 +340,39 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (earlier) return earlier.order.paymentStatus === 'paid' ? { order: earlier.order, status: 201, replayed: true } : { order: earlier.order, paymentRequest: earlier.paymentRequest, status: 202, replayed: true };
     }
     const resolved = [];
-    for (const { productId, qty } of lines) {
+    // Product stock is always the limit; a variant that keeps its own stock is a second limit on its units.
+    const productStock = new Map();
+    for (const { productId, variant, qty } of lines) {
       const product = await products.findByIdAsync(productId);
       if (!product || product.deletedAt || product.status !== 'active' || ['pending', 'rejected'].includes(product.approvalStatus)) return { error: 'product_not_found', status: 404, productId };
+      // The vendor has hidden it: it is not sold, even by id.
+      if ((product.visibility || 'visible') === 'hidden') return { error: 'product_not_found', status: 404, productId };
       if (!(await partnerGate.isOperational(product.vendorId))) return { error: 'product_not_found', status: 404, productId };
       // Hidden or suspended in moderation: it is not sold, even to someone with an old link.
       if (await publicGate.isBlocked('product', product.id) || await publicGate.isBlocked('vendor', product.vendorId)) return { error: 'product_not_found', status: 404, productId };
-      // A quick answer; the store re-checks stock atomically when it reserves.
-      if (Number(product.stock) < qty) return { error: 'insufficient_stock', status: 409, productId: product.id };
-      resolved.push({ product, qty });
+      const variants = Array.isArray(product.variants) ? product.variants.filter(v => v && typeof v === 'object') : [];
+      const chosen = variant ? variants.find(v => v.name === variant) : null;
+      if (variant && !chosen) return { error: 'variant_not_found', status: 404, productId };
+      // Variants that keep their own stock must be chosen once the app can choose; plain labels (no stock) are optional.
+      if (requireVariantChoice && !variant && variants.some(v => typeof v.stock === 'number')) return { error: 'variant_required', status: 400, productId, variants: variants.map(v => v.name) };
+      const variantTracked = Boolean(chosen && typeof chosen.stock === 'number');
+      if (variantTracked && chosen.stock < qty) return { error: 'insufficient_stock', status: 409, productId };
+      productStock.set(productId, (productStock.get(productId) || 0) + qty);
+      if (Number(product.stock) < productStock.get(productId)) return { error: 'insufficient_stock', status: 409, productId: product.id };
+      resolved.push({ product, qty, variant, variantTracked });
     }
     // Each line carries the commission at its vendor's rate today, so a later rate change never alters this order.
     const rates = new Map();
     for (const vendorId of new Set(resolved.map(({ product }) => product.vendorId).filter(Boolean))) {
       rates.set(vendorId, vendorCommissionPct(await users.findByIdAsync(vendorId)));
     }
-    const orderItems = resolved.map(({ product, qty }) => {
+    const orderItems = resolved.map(({ product, qty, variant, variantTracked }) => {
       const priceTzs = priceOf(product);
       const { commissionPct, commissionTzs, vendorPayoutTzs } = priceOrderLine({ priceTzs, qty, commissionPct: rates.get(product.vendorId) ?? VENDOR_COMMISSION_PCT.default });
-      return { productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs, image: product.images?.[0] || null, commissionPct, commissionTzs, vendorPayoutTzs };
+      return {
+        productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs, image: product.images?.[0] || null, commissionPct, commissionTzs, vendorPayoutTzs,
+        ...(variant ? { variant, ...(variantTracked ? { variantStockReserved: true } : {}) } : {}),
+      };
     });
     const totalTzs = orderItems.reduce((sum, item) => sum + item.priceTzs * item.qty, 0);
     const placedAt = now();
@@ -374,7 +396,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     };
     const placed = await orderStore.placeOrder({
       order,
-      lines: resolved.map(({ product, qty }) => ({ productId: product.id, qty, priceTzs: Number(product.priceTzs || 0), discountPriceTzs: Number(product.discountPriceTzs || 0) })),
+      lines: resolved.map(({ product, qty, variant, variantTracked }) => ({ productId: product.id, variant, variantTracked, qty, priceTzs: Number(product.priceTzs || 0), discountPriceTzs: Number(product.discountPriceTzs || 0) })),
       paymentRequest,
       idempotency: key ? { key: String(key), fingerprint } : null,
     });
@@ -419,11 +441,27 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const paid = await orderStore.markPaid(orderId);
       if (paid.outcome === 'paid') { await orderPaid(paid.order); return; }
       if (paid.outcome !== 'cancelled') return;
-      // The money arrived after the order was cancelled or its reservation lapsed. The stock is
-      // already back on the shelf, so the order is not revived: the payment is owed back, once.
+      // The money arrived after the order was cancelled or its reservation lapsed. If it lapsed on its
+      // own (expiry or an unconfirmed payment) the order is revived when its stock can be taken again;
+      // if a person cancelled it, or the stock has gone, the payment is owed back, once.
+      const entries = Array.isArray(paid.order.timeline) ? paid.order.timeline : [];
+      const cancelledBy = [...entries].reverse().find(e => e.status === 'cancelled')?.by;
+      const byPerson = ['buyer', 'vendor', 'admin'].includes(cancelledBy);
+      let revivedReason = byPerson ? 'cancelled_by_person' : null;
+      if (!byPerson) {
+        const timeline = [...entries, { status: 'pending', at, by: 'system', reason: 'revived_after_late_payment' }];
+        const revived = await orderStore.reviveOrder(orderId, { patch: { timeline } });
+        if (revived.revived) {
+          await auditLog.insertAsync({ id: randomUUID(), at, actor: 'system', action: 'shop_order_revived_after_late_payment', target: orderId, before: { status: 'cancelled', paymentStatus: paid.order.paymentStatus }, after: { status: 'pending', paymentStatus: 'paid' } });
+          await orderPaid(revived.order);
+          return;
+        }
+        revivedReason = revived.reason;
+        if (revived.reason === 'not_revivable' && revived.order?.status !== 'cancelled') return; // someone else handled it
+      }
       const late = await orderStore.markLatePayment(orderId);
       if (!late.marked) return;
-      await auditLog.insertAsync({ id: randomUUID(), at, actor: 'system', action: 'shop_order_payment_after_cancellation', target: orderId, before: { status: 'cancelled', paymentStatus: paid.order.paymentStatus }, after: { paymentStatus: 'refund_pending', amountTzs: order.totalTzs } });
+      await auditLog.insertAsync({ id: randomUUID(), at, actor: 'system', action: 'shop_order_payment_after_cancellation', target: orderId, before: { status: 'cancelled', paymentStatus: paid.order.paymentStatus }, after: { paymentStatus: 'refund_pending', amountTzs: order.totalTzs, reason: revivedReason } });
       await raiseRefund(late.order, { reasonCode: 'payment_error', actorId: 'system', role: 'system' });
       await notify(order.buyerId, 'order_payment_refund_due', { orderId, totalTzs: order.totalTzs });
       return;

@@ -221,7 +221,8 @@ export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
   // Stock reservation and cancellation are single database transactions.
   orderStore: createPgShopOrderStore({ db }),
-  reservationTtlMinutes: Number(process.env.SHOP_RESERVATION_TTL_MINUTES) > 0 ? Number(process.env.SHOP_RESERVATION_TTL_MINUTES) : 24 * 60,
+  requireVariantChoice: process.env.SHOP_REQUIRE_VARIANT === 'on',
+  reservationTtlMinutes: Number(process.env.SHOP_RESERVATION_TTL_MINUTES) > 0 ? Number(process.env.SHOP_RESERVATION_TTL_MINUTES) : 48 * 60,
   onRefundDue: ({ order, reasonCode, actorId, role }) => refundService.raise({
     memberId: order.buyerId, kind: 'shop_order', sourceId: order.id,
     amountTzs: order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,

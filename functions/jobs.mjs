@@ -89,7 +89,7 @@ export const vendorSettlementDrafts = {
 
 export const shopReservationExpiry = {
   created, rule: '*/10 * * * *', // every 10 minutes
-  description: 'Marketplace: cancel unpaid orders whose stock reservation has lapsed (SHOP_RESERVATION_TTL_MINUTES after the order, default 24h) and put their stock back. Does nothing unless SHOP_RESERVATION_EXPIRY=on, so enabling it is a deliberate step. Safe to rerun and to overlap: each order is released once; a payment that arrives later is queued for refund.',
+  description: 'Marketplace: cancel unpaid orders whose stock reservation has lapsed (SHOP_RESERVATION_TTL_MINUTES after the order, default 48h) and put their stock back. Does nothing unless SHOP_RESERVATION_EXPIRY=on, so enabling it is a deliberate step. Safe to rerun and to overlap: each order is released once; a payment that arrives later is queued for refund.',
   onJob: async () => {
     if (process.env.SHOP_RESERVATION_EXPIRY !== 'on') return;
     const r = await shopService.expireStaleReservations({});

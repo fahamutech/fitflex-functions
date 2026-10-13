@@ -198,7 +198,7 @@ export const createShopOrder = {
       // A retried request carries the same key and gets the order it already made.
       idempotencyKey: req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'] || null,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId });
+    if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId, ...(result.variants ? { variants: result.variants } : {}) });
     if (result.replayed) res.set?.('Idempotent-Replay', 'true');
     res.status(201).json(result.order);
   }

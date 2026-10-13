@@ -13,12 +13,25 @@
 //   findReplay({ buyerId, key, fingerprint }) → { order, paymentRequest, replayed } | { error, status } | null
 //   cancelAndRelease(orderId, { patch, fromStatuses, paymentStatuses })
 //     → { order, changed, released?, reason? } | { error, status }
+//   reviveOrder(orderId, { patch }) → { revived, order?, reason?, productId? }   (re-reserves a released order; all lines or none)
 //   markPaid(orderId, { patch }) → { outcome: 'paid'|'already_paid'|'cancelled'|'missing', order }
 //   markLatePayment(orderId) → { marked, order }
 //   findExpired({ before, limit }) → orders
 
 export function createMemoryShopOrderStore({ products, shopOrders, paymentRequests = null, now = () => new Date() }) {
   const nowIso = () => now().toISOString();
+
+  const isSellable = (product) => Boolean(product && !product.deletedAt && product.status === 'active'
+    && !['pending', 'rejected'].includes(product.approvalStatus) && (product.visibility || 'visible') !== 'hidden');
+  const variantCheck = (product, line) => {
+    if (!line.variantTracked) return null;
+    const variant = (product.variants || []).find(v => v?.name === line.variant);
+    if (!variant || typeof variant.stock !== 'number') return 'variant_not_found';
+    return variant.stock < line.qty ? 'insufficient_stock' : null;
+  };
+  const withVariantStock = (product, line, sign) => (product.variants || []).map(v => (
+    line.variantTracked && v?.name === line.variant && typeof v.stock === 'number' ? { ...v, stock: v.stock + sign * line.qty } : v));
+  const lineOf = (item) => ({ productId: item.productId, variant: item.variant || null, variantTracked: Boolean(item.variantStockReserved), qty: Number(item.qty || 0) });
 
   async function findReplay({ buyerId, key, fingerprint }) {
     const earlier = await shopOrders.findAsync(row => row.buyerId === buyerId && row.idempotencyKey === key);
@@ -39,22 +52,25 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     const current = [];
     for (const line of lines) {
       const product = await products.findByIdAsync(line.productId);
-      const sellable = product && !product.deletedAt && product.status === 'active' && !['pending', 'rejected'].includes(product.approvalStatus);
-      if (!sellable) return { error: 'product_not_found', status: 404, productId: line.productId };
+      if (!isSellable(product)) return { error: 'product_not_found', status: 404, productId: line.productId };
       if (Number(product.stock) < line.qty) return { error: 'insufficient_stock', status: 409, productId: line.productId };
+      const variantProblem = variantCheck(product, line);
+      if (variantProblem) return { error: variantProblem, status: variantProblem === 'variant_not_found' ? 404 : 409, productId: line.productId };
       if (Number(product.priceTzs || 0) !== line.priceTzs || Number(product.discountPriceTzs || 0) !== Number(line.discountPriceTzs || 0)) {
         return { error: 'price_changed', status: 409, productId: line.productId };
       }
       current.push({ product, line });
     }
     for (const { product, line } of current) {
-      await products.updateByIdAsync(product.id, { stock: Number(product.stock) - line.qty, soldCount: Number(product.soldCount || 0) + line.qty, updatedAt: nowIso() });
+      const fresh = await products.findByIdAsync(product.id);
+      await products.updateByIdAsync(product.id, { stock: Number(fresh.stock) - line.qty, soldCount: Number(fresh.soldCount || 0) + line.qty, variants: withVariantStock(fresh, line, -1), updatedAt: nowIso() });
     }
     const saved = await shopOrders.insertAsync({
       ...order,
       idempotencyKey: idempotency?.key || null,
       idempotencyFingerprint: idempotency?.key ? idempotency.fingerprint || null : null,
       stockState: 'reserved',
+      reservationCycle: 1,
     });
     if (paymentRequest && paymentRequests) await paymentRequests.insertAsync(paymentRequest);
     return { order: saved, paymentRequest, replayed: false };
@@ -69,12 +85,13 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     let released = false;
     // Orders written before stock states existed have none; they are treated as holding their stock.
     if ((current.stockState || 'reserved') === 'reserved') {
-      for (const item of current.items || []) {
-        const product = await products.findByIdAsync(item.productId);
+      for (const line of (current.items || []).map(lineOf)) {
+        const product = await products.findByIdAsync(line.productId);
         if (product) {
           await products.updateByIdAsync(product.id, {
-            stock: Number(product.stock) + Number(item.qty || 0),
-            soldCount: Math.max(0, Number(product.soldCount || 0) - Number(item.qty || 0)),
+            stock: Number(product.stock) + line.qty,
+            soldCount: Math.max(0, Number(product.soldCount || 0) - line.qty),
+            variants: withVariantStock(product, line, +1),
             updatedAt: nowIso(),
           });
         }
@@ -94,6 +111,32 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     return { outcome: 'paid', order: updated };
   }
 
+  async function reviveOrder(orderId, { patch = {} } = {}) {
+    const order = await shopOrders.findByIdAsync(orderId);
+    if (!order) return { revived: false, reason: 'missing' };
+    if (order.status !== 'cancelled' || order.stockState !== 'released' || !['pending', 'cancelled', 'failed'].includes(order.paymentStatus)) {
+      return { revived: false, reason: 'not_revivable', order };
+    }
+    const lines = (order.items || []).map(lineOf).filter(l => l.qty > 0);
+    const found = [];
+    for (const line of lines) {
+      const product = await products.findByIdAsync(line.productId);
+      if (!isSellable(product)) return { revived: false, reason: 'product_not_found', productId: line.productId, order };
+      if (Number(product.stock) < line.qty) return { revived: false, reason: 'insufficient_stock', productId: line.productId, order };
+      const problem = variantCheck(product, line);
+      if (problem) return { revived: false, reason: problem, productId: line.productId, order };
+      found.push({ product, line });
+    }
+    for (const { product, line } of found) {
+      await products.updateByIdAsync(product.id, { stock: Number(product.stock) - line.qty, soldCount: Number(product.soldCount || 0) + line.qty, variants: withVariantStock(product, line, -1), updatedAt: nowIso() });
+    }
+    const updated = await shopOrders.updateByIdAsync(orderId, {
+      ...patch, status: 'pending', paymentStatus: 'paid', stockState: 'reserved',
+      reservationCycle: (order.reservationCycle || 1) + 1, reservationExpiresAt: null, updatedAt: nowIso(),
+    });
+    return { revived: true, order: updated };
+  }
+
   async function markLatePayment(orderId) {
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order || order.status !== 'cancelled' || !['pending', 'cancelled', 'failed'].includes(order.paymentStatus)) return { marked: false, order };
@@ -106,5 +149,5 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       && (order.stockState || 'reserved') === 'reserved' && order.reservationExpiresAt && +new Date(order.reservationExpiresAt) <= cutoff)).slice(0, limit);
   }
 
-  return { placeOrder, findReplay, cancelAndRelease, markPaid, markLatePayment, findExpired };
+  return { placeOrder, findReplay, cancelAndRelease, markPaid, reviveOrder, markLatePayment, findExpired };
 }
