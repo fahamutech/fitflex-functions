@@ -41,3 +41,14 @@ export function orgAuthzMode() {
 export function checkinVisitorNamesOn() {
   return on('CHECKIN_VISITOR_NAMES');
 }
+
+/**
+ * Members may choose a username shown in public places (migration
+ * member-usernames, /me/username endpoints, admin clear on reports). Off
+ * unless MEMBER_USERNAMES is set: the endpoints answer 404 feature_disabled
+ * and /me omits the new fields.
+ */
+export function memberUsernamesOn() {
+  return on('MEMBER_USERNAMES');
+}
+
