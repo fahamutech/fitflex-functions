@@ -193,6 +193,18 @@ export const EXERCISES = [
     areas: ['triceps'], pattern: 'push', gear: ['machines'], where: GYM, goals: MUSCLE, reps: 12, rest: 45, kg: true,
     how: ['Elbows by your sides, hands on the bar or rope.', 'Push down until your arms are straight.', 'Let it rise to chest height.'],
     alts: ['overhead_triceps_extension', 'bench_dip'] }),
+  ex('wrist_curl', 'Wrist Curl', 'A small movement for the inside of the forearm and a stronger grip.', {
+    areas: ['forearms'], pattern: 'pull', gear: ['dumbbells'], where: INDOORS, goals: MUSCLE, reps: 15, rest: 45, kg: true,
+    how: ['Sit and rest your forearms on your thighs, palms up, wrists just past your knees.', 'Let the weights roll down towards your fingers, then curl your wrists up.', 'Lower slowly. Only your hands move.'],
+    alts: ['reverse_wrist_curl', 'towel_wring'] }),
+  ex('reverse_wrist_curl', 'Reverse Wrist Curl', 'The wrist curl with palms down, for the outside of the forearm.', {
+    areas: ['forearms'], pattern: 'pull', gear: ['dumbbells'], where: INDOORS, goals: MUSCLE, reps: 15, rest: 45, kg: true,
+    how: ['Sit and rest your forearms on your thighs, palms down, wrists just past your knees.', 'Lift the backs of your hands towards the ceiling.', 'Lower slowly. Use a lighter weight than for the wrist curl.'],
+    alts: ['wrist_curl', 'towel_wring'] }),
+  ex('towel_wring', 'Towel Wring', 'Twisting a rolled towel as hard as you can, for grip and forearms with no weights.', {
+    areas: ['forearms'], goals: BASICS, secs: 30, rest: 30,
+    how: ['Roll a towel and hold it in front of you with both hands, arms straight.', 'Twist your hands in opposite directions, as if wringing out water.', 'Hold the squeeze, then twist the other way.'],
+    alts: ['wrist_curl', 'reverse_wrist_curl'] }),
 
   // ── Legs ────────────────────────────────────────────────────────────────
   ex('bodyweight_squat', 'Bodyweight Squat', 'The basic squat for the legs and glutes.', {
@@ -259,6 +271,18 @@ export const EXERCISES = [
     areas: ['calves'], pattern: 'squat', gear: ['dumbbells'], where: INDOORS, goals: MUSCLE, reps: 15, rest: 45, kg: true,
     how: ['Dumbbells at your sides.', 'Rise onto the balls of your feet.', 'Lower slowly.'],
     alts: ['calf_raise'] }),
+  ex('sumo_squat', 'Sumo Squat', 'A wide-stance squat holding one dumbbell, for the inner thighs and glutes.', {
+    areas: ['inner_thighs', 'glutes'], also: ['quadriceps'], pattern: 'squat', gear: ['dumbbells'], where: INDOORS, goals: MUSCLE, reps: 12, rest: 75, kg: true,
+    how: ['Stand with feet wider than your shoulders, toes turned out, holding one dumbbell with both hands.', 'Sit straight down, pushing your knees out over your toes.', 'Stand up by pressing through your heels.'],
+    alts: ['side_lying_inner_thigh_raise', 'goblet_squat', 'bodyweight_squat'] }),
+  ex('hip_adduction_machine', 'Hip Adduction Machine', 'Squeezing your knees together against the machine, for the inner thighs.', {
+    areas: ['inner_thighs'], gear: ['machines'], where: GYM, goals: MUSCLE, reps: 15, rest: 45, kg: true,
+    how: ['Sit with your back against the pad and the pads on the inside of your knees.', 'Squeeze your knees together.', 'Let them open slowly to a comfortable stretch.'],
+    alts: ['sumo_squat', 'side_lying_inner_thigh_raise'] }),
+  ex('side_lying_inner_thigh_raise', 'Side-lying Inner Thigh Raise', 'Lifting the lower leg while lying on your side. Needs no equipment.', {
+    areas: ['inner_thighs'], goals: BASICS, reps: 12, rest: 45,
+    how: ['Lie on your side and cross your top foot over, flat on the floor in front of you.', 'Lift your lower leg as high as you can, keeping it straight.', 'Lower slowly. Change sides after your reps.'],
+    alts: ['sumo_squat'] }),
 
   // ── Core ────────────────────────────────────────────────────────────────
   ex('plank', 'Plank', 'A hold that steadies the whole trunk.', {
@@ -350,7 +374,7 @@ export const EXERCISES = [
     how: ['On hands and feet, knees just off the floor.', 'Move opposite hand and foot together.', 'Keep your back flat.'],
     alts: ['mountain_climber'] }),
   ex('farmer_carry', 'Farmer Carry', 'Walk while holding a weight in each hand.', {
-    cat: 'functional', areas: ['full_body'], also: ['shoulders', 'abs'], pattern: 'carry', gear: ['dumbbells'], where: INDOORS, goals: BASICS, secs: 40, kg: true,
+    cat: 'functional', areas: ['full_body'], also: ['shoulders', 'abs', 'forearms'], pattern: 'carry', gear: ['dumbbells'], where: INDOORS, goals: BASICS, secs: 40, kg: true,
     how: ['Pick up a dumbbell in each hand and stand tall.', 'Walk with short steps, shoulders back.', 'Set them down with a flat back.'],
     alts: ['bear_crawl'] }),
   ex('dumbbell_thruster', 'Dumbbell Thruster', 'A squat straight into an overhead press.', {

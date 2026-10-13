@@ -57,6 +57,29 @@ test('alternatives keep the workout intent: they share a main area', () => {
   }
 });
 
+test('forearms and inner thighs are areas a member can choose, with or without equipment', async () => {
+  const names = draft => new Set(exercisesOf(draft).map(e => e.exerciseName));
+  const gym = (await draftFor({
+    fitnessGoals: ['gain_muscle'],
+    trainingPreferences: { targetAreas: ['forearms', 'inner_thighs'], daysPerWeek: 4, sessionMinutes: 45, environment: 'gym', equipment: ['full_gym'] },
+  })).draft;
+  const forearms = listExercises({ area: 'forearms' }).map(e => e.name);
+  const thighs = listExercises({ area: 'inner_thighs' }).map(e => e.name);
+  assert.ok(forearms.some(n => names(gym).has(n)), 'a forearm exercise is planned');
+  assert.ok(thighs.some(n => names(gym).has(n)), 'an inner-thigh exercise is planned');
+  assert.ok(sessions(gym).some(d => d.workout.focusAreas?.includes('forearms') || d.focusAreas?.includes('forearms')));
+
+  const home = (await draftFor({
+    fitnessGoals: ['stay_fit'],
+    trainingPreferences: { targetAreas: ['forearms', 'inner_thighs'], daysPerWeek: 4, environment: 'home', equipment: ['none'], experienceLevel: 'beginner' },
+  })).draft;
+  assert.ok(names(home).has('Towel Wring') && names(home).has('Side-lying Inner Thigh Raise'));
+
+  // Swahili has a word for each.
+  const sw = (await draftFor({ fitnessGoals: ['gain_muscle'], trainingPreferences: { targetAreas: ['forearms', 'inner_thighs'], daysPerWeek: 4 } }, { lang: 'sw' })).draft;
+  assert.ok(sessions(sw).some(d => /Mkono wa chini|Mapaja \(ndani\)/.test(d.workout.name)));
+});
+
 test('a member who has told FitFlex nothing still gets a sensible plan', async () => {
   const { draft } = await draftFor({});
   assert.equal(draft.name, '4-Week Fitness Plan');

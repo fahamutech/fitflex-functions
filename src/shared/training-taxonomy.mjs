@@ -23,8 +23,8 @@ export const DEFAULT_FITNESS_GOAL = 'stay_fit';
 
 /** Where training is focused. A focus for programming, never a judgement of how anyone looks. */
 export const TARGET_AREA_GROUPS = [
-  { id: 'upper_body', areas: ['chest', 'back', 'shoulders', 'biceps', 'triceps'] },
-  { id: 'lower_body', areas: ['glutes', 'quadriceps', 'hamstrings', 'calves'] },
+  { id: 'upper_body', areas: ['chest', 'back', 'shoulders', 'biceps', 'triceps', 'forearms'] },
+  { id: 'lower_body', areas: ['glutes', 'quadriceps', 'hamstrings', 'inner_thighs', 'calves'] },
   { id: 'core', areas: ['abs', 'obliques', 'lower_back'] },
   { id: 'general', areas: ['full_body', 'mobility', 'cardio'] },
 ];

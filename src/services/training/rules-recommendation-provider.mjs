@@ -13,11 +13,12 @@
 import { listExercises, localizedExercise } from '../../shared/exercise-library.mjs';
 import { EXPERIENCE_LEVELS } from '../../shared/training-taxonomy.mjs';
 
-const UPPER = ['chest', 'back', 'shoulders', 'biceps', 'triceps'];
-const LOWER = ['quadriceps', 'glutes', 'hamstrings', 'calves'];
+// Forearms and inner thighs come last: they get a turn when there is time, or first when the member chose them.
+const UPPER = ['chest', 'back', 'shoulders', 'biceps', 'triceps', 'forearms'];
+const LOWER = ['quadriceps', 'glutes', 'hamstrings', 'calves', 'inner_thighs'];
 const CORE = ['abs', 'obliques', 'lower_back'];
 const PUSH = ['chest', 'shoulders', 'triceps'];
-const PULL = ['back', 'biceps'];
+const PULL = ['back', 'biceps', 'forearms'];
 const MUSCLES = [...UPPER, ...LOWER, ...CORE];
 
 // A session kind: the areas it draws on (in order) and how it is recorded.
@@ -89,8 +90,8 @@ const SW = {
     core: 'Kiwiliwili', cardio: 'Pumzi na Moyo', conditioning: 'Stamina', mobility: 'Unyumbufu', functional: 'Mazoezi Mchanganyiko',
   },
   areas: {
-    chest: 'Kifua', back: 'Mgongo', shoulders: 'Mabega', biceps: 'Misuli ya mbele ya mkono', triceps: 'Misuli ya nyuma ya mkono',
-    glutes: 'Makalio', quadriceps: 'Mapaja (mbele)', hamstrings: 'Mapaja (nyuma)', calves: 'Ndama',
+    chest: 'Kifua', back: 'Mgongo', shoulders: 'Mabega', biceps: 'Misuli ya mbele ya mkono', triceps: 'Misuli ya nyuma ya mkono', forearms: 'Mkono wa chini',
+    glutes: 'Makalio', quadriceps: 'Mapaja (mbele)', hamstrings: 'Mapaja (nyuma)', inner_thighs: 'Mapaja (ndani)', calves: 'Ndama',
     abs: 'Tumbo', obliques: 'Pembeni mwa tumbo', lower_back: 'Kiuno',
   },
   styles: { strength: 'Nguvu', mixed: 'Afya', cardio: 'Ustahimilivu', hiit: 'HIIT', functional: 'Mazoezi Mchanganyiko', mobility: 'Unyumbufu' },
