@@ -141,7 +141,7 @@ test('visitorName: trims, prefers the trainer profile, withholds contact details
 
 after(async () => {
   for (const id of created.checkins) await db('Checkin').where({ id }).del().catch(() => {});
-  for (const id of created.trainers) await db('Trainer').where({ id }).del().catch(() => {});
+  for (const id of created.trainers) await db('TrainerProfile').where({ id }).del().catch(() => {});
   for (const id of created.gyms) await db('Gym').where({ id }).del().catch(() => {});
   for (const id of created.users) await db('User').where({ id }).del().catch(() => {});
 });
