@@ -1,9 +1,11 @@
 # Marketplace production readiness
 
-Status as of 2026-10-13, after **PR 1 (checkout and inventory integrity)** and
-**PR 2 (order state machine and vendor-scoped fulfilment)**.
-Outcome so far: **NOT READY** — payments, refunds, reconciliation, the mobile
-client and settlement controls are not yet reviewed or fixed (PR 3–5). See "Outcome".
+Status as of 2026-10-13, after **PR 1 (checkout and inventory integrity)**,
+**PR 2 (order state machine and vendor-scoped fulfilment)** and
+**PR 3 (payment confirmation, refund reliability, reconciliation)**.
+Outcome so far: **NOT READY** — there is **no payment-provider integration**
+for shop orders (payments are confirmed by hand), and the mobile client and
+settlement controls are not yet reviewed (PR 4–5). See "Outcome".
 
 Evidence rules for this document: a defect is **confirmed** only if it was
 reproduced by a test or read directly in the code at the cited location. Anything
@@ -54,7 +56,7 @@ shop orders in this code path** (see PR 3).
 | M-05 | P1 | Restock was not exactly-once: `restock` ran before the status write, guarded only by a stale read of `status`. Concurrent cancels double-restocked; a crash between restock and status write re-restocked on retry. | `restock`, `cancelOrder`, `applyPaymentToOrder` | **Fixed PR 1** — release is a conditional state change plus a ledger unique key |
 | M-06 | P1 | **Late payment lost.** Approval of a payment for an order already cancelled returned silently ("FitFlex refunds it") — no refund was raised, nothing recorded. | `applyPaymentToOrder` | **Fixed PR 1** (decision D-2) — an order that lapsed on its own is **revived** if its stock can be taken again; otherwise, or if a person cancelled it, it stays cancelled, is marked `refund_pending`, and one refund is raised and audited |
 | M-07 | P1 | No reservation expiry: an unpaid order held its stock forever. | — | **Implemented PR 1, off by default** (`SHOP_RESERVATION_EXPIRY=on`) |
-| M-08 | P1 | A refund that could not be raised was only `console.warn`ed. | `cancelOrder` | **Partly fixed PR 1** — recorded as audit `shop_refund_not_raised`; order stays `refund_pending`. Ops screen for these → PR 3 |
+| M-08 | P1 | A refund that could not be raised was only `console.warn`ed. | `cancelOrder` | **Fixed PR 1 + PR 3** — audited, order stays `refund_pending`, listed by reconciliation, retry endpoint |
 | M-09 | P2 | Fractional / non-integer quantities accepted (`1.5`). No cap on lines. | `createOrder` | **Fixed PR 1** (integers only, ≤ 50 lines) |
 | M-10 | P2 | `soldCount` rose on reservation and never fell on release. | `restock` | **Fixed PR 1** |
 | M-11 | P1 | **Vendor authorisation was per order, not per line.** `updateOrderStatus` let any vendor owning *any* item move the *whole* order (including other vendors' lines) to any status; `vendorOrders` returned every vendor's lines, commissions and payouts. Reproduced: vendor A marked a 2-vendor order `delivered` from `pending`; vendor B never touched it. | `updateOrderStatus`, `vendorOrders` | **Fixed PR 2** — per-vendor fulfilments; vendors see and move only their own |
@@ -67,7 +69,17 @@ shop orders in this code path** (see PR 3).
 | M-15 | P2 | Product `variants` carry their own `stock` but order lines had no variant, so variant stock was never checked or reserved. | `createOrder`, data model | **Fixed PR 1** (decision D-3) — see §5 "Variants" |
 | M-16 | P2 | `createOrder` did not check `visibility === 'hidden'`; the catalogue does. A hidden product could be bought by id. | `createOrder` vs `listProducts` | **Fixed PR 1** (decision D-4) — checked in the service and again in the atomic reserve |
 | M-17 | P2 | `pickupGymId` / `deliveryAddress` are not validated beyond presence (gym existence, ownership). | `createOrder` | **Open → PR 4** |
-| M-18 | P2 | `paymentReference` is client-supplied and stored unverified. It is not used to mark anything paid. | `createOrder` | **Open → PR 3** (note only) |
+| M-18 | P2 | `paymentReference` is client-supplied and stored unverified. It is not used to mark anything paid. | `createOrder` | **Mitigated PR 3** — a reference confirms one order only; still unverified against a provider (none exists) |
+| M-22 | P0 | **Double confirmation.** Approving a payment was read-then-write: two staff approving at once both succeeded and the order payment was applied twice. Reproduced: 2 successes, applied 2×. | `adminPaymentService.decide/update` | **Fixed PR 3** — conditional update; `409 already_decided` |
+| M-23 | P1 | **A confirmed order payment could be edited back** to rejected / pending / cancelled while the order stayed paid (records disagree; refund flow bypassed). Reproduced. | `adminPaymentService.update` | **Fixed PR 3** — `409 payment_already_confirmed` |
+| M-24 | P1 | Confirmation did not check the payment against the order (buyer, currency, amount) or what was received. | `decide/update` | **Fixed PR 3** — `checkOrderPayment`; optional `amountTzs` |
+| M-25 | P1 | One transaction reference could confirm any number of orders. | `decide/update` | **Fixed PR 3** — service check + partial unique index (created only if existing data has no duplicates) |
+| M-26 | P1 | Refund `decide` / `markPaid` were read-then-write: a refund could be "paid" twice (two records, two "refund sent" messages); a failure updating the order after payment was swallowed (`catch {}`). | `refundService` | **Fixed PR 3** — conditional updates; failure audited and reconciled |
+| M-27 | P1 | A refund the refund service refused (`{ error }`) was treated as "no refund" with no record. | `bootstrap onRefundDue` | **Fixed PR 3** — thrown, audited, `refund_owed_none_raised` |
+| M-28 | P1 | A refund could exceed what was confirmed (amount came from the order total only). | `raiseRefund` | **Fixed PR 3** — capped at confirmed; audited |
+| M-29 | P1 | A crash between "payment recorded" and "order marked paid" left money confirmed and the order unpaid, undetectable. | `adminPaymentService` | **Fixed PR 3** — reconciliation + `repair-payment` |
+| M-30 | P1 | **No payment-provider integration for shop orders.** Selcom webhook is subscriptions-only, token-protected, signature verification open (OI-004); nothing initiates a charge for an order; refunds are paid by hand. | `functions/webhooks.mjs`, `webhook-service.mjs` | **BLOCKED** — needs provider choice, documentation, sandbox, credentials. See `marketplace-payment-and-refund-flows.md` for the seams |
+| M-31 | P2 | The Selcom webhook's replay guard checks `webhookSeen` then claims in two steps (the claim's primary key makes it safe, but the first read is redundant), and its token travels in the URL query. | `webhook-service.mjs`, `webhooks.mjs` | **Open** — outside the shop path; fix with the provider work |
 
 ### Not yet inspected (no claim made)
 
@@ -135,6 +147,10 @@ shop orders in this code path** (see PR 3).
 | D-6 | Cancelling or returning **one vendor's part** of a multi-vendor order needs a partial refund (the refund model is one per order). Until decided, vendors cannot cancel a mixed order and FitFlex cancels it whole; once any vendor has delivered it cannot be cancelled at all. | **Open — financial-model decision** |
 | D-7 | Per-vendor settlement: today a mixed order is paid out only when **every** vendor has delivered (conservative). Pay each vendor as their own part is delivered? | **Open** (PR 5) |
 | D-8 | Remove the legacy `fulfilled` completion shortcut once no client uses it. | **Open** (low) |
+| D-9 | **Payment provider** for shop orders: which, with documentation, sandbox and credentials; webhook authentication scheme. Until then payments stay manual. | **Open — blocks go-live of unattended payments** |
+| D-10 | Refund payout: stay manual, or automate through the provider's refund API once D-9 exists. | **Open** |
+| D-11 | Reference uniqueness index: resolve any existing duplicate order references (the migration prints them) and create the index. | **Open — needs production data check** |
+| D-12 | Alerting: wire an alert on the `[shop-reconciliation]` log lines / the report's `ok:false`; no alerting channel is configured in this repo for it. | **Open — operational** |
 
 ## 7. Tests
 
@@ -185,6 +201,29 @@ expiry → order revived once with a new ledger cycle (and releasable again); st
 refunded once; buyer-cancelled → refunded; stock-tracked variants (race, release, required,
 unknown; mandatory choice behind the switch); label variants; hidden product; 48 h default; refund-raise failure recorded.
 
+**PR 3** (stacked on PR 2):
+
+| Command | Result |
+|---|---|
+| `specs/shop-payments.specs.mjs` (real Postgres, real payment-request and refund services) | **15 pass, 0 fail** |
+| `npm test` (full suite) on a **brand-new database**, all 95 migrations from scratch | **1916 pass, 0 fail, 0 skipped** |
+| negative control: old `adminPaymentService`, two staff approve at once, real DB | **2 successes, order payment applied 2×**; a confirmed payment edited back to `rejected` |
+
+PR 3 covers: simultaneous approvals; amount / buyer / currency mismatch; reference
+reuse (service and database); confirmed payment cannot be edited back; reject then
+confirm later (revived once); half-finished confirmation found and repaired once;
+refund recorded paid once under two staff; refund service down → recorded, listed,
+retried once; refund paid but order not updated → recorded and listed; refund
+capped at what was confirmed; unexpected refund state audited; reconciliation
+checks (clean, paid-without-payment, stock mismatch, cancelled order on a vendor
+statement).
+
+Test-environment note: re-running the full suite many times against *one* database
+fails two identity specs (`identity-i1-foundation`: a hard-coded public id `FM999`
+that the id counter eventually reaches, because other identity specs leave users
+behind). It is a pre-existing test-isolation problem unrelated to the shop; on a
+fresh database, as in CI, the suite passes. Not fixed here.
+
 Known test limits: concurrency tests run in one Node process against a pooled
 connection set (real row locking, but not multi-process). The service-level
 unit specs still use the in-memory store, which is deliberately not atomic.
@@ -195,14 +234,14 @@ unit specs still use the in-memory store, which is deliberately not atomic.
 |---|---|---|
 | 1 | transactional inventory, idempotency, expiry, late payment | **done, awaiting review** |
 | 2 | state machine + vendor-scoped fulfilment (M-11, M-12, M-13, M-19–M-21) | **done, awaiting review** (stacked on PR 1) |
-| 3 | payment confirmation, refund reliability, reconciliation (M-08, M-14, M-18) | not started; provider integration cannot be assumed |
+| 3 | payment confirmation, refund reliability, reconciliation (M-08, M-18, M-22–M-29) | **done, awaiting review** (stacked on PR 2). Provider integration (M-30) **blocked**, not done |
 | 4 | mobile idempotency key, resume pending payment, status display (M-03 client half, M-17, variant picker) | not started |
 | 5 | settlement controls, security hardening, go-live regression | not started |
 
-Also still to write: `marketplace-order-state-machine.md`,
-`marketplace-payment-and-refund-flows.md`, `marketplace-go-live-checklist.md`.
+Written: `marketplace-order-state-machine.md` (PR 2), `marketplace-payment-and-refund-flows.md` (PR 3).
+Still to write: `marketplace-go-live-checklist.md` (PR 5).
 
-## 9. Deployment prerequisites (PR 1 and PR 2)
+## 9. Deployment prerequisites (PR 1, 2 and 3)
 
 1. Back up / snapshot the production database (additive migration, but it touches `ShopOrder` and `Product`).
 2. Run the migration **before** deploying the new code (new code needs the columns). Old code keeps working on the new schema.
@@ -210,6 +249,8 @@ Also still to write: `marketplace-order-state-machine.md`,
 4. Optional, later and deliberately: `SHOP_RESERVATION_EXPIRY=on` (D-1; TTL default 48 h).
 5. Rollback: redeploy old code; the down-migration is available but loses idempotency keys and the stock ledger.
 6. PR 2 adds `ShopOrder.fulfilments` (nullable jsonb; no backfill, derived lazily). Run its migration before deploying PR 2's code. Rollback drops the column; `status` and `timeline` stay complete.
+8. PR 3 migration `20261224123000` creates a unique index on confirmed order payment references **only if no duplicates exist**; otherwise it prints them and skips it (resolve, then create the index by hand: statement in the migration output). No downtime either way.
+9. PR 3 adds `GET /admin/marketplace/reconciliation` and two repair endpoints, and an hourly job `shopReconciliation` (read-only). Nothing alerts on it yet (D-12).
 7. PR 2 changes what `GET /vendor/orders` returns for a vendor: their own lines and subtotal, `status` = their own fulfilment's status, plus `orderStatus` and `nextStatuses`. Identical for single-vendor orders. The vendor app needs no change.
 
 ## Outcome

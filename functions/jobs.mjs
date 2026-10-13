@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -94,6 +94,17 @@ export const shopReservationExpiry = {
     if (process.env.SHOP_RESERVATION_EXPIRY !== 'on') return;
     const r = await shopService.expireStaleReservations({});
     if (r.expired) console.log(`[shop] reservations expired=${r.expired} due=${r.due}`);
+  }
+};
+
+export const shopReconciliation = {
+  created, rule: '15 * * * *', // hourly
+  description: 'Marketplace: reconcile orders, confirmed payments, refunds, stock and vendor statements. Read-only; logs one line per open finding so an alert can key on "[shop-reconciliation]". The same report is at GET /admin/marketplace/reconciliation.',
+  onJob: async () => {
+    const r = await shopReconciliationService.report();
+    for (const c of r.checks.filter(x => x.count !== 0 && x.severity !== 'P2')) {
+      console.warn(`[shop-reconciliation] ${c.severity} ${c.id} count=${c.count} sample=${c.sample.slice(0, 5).map(s => s.id || s.orderId || s.refundId).join(',')}`);
+    }
   }
 };
 

@@ -51,6 +51,7 @@ import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
 import { createTermsService } from '../services/terms-service.mjs';
 import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
+import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -223,16 +224,21 @@ export const shopService = createShopService({
   orderStore: createPgShopOrderStore({ db }),
   requireVariantChoice: process.env.SHOP_REQUIRE_VARIANT === 'on',
   reservationTtlMinutes: Number(process.env.SHOP_RESERVATION_TTL_MINUTES) > 0 ? Number(process.env.SHOP_RESERVATION_TTL_MINUTES) : 48 * 60,
-  onRefundDue: ({ order, reasonCode, actorId, role }) => refundService.raise({
+  onRefundDue: ({ order, amountTzs, reasonCode, actorId, role }) => refundService.raise({
     memberId: order.buyerId, kind: 'shop_order', sourceId: order.id,
-    amountTzs: order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,
-  }).then(out => out.refund || null),
+    amountTzs: amountTzs ?? order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,
+  }).then((out) => {
+    // A refusal is a failure the shop records, not a quiet "no refund".
+    if (out.error) throw new Error(`refund_${out.error}`);
+    return out.refund;
+  }),
   marketplaceEnquiries, marketplaceNotifications, productReviews, partnerGate, partnerKycCases, publicGate: moderationGate,
   onVendorEvent: (vendorId, event, data) => partnerNotifier.vendorEvent(vendorId, event, data),
   // A paid order is credited to the promotion the buyer opened (promotionEventsService is defined below; this only runs later).
   onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
 });
+export const shopReconciliationService = createShopReconciliationService({ db });
 export const corporateService = createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
   // Every new company gets its employer B2B organisation. b2bService is defined
@@ -431,6 +437,7 @@ export const adminPaymentService = createAdminPaymentService({
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
+  beforeOrderPayment: (request, opts) => shopService.checkOrderPayment(request, opts),
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });

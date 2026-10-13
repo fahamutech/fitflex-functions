@@ -2,7 +2,7 @@
 import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopService, vendorSettlementService } from '../src/bootstrap/services.mjs';
+import { shopService, vendorSettlementService, shopReconciliationService } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
@@ -185,6 +185,43 @@ export const adminUpdateVendor = {
       return res.status(status).json({ error, ...extra });
     }
     res.json(result.vendor);
+  },
+};
+
+// ── marketplace operations: books that do not add up, and the ways to put them right ──────────
+
+export const adminMarketplaceReconciliation = {
+  created, method: 'get', path: '/admin/marketplace/reconciliation',
+  description: 'Admin (shop or payments scope): reconcile marketplace orders, confirmed payments, refunds, stock and vendor statements against each other. Read-only. → { ok, open: ["P0 …"], checks: [{ id, severity, description, count, sample }] }. `ok` is false while any P0/P1 finding is open.',
+  onGuard: [requireAuth('admin'), requireAcl('shop', 'payments')],
+  onRequest: async (_req, res) => res.json(await shopReconciliationService.report()),
+};
+
+export const adminMarketplaceRaiseRefund = {
+  created, method: 'post', path: '/admin/marketplace/orders/:id/raise-refund',
+  description: 'Admin (payments scope): retry the refund of an order that is owed money (paymentStatus refund_pending) and has none raised. Safe to repeat: one live refund per order.',
+  onGuard: [requireAuth('admin'), requireAcl('payments')],
+  onRequest: async (req, res) => {
+    const result = await shopService.raiseMissingRefund({ orderId: req.params.id, actorId: req.user.sub });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
+    res.json(result);
+  },
+};
+
+export const adminMarketplaceRepairPayment = {
+  created, method: 'post', path: '/admin/marketplace/orders/:id/repair-payment',
+  description: 'Admin (payments scope): an order whose payment was confirmed but which is not marked paid — apply the confirmed payment to it. Safe to repeat.',
+  onGuard: [requireAuth('admin'), requireAcl('payments')],
+  onRequest: async (req, res) => {
+    const result = await shopService.repairOrderPayment({ orderId: req.params.id, actorId: req.user.sub });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
+    res.json(result.order);
   },
 };
 
