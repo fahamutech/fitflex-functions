@@ -27,7 +27,7 @@ const TIER_DOWNLIFT_BELOW = {
 const makeId = () => `grev_${randomUUID().slice(0, 8)}`;
 const nowIso = () => new Date().toISOString();
 
-export function createGymReviewService({ gymReviews, gyms, checkins, subscriptions, users, auditLog,
+export function createGymReviewService({ usernames = null, gymReviews, gyms, checkins, subscriptions, users, auditLog,
   // A member left a new review: (review) → void. Told to the gym.
   onNewReview = async () => {} }) {
   function validate(rating, text) {
@@ -117,7 +117,7 @@ export function createGymReviewService({ gymReviews, gyms, checkins, subscriptio
       // Public: other members see first name + initial, never the member id.
       return {
         id: r.id, gymId: r.gymId, rating: r.rating, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt,
-        memberName: shortName(u?.displayName), memberPhotoUrl: u?.photoUrl || null,
+        memberName: (await usernames?.handleOf(r.memberId)) ?? shortName(u?.displayName), memberPhotoUrl: u?.photoUrl || null,
       };
     }));
   }

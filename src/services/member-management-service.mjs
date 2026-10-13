@@ -13,6 +13,7 @@ import { CHECKIN_STATUS, CHECKIN_SOURCE, isDuplicateVisit } from '../shared/chec
 import { localDay } from '../shared/member-progress.mjs';
 
 export function createMemberManagementService({
+  usernames = null,
   users,
   gyms,
   subscriptions,
@@ -97,6 +98,12 @@ export function createMemberManagementService({
     return streak;
   }
 
+  /** { username } for a partner view, or nothing when there is none (or the feature is off). */
+  async function usernameField(userId) {
+    const handle = await usernames?.handleOf(userId);
+    return handle ? { username: handle } : {};
+  }
+
   async function buildRow(member, memberType, sub, gymIds, now) {
     const status = memberType === 'direct'
       ? await statusForDirect(member, sub, gymIds, now)
@@ -106,6 +113,7 @@ export function createMemberManagementService({
       id: member.id,
       publicId: await publicUserId(member, 'member'),
       displayName: member.displayName || null,
+      ...(await usernameField(member.id)),
       phone: member.phone || null,
       photoUrl: member.photoUrl || null,
       memberType,
@@ -395,6 +403,7 @@ export function createMemberManagementService({
         id: member.id,
         publicId: await publicUserId(member, 'member'),
         displayName: member.displayName || null,
+        ...(await usernameField(member.id)),
         email: member.email || null,
         phone: member.phone || null,
         photoUrl: member.photoUrl || null,

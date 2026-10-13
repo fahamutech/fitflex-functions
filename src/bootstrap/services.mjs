@@ -179,7 +179,7 @@ export const settingsService = createSettingsService({ platformSettings, auditLo
 export const gymService = createGymService({ gyms, users, checkins, auditLog });
 // Tells gym owners, staff and vendors what happens at their gym or shop (inbox + push).
 export const partnerNotifier = createPartnerNotifier({
-  users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
+  usernames: { handleOf: userId => usernameService.handleOf(userId) }, users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const trainerService = createTrainerService({
@@ -400,8 +400,10 @@ const lifecycle = {
   },
   paymentFailed: (sub, extra) => automationService.handleEvent({ type: 'payment_failed', subscription: sub, ...extra }),
 };
+// The username service is built further down; these only call it later.
+const usernamesLazy = { handleOf: userId => usernameService.handleOf(userId) };
 export const memberManagement = createMemberManagementService({
-  users, gyms, subscriptions, checkins, paymentRequests, publicUserId, initFirebaseAdmin, getAdminAuth,
+  usernames: usernamesLazy, users, gyms, subscriptions, checkins, paymentRequests, publicUserId, initFirebaseAdmin, getAdminAuth,
   onMembershipActivated: lifecycle.activated,
 });
 export const operatorService = createOperatorService({
@@ -463,10 +465,10 @@ export const webhookService = createWebhookService({
   onPaymentFailed: (sub, paymentId) => lifecycle.paymentFailed(sub, { reference: `selcom:${paymentId}` }),
 });
 export const gymReviewService = createGymReviewService({
-  gymReviews, gyms, checkins, subscriptions, users, auditLog,
+  usernames: usernamesLazy, gymReviews, gyms, checkins, subscriptions, users, auditLog,
   onNewReview: review => partnerNotifier.gymReview(review),
 });
-export const trainerReviewService = createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog });
+export const trainerReviewService = createTrainerReviewService({ usernames: usernamesLazy, trainerReviews, trainers, trainerBookings, users, auditLog });
 export const whatsAppService = createWhatsAppService({
   apiKey: process.env.AFRICAS_TALKING_API_KEY,
   apiUrl: process.env.AFRICAS_TALKING_API_URL || undefined,
@@ -538,11 +540,11 @@ export const trainerPlanService = createTrainerPlanService({
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const gymSharingService = createGymSharingService({
-  sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
+  usernames: usernamesLazy, sharing: gymMemberSharing, gyms, subscriptions, checkins, activities, users,
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
 });
 export const challengeService = createChallengeService({
-  challenges, participants: challengeParticipants, users, trainers, gyms,
+  usernames: usernamesLazy, challenges, participants: challengeParticipants, users, trainers, gyms,
   relationships: trainerMemberRelationships, gymMemberSharing,
   gymMemberIds: memberId => gymSharingService.memberGymIds(memberId),
   activities, checkins, teams: challengeTeams, corporateEmployees, subscriptions, rewardAwards: challengeRewards,
@@ -724,7 +726,7 @@ export const challengeRewardService = createChallengeRewardService({
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 export const trainerClientService = createTrainerClientService({
-  relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals, partnerGate,
+  usernames: usernamesLazy, relationships: trainerMemberRelationships, trainers, users, workouts, workoutPlans, activities, goals, partnerGate,
   notify: (userId, message) => notificationService.notify(userId, message),
   challengeProgressFor: (...args) => challengeService.memberProgressForCreator(...args),
   challenges, participants: challengeParticipants,

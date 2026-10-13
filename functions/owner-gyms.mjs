@@ -3,7 +3,7 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth, requireGymAcl } from '../src/auth/jwt.mjs';
 import { identityFlag, checkinVisitorNamesOn } from '../src/shared/feature-flags.mjs';
 import { visitorName } from '../src/shared/visitor-name.mjs';
-import { ownerGymService, resolveRequestUser, publicUserId, checkins, users, trainers } from '../src/bootstrap/services.mjs';
+import { ownerGymService, resolveRequestUser, publicUserId, checkins, users, trainers, usernameService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -87,6 +87,9 @@ export const ownerGymCheckins = {
       const pubId = await publicUserId(list[i].memberId, 'member');
       list[i].memberName = pubId;
       list[i].memberPublicId = pubId;
+      // The member's username (MEMBER_USERNAMES), next to their name for the gym.
+      const handle = await usernameService.handleOf(list[i].memberId);
+      if (handle) list[i].username = handle;
       if (!withNames) continue;
       const id = list[i].memberId;
       if (!names.has(id)) {
