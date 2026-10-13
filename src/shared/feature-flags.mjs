@@ -32,3 +32,12 @@ export function orgAuthzMode() {
   if (value === 'shadow') return 'shadow';
   return TRUE_VALUES.has(value) ? 'enforce' : 'off';
 }
+
+/**
+ * Owner check-in lists show who visited by name (GET /owner/gyms/:id/checkins
+ * adds `displayName`). Off unless CHECKIN_VISITOR_NAMES is set, so a deploy
+ * never changes what owners see on its own.
+ */
+export function checkinVisitorNamesOn() {
+  return on('CHECKIN_VISITOR_NAMES');
+}

@@ -1,8 +1,9 @@
 // Owner/operator gym management REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireGymAcl } from '../src/auth/jwt.mjs';
-import { identityFlag } from '../src/shared/feature-flags.mjs';
-import { ownerGymService, resolveRequestUser, publicUserId, checkins, users } from '../src/bootstrap/services.mjs';
+import { identityFlag, checkinVisitorNamesOn } from '../src/shared/feature-flags.mjs';
+import { visitorName } from '../src/shared/visitor-name.mjs';
+import { ownerGymService, resolveRequestUser, publicUserId, checkins, users, trainers } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -78,10 +79,22 @@ export const ownerGymCheckins = {
     const result = await ownerGymService.gymCheckIns({ owner, gymId: req.params.gymId, checkins });
     if (result.error) return res.status(result.status).json({ error: result.error });
     const list = result.list;
+    // The public ID stays in memberName/memberPublicId for older apps; the
+    // name is an extra field, behind CHECKIN_VISITOR_NAMES.
+    const withNames = checkinVisitorNamesOn();
+    const names = new Map();
     for (let i = 0; i < list.length; i++) {
       const pubId = await publicUserId(list[i].memberId, 'member');
       list[i].memberName = pubId;
       list[i].memberPublicId = pubId;
+      if (!withNames) continue;
+      const id = list[i].memberId;
+      if (!names.has(id)) {
+        const user = await users.findByIdAsync(id);
+        const trainer = user?.userType === 'trainer' ? trainers.find(t => t.userId === id) : null;
+        names.set(id, visitorName({ user, trainer }));
+      }
+      list[i].displayName = names.get(id);
     }
     res.json(list);
   }
