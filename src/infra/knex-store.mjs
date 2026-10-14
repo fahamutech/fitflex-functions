@@ -553,6 +553,30 @@ export function collection(name) {
       return _findByIdFromDb(id);
     },
 
+    /**
+     * Update a record only if it still has the expected column values — one atomic statement.
+     * `where` is { column: value | [values] }. Returns the updated row, or null when the row is
+     * missing or has changed (someone else got there first). The way to make a decision "once".
+     */
+    updateByIdWhereAsync: async (id, where, patch) => {
+      const pk = pkField(name);
+      const writeData = prepareForKnex(name, patch, true);
+      if (!Object.keys(writeData).length) return null;
+      let query = db(meta.table).where({ [pk]: id });
+      for (const [column, expected] of Object.entries(where || {})) {
+        query = Array.isArray(expected)
+          ? query.where((q) => {
+            const real = expected.filter(v => v !== null);
+            if (real.length) q.whereIn(column, real);
+            if (expected.includes(null)) q.orWhereNull(column);
+          })
+          : expected === null ? query.whereNull(column) : query.where(column, expected);
+      }
+      const rows = await query.update(writeData).returning(pk);
+      invalidate(name);
+      return rows.length ? _findByIdFromDb(id) : null;
+    },
+
     remove: (pred) => {
       console.warn(`[knex-store] sync remove() on db-only collection "${name}" — prefer removeByIdAsync()`);
       return null;

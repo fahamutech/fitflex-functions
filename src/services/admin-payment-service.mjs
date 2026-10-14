@@ -5,12 +5,16 @@ import { randomUUID } from 'node:crypto';
 import { activationDates } from '../shared/subscription-status.mjs';
 import { productTypeOfPayment } from '../shared/payment-product.mjs';
 import { upgradeOf, upgradeApprovable, applyUpgradeStatus } from '../shared/pass-upgrade.mjs';
+import { updateIf } from '../shared/conditional-update.mjs';
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
   gyms = null,
   onBookingPayment = async () => {},
   onOrderPayment = async () => {},
+  // Before a shop order's payment is confirmed: (request, { amountTzs }) → null | { error, status }.
+  // Checks the payment against the order (buyer, currency, amount).
+  beforeOrderPayment = async () => null,
   onSubscriptionActivated = async () => {},
   // A rejected payment for a membership (lifecycle automations).
   onPaymentRejected = async () => {},
@@ -109,7 +113,36 @@ export function createAdminPaymentService({
     }));
   }
 
-  async function decide({ id, decision, reference, note, actorId }) {
+  /**
+   * The reference an order payment is confirmed with. A mobile-money or bank reference pays for one
+   * order only: using it again is refused (the database also enforces it for confirmed order payments).
+   */
+  async function referenceInUse(request, reference) {
+    if (!request.orderId || !reference || String(reference).startsWith('ADMIN_')) return false;
+    const same = await paymentRequests.filterByColumnAsync('reference', reference);
+    return same.some(p => p.id !== request.id && p.orderId && p.status === 'approved');
+  }
+
+  /** Checks that must hold before a shop order's payment is confirmed. */
+  async function checkConfirmation(request, { reference, amountTzs }) {
+    if (!request.orderId) return null;
+    const problem = await beforeOrderPayment(request, { amountTzs });
+    if (problem?.error) return problem;
+    if (await referenceInUse(request, reference)) return { error: 'reference_already_used', status: 409 };
+    return null;
+  }
+
+  /** Write the decision only if the request is still in the state it was read in. */
+  async function writeDecision(request, patch) {
+    try {
+      return await updateIf(paymentRequests, request.id, { status: request.status }, patch);
+    } catch (err) {
+      if (err?.code === '23505') return 'reference_already_used';
+      throw err;
+    }
+  }
+
+  async function decide({ id, decision, reference, note, actorId, amountTzs = null }) {
     if (!['approve', 'reject'].includes(decision)) return { error: 'invalid_decision', status: 400 };
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
@@ -117,11 +150,13 @@ export function createAdminPaymentService({
     if (decision === 'approve') {
       const can = await upgradeApprovable(subscriptions, request);
       if (!can.ok) return { error: can.error, status: 409 };
+      const problem = await checkConfirmation(request, { reference: reference || request.reference, amountTzs });
+      if (problem) return problem;
     }
 
     const now = new Date().toISOString();
     const status = decision === 'approve' ? 'approved' : 'rejected';
-    const updated = await paymentRequests.updateByIdAsync(request.id, {
+    const updated = await writeDecision(request, {
       status,
       reference: reference || request.reference,
       // An upgrade's note names the plan it upgrades: it stays as it is.
@@ -129,6 +164,9 @@ export function createAdminPaymentService({
       decidedAt: now,
       decidedBy: actorId
     });
+    // Another decision got there first (two staff members, or a double click).
+    if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
+    if (!updated) return { error: 'already_decided', status: 409 };
     await applyPaymentStatusToSubscription(request, status, reference || `ADMIN_${request.id}`);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
@@ -137,24 +175,33 @@ export function createAdminPaymentService({
     return { paymentRequest: updated };
   }
 
-  async function update({ id, status, reference, note, actorId }) {
+  async function update({ id, status, reference, note, actorId, amountTzs = null }) {
     const allowed = ['pending', 'approved', 'rejected', 'cancelled'];
     if (status && !allowed.includes(status)) return { error: 'invalid_status', status: 400 };
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     const nextStatus = status || request.status;
+    // A confirmed shop-order payment is not edited back: the order is paid, maybe fulfilled.
+    // Getting the money back is the refund workflow.
+    if (request.orderId && request.status === 'approved' && nextStatus !== 'approved') {
+      return { error: 'payment_already_confirmed', status: 409 };
+    }
     if (nextStatus === 'approved' && request.status !== 'approved') {
       const can = await upgradeApprovable(subscriptions, request);
       if (!can.ok) return { error: can.error, status: 409 };
+      const problem = await checkConfirmation(request, { reference: reference ?? request.reference, amountTzs });
+      if (problem) return problem;
     }
     const now = new Date().toISOString();
-    const updated = await paymentRequests.updateByIdAsync(request.id, {
+    const updated = await writeDecision(request, {
       status: nextStatus,
       reference: reference ?? request.reference,
       note: upgradeOf(request) ? request.note : (note ?? request.note ?? null),
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
       decidedBy: nextStatus === 'pending' ? null : actorId
     });
+    if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
+    if (!updated) return { error: 'payment_changed', status: 409 };
     await applyPaymentStatusToSubscription(request, nextStatus, reference ?? request.reference);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,

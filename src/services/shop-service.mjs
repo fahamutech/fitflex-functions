@@ -2,6 +2,7 @@
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
+import { updateIf } from '../shared/conditional-update.mjs';
 import { decideTransition, combinedStatus, fulfilmentsOf, anyAtLeast, canonicalStatus, nextStatuses, STATUSES, LEGACY_INPUTS } from '../shared/order-lifecycle.mjs';
 import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
@@ -34,7 +35,8 @@ const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? ''
 export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null,
   // Moderation: pending, rejected, suspended and hidden products and vendors are not shown to buyers.
   publicGate = OPEN_PUBLIC_GATE,
-  // A paid order was cancelled and the money is owed back: ({ order, reasonCode, actorId, role }) → refund.
+  // A paid order was cancelled and the money is owed back: ({ order, amountTzs, reasonCode, actorId, role }) → refund.
+  // Returns the refund; throws if it could not be raised (the failure is recorded). null = nothing configured.
   onRefundDue = async () => null,
   // A paid order, for promotion analytics: (order) → void. Never allowed to fail the order.
   onOrderPaid = async () => null,
@@ -418,17 +420,69 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
   }
 
-  /** Raise the refund for money held for an order. A failure is recorded, never only logged. */
+  /**
+   * Raise the refund for money held for an order. It is never more than was confirmed. A failure is
+   * recorded (audit `shop_refund_not_raised`), never only logged: the order stays `refund_pending`,
+   * which the reconciliation report lists and `raiseMissingRefund` retries.
+   */
   async function raiseRefund(order, { reasonCode, actorId, role }) {
-    try {
-      return await onRefundDue({ order, reasonCode, actorId, role });
-    } catch (err) {
-      console.error('[shop] refund not raised:', order.id, err?.message);
+    const fail = async (error) => {
+      console.error('[shop] refund not raised:', order.id, error);
       try {
-        await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId || 'system', action: 'shop_refund_not_raised', target: order.id, before: null, after: { reasonCode, error: String(err?.message || err).slice(0, 300) } });
+        await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId || 'system', action: 'shop_refund_not_raised', target: order.id, before: null, after: { reasonCode, error: String(error).slice(0, 300) } });
       } catch (auditErr) { console.error('[shop] refund failure not recorded:', auditErr?.message); }
       return null;
+    };
+    try {
+      let amountTzs = Number(order.totalTzs);
+      if (paymentRequests) {
+        const confirmed = (await paymentRequests.filterAsync(p => p.orderId === order.id && p.status === 'approved')).reduce((sum, p) => sum + Number(p.amountTzs || 0), 0);
+        if (confirmed > 0 && confirmed < amountTzs) {
+          await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: 'system', action: 'shop_refund_amount_capped', target: order.id, before: { totalTzs: amountTzs }, after: { confirmedTzs: confirmed } });
+          amountTzs = confirmed;
+        }
+      }
+      return await onRefundDue({ order, amountTzs, reasonCode, actorId, role });
+    } catch (err) {
+      return fail(err?.message || err);
     }
+  }
+
+  /** Staff: retry the refund of an order that is owed money and has none raised. Safe to repeat. */
+  async function raiseMissingRefund({ orderId, actorId }) {
+    const order = await shopOrders.findByIdAsync(orderId);
+    if (!order) return { error: 'order_not_found', status: 404 };
+    if (order.paymentStatus !== 'refund_pending') return { error: 'no_refund_owed', status: 409, paymentStatus: order.paymentStatus };
+    const refund = await raiseRefund(order, { reasonCode: 'payment_error', actorId, role: 'admin' });
+    if (!refund) return { error: 'refund_not_raised', status: 502 };
+    await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'shop_refund_retried', target: orderId, before: null, after: { refundId: refund.id } });
+    return { refund };
+  }
+
+  /**
+   * Staff: an order whose payment was confirmed but which was never marked paid (the confirmation
+   * was recorded and the system stopped before the order was updated). Re-applies it; safe to repeat.
+   */
+  async function repairOrderPayment({ orderId, actorId }) {
+    const order = await shopOrders.findByIdAsync(orderId);
+    if (!order) return { error: 'order_not_found', status: 404 };
+    if (order.paymentStatus === 'paid') return { order, unchanged: true };
+    const approved = paymentRequests ? await paymentRequests.filterAsync(p => p.orderId === orderId && p.status === 'approved') : [];
+    if (!approved.length) return { error: 'no_confirmed_payment', status: 409 };
+    await applyPaymentToOrder(orderId, 'approved');
+    await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'shop_order_payment_repaired', target: orderId, before: { paymentStatus: order.paymentStatus, status: order.status }, after: null });
+    return { order: await shopOrders.findByIdAsync(orderId) };
+  }
+
+  /** Before a shop order's payment is confirmed: is this payment for this order, in this amount? */
+  async function checkOrderPayment(request, { amountTzs = null } = {}) {
+    const order = await shopOrders.findByIdAsync(request.orderId);
+    if (!order) return { error: 'order_not_found', status: 409 };
+    if (order.buyerId !== request.memberId) return { error: 'order_buyer_mismatch', status: 409 };
+    if ((request.currency || 'TZS') !== 'TZS') return { error: 'currency_mismatch', status: 409 };
+    if (Number(request.amountTzs) !== Number(order.totalTzs)) return { error: 'order_amount_mismatch', status: 409, expectedTzs: Number(order.totalTzs) };
+    if (amountTzs != null && Number(amountTzs) !== Number(request.amountTzs)) return { error: 'amount_mismatch', status: 409, expectedTzs: Number(request.amountTzs) };
+    return null;
   }
 
   /**
@@ -704,11 +758,16 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return cancelOrder(order, { actorId: buyerId, role: 'buyer', reasonCode: 'member_cancelled' });
   }
 
-  /** The refund for a cancelled order was sent. */
+  /** The refund for a cancelled order was sent. Only an order that was owed it becomes refunded. */
   async function markOrderRefunded(orderId) {
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order) return null;
-    return shopOrders.updateByIdAsync(orderId, { paymentStatus: 'refunded', updatedAt: nowIso() });
+    if (order.paymentStatus === 'refunded') return order;
+    const done = await updateIf(shopOrders, orderId, { paymentStatus: 'refund_pending' }, { paymentStatus: 'refunded', updatedAt: nowIso() });
+    if (done) return done;
+    // A refund was paid for an order that was not waiting for one: keep the books as they are and say so.
+    await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: 'system', action: 'shop_refund_paid_unexpected_state', target: orderId, before: { paymentStatus: order.paymentStatus, status: order.status }, after: null });
+    return order;
   }
 
   async function vendorPayments(vendorId) {
@@ -811,5 +870,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
+  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
 }
