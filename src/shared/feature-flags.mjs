@@ -52,3 +52,14 @@ export function memberUsernamesOn() {
   return on('MEMBER_USERNAMES');
 }
 
+
+/**
+ * Pay by mobile money through Malipo by Tunzaa (POST /me/payments/:id/mobile-money).
+ * Off unless TUNZAA_PAYMENTS is set (and the Tunzaa credentials are present):
+ * the endpoint answers 404 feature_disabled and /payments/options says
+ * `enabled: false`, so members keep the manual flow. Callbacks for payments
+ * already in flight are always honoured (see mobile-money-service).
+ */
+export function tunzaaPaymentsOn() {
+  return on('TUNZAA_PAYMENTS');
+}
