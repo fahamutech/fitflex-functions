@@ -115,6 +115,7 @@ test('reject: no friendship; inviter sees declined and cannot re-invite straight
   assert.equal((await s.svc.invite('neema', { userId: 'juma' })).error, 'recently_declined');
   const out = (await s.svc.list('neema')).outgoing;
   assert.equal(out[0].status, 'rejected');
+  assert.equal(out[0].name, 'J*** F**', 'masked until accepted');
 });
 
 test('not on FitFlex: share link + message, token only hashed, attaches after the contact is verified', async () => {
@@ -187,4 +188,17 @@ test('a number held only as a verified login identifier still attaches the invit
   const inc = (await s.svc.list('zed')).incoming;
   assert.equal(inc.length, 1);
   assert.equal(s.notifications.rows.at(-1).userId, 'zed');
+});
+
+test('the inviter sees the contact they invited; the recipient never does', async () => {
+  const s = setup();
+  const r = await s.svc.invite('neema', { phone: '0650387211' });
+  const mine = (await s.svc.list('neema')).outgoing[0];
+  assert.equal(mine.contact, '+255650387211');
+  assert.equal(mine.contactType, 'phone');
+  s.users.rows.push({ id: 'zed', userType: 'member', displayName: 'Zed', accountStatus: 'active', phone: '+255650387211' });
+  await s.svc.attachFor('zed');
+  const theirs = (await s.svc.list('zed')).incoming[0];
+  assert.equal(theirs.contact, null);
+  assert.ok(!JSON.stringify(s.notifications.rows).includes('650387211'));
 });

@@ -108,10 +108,14 @@ export function createFriendInvitationService({
       status: inv.status === 'pending' && expired(inv) ? 'expired' : inv.status,
       direction: mine ? 'outgoing' : 'incoming',
       userId: otherId ?? null,
-      name: otherId ? await nameOf(otherId) : null,
-      // An outgoing invitation to someone not on FitFlex yet is a link the
-      // inviter shared; show it by the kind of contact, not the contact.
-      contactType: mine && !inv.recipientUserId ? inv.identifierType : null,
+      // Whoever you invited stays masked until they accept, as in search.
+      name: otherId
+        ? (mine && inv.status !== 'accepted' ? maskName(await nameOf(otherId)) : await nameOf(otherId))
+        : null,
+      // The inviter typed this contact themselves, so they may see it again;
+      // the recipient never gets it, and no notification carries it.
+      contactType: mine ? inv.identifierType : null,
+      contact: mine ? inv.identifierValue ?? null : null,
       createdAt: iso(inv.createdAt),
       expiresAt: iso(inv.expiresAt),
       respondedAt: inv.respondedAt ? iso(inv.respondedAt) : null,
