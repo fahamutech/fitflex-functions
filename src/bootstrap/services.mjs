@@ -50,6 +50,7 @@ import { createPortalUserService } from '../services/portal-user-service.mjs';
 import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
 import { createTermsService } from '../services/terms-service.mjs';
+import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -220,6 +221,10 @@ export const trainerEngagementService = createTrainerEngagementService({
 });
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
+  // Stock reservation and cancellation are single database transactions.
+  orderStore: createPgShopOrderStore({ db }),
+  requireVariantChoice: process.env.SHOP_REQUIRE_VARIANT === 'on',
+  reservationTtlMinutes: Number(process.env.SHOP_RESERVATION_TTL_MINUTES) > 0 ? Number(process.env.SHOP_RESERVATION_TTL_MINUTES) : 48 * 60,
   onRefundDue: ({ order, reasonCode, actorId, role }) => refundService.raise({
     memberId: order.buyerId, kind: 'shop_order', sourceId: order.id,
     amountTzs: order.totalTzs, reasonCode, requestedBy: actorId, requestedRole: role, approved: true,

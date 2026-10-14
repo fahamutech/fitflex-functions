@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -84,6 +84,16 @@ export const vendorSettlementDrafts = {
     const r = await vendorSettlementService.prepare({ actorId: 'system:weekly-vendor-statements' });
     if (r.error) console.warn(`[vendor-settlements] ${r.error}`);
     else if (r.prepared || r.rebuilt) console.log(`[vendor-settlements] ${r.periodStartDate}: prepared=${r.prepared} rebuilt=${r.rebuilt} skipped=${r.skipped}`);
+  }
+};
+
+export const shopReservationExpiry = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'Marketplace: cancel unpaid orders whose stock reservation has lapsed (SHOP_RESERVATION_TTL_MINUTES after the order, default 48h) and put their stock back. Does nothing unless SHOP_RESERVATION_EXPIRY=on, so enabling it is a deliberate step. Safe to rerun and to overlap: each order is released once; a payment that arrives later is queued for refund.',
+  onJob: async () => {
+    if (process.env.SHOP_RESERVATION_EXPIRY !== 'on') return;
+    const r = await shopService.expireStaleReservations({});
+    if (r.expired) console.log(`[shop] reservations expired=${r.expired} due=${r.due}`);
   }
 };
 
