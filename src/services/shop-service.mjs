@@ -28,6 +28,27 @@ const publicProfile = profile => profile?.status === 'published'
 
 const makeId = prefix => `${prefix}_${randomUUID().slice(0, 8)}`;
 const nowIso = () => new Date().toISOString();
+const MAX_TEXT = { deliveryAddress: 300, note: 500, paymentReference: 100, pickupGymId: 100 };
+const MAX_QTY_PER_LINE = 1000;
+const MAX_ORDER_TOTAL_TZS = 100_000_000; // far above any real basket, far below the integer column's limit
+const MAX_UNPAID_ORDERS = Number(process.env.SHOP_MAX_UNPAID_ORDERS) > 0 ? Number(process.env.SHOP_MAX_UNPAID_ORDERS) : 5;
+const isMoneyInt = (v, { allowZero = false } = {}) => Number.isInteger(Number(v)) && (allowZero ? Number(v) >= 0 : Number(v) > 0) && Number(v) <= MAX_ORDER_TOTAL_TZS;
+
+/** What the buyer, the public or a vendor may see of a stored order: not the commission, payouts or internals. */
+const INTERNAL_ORDER_FIELDS = ['idempotencyKey', 'idempotencyFingerprint', 'stockState', 'reservationCycle', 'reservationExpiresAt', 'fulfilments', 'settlementStatus'];
+const INTERNAL_ITEM_FIELDS = ['commissionPct', 'commissionTzs', 'vendorPayoutTzs', 'variantStockReserved'];
+export function buyerOrderView(order) {
+  if (!order) return order;
+  const view = { ...order, items: (order.items || []).map((item) => {
+    const copy = { ...item };
+    for (const f of INTERNAL_ITEM_FIELDS) delete copy[f];
+    return copy;
+  }) };
+  for (const f of INTERNAL_ORDER_FIELDS) delete view[f];
+  return view;
+}
+/** A review as the public sees it: no buyer or order identifiers. */
+export const publicReview = ({ id, productId, rating, comment, createdAt }) => ({ id, productId, rating, comment, createdAt });
 const bool = value => value === true || value === 'true' || value === '1' ? true : value === false || value === 'false' || value === '0' ? false : undefined;
 const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0) ? Number(product.discountPriceTzs) : Number(product.priceTzs || 0);
 const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
@@ -105,7 +126,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const profile = publicProfile(await getVendorProfile(vendorId));
     if (!profile) return null;
     const storeProducts = await listProducts({ vendorId });
-    const reviews = await productReviews.filterAsync(review => storeProducts.some(product => product.id === review.productId));
+    const reviews = (await productReviews.filterAsync(review => storeProducts.some(product => product.id === review.productId))).map(publicReview);
     const rating = reviews.length ? reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0) / reviews.length : 0;
     return { ...profile, rating, reviewCount: reviews.length, products: storeProducts, reviews };
   }
@@ -145,12 +166,35 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const product = await products.findByIdAsync(productId);
     if (!product || product.deletedAt) return null;
     if (!includeUnlisted && !(await listProducts({})).some(row => row.id === productId)) return null;
-    const reviews = await productReviews.filterAsync(review => review.productId === productId);
+    const reviews = (await productReviews.filterAsync(review => review.productId === productId)).map(publicReview);
     return { ...product, vendor: publicProfile(await getVendorProfile(product.vendorId)), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
+  }
+
+  /** Shape and size limits on what a vendor may store; null when fine. */
+  function validateProductInput(input) {
+    const text = (field, max) => (input[field] != null && (typeof input[field] !== 'string' || input[field].length > max) ? { error: 'invalid_field', status: 400, field } : null);
+    for (const [field, max] of [['name', 200], ['description', 5000], ['brand', 100], ['sku', 100], ['category', 100]]) {
+      const problem = text(field, max);
+      if (problem) return problem;
+    }
+    for (const field of ['priceTzs', 'discountPriceTzs']) {
+      if (input[field] != null && !isMoneyInt(input[field], { allowZero: field === 'discountPriceTzs' })) return { error: field === 'priceTzs' ? 'priceTzs_required' : 'invalid_field', status: 400, field };
+    }
+    if (input.stock != null && (!Number.isInteger(Number(input.stock)) || Number(input.stock) < 0 || Number(input.stock) > 1_000_000)) return { error: 'invalid_stock', status: 400 };
+    if (input.images != null && (!Array.isArray(input.images) || input.images.length > 10 || input.images.some(i => typeof i !== 'string' || i.length > 500))) return { error: 'invalid_field', status: 400, field: 'images' };
+    if (input.variants != null) {
+      const v = input.variants;
+      const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && x.name.length <= 60
+        && (x.stock == null || (Number.isInteger(x.stock) && x.stock >= 0 && x.stock <= 1_000_000)));
+      if (!ok) return { error: 'invalid_field', status: 400, field: 'variants' };
+    }
+    return null;
   }
 
   async function upsertProduct({ vendorId, body, productId, keepCategory = false }) {
     const input = body || {};
+    const bad = validateProductInput(input);
+    if (bad) return bad;
     if (productId) {
       const prior = await products.findByIdAsync(productId);
       if (!prior || prior.deletedAt) return { error: 'product_not_found', status: 404 };
@@ -318,6 +362,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (deliveryMethod === 'home_delivery' && !body?.deliveryAddress) return { error: 'delivery_address_required', status: 400 };
     const paymentMethod = body?.paymentMethod || 'mpesa';
     if (!PAYMENT_METHODS.has(paymentMethod)) return { error: 'invalid_payment_method', status: 400 };
+    for (const [field, max] of Object.entries(MAX_TEXT)) {
+      const value = body?.[field];
+      if (value != null && (typeof value !== 'string' || value.length > max)) return { error: 'invalid_field', status: 400, field };
+    }
+    if (body?.note != null && typeof body.note !== 'string') return { error: 'invalid_field', status: 400, field: 'note' };
     // The app's own payment result is never trusted: an order is paid only
     // once FitFlex confirms the payment (admin approval of its payment request).
     if (body?.paymentOutcome === 'failed') return { error: 'payment_failed', status: 402 };
@@ -325,7 +374,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const wanted = new Map();
     for (const item of items) {
       const qty = Number(item?.qty || 0);
-      if (!Number.isSafeInteger(qty) || qty <= 0) return { error: 'invalid_quantity', status: 400 };
+      if (!Number.isSafeInteger(qty) || qty <= 0 || qty > MAX_QTY_PER_LINE) return { error: 'invalid_quantity', status: 400 };
       if (typeof item.productId !== 'string' || !item.productId) return { error: 'product_not_found', status: 404, productId: item?.productId };
       const variant = item.variant == null || item.variant === '' ? null : String(item.variant).trim();
       if (item.variant != null && typeof item.variant !== 'string') return { error: 'invalid_variant', status: 400, productId: item.productId };
@@ -341,6 +390,12 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const earlier = await orderStore.findReplay({ buyerId, key: String(key), fingerprint });
       if (earlier?.error) return { error: earlier.error, status: earlier.status };
       if (earlier) return earlier.order.paymentStatus === 'paid' ? { order: earlier.order, status: 201, replayed: true } : { order: earlier.order, paymentRequest: earlier.paymentRequest, status: 202, replayed: true };
+    }
+    // Reserving stock costs other customers: an unpaid order holds it until paid or expired, so one
+    // buyer may not hold an unbounded number of them.
+    if (paymentRequests) {
+      const open = await shopOrders.filterAsync(o => o.buyerId === buyerId && o.status === 'pending' && o.paymentStatus === 'pending');
+      if (open.length >= MAX_UNPAID_ORDERS) return { error: 'too_many_unpaid_orders', status: 429, limit: MAX_UNPAID_ORDERS };
     }
     const resolved = [];
     // Product stock is always the limit; a variant that keeps its own stock is a second limit on its units.
@@ -378,6 +433,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       };
     });
     const totalTzs = orderItems.reduce((sum, item) => sum + item.priceTzs * item.qty, 0);
+    if (totalTzs > MAX_ORDER_TOTAL_TZS) return { error: 'order_too_large', status: 400, maxTzs: MAX_ORDER_TOTAL_TZS };
     const placedAt = now();
     const at = placedAt.toISOString();
     const free = totalTzs === 0 || !paymentRequests;
@@ -582,7 +638,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await shopOrders.filterAsync(order => order.buyerId === buyerId))
       .sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0))
       // Whether the buyer can still cancel it themselves (before it is on its way).
-      .map(order => ({ ...order, canCancel: CANCELLABLE.has(order.status) }));
+      .map(order => ({ ...buyerOrderView(order), canCancel: CANCELLABLE.has(order.status) }));
   }
   /** Every order with a line of this vendor's (lines carry the vendor; older rows fall back to product ownership). */
   async function ordersOfVendor(vendorId) {
@@ -755,7 +811,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order || order.buyerId !== buyerId) return { error: 'order_not_found', status: 404 };
     if (order.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
-    return cancelOrder(order, { actorId: buyerId, role: 'buyer', reasonCode: 'member_cancelled' });
+    const result = await cancelOrder(order, { actorId: buyerId, role: 'buyer', reasonCode: 'member_cancelled' });
+    return result.order ? { ...result, order: buyerOrderView(result.order) } : result;
   }
 
   /** The refund for a cancelled order was sent. Only an order that was owed it becomes refunded. */

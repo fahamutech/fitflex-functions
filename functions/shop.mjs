@@ -3,6 +3,7 @@ import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { shopService, vendorSettlementService, shopReconciliationService } from '../src/bootstrap/services.mjs';
+import { buyerOrderView } from '../src/services/shop-service.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
@@ -238,9 +239,9 @@ export const createShopOrder = {
       // A retried request carries the same key and gets the order it already made.
       idempotencyKey: req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'] || null,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId, ...(result.variants ? { variants: result.variants } : {}) });
+    if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId, ...(result.field ? { field: result.field } : {}), ...(result.limit ? { limit: result.limit } : {}), ...(result.variants ? { variants: result.variants } : {}) });
     if (result.replayed) res.set?.('Idempotent-Replay', 'true');
-    res.status(201).json(result.order);
+    res.status(201).json(buyerOrderView(result.order));
   }
 };
 

@@ -16,6 +16,8 @@ const FULL_MAX_DIMENSION = 1280;
 const FULL_WEBP_QUALITY = 82;
 const THUMB_MAX_DIMENSION = 320;
 const THUMB_WEBP_QUALITY = 70;
+// An upload is read into memory: bounded, so one request cannot exhaust the server.
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 const stripTrailingSlash = value => `${value ?? ''}`.replace(/\/+$/g, '');
 const isImageMime = mime => `${mime ?? ''}`.toLowerCase().startsWith('image/');
@@ -55,18 +57,25 @@ export const uploadStorageFile = {
       return res.status(503).json({ error: 'storage_service_unavailable' });
     }
     try {
-      const { files } = await parseMultipartRequest(req);
+      const { files } = await parseMultipartRequest(req, { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 10, parts: 12 });
       if (!files.length) return res.status(400).json({ error: 'no_file_provided' });
 
       const file = files[0];
+      if (file.truncated) return res.status(413).json({ error: 'file_too_large', maxBytes: MAX_UPLOAD_BYTES });
       if (!isImageMime(file.mimetype)) {
         return res.status(400).json({ error: 'unsupported_file_type', reason: 'Only image uploads are supported' });
       }
 
-      const [fullBuffer, thumbBuffer] = await Promise.all([
-        toWebp(file.buffer, FULL_MAX_DIMENSION, FULL_WEBP_QUALITY),
-        toWebp(file.buffer, THUMB_MAX_DIMENSION, THUMB_WEBP_QUALITY)
-      ]);
+      // The declared type is the client's word; the bytes must actually decode as an image.
+      let fullBuffer; let thumbBuffer;
+      try {
+        [fullBuffer, thumbBuffer] = await Promise.all([
+          toWebp(file.buffer, FULL_MAX_DIMENSION, FULL_WEBP_QUALITY),
+          toWebp(file.buffer, THUMB_MAX_DIMENSION, THUMB_WEBP_QUALITY)
+        ]);
+      } catch {
+        return res.status(400).json({ error: 'unsupported_file_type', reason: 'The file is not a readable image' });
+      }
 
       const [fullResponse, thumbResponse] = await Promise.all([
         uploadToZebra(fullBuffer, webpName(file.filename), 'image/webp'),
@@ -110,6 +119,6 @@ export const getStorageFile = {
   onRequest: (req, res) => {
     if (!ZEBRA_BASE_URL) return res.status(503).json({ error: 'storage_service_unavailable' });
     const { cid, filename } = req.params || {};
-    res.redirect(307, `${stripTrailingSlash(ZEBRA_BASE_URL)}/storage/${cid}/${filename}`);
+    res.redirect(307, `${stripTrailingSlash(ZEBRA_BASE_URL)}/storage/${encodeURIComponent(cid)}/${encodeURIComponent(filename)}`);
   }
 };

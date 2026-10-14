@@ -82,6 +82,31 @@ export function createShopReconciliationService({ db, now = () => new Date(), sa
         .select('o.id as orderId', 'o.status', 'o.paymentStatus', 's.id as statementId', 's.status as statementStatus', 's.vendorId'),
     },
     {
+      id: 'vendor_statement_total_mismatch', severity: 'P0',
+      description: 'A vendor statement\'s net total is not the sum of its live lines.',
+      query: () => db('VendorSettlement as s')
+        .leftJoin('VendorSettlementLine as l', function join() { this.on('l.vendorSettlementId', 's.id').andOn('l.voided', db.raw('false')); })
+        .whereNot('s.status', 'voided')
+        .groupBy('s.id', 's.vendorId', 's.finalNetTzs', 's.status')
+        .havingRaw('s."finalNetTzs" <> COALESCE(SUM(l."payoutTzs"), 0)')
+        .select('s.id as statementId', 's.vendorId', 's.status', 's.finalNetTzs', db.raw('COALESCE(SUM(l."payoutTzs"), 0)::int as "linesTzs"')),
+    },
+    {
+      id: 'order_share_on_two_live_statements', severity: 'P0',
+      description: 'A vendor\'s share of an order is on more than one live statement (it would be paid twice).',
+      query: () => db('VendorSettlementLine as l').join('VendorSettlement as s', 's.id', 'l.vendorSettlementId')
+        .where('l.voided', false).whereNot('s.status', 'voided')
+        .groupBy('l.orderId', 'l.vendorId').havingRaw('COUNT(*) > 1')
+        .select('l.orderId', 'l.vendorId', db.raw('COUNT(*)::int as n')),
+    },
+    {
+      id: 'settled_order_not_delivered_and_paid', severity: 'P0',
+      description: 'An order marked settled that is not both delivered and paid.',
+      query: () => db('ShopOrder as o').where('o.settlementStatus', 'settled')
+        .where((q) => q.whereNotIn('o.status', ['delivered', 'fulfilled']).orWhereNot('o.paymentStatus', 'paid'))
+        .select('o.id', 'o.status', 'o.paymentStatus', 'o.settlementStatus'),
+    },
+    {
       id: 'unpaid_past_reservation', severity: 'P2',
       description: 'Unpaid orders still holding stock after their reservation lapsed (the expiry job is off or behind).',
       query: () => db('ShopOrder as o').where({ 'o.status': 'pending', 'o.paymentStatus': 'pending', 'o.stockState': 'reserved' })
