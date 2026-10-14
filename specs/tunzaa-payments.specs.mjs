@@ -142,17 +142,18 @@ const DAY = 86_400_000;
 const PRICES = { basic: 60_000, pro: 120_000 };
 const tiers = Object.entries(PRICES).map(([key, monthlyPrice]) => ({ key, label: key, monthlyPrice, visits: 20, gymAccess: 'standard' }));
 
-function world({ enabled = true, status = {}, subs = [], requests = [] } = {}) {
+function world({ enabled = true, canSettle = true, status = {}, subs = [], requests = [] } = {}) {
   const subscriptions = memStore(subs);
   const paymentRequests = memStore(requests);
   const audit = [];
   const auditLog = { async insertAsync(e) { audit.push(e); } };
   const adminPaymentService = createAdminPaymentService({ paymentRequests, subscriptions, users: memStore(), auditLog });
   const remote = { initiated: [], statusOf: { TXN_1: { status: 'PENDING', amount: '60000.00' }, ...status }, failInitiate: null };
+  const clock = { t: 1_800_000_000_000 };
   const client = {
     environment: 'sandbox',
     async initiatePayment(args) {
-      if (remote.failInitiate) throw new TunzaaError('no', { code: remote.failInitiate });
+      if (remote.failInitiate) throw new TunzaaError('no', { code: remote.failInitiate, status: remote.failInitiate === 'provider_error' ? 500 : 502 });
       remote.initiated.push(args);
       return { transactionId: `TXN_${remote.initiated.length}` };
     },
@@ -161,13 +162,16 @@ function world({ enabled = true, status = {}, subs = [], requests = [] } = {}) {
       return { status: s.status, amountTzs: s.amount ? Number(s.amount) : null, transactionId: id, remark: s.remark || null };
     },
   };
-  const service = createMobileMoneyService({ paymentRequests, subscriptions, adminPaymentService, auditLog, client, enabled: () => enabled });
+  const service = createMobileMoneyService({
+    paymentRequests, subscriptions, adminPaymentService, auditLog, client,
+    enabled: () => enabled, canSettle: () => canSettle, now: () => clock.t,
+  });
   const subscriptionService = createSubscriptionService({
     subscriptions, paymentRequests, checkins: memStore(), gyms: [],
     settingsService: { priceForTier: (t) => PRICES[t] ?? 0, visitCapForTier: () => null, publicTiers: () => tiers },
     publicUserId: async () => 'FF-1',
   });
-  return { subscriptions, paymentRequests, audit, service, subscriptionService, remote, adminPaymentService };
+  return { subscriptions, paymentRequests, audit, service, subscriptionService, remote, adminPaymentService, clock };
 }
 
 const pendingPass = (over = {}) => ({
@@ -179,6 +183,13 @@ const pendingPass = (over = {}) => ({
 test('options say whether paying is on, and in which environment', () => {
   assert.deepEqual(world({ enabled: false }).service.options(), { enabled: false, provider: 'tunzaa', environment: null });
   assert.deepEqual(world().service.options(), { enabled: true, provider: 'tunzaa', environment: 'sandbox' });
+  // sandbox payments settle real plans: not offered unless that was asked for
+  assert.deepEqual(world({ canSettle: false }).service.options(), { enabled: false, provider: 'tunzaa', environment: null });
+});
+
+test('against the sandbox without opting in, paying is closed', async () => {
+  const w = world({ ...pendingPass(), canSettle: false });
+  assert.equal((await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' })).error, 'feature_disabled');
 });
 
 test('pay sends the request\'s own amount and reference, and marks it in flight', async () => {
@@ -186,7 +197,10 @@ test('pay sends the request\'s own amount and reference, and marks it in flight'
   const out = await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' });
   assert.equal(out.status, 202);
   assert.equal(out.state, 'in_progress');
-  assert.deepEqual(w.remote.initiated, [{ msisdn: '255712345678', amountTzs: 60_000, reference: 'pay_1', scenario: null }]);
+  assert.equal(w.remote.initiated.length, 1);
+  const sent = w.remote.initiated[0];
+  assert.deepEqual([sent.msisdn, sent.amountTzs, sent.scenario], ['255712345678', 60_000, null]);
+  assert.match(sent.reference, /^pay_1\.[a-z0-9]+$/, 'our reference: the request id and an attempt');
   const row = w.paymentRequests.rows[0];
   assert.deepEqual([row.provider, row.reference, row.status], ['tunzaa', 'TXN_1', 'pending']);
 });
@@ -216,13 +230,41 @@ test('a second tap does not send a second prompt', async () => {
   assert.equal(w.remote.initiated.length, 1);
 });
 
-test('a provider that cannot be reached leaves the request as it was, ready to try again', async () => {
+test('a request the provider refused outright is released at once', async () => {
   const w = world(pendingPass());
-  w.remote.failInitiate = 'unreachable';
-  assert.equal((await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' })).error, 'provider_unavailable');
+  w.remote.failInitiate = 'rejected';
+  assert.equal((await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' })).error, 'provider_rejected');
   assert.deepEqual([w.paymentRequests.rows[0].provider, w.paymentRequests.rows[0].reference], ['admin_approved', null]);
   w.remote.failInitiate = null;
   assert.equal((await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' })).status, 202);
+});
+
+test('a call that may have reached the phone keeps its claim: no second prompt, then it expires', async () => {
+  const w = world(pendingPass());
+  w.remote.failInitiate = 'unreachable';
+  assert.equal((await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' })).error, 'provider_unavailable');
+  assert.equal(w.paymentRequests.rows[0].provider, 'tunzaa');
+  assert.match(w.paymentRequests.rows[0].reference, /^pending:/);
+  w.remote.failInitiate = null;
+  const again = await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' });
+  assert.equal(again.alreadyRequested, true);
+  assert.equal(w.remote.initiated.length, 0);
+  // after the claim expires the member can try again
+  w.clock.t += 3 * 60_000;
+  assert.equal((await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' })).status, 202);
+  assert.equal(w.remote.initiated.length, 1);
+});
+
+test('a prompt whose answer was lost still settles through its signed callback', async () => {
+  const w = world(pendingPass());
+  w.remote.failInitiate = 'unreachable';
+  await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' });
+  w.remote.statusOf.TXN_LOST = { status: 'COMPLETED', amount: '60000.00' };
+  const out = await w.service.handleCallback({ transaction_id: 'TXN_LOST', reference_id: 'pay_1.k3j2', status: 'COMPLETED', amount: '60000.00' });
+  assert.equal(out.state, 'completed');
+  assert.equal(w.paymentRequests.rows[0].status, 'approved');
+  assert.equal(w.paymentRequests.rows[0].reference, 'TXN_LOST');
+  assert.equal(w.subscriptions.rows[0].status, 'active');
 });
 
 test('completed: callback confirms with Tunzaa, approves and activates the pass; repeats are harmless', async () => {
@@ -249,15 +291,53 @@ test('a callback saying COMPLETED is not believed unless Tunzaa says so too', as
   assert.equal(w.subscriptions.rows[0].status, 'payment_pending');
 });
 
-test('a callback for another transaction or an unknown reference does nothing', async () => {
+test('a callback is acted on only as far as Tunzaa confirms it', async () => {
   const w = world(pendingPass());
   await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' });
-  w.remote.statusOf.TXN_X = { status: 'COMPLETED', amount: '60000.00' };
-  const other = await w.service.handleCallback({ transaction_id: 'TXN_X', reference_id: 'pay_1', status: 'COMPLETED' });
-  assert.equal(other.ignored, 'transaction_mismatch');
+  // Tunzaa says that transaction is still pending: nothing happens
+  w.remote.statusOf.TXN_X = { status: 'PENDING', amount: null };
+  assert.equal((await w.service.handleCallback({ transaction_id: 'TXN_X', reference_id: 'pay_1.a', status: 'COMPLETED' })).state, 'in_progress');
   assert.equal(w.paymentRequests.rows[0].status, 'pending');
-  assert.equal((await w.service.handleCallback({ transaction_id: 'T', reference_id: 'pay_zzz' })).ignored, 'unknown_reference');
+  assert.equal((await w.service.handleCallback({ transaction_id: 'T', reference_id: 'pay_zzz.a' })).ignored, 'unknown_reference');
   assert.equal((await w.service.handleCallback({ reference_id: 'pay_1' })).error, 'invalid_payload');
+});
+
+test('an amount Tunzaa does not report is not good enough', async () => {
+  const w = world(pendingPass());
+  await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' });
+  w.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: null };
+  const out = await w.service.refresh({ memberId: 'm1', paymentRequestId: 'pay_1' });
+  assert.deepEqual([out.state, out.reason], ['held', 'amount_mismatch']);
+  assert.equal(w.paymentRequests.rows[0].status, 'pending');
+});
+
+test('money arriving for a request that was closed meanwhile is audited, not lost', async () => {
+  const w = world(pendingPass());
+  await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' });
+  w.paymentRequests.rows[0].status = 'cancelled';
+  w.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '60000.00' };
+  const out = await w.service.handleCallback({ transaction_id: 'TXN_1', reference_id: 'pay_1.a', status: 'COMPLETED' });
+  assert.equal(out.state, 'failed'); // not approved
+  assert.equal(w.subscriptions.rows[0].status, 'payment_pending');
+  assert.ok(w.audit.some((a) => a.action === 'payment_mobile_money_orphaned' && a.target === 'pay_1'));
+});
+
+test('prompts are limited per phone, and a staff-cancelled plan with a live prompt is not cancelled', async () => {
+  const w = world(pendingPass());
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal((await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' })).status, 202);
+    w.remote.statusOf[`TXN_${i + 1}`] = { status: 'FAILED', amount: null };
+    await w.service.refresh({ memberId: 'm1', paymentRequestId: 'pay_1' });
+  }
+  assert.equal((await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_1', phone: '0712345678' })).error, 'too_many_attempts');
+
+  const g = world({
+    subs: [{ id: 'sub_g', memberId: 'm1', type: 'direct_sub', plan: 'monthly', homeGymId: 'gym_1', status: 'payment_pending', startedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * DAY).toISOString() }],
+    requests: [{ id: 'pay_g', memberId: 'm1', subscriptionId: 'sub_g', plan: 'monthly', gymId: 'gym_1', amountTzs: 80_000, status: 'pending', provider: 'admin_approved', reference: null }],
+  });
+  await g.service.pay({ memberId: 'm1', paymentRequestId: 'pay_g', phone: '0712345678' });
+  const cancelled = await g.subscriptionService.cancelTrainerPass({ trainerUserId: 'm1', subscriptionId: 'sub_g' });
+  assert.equal(cancelled.error, 'payment_in_progress');
 });
 
 test('the wrong amount is held for staff, never approved', async () => {

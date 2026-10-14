@@ -23,7 +23,9 @@ export function tunzaaSettings(env = process.env) {
   const secretKey = clean(env.TUNZAA_SECRET_KEY);
   if (!apiKey || !secretKey) return null;
   const environment = clean(env.TUNZAA_ENV).toLowerCase() === 'live' ? 'live' : 'sandbox';
-  return { apiKey, secretKey, environment, baseUrl: clean(env.TUNZAA_BASE_URL) || TUNZAA_BASE_URL };
+  // The host is fixed in production: pointing it elsewhere would let a mock "confirm" payments.
+  const override = env.NODE_ENV === 'production' ? '' : clean(env.TUNZAA_BASE_URL);
+  return { apiKey, secretKey, environment, baseUrl: override || TUNZAA_BASE_URL };
 }
 
 /** A Tanzanian number as 255XXXXXXXXX (what Tunzaa wants), or null when it is not one. */
@@ -67,6 +69,14 @@ export function amountToTzs(raw) {
   const n = Number(String(raw ?? '').replace(/,/g, ''));
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
 }
+
+/**
+ * Did the request possibly reach Tunzaa? A timeout, a dropped connection or a
+ * 5xx can come after Tunzaa already put a prompt on the phone; a 4xx or a
+ * refused token cannot have.
+ */
+export const maybeSent = (err) =>
+  err?.code === 'unreachable' || (err?.code === 'provider_error' && Number(err?.status) >= 500);
 
 export class TunzaaError extends Error {
   constructor(message, { status = 502, body = null, code = 'provider_error' } = {}) {

@@ -31,7 +31,7 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn } from '../shared/feature-flags.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
 import { createSmsProvider } from '../integrations/sms/provider.mjs';
 import { createSmsService } from '../services/sms-service.mjs';
@@ -450,10 +450,16 @@ export const adminPaymentService = createAdminPaymentService({
 // client exists only when TUNZAA_API_KEY and TUNZAA_SECRET_KEY are both set.
 const tunzaaConfig = tunzaaSettings();
 export const tunzaaSecretKey = tunzaaConfig?.secretKey ?? null;
+if (tunzaaConfig && tunzaaPaymentsOn() && tunzaaConfig.environment !== 'live') {
+  console.warn(`[tunzaa] payments are ON against the SANDBOX${tunzaaSandboxSettlesOn() ? ' and sandbox payments settle real plans (TUNZAA_SANDBOX_SETTLES)' : ' but will not be offered (set TUNZAA_SANDBOX_SETTLES to rehearse)'}`);
+}
 export const mobileMoneyService = createMobileMoneyService({
   paymentRequests, subscriptions, adminPaymentService, auditLog,
   client: tunzaaConfig ? createTunzaaClient({ settings: tunzaaConfig }) : null,
   enabled: tunzaaPaymentsOn,
+  // Sandbox transactions still activate real plans, so against the sandbox this
+  // must be asked for (TUNZAA_SANDBOX_SETTLES); live needs nothing extra.
+  canSettle: () => tunzaaConfig?.environment === 'live' || tunzaaSandboxSettlesOn(),
   // Sandbox only (the client ignores it on live): 'success' or 'failure' to rehearse an outcome.
   scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
 });

@@ -204,6 +204,9 @@ export function createSubscriptionService({
       return { error: 'not_found', status: 404 };
     }
     if (sub.status !== 'payment_pending') return { error: 'not_cancellable', status: 409 };
+    // A mobile-money prompt is on the member's phone: cancelling now would strand the money.
+    const live = await paymentRequests.filterAsync(p => p.subscriptionId === sub.id && p.status === 'pending' && p.provider === 'tunzaa' && p.reference);
+    if (live.length) return { error: 'payment_in_progress', status: 409 };
     const updated = await subscriptions.updateByIdAsync(sub.id, { status: 'payment_cancelled' });
     const requests = await paymentRequests.filterAsync(p => p.subscriptionId === sub.id && p.status === 'pending');
     for (const r of requests) {

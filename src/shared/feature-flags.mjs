@@ -63,3 +63,13 @@ export function memberUsernamesOn() {
 export function tunzaaPaymentsOn() {
   return on('TUNZAA_PAYMENTS');
 }
+
+/**
+ * Sandbox payments settle real entitlements (an approved sandbox transaction
+ * still activates a pass). So against Tunzaa's sandbox, paying is offered only
+ * when TUNZAA_SANDBOX_SETTLES is set on purpose: a test server says so, a
+ * production server can never do it by accident. Live needs no such flag.
+ */
+export function tunzaaSandboxSettlesOn() {
+  return on('TUNZAA_SANDBOX_SETTLES');
+}

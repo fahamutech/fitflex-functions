@@ -20,7 +20,7 @@ export const paymentOptions = {
 
 export const payByMobileMoney = {
   created, method: 'post', path: '/me/payments/:id/mobile-money',
-  description: 'Ask the member\'s phone to approve one of their pending payment requests (pass, upgrade or gym plan). Body {phone}. The amount is always the request\'s own. 404 feature_disabled while off; 409 payment_not_pending / not_payable_this_way; 400 invalid_phone.',
+  description: 'Ask the member\'s phone to approve one of their pending payment requests (pass, upgrade or gym plan). Body {phone}. The amount is always the request\'s own. 404 feature_disabled while off; 409 payment_not_pending / not_payable_this_way; 400 invalid_phone; 429 too_many_attempts.',
   requestSample: { phone: '0712345678' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await mobileMoneyService.pay({
