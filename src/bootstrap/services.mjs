@@ -507,14 +507,34 @@ export const socialService = createSocialService({
 export const friendInvitationService = createFriendInvitationService({
   users, follows, blocks, invites: friendInvitations, notifications,
   notify: (userId, message) => notificationService.notify(userId, message),
+  // The member behind a verified email / number. The number can live only in
+  // LoginIdentifier (User.phone is null when another persona of the same
+  // person holds it), so look there first, then at the member row itself.
   findMember: async ({ type, value }) => {
-    const q = db('User').where({ userType: 'member' }).whereNot('accountStatus', 'suspended');
+    const live = () => db('User').where({ userType: 'member' }).whereNot('accountStatus', 'suspended');
+    const viaIdentifier = await db('LoginIdentifier')
+      .where({ type, normalizedValue: value, status: 'active' }).whereNotNull('verifiedAt')
+      .first('personId');
+    if (viaIdentifier?.personId) {
+      const m = await live().where({ personId: viaIdentifier.personId }).first('id', 'displayName');
+      if (m) return m;
+    }
+    const q = live();
     if (type === 'email') q.whereRaw('lower("email") = ?', [value]);
     else {
       const digits = value.replace('+', '');
       q.whereIn('phone', [value, digits, `0${digits.slice(3)}`]);
     }
     return (await q.first('id', 'displayName')) ?? null;
+  },
+  // Every verified email / number of the person behind a member, for attaching invitations.
+  contactsFor: async (userId) => {
+    const u = await db('User').where({ id: userId }).first('personId');
+    if (!u?.personId) return [];
+    const rows = await db('LoginIdentifier')
+      .where({ personId: u.personId, status: 'active' }).whereIn('type', ['email', 'phone']).whereNotNull('verifiedAt')
+      .select('type', 'normalizedValue');
+    return rows.map(r => ({ type: r.type, value: r.normalizedValue }));
   },
   transition: async (id, from, patch, opts = {}) => {
     const q = db('FriendInvitation').where({ id, status: from });
