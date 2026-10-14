@@ -84,7 +84,8 @@ export const ownerGymCheckins = {
     const withNames = checkinVisitorNamesOn();
     const names = new Map();
     for (let i = 0; i < list.length; i++) {
-      const pubId = await publicUserId(list[i].memberId, 'member');
+      // The person's own code: a trainer who checked in reads FT…, a member FM…
+      const pubId = await publicUserId(list[i].memberId);
       list[i].memberName = pubId;
       list[i].memberPublicId = pubId;
       // The member's username (MEMBER_USERNAMES), next to their name for the gym.
