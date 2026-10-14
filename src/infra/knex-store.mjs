@@ -553,6 +553,30 @@ export function collection(name) {
       return _findByIdFromDb(id);
     },
 
+    /**
+     * Update a record only if it still has the expected column values — one atomic statement.
+     * `where` is { column: value | [values] }. Returns the updated row, or null when the row is
+     * missing or has changed (someone else got there first). The way to make a decision "once".
+     */
+    updateByIdWhereAsync: async (id, where, patch) => {
+      const pk = pkField(name);
+      const writeData = prepareForKnex(name, patch, true);
+      if (!Object.keys(writeData).length) return null;
+      let query = db(meta.table).where({ [pk]: id });
+      for (const [column, expected] of Object.entries(where || {})) {
+        query = Array.isArray(expected)
+          ? query.where((q) => {
+            const real = expected.filter(v => v !== null);
+            if (real.length) q.whereIn(column, real);
+            if (expected.includes(null)) q.orWhereNull(column);
+          })
+          : expected === null ? query.whereNull(column) : query.where(column, expected);
+      }
+      const rows = await query.update(writeData).returning(pk);
+      invalidate(name);
+      return rows.length ? _findByIdFromDb(id) : null;
+    },
+
     remove: (pred) => {
       console.warn(`[knex-store] sync remove() on db-only collection "${name}" — prefer removeByIdAsync()`);
       return null;
@@ -616,7 +640,7 @@ const ALLOWED_FIELDS = {
   trainer_engagements: new Set(['id','memberId','trainerId','type','message','gymId','status','messages','lastMessageAt','lastMessageFrom','trainerReadAt','memberReadAt','createdAt','updatedAt']),
   trainer_sessions: new Set(['id','trainerId','memberId','customerName','customerEmail','customerPhone','gymId','locationType','locationLabel','date','slot','source','status','amountTzs','createdAt']),
   products:         new Set(['id','vendorId','name','description','category','brand','priceTzs','discountPriceTzs','stock','sku','weightKg','distanceKm','variants','images','visibility','deliveryAvailable','status','approvalStatus','rating','reviewCount','soldCount','homepageVisible','homepagePriority','deletedAt','createdAt','updatedAt']),
-  shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','deliveryMethod','pickupGymId','deliveryAddress','paymentMethod','paymentStatus','paymentReference','timeline','settlementStatus','note','createdAt','updatedAt']),
+  shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','deliveryMethod','pickupGymId','deliveryAddress','paymentMethod','paymentStatus','paymentReference','timeline','settlementStatus','note','idempotencyKey','idempotencyFingerprint','stockState','reservationExpiresAt','reservationCycle','fulfilments','createdAt','updatedAt']),
   marketplace_enquiries: new Set(['id','buyerId','vendorId','productId','subject','status','messages','createdAt','updatedAt']),
   marketplace_notifications: new Set(['id','userId','type','data','read','createdAt']),
   product_reviews:  new Set(['id','buyerId','orderId','productId','rating','comment','createdAt']),
@@ -702,7 +726,7 @@ const JSON_FIELDS = {
   gyms: ['operatingHours', 'coordinates', 'classes', 'trainerPass'],
   platform_settings: ['subscriptionTiers', 'payoutBands'],
   audit_log: ['before', 'after'],
-  shop_orders: ['items', 'timeline'],
+  shop_orders: ['items', 'timeline', 'fulfilments'],
   trainer_engagements: ['messages'],
   products: ['variants'],
   marketplace_enquiries: ['messages'],

@@ -66,7 +66,7 @@ export function engagementFrom(checkinTimestamps, now) {
 }
 
 export function createGymSharingService({
-  sharing, gyms, subscriptions, checkins, activities, users, now = () => new Date(),
+  usernames = null, sharing, gyms, subscriptions, checkins, activities, users, now = () => new Date(),
   // (creatorType, creatorId, memberId) → progress on that gym's challenges.
   challengeProgressFor = async () => [],
 }) {
@@ -203,7 +203,8 @@ export function createGymSharingService({
     const list = [];
     for (const a of attention.slice(0, LIST_LIMIT)) {
       const u = await users.findByIdAsync(a.memberId);
-      list.push({ member: { id: a.memberId, displayName: u?.displayName ?? null }, ...a, memberId: undefined });
+      const handle = await usernames?.handleOf(a.memberId);
+      list.push({ member: { id: a.memberId, displayName: u?.displayName ?? null, ...(handle ? { username: handle } : {}) }, ...a, memberId: undefined });
     }
     return {
       members: byMember.size,

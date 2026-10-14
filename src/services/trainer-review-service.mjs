@@ -16,7 +16,7 @@ const QUALIFYING_BOOKING_STATUSES = new Set(['completed', 'no_show', 'fulfilled'
 const makeId = () => `trev_${randomUUID().slice(0, 8)}`;
 const nowIso = () => new Date().toISOString();
 
-export function createTrainerReviewService({ trainerReviews, trainers, trainerBookings, users, auditLog }) {
+export function createTrainerReviewService({ usernames = null, trainerReviews, trainers, trainerBookings, users, auditLog }) {
   function validate(rating, text) {
     if (!Number.isInteger(rating) || rating < MIN_RATING || rating > MAX_RATING) {
       return { error: 'rating_must_be_integer_1_to_5', status: 400 };
@@ -93,7 +93,7 @@ export function createTrainerReviewService({ trainerReviews, trainers, trainerBo
       // Public: other members see first name + initial, never the member id.
       return {
         id: r.id, trainerId: r.trainerId, rating: r.rating, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt,
-        memberName: shortName(u?.displayName), memberPhotoUrl: u?.photoUrl || null,
+        memberName: (await usernames?.handleOf(r.memberId)) ?? shortName(u?.displayName), memberPhotoUrl: u?.photoUrl || null,
       };
     }));
   }

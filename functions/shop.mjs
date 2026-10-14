@@ -2,7 +2,8 @@
 import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopService, vendorSettlementService } from '../src/bootstrap/services.mjs';
+import { shopService, vendorSettlementService, shopReconciliationService } from '../src/bootstrap/services.mjs';
+import { buyerOrderView } from '../src/services/shop-service.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
@@ -19,6 +20,9 @@ function requireVendorPermission(permission) {
     return res.status(403).json({ error: 'vendor_permission_forbidden', requiredPermission: permission });
   };
 }
+
+// An administrator acts on marketplace orders only with the `shop` scope (a super-admin has all).
+const requireAdminShopScope = (req, res, next) => (req.user?.userType === 'admin' ? requireAcl('shop')(req, res, next) : next());
 
 // ── catalogue ────────────────────────────────────────────────────────────────
 
@@ -185,19 +189,59 @@ export const adminUpdateVendor = {
   },
 };
 
+// ── marketplace operations: books that do not add up, and the ways to put them right ──────────
+
+export const adminMarketplaceReconciliation = {
+  created, method: 'get', path: '/admin/marketplace/reconciliation',
+  description: 'Admin (shop or payments scope): reconcile marketplace orders, confirmed payments, refunds, stock and vendor statements against each other. Read-only. → { ok, open: ["P0 …"], checks: [{ id, severity, description, count, sample }] }. `ok` is false while any P0/P1 finding is open.',
+  onGuard: [requireAuth('admin'), requireAcl('shop', 'payments')],
+  onRequest: async (_req, res) => res.json(await shopReconciliationService.report()),
+};
+
+export const adminMarketplaceRaiseRefund = {
+  created, method: 'post', path: '/admin/marketplace/orders/:id/raise-refund',
+  description: 'Admin (payments scope): retry the refund of an order that is owed money (paymentStatus refund_pending) and has none raised. Safe to repeat: one live refund per order.',
+  onGuard: [requireAuth('admin'), requireAcl('payments')],
+  onRequest: async (req, res) => {
+    const result = await shopService.raiseMissingRefund({ orderId: req.params.id, actorId: req.user.sub });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
+    res.json(result);
+  },
+};
+
+export const adminMarketplaceRepairPayment = {
+  created, method: 'post', path: '/admin/marketplace/orders/:id/repair-payment',
+  description: 'Admin (payments scope): an order whose payment was confirmed but which is not marked paid — apply the confirmed payment to it. Safe to repeat.',
+  onGuard: [requireAuth('admin'), requireAcl('payments')],
+  onRequest: async (req, res) => {
+    const result = await shopService.repairOrderPayment({ orderId: req.params.id, actorId: req.user.sub });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
+    res.json(result.order);
+  },
+};
+
 // ── orders ───────────────────────────────────────────────────────────────────
 
 export const createShopOrder = {
   created, method: 'post', path: '/me/shop-orders',
-  description: 'Any signed-in user: place a shop order. Stock is validated and deducted.',
+  description: 'Any signed-in user: place a shop order. Stock is validated and reserved atomically. Send an Idempotency-Key header (8–100 chars) so a retry returns the original order instead of a second one; the order is unpaid (paymentStatus pending) until FitFlex confirms the payment.',
   requestSample: { items: [{ productId: 'prd_x', qty: 2 }], deliveryMethod: 'gym_pickup', pickupGymId: 'gym_x', paymentMethod: 'mpesa', paymentOutcome: 'success' },
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     const result = await shopService.createOrder({
       buyerId: req.user.sub, buyerRole: req.user.userType || 'member', body: req.body || {},
+      // A retried request carries the same key and gets the order it already made.
+      idempotencyKey: req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'] || null,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId });
-    res.status(201).json(result.order);
+    if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId, ...(result.field ? { field: result.field } : {}), ...(result.limit ? { limit: result.limit } : {}), ...(result.variants ? { variants: result.variants } : {}) });
+    if (result.replayed) res.set?.('Idempotent-Replay', 'true');
+    res.status(201).json(buyerOrderView(result.order));
   }
 };
 
@@ -217,17 +261,22 @@ export const vendorOrders = {
 
 export const vendorUpdateOrderStatus = {
   created, method: 'post', path: '/vendor/orders/:id/status',
-  description: 'Vendor/admin: move an order through its lifecycle (pending → confirmed → fulfilled | cancelled). Cancelling restocks items.',
-  requestSample: { status: 'confirmed' },
-  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('orders')],
+  description: 'Vendor/admin: move this vendor\'s part of an order forward: pending → accepted → [processing] → [packed] → dispatched | ready_for_pickup → delivered, or cancelled until delivered. Steps cannot be skipped except processing/packed; repeating the current status changes nothing. A vendor moves only their own lines; an admin (scope `shop`) names `vendorId` when the order has several vendors. Optional `reason` is kept in the audit trail. Legacy: confirmed = accepted, fulfilled = delivered. Cancelling restocks items and refunds a paid order. 409 invalid_transition lists the `allowed` next statuses.',
+  requestSample: { status: 'accepted', vendorId: 'usr_vendor_1', reason: 'optional' },
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('orders'), requireAdminShopScope],
   onRequest: async (req, res) => {
     const result = await shopService.updateOrderStatus({
       orderId: req.params.id,
       status: req.body?.status,
       actorId: req.user.vendorId || req.user.sub,
       actorRole: req.user.userType,
+      vendorId: req.user.userType === 'admin' ? req.body?.vendorId || null : null,
+      reason: req.body?.reason || null,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
     res.json(result.order);
   }
 };

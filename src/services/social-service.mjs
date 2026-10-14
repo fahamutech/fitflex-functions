@@ -123,7 +123,13 @@ export function createSocialService({
     return (await profiles.findByIdAsync(userId))?.publicProfile === true;
   }
 
+  /** What other people see: the member's username when they have one, else their name. */
   async function nameOf(userId) {
+    return (await usernames?.handleOf(userId)) ?? (await realNameOf(userId));
+  }
+
+  /** The person's own name (admin moderation views; never the username alone). */
+  async function realNameOf(userId) {
     const u = await users.findByIdAsync(userId);
     // A trainer is known by the name on their trainer profile (their nickname
     // when they chose one), wherever they post, comment or join a group.
@@ -138,9 +144,11 @@ export function createSocialService({
     ctx.following ??= await following(viewerId);
     ctx.followers ??= await followers(viewerId);
     const f = ctx.following.has(userId), b = ctx.followers.has(userId);
+    const handle = await usernames?.handleOf(userId);
     return {
       id: userId,
-      displayName: await nameOf(userId),
+      displayName: handle ?? (await realNameOf(userId)),
+      ...(handle ? { username: handle } : {}),
       relationship: f && b ? 'friends' : f ? 'following' : b ? 'follows_you' : 'none',
     };
   }
@@ -326,17 +334,28 @@ export function createSocialService({
     const query = String(q).trim().toLowerCase();
     if (query.length < 2) return { people: [] };
     const pool = new Set();
+    // People you share a group or a company with: you already know them, so
+    // their name matches even when they have a username.
+    const contacts = new Set();
+    for (const g of await activeGroupIds(userId)) {
+      for (const m of await groupMembers.filterByColumnAsync('groupId', g)) if (m.status === 'active') contacts.add(m.userId);
+    }
+    for (const id of await directory.colleaguesOf(userId)) contacts.add(id);
     // Public profiles can be found by anyone.
     for (const p of await profiles.allAsync()) if (p.publicProfile === true) pool.add(p.id);
-    for (const g of await activeGroupIds(userId)) {
-      for (const m of await groupMembers.filterByColumnAsync('groupId', g)) if (m.status === 'active') pool.add(m.userId);
-    }
-    for (const id of await directory.colleaguesOf(userId)) pool.add(id);
+    for (const id of contacts) pool.add(id);
     pool.delete(userId);
     for (const uid of pool) {
       if (out.size >= 30) break;
       const u = await users.findByIdAsync(uid);
-      if (!u || u.userType !== 'member' || !(u.displayName ?? '').toLowerCase().includes(query)) continue;
+      if (!u || u.userType !== 'member') continue;
+      // Someone only reachable through a public profile who has a username is
+      // found by that username, never by their real name: searching must not
+      // be a way to link a real name to a handle.
+      const handle = await usernames?.handleOf(uid);
+      const byHandle = !!handle && handle.toLowerCase().includes(query.replace(/^@/, ''));
+      const byName = (u.displayName ?? '').toLowerCase().includes(query);
+      if (handle && !contacts.has(uid) ? !byHandle : !(byName || byHandle)) continue;
       if (await isBlocked(userId, uid)) continue;
       out.set(uid, await person(userId, uid, ctx));
     }
@@ -785,17 +804,17 @@ export function createSocialService({
       let target = null;
       if (r.targetType === 'comment') {
         const c = await comments.findByIdAsync(r.targetId);
-        target = c ? { text: c.text, author: await nameOf(c.userId), removed: !!c.deletedAt } : null;
+        target = c ? { text: c.text, author: await realNameOf(c.userId), authorUsername: (await usernames?.handleOf(c.userId)) ?? null, removed: !!c.deletedAt } : null;
       } else if (r.targetType === 'user') {
-        target = { displayName: await nameOf(r.targetId) };
+        target = { displayName: await realNameOf(r.targetId), username: (await usernames?.handleOf(r.targetId)) ?? null };
       } else if (r.targetType === 'group') {
         const g = await groups.findByIdAsync(r.targetId);
         target = g ? { name: g.name, archived: g.status !== 'active' } : null;
       } else if (r.targetType === 'activity') {
         const a = await activities.findByIdAsync(r.targetId);
-        target = a ? { owner: await nameOf(a.userId), type: a.type, title: a.notes ?? null } : null;
+        target = a ? { owner: await realNameOf(a.userId), type: a.type, title: a.notes ?? null } : null;
       }
-      out.push({ ...r, reporter: await nameOf(r.reporterId), target });
+      out.push({ ...r, reporter: await realNameOf(r.reporterId), target });
     }
     return { reports: out };
   }

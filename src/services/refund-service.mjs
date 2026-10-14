@@ -12,6 +12,7 @@
 //
 //   requested ──approve──▶ approved ──paid──▶ paid
 //       └──────reject────▶ rejected
+import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
 
 export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order'];
@@ -146,10 +147,12 @@ export function createRefundService({
       if (!Number.isFinite(amountTzs) || amountTzs <= 0 || amountTzs > prior.amountTzs) return fail('invalid_amount');
     }
     const at = nowIso();
-    const refund = await refunds.updateByIdAsync(id, {
+    // Only while it is still waiting: two staff members deciding at once cannot both succeed.
+    const refund = await updateIf(refunds, id, { status: 'requested' }, {
       status: body.decision === 'approve' ? 'approved' : 'rejected', amountTzs,
       decidedBy: actorId, decidedAt: at, decisionNote: note, updatedAt: at,
     });
+    if (!refund) return fail('already_decided', 409);
     // A pass or plan refunded in full stops giving access, when the reviewer says so.
     if (refund.status === 'approved' && body.endAccess === true && refund.subscriptionId && subscriptions) {
       await subscriptions.updateByIdAsync(refund.subscriptionId, { expiresAt: at, renewsAt: at });
@@ -185,15 +188,27 @@ export function createRefundService({
   async function markPaid({ id, body = {}, actorId }) {
     const prior = await refunds.findByIdAsync(id);
     if (!prior) return fail('refund_not_found', 404);
+    if (prior.status === 'paid') return fail('already_paid', 409, { refundStatus: 'paid' });
     if (prior.status !== 'approved') return fail('refund_not_approved', 409, { refundStatus: prior.status });
     const reference = text(body.paymentReference, 120);
     if (!reference) return fail('payment_reference_required');
     const at = nowIso();
-    const refund = await refunds.updateByIdAsync(id, {
+    // Only an approved refund that nobody has paid yet: a double click or two staff members record one payment.
+    const refund = await updateIf(refunds, id, { status: 'approved' }, {
       status: 'paid', paidBy: actorId, paidAt: at, paymentReference: reference, paidTo: text(body.paidTo, 120), updatedAt: at,
     });
+    if (!refund) {
+      const now = await refunds.findByIdAsync(id);
+      return fail(now?.status === 'paid' ? 'already_paid' : 'refund_not_approved', 409, { refundStatus: now?.status });
+    }
     await audit('refund_paid', actorId, prior, refund);
-    try { await onPaid(refund); } catch { /* the refund itself is recorded */ }
+    try {
+      await onPaid(refund);
+    } catch (err) {
+      // The refund is recorded; what it was for was not updated. Say so where staff will find it.
+      console.error('[refunds] paid refund not applied to its source:', refund.id, err?.message);
+      try { await audit('refund_paid_source_not_updated', actorId, null, { id: refund.id, kind: refund.kind, error: String(err?.message || err).slice(0, 300) }); } catch { /* logged above */ }
+    }
     await tell(refund, 'refund_paid', 'Refund sent', `We sent ${money(refund.amountTzs)} back to you. Reference: ${reference}.`);
     return { refund };
   }
