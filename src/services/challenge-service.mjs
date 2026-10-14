@@ -96,7 +96,7 @@ export function challengePhase(c, now) {
 }
 
 export function createChallengeService({
-  challenges, participants, users, trainers, gyms, relationships, gymMemberSharing, gymMemberIds,
+  usernames = null, challenges, participants, users, trainers, gyms, relationships, gymMemberSharing, gymMemberIds,
   activities, checkins, teams = null, corporateEmployees = null, subscriptions = null, rewardAwards = null,
   // Who belongs to a company or organisation. Built from the collections given when not passed in.
   directory = createCompanyDirectory({ users, corporateEmployees }),
@@ -340,7 +340,7 @@ export function createChallengeService({
       const u = await users.findByIdAsync(s.p.memberId);
       individuals.push({
         rank: i + 1,
-        name: shortName(u?.displayName),
+        name: (await usernames?.handleOf(s.p.memberId)) ?? shortName(u?.displayName),
         progress: s.progress,
         fraction: Math.round(s.fraction * 1000) / 1000,
         completed: s.progress >= c.target,
@@ -835,7 +835,8 @@ export function createChallengeService({
     const out = [];
     for (const p of joined) {
       const u = await users.findByIdAsync(p.memberId);
-      const row = { member: { id: p.memberId, displayName: u?.displayName ?? null }, joinedAt: p.joinedAt };
+      const handle = await usernames?.handleOf(p.memberId);
+      const row = { member: { id: p.memberId, displayName: u?.displayName ?? null, ...(handle ? { username: handle } : {}) }, joinedAt: p.joinedAt };
       if (await sharesWithCreator(c, p.memberId)) {
         const progress = await progressFor(c, p.memberId);
         row.progress = progress;

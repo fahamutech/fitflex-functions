@@ -12,7 +12,7 @@ const tzs = n => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
 const NEW_MEMBERSHIP_MS = 10 * 60 * 1000;
 
 export function createPartnerNotifier({
-  users, gyms, trainers = null, subscriptions = null, paymentRequests = null,
+  usernames = null, users, gyms, trainers = null, subscriptions = null, paymentRequests = null,
   // Each person's own message choices (communication preferences): check-in alerts can be switched off.
   preferences = null,
   notify, logger = console, now = () => new Date(),
@@ -49,7 +49,12 @@ export function createPartnerNotifier({
     }
   }
 
-  const nameOf = async (userId, fallback) => (await users.findByIdAsync(userId))?.displayName || fallback;
+  // A gym sees the member's name, with their username beside it when they have one.
+  const nameOf = async (userId, fallback) => {
+    const name = (await users.findByIdAsync(userId))?.displayName || fallback;
+    const handle = await usernames?.handleOf(userId);
+    return handle ? `${name} (@${handle})` : name;
+  };
   const gymName = async gymId => (await gyms.findByIdAsync?.(gymId))?.name || 'your gym';
 
   /** Has this person switched check-in alerts off? On unless they said so. */

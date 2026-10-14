@@ -50,7 +50,7 @@ export function normalizePermissions(input, base = {}) {
 }
 
 export function createTrainerClientService({
-  relationships, trainers, users, workouts, workoutPlans, activities, goals,
+  usernames = null, relationships, trainers, users, workouts, workoutPlans, activities, goals,
   // For goals tied to the trainer's own challenges.
   challenges = null, participants = null,
   notify = async () => {}, now = () => new Date(),
@@ -72,7 +72,8 @@ export function createTrainerClientService({
 
   async function memberCard(memberId) {
     const u = await users.findByIdAsync(memberId);
-    return u ? { id: u.id, displayName: u.displayName ?? null, photoUrl: u.photoUrl ?? null } : null;
+    const handle = u ? await usernames?.handleOf(u.id) : null;
+    return u ? { id: u.id, displayName: u.displayName ?? null, ...(handle ? { username: handle } : {}), photoUrl: u.photoUrl ?? null } : null;
   }
 
   async function safeNotify(userId, message) {

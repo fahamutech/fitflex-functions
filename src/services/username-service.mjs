@@ -8,6 +8,7 @@
 // trainer's nickname or a gym's name.
 import { randomUUID } from 'node:crypto';
 import { cleanUsername, squash, CHANGE_COOLDOWN_DAYS, RELEASE_HOLD_DAYS } from '../shared/username.mjs';
+import { memberUsernamesOn } from '../shared/feature-flags.mjs';
 
 const DAY = 86_400_000;
 
@@ -127,6 +128,17 @@ export function createUsernameService({
     await memberUsernames.removeAsync((r) => r.id === userId);
   }
 
+  /**
+   * The member's active handle for showing to others, or null: no username,
+   * cleared, or the feature is off. Every serializer goes through this, so
+   * with the flag off nothing about any response changes.
+   */
+  async function handleOf(userId) {
+    if (!userId || !memberUsernamesOn()) return null;
+    const row = await memberUsernames.findByIdAsync(userId);
+    return row?.status === 'active' && row.handle ? row.handle : null;
+  }
+
   /** Map of userId -> handle for those who have one (for the name resolver). */
   async function handlesFor(userIds) {
     const wanted = new Set(userIds);
@@ -134,5 +146,5 @@ export function createUsernameService({
     return new Map(rows.map((r) => [r.id, r.handle]));
   }
 
-  return { mine, available, set, clear, adminClear, forgetUser, handlesFor };
+  return { mine, available, set, clear, adminClear, forgetUser, handlesFor, handleOf };
 }
