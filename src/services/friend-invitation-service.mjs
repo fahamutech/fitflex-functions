@@ -62,6 +62,8 @@ export function createFriendInvitationService({
   notify = async () => {},
   // ({ type, value }) → the member who owns that verified email / phone, or null.
   findMember,
+  // (userId) → [{ type, value }] verified contacts of the person behind that member (optional).
+  contactsFor = async () => [],
   // (id, fromStatus, patch) → true when that row was in `fromStatus` and is now patched. Atomic.
   transition,
   // Public base URL the invitation link lives under.
@@ -307,7 +309,7 @@ export function createFriendInvitationService({
     if (expired(inv)) return { error: 'invitation_expired', status: 410 };
     if (inv.recipientUserId === userId) return { invitation: await view(inv, userId) };
     const me = await users.findByIdAsync(userId);
-    const mine = me && me.userType === 'member' ? contactsOf(me) : [];
+    const mine = me && me.userType === 'member' ? await contactsOf(me) : [];
     if (!mine.some(c => c.type === inv.identifierType && c.value === inv.identifierValue)) {
       return { error: 'contact_mismatch', status: 403, contactType: inv.identifierType };
     }
@@ -317,10 +319,14 @@ export function createFriendInvitationService({
     return { invitation: await view(now2, userId) };
   }
 
-  const contactsOf = u => [
-    u.email ? { type: 'email', value: normalizeEmail(u.email) } : null,
-    u.phone ? { type: 'phone', value: normalizePhone(u.phone) } : null,
-  ].filter(c => c && c.value);
+  const contactsOf = async u => {
+    const all = [
+      u.email ? { type: 'email', value: normalizeEmail(u.email) } : null,
+      u.phone ? { type: 'phone', value: normalizePhone(u.phone) } : null,
+      ...(await contactsFor(u.id)),
+    ].filter(c => c && c.value);
+    return all.filter((c, i) => all.findIndex(x => x.type === c.type && x.value === c.value) === i);
+  };
 
   /**
    * Called when a member's inbox or invitations are opened: invitations made
@@ -332,7 +338,7 @@ export function createFriendInvitationService({
     const me = await users.findByIdAsync(userId);
     if (!me || me.userType !== 'member') return 0;
     let attached = 0;
-    for (const c of contactsOf(me)) {
+    for (const c of await contactsOf(me)) {
       const open = (await invites.filterAsync(i => !i.recipientUserId && i.status === 'pending'
         && i.identifierType === c.type && i.identifierValue === c.value));
       for (const inv of open) {
