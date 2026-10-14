@@ -1,7 +1,7 @@
 // Malipo by Tunzaa — the one place FitFlex talks to it.
 // Docs: https://malipo.tunzaa.co.tz/docs/
 // Credentials and the environment only ever come from the server's settings
-// (TUNZAA_API_KEY, TUNZAA_SECRET_KEY, TUNZAA_ENV), never from code or the database.
+// (MALIPO_API_KEY, MALIPO_API_SECRET, MALIPO_ENV), never from code or the database.
 //
 //   token     POST /accounts/request/token   {api_key, secret_key} → Bearer, 1 hour
 //   charge    POST /payments/initiate-payment {customer_msisdn, amount, reference} → USSD push
@@ -13,18 +13,32 @@ export const TUNZAA_BASE_URL = 'https://pay.tunzaa.co.tz';
 
 const clean = (value) => String(value ?? '').trim().replace(/^(["'])(.*)\1$/s, '$2').trim();
 
+/** The first of these settings that has a value. */
+const first = (env, names) => {
+  for (const name of names) {
+    const value = clean(env[name]);
+    if (value) return value;
+  }
+  return '';
+};
+
 /**
  * Tunzaa's settings from the environment, or null when a credential is missing.
- * `environment` is 'sandbox' unless TUNZAA_ENV is exactly 'live': a typo can
- * never send real money.
+ * The server's names are MALIPO_API_KEY and MALIPO_API_SECRET (as shown in the
+ * Malipo dashboard); TUNZAA_API_KEY / TUNZAA_SECRET_KEY are accepted too.
+ *
+ * `environment` is 'sandbox' unless MALIPO_ENV (or TUNZAA_ENV) is exactly
+ * 'live': a typo can never send real money. A sandbox key (the dashboard
+ * prefixes them `SB_`) is always sandbox, whatever the setting says.
  */
 export function tunzaaSettings(env = process.env) {
-  const apiKey = clean(env.TUNZAA_API_KEY);
-  const secretKey = clean(env.TUNZAA_SECRET_KEY);
+  const apiKey = first(env, ['MALIPO_API_KEY', 'TUNZAA_API_KEY']);
+  const secretKey = first(env, ['MALIPO_API_SECRET', 'MALIPO_SECRET_KEY', 'TUNZAA_SECRET_KEY']);
   if (!apiKey || !secretKey) return null;
-  const environment = clean(env.TUNZAA_ENV).toLowerCase() === 'live' ? 'live' : 'sandbox';
+  const wantsLive = first(env, ['MALIPO_ENV', 'TUNZAA_ENV']).toLowerCase() === 'live';
+  const environment = wantsLive && !/^SB_/i.test(apiKey) ? 'live' : 'sandbox';
   // The host is fixed in production: pointing it elsewhere would let a mock "confirm" payments.
-  const override = env.NODE_ENV === 'production' ? '' : clean(env.TUNZAA_BASE_URL);
+  const override = env.NODE_ENV === 'production' ? '' : first(env, ['MALIPO_BASE_URL', 'TUNZAA_BASE_URL']);
   return { apiKey, secretKey, environment, baseUrl: override || TUNZAA_BASE_URL };
 }
 

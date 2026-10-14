@@ -4,8 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const SECRET = 'spec-secret';
-process.env.TUNZAA_API_KEY = 'spec-key';
-process.env.TUNZAA_SECRET_KEY = SECRET;
+process.env.MALIPO_API_KEY = 'spec-key';
+process.env.MALIPO_API_SECRET = SECRET;
 delete process.env.TUNZAA_PAYMENTS;
 
 const { tunzaaWebhook } = await import('../functions/webhooks.mjs');

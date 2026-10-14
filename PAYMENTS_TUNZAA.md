@@ -7,17 +7,17 @@ Docs: https://malipo.tunzaa.co.tz/docs/ · API host `https://pay.tunzaa.co.tz`.
 ## Switching it on (dormant by default)
 | Variable | Meaning |
 |---|---|
-| `TUNZAA_API_KEY`, `TUNZAA_SECRET_KEY` | Credentials from the Malipo dashboard. Server only, never in the apps. |
-| `TUNZAA_ENV` | `sandbox` (default) or exactly `live`. Anything else is sandbox. |
+| `MALIPO_API_KEY`, `MALIPO_API_SECRET` | Credentials from the Malipo dashboard (`TUNZAA_API_KEY` / `TUNZAA_SECRET_KEY` also work). Server only, never in the apps, never in the repo or chat. |
+| `MALIPO_ENV` | `sandbox` (default) or exactly `live` (`TUNZAA_ENV` also works). Anything else is sandbox, and a key starting `SB_` is always sandbox. |
 | `TUNZAA_PAYMENTS` | `on` to offer "Pay now". Without it nothing is initiated; callbacks already in flight are still honoured. |
 | `TUNZAA_SANDBOX_SETTLES` | `on` to allow paying against the **sandbox**. A sandbox payment still activates a real plan, so without this flag Pay now is not offered in sandbox (live needs nothing extra). Set it only on a test server. |
-| `TUNZAA_SANDBOX_SCENARIO` | Sandbox only: `success` or `failure` to rehearse an outcome without a real phone. |
+| `MALIPO_SANDBOX_SCENARIO` | Sandbox only: `success` or `failure` to rehearse an outcome without a real phone. |
 
 In the Malipo merchant settings set the callback URL (sandbox and live) to `<PUBLIC_API_URL>/webhooks/tunzaa`.
 
 **Sandbox is not money.** An approved sandbox payment still activates the pass or plan in FitFlex, which is why it needs
 `TUNZAA_SANDBOX_SETTLES`. The app shows a "Test mode" notice while `/payments/options` reports `environment: "sandbox"`.
-`TUNZAA_BASE_URL` is ignored when `NODE_ENV=production`.
+`MALIPO_BASE_URL` is ignored when `NODE_ENV=production`.
 
 ## Flow
 1. The request is created as before (`POST /me/subscribe`, `/me/upgrade`, a gym plan).

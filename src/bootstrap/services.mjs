@@ -447,7 +447,7 @@ export const adminPaymentService = createAdminPaymentService({
   beforeOrderPayment: (request, opts) => shopService.checkOrderPayment(request, opts),
 });
 // Pay by mobile money (Malipo by Tunzaa). Dormant unless TUNZAA_PAYMENTS is set; the
-// client exists only when TUNZAA_API_KEY and TUNZAA_SECRET_KEY are both set.
+// client exists only when MALIPO_API_KEY and MALIPO_API_SECRET are both set.
 const tunzaaConfig = tunzaaSettings();
 export const tunzaaSecretKey = tunzaaConfig?.secretKey ?? null;
 if (tunzaaConfig && tunzaaPaymentsOn() && tunzaaConfig.environment !== 'live') {
@@ -461,7 +461,7 @@ export const mobileMoneyService = createMobileMoneyService({
   // must be asked for (TUNZAA_SANDBOX_SETTLES); live needs nothing extra.
   canSettle: () => tunzaaConfig?.environment === 'live' || tunzaaSandboxSettlesOn(),
   // Sandbox only (the client ignores it on live): 'success' or 'failure' to rehearse an outcome.
-  scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
+  scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });

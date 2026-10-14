@@ -12,13 +12,22 @@ import { createSubscriptionService } from '../src/services/subscription-service.
 
 // ── pure helpers ──────────────────────────────────────────────────────────
 
-test('settings: sandbox unless exactly live; null without both keys', () => {
+test('settings: MALIPO_* names (TUNZAA_* too); sandbox unless exactly live; sandbox keys never go live', () => {
   assert.equal(tunzaaSettings({}), null);
-  assert.equal(tunzaaSettings({ TUNZAA_API_KEY: 'k' }), null);
-  assert.equal(tunzaaSettings({ TUNZAA_API_KEY: 'k', TUNZAA_SECRET_KEY: 's' }).environment, 'sandbox');
-  assert.equal(tunzaaSettings({ TUNZAA_API_KEY: 'k', TUNZAA_SECRET_KEY: 's', TUNZAA_ENV: 'Liv' }).environment, 'sandbox');
-  assert.equal(tunzaaSettings({ TUNZAA_API_KEY: ' "k" ', TUNZAA_SECRET_KEY: 's', TUNZAA_ENV: 'live' }).environment, 'live');
-  assert.equal(tunzaaSettings({ TUNZAA_API_KEY: ' "k" ', TUNZAA_SECRET_KEY: 's' }).apiKey, 'k');
+  assert.equal(tunzaaSettings({ MALIPO_API_KEY: 'k' }), null);
+  const m = tunzaaSettings({ MALIPO_API_KEY: 'k', MALIPO_API_SECRET: 's' });
+  assert.deepEqual([m.apiKey, m.secretKey, m.environment], ['k', 's', 'sandbox']);
+  assert.equal(tunzaaSettings({ TUNZAA_API_KEY: 'k', TUNZAA_SECRET_KEY: 's' }).apiKey, 'k');
+  // MALIPO_* wins when both are set
+  assert.equal(tunzaaSettings({ MALIPO_API_KEY: 'a', MALIPO_API_SECRET: 's', TUNZAA_API_KEY: 'b', TUNZAA_SECRET_KEY: 's' }).apiKey, 'a');
+  assert.equal(tunzaaSettings({ MALIPO_API_KEY: 'k', MALIPO_API_SECRET: 's', MALIPO_ENV: 'Liv' }).environment, 'sandbox');
+  assert.equal(tunzaaSettings({ MALIPO_API_KEY: ' "k" ', MALIPO_API_SECRET: 's', MALIPO_ENV: 'live' }).environment, 'live');
+  assert.equal(tunzaaSettings({ MALIPO_API_KEY: ' "k" ', MALIPO_API_SECRET: 's' }).apiKey, 'k');
+  // a key the dashboard marks SB_ is a sandbox key: it can never be live
+  assert.equal(tunzaaSettings({ MALIPO_API_KEY: 'SB_ABC', MALIPO_API_SECRET: 's', MALIPO_ENV: 'live' }).environment, 'sandbox');
+  // the host cannot be redirected in production
+  assert.equal(tunzaaSettings({ MALIPO_API_KEY: 'k', MALIPO_API_SECRET: 's', MALIPO_BASE_URL: 'https://mock.test', NODE_ENV: 'production' }).baseUrl, 'https://pay.tunzaa.co.tz');
+  assert.equal(tunzaaSettings({ MALIPO_API_KEY: 'k', MALIPO_API_SECRET: 's', MALIPO_BASE_URL: 'https://mock.test' }).baseUrl, 'https://mock.test');
 });
 
 test('phone numbers become 255XXXXXXXXX or null', () => {
