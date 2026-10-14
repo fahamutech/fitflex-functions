@@ -338,9 +338,11 @@ export function createChallengeService({
     const individuals = [];
     for (const [i, s] of listed.entries()) {
       const u = await users.findByIdAsync(s.p.memberId);
+      const handle = await usernames?.handleOf(s.p.memberId);
       individuals.push({
         rank: i + 1,
-        name: (await usernames?.handleOf(s.p.memberId)) ?? shortName(u?.displayName),
+        name: handle ?? shortName(u?.displayName),
+        ...(handle ? { username: handle } : {}),
         progress: s.progress,
         fraction: Math.round(s.fraction * 1000) / 1000,
         completed: s.progress >= c.target,

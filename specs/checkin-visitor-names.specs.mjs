@@ -105,6 +105,8 @@ test('flag on: members by name, trainers by profile name, contact details withhe
     const by = (id) => out.body.find(r => r.id === id);
     assert.equal(by(rows.amina).displayName, 'Amina Said');
     assert.equal(by(rows.coach).displayName, 'Coach Amani');
+    assert.match(by(rows.coach).memberPublicId, /^FT\d+/, 'a trainer reads FT…');
+    assert.match(by(rows.amina).memberPublicId, /^FM\d+/, 'a member reads FM…');
     assert.equal(by(rows.mailish).displayName, null, 'an email is not a name');
     assert.equal(by(rows.phoneish).displayName, null, 'a phone number is not a name');
     for (const row of out.body) {

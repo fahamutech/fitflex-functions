@@ -122,7 +122,7 @@ export function createOperatorService({
         // Gym staff learn that a sponsor covers the visit, not who the sponsor is or what it pays.
         ...(b2b ? { b2b: { covered: true } } : {}),
         checkin: result.checkin
-          ? { ...result.checkin, memberPublicId: await publicUserId(claim.userId, 'member') }
+          ? { ...result.checkin, memberPublicId: await publicUserId(claim.userId) }
           : result.checkin,
       },
     };
@@ -136,7 +136,7 @@ export function createOperatorService({
       .slice(0, 50)
       .map(c => ({ ...c, memberId: c.memberId }));
     for (let i = 0; i < list.length; i++) {
-      list[i].memberPublicId = await publicUserId(list[i].memberId, 'member');
+      list[i].memberPublicId = await publicUserId(list[i].memberId);
       list[i].memberPhone = null;
       list[i].memberEmail = null;
     }

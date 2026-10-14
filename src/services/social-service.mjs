@@ -760,7 +760,8 @@ export function createSocialService({
     const list = [];
     for (const m of members) {
       if (m.status !== 'active' && !manager) continue;
-      list.push({ id: m.userId, displayName: await nameOf(m.userId), role: m.role, status: m.status });
+      const handle = await usernames?.handleOf(m.userId);
+      list.push({ id: m.userId, displayName: await nameOf(m.userId), ...(handle ? { username: handle } : {}), role: m.role, status: m.status });
     }
     return {
       group: { ...groupView(g, mine, members.filter(m => m.status === 'active').length), ...(manager && { inviteCode: g.inviteCode }), canManage: manager },

@@ -114,10 +114,11 @@ export function createGymReviewService({ usernames = null, gymReviews, gyms, che
     rows = rows.slice(0, limit);
     return Promise.all(rows.map(async r => {
       const u = await users.findByIdAsync(r.memberId);
+      const handle = await usernames?.handleOf(r.memberId);
       // Public: other members see first name + initial, never the member id.
       return {
         id: r.id, gymId: r.gymId, rating: r.rating, text: r.text, createdAt: r.createdAt, updatedAt: r.updatedAt,
-        memberName: (await usernames?.handleOf(r.memberId)) ?? shortName(u?.displayName), memberPhotoUrl: u?.photoUrl || null,
+        memberName: handle ?? shortName(u?.displayName), ...(handle ? { memberUsername: handle } : {}), memberPhotoUrl: u?.photoUrl || null,
       };
     }));
   }
