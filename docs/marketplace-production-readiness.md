@@ -2,10 +2,11 @@
 
 Status as of 2026-10-13, after **PR 1 (checkout and inventory integrity)**,
 **PR 2 (order state machine and vendor-scoped fulfilment)** and
-**PR 3 (payment confirmation, refund reliability, reconciliation)**.
-Outcome so far: **NOT READY** — there is **no payment-provider integration**
-for shop orders (payments are confirmed by hand), and the mobile client and
-settlement controls are not yet reviewed (PR 4–5). See "Outcome".
+**PR 3 (payment confirmation, refund reliability, reconciliation)**,
+**PR 4 (mobile checkout)** and **PR 5 (hardening and go-live regression)**.
+Outcome: **CONDITIONALLY READY** for a controlled launch with **manual**
+payment confirmation. There is **no payment-provider integration**; unattended
+payments are NOT READY. See "Outcome" and `marketplace-go-live-checklist.md`.
 
 Evidence rules for this document: a defect is **confirmed** only if it was
 reproduced by a test or read directly in the code at the cited location. Anything
@@ -72,6 +73,14 @@ shop orders in this code path** (see PR 3).
 | M-32 | P1 | **Mobile: a checkout timeout stuck the order button with no message** (only `ApiException` was caught) and the client's automatic POST retry on dropped connections had nothing making it safe. | `shop_browse_page.dart` `_checkout`, `api_client.dart` | **Fixed PR 4** (read in code; pinned by widget tests; not reproduced on a device) |
 | M-33 | P2 | Mobile showed "order placed" for unconfirmed payment; `refund_pending` looked like a finished refund; cancel text said the refund was "on its way". | `shop_browse_page.dart`, i18n | **Fixed PR 4** |
 | M-34 | P2 | Mobile cannot buy two options of one product in one order, and *Reorder* drops options. | cart keyed by product | **Open** — documented limit (decide with `SHOP_REQUIRE_VARIANT`) |
+| M-35 | P1 | **Customers were sent vendors' commission and payout figures** (`commissionPct/Tzs`, `vendorPayoutTzs`) and internal fields with every order, and product pages returned reviewers' buyer and order ids. | `myOrders`, `createOrder`/cancel responses, `getProduct`, `getVendorStore` | **Fixed PR 5** — `buyerOrderView`, `publicReview` |
+| M-36 | P1 | **Stock hoarding.** One buyer could place unlimited unpaid orders, each reserving stock until expiry. | `createOrder` | **Fixed PR 5** — ≤ 5 unpaid orders per buyer (`SHOP_MAX_UNPAID_ORDERS`), `429 too_many_unpaid_orders` |
+| M-37 | P1 | **Unbounded input.** Image upload read any size into memory for any signed-in user; order text fields, product text, price/stock (non-integers), image and option lists had no limits. | `functions/storage.mjs`, `createOrder`, `upsertProduct` | **Fixed PR 5** — 10 MB upload cap (413), bytes must decode as an image (400), field limits, integer money/stock, caps on lines, qty, total, images, options |
+| M-38 | P2 | Storage redirect interpolated path params into the redirect URL unencoded. | `getStorageFile` | **Fixed PR 5** |
+| M-39 | P2 | Reconciliation did not cover vendor statements' own arithmetic or settled orders. | reconciliation | **Fixed PR 5** — three checks added (`order_share_on_two_live_statements` is also enforced by a unique index, kept as a tripwire) |
+| M-40 | P2 | A vendor setting a product's stock is an absolute write that can overwrite a purchase made at the same instant. | `upsertProduct` | **Open** — needs an adjust-by API; accepted limit (checklist H) |
+| M-41 | P2 | No generic rate limiting on shop routes (the platform has it only for sign-in, PIN, invitations). | platform | **Open** |
+| M-42 | P2 | Mobile shows a generic message for `too_many_unpaid_orders`. | mobile | **Open** (small) |
 | M-18 | P2 | `paymentReference` is client-supplied and stored unverified. It is not used to mark anything paid. | `createOrder` | **Mitigated PR 3** — a reference confirms one order only; still unverified against a provider (none exists) |
 | M-22 | P0 | **Double confirmation.** Approving a payment was read-then-write: two staff approving at once both succeeded and the order payment was applied twice. Reproduced: 2 successes, applied 2×. | `adminPaymentService.decide/update` | **Fixed PR 3** — conditional update; `409 already_decided` |
 | M-23 | P1 | **A confirmed order payment could be edited back** to rejected / pending / cancelled while the order stayed paid (records disagree; refund flow bypassed). Reproduced. | `adminPaymentService.update` | **Fixed PR 3** — `409 payment_already_confirmed` |
@@ -240,6 +249,15 @@ unit specs still use the in-memory store, which is deliberately not atomic.
 | `flutter analyze` | **no issues** |
 | device / Flutter web UAT | **not run** |
 
+**PR 5** (stacked on PR 3):
+
+| Command | Result |
+|---|---|
+| `specs/shop-hardening.specs.mjs` (real Postgres, production wiring) | **7 pass, 0 fail** |
+| `npm test` on a fresh database, second run | **1923 pass, 0 fail, 0 skipped** |
+| `npm test` on a fresh database, first run | 1922 pass, **1 fail**: `b2b-analytics-validation` "no analytics response carries a field an organisation must never receive" (asserts a response string does not contain `175`; it also failed once during PR 1 and passes on re-run). Pre-existing flake, unrelated to the shop, not changed |
+| golden path: listing → moderation → purchase → payment → fulfilment → statement (prepared twice) → two-person approval → payout (paid twice at once) → settled → reconciliation clean for the order | pass |
+
 ## 8. Remaining work
 
 | PR | Content | State |
@@ -248,10 +266,9 @@ unit specs still use the in-memory store, which is deliberately not atomic.
 | 2 | state machine + vendor-scoped fulfilment (M-11, M-12, M-13, M-19–M-21) | **done, awaiting review** (stacked on PR 1) |
 | 3 | payment confirmation, refund reliability, reconciliation (M-08, M-18, M-22–M-29) | **done, awaiting review** (stacked on PR 2). Provider integration (M-30) **blocked**, not done |
 | 4 | mobile idempotency key, resume pending payment, status display, option picker (M-03 client half, M-32, M-33) | **done, awaiting review** — fitflex-mobile#113 → `release-candidate`. Not run on a device |
-| 5 | settlement controls, security hardening, go-live regression | not started |
+| 5 | settlement integrity checks, security hardening, go-live regression, checklist | **done, awaiting review** (stacked on PR 3). **Settlement rules were not changed** (D-7 needs your decision) |
 
-Written: `marketplace-order-state-machine.md` (PR 2), `marketplace-payment-and-refund-flows.md` (PR 3).
-Still to write: `marketplace-go-live-checklist.md` (PR 5).
+Written: `marketplace-order-state-machine.md` (PR 2), `marketplace-payment-and-refund-flows.md` (PR 3), `marketplace-go-live-checklist.md` (PR 5).
 
 ## 9. Deployment prerequisites (PR 1, 2, 3 and 4)
 
@@ -268,8 +285,24 @@ Still to write: `marketplace-go-live-checklist.md` (PR 5).
 
 ## Outcome
 
-**NOT READY.** The overselling, atomicity, retry and exactly-once-release
-blockers in checkout are fixed and tested against a real database. The
-marketplace still lacks an enforced order state machine, per-vendor fulfilment
-authorisation, a verified payment provider integration with reconciliation,
-and a reviewed mobile checkout. Do not enable unrestricted live transactions.
+**CONDITIONALLY READY — for a controlled launch where staff confirm every payment and send every refund by hand.**
+**NOT READY for unattended (provider-confirmed) payments.**
+
+Why not READY FOR CONTROLLED LAUNCH: the code gates in `marketplace-go-live-checklist.md`
+pass, but these are unverified or undone, and each needs a person or access I do not have:
+
+1. Nothing is deployed or migrated; rollback has not been rehearsed (B1–B7).
+2. The mobile build has not run on a device or in UAT (F2).
+3. The manual-payment process (who confirms, who refunds, how fast) is not defined (C2–C3).
+4. No alerting on reconciliation (E2) and no screen for it (F4).
+5. No independent security review was run (G5).
+6. Mixed-order cancellation/returns and per-vendor payout are undecided (D-6, D-7).
+
+What would make it NOT READY again: any open P0 — none is known; the reconciliation
+report returning P0 findings in production; or a decision to launch unattended payments
+before D-9.
+
+Evidence base: 5 backend PRs and 1 mobile PR; every P0/P1 above was reproduced on the old
+code where marked, fixed, and pinned by tests run against a real Postgres. What the tests
+do not cover: multi-process concurrency, real payment providers (none exist), real payouts
+(none were made), real devices.
