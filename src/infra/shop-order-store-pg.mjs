@@ -15,12 +15,12 @@ const plain = (row) => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v
 const json = (value) => (value === undefined || value === null || typeof value === 'string' ? value : JSON.stringify(value));
 const at = (value) => (value ? new Date(value) : null);
 
-const ORDER_JSON = ['items', 'timeline'];
+const ORDER_JSON = ['items', 'timeline', 'fulfilments'];
 const ORDER_DATES = ['createdAt', 'updatedAt', 'reservationExpiresAt'];
 const ORDER_COLUMNS = new Set([
   'id', 'buyerId', 'buyerRole', 'items', 'totalTzs', 'status', 'deliveryMethod', 'pickupGymId', 'deliveryAddress',
   'paymentMethod', 'paymentStatus', 'paymentReference', 'timeline', 'settlementStatus', 'note', 'createdAt', 'updatedAt',
-  'idempotencyKey', 'idempotencyFingerprint', 'stockState', 'reservationExpiresAt', 'reservationCycle',
+  'idempotencyKey', 'idempotencyFingerprint', 'stockState', 'reservationExpiresAt', 'reservationCycle', 'fulfilments',
 ]);
 const PAYMENT_COLUMNS = new Set([
   'id', 'memberId', 'orderId', 'amountTzs', 'currency', 'status', 'provider', 'reference', 'requestedAt', 'decidedAt', 'decidedBy', 'note',
@@ -161,15 +161,19 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
    * state the caller expected, so two concurrent cancels cannot both win.
    *   fromStatuses / paymentStatuses: optional lists the order must currently be in.
    */
-  async function cancelAndRelease(orderId, { patch = {}, fromStatuses = null, paymentStatuses = null } = {}) {
+  async function cancelAndRelease(orderId, { patch = {}, fromStatuses = null, paymentStatuses = null, refuseIf = null } = {}) {
     return db.transaction(async (trx) => {
       const current = out(await trx('ShopOrder').where({ id: orderId }).forUpdate().first());
       if (!current) return { error: 'order_not_found', status: 404 };
       if (current.status === 'cancelled') return { order: current, changed: false, reason: 'already_cancelled' };
       if (fromStatuses && !fromStatuses.includes(current.status)) return { order: current, changed: false, reason: 'status_changed' };
       if (paymentStatuses && !paymentStatuses.includes(current.paymentStatus)) return { order: current, changed: false, reason: 'payment_changed' };
+      // The caller's own rule, judged on the row as it is now that it is locked.
+      const refused = refuseIf ? refuseIf(current) : null;
+      if (refused) return refused;
       const atTime = now();
       const cycle = current.reservationCycle || 1;
+      const applied = typeof patch === 'function' ? patch(current) : patch;
       let released = false;
       if (current.stockState === 'reserved') {
         for (const line of (current.items || []).map(lineOf).filter(l => l.qty > 0).sort(byLine)) {
@@ -194,10 +198,31 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
         }
         released = true;
       }
-      const update = orderRow({ ...patch, status: 'cancelled', stockState: released ? 'released' : current.stockState, updatedAt: patch.updatedAt || atTime });
+      const update = orderRow({ ...applied, status: 'cancelled', stockState: released ? 'released' : current.stockState, updatedAt: applied.updatedAt || atTime });
       delete update.id;
       await trx('ShopOrder').where({ id: orderId }).update(update);
       return { order: out(await trx('ShopOrder').where({ id: orderId }).first()), changed: true, released };
+    });
+  }
+
+  /**
+   * Change one order under its row lock. `decide(current)` is pure: it returns
+   *   { error, status, ... }            → nothing is written, the error is returned
+   *   { patch, value? }                  → patch is written, { order, value } returned
+   *   { value }                          → nothing to write (a no-op), { order, value } returned
+   * Concurrent changes to the same order run one after the other, each seeing the last one's result.
+   */
+  async function updateWithLock(orderId, decide) {
+    return db.transaction(async (trx) => {
+      const current = out(await trx('ShopOrder').where({ id: orderId }).forUpdate().first());
+      if (!current) return { error: 'order_not_found', status: 404 };
+      const decision = decide(current);
+      if (decision.error) return decision;
+      if (!decision.patch) return { order: current, value: decision.value };
+      const update = orderRow({ ...decision.patch, updatedAt: decision.patch.updatedAt || now() });
+      delete update.id;
+      await trx('ShopOrder').where({ id: orderId }).update(update);
+      return { order: out(await trx('ShopOrder').where({ id: orderId }).first()), value: decision.value };
     });
   }
 
@@ -229,6 +254,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
           return { revived: false, reason: 'not_revivable', order: current };
         }
         const atTime = now();
+        const applied = typeof patch === 'function' ? patch(current) : patch;
         const cycle = (current.reservationCycle || 1) + 1;
         for (const line of (current.items || []).map(lineOf).filter(l => l.qty > 0).sort(byLine)) {
           const stockAfter = await reserveLine(trx, line, { requirePrice: false, atTime });
@@ -236,7 +262,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
           await trx('ShopStockMovement').insert(ledgerRow(orderId, line, 'reserve', cycle, -line.qty, atTime, stockAfter));
         }
         await trx('ShopOrder').where({ id: orderId }).update(orderRow({
-          ...patch, status: 'pending', paymentStatus: 'paid', stockState: 'reserved', reservationCycle: cycle, reservationExpiresAt: null, updatedAt: atTime,
+          ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved', reservationCycle: cycle, reservationExpiresAt: null, updatedAt: atTime,
         }));
         return { revived: true, order: out(await trx('ShopOrder').where({ id: orderId }).first()) };
       });
@@ -265,5 +291,5 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     return rows.map(out);
   }
 
-  return { placeOrder, findReplay: ({ buyerId, key, fingerprint }) => replay(buyerId, key, fingerprint), cancelAndRelease, markPaid, reviveOrder, markLatePayment, findExpired };
+  return { placeOrder, findReplay: ({ buyerId, key, fingerprint }) => replay(buyerId, key, fingerprint), cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired };
 }

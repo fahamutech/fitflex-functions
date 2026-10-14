@@ -209,7 +209,9 @@ test('marketplace: checkout creates paid delivery order and preserves a seven-st
     });
     assert.equal(result.order.status, status);
   }
-  assert.deepEqual(placed.order.timeline.map(entry => entry.status), [
+  // Read back from the store: a status change writes a new timeline, it does not edit the one returned earlier.
+  const stored = await service.myOrders('member-1');
+  assert.deepEqual(stored[0].timeline.map(entry => entry.status), [
     'pending', 'accepted', 'processing', 'packed', 'dispatched', 'delivered',
   ]);
 });
@@ -230,6 +232,13 @@ test('marketplace: gym pickup requires a gym and supports ready-for-pickup', asy
       paymentMethod: 'airtel_money', paymentOutcome: 'success',
     },
   });
+  // Accepting comes first: a pickup order cannot be marked ready before the vendor has accepted it.
+  const early = await service.updateOrderStatus({
+    orderId: placed.order.id, status: 'ready_for_pickup', actorId: 'vendor-1', actorRole: 'vendor',
+  });
+  assert.equal(early.error, 'invalid_transition');
+  assert.deepEqual(early.allowed, ['accepted']);
+  await service.updateOrderStatus({ orderId: placed.order.id, status: 'accepted', actorId: 'vendor-1', actorRole: 'vendor' });
   const ready = await service.updateOrderStatus({
     orderId: placed.order.id, status: 'ready_for_pickup', actorId: 'vendor-1', actorRole: 'vendor',
   });

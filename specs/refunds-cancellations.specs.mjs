@@ -197,6 +197,7 @@ test('an unpaid order is simply cancelled; a dispatched one can no longer be can
 
   const second = await f.shop.createOrder({ buyerId: 'm1', body: checkout });
   await f.shop.applyPaymentToOrder(second.order.id, 'approved');
+  await f.shop.updateOrderStatus({ orderId: second.order.id, status: 'accepted', actorId: 'ven1' });
   await f.shop.updateOrderStatus({ orderId: second.order.id, status: 'dispatched', actorId: 'ven1' });
   assert.deepEqual(await f.shop.buyerCancelOrder({ buyerId: 'm1', orderId: second.order.id }), { error: 'order_already_dispatched', status: 409 });
   assert.equal((await f.shop.buyerCancelOrder({ buyerId: 'someone', orderId: second.order.id })).error, 'order_not_found');
@@ -206,7 +207,7 @@ test('an unpaid order is simply cancelled; a dispatched one can no longer be can
   // A delivered order is a return, not a cancellation.
   const third = await f.shop.createOrder({ buyerId: 'm1', body: checkout });
   await f.shop.applyPaymentToOrder(third.order.id, 'approved');
-  await f.shop.updateOrderStatus({ orderId: third.order.id, status: 'delivered', actorId: 'ven1' });
+  for (const status of ['accepted', 'dispatched', 'delivered']) await f.shop.updateOrderStatus({ orderId: third.order.id, status, actorId: 'ven1' });
   assert.equal((await f.shop.updateOrderStatus({ orderId: third.order.id, status: 'cancelled', actorId: 'ven1' })).error, 'order_already_delivered');
 });
 

@@ -11,9 +11,10 @@
 //   placeOrder({ order, lines, paymentRequest, idempotency })
 //     → { order, paymentRequest, replayed } | { error, status, productId? }
 //   findReplay({ buyerId, key, fingerprint }) → { order, paymentRequest, replayed } | { error, status } | null
-//   cancelAndRelease(orderId, { patch, fromStatuses, paymentStatuses })
+//   cancelAndRelease(orderId, { patch (object | current→object), fromStatuses, paymentStatuses, refuseIf(current)→null|{error,status} })
 //     → { order, changed, released?, reason? } | { error, status }
 //   reviveOrder(orderId, { patch }) → { revived, order?, reason?, productId? }   (re-reserves a released order; all lines or none)
+//   updateWithLock(orderId, decide(current) → { error } | { patch, value? } | { value }) → { order, value } | { error, status }
 //   markPaid(orderId, { patch }) → { outcome: 'paid'|'already_paid'|'cancelled'|'missing', order }
 //   markLatePayment(orderId) → { marked, order }
 //   findExpired({ before, limit }) → orders
@@ -76,12 +77,15 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     return { order: saved, paymentRequest, replayed: false };
   }
 
-  async function cancelAndRelease(orderId, { patch = {}, fromStatuses = null, paymentStatuses = null } = {}) {
+  async function cancelAndRelease(orderId, { patch = {}, fromStatuses = null, paymentStatuses = null, refuseIf = null } = {}) {
     const current = await shopOrders.findByIdAsync(orderId);
     if (!current) return { error: 'order_not_found', status: 404 };
     if (current.status === 'cancelled') return { order: current, changed: false, reason: 'already_cancelled' };
     if (fromStatuses && !fromStatuses.includes(current.status)) return { order: current, changed: false, reason: 'status_changed' };
     if (paymentStatuses && !paymentStatuses.includes(current.paymentStatus)) return { order: current, changed: false, reason: 'payment_changed' };
+    const refused = refuseIf ? refuseIf(current) : null;
+    if (refused) return refused;
+    const applied = typeof patch === 'function' ? patch(current) : patch;
     let released = false;
     // Orders written before stock states existed have none; they are treated as holding their stock.
     if ((current.stockState || 'reserved') === 'reserved') {
@@ -98,8 +102,19 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       }
       released = true;
     }
-    const order = await shopOrders.updateByIdAsync(orderId, { ...patch, status: 'cancelled', stockState: released ? 'released' : current.stockState, updatedAt: patch.updatedAt || nowIso() });
+    const order = await shopOrders.updateByIdAsync(orderId, { ...applied, status: 'cancelled', stockState: released ? 'released' : current.stockState, updatedAt: applied.updatedAt || nowIso() });
     return { order, changed: true, released };
+  }
+
+  // Not a lock: the memory store is for unit specs, which are sequential.
+  async function updateWithLock(orderId, decide) {
+    const current = await shopOrders.findByIdAsync(orderId);
+    if (!current) return { error: 'order_not_found', status: 404 };
+    const decision = decide(current);
+    if (decision.error) return decision;
+    if (!decision.patch) return { order: current, value: decision.value };
+    const order = await shopOrders.updateByIdAsync(orderId, { ...decision.patch, updatedAt: decision.patch.updatedAt || nowIso() });
+    return { order, value: decision.value };
   }
 
   async function markPaid(orderId, { patch = {} } = {}) {
@@ -117,6 +132,7 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     if (order.status !== 'cancelled' || order.stockState !== 'released' || !['pending', 'cancelled', 'failed'].includes(order.paymentStatus)) {
       return { revived: false, reason: 'not_revivable', order };
     }
+    const applied = typeof patch === 'function' ? patch(order) : patch;
     const lines = (order.items || []).map(lineOf).filter(l => l.qty > 0);
     const found = [];
     for (const line of lines) {
@@ -131,7 +147,7 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       await products.updateByIdAsync(product.id, { stock: Number(product.stock) - line.qty, soldCount: Number(product.soldCount || 0) + line.qty, variants: withVariantStock(product, line, -1), updatedAt: nowIso() });
     }
     const updated = await shopOrders.updateByIdAsync(orderId, {
-      ...patch, status: 'pending', paymentStatus: 'paid', stockState: 'reserved',
+      ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved',
       reservationCycle: (order.reservationCycle || 1) + 1, reservationExpiresAt: null, updatedAt: nowIso(),
     });
     return { revived: true, order: updated };
@@ -149,5 +165,5 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       && (order.stockState || 'reserved') === 'reserved' && order.reservationExpiresAt && +new Date(order.reservationExpiresAt) <= cutoff)).slice(0, limit);
   }
 
-  return { placeOrder, findReplay, cancelAndRelease, markPaid, reviveOrder, markLatePayment, findExpired };
+  return { placeOrder, findReplay, cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired };
 }
