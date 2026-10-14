@@ -15,7 +15,7 @@ import { createPartnerNotifier } from '../src/services/partner-notifier.mjs';
 const uid = (p) => `${p}_${randomUUID().slice(0, 8)}`;
 const letters = () => randomUUID().replace(/-/g, '').slice(0, 8).replace(/[0-9]/g, (d) => 'ghijklmnop'[d]);
 const now = () => new Date().toISOString();
-const made = { users: [], gyms: [], checkins: [], reviews: [], profiles: [], reports: [] };
+const made = { users: [], gyms: [], checkins: [], reviews: [], profiles: [], reports: [], groups: [] };
 const on = () => { process.env.MEMBER_USERNAMES = '1'; };
 const off = () => { delete process.env.MEMBER_USERNAMES; };
 
@@ -101,6 +101,37 @@ test('reviews: the username replaces "Aisha M." only when there is one', async (
   } finally { off(); }
 });
 
+test('reviews and group members carry a username field next to the handle', async () => {
+  const gymId = uid('gym');
+  await gyms.insertAsync({ id: gymId, name: `Field Gym ${gymId}`, tier: 'standard', location: 'DSM', status: 'active', createdAt: now(), updatedAt: now() });
+  made.gyms.push(gymId);
+  const handle = `neema_${letters()}`;
+  const withHandle = await member('Neema Kitomari', handle);
+  const plain = await member('Juma Shaban');
+  for (const memberId of [withHandle, plain]) {
+    const id = uid('rev');
+    await gymReviews.insertAsync({ id, gymId, memberId, rating: 4, text: 'Good', status: 'published', createdAt: now(), updatedAt: now() });
+    made.reviews.push(id);
+  }
+  on();
+  try {
+    const reviews = await gymReviewService.listForGym(gymId);
+    const a = reviews.find((r) => r.memberUsername === handle);
+    assert.ok(a, 'review has memberUsername');
+    assert.equal(a.memberName, handle);
+    const b = reviews.find((r) => r.memberName === 'Juma S.');
+    assert.ok(b && !('memberUsername' in b), 'no field without a username');
+
+    const created = await socialService.createGroup({ ownerType: 'member', ownerId: withHandle }, { name: `Group ${letters()}`, description: 'x' });
+    assert.ok(created.group, JSON.stringify(created));
+    made.groups.push(created.group.id);
+    const detail = await socialService.groupDetail({ userId: withHandle }, created.group.id);
+    const row = detail.members.find((m) => m.id === withHandle);
+    assert.equal(row.displayName, handle);
+    assert.equal(row.username, handle);
+  } finally { off(); }
+});
+
 test('a gym sees the name and the username on its check-ins', async () => {
   on();
   try {
@@ -151,6 +182,10 @@ test('the gym check-in push carries the name with the username beside it', async
 
 after(async () => {
   off();
+  for (const id of made.groups) {
+    await db('SocialGroupMember').where({ groupId: id }).del().catch(() => {});
+    await db('SocialGroup').where({ id }).del().catch(() => {});
+  }
   for (const id of made.reviews) await db('GymReview').where({ id }).del().catch(() => {});
   for (const id of made.checkins) await db('Checkin').where({ id }).del().catch(() => {});
   for (const id of made.gyms) await db('Gym').where({ id }).del().catch(() => {});
