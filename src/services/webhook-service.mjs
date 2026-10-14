@@ -38,6 +38,8 @@ export function createWebhookService({
       const sub = await subscriptions.findByIdAsync(subscription_id);
       if (!sub) return { error: 'subscription_not_found', status: 404 };
       const request = await openRequestFor(sub.id);
+      // A mobile-money prompt is out for this request: that answer settles it, not this one.
+      if (request?.provider === 'tunzaa' && request.reference) return { ok: true, ignored: 'tunzaa_in_flight' };
       // The money received must be what was asked for this exact product.
       if (request && amount != null && Number(amount) !== Number(request.amountTzs)) {
         return { error: 'amount_mismatch', status: 409 };
