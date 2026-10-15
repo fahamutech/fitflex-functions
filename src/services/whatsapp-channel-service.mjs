@@ -96,6 +96,11 @@ export function createWhatsAppChannelService({
 
   // ── delivery ───────────────────────────────────────────────────────────
 
+  // The registry's variables, in order (stored as JSON).
+  const variablesOf = (row) => {
+    const v = typeof row?.variables === 'string' ? JSON.parse(row.variables) : row?.variables;
+    return Array.isArray(v) ? v : [];
+  };
   const approvedRow = (templateName, language) => db('WhatsAppTemplate')
     .where({ provider: provider.name, providerTemplateName: templateName, language, approvalStatus: 'approved' })
     .first('id', 'variables');
@@ -118,11 +123,13 @@ export function createWhatsAppChannelService({
     if (!recipient.ok) return { skipped: recipient.reason };
     const p = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload;
     if (!p?.templateName || !p?.language) return { permanent: true, reason: 'whatsapp_template_missing' };
-    if (!(await approvedRow(p.templateName, p.language))) return { skipped: 'whatsapp_template_not_approved' };
+    const approved = await approvedRow(p.templateName, p.language);
+    if (!approved) return { skipped: 'whatsapp_template_not_approved' };
 
     const r = await provider.sendTemplate({
       to: recipient.to, templateName: p.templateName, language: p.language,
-      parameters: (p.parameters || []).map(whatsappParameter), category: msg.category, reference: msg.id,
+      parameters: (p.parameters || []).map(whatsappParameter), parameterNames: variablesOf(approved),
+      category: msg.category, reference: msg.id,
     });
     if (r.ok) return { status: 'sent', providerMessageId: r.providerMessageId };
     if (r.error === ERRORS.optedOut) {
@@ -376,8 +383,9 @@ export function createWhatsAppChannelService({
     if (!Array.isArray(parameters) || !parameters.every(p => typeof p === 'string' && p.length <= 200)) {
       return { error: 'invalid_parameters', status: 400 };
     }
-    if (!(await approvedRow(templateName, language))) return { error: 'whatsapp_template_not_approved', status: 400 };
-    const r = await provider.sendTemplate({ to: recipient.to, templateName, language, parameters: parameters.map(whatsappParameter), category: 'utility', reference: id('watest') });
+    const approved = await approvedRow(templateName, language);
+    if (!approved) return { error: 'whatsapp_template_not_approved', status: 400 };
+    const r = await provider.sendTemplate({ to: recipient.to, templateName, language, parameters: parameters.map(whatsappParameter), parameterNames: variablesOf(approved), category: 'utility', reference: id('watest') });
     audit(actorId, 'whatsapp_test_sent', 'whatsapp', null, { to: maskPhone(recipient.to), templateName, language, ok: Boolean(r.ok), error: r.error || null });
     return r.ok ? { ok: true, providerMessageId: r.providerMessageId } : { error: r.error, status: 502 };
   }

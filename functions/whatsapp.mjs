@@ -49,7 +49,9 @@ export const sendOtp = {
 // their provider's signature check on top in parseWebhook.
 function hasWebhookToken(req) {
   const expected = process.env.WHATSAPP_WEBHOOK_SECRET;
-  const given = req.headers?.['x-whatsapp-webhook-token'] ?? req.query?.token;
+  // Meta's GET check when the callback URL is saved sends the secret as
+  // hub.verify_token.
+  const given = req.headers?.['x-whatsapp-webhook-token'] ?? req.query?.token ?? req.query?.['hub.verify_token'];
   if (!expected || typeof given !== 'string') return false;
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
