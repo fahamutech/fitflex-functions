@@ -30,7 +30,7 @@ function setup() {
       u('juma', 'Juma Fan', { email: 'Juma@Example.com', phone: '+255712000002' }),
       u('asha', 'Asha Other', { phone: '+255712000003' }),
     ]),
-    follows: store(), blocks: store(), invites: store(), notifications: store(), sent: [],
+    follows: store(), blocks: store(), invites: store(), notifications: store(), sent: [], delivered: [],
   };
   s.clock = { now: NOW };
   s.svc = createFriendInvitationService({
@@ -52,6 +52,9 @@ function setup() {
       Object.assign(r, patch); return true;
     },
     contactsFor: async (userId) => s.extraContacts?.[userId] ?? [],
+    delivery: () => s.on ?? { sms: false, whatsapp: false },
+    handleOf: async (id) => (id === 'neema' ? 'neema_star' : null),
+    deliver: async (a) => { s.delivered.push(a); return s.deliverResult ?? { sms: 'sent' }; },
     baseLink: () => 'https://app.example',
     now: () => s.clock.now,
   });
@@ -123,7 +126,7 @@ test('not on FitFlex: share link + message, token only hashed, attaches after th
   const r = await s.svc.invite('neema', { email: 'new.person@example.com' });
   assert.equal(r.invitation.status, 'pending');
   assert.match(r.share.link, /^https:\/\/app\.example\/friend-invite\/[A-Za-z0-9_-]{20,}$/);
-  assert.ok(r.share.text.includes('Neema Star') && r.share.text.includes(r.share.link));
+  assert.ok(r.share.text.includes('@neema_star') && r.share.text.includes(r.share.link));
   const token = r.share.link.split('/').pop();
   assert.ok(!JSON.stringify(s.invites.rows).includes(token), 'plain token is not stored');
   assert.equal(s.sent.length, 0, 'nothing sent by FitFlex');
@@ -201,4 +204,52 @@ test('the inviter sees the contact they invited; the recipient never does', asyn
   const theirs = (await s.svc.list('zed')).incoming[0];
   assert.equal(theirs.contact, null);
   assert.ok(!JSON.stringify(s.notifications.rows).includes('650387211'));
+});
+
+test('sending is off by default: nothing is delivered by FitFlex', async () => {
+  const s = setup();
+  const r = await s.svc.invite('neema', { phone: '0650387211' });
+  assert.equal(r.delivery, undefined);
+  assert.equal(s.delivered.length, 0);
+  assert.deepEqual((await s.svc.lookup('neema', { phone: '0650387211' })).result.delivery, { sms: false, whatsapp: false });
+});
+
+test('with SMS on, FitFlex sends once to the number, naming the inviter by @username', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: false };
+  const r = await s.svc.invite('neema', { phone: '0650387211' });
+  assert.deepEqual(r.delivery, { sms: 'sent' });
+  assert.equal(s.delivered.length, 1);
+  assert.equal(s.delivered[0].phone, '+255650387211');
+  assert.ok(s.delivered[0].text.includes('@neema_star'));
+  assert.ok(s.delivered[0].text.includes(r.share.link));
+  // inviting again straight away does not send a second message
+  const again = await s.svc.invite('neema', { phone: '0650387211' });
+  assert.deepEqual(again.delivery, { sms: 'skipped:recently_sent', whatsapp: 'skipped:recently_sent' });
+  assert.equal(s.delivered.length, 1);
+});
+
+test('email invitations and members are never sent by SMS; failure keeps the link', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: true };
+  assert.equal((await s.svc.invite('neema', { email: 'someone@example.com' })).delivery, undefined);
+  assert.equal((await s.svc.invite('neema', { userId: 'juma' })).delivery, undefined);
+  s.deliverResult = { sms: 'failed', whatsapp: 'skipped:whatsapp_template_not_approved' };
+  const r = await s.svc.invite('neema', { phone: '0650387299' });
+  assert.ok(r.share.link, 'the share link is still returned');
+  assert.equal(r.delivery.sms, 'failed');
+  const row = s.invites.rows.find(i => i.identifierValue === '+255650387299');
+  assert.equal(row.sentAt ?? null, null, 'nothing counted as sent');
+});
+
+test('daily cap on messages FitFlex sends', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: false };
+  process.env.FRIEND_INVITE_SEND_PER_DAY = '1';
+  process.env.FRIEND_INVITE_CREATE_PER_HOUR = '50';
+  try {
+    assert.deepEqual((await s.svc.invite('neema', { phone: '0650000001' })).delivery, { sms: 'sent' });
+    assert.equal((await s.svc.invite('neema', { phone: '0650000002' })).delivery.sms, 'skipped:daily_limit');
+    assert.equal(s.delivered.length, 1);
+  } finally { delete process.env.FRIEND_INVITE_SEND_PER_DAY; delete process.env.FRIEND_INVITE_CREATE_PER_HOUR; }
 });

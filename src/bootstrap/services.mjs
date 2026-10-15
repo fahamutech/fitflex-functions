@@ -102,6 +102,7 @@ import { createCommunicationHistoryService } from '../services/communication-his
 import { createAutomationService } from '../services/automation-service.mjs';
 import { createCommunicationAnalyticsService } from '../services/communication-analytics-service.mjs';
 import { createCommunicationAccess } from '../services/communication-access.mjs';
+import { whatsappParameter } from '../shared/message-render.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
@@ -554,6 +555,45 @@ export const friendInvitationService = createFriendInvitationService({
       .where({ personId: u.personId, status: 'active' }).whereIn('type', ['email', 'phone']).whereNotNull('verifiedAt')
       .select('type', 'normalizedValue');
     return rows.map(r => ({ type: r.type, value: r.normalizedValue }));
+  },
+  // FitFlex sends the invitation itself only when these are switched on
+  // (FRIEND_INVITE_SMS / FRIEND_INVITE_WHATSAPP = on). SMS goes through the
+  // shared SMS service and its registered sender name; WhatsApp needs an
+  // approved template (FRIEND_INVITE_WHATSAPP_TEMPLATE) and a configured
+  // provider. smsService / whatsApp* are defined further down; this runs later.
+  delivery: () => ({
+    sms: String(process.env.FRIEND_INVITE_SMS || '').toLowerCase() === 'on',
+    whatsapp: String(process.env.FRIEND_INVITE_WHATSAPP || '').toLowerCase() === 'on',
+  }),
+  handleOf: userId => usernameService.handleOf(userId),
+  deliver: async ({ phone, text, inviterName, link, locale, reference, sms, whatsapp }) => {
+    const out = {};
+    if (sms) {
+      const r = await smsService.send({
+        category: 'invitation', text, recipients: [{ phone, dedupeKey: `friend-invite:${reference}:${new Date().toISOString().slice(0, 10)}` }], maxAttempts: 1,
+      });
+      const x = r.results?.[0] ?? {};
+      out.sms = x.outcome === 'sent' ? 'sent' : (x.outcome === 'skipped' ? `skipped:${x.reason ?? 'not_sent'}` : 'failed');
+    }
+    if (whatsapp) {
+      if (!whatsappChannelService.available()) out.whatsapp = 'skipped:whatsapp_not_available';
+      else {
+        const language = locale === 'sw' ? 'sw' : 'en';
+        const templateName = process.env.FRIEND_INVITE_WHATSAPP_TEMPLATE || 'friend_invitation';
+        const approved = await db('WhatsAppTemplate')
+          .where({ provider: whatsAppProvider.name, providerTemplateName: templateName, language, approvalStatus: 'approved' }).first('id');
+        const to = whatsAppProvider.validateRecipient(phone);
+        if (!approved) out.whatsapp = 'skipped:whatsapp_template_not_approved';
+        else if (!to.ok) out.whatsapp = `skipped:${to.reason}`;
+        else {
+          const r = await whatsAppProvider.sendTemplate({
+            to: to.to, templateName, language, parameters: [inviterName, link].map(whatsappParameter), category: 'utility', reference,
+          });
+          out.whatsapp = r.ok ? 'sent' : (r.error === 'recipient_opted_out' ? 'skipped:recipient_opted_out' : 'failed');
+        }
+      }
+    }
+    return out;
   },
   transition: async (id, from, patch, opts = {}) => {
     const q = db('FriendInvitation').where({ id, status: from });
