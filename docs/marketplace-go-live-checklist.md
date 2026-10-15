@@ -39,7 +39,7 @@ provider integration for shop orders; unattended payments are not covered.
 
 | # | Gate | State |
 |---|---|---|
-| C1 | Payment provider chosen, documented, sandbox credentials — D-9 | **OPEN — blocks unattended payments** |
+| C1 | Payment provider chosen, documented, sandbox credentials — D-9 | **DECIDED 2026-10-15: manual confirmation for the controlled launch (Option A); provider deferred. Blocks unattended payments only** |
 | C2 | If manual: staff trained on the rules (amount must equal the order total; one reference per order; confirmed payments are not edited back; late payment revives or refunds) | OPEN |
 | C3 | Who sends refunds, in what time, from which account; refunds waiting > 3 days are flagged | OPEN (flag exists; process does not) |
 | C4 | Webhook authentication scheme (Selcom signature, OI-004) — only needed with C1 | OPEN |
@@ -49,8 +49,8 @@ provider integration for shop orders; unattended payments are not covered.
 
 | # | Decision | State |
 |---|---|---|
-| D-6 | Cancel/return one vendor's part of a mixed order (partial refund). Until decided: FitFlex cancels mixed orders whole; nobody can cancel after any vendor delivered. | OPEN |
-| D-7 | Pay each vendor when their own part is delivered. Until decided: paid when every vendor has delivered. **Settlement rules were not changed.** | OPEN |
+| D-6 | Cancel/return one vendor's part of a mixed order (partial refund). **Decided 2026-10-15: keep** — FitFlex cancels mixed orders whole; nobody can cancel after any vendor delivered. | DECIDED |
+| D-7 | Pay each vendor when their own part is delivered. **Decided 2026-10-15: keep** — paid when every vendor has delivered. **Settlement rules were not changed.** | DECIDED |
 | — | Returns of delivered orders (a workflow does not exist) | OPEN |
 | — | VAT on commission/payouts (platform-wide DR-05) | OPEN |
 
