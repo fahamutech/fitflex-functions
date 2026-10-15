@@ -1,5 +1,7 @@
 // Composition root — every service is instantiated exactly once here with its
 // dependencies injected, then imported by the thin REST modules in functions/.
+import { createMobileMoneyService } from '../services/mobile-money-service.mjs';
+import { createTunzaaClient, tunzaaSettings } from '../integrations/payments/tunzaa.mjs';
 import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose, invalidateAccountStatus } from '../auth/jwt.mjs';
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
 import { createPinAuthService } from '../services/pin-auth-service.mjs';
@@ -29,7 +31,7 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn } from '../shared/feature-flags.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
 import { createSmsProvider } from '../integrations/sms/provider.mjs';
 import { createSmsService } from '../services/sms-service.mjs';
@@ -100,6 +102,7 @@ import { createCommunicationHistoryService } from '../services/communication-his
 import { createAutomationService } from '../services/automation-service.mjs';
 import { createCommunicationAnalyticsService } from '../services/communication-analytics-service.mjs';
 import { createCommunicationAccess } from '../services/communication-access.mjs';
+import { whatsappParameter } from '../shared/message-render.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
@@ -444,6 +447,23 @@ export const adminPaymentService = createAdminPaymentService({
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
   beforeOrderPayment: (request, opts) => shopService.checkOrderPayment(request, opts),
 });
+// Pay by mobile money (Malipo by Tunzaa). Dormant unless TUNZAA_PAYMENTS is set; the
+// client exists only when MALIPO_API_KEY and MALIPO_API_SECRET are both set.
+const tunzaaConfig = tunzaaSettings();
+export const tunzaaSecretKey = tunzaaConfig?.secretKey ?? null;
+if (tunzaaConfig && tunzaaPaymentsOn() && tunzaaConfig.environment !== 'live') {
+  console.warn(`[tunzaa] payments are ON against the SANDBOX${tunzaaSandboxSettlesOn() ? ' and sandbox payments settle real plans (TUNZAA_SANDBOX_SETTLES)' : ' but will not be offered (set TUNZAA_SANDBOX_SETTLES to rehearse)'}`);
+}
+export const mobileMoneyService = createMobileMoneyService({
+  paymentRequests, subscriptions, adminPaymentService, auditLog,
+  client: tunzaaConfig ? createTunzaaClient({ settings: tunzaaConfig }) : null,
+  enabled: tunzaaPaymentsOn,
+  // Sandbox transactions still activate real plans, so against the sandbox this
+  // must be asked for (TUNZAA_SANDBOX_SETTLES); live needs nothing extra.
+  canSettle: () => tunzaaConfig?.environment === 'live' || tunzaaSandboxSettlesOn(),
+  // Sandbox only (the client ignores it on live): 'success' or 'failure' to rehearse an outcome.
+  scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
+});
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
@@ -535,6 +555,45 @@ export const friendInvitationService = createFriendInvitationService({
       .where({ personId: u.personId, status: 'active' }).whereIn('type', ['email', 'phone']).whereNotNull('verifiedAt')
       .select('type', 'normalizedValue');
     return rows.map(r => ({ type: r.type, value: r.normalizedValue }));
+  },
+  // FitFlex sends the invitation itself only when these are switched on
+  // (FRIEND_INVITE_SMS / FRIEND_INVITE_WHATSAPP = on). SMS goes through the
+  // shared SMS service and its registered sender name; WhatsApp needs an
+  // approved template (FRIEND_INVITE_WHATSAPP_TEMPLATE) and a configured
+  // provider. smsService / whatsApp* are defined further down; this runs later.
+  delivery: () => ({
+    sms: String(process.env.FRIEND_INVITE_SMS || '').toLowerCase() === 'on',
+    whatsapp: String(process.env.FRIEND_INVITE_WHATSAPP || '').toLowerCase() === 'on',
+  }),
+  handleOf: userId => usernameService.handleOf(userId),
+  deliver: async ({ phone, text, inviterName, link, locale, reference, sms, whatsapp }) => {
+    const out = {};
+    if (sms) {
+      const r = await smsService.send({
+        category: 'invitation', text, recipients: [{ phone, dedupeKey: `friend-invite:${reference}:${new Date().toISOString().slice(0, 10)}` }], maxAttempts: 1,
+      });
+      const x = r.results?.[0] ?? {};
+      out.sms = x.outcome === 'sent' ? 'sent' : (x.outcome === 'skipped' ? `skipped:${x.reason ?? 'not_sent'}` : 'failed');
+    }
+    if (whatsapp) {
+      if (!whatsappChannelService.available()) out.whatsapp = 'skipped:whatsapp_not_available';
+      else {
+        const language = locale === 'sw' ? 'sw' : 'en';
+        const templateName = process.env.FRIEND_INVITE_WHATSAPP_TEMPLATE || 'friend_invitation';
+        const approved = await db('WhatsAppTemplate')
+          .where({ provider: whatsAppProvider.name, providerTemplateName: templateName, language, approvalStatus: 'approved' }).first('id');
+        const to = whatsAppProvider.validateRecipient(phone);
+        if (!approved) out.whatsapp = 'skipped:whatsapp_template_not_approved';
+        else if (!to.ok) out.whatsapp = `skipped:${to.reason}`;
+        else {
+          const r = await whatsAppProvider.sendTemplate({
+            to: to.to, templateName, language, parameters: [inviterName, link].map(whatsappParameter), category: 'utility', reference,
+          });
+          out.whatsapp = r.ok ? 'sent' : (r.error === 'recipient_opted_out' ? 'skipped:recipient_opted_out' : 'failed');
+        }
+      }
+    }
+    return out;
   },
   transition: async (id, from, patch, opts = {}) => {
     const q = db('FriendInvitation').where({ id, status: from });
