@@ -35,6 +35,8 @@ export const friendInvitationLimits = () => ({
   createPerHour: num('FRIEND_INVITE_CREATE_PER_HOUR', 20),
   lookupPerHour: num('FRIEND_INVITE_LOOKUP_PER_HOUR', 40),
   redeclineDays: num('FRIEND_INVITE_REINVITE_AFTER_DAYS', 30),
+  sendsPerDay: num('FRIEND_INVITE_SEND_PER_DAY', 10),
+  resendWaitHours: num('FRIEND_INVITE_RESEND_WAIT_HOURS', 24),
 });
 
 /** "Neema Abdallah" → "N**** A*******": enough to recognise, not to identify. */
@@ -64,6 +66,14 @@ export function createFriendInvitationService({
   findMember,
   // (userId) → [{ type, value }] verified contacts of the person behind that member (optional).
   contactsFor = async () => [],
+  // Sending the invitation ourselves (SMS / WhatsApp), only when the flags are on.
+  //   delivery() → { sms: boolean, whatsapp: boolean }  what is switched on right now
+  //   deliver({ phone, text, inviterName, link, locale, reference }) → { sms?, whatsapp? }
+  //     each 'sent' (the provider accepted it) | 'failed' | 'skipped:<why>'
+  //   handleOf(userId) → the member's @username, or null
+  delivery = () => ({ sms: false, whatsapp: false }),
+  deliver = null,
+  handleOf = async () => null,
   // (id, fromStatus, patch) → true when that row was in `fromStatus` and is now patched. Atomic.
   transition,
   // Public base URL the invitation link lives under.
@@ -170,7 +180,8 @@ export function createFriendInvitationService({
     if (member && member.id === userId) return { error: 'cannot_invite_yourself', status: 400 };
     if (!member || await isBlocked(userId, member.id)) {
       // A blocked member looks like nobody: no way to probe around a block.
-      return { result: { kind: 'unregistered', contactType: contact.type } };
+      const d = delivery();
+      return { result: { kind: 'unregistered', contactType: contact.type, delivery: contact.type === 'phone' ? { sms: d.sms, whatsapp: d.whatsapp } : { sms: false, whatsapp: false } } };
     }
     const relationship = await connection(userId, member.id);
     const open = (await invites.filterByColumnAsync('inviterId', userId))
@@ -253,11 +264,15 @@ export function createFriendInvitationService({
     const open = mine.find(i => !i.recipientUserId && i.identifierType === contact.type
       && i.identifierValue === contact.value && i.status === 'pending' && !expired(i));
     const token = newToken();
-    const inviterName = (await nameOf(userId)) ?? 'A FitFlex member';
+    // The message names the inviter by their FitFlex @username when they have one.
+    const handle = await handleOf(userId);
+    const inviterName = handle ? `@${handle}` : ((await nameOf(userId)) ?? 'A FitFlex member');
     if (open) {
       // The plain token is never stored, so sharing again issues a fresh link.
       await invites.updateByIdAsync(open.id, { tokenHash: sha256(token), updatedAt: t });
-      return { invitation: await view({ ...open }, userId), share: await message(open, token, inviterName, locale), duplicate: true };
+      const share = await message(open, token, inviterName, locale);
+      const sent = await sendIt(open, contact, share, inviterName, locale, mine);
+      return { invitation: await view({ ...open }, userId), share, ...(sent ? { delivery: sent } : {}), duplicate: true };
     }
     const declined = mine.find(i => i.identifierType === contact.type && i.identifierValue === contact.value
       && i.status === 'rejected' && +now() - +new Date(i.respondedAt ?? i.updatedAt) < limits().redeclineDays * 86400e3);
@@ -272,7 +287,41 @@ export function createFriendInvitationService({
       if (!/unique|duplicate/i.test(err.message ?? '')) throw err;
       return { error: 'conflict', status: 409 };
     }
-    return { invitation: await view(row, userId), share: await message(row, token, inviterName, locale) };
+    const share = await message(row, token, inviterName, locale);
+    const sent = await sendIt(row, contact, share, inviterName, locale, mine);
+    return { invitation: await view(row, userId), share, ...(sent ? { delivery: sent } : {}) };
+  }
+
+  /**
+   * FitFlex sends the invitation itself, by SMS and / or WhatsApp, when those
+   * are switched on and the contact is a mobile number. Capped per inviter
+   * per day and not repeated within the resend wait. Returns null when
+   * nothing applies; otherwise what happened per channel. A failure never
+   * fails the invitation: the member can still use the share sheet.
+   */
+  async function sendIt(inv, contact, share, inviterName, locale, mine) {
+    const on = delivery();
+    if (!deliver || contact.type !== 'phone' || (!on.sms && !on.whatsapp)) return null;
+    const lim = limits();
+    const since = +now() - 24 * 3600e3;
+    const sentToday = mine.filter(i => i.sentAt && +new Date(i.sentAt) >= since).length;
+    if (sentToday >= lim.sendsPerDay) return { sms: 'skipped:daily_limit', whatsapp: 'skipped:daily_limit' };
+    const fresh = await invites.findByIdAsync(inv.id);
+    if (fresh?.sentAt && +now() - +new Date(fresh.sentAt) < lim.resendWaitHours * 3600e3) {
+      return { sms: 'skipped:recently_sent', whatsapp: 'skipped:recently_sent' };
+    }
+    let result;
+    try {
+      result = await deliver({
+        phone: contact.value, text: share.text, inviterName, link: share.link, locale, reference: inv.id,
+        sms: on.sms, whatsapp: on.whatsapp,
+      });
+    } catch (err) {
+      return { sms: on.sms ? 'failed' : undefined, whatsapp: on.whatsapp ? 'failed' : undefined };
+    }
+    const via = Object.entries(result || {}).filter(([, v]) => v === 'sent').map(([k]) => k);
+    if (via.length) await invites.updateByIdAsync(inv.id, { sentAt: iso(), sentVia: via.join(','), updatedAt: iso() });
+    return result;
   }
 
   // ── Link: preview, claim, attach ───────────────────────────────────────
