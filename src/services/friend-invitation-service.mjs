@@ -66,13 +66,16 @@ export function createFriendInvitationService({
   findMember,
   // (userId) → [{ type, value }] verified contacts of the person behind that member (optional).
   contactsFor = async () => [],
-  // Sending the invitation ourselves (SMS / WhatsApp), only when the flags are on.
+  // Sending the invitation ourselves, only when the flags are on. WhatsApp
+  // first; SMS when the number has no WhatsApp (or WhatsApp can't be used).
   //   delivery() → { sms: boolean, whatsapp: boolean }  what is switched on right now
-  //   deliver({ phone, text, inviterName, link, locale, reference }) → { sms?, whatsapp? }
-  //     each 'sent' (the provider accepted it) | 'failed' | 'skipped:<why>'
+  //   channels.whatsapp({ phone, inviterName, link, locale, reference })
+  //        → { status: 'sent', providerMessageId } | { status: 'skipped:<why>' } | { status: 'failed' }
+  //   channels.sms({ phone, text, reference }) → { status: 'sent' | 'failed' | 'skipped:<why>' }
+  //   channels.whatsappStatus(providerMessageId) → 'delivered' | 'read' | 'sent' | 'failed' | null
   //   handleOf(userId) → the member's @username, or null
   delivery = () => ({ sms: false, whatsapp: false }),
-  deliver = null,
+  channels = null,
   handleOf = async () => null,
   // (id, fromStatus, patch) → true when that row was in `fromStatus` and is now patched. Atomic.
   transition,
@@ -126,6 +129,11 @@ export function createFriendInvitationService({
       // the recipient never gets it, and no notification carries it.
       contactType: mine ? inv.identifierType : null,
       contact: mine ? inv.identifierValue ?? null : null,
+      // How FitFlex itself sent it (inviter only): 'whatsapp', 'sms' or both,
+      // and whether WhatsApp could not deliver so SMS was used instead.
+      sentBy: mine && inv.sentAt ? String(inv.sentVia || '').split(',').filter(Boolean) : [],
+      sentAt: mine && inv.sentAt ? iso(inv.sentAt) : null,
+      whatsappFailed: mine ? inv.waState === 'failed' : false,
       createdAt: iso(inv.createdAt),
       expiresAt: iso(inv.expiresAt),
       respondedAt: inv.respondedAt ? iso(inv.respondedAt) : null,
@@ -293,15 +301,18 @@ export function createFriendInvitationService({
   }
 
   /**
-   * FitFlex sends the invitation itself, by SMS and / or WhatsApp, when those
-   * are switched on and the contact is a mobile number. Capped per inviter
-   * per day and not repeated within the resend wait. Returns null when
-   * nothing applies; otherwise what happened per channel. A failure never
-   * fails the invitation: the member can still use the share sheet.
+   * FitFlex sends the invitation itself when the flags are on and the contact
+   * is a mobile number: WhatsApp first; if WhatsApp can't be used right now
+   * (not set up, template not approved, rejected) SMS goes at once; if
+   * WhatsApp accepts it but later reports the number isn't on WhatsApp,
+   * resolveFallbacks() sends the SMS. A number that opted out of WhatsApp
+   * gets nothing. Capped per inviter per day and not repeated within the
+   * resend wait. A failure never fails the invitation: the member can still
+   * use the share sheet.
    */
   async function sendIt(inv, contact, share, inviterName, locale, mine) {
     const on = delivery();
-    if (!deliver || contact.type !== 'phone' || (!on.sms && !on.whatsapp)) return null;
+    if (!channels || contact.type !== 'phone' || (!on.sms && !on.whatsapp)) return null;
     const lim = limits();
     const since = +now() - 24 * 3600e3;
     const sentToday = mine.filter(i => i.sentAt && +new Date(i.sentAt) >= since).length;
@@ -310,18 +321,83 @@ export function createFriendInvitationService({
     if (fresh?.sentAt && +now() - +new Date(fresh.sentAt) < lim.resendWaitHours * 3600e3) {
       return { sms: 'skipped:recently_sent', whatsapp: 'skipped:recently_sent' };
     }
-    let result;
-    try {
-      result = await deliver({
-        phone: contact.value, text: share.text, inviterName, link: share.link, locale, reference: inv.id,
-        sms: on.sms, whatsapp: on.whatsapp,
-      });
-    } catch (err) {
-      return { sms: on.sms ? 'failed' : undefined, whatsapp: on.whatsapp ? 'failed' : undefined };
+    const out = {};
+    const via = [];
+    let patch = {};
+    if (on.whatsapp) {
+      let wa;
+      try {
+        wa = await channels.whatsapp({ phone: contact.value, inviterName, link: share.link, locale, reference: inv.id });
+      } catch { wa = { status: 'failed' }; }
+      out.whatsapp = wa.status;
+      if (wa.status === 'sent') {
+        via.push('whatsapp');
+        patch = { waMessageId: wa.providerMessageId ?? null, waState: wa.providerMessageId ? 'pending' : 'unknown' };
+      }
     }
-    const via = Object.entries(result || {}).filter(([, v]) => v === 'sent').map(([k]) => k);
-    if (via.length) await invites.updateByIdAsync(inv.id, { sentAt: iso(), sentVia: via.join(','), updatedAt: iso() });
-    return result;
+    // A number that opted out of WhatsApp from FitFlex hears nothing from us by SMS either.
+    const optedOut = out.whatsapp === 'skipped:recipient_opted_out';
+    if (on.sms && out.whatsapp !== 'sent' && !optedOut) {
+      out.sms = await smsOnce(inv, share.text);
+      if (out.sms === 'sent') via.push('sms');
+    } else if (on.sms) {
+      out.sms = optedOut ? 'skipped:recipient_opted_out' : 'skipped:whatsapp_sent';
+    }
+    if (via.length) await invites.updateByIdAsync(inv.id, { sentAt: iso(), sentVia: via.join(','), ...patch, updatedAt: iso() });
+    return out;
+  }
+
+  async function smsOnce(inv, text) {
+    try {
+      const r = await channels.sms({ phone: inv.identifierValue, text, reference: inv.id });
+      return r.status;
+    } catch { return 'failed'; }
+  }
+
+  /**
+   * Job: for invitations WhatsApp accepted, ask the provider what became of
+   * them. 'failed' means the number has no WhatsApp (or can't receive it):
+   * send the SMS instead, once. Delivered / read: done. Anything else waits;
+   * after a day it is left alone. Safe to run often and to overlap.
+   */
+  async function resolveFallbacks() {
+    if (!channels?.whatsappStatus) return { checked: 0, sms: 0 };
+    const pending = (await invites.filterByColumnAsync('waState', 'pending')).filter(i => i.waMessageId);
+    let checked = 0, sms = 0;
+    for (const inv of pending) {
+      checked += 1;
+      const age = +now() - +new Date(inv.sentAt ?? inv.createdAt);
+      let status = null;
+      try { status = await channels.whatsappStatus(inv.waMessageId); } catch { status = null; }
+      if (status === 'delivered' || status === 'read') {
+        await transition(inv.id, 'pending', { waState: 'delivered', updatedAt: iso() }, { column: 'waState', from: 'pending' });
+      } else if (status === 'failed') {
+        // Claim the fallback first, so two runs never send two SMS.
+        const won = await transition(inv.id, 'pending', { waState: 'failed', updatedAt: iso() }, { column: 'waState', from: 'pending' });
+        if (!won) continue;
+        const fresh = await invites.findByIdAsync(inv.id);
+        if (fresh?.status !== 'pending' || !delivery().sms) continue;
+        const text = await fallbackText(fresh);
+        if (!text) continue;
+        if (await smsOnce(fresh, text) === 'sent') {
+          sms += 1;
+          const via = new Set(String(fresh.sentVia || '').split(',').filter(Boolean)); via.add('sms');
+          await invites.updateByIdAsync(inv.id, { sentVia: [...via].join(','), updatedAt: iso() });
+        }
+      } else if (age > 24 * 3600e3) {
+        await transition(inv.id, 'pending', { waState: 'unknown', updatedAt: iso() }, { column: 'waState', from: 'pending' });
+      }
+    }
+    return { checked, sms };
+  }
+
+  /** The SMS text for an invitation: a fresh link (the old token is hashed, so a new one is issued). */
+  async function fallbackText(inv) {
+    const token = newToken();
+    await invites.updateByIdAsync(inv.id, { tokenHash: sha256(token), updatedAt: iso() });
+    const handle = await handleOf(inv.inviterId);
+    const inviterName = handle ? `@${handle}` : ((await nameOf(inv.inviterId)) ?? 'A FitFlex member');
+    return (await message(inv, token, inviterName, 'en')).text;
   }
 
   // ── Link: preview, claim, attach ───────────────────────────────────────
@@ -480,5 +556,5 @@ export function createFriendInvitationService({
     };
   }
 
-  return { lookup, invite, preview, claim, attachFor, approve, reject, revoke, list };
+  return { lookup, invite, preview, claim, attachFor, approve, reject, revoke, list, resolveFallbacks };
 }

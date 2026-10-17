@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -37,6 +37,15 @@ export const smsReminders = {
     const r = await smsService.sendDueReminders();
     const n = (x) => x.sent + x.failed;
     if (n(r.bookings) || n(r.renewals)) console.log(`[sms] bookings sent=${r.bookings.sent} failed=${r.bookings.failed} · renewals sent=${r.renewals.sent} failed=${r.renewals.failed}`);
+  }
+};
+
+export const friendInviteFallback = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Friend invitations: for invitations WhatsApp accepted, ask the provider whether it was delivered; when the number has no WhatsApp, send the SMS instead (once). Does nothing unless FRIEND_INVITE_WHATSAPP and FRIEND_INVITE_SMS are on. Safe to overlap.',
+  onJob: async () => {
+    const r = await friendInvitationService.resolveFallbacks();
+    if (r.sms) console.log(`[friend-invite] WhatsApp not delivered, SMS sent=${r.sms} of checked=${r.checked}`);
   }
 };
 
