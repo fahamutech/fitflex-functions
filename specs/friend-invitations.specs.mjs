@@ -48,13 +48,17 @@ function setup() {
     },
     transition: async (id, from, patch, opts = {}) => {
       const r = s.invites.rows.find(x => x.id === id);
-      if (!r || r.status !== from || (opts.whereRecipientNull && r.recipientUserId)) return false;
+      if (!r || r[opts.column ?? 'status'] !== from || (opts.whereRecipientNull && r.recipientUserId)) return false;
       Object.assign(r, patch); return true;
     },
     contactsFor: async (userId) => s.extraContacts?.[userId] ?? [],
     delivery: () => s.on ?? { sms: false, whatsapp: false },
     handleOf: async (id) => (id === 'neema' ? 'neema_star' : null),
-    deliver: async (a) => { s.delivered.push(a); return s.deliverResult ?? { sms: 'sent' }; },
+    channels: {
+      whatsapp: async (a) => { s.delivered.push({ channel: 'whatsapp', ...a }); return s.wa ?? { status: 'skipped:whatsapp_not_available' }; },
+      sms: async (a) => { s.delivered.push({ channel: 'sms', ...a }); return { status: s.smsStatus ?? 'sent' }; },
+      whatsappStatus: async () => s.waStatus ?? null,
+    },
     baseLink: () => 'https://app.example',
     now: () => s.clock.now,
   });
@@ -214,7 +218,7 @@ test('sending is off by default: nothing is delivered by FitFlex', async () => {
   assert.deepEqual((await s.svc.lookup('neema', { phone: '0650387211' })).result.delivery, { sms: false, whatsapp: false });
 });
 
-test('with SMS on, FitFlex sends once to the number, naming the inviter by @username', async () => {
+test('with only SMS on, FitFlex sends the SMS once, naming the inviter by @username', async () => {
   const s = setup();
   s.on = { sms: true, whatsapp: false };
   const r = await s.svc.invite('neema', { phone: '0650387211' });
@@ -223,21 +227,102 @@ test('with SMS on, FitFlex sends once to the number, naming the inviter by @user
   assert.equal(s.delivered[0].phone, '+255650387211');
   assert.ok(s.delivered[0].text.includes('@neema_star'));
   assert.ok(s.delivered[0].text.includes(r.share.link));
-  // inviting again straight away does not send a second message
   const again = await s.svc.invite('neema', { phone: '0650387211' });
   assert.deepEqual(again.delivery, { sms: 'skipped:recently_sent', whatsapp: 'skipped:recently_sent' });
   assert.equal(s.delivered.length, 1);
+  const mine = (await s.svc.list('neema')).outgoing[0];
+  assert.deepEqual(mine.sentBy, ['sms']);
+  assert.ok(mine.sentAt);
 });
 
-test('email invitations and members are never sent by SMS; failure keeps the link', async () => {
+test('WhatsApp first: when it accepts the message, no SMS goes', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: true };
+  s.wa = { status: 'sent', providerMessageId: 'wamid.1' };
+  const r = await s.svc.invite('neema', { phone: '0650387211' });
+  assert.equal(r.delivery.whatsapp, 'sent');
+  assert.equal(r.delivery.sms, 'skipped:whatsapp_sent');
+  assert.deepEqual(s.delivered.map(d => d.channel), ['whatsapp']);
+  const row = s.invites.rows[0];
+  assert.equal(row.waState, 'pending');
+  assert.equal(row.waMessageId, 'wamid.1');
+});
+
+test('WhatsApp not usable (not set up / template not approved): SMS goes at once', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: true };
+  s.wa = { status: 'skipped:whatsapp_template_not_approved' };
+  const r = await s.svc.invite('neema', { phone: '0650387211' });
+  assert.deepEqual(r.delivery, { whatsapp: 'skipped:whatsapp_template_not_approved', sms: 'sent' });
+  assert.deepEqual(s.delivered.map(d => d.channel), ['whatsapp', 'sms']);
+});
+
+test('a number that opted out of WhatsApp gets neither', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: true };
+  s.wa = { status: 'skipped:recipient_opted_out' };
+  const r = await s.svc.invite('neema', { phone: '0650387211' });
+  assert.equal(r.delivery.sms, 'skipped:recipient_opted_out');
+  assert.deepEqual(s.delivered.map(d => d.channel), ['whatsapp']);
+});
+
+test('no WhatsApp on the number: WhatsApp reports failed, the job sends one SMS with a fresh link', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: true };
+  s.wa = { status: 'sent', providerMessageId: 'wamid.2' };
+  const r = await s.svc.invite('neema', { phone: '0650387211' });
+  assert.equal(s.delivered.length, 1);
+
+  s.waStatus = 'sent'; // not delivered yet: wait
+  assert.deepEqual(await s.svc.resolveFallbacks(), { checked: 1, sms: 0 });
+  assert.equal(s.delivered.length, 1);
+
+  s.waStatus = 'failed';
+  assert.deepEqual(await s.svc.resolveFallbacks(), { checked: 1, sms: 1 });
+  const sms = s.delivered.at(-1);
+  assert.equal(sms.channel, 'sms');
+  assert.match(sms.text, /friend-invite\/[A-Za-z0-9_-]{20,}/);
+  assert.notEqual(sms.text.match(/friend-invite\/(\S+)/)[1], r.share.link.split('/').pop(), 'a new link, the old token is gone');
+  // running again sends nothing more
+  assert.deepEqual(await s.svc.resolveFallbacks(), { checked: 0, sms: 0 });
+  assert.equal(s.delivered.length, 2);
+  const mine = (await s.svc.list('neema')).outgoing[0];
+  assert.deepEqual(mine.sentBy, ['whatsapp', 'sms']);
+  assert.equal(mine.whatsappFailed, true);
+  // the new link works
+  const token = sms.text.match(/friend-invite\/(\S+)/)[1];
+  assert.equal((await s.svc.preview(token)).invitation.status, 'pending');
+});
+
+test('WhatsApp delivered: no SMS; a withdrawn invitation gets no fallback SMS', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: true };
+  s.wa = { status: 'sent', providerMessageId: 'wamid.3' };
+  await s.svc.invite('neema', { phone: '0650387211' });
+  s.waStatus = 'delivered';
+  assert.deepEqual(await s.svc.resolveFallbacks(), { checked: 1, sms: 0 });
+  assert.equal(s.invites.rows[0].waState, 'delivered');
+
+  const s2 = setup();
+  s2.on = { sms: true, whatsapp: true };
+  s2.wa = { status: 'sent', providerMessageId: 'wamid.4' };
+  const r2 = await s2.svc.invite('neema', { phone: '0650387299' });
+  await s2.svc.revoke('neema', r2.invitation.id);
+  s2.waStatus = 'failed';
+  assert.deepEqual(await s2.svc.resolveFallbacks(), { checked: 1, sms: 0 });
+  assert.equal(s2.delivered.length, 1);
+});
+
+test('email invitations and members are never sent by FitFlex; a failed send keeps the link', async () => {
   const s = setup();
   s.on = { sms: true, whatsapp: true };
   assert.equal((await s.svc.invite('neema', { email: 'someone@example.com' })).delivery, undefined);
   assert.equal((await s.svc.invite('neema', { userId: 'juma' })).delivery, undefined);
-  s.deliverResult = { sms: 'failed', whatsapp: 'skipped:whatsapp_template_not_approved' };
+  s.wa = { status: 'failed' };
+  s.smsStatus = 'failed';
   const r = await s.svc.invite('neema', { phone: '0650387299' });
   assert.ok(r.share.link, 'the share link is still returned');
-  assert.equal(r.delivery.sms, 'failed');
+  assert.deepEqual(r.delivery, { whatsapp: 'failed', sms: 'failed' });
   const row = s.invites.rows.find(i => i.identifierValue === '+255650387299');
   assert.equal(row.sentAt ?? null, null, 'nothing counted as sent');
 });
