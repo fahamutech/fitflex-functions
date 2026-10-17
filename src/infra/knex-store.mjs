@@ -651,7 +651,7 @@ const ALLOWED_FIELDS = {
   activities:       new Set(['id','userId','type','source','startedAt','durationMinutes','distanceKm','steps','activeMinutes','calories','intensity','workoutId','gymId','trainerId','notes','devicePlatform','externalId','deviceName','movingSeconds','elevationGainM','splits','hasRoute','shareWith','createdAt']),
   activity_routes:  new Set(['id','userId','segments','createdAt']),
   follows:          new Set(['id','followerId','followeeId','createdAt']),
-  friend_invitations: new Set(['id','inviterId','recipientUserId','identifierType','identifierValue','tokenHash','status','notificationId','expiresAt','respondedAt','sentAt','sentVia','createdAt','updatedAt']),
+  friend_invitations: new Set(['id','inviterId','recipientUserId','identifierType','identifierValue','tokenHash','status','notificationId','expiresAt','respondedAt','sentAt','sentVia','waMessageId','waState','createdAt','updatedAt']),
   blocks:           new Set(['id','blockerId','blockedId','createdAt']),
   social_profiles:  new Set(['id','defaultShare','inviteCode','publicProfile','createdAt','updatedAt']),
   activity_views:   new Set(['id','activityId','userId','createdAt']),

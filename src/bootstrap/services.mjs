@@ -566,37 +566,42 @@ export const friendInvitationService = createFriendInvitationService({
     whatsapp: String(process.env.FRIEND_INVITE_WHATSAPP || '').toLowerCase() === 'on',
   }),
   handleOf: userId => usernameService.handleOf(userId),
-  deliver: async ({ phone, text, inviterName, link, locale, reference, sms, whatsapp }) => {
-    const out = {};
-    if (sms) {
+  // WhatsApp first (needs the channel enabled + configured and an approved
+  // template); SMS through the shared SMS service when WhatsApp can't be used
+  // or the number has no WhatsApp (the job in functions/jobs.mjs asks the
+  // provider whether WhatsApp could deliver).
+  channels: {
+    whatsapp: async ({ phone, inviterName, link, locale, reference }) => {
+      if (!whatsappChannelService.available()) return { status: 'skipped:whatsapp_not_available' };
+      const language = locale === 'sw' ? 'sw' : 'en';
+      const templateName = process.env.FRIEND_INVITE_WHATSAPP_TEMPLATE || 'friend_invitation';
+      const approved = await db('WhatsAppTemplate')
+        .where({ provider: whatsAppProvider.name, providerTemplateName: templateName, language, approvalStatus: 'approved' }).first('id');
+      if (!approved) return { status: 'skipped:whatsapp_template_not_approved' };
+      const to = whatsAppProvider.validateRecipient(phone);
+      if (!to.ok) return { status: `skipped:${to.reason}` };
+      const r = await whatsAppProvider.sendTemplate({
+        to: to.to, templateName, language, parameters: [inviterName, link].map(whatsappParameter), category: 'utility', reference,
+      });
+      if (r.ok) return { status: 'sent', providerMessageId: r.providerMessageId ?? null };
+      return { status: r.error === 'recipient_opted_out' ? 'skipped:recipient_opted_out' : 'failed' };
+    },
+    sms: async ({ phone, text, reference }) => {
       const r = await smsService.send({
-        category: 'invitation', text, recipients: [{ phone, dedupeKey: `friend-invite:${reference}:${new Date().toISOString().slice(0, 10)}` }], maxAttempts: 1,
+        category: 'invitation', text, maxAttempts: 1,
+        recipients: [{ phone, dedupeKey: `friend-invite:${reference}:${new Date().toISOString().slice(0, 13)}` }],
       });
       const x = r.results?.[0] ?? {};
-      out.sms = x.outcome === 'sent' ? 'sent' : (x.outcome === 'skipped' ? `skipped:${x.reason ?? 'not_sent'}` : 'failed');
-    }
-    if (whatsapp) {
-      if (!whatsappChannelService.available()) out.whatsapp = 'skipped:whatsapp_not_available';
-      else {
-        const language = locale === 'sw' ? 'sw' : 'en';
-        const templateName = process.env.FRIEND_INVITE_WHATSAPP_TEMPLATE || 'friend_invitation';
-        const approved = await db('WhatsAppTemplate')
-          .where({ provider: whatsAppProvider.name, providerTemplateName: templateName, language, approvalStatus: 'approved' }).first('id');
-        const to = whatsAppProvider.validateRecipient(phone);
-        if (!approved) out.whatsapp = 'skipped:whatsapp_template_not_approved';
-        else if (!to.ok) out.whatsapp = `skipped:${to.reason}`;
-        else {
-          const r = await whatsAppProvider.sendTemplate({
-            to: to.to, templateName, language, parameters: [inviterName, link].map(whatsappParameter), category: 'utility', reference,
-          });
-          out.whatsapp = r.ok ? 'sent' : (r.error === 'recipient_opted_out' ? 'skipped:recipient_opted_out' : 'failed');
-        }
-      }
-    }
-    return out;
+      return { status: x.outcome === 'sent' ? 'sent' : (x.outcome === 'skipped' ? `skipped:${x.reason ?? 'not_sent'}` : 'failed') };
+    },
+    whatsappStatus: async (providerMessageId) => {
+      if (!whatsappChannelService.available() || !providerMessageId) return null;
+      const r = await whatsAppProvider.getDeliveryStatus(providerMessageId);
+      return r?.error ? null : (r?.status ?? null);
+    },
   },
   transition: async (id, from, patch, opts = {}) => {
-    const q = db('FriendInvitation').where({ id, status: from });
+    const q = db('FriendInvitation').where({ id, [opts.column ?? 'status']: from });
     if (opts.whereRecipientNull) q.whereNull('recipientUserId');
     return (await q.update(patch)) === 1;
   },
