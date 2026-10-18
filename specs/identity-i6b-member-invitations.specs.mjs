@@ -303,3 +303,22 @@ test('a side effect that throws puts the invitation back to open, so it can be a
     assert.equal((await db('Invitation').where({ id }).first()).status, 'accepted');
   });
 });
+
+test('a member invitation stuck in accepting is never retried: it expires and a paid one surfaces for the gym', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const p = await personWithPhone();
+    const sent = await invite(o, plan({ phone: p.phone, paidAmount: 25000 }));
+    const id = sent.body.invitation.id;
+    // The accept may have created the plan before it was interrupted.
+    await db('Invitation').where({ id }).update({ status: 'accepting', updatedAt: new Date(Date.now() - 11 * 60e3) });
+
+    const flagged = await call(gymListInvitations, o.claims, { params: { gymId: o.gymId }, query: { needsResolution: '1' } });
+    assert.deepEqual(flagged.body.invitations.map(i => [i.id, i.status, i.needsResolution]), [[id, 'expired', true]]);
+    const row = await db('Invitation').where({ id }).first();
+    assert.ok(row.payload.interruptedAccept, 'marked as an interrupted accept');
+    assert.equal(row.payload.payment.amountTzs, 25000, 'the payment record is kept');
+    assert.equal((await accept(p, id)).body.error, 'invitation_not_open');
+    assert.equal(await count('Subscription', { memberId: p.user.id }), 0, 'nothing retried automatically');
+  });
+});

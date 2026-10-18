@@ -439,3 +439,108 @@ test('a failed acceptance leaves the invitation open, with its link', async () =
     assert.equal((await call(openMyInvitation, p.claims, { body: { token: sent.body.token } })).statusCode, 200);
   });
 });
+
+// ── An interrupted accept, uniqueness while accepting, and resend ──────────
+
+const minutesAgo = m => new Date(Date.now() - m * 60e3);
+
+test('a staff invitation stuck in accepting goes back to open once stale, or to expired if past its expiry', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const sent = await invite(o, { role: 'staff', email: p.email });
+    const id = sent.body.invitation.id;
+    const before = await stored(id);
+
+    // Recent: an accept may still be running, so it is left alone.
+    await db('Invitation').where({ id }).update({ status: 'accepting', updatedAt: minutesAgo(2) });
+    await call(myInvitations, p.claims);
+    assert.equal((await stored(id)).status, 'accepting');
+
+    // Stale: back to the open state it came from, link intact, and acceptable.
+    await db('Invitation').where({ id }).update({ updatedAt: minutesAgo(11) });
+    const inbox = await call(myInvitations, p.claims);
+    assert.deepEqual(inbox.body.invitations.map(i => [i.id, i.status]), [[id, before.status]]);
+    assert.equal((await stored(id)).tokenHash, before.tokenHash);
+    assert.equal((await call(acceptMyInvitation, p.claims, { params: { invitationId: id } })).statusCode, 200);
+
+    // Stale and past its expiry: expired.
+    const q = await verifiedPerson();
+    const late = await invite(o, { role: 'staff', email: q.email });
+    await db('Invitation').where({ id: late.body.invitation.id })
+      .update({ status: 'accepting', createdAt: new Date(Date.now() - 20 * 864e5), expiresAt: minutesAgo(1), updatedAt: minutesAgo(11) });
+    await call(myInvitations, q.claims);
+    assert.equal((await stored(late.body.invitation.id)).status, 'expired');
+  });
+  // The window can be changed by env.
+  await withEnv({ INVITE_ACCEPTING_STALE_MINUTES: '1' }, async () => {
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const sent = await invite(o, { role: 'staff', email: p.email });
+    await db('Invitation').where({ id: sent.body.invitation.id }).update({ status: 'accepting', updatedAt: minutesAgo(2) });
+    await call(myInvitations, p.claims);
+    assert.equal((await stored(sent.body.invitation.id)).status, 'pending');
+  });
+});
+
+test('while an accept is in flight no second invitation is made, by the service or the database', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const sent = await invite(o, { role: 'staff', email: p.email });
+    const id = sent.body.invitation.id;
+    await db('Invitation').where({ id }).update({ status: 'accepting', updatedAt: new Date() });
+
+    const again = await invite(o, { role: 'staff', email: p.email });
+    assert.equal(again.body.created, false);
+    assert.equal(again.body.invitation.id, id);
+
+    const row = await stored(id);
+    await assert.rejects(
+      db('Invitation').insert({ ...row, id: uniq('inv'), tokenHash: uniq('h'), status: 'pending' }),
+      err => err.code === '23505',
+    );
+  });
+});
+
+test('a resend that loses to an accept, decline or cancel is refused and sends nothing', async () => {
+  await on(async () => {
+    const { createInvitationService } = await import('../src/services/invitation-service.mjs');
+    let race = null;
+    // The real db, except that just before the resend's update another request closes the invitation.
+    const racingDb = new Proxy(db, {
+      apply(target, self, args) {
+        const q = target(...args);
+        if (args[0] === 'Invitation' && race) {
+          const update = q.update;
+          q.update = async (...u) => {
+            if (!u[0] || !('tokenHash' in u[0])) return update.apply(q, u); // only the resend's own update
+            const id = race; race = null;
+            await target('Invitation').where({ id }).update({ status: 'cancelled', tokenHash: null });
+            return update.apply(q, u);
+          };
+        }
+        return q;
+      },
+    });
+    const sent = [];
+    const svc = createInvitationService({
+      db: racingDb, users, trainers,
+      notify: async (...a) => { sent.push(['notify', ...a]); },
+      senders: { sms: () => ({ configured: true, send: async (...a) => { sent.push(['sms', ...a]); return { ok: true }; } }), email: () => ({ configured: false }) },
+    });
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const made = await invite(o, { role: 'staff', email: p.email });
+    const id = made.body.invitation.id;
+    await db('Invitation').where({ id }).update({ lastSentAt: new Date(Date.now() - 25 * 3600e3) });
+    const before = await stored(id);
+
+    race = id;
+    const out = await svc.resend({ actor: o.owner, orgType: 'gym', orgId: o.gymId, invitationId: id });
+    assert.deepEqual(out, { error: 'invitation_not_open', status: 409 });
+    assert.deepEqual(sent, [], 'nothing was sent');
+    const after = await stored(id);
+    assert.deepEqual([after.status, after.tokenHash, after.resendCount], ['cancelled', null, before.resendCount]);
+  });
+});

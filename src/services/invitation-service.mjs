@@ -44,6 +44,8 @@ export const invitationLimits = () => ({
   lookupsPerOrgPerDay: num('LOOKUP_PER_ORG_PER_DAY', 200),
   missesBeforeCooldown: num('LOOKUP_MISSES_BEFORE_COOLDOWN', 10),
   cooldownMinutes: num('LOOKUP_COOLDOWN_MINUTES', 15),
+  // An accept still 'accepting' after this long was interrupted (see expireDue).
+  acceptingStaleMinutes: num('INVITE_ACCEPTING_STALE_MINUTES', 10),
 });
 
 const sha256 = value => createHash('sha256').update(String(value)).digest('hex');
@@ -144,8 +146,35 @@ export function createInvitationService({
   }
 
   async function expireDue() {
+    await recoverInterruptedAccepts();
     await db('Invitation').whereIn('status', OPEN).where('expiresAt', '<', db.fn.now())
       .update({ status: 'expired', updatedAt: db.fn.now() });
+  }
+
+  /**
+   * An accept that stayed 'accepting' past the stale window was interrupted
+   * (a crash, or a failed move back after a failed side effect). Whether its
+   * side effects ran is unknown, so:
+   *   staff / trainer  creating the role again is idempotent (an existing
+   *                    persona or gym link is reused), so the invitation goes
+   *                    back to the open state it came from ('claimed' if it
+   *                    was claimed, else 'pending'), or to 'expired' if past
+   *                    its expiry.
+   *   member           creating the plan again is not: a retry could give a
+   *                    second plan and payment. It becomes 'expired', marked
+   *                    interruptedAccept, so a paid one surfaces for the gym
+   *                    (needsResolution) to check, re-issue or refund by hand.
+   */
+  async function recoverInterruptedAccepts() {
+    const cutoff = new Date(Date.now() - invitationLimits().acceptingStaleMinutes * 60e3);
+    const stale = () => db('Invitation').where({ status: ACCEPTING }).where('updatedAt', '<', cutoff);
+    await stale().where(q => q.where({ role: 'member' }).orWhere('expiresAt', '<=', db.fn.now()))
+      .update({
+        status: 'expired', updatedAt: db.fn.now(),
+        payload: db.raw(`coalesce(payload, '{}'::jsonb) || jsonb_build_object('interruptedAccept', now())`),
+      });
+    await stale().whereNot({ role: 'member' }).where('expiresAt', '>', db.fn.now())
+      .update({ status: db.raw(`CASE WHEN "claimedAt" IS NULL THEN 'pending' ELSE 'claimed' END`), updatedAt: db.fn.now() });
   }
 
   // ── Lookup ───────────────────────────────────────────────────────────────
@@ -224,7 +253,7 @@ export function createInvitationService({
     }
     const open = await db('Invitation')
       .where({ ...orgRef(orgType, orgId), role, identifierType: identifier.type, identifierValue: identifier.value })
-      .whereIn('status', OPEN).first();
+      .whereIn('status', [...OPEN, ACCEPTING]).first();
     if (open) return { created: false, invitation: view(open) };
 
     const token = newToken();
@@ -359,9 +388,11 @@ export function createInvitationService({
       return { error: 'resend_too_soon', status: 429 };
     }
     const token = newToken();
-    await db('Invitation').where({ id: inv.id }).update({
+    // Only while still open: an accept, decline or cancel in between wins, and nothing is sent.
+    const changed = await db('Invitation').where({ id: inv.id }).whereIn('status', OPEN).update({
       tokenHash: sha256(token), resendCount: inv.resendCount + 1, lastSentAt: db.fn.now(), updatedAt: db.fn.now(),
     });
+    if (!changed) return { error: 'invitation_not_open', status: 409 };
     await audit(actor.id, 'invitation_resent', inv.id, { orgType, orgId });
     await tellPerson(inv);
     const delivery = await deliver(inv, null);
@@ -514,11 +545,12 @@ export function createInvitationService({
         result = await acceptMember(user, inv, person);
       }
     } catch (err) {
-      await reopen().catch(() => {});
+      await reopen().catch(() => {}); // as above
       throw err;
     }
     if (result.error) {
-      await reopen();
+      // If this fails too, expireDue recovers the row once it is stale.
+      await reopen().catch(() => {});
       return result;
     }
     const { personaId } = result;
