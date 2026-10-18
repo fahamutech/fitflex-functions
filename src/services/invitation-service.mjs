@@ -23,6 +23,8 @@ import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 
 const OPEN = ['pending', 'claimed'];
+// Held by exactly one accept while it creates the role (see accept()).
+const ACCEPTING = 'accepting';
 const INVITABLE_ROLES = { gym: ['staff', 'trainer', 'member'], vendor: ['staff'] };
 // The persona type that owns each kind of organisation.
 const OWNER_TYPE = { gym: 'gym_operator', vendor: 'vendor' };
@@ -42,6 +44,8 @@ export const invitationLimits = () => ({
   lookupsPerOrgPerDay: num('LOOKUP_PER_ORG_PER_DAY', 200),
   missesBeforeCooldown: num('LOOKUP_MISSES_BEFORE_COOLDOWN', 10),
   cooldownMinutes: num('LOOKUP_COOLDOWN_MINUTES', 15),
+  // An accept still 'accepting' after this long was interrupted (see expireDue).
+  acceptingStaleMinutes: num('INVITE_ACCEPTING_STALE_MINUTES', 10),
 });
 
 const sha256 = value => createHash('sha256').update(String(value)).digest('hex');
@@ -142,8 +146,35 @@ export function createInvitationService({
   }
 
   async function expireDue() {
+    await recoverInterruptedAccepts();
     await db('Invitation').whereIn('status', OPEN).where('expiresAt', '<', db.fn.now())
       .update({ status: 'expired', updatedAt: db.fn.now() });
+  }
+
+  /**
+   * An accept that stayed 'accepting' past the stale window was interrupted
+   * (a crash, or a failed move back after a failed side effect). Whether its
+   * side effects ran is unknown, so:
+   *   staff / trainer  creating the role again is idempotent (an existing
+   *                    persona or gym link is reused), so the invitation goes
+   *                    back to the open state it came from ('claimed' if it
+   *                    was claimed, else 'pending'), or to 'expired' if past
+   *                    its expiry.
+   *   member           creating the plan again is not: a retry could give a
+   *                    second plan and payment. It becomes 'expired', marked
+   *                    interruptedAccept, so a paid one surfaces for the gym
+   *                    (needsResolution) to check, re-issue or refund by hand.
+   */
+  async function recoverInterruptedAccepts() {
+    const cutoff = new Date(Date.now() - invitationLimits().acceptingStaleMinutes * 60e3);
+    const stale = () => db('Invitation').where({ status: ACCEPTING }).where('updatedAt', '<', cutoff);
+    await stale().where(q => q.where({ role: 'member' }).orWhere('expiresAt', '<=', db.fn.now()))
+      .update({
+        status: 'expired', updatedAt: db.fn.now(),
+        payload: db.raw(`coalesce(payload, '{}'::jsonb) || jsonb_build_object('interruptedAccept', now())`),
+      });
+    await stale().whereNot({ role: 'member' }).where('expiresAt', '>', db.fn.now())
+      .update({ status: db.raw(`CASE WHEN "claimedAt" IS NULL THEN 'pending' ELSE 'claimed' END`), updatedAt: db.fn.now() });
   }
 
   // ── Lookup ───────────────────────────────────────────────────────────────
@@ -222,7 +253,7 @@ export function createInvitationService({
     }
     const open = await db('Invitation')
       .where({ ...orgRef(orgType, orgId), role, identifierType: identifier.type, identifierValue: identifier.value })
-      .whereIn('status', OPEN).first();
+      .whereIn('status', [...OPEN, ACCEPTING]).first();
     if (open) return { created: false, invitation: view(open) };
 
     const token = newToken();
@@ -337,7 +368,10 @@ export function createInvitationService({
     const inv = await ownInvitation({ orgType, orgId, invitationId });
     if (!inv || !canManage(actor, inv)) return { error: 'invitation_not_found', status: 404 };
     if (!OPEN.includes(inv.status)) return { error: 'invitation_not_open', status: 409 };
-    await db('Invitation').where({ id: inv.id }).update({ status: 'cancelled', respondedAt: db.fn.now(), updatedAt: db.fn.now() });
+    // Only from an open state, so a cancel cannot land on an accept in flight.
+    const changed = await db('Invitation').where({ id: inv.id }).whereIn('status', OPEN)
+      .update({ status: 'cancelled', tokenHash: null, respondedAt: db.fn.now(), updatedAt: db.fn.now() });
+    if (!changed) return { error: 'invitation_not_open', status: 409 };
     await audit(actor.id, 'invitation_cancelled', inv.id, { orgType, orgId });
     return { invitation: view({ ...inv, status: 'cancelled' }) };
   }
@@ -354,9 +388,11 @@ export function createInvitationService({
       return { error: 'resend_too_soon', status: 429 };
     }
     const token = newToken();
-    await db('Invitation').where({ id: inv.id }).update({
+    // Only while still open: an accept, decline or cancel in between wins, and nothing is sent.
+    const changed = await db('Invitation').where({ id: inv.id }).whereIn('status', OPEN).update({
       tokenHash: sha256(token), resendCount: inv.resendCount + 1, lastSentAt: db.fn.now(), updatedAt: db.fn.now(),
     });
+    if (!changed) return { error: 'invitation_not_open', status: 409 };
     await audit(actor.id, 'invitation_resent', inv.id, { orgType, orgId });
     await tellPerson(inv);
     const delivery = await deliver(inv, null);
@@ -455,14 +491,37 @@ export function createInvitationService({
     return { inv };
   }
 
+  /**
+   * Move this Person's invitation out of an open, unexpired state in one
+   * conditional update. True only for the single caller that wins.
+   */
+  async function takeOpen(inv, personId, changes) {
+    const n = await db('Invitation')
+      .where({ id: inv.id, targetPersonId: personId }).whereIn('status', OPEN)
+      .where('expiresAt', '>', db.fn.now())
+      .update({ ...changes, updatedAt: db.fn.now() });
+    return n === 1;
+  }
+  const notOpen = () => ({ error: 'invitation_not_open', status: 409 });
+
   async function decline({ user, invitationId }) {
     const found = await mine({ personId: user.personId, invitationId });
     if (found.error) return found;
-    await db('Invitation').where({ id: found.inv.id }).update({ status: 'declined', respondedAt: db.fn.now(), updatedAt: db.fn.now() });
+    const won = await takeOpen(found.inv, user.personId, { status: 'declined', tokenHash: null, respondedAt: db.fn.now() });
+    if (!won) return notOpen();
     await audit(user.id, 'invitation_declined', found.inv.id, { orgType: found.inv.orgType, orgId: orgIdOf(found.inv) });
     return { invitation: view({ ...found.inv, status: 'declined' }) };
   }
 
+  /**
+   * Accept exactly once. The invitation is first moved from its open state to
+   * 'accepting' by a conditional update, so of two concurrent accepts only one
+   * goes on to create the role; the other gets invitation_not_open. The role
+   * is created through the collections and their sync hooks, which cannot
+   * join a database transaction, so a failed side effect (an error result or
+   * a throw) moves the invitation back to the open state it came from instead
+   * of rolling back. Only then is it marked accepted and its link cleared.
+   */
   async function accept({ user, invitationId }) {
     const found = await mine({ personId: user.personId, invitationId });
     if (found.error) return found;
@@ -470,29 +529,37 @@ export function createInvitationService({
     const person = await db('Person').where({ id: user.personId }).first('id', 'status');
     if (person?.status !== 'active') return { error: 'person_not_active', status: 403 };
     if (!(await orgOf(inv))) return { error: 'organisation_not_found', status: 409 };
+    if (!['staff', 'trainer', 'member'].includes(inv.role)) return { error: 'role_not_invitable', status: 400 };
 
-    let personaId;
-    if (inv.role === 'staff') {
-      const result = inv.orgType === 'vendor' ? await acceptVendorStaff(user, inv) : await acceptStaff(user, inv);
-      if (result.error) return result;
-      personaId = result.personaId;
-    } else if (inv.role === 'trainer') {
-      const result = await acceptTrainer(user, inv);
-      if (result.error) return result;
-      personaId = result.personaId;
-    } else if (inv.role === 'member') {
-      const result = await acceptMember(user, inv, person);
-      if (result.error) return result;
-      personaId = result.personaId;
-    } else {
-      return { error: 'role_not_invitable', status: 400 };
+    if (!(await takeOpen(inv, user.personId, { status: ACCEPTING }))) return notOpen();
+    const reopen = () => db('Invitation').where({ id: inv.id, status: ACCEPTING })
+      .update({ status: inv.status, updatedAt: db.fn.now() });
+
+    let result;
+    try {
+      if (inv.role === 'staff') {
+        result = inv.orgType === 'vendor' ? await acceptVendorStaff(user, inv) : await acceptStaff(user, inv);
+      } else if (inv.role === 'trainer') {
+        result = await acceptTrainer(user, inv);
+      } else {
+        result = await acceptMember(user, inv, person);
+      }
+    } catch (err) {
+      await reopen().catch(() => {}); // as above
+      throw err;
     }
+    if (result.error) {
+      // If this fails too, expireDue recovers the row once it is stale.
+      await reopen().catch(() => {});
+      return result;
+    }
+    const { personaId } = result;
 
     const membership = await db('OrgMembership')
       .where({ personId: user.personId, ...orgRef(inv.orgType, orgIdOf(inv)), role: inv.role })
       .orderByRaw(`CASE WHEN status IN ('active', 'suspended') THEN 0 ELSE 1 END, "createdAt" DESC`).first('id');
-    await db('Invitation').where({ id: inv.id }).update({
-      status: 'accepted', respondedAt: db.fn.now(), membershipId: membership?.id ?? null, updatedAt: db.fn.now(),
+    await db('Invitation').where({ id: inv.id, status: ACCEPTING }).update({
+      status: 'accepted', tokenHash: null, respondedAt: db.fn.now(), membershipId: membership?.id ?? null, updatedAt: db.fn.now(),
     });
     if (membership) await db('OrgMembership').where({ id: membership.id }).update({ source: 'invite', invitedBy: inv.invitedBy });
     await audit(user.id, 'invitation_accepted', inv.id, { orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role, personaId });
