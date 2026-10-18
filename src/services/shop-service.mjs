@@ -230,7 +230,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       brand: input.brand || null, priceTzs: Number(input.priceTzs), discountPriceTzs: input.discountPriceTzs == null ? null : Number(input.discountPriceTzs),
       stock: Number(input.stock ?? 0), sku: input.sku || null, weightKg: input.weightKg == null ? null : Number(input.weightKg), distanceKm: input.distanceKm == null ? null : Number(input.distanceKm),
       variants: Array.isArray(input.variants) ? input.variants : [], images: Array.isArray(input.images) ? input.images : [], visibility: input.visibility || 'visible',
-      deliveryAvailable: input.deliveryAvailable !== false, status: 'active', approvalStatus: 'pending', rating: Number(input.rating || 0), reviewCount: Number(input.reviewCount || 0), soldCount: Number(input.soldCount || 0),
+      // Rating, review count and sold count are the server's: reviewProduct recomputes the first two from real
+      // reviews and the order store keeps soldCount. Whatever a vendor (or admin) sends for them is ignored.
+      deliveryAvailable: input.deliveryAvailable !== false, status: 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
       homepageVisible: true, homepagePriority: 0, createdAt: at, updatedAt: at,
     });
     return { product, created: true };

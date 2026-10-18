@@ -73,3 +73,12 @@ export function tunzaaPaymentsOn() {
 export function tunzaaSandboxSettlesOn() {
   return on('TUNZAA_SANDBOX_SETTLES');
 }
+
+/**
+ * The Shop home (GET /shop/home). Off unless SHOP_HOME_V2 is set: the
+ * endpoint answers 404 feature_disabled and the app
+ * keeps today's shop.
+ */
+export function shopHomeV2On() {
+  return on('SHOP_HOME_V2');
+}
