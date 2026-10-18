@@ -247,3 +247,59 @@ test('flag on: the legacy member create is replaced by invitations', async () =>
     assert.equal(await count('User', { displayName: 'Walk In' }), 0);
   });
 });
+
+// ── Exactly once ───────────────────────────────────────────────────────────
+
+test('two accepts at the same moment: one succeeds, the other is refused, and one plan exists', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const p = await personWithPhone();
+    const sent = await invite(o, plan({ phone: p.phone, paidAmount: 40000 }));
+    const id = sent.body.invitation.id;
+
+    const outs = await Promise.all([accept(p, id), accept(p, id)]);
+    const codes = outs.map(r => r.statusCode).sort();
+    assert.deepEqual(codes, [200, 409]);
+    const loser = outs.find(r => r.statusCode === 409);
+    assert.equal(loser.body.error, 'invitation_not_open');
+
+    assert.equal(await count('Subscription', { memberId: p.user.id, homeGymId: o.gymId }), 1, 'one plan, not two');
+    assert.equal(await count('PaymentRequest', { memberId: p.user.id }), 1, 'one payment record');
+    assert.equal(await count('OrgMembership', { personId: p.user.personId, gymId: o.gymId, role: 'member', status: 'active' }), 1);
+    const row = await db('Invitation').where({ id }).first();
+    assert.deepEqual([row.status, row.tokenHash], ['accepted', null]);
+    assert.equal((await accept(p, id)).body.error, 'invitation_not_open');
+  });
+});
+
+test('a side effect that throws puts the invitation back to open, so it can be accepted later', async () => {
+  await on(async () => {
+    const { createInvitationService } = await import('../src/services/invitation-service.mjs');
+    const { trainers } = await import('../src/bootstrap/services.mjs');
+    let fail = true;
+    const created = [];
+    const svc = createInvitationService({
+      db, users, trainers,
+      activateDirectMembership: async args => {
+        if (fail) throw new Error('boom');
+        created.push(args);
+        return {};
+      },
+    });
+    const o = await makeOwner();
+    const p = await personWithPhone();
+    const made = await svc.create({ actor: o.owner, orgType: 'gym', orgId: o.gymId, body: plan({ phone: p.phone }) });
+    const id = made.invitation.id;
+    const before = await db('Invitation').where({ id }).first();
+
+    await assert.rejects(svc.accept({ user: p.user, invitationId: id }), /boom/);
+    const reopened = await db('Invitation').where({ id }).first();
+    assert.deepEqual([reopened.status, reopened.tokenHash], [before.status, before.tokenHash]);
+
+    fail = false;
+    const ok = await svc.accept({ user: p.user, invitationId: id });
+    assert.equal(ok.error, undefined);
+    assert.equal(created.length, 1);
+    assert.equal((await db('Invitation').where({ id }).first()).status, 'accepted');
+  });
+});
