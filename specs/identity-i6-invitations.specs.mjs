@@ -355,3 +355,192 @@ test('flag on: the legacy create endpoints refuse credentials', async () => {
     assert.equal(Number((await db('User').whereIn('email', ['r@example.com', 'c@example.com']).count({ n: '*' }).first()).n), 0);
   });
 });
+
+// ── Responding happens once; a closed invitation's link finds nothing ──────
+
+const stored = id => db('Invitation').where({ id }).first();
+
+test('accepted, declined and cancelled invitations clear their link; the old token finds nothing', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+
+    const a = await verifiedPerson();
+    const toAccept = await invite(o, { role: 'staff', email: a.email });
+    assert.equal((await call(acceptMyInvitation, a.claims, { params: { invitationId: toAccept.body.invitation.id } })).statusCode, 200);
+    const accepted = await stored(toAccept.body.invitation.id);
+    assert.deepEqual([accepted.status, accepted.tokenHash], ['accepted', null]);
+    const openAccepted = await call(openMyInvitation, a.claims, { body: { token: toAccept.body.token } });
+    assert.deepEqual([openAccepted.statusCode, openAccepted.body.error], [404, 'invitation_not_found']);
+
+    const d = await verifiedPerson();
+    const toDecline = await invite(o, { role: 'staff', email: d.email });
+    assert.equal((await call(declineMyInvitation, d.claims, { params: { invitationId: toDecline.body.invitation.id } })).statusCode, 200);
+    assert.deepEqual(Object.values(await db('Invitation').where({ id: toDecline.body.invitation.id }).first('status', 'tokenHash')), ['declined', null]);
+    const openDeclined = await call(openMyInvitation, d.claims, { body: { token: toDecline.body.token } });
+    assert.deepEqual([openDeclined.statusCode, openDeclined.body.error], [404, 'invitation_not_found']);
+
+    const c = await verifiedPerson();
+    const toCancel = await invite(o, { role: 'staff', email: c.email });
+    const cancelled = await call(gymCancelInvitation, o.claims, { params: { gymId: o.gymId, invitationId: toCancel.body.invitation.id } });
+    assert.equal(cancelled.body.invitation.status, 'cancelled');
+    assert.deepEqual(Object.values(await db('Invitation').where({ id: toCancel.body.invitation.id }).first('status', 'tokenHash')), ['cancelled', null]);
+    const openCancelled = await call(openMyInvitation, c.claims, { body: { token: toCancel.body.token } });
+    assert.deepEqual([openCancelled.statusCode, openCancelled.body.error], [404, 'invitation_not_found']);
+  });
+});
+
+test('decline after accept, accept after decline, and accept after expiry are refused', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+
+    const p = await verifiedPerson();
+    const sent = await invite(o, { role: 'staff', email: p.email });
+    const params = { invitationId: sent.body.invitation.id };
+    assert.equal((await call(acceptMyInvitation, p.claims, { params })).statusCode, 200);
+    const lateDecline = await call(declineMyInvitation, p.claims, { params });
+    assert.deepEqual([lateDecline.statusCode, lateDecline.body.error], [409, 'invitation_not_open']);
+    assert.equal((await stored(params.invitationId)).status, 'accepted', 'the acceptance stands');
+
+    const q = await verifiedPerson();
+    const declined = await invite(o, { role: 'staff', email: q.email });
+    const qParams = { invitationId: declined.body.invitation.id };
+    assert.equal((await call(declineMyInvitation, q.claims, { params: qParams })).statusCode, 200);
+    const lateAccept = await call(acceptMyInvitation, q.claims, { params: qParams });
+    assert.deepEqual([lateAccept.statusCode, lateAccept.body.error], [409, 'invitation_not_open']);
+    assert.equal(Number((await db('User').where({ personId: q.user.personId, userType: 'gym_staff' }).count({ n: '*' }).first()).n), 0);
+
+    const r = await verifiedPerson();
+    const lapsed = await invite(o, { role: 'staff', email: r.email });
+    await db('Invitation').where({ id: lapsed.body.invitation.id })
+      .update({ createdAt: new Date(Date.now() - 20 * 864e5), expiresAt: new Date(Date.now() - 1000) });
+    const expiredAccept = await call(acceptMyInvitation, r.claims, { params: { invitationId: lapsed.body.invitation.id } });
+    assert.deepEqual([expiredAccept.statusCode, expiredAccept.body.error], [409, 'invitation_not_open']);
+    const expiredDecline = await call(declineMyInvitation, r.claims, { params: { invitationId: lapsed.body.invitation.id } });
+    assert.equal(expiredDecline.statusCode, 409);
+    const row = await stored(lapsed.body.invitation.id);
+    assert.equal(row.status, 'expired');
+    assert.notEqual(row.tokenHash, null, 'expired rows keep their hash');
+    assert.equal(Number((await db('User').where({ personId: r.user.personId, userType: 'gym_staff' }).count({ n: '*' }).first()).n), 0);
+  });
+});
+
+test('a failed acceptance leaves the invitation open, with its link', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const elsewhere = await makeGym();
+    // Already staff at another gym: one legacy staff persona can't hold a second gym's ACL.
+    const p = await verifiedPerson({ userType: 'gym_staff', gymIds: [elsewhere], gymId: elsewhere });
+    const sent = await invite(o, { role: 'staff', email: p.email });
+    const before = await stored(sent.body.invitation.id);
+    const out = await call(acceptMyInvitation, p.claims, { params: { invitationId: sent.body.invitation.id } });
+    assert.deepEqual([out.statusCode, out.body.error], [409, 'already_staff_elsewhere']);
+    const after = await stored(sent.body.invitation.id);
+    assert.deepEqual([after.status, after.tokenHash], [before.status, before.tokenHash]);
+    assert.equal((await call(openMyInvitation, p.claims, { body: { token: sent.body.token } })).statusCode, 200);
+  });
+});
+
+// ── An interrupted accept, uniqueness while accepting, and resend ──────────
+
+const minutesAgo = m => new Date(Date.now() - m * 60e3);
+
+test('a staff invitation stuck in accepting goes back to open once stale, or to expired if past its expiry', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const sent = await invite(o, { role: 'staff', email: p.email });
+    const id = sent.body.invitation.id;
+    const before = await stored(id);
+
+    // Recent: an accept may still be running, so it is left alone.
+    await db('Invitation').where({ id }).update({ status: 'accepting', updatedAt: minutesAgo(2) });
+    await call(myInvitations, p.claims);
+    assert.equal((await stored(id)).status, 'accepting');
+
+    // Stale: back to the open state it came from, link intact, and acceptable.
+    await db('Invitation').where({ id }).update({ updatedAt: minutesAgo(11) });
+    const inbox = await call(myInvitations, p.claims);
+    assert.deepEqual(inbox.body.invitations.map(i => [i.id, i.status]), [[id, before.status]]);
+    assert.equal((await stored(id)).tokenHash, before.tokenHash);
+    assert.equal((await call(acceptMyInvitation, p.claims, { params: { invitationId: id } })).statusCode, 200);
+
+    // Stale and past its expiry: expired.
+    const q = await verifiedPerson();
+    const late = await invite(o, { role: 'staff', email: q.email });
+    await db('Invitation').where({ id: late.body.invitation.id })
+      .update({ status: 'accepting', createdAt: new Date(Date.now() - 20 * 864e5), expiresAt: minutesAgo(1), updatedAt: minutesAgo(11) });
+    await call(myInvitations, q.claims);
+    assert.equal((await stored(late.body.invitation.id)).status, 'expired');
+  });
+  // The window can be changed by env.
+  await withEnv({ INVITE_ACCEPTING_STALE_MINUTES: '1' }, async () => {
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const sent = await invite(o, { role: 'staff', email: p.email });
+    await db('Invitation').where({ id: sent.body.invitation.id }).update({ status: 'accepting', updatedAt: minutesAgo(2) });
+    await call(myInvitations, p.claims);
+    assert.equal((await stored(sent.body.invitation.id)).status, 'pending');
+  });
+});
+
+test('while an accept is in flight no second invitation is made, by the service or the database', async () => {
+  await on(async () => {
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const sent = await invite(o, { role: 'staff', email: p.email });
+    const id = sent.body.invitation.id;
+    await db('Invitation').where({ id }).update({ status: 'accepting', updatedAt: new Date() });
+
+    const again = await invite(o, { role: 'staff', email: p.email });
+    assert.equal(again.body.created, false);
+    assert.equal(again.body.invitation.id, id);
+
+    const row = await stored(id);
+    await assert.rejects(
+      db('Invitation').insert({ ...row, id: uniq('inv'), tokenHash: uniq('h'), status: 'pending' }),
+      err => err.code === '23505',
+    );
+  });
+});
+
+test('a resend that loses to an accept, decline or cancel is refused and sends nothing', async () => {
+  await on(async () => {
+    const { createInvitationService } = await import('../src/services/invitation-service.mjs');
+    let race = null;
+    // The real db, except that just before the resend's update another request closes the invitation.
+    const racingDb = new Proxy(db, {
+      apply(target, self, args) {
+        const q = target(...args);
+        if (args[0] === 'Invitation' && race) {
+          const update = q.update;
+          q.update = async (...u) => {
+            if (!u[0] || !('tokenHash' in u[0])) return update.apply(q, u); // only the resend's own update
+            const id = race; race = null;
+            await target('Invitation').where({ id }).update({ status: 'cancelled', tokenHash: null });
+            return update.apply(q, u);
+          };
+        }
+        return q;
+      },
+    });
+    const sent = [];
+    const svc = createInvitationService({
+      db: racingDb, users, trainers,
+      notify: async (...a) => { sent.push(['notify', ...a]); },
+      senders: { sms: () => ({ configured: true, send: async (...a) => { sent.push(['sms', ...a]); return { ok: true }; } }), email: () => ({ configured: false }) },
+    });
+    const o = await makeOwner();
+    const p = await verifiedPerson();
+    const made = await invite(o, { role: 'staff', email: p.email });
+    const id = made.body.invitation.id;
+    await db('Invitation').where({ id }).update({ lastSentAt: new Date(Date.now() - 25 * 3600e3) });
+    const before = await stored(id);
+
+    race = id;
+    const out = await svc.resend({ actor: o.owner, orgType: 'gym', orgId: o.gymId, invitationId: id });
+    assert.deepEqual(out, { error: 'invitation_not_open', status: 409 });
+    assert.deepEqual(sent, [], 'nothing was sent');
+    const after = await stored(id);
+    assert.deepEqual([after.status, after.tokenHash, after.resendCount], ['cancelled', null, before.resendCount]);
+  });
+});
