@@ -170,7 +170,8 @@ export function createDiscoveryService({
 
     // What the card says about its promotion; with a session, also the proof that it was served to that session.
     const tagOf = p => ({
-      id: p.id, type: p.type, label: p.label, commercial: p.commercial,
+      // label: English, as before (older apps). disclosure: { codes, en, sw } for apps that show Swahili.
+      id: p.id, type: p.type, label: p.label, ...(p.disclosure ? { disclosure: p.disclosure } : {}), commercial: p.commercial,
       ...(signToken && session ? { token: signToken({ promotionId: p.id, entityType: p.entityType, entityId: p.entityId, sessionId: session, now: now() }) } : {}),
     });
     const pageSize = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);

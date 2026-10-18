@@ -56,3 +56,22 @@ export function buildDevIdentity(role) {
 
 export const DEV_GYM_ID = 'gym_dev_demo';
 export const DEV_OWNER_GYM_ID = 'gym_dev_owner';
+
+/**
+ * The marketplace product the dev vendor login seeds. It has no reviews and no
+ * sales, so it claims none (rating, reviewCount and soldCount are 0), and its
+ * category is one of the real keys. Re-seeding overwrites older seeded values.
+ */
+export function devMarketplaceProduct(vendorId, nowIso) {
+  return {
+    id: 'prd_dev_marketplace', vendorId,
+    name: 'FitFlex Resistance Bands', description: 'Five-band training set for home or gym workouts.',
+    category: 'accessories_gear', brand: 'FitFlex', priceTzs: 45000, discountPriceTzs: 39000,
+    stock: 25, sku: 'FF-RB-5', weightKg: 0.7, distanceKm: 3.2,
+    variants: [{ name: 'Five-band set', stock: 25 }],
+    images: ['https://images.unsplash.com/photo-1598289431512-b97b0917affc?w=800'],
+    visibility: 'visible', deliveryAvailable: true, status: 'active', approvalStatus: 'approved',
+    rating: 0, reviewCount: 0, soldCount: 0,
+    homepageVisible: true, homepagePriority: 5000, createdAt: nowIso, updatedAt: nowIso,
+  };
+}

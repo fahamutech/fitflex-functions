@@ -26,6 +26,7 @@ Signed in (any role). With `SHOP_HOME_V2` off the answer is `404 {"error":"featu
   "personalised": false,
   "signalsUsed": ["role", "goal", "recently_viewed"],
   "categories": [{ "key": "sportswear_footwear", "en": "Sportswear & footwear", "sw": "Mavazi na viatu vya michezo", "count": 7 }],
+  "allProductsCount": 23,
   "sections": [{
     "key": "best_sellers",
     "title": { "en": "Best sellers", "sw": "Zinazouzwa zaidi" },
@@ -42,29 +43,39 @@ Signed in (any role). With `SHOP_HOME_V2` off the answer is `404 {"error":"featu
 - `personalised` is always `false` in Phase 1.
 - `signalsUsed` ⊆ `role`, `goal` (the member's declared `memberProfile.fitnessGoal(s)`, member mode only), `specialty` (the trainer's declared `TrainerProfile.specialties`, trainer mode only), `recently_viewed` (only when that section was shown). Phase 2 will add `purchase_history`, `gender`, `age`, `location`.
 - `categories`: the existing 8, ordered for the mode (design spec §5.2). Only categories with at least one eligible product are listed, and `other` is always last. `count` = eligible products on the home (in stock, not the viewer's own).
-- `products[id]` is exactly the row `GET /shop/products` returns. Products in the `featured` section also carry `promotion: { id, type, label, commercial, token? }`, the same tag as `/discover/products`. Show the disclosure badge from `label`.
+- `allProductsCount` (QA round 1, additive): how many products `GET /shop/products` lists with no filter. That count includes out-of-stock products and the viewer's own products, which the home leaves out.
+- `products[id]` is exactly the row `GET /shop/products` returns. Products in the `featured` section also carry `promotion: { id, type, label, disclosure, commercial, token? }`, the same tag as `/discover/products`. The order of the Featured set is the mode's category order (the same order as `categories`), and within a category the Featured system's order. Every mode gets the same set.
+- **Disclosure** (QA round 1, additive; also on every `/discover/*` promotion tag and on admin promotion views):
+  ```json
+  "promotion": { "id": "promo_1", "type": "featured", "label": "Featured · Sponsored",
+    "disclosure": { "codes": ["featured", "sponsored"], "en": "Featured · Sponsored", "sw": "Iliyoangaziwa · Iliyodhaminiwa" },
+    "commercial": true, "token": "…" }
+  ```
+  `label` is unchanged (English, for older apps). `disclosure.codes` ⊆ `featured`, `promoted`, `sponsored`, `recommended`, `campaign` and maps 1:1 to the app's `promo.<code>` strings. Prefer rendering from the codes joined with " · ". Otherwise use `disclosure.en` / `disclosure.sw` (built from the same words as the app: Iliyoangaziwa, Iliyopandishwa, Iliyodhaminiwa, Imependekezwa na FitFlex, Kampeni). `sponsored` is present whenever the placement was paid for. A custom admin wording appears only in `en` (it is free English text), while `sw` is built from the codes.
 - Ratings: `rating`/`reviewCount` come from real reviews only (see Security below). Show a rating only when `reviewCount ≥ 1`.
 
 ### Sections
 
-Default order (and the de-duplication priority): a product appears in **one section at most**, and the first section in order takes it.
+Default display order is the table order: Featured, Best sellers, Recommended, … (design §5.1). `SHOP_HOME_SECTIONS` can change which sections show and in what order.
+
+A product appears in **one section at most**. Which section gets it is decided in a **fixed allocation order**, not the display order: `featured` > `best_sellers` > `recently_viewed` > `recommended` > `essentials` > `deals` > `new_arrivals` (design DD-7). Recently viewed is the shopper's own history (at most 20), so it takes its products before the suggestion sections. It is still shown in its display position.
 
 | key | What | Title (en / sw [SW review]) | viewAll.query |
 |---|---|---|---|
-| `featured` | The existing Featured system (`/discover/products`, placement `marketplace`), in its order. | member/vendor_personal "Featured gear" / "Vifaa vilivyoangaziwa"; trainer "Featured coaching gear" / "Vifaa vya trainer vilivyoangaziwa"; owner "Featured equipment" / "Vifaa vya gym vilivyoangaziwa" | `{}` |
-| `recommended` | Organic only: **no product with any live promotion** (featured, promoted, sponsored, recommended, campaign; targeted anywhere, by area or radius) and nothing from `featured`. The role's categories come first, then paid orders (30 days) by buyers in this role, then all paid orders, then admin priority, newest, id. | "Popular with members / trainers / gym owners" / "Maarufu kwa wanachama / ma-trainer / wamiliki wa gym"; vendor_personal "Popular in the shop" / "Maarufu dukani" | `{category:<first role category>, sort:"popularity"}` |
-| `best_sellers` | Products in paid, uncancelled orders placed in the last 30 days, ranked by number of orders, then units. Never `soldCount`. | "Best sellers" / "Zinazouzwa zaidi" | `{sort:"popularity"}` |
-| `essentials` | Organic like `recommended`: **no product with any live promotion**. Takes turns across the needed categories (goal/specialty categories first, then role defaults). Within a category: paid orders (30 days), priority, newest. | member/vendor_personal "Training essentials" / "Mahitaji muhimu ya mazoezi"; trainer "Coaching essentials" / "Mahitaji muhimu ya trainer"; owner "Gym essentials" / "Mahitaji muhimu ya gym" | `{category:<first needed category>}` |
-| `recently_viewed` | The `recent` ids in the app's order, eligible ones only. | "Recently viewed" / "Ulizotazama hivi karibuni" | `{}` |
-| `deals` | `discountPriceTzs > 0` and `< priceTzs`, biggest % first. | "Deals" / "Ofa" | `{promotions:"true"}` |
-| `new_arrivals` | Created in the last 90 days, newest first. | "New arrivals" / "Bidhaa mpya" | `{}` |
+| `featured` | The existing Featured system (`/discover/products`, placement `marketplace`): the same set for every mode, ordered by the mode's category order, then the Featured system's order. | member/vendor_personal "Featured gear" / "Vifaa vilivyoangaziwa"; trainer "Featured coaching gear" / "Vifaa vya trainer vilivyoangaziwa"; owner "Featured equipment" / "Vifaa vya gym vilivyoangaziwa" | `{category}` if all one category, else `{}`; `hasMore` always false |
+| `best_sellers` | Products in paid, uncancelled orders placed in the last 30 days, ranked by number of orders, then units. Never `soldCount`. | "Best sellers" / "Zinazouzwa zaidi" | `{sort:"popularity"}` + `category` only if all one category |
+| `recommended` | Organic only: **no product with any live promotion** (featured, promoted, sponsored, recommended, campaign; targeted anywhere, by area or radius) and nothing from `featured`. The role's categories come first, then paid orders (30 days) by buyers in this role, then all paid orders, then admin priority, newest, id. | "Popular with members / trainers / gym owners" / "Maarufu kwa wanachama / ma-trainer / wamiliki wa gym"; vendor_personal "Popular in the shop" / "Maarufu dukani" | `{sort:"popularity"}` + `category` only if all one category |
+| `essentials` | Organic like `recommended`: **no product with any live promotion**. Takes turns across the needed categories (goal/specialty categories first, then role defaults). Within a category: paid orders (30 days), priority, newest. | member/vendor_personal "Training essentials" / "Mahitaji muhimu ya mazoezi"; trainer "Coaching essentials" / "Mahitaji muhimu ya trainer"; owner "Gym essentials" / "Mahitaji muhimu ya gym" | `{category}` if all one category (then `hasMore` can be true), else `{}` and `hasMore` false |
+| `recently_viewed` | The `recent` ids in the app's order, eligible ones only. | "Recently viewed" / "Ulizotazama hivi karibuni" | `{category}` if all one category, else `{}`; `hasMore` always false |
+| `deals` | `discountPriceTzs > 0` and `< priceTzs`, biggest % first. | "Deals" / "Ofa" | `{promotions:"true"}` + `category` only if all one category |
+| `new_arrivals` | Created in the last 90 days, newest first. | "New arrivals" / "Bidhaa mpya" | `{category}` if all one category, else `{}`; `hasMore` always false |
 
 - "Live promotion" is read with `promotionService.listLive({ anyLocation: true })`, a new option that skips location matching. A promotion targeted only by a radius is excluded too, even though the viewer sends no position. `best_sellers`, `deals`, `new_arrivals` and `recently_viewed` state facts, so a promoted product can still appear there, without a badge.
 - **Ranking differs from the list's `sort=popularity` (known, Phase 2):** `best_sellers`, `recommended` and `essentials` rank by paid orders in the last 30 days. `GET /shop/products?sort=popularity` (the `viewAll` for `recommended` and `best_sellers`) still sorts by the stored all-time `soldCount`, so "View all" can show a different order from the section. Phase 2 should make the list use the same 30-day measure.
-- At most 12 products per section; `hasMore` says whether more qualified.
-- A section with fewer than `SHOP_HOME_MIN_ITEMS` (default 4) products is left out entirely. Its products stay available to later sections. If no section qualifies, `sections` is `[]`: show the categories and an "All products" grid from `/shop/products`.
+- At most 12 products per section. `hasMore` is true only when more qualified **and** `viewAll` can show them (see below), so the app shows "View all" exactly when `hasMore` is true.
+- A section with fewer than `SHOP_HOME_MIN_ITEMS` (default 4) products is left out entirely. Its products stay available to later sections. If no section qualifies, `sections` is `[]`, but `categories` and `allProductsCount` still come back: show the categories and an "All products" grid from `/shop/products`. If `allProductsCount` is 0, show the "getting ready" empty state.
 - `reasonCodes` come from the closed list in design §8.3 plus `profile_goal`, `trainer_specialty`, `recently_viewed`, `seller_discount`, `new_arrival`, `generic`. Build the Why sheet from these codes. `reason` is a ready-made sentence for simple display.
-- `viewAll` targets the existing `GET /shop/products` with the given query. For `featured`, `recently_viewed` and `new_arrivals` there is no exact list filter, so the query is `{}` (all products).
+- `viewAll` = `{ path: "/shop/products", query }`. The rule: the list for `query` **includes every product the section shows**. `category` is added only when every product shown is in that one category, so a rail that mixes categories never points at one of them. Featured, Recently viewed, New arrivals and multi-category Essentials have no list filter that reproduces them, so their `hasMore` is always false.
 
 ### Eligibility (what never appears on the home)
 
@@ -83,7 +94,7 @@ The catalogue, vendor suspension, 30-day sales, the Featured list and the live-p
 | Env | Default | Meaning |
 |---|---|---|
 | `SHOP_HOME_V2` | off | Turns on `GET /shop/home`. |
-| `SHOP_HOME_SECTIONS` | all, in the order above | Comma list: which sections, in which order. Unknown keys are ignored. |
+| `SHOP_HOME_SECTIONS` | `featured,best_sellers,recommended,essentials,recently_viewed,deals,new_arrivals` | Comma list: which sections are shown, in which display order. Unknown keys are ignored. Allocation order is fixed (above). |
 | `SHOP_HOME_MIN_ITEMS` | 4 | The fewest products a section needs to be shown. |
 | `SHOP_HOME_CACHE_SECONDS` | 60 | Shared-data cache lifetime, 1–300 seconds. |
 
@@ -96,6 +107,10 @@ Role, goal and specialty category maps are config in `src/services/shop-recommen
 ### Before go-live (not done, do not run without the owner's go-ahead)
 
 A one-off recompute of existing products: `rating` and `reviewCount` from `ProductReview`, and `soldCount` from paid, uncancelled order lines. Products created before this change may still hold values a vendor typed in.
+
+## Dev seed
+
+The dev vendor login (`POST /auth/dev-login`, never in production) seeds `prd_dev_marketplace` with `rating 0, reviewCount 0, soldCount 0` and category `accessories_gear`. Previously it had 4.8 / 12 / 64 with no review rows and the invalid category `Equipment`. The seed overwrites the row, so existing dev/UAT databases are corrected on the next dev vendor login.
 
 ## Not in Phase 1
 

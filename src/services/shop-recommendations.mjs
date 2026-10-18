@@ -196,8 +196,18 @@ export function filterEligible(products, { ownVendorIds = [], suspendedVendorIds
 
 // ── (d) assembly ─────────────────────────────────────────────────────────────
 
-/** Every section, in the default order. Earlier sections win a product that would fit several. */
-export const SECTION_KEYS = Object.freeze(['featured', 'recommended', 'best_sellers', 'essentials', 'recently_viewed', 'deals', 'new_arrivals']);
+/**
+ * Every section, in the default display order (design spec §5.1: Featured, then Best sellers, then
+ * Recommended). SHOP_HOME_SECTIONS can choose and reorder them for display.
+ */
+export const SECTION_KEYS = Object.freeze(['featured', 'best_sellers', 'recommended', 'essentials', 'recently_viewed', 'deals', 'new_arrivals']);
+/**
+ * Which section gets a product that fits several (design DD-7: Featured > Best sellers > Recommended).
+ * Recently viewed is the shopper's own explicit history (at most 20), so it takes its products before the
+ * suggestion sections do; otherwise those would always have taken them and it would never show.
+ * This order is fixed; the display order above is configurable.
+ */
+export const ALLOCATION_ORDER = Object.freeze(['featured', 'best_sellers', 'recently_viewed', 'recommended', 'essentials', 'deals', 'new_arrivals']);
 export const DEFAULT_ASSEMBLY = Object.freeze({ sections: SECTION_KEYS, minItems: 4, maxItems: 12, newArrivalDays: 90 });
 
 /** SHOP_HOME_SECTIONS → the enabled keys in that order (unknown keys and repeats dropped). Empty → all. */
@@ -252,8 +262,14 @@ function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, conf
   const byIdMap = new Map(eligible.map(p => [p.id, p]));
   const paid = new Set(paidPlacementIds || []);
   return {
-    // The Featured system's own order; only what is eligible here.
-    featured: () => (featured || []).map(f => byIdMap.get(f.productId)).filter(Boolean),
+    // The Featured system's set, in this role's category order (a reorder, never a filter);
+    // within a category, the Featured system's own order.
+    featured: () => {
+      const order = CATEGORY_ORDER[needs.mode] || CATEGORY_ORDER.member;
+      const pos = c => { const i = order.indexOf(c); return i < 0 ? order.length : i; };
+      return (featured || []).map((f, i) => ({ p: byIdMap.get(f.productId), i })).filter(x => x.p)
+        .sort((a, b) => pos(a.p.category) - pos(b.p.category) || a.i - b.i).map(x => x.p);
+    },
     // Organic only: anything with a live paid or editorial placement is left out.
     // The role's own categories first, then what people shopping in this role buy, then everyone.
     recommended: () => eligible.filter(p => !paid.has(p.id)).sort((a, b) =>
@@ -280,25 +296,43 @@ function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, conf
 }
 
 /**
- * The sections, in the configured order. A product appears in at most one
- * section (the first that takes it). A section with fewer than `minItems`
- * products is left out, and the products it would have taken stay free for
- * later sections. → [{ key, productIds, hasMore }]
+ * "View all" for a section: a GET /shop/products query whose results include every product the
+ * section shows. A category is added only when every product shown is in it. Where the list has no
+ * filter for the section's own rule (Featured, Recently viewed, New arrivals, Essentials across
+ * several categories), "all" cannot be shown faithfully, so the section reports `hasMore: false`
+ * and the app offers no "View all" for it.
+ * → { viewAll: { path, query }, faithful }
+ */
+export function viewAllFor(key, picked) {
+  const cats = uniq(picked.map(p => p.category));
+  const category = cats.length === 1 && cats[0] ? { category: cats[0] } : {};
+  const base = { best_sellers: { sort: 'popularity' }, recommended: { sort: 'popularity' }, deals: { promotions: 'true' } }[key] || {};
+  const faithful = ['best_sellers', 'recommended', 'deals'].includes(key) || (key === 'essentials' && Boolean(category.category));
+  return { viewAll: { path: '/shop/products', query: { ...category, ...base } }, faithful };
+}
+
+/**
+ * The sections. Products are allocated in ALLOCATION_ORDER (a product appears in at most one section);
+ * the answer lists them in the configured display order. A section with fewer than `minItems`
+ * products is left out, and the products it would have taken stay free for the sections after it.
+ * → [{ key, productIds, hasMore, viewAll }]
  */
 export function assembleSections({ needs, eligible, featured = [], paidPlacementIds = [], sales = new Map(), now, config = {} }) {
   const cfg = { ...DEFAULT_ASSEMBLY, ...config };
   const rank = rankers({ needs, eligible, featured, paidPlacementIds, sales, now, config: cfg });
+  const enabled = new Set(cfg.sections);
   const used = new Set();
-  const out = [];
-  for (const key of cfg.sections) {
-    if (!rank[key]) continue;
+  const built = new Map();
+  for (const key of ALLOCATION_ORDER) {
+    if (!enabled.has(key) || !rank[key]) continue;
     const free = rank[key]().filter(p => !used.has(p.id));
     const picked = free.slice(0, cfg.maxItems);
     if (picked.length < cfg.minItems) continue;
     for (const p of picked) used.add(p.id);
-    out.push({ key, productIds: picked.map(p => p.id), hasMore: free.length > picked.length });
+    const { viewAll, faithful } = viewAllFor(key, picked);
+    built.set(key, { key, productIds: picked.map(p => p.id), hasMore: faithful && free.length > picked.length, viewAll });
   }
-  return out;
+  return cfg.sections.filter(k => built.has(k)).map(k => built.get(k));
 }
 
 // ── copy (English + Swahili; Swahili is a draft for native review) ───────────
@@ -371,20 +405,6 @@ const COPY = {
   },
 };
 
-/** Query for the existing GET /shop/products list that shows "all" of a section. */
-function viewAllOf(key, needs) {
-  const query = {
-    featured: {},
-    recommended: needs.roleCategories[0] ? { category: needs.roleCategories[0], sort: 'popularity' } : { sort: 'popularity' },
-    best_sellers: { sort: 'popularity' },
-    essentials: needs.categories[0] ? { category: needs.categories[0] } : {},
-    recently_viewed: {},
-    deals: { promotions: 'true' },
-    new_arrivals: {},
-  }[key] || {};
-  return { path: '/shop/products', query };
-}
-
 /** Titles, reasons and "view all" for assembled sections. */
 export function describeSections(sections, needs) {
   return sections.map((s) => {
@@ -394,7 +414,7 @@ export function describeSections(sections, needs) {
       title: copy.title[needs.mode] || copy.title.all,
       reason: copy.reason(needs.mode, needs),
       reasonCodes: copy.codes(needs.mode, needs),
-      viewAll: viewAllOf(s.key, needs),
+      viewAll: s.viewAll || { path: '/shop/products', query: {} },
       productIds: s.productIds,
       hasMore: s.hasMore,
     };
@@ -424,7 +444,9 @@ export function categoriesFor(mode, eligible) {
  * All four layers. `products` are buyer-visible listings; `featured` is
  * [{ productId }] from the Featured system in its order; `paidPlacementIds`
  * are products with any live promotion; `orders` are recent paid orders.
- * → { mode, signalsUsed, categories, sections } or { error }
+ * → { mode, signalsUsed, categories, allProductsCount, sections } or { error }
+ * `allProductsCount` is how many products GET /shop/products lists (the input `products`), so the
+ * app can show an "All products" grid when no section reached the minimum, or "getting ready" at 0.
  */
 export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, suspendedVendorIds = [], products, featured, paidPlacementIds, orders, config = {}, now }) {
   const identity = resolveShoppingMode({ requested: mode, sessionUserType, heldUserTypes });
@@ -436,6 +458,7 @@ export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProf
     mode: identity.mode,
     signalsUsed: needs.signalsUsed.filter(s => s !== 'recently_viewed' || sections.some(x => x.key === 'recently_viewed')),
     categories: categoriesFor(identity.mode, eligible),
+    allProductsCount: (products || []).length,
     sections: describeSections(sections, needs),
   };
 }
