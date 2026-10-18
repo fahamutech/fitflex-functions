@@ -166,13 +166,16 @@ export function buildNeeds({ mode, memberProfile = null, trainerProfile = null, 
  * listed, vendor allowed to sell, not hidden or suspended in moderation); the
  * same row checks are repeated here so the module is safe on its own. Then:
  *   - out of stock (stock ≤ 0) never appears on the home (it stays in search and results);
- *   - the shopper's own products (any vendor persona they hold) never appear.
+ *   - the shopper's own products (any vendor persona they hold) never appear;
+ *   - products of a vendor whose account is suspended (User.accountStatus) never appear.
+ *     (Moderation suspension is already applied by listProducts; account suspension is not.)
  * Delivery: products carry no buyer-area coverage in Phase 1, and gym pickup is
  * always offered, so nothing is excluded by delivery yet.
  * → { eligible: Product[], excluded: { [productId]: reason } }
  */
-export function filterEligible(products, { ownVendorIds = [] } = {}) {
+export function filterEligible(products, { ownVendorIds = [], suspendedVendorIds = [] } = {}) {
   const own = new Set(ownVendorIds.filter(Boolean));
+  const suspended = new Set(suspendedVendorIds.filter(Boolean));
   const eligible = [];
   const excluded = {};
   for (const p of products || []) {
@@ -183,6 +186,7 @@ export function filterEligible(products, { ownVendorIds = [] } = {}) {
     else if (['pending', 'rejected'].includes(p.approvalStatus)) reason = 'not_approved';
     else if (p.visibility === 'hidden' || p.homepageVisible === false) reason = 'hidden';
     else if (!(Number(p.stock) > 0)) reason = 'out_of_stock';
+    else if (suspended.has(p.vendorId)) reason = 'vendor_suspended';
     else if (own.has(p.vendorId)) reason = 'own_product';
     if (reason) excluded[p.id] = reason;
     else eligible.push(p);
@@ -258,8 +262,9 @@ function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, conf
     // Bought in paid orders in the last 30 days, most orders first. Never the stored soldCount.
     best_sellers: () => eligible.filter(p => ordersOf(p) > 0).sort((a, b) => ordersOf(b) - ordersOf(a) || unitsOf(b) - unitsOf(a) || byId(a, b)),
     // Round-robin over the needed categories (most specific first), so one category cannot fill it.
+    // Organic like recommended: no paid or editorial placement.
     essentials: () => {
-      const lanes = needs.categories.map(c => eligible.filter(p => p.category === c).sort((a, b) => ordersOf(b) - ordersOf(a) || tieBreak(a, b)));
+      const lanes = needs.categories.map(c => eligible.filter(p => p.category === c && !paid.has(p.id)).sort((a, b) => ordersOf(b) - ordersOf(a) || tieBreak(a, b)));
       const out = [];
       for (let i = 0; lanes.some(l => i < l.length); i += 1) for (const lane of lanes) if (lane[i]) out.push(lane[i]);
       return out;
@@ -300,32 +305,34 @@ export function assembleSections({ needs, eligible, featured = [], paidPlacement
 
 const ROLE_WORD = {
   member: { en: 'a member', sw: 'mwanachama' },
-  trainer: { en: 'a trainer', sw: 'mkufunzi' },
+  trainer: { en: 'a trainer', sw: 'trainer' },
   owner: { en: 'a gym owner', sw: 'mmiliki wa gym' },
   vendor_personal: { en: 'a member', sw: 'mwanachama' },
 };
-// [SW review] every `sw` string below.
+// [SW review] every `sw` string below. Terms follow docs/localization/fitflex-terminology-glossary.md
+// (parent repo): "trainer" / "ma-trainer" (never kocha or mkufunzi), role = "nafasi" (never jukumu),
+// the Sponsored badge reads "Iliyodhaminiwa" as in the app.
 const COPY = {
   featured: {
     title: {
       member: { en: 'Featured gear', sw: 'Vifaa vilivyoangaziwa' },
-      trainer: { en: 'Featured coaching gear', sw: 'Vifaa vya ukocha vilivyoangaziwa' },
+      trainer: { en: 'Featured coaching gear', sw: 'Vifaa vya trainer vilivyoangaziwa' },
       owner: { en: 'Featured equipment', sw: 'Vifaa vya gym vilivyoangaziwa' },
       vendor_personal: { en: 'Featured gear', sw: 'Vifaa vilivyoangaziwa' },
     },
-    reason: () => ({ en: 'Featured products are chosen by FitFlex or paid for by sellers. Paid ones are labelled Sponsored.', sw: 'Bidhaa zilizoangaziwa huchaguliwa na FitFlex au hulipiwa na wauzaji. Zilizolipiwa zimeandikwa "Imedhaminiwa".' }),
+    reason: () => ({ en: 'Featured products are chosen by FitFlex or paid for by sellers. Paid ones are labelled Sponsored.', sw: 'Bidhaa zilizoangaziwa huchaguliwa na FitFlex au hulipiwa na wauzaji. Zilizolipiwa zimeandikwa "Iliyodhaminiwa".' }),
     codes: () => ['featured_disclosure'],
   },
   recommended: {
     title: {
       member: { en: 'Popular with members', sw: 'Maarufu kwa wanachama' },
-      trainer: { en: 'Popular with trainers', sw: 'Maarufu kwa wakufunzi' },
+      trainer: { en: 'Popular with trainers', sw: 'Maarufu kwa ma-trainer' },
       owner: { en: 'Popular with gym owners', sw: 'Maarufu kwa wamiliki wa gym' },
       vendor_personal: { en: 'Popular in the shop', sw: 'Maarufu dukani' },
     },
     reason: mode => (mode === 'vendor_personal'
       ? { en: "Suggested from what's popular on FitFlex.", sw: 'Imependekezwa kutokana na kinachopendwa kwenye FitFlex.' }
-      : { en: "It's popular with others shopping in this role.", sw: 'Ni maarufu kwa wengine wanaonunua katika jukumu hili.' }),
+      : { en: "It's popular with others shopping in this role.", sw: 'Ni maarufu kwa wengine wanaonunua katika nafasi hii.' }),
     codes: mode => (mode === 'vendor_personal' ? ['generic', 'role_context'] : ['popular_with_role', 'role_context']),
   },
   best_sellers: {
@@ -336,13 +343,13 @@ const COPY = {
   essentials: {
     title: {
       member: { en: 'Training essentials', sw: 'Mahitaji muhimu ya mazoezi' },
-      trainer: { en: 'Coaching essentials', sw: 'Mahitaji muhimu ya ukocha' },
+      trainer: { en: 'Coaching essentials', sw: 'Mahitaji muhimu ya trainer' },
       owner: { en: 'Gym essentials', sw: 'Mahitaji muhimu ya gym' },
       vendor_personal: { en: 'Training essentials', sw: 'Mahitaji muhimu ya mazoezi' },
     },
     reason: (mode, needs) => {
       if (needs.goalCategories.length) return { en: 'Matches the fitness goal in your profile.', sw: 'Inalingana na lengo la mazoezi kwenye wasifu wako.' };
-      if (needs.specialtyCategories.length) return { en: 'Matches the specialties on your trainer profile.', sw: 'Inalingana na fani zilizo kwenye wasifu wako wa mkufunzi.' };
+      if (needs.specialtyCategories.length) return { en: 'Matches the specialties on your trainer profile.', sw: 'Inalingana na utaalamu ulio kwenye wasifu wako wa trainer.' };
       return { en: `Picked for people shopping as ${ROLE_WORD[mode].en}.`, sw: `Imechaguliwa kwa wanaonunua kama ${ROLE_WORD[mode].sw}.` };
     },
     codes: (mode, needs) => [...(needs.goalCategories.length ? ['profile_goal'] : []), ...(needs.specialtyCategories.length ? ['trainer_specialty'] : []), 'role_context'],
@@ -419,11 +426,11 @@ export function categoriesFor(mode, eligible) {
  * are products with any live promotion; `orders` are recent paid orders.
  * → { mode, signalsUsed, categories, sections } or { error }
  */
-export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, products, featured, paidPlacementIds, orders, config = {}, now }) {
+export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, suspendedVendorIds = [], products, featured, paidPlacementIds, orders, config = {}, now }) {
   const identity = resolveShoppingMode({ requested: mode, sessionUserType, heldUserTypes });
   if (identity.error) return identity;
   const needs = buildNeeds({ mode: identity.mode, memberProfile, trainerProfile, recentIds, config });
-  const { eligible } = filterEligible(products, { ownVendorIds });
+  const { eligible } = filterEligible(products, { ownVendorIds, suspendedVendorIds });
   const sections = assembleSections({ needs, eligible, featured, paidPlacementIds, sales: salesStats(orders, { now }), now, config });
   return {
     mode: identity.mode,

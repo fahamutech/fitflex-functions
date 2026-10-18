@@ -101,11 +101,11 @@ test('eligibility: inactive, unapproved, hidden, unlisted, deleted, out of stock
     ok,
     product({ status: 'paused' }), product({ approvalStatus: 'pending' }), product({ approvalStatus: 'rejected' }),
     product({ visibility: 'hidden' }), product({ homepageVisible: false }), product({ deletedAt: daysAgo(1) }),
-    product({ stock: 0 }), product({ stock: null }), product({ vendorId: 'me' }),
+    product({ stock: 0 }), product({ stock: null }), product({ vendorId: 'me' }), product({ vendorId: 'v_suspended' }),
   ];
-  const { eligible, excluded } = filterEligible(rows, { ownVendorIds: ['me', null] });
+  const { eligible, excluded } = filterEligible(rows, { ownVendorIds: ['me', null], suspendedVendorIds: ['v_suspended'] });
   assert.deepEqual(eligible.map(p => p.id), [ok.id]);
-  assert.deepEqual(Object.values(excluded).sort(), ['deleted', 'hidden', 'hidden', 'inactive', 'not_approved', 'not_approved', 'out_of_stock', 'out_of_stock', 'own_product'].sort());
+  assert.deepEqual(Object.values(excluded).sort(), ['deleted', 'hidden', 'hidden', 'inactive', 'not_approved', 'not_approved', 'out_of_stock', 'out_of_stock', 'own_product', 'vendor_suspended'].sort());
 });
 
 // ── (d) assembly ─────────────────────────────────────────────────────────────
@@ -138,6 +138,13 @@ test('assembly: recommended never holds a paid placement', () => {
   const paid = rows.slice(0, 5).map(p => p.id);
   const [rec] = assembleSections({ needs: needsFor('member'), eligible: rows, paidPlacementIds: paid, now: NOW, config: { sections: ['recommended'], minItems: 1 } });
   assert.deepEqual(rec.productIds, rows.slice(5).map(p => p.id));
+});
+
+test('assembly: essentials hold no paid placement either', () => {
+  const rows = many(6, { category: 'equipment' });
+  const paid = [rows[0].id, rows[2].id];
+  const [ess] = assembleSections({ needs: needsFor('owner'), eligible: rows, paidPlacementIds: paid, now: NOW, config: { sections: ['essentials'], minItems: 1 } });
+  assert.deepEqual(ess.productIds, [rows[1], rows[3], rows[4], rows[5]].map(p => p.id));
 });
 
 test('assembly: recommended puts the role\'s categories first, then what that role buys', () => {

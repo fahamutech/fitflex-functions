@@ -539,7 +539,9 @@ export function createPromotionService({
    * entity that is still approved and eligible, reaching this viewer. This is
    * the only thing discovery should ask; ranking applies the (bounded) boost.
    */
-  async function listLive({ placement, entityType, viewer = {}, type, checkEntities = true } = {}) {
+  // anyLocation: every live promotion wherever it is targeted (area or radius), e.g. to keep all paid
+  // placements out of an organic list. Default false: only those that reach this viewer.
+  async function listLive({ placement, entityType, viewer = {}, type, checkEntities = true, anyLocation = false } = {}) {
     const areas = await areasById();
     const rows = (await withPlacements(await promotions.allAsync())).filter(p => p.status === 'scheduled' || p.status === 'active');
     const out = [];
@@ -548,7 +550,7 @@ export function createPromotionService({
       if (placement && !p.placements.includes(placement)) continue;
       if (entityType && p.entityType !== entityType) continue;
       if (type && p.type !== type) continue;
-      if (!geoMatches(p.geoScope, viewer, areas)) continue;
+      if (!anyLocation && !geoMatches(p.geoScope, viewer, areas)) continue;
       // Discovery already holds the listings it may show, so it checks them itself and skips these lookups.
       if (checkEntities) {
         const entity = await entities.get(p.entityType, p.entityId);

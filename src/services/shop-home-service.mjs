@@ -12,14 +12,16 @@ import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recomm
 const usable = p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected';
 const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
 
+export const CACHE_SECONDS = Object.freeze({ default: 60, min: 1, max: 300 });
+
 /** Assembly settings from the environment: SHOP_HOME_SECTIONS, SHOP_HOME_MIN_ITEMS, SHOP_HOME_CACHE_SECONDS. */
 export function shopHomeConfigFromEnv(env = process.env) {
   return {
     sections: parseSectionList(env.SHOP_HOME_SECTIONS),
     minItems: positiveInt(env.SHOP_HOME_MIN_ITEMS, DEFAULT_ASSEMBLY.minItems),
     maxItems: DEFAULT_ASSEMBLY.maxItems,
-    cacheSeconds: env.SHOP_HOME_CACHE_SECONDS !== undefined && Number.isInteger(Number(env.SHOP_HOME_CACHE_SECONDS)) && Number(env.SHOP_HOME_CACHE_SECONDS) >= 0
-      ? Number(env.SHOP_HOME_CACHE_SECONDS) : 60,
+    // Bounded both ways: never rebuilt on every request, never stale for more than five minutes.
+    cacheSeconds: Math.min(CACHE_SECONDS.max, Math.max(CACHE_SECONDS.min, positiveInt(env.SHOP_HOME_CACHE_SECONDS, CACHE_SECONDS.default))),
   };
 }
 
@@ -27,31 +29,39 @@ export function createShopHomeService({
   shopService,          // listProducts(): the buyer-visible catalogue (listing, KYC and moderation rules)
   discoveryService,     // discover(): the existing Featured system for products
   promotionService,     // listLive(): which products hold a live promotion of any kind
-  geoAreas,             // so area-targeted promotions are counted as paid placements too
   users, trainerService, identityLink,
   recentPaidOrders,     // ({ since }) → paid, not cancelled orders placed since then: [{ buyerRole, items, createdAt }]
   signToken = null,     // ({ promotionId, entityType, entityId, sessionId, now }) → proof that a promoted card was served
   config = () => shopHomeConfigFromEnv(),
   now = () => new Date(),
 }) {
-  let cache = null; // { at, value }
+  let cache = null;    // { at, value }
+  let loading = null;  // the rebuild in flight: concurrent requests wait for it instead of starting their own
 
   async function loadShared() {
     const cfg = config();
     const at = now().getTime();
     if (cache && at - cache.at < cfg.cacheSeconds * 1000) return cache.value;
+    if (!loading) loading = rebuild(at).finally(() => { loading = null; });
+    return loading;
+  }
+
+  async function rebuild(at) {
     const since = new Date(at - 30 * 86_400_000);
-    const [products, orders, discovered, areas] = await Promise.all([
+    const [products, orders, discovered] = await Promise.all([
       shopService.listProducts({}),
       recentPaidOrders({ since }),
       discoveryService.discover({ entityType: 'product', sort: 'relevance', limit: 1 }),
-      geoAreas.allAsync(),
     ]);
-    // Every live product promotion, wherever it is targeted: none of them may sit in the organic section.
-    const live = await promotionService.listLive({ entityType: 'product', viewer: { areaIds: areas.map(a => a.id) }, checkEntities: false });
+    // Every live product promotion, wherever it is targeted (any area, any radius): none may sit in an organic section.
+    const live = await promotionService.listLive({ entityType: 'product', anyLocation: true, checkEntities: false });
     const featured = (discovered?.featured || []).map(card => ({ productId: card.id, promotion: card.promotion }));
+    // Vendors suspended on their account (not only in moderation) are left out of the home.
+    const vendorIds = [...new Set(products.map(p => p.vendorId).filter(Boolean))];
+    const vendors = vendorIds.length ? await users.filterByColumnInAsync('id', vendorIds) : [];
     const value = {
       products,
+      suspendedVendorIds: vendors.filter(v => v.accountStatus === 'suspended').map(v => v.id),
       orders,
       featured,
       paidPlacementIds: [...new Set([...live.map(p => p.entityId), ...featured.map(f => f.productId)])],
@@ -86,7 +96,7 @@ export function createShopHomeService({
     const out = buildShopHome({
       mode: query.mode, sessionUserType: claims.userType, heldUserTypes,
       memberProfile, trainerProfile, recentIds: query.recent, ownVendorIds,
-      products: shared.products, featured: shared.featured, paidPlacementIds: shared.paidPlacementIds, orders: shared.orders,
+      products: shared.products, suspendedVendorIds: shared.suspendedVendorIds, featured: shared.featured, paidPlacementIds: shared.paidPlacementIds, orders: shared.orders,
       config: cfg, now: at,
     });
     if (out.error) return { error: out.error, status: 403 };
@@ -124,5 +134,5 @@ export function createShopHomeService({
     };
   }
 
-  return { home, clearCache: () => { cache = null; } };
+  return { home, clearCache: () => { cache = null; }, loadShared };
 }

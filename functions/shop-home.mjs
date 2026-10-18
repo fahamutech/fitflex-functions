@@ -10,9 +10,28 @@ import { shopHomeV2On } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
 
+// Requests per signed-in user per minute. In memory per server (the same approach as POST /events in
+// promotion-events.mjs, which keeps its limiter private): with several servers the real allowance is the
+// number of servers times this. The page is cached, so this is about abuse, not load from normal use.
+export const SHOP_HOME_LIMIT = Object.freeze({ perMinute: 60, maxTracked: 5000 });
+const windows = new Map(); // userId → { count, resetAt }
+export function allowShopHome(userId, nowMs = Date.now()) {
+  let w = windows.get(userId);
+  if (!w || w.resetAt <= nowMs) {
+    // Forget finished windows before the map can grow without bound.
+    if (windows.size >= SHOP_HOME_LIMIT.maxTracked) for (const [k, v] of windows) if (v.resetAt <= nowMs) windows.delete(k);
+    w = { count: 0, resetAt: nowMs + 60_000 };
+    windows.set(userId, w);
+  }
+  if (w.count >= SHOP_HOME_LIMIT.perMinute) return false;
+  w.count += 1;
+  return true;
+}
+export const resetShopHomeLimits = () => windows.clear();
+
 export const shopHome = {
   created, method: 'get', path: '/shop/home',
-  description: 'Any signed-in user (SHOP_HOME_V2): the shop landing page. Query: ?mode=member|trainer|owner|vendor_personal (a role this account holds; default = the signed-in role; otherwise 403 mode_not_allowed), ?recent=<comma ids, most recent first, max 20; never stored>, ?session=<promotion session id: Featured cards then carry promotion.token>. → { serverNow, currency, mode, personalised, signalsUsed, categories:[{key,en,sw,count}], sections:[{key,title{en,sw},reason{en,sw},reasonCodes,viewAll{path,query},productIds,hasMore}], products:{ id: product as in GET /shop/products } }. Out of stock and the viewer\'s own products never appear; a product is in one section at most; sections with fewer than SHOP_HOME_MIN_ITEMS (4) products are left out. Flag off: 404 feature_disabled.',
+  description: 'Any signed-in user (SHOP_HOME_V2): the shop landing page. Query: ?mode=member|trainer|owner|vendor_personal (a role this account holds; default = the signed-in role; otherwise 403 mode_not_allowed), ?recent=<comma ids, most recent first, max 20; never stored>, ?session=<promotion session id: Featured cards then carry promotion.token>. → { serverNow, currency, mode, personalised, signalsUsed, categories:[{key,en,sw,count}], sections:[{key,title{en,sw},reason{en,sw},reasonCodes,viewAll{path,query},productIds,hasMore}], products:{ id: product as in GET /shop/products } }. Out of stock and the viewer\'s own products never appear; a product is in one section at most; sections with fewer than SHOP_HOME_MIN_ITEMS (4) products are left out. Flag off: 404 feature_disabled. More than 60 calls a minute per user: 429 rate_limited.',
   responseSample: {
     serverNow: '2026-10-19T08:00:00.000Z', currency: 'TZS', mode: 'member', personalised: false, signalsUsed: ['role'],
     categories: [{ key: 'equipment', en: 'Gym & fitness equipment', sw: 'Vifaa vya gym na mazoezi', count: 12 }],
@@ -22,6 +41,7 @@ export const shopHome = {
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     if (!shopHomeV2On()) return res.status(404).json({ error: 'feature_disabled' });
+    if (!allowShopHome(req.user.sub)) return res.status(429).json({ error: 'rate_limited' });
     const q = req.query || {};
     const out = await shopHomeService.home({
       claims: req.user,

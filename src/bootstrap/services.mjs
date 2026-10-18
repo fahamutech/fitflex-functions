@@ -882,7 +882,7 @@ export const promotionAnalyticsService = createPromotionAnalyticsService({
 // Sales are read from paid, not cancelled orders of the last 30 days only, newest first and capped, so memory stays bounded.
 const SHOP_HOME_MAX_ORDERS = 20_000;
 export const shopHomeService = createShopHomeService({
-  shopService, discoveryService, promotionService, geoAreas, users, trainerService, identityLink: identityLinkService,
+  shopService, discoveryService, promotionService, users, trainerService, identityLink: identityLinkService,
   recentPaidOrders: ({ since }) => db('ShopOrder')
     .where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
     .orderBy('createdAt', 'desc').limit(SHOP_HOME_MAX_ORDERS)

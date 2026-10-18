@@ -5,7 +5,7 @@ Scope (owner, 2026-10-19): Phase 1 = UI + foundations, with role-based rules onl
 
 ## `GET /shop/home`
 
-Signed in (any role). With `SHOP_HOME_V2` off the answer is `404 {"error":"feature_disabled"}`; signed out is `401 {"error":"unauthenticated"}`.
+Signed in (any role). With `SHOP_HOME_V2` off the answer is `404 {"error":"feature_disabled"}`; signed out is `401 {"error":"unauthenticated"}`. More than 60 calls a minute by one user is `429 {"error":"rate_limited"}`. The limit is kept in memory per server, so with several servers the real allowance is that many times 60.
 
 ### Query
 
@@ -51,14 +51,16 @@ Default order (and the de-duplication priority): a product appears in **one sect
 
 | key | What | Title (en / sw [SW review]) | viewAll.query |
 |---|---|---|---|
-| `featured` | The existing Featured system (`/discover/products`, placement `marketplace`), in its order. | member/vendor_personal "Featured gear" / "Vifaa vilivyoangaziwa"; trainer "Featured coaching gear" / "Vifaa vya ukocha vilivyoangaziwa"; owner "Featured equipment" / "Vifaa vya gym vilivyoangaziwa" | `{}` |
-| `recommended` | Organic only: **no product with any live promotion** (featured, promoted, sponsored, recommended, campaign) and nothing from `featured`. The role's categories come first, then paid orders (30 days) by buyers in this role, then all paid orders, then admin priority, newest, id. | "Popular with members / trainers / gym owners" / "Maarufu kwa wanachama / wakufunzi / wamiliki wa gym"; vendor_personal "Popular in the shop" / "Maarufu dukani" | `{category:<first role category>, sort:"popularity"}` |
+| `featured` | The existing Featured system (`/discover/products`, placement `marketplace`), in its order. | member/vendor_personal "Featured gear" / "Vifaa vilivyoangaziwa"; trainer "Featured coaching gear" / "Vifaa vya trainer vilivyoangaziwa"; owner "Featured equipment" / "Vifaa vya gym vilivyoangaziwa" | `{}` |
+| `recommended` | Organic only: **no product with any live promotion** (featured, promoted, sponsored, recommended, campaign; targeted anywhere, by area or radius) and nothing from `featured`. The role's categories come first, then paid orders (30 days) by buyers in this role, then all paid orders, then admin priority, newest, id. | "Popular with members / trainers / gym owners" / "Maarufu kwa wanachama / ma-trainer / wamiliki wa gym"; vendor_personal "Popular in the shop" / "Maarufu dukani" | `{category:<first role category>, sort:"popularity"}` |
 | `best_sellers` | Products in paid, uncancelled orders placed in the last 30 days, ranked by number of orders, then units. Never `soldCount`. | "Best sellers" / "Zinazouzwa zaidi" | `{sort:"popularity"}` |
-| `essentials` | Takes turns across the needed categories (goal/specialty categories first, then role defaults). Within a category: paid orders (30 days), priority, newest. | member/vendor_personal "Training essentials" / "Mahitaji muhimu ya mazoezi"; trainer "Coaching essentials" / "Mahitaji muhimu ya ukocha"; owner "Gym essentials" / "Mahitaji muhimu ya gym" | `{category:<first needed category>}` |
+| `essentials` | Organic like `recommended`: **no product with any live promotion**. Takes turns across the needed categories (goal/specialty categories first, then role defaults). Within a category: paid orders (30 days), priority, newest. | member/vendor_personal "Training essentials" / "Mahitaji muhimu ya mazoezi"; trainer "Coaching essentials" / "Mahitaji muhimu ya trainer"; owner "Gym essentials" / "Mahitaji muhimu ya gym" | `{category:<first needed category>}` |
 | `recently_viewed` | The `recent` ids in the app's order, eligible ones only. | "Recently viewed" / "Ulizotazama hivi karibuni" | `{}` |
 | `deals` | `discountPriceTzs > 0` and `< priceTzs`, biggest % first. | "Deals" / "Ofa" | `{promotions:"true"}` |
 | `new_arrivals` | Created in the last 90 days, newest first. | "New arrivals" / "Bidhaa mpya" | `{}` |
 
+- "Live promotion" is read with `promotionService.listLive({ anyLocation: true })`, a new option that skips location matching. A promotion targeted only by a radius is excluded too, even though the viewer sends no position. `best_sellers`, `deals`, `new_arrivals` and `recently_viewed` state facts, so a promoted product can still appear there, without a badge.
+- **Ranking differs from the list's `sort=popularity` (known, Phase 2):** `best_sellers`, `recommended` and `essentials` rank by paid orders in the last 30 days. `GET /shop/products?sort=popularity` (the `viewAll` for `recommended` and `best_sellers`) still sorts by the stored all-time `soldCount`, so "View all" can show a different order from the section. Phase 2 should make the list use the same 30-day measure.
 - At most 12 products per section; `hasMore` says whether more qualified.
 - A section with fewer than `SHOP_HOME_MIN_ITEMS` (default 4) products is left out entirely. Its products stay available to later sections. If no section qualifies, `sections` is `[]`: show the categories and an "All products" grid from `/shop/products`.
 - `reasonCodes` come from the closed list in design §8.3 plus `profile_goal`, `trainer_specialty`, `recently_viewed`, `seller_discount`, `new_arrival`, `generic`. Build the Why sheet from these codes. `reason` is a ready-made sentence for simple display.
@@ -68,12 +70,13 @@ Default order (and the de-duplication priority): a product appears in **one sect
 
 The base is `shopService.listProducts({})`: active, not pending or rejected, not hidden, `homepageVisible`, the vendor may sell (KYC rule), and the product and vendor are not blocked in moderation. On top of that:
 - out of stock (`stock ≤ 0`): never on the home, still in search and results;
+- products of a vendor whose **account** is suspended (`User.accountStatus = 'suspended'`): excluded. Moderation suspension is already applied by `listProducts`. Note: `GET /shop/products` and checkout do **not** check account suspension today. That is an existing gap, not changed here;
 - the viewer's own products: excluded in **every** mode when the person holds a vendor persona (design DD-12), not only in `vendor_personal`;
 - delivery: products have no buyer-area coverage yet and gym pickup always exists, so nothing is excluded by delivery in Phase 1.
 
 ### Caching
 
-The catalogue, 30-day sales, the Featured list and the live-promotion set are cached in memory per server for `SHOP_HOME_CACHE_SECONDS` (default 60). Per-viewer parts (personas, goal, specialty, own products, `recent`) are read on every request and never cached or stored. Sales are read from paid, uncancelled orders of the last 30 days only (newest first, capped at 20,000 orders).
+The catalogue, vendor suspension, 30-day sales, the Featured list and the live-promotion set are cached in memory per server for `SHOP_HOME_CACHE_SECONDS` (default 60, kept within 1–300; a value that isn't a positive whole number means 60). One rebuild runs at a time: requests arriving while it runs wait for it. A failed rebuild is not cached. So a listing, moderation or suspension change can take up to that long to show on the home. Per-viewer parts (personas, goal, specialty, own products, `recent`) are read on every request and never cached or stored. Sales are read from paid, uncancelled orders of the last 30 days only (newest first, capped at 20,000 orders).
 
 ## Configuration
 
@@ -82,13 +85,17 @@ The catalogue, 30-day sales, the Featured list and the live-promotion set are ca
 | `SHOP_HOME_V2` | off | Turns on `GET /shop/home`. |
 | `SHOP_HOME_SECTIONS` | all, in the order above | Comma list: which sections, in which order. Unknown keys are ignored. |
 | `SHOP_HOME_MIN_ITEMS` | 4 | The fewest products a section needs to be shown. |
-| `SHOP_HOME_CACHE_SECONDS` | 60 | Shared-data cache lifetime (0 = no cache). |
+| `SHOP_HOME_CACHE_SECONDS` | 60 | Shared-data cache lifetime, 1–300 seconds. |
 
 Role, goal and specialty category maps are config in `src/services/shop-recommendations.mjs` (`DEFAULT_ROLE_CATEGORIES`, `DEFAULT_GOAL_CATEGORIES`, `DEFAULT_SPECIALTY_CATEGORIES`). They reorder only and never restrict what a role can see or buy.
 
 ## Security change (product create)
 
 `POST /vendor/products` and `POST /admin/products` (and duplicate) now **ignore** `rating`, `reviewCount` and `soldCount` in the body. A new product starts at 0/0/0. Only `reviewProduct` (from real reviews) and the order store (sales) change them. The update path already ignored them. Rows created before this change are not recomputed.
+
+### Before go-live (not done, do not run without the owner's go-ahead)
+
+A one-off recompute of existing products: `rating` and `reviewCount` from `ProductReview`, and `soldCount` from paid, uncancelled order lines. Products created before this change may still hold values a vendor typed in.
 
 ## Not in Phase 1
 
@@ -104,4 +111,4 @@ Role, goal and specialty category maps are config in `src/services/shop-recommen
 - `functions/shop-home.mjs`: the route.
 - Specs: `specs/shop-recommendations.specs.mjs` (each layer), `specs/shop-home.specs.mjs` (service + route + create fix, CI DB), `specs/shop-home-regression.specs.mjs` (cart/checkout/orders unchanged with the flag off and on).
 
-Swahili strings are drafts for native review.
+Swahili strings are drafts for native review. They follow `docs/localization/fitflex-terminology-glossary.md` (parent repo): "trainer" / "ma-trainer", role = "nafasi", and the Sponsored badge is "Iliyodhaminiwa".

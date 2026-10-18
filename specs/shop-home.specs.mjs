@@ -6,11 +6,12 @@ import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { ensureInit } from '../functions/index.mjs';
-import { shopHome } from '../functions/shop-home.mjs';
+import { shopHome, allowShopHome, resetShopHomeLimits, SHOP_HOME_LIMIT } from '../functions/shop-home.mjs';
 import { vendorCreateProduct } from '../functions/shop.mjs';
 import { shopHomeService } from '../src/bootstrap/services.mjs';
 import { createShopService } from '../src/services/shop-service.mjs';
-import { createShopHomeService, shopHomeConfigFromEnv } from '../src/services/shop-home-service.mjs';
+import { createShopHomeService, shopHomeConfigFromEnv, CACHE_SECONDS } from '../src/services/shop-home-service.mjs';
+import { makeWorld, approved, HOUR } from './support/promotion-fixtures.mjs';
 import { verifyServedToken, signServedToken } from '../src/auth/promotion-token.mjs';
 
 await ensureInit();
@@ -32,7 +33,7 @@ function memStore(rows = []) {
   };
 }
 
-function setup({ personas = [], unverifiedVendors = [], blockedProducts = [], blockedVendors = [], featured = [], live = [], orders = [], users: extraUsers = [], trainers = [], env = {} } = {}) {
+function setup({ personas = [], unverifiedVendors = [], blockedProducts = [], blockedVendors = [], featured = [], live = [], orders = [], users: extraUsers = [], trainers = [], env = {}, promotionService = null, ordersDelayMs = 0 } = {}) {
   const products = memStore();
   const users = memStore([...extraUsers]);
   const shopService = createShopService({
@@ -51,12 +52,11 @@ function setup({ personas = [], unverifiedVendors = [], blockedProducts = [], bl
   const service = createShopHomeService({
     shopService,
     discoveryService: { discover: async () => ({ featured: featured.map(f => ({ id: f.productId, promotion: { id: f.promotionId, type: 'featured', label: 'Featured', commercial: true } })) }) },
-    promotionService: { listLive: async () => live.map(id => ({ entityType: 'product', entityId: id })) },
-    geoAreas: { allAsync: async () => [] },
+    promotionService: promotionService || { listLive: async () => live.map(id => ({ entityType: 'product', entityId: id })) },
     users,
     trainerService: { findProfileByUser: id => trainers.find(t => t.userId === id) || null },
     identityLink: { personasOf: async () => personas },
-    recentPaidOrders: async () => { calls.orders += 1; return orders; },
+    recentPaidOrders: async () => { calls.orders += 1; if (ordersDelayMs) await new Promise(r => setTimeout(r, ordersDelayMs)); return orders; },
     signToken: signServedToken,
     config: () => shopHomeConfigFromEnv({ SHOP_HOME_MIN_ITEMS: '1', SHOP_HOME_CACHE_SECONDS: '0', ...env }),
     now: () => NOW,
@@ -131,6 +131,29 @@ test('service: Featured keeps its disclosure and gets a token for the session; r
   assert.equal(plain.body.products.prd_001.promotion.token, undefined);
 });
 
+test('service: a radius-only paid promotion is kept out of recommended and essentials for a viewer with no position', async () => {
+  // The real promotion service: a promoted product targeted only by a radius.
+  const world = makeWorld();
+  const promo = await approved(world, {
+    entityType: 'product', entityId: 'prod_1', type: 'promoted', placements: ['marketplace'],
+    geoScope: { areaIds: [], radius: { lat: -6.792, lng: 39.208, km: 5 } },
+  });
+  assert.ok(!(await world.promotionService.schedule({ id: promo.id, actorId: 'admin_checker' })).error);
+  world.clock.advance(2 * HOUR);
+  assert.equal((await world.promotionService.runLifecycle()).activated, 1, 'now running');
+  // Matching by location would miss it (the viewer has no position); that is why the home asks for any location.
+  assert.deepEqual((await world.promotionService.listLive({ entityType: 'product', checkEntities: false })).map(p => p.id), []);
+  assert.deepEqual((await world.promotionService.listLive({ entityType: 'product', anyLocation: true, checkEntities: false })).map(p => p.id), [promo.id]);
+
+  const s = setup({ promotionService: world.promotionService, env: { SHOP_HOME_SECTIONS: 'recommended,essentials,best_sellers' } });
+  s.add({ id: 'prod_1', category: 'equipment' });
+  for (let i = 0; i < 5; i += 1) s.add({ category: 'equipment' });
+  const out = await s.service.home({ claims: { sub: 'own1', userType: 'gym_operator' } });
+  const rec = out.body.sections.find(x => x.key === 'recommended');
+  assert.ok(rec.productIds.length > 0);
+  for (const sec of out.body.sections.filter(x => ['recommended', 'essentials'].includes(x.key))) assert.ok(!sec.productIds.includes('prod_1'), sec.key);
+});
+
 test('service: role defaults per mode drive essentials; a person may shop in another role they hold', async () => {
   const s = setup({
     personas: [{ id: 'own1', userType: 'gym_operator' }, { id: 'm1', userType: 'member' }],
@@ -189,6 +212,36 @@ test('service: a vendor never sees their own products, as a vendor or in another
   assert.equal(staff.error, 'mode_not_allowed');
 });
 
+test('config: SHOP_HOME_CACHE_SECONDS is bounded to 1..300 seconds', () => {
+  assert.deepEqual(CACHE_SECONDS, { default: 60, min: 1, max: 300 });
+  const secs = v => shopHomeConfigFromEnv({ SHOP_HOME_CACHE_SECONDS: v }).cacheSeconds;
+  assert.equal(secs(undefined), 60);
+  assert.equal(secs('0'), 60, 'not a positive whole number: default');
+  assert.equal(secs('-5'), 60);
+  assert.equal(secs('abc'), 60);
+  assert.equal(secs('1'), 1);
+  assert.equal(secs('120'), 120);
+  assert.equal(secs('100000'), 300);
+});
+
+test('service: concurrent requests share one rebuild of the shared data', async () => {
+  const s = setup({ env: { SHOP_HOME_CACHE_SECONDS: '60' }, ordersDelayMs: 30 });
+  for (let i = 0; i < 4; i += 1) s.add();
+  const outs = await Promise.all(Array.from({ length: 8 }, (_, i) => s.service.home({ claims: { sub: `m${i}`, userType: 'member' } })));
+  assert.equal(s.calls.orders, 1, 'one rebuild for eight requests');
+  assert.ok(outs.every(o => o.body.sections.length > 0));
+  // A failed rebuild is not kept: the next request tries again.
+  let fail = true;
+  const broken = createShopHomeService({
+    shopService: { listProducts: async () => { if (fail) throw new Error('db down'); return []; } },
+    discoveryService: { discover: async () => ({ featured: [] }) }, promotionService: { listLive: async () => [] },
+    users: memStore(), recentPaidOrders: async () => [], config: () => shopHomeConfigFromEnv({}), now: () => NOW,
+  });
+  await assert.rejects(broken.home({ claims: { sub: 'm1', userType: 'member' } }), /db down/);
+  fail = false;
+  assert.equal((await broken.home({ claims: { sub: 'm1', userType: 'member' } })).body.sections.length, 0);
+});
+
 test('service: shared data is cached for SHOP_HOME_CACHE_SECONDS, personal parts are not', async () => {
   const s = setup({ env: { SHOP_HOME_CACHE_SECONDS: '60' }, users: [{ id: 'm1', userType: 'member', memberProfile: {} }] });
   for (let i = 0; i < 4; i += 1) s.add();
@@ -201,7 +254,7 @@ test('service: shared data is cached for SHOP_HOME_CACHE_SECONDS, personal parts
 
 // ── GET /shop/home and product create, against the CI database ──────────────
 
-const made = { users: [], products: [], persons: [] };
+const made = { users: [], products: [], persons: [], moderation: [] };
 function res() {
   return { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
 }
@@ -232,12 +285,14 @@ async function product(vendorId, extra = {}) {
 beforeEach(() => {
   process.env.SHOP_HOME_V2 = '1';
   process.env.SHOP_HOME_MIN_ITEMS = '1';
-  process.env.SHOP_HOME_CACHE_SECONDS = '0';
+  process.env.SHOP_HOME_CACHE_SECONDS = '1';
   shopHomeService.clearCache();
+  resetShopHomeLimits();
 });
 after(async () => {
   for (const k of ['SHOP_HOME_V2', 'SHOP_HOME_MIN_ITEMS', 'SHOP_HOME_CACHE_SECONDS', 'SHOP_HOME_SECTIONS']) delete process.env[k];
   await db('AuditLog').whereIn('target', made.products).del();
+  await db('ModerationState').whereIn('id', made.moderation).del();
   await db('Product').whereIn('id', made.products).del();
   await db('User').whereIn('id', made.users).del();
   if (made.persons.length) await db('Person').whereIn('id', made.persons).del();
@@ -253,6 +308,55 @@ test('route: flag off answers 404 feature_disabled; signed out is 401', async ()
   const anon = res();
   await shopHome.onGuard({ headers: {}, query: {} }, anon, () => assert.fail('guard let an anonymous call through'));
   assert.equal(anon.statusCode, 401);
+});
+
+test('route: more than the per-user limit in a minute answers 429 rate_limited', async () => {
+  const member = await user('member');
+  const other = await user('member');
+  const t = Date.now();
+  for (let i = 0; i < SHOP_HOME_LIMIT.perMinute; i += 1) assert.equal(allowShopHome(member, t), true);
+  assert.equal(allowShopHome(member, t), false);
+  assert.equal(allowShopHome(member, t + 60_001), true, 'a new minute starts again');
+  for (let i = 0; i < SHOP_HOME_LIMIT.perMinute; i += 1) allowShopHome(member);
+  const out = await call(shopHome, { sub: member, userType: 'member' });
+  assert.equal(out.statusCode, 429);
+  assert.deepEqual(out.body, { error: 'rate_limited' });
+  assert.equal((await call(shopHome, { sub: other, userType: 'member' })).statusCode, 200, 'other users are not affected');
+});
+
+test('route: hidden, moderation-blocked, unverified (KYC gate on) and suspended vendors\' products never appear', async () => {
+  const before = process.env.KYC_ENFORCEMENT;
+  const old = new Date('2026-01-01T00:00:00Z'); // before KYC enforcement started: exempt
+  const okVendor = await user('vendor', { createdAt: old });
+  const newVendor = await user('vendor'); // created now, no approved KYC case
+  const modSuspendedVendor = await user('vendor', { createdAt: old });
+  const accountSuspendedVendor = await user('vendor', { createdAt: old, accountStatus: 'suspended' });
+  const shown = await product(okVendor);
+  const hidden = await product(okVendor, { visibility: 'hidden' });
+  const modHidden = await product(okVendor);
+  const unverified = await product(newVendor);
+  const ofModSuspended = await product(modSuspendedVendor);
+  const ofAccountSuspended = await product(accountSuspendedVendor);
+  const states = [
+    { id: uid('mod'), entityType: 'product', entityId: modHidden, status: 'hidden', updatedAt: new Date() },
+    { id: uid('mod'), entityType: 'vendor', entityId: modSuspendedVendor, status: 'suspended', updatedAt: new Date() },
+  ];
+  await db('ModerationState').insert(states);
+  made.moderation.push(...states.map(x => x.id));
+  const member = await user('member');
+  try {
+    process.env.KYC_ENFORCEMENT = 'on';
+    process.env.SHOP_HOME_SECTIONS = 'recently_viewed,new_arrivals,recommended,essentials';
+    const all = [shown, hidden, modHidden, unverified, ofModSuspended, ofAccountSuspended];
+    const out = await call(shopHome, { sub: member, userType: 'member' }, { query: { recent: all.join(',') } });
+    assert.equal(out.statusCode, 200, JSON.stringify(out.body));
+    const ids = new Set([...out.body.sections.flatMap(x => x.productIds), ...Object.keys(out.body.products)]);
+    assert.ok(ids.has(shown), 'the listable product is shown');
+    for (const [name, id] of Object.entries({ hidden, modHidden, unverified, ofModSuspended, ofAccountSuspended })) assert.ok(!ids.has(id), name);
+  } finally {
+    if (before === undefined) delete process.env.KYC_ENFORCEMENT; else process.env.KYC_ENFORCEMENT = before;
+    delete process.env.SHOP_HOME_SECTIONS;
+  }
 });
 
 test('route: a faked mode is refused with 403 mode_not_allowed', async () => {
