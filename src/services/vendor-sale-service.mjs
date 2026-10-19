@@ -8,6 +8,7 @@
 // flag (VENDOR_TOOLS + VENDOR_WALKIN_SALES) and the `sales` permission before calling in here.
 import { parseSale, saleFingerprint, soldAtOutOfRange, parseVoid, SALES_PAGE_DEFAULT, SALES_PAGE_MAX } from '../shared/vendor-sale.mjs';
 import { eatDayStart } from '../shared/vendor-stock.mjs';
+import { eatDate } from '../shared/vendor-order-view.mjs';
 
 const DAY_MS = 86_400_000;
 const STATUSES = new Set(['completed', 'voided']);
@@ -16,6 +17,8 @@ export function createVendorSaleService({
   store,
   // Stock moved for these products: tell the vendor about any that just went low (S1, best effort).
   afterStockMoved = async () => {},
+  // Tell the vendor account something (shopService.notifyVendor: shop list + push). Best effort.
+  notifyVendor = async () => {},
   now = () => new Date(),
 }) {
   async function lowStockCheck(productIds) {
@@ -67,13 +70,32 @@ export function createVendorSaleService({
     return sale ? { sale } : { error: 'sale_not_found', status: 404 };
   }
 
-  /** POST /vendor/sales/:id/void { reason } → { sale } or { error, status }. */
-  async function voidSale({ vendorId, actorId, saleId, body }) {
+  /**
+   * POST /vendor/sales/:id/void { reason } → { sale } or { error, status }.
+   * Security review M2: `voidsAny` (the vendor account, staff with vendorRole admin) may void any sale;
+   * other `sales` staff only a sale they recorded, on the EAT day it was sold → else 403 void_not_allowed
+   * { reason: not_own | too_old }. A void by staff is reported to the vendor account (after commit).
+   */
+  async function voidSale({ vendorId, actorId, saleId, body, voidsAny = false }) {
     const parsed = parseVoid(body || {});
     if (parsed.error) return parsed;
-    const out = await store.voidSale({ vendorId, saleId, actorId, reason: parsed.reason });
+    const canVoid = (sale) => {
+      if (voidsAny) return null;
+      if (sale.createdBy !== actorId) return { error: 'void_not_allowed', status: 403, reason: 'not_own' };
+      if (eatDate(sale.soldAt) !== eatDate(now())) return { error: 'void_not_allowed', status: 403, reason: 'too_old' };
+      return null;
+    };
+    const out = await store.voidSale({ vendorId, saleId, actorId, reason: parsed.reason, canVoid });
     if (out.error) return out;
     await lowStockCheck(out.productIds);
+    if (actorId !== vendorId) {
+      try {
+        await notifyVendor(vendorId, 'vendor_sale_voided', {
+          saleId: out.sale.id, number: out.sale.number, totalTzs: out.sale.totalTzs,
+          voidedByName: out.sale.voidedBy?.name ?? null, reason: out.sale.voidReason,
+        });
+      } catch (err) { console.warn('[vendor-sales] void notification failed:', err?.message); }
+    }
     return { sale: out.sale };
   }
 

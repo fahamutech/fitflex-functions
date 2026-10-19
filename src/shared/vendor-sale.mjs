@@ -17,6 +17,10 @@ export const MAX_LINES = 100;
 export const MAX_PAYMENTS = 10;
 export const MAX_QTY_PER_LINE = 1000;
 export const MAX_SALE_TZS = 100_000_000;
+/** Change may be at most the total plus this (security review L2): a typo of extra zeros is refused. */
+export const MAX_CHANGE_OVER_TOTAL_TZS = 1_000_000;
+/** A sale reached FitFlex this long after it was made: "recorded late" (offline, or back-dated). */
+export const LATE_RECORDED_MS = 5 * 60_000;
 export const MAX_NOTE = 200;
 export const MAX_REFERENCE = 100;
 export const VOID_REASON = { min: 3, max: 200 };
@@ -155,11 +159,13 @@ export function priceSale(priced, discountTzs, payments) {
 
   const paidTzs = payments.reduce((s, p) => s + p.amountTzs, 0);
   if (totalTzs === 0 && payments.length) return fail('invalid_payment', 400, { reason: 'nothing_to_pay' });
+  if (paidTzs > MAX_SALE_TZS) return fail('invalid_payment', 400, { reason: 'paid_too_large', max: MAX_SALE_TZS });
   if (paidTzs < totalTzs) return fail('payment_short', 409, { totalTzs, paidTzs, shortTzs: totalTzs - paidTzs });
   const changeTzs = paidTzs - totalTzs;
   const cashTzs = payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amountTzs, 0);
   // Only cash gives change: the other methods together may not pay more than the total.
   if (changeTzs > cashTzs) return fail('invalid_payment', 400, { reason: 'non_cash_over_total', totalTzs, nonCashTzs: paidTzs - cashTzs });
+  if (changeTzs > totalTzs + MAX_CHANGE_OVER_TOTAL_TZS) return fail('invalid_payment', 400, { reason: 'change_too_large', maxChangeTzs: totalTzs + MAX_CHANGE_OVER_TOTAL_TZS });
   return { lines: out, subtotalTzs, lineDiscountTzs, discountTzs, totalTzs, paidTzs, changeTzs };
 }
 

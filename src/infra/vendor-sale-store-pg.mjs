@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import { VARIANT_HAS_STOCK, variantStockAdjusted, variantStockOf } from './shop-order-store-pg.mjs';
 import { variantsOf, isTracked } from '../shared/vendor-stock.mjs';
-import { walkInPrice, priceSale, receiptNumber, RECEIPT_DOC_TYPE, PAYMENT_METHODS } from '../shared/vendor-sale.mjs';
+import { walkInPrice, priceSale, receiptNumber, RECEIPT_DOC_TYPE, PAYMENT_METHODS, LATE_RECORDED_MS } from '../shared/vendor-sale.mjs';
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
@@ -28,6 +28,8 @@ const newId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 16)
 const iso = v => (v == null ? null : new Date(v).toISOString());
 const person = (id, name) => (id ? { id, name: name ?? null } : null);
 const keyOf = (productId, variant) => `${productId}\u0000${variant || ''}`;
+/** Reached FitFlex more than 5 minutes after it was made (security review L4). */
+const lateRecorded = s => +new Date(s.createdAt) - +new Date(s.soldAt) > LATE_RECORDED_MS;
 
 export function createPgVendorSaleStore({ db, now = () => new Date() }) {
   // ── views ─────────────────────────────────────────────────────────────────
@@ -44,7 +46,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
     const s = plain(sale);
     return {
       id: s.id, number: s.number, status: s.status, kind: s.kind,
-      soldAt: iso(s.soldAt), recordedAt: iso(s.createdAt), clientRef: s.clientRef,
+      soldAt: iso(s.soldAt), recordedAt: iso(s.createdAt), lateRecorded: lateRecorded(s), clientRef: s.clientRef,
       subtotalTzs: s.subtotalTzs, lineDiscountTzs: s.lineDiscountTzs, discountTzs: s.discountTzs,
       totalTzs: s.totalTzs, paidTzs: s.paidTzs, changeTzs: s.changeTzs,
       note: s.note ?? null,
@@ -121,9 +123,8 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
         const productIds = [...new Set(sale.lines.map(l => l.productId))].sort();
         const products = new Map();
         for (const id of productIds) {
-          const row = plain(await trx('Product').where({ id }).forUpdate().first());
-          // Another vendor's product is "not found": its existence is not this vendor's business.
-          products.set(id, row && row.vendorId === vendorId ? row : null);
+          // Only this vendor's row is locked; another vendor's product is "not found" (L3).
+          products.set(id, plain(await trx('Product').where({ id, vendorId }).forUpdate().first()) || null);
         }
         const priced = sale.lines.map((line) => {
           const facts = checkLine(products.get(line.productId), line);
@@ -227,13 +228,18 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
 
   // ── void ──────────────────────────────────────────────────────────────────
 
-  /** Void a completed sale: its units go back to stock once. → { sale, productIds } or { error, status }. */
-  async function voidSale({ vendorId, saleId, actorId, reason }) {
+  /**
+   * Void a completed sale: its units go back to stock once. `canVoid(sale)` → null or a refusal, judged on
+   * the locked row (M2: who may void which sale). → { sale, productIds } or { error, status }.
+   */
+  async function voidSale({ vendorId, saleId, actorId, reason, canVoid = () => null }) {
     if (typeof saleId !== 'string' || !saleId) return fail('sale_not_found', 404);
     try {
       return await db.transaction(async (trx) => {
         const sale = plain(await trx('VendorSale').where({ id: saleId, vendorId }).forUpdate().first());
         if (!sale) throw refusal('sale_not_found', 404);
+        const refused = canVoid(sale);
+        if (refused) throw Object.assign(new Error(refused.error), { refusal: refused });
         if (sale.status === 'voided') throw refusal('already_voided', 409, { voidedAt: iso(sale.voidedAt) });
         const at = now();
         const lines = await trx('VendorSaleLine').where({ saleId });
@@ -246,13 +252,17 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
         }
         const ordered = [...groups.values()].sort((a, b) => (keyOf(a.productId, a.variant) < keyOf(b.productId, b.variant) ? -1 : 1));
         for (const g of ordered) {
-          const product = plain(await trx('Product').where({ id: g.productId }).forUpdate().first());
-          if (!product) continue; // a product row is never hard-deleted by the app; nothing to give back to
+          const product = plain(await trx('Product').where({ id: g.productId, vendorId }).forUpdate().first());
+          if (!product) {
+            // Never expected (products are soft-deleted and keep their vendor); the units cannot go back.
+            console.warn('[vendor-sales] void: product not found for restock', { saleId, productId: g.productId });
+            continue;
+          }
           // The variant's own count gets its units back while it still keeps one; otherwise the product's.
           const stillTracked = g.variantTracked && variantsOf(product).some(v => v.name === g.variant && isTracked(v));
           const update = { stock: trx.raw('stock + ?', [g.qty]), updatedAt: at };
           if (stillTracked) update.variants = trx.raw(variantStockAdjusted('+'), [g.variant, g.qty]);
-          const rows = await trx('Product').where({ id: g.productId }).update(update).returning(['stock', 'variants']);
+          const rows = await trx('Product').where({ id: g.productId, vendorId }).update(update).returning(['stock', 'variants']);
           const stockAfter = stillTracked ? variantStockOf(rows[0].variants, g.variant) ?? rows[0].stock : rows[0].stock;
           // Unique (sourceId, productId, variant, reason): a second give-back of this sale cannot be written.
           await trx('ShopStockMovement').insert({
@@ -269,7 +279,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
           after: JSON.stringify({ status: 'voided', vendorId, reason }),
         });
         const saved = await load(trx, { id: saleId });
-        return { sale: saved.view, productIds: ordered.map(g => g.productId) };
+        return { sale: saved.view, productIds: ordered.map(g => g.productId), voided: sale };
       });
     } catch (err) {
       if (err.refusal) return err.refusal;
@@ -313,12 +323,14 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
     const page = rows.slice(0, limit);
     const ids = page.map(r => r.id);
 
-    const [items, pays, names] = await Promise.all([
+    const [items, overridden, pays, names] = await Promise.all([
       ids.length ? db('VendorSaleLine').whereIn('saleId', ids).groupBy('saleId').select('saleId').sum({ n: 'qty' }) : [],
+      ids.length ? db('VendorSaleLine').whereIn('saleId', ids).whereRaw('"unitPriceTzs" <> "listPriceTzs"').distinct('saleId') : [],
       ids.length ? db('VendorSalePayment').whereIn('saleId', ids).orderBy(['saleId', 'position']).select('saleId', 'method') : [],
       namesOf(db, page.map(r => r.createdBy)),
     ]);
     const itemCount = new Map(items.map(r => [r.saleId, Number(r.n)]));
+    const withOverride = new Set(overridden.map(r => r.saleId));
     const methods = new Map();
     for (const p of pays) {
       const m = methods.get(p.saleId) || [];
@@ -331,6 +343,10 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
       db.raw(`COALESCE(sum("totalTzs") FILTER (WHERE status = 'completed'), 0)::bigint AS "totalTzs"`),
       db.raw(`COALESCE(sum("changeTzs") FILTER (WHERE status = 'completed'), 0)::bigint AS "changeTzs"`),
       db.raw(`count(*) FILTER (WHERE status = 'voided')::int AS "voidedCount"`),
+      db.raw(`COALESCE(sum("lineDiscountTzs" + "discountTzs") FILTER (WHERE status = 'completed'), 0)::bigint AS "discountTzs"`),
+      db.raw(`count(*) FILTER (WHERE status = 'completed' AND EXISTS (SELECT 1 FROM "VendorSaleLine" l
+        WHERE l."saleId" = "VendorSale".id AND l."unitPriceTzs" <> l."listPriceTzs"))::int AS "overrideCount"`),
+      db.raw(`count(*) FILTER (WHERE "createdAt" - "soldAt" > make_interval(secs => ?))::int AS "lateCount"`, [LATE_RECORDED_MS / 1000]),
     );
     const byMethodRows = await scope(db('VendorSalePayment as p').join('VendorSale as s', 's.id', 'p.saleId'), 's')
       .where('s.status', 'completed').groupBy('p.method').select('p.method').sum({ amount: 'p.amountTzs' });
@@ -342,11 +358,15 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
     return {
       sales: page.map(r => ({
         id: r.id, number: r.number, soldAt: iso(r.soldAt), recordedAt: iso(r.createdAt), status: r.status,
-        totalTzs: r.totalTzs, itemCount: itemCount.get(r.id) || 0, methods: methods.get(r.id) || [],
+        totalTzs: r.totalTzs, discountTzs: r.lineDiscountTzs + r.discountTzs, hasOverride: withOverride.has(r.id), lateRecorded: lateRecorded(r),
+        itemCount: itemCount.get(r.id) || 0, methods: methods.get(r.id) || [],
         createdBy: person(r.createdBy, names.get(r.createdBy)),
       })),
       nextCursor: rows.length > limit ? encodeCursor(page[page.length - 1]) : null,
-      summary: { count: Number(totals.count), totalTzs: Number(totals.totalTzs), voidedCount: Number(totals.voidedCount), byMethod },
+      summary: {
+        count: Number(totals.count), totalTzs: Number(totals.totalTzs), voidedCount: Number(totals.voidedCount),
+        discountTzs: Number(totals.discountTzs), overrideCount: Number(totals.overrideCount), lateCount: Number(totals.lateCount), byMethod,
+      },
     };
   }
 

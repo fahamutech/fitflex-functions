@@ -16,7 +16,7 @@ import { partnerSettlementAccounts } from '../src/bootstrap/collections.mjs';
 import { createPayoutEligibility } from '../src/services/payout-eligibility.mjs';
 import { createVendorSettlementService } from '../src/services/vendor-settlement-service.mjs';
 import { vendorToolsOptionsRoute, vendorCreateProduct, vendorStockMovements, vendorCreateStaff, createShopOrder, vendorPayments } from '../functions/shop.mjs';
-import { vendorRecordSale, vendorListSales, vendorGetSale, vendorVoidSale } from '../functions/vendor-sales.mjs';
+import { vendorRecordSale, vendorListSales, vendorGetSale, vendorVoidSale, allowVendorSale, resetVendorSalesLimits, VENDOR_SALES_LIMIT } from '../functions/vendor-sales.mjs';
 import { allocate, priceSale, parseSale, walkInPrice } from '../src/shared/vendor-sale.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
@@ -175,6 +175,10 @@ test('rules: walk-in price, line discount for the whole line, subtotal before di
   assert.deepEqual(priceSale([{ ...priced[1], discountTzs: 10_001 }], 0, []), { error: 'discount_exceeds_price', status: 400, productId: 'b', variant: null, maxTzs: 10_000 });
   assert.equal(priceSale(priced, 0, [{ method: 'mpesa', amountTzs: 100_000, reference: 'X' }]).reason, 'non_cash_over_total');
   assert.deepEqual(priceSale(priced, 0, cash(90_000)), { error: 'payment_short', status: 409, totalTzs: 95_000, paidTzs: 90_000, shortTzs: 5_000 });
+  // L2: change at most total + 1,000,000; paid at most 100,000,000.
+  assert.equal(priceSale(priced, 0, cash(95_000 + 95_000 + 1_000_000)).changeTzs, 1_095_000);
+  assert.deepEqual(priceSale(priced, 0, cash(95_000 + 95_000 + 1_000_001)), { error: 'invalid_payment', status: 400, reason: 'change_too_large', maxChangeTzs: 1_095_000 });
+  assert.equal(priceSale(priced, 0, [{ method: 'cash', amountTzs: 60_000_000 }, { method: 'cash', amountTzs: 60_000_000 }]).reason, 'paid_too_large');
   assert.equal(parseSale({ clientRef: 'x'.repeat(10), lines: [{ productId: 'a', qty: 1 }], payments: [{ method: 'bank', amountTzs: 1 }] }).error, 'reference_required');
   assert.equal(parseSale({ clientRef: 'x'.repeat(10), lines: [{ productId: 'a', qty: 1 }], payments: [{ method: 'card', amountTzs: 1 }] }).error, undefined, 'card: reference optional');
   assert.equal(parseSale({ clientRef: 'x'.repeat(10), lines: [{ productId: 'a', qty: 1 }], payments: [{ method: 'cheque', amountTzs: 1 }] }).error, 'invalid_payment');
@@ -303,7 +307,7 @@ test('payments: reference required for mobile money and bank, optional for card/
   for (const s of sales) assert.equal(s.paidTzs - s.changeTzs, s.totalTzs);
 });
 
-test('what may be sold (Q-4, Q-6): paused, pending and rejected listings, a pending vendor, staff of a suspended vendor; not archived, deleted or another vendor\'s products', async () => {
+test('what may be sold (Q-4): paused, pending and rejected listings, a pending vendor; not archived, deleted or another vendor\'s products; a suspended vendor records nothing (M1)', async () => {
   salesOn();
   const v = await vendor();
   const paused = await product(v, { name: 'Paused', stock: 2 });
@@ -332,15 +336,25 @@ test('what may be sold (Q-4, Q-6): paused, pending and rejected listings, a pend
   const np = await product(newcomer, { stock: 1 }, { approve: false });
   assert.equal((await sell(as(newcomer), saleBody([{ productId: np.id, qty: 1 }], cash(45_000)))).status, 201);
 
-  // A suspended vendor: the account itself is stopped by the platform sign-in check (unchanged);
-  // their active staff with `sales` may still record counter sales (Q-6, for security review).
+  // A suspended vendor (security review M1, fail closed): the account is stopped by the platform sign-in
+  // check (403 account_suspended, unchanged); their active staff get 403 vendor_suspended on every route.
   // (The product is made by another vendor and handed over, so the suspended account never signs in while active.)
   const suspended = await vendor({ accountStatus: 'suspended' });
   const sp = await product(await vendor(), { stock: 3 });
   await db('Product').where({ id: sp.id }).update({ vendorId: suspended });
-  const seller = await staff(suspended, ['sales']);
-  assert.equal((await sell(staffOf(seller, suspended), saleBody([{ productId: sp.id, qty: 1 }], cash(45_000)))).status, 201);
+  const seller = await staff(suspended, ['sales'], { vendorRole: 'admin' });
+  const earlier = uid('sal');
+  await db('VendorSale').insert({ id: earlier, vendorId: suspended, seq: 1, number: 'R-000001', soldAt: new Date(), subtotalTzs: 0, totalTzs: 0, paidTzs: 0, clientRef: uid('ref'), fingerprint: 'x', createdBy: seller });
+  await db('VendorDocumentSequence').insert({ vendorId: suspended, docType: 'receipt', next: 2 }); // as if recorded through the API
+  for (const [route, opts] of [[vendorRecordSale, { body: saleBody([{ productId: sp.id, qty: 1 }], cash(45_000)) }], [vendorListSales, {}], [vendorGetSale, { params: { id: earlier } }], [vendorVoidSale, { params: { id: earlier }, body: { reason: 'while suspended' } }]]) {
+    assert.deepEqual(await call(route, staffOf(seller, suspended), opts), { status: 403, body: { error: 'vendor_suspended' } });
+  }
   assert.deepEqual(await sell(as(suspended), saleBody([{ productId: sp.id, qty: 1 }], cash(45_000))), { status: 403, body: { error: 'account_suspended' } });
+  assert.equal((await row(sp.id)).stock, 3, 'nothing recorded');
+  assert.equal((await db('VendorSale').where({ id: earlier }).first()).status, 'completed');
+  // Back to active: the same staff member records again.
+  await db('User').where({ id: suspended }).update({ accountStatus: 'active' });
+  assert.equal((await sell(staffOf(seller, suspended), saleBody([{ productId: sp.id, qty: 1 }], cash(45_000)))).status, 201);
 });
 
 test('soldAt (Q-14): from 7 days ago to 5 minutes ahead; default now; the receipt number follows the order sales reach FitFlex', async () => {
@@ -475,7 +489,7 @@ test('gap-free numbers under concurrency: 30 sales by two sellers at once, with 
 test('void: every unit back once (sale_void), audited, 409 already_voided, reason required, concurrent voids → one; stock history links both rows to the receipt', async () => {
   ledgerOn();
   const v = await vendor();
-  const seller = await staff(v, ['sales']);
+  const seller = await staff(v, ['sales'], { vendorRole: 'admin', displayName: 'Admin Neema' });
   const tee = await product(v, { name: 'Tee', priceTzs: 15_000, variants: [{ name: 'S', stock: 3 }, { name: 'M', stock: 3 }] });
   const bar = await product(v, { name: 'Bar', priceTzs: 2_000, stock: 5 });
   const sold = await sell(as(v), saleBody([{ productId: tee.id, variant: 'S', qty: 1 }, { productId: tee.id, variant: 'S', qty: 1, unitPriceTzs: 14_000 }, { productId: bar.id, qty: 2 }], cash(33_000)));
@@ -486,7 +500,7 @@ test('void: every unit back once (sale_void), audited, 409 already_voided, reaso
 
   assert.deepEqual(await call(vendorVoidSale, as(v), { params: { id }, body: { reason: ' x ' } }), { status: 400, body: { error: 'reason_required', min: 3 } });
   assert.equal((await call(vendorVoidSale, as(v), { params: { id }, body: { reason: 'y'.repeat(201) } })).body.error, 'reason_too_long');
-  // Staff may void a sale someone else recorded (Q-16); two voids at once → one wins.
+  // Admin staff may void a sale someone else recorded (M2); two voids at once → one wins.
   const both = await Promise.all([
     call(vendorVoidSale, staffOf(seller, v), { params: { id }, body: { reason: 'Customer changed mind' } }),
     call(vendorVoidSale, as(v), { params: { id }, body: { reason: 'Rang up twice' } }),
@@ -549,14 +563,23 @@ test('GET /vendor/sales: newest first, paged, filters (dates, status, createdBy=
   const c = await mk(as(v), 2, 1, [{ method: 'card', amountTzs: 1_000 }]);
   const d = await mk(staffOf(seller, v), 3, 4, [{ method: 'mpesa', amountTzs: 4_000, reference: 'MP2' }]);
   await call(vendorVoidSale, as(v), { params: { id: c.id }, body: { reason: 'test void' } });
+  // Sold now (not late), at a changed price and with a line discount.
+  const e = (await sell(as(v), saleBody([{ productId: p.id, qty: 1, unitPriceTzs: 900, discountTzs: 100 }], [{ method: 'card', amountTzs: 800 }]))).body.sale;
+  assert.equal(e.lateRecorded, false);
+  assert.equal((await call(vendorGetSale, as(v), { params: { id: a.id } })).body.sale.lateRecorded, true);
 
   const all = await call(vendorListSales, as(v));
   assert.equal(all.status, 200, JSON.stringify(all.body));
-  assert.deepEqual(all.body.sales.map(s => s.number), [d.number, c.number, b.number, a.number]);
-  assert.deepEqual(Object.keys(all.body.sales[0]).sort(), ['createdBy', 'id', 'itemCount', 'methods', 'number', 'recordedAt', 'soldAt', 'status', 'totalTzs']);
+  assert.deepEqual(all.body.sales.map(s => s.number), [e.number, d.number, c.number, b.number, a.number]);
+  assert.deepEqual(Object.keys(all.body.sales[0]).sort(), ['createdBy', 'discountTzs', 'hasOverride', 'id', 'itemCount', 'lateRecorded', 'methods', 'number', 'recordedAt', 'soldAt', 'status', 'totalTzs']);
   const bRow = all.body.sales.find(s => s.id === b.id);
-  assert.deepEqual([bRow.itemCount, bRow.methods, bRow.createdBy, bRow.totalTzs], [3, ['cash', 'mpesa'], { id: seller, name: 'Juma Seller' }, 3_000]);
-  assert.deepEqual(all.body.summary, { count: 3, totalTzs: 9_000, voidedCount: 1, byMethod: [{ method: 'cash', amountTzs: 3_000 }, { method: 'mpesa', amountTzs: 6_000 }] });
+  assert.deepEqual([bRow.itemCount, bRow.methods, bRow.createdBy, bRow.totalTzs, bRow.hasOverride, bRow.discountTzs, bRow.lateRecorded], [3, ['cash', 'mpesa'], { id: seller, name: 'Juma Seller' }, 3_000, false, 0, true]);
+  const eRow = all.body.sales[0];
+  assert.deepEqual([eRow.hasOverride, eRow.discountTzs, eRow.lateRecorded], [true, 100, false]);
+  assert.deepEqual(all.body.summary, {
+    count: 4, totalTzs: 9_800, voidedCount: 1, discountTzs: 100, overrideCount: 1, lateCount: 4,
+    byMethod: [{ method: 'cash', amountTzs: 3_000 }, { method: 'mpesa', amountTzs: 6_000 }, { method: 'card', amountTzs: 800 }],
+  });
   assert.equal(all.body.summary.byMethod.reduce((s, m) => s + m.amountTzs, 0), all.body.summary.totalTzs);
   assert.equal(all.body.nextCursor, null);
 
@@ -564,7 +587,7 @@ test('GET /vendor/sales: newest first, paged, filters (dates, status, createdBy=
   assert.equal(page1.body.sales.length, 3);
   assert.ok(page1.body.nextCursor);
   const page2 = await call(vendorListSales, as(v), { query: { limit: '3', cursor: page1.body.nextCursor } });
-  assert.deepEqual(page2.body.sales.map(s => s.id), [a.id]);
+  assert.deepEqual(page2.body.sales.map(s => s.id), [b.id, a.id]);
   assert.equal(page2.body.nextCursor, null);
   assert.deepEqual(page2.body.summary, all.body.summary, 'the summary is the range, not the page');
 
@@ -572,20 +595,74 @@ test('GET /vendor/sales: newest first, paged, filters (dates, status, createdBy=
   assert.deepEqual(mine.body.sales.map(s => s.id), [d.id, b.id]);
   assert.deepEqual([mine.body.summary.count, mine.body.summary.totalTzs], [2, 7_000]);
   assert.deepEqual((await call(vendorListSales, as(v), { query: { status: 'voided' } })).body.sales.map(s => s.id), [c.id]);
-  assert.equal((await call(vendorListSales, as(v), { query: { status: 'completed' } })).body.sales.length, 3);
+  assert.equal((await call(vendorListSales, as(v), { query: { status: 'completed' } })).body.sales.length, 4);
 
   const eatDay = ms => new Date(ms + 3 * hour).toISOString().slice(0, 10);
   const today = eatDay(Date.now());
   const inRange = await call(vendorListSales, as(v), { query: { from: eatDay(t0), to: today } });
-  assert.equal(inRange.body.sales.length, 4);
+  assert.equal(inRange.body.sales.length, 5);
   const longAgo = await call(vendorListSales, as(v), { query: { from: '2026-01-01', to: '2026-01-02' } });
-  assert.deepEqual([longAgo.body.sales, longAgo.body.summary], [[], { count: 0, totalTzs: 0, voidedCount: 0, byMethod: [] }]);
+  assert.deepEqual([longAgo.body.sales, longAgo.body.summary], [[], { count: 0, totalTzs: 0, voidedCount: 0, discountTzs: 0, overrideCount: 0, lateCount: 0, byMethod: [] }]);
 
   for (const [query, error] of [[{ from: '2026-13-01' }, 'invalid_date'], [{ from: '2026-10-02', to: '2026-10-01' }, 'invalid_date'], [{ status: 'refunded' }, 'invalid_status'], [{ createdBy: seller }, 'invalid_created_by'], [{ limit: '0' }, 'invalid_limit'], [{ cursor: 'garbage' }, 'invalid_cursor']]) {
     const out = await call(vendorListSales, as(v), { query });
     assert.deepEqual([out.status, out.body.error], [400, error], JSON.stringify(query));
   }
   assert.equal((await call(vendorListSales, as(v), { query: { limit: '999' } })).status, 200, 'above 200 is capped');
+});
+
+test('who may void (M2): vendor and admin staff any sale; other staff only their own, on the EAT day it was sold; staff voids notify the vendor account', async () => {
+  salesOn();
+  const v = await vendor();
+  const p = await product(v, { priceTzs: 1_000, stock: 20 });
+  const juma = await staff(v, ['sales']);
+  const asha = await staff(v, ['sales'], { displayName: 'Asha Seller' });
+  const neema = await staff(v, ['sales'], { vendorRole: 'admin', displayName: 'Admin Neema' });
+  const one = (claims, extra = {}) => sell(claims, saleBody([{ productId: p.id, qty: 1 }], cash(1_000), extra)).then(r => r.body.sale);
+  const voidAs = (claims, id) => call(vendorVoidSale, claims, { params: { id }, body: { reason: 'counted twice' } });
+  const voidAlerts = () => db('MarketplaceNotification').where({ userId: v, type: 'vendor_sale_voided' });
+
+  const jumas = await one(staffOf(juma, v));
+  const ownersSale = await one(as(v));
+  const old = await one(staffOf(juma, v), { soldAt: new Date(Date.now() - 2 * 86_400_000).toISOString() });
+  assert.deepEqual(await voidAs(staffOf(asha, v), jumas.id), { status: 403, body: { error: 'void_not_allowed', reason: 'not_own' } });
+  assert.deepEqual(await voidAs(staffOf(juma, v), ownersSale.id), { status: 403, body: { error: 'void_not_allowed', reason: 'not_own' } });
+  assert.deepEqual(await voidAs(staffOf(juma, v), old.id), { status: 403, body: { error: 'void_not_allowed', reason: 'too_old' } });
+  assert.equal((await row(p.id)).stock, 17, 'refused voids gave nothing back');
+  assert.equal((await voidAlerts()).length, 0);
+
+  const own = await voidAs(staffOf(juma, v), jumas.id);
+  assert.equal(own.status, 200, JSON.stringify(own.body));
+  // A refused staff void of a voided sale still says why it is not theirs (checked first).
+  assert.deepEqual(await voidAs(staffOf(asha, v), jumas.id), { status: 403, body: { error: 'void_not_allowed', reason: 'not_own' } });
+  assert.equal((await voidAs(staffOf(neema, v), old.id)).status, 200, 'admin staff: any sale, any day');
+  assert.equal((await voidAs(as(v), ownersSale.id)).status, 200, 'the vendor account: any sale');
+  assert.equal((await row(p.id)).stock, 20);
+
+  const alerts = await voidAlerts();
+  assert.equal(alerts.length, 2, 'one per staff void; none when the vendor account voids');
+  const data = alerts.map(a => (typeof a.data === 'string' ? JSON.parse(a.data) : a.data));
+  assert.deepEqual(data.map(d => d.number).sort(), [jumas.number, old.number].sort());
+  assert.ok(data.every(d => d.saleId && d.reason === 'counted twice' && d.voidedByName));
+});
+
+test('rate limit (L5): more than 120 sales a minute for one vendor → 429 rate_limited { retryAfterSeconds }, nothing recorded; other vendors unaffected', async () => {
+  salesOn();
+  const v = await vendor();
+  const other = await vendor();
+  const p = await product(v, { priceTzs: 1_000, stock: 5 });
+  const q = await product(other, { priceTzs: 1_000, stock: 5 });
+  for (let i = 0; i < VENDOR_SALES_LIMIT.perMinute; i += 1) assert.equal(allowVendorSale(v).ok, true);
+  const limited = await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(1_000)));
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.error, 'rate_limited');
+  assert.ok(limited.body.retryAfterSeconds >= 1 && limited.body.retryAfterSeconds <= 60);
+  assert.equal(limited.headers['Retry-After'], String(limited.body.retryAfterSeconds));
+  assert.equal((await row(p.id)).stock, 5);
+  assert.equal((await sell(as(other), saleBody([{ productId: q.id, qty: 1 }], cash(1_000)))).status, 201);
+  assert.equal(allowVendorSale(v, Date.now() + 61_000).ok, true, 'a new minute, a new allowance');
+  resetVendorSalesLimits();
+  assert.equal((await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(1_000)))).status, 201);
 });
 
 // ── permissions and tenancy ──────────────────────────────────────────────────

@@ -263,6 +263,7 @@ export const shopService = createShopService({
 export const vendorSaleService = createVendorSaleService({
   store: createPgVendorSaleStore({ db }),
   afterStockMoved: productIds => shopService.afterStockMoved(productIds),
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const corporateService = createCorporateService({
