@@ -127,20 +127,33 @@ test('turning the public profile off drops public from the default but keeps all
   assert.deepEqual((await s.svc.findPeople('cy', { q: 'ana' })).people, []);
 });
 
-test('device step rows get the member\'s default; rows already saved keep theirs', async () => {
+test('device step rows go to the member\'s groups only — never public; rows already saved keep theirs', async () => {
   const s = setup();
   const g = await s.group('ben', 'Runners');
   await s.svc.joinGroup('ana', { groupId: g.id });
   const rec = (day, steps) => ({ devicePlatform: 'phone_sensor', externalId: `steps:${day}`, type: 'walking', startedAt: `${day}T00:00:00.000Z`, steps });
+  const row = day => s.activities.rows.find(r => r.userId === 'ana' && r.externalId === `steps:${day}`);
   assert.deepEqual(await s.acts.syncDevice('ana', { records: [rec('2026-10-18', 6000), rec('2026-10-19', 2000)] }), { created: 2, updated: 0, unchanged: 0 });
-  for (const row of s.activities.rows) assert.deepEqual(row.shareWith, share({ groups: [g.id] }));
+  for (const r of s.activities.rows) {
+    assert.deepEqual(r.shareWith, share({ public: false, groups: [g.id] }), 'groups present, public off');
+  }
+  assert.equal(await s.sees('ben', row('2026-10-18')), true, 'group-mates see it');
+  assert.equal(await s.sees('cy', row('2026-10-18')), false, 'not public');
+  assert.deepEqual((await s.svc.explore('cy')).items, [], 'never in Explore');
 
-  // Switching to private changes neither the saved rows nor their updates.
+  // No groups yet: the default is Public only, so step rows stay private.
+  await s.acts.syncDevice('cy', { records: [rec('2026-10-19', 1000)] });
+  assert.equal(s.activities.rows.find(r => r.userId === 'cy').shareWith, null);
+
+  // Groups removed from the default: private, and saved rows are untouched.
+  await s.svc.updateSettings('ana', { defaultShare: { v: 2, public: true, followers: true } });
+  await s.acts.syncDevice('ana', { records: [rec('2026-10-19', 5000), rec('2026-10-17', 3000)] });
+  assert.equal(row('2026-10-19').steps, 5000);
+  assert.deepEqual(row('2026-10-19').shareWith, share({ public: false, groups: [g.id] }), 'existing rows are not rewritten');
+  assert.equal(row('2026-10-17').shareWith, null, 'a default without groups gives null');
+
+  // A private default: step rows stay private.
   await s.svc.updateSettings('ana', { defaultShare: null });
-  await s.acts.syncDevice('ana', { records: [rec('2026-10-19', 5000)] });
-  const today = s.activities.rows.find(r => r.externalId === 'steps:2026-10-19');
-  assert.equal(today.steps, 5000);
-  assert.deepEqual(today.shareWith, share({ groups: [g.id] }));
-  await s.acts.syncDevice('ana', { records: [rec('2026-10-17', 3000)] });
-  assert.equal(s.activities.rows.find(r => r.externalId === 'steps:2026-10-17').shareWith, null, 'new rows follow the new default');
+  await s.acts.syncDevice('ana', { records: [rec('2026-10-16', 4000)] });
+  assert.equal(row('2026-10-16').shareWith, null);
 });

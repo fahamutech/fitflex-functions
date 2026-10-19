@@ -77,6 +77,11 @@ const MAX_RUN_KM = 300;
 const MAX_RUN_SPEED_KMH = 25;
 const MAX_RECORD_AGE_DAYS = 7;
 
+/** A share narrowed to its groups; null when it has none. */
+const groupsOnly = share => (share?.groups?.length
+  ? { friends: false, followers: false, public: false, groups: share.groups, company: false }
+  : null);
+
 export function createActivityService({ activities, users = null, routes = null, resolveShare = null, now = () => new Date() }) {
   // Who a new activity is shared with (the social service; private without it).
   const shareFor = async (memberId, raw) => (resolveShare ? resolveShare(memberId, raw) : { share: null });
@@ -185,8 +190,9 @@ export function createActivityService({ activities, users = null, routes = null,
     const heightCm = users ? (await users.findByIdAsync(memberId))?.memberProfile?.heightCm : null;
     const distanceFor = (platform, steps) => (STEP_ONLY_PLATFORMS.has(platform) ? estimateWalkKm(steps, heightCm) : null);
     let created = 0, updated = 0, unchanged = 0;
-    // New step rows get the member's default sharing (looked up once);
-    // rows already saved keep theirs.
+    // New step rows go to the groups in the member's default sharing only —
+    // never public, friends, followers or company (owner decision
+    // 2026-10-19). Looked up once; rows already saved keep theirs.
     let deviceShare;
     for (const r of clean) {
       const existing = mine.find(a => a.devicePlatform === r.devicePlatform && a.externalId === r.externalId);
@@ -199,7 +205,7 @@ export function createActivityService({ activities, users = null, routes = null,
         } else unchanged += 1;
         continue;
       }
-      if (deviceShare === undefined) deviceShare = (await shareFor(memberId, undefined)).share ?? null;
+      if (deviceShare === undefined) deviceShare = groupsOnly((await shareFor(memberId, undefined)).share);
       const row = {
         id: `act_${randomUUID().slice(0, 12)}`,
         userId: memberId,
