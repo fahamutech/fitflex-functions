@@ -47,7 +47,12 @@ function memStore(rows = []) {
 
 const PRICES = { online_free: 0, basic: 60_000, pro: 120_000 };
 const tiers = Object.keys(PRICES).map((key) => ({ key, label: key, monthlyPrice: PRICES[key], visits: 8, gymAccess: 'standard' }));
-const fakeSettings = { priceForTier: (t) => PRICES[t] ?? 0, visitCapForTier: () => null, publicTiers: () => tiers };
+// Like settingsService after functions#189: only a tier with a positive price is sold (the free online tier is not).
+const sellableTier = (t) => (PRICES[t] > 0 ? { key: t, label: t, price: PRICES[t], visitCap: null, gymAccess: 'standard' } : null);
+const fakeSettings = {
+  priceForTier: (t) => PRICES[t] ?? 0, visitCapForTier: () => null, publicTiers: () => tiers,
+  sellableTier, isTierSellable: (t) => sellableTier(t) !== null, sellableTierKeys: () => Object.keys(PRICES).filter((t) => sellableTier(t)),
+};
 const gym = { id: 'gym_m1', name: 'Gym', status: 'active', ratePerDay: 5_000, ratePerWeek: 25_000, ratePerMonth: 80_000 };
 const DAY = 86_400_000;
 const PHONE = '0712 345 678';
@@ -278,10 +283,12 @@ test('required: a pass upgrade needs the transaction ID; stored on the upgrade r
   assert.equal(ok.paymentRequest.amountTzs, 60_000);
 });
 
-test('required: the free online tier and a trainer buying a gym member plan are not asked for a reference', async () => {
+test('required: the free online tier is not sold (functions#189); a trainer buying a gym member plan is not asked for a reference', async () => {
   const { service } = setup({ required: true });
+  // Since functions#189 the free online tier is never activated by subscribing: refused before any reference is asked for.
   const free = await service.subscribe({ memberId: 'm1', tier: 'online_free' });
-  assert.equal(free.status, 201, JSON.stringify(free));
+  assert.equal(free.error, 'tier_not_available', JSON.stringify(free));
+  assert.equal(free.status, 409);
   const trainerPlan = await service.trainerMemberPlanPurchase({ trainerUserId: 't1', gymId: gym.id, plan: 'daily', trainer: { gyms: [] } });
   assert.equal(trainerPlan.status, 202, JSON.stringify(trainerPlan));
   assert.equal('memberReference' in trainerPlan.paymentRequest, false);

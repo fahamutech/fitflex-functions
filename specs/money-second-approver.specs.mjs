@@ -28,6 +28,7 @@ function memStore(rows = []) {
     async findAsync(fn) { return rows.find(fn) || null; },
     async findByIdAsync(id) { return rows.find(r => r.id === id) || null; },
     async filterByColumnAsync(col, value) { return rows.filter(r => r[col] === value); },
+    async filterAsync(fn) { return rows.filter(fn); },
     async filterByColumnInAsync(col, ids) { return rows.filter(r => ids.includes(r[col])); },
     async insertAsync(row) { rows.push(row); return row; },
     async updateByIdAsync(id, patch) {
@@ -609,4 +610,17 @@ test('db + endpoints, flag on: admin-raised refund needs another admin to approv
   } finally {
     delete process.env.MONEY_SECOND_APPROVER;
   }
+});
+
+test('A1 + A3: confirmChange → approved checks the final reference (recorded, else the member ID) by its normalised key', async () => {
+  // Another pending request already holds the member ID (different punctuation/case: same key).
+  const holder = { id: 'pr0', memberId: 'm2', subscriptionId: 'subX', amountTzs: 60_000, status: 'pending', provider: 'admin_approved', reference: null, memberReference: 'qgh7-xk2l9p' };
+  const c = payments(true, { status: 'rejected', decidedBy: 'a2', reference: null, memberReference: 'QGH7XK2L9P' }, { others: [holder] });
+  await c.svc.requestChange({ id: 'pr1', status: 'approved', reason: 'money found', actorId: 'a1' });
+  assert.deepEqual(await c.svc.confirmChange({ id: 'pr1', actorId: 'a2' }), { error: 'reference_already_used', status: 409 });
+  assert.equal(c.row().status, 'rejected');
+  // Not held elsewhere: the change is confirmed.
+  const ok = payments(true, { status: 'rejected', decidedBy: 'a2', reference: null, memberReference: 'QGH7XK2L9P' });
+  await ok.svc.requestChange({ id: 'pr1', status: 'approved', reason: 'money found', actorId: 'a1' });
+  assert.equal((await ok.svc.confirmChange({ id: 'pr1', actorId: 'a2' })).paymentRequest.status, 'approved');
 });
