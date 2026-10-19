@@ -1,12 +1,19 @@
 // Single source of truth for FitFlex Af business constants (Business Logic Doc v2.0).
 // Mirror this file into apps/mobile/portal as needed (e.g., via codegen or copy).
 
+// FitFlex Pass tiers: the known tier keys and their NON-price metadata only.
+// Prices, visit caps and gym access live in platform Settings and nowhere
+// else (owner decision 2026-10-19: no tier may be sold unless it is
+// configured in Settings). Do not add price or visitCap back here.
+//   trainerDiscountPct — member discount on trainer sessions (trainer-pricing)
+//   accessMode         — 'free_online' marks the free online plan, which is
+//                        never in the member catalogue
 export const PASS_TIERS = Object.freeze({
-  online_free: { price: 0,       visitCap: Infinity,  gymTiers: ['online'],                                     multiGymPerDay: true,  trainerDiscountPct: 0, accessMode: 'free_online' },
-  basic:     { price: 60_000,  visitCap: 20,        gymTiers: ['standard'],                                   multiGymPerDay: false, trainerDiscountPct: 0 },
-  pro:       { price: 120_000, visitCap: 30,        gymTiers: ['standard', 'midtier'],                        multiGymPerDay: true,  trainerDiscountPct: 10 },
-  premium:   { price: 200_000, visitCap: 40,        gymTiers: ['standard', 'midtier', 'premium'],             multiGymPerDay: true,  trainerDiscountPct: 20 },
-  executive: { price: 350_000, visitCap: Infinity,  gymTiers: ['standard', 'midtier', 'premium', 'luxury_executive'], multiGymPerDay: true, trainerDiscountPct: 20 }
+  online_free: Object.freeze({ trainerDiscountPct: 0, accessMode: 'free_online' }),
+  basic:       Object.freeze({ trainerDiscountPct: 0 }),
+  pro:         Object.freeze({ trainerDiscountPct: 10 }),
+  premium:     Object.freeze({ trainerDiscountPct: 20 }),
+  executive:   Object.freeze({ trainerDiscountPct: 20 }),
 });
 
 export const GYM_TIERS = Object.freeze(['online', 'standard', 'midtier', 'premium', 'luxury_executive']);

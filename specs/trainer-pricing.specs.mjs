@@ -1,8 +1,12 @@
 // Trainer pricing. Whoever sponsors a discount absorbs it: the trainer is
 // paid on their full price unless they fund the discount themselves.
+import { settingsWithTiers, TEST_TIERS } from './fixtures/tier-settings.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { priceSession, priceBooking, passDiscountPct, trainerCommissionPct } from '../src/shared/trainer-pricing.mjs';
+
+// The Pass trainer discount applies only to tiers configured in Settings.
+const settings = settingsWithTiers();
 
 test('no pass: commission on the full price', () => {
   const p = priceSession({ listPrice: 50_000, discountPct: 0, commissionPct: 15 });
@@ -12,7 +16,7 @@ test('no pass: commission on the full price', () => {
 });
 
 test('Pro pass: the member pays 10% less, FitFlex funds it, and the trainer earns as if there were no discount', () => {
-  const p = priceSession({ listPrice: 50_000, discountPct: passDiscountPct('pro'), commissionPct: 15 });
+  const p = priceSession({ listPrice: 50_000, discountPct: passDiscountPct('pro', settings.getTierConfig('pro')), commissionPct: 15 });
   assert.equal(p.discount, 5_000);
   assert.equal(p.memberPrice, 45_000);
   assert.equal(p.discountFundedBy, 'fitflex');
@@ -33,11 +37,20 @@ test('a discount the trainer funds comes out of the trainer\'s side', () => {
   assert.equal(p.trainerPayout, 38_250);
 });
 
-test('pass discounts follow PASS_TIERS', () => {
-  assert.equal(passDiscountPct('basic'), 0);
-  assert.equal(passDiscountPct('premium'), 20);
-  assert.equal(passDiscountPct('executive'), 20);
+test('pass discounts follow PASS_TIERS, for tiers configured in Settings', () => {
+  assert.equal(passDiscountPct('basic', settings.getTierConfig('basic')), 0);
+  assert.equal(passDiscountPct('premium', settings.getTierConfig('premium')), 20);
+  assert.equal(passDiscountPct('executive', settings.getTierConfig('executive')), 20);
   assert.equal(passDiscountPct(null), 0);
+});
+
+test('no trainer discount for a tier not configured in Settings (fail closed)', () => {
+  const noPremium = settingsWithTiers(TEST_TIERS.filter(t => t.key !== 'premium'));
+  assert.equal(passDiscountPct('premium', noPremium.getTierConfig('premium')), 0);
+  assert.equal(passDiscountPct('premium'), 0, 'no Settings config passed: no discount');
+  assert.equal(passDiscountPct('pro', null), 0);
+  const badAccess = settingsWithTiers([{ key: 'pro', label: 'Pro', monthlyPrice: 60_000, visits: 30, gymAccess: 'everywhere' }]);
+  assert.equal(passDiscountPct('pro', badAccess.getTierConfig('pro')), 0);
 });
 
 test('commission defaults to 15% and is clamped to the 15–20% band', () => {

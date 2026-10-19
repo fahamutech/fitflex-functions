@@ -196,6 +196,8 @@ export const trainerService = createTrainerService({
 export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
+  // The Pass trainer discount only for a tier configured in Settings.
+  getTierConfig: settingsService.getTierConfig,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
   // promotionEventsService is defined at the end of this file; this only runs later.
   onBookingConversion: ({ action, groupId, bookings }) => (action === 'credit' ? promotionEventsService.recordBooking(bookings) : promotionEventsService.reverseBooking(groupId)),
@@ -471,6 +473,8 @@ export const mobileMoneyService = createMobileMoneyService({
   canSettle: () => tunzaaConfig?.environment === 'live' || tunzaaSandboxSettlesOn(),
   // Sandbox only (the client ignores it on live): 'success' or 'failure' to rehearse an outcome.
   scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
+  // Only tiers configured in Settings are sold (owner decision 2026-10-19).
+  tierSellable: settingsService.isTierSellable,
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });

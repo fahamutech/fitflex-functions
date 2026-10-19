@@ -9,6 +9,7 @@ import {
 import { createMobileMoneyService } from '../src/services/mobile-money-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
 import { createSubscriptionService } from '../src/services/subscription-service.mjs';
+import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 
 // ── pure helpers ──────────────────────────────────────────────────────────
 
@@ -177,7 +178,7 @@ function world({ enabled = true, canSettle = true, status = {}, subs = [], reque
   });
   const subscriptionService = createSubscriptionService({
     subscriptions, paymentRequests, checkins: memStore(), gyms: [],
-    settingsService: { priceForTier: (t) => PRICES[t] ?? 0, visitCapForTier: () => null, publicTiers: () => tiers },
+    settingsService: settingsWithTiers(tiers),
     publicUserId: async () => 'FF-1',
   });
   return { subscriptions, paymentRequests, audit, service, subscriptionService, remote, adminPaymentService, clock };

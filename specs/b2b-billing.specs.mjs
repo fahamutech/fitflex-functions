@@ -461,7 +461,11 @@ test('a voided invoice is kept, and what was on it can be invoiced again; a paid
   const perUseOnly = await programme(orgId, { name: 'Custom', benefitType: 'custom', fundingType: 'full' });
   assert.equal((await billing.preparePrepaid({ programId: perUseOnly.programId, period: PERIOD, actorId: ADMIN.userId })).error, 'no_sponsored_pass');
   const a = await access(orgId);
-  assert.equal((await b2bProgramService.createBenefit({ access: a, programId, body: { ...PASS, passTier: 'gold' } })).error, 'invalid_pass_tier');
+  // A tier not configured in Settings is not sold (owner decision 2026-10-19).
+  const gold = await b2bProgramService.createBenefit({ access: a, programId, body: { ...PASS, passTier: 'gold' } });
+  assert.deepEqual([gold.error, gold.status], ['tier_not_available', 409]);
+  assert.equal((await b2bProgramService.createBenefit({ access: a, programId, body: { ...PASS, passTier: undefined } })).error, 'invalid_pass_tier');
+  assert.equal((await b2bProgramService.createBenefit({ access: a, programId, body: { ...PASS, passTier: 'online_free' } })).error, 'invalid_pass_tier');
   assert.equal((await b2bProgramService.createBenefit({ access: a, programId, body: { ...PASS, fundingType: 'none' } })).error, 'pass_needs_funding');
 });
 
@@ -573,4 +577,64 @@ test('a company\'s seats become a programme: same tier and split, real passes, a
   // Corporate's own records are untouched.
   assert.equal((await db('CorporateBill').where({ corporateId: account.id })).length, 2);
   await db('CorporateBill').where({ corporateId: account.id }).del();
+});
+
+// ── Owner decision 2026-10-19: only tiers configured in Settings are sold ──
+
+/** Run fn with `tier` taken out of Settings, then put Settings back as it was. */
+async function withoutTier(tier, fn) {
+  const before = settingsService.adminGet().subscriptionTiers.map(t => ({ ...t }));
+  await settingsService.adminUpdate({ body: { subscriptionTiers: before.filter(t => t.key !== tier) }, actorId: ADMIN.userId });
+  try {
+    assert.equal(settingsService.isTierSellable(tier), false);
+    return await fn();
+  } finally {
+    await settingsService.adminUpdate({ body: { subscriptionTiers: before }, actorId: ADMIN.userId });
+    assert.equal(settingsService.isTierSellable(tier), true);
+  }
+}
+
+test('a tier taken out of Settings is not sold: no new benefit, no invoice, no unlock, no seat bill, no conversion', async () => {
+  const orgId = await sponsor('employer');
+  const m = await enrol(orgId);
+  const { programId, benefitId } = await programme(orgId, { ...PASS, fundingType: 'sponsor_percentage', sponsorShareBps: 7000 });
+  await paidPrepaid(programId);
+  const [e] = await entitlements({ benefitId });
+  assert.equal(e.status, 'awaiting_member');
+
+  const other = await sponsor();
+  await enrol(other);
+  const plain = await programme(other);
+
+  const { account } = await corporateService.onboard({
+    body: { companyName: `Tier Corp ${uid('c')}`, industrySector: 'banking', workforceBracket: '50-100', subsidyModel: 'copay_70_30', passTier: 'pro', seatLimit: 5 }, actorId: ADMIN.userId,
+  });
+  made.corporates.push(account.id);
+
+  await withoutTier('pro', async () => {
+    const a = await access(orgId);
+    const benefit = await b2bProgramService.createBenefit({ access: a, programId, body: PASS, actorId: ADMIN.userId });
+    assert.deepEqual([benefit.error, benefit.status, benefit.tier], ['tier_not_available', 409, 'pro']);
+    assert.ok(!benefit.allowed.includes('pro'));
+
+    const prepared = await billing.preparePrepaid({ programId: plain.programId, period: PERIOD, actorId: ADMIN.userId });
+    assert.deepEqual([prepared.error, prepared.status, prepared.tier, prepared.benefitId], ['tier_not_available', 409, 'pro', plain.benefitId]);
+    assert.equal((await db('B2BSponsorInvoice').where({ programId: plain.programId })).length, 0);
+
+    const unlocked = await billing.unlock({ userId: m.userId, entitlementId: e.id });
+    assert.deepEqual([unlocked.error, unlocked.status], ['tier_not_available', 409]);
+    assert.equal((await payments(`sub_${e.id}`)).length, 0);
+
+    assert.deepEqual(await corporateService.generateBill({ corporateId: account.id, period: LAST, actorId: ADMIN.userId }), { error: 'tier_not_available', status: 409, tier: 'pro' });
+    const converted = await billing.convertCorporate({ corporateId: account.id, actorId: ADMIN.userId });
+    assert.deepEqual([converted.error, converted.status], ['tier_not_available', 409]);
+    const onboard = await corporateService.onboard({
+      body: { companyName: `Tier Corp ${uid('c')}`, industrySector: 'banking', workforceBracket: '50-100', subsidyModel: 'copay_70_30', passTier: 'pro', seatLimit: 5 }, actorId: ADMIN.userId,
+    });
+    assert.equal(onboard.error, 'invalid_pass_tier');
+  });
+
+  // Back in Settings: sold again.
+  assert.ok((await billing.unlock({ userId: m.userId, entitlementId: e.id })).paymentRequest);
+  assert.ok((await billing.preparePrepaid({ programId: plain.programId, period: PERIOD, actorId: ADMIN.userId })).invoice);
 });

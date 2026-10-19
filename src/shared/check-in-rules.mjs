@@ -1,7 +1,7 @@
 // BL-010, BL-011, BL-012: visit counting & check-in validation.
 // Pure functions — no I/O, fully unit-testable.
 
-import { PASS_TIERS, SUBSCRIPTION_GRACE_HOURS } from './constants.mjs';
+import { SUBSCRIPTION_GRACE_HOURS } from './constants.mjs';
 import { effectiveSubscriptionStatus } from './subscription-status.mjs';
 
 /**
@@ -13,7 +13,10 @@ export const CHECKIN_FAILURE = Object.freeze({
   VISITS_EXHAUSTED:      'visits_exhausted',
   GYM_CLOSED:            'gym_closed',
   BASIC_DAILY_LIMIT:     'basic_daily_limit',
-  WRONG_GYM:             'wrong_gym'
+  WRONG_GYM:             'wrong_gym',
+  // The pass's tier is not configured in Settings (missing, switched off, or
+  // no explicit visits value). Refused rather than treated as unlimited.
+  TIER_NOT_CONFIGURED:   'tier_not_configured'
 });
 
 // Direct gym plans and trainer passes are bought for ONE gym (homeGymId);
@@ -68,24 +71,47 @@ const isGymOpen = (gym, now) => {
   return m >= openH * 60 + openM && m < closeH * 60 + closeM;
 };
 
-const gymAccessTiers = (access) => {
-  switch (access) {
-    case 'standard':
-      return ['standard'];
-    case 'midtier':
-      return ['standard', 'midtier'];
-    case 'premium':
-      return ['standard', 'midtier', 'premium'];
-    case 'luxury_executive':
-      return ['standard', 'midtier', 'premium', 'luxury_executive'];
-    default:
-      return null;
-  }
-};
+// What each Settings `gymAccess` value lets a pass into (gym tiers covered).
+const GYM_ACCESS_COVERS = Object.freeze({
+  online: Object.freeze(['online']),
+  standard: Object.freeze(['standard']),
+  midtier: Object.freeze(['standard', 'midtier']),
+  premium: Object.freeze(['standard', 'midtier', 'premium']),
+  luxury_executive: Object.freeze(['standard', 'midtier', 'premium', 'luxury_executive']),
+});
 
+/** The only valid values of a pass tier's `gymAccess` in Settings. */
+export const PASS_GYM_ACCESS = Object.freeze(Object.keys(GYM_ACCESS_COVERS));
+
+/** The gym tiers a `gymAccess` value covers, or null when it is missing or unknown. */
+export const gymAccessTiers = (access) =>
+  (typeof access === 'string' && Object.hasOwn(GYM_ACCESS_COVERS, access) ? GYM_ACCESS_COVERS[access] : null);
+
+// A gym's own plan (direct_sub) or a trainer pass is the gym's product, bought
+// for that one gym: not a FitFlex Pass tier. Plans sold at the gym desk may
+// still carry a tier label (e.g. 'basic', 'standard'); when that label is a
+// tier configured in Settings its rules apply as before, otherwise the plan
+// has no cap (as it always had). This keeps gym plans exactly as they were.
+const UNTIERED_GYM_PLAN = Object.freeze({ visitCap: Infinity });
+
+/**
+ * The tier rules a check-in on this subscription follows: the Settings tier
+ * config passed in, or none for a gym plan. Null means a FitFlex Pass whose
+ * tier is not configured in Settings: the check-in must be refused.
+ */
+function tierRulesFor(subscription, tierConfig) {
+  // A tier config whose gymAccess is missing or unknown is not configured:
+  // it must never be read as "covers every gym" (fail closed).
+  const usable = tierConfig && gymAccessTiers(tierConfig.gymAccess) ? tierConfig : null;
+  if (GYM_BOUND_TYPES.has(subscription.type)) return usable ?? UNTIERED_GYM_PLAN;
+  return usable;
+}
+
+/** Does this tier's gym access cover the gym? A gym plan (no tier) covers its own gym. */
 const tierCoversGym = (tierCfg, gym) => {
-  const tiers = tierCfg.gymTiers ?? gymAccessTiers(tierCfg.gymAccess);
-  return !tiers || tiers.includes(gym.tier);
+  if (tierCfg === UNTIERED_GYM_PLAN) return true;   // gym-bound: subscriptionCoversGym already checked the gym
+  const tiers = gymAccessTiers(tierCfg.gymAccess);
+  return Boolean(tiers) && tiers.includes(gym.tier);
 };
 
 /**
@@ -120,7 +146,9 @@ export function classifyVisit(todaysCheckins, gymId) {
  * @param {Array}  ctx.todaysCheckins same-day check-ins for the member
  * @param {Object} ctx.cycleUsage { visitsUsedInCycle }
  * @param {Date}   ctx.now
- * @param {Object} ctx.tierConfig optional subscription-tier override from platform settings
+ * @param {Object} ctx.tierConfig the subscription tier's config from platform Settings
+ *   (settingsService.getTierConfig); required for any tiered pass, else the
+ *   check-in is refused with tier_not_configured
  */
 export function validateCheckIn({ subscription, gym, todaysCheckins, cycleUsage, now = new Date(), tierConfig }) {
   // 1. Subscription active (with grace) — status is DERIVED from expiresAt (A1)
@@ -134,7 +162,12 @@ export function validateCheckIn({ subscription, gym, todaysCheckins, cycleUsage,
     return { ok: false, failure: CHECKIN_FAILURE.WRONG_GYM };
   }
 
-  const tierCfg = tierConfig ?? PASS_TIERS[subscription.tier] ?? { visitCap: Infinity, multiGymPerDay: true };
+  // Settings is the only source of a tier's cap and gym access. A tier not
+  // configured there is refused — never treated as unlimited.
+  const tierCfg = tierRulesFor(subscription, tierConfig);
+  if (!tierCfg) {
+    return { ok: false, failure: CHECKIN_FAILURE.TIER_NOT_CONFIGURED };
+  }
   if (!tierCoversGym(tierCfg, gym)) {
     return { ok: false, failure: CHECKIN_FAILURE.TIER_NOT_COVERED };
   }

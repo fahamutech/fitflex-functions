@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { createSubscriptionService } from '../src/services/subscription-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
 import { upgradeDifference, upgradeOf, upgradeNote, isSponsoredPassId } from '../src/shared/pass-upgrade.mjs';
+import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 
 function memStore(rows = []) {
   return {
@@ -24,7 +25,7 @@ function memStore(rows = []) {
 }
 
 const PRICES = { online_free: 0, basic: 60_000, pro: 120_000, premium: 200_000, executive: 350_000 };
-const tiers = Object.entries(PRICES).map(([key, monthlyPrice]) => ({ key, label: key, monthlyPrice, visits: 20, gymAccess: ['standard'] }));
+const tiers = Object.entries(PRICES).map(([key, monthlyPrice]) => ({ key, label: key, monthlyPrice, visits: 20, gymAccess: 'standard' }));
 const DAY = 86_400_000;
 
 function setup(subs = []) {
@@ -32,7 +33,7 @@ function setup(subs = []) {
   const paymentRequests = memStore();
   const service = createSubscriptionService({
     subscriptions, paymentRequests, checkins: memStore(), gyms: [],
-    settingsService: { priceForTier: (t) => PRICES[t] ?? 0, visitCapForTier: () => null, publicTiers: () => tiers },
+    settingsService: settingsWithTiers(tiers),
     publicUserId: async () => 'FF-1',
   });
   const admin = createAdminPaymentService({
@@ -83,7 +84,11 @@ test('not an upgrade, nothing to upgrade, sponsored, or one already pending are 
   const { service } = setup([active({ tier: 'pro' })]);
   assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'basic' })).error, 'not_an_upgrade');
   assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'pro' })).error, 'not_an_upgrade');
-  assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'nope' })).error, 'invalid_tier');
+  // A tier not configured in Settings is not sold (owner decision 2026-10-19).
+  const unknown = await service.upgradePass({ memberId: 'm1', tier: 'nope' });
+  assert.equal(unknown.error, 'tier_not_available');
+  assert.equal(unknown.status, 409);
+  assert.equal((await service.upgradePass({ memberId: 'm1', tier: undefined })).error, 'invalid_tier');
   assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'online_free' })).error, 'invalid_tier');
   assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'premium' })).status, 202);
   assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'executive' })).error, 'payment_already_pending');
@@ -120,7 +125,7 @@ test('the member is told, and the decision can be taken back', async () => {
   const paymentRequests = memStore();
   const service = createSubscriptionService({
     subscriptions, paymentRequests, checkins: memStore(), gyms: [],
-    settingsService: { priceForTier: (t) => PRICES[t] ?? 0, visitCapForTier: () => null, publicTiers: () => tiers },
+    settingsService: settingsWithTiers(tiers),
     publicUserId: async () => 'FF-1',
   });
   const admin = createAdminPaymentService({
@@ -161,4 +166,45 @@ test('while an upgrade waits, a second one or a new pass purchase is refused', a
   await service.upgradePass({ memberId: 'm1', tier: 'pro' });
   assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'premium' })).error, 'payment_already_pending');
   assert.equal((await service.subscribe({ memberId: 'm1', tier: 'executive' })).error, 'payment_already_pending');
+});
+
+// ── Owner decision 2026-10-19: only tiers configured in Settings are sold ──
+
+function setupWith(tierRows, subs) {
+  const subscriptions = memStore(subs);
+  const paymentRequests = memStore();
+  const service = createSubscriptionService({
+    subscriptions, paymentRequests, checkins: memStore(), gyms: [],
+    settingsService: settingsWithTiers(tierRows), publicUserId: async () => 'FF-1',
+  });
+  return { service, paymentRequests };
+}
+
+test('upgrade to a tier without a price or an explicit visits value, or switched off, is refused with tier_not_available', async () => {
+  const rows = [
+    { key: 'basic', label: 'Basic', monthlyPrice: 60_000, visits: 20, gymAccess: 'standard' },
+    { key: 'pro', label: 'Pro', monthlyPrice: 120_000, gymAccess: 'midtier' },                          // no visits
+    { key: 'premium', label: 'Premium', monthlyPrice: 0, visits: 40, gymAccess: 'premium' },            // no price
+    { key: 'executive', label: 'Exec', monthlyPrice: 350_000, visits: -1, gymAccess: 'luxury_executive', enabled: false },
+  ];
+  const { service, paymentRequests } = setupWith(rows, [active({ tier: 'basic' })]);
+  for (const tier of ['pro', 'premium', 'executive']) {
+    const out = await service.upgradePass({ memberId: 'm1', tier });
+    assert.deepEqual([out.error, out.status], ['tier_not_available', 409], tier);
+  }
+  assert.equal(paymentRequests.rows.length, 0);
+  const opts = await service.upgradeOptions('m1');
+  assert.deepEqual(opts.options, []);
+});
+
+test('upgrade options and the price come from Settings only', async () => {
+  const rows = [
+    { key: 'basic', label: 'Basic', monthlyPrice: 30_000, visits: 12, gymAccess: 'standard' },
+    { key: 'pro', label: 'Pro', monthlyPrice: 60_000, visits: 30, gymAccess: 'midtier' },
+  ];
+  const { service } = setupWith(rows, [active({ tier: 'basic' })]);
+  const opts = await service.upgradeOptions('m1');
+  assert.deepEqual(opts.options.map(o => [o.tier, o.differenceTzs]), [['pro', 30_000]]);
+  assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'premium' })).error, 'tier_not_available');
+  assert.equal((await service.upgradePass({ memberId: 'm1', tier: 'pro' })).paymentRequest.amountTzs, 30_000);
 });
