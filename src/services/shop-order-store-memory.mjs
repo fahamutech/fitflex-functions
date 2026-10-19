@@ -18,6 +18,7 @@
 //   markPaid(orderId, { patch }) → { outcome: 'paid'|'already_paid'|'cancelled'|'missing', order }
 //   markLatePayment(orderId) → { marked, order }
 //   findExpired({ before, limit }) → orders
+//   ordersForVendor(vendorId) → orders with a line naming this vendor, newest first
 
 export function createMemoryShopOrderStore({ products, shopOrders, paymentRequests = null, now = () => new Date() }) {
   const nowIso = () => now().toISOString();
@@ -165,5 +166,11 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       && (order.stockState || 'reserved') === 'reserved' && order.reservationExpiresAt && +new Date(order.reservationExpiresAt) <= cutoff)).slice(0, limit);
   }
 
-  return { placeOrder, findReplay, cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired };
+  async function ordersForVendor(vendorId) {
+    if (!vendorId) return [];
+    return (await shopOrders.filterAsync(order => (order.items || []).some(item => item?.vendorId != null && item.vendorId === vendorId)))
+      .sort((a, b) => (+new Date(b.createdAt || 0) - +new Date(a.createdAt || 0)) || (String(b.id) < String(a.id) ? -1 : 1));
+  }
+
+  return { placeOrder, findReplay, cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor };
 }

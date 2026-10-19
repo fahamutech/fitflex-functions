@@ -9,7 +9,9 @@ import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../s
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
-import { vendorStockLedgerOn } from '../shared/feature-flags.mjs';
+import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions } from '../shared/feature-flags.mjs';
+import { vendorOrderView, ownLines, eatDate, eatDayBounds } from '../shared/vendor-order-view.mjs';
+import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
@@ -81,8 +83,15 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // what vendors see of it runs only while `stockLedgerOn()` (VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
   stockLedger = null,
   stockLedgerOn = vendorStockLedgerOn,
+  // Vendor tools · S2: pickup gym names on vendor orders (gyms collection), the vendor-scoped buyer
+  // pseudonyms (src/infra/vendor-buyer-ref-store-pg.mjs; in memory when not given) and whether vendors
+  // see the buyer's phone (VENDOR_TOOLS + VENDOR_ORDER_BUYER_CONTACT).
+  gyms = null,
+  buyerRefs = null,
+  buyerContactOn = vendorBuyerContactOn,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
+  buyerRefs ||= createMemoryVendorBuyerRefStore();
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -109,9 +118,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function vendorProfileFor(claims) {
     const profile = await getVendorProfile(claims.vendorId || claims.sub);
     if (!profile || claims.userType !== 'vendor_staff') return profile;
-    const staff = await activeStaffOf(claims);
-    const seesMoney = !!staff && (staff.vendorRole === 'admin' || (Array.isArray(staff.vendorPermissions) && staff.vendorPermissions.includes('payments')));
-    if (seesMoney) return profile;
+    if (staffSeesMoney(await activeStaffOf(claims))) return profile;
     const { settlementAccount, commissionPct, ...rest } = profile;
     return rest;
   }
@@ -894,12 +901,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // Whether the buyer can still cancel it themselves (before it is on its way).
       .map(order => ({ ...buyerOrderView(order), canCancel: CANCELLABLE.has(order.status) }));
   }
-  /** Every order with a line of this vendor's (lines carry the vendor; older rows fall back to product ownership). */
+  /**
+   * Every order with a line naming this vendor, newest first (one indexed query in Postgres).
+   * Lines without a vendorId (older rows) are not this vendor's to see (plan §3), so they are not
+   * looked up through product ownership any more.
+   */
   async function ordersOfVendor(vendorId) {
-    const direct = await shopOrders.filterAsync(order => (order.items || []).some(item => item.vendorId === vendorId));
-    if (direct.length) return direct.sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
-    const ids = new Set((await products.filterAsync(product => product.vendorId === vendorId)).map(product => product.id));
-    return (await shopOrders.filterAsync(order => (order.items || []).some(item => ids.has(item.productId)))).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
+    return orderStore.ordersForVendor(vendorId);
   }
 
   /** The vendors an order has lines from; lines without a vendor are resolved through their product. */
@@ -913,24 +921,44 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return [...ids];
   }
 
-  /**
-   * What a vendor may see of an order: their own lines, their own subtotal, and their own fulfilment's
-   * status (so their app offers the right next step). Other vendors' lines, commissions and statuses
-   * are not shown; `orderStatus` is the customer-facing combined status.
-   */
-  function vendorView(order, vendorId) {
-    const mine = (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null);
-    const own = fulfilmentsOf(order).find(f => f.vendorId === vendorId);
-    const { fulfilments, idempotencyKey, idempotencyFingerprint, stockState, reservationCycle, reservationExpiresAt, ...rest } = order;
-    const status = own?.status || order.status;
-    return {
-      ...rest, items: mine, totalTzs: mine.reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0),
-      status, orderStatus: order.status, timeline: own?.timeline?.length ? own.timeline : rest.timeline,
-      nextStatuses: order.status === 'cancelled' || order.paymentStatus !== 'paid' ? [] : nextStatuses(status, order.deliveryMethod),
-    };
+  /** Rows by id: one IN query when the collection has it, else one lookup per id (memory collections). */
+  async function rowsById(collection, ids) {
+    const wanted = [...new Set(ids.filter(Boolean).map(String))];
+    if (!collection || !wanted.length) return new Map();
+    const rows = typeof collection.filterByColumnInAsync === 'function'
+      ? await collection.filterByColumnInAsync('id', wanted)
+      : await Promise.all(wanted.map(id => collection.findByIdAsync(id)));
+    return new Map(rows.filter(Boolean).map(row => [row.id, row]));
   }
-  async function vendorOrders(vendorId) {
-    return (await ordersOfVendor(vendorId)).map(order => vendorView(order, vendorId));
+
+  /**
+   * What a vendor may see of orders (plan §3, allowlist in src/shared/vendor-order-view.mjs): their
+   * own lines and subtotal, their own fulfilment's status and timeline, the buyer as a vendor-scoped
+   * customerId + display name, the pickup gym's name; the delivery address while their part is open
+   * and paid and 7 days after delivery; the buyer's phone too with VENDOR_ORDER_BUYER_CONTACT.
+   * Commission and payout per line only when `seesMoney` (Q-5).
+   */
+  async function vendorViews(orders, vendorId, { seesMoney = false } = {}) {
+    if (!orders.length) return [];
+    const [buyers, pickupGyms, refs] = await Promise.all([
+      rowsById(users, orders.map(o => o.buyerId)),
+      rowsById(gyms, orders.map(o => o.pickupGymId)),
+      buyerRefs.refsFor(vendorId, orders.map(o => o.buyerId)),
+    ]);
+    const contactOn = buyerContactOn(), at = now();
+    return orders.map(order => vendorOrderView(order, vendorId, {
+      customerId: refs.get(String(order.buyerId)) ?? null, buyer: buyers.get(order.buyerId) || null,
+      gym: pickupGyms.get(order.pickupGymId) || null, seesMoney, contactOn, now: at,
+    }));
+  }
+  async function vendorOrders(vendorId, { seesMoney = false } = {}) {
+    return vendorViews(await ordersOfVendor(vendorId), vendorId, { seesMoney });
+  }
+  /** One order as its vendor sees it; 404 when it has no line of theirs (another vendor's order looks absent). */
+  async function vendorOrder(vendorId, orderId, { seesMoney = false } = {}) {
+    const order = orderId ? await shopOrders.findByIdAsync(String(orderId)) : null;
+    if (!order || !ownLines(order, vendorId).length) return { error: 'order_not_found', status: 404 };
+    return { order: (await vendorViews([order], vendorId, { seesMoney }))[0] };
   }
 
   /**
@@ -942,7 +970,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * - An admin (FitFlex) names the vendor when the order has several; every move follows the same matrix.
    * - The move is decided under the order's row lock, so two requests cannot both win.
    */
-  async function updateOrderStatus({ orderId, status, actorId, actorRole = 'vendor', vendorId = null, reason = null }) {
+  async function updateOrderStatus({ orderId, status, actorId, actorRole = 'vendor', vendorId = null, reason = null, seesMoney = false }) {
     if (!ORDER_STATUSES.has(status)) return { error: 'invalid_status', status: 400 };
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order) return { error: 'order_not_found', status: 404 };
@@ -968,7 +996,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // Several vendors: cancelling one vendor's part would need a partial refund, which is a financial
       // decision of its own. A vendor cannot do it alone; FitFlex cancels the whole order.
       if (!isAdmin && vendors.length > 1) return { error: 'multi_vendor_cancel_requires_admin', status: 409 };
-      return cancelOrder(order, { actorId, role: isAdmin ? 'admin' : 'vendor', reasonCode: isAdmin ? 'cancelled_by_fitflex' : 'vendor_cancelled', note: reason });
+      const cancelled = await cancelOrder(order, { actorId, role: isAdmin ? 'admin' : 'vendor', reasonCode: isAdmin ? 'cancelled_by_fitflex' : 'vendor_cancelled', note: reason });
+      // A vendor gets the order as they see it, not the buyer's details (the route sends only `order`;
+      // `refund` stays for the server's own callers).
+      if (isAdmin || cancelled.error) return cancelled;
+      return { ...cancelled, order: (await vendorViews([cancelled.order], target, { seesMoney }))[0] };
     }
     if (order.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
     const at = nowIso();
@@ -997,14 +1029,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       };
     });
     if (result.error) return result;
-    if (result.value?.noop) return { order: isAdmin ? result.order : vendorView(result.order, target), unchanged: true };
+    if (result.value?.noop) return { order: isAdmin ? result.order : (await vendorViews([result.order], target, { seesMoney }))[0], unchanged: true };
     const { from, to } = result.value;
     await auditLog.insertAsync({
       id: randomUUID(), at, actor: actorId, action: `shop_order_${to}`, target: orderId,
       before: { status: from, vendorId: target }, after: { status: to, vendorId: target, actorRole: isAdmin ? 'admin' : 'vendor', ...(reason ? { reason: String(reason).slice(0, 300) } : {}) },
     });
     await notify(order.buyerId, `order_${to}`, { orderId, vendorId: target });
-    return { order: isAdmin ? result.order : vendorView(result.order, target) };
+    return { order: isAdmin ? result.order : (await vendorViews([result.order], target, { seesMoney }))[0] };
   }
 
   // An order can be cancelled until it is on its way: once dispatched, ready
@@ -1085,18 +1117,25 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return order;
   }
 
+  /**
+   * Sales dashboard. todaySalesTzs (Q-3, S2): this vendor's own lines of the orders placed today (EAT
+   * calendar day) that are paid — not cancelled, refunded or still unpaid — whatever their delivery
+   * status. The other figures still count delivered, paid orders.
+   */
   async function vendorPayments(vendorId) {
     const orders = await ordersOfVendor(vendorId);
     const delivered = orders.filter(order => order.paymentStatus === 'paid' && ['delivered', 'fulfilled'].includes(order.status));
-    const value = order => (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
-    const current = new Date(), day = current.toISOString().slice(0, 10), week = +current - 7 * 86400000, month = +current - 30 * 86400000;
+    const value = order => ownLines(order, vendorId).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
+    const current = now(), week = +current - 7 * 86400000, month = +current - 30 * 86400000;
+    const today = eatDayBounds(eatDate(current));
+    const placedToday = order => { const t = +new Date(order.createdAt); return t >= today.start && t < today.end; };
     const total = rows => rows.reduce((sum, order) => sum + value(order), 0);
-    return { todaySalesTzs: total(delivered.filter(order => String(order.updatedAt || order.createdAt).slice(0, 10) === day)), weeklySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week)), monthlySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month)), pendingSettlementTzs: total(delivered.filter(order => order.settlementStatus !== 'settled')), settledPaymentsTzs: total(delivered.filter(order => order.settlementStatus === 'settled')), settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), status: order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })) };
+    return { todaySalesTzs: total(orders.filter(order => order.paymentStatus === 'paid' && order.status !== 'cancelled' && placedToday(order))), weeklySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week)), monthlySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month)), pendingSettlementTzs: total(delivered.filter(order => order.settlementStatus !== 'settled')), settledPaymentsTzs: total(delivered.filter(order => order.settlementStatus === 'settled')), settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), status: order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })) };
   }
   async function vendorStatement(vendorId) {
     const lines = ['order_id,amount_tzs,order_status,payment_status,settlement_status,date'];
     for (const order of await ordersOfVendor(vendorId)) {
-      const amount = (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
+      const amount = ownLines(order, vendorId).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
       lines.push([order.id, amount, order.status, order.paymentStatus || 'unknown', order.settlementStatus || 'pending', order.updatedAt || order.createdAt].map(csv).join(','));
     }
     return `${lines.join('\n')}\n`;
@@ -1158,6 +1197,40 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
   /** Any active staff member of the vendor (no particular permission): read-only vendor context. */
   const isActiveStaff = async claims => !!(await activeStaffOf(claims));
+  /** Staff who see the vendor's money (payout account, commission, payout per order): vendor admins and `payments`. */
+  const staffSeesMoney = staff => !!staff && (staff.vendorRole === 'admin' || (Array.isArray(staff.vendorPermissions) && staff.vendorPermissions.includes('payments')));
+  /**
+   * Q-5: per-order commission and "you receive" go to the vendor account, vendor admins, staff with
+   * `payments` and FitFlex admins; other staff get order lines without them. Read from the stored staff record.
+   */
+  async function canSeeOrderMoney(claims) {
+    if (claims?.userType === 'vendor' || claims?.userType === 'admin') return true;
+    if (claims?.userType !== 'vendor_staff') return false;
+    return staffSeesMoney(await activeStaffOf(claims));
+  }
+
+  /**
+   * GET /vendor/me (S2): who the caller is in their business, for the web portal. Rights are read from
+   * the stored accounts, not from the token. null = staff no longer active (the route answers 403).
+   */
+  async function vendorMe(claims) {
+    const isStaff = claims?.userType === 'vendor_staff';
+    const staff = isStaff ? await activeStaffOf(claims) : null;
+    if (isStaff && !staff) return null;
+    const vendorId = isStaff ? staff.vendorId : claims.sub;
+    const vendor = await users.findByIdAsync(vendorId);
+    const permissions = [...STAFF_PERMISSIONS].filter(permission => !isStaff || canStaff(staff, permission));
+    return {
+      vendorId,
+      businessName: vendor?.vendorProfile?.businessName || null,
+      userType: claims.userType,
+      vendorRole: isStaff ? staff.vendorRole || null : null,
+      permissions,
+      approvalStatus: vendor?.approvalStatus ?? null,
+      accountStatus: vendor?.accountStatus ?? null,
+      tools: { ...vendorToolsOptions(), canSeeCost: await canSeeCost(claims) },
+    };
+  }
   const staffView = ({ passwordHash, ...staff }) => staff;
   // GET /vendor/staff returns only these fields per staff member (vendor and staff callers alike).
   const STAFF_LIST_FIELDS = ['id', 'displayName', 'email', 'phone', 'vendorRole', 'vendorPermissions', 'accountStatus', 'createdAt'];
@@ -1195,5 +1268,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
+  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
 }

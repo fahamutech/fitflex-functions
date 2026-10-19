@@ -132,7 +132,12 @@ export function createAuthService({
     const [person, personas] = await Promise.all([identityLink.personOf(personId), identityLink.personasOf(personId)]);
     if (person?.status !== 'active') return { error: 'person_not_active', status: 403 };
     const usable = personas.filter(p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected');
-    if (!usable.length) return { error: 'no_profile', status: 409 };
+    if (!usable.length) {
+      // Vendor tools · S2 (Q-2): a person whose only profile is vendor staff that the vendor turned off
+      // is told so, instead of being sent to onboarding as if they had no business at all.
+      if (personas.some(p => p.userType === 'vendor_staff' && p.accountStatus === 'suspended')) return { error: 'vendor_staff_inactive', status: 403 };
+      return { error: 'no_profile', status: 409 };
+    }
     const { pool, last } = openingPool(usable, person.lastPersonaId);
     const operational = pool.filter(p => p.userType !== 'member');
     const chosen = last || (operational.length === 1 ? operational[0] : pool[0]);

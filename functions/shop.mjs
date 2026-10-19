@@ -4,7 +4,7 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { shopService, vendorSettlementService, shopReconciliationService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
-import { identityFlag, vendorStockLedgerOn, vendorToolsOptions } from '../src/shared/feature-flags.mjs';
+import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 
 const created = new Date().toISOString();
@@ -98,6 +98,19 @@ export const vendorToolsOptionsRoute = {
   responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off' },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
   onRequest: async (req, res) => res.json({ ...vendorToolsOptions(), canSeeCost: await shopService.canSeeCost(req.user) }),
+};
+
+export const vendorMeRoute = {
+  created, method: 'get', path: '/vendor/me',
+  description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
+  responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off' } },
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireActiveVendorStaff]),
+  onRequest: async (req, res) => {
+    const me = await shopService.vendorMe(req.user);
+    if (!me) return res.status(403).json({ error: 'vendor_staff_inactive' });
+    if (!vendorPortalOn()) return res.status(404).json({ error: 'feature_disabled' });
+    res.json(me);
+  },
 };
 
 export const vendorStockAdjustment = {
@@ -326,14 +339,25 @@ export const myShopOrders = {
 
 export const vendorOrders = {
   created, method: 'get', path: '/vendor/orders',
-  description: 'Vendor: list orders containing own products.',
+  description: 'Vendor / staff with `orders`: my orders, newest first. Each order is exactly { id, shortRef (last 6 characters of id, uppercase), createdAt, status (this vendor\'s own fulfilment status), orderStatus (combined, customer-facing), nextStatuses[] (empty unless paid and not cancelled), timeline[{ status, at, reason? }] (own), items[{ productId, name, variant|null, qty, priceTzs, image|null, commissionTzs?, vendorPayoutTzs? }] (own lines only; lines without a vendorId are never shown), totalTzs (own subtotal), paymentStatus, paymentMethod, deliveryMethod, note|null, pickupGymId|null (kept for older app builds), pickupGym { id, name|null }|null, buyer { customerId (vendor-scoped, stable), displayName|null, phone?, contactVisibleUntil? }, deliveryAddress? }. commissionTzs / vendorPayoutTzs only for the vendor account, vendor admins, staff with `payments` and FitFlex admins. deliveryAddress (home delivery) while this vendor\'s part is open and the order paid, and until the end of the 7th EAT day after they delivered it; buyer.phone and buyer.contactVisibleUntil (null while open; else that day 23:59:59+03:00) in the same window and only with VENDOR_TOOLS + VENDOR_ORDER_BUYER_CONTACT. Never: buyerId, buyerRole, email, paymentReference, other vendors\' lines or totals, internals.',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('orders')]),
-  onRequest: async (req, res) => res.json(await shopService.vendorOrders(req.user.vendorId || req.user.sub))
+  onRequest: async (req, res) => res.json(await shopService.vendorOrders(req.user.vendorId || req.user.sub, { seesMoney: await shopService.canSeeOrderMoney(req.user) })),
+};
+
+export const vendorOrderDetail = {
+  created, method: 'get', path: '/vendor/orders/:id',
+  description: 'Vendor / staff with `orders`: one of my orders, in the same shape as GET /vendor/orders. An order with no line of mine (another vendor\'s, or unknown) → 404 order_not_found.',
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireVendorPermission('orders')]),
+  onRequest: async (req, res) => {
+    const result = await shopService.vendorOrder(req.user.vendorId || req.user.sub, req.params.id, { seesMoney: await shopService.canSeeOrderMoney(req.user) });
+    if (result.error) return sendError(res, result);
+    res.json(result.order);
+  },
 };
 
 export const vendorUpdateOrderStatus = {
   created, method: 'post', path: '/vendor/orders/:id/status',
-  description: 'Vendor/admin: move this vendor\'s part of an order forward: pending → accepted → [processing] → [packed] → dispatched | ready_for_pickup → delivered, or cancelled until delivered. Steps cannot be skipped except processing/packed; repeating the current status changes nothing. A vendor moves only their own lines; an admin (scope `shop`) names `vendorId` when the order has several vendors. Optional `reason` is kept in the audit trail. Legacy: confirmed = accepted, fulfilled = delivered. Cancelling restocks items and refunds a paid order. 409 invalid_transition lists the `allowed` next statuses.',
+  description: 'Vendor/admin: move this vendor\'s part of an order forward: pending → accepted → [processing] → [packed] → dispatched | ready_for_pickup → delivered, or cancelled until delivered. Steps cannot be skipped except processing/packed; repeating the current status changes nothing. A vendor moves only their own lines; an admin (scope `shop`) names `vendorId` when the order has several vendors. Optional `reason` is kept in the audit trail. Legacy: confirmed = accepted, fulfilled = delivered. Cancelling restocks items and refunds a paid order. 409 invalid_transition lists the `allowed` next statuses. A vendor or their staff get the order back in the GET /vendor/orders shape (allowlisted); an admin gets the stored order.',
   requestSample: { status: 'accepted', vendorId: 'usr_vendor_1', reason: 'optional' },
   onGuard: routeGuard('post', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('orders'), requireAdminShopScope]),
   onRequest: async (req, res) => {
@@ -344,6 +368,7 @@ export const vendorUpdateOrderStatus = {
       actorRole: req.user.userType,
       vendorId: req.user.userType === 'admin' ? req.body?.vendorId || null : null,
       reason: req.body?.reason || null,
+      seesMoney: await shopService.canSeeOrderMoney(req.user),
     });
     if (result.error) {
       const { error, status, ...extra } = result;
@@ -354,7 +379,7 @@ export const vendorUpdateOrderStatus = {
 };
 
 export const vendorPayments = {
-  created, method: 'get', path: '/vendor/payments', description: 'Vendor: sales and settlement dashboard.',
+  created, method: 'get', path: '/vendor/payments', description: 'Vendor: sales and settlement dashboard. todaySalesTzs = my lines of orders placed today (EAT day) that are paid (not cancelled, refunded or unpaid), whatever their delivery status; weekly / monthly / pending / settled figures count delivered, paid orders.',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('payments')]),
   onRequest: async (req, res) => res.json(await shopService.vendorPayments(req.user.vendorId || req.user.sub)),
 };

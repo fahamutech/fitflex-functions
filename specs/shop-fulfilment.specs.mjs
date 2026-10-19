@@ -97,12 +97,12 @@ test('a vendor with no line in the order cannot touch it, whoever they are', asy
 });
 
 test('a vendor sees only their own lines, subtotal and status; never another vendor\'s lines or commission', async () => {
-  const { a, b, orderId } = await twoVendorOrder();
+  const { a, b, pa, orderId } = await twoVendorOrder();
   await move(orderId, 'accepted', a);
   const [viewA] = await service.vendorOrders(a);
   assert.equal(viewA.id, orderId);
   assert.equal(viewA.items.length, 1);
-  assert.ok(viewA.items.every(i => i.vendorId === a));
+  assert.deepEqual(viewA.items.map(i => i.productId), [pa]);
   assert.equal(viewA.totalTzs, 10_000);
   assert.equal(viewA.status, 'accepted');
   assert.equal(viewA.orderStatus, 'pending');
@@ -341,7 +341,8 @@ test('an order made before fulfilments existed (legacy status, no vendor on its 
     id, buyerId: buyer, items: JSON.stringify([{ productId, name: 'Old', qty: 1, priceTzs: 10_000 }]), totalTzs: 10_000,
     status: 'confirmed', paymentStatus: 'paid', deliveryMethod: 'home_delivery', timeline: JSON.stringify([{ status: 'confirmed' }]), stockState: 'reserved',
   });
-  assert.equal((await service.vendorOrders(vendor))[0].status, 'confirmed');
+  // S2 privacy rule (plan §3): lines without a vendorId are never shown to a vendor, so the order is not listed.
+  assert.equal((await service.vendorOrders(vendor)).some(o => o.id === id), false);
   assert.equal((await move(id, 'accepted', vendor)).unchanged, true, 'confirmed already is accepted');
   assert.equal((await move(id, 'dispatched', vendor)).order.status, 'dispatched');
   assert.equal((await move(id, 'fulfilled', vendor)).order.status, 'delivered');
