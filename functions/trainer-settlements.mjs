@@ -19,7 +19,17 @@ const send = (res, result, ok = 200) => {
   }
   res.status(ok).json(result);
 };
-const act = (fn) => async (req, res) => send(res, await fn({ id: req.params.id, actorId: req.user?.sub, ...(req.body || {}) }));
+// Only the fields the statement actions read are taken from the body (reason: reject, hold,
+// void-request and its cancel; paymentReference and receiptUrl: pay). The statement id and the
+// actor always come from the route and the token: a body must never name who is acting, or one
+// admin could submit and approve, or request and confirm a void, as two people.
+const act = (fn) => async (req, res) => {
+  const body = req.body || {};
+  return send(res, await fn({
+    reason: body.reason, paymentReference: body.paymentReference, receiptUrl: body.receiptUrl,
+    id: req.params.id, actorId: req.user?.sub,
+  }));
+};
 
 // ── FitFlex staff ───────────────────────────────────────────────────────────
 
