@@ -62,9 +62,11 @@ export function parseContact({ email, phone } = {}) {
 export function createFriendInvitationService({
   users, follows, blocks, invites, notifications,
   notify = async () => {},
-  // ({ type, value }) → the member who owns that verified email / phone, or null.
+  // ({ type, value }) → the member who owns that VERIFIED email / phone, or null.
+  // Must never match on User.email / User.phone (unverified, self-editable).
   findMember,
-  // (userId) → [{ type, value }] verified contacts of the person behind that member (optional).
+  // (userId) → [{ type, value }] VERIFIED contacts of the person behind that
+  // member. The only source of contacts for attaching and claiming invitations.
   contactsFor = async () => [],
   // Sending the invitation ourselves, only when the flags are on. WhatsApp
   // first; SMS when the number has no WhatsApp (or WhatsApp can't be used).
@@ -452,12 +454,14 @@ export function createFriendInvitationService({
     return { invitation: await view(now2, userId) };
   }
 
+  // Only contacts the person has PROVEN: verified LoginIdentifier rows, via
+  // contactsFor. User.email / User.phone are never used here: an unverified
+  // Firebase sign-up stores its email there, and POST /me/profile lets anyone
+  // type any email or number into their own row, so neither proves anything.
   const contactsOf = async u => {
-    const all = [
-      u.email ? { type: 'email', value: normalizeEmail(u.email) } : null,
-      u.phone ? { type: 'phone', value: normalizePhone(u.phone) } : null,
-      ...(await contactsFor(u.id)),
-    ].filter(c => c && c.value);
+    const all = (await contactsFor(u.id))
+      .map(c => ({ type: c.type, value: c.type === 'email' ? normalizeEmail(c.value) : c.type === 'phone' ? normalizePhone(c.value) : null }))
+      .filter(c => c.value);
     return all.filter((c, i) => all.findIndex(x => x.type === c.type && x.value === c.value) === i);
   };
 

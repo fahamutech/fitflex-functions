@@ -314,16 +314,25 @@ export function createAuthService({
     }
 
     // Identity V2 · I2: link this person's personas on verified evidence only.
-    // Linking must never block a sign-in, so a failure is logged and skipped.
-    if (identityFlag('V2_LINKING') && identityLink) {
+    // With V2_LINKING off, still RECORD what this sign-in proved (verified
+    // email / Firebase phone / uid) as LoginIdentifier rows on the person,
+    // without moving any persona (attachOnly) — the same thing the FitFlex
+    // code paths (registration, PIN, recovery, identifier change) already do
+    // unflagged. Matching by contact (friend invitations, org invitations)
+    // trusts only those rows, never User.email, so this is how a member whose
+    // email Firebase verifies becomes reachable by it. Writes to the identity
+    // tables are not flagged (decision C2). Must never block a sign-in.
+    if (identityLink) {
+      const linking = identityFlag('V2_LINKING');
       try {
         await identityLink.linkOnVerifiedSignIn({
           anchorUserId: user.id, uid: fb.uid,
           email: emailVerified ? fbEmail : null,
           phone: fb.phoneNumber || null,
           provider: fb.signInProvider || null,
+          attachOnly: !linking,
         });
-        user = (await users.findByIdAsync(user.id)) || user;
+        if (linking) user = (await users.findByIdAsync(user.id)) || user;
       } catch (err) {
         console.warn('[identity] linking skipped:', err?.message);
       }

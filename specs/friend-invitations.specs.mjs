@@ -145,8 +145,11 @@ test('not on FitFlex: share link + message, token only hashed, attaches after th
   assert.equal((await s.svc.claim('juma', token)).error, 'contact_mismatch');
   assert.equal(s.notifications.rows.length, 0);
 
-  // The invited person registers with that verified email.
+  // The invited person registers; until the email is verified nothing attaches.
   s.users.rows.push({ id: 'newbie', userType: 'member', displayName: 'New Person', accountStatus: 'active', email: 'new.person@example.com' });
+  assert.equal(await s.svc.attachFor('newbie'), 0, 'the email on the row alone proves nothing');
+  // Verified (a verified LoginIdentifier now exists for it).
+  s.extraContacts = { newbie: [{ type: 'email', value: 'new.person@example.com' }] };
   assert.equal(await s.svc.attachFor('newbie'), 1);
   assert.equal(s.notifications.rows[0].userId, 'newbie');
   assert.equal(s.follows.rows.length, 0, 'still needs approval');
@@ -206,6 +209,7 @@ test('the inviter sees the contact they invited; the recipient never does', asyn
   assert.equal(mine.contact, '+255650387211');
   assert.equal(mine.contactType, 'phone');
   s.users.rows.push({ id: 'zed', userType: 'member', displayName: 'Zed', accountStatus: 'active', phone: '+255650387211' });
+  s.extraContacts = { zed: [{ type: 'phone', value: '+255650387211' }] };
   await s.svc.attachFor('zed');
   const theirs = (await s.svc.list('zed')).incoming[0];
   assert.equal(theirs.contact, null);
@@ -354,4 +358,40 @@ test('link format: /friend-invite/#<token> in the share link and in both languag
     assert.ok(!/friend-invite\/[A-Za-z0-9_-]/.test(r.share.text), `${locale} text never puts the token in the path`);
     assert.equal((await s.svc.preview(link.hash.slice(1))).invitation.status, 'pending');
   }
+});
+
+// ── Security: only verified contacts route, attach or claim (19 Oct 2026) ──
+
+test('an email / number that is only on the User row (unverified, self-editable) gets no invitation, by inbox or by link', async () => {
+  const s = setup();
+  const byEmail = await s.svc.invite('neema', { email: 'victim@example.com' });
+  const byPhone = await s.svc.invite('neema', { phone: '0650387244' });
+  const emailToken = byEmail.share.link.split('#').pop();
+  const phoneToken = byPhone.share.link.split('#').pop();
+  // Someone puts the victim's email and number on their own row (unverified
+  // sign-up / profile edit) and has no verified contacts.
+  s.users.rows.push({ id: 'mallory', userType: 'member', displayName: 'Mallory', accountStatus: 'active', email: 'victim@example.com', phone: '+255650387244' });
+  assert.equal(await s.svc.attachFor('mallory'), 0);
+  assert.equal((await s.svc.list('mallory')).incoming.length, 0);
+  const c1 = await s.svc.claim('mallory', emailToken);
+  assert.equal(c1.error, 'contact_mismatch');
+  assert.equal(c1.status, 403);
+  assert.equal((await s.svc.claim('mallory', phoneToken)).error, 'contact_mismatch');
+  assert.ok(s.invites.rows.every(i => !i.recipientUserId), 'nothing attached');
+  assert.ok(!s.notifications.rows.some(n => n.userId === 'mallory'), 'no inviter name leaked into their inbox');
+  // The real owner, once verified, still gets both.
+  s.users.rows.push({ id: 'victim', userType: 'member', displayName: 'Victim', accountStatus: 'active' });
+  s.extraContacts = { victim: [{ type: 'email', value: 'victim@example.com' }, { type: 'phone', value: '+255650387244' }] };
+  assert.equal((await s.svc.claim('victim', emailToken)).invitation.status, 'pending');
+  assert.equal(await s.svc.attachFor('victim'), 1, 'the phone one attaches from the inbox');
+  assert.equal((await s.svc.list('victim')).incoming.length, 2);
+});
+
+test('verified contacts are normalised before matching (case, local phone format)', async () => {
+  const s = setup();
+  await s.svc.invite('neema', { email: 'Mixed.Case@Example.com' });
+  await s.svc.invite('neema', { phone: '0650387255' });
+  s.users.rows.push({ id: 'mc', userType: 'member', displayName: 'Mixed Case', accountStatus: 'active' });
+  s.extraContacts = { mc: [{ type: 'email', value: 'MIXED.case@example.com' }, { type: 'phone', value: '0650387255' }] };
+  assert.equal(await s.svc.attachFor('mc'), 2);
 });
