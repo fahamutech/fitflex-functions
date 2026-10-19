@@ -262,6 +262,13 @@ test('admin: approving with no reference typed confirms the member\'s transactio
   const two = await admin.decide({ id: 'pay_2', decision: 'approve', reference: 'STATEMENT-99', actorId: 'adm' });
   assert.equal(two.paymentRequest.reference, 'STATEMENT-99');
   assert.equal(two.paymentRequest.memberReference, 'ABC123456', 'what the member typed is kept');
+  // A reference already recorded on the request (e.g. by a verifying admin) is not replaced by the member's.
+  paymentRequests.rows.push({ id: 'pay_3', memberId: 'm3', subscriptionId: null, tier: 'basic', status: 'pending', provider: 'admin_approved', reference: 'VERIFIED-1', memberReference: 'MEM123456' });
+  const three = await admin.decide({ id: 'pay_3', decision: 'approve', actorId: 'adm' });
+  assert.equal(three.paymentRequest.reference, 'VERIFIED-1');
+  // Rejecting never copies the member's ID into reference.
+  paymentRequests.rows.push({ id: 'pay_4', memberId: 'm4', subscriptionId: null, tier: 'basic', status: 'pending', provider: 'admin_approved', reference: null, memberReference: 'REJ123456' });
+  assert.equal((await admin.decide({ id: 'pay_4', decision: 'reject', actorId: 'adm' })).paymentRequest.reference, null);
 });
 
 test('mobile money: a request the member already paid manually cannot be sent as a phone prompt (no double charge)', async () => {

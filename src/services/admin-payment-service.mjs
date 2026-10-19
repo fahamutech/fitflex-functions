@@ -156,11 +156,13 @@ export function createAdminPaymentService({
 
     const now = new Date().toISOString();
     const status = decision === 'approve' ? 'approved' : 'rejected';
-    // Approving with no reference typed confirms the transaction ID the member gave (slice A3).
-    const confirmedRef = reference || (decision === 'approve' ? request.memberReference : null) || null;
+    // Approving with no reference typed, and none recorded yet (e.g. by a verifying admin),
+    // confirms the transaction ID the member gave (slice A3). A recorded or typed one wins.
+    const memberRef = decision === 'approve' && !request.reference ? (request.memberReference || null) : null;
+    const confirmedRef = reference || memberRef;
     const updated = await writeDecision(request, {
       status,
-      reference: confirmedRef || request.reference,
+      reference: reference || request.reference || memberRef,
       // An upgrade's note names the plan it upgrades: it stays as it is.
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
