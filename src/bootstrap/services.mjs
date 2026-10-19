@@ -556,7 +556,7 @@ export const invoiceService = createInvoiceService({
 // Replaceable, so specs can stand in for the Firebase admin SDK.
 export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth };
 export const portalUserService = createPortalUserService({
-  users, auditLog, isConfiguredAdminEmail,
+  users, auditLog, isConfiguredAdminEmail, db,
   initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
   // The start password is checked with the same server key as PINs.
   pepper: () => pinPepper(), forgetSession: invalidateAccountStatus,

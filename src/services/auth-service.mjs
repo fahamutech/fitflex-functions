@@ -88,6 +88,20 @@ export function createAuthService({
     }
   }
 
+  /**
+   * A Firebase sign-in from before this profile's sessions were ended (a portal
+   * admin changed their start password): a saved ID token, or one refreshed
+   * from it, keeps the original auth_time and must not open a new session.
+   * Without auth_time it is refused too (fail closed); real Firebase tokens
+   * always carry it.
+   */
+  function firebaseSignInEnded(row, fb) {
+    if (!row?.sessionsValidAfter) return false;
+    const cutOff = +new Date(row.sessionsValidAfter);
+    if (!Number.isFinite(cutOff)) return false;
+    return !Number.isFinite(fb?.authTime) || fb.authTime * 1000 < cutOff;
+  }
+
   /** JWT claims for a persona row. `sub` stays the persona (User) id. */
   function sessionClaims(user) {
     return {
@@ -287,6 +301,7 @@ export function createAuthService({
     }
 
     if (user) {
+      if (firebaseSignInEnded(user, fb)) return { error: 'session_ended', status: 401 };
       // Existing user: NEVER change their stored userType via this endpoint.
       // Only exception: configured admin email always stays admin.
       const patch = {
@@ -374,6 +389,8 @@ export function createAuthService({
     if (user.portalUser === true && requestedRole !== 'admin') return { error: 'portal_user_app_access_denied', status: 403 };
     if (user.accountStatus === 'suspended') return { error: 'account_suspended', status: 403 };
     if (user.approvalStatus === 'rejected') return { error: 'profile_rejected', status: 403, approvalNote: user.approvalNote || null };
+    // Again for the profile finally opened (a V2 client may land on another persona).
+    if (firebaseSignInEnded(user, fb)) return { error: 'session_ended', status: 401 };
 
     user = await settleTrainerOnboarding(user);
     const token = signJwt(sessionClaims(user));

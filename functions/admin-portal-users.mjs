@@ -6,6 +6,11 @@ import { portalUserService } from '../src/bootstrap/services.mjs';
 const created = new Date().toISOString();
 
 // The caller, from the verified token only — never from the body.
+// Who made the request, for the audit row (never trusted for decisions).
+const requestMetaOf = req => ({
+  ip: String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || req.socket?.remoteAddress || null,
+  userAgent: req.headers?.['user-agent'] ? String(req.headers['user-agent']).slice(0, 300) : null,
+});
 const actorOf = req => ({ id: req.user?.sub, portalUser: req.user?.portalUser, aclPermissions: req.user?.aclPermissions });
 const errorBody = r => ({
   error: r.error,
@@ -28,7 +33,7 @@ export const adminCreatePortalUser = {
   onGuard: [requireAuth('admin'), requireAcl('users')],
   onRequest: async (req, res) => {
     const { email, password, displayName, aclPermissions = [] } = req.body || {};
-    const result = await portalUserService.create({ email, password, displayName, aclPermissions, actor: actorOf(req) });
+    const result = await portalUserService.create({ email, password, displayName, aclPermissions, actor: actorOf(req), ...requestMetaOf(req) });
     if (result.error) return res.status(result.status).json(errorBody(result));
     res.status(201).json(result.user);
   }

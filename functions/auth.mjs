@@ -89,12 +89,16 @@ export const authFirebaseSession = {
 
 export const authPortalChangeStartPassword = {
   created, method: 'post', path: '/auth/portal/password',
-  description: 'Portal admin: replace the start password another admin chose, at first sign-in (the only route a session with pwc: true may use). Body { newPassword } (at least 10 characters, not the start password). Sets the Firebase password, ends every earlier session of this profile, and returns a new session { token, user } without pwc. 400 password_too_short | password_unchanged; 409 password_change_not_required; 502 firebase_update_failed (nothing changes).',
+  description: 'Portal admin: replace the start password another admin chose, at first sign-in (the only route a session with pwc: true may use). Body { newPassword } (at least 10 characters, not the start password). Sets the Firebase password, ends every earlier session of this profile, and returns a new session { token, user } without pwc. Also revokes the Firebase refresh tokens of the identity; a Firebase ID token from before the change can no longer open a session (401 session_ended at /auth/firebase/session). 400 password_too_short | password_unchanged; 409 password_change_not_required | password_change_in_progress (another change is running); 502 firebase_update_failed (nothing changed); 500 password_changed_session_failed (the password WAS changed but the session could not be finished: sign in again with the new password).',
   requestSample: { newPassword: 'a-new-long-password' },
   responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'admin', passwordChangeRequired: false } },
   onGuard: requireAuthAllowingPasswordChange('admin'),
   onRequest: async (req, res) => {
-    const result = await portalUserService.changeStartPassword({ userId: req.user.sub, newPassword: req.body?.newPassword });
+    const result = await portalUserService.changeStartPassword({
+      userId: req.user.sub, newPassword: req.body?.newPassword,
+      ip: String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || req.socket?.remoteAddress || null,
+      userAgent: req.headers?.['user-agent'] ? String(req.headers['user-agent']).slice(0, 300) : null,
+    });
     if (result.error) {
       return res.status(result.status).json({ error: result.error, ...(result.minLength ? { minLength: result.minLength } : {}) });
     }

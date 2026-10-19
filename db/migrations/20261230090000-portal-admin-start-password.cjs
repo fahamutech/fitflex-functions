@@ -14,11 +14,15 @@
 //                                no longer accepted (set when the start password
 //                                is changed). Person.sessionsValidAfter does the
 //                                same for people; portal-only admins have no Person.
+//   User.passwordChangeClaimedAt set while one change request holds the row
+//                                (before Firebase is called), so two concurrent
+//                                changes can't both reach Firebase. Released on
+//                                failure; a stale claim (> 60 s) can be taken over.
 //
 // Additive: nullable / defaulted columns, nothing backfilled (existing admins are
-// unaffected). Down drops the three columns.
+// unaffected). Down drops the four columns.
 
-const COLUMNS = ['passwordChangeRequired', 'startPasswordHash', 'sessionsValidAfter'];
+const COLUMNS = ['passwordChangeRequired', 'startPasswordHash', 'sessionsValidAfter', 'passwordChangeClaimedAt'];
 
 /** @param {import('knex').Knex} knex */
 exports.up = async function up(knex) {
@@ -29,6 +33,7 @@ exports.up = async function up(knex) {
     if (missing.includes('passwordChangeRequired')) table.boolean('passwordChangeRequired').notNullable().defaultTo(false);
     if (missing.includes('startPasswordHash')) table.text('startPasswordHash');
     if (missing.includes('sessionsValidAfter')) table.timestamp('sessionsValidAfter', { useTz: true });
+    if (missing.includes('passwordChangeClaimedAt')) table.timestamp('passwordChangeClaimedAt', { useTz: true });
   });
 };
 

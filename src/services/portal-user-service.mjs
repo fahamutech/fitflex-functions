@@ -39,8 +39,13 @@ export const PORTAL_PASSWORD_MIN_LENGTH = 10;
 //   - "Change" means a value different from the stored one, so a form that
 //     re-sends unchanged values (the portal's edit dialog does) is not refused.
 //   - Every refusal is audited (portal_user_create_refused / _update_refused).
+/** A change request holds the row this long at most; after it another request may take over. */
+const CHANGE_CLAIM_MS = 60_000;
+
 export function createPortalUserService({
   users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail,
+  // Knex handle: the change-password claim is one conditional UPDATE (null in unit specs that never change).
+  db = null,
   // The server key the start password is mixed with (PIN_PEPPER). Null = not configured: fail closed.
   pepper = () => null,
   // Drop the cached session check for a profile, so ended sessions stop at once.
@@ -99,7 +104,7 @@ export function createPortalUserService({
     return rows.map(slim);
   }
 
-  async function create({ email: rawEmail, password, displayName, aclPermissions = [], actor, actorId = actor?.id }) {
+  async function create({ email: rawEmail, password, displayName, aclPermissions = [], actor, actorId = actor?.id, ip = null, userAgent = null }) {
     const email = normalizeEmail(rawEmail);
     if (!email || !password) return { error: 'email_and_password_required', status: 400 };
     if (!Array.isArray(aclPermissions)) return { error: 'aclPermissions_must_be_array', status: 400 };
@@ -160,9 +165,11 @@ export function createPortalUserService({
       portalUser: true,
       aclPermissions,
       onboardingCompleted: true,
-      // Owner decision 2026-10-19: the new admin replaces the creator's password before anything else.
-      // An identity that already existed keeps its own password, so it is not flagged.
-      passwordChangeRequired: passwordSetByCreator,
+      // Owner decision 2026-10-19: an admin made by another admin replaces the password before
+      // anything else. Always flagged, also on an identity that already existed in Firebase
+      // (security review: the creator may know or have set that password too). Only when this
+      // call set the password is there a start password to refuse as "unchanged".
+      passwordChangeRequired: true,
       startPasswordHash: passwordSetByCreator ? startPasswordHash(id, password) : null,
       createdAt: new Date().toISOString(),
     };
@@ -170,7 +177,8 @@ export function createPortalUserService({
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'portal_user_created',
-      target: row.id, before: null, after: { email: row.email, aclPermissions, passwordChangeRequired: passwordSetByCreator }
+      target: row.id, before: null,
+      after: { email: row.email, aclPermissions, passwordChangeRequired: true, existingIdentity: !passwordSetByCreator, ip, userAgent }
     });
     return {
       user: {
@@ -183,11 +191,16 @@ export function createPortalUserService({
 
   /**
    * The forced first change of the start password (POST /auth/portal/password).
-   * Sets the Firebase password, clears the flag and ends every earlier session
-   * of this profile (including any the creator opened with the start password).
+   *
+   * 1. Claim the row (one conditional UPDATE) so a second concurrent change can't
+   *    also reach Firebase: it gets 409 password_change_in_progress.
+   * 2. Set the Firebase password and revoke the identity's refresh tokens. On
+   *    failure the claim is released and the flag stays.
+   * 3. Clear the flag and end every earlier session of this profile (FitFlex
+   *    tokens by issue time; Firebase ID tokens by auth_time, at sign-in).
    * Returns the updated row; the caller mints the new session.
    */
-  async function changeStartPassword({ userId, newPassword }) {
+  async function changeStartPassword({ userId, newPassword, ip = null, userAgent = null }) {
     const user = userId ? await users.findByIdAsync(userId) : null;
     if (!user || user.userType !== 'admin') return { error: 'portal_user_not_found', status: 404 };
     if (user.passwordChangeRequired !== true) return { error: 'password_change_not_required', status: 409 };
@@ -195,36 +208,71 @@ export function createPortalUserService({
       return { error: 'password_too_short', status: 400, minLength: PORTAL_PASSWORD_MIN_LENGTH };
     }
     if (!pepper()) return { error: 'start_password_not_configured', status: 503 };
-    if (sameDigest(startPasswordHash(user.id, newPassword), user.startPasswordHash)) {
+    // No start password to compare with when the identity existed before (startPasswordHash null).
+    if (user.startPasswordHash && sameDigest(startPasswordHash(user.id, newPassword), user.startPasswordHash)) {
       return { error: 'password_unchanged', status: 400 };
     }
     if (!user.firebaseUid) return { error: 'firebase_update_failed', status: 502 };
+    if (!db) return { error: 'start_password_not_configured', status: 503 };
+
+    // 1. Claim. Whole milliseconds, so the release and the finish can match it exactly.
+    const claimedAt = new Date(Date.now());
+    const claimed = await db('User')
+      .where({ id: user.id, passwordChangeRequired: true })
+      .andWhere(q => q.whereNull('passwordChangeClaimedAt').orWhere('passwordChangeClaimedAt', '<', new Date(+claimedAt - CHANGE_CLAIM_MS)))
+      .update({ passwordChangeClaimedAt: claimedAt })
+      .returning('id');
+    if (!claimed.length) {
+      const now = await users.findByIdAsync(user.id);
+      return now?.passwordChangeRequired === true
+        ? { error: 'password_change_in_progress', status: 409 }
+        : { error: 'password_change_not_required', status: 409 };
+    }
+    const mine = () => db('User').where({ id: user.id, passwordChangeClaimedAt: claimedAt });
+
+    // 2. Firebase.
+    let refreshTokensRevoked = false;
     try {
       initFirebaseAdmin();
       await getAdminAuth().updateUser(user.firebaseUid, { password: newPassword });
     } catch (fbErr) {
       // The flag stays: the start password is still the working one.
       console.error('[portal-users] Firebase password update failed:', fbErr?.message);
+      await mine().update({ passwordChangeClaimedAt: null }).catch(err => console.error('[portal-users] claim release failed:', err?.message));
       return { error: 'firebase_update_failed', status: 502 };
     }
-    // Session issue times are whole seconds: cut off at the start of this second,
-    // so the session minted straight after stays valid and every earlier one ends.
-    const now = Date.now();
-    // Only once: a second change racing this one finds the flag already cleared.
-    const updated = await users.updateByIdWhereAsync(user.id, { passwordChangeRequired: true }, {
-      passwordChangeRequired: false,
-      startPasswordHash: null,
-      sessionsValidAfter: new Date(Math.floor(now / 1000) * 1000),
-      updatedAt: new Date(now).toISOString(),
-    });
+    try {
+      await getAdminAuth().revokeRefreshTokens(user.firebaseUid);
+      refreshTokensRevoked = true;
+    } catch (err) {
+      // The password is already changed; a saved ID token is still refused at sign-in by auth_time.
+      console.error('[portal-users] Firebase refresh-token revocation failed:', err?.message);
+    }
+
+    // 3. Session issue times (FitFlex iat, Firebase auth_time) are whole seconds: cut
+    // off at the start of this second, so the session minted straight after stays valid.
+    const done = Date.now();
+    let finished = 0;
+    try {
+      finished = (await mine().update({
+        passwordChangeRequired: false, startPasswordHash: null, passwordChangeClaimedAt: null,
+        sessionsValidAfter: new Date(Math.floor(done / 1000) * 1000), updatedAt: new Date(done),
+      }).returning('id')).length;
+    } catch (err) {
+      console.error('[portal-users] clearing the start-password flag failed:', err?.message);
+    }
     forgetSession(user.id);
-    if (!updated) return { error: 'password_change_not_required', status: 409 };
+    // The password IS changed but the profile could not be updated: tell the portal to sign in
+    // again with the new password (the flag stays, so the next session is still held to this route).
+    if (!finished) return { error: 'password_changed_session_failed', status: 500 };
+
     await auditLog.insertAsync({
-      id: randomUUID(), at: new Date(now).toISOString(),
+      id: randomUUID(), at: new Date(done).toISOString(),
       actor: user.id, action: 'portal_user.password_changed',
-      target: user.id, before: { passwordChangeRequired: true }, after: { passwordChangeRequired: false, sessionsEnded: true },
+      target: user.id, before: { passwordChangeRequired: true },
+      after: { passwordChangeRequired: false, sessionsEnded: true, refreshTokensRevoked, ip, userAgent },
     });
-    return { user: updated };
+    return { user: await users.findByIdAsync(user.id) };
   }
 
   async function update({ id, aclPermissions, accountStatus, displayName, portalUser, actor, actorId = actor?.id }) {
