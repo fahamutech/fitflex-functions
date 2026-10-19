@@ -63,6 +63,7 @@ provider integration for shop orders; unattended payments are not covered.
 | E3 | Repair runbook: `raise-refund`, `repair-payment` endpoints | PASS (exist, tested); runbook text OPEN |
 | E4 | `SHOP_RESERVATION_EXPIRY=on` switched on deliberately after deploy | OPEN |
 | E5 | Vendor payout runs only with two staff, verified account, real reference | PASS (code); real payout never exercised — **no real payouts were made or simulated against a provider** |
+| E6 | Product stats recompute: `POST /admin/shop/product-stats/recompute` (or `npm run shop:recompute-stats`) — dry run, review the table, then `{"apply": true}` once; a second dry run must show 0 changed. Clears vendor-typed rating/reviewCount/soldCount from before functions#178 | OPEN (built; not run on production) |
 
 ## F. Mobile and portal
 
