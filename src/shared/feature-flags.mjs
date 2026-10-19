@@ -52,6 +52,19 @@ export function memberUsernamesOn() {
   return on('MEMBER_USERNAMES');
 }
 
+/**
+ * With Identity V2 linking off, a Firebase session also records what it
+ * proved (uid, verified email, Firebase phone) as verified LoginIdentifier
+ * rows on the signer's own Person, without moving any persona. Contact
+ * matching (friend invitations) trusts only those rows, so members verified
+ * only by Firebase stay unmatched (fail-closed) until this is on or
+ * scripts/identity-reconcile.mjs --firebase --apply has run. Off unless
+ * IDENTITY_RECORD_FIREBASE_EVIDENCE is set. Has no effect when V2_LINKING is on.
+ */
+export function recordFirebaseEvidenceOn() {
+  return on('IDENTITY_RECORD_FIREBASE_EVIDENCE');
+}
+
 
 /**
  * Pay by mobile money through Malipo by Tunzaa (POST /me/payments/:id/mobile-money).

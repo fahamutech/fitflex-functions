@@ -79,6 +79,7 @@ import { createExerciseAdminService } from '../services/training/exercise-admin-
 import { createSocialService } from '../services/social-service.mjs';
 import { createUsernameService } from '../services/username-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
+import { createVerifiedContacts } from '../services/friend-invitation-contacts.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createChallengeService } from '../services/challenge-service.mjs';
@@ -570,35 +571,9 @@ export const socialService = createSocialService({
 export const friendInvitationService = createFriendInvitationService({
   users, follows, blocks, invites: friendInvitations, notifications,
   notify: (userId, message) => notificationService.notify(userId, message),
-  // The member behind a verified email / number. The number can live only in
-  // LoginIdentifier (User.phone is null when another persona of the same
-  // person holds it), so look there first, then at the member row itself.
-  findMember: async ({ type, value }) => {
-    const live = () => db('User').where({ userType: 'member' }).whereNot('accountStatus', 'suspended');
-    const viaIdentifier = await db('LoginIdentifier')
-      .where({ type, normalizedValue: value, status: 'active' }).whereNotNull('verifiedAt')
-      .first('personId');
-    if (viaIdentifier?.personId) {
-      const m = await live().where({ personId: viaIdentifier.personId }).first('id', 'displayName');
-      if (m) return m;
-    }
-    const q = live();
-    if (type === 'email') q.whereRaw('lower("email") = ?', [value]);
-    else {
-      const digits = value.replace('+', '');
-      q.whereIn('phone', [value, digits, `0${digits.slice(3)}`]);
-    }
-    return (await q.first('id', 'displayName')) ?? null;
-  },
-  // Every verified email / number of the person behind a member, for attaching invitations.
-  contactsFor: async (userId) => {
-    const u = await db('User').where({ id: userId }).first('personId');
-    if (!u?.personId) return [];
-    const rows = await db('LoginIdentifier')
-      .where({ personId: u.personId, status: 'active' }).whereIn('type', ['email', 'phone']).whereNotNull('verifiedAt')
-      .select('type', 'normalizedValue');
-    return rows.map(r => ({ type: r.type, value: r.normalizedValue }));
-  },
+  // Verified evidence only (LoginIdentifier.verifiedAt): never User.email /
+  // User.phone, which are unverified and self-editable. See friend-invitation-contacts.mjs.
+  ...createVerifiedContacts(db),
   // FitFlex sends the invitation itself only when these are switched on
   // (FRIEND_INVITE_SMS / FRIEND_INVITE_WHATSAPP = on). SMS goes through the
   // shared SMS service and its registered sender name; WhatsApp needs an

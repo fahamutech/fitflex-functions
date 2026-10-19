@@ -85,6 +85,13 @@ export function createIdentityLinkService({ db }) {
       if (!anchor?.personId) return { personId: null, linkedUserIds: [], mergedPersonIds: [], conflicts };
       const uidOwner = uid ? await trx('LoginIdentifier')
         .where({ type: 'firebase_uid', normalizedValue: uid, status: 'active' }).first('personId') : null;
+      // Recording a Firebase account's evidence (attachOnly) onto a row owned by
+      // a DIFFERENT Firebase account would hand that account's Person this uid
+      // and email. Nothing is attached then. (uid null = a FitFlex code, which
+      // proves the contact for the anchor's own person: not affected.)
+      if (attachOnly && uid && !uidOwner && anchor.firebaseUid && anchor.firebaseUid !== uid) {
+        return { personId: null, linkedUserIds: [], mergedPersonIds: [], conflicts };
+      }
       const personId = uidOwner?.personId ?? anchor.personId;
 
       // Rows the verified evidence points at.
