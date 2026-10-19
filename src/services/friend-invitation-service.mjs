@@ -165,7 +165,11 @@ export function createFriendInvitationService({
   }
 
   async function message(inv, token, inviterName, locale) {
-    const link = `${String(baseLink()).replace(/\/+$/, '')}/friend-invite/${token}`;
+    // The token rides in the fragment (after '#'): browsers and the app read
+    // it, but it is never sent to Firebase Hosting / the CDN, so it stays out
+    // of their request logs. The path stays /friend-invite/ so the Android
+    // App Link (pathPrefix /friend-invite/) still opens the app.
+    const link = `${String(baseLink()).replace(/\/+$/, '')}/friend-invite/#${token}`;
     const sw = locale === 'sw';
     const text = sw
       ? `Habari! ${inviterName} amekualika uungane kwenye FitFlex Africa. Jiunge na FitFlex ili uungane na jumuiya yako ya mazoezi na ugundue fursa za mazoezi. Jisajili hapa: ${link}`
