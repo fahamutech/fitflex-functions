@@ -82,3 +82,14 @@ export function tunzaaSandboxSettlesOn() {
 export function shopHomeV2On() {
   return on('SHOP_HOME_V2');
 }
+
+/**
+ * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
+ * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
+ * carries no `manual` block and subscribe / upgrade take no reference, exactly
+ * as before. On, it takes effect only once the admin has saved the Lipa Namba
+ * and account name in platform settings (`manualPayment`).
+ */
+export function manualPayInstructionsOn() {
+  return on('MANUAL_PAY_INSTRUCTIONS');
+}

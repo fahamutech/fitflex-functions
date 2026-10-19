@@ -2,6 +2,7 @@
 // specialties. Seeds sane defaults on first read.
 import { randomUUID } from 'node:crypto';
 import { PASS_TIERS } from '../shared/constants.mjs';
+import { validateManualPaymentSettings } from '../shared/manual-payment.mjs';
 
 const DEFAULT_SPECIALTIES = [
   'Yoga', 'Cardio', 'Aerobics', 'Weight Loss', 'Muscle Gain', 'Dance',
@@ -84,6 +85,12 @@ export function createSettingsService({ platformSettings, auditLog }) {
     for (const k of allowed) {
       if (body[k] !== undefined) updates[k] = body[k];
     }
+    // Manual mobile-money details (slice A3): validated, replaced whole; null clears them.
+    if (body.manualPayment !== undefined) {
+      const checked = validateManualPaymentSettings(body.manualPayment);
+      if (checked.error) return { error: checked.error, field: checked.field, status: 400 };
+      updates.manualPayment = checked.value;
+    }
     updates.updatedAt = new Date().toISOString();
     const updated = await platformSettings.updateAsync(s => s.id === 'platform', updates);
     await auditLog.insertAsync({
@@ -92,6 +99,11 @@ export function createSettingsService({ platformSettings, auditLog }) {
       target: 'platform', before, after: updated
     });
     return updated;
+  }
+
+  /** The saved manual-payment details ({ lipaNamba, accountName, network, instructions }), or null. */
+  function manualPaymentSettings() {
+    return ensureDefaultSettings().manualPayment ?? null;
   }
 
   function getSpecialtiesList() {
@@ -118,6 +130,6 @@ export function createSettingsService({ platformSettings, auditLog }) {
 
   return {
     ensureDefaultSettings, getTierConfig, visitCapForTier, priceForTier,
-    publicTiers, adminGet, adminUpdate, getSpecialtiesList, addSpecialty, deleteSpecialty,
+    publicTiers, adminGet, adminUpdate, manualPaymentSettings, getSpecialtiesList, addSpecialty, deleteSpecialty,
   };
 }

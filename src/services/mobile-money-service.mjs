@@ -99,6 +99,8 @@ export function createMobileMoneyService({
     if (own.error) return own.error;
     const { request } = own;
     if (request.status !== 'pending') return fail('payment_not_pending', 409);
+    // The member says they paid the Lipa Namba already (slice A3): a prompt now would charge twice.
+    if (request.memberReference) return fail('manual_payment_submitted', 409);
     if (!PAYABLE.has(await productOf(request))) return fail('not_payable_this_way', 409);
     if (!(request.amountTzs > 0)) return fail('invalid_amount', 409);
     const msisdn = toMsisdn(phone);

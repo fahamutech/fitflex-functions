@@ -1,7 +1,7 @@
 // Pay a payment request by mobile money (Malipo by Tunzaa).
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { mobileMoneyService } from '../src/bootstrap/services.mjs';
+import { mobileMoneyService, manualPayment } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -13,9 +13,13 @@ function send(res, result) {
 
 export const paymentOptions = {
   created, method: 'get', path: '/payments/options',
-  description: 'Whether paying by mobile money is available, and in which environment (sandbox shows a test-mode notice in the app).',
+  description: 'Whether paying by mobile money is available, and in which environment (sandbox shows a test-mode notice in the app). While MANUAL_PAY_INSTRUCTIONS is on, also `manual` { enabled, lipaNamba, accountName, network, instructions, referenceRequired }: enabled only when the Lipa Namba and account name are configured.',
   onGuard: requireAuth(),
-  onRequest: async (_, res) => res.json(mobileMoneyService.options())
+  onRequest: async (_, res) => res.json({
+    ...mobileMoneyService.options(),
+    // Flag off: the response is exactly as before (no `manual` key).
+    ...(manualPayment.flagOn() ? { manual: manualPayment.options() } : {}),
+  })
 };
 
 export const payByMobileMoney = {

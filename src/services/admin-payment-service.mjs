@@ -156,9 +156,11 @@ export function createAdminPaymentService({
 
     const now = new Date().toISOString();
     const status = decision === 'approve' ? 'approved' : 'rejected';
+    // Approving with no reference typed confirms the transaction ID the member gave (slice A3).
+    const confirmedRef = reference || (decision === 'approve' ? request.memberReference : null) || null;
     const updated = await writeDecision(request, {
       status,
-      reference: reference || request.reference,
+      reference: confirmedRef || request.reference,
       // An upgrade's note names the plan it upgrades: it stays as it is.
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
@@ -167,7 +169,7 @@ export function createAdminPaymentService({
     // Another decision got there first (two staff members, or a double click).
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'already_decided', status: 409 };
-    await applyPaymentStatusToSubscription(request, status, reference || `ADMIN_${request.id}`);
+    await applyPaymentStatusToSubscription(request, status, confirmedRef || `ADMIN_${request.id}`);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: `payment_${status}`, target: request.id, before: request, after: updated

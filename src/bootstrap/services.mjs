@@ -31,7 +31,8 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn } from '../shared/feature-flags.mjs';
+import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
 import { createSmsProvider } from '../integrations/sms/provider.mjs';
 import { createSmsService } from '../services/sms-service.mjs';
@@ -362,7 +363,16 @@ export const authService = createAuthService({
   identityLink: identityLinkService, auditLog, orgMemberships: orgMembershipService,
 });
 
-export const subscriptionService = createSubscriptionService({ subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId });
+/**
+ * Slice A3: manual mobile-money payment. Off unless MANUAL_PAY_INSTRUCTIONS is
+ * set; on, it applies only once the admin has saved a Lipa Namba and account name.
+ */
+export const manualPayment = {
+  flagOn: () => manualPayInstructionsOn(),
+  required: () => manualPayInstructionsOn() && manualPaymentConfigured(settingsService.manualPaymentSettings()),
+  options: () => manualPaymentOptions(settingsService.manualPaymentSettings(), manualPayInstructionsOn()),
+};
+export const subscriptionService = createSubscriptionService({ subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId, manualPayment });
 export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
   // promotionEventsService is defined at the end of this file; this only runs later.
