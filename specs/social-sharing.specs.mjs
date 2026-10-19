@@ -1,6 +1,6 @@
-// Sharing between members: only mutual followers, group-mates or company
-// colleagues ever see a shared activity; private by default; blocks hide
-// everything; group owners who aren't members see nothing.
+// Sharing between members: only the audience an activity is shared with
+// ever sees it; public by default, private when the member chooses; blocks
+// hide everything; group owners who aren't members see nothing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSocialService, publicActivity } from '../src/services/social-service.mjs';
@@ -39,10 +39,10 @@ function setup() {
   return s;
 }
 
-test('private by default; `followers` from older apps still means mutual friends', async () => {
+test('private when chosen; `followers` from older apps still means mutual friends', async () => {
   const s = setup();
-  const priv = await s.log('ana');
-  assert.equal(priv.shareWith, null, 'nothing is shared unless chosen');
+  const priv = await s.log('ana', null);
+  assert.equal(priv.shareWith, null, 'choosing private shares nothing');
   const shared = await s.log('ana', { followers: true });
 
   assert.equal(await s.sees('ben', shared), false);
@@ -145,7 +145,7 @@ test('feed, kudos and comments', async () => {
   const s = setup();
   await s.svc.follow('ana', 'ben'); await s.svc.follow('ben', 'ana');
   const mine = await s.log('ben', { followers: true });
-  const hidden = await s.log('ben');
+  const hidden = await s.log('ben', null);
   const old = (await s.acts.log('ben', { type: 'walking', startedAt: new Date(+NOW - 40 * 86400e3).toISOString(), steps: 1, shareWith: { followers: true } })).activity;
 
   const feed = await s.svc.feed('ana');
@@ -175,7 +175,9 @@ test('feed, kudos and comments', async () => {
 
 test('finding people: shared groups or company by name, anyone by invite code', async () => {
   const s = setup();
-  assert.deepEqual((await s.svc.findPeople('ana', { q: 'ben' })).people, [], 'no open search');
+  assert.deepEqual((await s.svc.findPeople('ana', { q: 'ben' })).people.map(p => p.id), ['ben'], 'public by default: found by name');
+  await s.svc.updateSettings('ben', { publicProfile: false });
+  assert.deepEqual((await s.svc.findPeople('ana', { q: 'ben' })).people, [], 'no open search of private profiles');
   const code = (await s.svc.settings('ben')).inviteCode;
   assert.equal((await s.svc.findPeople('ana', { code })).people[0].id, 'ben');
   assert.deepEqual((await s.svc.findPeople('dee', { q: 'el' })).people.map(p => p.id), ['eli'], 'colleague by name');

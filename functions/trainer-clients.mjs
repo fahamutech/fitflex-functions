@@ -23,7 +23,7 @@ export const myTrainerConnections = {
 
 export const requestTrainerConnection = {
   created, method: 'post', path: '/trainers/:id/connect',
-  description: 'Member: ask a trainer to connect. { permissions: { steps, distance, activeMinutes, workoutHistory, workoutDetails, goals, streaks, challenges } } — all default to false.',
+  description: 'Member: ask a trainer to connect. { permissions: { steps, distance, activeMinutes, workoutHistory, workoutDetails, goals, streaks, challenges } } — without `permissions` all eight start on; when sent, keys left out are off.',
   requestSample: { permissions: { workoutHistory: true, goals: true } },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {

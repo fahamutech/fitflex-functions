@@ -185,6 +185,9 @@ export function createActivityService({ activities, users = null, routes = null,
     const heightCm = users ? (await users.findByIdAsync(memberId))?.memberProfile?.heightCm : null;
     const distanceFor = (platform, steps) => (STEP_ONLY_PLATFORMS.has(platform) ? estimateWalkKm(steps, heightCm) : null);
     let created = 0, updated = 0, unchanged = 0;
+    // New step rows get the member's default sharing (looked up once);
+    // rows already saved keep theirs.
+    let deviceShare;
     for (const r of clean) {
       const existing = mine.find(a => a.devicePlatform === r.devicePlatform && a.externalId === r.externalId);
       if (existing) {
@@ -196,6 +199,7 @@ export function createActivityService({ activities, users = null, routes = null,
         } else unchanged += 1;
         continue;
       }
+      if (deviceShare === undefined) deviceShare = (await shareFor(memberId, undefined)).share ?? null;
       const row = {
         id: `act_${randomUUID().slice(0, 12)}`,
         userId: memberId,
@@ -208,6 +212,7 @@ export function createActivityService({ activities, users = null, routes = null,
         devicePlatform: r.devicePlatform,
         externalId: r.externalId,
         deviceName: r.deviceName,
+        shareWith: deviceShare,
         createdAt: now().toISOString(),
       };
       try {
