@@ -84,6 +84,22 @@ export function shopHomeV2On() {
 }
 
 /**
+ * A1 · second approver on money. Off unless MONEY_SECOND_APPROVER is set, so a
+ * deploy never changes how payments and refunds are decided on its own. On:
+ *   - a manual payment is verified by one admin and approved by a different one
+ *     (403 cannot_approve_own_verification);
+ *   - an already-decided payment changes status only by request + confirmation
+ *     by a different admin (403 cannot_confirm_own_request);
+ *   - an admin-raised refund waits for approval by someone other than the raiser
+ *     (403 cannot_approve_own_request), and a refund is marked paid by someone
+ *     other than its approver (403 cannot_pay_own_approval).
+ * Payments a provider confirms (mobile money, Selcom) are not affected.
+ */
+export function moneySecondApproverOn() {
+  return on('MONEY_SECOND_APPROVER');
+}
+
+/**
  * Vendor business tools (plan docs/plans/vendor-business-tools-plan.md).
  * VENDOR_TOOLS is the umbrella: a slice flag is on only when both it and
  * VENDOR_TOOLS are on. Everything is off unless set. Writes that are pure
