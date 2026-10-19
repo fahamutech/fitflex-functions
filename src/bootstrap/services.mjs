@@ -58,6 +58,7 @@ import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
+import { createProductStatsRecomputeService } from '../services/product-stats-recompute-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -258,6 +259,7 @@ export const shopService = createShopService({
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
+export const productStatsRecomputeService = createProductStatsRecomputeService({ db });
 export const corporateService = createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
   // Every new company gets its employer B2B organisation. b2bService is defined

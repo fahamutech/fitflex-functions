@@ -2,7 +2,7 @@
 import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopService, vendorSettlementService, shopReconciliationService } from '../src/bootstrap/services.mjs';
+import { shopService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
 import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
@@ -308,6 +308,23 @@ export const adminMarketplaceRepairPayment = {
       return res.status(status).json({ error, ...extra });
     }
     res.json(result.order);
+  },
+};
+
+export const adminRecomputeProductStats = {
+  created, method: 'post', path: '/admin/shop/product-stats/recompute',
+  description: 'Admin (scope `shop`, as /admin/products): recompute each product\'s rating, reviewCount and soldCount from the records, as the server keeps them — rating = plain average of its ProductReview rows (stored to 2 decimals), reviewCount = number of those rows (none → 0 / 0), soldCount = sum of line qty over orders still holding their stock (stockState reserved: paid or unpaid, any fulfilment status; cancelled/expired orders that gave stock back do not count). Nothing else on the product is touched. Body { apply?: boolean (default false = dry run, writes nothing), productIds?: string[] (optional subset, 1–1000) }. → 200 { dryRun, checked, changed: [{ productId, name, vendorId, before: { rating, reviewCount, soldCount }, after: { … } }], unchanged, appliedAt?, runId? } (appliedAt/runId only when applied; runId = the AuditLog id, action admin_product_stats_recomputed). Apply is one transaction; a second apply while one runs → 409 recompute_in_progress. 400 invalid_apply | invalid_product_ids | too_many_product_ids. Vendors, members, everyone else → 403.',
+  requestSample: { apply: false },
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('shop')]),
+  onRequest: async (req, res) => {
+    const body = req.body || {};
+    if (body.apply !== undefined && typeof body.apply !== 'boolean') return res.status(400).json({ error: 'invalid_apply' });
+    const result = await productStatsRecomputeService.recompute({ apply: body.apply === true, productIds: body.productIds, actorId: req.user.sub });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
+    res.json(result);
   },
 };
 
