@@ -1,7 +1,7 @@
 // Gym ↔ member activity sharing and membership engagement.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createGymSharingService, engagementFrom, normalizeGymPermissions } from '../src/services/gym-sharing-service.mjs';
+import { createGymSharingService, engagementFrom, normalizeGymPermissions, gymPermissionsFor } from '../src/services/gym-sharing-service.mjs';
 
 function store(rows = []) {
   const clone = (r) => JSON.parse(JSON.stringify(r));
@@ -50,33 +50,51 @@ function setup() {
 
 const owner = { id: 'o1', gymIds: ['g1'] };
 
-test('permissions: known keys only, all off by default', () => {
+test('permissions: known keys only; no row means all on, a row is honoured exactly', () => {
   assert.deepEqual(normalizeGymPermissions({ classAttendance: true, steps: true }), {
     classAttendance: true, gymWorkouts: false, challenges: false,
   });
   assert.deepEqual(normalizeGymPermissions(undefined), { classAttendance: false, gymWorkouts: false, challenges: false });
+  assert.deepEqual(gymPermissionsFor(null), { classAttendance: true, gymWorkouts: true, challenges: true });
+  assert.deepEqual(gymPermissionsFor({ permissions: { gymWorkouts: true } }), { classAttendance: false, gymWorkouts: true, challenges: false });
+  assert.deepEqual(gymPermissionsFor({ permissions: {} }), { classAttendance: false, gymWorkouts: false, challenges: false });
 });
 
-test('member sees their gyms — home and visited — with nothing extra shared', async () => {
+test('member sees their gyms — home and visited — with everything shared by default', async () => {
   const s = setup();
   const { gyms } = await s.svc.memberSharing('m1');
   assert.deepEqual(gyms.map(g => [g.gym.id, g.reasons]), [['g1', ['member', 'visited']], ['g2', ['visited']]]);
-  assert.ok(gyms.every(g => Object.values(g.permissions).every(v => v === false)));
+  assert.ok(gyms.every(g => Object.values(g.permissions).every(v => v === true)));
+  assert.equal(s.sharing.rows.length, 0, 'no row is written just by looking');
 });
 
 test('members can only set sharing for their own gyms', async () => {
   const s = setup();
   assert.equal((await s.svc.updateMemberSharing('m1', 'g3', { permissions: { classAttendance: true } })).status, 404);
   assert.equal((await s.svc.updateMemberSharing('m1', 'g1', {})).error, 'invalid_permissions');
-  const r = await s.svc.updateMemberSharing('m1', 'g1', { permissions: { classAttendance: true } });
-  assert.equal(r.permissions.classAttendance, true);
-  const again = await s.svc.updateMemberSharing('m1', 'g1', { permissions: { gymWorkouts: true } });
-  assert.deepEqual(again.permissions, { classAttendance: true, gymWorkouts: true, challenges: false }, 'omitted keys kept');
+  const r = await s.svc.updateMemberSharing('m1', 'g1', { permissions: { classAttendance: false } });
+  assert.deepEqual(r.permissions, { classAttendance: false, gymWorkouts: true, challenges: true }, 'the first change starts from all on');
+  const again = await s.svc.updateMemberSharing('m1', 'g1', { permissions: { challenges: false } });
+  assert.deepEqual(again.permissions, { classAttendance: false, gymWorkouts: true, challenges: false }, 'omitted keys kept');
   assert.equal(s.sharing.rows.length, 1, 'one row per member per gym');
+  const [g1] = (await s.svc.memberSharing('m1')).gyms;
+  assert.deepEqual(g1.permissions, again.permissions, 'the member\'s own view shows the saved choice');
 });
 
-test('by default a gym sees visit patterns only — no activity', async () => {
+test('by default a gym sees class attendance, gym workouts and challenges at that gym', async () => {
   const s = setup();
+  const [g] = (await s.svc.ownerMemberActivity(owner, 'm1')).gyms;
+  assert.deepEqual(g.permissions, { classAttendance: true, gymWorkouts: true, challenges: true });
+  assert.deepEqual(g.classAttendance, [{ date: '2026-09-20', type: 'group_class', durationMinutes: 50 }]);
+  assert.deepEqual(g.gymWorkouts, [{ date: '2026-09-22', type: 'strength', durationMinutes: 45 }]);
+  assert.deepEqual(g.challenges, []);
+  const json = JSON.stringify(g);
+  for (const leak of ['running', '9000', 'private note', 'distanceKm']) assert.equal(json.includes(leak), false, leak);
+});
+
+test('a member who switches everything off: the gym sees visit patterns only — no activity', async () => {
+  const s = setup();
+  await s.svc.updateMemberSharing('m1', 'g1', { permissions: { classAttendance: false, gymWorkouts: false, challenges: false } });
   const { gyms } = await s.svc.ownerMemberActivity(owner, 'm1');
   assert.equal(gyms.length, 1, 'only the gyms this owner manages');
   const [g] = gyms;

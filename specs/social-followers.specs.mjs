@@ -57,6 +57,8 @@ test('Followers: a one-way follow sees it — no follow-back needed; Friends sti
 
 test('Public: needs a public profile; then any member sees it, finds them and can open their profile', async () => {
   const s = setup();
+  // Public is the default; switched off, nothing public goes out.
+  await s.svc.updateSettings('star', { publicProfile: false });
   assert.equal((await s.acts.log('star', { type: 'walking', startedAt: ago(1), steps: 10, shareWith: { v: 2, public: true } })).error, 'profile_not_public');
   assert.deepEqual((await s.svc.findPeople('stranger', { q: 'neema' })).people, [], 'private profiles aren\'t searchable');
   assert.equal((await s.svc.profilePage('stranger', 'star')).status, 404);
@@ -124,6 +126,7 @@ test('views and engagement: the poster sees a view count and who engaged; viewer
 
 test('the default audience can include followers and public', async () => {
   const s = setup();
+  await s.svc.updateSettings('star', { publicProfile: false });
   assert.equal((await s.svc.updateSettings('star', { defaultShare: { v: 2, public: true } })).error, 'profile_not_public');
   await s.svc.updateSettings('star', { publicProfile: true, defaultShare: { v: 2, followers: true, public: true } });
   assert.deepEqual((await s.post('star')).shareWith, { friends: false, followers: true, public: true, groups: [], company: false });

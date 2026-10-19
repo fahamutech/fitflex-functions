@@ -43,6 +43,18 @@ function setup() {
   return s;
 }
 
+test('permissions sent with the request are honoured exactly; keys left out are off', async () => {
+  const s = setup();
+  const some = (await s.svc.request('m1', 'trn_1', { permissions: { steps: true, goals: true, streaks: false } })).connection;
+  assert.deepEqual(some.permissions, {
+    steps: true, distance: false, activeMinutes: false, workoutHistory: false,
+    workoutDetails: false, goals: true, streaks: false, challenges: false,
+  });
+  const none = (await s.svc.request('m2', 'trn_1', { permissions: {} })).connection;
+  assert.ok(Object.values(none.permissions).every(v => v === false), 'an empty choice shares nothing');
+});
+
+// Connects m1 to trn_1 sharing exactly [permissions] (nothing when omitted).
 async function connect(s, permissions = {}) {
   const { connection } = await s.svc.request('m1', 'trn_1', { permissions });
   await s.svc.accept('usr_t1', connection.id);
@@ -56,7 +68,7 @@ function leaves(value, key = null) {
   return [{ key, value }, ...entries.flatMap(([k, v]) => leaves(v, k))];
 }
 
-test('permissions default to off and ignore unknown keys', () => {
+test('permissions: only literal true counts and unknown keys are ignored', () => {
   const p = normalizePermissions({ steps: true, workoutDetails: true, bankBalance: true, goals: 'yes' });
   assert.deepEqual(Object.keys(p), PERMISSIONS);
   assert.equal(p.steps, true);
@@ -69,7 +81,8 @@ test('member requests, trainer is notified and accepts', async () => {
   const s = setup();
   const { connection } = await s.svc.request('m1', 'trn_1', {});
   assert.equal(connection.status, 'pending');
-  assert.ok(Object.values(connection.permissions).every(v => v === false));
+  assert.deepEqual(Object.keys(connection.permissions), PERMISSIONS);
+  assert.ok(Object.values(connection.permissions).every(v => v === true), 'no permissions sent: all eight start on');
   assert.equal(s.sent[0].userId, 'usr_t1');
   assert.equal(s.sent[0].type, 'trainer_client_request');
 

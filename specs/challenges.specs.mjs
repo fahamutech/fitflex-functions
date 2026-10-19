@@ -172,6 +172,16 @@ test('gym participants use the gym sharing switch and gym-only check-ins', async
   assert.equal(p.progress, 1, 'the check-in at another gym does not count');
 });
 
+test('gym participants: no sharing row means challenges are shared; a row switching it off is honoured', async () => {
+  const s = setup();
+  s.gymMemberSharing.rows.length = 0;
+  const c = (await s.svc.create(GYM, { ...base, type: 'gym_attendance', target: 5 })).challenge;
+  await s.svc.join('m1', c.id);
+  assert.equal((await s.svc.creatorParticipants(GYM, c.id)).participants[0].progress, 1, 'never changed anything: shared');
+  s.gymMemberSharing.rows.push({ id: 'gs2', gymId: 'g1', memberId: 'm1', permissions: { classAttendance: true, gymWorkouts: true, challenges: false } });
+  assert.equal('progress' in (await s.svc.creatorParticipants(GYM, c.id)).participants[0], false, 'switched off: not shared');
+});
+
 test('FitFlex and employers only ever see totals', async () => {
   const s = setup();
   for (const creator of [FITFLEX, CORP]) {
