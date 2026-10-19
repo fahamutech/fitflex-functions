@@ -145,6 +145,9 @@ export function createSettingsService({ platformSettings, auditLog }) {
   function invalidTiers(rows) {
     const bad = (tier, field, extra = {}) => ({ error: 'invalid_subscription_tier', status: 400, tier, field, ...extra });
     if (!Array.isArray(rows)) return bad(null, 'subscriptionTiers');
+    // Under the fail-closed rule an empty list would stop every sale and
+    // every check-in on a held pass; it is never a valid save.
+    if (rows.length === 0) return bad(null, 'subscriptionTiers', { reason: 'empty' });
     const seen = new Set();
     for (const [i, row] of rows.entries()) {
       const tier = typeof row?.key === 'string' && row.key.trim() ? row.key : null;
@@ -156,6 +159,8 @@ export function createSettingsService({ platformSettings, auditLog }) {
       if (visitCapOf(row) === null) return bad(tier, 'visits', { hint: '-1 for unlimited, or a whole number above 0' });
       if (!PASS_GYM_ACCESS.includes(row.gymAccess)) return bad(tier, 'gymAccess', { allowed: PASS_GYM_ACCESS });
     }
+    // Same effect as an empty list: every row switched off (active/enabled false).
+    if (rows.every(switchedOff)) return bad(null, 'subscriptionTiers', { reason: 'none_on_sale' });
     return null;
   }
 

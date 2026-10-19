@@ -129,6 +129,9 @@ export function createOperatorService({
       status: 200,
       body: {
         ...result,
+        // true when the scan repeated a visit already recorded today at this gym (no new visit used);
+        // always present so the scanner can show "already checked in" without guessing.
+        idempotent: result.idempotent === true,
         // Gym staff learn that a sponsor covers the visit, not who the sponsor is or what it pays.
         ...(b2b ? { b2b: { covered: true } } : {}),
         checkin: result.checkin

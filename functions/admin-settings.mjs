@@ -21,7 +21,7 @@ export const adminGetSettings = {
 
 export const adminUpdateSettings = {
   created, method: 'put', path: '/admin/settings',
-  description: 'Admin: update platform settings. Optional manualPayment { lipaNamba, accountName, network?, instructions?: { en, sw } } (or null to clear) — the Lipa Namba members pay manually; 400 manual_payment_invalid with `field` when invalid.',
+  description: 'Admin: update platform settings. Optional manualPayment { lipaNamba, accountName, network?, instructions?: { en, sw } } (or null to clear) — the Lipa Namba members pay manually; 400 manual_payment_invalid with `field` when invalid. subscriptionTiers must be a non-empty list of complete rows: 400 invalid_subscription_tier with tier + field (field subscriptionTiers with reason empty | none_on_sale when the list is empty or every row is switched off).',
   onGuard: routeGuard('put', [requireAuth('admin'), requireAcl('settings')]),
   onRequest: async (req, res) => {
     const result = await settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub });
