@@ -19,6 +19,7 @@ import {
   adminListProducts, adminCreateProduct, adminUpdateProductListing,
 } from '../functions/shop.mjs';
 import { shopHome, resetShopHomeLimits } from '../functions/shop-home.mjs';
+import { findLeaks } from './fixtures/leak-scan.mjs';
 
 await ensureInit();
 
@@ -574,7 +575,12 @@ test('cost price and reorder level never appear in /shop/products, /shop/product
   const p = await listed(v, { name: 'Private cost whey', stock: 50, costTzs: 7_777, reorderLevel: 5, variants: [{ name: 'Big', stock: 50, costTzs: 8_888, reorderLevel: 4 }] });
   for (let i = 0; i < 4; i += 1) await listed(v, { name: `Cost item ${i}`, stock: 20, costTzs: 1_000 + i, reorderLevel: 1 });
   const member = { sub: await user('member'), userType: 'member' };
-  const leaks = body => ['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel', 'lowStockAlertedAt', '7777', '8888'].filter(k => JSON.stringify(body).includes(k));
+  // Key names anywhere in the JSON; the seeded costs as whole values only (a
+  // substring search for '7777' trips on random ids and other rows' prices).
+  const leaks = body => [
+    ...['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel', 'lowStockAlertedAt'].filter(k => JSON.stringify(body).includes(k)),
+    ...[7777, 8888].filter(n => findLeaks(body, { numbers: [n] }).length).map(String),
+  ];
   const list = await call(listShopProducts, member, { query: { vendorId: v } });
   assert.equal(list.body.some(x => x.id === p.id), true, 'the product is listed (not a vacuous check)');
   assert.deepEqual(leaks(list.body), []);
@@ -756,7 +762,10 @@ test('PUT /admin/products/:id/listing: an admin sets cost / reorder level (audit
 
   // Whatever an admin set, the public shop shows none of it.
   const member = { sub: await user('member'), userType: 'member' };
-  const leaks = body => ['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel', '4400', '4321'].filter(k => JSON.stringify(body).includes(k));
+  const leaks = body => [
+    ...['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel'].filter(k => JSON.stringify(body).includes(k)),
+    ...[4400, 4321].filter(n => findLeaks(body, { numbers: [n] }).length).map(String),   // whole values, see above
+  ];
   const list = await call(listShopProducts, member, { query: { vendorId: v } });
   assert.equal(list.body.some(x => x.id === p.id), true);
   assert.deepEqual(leaks(list.body), []);

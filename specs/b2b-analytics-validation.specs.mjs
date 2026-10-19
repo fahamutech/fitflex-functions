@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { purgeB2BBilling } from './fixtures/ledger-cleanup.mjs';
+import { findLeaks, csvHeader } from './fixtures/leak-scan.mjs';
 import {
   gyms, b2bService, b2bProgramService, b2bConsumptionService as usage, b2bAnalyticsService as analytics, corporateService, signJwt as sign,
 } from '../src/bootstrap/services.mjs';
@@ -312,17 +313,34 @@ test('a day is an East Africa Time day: 23:30 and 00:30 land on different days e
 });
 
 test('no analytics response carries a field an organisation must never receive', async () => {
+  // What this checks, for every analytics response and every CSV export an
+  // organisation owner can fetch:
+  //  - no key, at any depth, names a forbidden field (body measurements,
+  //    calories, notes, routes, splits, elevation, contact details, PIN or
+  //    password material, device names, settlement or payout figures), and no
+  //    CSV column header does either;
+  //  - the person's own values appear nowhere, whatever key they sit under:
+  //    their note, email and phone (and the memberProfile key names) as
+  //    substrings of any string; their calories, height, weight and elevation
+  //    as a whole value: a number field equal to it, or a whole token of any
+  //    string (a CSV cell, "411 kcal", JSON held in a string). See
+  //    specs/fixtures/leak-scan.mjs. Checking whole values rather than
+  //    substrings of the JSON text is what keeps random ids and timestamps
+  //    (which contain "411" or "175" by chance) from failing the test.
   const g = await gym('Validation Privacy Gym', 5000);
   const orgId = await sponsor('privacy');
   const userId = await user('member', 'Private Person');
+  // Measurements no other figure in these responses can equal by chance.
+  await db('User').where({ id: userId }).update({ memberProfile: JSON.stringify({ weightKg: 93.7, heightCm: 175 }) });
   const { beneficiary } = await b2bService.enrollBeneficiary({ access: await access(orgId), body: { userId, status: 'active', groupName: 'Ops' }, actorId: BILLER });
   await programme(orgId, VISITS);
   const id = await checkin(userId, g, new Date());
   await usage.consume({ userId, sourceType: 'gym_checkin', sourceId: id, provider: { type: 'gym', id: g, tier: 'standard' }, grossTzs: 5000 });
   const act = uid('act');
-  await db('Activity').insert({ id: act, userId, type: 'running', source: 'manual', startedAt: new Date(), durationMinutes: 20, calories: 411, notes: 'secret-note', hasRoute: true, splits: JSON.stringify([{ km: 1 }]), elevationGainM: 12 });
+  await db('Activity').insert({ id: act, userId, type: 'running', source: 'manual', startedAt: new Date(), durationMinutes: 20, calories: 411, notes: 'secret-note', hasRoute: true, splits: JSON.stringify([{ km: 1 }]), elevationGainM: 287 });
   made.activities.push(act);
   const me = await db('User').where({ id: userId }).first();
+  assert.ok(me.email && me.phone, 'the person has an email and phone to leak');
 
   const owner = await user('member', 'Owner');
   await b2bService.addOrganizationUser({ access: await access(orgId), body: { userId: owner, role: 'owner' }, actorId: BILLER });
@@ -336,19 +354,23 @@ test('no analytics response carries a field an organisation must never receive',
   for (const report of ['beneficiaries', 'usage', 'activity', 'benefits', 'programs', 'providers', 'invoices', 'payments']) responses[`csv:${report}`] = await analytics.exportCsv({ access: a, report, query: q, actorId: owner });
 
   const forbiddenKeys = /weight|height|calorie|^notes$|route|split|elevation|email|phone|^pin|pinhash|password|memberprofile|devicename|externalid|settlement|payout/i;
-  const walk = (value, path, hits) => {
-    if (Array.isArray(value)) value.forEach((v, i) => walk(v, `${path}[${i}]`, hits));
-    else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) { if (forbiddenKeys.test(k)) hits.push(`${path}.${k}`); walk(v, `${path}.${k}`, hits); }
+  const forbidden = {
+    keys: forbiddenKeys,
+    numbers: [411, 175, 93.7, 287],                                   // calories, heightCm, weightKg, elevationGainM
+    strings: ['secret-note', me.email, me.phone, 'weightKg', 'heightCm', 'memberProfile'],
   };
   for (const [name, body] of Object.entries(responses)) {
     assert.ok(!body.error, `${name}: ${JSON.stringify(body).slice(0, 200)}`);
-    const hits = [];
-    walk(name === 'person' ? { ...body, notShown: undefined } : body, name, hits);
+    // `person.notShown` names what is withheld ('weight', 'calories', ...) and is the one place those words belong.
+    const hits = findLeaks(name === 'person' ? { ...body, notShown: undefined } : body, { ...forbidden, path: name });
+    if (name.startsWith('csv:')) for (const h of csvHeader(body.csv)) if (forbiddenKeys.test(h)) hits.push(`${name} column "${h}"`);
     assert.deepEqual(hits, [], name);
-    // And none of the values themselves, whatever key they sit under.
-    const text = JSON.stringify(name === 'person' ? { ...body, notShown: [] } : body);
-    for (const secret of ['secret-note', '411', me.email, me.phone, '"weightKg"', '175']) assert.equal(text.includes(secret), false, `${name} contains ${secret}`);
   }
+  // The scan is not vacuous: the person and their activity are in the responses.
   assert.equal(responses.person.activities.length, 1);
   assert.equal(responses['csv:activity'].rows, 1);
+  assert.ok(responses.people.items.some(r => r.beneficiaryId === beneficiary.id));
+  // And it does see a leak when there is one.
+  assert.deepEqual(findLeaks({ a: { kcal: 411 }, b: 'x,175,y', c: '{"w":93.7}', d: `call ${me.phone}`, e: { calories: 1 } }, { ...forbidden, path: 'probe' }).length, 5);
+  assert.deepEqual(findLeaks({ id: 'a411b-0411-1750', at: '2026-10-19T08:00:00.411Z', price: 14110, n: 1411 }, { ...forbidden, path: 'probe' }), []);
 });
