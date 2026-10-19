@@ -204,6 +204,8 @@ export function createMobileMoneyService({
       }
       const out = await adminPaymentService.decide({
         id: request.id, decision: 'approve', reference: txn, actorId: ACTOR, amountTzs: request.amountTzs,
+        // The provider confirmed the money: that is the verification (MONEY_SECOND_APPROVER does not apply).
+        automated: true,
       });
       if (out.error === 'already_decided') {
         const latest = await paymentRequests.findByIdAsync(request.id);

@@ -82,3 +82,19 @@ export function tunzaaSandboxSettlesOn() {
 export function shopHomeV2On() {
   return on('SHOP_HOME_V2');
 }
+
+/**
+ * A1 · second approver on money. Off unless MONEY_SECOND_APPROVER is set, so a
+ * deploy never changes how payments and refunds are decided on its own. On:
+ *   - a manual payment is verified by one admin and approved by a different one
+ *     (403 cannot_approve_own_verification);
+ *   - an already-decided payment changes status only by request + confirmation
+ *     by a different admin (403 cannot_confirm_own_request);
+ *   - an admin-raised refund waits for approval by someone other than the raiser
+ *     (403 cannot_approve_own_request), and a refund is marked paid by someone
+ *     other than its approver (403 cannot_pay_own_approval).
+ * Payments a provider confirms (mobile money, Selcom) are not affected.
+ */
+export function moneySecondApproverOn() {
+  return on('MONEY_SECOND_APPROVER');
+}

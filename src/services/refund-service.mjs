@@ -14,6 +14,7 @@
 //       └──────reject────▶ rejected
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
+import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
 
 export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order'];
 export const REFUND_STATUSES = ['requested', 'approved', 'paid', 'rejected'];
@@ -31,6 +32,8 @@ export function createRefundService({
   refunds, paymentRequests, subscriptions, users, auditLog,
   notify = async () => {},          // (userId, { type, title, body, data })
   onPaid = async () => {},          // (refund) → e.g. mark the order refunded
+  // A1: two admins on refunds (MONEY_SECOND_APPROVER). Off: unchanged.
+  secondApprover = moneySecondApproverOn,
 }) {
   const money = n => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
 
@@ -116,7 +119,10 @@ export function createRefundService({
     return out;
   }
 
-  /** Admin: raise a refund for any confirmed pass or plan payment (approved at once). */
+  /**
+   * Admin: raise a refund for any confirmed pass or plan payment. Approved at
+   * once, unless MONEY_SECOND_APPROVER is on: then it waits for another admin.
+   */
   async function adminRaise({ body = {}, actorId }) {
     const request = body.paymentRequestId ? await paymentRequests.findByIdAsync(body.paymentRequestId) : null;
     if (!request) return fail('payment_not_found', 404);
@@ -127,7 +133,7 @@ export function createRefundService({
     const out = await raise({
       memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId,
       amountTzs, currency: request.currency || 'TZS', reasonCode: body.reasonCode || 'payment_error', note: body.note,
-      requestedBy: actorId, requestedRole: 'admin', approved: true,
+      requestedBy: actorId, requestedRole: 'admin', approved: !secondApprover(),
     });
     if (out.existing) return fail('refund_already_requested', 409, { refund: out.refund });
     return out;
@@ -139,6 +145,10 @@ export function createRefundService({
     const prior = await refunds.findByIdAsync(id);
     if (!prior) return fail('refund_not_found', 404);
     if (prior.status !== 'requested') return fail('already_decided', 409, { refundStatus: prior.status });
+    // Flag on: whoever raised a refund cannot approve it (rejecting your own is allowed: no money moves).
+    if (body.decision === 'approve' && secondApprover() && prior.requestedRole === 'admin' && prior.requestedBy === actorId) {
+      return fail('cannot_approve_own_request', 403);
+    }
     const note = text(body.note);
     if (body.decision === 'reject' && !note) return fail('note_required');
     let amountTzs = prior.amountTzs;
@@ -190,6 +200,8 @@ export function createRefundService({
     if (!prior) return fail('refund_not_found', 404);
     if (prior.status === 'paid') return fail('already_paid', 409, { refundStatus: 'paid' });
     if (prior.status !== 'approved') return fail('refund_not_approved', 409, { refundStatus: prior.status });
+    // Flag on: whoever approved a refund does not also record it paid. Policy approvals ('policy') are not people.
+    if (secondApprover() && prior.decidedBy && prior.decidedBy === actorId) return fail('cannot_pay_own_approval', 403);
     const reference = text(body.paymentReference, 120);
     if (!reference) return fail('payment_reference_required');
     const at = nowIso();
@@ -220,16 +232,34 @@ export function createRefundService({
     return { refunds: (await refunds.filterByColumnAsync('memberId', memberId)).sort(byNewest) };
   }
 
+  /**
+   * Where a refund stands in the two-admin workflow (admin list, flag on only):
+   *   approvalStage: awaiting_approval | awaiting_payment | null
+   *   approveNotBy: the admin who raised it (admin-raised, still requested)
+   *   payNotBy:     the admin who approved it (approved, not yet paid)
+   */
+  function secondApproval(r) {
+    const approveNotBy = r.status === 'requested' && r.requestedRole === 'admin' ? (r.requestedBy || null) : null;
+    const payNotBy = r.status === 'approved' && r.decidedBy && r.decidedBy !== 'policy' ? r.decidedBy : null;
+    const approvalStage = r.status === 'requested' ? 'awaiting_approval' : r.status === 'approved' ? 'awaiting_payment' : null;
+    return { secondApproverRequired: true, approvalStage, approveNotBy, payNotBy };
+  }
+
   /** Admin: refunds, optionally by status, with who they are for. */
   async function adminList({ status } = {}) {
     if (status && !REFUND_STATUSES.includes(status)) return fail('invalid_status', 400, { allowed: REFUND_STATUSES });
     const rows = (status ? await refunds.filterByColumnAsync('status', status) : await refunds.allAsync()).sort(byNewest);
     const people = await users.filterByColumnInAsync('id', [...new Set(rows.map(r => r.memberId))]);
     const byId = new Map(people.map(u => [u.id, u]));
+    const twoAdmins = secondApprover();
     return {
       refunds: rows.map((r) => {
         const u = byId.get(r.memberId);
-        return { ...r, member: u ? { id: u.id, displayName: u.displayName || null, phone: u.phone || null, email: u.email || null } : null };
+        return {
+          ...r,
+          member: u ? { id: u.id, displayName: u.displayName || null, phone: u.phone || null, email: u.email || null } : null,
+          ...(twoAdmins ? secondApproval(r) : {}),
+        };
       }),
     };
   }

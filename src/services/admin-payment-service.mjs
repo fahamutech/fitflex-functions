@@ -6,6 +6,12 @@ import { activationDates } from '../shared/subscription-status.mjs';
 import { productTypeOfPayment } from '../shared/payment-product.mjs';
 import { upgradeOf, upgradeApprovable, applyUpgradeStatus } from '../shared/pass-upgrade.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
+import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
+
+const DECIDED = ['approved', 'rejected', 'cancelled'];
+const STATUSES = ['pending', ...DECIDED];
+const CHANGE_CLEARED = { changeRequestedStatus: null, changeRequestedBy: null, changeRequestedAt: null, changeRequestReason: null };
+const text = (v, max = 500) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
@@ -22,6 +28,8 @@ export function createAdminPaymentService({
   onSubscriptionPaymentReversed = async () => {},
   // A pass was upgraded in place: (subscription, request) => void. Best-effort.
   onPassUpgraded = async () => {},
+  // A1: two admins on every manual payment decision (MONEY_SECOND_APPROVER). Off: unchanged.
+  secondApprover = moneySecondApproverOn,
 }) {
   function slimMember(u) {
     if (!u) return null;
@@ -104,13 +112,33 @@ export function createAdminPaymentService({
     const memberById = new Map(memberRows.map(u => [u.id, u]));
     const subById = new Map(subscriptionRows.map(s => [s.id, s]));
 
+    const twoAdmins = secondApprover();
     return allPayReqs.map(p => ({
       ...p,
       member: slimMember(memberById.get(p.memberId) || null),
       subscription: slimSub(subById.get(p.subscriptionId) || null),
       productType: productTypeOfPayment(p, subById.get(p.subscriptionId) || null),
       gym: slimGym(p.gymId),
+      ...(twoAdmins ? secondApproval(p) : {}),
     }));
+  }
+
+  /**
+   * Where a payment stands in the two-admin workflow (list rows, flag on only):
+   *   approvalStage: awaiting_verification | awaiting_second_approval | change_requested | null
+   *   approveNotBy:  who may not approve it (the verifier)
+   *   confirmChangeNotBy: who may not confirm the requested change (the requester)
+   */
+  function secondApproval(p) {
+    let approvalStage = null;
+    if (p.changeRequestedBy) approvalStage = 'change_requested';
+    else if (p.status === 'pending') approvalStage = p.verifiedBy ? 'awaiting_second_approval' : 'awaiting_verification';
+    return {
+      secondApproverRequired: true,
+      approvalStage,
+      approveNotBy: p.status === 'pending' ? (p.verifiedBy || null) : null,
+      confirmChangeNotBy: p.changeRequestedBy || null,
+    };
   }
 
   /**
@@ -133,21 +161,39 @@ export function createAdminPaymentService({
   }
 
   /** Write the decision only if the request is still in the state it was read in. */
-  async function writeDecision(request, patch) {
+  async function writeDecision(request, patch, guard = {}) {
     try {
-      return await updateIf(paymentRequests, request.id, { status: request.status }, patch);
+      return await updateIf(paymentRequests, request.id, { status: request.status, ...guard }, patch);
     } catch (err) {
       if (err?.code === '23505') return 'reference_already_used';
       throw err;
     }
   }
 
-  async function decide({ id, decision, reference, note, actorId, amountTzs = null }) {
+  /**
+   * With the flag on, approving a manual payment needs a verification by a
+   * different admin. `automated` is for provider-confirmed payments (mobile
+   * money): the provider is the verification. It is never set from an endpoint.
+   */
+  function approvalBlocked(request, actorId, automated, reference) {
+    if (automated || !secondApprover()) return null;
+    if (!request.verifiedBy) return { error: 'verification_required', status: 409 };
+    if (request.verifiedBy === actorId) return { error: 'cannot_approve_own_verification', status: 403 };
+    // The approver approves what was verified: not a different reference.
+    if (referenceChanged(request, reference)) return { error: 'reference_differs_from_verification', status: 409 };
+    return null;
+  }
+
+  const referenceChanged = (request, reference) => reference != null && reference !== '' && reference !== request.reference;
+
+  async function decide({ id, decision, reference, note, actorId, amountTzs = null, automated = false }) {
     if (!['approve', 'reject'].includes(decision)) return { error: 'invalid_decision', status: 400 };
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
     if (decision === 'approve') {
+      const blocked = approvalBlocked(request, actorId, automated, reference);
+      if (blocked) return blocked;
       const can = await upgradeApprovable(subscriptions, request);
       if (!can.ok) return { error: can.error, status: 409 };
       const problem = await checkConfirmation(request, { reference: reference || request.reference, amountTzs });
@@ -156,6 +202,8 @@ export function createAdminPaymentService({
 
     const now = new Date().toISOString();
     const status = decision === 'approve' ? 'approved' : 'rejected';
+    // Approved by a second admin: only while the verification it was checked against still stands.
+    const guard = (decision === 'approve' && !automated && secondApprover()) ? { verifiedBy: request.verifiedBy } : {};
     const updated = await writeDecision(request, {
       status,
       reference: reference || request.reference,
@@ -163,7 +211,7 @@ export function createAdminPaymentService({
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
       decidedBy: actorId
-    });
+    }, guard);
     // Another decision got there first (two staff members, or a double click).
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'already_decided', status: 409 };
@@ -181,6 +229,20 @@ export function createAdminPaymentService({
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     const nextStatus = status || request.status;
+    if (secondApprover()) {
+      // A decided payment changes only by request + confirmation (requestChange / confirmChange).
+      if (DECIDED.includes(request.status) && (nextStatus !== request.status || referenceChanged(request, reference))) {
+        return { error: 'change_requires_confirmation', status: 409 };
+      }
+      if (nextStatus === 'approved' && request.status === 'pending') {
+        const blocked = approvalBlocked(request, actorId, false, reference);
+        if (blocked) return blocked;
+      }
+      // A verified payment keeps the reference it was verified with.
+      if (request.status === 'pending' && request.verifiedBy && referenceChanged(request, reference)) {
+        return { error: 'reference_differs_from_verification', status: 409 };
+      }
+    }
     // A confirmed shop-order payment is not edited back: the order is paid, maybe fulfilled.
     // Getting the money back is the refund workflow.
     if (request.orderId && request.status === 'approved' && nextStatus !== 'approved') {
@@ -193,13 +255,16 @@ export function createAdminPaymentService({
       if (problem) return problem;
     }
     const now = new Date().toISOString();
+    const twoAdmins = secondApprover();
+    // Flag on: a note-only edit of a decided payment keeps who decided it.
+    const keepDecider = twoAdmins && DECIDED.includes(request.status) && nextStatus === request.status;
     const updated = await writeDecision(request, {
       status: nextStatus,
       reference: reference ?? request.reference,
       note: upgradeOf(request) ? request.note : (note ?? request.note ?? null),
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
-      decidedBy: nextStatus === 'pending' ? null : actorId
-    });
+      decidedBy: nextStatus === 'pending' ? null : (keepDecider ? request.decidedBy : actorId)
+    }, (twoAdmins && nextStatus === 'approved' && request.status === 'pending') ? { verifiedBy: request.verifiedBy } : {});
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'payment_changed', status: 409 };
     await applyPaymentStatusToSubscription(request, nextStatus, reference ?? request.reference);
@@ -210,5 +275,99 @@ export function createAdminPaymentService({
     return { paymentRequest: updated };
   }
 
-  return { list, decide, update, applyPaymentStatusToSubscription };
+  const off = { error: 'feature_disabled', status: 404 };
+  const audit = (action, actorId, before, after, at) => auditLog.insertAsync({
+    id: randomUUID(), at, actor: actorId, action, target: before.id, before, after,
+  });
+
+  /** Flag on: an admin records that a pending manual payment arrived. A different admin then approves it. */
+  async function verify({ id, reference, note, actorId }) {
+    if (!secondApprover()) return off;
+    const request = await paymentRequests.findAsync(p => p.id === id);
+    if (!request) return { error: 'not_found', status: 404 };
+    if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
+    if (request.verifiedBy) return { error: 'already_verified', status: 409, verifiedBy: request.verifiedBy };
+    const at = new Date().toISOString();
+    const updated = await updateIf(paymentRequests, request.id, { status: 'pending', verifiedBy: null }, {
+      verifiedBy: actorId, verifiedAt: at,
+      reference: text(reference, 120) ?? request.reference,
+      note: upgradeOf(request) ? request.note : (text(note) ?? request.note ?? null),
+    });
+    if (!updated) return { error: 'payment_changed', status: 409 };
+    await audit('payment_verified', actorId, request, updated, at);
+    return { paymentRequest: updated };
+  }
+
+  /** Flag on: ask to change a decided payment's status, with a reason. A different admin confirms. */
+  async function requestChange({ id, status, reason, actorId }) {
+    if (!secondApprover()) return off;
+    if (!STATUSES.includes(status)) return { error: 'invalid_status', status: 400, allowed: STATUSES };
+    const why = text(reason);
+    if (!why) return { error: 'reason_required', status: 400 };
+    const request = await paymentRequests.findAsync(p => p.id === id);
+    if (!request) return { error: 'not_found', status: 404 };
+    if (!DECIDED.includes(request.status)) return { error: 'not_decided', status: 409, currentStatus: request.status };
+    if (status === request.status) return { error: 'no_change', status: 400 };
+    if (request.changeRequestedBy) return { error: 'change_already_requested', status: 409, changeRequestedBy: request.changeRequestedBy };
+    // A confirmed shop-order payment is not edited back: getting the money back is the refund workflow.
+    if (request.orderId && request.status === 'approved') return { error: 'payment_already_confirmed', status: 409 };
+    const at = new Date().toISOString();
+    const updated = await updateIf(paymentRequests, request.id, { status: request.status, changeRequestedBy: null }, {
+      changeRequestedStatus: status, changeRequestedBy: actorId, changeRequestedAt: at, changeRequestReason: why,
+    });
+    if (!updated) return { error: 'payment_changed', status: 409 };
+    await audit('payment_change_requested', actorId, request, updated, at);
+    return { paymentRequest: updated };
+  }
+
+  /** Flag on: withdraw or decline a change request (anyone with payments access). The payment stays as it is. */
+  async function cancelChange({ id, reason, actorId }) {
+    if (!secondApprover()) return off;
+    const request = await paymentRequests.findAsync(p => p.id === id);
+    if (!request) return { error: 'not_found', status: 404 };
+    if (!request.changeRequestedBy) return { error: 'change_not_requested', status: 409 };
+    const at = new Date().toISOString();
+    const updated = await updateIf(paymentRequests, request.id,
+      { status: request.status, changeRequestedBy: request.changeRequestedBy }, { ...CHANGE_CLEARED });
+    if (!updated) return { error: 'payment_changed', status: 409 };
+    await audit('payment_change_request_cancelled', actorId, request, { ...updated, cancelReason: text(reason) }, at);
+    return { paymentRequest: updated };
+  }
+
+  /** Flag on: a different admin confirms a requested change; it takes effect now. */
+  async function confirmChange({ id, actorId }) {
+    if (!secondApprover()) return off;
+    const request = await paymentRequests.findAsync(p => p.id === id);
+    if (!request) return { error: 'not_found', status: 404 };
+    if (!request.changeRequestedBy) return { error: 'change_not_requested', status: 409 };
+    if (request.changeRequestedBy === actorId) return { error: 'cannot_confirm_own_request', status: 403 };
+    const nextStatus = request.changeRequestedStatus;
+    if (!STATUSES.includes(nextStatus) || nextStatus === request.status) return { error: 'invalid_status', status: 409 };
+    if (request.orderId && request.status === 'approved') return { error: 'payment_already_confirmed', status: 409 };
+    if (nextStatus === 'approved') {
+      const can = await upgradeApprovable(subscriptions, request);
+      if (!can.ok) return { error: can.error, status: 409 };
+      const problem = await checkConfirmation(request, { reference: request.reference, amountTzs: null });
+      if (problem) return problem;
+    }
+    const at = new Date().toISOString();
+    const patch = {
+      status: nextStatus,
+      decidedAt: nextStatus === 'pending' ? null : at,
+      decidedBy: nextStatus === 'pending' ? null : actorId,
+      ...CHANGE_CLEARED,
+    };
+    // Back to pending: it has to be verified again before anyone approves it.
+    if (nextStatus === 'pending') Object.assign(patch, { verifiedBy: null, verifiedAt: null });
+    const updated = await writeDecision(request, patch, { changeRequestedBy: request.changeRequestedBy });
+    if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
+    if (!updated) return { error: 'payment_changed', status: 409 };
+    await applyPaymentStatusToSubscription(request, nextStatus, request.reference);
+    await audit('payment_change_confirmed', actorId, request, {
+      ...updated, requestedBy: request.changeRequestedBy, requestedAt: request.changeRequestedAt, reason: request.changeRequestReason,
+    }, at);
+    return { paymentRequest: updated };
+  }
+
+  return { list, decide, update, verify, requestChange, cancelChange, confirmChange, applyPaymentStatusToSubscription };
 }
