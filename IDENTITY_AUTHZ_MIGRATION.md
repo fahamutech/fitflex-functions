@@ -74,6 +74,8 @@ A decision under the membership model therefore considers Person + persona + org
 | Gym, trainer and payment management (`functions/owner-gyms.mjs`) | 12 | `requireGymAcl('gyms' \| 'trainers' \| 'payments' \| 'checkins')` + row `gymIds` |
 | Communications (`functions/communications.mjs`) | owner routes | `requireGymAcl('communications')` + row `gymIds` |
 | Gym sharing, reviews, challenges, social groups | 5 | `requireGymAcl('members' \| 'gyms')` |
+
+`GET /owner/members/:memberId/activity` (gym sharing) is the exception: it carries `requireGymAcl('members')` **and** `requireGymAccess('members', …)`, so under `enforce` it also needs an active `members` membership (its gym set is still the row's `gymIds`). Before the route-guard fix (#199) it got that check from `GET /owner/members/:memberId`'s guard, which ran on the sub-path; declaring it on the route keeps access as it was.
 | Vendor (`functions/shop.mjs`) | all | `requireVendorPermission` (JWT) and `req.user.vendorId \|\| req.user.sub` |
 | Vendor invitations (`functions/invitations.mjs`, I6 slice C) | 5 | `requireAuth('vendor')` and `:vendorId` = the caller's own id (the vendor persona is the owner; staff cannot invite) |
 | Corporate / B2B | all | The B2B module's own organisation-user rules (not `OrgMembership`) |

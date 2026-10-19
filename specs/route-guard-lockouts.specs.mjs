@@ -305,14 +305,33 @@ test('POST /owner/members/:memberId/checkin: `checkins` staff reach it without `
   assert.deepEqual(await hit(realUrl, 'POST', url, staffClaims(desk, ['members']), { gymId }), { status: 403, body: acl('checkins') });
 });
 
-test('GET /owner/members/:memberId/activity follows its own (legacy, token) guard in every org-authz mode; owner-members\' membership check no longer runs on it', async () => {
-  // Under V2_ORG_AUTHZ enforce it used to need an active `members` membership too (borrowed from
-  // GET /owner/members/:memberId). IDENTITY_AUTHZ_MIGRATION.md lists gym sharing as not migrated.
+test('GET /owner/members/:memberId/activity keeps exactly the access it had: token `members` always, plus an active `members` membership under org-authz enforce (now on its own guard)', async () => {
+  // Until this fix the enforce-mode membership check came from GET /owner/members/:memberId's guard
+  // leaking onto this sub-path; it is now declared on the route itself, so access does not widen.
+  const gymId = await gym();
+  const withMembership = await user('gym_staff', { gymId, gymIds: [gymId], aclPermissions: ['members'] });
+  await membership(withMembership, gymId, 'staff', ['members']);
+  const membershipOnly = await user('gym_staff', { gymId, gymIds: [gymId], aclPermissions: ['members'] });
+  await membership(membershipOnly, gymId, 'staff', ['members']);
   const tokenOnly = staffClaims(uid('gs'), ['members']);
+  const url = `/owner/members/${uid('m')}/activity`;
+  const guards = functions['gym-sharing.mjs:ownerMemberActivity'].onGuard;
+  assert.equal(guards.length, 3, 'requireAuth, requireGymAcl(members), requireGymAccess(members)');
+  await withAuthzMode('off', async () => {
+    assert.equal((await hit(stubUrl, 'GET', url, tokenOnly)).status, 200);
+    assert.equal((await hit(stubUrl, 'GET', url, staffClaims(withMembership, ['members']))).status, 200);
+    assert.deepEqual(await hit(stubUrl, 'GET', url, staffClaims(membershipOnly, [])), { status: 403, body: acl('members') });
+  });
+  await withAuthzMode('enforce', async () => {
+    assert.equal((await hit(stubUrl, 'GET', url, staffClaims(withMembership, ['members']))).status, 200);
+    const real200 = await hit(realUrl, 'GET', url, staffClaims(withMembership, ['members']));
+    assert.notEqual(real200.status, 403, JSON.stringify(real200.body));
+    assert.deepEqual(await hit(stubUrl, 'GET', url, tokenOnly), { status: 403, body: acl('members') }, 'no active membership');
+    assert.deepEqual(await hit(stubUrl, 'GET', url, staffClaims(membershipOnly, [])), { status: 403, body: acl('members') }, 'token lacks members');
+  });
   for (const mode of ['off', 'enforce']) {
     await withAuthzMode(mode, async () => {
-      assert.equal((await hit(stubUrl, 'GET', `/owner/members/${uid('m')}/activity`, tokenOnly)).status, 200, mode);
-      assert.deepEqual(await hit(stubUrl, 'GET', `/owner/members/${uid('m')}/activity`, staffClaims(uid('gs'), ['checkins'])), { status: 403, body: acl('members') }, mode);
+      assert.deepEqual(await hit(stubUrl, 'GET', url, staffClaims(uid('gs'), ['checkins'])), { status: 403, body: acl('members') }, mode);
     });
   }
 });
