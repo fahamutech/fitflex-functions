@@ -181,3 +181,11 @@ export function vendorPortalOn() {
 export function vendorBuyerContactOn() {
   return vendorToolsFlag('VENDOR_ORDER_BUYER_CONTACT');
 }
+
+/**
+ * S3: walk-in (counter) sales recorded by the vendor — POS, sales history, void. Off → the
+ * /vendor/sales endpoints answer 404 feature_disabled.
+ */
+export function vendorWalkInSalesOn() {
+  return vendorToolsFlag('VENDOR_WALKIN_SALES');
+}

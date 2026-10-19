@@ -22,6 +22,23 @@ function requireVendorPermission(permission) {
   };
 }
 
+/**
+ * vendor_staff holding ANY of these permissions (read from the stored staff record). The 403 keeps
+ * `requiredPermission` (the first one) for older clients and lists every accepted permission.
+ */
+function requireAnyVendorPermission(...permissions) {
+  return async (req, res, next) => {
+    if (req.user?.userType !== 'vendor_staff') return next();
+    try {
+      for (const permission of permissions) if (await shopService.authorizeStaff(req.user, permission)) return next();
+    } catch (error) {
+      console.error('[marketplace] staff authorization lookup failed', { staffId: req.user.sub, error: error.message });
+      return res.status(503).json({ error: 'authorization_unavailable' });
+    }
+    return res.status(403).json({ error: 'vendor_permission_forbidden', requiredPermission: permissions[0], acceptedPermissions: permissions });
+  };
+}
+
 // An administrator acts on marketplace orders only with the `shop` scope (a super-admin has all).
 const requireAdminShopScope = (req, res, next) => (req.user?.userType === 'admin' ? requireAcl('shop')(req, res, next) : next());
 
@@ -77,8 +94,8 @@ export const getVendorStore = {
 
 export const vendorMyProducts = {
   created, method: 'get', path: '/vendor/products',
-  description: 'Vendor: list own products (including archived). With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
-  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
+  description: 'Vendor / staff with `products` OR `sales` (S3: the POS loads the products to sell; read only — every write and stock route still needs `products`): list own products (including archived). Staff with neither → 403 vendor_permission_forbidden { requiredPermission: products, acceptedPermissions: [products, sales] }. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireAnyVendorPermission('products', 'sales'), requireAdminShopScope]),
   onRequest: async (req, res) => {
     res.json(await shopService.vendorListProducts(req.user.vendorId || req.user.sub, { costAllowed: await shopService.canSeeCost(req.user) }));
   }
@@ -102,7 +119,7 @@ export const vendorToolsOptionsRoute = {
 
 export const vendorMeRoute = {
   created, method: 'get', path: '/vendor/me',
-  description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
+  description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|sales|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
   responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off' } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
@@ -130,7 +147,7 @@ export const vendorStockAdjustment = {
 
 export const vendorStockMovements = {
   created, method: 'get', path: '/vendor/products/:id/stock-movements',
-  description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): one product\'s stock history, newest first. Query: from, to (EAT days YYYY-MM-DD, inclusive; optional), variant (optional), limit (1–200, default 50), cursor. → { productId, variant, openingStock, closingStock, rows:[{ id, productId, variant, reason, kind, delta, stockBefore, stockAfter, note, actor:{id,name}|null, orderId, document:{type:\'order\',id,number:null,shortRef (last 6 characters of the order id, uppercase — as on Orders)}|null, createdAt }], nextCursor }. Flag off: 404 feature_disabled.',
+  description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): one product\'s stock history, newest first. Query: from, to (EAT days YYYY-MM-DD, inclusive; optional), variant (optional), limit (1–200, default 50), cursor. → { productId, variant, openingStock, closingStock, rows:[{ id, productId, variant, reason, kind, delta, stockBefore, stockAfter, note, actor:{id,name}|null, orderId, document:{type:\'order\',id,number:null,shortRef (last 6 characters of the order id, uppercase — as on Orders)} | {type:\'sale\',id,number (receipt R-000001)} (reasons sale / sale_void, S3) | null, createdAt }], nextCursor }. Flag off: 404 feature_disabled.',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
   onRequest: async (req, res) => {
     if (!vendorStockLedgerOn()) return ledgerDisabled(res);
