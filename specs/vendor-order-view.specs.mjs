@@ -743,3 +743,59 @@ test('PIN sign-in (UAT D3): a suspended vendor owner with the right PIN gets 403
     assert.equal(ok.body.user.userType, 'vendor');
   });
 });
+
+// ── UAT re-check: a move on an order cancelled meanwhile → 409 order_cancelled, not order_not_paid ──
+
+test('status move on an order cancelled meanwhile (refund_pending / refunded / own part cancelled) → 409 order_cancelled before the payment check; unpaid still → order_not_paid; cancelling again is a no-op', async () => {
+  const w = await world();
+  // Vendor cancels the paid pickup order: cancelled + refund_pending.
+  assert.ok((await local.updateOrderStatus({ orderId: w.pickup, status: 'cancelled', actorId: w.a, reason: 'Out of stock' })).order);
+  const stored = await db('ShopOrder').where({ id: w.pickup }).first();
+  assert.deepEqual([stored.status, stored.paymentStatus], ['cancelled', 'refund_pending']);
+  for (const status of ['accepted', 'dispatched', 'delivered']) {
+    assert.deepEqual(await hit('POST', `/vendor/orders/${w.pickup}/status`, vendorClaims(w.a), { status }), { status: 409, body: { error: 'order_cancelled' } }, status);
+  }
+  const clerk = await staffOf(w.a, ['orders']);
+  assert.deepEqual(await hit('POST', `/vendor/orders/${w.pickup}/status`, staffClaims(clerk, w.a), { status: 'accepted' }), { status: 409, body: { error: 'order_cancelled' } });
+  // Refunded afterwards: still order_cancelled.
+  await db('ShopOrder').where({ id: w.pickup }).update({ paymentStatus: 'refunded' });
+  assert.deepEqual(await hit('POST', `/vendor/orders/${w.pickup}/status`, vendorClaims(w.a), { status: 'accepted' }), { status: 409, body: { error: 'order_cancelled' } });
+  // Admins get the same answer.
+  assert.deepEqual(await hit('POST', `/vendor/orders/${w.pickup}/status`, { sub: uid('adm'), userType: 'admin' }, { status: 'accepted' }), { status: 409, body: { error: 'order_cancelled' } });
+  // Cancelling again changes nothing and is not an error.
+  const again = await hit('POST', `/vendor/orders/${w.pickup}/status`, vendorClaims(w.a), { status: 'cancelled' });
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.equal(again.body.orderStatus, 'cancelled');
+
+  // refund_pending on an order not marked cancelled (money owed back): order_cancelled.
+  const owed = await paidOrder(w.buyer, [{ productId: w.pa, qty: 1 }]);
+  await db('ShopOrder').where({ id: owed }).update({ paymentStatus: 'refund_pending' });
+  assert.deepEqual(await local.updateOrderStatus({ orderId: owed, status: 'accepted', actorId: w.a }), { error: 'order_cancelled', status: 409 });
+  // Only this vendor's part cancelled: order_cancelled.
+  const part = await paidOrder(w.buyer, [{ productId: w.pa, qty: 1 }]);
+  const row = await db('ShopOrder').where({ id: part }).first();
+  await db('ShopOrder').where({ id: part }).update({ fulfilments: JSON.stringify(row.fulfilments.map(f => ({ ...f, status: 'cancelled' }))) });
+  assert.deepEqual(await local.updateOrderStatus({ orderId: part, status: 'accepted', actorId: w.a }), { error: 'order_cancelled', status: 409 });
+
+  // Unpaid and not cancelled: still order_not_paid.
+  const unpaid = await local.createOrder({ buyerId: w.buyer, body: { items: [{ productId: w.pa, qty: 1 }], deliveryMethod: 'home_delivery', deliveryAddress: 'x', paymentMethod: 'mpesa' } });
+  made.orders.push(unpaid.order.id);
+  assert.deepEqual(await hit('POST', `/vendor/orders/${unpaid.order.id}/status`, vendorClaims(w.a), { status: 'accepted' }), { status: 409, body: { error: 'order_not_paid' } });
+});
+
+test('status move: an order cancelled between the read and the row lock → 409 order_cancelled (decided under the lock)', async () => {
+  const w = await world();
+  const store = createPgShopOrderStore({ db });
+  const racing = createShopService({
+    products, shopOrders, users, auditLog, paymentRequests, buyerRefs: createPgVendorBuyerRefStore({ db }),
+    orderStore: { ...store, async updateWithLock(orderId, decide) {
+      // Someone cancels the order (FitFlex, buyer) after the move read it and before it takes the lock.
+      await db('ShopOrder').where({ id: orderId }).update({ status: 'cancelled', paymentStatus: 'refund_pending' });
+      return store.updateWithLock(orderId, decide);
+    } },
+    onRefundDue: async () => null,
+  });
+  assert.deepEqual(await racing.updateOrderStatus({ orderId: w.pickup, status: 'accepted', actorId: w.a }), { error: 'order_cancelled', status: 409 });
+  const stored = await db('ShopOrder').where({ id: w.pickup }).first();
+  assert.equal(stored.fulfilments.find(f => f.vendorId === w.a).status, 'pending', 'nothing moved');
+});
