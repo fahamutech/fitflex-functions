@@ -226,14 +226,15 @@ export const DISCLOSURE_WORDS = Object.freeze({
  *   { codes: ['featured', 'sponsored'], en: 'Featured · Sponsored', sw: 'Iliyoangaziwa · Iliyodhaminiwa' }
  * `codes` are what the app maps to its own strings (promo.<code>). `en` is exactly disclosureLabel(p).
  * A custom admin wording (p.disclosureLabel) is free English text, so `sw` is built from the codes
- * instead: the Swahili always says what kind of placement it is, and Sponsored when it was paid for.
+ * instead: the Swahili always says what kind of placement it is, and Sponsored only when it was paid
+ * for (isCommercial). A non-paid label that merely contains "Ad" or "Sponsored" does not add the code.
  */
 export function disclosureText(p) {
   const type = DISCLOSURE_WORDS[p.type] ? p.type : 'promoted';
   const en = disclosureLabel(p);
-  const sponsoredInBase = /sponsor|advert|\bad\b/i.test(p.disclosureLabel || PROMOTION_TYPES[p.type]?.disclosure || '');
   const codes = [type];
-  if (type !== 'sponsored' && (p.isCommercial || sponsoredInBase)) codes.push('sponsored');
+  // "Sponsored" is a fact about money, not about wording: only a paid placement gets it, whatever its label says.
+  if (type !== 'sponsored' && p.isCommercial === true) codes.push('sponsored');
   return { codes, en, sw: codes.map(c => DISCLOSURE_WORDS[c].sw).join(' · ') };
 }
 

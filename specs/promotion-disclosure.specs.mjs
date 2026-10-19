@@ -17,7 +17,11 @@ test('disclosure: codes and both languages; English is exactly the existing labe
     [{ type: 'campaign', isCommercial: true }, ['campaign', 'sponsored'], 'Kampeni · Iliyodhaminiwa'],
     // Custom admin wording is English free text: Swahili still says what it is, and that it was paid for.
     [{ type: 'promoted', isCommercial: true, disclosureLabel: 'Top pick' }, ['promoted', 'sponsored'], 'Iliyopandishwa · Iliyodhaminiwa'],
-    [{ type: 'promoted', isCommercial: false, disclosureLabel: 'Sponsored pick' }, ['promoted', 'sponsored'], 'Iliyopandishwa · Iliyodhaminiwa'],
+    // Not paid for: no Sponsored code, whatever the wording says. English stays exactly the label.
+    [{ type: 'promoted', isCommercial: false, disclosureLabel: 'Sponsored pick' }, ['promoted'], 'Iliyopandishwa'],
+    [{ type: 'campaign', isCommercial: false, disclosureLabel: 'Ad' }, ['campaign'], 'Kampeni'],
+    [{ type: 'recommended', isCommercial: false, disclosureLabel: 'Advert-free pick' }, ['recommended'], 'Imependekezwa na FitFlex'],
+    [{ type: 'featured', disclosureLabel: 'Ad' }, ['featured'], 'Iliyoangaziwa'],
   ];
   for (const [p, codes, sw] of cases) {
     const d = disclosureText(p);

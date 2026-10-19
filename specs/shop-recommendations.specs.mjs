@@ -230,6 +230,12 @@ test('copy: every section has English and Swahili title and reason for every mod
       assert.ok(Array.isArray(s.reasonCodes) && s.reasonCodes.length);
     }
   }
+  const self = describeSections([{ key: 'essentials', productIds: [], hasMore: false }], needsFor('vendor_personal'))[0];
+  assert.deepEqual(self.reason, { en: "You're shopping for yourself.", sw: 'Unanunua kwa ajili yako mwenyewe.' });
+  for (const mode of ['member', 'trainer', 'owner', 'vendor_personal']) {
+    const all = describeSections(SECTION_KEYS.map(key => ({ key, productIds: [], hasMore: false })), needsFor(mode));
+    if (mode === 'vendor_personal') assert.ok(all.every(s => !/as a member/.test(s.reason.en) && !/kama mwanachama/.test(s.reason.sw)), 'vendor never told they shop as a member');
+  }
   const owner = describeSections([{ key: 'featured', productIds: [], hasMore: false }], needsFor('owner'))[0];
   assert.equal(owner.title.en, 'Featured equipment');
 });

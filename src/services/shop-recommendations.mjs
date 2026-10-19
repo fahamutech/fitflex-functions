@@ -341,7 +341,8 @@ const ROLE_WORD = {
   member: { en: 'a member', sw: 'mwanachama' },
   trainer: { en: 'a trainer', sw: 'trainer' },
   owner: { en: 'a gym owner', sw: 'mmiliki wa gym' },
-  vendor_personal: { en: 'a member', sw: 'mwanachama' },
+  // A vendor buying for themselves is not "a member": the app says "You're shopping for yourself."
+  vendor_personal: { en: 'yourself', sw: 'wewe mwenyewe' },
 };
 // [SW review] every `sw` string below. Terms follow docs/localization/fitflex-terminology-glossary.md
 // (parent repo): "trainer" / "ma-trainer" (never kocha or mkufunzi), role = "nafasi" (never jukumu),
@@ -384,6 +385,8 @@ const COPY = {
     reason: (mode, needs) => {
       if (needs.goalCategories.length) return { en: 'Matches the fitness goal in your profile.', sw: 'Inalingana na lengo la mazoezi kwenye wasifu wako.' };
       if (needs.specialtyCategories.length) return { en: 'Matches the specialties on your trainer profile.', sw: 'Inalingana na utaalamu ulio kwenye wasifu wako wa trainer.' };
+      // [SW review] "Unanunua kwa ajili yako mwenyewe."
+      if (mode === 'vendor_personal') return { en: "You're shopping for yourself.", sw: 'Unanunua kwa ajili yako mwenyewe.' };
       return { en: `Picked for people shopping as ${ROLE_WORD[mode].en}.`, sw: `Imechaguliwa kwa wanaonunua kama ${ROLE_WORD[mode].sw}.` };
     },
     codes: (mode, needs) => [...(needs.goalCategories.length ? ['profile_goal'] : []), ...(needs.specialtyCategories.length ? ['trainer_specialty'] : []), 'role_context'],
