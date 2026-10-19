@@ -11,6 +11,7 @@
 // scope, and only gyms that exist and are still theirs.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, requireGymAcl } from '../src/auth/jwt.mjs';
+import { requireGymAccess } from '../src/auth/org-authz.mjs';
 import { segmentService, campaignService, templateService, whatsappChannelService, communicationHistoryService, communicationAnalyticsService, automationService, communicationAccess } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -271,7 +272,14 @@ const ownerHistory = historyRoutes('/owner', ownerGuard, gymSender, 'Owner/staff
 export const ownerCommunicationMessages = ownerHistory.messages;
 export const ownerCommunicationSummary = ownerHistory.summary;
 export const ownerCommunicationMessage = ownerHistory.message;
-export const ownerMemberCommunications = ownerHistory.member;
+// One member's timeline sits under /owner/members/:memberId, the member-management routes. Under
+// V2_ORG_AUTHZ enforce it also needs an active membership with `communications` (with org-authz off
+// requireGymAccess decides exactly as requireGymAcl). Until #199 it got a membership check (with
+// `members`) from GET /owner/members/:memberId's guard running on this sub-path.
+export const ownerMemberCommunications = {
+  ...ownerHistory.member,
+  onGuard: [...ownerGuard, requireGymAccess('communications', 'GET /owner/members/:memberId/communications')],
+};
 
 const adminHistory = historyRoutes('/admin', adminGuard, platformSender, 'Admin (FitFlex\'s own messages)');
 export const adminCommunicationMessages = adminHistory.messages;

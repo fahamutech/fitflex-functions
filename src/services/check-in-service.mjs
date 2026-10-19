@@ -1,7 +1,7 @@
 // Check-in service: orchestrates BL-012 validation + BL-010/011 visit counting + logging.
 // Pure DI: receives repos via constructor.
 
-import { validateCheckIn, pickSubscriptionForGym, subscriptionCoversGym, validateTrainerHomeEntry, fundedBySubscription } from '../shared/check-in-rules.mjs';
+import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry, fundedBySubscription, visitNeedsVerifiedGym } from '../shared/check-in-rules.mjs';
 import { CHECKIN_STATUS, sourceForMethod, isDuplicateVisit } from '../shared/checkin-status.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 import { randomUUID } from 'node:crypto';
@@ -167,8 +167,8 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       // Until the gym's owner is verified, only the gym's own people get in:
       // its direct members and its home trainers. FitFlex Pass members, and
       // visits a sponsor would pay for through FitFlex, wait for verification.
-      const gymsOwnMember = sub?.type === 'direct_sub' && subscriptionCoversGym(sub, gym);
-      if (gymOpenToPass && !homeTrainer && !gymsOwnMember && !(await gymOpenToPass(gymId))) {
+      // (Same rule as the scanner preview: visitNeedsVerifiedGym.)
+      if (gymOpenToPass && visitNeedsVerifiedGym({ subscription: sub, gym, homeTrainer }) && !(await gymOpenToPass(gymId))) {
         return { ok: false, failure: 'gym_not_verified' };
       }
 

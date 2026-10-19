@@ -3,6 +3,7 @@
 // Expiry is DERIVED from expiresAt so a subscription can never stay usable
 // just because nothing flipped its stored status.
 
+import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { effectiveSubscriptionStatus } from '../src/shared/subscription-status.mjs';
@@ -78,6 +79,8 @@ test('A1: stored-active subscription just past expiry is allowed within the 24h 
     gym: { id: 'g1', tier: 'standard' },
     todaysCheckins: [],
     cycleUsage: { visitsUsedInCycle: 0 },
+    // The tier's rules come from Settings only.
+    tierConfig: settingsWithTiers().getTierConfig('pro'),
   });
   assert.equal(r.ok, true);
 });

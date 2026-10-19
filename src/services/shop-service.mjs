@@ -9,6 +9,10 @@ import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../s
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
+import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions } from '../shared/feature-flags.mjs';
+import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
+import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
+import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set([...STATUSES, ...LEGACY_INPUTS]);
@@ -74,8 +78,20 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // Off while the app does not yet let a buyer pick a variant: an order that names none reserves
   // product stock only. Switch on (SHOP_REQUIRE_VARIANT=on) once the app sends `variant`.
   requireVariantChoice = false,
+  // Vendor tools · S1: the stock ledger store (src/infra/vendor-stock-store-pg.mjs). Without one (unit specs)
+  // there is no ledger: products save as before. Its bookkeeping (cost snapshots) runs whenever it is given;
+  // what vendors see of it runs only while `stockLedgerOn()` (VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
+  stockLedger = null,
+  stockLedgerOn = vendorStockLedgerOn,
+  // Vendor tools · S2: pickup gym names on vendor orders (gyms collection), the vendor-scoped buyer
+  // pseudonyms (src/infra/vendor-buyer-ref-store-pg.mjs; in memory when not given) and whether vendors
+  // see the buyer's phone (VENDOR_TOOLS + VENDOR_ORDER_BUYER_CONTACT).
+  gyms = null,
+  buyerRefs = null,
+  buyerContactOn = vendorBuyerContactOn,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
+  buyerRefs ||= createMemoryVendorBuyerRefStore();
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
   productReviews ||= { insertAsync: async row => row, filterAsync: async () => [], findAsync: async () => null };
@@ -102,9 +118,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function vendorProfileFor(claims) {
     const profile = await getVendorProfile(claims.vendorId || claims.sub);
     if (!profile || claims.userType !== 'vendor_staff') return profile;
-    const staff = await activeStaffOf(claims);
-    const seesMoney = !!staff && (staff.vendorRole === 'admin' || (Array.isArray(staff.vendorPermissions) && staff.vendorPermissions.includes('payments')));
-    if (seesMoney) return profile;
+    if (staffSeesMoney(await activeStaffOf(claims))) return profile;
     const { settlementAccount, commissionPct, ...rest } = profile;
     return rest;
   }
@@ -215,16 +229,46 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (input.variants != null) {
       const v = input.variants;
       const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && x.name.length <= 60
-        && (x.stock == null || (Number.isInteger(x.stock) && x.stock >= 0 && x.stock <= 1_000_000)));
+        && (x.stock == null || (Number.isInteger(x.stock) && x.stock >= 0 && x.stock <= 1_000_000)) && !invalidPrivateField(x));
       if (!ok) return { error: 'invalid_field', status: 400, field: 'variants' };
     }
+    const privateField = invalidPrivateField(input);
+    if (privateField) return { error: 'invalid_field', status: 400, field: privateField };
     return null;
   }
 
-  async function upsertProduct({ vendorId, body, productId, keepCategory = false }) {
+  const ledgerOn = () => Boolean(stockLedger) && stockLedgerOn();
+  /** Cost price and reorder level in the body: [{ variant, costTzs?, reorderLevel? }] ('' = the product). */
+  function privatesFrom(input) {
+    const out = [];
+    if (input.costTzs !== undefined || input.reorderLevel !== undefined) out.push({ variant: '', costTzs: input.costTzs, reorderLevel: input.reorderLevel });
+    for (const v of Array.isArray(input.variants) ? input.variants : []) {
+      if (v.costTzs !== undefined || v.reorderLevel !== undefined) out.push({ variant: String(v.name).trim(), costTzs: v.costTzs, reorderLevel: v.reorderLevel });
+    }
+    return out;
+  }
+
+  /**
+   * Cost price is the vendor's own business (owner decision 2026-10-19): the vendor account itself and
+   * vendor_staff whose vendorRole is 'admin' see and set it; other staff, even with `products`, do not.
+   * Read from the stored account, not the token.
+   * FitFlex admins see everything (owner decision 2026-10-19): an admin with the `shop` scope that the
+   * admin product pages use (a super-admin, i.e. not a portal user, has every scope — as requireAcl).
+   */
+  async function canSeeCost(claims) {
+    if (claims?.userType === 'vendor') return true;
+    if (claims?.userType === 'admin') return !claims.portalUser || (Array.isArray(claims.aclPermissions) && claims.aclPermissions.includes('shop'));
+    if (claims?.userType !== 'vendor_staff') return false;
+    const staff = await users.findByIdAsync(claims.sub);
+    return staff?.userType === 'vendor_staff' && staff.vendorId === claims.vendorId && staff.accountStatus === 'active' && staff.vendorRole === 'admin';
+  }
+  const sendsCost = input => input.costTzs !== undefined || (Array.isArray(input.variants) && input.variants.some(v => v && v.costTzs !== undefined));
+
+  async function upsertProduct({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
+    if (ledgerOn() && !costAllowed && sendsCost(input)) return { error: 'cost_forbidden', status: 403 };
     if (productId) {
       const prior = await products.findByIdAsync(productId);
       if (!prior || prior.deletedAt) return { error: 'product_not_found', status: 404 };
@@ -239,13 +283,35 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const patch = { updatedAt: nowIso() };
       if (input.name !== undefined) patch.name = String(input.name).trim();
       for (const field of ['description', 'category', 'brand', 'sku', 'visibility', 'deliveryAvailable']) if (input[field] !== undefined) patch[field] = input[field];
-      for (const field of ['priceTzs', 'discountPriceTzs', 'stock', 'weightKg', 'distanceKm']) if (input[field] !== undefined) patch[field] = input[field] === null ? null : Number(input[field]);
+      for (const field of ['priceTzs', 'discountPriceTzs', 'weightKg', 'distanceKm']) if (input[field] !== undefined) patch[field] = input[field] === null ? null : Number(input[field]);
       if (Array.isArray(input.images)) patch.images = input.images;
-      if (Array.isArray(input.variants)) patch.variants = input.variants;
       if (input.status && PRODUCT_STATUSES.has(input.status)) patch.status = input.status;
-      if (prior.approvalStatus === 'approved' && Object.keys(input).some(field => PRODUCT_REVIEW_FIELDS.has(field))) {
-        patch.approvalStatus = 'pending';
+      const needsReview = (current, variants) => current.approvalStatus === 'approved'
+        && Object.keys(input).some(field => PRODUCT_REVIEW_FIELDS.has(field)) && reviewChanged(current, input, variants);
+      if (ledgerOn()) {
+        // Stock moves only with a ledger row: a changed count from the form (old app builds send `stock`
+        // on every save) is recorded as a `count`, decided under the product's row lock.
+        // Fields, approval status, stock and ledger rows are written together, in one transaction.
+        const saved = await stockLedger.applyProductForm({
+          productId, vendorId, actorId,
+          decide: (current) => {
+            const plan = planStock(current, input, { ledger: true });
+            if (plan.error) return plan;
+            const fields = needsReview(current, plan.variants || null) ? { ...patch, approvalStatus: 'pending' } : patch;
+            return { ...plan, fields, privates: privatesFrom(input) };
+          },
+        });
+        if (saved.error) return saved;
+        await afterStockMoved([productId]);
+        return { product: (await vendorProductsView(vendorId, [saved.product], { costAllowed }))[0] };
       }
+      // Variants are merged by name and keep their stored stock when the body leaves it out (F3).
+      const plan = planStock(prior, input, { ledger: false });
+      if (plan.error) return plan; // stockSeen: the count moved since the form opened
+      if (plan.variants) patch.variants = plan.variants;
+      if (plan.stock !== undefined) patch.stock = plan.stock;
+      // Back to review only when something FitFlex reviews actually changed (F1).
+      if (needsReview(prior, plan.variants || null)) patch.approvalStatus = 'pending';
       return { product: await products.updateByIdAsync(productId, patch) };
     }
     if (!input.name?.trim()) return { error: 'name_required', status: 400 };
@@ -254,18 +320,115 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     }
     if (input.priceTzs == null || Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
     if (Number(input.stock ?? 0) < 0) return { error: 'invalid_stock', status: 400 };
+    const ledger = ledgerOn();
+    const plan = ledger ? planStock(null, input, { ledger: true }) : null;
+    if (plan?.error) return plan;
     const at = nowIso();
-    const product = await products.insertAsync({
+    const row = {
       id: makeId('prd'), vendorId, name: input.name.trim(), description: input.description || null, category: input.category || null,
       brand: input.brand || null, priceTzs: Number(input.priceTzs), discountPriceTzs: input.discountPriceTzs == null ? null : Number(input.discountPriceTzs),
-      stock: Number(input.stock ?? 0), sku: input.sku || null, weightKg: input.weightKg == null ? null : Number(input.weightKg), distanceKm: input.distanceKm == null ? null : Number(input.distanceKm),
-      variants: Array.isArray(input.variants) ? input.variants : [], images: Array.isArray(input.images) ? input.images : [], visibility: input.visibility || 'visible',
+      stock: plan ? plan.stock : Number(input.stock ?? 0), sku: input.sku || null, weightKg: input.weightKg == null ? null : Number(input.weightKg), distanceKm: input.distanceKm == null ? null : Number(input.distanceKm),
+      // Cost price and reorder level never go on the public row.
+      variants: plan?.variants ?? (Array.isArray(input.variants) ? input.variants.map(stripPrivate) : []), images: Array.isArray(input.images) ? input.images : [], visibility: input.visibility || 'visible',
       // Rating, review count and sold count are the server's: reviewProduct recomputes the first two from real
       // reviews and the order store keeps soldCount. Whatever a vendor (or admin) sends for them is ignored.
       deliveryAvailable: input.deliveryAvailable !== false, status: 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
       homepageVisible: true, homepagePriority: 0, createdAt: at, updatedAt: at,
-    });
+    };
+    if (ledger) {
+      // The product and the first rows of its stock history are written together, in one transaction.
+      const product = await stockLedger.createProduct({ product: row, actorId, movements: plan.movements, privates: privatesFrom(input) });
+      await afterStockMoved([product.id]);
+      return { product: (await vendorProductsView(vendorId, [product], { costAllowed }))[0], created: true };
+    }
+    const product = await products.insertAsync(row);
     return { product, created: true };
+  }
+
+  /**
+   * What the vendor sees of their own products: with the ledger on, the private fields too —
+   * costTzs / reorderLevel (the product's own, '' row), and per variant its own costTzs / reorderLevel
+   * plus the effective ones (own, else the product's: Q-1). Never used for public views.
+   * vendorId null = FitFlex admin views across vendors (the rows' own ids scope the read).
+   */
+  async function vendorProductsView(vendorId, rows, { costAllowed = true } = {}) {
+    if (!ledgerOn() || !rows.length) return rows;
+    const privates = await stockLedger.privatesOf(vendorId, rows.map(p => p.id));
+    // Without cost rights the cost fields are left out entirely (not null), so nothing hints at them.
+    const cost = value => (costAllowed ? value : undefined);
+    const drop = obj => Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined));
+    return rows.map((p) => {
+      const own = privates.get(p.id);
+      const base = own?.get('') || null;
+      return drop({
+        ...p,
+        costTzs: cost(base?.costTzs ?? null),
+        reorderLevel: base?.reorderLevel ?? null,
+        variants: variantsOf(p).map((v) => {
+          const mine = own?.get(v.name) || null;
+          return drop({
+            ...v, stock: isTracked(v) ? v.stock : null,
+            costTzs: cost(mine?.costTzs ?? null), reorderLevel: mine?.reorderLevel ?? null,
+            effectiveCostTzs: cost(mine?.costTzs ?? base?.costTzs ?? null),
+            effectiveReorderLevel: mine?.reorderLevel ?? base?.reorderLevel ?? null,
+          });
+        }),
+      });
+    });
+  }
+
+  /** GET /vendor/products: own products, including archived (private fields with the ledger on; cost only with cost rights). */
+  async function vendorListProducts(vendorId, { costAllowed = true } = {}) {
+    return vendorProductsView(vendorId, await listProducts({ vendorId, includeArchived: true }), { costAllowed });
+  }
+
+  /**
+   * Stock moved for these products: tell the vendor about each unit that has just gone to or below its
+   * reorder level — once per crossing. Ledger on only (Q-3). Never fails the change that moved the stock.
+   */
+  async function afterStockMoved(productIds) {
+    if (!ledgerOn()) return;
+    for (const productId of new Set(productIds.filter(Boolean))) {
+      try {
+        for (const unit of await stockLedger.checkLow(productId)) {
+          await notifyVendor(unit.vendorId, 'vendor_low_stock', {
+            productId: unit.productId, productName: unit.name, variant: unit.variant, stock: unit.stock, reorderLevel: unit.reorderLevel,
+          });
+        }
+      } catch (err) {
+        console.warn('[shop] low-stock check failed:', productId, err?.message);
+      }
+    }
+  }
+  const productIdsOf = order => (order?.items || []).map(item => item.productId);
+
+  /** POST /vendor/products/:id/stock-adjustments. */
+  async function adjustStock({ vendorId, actorId, productId, body }) {
+    const adj = parseAdjustment(body || {});
+    if (adj.error) return adj;
+    const out = await stockLedger.adjust({ vendorId, actorId, productId, adj });
+    if (out.error) return out;
+    if (!out.replayed) await afterStockMoved([productId]);
+    return { movement: out.movement, product: out.product, status: out.replayed ? 200 : 201 };
+  }
+
+  /** GET /vendor/products/:id/stock-movements?from&to&variant&limit&cursor (from/to: EAT days, inclusive). */
+  async function stockMovements({ vendorId, productId, query = {} }) {
+    const from = query.from ? eatDayStart(query.from) : null;
+    if (query.from && !from) return { error: 'invalid_date', status: 400, field: 'from' };
+    const toDay = query.to ? eatDayStart(query.to) : null;
+    if (query.to && !toDay) return { error: 'invalid_date', status: 400, field: 'to' };
+    const to = toDay ? new Date(+toDay + 86_400_000) : null;
+    if (from && to && from >= to) return { error: 'invalid_date', status: 400, field: 'to' };
+    const limit = query.limit == null || query.limit === '' ? 50 : Number(query.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) return { error: 'invalid_limit', status: 400, max: 200 };
+    const variant = typeof query.variant === 'string' && query.variant.trim() ? query.variant.trim() : null;
+    return stockLedger.movements({ vendorId, productId, variant, from, to, limit, cursor: query.cursor || null });
+  }
+
+  /** GET /vendor/stock/low. */
+  async function lowStock(vendorId) {
+    return stockLedger.lowStock(vendorId);
   }
 
   async function duplicateProduct({ vendorId, productId }) {
@@ -281,8 +444,38 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     await products.updateByIdAsync(productId, { deletedAt: nowIso(), status: 'archived', updatedAt: nowIso() });
     return { deleted: true };
   }
+  /** GET /admin/products. With the ledger on, admins see the private fields too (cost included). */
   async function adminListProducts() {
-    return (await products.filterAsync(product => !product.deletedAt)).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
+    const rows = (await products.filterAsync(product => !product.deletedAt)).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
+    return vendorProductsView(null, rows, { costAllowed: true });
+  }
+
+  /**
+   * Cost / reorder level an admin sends on PUT /admin/products/:id/listing: { costTzs?, reorderLevel?,
+   * variants?: [{ name, costTzs?, reorderLevel? }] } (null clears; other variant keys are ignored here).
+   * → { privates } or { error }.
+   */
+  function adminPrivatesFrom(body, product) {
+    const input = { costTzs: body?.costTzs, reorderLevel: body?.reorderLevel };
+    const bad = invalidPrivateField(input);
+    if (bad) return { error: 'invalid_field', status: 400, field: bad };
+    if (body?.variants !== undefined) {
+      const v = body.variants;
+      const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && !invalidPrivateField(x));
+      if (!ok) return { error: 'invalid_field', status: 400, field: 'variants' };
+      // Same rule as the vendor form: one entry per variant name (case and spaces ignored).
+      const seen = new Set();
+      for (const x of v) {
+        const key = x.name.trim().toLowerCase();
+        if (seen.has(key)) return { error: 'duplicate_variant', status: 400, variant: x.name.trim() };
+        seen.add(key);
+      }
+      const names = variantsOf(product).map(x => x.name);
+      const unknown = v.find(x => !names.includes(String(x.name).trim()));
+      if (unknown) return { error: 'variant_not_found', status: 404, variant: unknown.name, variants: names };
+      input.variants = v.map(x => ({ name: x.name, costTzs: x.costTzs, reorderLevel: x.reorderLevel }));
+    }
+    return { privates: privatesFrom(input) };
   }
   async function adminCreateProduct({ body, actorId }) {
     const vendorId = String(body?.vendorId || '').trim();
@@ -290,7 +483,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const vendor = await users.findByIdAsync(vendorId);
     if (!vendor || vendor.userType !== 'vendor') return { error: 'vendor_not_found', status: 404 };
     if (vendor.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 409 };
-    const created = await upsertProduct({ vendorId, body });
+    // The admin is the actor of the opening stock rows; cost and reorder level are stored as the vendor's would be.
+    const created = await upsertProduct({ vendorId, body, actorId, costAllowed: true });
     if (created.error) return created;
     const requestedApproval = ['pending', 'approved', 'rejected'].includes(body?.approvalStatus)
       ? body.approvalStatus
@@ -301,22 +495,43 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       homepagePriority: Number(body?.homepagePriority || 0),
       updatedAt: nowIso(),
     });
+    const privates = ledgerOn() ? privatesFrom(body || {}) : [];
     await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'admin_product_created',
-      target: product.id, before: null, after: { vendorId, approvalStatus: requestedApproval },
+      target: product.id, before: null, after: { vendorId, approvalStatus: requestedApproval, ...(privates.length ? { privates } : {}) },
     });
     if (requestedApproval !== 'pending') await notifyVendor(vendorId, `product_${requestedApproval}`, { productId: product.id });
-    return { product, status: 201 };
+    return { product: (await vendorProductsView(null, [product], { costAllowed: true }))[0], status: 201 };
   }
   async function adminUpdateProductListing({ productId, body, actorId }) {
+    const patch = { ...(typeof body?.homepageVisible === 'boolean' ? { homepageVisible: body.homepageVisible } : {}), ...(body?.homepagePriority !== undefined ? { homepagePriority: Number(body.homepagePriority) || 0 } : {}), ...(['approved', 'pending', 'rejected'].includes(body?.approvalStatus) ? { approvalStatus: body.approvalStatus } : {}), updatedAt: nowIso() };
+    if (ledgerOn()) {
+      // With the ledger on an admin may also set cost price / reorder level. Listing fields, private fields
+      // and both audit rows are one transaction under the product's row lock (variant names checked there too).
+      let privates = [];
+      const saved = await stockLedger.adminUpdateListing({
+        productId, actorId,
+        decide: (current) => {
+          const parsed = adminPrivatesFrom(body, current);
+          if (parsed.error) return parsed;
+          privates = parsed.privates;
+          return { patch, privates };
+        },
+      });
+      if (saved.error) return saved;
+      if (patch.approvalStatus) await notifyVendor(saved.prior.vendorId, `product_${patch.approvalStatus}`, { productId });
+      // A reorder level raised to or above the stock alerts the vendor once, as from the vendor's own form.
+      if (privates.length) await afterStockMoved([productId]);
+      return { product: (await vendorProductsView(null, [saved.product], { costAllowed: true }))[0] };
+    }
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
-    const patch = { ...(typeof body?.homepageVisible === 'boolean' ? { homepageVisible: body.homepageVisible } : {}), ...(body?.homepagePriority !== undefined ? { homepagePriority: Number(body.homepagePriority) || 0 } : {}), ...(['approved', 'pending', 'rejected'].includes(body?.approvalStatus) ? { approvalStatus: body.approvalStatus } : {}), updatedAt: nowIso() };
     const product = await products.updateByIdAsync(productId, patch);
     await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_listing_updated', target: productId, before: { homepageVisible: prior.homepageVisible ?? true, homepagePriority: Number(prior.homepagePriority || 0), approvalStatus: prior.approvalStatus || 'pending' }, after: patch });
     if (patch.approvalStatus) await notifyVendor(prior.vendorId, `product_${patch.approvalStatus}`, { productId });
     return { product };
   }
+
 
   async function adminListVendors() {
     const vendors = await users.filterAsync(user => user.userType === 'vendor');
@@ -447,7 +662,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const chosen = variant ? variants.find(v => v.name === variant) : null;
       if (variant && !chosen) return { error: 'variant_not_found', status: 404, productId };
       // Variants that keep their own stock must be chosen once the app can choose; plain labels (no stock) are optional.
-      if (requireVariantChoice && !variant && variants.some(v => typeof v.stock === 'number')) return { error: 'variant_required', status: 400, productId, variants: variants.map(v => v.name) };
+      // With the stock ledger on, a product whose variants keep stock is always sold by variant: units taken
+      // from the product alone would leave its count and its variants' counts apart (security review H1).
+      if ((requireVariantChoice || ledgerOn()) && !variant && variants.some(v => typeof v.stock === 'number')) return { error: 'variant_required', status: 400, productId, variants: variants.map(v => v.name) };
       const variantTracked = Boolean(chosen && typeof chosen.stock === 'number');
       if (variantTracked && chosen.stock < qty) return { error: 'insufficient_stock', status: 409, productId };
       productStock.set(productId, (productStock.get(productId) || 0) + qty);
@@ -498,6 +715,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     });
     if (placed.error) return { error: placed.error, status: placed.status, productId: placed.productId };
     if (placed.replayed) return placed.order.paymentStatus === 'paid' ? { order: placed.order, status: 201, replayed: true } : { order: placed.order, paymentRequest: placed.paymentRequest, status: 202, replayed: true };
+    await afterStockMoved(lines.map(l => l.productId));
     if (free) {
       await orderPaid(placed.order);
       return { order: placed.order, status: 201 };
@@ -506,6 +724,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   async function orderPaid(order) {
+    // Bookkeeping for vendor profit reports: each line's cost as it is now. A side table only;
+    // the order, its prices, commission and settlement are untouched. Never fails the payment.
+    if (stockLedger) {
+      try { await stockLedger.snapshotOrderCosts(order); } catch (err) { console.warn('[shop] order line costs not recorded:', order?.id, err?.message); }
+    }
     try { await onOrderPaid(order); } catch (err) { console.warn('[shop] order not credited to a promotion:', err?.message); }
     for (const vendorId of new Set((order.items || []).map(item => item.vendorId))) await notifyVendor(vendorId, 'new_order', { orderId: order.id });
     await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
@@ -621,6 +844,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         });
         if (revived.revived) {
           await auditLog.insertAsync({ id: randomUUID(), at, actor: 'system', action: 'shop_order_revived_after_late_payment', target: orderId, before: { status: 'cancelled', paymentStatus: paid.order.paymentStatus }, after: { status: 'pending', paymentStatus: 'paid' } });
+          await afterStockMoved(productIdsOf(revived.order));
           await orderPaid(revived.order);
           return;
         }
@@ -640,6 +864,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       paymentStatuses: ['pending', 'failed', 'cancelled', null],
     });
     if (!out.changed) return;
+    if (out.released) await afterStockMoved(productIdsOf(order));
     await notify(order.buyerId, 'order_cancelled', { orderId, reason: 'payment_not_confirmed' });
   }
 
@@ -659,6 +884,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       });
       if (!out.changed) continue;
       expired += 1;
+      if (out.released) await afterStockMoved(productIdsOf(order));
       if (paymentRequests) {
         for (const r of await paymentRequests.filterAsync(p => p.orderId === order.id && p.status === 'pending')) {
           await paymentRequests.updateByIdAsync(r.id, { status: 'cancelled', decidedAt: at, decidedBy: 'system' });
@@ -675,12 +901,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // Whether the buyer can still cancel it themselves (before it is on its way).
       .map(order => ({ ...buyerOrderView(order), canCancel: CANCELLABLE.has(order.status) }));
   }
-  /** Every order with a line of this vendor's (lines carry the vendor; older rows fall back to product ownership). */
+  /**
+   * Every order with a line naming this vendor, newest first (one indexed query in Postgres).
+   * Lines without a vendorId (older rows) are not this vendor's to see (plan §3), so they are not
+   * looked up through product ownership any more.
+   */
   async function ordersOfVendor(vendorId) {
-    const direct = await shopOrders.filterAsync(order => (order.items || []).some(item => item.vendorId === vendorId));
-    if (direct.length) return direct.sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
-    const ids = new Set((await products.filterAsync(product => product.vendorId === vendorId)).map(product => product.id));
-    return (await shopOrders.filterAsync(order => (order.items || []).some(item => ids.has(item.productId)))).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
+    return orderStore.ordersForVendor(vendorId);
   }
 
   /** The vendors an order has lines from; lines without a vendor are resolved through their product. */
@@ -694,24 +921,68 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return [...ids];
   }
 
+  /** Rows by id: one IN query when the collection has it, else one lookup per id (memory collections). */
+  async function rowsById(collection, ids) {
+    const wanted = [...new Set(ids.filter(Boolean).map(String))];
+    if (!collection || !wanted.length) return new Map();
+    const rows = typeof collection.filterByColumnInAsync === 'function'
+      ? await collection.filterByColumnInAsync('id', wanted)
+      : await Promise.all(wanted.map(id => collection.findByIdAsync(id)));
+    return new Map(rows.filter(Boolean).map(row => [row.id, row]));
+  }
+
   /**
-   * What a vendor may see of an order: their own lines, their own subtotal, and their own fulfilment's
-   * status (so their app offers the right next step). Other vendors' lines, commissions and statuses
-   * are not shown; `orderStatus` is the customer-facing combined status.
+   * What a vendor may see of orders (plan §3, allowlist in src/shared/vendor-order-view.mjs): their
+   * own lines and subtotal, their own fulfilment's status and timeline, the buyer as a vendor-scoped
+   * customerId + display name, the pickup gym's name; the delivery address while their part is open
+   * and paid and 7 days after delivery; the buyer's phone too with VENDOR_ORDER_BUYER_CONTACT.
+   * Commission and payout per line only when `seesMoney` (Q-5).
    */
-  function vendorView(order, vendorId) {
-    const mine = (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null);
-    const own = fulfilmentsOf(order).find(f => f.vendorId === vendorId);
-    const { fulfilments, idempotencyKey, idempotencyFingerprint, stockState, reservationCycle, reservationExpiresAt, ...rest } = order;
-    const status = own?.status || order.status;
+  async function vendorViews(orders, vendorId, { seesMoney = false } = {}) {
+    if (!orders.length) return [];
+    const [buyers, pickupGyms, refs] = await Promise.all([
+      rowsById(users, orders.map(o => o.buyerId)),
+      rowsById(gyms, orders.map(o => o.pickupGymId)),
+      buyerRefs.refsFor(vendorId, orders.map(o => o.buyerId)),
+    ]);
+    const contactOn = buyerContactOn(), at = now();
+    return orders.map(order => vendorOrderView(order, vendorId, {
+      customerId: refs.get(String(order.buyerId)) ?? null, buyer: buyers.get(order.buyerId) || null,
+      gym: pickupGyms.get(order.pickupGymId) || null, seesMoney, contactOn, now: at,
+    }));
+  }
+  async function vendorOrders(vendorId, { seesMoney = false } = {}) {
+    return vendorViews(await ordersOfVendor(vendorId), vendorId, { seesMoney });
+  }
+  /**
+   * One page of a vendor's orders, newest first (createdAt desc, id desc). `limit` 1–200 (default 50;
+   * larger is capped at 200), `cursor` = the nextCursor of the previous page.
+   * → { orders, nextCursor|null } | { error: invalid_limit | invalid_cursor, status: 400 }
+   */
+  async function vendorOrdersPage(vendorId, { limit, cursor, seesMoney = false } = {}) {
+    let size = ORDERS_PAGE_DEFAULT;
+    if (limit !== undefined && limit !== null && limit !== '') {
+      const n = Number(limit);
+      if (!Number.isInteger(n) || n < 1) return { error: 'invalid_limit', status: 400 };
+      size = Math.min(n, ORDERS_PAGE_MAX);
+    }
+    let after = null;
+    if (cursor !== undefined && cursor !== null && cursor !== '') {
+      after = decodeOrderCursor(cursor);
+      if (!after) return { error: 'invalid_cursor', status: 400 };
+    }
+    const rows = await orderStore.ordersForVendor(vendorId, { limit: size + 1, after });
+    const page = rows.slice(0, size);
     return {
-      ...rest, items: mine, totalTzs: mine.reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0),
-      status, orderStatus: order.status, timeline: own?.timeline?.length ? own.timeline : rest.timeline,
-      nextStatuses: order.status === 'cancelled' || order.paymentStatus !== 'paid' ? [] : nextStatuses(status, order.deliveryMethod),
+      orders: await vendorViews(page, vendorId, { seesMoney }),
+      nextCursor: rows.length > size ? encodeOrderCursor(page[page.length - 1]) : null,
     };
   }
-  async function vendorOrders(vendorId) {
-    return (await ordersOfVendor(vendorId)).map(order => vendorView(order, vendorId));
+  /** One order as its vendor sees it; 404 when it has no line of theirs (another vendor's order looks absent). */
+  async function vendorOrder(vendorId, orderId, { seesMoney = false } = {}) {
+    const order = orderId ? await shopOrders.findByIdAsync(String(orderId)) : null;
+    if (!order || !ownLines(order, vendorId).length) return { error: 'order_not_found', status: 404 };
+    return { order: (await vendorViews([order], vendorId, { seesMoney }))[0] };
   }
 
   /**
@@ -723,7 +994,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * - An admin (FitFlex) names the vendor when the order has several; every move follows the same matrix.
    * - The move is decided under the order's row lock, so two requests cannot both win.
    */
-  async function updateOrderStatus({ orderId, status, actorId, actorRole = 'vendor', vendorId = null, reason = null }) {
+  async function updateOrderStatus({ orderId, status, actorId, actorRole = 'vendor', vendorId = null, reason = null, seesMoney = false }) {
     if (!ORDER_STATUSES.has(status)) return { error: 'invalid_status', status: 400 };
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order) return { error: 'order_not_found', status: 404 };
@@ -731,7 +1002,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const vendors = await vendorsOfOrder(order);
     let target;
     if (!isAdmin) {
-      if (!vendors.includes(actorId)) return { error: 'order_not_owned_by_vendor', status: 403 };
+      // A vendor (or their staff) acts only on orders they can see: a line that names them (S2). Lines
+      // without a vendorId are resolved through product ownership for FitFlex admins only. An order with
+      // no line of theirs looks absent, as on GET /vendor/orders/:id.
+      if (!ownLines(order, actorId).length) return { error: 'order_not_found', status: 404 };
       const vendor = await users.findByIdAsync(actorId);
       if (vendor?.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 403 };
       target = actorId;
@@ -749,7 +1023,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // Several vendors: cancelling one vendor's part would need a partial refund, which is a financial
       // decision of its own. A vendor cannot do it alone; FitFlex cancels the whole order.
       if (!isAdmin && vendors.length > 1) return { error: 'multi_vendor_cancel_requires_admin', status: 409 };
-      return cancelOrder(order, { actorId, role: isAdmin ? 'admin' : 'vendor', reasonCode: isAdmin ? 'cancelled_by_fitflex' : 'vendor_cancelled', note: reason });
+      const cancelled = await cancelOrder(order, { actorId, role: isAdmin ? 'admin' : 'vendor', reasonCode: isAdmin ? 'cancelled_by_fitflex' : 'vendor_cancelled', note: reason });
+      // A vendor gets the order as they see it, not the buyer's details (the route sends only `order`;
+      // `refund` stays for the server's own callers).
+      if (isAdmin || cancelled.error) return cancelled;
+      return { ...cancelled, order: (await vendorViews([cancelled.order], target, { seesMoney }))[0] };
     }
     if (order.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
     const at = nowIso();
@@ -758,7 +1036,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (current.paymentStatus && current.paymentStatus !== 'paid') return { error: 'order_not_paid', status: 409 };
       const all = fulfilmentsOf(current, vendors);
       const mine = all.find(f => f.vendorId === target);
-      if (!mine) return { error: 'order_not_owned_by_vendor', status: 403 };
+      if (!mine) return isAdmin ? { error: 'order_not_owned_by_vendor', status: 403 } : { error: 'order_not_found', status: 404 };
       const decision = decideTransition({ from: mine.status, to: status, deliveryMethod: current.deliveryMethod });
       if (!decision.ok) {
         return { error: decision.error === 'status_is_final' ? 'order_status_final' : 'invalid_transition', status: 409, from: canonicalStatus(mine.status), to: status, allowed: decision.allowed };
@@ -778,14 +1056,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       };
     });
     if (result.error) return result;
-    if (result.value?.noop) return { order: isAdmin ? result.order : vendorView(result.order, target), unchanged: true };
+    if (result.value?.noop) return { order: isAdmin ? result.order : (await vendorViews([result.order], target, { seesMoney }))[0], unchanged: true };
     const { from, to } = result.value;
     await auditLog.insertAsync({
       id: randomUUID(), at, actor: actorId, action: `shop_order_${to}`, target: orderId,
       before: { status: from, vendorId: target }, after: { status: to, vendorId: target, actorRole: isAdmin ? 'admin' : 'vendor', ...(reason ? { reason: String(reason).slice(0, 300) } : {}) },
     });
     await notify(order.buyerId, `order_${to}`, { orderId, vendorId: target });
-    return { order: isAdmin ? result.order : vendorView(result.order, target) };
+    return { order: isAdmin ? result.order : (await vendorViews([result.order], target, { seesMoney }))[0] };
   }
 
   // An order can be cancelled until it is on its way: once dispatched, ready
@@ -826,6 +1104,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       return { error: 'order_changed', status: 409 };
     }
     const updated = result.order;
+    if (result.released) await afterStockMoved(productIdsOf(order));
     if (order.paymentStatus === 'pending' && paymentRequests) {
       for (const r of await paymentRequests.filterAsync(p => p.orderId === order.id && p.status === 'pending')) {
         await paymentRequests.updateByIdAsync(r.id, { status: 'cancelled', decidedAt: at, decidedBy: actorId });
@@ -865,18 +1144,25 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return order;
   }
 
+  /**
+   * Sales dashboard. todaySalesTzs (Q-3, S2): this vendor's own lines of the orders placed today (EAT
+   * calendar day) that are paid — not cancelled, refunded or still unpaid — whatever their delivery
+   * status. The other figures still count delivered, paid orders.
+   */
   async function vendorPayments(vendorId) {
     const orders = await ordersOfVendor(vendorId);
     const delivered = orders.filter(order => order.paymentStatus === 'paid' && ['delivered', 'fulfilled'].includes(order.status));
-    const value = order => (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
-    const current = new Date(), day = current.toISOString().slice(0, 10), week = +current - 7 * 86400000, month = +current - 30 * 86400000;
+    const value = order => ownLines(order, vendorId).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
+    const current = now(), week = +current - 7 * 86400000, month = +current - 30 * 86400000;
+    const today = eatDayBounds(eatDate(current));
+    const placedToday = order => { const t = +new Date(order.createdAt); return t >= today.start && t < today.end; };
     const total = rows => rows.reduce((sum, order) => sum + value(order), 0);
-    return { todaySalesTzs: total(delivered.filter(order => String(order.updatedAt || order.createdAt).slice(0, 10) === day)), weeklySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week)), monthlySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month)), pendingSettlementTzs: total(delivered.filter(order => order.settlementStatus !== 'settled')), settledPaymentsTzs: total(delivered.filter(order => order.settlementStatus === 'settled')), settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), status: order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })) };
+    return { todaySalesTzs: total(orders.filter(order => order.paymentStatus === 'paid' && order.status !== 'cancelled' && placedToday(order))), weeklySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week)), monthlySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month)), pendingSettlementTzs: total(delivered.filter(order => order.settlementStatus !== 'settled')), settledPaymentsTzs: total(delivered.filter(order => order.settlementStatus === 'settled')), settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), status: order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })) };
   }
   async function vendorStatement(vendorId) {
     const lines = ['order_id,amount_tzs,order_status,payment_status,settlement_status,date'];
     for (const order of await ordersOfVendor(vendorId)) {
-      const amount = (order.items || []).filter(item => item.vendorId === vendorId || item.vendorId == null).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
+      const amount = ownLines(order, vendorId).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
       lines.push([order.id, amount, order.status, order.paymentStatus || 'unknown', order.settlementStatus || 'pending', order.updatedAt || order.createdAt].map(csv).join(','));
     }
     return `${lines.join('\n')}\n`;
@@ -938,6 +1224,40 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
   /** Any active staff member of the vendor (no particular permission): read-only vendor context. */
   const isActiveStaff = async claims => !!(await activeStaffOf(claims));
+  /** Staff who see the vendor's money (payout account, commission, payout per order): vendor admins and `payments`. */
+  const staffSeesMoney = staff => !!staff && (staff.vendorRole === 'admin' || (Array.isArray(staff.vendorPermissions) && staff.vendorPermissions.includes('payments')));
+  /**
+   * Q-5: per-order commission and "you receive" go to the vendor account, vendor admins, staff with
+   * `payments` and FitFlex admins; other staff get order lines without them. Read from the stored staff record.
+   */
+  async function canSeeOrderMoney(claims) {
+    if (claims?.userType === 'vendor' || claims?.userType === 'admin') return true;
+    if (claims?.userType !== 'vendor_staff') return false;
+    return staffSeesMoney(await activeStaffOf(claims));
+  }
+
+  /**
+   * GET /vendor/me (S2): who the caller is in their business, for the web portal. Rights are read from
+   * the stored accounts, not from the token. null = staff no longer active (the route answers 403).
+   */
+  async function vendorMe(claims) {
+    const isStaff = claims?.userType === 'vendor_staff';
+    const staff = isStaff ? await activeStaffOf(claims) : null;
+    if (isStaff && !staff) return null;
+    const vendorId = isStaff ? staff.vendorId : claims.sub;
+    const vendor = await users.findByIdAsync(vendorId);
+    const permissions = [...STAFF_PERMISSIONS].filter(permission => !isStaff || canStaff(staff, permission));
+    return {
+      vendorId,
+      businessName: vendor?.vendorProfile?.businessName || null,
+      userType: claims.userType,
+      vendorRole: isStaff ? staff.vendorRole || null : null,
+      permissions,
+      approvalStatus: vendor?.approvalStatus ?? null,
+      accountStatus: vendor?.accountStatus ?? null,
+      tools: { ...vendorToolsOptions(), canSeeCost: await canSeeCost(claims) },
+    };
+  }
   const staffView = ({ passwordHash, ...staff }) => staff;
   // GET /vendor/staff returns only these fields per staff member (vendor and staff callers alike).
   const STAFF_LIST_FIELDS = ['id', 'displayName', 'email', 'phone', 'vendorRole', 'vendorPermissions', 'accountStatus', 'createdAt'];
@@ -969,11 +1289,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function reorder({ buyerId, orderId }) {
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order || order.buyerId !== buyerId) return { error: 'order_not_found', status: 404 };
-    return { items: (order.items || []).map(item => ({ productId: item.productId, qty: item.qty })) };
+    return { items: (order.items || []).map(item => ({ productId: item.productId, variant: item.variant ?? null, qty: item.qty })) };
   }
   async function notifications(userId) {
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
+  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
 }

@@ -4,7 +4,7 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { shopService, vendorSettlementService, shopReconciliationService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
-import { identityFlag } from '../src/shared/feature-flags.mjs';
+import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 
 const created = new Date().toISOString();
@@ -77,11 +77,77 @@ export const getVendorStore = {
 
 export const vendorMyProducts = {
   created, method: 'get', path: '/vendor/products',
-  description: 'Vendor: list own products (including archived).',
-  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')]),
+  description: 'Vendor: list own products (including archived). With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
   onRequest: async (req, res) => {
-    res.json(await shopService.listProducts({ vendorId: req.user.vendorId || req.user.sub, includeArchived: true }));
+    res.json(await shopService.vendorListProducts(req.user.vendorId || req.user.sub, { costAllowed: await shopService.canSeeCost(req.user) }));
   }
+};
+
+// ── vendor tools · S1: stock ledger ──────────────────────────────────────────
+
+const sendError = (res, result) => {
+  const { error, status, ...extra } = result;
+  return res.status(status).json({ error, ...extra });
+};
+const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' });
+
+export const vendorToolsOptionsRoute = {
+  created, method: 'get', path: '/vendor/tools/options',
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
+  responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off' },
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
+  onRequest: async (req, res) => res.json({ ...vendorToolsOptions(), canSeeCost: await shopService.canSeeCost(req.user) }),
+};
+
+export const vendorMeRoute = {
+  created, method: 'get', path: '/vendor/me',
+  description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
+  responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off' } },
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireActiveVendorStaff]),
+  onRequest: async (req, res) => {
+    const me = await shopService.vendorMe(req.user);
+    if (!me) return res.status(403).json({ error: 'vendor_staff_inactive' });
+    if (!vendorPortalOn()) return res.status(404).json({ error: 'feature_disabled' });
+    res.json(me);
+  },
+};
+
+export const vendorStockAdjustment = {
+  created, method: 'post', path: '/vendor/products/:id/stock-adjustments',
+  description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): change a product\'s (or a variant\'s) stock with a reason. Body { variant?, reason: count|damaged|expired|lost|found|returned|restock|other, quantity, expectedStock? (count: the stock the vendor saw), direction? (other: in|out), note? (≤200; required for other), clientRef (8–100 chars, reuse it on retries) }. count sets the stock to `quantity`; the others add or remove `quantity`. → 201 { movement, product }; a replayed clientRef → 200 with the same movement. 409 stock_changed { currentStock } (count, stale expectedStock), 409 insufficient_stock { currentStock }, 409 client_ref_reused, 400 invalid_reason | invalid_quantity | note_too_long | note_required | invalid_direction | expected_stock_required | invalid_client_ref | variant_required { variants }, 404 product_not_found | variant_not_found, 403 not_your_product. Flag off: 404 feature_disabled.',
+  requestSample: { reason: 'count', quantity: 12, expectedStock: 15, note: 'Shelf count', clientRef: '3b0c8f6e-2c1a-4c55-9a51-7c1f3b2d9e10' },
+  onGuard: routeGuard('post', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
+  onRequest: async (req, res) => {
+    if (!vendorStockLedgerOn()) return ledgerDisabled(res);
+    const result = await shopService.adjustStock({
+      vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, productId: req.params.id, body: req.body || {},
+    });
+    if (result.error) return sendError(res, result);
+    res.status(result.status).json({ movement: result.movement, product: result.product });
+  },
+};
+
+export const vendorStockMovements = {
+  created, method: 'get', path: '/vendor/products/:id/stock-movements',
+  description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): one product\'s stock history, newest first. Query: from, to (EAT days YYYY-MM-DD, inclusive; optional), variant (optional), limit (1–200, default 50), cursor. → { productId, variant, openingStock, closingStock, rows:[{ id, productId, variant, reason, kind, delta, stockBefore, stockAfter, note, actor:{id,name}|null, orderId, document:{type:\'order\',id,number:null}|null, createdAt }], nextCursor }. Flag off: 404 feature_disabled.',
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
+  onRequest: async (req, res) => {
+    if (!vendorStockLedgerOn()) return ledgerDisabled(res);
+    const result = await shopService.stockMovements({ vendorId: req.user.vendorId || req.user.sub, productId: req.params.id, query: req.query || {} });
+    if (result.error) return sendError(res, result);
+    res.json(result);
+  },
+};
+
+export const vendorLowStock = {
+  created, method: 'get', path: '/vendor/stock/low',
+  description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): products and variants at or below their reorder level (a variant without its own level uses the product\'s). → [{ productId, name, variant|null, stock, reorderLevel }]. Flag off: 404 feature_disabled.',
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
+  onRequest: async (req, res) => {
+    if (!vendorStockLedgerOn()) return ledgerDisabled(res);
+    res.json(await shopService.lowStock(req.user.vendorId || req.user.sub));
+  },
 };
 
 export const shopCategories = {
@@ -97,21 +163,22 @@ export const vendorCreateProduct = {
   requestSample: { name: 'Whey Protein 1kg', category: 'supplements', priceTzs: 85000, stock: 20 },
   onGuard: routeGuard('post', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
   onRequest: async (req, res) => {
-    const result = await shopService.upsertProduct({ vendorId: req.user.vendorId || req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, allowed: result.allowed });
+    const result = await shopService.upsertProduct({ vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user) });
+    if (result.error) return sendError(res, result);
     res.status(201).json(result.product);
   }
 };
 
 export const vendorUpdateProduct = {
   created, method: 'put', path: '/vendor/products/:id',
-  description: 'Vendor: update own product (price, stock, status...).',
+  description: 'Vendor: update own product (price, stock, status...). The product goes back to review only when a reviewed field (name, description, category, brand, price, discount, images, variant names) actually changes. `variants` are merged by name: a variant sent without `stock` keeps its stored stock. With VENDOR_STOCK_LEDGER on: a `stock` that differs is recorded as a `count` adjustment (note product_form); costTzs / reorderLevel (product and per variant; null clears) are stored privately; when variants keep stock, every variant must (400 variant_stock_mixed), the body `stock` is ignored and the product stock moves only by what variant counts moved (each recorded); optional `stockSeen` (product) / `variants[].stockSeen` = the count the form showed → 409 stock_changed { currentStock, variant? } if it has moved; dropping a variant that still has stock → 409 variant_has_stock { variant, stock }, or that an open order holds units of → 409 variant_has_reservations { variant }; duplicate names → 400 duplicate_variant. costTzs (product or variant) may be sent only by the vendor account or vendor_staff with vendorRole admin, else 403 cost_forbidden; leaving it out keeps the stored cost. Also with the ledger on, checkout of a product whose variants keep stock requires `variant` (400 variant_required { variants }).',
   onGuard: routeGuard('put', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
   onRequest: async (req, res) => {
     const result = await shopService.upsertProduct({
-      vendorId: req.user.vendorId || req.user.sub, body: req.body || {}, productId: req.params.id,
+      vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, body: req.body || {}, productId: req.params.id,
+      costAllowed: await shopService.canSeeCost(req.user),
     });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) return sendError(res, result);
     res.json(result.product);
   }
 };
@@ -155,14 +222,14 @@ export const vendorSaveProfile = {
 
 export const adminListProducts = {
   created, method: 'get', path: '/admin/products',
-  description: 'Admin: list every product with homepage visibility and priority controls.',
+  description: 'Admin: list every product with homepage visibility and priority controls. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries the vendor\'s private costTzs and reorderLevel (null when not set) and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — the same shape as GET /vendor/products for the vendor account. Never on /shop/*. Portal: show cost/reorder fields only when they are present (flag off → absent).',
   onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('shop')]),
   onRequest: async (_req, res) => res.json(await shopService.adminListProducts()),
 };
 
 export const adminCreateProduct = {
   created, method: 'post', path: '/admin/products',
-  description: 'Admin: create a product for a selected vendor.',
+  description: 'Admin: create a product for a selected vendor. With VENDOR_STOCK_LEDGER on, costTzs / reorderLevel (product and per variant) are accepted and stored privately, the admin is the actor of the opening stock rows and the audit entry, and the response carries the private fields as GET /admin/products does.',
   onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('shop')]),
   onRequest: async (req, res) => {
     const result = await shopService.adminCreateProduct({ body: req.body || {}, actorId: req.user.sub });
@@ -173,7 +240,7 @@ export const adminCreateProduct = {
 
 export const adminUpdateProductListing = {
   created, method: 'put', path: '/admin/products/:id/listing',
-  description: 'Admin: control whether a product is listed and its homepage priority.',
+  description: 'Admin: control whether a product is listed and its homepage priority. With VENDOR_STOCK_LEDGER on, also optional costTzs, reorderLevel and variants: [{ name, costTzs?, reorderLevel? }] (null clears; other variant keys are ignored; 400 invalid_field { field }, 400 duplicate_variant { variant }, 404 variant_not_found { variant, variants }); listing fields, private fields and audit rows are written in one transaction; recorded in the audit log with the admin as actor (admin_product_private_updated). A reorder level raised to or above the stock sends the vendor one low-stock alert. The response carries the private fields as GET /admin/products does.',
   onGuard: routeGuard('put', [requireAuth('admin'), requireAcl('shop')]),
   onRequest: async (req, res) => {
     const result = await shopService.adminUpdateProductListing({
@@ -181,7 +248,7 @@ export const adminUpdateProductListing = {
       body: req.body || {},
       actorId: req.user.sub,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) return sendError(res, result);
     res.json(result.product);
   },
 };
@@ -272,14 +339,34 @@ export const myShopOrders = {
 
 export const vendorOrders = {
   created, method: 'get', path: '/vendor/orders',
-  description: 'Vendor: list orders containing own products.',
+  description: 'Vendor / staff with `orders`: my orders, newest first (createdAt desc, id desc). Without paging params the response is the whole list as a JSON array (as before; older app builds). With `limit` and/or `cursor` it is one page: { orders: [...], nextCursor: string|null } — limit 1–200 (default 50; above 200 is capped at 200), cursor = the previous page\'s nextCursor (opaque); null nextCursor = last page. 400 invalid_limit (not a whole number ≥ 1) | invalid_cursor. Each order is exactly { id, shortRef (last 6 characters of id, uppercase), createdAt, status (this vendor\'s own fulfilment status), orderStatus (combined, customer-facing), nextStatuses[] (empty unless paid and not cancelled), timeline[{ status, at, reason? }] (own), items[{ productId, name, variant|null, qty, priceTzs, image|null, commissionTzs?, vendorPayoutTzs? }] (own lines only; lines without a vendorId are never shown), totalTzs (own subtotal), paymentStatus, paymentMethod, deliveryMethod, note|null, pickupGymId|null (kept for older app builds), pickupGym { id, name|null }|null, buyer { customerId (vendor-scoped, stable), displayName|null, phone?, contactVisibleUntil? }, deliveryAddress? }. commissionTzs / vendorPayoutTzs only for the vendor account, vendor admins, staff with `payments` and FitFlex admins. deliveryAddress (home delivery) while this vendor\'s part is open and the order paid, and until the end of the 7th EAT day after they delivered it; buyer.phone and buyer.contactVisibleUntil (null while open; else that day 23:59:59+03:00) in the same window and only with VENDOR_TOOLS + VENDOR_ORDER_BUYER_CONTACT. Never: buyerId, buyerRole, email, paymentReference, other vendors\' lines or totals, internals.',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('orders')]),
-  onRequest: async (req, res) => res.json(await shopService.vendorOrders(req.user.vendorId || req.user.sub))
+  onRequest: async (req, res) => {
+    const vendorId = req.user.vendorId || req.user.sub;
+    const seesMoney = await shopService.canSeeOrderMoney(req.user);
+    const { limit, cursor } = req.query || {};
+    // Older app builds send no paging params and read a plain array: they keep getting the whole list.
+    if (limit === undefined && cursor === undefined) return res.json(await shopService.vendorOrders(vendorId, { seesMoney }));
+    const page = await shopService.vendorOrdersPage(vendorId, { limit, cursor, seesMoney });
+    if (page.error) return sendError(res, page);
+    res.json(page);
+  },
+};
+
+export const vendorOrderDetail = {
+  created, method: 'get', path: '/vendor/orders/:id',
+  description: 'Vendor / staff with `orders`: one of my orders, in the same shape as GET /vendor/orders. An order with no line of mine (another vendor\'s, or unknown) → 404 order_not_found.',
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireVendorPermission('orders')]),
+  onRequest: async (req, res) => {
+    const result = await shopService.vendorOrder(req.user.vendorId || req.user.sub, req.params.id, { seesMoney: await shopService.canSeeOrderMoney(req.user) });
+    if (result.error) return sendError(res, result);
+    res.json(result.order);
+  },
 };
 
 export const vendorUpdateOrderStatus = {
   created, method: 'post', path: '/vendor/orders/:id/status',
-  description: 'Vendor/admin: move this vendor\'s part of an order forward: pending → accepted → [processing] → [packed] → dispatched | ready_for_pickup → delivered, or cancelled until delivered. Steps cannot be skipped except processing/packed; repeating the current status changes nothing. A vendor moves only their own lines; an admin (scope `shop`) names `vendorId` when the order has several vendors. Optional `reason` is kept in the audit trail. Legacy: confirmed = accepted, fulfilled = delivered. Cancelling restocks items and refunds a paid order. 409 invalid_transition lists the `allowed` next statuses.',
+  description: 'Vendor/admin: move this vendor\'s part of an order forward: pending → accepted → [processing] → [packed] → dispatched | ready_for_pickup → delivered, or cancelled until delivered. Steps cannot be skipped except processing/packed; repeating the current status changes nothing. A vendor moves only their own lines; an admin (scope `shop`) names `vendorId` when the order has several vendors. Optional `reason` is kept in the audit trail. Legacy: confirmed = accepted, fulfilled = delivered. Cancelling restocks items and refunds a paid order. 409 invalid_transition lists the `allowed` next statuses. A vendor or their staff get the order back in the GET /vendor/orders shape (allowlisted); an admin gets the stored order. A vendor or their staff may act only on an order with a line that names them: otherwise (another vendor\'s order, older lines without a vendorId, unknown id) → 404 order_not_found. An admin keeps 404 order_not_found / 404 vendor_not_in_order / 400 vendor_required.',
   requestSample: { status: 'accepted', vendorId: 'usr_vendor_1', reason: 'optional' },
   onGuard: routeGuard('post', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('orders'), requireAdminShopScope]),
   onRequest: async (req, res) => {
@@ -290,6 +377,7 @@ export const vendorUpdateOrderStatus = {
       actorRole: req.user.userType,
       vendorId: req.user.userType === 'admin' ? req.body?.vendorId || null : null,
       reason: req.body?.reason || null,
+      seesMoney: await shopService.canSeeOrderMoney(req.user),
     });
     if (result.error) {
       const { error, status, ...extra } = result;
@@ -300,7 +388,7 @@ export const vendorUpdateOrderStatus = {
 };
 
 export const vendorPayments = {
-  created, method: 'get', path: '/vendor/payments', description: 'Vendor: sales and settlement dashboard.',
+  created, method: 'get', path: '/vendor/payments', description: 'Vendor: sales and settlement dashboard. todaySalesTzs = my lines of orders placed today (EAT day) that are paid (not cancelled, refunded or unpaid), whatever their delivery status; weekly / monthly / pending / settled figures count delivered, paid orders.',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('payments')]),
   onRequest: async (req, res) => res.json(await shopService.vendorPayments(req.user.vendorId || req.user.sub)),
 };
@@ -411,7 +499,7 @@ export const marketplaceInvoice = {
   },
 };
 export const marketplaceReorder = {
-  created, method: 'post', path: '/me/shop-orders/:id/reorder', description: 'Buyer: return a prior order as a cart payload.',
+  created, method: 'post', path: '/me/shop-orders/:id/reorder', description: 'Buyer: return a prior order as a cart payload → { items: [{ productId, variant|null, qty }] }.',
   onGuard: routeGuard('post', requireAuth()),
   onRequest: async (req, res) => {
     const result = await shopService.reorder({ buyerId: req.user.sub, orderId: req.params.id });

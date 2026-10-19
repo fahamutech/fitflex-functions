@@ -82,3 +82,89 @@ export function tunzaaSandboxSettlesOn() {
 export function shopHomeV2On() {
   return on('SHOP_HOME_V2');
 }
+
+/**
+ * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
+ * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
+ * carries no `manual` block and subscribe / upgrade take no reference, exactly
+ * as before. On, it takes effect only once the admin has saved the Lipa Namba
+ * and account name in platform settings (`manualPayment`).
+ */
+export function manualPayInstructionsOn() {
+  return on('MANUAL_PAY_INSTRUCTIONS');
+}
+
+/**
+ * A1 · second approver on money. Off unless MONEY_SECOND_APPROVER is set, so a
+ * deploy never changes how payments and refunds are decided on its own. On:
+ *   - a manual payment is verified by one admin and approved by a different one
+ *     (403 cannot_approve_own_verification);
+ *   - an already-decided payment changes status only by request + confirmation
+ *     by a different admin (403 cannot_confirm_own_request);
+ *   - an admin-raised refund waits for approval by someone other than the raiser
+ *     (403 cannot_approve_own_request), and a refund is marked paid by someone
+ *     other than its approver (403 cannot_pay_own_approval).
+ * Payments a provider confirms (mobile money, Selcom) are not affected.
+ */
+export function moneySecondApproverOn() {
+  return on('MONEY_SECOND_APPROVER');
+}
+
+/**
+ * Vendor business tools (plan docs/plans/vendor-business-tools-plan.md).
+ * VENDOR_TOOLS is the umbrella: a slice flag is on only when both it and
+ * VENDOR_TOOLS are on. Everything is off unless set. Writes that are pure
+ * bookkeeping (stock ledger rows, order-line cost snapshots) are not flagged.
+ */
+export const VENDOR_TOOLS_FLAGS = [
+  'VENDOR_STOCK_LEDGER', 'VENDOR_PORTAL', 'VENDOR_ORDER_BUYER_CONTACT', 'VENDOR_WALKIN_SALES', 'VENDOR_CUSTOMERS',
+  'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL',
+];
+
+/** True when VENDOR_TOOLS and the given slice flag are both enabled. */
+export function vendorToolsFlag(name) {
+  if (!VENDOR_TOOLS_FLAGS.includes(name)) throw new Error(`unknown vendor tools flag: ${name}`);
+  return on('VENDOR_TOOLS') && on(name);
+}
+
+/** S1: stock history with reasons, per-variant stock, cost price, low stock. */
+export function vendorStockLedgerOn() {
+  return vendorToolsFlag('VENDOR_STOCK_LEDGER');
+}
+
+/**
+ * What the vendor apps may show (GET /vendor/tools/options). Fiscal receipts:
+ * 'off' unless VENDOR_FISCAL is on; then VENDOR_FISCAL_MODE manual → 'manual',
+ * sandbox|live → 'vfd', anything else → 'off'.
+ */
+export function vendorToolsOptions() {
+  const mode = String(process.env.VENDOR_FISCAL_MODE ?? '').trim().toLowerCase();
+  const fiscal = !vendorToolsFlag('VENDOR_FISCAL') ? 'off' : mode === 'manual' ? 'manual' : ['sandbox', 'live'].includes(mode) ? 'vfd' : 'off';
+  return {
+    stockLedger: vendorToolsFlag('VENDOR_STOCK_LEDGER'),
+    portal: vendorToolsFlag('VENDOR_PORTAL'),
+    buyerContact: vendorToolsFlag('VENDOR_ORDER_BUYER_CONTACT'),
+    walkInSales: vendorToolsFlag('VENDOR_WALKIN_SALES'),
+    customers: vendorToolsFlag('VENDOR_CUSTOMERS'),
+    documents: vendorToolsFlag('VENDOR_DOCUMENTS'),
+    vat: vendorToolsFlag('VENDOR_VAT'),
+    reports: vendorToolsFlag('VENDOR_REPORTS'),
+    refunds: vendorToolsFlag('VENDOR_REFUNDS'),
+    barcodes: vendorToolsFlag('VENDOR_BARCODES'),
+    purchases: vendorToolsFlag('VENDOR_PURCHASES'),
+    fiscal,
+  };
+}
+
+/** S2: the vendor web portal (GET /vendor/me opens it). */
+export function vendorPortalOn() {
+  return vendorToolsFlag('VENDOR_PORTAL');
+}
+
+/**
+ * S2: a vendor sees the buyer's phone (and the contact window's end) on an order while their part
+ * is open and paid, and for 7 EAT days after they delivered it (O-3).
+ */
+export function vendorBuyerContactOn() {
+  return vendorToolsFlag('VENDOR_ORDER_BUYER_CONTACT');
+}

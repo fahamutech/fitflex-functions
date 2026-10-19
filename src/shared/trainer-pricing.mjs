@@ -11,8 +11,13 @@
 //      worked out on the discounted price.
 import { PASS_TIERS, TRAINER_COMMISSION_PCT } from './constants.mjs';
 
-/** Trainer discount the member's active pass grants (0 when none). */
-export function passDiscountPct(passTier) {
+/**
+ * Trainer discount the member's active pass grants (0 when none). Only a
+ * tier configured in Settings grants it: pass the tier's Settings config
+ * (settingsService.getTierConfig); without one there is no discount.
+ */
+export function passDiscountPct(passTier, tierConfig = null) {
+  if (!passTier || !tierConfig) return 0;
   return PASS_TIERS[passTier]?.trainerDiscountPct ?? 0;
 }
 

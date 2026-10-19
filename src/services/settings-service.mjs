@@ -1,7 +1,13 @@
 // Platform settings service — subscription tiers, payout bands, trainer
 // specialties. Seeds sane defaults on first read.
+//
+// Settings is the ONLY runtime source of FitFlex Pass tier prices and visit
+// caps (owner decision 2026-10-19: no tier may be sold unless it is configured
+// in Settings; fail closed). There is no fallback to built-in constants.
 import { randomUUID } from 'node:crypto';
-import { PASS_TIERS } from '../shared/constants.mjs';
+import { validateManualPaymentSettings } from '../shared/manual-payment.mjs';
+import { defaultSubscriptionTiers } from '../shared/default-subscription-tiers.mjs';
+import { PASS_GYM_ACCESS } from '../shared/check-in-rules.mjs';
 
 const DEFAULT_SPECIALTIES = [
   'Yoga', 'Cardio', 'Aerobics', 'Weight Loss', 'Muscle Gain', 'Dance',
@@ -16,12 +22,9 @@ export function createSettingsService({ platformSettings, auditLog }) {
     if (existing) return existing;
     const defaults = {
       id: 'platform',
-      subscriptionTiers: [
-        { key: 'basic',     label: 'Basic',     monthlyPrice: 60000,  visits: 8,  gymAccess: 'standard' },
-        { key: 'pro',       label: 'Pro',       monthlyPrice: 120000, visits: 12, gymAccess: 'midtier' },
-        { key: 'premium',   label: 'Premium',   monthlyPrice: 200000, visits: 20, gymAccess: 'premium' },
-        { key: 'executive', label: 'Executive', monthlyPrice: 350000, visits: -1, gymAccess: 'luxury_executive' },
-      ],
+      // Same tiers as the start-up seed (seed-db): one default list, so the
+      // first writer never decides the prices. Only used when no row exists.
+      subscriptionTiers: defaultSubscriptionTiers(),
       payoutBands: [
         { key: 'band1', label: 'Band 1', minVisits: 1,  maxVisits: 2,  payoutTiming: 'daily',     commissionPct: 15 },
         { key: 'band2', label: 'Band 2', minVisits: 3,  maxVisits: 7,  payoutTiming: 'weekly',    commissionPct: 10 },
@@ -39,17 +42,72 @@ export function createSettingsService({ platformSettings, auditLog }) {
     return defaults;
   }
 
-  function getTierConfig(tierKey) {
+  /**
+   * A tier's visit allowance from its settings row: -1 = unlimited, a whole
+   * number above zero = that many visits a cycle. Anything else (missing,
+   * zero, text, fractions) is not a usable setting and gives null.
+   */
+  function visitCapOf(row) {
+    if (row?.visits === undefined || row?.visits === null || row?.visits === '') return null;
+    const v = Number(row.visits);
+    if (v === -1) return Infinity;
+    return Number.isInteger(v) && v > 0 ? v : null;
+  }
+
+  /** Switched off in Settings (only when the row carries such a field). */
+  const switchedOff = (row) => row?.active === false || row?.enabled === false;
+
+  function tierRow(tierKey) {
+    if (!tierKey) return null;
     const settings = ensureDefaultSettings();
-    const configured = (settings.subscriptionTiers || []).find(t => t.key === tierKey);
-    if (!configured) return PASS_TIERS[tierKey] ?? null;
-    const visitCap = Number(configured.visits) === -1 ? Infinity : Number(configured.visits ?? 0);
+    return (settings.subscriptionTiers || []).find(t => t?.key === tierKey) ?? null;
+  }
+
+  function normalise(row, tierKey, visitCap) {
+    const price = Number(row.monthlyPrice);
     return {
-      price: Number(configured.monthlyPrice ?? 0),
+      key: tierKey,
+      label: row.label ?? null,
+      price: Number.isFinite(price) ? price : 0,
       visitCap,
-      gymAccess: configured.gymAccess,
+      gymAccess: row.gymAccess,
       multiGymPerDay: tierKey !== 'basic',
     };
+  }
+
+  /**
+   * The tier as configured in Settings, for using a pass already held
+   * (check-in, visit counts): present, not switched off, with an explicit
+   * visits value and a known gymAccess. Otherwise null — never a built-in
+   * fallback.
+   */
+  function getTierConfig(tierKey) {
+    const row = tierRow(tierKey);
+    if (!row || switchedOff(row)) return null;
+    // Gym access must be a known value: a missing or unknown one would
+    // otherwise read as "every gym" (fail closed).
+    if (!PASS_GYM_ACCESS.includes(row.gymAccess)) return null;
+    const visitCap = visitCapOf(row);
+    if (visitCap === null) return null;
+    return normalise(row, tierKey, visitCap);
+  }
+
+  /**
+   * The tier if it may be SOLD today: configured (see getTierConfig) and with
+   * a positive whole price. Otherwise null.
+   */
+  function sellableTier(tierKey) {
+    const cfg = getTierConfig(tierKey);
+    if (!cfg) return null;
+    return Number.isInteger(cfg.price) && cfg.price > 0 ? cfg : null;
+  }
+
+  const isTierSellable = (tierKey) => sellableTier(tierKey) !== null;
+
+  /** The keys of every tier that may be sold today, in Settings order. */
+  function sellableTierKeys() {
+    const settings = ensureDefaultSettings();
+    return (settings.subscriptionTiers || []).map(t => t?.key).filter(k => k && isTierSellable(k));
   }
 
   function visitCapForTier(tierKey) {
@@ -57,13 +115,15 @@ export function createSettingsService({ platformSettings, auditLog }) {
     return Number.isFinite(cap) ? cap : null;
   }
 
+  /** The tier's price in Settings; 0 when the tier is not configured (never a built-in price). */
   function priceForTier(tierKey) {
-    return Number(getTierConfig(tierKey)?.price ?? PASS_TIERS[tierKey]?.price ?? 0);
+    return Number(getTierConfig(tierKey)?.price ?? 0);
   }
 
+  /** The member-facing catalogue: only tiers that may be sold today. */
   function publicTiers() {
     const settings = ensureDefaultSettings();
-    return (settings.subscriptionTiers || []).map(t => ({
+    return (settings.subscriptionTiers || []).filter(t => t?.key && isTierSellable(t.key)).map(t => ({
       key: t.key,
       label: t.label,
       monthlyPrice: t.monthlyPrice,
@@ -76,13 +136,46 @@ export function createSettingsService({ platformSettings, auditLog }) {
     return ensureDefaultSettings();
   }
 
+  /**
+   * Every pass tier row an admin saves must be complete, so nothing is sold
+   * or checked in on half a setting: a unique key, a positive whole price, a
+   * visits value (-1 = unlimited or a whole number > 0) and a known gymAccess.
+   * Returns the first problem as { error, status: 400, tier, field } or null.
+   */
+  function invalidTiers(rows) {
+    const bad = (tier, field, extra = {}) => ({ error: 'invalid_subscription_tier', status: 400, tier, field, ...extra });
+    if (!Array.isArray(rows)) return bad(null, 'subscriptionTiers');
+    const seen = new Set();
+    for (const [i, row] of rows.entries()) {
+      const tier = typeof row?.key === 'string' && row.key.trim() ? row.key : null;
+      if (!tier) return bad(`#${i + 1}`, 'key');
+      if (seen.has(tier)) return bad(tier, 'key', { reason: 'duplicate' });
+      seen.add(tier);
+      const price = Number(row.monthlyPrice);
+      if (row.monthlyPrice === null || row.monthlyPrice === '' || !Number.isInteger(price) || price <= 0) return bad(tier, 'monthlyPrice');
+      if (visitCapOf(row) === null) return bad(tier, 'visits', { hint: '-1 for unlimited, or a whole number above 0' });
+      if (!PASS_GYM_ACCESS.includes(row.gymAccess)) return bad(tier, 'gymAccess', { allowed: PASS_GYM_ACCESS });
+    }
+    return null;
+  }
+
   async function adminUpdate({ body, actorId }) {
+    if (body.subscriptionTiers !== undefined) {
+      const invalid = invalidTiers(body.subscriptionTiers);
+      if (invalid) return invalid;
+    }
     const current = ensureDefaultSettings();
     const before = { ...current };
     const allowed = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency', 'trainerSpecialties'];
     const updates = {};
     for (const k of allowed) {
       if (body[k] !== undefined) updates[k] = body[k];
+    }
+    // Manual mobile-money details (slice A3): validated, replaced whole; null clears them.
+    if (body.manualPayment !== undefined) {
+      const checked = validateManualPaymentSettings(body.manualPayment);
+      if (checked.error) return { error: checked.error, field: checked.field, status: 400 };
+      updates.manualPayment = checked.value;
     }
     updates.updatedAt = new Date().toISOString();
     const updated = await platformSettings.updateAsync(s => s.id === 'platform', updates);
@@ -92,6 +185,11 @@ export function createSettingsService({ platformSettings, auditLog }) {
       target: 'platform', before, after: updated
     });
     return updated;
+  }
+
+  /** The saved manual-payment details ({ lipaNamba, accountName, network, instructions }), or null. */
+  function manualPaymentSettings() {
+    return ensureDefaultSettings().manualPayment ?? null;
   }
 
   function getSpecialtiesList() {
@@ -117,7 +215,7 @@ export function createSettingsService({ platformSettings, auditLog }) {
   }
 
   return {
-    ensureDefaultSettings, getTierConfig, visitCapForTier, priceForTier,
-    publicTiers, adminGet, adminUpdate, getSpecialtiesList, addSpecialty, deleteSpecialty,
+    ensureDefaultSettings, getTierConfig, sellableTier, isTierSellable, sellableTierKeys, visitCapForTier, priceForTier,
+    publicTiers, adminGet, adminUpdate, manualPaymentSettings, getSpecialtiesList, addSpecialty, deleteSpecialty,
   };
 }

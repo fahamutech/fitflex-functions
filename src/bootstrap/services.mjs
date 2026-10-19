@@ -31,7 +31,9 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn } from '../shared/feature-flags.mjs';
+import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
+import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
 import { createSmsProvider } from '../integrations/sms/provider.mjs';
 import { createSmsService } from '../services/sms-service.mjs';
@@ -53,6 +55,8 @@ import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
 import { createTermsService } from '../services/terms-service.mjs';
 import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
+import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
+import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
@@ -195,6 +199,8 @@ export const trainerService = createTrainerService({
 export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
+  // The Pass trainer discount only for a tier configured in Settings.
+  getTierConfig: settingsService.getTierConfig,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
   // promotionEventsService is defined at the end of this file; this only runs later.
   onBookingConversion: ({ action, groupId, bookings }) => (action === 'credit' ? promotionEventsService.recordBooking(bookings) : promotionEventsService.reverseBooking(groupId)),
@@ -228,6 +234,10 @@ export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
   // Stock reservation and cancellation are single database transactions.
   orderStore: createPgShopOrderStore({ db }),
+  // Vendor tools · S1: stock ledger, cost price, reorder level (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
+  stockLedger: createPgVendorStockStore({ db }),
+  // Vendor tools · S2: pickup gym names and vendor-scoped buyer ids on vendor orders.
+  gyms, buyerRefs: createPgVendorBuyerRefStore({ db }),
   requireVariantChoice: process.env.SHOP_REQUIRE_VARIANT === 'on',
   reservationTtlMinutes: Number(process.env.SHOP_RESERVATION_TTL_MINUTES) > 0 ? Number(process.env.SHOP_RESERVATION_TTL_MINUTES) : 48 * 60,
   onRefundDue: ({ order, amountTzs, reasonCode, actorId, role }) => refundService.raise({
@@ -362,7 +372,20 @@ export const authService = createAuthService({
   identityLink: identityLinkService, auditLog, orgMemberships: orgMembershipService,
 });
 
-export const subscriptionService = createSubscriptionService({ subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId });
+/**
+ * Slice A3: manual mobile-money payment. Off unless MANUAL_PAY_INSTRUCTIONS is
+ * set; on, it applies only once the admin has saved a Lipa Namba and account name.
+ */
+export const manualPayment = {
+  flagOn: () => manualPayInstructionsOn(),
+  required: () => manualPayInstructionsOn() && manualPaymentConfigured(settingsService.manualPaymentSettings()),
+  options: () => manualPaymentOptions(settingsService.manualPaymentSettings(), manualPayInstructionsOn()),
+};
+export const paymentReferenceStore = createPaymentReferenceStore({ db });
+export const subscriptionService = createSubscriptionService({
+  subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId, manualPayment,
+  auditLog, referenceStore: paymentReferenceStore,
+});
 export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
   // promotionEventsService is defined at the end of this file; this only runs later.
@@ -370,13 +393,15 @@ export const accountService = createAccountService({
   onAccountDeleted: async userId => { await promotionEventsService.forgetUser(userId); await usernameService.forgetUser(userId); },
 });
 
+// Until a gym's owner is verified, only the gym's own members check in there.
+// One check for the check-in and the scanner preview.
+const gymOpenToPass = gymId => partnerGate.isGymOperational(gymId);
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
   onCheckin: checkin => partnerNotifier.gymCheckin(checkin),
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
-  // Until a gym's owner is verified, only the gym's own members check in there.
-  gymOpenToPass: gymId => partnerGate.isGymOperational(gymId),
+  gymOpenToPass,
 });
 // Gym settlement configuration (settlement Phase 2): not used by any payout flow yet.
 export const settlementConfigService = createSettlementConfigService();
@@ -425,6 +450,8 @@ export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
   b2bFunding: b2bConsumptionService,
   settlementSummary: (args) => settlementViewService.ownerDashboard(args),
+  // The scanner preview refuses as the check-in would (gym_not_verified).
+  gymOpenToPass,
 });
 
 export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate });
@@ -435,6 +462,8 @@ export const adminMemberService = createAdminMemberService({
 });
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog, gyms,
+  // Slice A3 (review L1): the final reference of an approval is checked for reuse.
+  referenceStore: paymentReferenceStore, manualReferenceChecks: manualPayInstructionsOn,
   onSubscriptionActivated: async (sub, ctx) => {
     await finishSponsoredPass(sub);
     await notificationService.notifySubscriptionActivated(sub);
@@ -464,6 +493,8 @@ export const mobileMoneyService = createMobileMoneyService({
   canSettle: () => tunzaaConfig?.environment === 'live' || tunzaaSandboxSettlesOn(),
   // Sandbox only (the client ignores it on live): 'success' or 'failure' to rehearse an outcome.
   scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
+  // Only tiers configured in Settings are sold (owner decision 2026-10-19).
+  tierSellable: settingsService.isTierSellable,
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });

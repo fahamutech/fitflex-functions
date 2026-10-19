@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSubscriptionService } from '../src/services/subscription-service.mjs';
+import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 
 function memStore(rows = []) {
   return {
@@ -37,7 +38,7 @@ function makeService({ gyms = [gymFixture] } = {}) {
     paymentRequests: memStore(),
     checkins: memStore(),
     gyms,
-    settingsService: { priceForTier: () => 100000, visitCapForTier: () => null },
+    settingsService: settingsWithTiers(),
     publicUserId: async () => 'FF-1000',
   });
 }

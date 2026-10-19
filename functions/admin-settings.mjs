@@ -1,6 +1,7 @@
 // Platform settings + trainer specialties REST surface (public catalogue + admin edit).
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import { routeGuard } from '../src/shared/route-guard.mjs';
 import { settingsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -14,15 +15,23 @@ export const publicSubscriptionTiers = {
 export const adminGetSettings = {
   created, method: 'get', path: '/admin/settings',
   description: 'Admin: get platform settings (tiers, bands, payment period, etc.).',
-  onGuard: [requireAuth('admin'), requireAcl('settings')],
+  onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('settings')]),
   onRequest: (_req, res) => res.json(settingsService.adminGet())
 };
 
 export const adminUpdateSettings = {
   created, method: 'put', path: '/admin/settings',
-  description: 'Admin: update platform settings.',
-  onGuard: [requireAuth('admin'), requireAcl('settings')],
-  onRequest: async (req, res) => res.json(await settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub }))
+  description: 'Admin: update platform settings. Optional manualPayment { lipaNamba, accountName, network?, instructions?: { en, sw } } (or null to clear) — the Lipa Namba members pay manually; 400 manual_payment_invalid with `field` when invalid.',
+  onGuard: routeGuard('put', [requireAuth('admin'), requireAcl('settings')]),
+  onRequest: async (req, res) => {
+    const result = await settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub });
+    // An incomplete pass tier is refused, naming the tier and the field.
+    if (result?.error) {
+      const { status, ...body } = result;
+      return res.status(status).json(body);
+    }
+    res.json(result);
+  }
 };
 
 export const publicGetSpecialties = {
@@ -35,14 +44,14 @@ export const adminGetSpecialties = {
   created, method: 'get', path: '/admin/settings/specialties',
   description: 'Admin: get trainer specialty list.',
   // Any admin: the Trainers page (scope 'trainers') reads it too, and /settings/specialties is public anyway.
-  onGuard: requireAuth('admin'),
+  onGuard: routeGuard('get', requireAuth('admin')),
   onRequest: (_req, res) => res.json(settingsService.getSpecialtiesList())
 };
 
 export const adminAddSpecialty = {
   created, method: 'post', path: '/admin/settings/specialties',
   description: 'Admin: add a trainer specialty.',
-  onGuard: [requireAuth('admin'), requireAcl('settings')],
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('settings')]),
   onRequest: async (req, res) => {
     const result = await settingsService.addSpecialty(req.body?.name);
     if (result.error) return res.status(result.status).json({ error: result.error });
@@ -53,7 +62,7 @@ export const adminAddSpecialty = {
 export const adminDeleteSpecialty = {
   created, method: 'delete', path: '/admin/settings/specialties/:name',
   description: 'Admin: remove a trainer specialty.',
-  onGuard: [requireAuth('admin'), requireAcl('settings')],
+  onGuard: routeGuard('delete', [requireAuth('admin'), requireAcl('settings')]),
   onRequest: async (req, res) => {
     const name = decodeURIComponent(req.params.name || '');
     const result = await settingsService.deleteSpecialty(name);

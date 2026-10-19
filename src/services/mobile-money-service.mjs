@@ -45,6 +45,10 @@ export function createMobileMoneyService({
   canSettle = () => true,  // false against the sandbox unless opted into
   scenario = null,         // sandbox only: 'success' | 'failure'
   now = () => Date.now(),
+  // (tierKey) → boolean: may this FitFlex Pass tier be sold today (Settings)?
+  // A pass or upgrade request for a tier that is no longer sold is not sent
+  // to the phone. Wired to settingsService.isTierSellable in bootstrap.
+  tierSellable = null,
 }) {
   const fail = (error, status, extra = {}) => ({ error, status, ...extra });
   const audit = (action, target, before, after) => auditLog?.insertAsync?.({
@@ -99,7 +103,15 @@ export function createMobileMoneyService({
     if (own.error) return own.error;
     const { request } = own;
     if (request.status !== 'pending') return fail('payment_not_pending', 409);
-    if (!PAYABLE.has(await productOf(request))) return fail('not_payable_this_way', 409);
+    // The member says they paid the Lipa Namba already (slice A3): a prompt now would charge twice.
+    if (request.memberReference) return fail('manual_payment_submitted', 409);
+    const product = await productOf(request);
+    if (!PAYABLE.has(product)) return fail('not_payable_this_way', 409);
+    // Owner decision 2026-10-19: a tier not configured in Settings is not sold,
+    // even on a request raised before it was taken off (fail closed).
+    if (product === PRODUCT_TYPES.FITFLEX_PASS && tierSellable && !tierSellable(request.tier)) {
+      return fail('tier_not_available', 409, { tier: request.tier ?? null });
+    }
     if (!(request.amountTzs > 0)) return fail('invalid_amount', 409);
     const msisdn = toMsisdn(phone);
     if (!msisdn) return fail('invalid_phone', 400);
@@ -204,6 +216,8 @@ export function createMobileMoneyService({
       }
       const out = await adminPaymentService.decide({
         id: request.id, decision: 'approve', reference: txn, actorId: ACTOR, amountTzs: request.amountTzs,
+        // The provider confirmed the money: that is the verification (MONEY_SECOND_APPROVER does not apply).
+        automated: true,
       });
       if (out.error === 'already_decided') {
         const latest = await paymentRequests.findByIdAsync(request.id);

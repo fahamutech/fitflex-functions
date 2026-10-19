@@ -2,7 +2,6 @@
 // ignored, path matched as a prefix), then app[method](path, onRequest). UAT 2026-10-19: vendor staff
 // got 403 {"requiredRoles":["vendor","admin"]} on GET /vendor/profile because the PUT guard ran on GET.
 // Against the CI database (staff permissions are read from the User row).
-// Hotfix port of #193 to main: the /vendor/tools/options case is left out (that route is not on main).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -206,7 +205,7 @@ test('GET /vendor/payments/statement: staff with `reports` only may read it (was
   assert.deepEqual([payments.status, payments.body], [403, { error: 'vendor_permission_forbidden', requiredPermission: 'payments' }]);
 });
 
-test('vendor product writes require the admin `shop` scope on their own guard (on main they had none; on RC they borrowed it from GET /vendor/products)', async () => {
+test('vendor product writes keep the admin `shop` scope they had (now on their own guard, not borrowed from GET /vendor/products)', async () => {
   const noScope = { sub: uid('adm'), userType: 'admin', portalUser: true, aclPermissions: ['members'] };
   const shop = { sub: uid('adm'), userType: 'admin', portalUser: true, aclPermissions: ['shop'] };
   for (const [method, url] of [['POST', '/vendor/products'], ['PUT', '/vendor/products/p1'], ['DELETE', '/vendor/products/p1'], ['POST', '/vendor/products/p1/duplicate']]) {
@@ -242,7 +241,7 @@ test('every shop.mjs route: as mounted by bfast-function, it lets in exactly who
   }
   const ownUrl = listen(own);
   const shopRoutes = http.filter(k => k.startsWith('shop.mjs:') && functions[k].path);
-  assert.ok(shopRoutes.length >= 35, `found ${shopRoutes.length} shop routes`);
+  assert.ok(shopRoutes.length >= 40, `found ${shopRoutes.length} shop routes`);
   const mismatches = [];
   for (const k of shopRoutes) {
     const d = functions[k];
@@ -303,4 +302,22 @@ test('GET /vendor/staff: each entry is exactly the allow-list, for the vendor an
     assert.equal(new Date(entry.createdAt).toISOString(), '2026-10-01T00:00:00.000Z');
     assert.equal(JSON.stringify(entry).includes('hash'), false);
   }
+});
+
+test('GET /vendor/tools/options: suspended, other-vendor and unknown staff get 403 vendor_staff_inactive; active staff and the vendor still read it', async () => {
+  const vendorId = await user('vendor');
+  const otherVendor = await user('vendor');
+  const active = await staff(vendorId, []);
+  const suspended = await staff(vendorId, PERMS, 'suspended');
+  const moved = await staff(otherVendor, PERMS);
+  assert.equal((await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(active, vendorId))).status, 200);
+  assert.equal((await hit(realUrl, 'GET', '/vendor/tools/options', vendorClaims(vendorId))).status, 200);
+  const s = await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(suspended, vendorId));
+  assert.equal(s.status, 403);
+  assert.ok(['account_suspended', 'vendor_staff_inactive'].includes(s.body.error), JSON.stringify(s.body));
+  // Bypass requireAuth's suspension check (cached per user) to prove this guard refuses too.
+  await db('User').where({ id: active }).update({ accountStatus: 'disabled' });
+  assert.deepEqual(await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(active, vendorId)), { status: 403, body: { error: 'vendor_staff_inactive' } });
+  assert.deepEqual(await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(moved, vendorId)), { status: 403, body: { error: 'vendor_staff_inactive' } });
+  assert.deepEqual(await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(uid('ghost'), vendorId)), { status: 403, body: { error: 'vendor_staff_inactive' } });
 });
