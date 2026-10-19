@@ -14,12 +14,12 @@ export const listPasses = {
 
 export const subscribe = {
   created, method: 'post', path: '/me/subscribe',
-  description: 'Create a pilot Platform Pass payment request. Admin approval activates the subscription.',
-  requestSample: { tier: 'pro', type: 'platform_pass' },
+  description: 'Create a pilot Platform Pass (or gym plan) payment request. Admin approval activates the subscription. While manual payment is on (GET /payments/options manual.enabled) `reference` (the mobile-money transaction ID) and `payerPhone` (the number paid from) are required: 400 payment_reference_required / payment_reference_invalid / payer_phone_required / payer_phone_invalid, 409 payment_reference_duplicate, 429 too_many_attempts.',
+  requestSample: { tier: 'pro', type: 'platform_pass', reference: 'QGH7XK2L9P', payerPhone: '0712345678' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
-    const { tier, type = 'platform_pass', homeGymId, plan } = req.body || {};
-    const result = await subscriptionService.subscribe({ memberId: req.user.sub, tier, type, homeGymId, plan });
+    const { tier, type = 'platform_pass', homeGymId, plan, reference, payerPhone } = req.body || {};
+    const result = await subscriptionService.subscribe({ memberId: req.user.sub, tier, type, homeGymId, plan, reference, payerPhone });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(result.status).json({ subscription: result.subscription, paymentRequest: result.paymentRequest });
   }
@@ -38,12 +38,12 @@ export const upgradeOptions = {
 
 export const upgradePass = {
   created, method: 'post', path: '/me/upgrade',
-  description: 'Upgrade the FitFlex Pass: creates a payment request for the price difference. Approval upgrades the plan in place (same end date, same visits used).',
-  requestSample: { tier: 'pro' },
+  description: 'Upgrade the FitFlex Pass: creates a payment request for the price difference. Approval upgrades the plan in place (same end date, same visits used). While manual payment is on, `reference` (the mobile-money transaction ID) and `payerPhone` are required, as for /me/subscribe.',
+  requestSample: { tier: 'pro', reference: 'QGH7XK2L9P', payerPhone: '0712345678' },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
-    const { tier } = req.body || {};
-    const result = await subscriptionService.upgradePass({ memberId: req.user.sub, tier });
+    const { tier, reference, payerPhone } = req.body || {};
+    const result = await subscriptionService.upgradePass({ memberId: req.user.sub, tier, reference, payerPhone });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(result.status).json({ paymentRequest: result.paymentRequest, upgradeFrom: result.upgradeFrom, endsAt: result.endsAt });
   }

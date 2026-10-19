@@ -103,6 +103,8 @@ export function createMobileMoneyService({
     if (own.error) return own.error;
     const { request } = own;
     if (request.status !== 'pending') return fail('payment_not_pending', 409);
+    // The member says they paid the Lipa Namba already (slice A3): a prompt now would charge twice.
+    if (request.memberReference) return fail('manual_payment_submitted', 409);
     const product = await productOf(request);
     if (!PAYABLE.has(product)) return fail('not_payable_this_way', 409);
     // Owner decision 2026-10-19: a tier not configured in Settings is not sold,

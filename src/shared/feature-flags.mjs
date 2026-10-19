@@ -84,6 +84,17 @@ export function shopHomeV2On() {
 }
 
 /**
+ * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
+ * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
+ * carries no `manual` block and subscribe / upgrade take no reference, exactly
+ * as before. On, it takes effect only once the admin has saved the Lipa Namba
+ * and account name in platform settings (`manualPayment`).
+ */
+export function manualPayInstructionsOn() {
+  return on('MANUAL_PAY_INSTRUCTIONS');
+}
+
+/**
  * A1 · second approver on money. Off unless MONEY_SECOND_APPROVER is set, so a
  * deploy never changes how payments and refunds are decided on its own. On:
  *   - a manual payment is verified by one admin and approved by a different one

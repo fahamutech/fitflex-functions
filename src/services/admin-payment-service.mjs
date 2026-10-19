@@ -6,6 +6,7 @@ import { activationDates } from '../shared/subscription-status.mjs';
 import { productTypeOfPayment } from '../shared/payment-product.mjs';
 import { upgradeOf, upgradeApprovable, applyUpgradeStatus } from '../shared/pass-upgrade.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
+import { referenceKey, memoryReferenceStore } from '../shared/manual-payment.mjs';
 import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
 
 const DECIDED = ['approved', 'rejected', 'cancelled'];
@@ -30,9 +31,14 @@ export function createAdminPaymentService({
   onSubscriptionPaymentReversed = async () => {},
   // A pass was upgraded in place: (subscription, request) => void. Best-effort.
   onPassUpgraded = async () => {},
+  // Slice A3: reference lookups (database in production) and whether every approval's
+  // final reference is checked for reuse (MANUAL_PAY_INSTRUCTIONS).
+  referenceStore = null,
+  manualReferenceChecks = () => false,
   // A1: two admins on every manual payment decision (MONEY_SECOND_APPROVER). Off: unchanged.
   secondApprover = moneySecondApproverOn,
 }) {
+  const references = referenceStore || memoryReferenceStore({ paymentRequests });
   function slimMember(u) {
     if (!u) return null;
     return { id: u.id, displayName: u.displayName || null, email: u.email || null, phone: u.phone || null, photoUrl: u.photoUrl || null };
@@ -176,6 +182,24 @@ export function createAdminPaymentService({
     return null;
   }
 
+  /**
+   * Slice A3 (review L1): the reference an approval will record — after the member's
+   * transaction ID has been copied in — must not be on another pending or approved
+   * request (same letters+digits key, member ID or admin/provider reference). Checked
+   * for requests that carry a member ID, and for every approval while
+   * MANUAL_PAY_INSTRUCTIONS is on; otherwise approvals behave as before.
+   */
+  async function finalReferenceTaken(request, finalRef) {
+    if (!request.memberReference && !manualReferenceChecks()) return false;
+    if (!finalRef || String(finalRef).startsWith('ADMIN_')) return false;
+    const key = referenceKey(finalRef);
+    if (!key) return false;
+    return (await references.holders(key, { excludeId: request.id })).length > 0;
+  }
+
+  /** The member's ID, when an approval has no reference typed and none recorded yet. */
+  const memberRefFor = (request, typedOrRecorded) => (!typedOrRecorded ? (request.memberReference || null) : null);
+
   /** Write the decision only if the request is still in the state it was read in. */
   async function writeDecision(request, patch, guard = {}) {
     try {
@@ -207,6 +231,10 @@ export function createAdminPaymentService({
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
+    // Approving with no reference typed, and none recorded yet (e.g. by a verifying admin),
+    // confirms the transaction ID the member gave (slice A3). A recorded or typed one wins.
+    const memberRef = decision === 'approve' ? memberRefFor(request, reference || request.reference) : null;
+    const finalRef = reference || request.reference || memberRef;
     if (decision === 'approve') {
       const blocked = approvalBlocked(request, actorId, automated, reference);
       if (blocked) return blocked;
@@ -214,16 +242,21 @@ export function createAdminPaymentService({
       if (!can.ok) return { error: can.error, status: 409 };
       const problem = await checkConfirmation(request, { reference: reference || request.reference, amountTzs });
       if (problem) return problem;
-      if (await referenceUsedElsewhere(request, reference || request.reference)) return { error: 'reference_already_used', status: 409 };
+      // The final reference (typed, else recorded, else the member's ID) is checked both ways: by its
+      // letters+digits key against pending/approved requests (A3) and, flag on, verbatim against approved ones (A1).
+      if (await finalReferenceTaken(request, finalRef) || await referenceUsedElsewhere(request, finalRef)) {
+        return { error: 'reference_already_used', status: 409 };
+      }
     }
 
     const now = new Date().toISOString();
     const status = decision === 'approve' ? 'approved' : 'rejected';
+    const confirmedRef = reference || memberRef;
     // Approved by a second admin: only while the verification it was checked against still stands.
     const guard = (decision === 'approve' && !automated && secondApprover()) ? { verifiedBy: request.verifiedBy } : {};
     const updated = await writeDecision(request, {
       status,
-      reference: reference || request.reference,
+      reference: finalRef,
       // An upgrade's note names the plan it upgrades: it stays as it is.
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
@@ -232,7 +265,7 @@ export function createAdminPaymentService({
     // Another decision got there first (two staff members, or a double click).
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'already_decided', status: 409 };
-    await applyPaymentStatusToSubscription(request, status, reference || `ADMIN_${request.id}`);
+    await applyPaymentStatusToSubscription(request, status, confirmedRef || `ADMIN_${request.id}`);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: `payment_${status}`, target: request.id, before: request, after: updated
@@ -266,12 +299,19 @@ export function createAdminPaymentService({
     if (request.orderId && request.status === 'approved' && nextStatus !== 'approved') {
       return { error: 'payment_already_confirmed', status: 409 };
     }
-    if (nextStatus === 'approved' && request.status !== 'approved') {
+    const approving = nextStatus === 'approved' && request.status !== 'approved';
+    const memberRef = approving ? memberRefFor(request, reference ?? request.reference) : null;
+    const finalRef = (reference ?? request.reference) || memberRef || (reference ?? request.reference);
+    if (approving) {
       const can = await upgradeApprovable(subscriptions, request);
       if (!can.ok) return { error: can.error, status: 409 };
       const problem = await checkConfirmation(request, { reference: reference ?? request.reference, amountTzs });
       if (problem) return problem;
-      if (await referenceUsedElsewhere(request, reference ?? request.reference)) return { error: 'reference_already_used', status: 409 };
+      // The final reference (typed, else recorded, else the member's ID) is checked both ways: by its
+      // letters+digits key against pending/approved requests (A3) and, flag on, verbatim against approved ones (A1).
+      if (await finalReferenceTaken(request, finalRef) || await referenceUsedElsewhere(request, finalRef)) {
+        return { error: 'reference_already_used', status: 409 };
+      }
     }
     const now = new Date().toISOString();
     const twoAdmins = secondApprover();
@@ -279,7 +319,7 @@ export function createAdminPaymentService({
     const keepDecider = twoAdmins && DECIDED.includes(request.status) && nextStatus === request.status;
     const updated = await writeDecision(request, {
       status: nextStatus,
-      reference: reference ?? request.reference,
+      reference: finalRef,
       note: upgradeOf(request) ? request.note : (note ?? request.note ?? null),
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
       decidedBy: nextStatus === 'pending' ? null : (keepDecider ? request.decidedBy : actorId)
@@ -287,7 +327,7 @@ export function createAdminPaymentService({
     }, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {});
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'payment_changed', status: 409 };
-    await applyPaymentStatusToSubscription(request, nextStatus, reference ?? request.reference);
+    await applyPaymentStatusToSubscription(request, nextStatus, finalRef);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: 'payment_updated', target: request.id, before: request, after: updated
@@ -309,10 +349,12 @@ export function createAdminPaymentService({
     if (request.verifiedBy) return { error: 'already_verified', status: 409, verifiedBy: request.verifiedBy };
     const typed = text(reference, 120);
     if (referenceLocked(request, typed)) return { error: 'reference_locked_provider', status: 409 };
-    // Nothing typed: keep the reference the payment has, else the one the member gave when paying
-    // (memberReference, once that field exists; absent today, so this is a no-op).
+    // Nothing typed: keep the reference the payment has, else the transaction ID the member gave
+    // when paying (memberReference, slice A3).
     const finalReference = typed ?? request.reference ?? text(request.memberReference, 120) ?? null;
-    if (await referenceUsedElsewhere(request, finalReference)) return { error: 'reference_already_used', status: 409 };
+    if (await finalReferenceTaken(request, finalReference) || await referenceUsedElsewhere(request, finalReference)) {
+      return { error: 'reference_already_used', status: 409 };
+    }
     const at = new Date().toISOString();
     const updated = await updateIf(paymentRequests, request.id, { status: 'pending', verifiedBy: null }, {
       verifiedBy: actorId, verifiedAt: at,
@@ -377,7 +419,11 @@ export function createAdminPaymentService({
       if (request.orderId && amountTzs == null) return { error: 'amount_required', status: 400 };
       const problem = await checkConfirmation(request, { reference: request.reference, amountTzs });
       if (problem) return problem;
-      if (await referenceUsedElsewhere(request, request.reference)) return { error: 'reference_already_used', status: 409 };
+      // As at a decision: the final reference (recorded, else the member's ID) must not be used elsewhere.
+      const finalRef = request.reference || request.memberReference || null;
+      if (await finalReferenceTaken(request, finalRef) || await referenceUsedElsewhere(request, finalRef)) {
+        return { error: 'reference_already_used', status: 409 };
+      }
     }
     const at = new Date().toISOString();
     const patch = {
