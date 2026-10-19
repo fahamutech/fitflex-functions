@@ -13,8 +13,9 @@ import { db } from '../src/infra/knex-store.mjs';
 import {
   partnerGate, trainerService, trainerBookingService, ownerGymService, gymService, shopService,
   checkInService, adminApprovalService, partnerKycService, trainers, gyms, trainerClientService, memberManagement,
-  partnerVerifiedFor,
+  partnerVerifiedFor, operatorService,
 } from '../src/bootstrap/services.mjs';
+import { issue as issueMemberQr } from '../src/auth/qr-token.mjs';
 import { createPartnerGate, OPEN_GATE, ENFORCEMENT_START } from '../src/services/partner-gate.mjs';
 import { getGym, listGyms } from '../functions/gyms.mjs';
 import { sign } from '../src/auth/jwt.mjs';
@@ -201,6 +202,11 @@ test('a new owner\'s gym is active and listed as not verified; only its own memb
     startedAt: now, cycleStartedAt: now, renewsAt: new Date(+now + 30 * 86400e3), expiresAt: new Date(+now + 30 * 86400e3), createdAt: now,
   });
   assert.deepEqual(await checkInService.perform({ memberId: passMember, gymId }), { ok: false, failure: 'gym_not_verified' });
+  // The scanner's preview says the same before staff tap Check in (it used to say eligible).
+  const scanner = { gymIds: [gymId] };
+  const preview = async (memberId) => (await operatorService.verifyQr({ operator: scanner, gymId, qrToken: issueMemberQr(memberId).token })).body;
+  const passPreview = await preview(passMember);
+  assert.deepEqual([passPreview.ok, passPreview.eligible, passPreview.reason], [true, false, 'gym_not_verified']);
 
   // The gym's own direct member still gets in.
   const ownMember = await makeUser('member', { approvalStatus: 'approved' });
@@ -208,6 +214,8 @@ test('a new owner\'s gym is active and listed as not verified; only its own memb
     memberId: ownMember, gymId, tier: 'standard', startDate: now.toISOString(),
     endDate: new Date(+now + 30 * 86400e3).toISOString(), paidAmount: 0,
   });
+  const ownPreview = await preview(ownMember);
+  assert.deepEqual([ownPreview.eligible, ownPreview.reason], [true, 'pass_valid'], JSON.stringify(ownPreview));
   const own = await checkInService.perform({ memberId: ownMember, gymId });
   assert.notEqual(own.failure, 'gym_not_verified', JSON.stringify(own));
 
@@ -218,6 +226,7 @@ test('a new owner\'s gym is active and listed as not verified; only its own memb
   assert.equal(approved.case.status, 'approved');
   assert.equal(await partnerGate.isGymOperational(gymId), true);
   assert.equal((await view()).body.verified, true);
+  assert.notEqual((await preview(passMember)).reason, 'gym_not_verified');
   const pass = await checkInService.perform({ memberId: passMember, gymId });
   assert.notEqual(pass.failure, 'gym_not_verified', JSON.stringify(pass));
 

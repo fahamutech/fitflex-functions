@@ -292,9 +292,14 @@ export function createB2BProgramService({
     if (!BENEFIT_TYPES[body.benefitType]) return fail('invalid_benefit_type', 400, { allowed: Object.keys(BENEFIT_TYPES) });
     const flatFee = body.benefitType === FLAT_FEE_BENEFIT;
     if (flatFee) {
-      // The pass itself sets how often and where it can be used.
-      const tier = PASS_TIERS[body.passTier];
-      if (!tier || tier.accessMode === 'free_online') return fail('invalid_pass_tier', 400, { allowed: Object.keys(PASS_TIERS).filter(k => PASS_TIERS[k].accessMode !== 'free_online') });
+      // The pass itself sets how often and where it can be used. Only a tier
+      // sold today, as configured in Settings, can be sponsored (owner
+      // decision 2026-10-19; fail closed).
+      const allowed = settingsService.sellableTierKeys().filter(k => PASS_TIERS[k]?.accessMode !== 'free_online');
+      if (!body.passTier || typeof body.passTier !== 'string' || PASS_TIERS[body.passTier]?.accessMode === 'free_online') {
+        return fail('invalid_pass_tier', 400, { allowed });
+      }
+      if (!settingsService.isTierSellable(body.passTier)) return fail('tier_not_available', 409, { tier: body.passTier, allowed });
       if (body.fundingType === 'none') return fail('pass_needs_funding', 400);
     }
     // A fee of its own for this pass, instead of the tier's price less the programme's discount.

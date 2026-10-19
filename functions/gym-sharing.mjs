@@ -1,6 +1,6 @@
 // Gym ↔ member activity sharing. Gyms always see their own check-in
-// records and visit patterns; anything from the member's activity log is
-// shared only when the member switches it on for that gym.
+// records and visit patterns; class attendance, gym workouts and challenge
+// progress are shared by default, and the member can switch each off per gym.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireGymAcl } from '../src/auth/jwt.mjs';
 import { gymSharingService as svc, resolveRequestUser } from '../src/bootstrap/services.mjs';
@@ -21,7 +21,7 @@ export const myGymSharing = {
 
 export const updateMyGymSharing = {
   created, method: 'put', path: '/me/gym-sharing/:gymId',
-  description: 'Member: set what a gym can see. { permissions: { classAttendance, gymWorkouts, challenges } } — keys left out keep their value; all default to false.',
+  description: 'Member: set what a gym can see. { permissions: { classAttendance, gymWorkouts, challenges } } — keys left out keep their value; a gym the member never changed has all three on.',
   requestSample: { permissions: { classAttendance: true } },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await svc.updateMemberSharing(req.user.sub, req.params.gymId, req.body || {}))

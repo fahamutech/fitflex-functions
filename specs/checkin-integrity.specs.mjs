@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { CHECKIN_STATUS, CHECKIN_SOURCE, canTransition, checkStatusChange, currentStatus, sourceForMethod } from '../src/shared/checkin-status.mjs';
 import { createCheckinStatusService } from '../src/services/checkin-status-service.mjs';
 import { createCheckInService } from '../src/services/check-in-service.mjs';
+import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 import { createMemberManagementService } from '../src/services/member-management-service.mjs';
 import { localDay } from '../src/shared/member-progress.mjs';
 
@@ -125,7 +126,7 @@ describe('check-in service records settlement inputs', () => {
       startedAt: '2026-10-01T07:00:00Z', cycleStartedAt: '2026-10-01T07:00:00Z', expiresAt: '2099-01-01T00:00:00Z' }]);
     const checkins = mkCol();
     const trainers = { find: (pred) => [{ id: 't1', userId: 't1', status: 'active', gymIds: ['g1'] }].find(pred) };
-    return { checkins, svc: createCheckInService({ users, gyms, subscriptions, checkins, trainers }) };
+    return { checkins, svc: createCheckInService({ users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsWithTiers().getTierConfig }) };
   };
 
   test('staff scan: valid, linked to the pass subscription, EAT business day, member_qr_by_staff', async () => {

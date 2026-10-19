@@ -4,6 +4,7 @@
 // C3: today's sessions combine bookings and manually recorded sessions.
 // A4: members can enquire / show interest in a trainer.
 
+import { settingsWithTiers, TEST_TIERS } from './fixtures/tier-settings.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTrainerBookingService } from '../src/services/trainer-booking-service.mjs';
@@ -274,7 +275,7 @@ test('A4: the trainer sees their engagements with member context', async () => {
 
 // ───────────────── Paid multi-slot bookings (UAT #58) ─────────────────
 
-function makePaidBookingService({ passTier = null } = {}) {
+function makePaidBookingService({ passTier = null, tierRows = TEST_TIERS } = {}) {
   const trainerBookings = memStore();
   const paymentRequests = memStore();
   const events = [];
@@ -292,6 +293,8 @@ function makePaidBookingService({ passTier = null } = {}) {
     subscriptions: memStore(passTier ? [{ id: 's1', memberId: 'usr_m1', type: 'platform_pass', tier: passTier, status: 'active' }] : []),
     paymentRequests,
     notify: async (event, payload) => { events.push({ event, payload }); },
+    // The Pass trainer discount only for tiers configured in Settings.
+    getTierConfig: settingsWithTiers(tierRows).getTierConfig,
   });
   return { service, trainerBookings, paymentRequests, events };
 }
@@ -307,6 +310,13 @@ test('quote prices several slots with the Pass discount and writes nothing', asy
   assert.equal(out.summary.total, 32_000);
   assert.deepEqual(out.summary.slots.map(s => s.slot), ['09:00', '10:00']);
   assert.equal(trainerBookings.rows.length, 0);
+});
+
+test('no Pass trainer discount on a tier that is not configured in Settings (fail closed)', async () => {
+  const { service } = makePaidBookingService({ passTier: 'premium', tierRows: TEST_TIERS.filter(t => t.key !== 'premium') });
+  const out = await service.quoteBooking({ memberId: 'usr_m1', body: TWO_SLOTS });
+  assert.ok(!out.error, JSON.stringify(out));
+  assert.deepEqual([out.summary.subtotal, out.summary.discountPct, out.summary.total], [40_000, 0, 40_000]);
 });
 
 test('booking several slots creates one payment request and holds them payment_pending', async () => {

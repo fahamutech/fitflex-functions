@@ -31,7 +31,7 @@ export const challengeDetail = {
 
 export const joinChallenge = {
   created, method: 'post', path: '/challenges/:id/join',
-  description: 'Member: join a challenge that has not ended. { teamId? (teams mode), gymId? (gym vs gym), leaderboardOptIn? (default false) }',
+  description: 'Member: join a challenge that has not ended. { teamId? (teams mode), gymId? (gym vs gym), leaderboardOptIn? (default true; send false to stay off the ranking) }',
   requestSample: { leaderboardOptIn: false },
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => send(res, await svc.join(req.user.sub, req.params.id, req.body || {}))

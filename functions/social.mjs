@@ -20,7 +20,7 @@ const me = req => req.user.sub;
 
 // ── Settings, people, follows, blocks ───────────────────────────────────
 export const socialSettings = route('get', '/me/social/settings', 'Member: default audience for new activities, invite code, blocked people.', req => svc.settings(me(req)));
-export const updateSocialSettings = route('put', '/me/social/settings', 'Member: public profile on/off, and the default audience. { publicProfile?, defaultShare?: null | { v: 2, friends, followers, public, groups: [id], company } }', req => svc.updateSettings(me(req), req.body || {}));
+export const updateSocialSettings = route('put', '/me/social/settings', 'Member: public profile on/off (on by default), and the default audience (Public + all groups by default). { publicProfile?, defaultShare?: null | { v: 2, friends, followers, public, groups: [id], company, allGroups } } — allGroups: every group the member is in when each activity is saved; left out means false.', req => svc.updateSettings(me(req), req.body || {}));
 export const myConnections = route('get', '/me/connections', 'Member: friends (mutual follows), people you follow, and people who follow you.', req => svc.connections(me(req)));
 export const findPeople = route('get', '/social/people', 'Member: find people who share a group or company with you (?q=name), or anyone by invite code (?code=).', req => svc.findPeople(me(req), { q: req.query?.q, code: req.query?.code }));
 export const followPerson = route('post', '/me/follows', 'Member: follow someone. { userId } — you see each other\'s shared activity once they follow back.', req => svc.follow(me(req), req.body?.userId));

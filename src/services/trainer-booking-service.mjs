@@ -56,6 +56,9 @@ export function createTrainerBookingService({
   onBookingConversion = null,
   // A paid session was cancelled and the money is owed back: ({ booking, reasonCode, actorId, role }) → refund.
   onRefundDue = async () => null,
+  // (tierKey) → the tier's Settings config or null. The Pass trainer discount
+  // applies only to a tier configured in Settings (none when not wired).
+  getTierConfig = () => null,
 }) {
   /**
    * Keep promotion analytics in step with a booking request: while any session in it is confirmed or done it counts
@@ -170,7 +173,7 @@ export function createTrainerBookingService({
     const pricing = priceBooking({
       listPrice: trainer.hourlyRateTzs,
       slotCount: slots.length,
-      discountPct: passDiscountPct(passTier),
+      discountPct: passDiscountPct(passTier, passTier ? getTierConfig(passTier) : null),
       commissionPct: trainerCommissionPct(trainer),
     });
     const summary = {

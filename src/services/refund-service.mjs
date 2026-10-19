@@ -12,6 +12,7 @@
 //
 //   requested ──approve──▶ approved ──paid──▶ paid
 //       └──────reject────▶ rejected
+import { formatTsh } from '../shared/money-display.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
 import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
@@ -35,7 +36,7 @@ export function createRefundService({
   // A1: two admins on refunds (MONEY_SECOND_APPROVER). Off: unchanged.
   secondApprover = moneySecondApproverOn,
 }) {
-  const money = n => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
+  const money = formatTsh;
 
   async function tell(refund, type, title, body) {
     try {

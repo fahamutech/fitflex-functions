@@ -162,6 +162,7 @@ test('payment notice: sent once, checked by FitFlex, and confirming it records t
   assert.match(confirmed.payment.number, /^FF-RCT-\d{4}-\d{6}$/);
   assert.deepEqual(await invoiceRow(inv.id).then(i => [i.status, i.amountPaidTzs]), ['paid', 300000]);
   assert.deepEqual(sent.inbox.map(m => [m.userId, m.type]), [[fin.sub, 'b2b_payment_confirmed']]);
+  assert.match(sent.inbox[0].body, /your payment of TSh 300,000 /, 'displayed money reads TSh (D-8)');
   // Confirming again changes nothing: one payment.
   assert.equal((await collections.confirmNotice({ noticeId: first.notice.id, actorId: CASHIER })).unchanged, true);
   assert.equal(await db('B2BPayment').where({ organizationId: orgId }).whereRaw('lower("reference") = ?', [ref.toLowerCase()]).then(r => r.length), 1);
@@ -188,6 +189,7 @@ test('payment notice: the statement shows another amount, a notice is rejected w
     .rejectNotice({ noticeId: wrong.notice.id, reason: 'Not on our statement', actorId: CASHIER });
   assert.deepEqual([rejected.notice.status, rejected.notice.decisionNote, rejected.notice.paymentId], ['rejected', 'Not on our statement', null]);
   assert.match(sent.inbox[0].body, /Not on our statement/);
+  assert.match(sent.inbox[0].body, /your payment of TSh 50,000 /);
   assert.equal((await collections.confirmNotice({ noticeId: wrong.notice.id, actorId: CASHIER })).error, 'notice_already_decided');
   assert.deepEqual(await invoiceRow(inv.id).then(i => i.amountPaidTzs), 450000);
   // A rejected reference can be sent again, corrected.

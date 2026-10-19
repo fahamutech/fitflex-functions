@@ -163,12 +163,12 @@ export function buildNeeds({ mode, memberProfile = null, trainerProfile = null, 
 /**
  * What may appear on the home. The products passed in should already be the
  * buyer-visible list (shopService.listProducts: active, approved, visible,
- * listed, vendor allowed to sell, not hidden or suspended in moderation); the
+ * listed, vendor allowed to sell, not hidden or suspended in moderation or on the account); the
  * same row checks are repeated here so the module is safe on its own. Then:
  *   - out of stock (stock ≤ 0) never appears on the home (it stays in search and results);
  *   - the shopper's own products (any vendor persona they hold) never appear;
  *   - products of a vendor whose account is suspended (User.accountStatus) never appear.
- *     (Moderation suspension is already applied by listProducts; account suspension is not.)
+ *     (listProducts now applies this too; repeated here so the module is safe on its own.)
  * Delivery: products carry no buyer-area coverage in Phase 1, and gym pickup is
  * always offered, so nothing is excluded by delivery yet.
  * → { eligible: Product[], excluded: { [productId]: reason } }

@@ -2,7 +2,7 @@
 // consuming a visit, the actual scan-to-checkin flow, recent activity, and
 // analytics for the owner/operator Home dashboard.
 import { resolveOperatorGymSelection, operatorGymIds } from '../shared/operator-gym-selection.mjs';
-import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry, fundedBySubscription } from '../shared/check-in-rules.mjs';
+import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry, fundedBySubscription, visitNeedsVerifiedGym } from '../shared/check-in-rules.mjs';
 import { issue as issueQr, verify as verifyQrToken, issueGymQr, verifyGymQr } from '../auth/qr-token.mjs';
 
 function sameEatDate(a, b) {
@@ -17,6 +17,9 @@ export function createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
   b2bFunding = null,
   settlementSummary = null,
+  // (gymId) → boolean: is the gym open to FitFlex Pass / sponsored visitors
+  // (owner verified)? The same check the check-in itself makes.
+  gymOpenToPass = null,
 }) {
   // B2B lookups must never break scanning: on any error, behave as before.
   const sponsored = async (fn) => {
@@ -45,10 +48,14 @@ export function createOperatorService({
     if (gymSelection.failure === 'not_your_gym') return { status: 403, body: { error: 'not_your_gym' } };
     const member = await users.findByIdAsync(claim.userId);
     if (!member) return { status: 404, body: { error: 'member_not_found' } };
-    const allSubs = await subscriptions.filterAsync(s => s.memberId === member.id && s.status === 'active');
+    const memberSubs = await subscriptions.filterAsync(s => s.memberId === member.id && ['active', 'expired', 'suspended'].includes(s.status));
+    const allSubs = memberSubs.filter(s => s.status === 'active');
     const sub = gym
       ? pickSubscriptionForGym(allSubs, gym)
       : allSubs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+    // Who counts as the gym's own member is decided on the same plans the
+    // check-in looks at (an expired plan still in its grace period included).
+    const checkInSub = gym ? pickSubscriptionForGym(memberSubs, gym) : null;
     let eligible = false;
     let reason = 'no_active_pass';
     let visitsUsed = 0;
@@ -61,6 +68,9 @@ export function createOperatorService({
       const validation = validateTrainerHomeEntry({ gym });
       eligible = validation.ok;
       reason = validation.ok ? 'trainer_home_gym' : validation.failure;
+    } else if (gymOpenToPass && visitNeedsVerifiedGym({ subscription: checkInSub, gym }) && !(await gymOpenToPass(gym.id))) {
+      // The check-in would be refused (check-in-service): say so before staff tap Check in.
+      reason = 'gym_not_verified';
     } else if (validateTrainerHomeEntry({ gym }).ok && await sponsored(b => b.wouldCoverGymVisit({ memberId: member.id, gym }))) {
       // Same order as the check-in itself: a sponsor's benefit before the member's own pass.
       eligible = true;

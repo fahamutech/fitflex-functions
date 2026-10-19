@@ -10,17 +10,51 @@ import { fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { PRODUCT_TYPES, MEMBER_ACCESS_PRODUCTS, productTypeOfPayment } from '../shared/payment-product.mjs';
 import { upgradeNote, upgradeOf, upgradeDifference, isSponsoredPassId } from '../shared/pass-upgrade.mjs';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+// GET /me/checkins: rows without a date range (unchanged for older app builds).
+export const CHECKIN_DEFAULT_LIMIT = 50;
+// With a date range: default window, longest window, and a defensive row cap.
+export const CHECKIN_RANGE_DEFAULT_DAYS = 90;
+export const CHECKIN_RANGE_MAX_DAYS = 366;
+export const CHECKIN_RANGE_MAX_ROWS = 1000;
+
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
 }) {
-  // A7: the member-facing catalogue must not offer the "Online Free" option.
+  // The legacy pass catalogue (GET /passes), read from Settings like
+  // /subscription-tiers: only tiers that may be sold today (owner decision
+  // 2026-10-19). Fields kept for older app builds (id, price, visitCap with
+  // null = unlimited) alongside the Settings names. A7: never "Online Free".
   function listPasses() {
-    return Object.entries(PASS_TIERS)
-      .filter(([, cfg]) => cfg.accessMode !== 'free_online')
-      .map(([id, cfg]) => ({
-        id, ...cfg,
-        visitCap: Number.isFinite(cfg.visitCap) ? cfg.visitCap : null
-      }));
+    return (settingsService.publicTiers?.() ?? [])
+      .filter(t => PASS_TIERS[t.key]?.accessMode !== 'free_online')
+      .map(t => {
+        const cfg = settingsService.sellableTier(t.key);
+        return cfg && {
+          id: t.key,
+          key: t.key,
+          label: cfg.label,
+          price: cfg.price,
+          monthlyPrice: cfg.price,
+          visitCap: Number.isFinite(cfg.visitCap) ? cfg.visitCap : null,
+          visits: t.visits,
+          gymAccess: cfg.gymAccess ?? null,
+          trainerDiscountPct: PASS_TIERS[t.key]?.trainerDiscountPct ?? 0,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * The tier when it may be sold today, else the refusal. Settings is the only
+   * source: a tier must be there with a positive price and an explicit visits
+   * value (and not switched off). Never a built-in fallback.
+   */
+  function sellable(tier) {
+    if (!tier || typeof tier !== 'string') return { error: 'invalid_tier', status: 400 };
+    const cfg = settingsService.sellableTier(tier);
+    if (!cfg) return { error: 'tier_not_available', status: 409, tier };
+    return { cfg };
   }
 
   // A7: gym direct plans — durations drive real expiry (A1).
@@ -219,14 +253,12 @@ export function createSubscriptionService({
     if (type === 'direct_sub') return subscribeDirect({ memberId, homeGymId, plan });
     // Only the two member products are bought here (trainer passes and sessions have their own routes).
     if (type !== 'platform_pass') return { error: 'invalid_type', status: 400 };
-    // The tier must be one the platform sells today: the configured catalogue
-    // (admin settings), else the built-in one.
-    const configured = settingsService.publicTiers?.().map(t => t.key);
-    const sellable = configured ? configured.includes(tier) || PASS_TIERS[tier]?.accessMode === 'free_online' : Boolean(PASS_TIERS[tier]);
-    if (!tier || !sellable) return { error: 'invalid_tier', status: 400 };
-    const amountTzs = Number(settingsService.priceForTier(tier));
-    const isFreeOnline = amountTzs === 0 && PASS_TIERS[tier]?.accessMode === 'free_online';
-    if (!isFreeOnline && !positiveTzs(amountTzs)) return { error: 'tier_not_available', status: 400 };
+    // The tier must be one the platform sells today, as configured in
+    // Settings (fail closed). This includes the free online plan: it is only
+    // available if Settings lists it, and a listed tier needs a positive price.
+    const offer = sellable(tier);
+    if (offer.error) return offer;
+    const amountTzs = offer.cfg.price;
     if (await openPassPayment(memberId)) return { error: 'payment_already_pending', status: 409 };
     const now = new Date();
     const renewsAt = new Date(+now + 30 * 86_400_000);
@@ -234,17 +266,16 @@ export function createSubscriptionService({
       id: `sub_${randomUUID().slice(0, 8)}`,
       memberId,
       type, tier,
-      status: isFreeOnline ? 'active' : 'payment_pending',
+      status: 'payment_pending',
       startedAt: now.toISOString(),
       cycleStartedAt: now.toISOString(),
       renewsAt: renewsAt.toISOString(),
       expiresAt: renewsAt.toISOString(),
       homeGymId: null, // a FitFlex Pass roams; it is never bound to one gym
-      paymentRef: isFreeOnline ? 'FREE_ONLINE' : null,
+      paymentRef: null,
       pilotPayment: true
     };
     await subscriptions.insertAsync(sub);
-    if (isFreeOnline) return { status: 201, subscription: sub, paymentRequest: null };
 
     const paymentRequest = await paymentRequests.insertAsync({
       id: `pay_${randomUUID().slice(0, 8)}`,
@@ -278,7 +309,8 @@ export function createSubscriptionService({
   async function upgradeOptions(memberId) {
     const held = await upgradableCurrentPass(memberId);
     if (held.error) return held;
-    const catalogue = settingsService.publicTiers?.() ?? [];
+    // Only tiers that may be sold today (publicTiers lists just those).
+    const catalogue = (settingsService.publicTiers?.() ?? []).filter(t => settingsService.isTierSellable(t.key));
     const options = catalogue
       .map(t => ({ ...t, differenceTzs: upgradeDifference(held.fromPrice, settingsService.priceForTier(t.key)) }))
       .filter(t => t.differenceTzs && PASS_TIERS[t.key]?.accessMode !== 'free_online')
@@ -307,10 +339,11 @@ export function createSubscriptionService({
   async function upgradePass({ memberId, tier }) {
     const held = await upgradableCurrentPass(memberId);
     if (held.error) return held;
-    const configured = settingsService.publicTiers?.().map(t => t.key);
-    const sellable = configured ? configured.includes(tier) : Boolean(PASS_TIERS[tier]);
-    if (!tier || !sellable || PASS_TIERS[tier]?.accessMode === 'free_online') return { error: 'invalid_tier', status: 400 };
-    const amountTzs = upgradeDifference(held.fromPrice, settingsService.priceForTier(tier));
+    if (PASS_TIERS[tier]?.accessMode === 'free_online') return { error: 'invalid_tier', status: 400 };
+    // The target tier must be sold today, as configured in Settings (fail closed).
+    const offer = sellable(tier);
+    if (offer.error) return offer;
+    const amountTzs = upgradeDifference(held.fromPrice, offer.cfg.price);
     if (!amountTzs) return { error: 'not_an_upgrade', status: 409 };
     if (await openPassPayment(memberId)) return { error: 'payment_already_pending', status: 409 };
 
@@ -406,11 +439,37 @@ export function createSubscriptionService({
     return { user: { ...toSessionUser(user), publicId: pubId, userCode: pubId }, subscription: sub, pendingPayment, pendingPayments, entitlements, visitsUsed, visitCap };
   }
 
-  async function memberCheckIns(memberId) {
-    return (await checkins.filterAsync(c => c.memberId === memberId))
-      .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
-      .slice(0, 50)
-      .map(c => ({ ...c, gym: hideTrainerPass(publicGym(gyms.find(g => g.id === c.gymId) || null)) }));
+  // GET /me/checkins. Without from/to: the newest 50 (what older app builds
+  // expect). With from and/or to: every check-in with from <= timestamp < to,
+  // newest first, capped at CHECKIN_RANGE_MAX_ROWS as a guard. A missing `to`
+  // is now; a missing `from` is `to` minus 90 days; the window is at most 366 days.
+  async function memberCheckIns(memberId, { from, to } = {}) {
+    const withGym = c => ({ ...c, gym: hideTrainerPass(publicGym(gyms.find(g => g.id === c.gymId) || null)) });
+    const newestFirst = (a, b) => +new Date(b.timestamp) - +new Date(a.timestamp);
+    const given = v => v !== undefined && v !== null && v !== '';
+    if (!given(from) && !given(to)) {
+      return (await checkins.filterAsync(c => c.memberId === memberId))
+        .sort(newestFirst)
+        .slice(0, CHECKIN_DEFAULT_LIMIT)
+        .map(withGym);
+    }
+    const parse = v => {
+      if (typeof v !== 'string') return null;
+      const d = new Date(v);
+      return Number.isNaN(+d) ? null : d;
+    };
+    const end = given(to) ? parse(to) : new Date();
+    if (!end) return { error: 'invalid_date', status: 400 };
+    const start = given(from) ? parse(from) : new Date(+end - CHECKIN_RANGE_DEFAULT_DAYS * DAY_MS);
+    if (!start) return { error: 'invalid_date', status: 400 };
+    if (start > end) return { error: 'invalid_range', status: 400 };
+    if (+end - +start > CHECKIN_RANGE_MAX_DAYS * DAY_MS) return { error: 'range_too_long', status: 400 };
+    return (await checkins.filterByColumnAsync('memberId', memberId))
+      .filter(c => c.memberId === memberId)
+      .filter(c => { const t = new Date(c.timestamp); return t >= start && t < end; })
+      .sort(newestFirst)
+      .slice(0, CHECKIN_RANGE_MAX_ROWS)
+      .map(withGym);
   }
 
   async function memberPaymentHistory(memberId) {
