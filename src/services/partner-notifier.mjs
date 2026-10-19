@@ -194,12 +194,40 @@ export function createPartnerNotifier({
     vendor_approved: () => ({ type: 'vendor_shop_approved', title: 'Your shop is approved', body: 'You can now sell on FitFlex.', data: {} }),
     vendor_rejected: d => ({ type: 'vendor_shop_rejected', title: 'Your shop was not approved', body: d.approvalNote || 'Open your shop profile to see what is needed.', data: {} }),
     vendor_suspended: d => ({ type: 'vendor_shop_suspended', title: 'Your shop is suspended', body: d.approvalNote || 'Your products are hidden until this is resolved.', data: {} }),
+    // Vendor tools · S1. Sent in the vendor's language (their communication preference: sw → Swahili,
+    // otherwise English); `titleSw` / `bodySw` are always in `data` for the app's inbox.
+    // Swahili texts (incl. the 'Bidhaa' fallback) are DRAFTS for native review (plan §4, design spec §8.5).
+    vendor_low_stock: (d, locale) => {
+      const named = fallback => (d.variant ? `${d.productName || fallback} (${d.variant})` : d.productName || fallback);
+      const en = { title: `Low stock: ${named('A product')}`, body: `Only ${d.stock} left. Time to restock.` };
+      const sw = { title: `Stock inakaribia kuisha: ${named('Bidhaa')}`, body: `Zimebaki ${d.stock} tu. Ni wakati wa kuongeza Stock.` };
+      const text = locale === 'sw' ? sw : en;
+      return {
+        type: 'vendor_low_stock',
+        title: text.title,
+        body: text.body,
+        data: {
+          productId: d.productId ?? '', variant: d.variant ?? '', stock: d.stock ?? '',
+          titleSw: sw.title, bodySw: sw.body,
+        },
+      };
+    },
   };
 
   /** Something happened in a vendor's shop. Events with no message here stay in the shop's own list only. */
   async function vendorEvent(vendorUserId, event, data = {}) {
     const make = VENDOR_MESSAGES[event];
-    if (make) await send(vendorUserId, make(data));
+    if (make) await send(vendorUserId, make(data, make.length > 1 ? await localeOf(vendorUserId) : null));
+  }
+
+  /** The language a person chose for messages ('sw' | 'en' | null). Never fails a notification. */
+  async function localeOf(userId) {
+    if (!preferences) return null;
+    try {
+      return (await preferences.findByIdAsync(userId))?.locale ?? null;
+    } catch {
+      return null;
+    }
   }
 
   return { gymCheckin, gymMemberJoined, gymTrainerRequest, gymReview, gymStatement, vendorEvent, gymPeople };

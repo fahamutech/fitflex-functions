@@ -133,7 +133,7 @@ test('browse, checkout, retry, order list, reorder, invoice, vendor orders and c
   assert.equal(off.retry.headers['Idempotent-Replay'], 'true');
   assert.equal(off.mine.body.length, 1);
   assert.equal(off.mine.body[0].canCancel, true);
-  assert.deepEqual(off.reorder.body, { items: [{ productId: '<product>', qty: 2 }] });
+  assert.deepEqual(off.reorder.body, { items: [{ productId: '<product>', variant: null, qty: 2 }] });
   assert.match(off.invoice.body, /Total: TSh 50,000/);
   assert.equal(off.vendorOrders.body.length, 1);
   assert.equal(off.cancel.status, 200);
