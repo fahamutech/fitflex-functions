@@ -231,9 +231,12 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * Cost price is the vendor's own business (owner decision 2026-10-19): the vendor account itself and
    * vendor_staff whose vendorRole is 'admin' see and set it; other staff, even with `products`, do not.
    * Read from the stored account, not the token.
+   * FitFlex admins see everything (owner decision 2026-10-19): an admin with the `shop` scope that the
+   * admin product pages use (a super-admin, i.e. not a portal user, has every scope — as requireAcl).
    */
   async function canSeeCost(claims) {
     if (claims?.userType === 'vendor') return true;
+    if (claims?.userType === 'admin') return !claims.portalUser || (Array.isArray(claims.aclPermissions) && claims.aclPermissions.includes('shop'));
     if (claims?.userType !== 'vendor_staff') return false;
     const staff = await users.findByIdAsync(claims.sub);
     return staff?.userType === 'vendor_staff' && staff.vendorId === claims.vendorId && staff.accountStatus === 'active' && staff.vendorRole === 'admin';
@@ -325,6 +328,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * What the vendor sees of their own products: with the ledger on, the private fields too —
    * costTzs / reorderLevel (the product's own, '' row), and per variant its own costTzs / reorderLevel
    * plus the effective ones (own, else the product's: Q-1). Never used for public views.
+   * vendorId null = FitFlex admin views across vendors (the rows' own ids scope the read).
    */
   async function vendorProductsView(vendorId, rows, { costAllowed = true } = {}) {
     if (!ledgerOn() || !rows.length) return rows;
@@ -419,8 +423,38 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     await products.updateByIdAsync(productId, { deletedAt: nowIso(), status: 'archived', updatedAt: nowIso() });
     return { deleted: true };
   }
+  /** GET /admin/products. With the ledger on, admins see the private fields too (cost included). */
   async function adminListProducts() {
-    return (await products.filterAsync(product => !product.deletedAt)).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
+    const rows = (await products.filterAsync(product => !product.deletedAt)).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
+    return vendorProductsView(null, rows, { costAllowed: true });
+  }
+
+  /**
+   * Cost / reorder level an admin sends on PUT /admin/products/:id/listing: { costTzs?, reorderLevel?,
+   * variants?: [{ name, costTzs?, reorderLevel? }] } (null clears; other variant keys are ignored here).
+   * → { privates } or { error }.
+   */
+  function adminPrivatesFrom(body, product) {
+    const input = { costTzs: body?.costTzs, reorderLevel: body?.reorderLevel };
+    const bad = invalidPrivateField(input);
+    if (bad) return { error: 'invalid_field', status: 400, field: bad };
+    if (body?.variants !== undefined) {
+      const v = body.variants;
+      const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && !invalidPrivateField(x));
+      if (!ok) return { error: 'invalid_field', status: 400, field: 'variants' };
+      // Same rule as the vendor form: one entry per variant name (case and spaces ignored).
+      const seen = new Set();
+      for (const x of v) {
+        const key = x.name.trim().toLowerCase();
+        if (seen.has(key)) return { error: 'duplicate_variant', status: 400, variant: x.name.trim() };
+        seen.add(key);
+      }
+      const names = variantsOf(product).map(x => x.name);
+      const unknown = v.find(x => !names.includes(String(x.name).trim()));
+      if (unknown) return { error: 'variant_not_found', status: 404, variant: unknown.name, variants: names };
+      input.variants = v.map(x => ({ name: x.name, costTzs: x.costTzs, reorderLevel: x.reorderLevel }));
+    }
+    return { privates: privatesFrom(input) };
   }
   async function adminCreateProduct({ body, actorId }) {
     const vendorId = String(body?.vendorId || '').trim();
@@ -428,7 +462,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const vendor = await users.findByIdAsync(vendorId);
     if (!vendor || vendor.userType !== 'vendor') return { error: 'vendor_not_found', status: 404 };
     if (vendor.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 409 };
-    const created = await upsertProduct({ vendorId, body, actorId });
+    // The admin is the actor of the opening stock rows; cost and reorder level are stored as the vendor's would be.
+    const created = await upsertProduct({ vendorId, body, actorId, costAllowed: true });
     if (created.error) return created;
     const requestedApproval = ['pending', 'approved', 'rejected'].includes(body?.approvalStatus)
       ? body.approvalStatus
@@ -439,22 +474,43 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       homepagePriority: Number(body?.homepagePriority || 0),
       updatedAt: nowIso(),
     });
+    const privates = ledgerOn() ? privatesFrom(body || {}) : [];
     await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'admin_product_created',
-      target: product.id, before: null, after: { vendorId, approvalStatus: requestedApproval },
+      target: product.id, before: null, after: { vendorId, approvalStatus: requestedApproval, ...(privates.length ? { privates } : {}) },
     });
     if (requestedApproval !== 'pending') await notifyVendor(vendorId, `product_${requestedApproval}`, { productId: product.id });
-    return { product, status: 201 };
+    return { product: (await vendorProductsView(null, [product], { costAllowed: true }))[0], status: 201 };
   }
   async function adminUpdateProductListing({ productId, body, actorId }) {
+    const patch = { ...(typeof body?.homepageVisible === 'boolean' ? { homepageVisible: body.homepageVisible } : {}), ...(body?.homepagePriority !== undefined ? { homepagePriority: Number(body.homepagePriority) || 0 } : {}), ...(['approved', 'pending', 'rejected'].includes(body?.approvalStatus) ? { approvalStatus: body.approvalStatus } : {}), updatedAt: nowIso() };
+    if (ledgerOn()) {
+      // With the ledger on an admin may also set cost price / reorder level. Listing fields, private fields
+      // and both audit rows are one transaction under the product's row lock (variant names checked there too).
+      let privates = [];
+      const saved = await stockLedger.adminUpdateListing({
+        productId, actorId,
+        decide: (current) => {
+          const parsed = adminPrivatesFrom(body, current);
+          if (parsed.error) return parsed;
+          privates = parsed.privates;
+          return { patch, privates };
+        },
+      });
+      if (saved.error) return saved;
+      if (patch.approvalStatus) await notifyVendor(saved.prior.vendorId, `product_${patch.approvalStatus}`, { productId });
+      // A reorder level raised to or above the stock alerts the vendor once, as from the vendor's own form.
+      if (privates.length) await afterStockMoved([productId]);
+      return { product: (await vendorProductsView(null, [saved.product], { costAllowed: true }))[0] };
+    }
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
-    const patch = { ...(typeof body?.homepageVisible === 'boolean' ? { homepageVisible: body.homepageVisible } : {}), ...(body?.homepagePriority !== undefined ? { homepagePriority: Number(body.homepagePriority) || 0 } : {}), ...(['approved', 'pending', 'rejected'].includes(body?.approvalStatus) ? { approvalStatus: body.approvalStatus } : {}), updatedAt: nowIso() };
     const product = await products.updateByIdAsync(productId, patch);
     await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_listing_updated', target: productId, before: { homepageVisible: prior.homepageVisible ?? true, homepagePriority: Number(prior.homepagePriority || 0), approvalStatus: prior.approvalStatus || 'pending' }, after: patch });
     if (patch.approvalStatus) await notifyVendor(prior.vendorId, `product_${patch.approvalStatus}`, { productId });
     return { product };
   }
+
 
   async function adminListVendors() {
     const vendors = await users.filterAsync(user => user.userType === 'vendor');
