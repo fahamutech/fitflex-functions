@@ -3,14 +3,12 @@
 // this contract, so going live is configuration: pick the provider with
 // WHATSAPP_PROVIDER and give it its credentials in the environment.
 //
-// There is no WhatsApp Business account yet (decision D2), so the only
-// providers are:
+// Providers:
 //   - not_configured (the default): nothing is sent; messages are skipped
 //     with `whatsapp_not_configured`.
+//   - meta: Meta's WhatsApp Cloud API (chosen 15 Oct 2026); see
+//     meta-provider.mjs for its settings.
 //   - fake: for tests and development; never in production.
-// A real adapter is added with registerWhatsAppProvider() once the account
-// and provider are confirmed, and checked against the provider's API with a
-// sandbox send.
 //
 // ── The contract ───────────────────────────────────────────────────────────
 // A provider is an object with:
@@ -18,9 +16,12 @@
 //   configured: boolean             — false: nothing can be sent
 //   validateRecipient(phone)        → { ok: true, to: '+255…' }
 //                                   | { ok: false, reason: 'no_phone' | 'invalid_phone' }
-//   sendTemplate({ to, templateName, language, parameters, category, reference })
+//   sendTemplate({ to, templateName, language, parameters, parameterNames?, category, reference })
 //                                   → SendResult. Business-initiated messages
 //                                     must use a provider-approved template.
+//                                     `parameterNames` are the registry's
+//                                     variables, in the same order as the
+//                                     values, for providers that name them.
 //                                     `reference` is our ledger id, passed on
 //                                     so a provider that supports it can drop
 //                                     a repeat.
@@ -47,6 +48,7 @@
 import { toE164 } from '../../shared/phone.mjs';
 import { createNotConfiguredWhatsAppProvider } from './not-configured-provider.mjs';
 import { createFakeWhatsAppProvider } from './fake-provider.mjs';
+import { createMetaWhatsAppProvider } from './meta-provider.mjs';
 
 export const ERRORS = {
   notConfigured: 'whatsapp_not_configured',
@@ -96,6 +98,10 @@ export function parseStandardWebhook({ body } = {}) {
 
 const factories = new Map([
   ['fake', { create: createFakeWhatsAppProvider, requiredEnv: [], devOnly: true }],
+  ['meta', {
+    create: createMetaWhatsAppProvider,
+    requiredEnv: ['WHATSAPP_META_ACCESS_TOKEN', 'WHATSAPP_META_PHONE_NUMBER_ID', 'WHATSAPP_META_BUSINESS_ACCOUNT_ID'],
+  }],
 ]);
 
 /**

@@ -957,7 +957,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   /**
    * One page of a vendor's orders, newest first (createdAt desc, id desc). `limit` 1–200 (default 50;
    * larger is capped at 200), `cursor` = the nextCursor of the previous page.
-   * → { orders, nextCursor|null } | { error: invalid_limit | invalid_cursor, status: 400 }
+   * `counts` (UAT D2): tab counts over ALL of the vendor's orders, not this page (rules: orderTab).
+   * → { orders, nextCursor|null, counts } | { error: invalid_limit | invalid_cursor, status: 400 }
    */
   async function vendorOrdersPage(vendorId, { limit, cursor, seesMoney = false } = {}) {
     let size = ORDERS_PAGE_DEFAULT;
@@ -971,11 +972,15 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       after = decodeOrderCursor(cursor);
       if (!after) return { error: 'invalid_cursor', status: 400 };
     }
-    const rows = await orderStore.ordersForVendor(vendorId, { limit: size + 1, after });
+    const [rows, counts] = await Promise.all([
+      orderStore.ordersForVendor(vendorId, { limit: size + 1, after }),
+      orderStore.countsForVendor(vendorId),
+    ]);
     const page = rows.slice(0, size);
     return {
       orders: await vendorViews(page, vendorId, { seesMoney }),
       nextCursor: rows.length > size ? encodeOrderCursor(page[page.length - 1]) : null,
+      counts,
     };
   }
   /** One order as its vendor sees it; 404 when it has no line of theirs (another vendor's order looks absent). */

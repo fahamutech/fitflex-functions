@@ -298,7 +298,7 @@ test('GET stock-movements: newest first, opening/closing stock, pages, EAT date 
   assert.equal(all.body.closingStock, 12);
   assert.equal(all.body.openingStock, 0);
   assert.deepEqual(all.body.rows.map(r => r.reason), ['reserve', 'damaged', 'restock', 'count']);
-  assert.deepEqual(all.body.rows[0].document, { type: 'order', id: order.body.id, number: null });
+  assert.deepEqual(all.body.rows[0].document, { type: 'order', id: order.body.id, number: null, shortRef: order.body.id.slice(-6).toUpperCase() });
   assert.deepEqual([all.body.rows[0].stockBefore, all.body.rows[0].stockAfter, all.body.rows[0].actor], [13, 12, null]);
   assert.equal(all.body.nextCursor, null);
 

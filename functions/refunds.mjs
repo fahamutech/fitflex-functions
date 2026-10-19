@@ -59,7 +59,7 @@ export const requestRefund = {
 
 export const adminListRefunds = {
   created, method: 'get', path: '/admin/refunds',
-  description: 'Admin: refunds with who they are for. ?status=requested|approved|paid|rejected. With MONEY_SECOND_APPROVER on each row also has secondApproverRequired, approvalStage, approveNotBy, payNotBy.',
+  description: 'Admin: refunds with who they are for. ?status=requested|approved|paid|rejected. Rows carry staff names requestedByName, decidedByName, paidByName (portal/admin user display name, else email; null for members, policy or unknown). With MONEY_SECOND_APPROVER on each row also has secondApproverRequired, approvalStage, approveNotBy, payNotBy.',
   onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('payments')]),
   onRequest: async (req, res) => send(res, await refundService.adminList({ status: req.query?.status || undefined })),
 };

@@ -8,6 +8,7 @@ import { upgradeOf, upgradeApprovable, applyUpgradeStatus } from '../shared/pass
 import { updateIf } from '../shared/conditional-update.mjs';
 import { referenceKey, memoryReferenceStore } from '../shared/manual-payment.mjs';
 import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
+import { staffNameLookup } from '../shared/staff-names.mjs';
 
 const DECIDED = ['approved', 'rejected', 'cancelled'];
 /** A payment FitFlex staff confirm by hand. Any other provider's reference is the provider's transaction. */
@@ -120,9 +121,15 @@ export function createAdminPaymentService({
     const memberById = new Map(memberRows.map(u => [u.id, u]));
     const subById = new Map(subscriptionRows.map(s => [s.id, s]));
 
+    // Staff who acted on each row, by name (admin list only; null when not a portal/admin user).
+    const nameOf = await staffNameLookup(users, allPayReqs, ['verifiedBy', 'changeRequestedBy', 'decidedBy']);
+
     const twoAdmins = secondApprover();
     return allPayReqs.map(p => ({
       ...p,
+      verifiedByName: nameOf(p.verifiedBy),
+      changeRequestedByName: nameOf(p.changeRequestedBy),
+      decidedByName: nameOf(p.decidedBy),
       member: slimMember(memberById.get(p.memberId) || null),
       subscription: slimSub(subById.get(p.subscriptionId) || null),
       productType: productTypeOfPayment(p, subById.get(p.subscriptionId) || null),
@@ -251,7 +258,6 @@ export function createAdminPaymentService({
 
     const now = new Date().toISOString();
     const status = decision === 'approve' ? 'approved' : 'rejected';
-    const confirmedRef = reference || memberRef;
     // Approved by a second admin: only while the verification it was checked against still stands.
     const guard = (decision === 'approve' && !automated && secondApprover()) ? { verifiedBy: request.verifiedBy } : {};
     const updated = await writeDecision(request, {
@@ -265,7 +271,9 @@ export function createAdminPaymentService({
     // Another decision got there first (two staff members, or a double click).
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'already_decided', status: 409 };
-    await applyPaymentStatusToSubscription(request, status, confirmedRef || `ADMIN_${request.id}`);
+    // The plan records the reference the payment request now carries (typed, else verified/recorded,
+    // else the member's transaction ID); ADMIN_<id> only when there is none at all.
+    await applyPaymentStatusToSubscription(request, status, updated.reference || finalRef || `ADMIN_${request.id}`);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: `payment_${status}`, target: request.id, before: request, after: updated
@@ -327,7 +335,7 @@ export function createAdminPaymentService({
     }, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {});
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'payment_changed', status: 409 };
-    await applyPaymentStatusToSubscription(request, nextStatus, finalRef);
+    await applyPaymentStatusToSubscription(request, nextStatus, updated.reference || finalRef);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: 'payment_updated', target: request.id, before: request, after: updated
@@ -434,10 +442,12 @@ export function createAdminPaymentService({
     };
     // Back to pending: it has to be verified again before anyone approves it.
     if (nextStatus === 'pending') Object.assign(patch, { verifiedBy: null, verifiedAt: null });
+    // Approved with no reference recorded: record the member's transaction ID, as a decision does.
+    if (nextStatus === 'approved' && !request.reference && request.memberReference) patch.reference = request.memberReference;
     const updated = await writeDecision(request, patch, { changeRequestedBy: request.changeRequestedBy });
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'payment_changed', status: 409 };
-    await applyPaymentStatusToSubscription(request, nextStatus, request.reference);
+    await applyPaymentStatusToSubscription(request, nextStatus, updated.reference || request.reference);
     await audit('payment_change_confirmed', actorId, request, {
       ...updated, requestedBy: request.changeRequestedBy, requestedAt: request.changeRequestedAt, reason: request.changeRequestReason,
     }, at);

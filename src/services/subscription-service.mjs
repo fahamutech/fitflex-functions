@@ -1,6 +1,7 @@
 // Member-facing subscription (Platform Pass) service — catalogue, subscribe,
 // self profile, check-in history, payment history.
 import { randomUUID } from 'node:crypto';
+import { CHECKIN_STATUS } from '../shared/checkin-status.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
 import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 import { trainerPassOptions, trainerGymAccess, hideTrainerPass } from '../shared/trainer-access.mjs';
@@ -509,7 +510,7 @@ export function createSubscriptionService({
     if (sub) {
       const since = +new Date(sub.cycleStartedAt);
       const own = fundedBySubscription(sub);
-      const visitCheckins = await checkins.filterAsync(c => c.memberId === uid && c.visitConsumed && +new Date(c.timestamp) >= since && own(c));
+      const visitCheckins = await checkins.filterAsync(c => c.memberId === uid && c.visitConsumed && c.status !== CHECKIN_STATUS.VOIDED && +new Date(c.timestamp) >= since && own(c));
       visitsUsed = visitCheckins.length;
       visitCap = settingsService.visitCapForTier(sub.tier);
     }

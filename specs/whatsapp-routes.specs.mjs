@@ -37,6 +37,13 @@ test('with the secret, the webhook is handled (as a header or ?token=)', async (
   assert.equal((await call(routes.whatsappWebhookVerify, { query: { token: 'spec-secret-123' } })).statusCode, 200);
 });
 
+test("Meta's URL check: the secret may come as hub.verify_token, and a wrong one is refused", async () => {
+  process.env.WHATSAPP_WEBHOOK_SECRET = 'spec-secret-123';
+  const check = (token) => call(routes.whatsappWebhookVerify, { query: { 'hub.mode': 'subscribe', 'hub.verify_token': token, 'hub.challenge': '4242' } });
+  assert.equal((await check('spec-secret-123')).statusCode, 200);
+  assert.equal((await check('spec-secret-12')).statusCode, 403);
+});
+
 test('the routes that let anyone WhatsApp any user are gone', () => {
   for (const name of ['sendTrainerMessage', 'sendBookingReminder', 'sendOrderConfirmation', 'sendOrderReady',
     'sendPaymentNotification', 'adminSendBulkReengagement', 'testSendWhatsApp',

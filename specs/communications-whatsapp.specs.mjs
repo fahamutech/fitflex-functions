@@ -159,6 +159,10 @@ test('a WhatsApp campaign sends the approved template, in each member\'s languag
   const out = fake.sent.find(s => s.providerMessageId === after.providerMessageId);
   assert.deepEqual([out.to, out.templateName, out.language, out.reference, out.category],
     ['+255712345678', 'fitflex_renewal_reminder', 'en', neema.id, 'transactional'], 'E.164 number; our ledger id as the reference');
+  const registered = await db('WhatsAppTemplate').where({ provider: provider.name, providerTemplateName: 'fitflex_renewal_reminder', language: 'en' }).first('variables');
+  const names = typeof registered.variables === 'string' ? JSON.parse(registered.variables) : registered.variables;
+  assert.deepEqual(out.parameterNames, names, 'each value goes with its variable name (Meta sends them named)');
+  assert.equal(out.parameterNames.length, out.parameters.length);
 });
 
 test('WhatsApp carries the approved wording, not the sender\'s edits, and falls back to an approved language', async () => {

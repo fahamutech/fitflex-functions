@@ -50,7 +50,7 @@ export function createFakeWhatsAppProvider({ templates = fakeApprovedTemplates()
     templates,
     failNext(result) { forced = { ok: false, retryable: false, ...result }; },
     validateRecipient,
-    async sendTemplate({ to, templateName, language, parameters = [], category, reference = null }) {
+    async sendTemplate({ to, templateName, language, parameters = [], parameterNames = null, category, reference = null }) {
       const check = validateRecipient(to);
       if (!check.ok) return { ok: false, error: ERRORS.invalidRecipient, retryable: false };
       const early = outcomeFor(check.to);
@@ -60,7 +60,7 @@ export function createFakeWhatsAppProvider({ templates = fakeApprovedTemplates()
       if (tpl.variables && parameters.length !== tpl.variables.length) {
         return { ok: false, error: 'bad_parameters', retryable: false, detail: `expected ${tpl.variables.length}` };
       }
-      return accept({ kind: 'template', to: check.to, templateName, language, parameters, category, reference });
+      return accept({ kind: 'template', to: check.to, templateName, language, parameters, parameterNames, category, reference });
     },
     async sendMessage({ to, text, reference = null }) {
       const check = validateRecipient(to);

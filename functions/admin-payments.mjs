@@ -7,7 +7,7 @@ const created = new Date().toISOString();
 
 export const adminPaymentRequests = {
   created, method: 'get', path: '/admin/payment-requests',
-  description: 'Admin: list pilot payment requests. Rows carry verifiedBy, verifiedAt, changeRequestedStatus, changeRequestedBy, changeRequestedAt, changeRequestReason; with MONEY_SECOND_APPROVER on also secondApproverRequired, approvalStage, approveNotBy, confirmChangeNotBy.',
+  description: 'Admin: list pilot payment requests. Rows carry verifiedBy, verifiedAt, changeRequestedStatus, changeRequestedBy, changeRequestedAt, changeRequestReason, and staff names verifiedByName, changeRequestedByName, decidedByName (portal/admin user display name, else email; null when unknown or not staff); with MONEY_SECOND_APPROVER on also secondApproverRequired, approvalStage, approveNotBy, confirmChangeNotBy.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (_, res) => res.json(await adminPaymentService.list())
 };

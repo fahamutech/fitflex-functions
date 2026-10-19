@@ -16,7 +16,7 @@ const DEFAULT_SPECIALTIES = [
   'Kickboxing', 'Calisthenics', 'Martial Arts',
 ];
 
-export function createSettingsService({ platformSettings, auditLog }) {
+export function createSettingsService({ platformSettings, auditLog, tierHolders = async () => 0 }) {
   function ensureDefaultSettings() {
     const existing = platformSettings.find(s => s.id === 'platform');
     if (existing) return existing;
@@ -145,6 +145,9 @@ export function createSettingsService({ platformSettings, auditLog }) {
   function invalidTiers(rows) {
     const bad = (tier, field, extra = {}) => ({ error: 'invalid_subscription_tier', status: 400, tier, field, ...extra });
     if (!Array.isArray(rows)) return bad(null, 'subscriptionTiers');
+    // Under the fail-closed rule an empty list would stop every sale and
+    // every check-in on a held pass; it is never a valid save.
+    if (rows.length === 0) return bad(null, 'subscriptionTiers', { reason: 'empty' });
     const seen = new Set();
     for (const [i, row] of rows.entries()) {
       const tier = typeof row?.key === 'string' && row.key.trim() ? row.key : null;
@@ -156,6 +159,28 @@ export function createSettingsService({ platformSettings, auditLog }) {
       if (visitCapOf(row) === null) return bad(tier, 'visits', { hint: '-1 for unlimited, or a whole number above 0' });
       if (!PASS_GYM_ACCESS.includes(row.gymAccess)) return bad(tier, 'gymAccess', { allowed: PASS_GYM_ACCESS });
     }
+    // Same effect as an empty list: every row switched off (active/enabled false).
+    if (rows.every(switchedOff)) return bad(null, 'subscriptionTiers', { reason: 'none_on_sale' });
+    return null;
+  }
+
+  /**
+   * Owner decision 2026-10-19: a tier that is on sale today and that members still hold
+   * (tierHolders) may not be removed, renamed or switched off by a save. Changing its
+   * price, visits or gym access to other valid values is fine (invalid values are
+   * refused earlier). → { error: 'tier_in_use', status: 409, tier, holders } or null.
+   */
+  async function tierTakenAway(rows) {
+    const sellableAfter = (key) => {
+      const row = rows.find(r => r?.key === key);
+      return !!row && !switchedOff(row) && PASS_GYM_ACCESS.includes(row.gymAccess)
+        && visitCapOf(row) !== null && Number.isInteger(Number(row.monthlyPrice)) && Number(row.monthlyPrice) > 0;
+    };
+    for (const key of sellableTierKeys()) {
+      if (sellableAfter(key)) continue;
+      const holders = await tierHolders(key);
+      if (holders > 0) return { error: 'tier_in_use', status: 409, tier: key, holders };
+    }
     return null;
   }
 
@@ -163,6 +188,8 @@ export function createSettingsService({ platformSettings, auditLog }) {
     if (body.subscriptionTiers !== undefined) {
       const invalid = invalidTiers(body.subscriptionTiers);
       if (invalid) return invalid;
+      const inUse = await tierTakenAway(body.subscriptionTiers);
+      if (inUse) return inUse;
     }
     const current = ensureDefaultSettings();
     const before = { ...current };
