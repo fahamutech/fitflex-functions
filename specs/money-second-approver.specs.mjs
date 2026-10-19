@@ -454,7 +454,7 @@ test('flag on: an admin-raised refund tells the member FitFlex is preparing it, 
   assert.equal(f.inbox[0].userId, 'm1');
   assert.equal(f.inbox[0].type, 'refund_preparing');
   assert.equal(f.inbox[0].id, `ntf_refund_preparing_${refund.id}`);
-  assert.match(f.inbox[0].body, /FitFlex is preparing a refund of TZS 60,000/);
+  assert.match(f.inbox[0].body, /FitFlex is preparing a refund of TSh 60,000/);
   assert.doesNotMatch(f.inbox[0].body, /your request/i);
   // a member's own request keeps the "request received" wording
   const g = refundsFixture(true);
