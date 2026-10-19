@@ -1,6 +1,7 @@
 // Owner/operator gym management REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireGymAcl } from '../src/auth/jwt.mjs';
+import { routeGuard } from '../src/shared/route-guard.mjs';
 import { identityFlag, checkinVisitorNamesOn } from '../src/shared/feature-flags.mjs';
 import { visitorName } from '../src/shared/visitor-name.mjs';
 import { ownerGymService, resolveRequestUser, publicUserId, checkins, users, trainers, usernameService } from '../src/bootstrap/services.mjs';
@@ -10,7 +11,7 @@ const created = new Date().toISOString();
 export const gymOwnerRegister = {
   created, method: 'post', path: '/gym-owner/register',
   description: 'Gym Owner: self-register with gym details. Creates one or more gyms and assigns to owner.',
-  onGuard: requireAuth('gym_operator'),
+  onGuard: routeGuard('post', requireAuth('gym_operator')),
   onRequest: async (req, res) => {
     try {
       const body = req.body || {};
@@ -39,7 +40,7 @@ export const gymOwnerRegister = {
 export const ownerMyGyms = {
   created, method: 'get', path: '/owner/gyms',
   description: 'Owner: list gyms assigned to the authenticated owner. Basic cross-feature context — visible to any gym_staff regardless of their ACL scopes.',
-  onGuard: requireAuth('gym_operator', 'gym_staff'),
+  onGuard: routeGuard('get', requireAuth('gym_operator', 'gym_staff')),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -50,7 +51,7 @@ export const ownerMyGyms = {
 export const ownerMyInvoices = {
   created, method: 'get', path: '/owner/invoices',
   description: 'Owner: list invoices for their gyms.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('payments')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('payments')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -61,7 +62,7 @@ export const ownerMyInvoices = {
 export const ownerMyEarnings = {
   created, method: 'get', path: '/owner/earnings',
   description: 'Owner: summary of earnings (paid invoices) for their gyms. Optional ?gymId scopes to a single owned gym.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('payments')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('payments')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -73,7 +74,7 @@ export const ownerMyEarnings = {
 export const ownerGymCheckins = {
   created, method: 'get', path: '/owner/gyms/:gymId/checkins',
   description: 'Owner: recent check-ins at a specific owned gym.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('checkins')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('checkins')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const result = await ownerGymService.gymCheckIns({ owner, gymId: req.params.gymId, checkins });
@@ -107,7 +108,7 @@ export const ownerGymCheckins = {
 export const ownerUpdateGym = {
   created, method: 'put', path: '/owner/gyms/:gymId',
   description: 'Owner: update details of an owned gym.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')],
+  onGuard: routeGuard('put', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')]),
   onRequest: async (req, res) => {
     try {
       const owner = await resolveRequestUser(req);
@@ -124,7 +125,7 @@ export const ownerUpdateGym = {
 export const ownerCreateGym = {
   created, method: 'post', path: '/owner/gyms',
   description: 'Owner: add a new gym to their account.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')]),
   onRequest: async (req, res) => {
     try {
       const owner = await resolveRequestUser(req);
@@ -142,7 +143,7 @@ export const ownerCreateGym = {
 export const ownerDeleteGym = {
   created, method: 'post', path: '/owner/gyms/:gymId/delete',
   description: 'Owner: delete a gym from their account (soft-remove).',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -155,7 +156,7 @@ export const ownerDeleteGym = {
 export const ownerUpdateTrainer = {
   created, method: 'post', path: '/owner/trainers/:trainerId',
   description: 'Retired: a trainer\'s profile is edited only by the trainer. Always answers 403 trainer_profile_not_editable (404/403 first if the trainer is unknown or not at the owner\'s gym). Owners add, approve/reject and remove trainers.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const result = await ownerGymService.updateTrainer({ owner, trainerId: req.params.trainerId, body: req.body || {} });
@@ -167,7 +168,7 @@ export const ownerUpdateTrainer = {
 export const ownerCreateTrainer = {
   created, method: 'post', path: '/owner/trainers',
   description: 'Owner: create a trainer account and assign it to one of their gyms.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')]),
   onRequest: async (req, res) => {
     // With invitations on, an organisation no longer sets a person's credentials.
     if (identityFlag('V2_INVITES')) {
@@ -193,7 +194,7 @@ export const ownerCreateTrainer = {
 export const ownerRemoveTrainer = {
   created, method: 'post', path: '/owner/trainers/:trainerId/remove',
   description: 'Owner: remove a trainer from all their gym(s). The trainer profile persists but is unlinked.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const result = await ownerGymService.removeTrainer({ owner, trainerId: req.params.trainerId });
@@ -205,7 +206,7 @@ export const ownerRemoveTrainer = {
 export const ownerListTrainers = {
   created, method: 'get', path: '/owner/trainers',
   description: 'Owner: list trainers assigned to their gyms. Optional ?gymId scopes the list to a single owned gym.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const requestedGymId = req.query?.gymId ? String(req.query.gymId) : null;
@@ -216,7 +217,7 @@ export const ownerListTrainers = {
 export const ownerPendingTrainers = {
   created, method: 'get', path: '/owner/trainers/pending',
   description: 'Owner: list trainers who self-registered and applied to join one of their gyms, awaiting approval.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     res.json(ownerGymService.pendingTrainers({ owner }));
@@ -226,7 +227,7 @@ export const ownerPendingTrainers = {
 export const ownerDecideTrainerJoin = {
   created, method: 'post', path: '/owner/trainers/:trainerId/decision',
   description: "Owner: approve or reject a trainer's request to join one of their gyms.",
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')]),
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     const { gymId, decision } = req.body || {};

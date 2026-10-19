@@ -3,6 +3,7 @@
 // progress are shared by default, and the member can switch each off per gym.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireGymAcl } from '../src/auth/jwt.mjs';
+import { requireGymAccess } from '../src/auth/org-authz.mjs';
 import { gymSharingService as svc, resolveRequestUser } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -30,7 +31,10 @@ export const updateMyGymSharing = {
 export const ownerMemberActivity = {
   created, method: 'get', path: '/owner/members/:memberId/activity',
   description: 'Owner/staff: per managed gym, the member\'s visit patterns and only the activity they share with that gym.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members')],
+  // requireGymAccess keeps what this route always had in effect: under V2_ORG_AUTHZ enforce it also
+  // needs an active `members` membership (until #199 that came from owner-members' guard leaking
+  // onto this sub-path). With org-authz off it decides exactly as requireGymAcl('members').
+  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('members'), requireGymAccess('members', 'GET /owner/members/:memberId/activity')],
   onRequest: async (req, res) => {
     const owner = await resolveRequestUser(req);
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
