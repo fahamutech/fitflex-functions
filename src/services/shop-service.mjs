@@ -1022,6 +1022,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     } else if (status !== 'cancelled') {
       return { error: 'vendor_required', status: 400, vendors };
     }
+    // An order cancelled meanwhile (whole order, this vendor's part, or its money owed back / refunded) is
+    // answered as cancelled before the payment check, so the vendor is not told to wait for a payment.
+    // Cancelling again stays a no-op (handled by cancelOrder).
+    if (status !== 'cancelled' && cancelledFor(order, target, vendors)) return { error: 'order_cancelled', status: 409 };
     // Vendors fulfil paid orders only; an unpaid order can only be cancelled.
     if (order.paymentStatus && order.paymentStatus !== 'paid' && status !== 'cancelled') return { error: 'order_not_paid', status: 409 };
     if (status === 'cancelled') {
@@ -1037,7 +1041,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (order.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
     const at = nowIso();
     const result = await orderStore.updateWithLock(orderId, (current) => {
-      if (current.status === 'cancelled') return { error: 'order_cancelled', status: 409 };
+      if (cancelledFor(current, target, vendors)) return { error: 'order_cancelled', status: 409 };
       if (current.paymentStatus && current.paymentStatus !== 'paid') return { error: 'order_not_paid', status: 409 };
       const all = fulfilmentsOf(current, vendors);
       const mine = all.find(f => f.vendorId === target);
@@ -1069,6 +1073,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     });
     await notify(order.buyerId, `order_${to}`, { orderId, vendorId: target });
     return { order: isAdmin ? result.order : (await vendorViews([result.order], target, { seesMoney }))[0] };
+  }
+
+  /** The order, or `vendorId`'s part of it, is cancelled, or its money is owed back or was refunded. */
+  function cancelledFor(order, vendorId, vendors = []) {
+    if (order.status === 'cancelled' || ['refund_pending', 'refunded'].includes(order.paymentStatus)) return true;
+    const own = vendorId ? fulfilmentsOf(order, vendors).find(f => f.vendorId === vendorId) : null;
+    return own?.status === 'cancelled';
   }
 
   // An order can be cancelled until it is on its way: once dispatched, ready
