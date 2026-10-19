@@ -253,19 +253,19 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (ledgerOn()) {
         // Stock moves only with a ledger row: a changed count from the form (old app builds send `stock`
         // on every save) is recorded as a `count`, decided under the product's row lock.
+        // Fields, approval status, stock and ledger rows are written together, in one transaction.
         const saved = await stockLedger.applyProductForm({
           productId, vendorId, actorId,
           decide: (current) => {
             const plan = planStock(current, input, { ledger: true });
             if (plan.error) return plan;
-            return { ...plan, privates: privatesFrom(input), value: { review: needsReview(current, plan.variants || null) } };
+            const fields = needsReview(current, plan.variants || null) ? { ...patch, approvalStatus: 'pending' } : patch;
+            return { ...plan, fields, privates: privatesFrom(input) };
           },
         });
         if (saved.error) return saved;
-        if (saved.value.review) patch.approvalStatus = 'pending';
-        const product = await products.updateByIdAsync(productId, patch);
         await afterStockMoved([productId]);
-        return { product: (await vendorProductsView(vendorId, [product]))[0] };
+        return { product: (await vendorProductsView(vendorId, [saved.product]))[0] };
       }
       // Variants are merged by name and keep their stored stock when the body leaves it out (F3).
       const plan = planStock(prior, input, { ledger: false });
@@ -285,7 +285,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const plan = ledger ? planStock(null, input, { ledger: true }) : null;
     if (plan?.error) return plan;
     const at = nowIso();
-    const product = await products.insertAsync({
+    const row = {
       id: makeId('prd'), vendorId, name: input.name.trim(), description: input.description || null, category: input.category || null,
       brand: input.brand || null, priceTzs: Number(input.priceTzs), discountPriceTzs: input.discountPriceTzs == null ? null : Number(input.discountPriceTzs),
       stock: plan ? plan.stock : Number(input.stock ?? 0), sku: input.sku || null, weightKg: input.weightKg == null ? null : Number(input.weightKg), distanceKm: input.distanceKm == null ? null : Number(input.distanceKm),
@@ -295,12 +295,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // reviews and the order store keeps soldCount. Whatever a vendor (or admin) sends for them is ignored.
       deliveryAvailable: input.deliveryAvailable !== false, status: 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
       homepageVisible: true, homepagePriority: 0, createdAt: at, updatedAt: at,
-    });
+    };
     if (ledger) {
-      await stockLedger.recordInitial({ productId: product.id, vendorId, actorId, movements: plan.movements, privates: privatesFrom(input) });
+      // The product and the first rows of its stock history are written together, in one transaction.
+      const product = await stockLedger.createProduct({ product: row, actorId, movements: plan.movements, privates: privatesFrom(input) });
       await afterStockMoved([product.id]);
       return { product: (await vendorProductsView(vendorId, [product]))[0], created: true };
     }
+    const product = await products.insertAsync(row);
     return { product, created: true };
   }
 
@@ -408,7 +410,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const vendor = await users.findByIdAsync(vendorId);
     if (!vendor || vendor.userType !== 'vendor') return { error: 'vendor_not_found', status: 404 };
     if (vendor.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 409 };
-    const created = await upsertProduct({ vendorId, body });
+    const created = await upsertProduct({ vendorId, body, actorId });
     if (created.error) return created;
     const requestedApproval = ['pending', 'approved', 'rejected'].includes(body?.approvalStatus)
       ? body.approvalStatus
@@ -565,7 +567,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const chosen = variant ? variants.find(v => v.name === variant) : null;
       if (variant && !chosen) return { error: 'variant_not_found', status: 404, productId };
       // Variants that keep their own stock must be chosen once the app can choose; plain labels (no stock) are optional.
-      if (requireVariantChoice && !variant && variants.some(v => typeof v.stock === 'number')) return { error: 'variant_required', status: 400, productId, variants: variants.map(v => v.name) };
+      // With the stock ledger on, a product whose variants keep stock is always sold by variant: units taken
+      // from the product alone would leave its count and its variants' counts apart (security review H1).
+      if ((requireVariantChoice || ledgerOn()) && !variant && variants.some(v => typeof v.stock === 'number')) return { error: 'variant_required', status: 400, productId, variants: variants.map(v => v.name) };
       const variantTracked = Boolean(chosen && typeof chosen.stock === 'number');
       if (variantTracked && chosen.stock < qty) return { error: 'insufficient_stock', status: 409, productId };
       productStock.set(productId, (productStock.get(productId) || 0) + qty);

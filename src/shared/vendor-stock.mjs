@@ -15,8 +15,8 @@ export const ADJUST_REASONS = ['count', 'damaged', 'expired', 'lost', 'found', '
 const IN_REASONS = new Set(['found', 'returned', 'restock']);
 const OUT_REASONS = new Set(['damaged', 'expired', 'lost']);
 
-/** Keys that are the vendor's own business and never stored on the public Product row. */
-const PRIVATE_KEYS = ['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel'];
+/** Keys that are the vendor's own business (or request-only) and never stored on the public Product row. */
+const PRIVATE_KEYS = ['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel', 'stockSeen'];
 export function stripPrivate(variant) {
   const copy = { ...(variant || {}) };
   for (const key of PRIVATE_KEYS) delete copy[key];
@@ -36,6 +36,7 @@ const isWhole = (value, max) => Number.isInteger(value) && value >= 0 && value <
 export function invalidPrivateField(body) {
   if (body.costTzs !== undefined && body.costTzs !== null && !isWhole(body.costTzs, MAX_COST_TZS)) return 'costTzs';
   if (body.reorderLevel !== undefined && body.reorderLevel !== null && !isWhole(body.reorderLevel, MAX_STOCK)) return 'reorderLevel';
+  if (body.stockSeen !== undefined && body.stockSeen !== null && !isWhole(body.stockSeen, MAX_STOCK)) return 'stockSeen';
   return null;
 }
 
@@ -78,8 +79,10 @@ export function reviewChanged(current, input, variants = null) {
  * no `stock` keeps its stored count; private keys never reach the Product row.
  * Ledger on: removing a variant that still has stock is refused (Q-2); tracked and untracked
  * variants may not be mixed (Q-6) — on an edit of a tracked product a new variant starts at 0;
- * tracked variants set Product.stock to their sum (O-1); every count that changes is returned as a
- * `count` movement so the caller records it in the ledger.
+ * Product.stock moves only by what the variants' counts moved (never reset to their sum, which would
+ * undo a reservation taken without a variant); every count that changes is returned as a `count`
+ * movement so the caller records it in the ledger. `stockSeen` (product) and `variants[].stockSeen`
+ * are what the form showed: if the count has moved since → 409 stock_changed { currentStock }.
  */
 export function planStock(current, input, { ledger = false } = {}) {
   const creating = !current;
@@ -88,6 +91,16 @@ export function planStock(current, input, { ledger = false } = {}) {
   const currentStock = creating ? 0 : Number(current.stock || 0);
   let merged = null;
   let removed = [];
+
+  if (ledger) {
+    if (input.stockSeen != null && Number(input.stockSeen) !== currentStock) return { error: 'stock_changed', status: 409, currentStock };
+    for (const v of Array.isArray(input.variants) ? input.variants : []) {
+      const old = byName.get(String(v.name).trim());
+      if (v.stockSeen != null && old && Number(v.stockSeen) !== (isTracked(old) ? old.stock : 0)) {
+        return { error: 'stock_changed', status: 409, variant: old.name, currentStock: isTracked(old) ? old.stock : 0 };
+      }
+    }
+  }
 
   if (Array.isArray(input.variants)) {
     if (ledger) {
@@ -131,24 +144,24 @@ export function planStock(current, input, { ledger = false } = {}) {
   }
 
   const allTracked = finalVariants.length > 0 && finalVariants.every(isTracked);
-  const nextStock = allTracked ? finalVariants.reduce((sum, v) => sum + v.stock, 0) : input.stock !== undefined ? Number(input.stock) : currentStock;
-  if (creating || nextStock !== currentStock) out.stock = nextStock;
-
   const note = creating ? 'product_created' : 'product_form';
   const move = (variant, before, after, why = note) => {
     if (before !== after) out.movements.push({ variant, delta: after - before, stockBefore: before, stockAfter: after, note: why });
   };
   if (allTracked) {
     const wasTracked = stored.some(isTracked);
-    // The product's own count gives way to its variants' counts.
+    // Starting to count by variant: the product's own count gives way to its variants' counts (recorded).
     if (!creating && !wasTracked) move('', currentStock, 0, 'variants_tracked');
     for (const v of finalVariants) {
       const old = byName.get(v.name);
       move(v.name, !creating && wasTracked && isTracked(old) ? old.stock : 0, v.stock);
     }
   } else {
-    move('', currentStock, nextStock);
+    move('', currentStock, input.stock !== undefined ? Number(input.stock) : currentStock);
   }
+  // Product.stock changes by exactly what the ledger rows record, and by nothing else.
+  const nextStock = (creating ? 0 : currentStock) + out.movements.reduce((sum, m) => sum + m.delta, 0);
+  if (creating || nextStock !== currentStock) out.stock = nextStock;
   return out;
 }
 

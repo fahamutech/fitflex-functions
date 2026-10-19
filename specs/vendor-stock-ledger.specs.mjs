@@ -228,9 +228,16 @@ test('clientRef: a retried adjustment is applied once and answers 200 with the s
   assert.equal(burst.filter(b => b.status === 200).length, 4);
   assert.equal(new Set(burst.map(b => b.body.movement.id)).size, 1);
   assert.equal((await row(p.id)).stock, 6);
-  // The same key for a different product is a client bug, not a replay.
+  // The same key for a different request is a client bug, not a replay: product, reason, quantity, direction.
   const q = await listed(v, { stock: 1 });
-  assert.deepEqual((await adjust(v, q.id, { reason: 'restock', quantity: 1, clientRef })).body, { error: 'client_ref_reused' });
+  assert.deepEqual((await adjust(v, q.id, { reason: 'restock', quantity: 3, clientRef })).body, { error: 'client_ref_reused' });
+  assert.deepEqual((await adjust(v, p.id, { reason: 'restock', quantity: 2, clientRef })).body, { error: 'client_ref_reused' });
+  assert.deepEqual((await adjust(v, p.id, { reason: 'found', quantity: 3, clientRef })).body, { error: 'client_ref_reused' });
+  const ref3 = randomUUID();
+  await adjust(v, p.id, { reason: 'other', direction: 'in', quantity: 1, note: 'gift', clientRef: ref3 });
+  assert.deepEqual((await adjust(v, p.id, { reason: 'other', direction: 'out', quantity: 1, note: 'gift', clientRef: ref3 })).body, { error: 'client_ref_reused' });
+  assert.equal((await adjust(v, p.id, { reason: 'other', direction: 'in', quantity: 1, note: 'gift', clientRef: ref3 })).status, 200);
+  assert.equal((await row(p.id)).stock, 7);
 });
 
 test('concurrent adjustment and checkouts never oversell, and the ledger matches the stock', async () => {
@@ -421,6 +428,77 @@ test('an old app build PUTting `stock` with the ledger on records a count adjust
   assert.deepEqual([bad.status, bad.body.error, bad.body.field], [400, 'invalid_field', 'costTzs']);
 });
 
+test('H1: with the ledger on a product whose variants keep stock is sold by variant, and a form save never resets its stock', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { name: 'Tee', priceTzs: 15_000, variants: [{ name: 'S', stock: 2 }, { name: 'M', stock: 3 }] });
+  const buyer = await user('member');
+  // An order taken while the ledger was off (SHOP_REQUIRE_VARIANT off): one unit from the product alone.
+  ledgerOff();
+  const legacy = await place(buyer, [{ productId: p.id, qty: 1 }]);
+  assert.equal(legacy.status, 201);
+  assert.equal((await row(p.id)).stock, 4);
+  ledgerOn();
+  const refused = await place(buyer, [{ productId: p.id, qty: 1 }]);
+  assert.deepEqual([refused.status, refused.body.error, refused.body.variants], [400, 'variant_required', ['S', 'M']]);
+  // The form (old app shape, with its stale product stock) does not undo the reservation.
+  const saved = await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { name: 'Tee', stock: 5, variants: [{ name: 'S' }, { name: 'M' }] } });
+  assert.equal(saved.status, 200);
+  assert.equal((await row(p.id)).stock, 4, 'unchanged: no variant count moved');
+  const cancelled = await shopService.buyerCancelOrder({ buyerId: buyer, orderId: legacy.body.id });
+  assert.equal(cancelled.order.status, 'cancelled');
+  const after = await row(p.id);
+  assert.equal(after.stock, 5);
+  assert.equal(after.stock, after.variants.reduce((sum, x) => sum + x.stock, 0), 'stock is the sum of the variants');
+  assert.equal(sumOf(await ledgerOf(p.id)), after.stock, 'the ledger adds up to the stock');
+  // A variant count changed by the form moves the product by the same amount, recorded.
+  await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { variants: [{ name: 'S', stock: 4 }, { name: 'M' }] } });
+  assert.equal((await row(p.id)).stock, 7);
+  assert.equal(sumOf(await ledgerOf(p.id)), 7);
+});
+
+test('M2: stockSeen on PUT — a count that moved since the form opened is refused with the current stock', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { stock: 10 });
+  const stale = await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { stock: 8, stockSeen: 9 } });
+  assert.deepEqual([stale.status, stale.body], [409, { error: 'stock_changed', currentStock: 10 }]);
+  assert.equal((await row(p.id)).stock, 10);
+  assert.equal((await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { stock: 8, stockSeen: 10 } })).body.stock, 8);
+  const t = await listed(v, { name: 'Tee', variants: [{ name: 'S', stock: 2 }, { name: 'M', stock: 3 }] });
+  const staleVariant = await call(vendorUpdateProduct, as(v), { params: { id: t.id }, body: { variants: [{ name: 'S', stock: 5, stockSeen: 1 }, { name: 'M', stockSeen: 3 }] } });
+  assert.deepEqual([staleVariant.status, staleVariant.body], [409, { error: 'stock_changed', variant: 'S', currentStock: 2 }]);
+  const ok = await call(vendorUpdateProduct, as(v), { params: { id: t.id }, body: { variants: [{ name: 'S', stock: 5, stockSeen: 2 }, { name: 'M', stockSeen: 3 }] } });
+  assert.equal(ok.status, 200);
+  assert.deepEqual((await row(t.id)).variants, [{ name: 'S', stock: 5 }, { name: 'M', stock: 3 }], 'stockSeen is never stored');
+  const bad = await call(vendorUpdateProduct, as(v), { params: { id: t.id }, body: { stockSeen: -1 } });
+  assert.deepEqual([bad.status, bad.body.field], [400, 'stockSeen']);
+});
+
+test('L4: a variant that an open order still holds units of cannot be removed', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { name: 'Tee', variants: [{ name: 'S', stock: 1 }, { name: 'M', stock: 0 }] });
+  const buyer = await user('member');
+  const order = await place(buyer, [{ productId: p.id, variant: 'S', qty: 1 }]);
+  assert.equal(order.status, 201);
+  const held = await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { variants: [{ name: 'M' }] } });
+  assert.deepEqual([held.status, held.body], [409, { error: 'variant_has_reservations', variant: 'S' }]);
+  await shopService.buyerCancelOrder({ buyerId: buyer, orderId: order.body.id });
+  assert.deepEqual((await row(p.id)).variants, [{ name: 'S', stock: 1 }, { name: 'M', stock: 0 }], 'the units came back to S');
+  assert.equal((await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { variants: [{ name: 'M' }] } })).body.error, 'variant_has_stock');
+});
+
+test('L2: a product an admin creates records the admin as the actor of its opening stock', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const admin = uid('adm');
+  const out = await shopService.adminCreateProduct({ actorId: admin, body: { vendorId: v, name: 'Mat', priceTzs: 30_000, stock: 4 } });
+  made.products.push(out.product.id);
+  const [first] = await ledgerOf(out.product.id);
+  assert.deepEqual([first.reason, first.delta, first.actorId, first.note], ['count', 4, admin, 'product_created']);
+});
+
 // ── privacy ──────────────────────────────────────────────────────────────────
 
 test('cost price and reorder level never appear in /shop/products, /shop/products/:id, /shop/vendors/:id or /shop/home', async () => {
@@ -544,7 +622,7 @@ test('schema: reason and kind are checked, adjustments need no order, an order l
   await db('ShopStockMovement').insert({ ...base, id: uid('stk'), reason: 'found', kind: 'adjustment' });
   const orderId = uid('ord');
   await db('ShopStockMovement').insert({ ...base, id: uid('stk'), orderId, reason: 'release' });
-  await assert.rejects(db('ShopStockMovement').insert({ ...base, id: uid('stk'), orderId, reason: 'release' }), /shopstockmovement_order_line_unique/);
+  await assert.rejects(db('ShopStockMovement').insert({ ...base, id: uid('stk'), orderId, reason: 'release' }), /shopstockmovement_orderid_productid_variant_reason_cycle_unique/);
   await db('ShopStockMovement').insert({ ...base, id: uid('stk'), reason: 'restock', kind: 'adjustment', clientRef: 'ref-unique-1' });
   await assert.rejects(db('ShopStockMovement').insert({ ...base, id: uid('stk'), reason: 'restock', kind: 'adjustment', clientRef: 'ref-unique-1' }), /shopstockmovement_vendor_client_ref_unique/);
   const d5 = (await db.raw(`SELECT convalidated FROM pg_constraint WHERE conname = 'product_stock_non_negative'`)).rows[0];

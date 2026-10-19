@@ -47,10 +47,19 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     return (await q('User').where({ id: actorId }).first('displayName'))?.displayName ?? null;
   }
 
-  async function replayOf(vendorId, clientRef, { productId, variant }) {
-    const row = await db('ShopStockMovement').where({ vendorId, clientRef }).first();
+  /** Is this stored adjustment the same request as `adj` (product, variant, reason, quantity, direction)? */
+  function sameRequest(row, productId, adj) {
+    if (row.productId !== productId || (row.variant || '') !== (adj.variant || '') || row.reason !== adj.reason) return false;
+    const delta = Number(row.delta);
+    if (adj.kind === 'count') return Number(row.stockAfter) === adj.quantity;
+    return Math.abs(delta) === adj.quantity && (adj.kind === 'in' ? delta > 0 : delta < 0);
+  }
+
+  async function replayOf(vendorId, productId, adj) {
+    const row = await db('ShopStockMovement').where({ vendorId, clientRef: adj.clientRef }).first();
     if (!row) return null;
-    if (row.productId !== productId || (row.variant || '') !== (variant || '')) return fail('client_ref_reused', 409);
+    // The same key with a different request is a client bug, not a retry.
+    if (!sameRequest(row, productId, adj)) return fail('client_ref_reused', 409);
     const product = await db('Product').where({ id: productId }).first();
     return { movement: movementView(row, await actorName(db, row.actorId)), product: product ? stockView(product) : null, replayed: true };
   }
@@ -60,7 +69,7 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
    * → { movement, product, replayed } or { error, status, currentStock? }.
    */
   async function adjust({ vendorId, actorId, productId, adj }) {
-    const earlier = await replayOf(vendorId, adj.clientRef, { productId, variant: adj.variant });
+    const earlier = await replayOf(vendorId, productId, adj);
     if (earlier) return earlier;
     const at = now();
     try {
@@ -104,7 +113,7 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     } catch (err) {
       // The same clientRef arrived twice at once: the other request won.
       if (err.code === UNIQUE_VIOLATION && /client_ref/.test(err.constraint || err.message)) {
-        const replay = await replayOf(vendorId, adj.clientRef, { productId, variant: adj.variant });
+        const replay = await replayOf(vendorId, productId, adj);
         if (replay) return replay;
       }
       if (err.code === CHECK_VIOLATION && /product_stock_non_negative/.test(err.constraint || err.message)) return fail('insufficient_stock', 409);
@@ -114,10 +123,40 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
 
   // ── product form (PUT /vendor/products/:id with the ledger on) ─────────────
 
+  // Product columns, read once: a form's fields are written only where they are real columns.
+  let productColumns = null;
+  async function columnsOf(q) {
+    productColumns ||= new Set(Object.keys(await q('Product').columnInfo()));
+    return productColumns;
+  }
+  async function productRow(q, fields) {
+    const columns = await columnsOf(q);
+    const out = {};
+    for (const [key, value] of Object.entries(fields)) {
+      if (!columns.has(key) || value === undefined) continue;
+      out[key] = key === 'variants' ? JSON.stringify(value) : value;
+    }
+    return out;
+  }
+
+  /** Variants (by name) that unpaid or unfulfilled orders still hold units of: their stock must come back to them. */
+  async function reservedVariants(q, productId, names) {
+    if (!names.length) return [];
+    const held = [];
+    for (const name of names) {
+      // Still holding the units and still able to give them back (a delivered order never does).
+      const open = await q('ShopOrder').where({ stockState: 'reserved' }).whereNotIn('status', ['cancelled', 'delivered', 'fulfilled'])
+        .whereRaw('items @> ?::jsonb', [JSON.stringify([{ productId, variant: name, variantStockReserved: true }])]).first('id');
+      if (open) held.push(name);
+    }
+    return held;
+  }
+
   /**
-   * Save the stock side of a product form under the product's row lock.
-   * decide(current) → { error, status, ... } | { stock?, variants?, movements, removed, privates, value }
-   * Writes stock/variants, one `count` ledger row per changed count, and the private fields — all or nothing.
+   * Save a product form under the product's row lock — fields, approval status, stock and the ledger in one transaction.
+   * decide(current) → { error, status, ... } | { fields, stock?, variants?, movements, removed, privates, value }
+   * Writes the fields, stock/variants, one `count` ledger row per changed count, and the private fields — all or nothing.
+   * A variant that open orders still hold units of cannot be removed (409 variant_has_reservations).
    */
   async function applyProductForm({ productId, vendorId, actorId, decide }) {
     const at = now();
@@ -128,9 +167,10 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
         if (current.vendorId !== vendorId) return fail('not_your_product', 403);
         const plan = decide(current);
         if (plan.error) return plan;
-        const update = {};
-        if (plan.stock !== undefined) update.stock = plan.stock;
-        if (plan.variants !== undefined) update.variants = JSON.stringify(plan.variants);
+        const trackedRemoved = variantsOf(current).filter(v => isTracked(v) && (plan.removed || []).includes(v.name)).map(v => v.name);
+        const held = await reservedVariants(trx, productId, trackedRemoved);
+        if (held.length) return fail('variant_has_reservations', 409, { variant: held[0] });
+        const update = await productRow(trx, { ...(plan.fields || {}), stock: plan.stock, variants: plan.variants });
         if (Object.keys(update).length) {
           update.updatedAt = at;
           await trx('Product').where({ id: productId }).update(update);
@@ -150,16 +190,20 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     }
   }
 
-  /** A product was just created with stock: its starting counts are the first rows of its history. */
-  async function recordInitial({ productId, vendorId, actorId, movements, privates = [] }) {
+  /** Create a product with its starting counts as the first rows of its history, and its private fields — one transaction. */
+  async function createProduct({ product, actorId, movements, privates = [] }) {
     const at = now();
-    await db.transaction(async (trx) => {
+    const productId = product.id;
+    const vendorId = product.vendorId;
+    return db.transaction(async (trx) => {
+      await trx('Product').insert(await productRow(trx, product));
       if (movements.length) {
         await trx('ShopStockMovement').insert(movements.map(m => ledgerRow({
           productId, vendorId, variant: m.variant, delta: m.delta, reason: 'count', stockAfter: m.stockAfter, note: m.note, actorId, at,
         })));
       }
       await writePrivates(trx, productId, vendorId, privates, at);
+      return plain(await trx('Product').where({ id: productId }).first());
     });
   }
 
@@ -327,5 +371,5 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     return inserted.length;
   }
 
-  return { adjust, applyProductForm, recordInitial, privatesOf, movements, lowStock, checkLow, snapshotOrderCosts };
+  return { adjust, applyProductForm, createProduct, privatesOf, movements, lowStock, checkLow, snapshotOrderCosts };
 }

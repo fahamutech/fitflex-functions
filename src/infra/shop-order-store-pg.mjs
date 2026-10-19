@@ -116,8 +116,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     id: `stk_${randomUUID().slice(0, 12)}`, orderId, productId: line.productId, variant: line.variant || '',
     cycle, reason, delta, stockAfter, createdAt: atTime, kind: 'order', vendorId: vendorId || line.vendorId || null,
   });
-  // The double-release guard: one row per order, product, variant, reason and cycle (a partial unique index).
-  const ORDER_LINE_CONFLICT = db.raw('("orderId", "productId", "variant", "reason", "cycle") WHERE "orderId" IS NOT NULL');
+
 
   /**
    * Reserve stock, create the order and its payment request — all or nothing.
@@ -194,7 +193,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
           // The ledger's unique key means a second release of the same order, product and cycle cannot be written.
           const inserted = await trx('ShopStockMovement')
             .insert(ledgerRow(orderId, line, 'release', cycle, line.qty, atTime))
-            .onConflict(ORDER_LINE_CONFLICT).ignore()
+            .onConflict(['orderId', 'productId', 'variant', 'reason', 'cycle']).ignore()
             .returning('id');
           if (!inserted.length) continue;
           const update = {

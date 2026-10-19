@@ -8,9 +8,11 @@
 //     actorId     who made the change (null = the system / a buyer's checkout)
 //     clientRef   the client's idempotency key: a retried adjustment is applied once
 //     sourceId    the document behind a later-slice movement (sale, refund, stock-in)
-//   The double-release guard stays: unique (orderId, productId, variant, reason, cycle), now a
-//   partial index over rows that have an order. New: unique (vendorId, clientRef) where clientRef
-//   is set; index (vendorId, createdAt). CHECKs on reason, kind and note length (added NOT VALID,
+//   The double-release guard is left exactly as it is: the table constraint unique (orderId,
+//   productId, variant, reason, cycle). Rows without an order never collide on it (Postgres treats
+//   NULLs as distinct), so code from before and after this migration works with the same schema
+//   during a rollout or rollback. New: unique (vendorId, clientRef) where clientRef is set;
+//   index (vendorId, createdAt). CHECKs on reason, kind and note length (added NOT VALID,
 //   then VALIDATEd).
 // - ProductPrivate: cost price and reorder level per product (variant '') and per variant. Kept
 //   off Product because the public shop endpoints return Product rows as they are.
@@ -41,9 +43,6 @@ exports.up = async function up(knex) {
   await knex.raw(`UPDATE "ShopStockMovement" m SET "vendorId" = p."vendorId"
     FROM "Product" p WHERE p.id = m."productId" AND m."vendorId" IS NULL`);
 
-  await knex.raw('ALTER TABLE "ShopStockMovement" DROP CONSTRAINT IF EXISTS shopstockmovement_orderid_productid_variant_reason_cycle_unique');
-  await knex.raw(`CREATE UNIQUE INDEX shopstockmovement_order_line_unique
-    ON "ShopStockMovement" ("orderId", "productId", "variant", "reason", "cycle") WHERE "orderId" IS NOT NULL`);
   await knex.raw(`CREATE UNIQUE INDEX shopstockmovement_vendor_client_ref_unique
     ON "ShopStockMovement" ("vendorId", "clientRef") WHERE "clientRef" IS NOT NULL`);
   await knex.raw('CREATE INDEX shopstockmovement_vendor_created_index ON "ShopStockMovement" ("vendorId", "createdAt")');
@@ -103,13 +102,10 @@ exports.down = async function down(knex) {
   await knex.raw('ALTER TABLE "ShopStockMovement" DROP CONSTRAINT IF EXISTS shopstockmovement_reason_check');
   await knex.raw('DROP INDEX IF EXISTS shopstockmovement_vendor_created_index');
   await knex.raw('DROP INDEX IF EXISTS shopstockmovement_vendor_client_ref_unique');
-  await knex.raw('DROP INDEX IF EXISTS shopstockmovement_order_line_unique');
   const orphan = (await knex.raw('SELECT count(*)::int AS n FROM "ShopStockMovement" WHERE "orderId" IS NULL')).rows[0].n;
   if (orphan) console.warn(`[migrate] deleting ${orphan} stock ledger row(s) without an order (they cannot exist in the old schema)`);
   await knex.raw('DELETE FROM "ShopStockMovement" WHERE "orderId" IS NULL');
   await knex.raw('ALTER TABLE "ShopStockMovement" ALTER COLUMN "orderId" SET NOT NULL');
-  await knex.raw(`ALTER TABLE "ShopStockMovement" ADD CONSTRAINT shopstockmovement_orderid_productid_variant_reason_cycle_unique
-    UNIQUE ("orderId", "productId", "variant", "reason", "cycle")`);
   await knex.schema.alterTable('ShopStockMovement', (table) => {
     table.dropColumn('sourceId');
     table.dropColumn('clientRef');
