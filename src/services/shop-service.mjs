@@ -1224,7 +1224,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (missing.length) return { error: 'staff_fields_missing', status: 400, missing };
     if (!STAFF_ROLES.has(body.role)) return { error: 'invalid_staff_role', status: 400 };
     if (await users.findAsync(user => user.userType === 'vendor_staff' && user.email === body.email && user.vendorId === vendorId)) return { error: 'duplicate_staff_email', status: 409 };
-    const permissions = body.role === 'admin' ? [...STAFF_PERMISSIONS] : (Array.isArray(body.permissions) ? body.permissions : []).filter(value => STAFF_PERMISSIONS.has(value));
+    const permissions = body.role === 'admin' ? [...STAFF_PERMISSIONS] : [...new Set((Array.isArray(body.permissions) ? body.permissions : []).filter(value => STAFF_PERMISSIONS.has(value)))];
+    // Vendor tools · S3: a `sales` role always carries the `sales` permission (as admin carries all).
+    if (body.role === 'sales' && !permissions.includes('sales')) permissions.push('sales');
     const at = nowIso();
     const staff = await users.insertAsync({ id: makeId('usr'), userType: 'vendor_staff', vendorId, displayName: body.name.trim(), email: body.email.trim().toLowerCase(), phone: body.phone.trim(), passwordHash: await hashPassword(body.password), vendorRole: body.role, vendorPermissions: permissions, accountStatus: 'active', approvalStatus: 'approved', onboardingCompleted: true, createdAt: at, updatedAt: at });
     return { staff: staffView(staff), status: 201 };

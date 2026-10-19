@@ -46,7 +46,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
     const s = plain(sale);
     return {
       id: s.id, number: s.number, status: s.status, kind: s.kind,
-      soldAt: iso(s.soldAt), recordedAt: iso(s.createdAt), lateRecorded: lateRecorded(s), clientRef: s.clientRef,
+      soldAt: iso(s.soldAt), clientSoldAt: iso(s.clientSoldAt), recordedAt: iso(s.createdAt), lateRecorded: lateRecorded(s), clientRef: s.clientRef,
       subtotalTzs: s.subtotalTzs, lineDiscountTzs: s.lineDiscountTzs, discountTzs: s.discountTzs,
       totalTzs: s.totalTzs, paidTzs: s.paidTzs, changeTzs: s.changeTzs,
       note: s.note ?? null,
@@ -144,13 +144,23 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
         const ordered = [...groups.values()].sort((a, b) => (keyOf(a.productId, a.variant) < keyOf(b.productId, b.variant) ? -1 : 1));
         for (const g of ordered) {
           // The same conditional update as an app order's reservation: the database refuses an oversell.
-          let query = trx('Product').where({ id: g.productId, vendorId }).whereNull('deletedAt').where('stock', '>=', g.qty);
-          const update = { stock: trx.raw('stock - ?', [g.qty]), updatedAt: at };
-          if (g.variantTracked) {
-            query = query.whereRaw(VARIANT_HAS_STOCK, [g.variant, g.qty]);
-            update.variants = trx.raw(variantStockAdjusted('-'), [g.variant, g.qty]);
+          // In its own savepoint, so that if the table's CHECK (product_stock_non_negative) refuses it, the
+          // sale can still read the row and answer like the main path (contract check #214, item 5).
+          let rows;
+          try {
+            rows = await trx.transaction(async (sp) => {
+              let query = sp('Product').where({ id: g.productId, vendorId }).whereNull('deletedAt').where('stock', '>=', g.qty);
+              const update = { stock: sp.raw('stock - ?', [g.qty]), updatedAt: at };
+              if (g.variantTracked) {
+                query = query.whereRaw(VARIANT_HAS_STOCK, [g.variant, g.qty]);
+                update.variants = sp.raw(variantStockAdjusted('-'), [g.variant, g.qty]);
+              }
+              return query.update(update).returning(['stock', 'variants']);
+            });
+          } catch (err) {
+            if (!(err.code === CHECK_VIOLATION && /product_stock_non_negative/.test(err.constraint || err.message))) throw err;
+            rows = [];
           }
-          const rows = await query.update(update).returning(['stock', 'variants']);
           if (!rows.length) {
             const current = plain(await trx('Product').where({ id: g.productId }).first());
             const productStock = Number(current?.stock || 0);
@@ -181,7 +191,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
 
         await trx('VendorSale').insert({
           id: saleId, vendorId, seq, number: receiptNumber(seq), kind: 'cash', status: 'completed', customerId: null,
-          soldAt: sale.soldAt, subtotalTzs: totals.subtotalTzs, lineDiscountTzs: totals.lineDiscountTzs, discountTzs: totals.discountTzs,
+          soldAt: sale.soldAt, clientSoldAt: sale.clientSoldAt ?? null, subtotalTzs: totals.subtotalTzs, lineDiscountTzs: totals.lineDiscountTzs, discountTzs: totals.discountTzs,
           vatTzs: 0, totalTzs: totals.totalTzs, paidTzs: totals.paidTzs, changeTzs: totals.changeTzs, balanceTzs: 0,
           clientRef: sale.clientRef, fingerprint, note: sale.note, createdBy: actorId, createdAt: at, updatedAt: at,
         });

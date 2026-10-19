@@ -219,7 +219,7 @@ export function createPartnerNotifier({
       const who = d.voidedByName || null;
       const amount = tzs(Number(d.totalTzs || 0));
       const en = { title: `Sale ${d.number} voided`, body: `${who || 'A staff member'} voided sale ${d.number} (${amount}). Reason: ${d.reason || '-'}` };
-      const sw = { title: `Mauzo ${d.number} yamebatilishwa`, body: `${who || 'Mhudumu'} amebatilisha mauzo ${d.number} (${amount}). Sababu: ${d.reason || '-'}` };
+      const sw = { title: `Mauzo ${d.number} yamebatilishwa`, body: `${who || 'Mfanyakazi'} amebatilisha mauzo ${d.number} (${amount}). Sababu: ${d.reason || '-'}` };
       const text = locale === 'en' ? en : sw;
       return {
         type: 'vendor_sale_voided',

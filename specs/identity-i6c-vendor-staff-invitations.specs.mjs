@@ -153,6 +153,7 @@ test('declining leaves no persona and no membership', async () => {
     const v = await makeVendor();
     const p = await verifiedPerson();
     const sent = await invite(v, { email: p.email, vendorRole: 'sales', permissions: ['orders'] });
+    assert.deepEqual(sent.body.invitation.aclPermissions, ['orders', 'sales'], 'the sales role always carries `sales` (S3)');
     const declined = await call(declineMyInvitation, p.claims, { params: { invitationId: sent.body.invitation.id } });
     assert.equal(declined.body.invitation.status, 'declined');
     assert.equal(await db('User').where({ personId: p.user.personId, userType: 'vendor_staff' }).first(), undefined);

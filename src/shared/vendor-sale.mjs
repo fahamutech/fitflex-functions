@@ -8,7 +8,8 @@
 // - Payment references are required for mobile money and bank, optional for card and other.
 // - A sale whose total is 0 is allowed, with no payments. Only cash may exceed its share
 //   (it gives change); Σ payments below the total → 409 payment_short (no pay-later before S4).
-// - soldAt from 7 days in the past to 5 minutes in the future (offline sales sync late).
+// - soldAt from 7 days in the past (offline sales sync late) to 24 hours in the future: a device clock
+//   that runs ahead is clamped to the server's now and the device's value kept as clientSoldAt (contract check #214).
 import { createHash } from 'node:crypto';
 
 export const PAYMENT_METHODS = ['cash', 'mpesa', 'airtel_money', 'mixx', 'halopesa', 'card', 'bank', 'other'];
@@ -25,7 +26,7 @@ export const MAX_NOTE = 200;
 export const MAX_REFERENCE = 100;
 export const VOID_REASON = { min: 3, max: 200 };
 export const SOLD_AT_PAST_MS = 7 * 86_400_000;
-export const SOLD_AT_FUTURE_MS = 5 * 60_000;
+export const SOLD_AT_FUTURE_MS = 24 * 3_600_000;
 export const SALES_PAGE_DEFAULT = 50;
 export const SALES_PAGE_MAX = 200;
 const CLIENT_REF = /^[A-Za-z0-9._:-]{8,100}$/;
@@ -123,7 +124,12 @@ export function saleFingerprint(sale) {
   })).digest('hex');
 }
 
-/** soldAt must lie between 7 days ago and 5 minutes from now (Q-14). null when fine. */
+/** soldAt must lie between 7 days ago and 24 hours from now (a future one is then clamped to now). null when fine. */
+/** A soldAt ahead of the server (a fast device clock) becomes the server's now; the device's value is kept. */
+export function clampSoldAt(soldAt, now) {
+  return +soldAt > +now ? { soldAt: new Date(+now), clientSoldAt: new Date(+soldAt) } : { soldAt, clientSoldAt: null };
+}
+
 export function soldAtOutOfRange(soldAt, now) {
   const t = +soldAt;
   const earliest = +now - SOLD_AT_PAST_MS;

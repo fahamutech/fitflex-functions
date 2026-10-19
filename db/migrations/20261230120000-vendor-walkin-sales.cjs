@@ -8,6 +8,7 @@
 //   inside the sale's transaction). clientRef = the device's idempotency key (unique per vendor).
 //   kind cash|credit (credit = S4), status completed|voided. Money is integer TZS:
 //   totalTzs = subtotalTzs − lineDiscountTzs − discountTzs; changeTzs = paidTzs − totalTzs.
+//   clientSoldAt: the device's soldAt when its clock ran ahead (soldAt was clamped to the server's now).
 // - VendorSaleLine: what was sold, with the price the shop lists (listPriceTzs), the price charged
 //   (unitPriceTzs), the line discount (total for the line), the share of the sale discount
 //   (saleDiscountShareTzs, for S6 profit), the unit cost snapshotted from ProductPrivate
@@ -46,6 +47,7 @@ exports.up = async function up(knex) {
     table.text('status').notNullable().defaultTo('completed');
     table.text('customerId');
     table.timestamp('soldAt', { precision: 3 }).notNullable();
+    table.timestamp('clientSoldAt', { precision: 3 }); // the device's soldAt when it was ahead of the server (clamped to now)
     table.integer('subtotalTzs').notNullable();
     table.integer('lineDiscountTzs').notNullable().defaultTo(0);
     table.integer('discountTzs').notNullable().defaultTo(0);

@@ -6,7 +6,7 @@
 //
 // Persistence is the Postgres store (src/infra/vendor-sale-store-pg.mjs). The routes check the
 // flag (VENDOR_TOOLS + VENDOR_WALKIN_SALES) and the `sales` permission before calling in here.
-import { parseSale, saleFingerprint, soldAtOutOfRange, parseVoid, SALES_PAGE_DEFAULT, SALES_PAGE_MAX } from '../shared/vendor-sale.mjs';
+import { parseSale, saleFingerprint, soldAtOutOfRange, clampSoldAt, parseVoid, SALES_PAGE_DEFAULT, SALES_PAGE_MAX } from '../shared/vendor-sale.mjs';
 import { eatDayStart } from '../shared/vendor-stock.mjs';
 import { eatDate } from '../shared/vendor-order-view.mjs';
 
@@ -38,6 +38,7 @@ export function createVendorSaleService({
     sale.soldAt ||= at;
     const outOfRange = soldAtOutOfRange(sale.soldAt, at);
     if (outOfRange) return outOfRange;
+    Object.assign(sale, clampSoldAt(sale.soldAt, at));
     const out = await store.record({ vendorId, actorId, sale, fingerprint });
     if (out.error) return out;
     if (!out.replayed) await lowStockCheck(out.productIds);

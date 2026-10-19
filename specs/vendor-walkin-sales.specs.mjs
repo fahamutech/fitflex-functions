@@ -357,7 +357,7 @@ test('what may be sold (Q-4): paused, pending and rejected listings, a pending v
   assert.equal((await sell(staffOf(seller, suspended), saleBody([{ productId: sp.id, qty: 1 }], cash(45_000)))).status, 201);
 });
 
-test('soldAt (Q-14): from 7 days ago to 5 minutes ahead; default now; the receipt number follows the order sales reach FitFlex', async () => {
+test('soldAt: from 7 days ago to 24 hours ahead (a fast device clock is clamped to now, its value kept as clientSoldAt); default now; numbers follow the order sales reach FitFlex', async () => {
   salesOn();
   const v = await vendor();
   const p = await product(v, { priceTzs: 1_000, stock: 10 });
@@ -366,7 +366,7 @@ test('soldAt (Q-14): from 7 days ago to 5 minutes ahead; default now; the receip
   assert.equal(tooOld.status, 400);
   assert.equal(tooOld.body.error, 'sold_at_out_of_range');
   assert.ok(tooOld.body.earliest && tooOld.body.latest);
-  assert.equal((await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(1_000), { soldAt: at(10 * 60_000) }))).body.error, 'sold_at_out_of_range');
+  assert.equal((await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(1_000), { soldAt: at(24 * 3_600_000 + 60_000) }))).body.error, 'sold_at_out_of_range', 'more than 24 hours ahead');
   assert.equal((await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(1_000), { soldAt: 'yesterday' }))).body.error, 'invalid_field');
   const late = await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(1_000), { soldAt: at(-6 * 86_400_000) }));
   assert.equal(late.status, 201);
@@ -375,7 +375,21 @@ test('soldAt (Q-14): from 7 days ago to 5 minutes ahead; default now; the receip
   assert.ok(Math.abs(Date.parse(now.body.sale.soldAt) - Date.now()) < 60_000);
   assert.deepEqual([late.body.sale.number, now.body.sale.number], ['R-000001', 'R-000002']);
   assert.ok(Date.parse(late.body.sale.recordedAt) - Date.parse(late.body.sale.soldAt) > 5 * 86_400_000, 'recorded offline: recordedAt well after soldAt');
-  assert.equal((await row(p.id)).stock, 8);
+  assert.deepEqual([late.body.sale.lateRecorded, late.body.sale.clientSoldAt, now.body.sale.clientSoldAt], [true, null, null]);
+
+  // A device clock 3 hours fast: accepted, soldAt is the server's now, the device value is kept for audit.
+  const aheadAt = at(3 * 3_600_000);
+  const aheadBody = saleBody([{ productId: p.id, qty: 1 }], cash(1_000), { soldAt: aheadAt });
+  const ahead = await sell(as(v), aheadBody);
+  assert.equal(ahead.status, 201, JSON.stringify(ahead.body));
+  assert.ok(Math.abs(Date.parse(ahead.body.sale.soldAt) - Date.now()) < 60_000, 'clamped to the server\'s now');
+  assert.ok(Date.parse(ahead.body.sale.soldAt) <= Date.parse(ahead.body.sale.recordedAt));
+  assert.equal(ahead.body.sale.clientSoldAt, new Date(aheadAt).toISOString());
+  assert.equal(ahead.body.sale.lateRecorded, false);
+  assert.equal(new Date((await db('VendorSale').where({ id: ahead.body.sale.id }).first()).clientSoldAt).toISOString(), new Date(aheadAt).toISOString());
+  const replay = await sell(as(v), aheadBody);
+  assert.deepEqual([replay.status, replay.body.sale.id], [200, ahead.body.sale.id], 'a retry with the same (future) soldAt is the same sale');
+  assert.equal((await row(p.id)).stock, 7);
 });
 
 test('variants: a variant that keeps stock is taken in the same statement; variant required; insufficient → 409 { productId, variant, available }', async () => {
@@ -399,6 +413,30 @@ test('variants: a variant that keeps stock is taken in the same statement; varia
   assert.equal((await sell(as(v), saleBody([{ productId: plenty.id, qty: 1 }, { productId: plain.id, qty: 5 }], cash(270_000)))).body.error, 'insufficient_stock');
   assert.equal((await row(plenty.id)).stock, 9);
   assert.equal((await ledgerOf(plenty.id)).filter(m => m.reason === 'sale').length, 0);
+});
+
+test('the table CHECK refusing a stock change (not the conditional update) → 409 insufficient_stock { productId, variant, available }, nothing recorded', async () => {
+  salesOn();
+  const v = await vendor();
+  const p = await product(v, { priceTzs: 1_000, stock: 4 });
+  const other = await product(v, { priceTzs: 1_000, stock: 4 });
+  const fn = `walkin_check_${randomUUID().slice(0, 8)}`;
+  // Stand-in for the database's own refusal: product_stock_non_negative raised for this one product.
+  await db.raw(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+    IF NEW.id = '${p.id}' AND NEW.stock < OLD.stock THEN
+      RAISE EXCEPTION 'new row violates check constraint' USING ERRCODE = '23514', CONSTRAINT = 'product_stock_non_negative';
+    END IF; RETURN NEW; END $$`);
+  await db.raw(`CREATE TRIGGER ${fn} BEFORE UPDATE ON "Product" FOR EACH ROW EXECUTE FUNCTION ${fn}()`);
+  try {
+    const out = await sell(as(v), saleBody([{ productId: other.id, qty: 1 }, { productId: p.id, qty: 1 }], cash(2_000)));
+    assert.deepEqual(out, { status: 409, body: { error: 'insufficient_stock', productId: p.id, variant: null, available: 4 } });
+  } finally {
+    await db.raw(`DROP TRIGGER IF EXISTS ${fn} ON "Product"`);
+    await db.raw(`DROP FUNCTION IF EXISTS ${fn}()`);
+  }
+  assert.deepEqual([(await row(p.id)).stock, (await row(other.id)).stock], [4, 4], 'all or nothing');
+  assert.equal(await db('VendorSale').where({ vendorId: v }).first(), undefined);
+  assert.equal(await db('VendorDocumentSequence').where({ vendorId: v }).first(), undefined, 'no number used');
 });
 
 // ── idempotency ──────────────────────────────────────────────────────────────
@@ -768,6 +806,15 @@ test('staff permission `sales`: new admin staff get it; the backfill adds it to 
   if (picked.status === 201) {
     made.users.push(picked.body.id);
     assert.deepEqual(picked.body.vendorPermissions, ['orders', 'sales'], 'sales may be granted; unknown permissions dropped');
+  }
+
+  const salesRole = await call(vendorCreateStaff, as(v), { body: { name: 'Seller', email: `${uid('s')}@example.com`, phone: '0712000333', password: 'Secret123!', role: 'sales', permissions: ['orders'] } });
+  if (salesRole.status === 201) {
+    made.users.push(salesRole.body.id);
+    assert.deepEqual(salesRole.body.vendorPermissions, ['orders', 'sales'], 'the sales role always carries `sales` (contract check #214)');
+    const bare = await call(vendorCreateStaff, as(v), { body: { name: 'Seller 2', email: `${uid('s')}@example.com`, phone: '0712000444', password: 'Secret123!', role: 'sales' } });
+    made.users.push(bare.body.id);
+    assert.deepEqual(bare.body.vendorPermissions, ['sales']);
   }
 
   const admin = await staff(v, ['products', 'orders', 'customers', 'reports', 'payments', 'staff'], { vendorRole: 'admin' });
