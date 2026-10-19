@@ -113,7 +113,7 @@ test('GET /vendor/tools/options: everything off by default; a tool needs the umb
   const off = await call(vendorToolsOptionsRoute, as(v));
   assert.equal(off.status, 200);
   assert.deepEqual(off.body, {
-    stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false,
+    canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false,
     vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off',
   });
   process.env.VENDOR_STOCK_LEDGER = '1';
@@ -497,6 +497,52 @@ test('L2: a product an admin creates records the admin as the actor of its openi
   made.products.push(out.product.id);
   const [first] = await ledgerOf(out.product.id);
   assert.deepEqual([first.reason, first.delta, first.actorId, first.note], ['count', 4, admin, 'product_created']);
+});
+
+test('cost price: only the vendor account and admin staff see or set it; other staff with `products` see reorder level only', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { name: 'Tee', costTzs: 9_000, reorderLevel: 2, variants: [{ name: 'S', stock: 2, costTzs: 10_000, reorderLevel: 1 }] });
+  const staff = async (vendorRole, permissions) => {
+    const id = await user('vendor_staff', { vendorId: v, vendorRole, vendorPermissions: permissions, accountStatus: 'active' });
+    return { sub: id, userType: 'vendor_staff', vendorId: v };
+  };
+  const owner = as(v);
+  const adminStaff = await staff('admin', ['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
+  const stocker = await staff('inventory_manager', ['products']);
+  const mineAs = async claims => (await call(vendorMyProducts, claims)).body.find(x => x.id === p.id);
+
+  for (const claims of [owner, adminStaff]) {
+    assert.equal((await call(vendorToolsOptionsRoute, claims)).body.canSeeCost, true);
+    const seen = await mineAs(claims);
+    assert.deepEqual([seen.costTzs, seen.variants[0].costTzs, seen.variants[0].effectiveCostTzs], [9_000, 10_000, 10_000]);
+  }
+  const ok = await call(vendorUpdateProduct, adminStaff, { params: { id: p.id }, body: { costTzs: 9_500 } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.costTzs, 9_500);
+
+  assert.equal((await call(vendorToolsOptionsRoute, stocker)).body.canSeeCost, false);
+  const limited = await mineAs(stocker);
+  assert.equal('costTzs' in limited, false);
+  assert.equal('costTzs' in limited.variants[0] || 'effectiveCostTzs' in limited.variants[0], false);
+  assert.deepEqual([limited.reorderLevel, limited.variants[0].reorderLevel, limited.variants[0].effectiveReorderLevel], [2, 1, 1]);
+  assert.equal(JSON.stringify(limited).includes('Cost'), false);
+  const refused = await call(vendorUpdateProduct, stocker, { params: { id: p.id }, body: { costTzs: 1 } });
+  assert.deepEqual([refused.status, refused.body], [403, { error: 'cost_forbidden' }]);
+  const refusedVariant = await call(vendorUpdateProduct, stocker, { params: { id: p.id }, body: { variants: [{ name: 'S', costTzs: 1 }] } });
+  assert.deepEqual([refusedVariant.status, refusedVariant.body.error], [403, 'cost_forbidden']);
+  const created = await call(vendorCreateProduct, stocker, { body: { name: 'Bar', priceTzs: 2_000, stock: 1, costTzs: 1_000 } });
+  assert.deepEqual([created.status, created.body.error], [403, 'cost_forbidden']);
+  // Leaving cost out keeps it: the stocker changes the reorder levels only.
+  const saved = await call(vendorUpdateProduct, stocker, { params: { id: p.id }, body: { reorderLevel: 3, variants: [{ name: 'S', reorderLevel: 2 }] } });
+  assert.equal(saved.status, 200);
+  assert.equal('costTzs' in saved.body, false);
+  const after = await mineAs(owner);
+  assert.deepEqual([after.costTzs, after.variants[0].costTzs, after.reorderLevel, after.variants[0].reorderLevel], [9_500, 10_000, 3, 2]);
+  // Stock history carries no cost for anyone.
+  const history = await call(vendorStockMovements, stocker, { params: { id: p.id } });
+  assert.equal(history.status, 200);
+  assert.equal(JSON.stringify(history.body).toLowerCase().includes('cost'), false);
 });
 
 // ── privacy ──────────────────────────────────────────────────────────────────

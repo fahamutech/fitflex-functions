@@ -227,10 +227,24 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return out;
   }
 
-  async function upsertProduct({ vendorId, body, productId, keepCategory = false, actorId = vendorId }) {
+  /**
+   * Cost price is the vendor's own business (owner decision 2026-10-19): the vendor account itself and
+   * vendor_staff whose vendorRole is 'admin' see and set it; other staff, even with `products`, do not.
+   * Read from the stored account, not the token.
+   */
+  async function canSeeCost(claims) {
+    if (claims?.userType === 'vendor') return true;
+    if (claims?.userType !== 'vendor_staff') return false;
+    const staff = await users.findByIdAsync(claims.sub);
+    return staff?.userType === 'vendor_staff' && staff.vendorId === claims.vendorId && staff.accountStatus === 'active' && staff.vendorRole === 'admin';
+  }
+  const sendsCost = input => input.costTzs !== undefined || (Array.isArray(input.variants) && input.variants.some(v => v && v.costTzs !== undefined));
+
+  async function upsertProduct({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
+    if (ledgerOn() && !costAllowed && sendsCost(input)) return { error: 'cost_forbidden', status: 403 };
     if (productId) {
       const prior = await products.findByIdAsync(productId);
       if (!prior || prior.deletedAt) return { error: 'product_not_found', status: 404 };
@@ -265,7 +279,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         });
         if (saved.error) return saved;
         await afterStockMoved([productId]);
-        return { product: (await vendorProductsView(vendorId, [saved.product]))[0] };
+        return { product: (await vendorProductsView(vendorId, [saved.product], { costAllowed }))[0] };
       }
       // Variants are merged by name and keep their stored stock when the body leaves it out (F3).
       const plan = planStock(prior, input, { ledger: false });
@@ -300,7 +314,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // The product and the first rows of its stock history are written together, in one transaction.
       const product = await stockLedger.createProduct({ product: row, actorId, movements: plan.movements, privates: privatesFrom(input) });
       await afterStockMoved([product.id]);
-      return { product: (await vendorProductsView(vendorId, [product]))[0], created: true };
+      return { product: (await vendorProductsView(vendorId, [product], { costAllowed }))[0], created: true };
     }
     const product = await products.insertAsync(row);
     return { product, created: true };
@@ -311,32 +325,35 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * costTzs / reorderLevel (the product's own, '' row), and per variant its own costTzs / reorderLevel
    * plus the effective ones (own, else the product's: Q-1). Never used for public views.
    */
-  async function vendorProductsView(vendorId, rows) {
+  async function vendorProductsView(vendorId, rows, { costAllowed = true } = {}) {
     if (!ledgerOn() || !rows.length) return rows;
     const privates = await stockLedger.privatesOf(vendorId, rows.map(p => p.id));
+    // Without cost rights the cost fields are left out entirely (not null), so nothing hints at them.
+    const cost = value => (costAllowed ? value : undefined);
+    const drop = obj => Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined));
     return rows.map((p) => {
       const own = privates.get(p.id);
       const base = own?.get('') || null;
-      return {
+      return drop({
         ...p,
-        costTzs: base?.costTzs ?? null,
+        costTzs: cost(base?.costTzs ?? null),
         reorderLevel: base?.reorderLevel ?? null,
         variants: variantsOf(p).map((v) => {
           const mine = own?.get(v.name) || null;
-          return {
+          return drop({
             ...v, stock: isTracked(v) ? v.stock : null,
-            costTzs: mine?.costTzs ?? null, reorderLevel: mine?.reorderLevel ?? null,
-            effectiveCostTzs: mine?.costTzs ?? base?.costTzs ?? null,
+            costTzs: cost(mine?.costTzs ?? null), reorderLevel: mine?.reorderLevel ?? null,
+            effectiveCostTzs: cost(mine?.costTzs ?? base?.costTzs ?? null),
             effectiveReorderLevel: mine?.reorderLevel ?? base?.reorderLevel ?? null,
-          };
+          });
         }),
-      };
+      });
     });
   }
 
-  /** GET /vendor/products: own products, including archived (private fields with the ledger on). */
-  async function vendorListProducts(vendorId) {
-    return vendorProductsView(vendorId, await listProducts({ vendorId, includeArchived: true }));
+  /** GET /vendor/products: own products, including archived (private fields with the ledger on; cost only with cost rights). */
+  async function vendorListProducts(vendorId, { costAllowed = true } = {}) {
+    return vendorProductsView(vendorId, await listProducts({ vendorId, includeArchived: true }), { costAllowed });
   }
 
   /**
@@ -1097,5 +1114,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
+  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
 }
