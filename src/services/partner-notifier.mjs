@@ -213,6 +213,21 @@ export function createPartnerNotifier({
         },
       };
     },
+    // Vendor tools · S3 (security review M2): a staff member voided a walk-in sale. Same language rule as
+    // vendor_low_stock. Swahili is a DRAFT for native review.
+    vendor_sale_voided: (d, locale) => {
+      const who = d.voidedByName || null;
+      const amount = tzs(Number(d.totalTzs || 0));
+      const en = { title: `Sale ${d.number} voided`, body: `${who || 'A staff member'} voided sale ${d.number} (${amount}). Reason: ${d.reason || '-'}` };
+      const sw = { title: `Mauzo ${d.number} yamebatilishwa`, body: `${who || 'Mfanyakazi'} amebatilisha mauzo ${d.number} (${amount}). Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_sale_voided',
+        title: text.title,
+        body: text.body,
+        data: { saleId: d.saleId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
   };
 
   /** Something happened in a vendor's shop. Events with no message here stay in the shop's own list only. */

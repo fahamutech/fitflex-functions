@@ -191,3 +191,11 @@ export function vendorBuyerContactOn() {
 export function heroImagesCmsOn() {
   return on('HERO_IMAGES_CMS');
 }
+
+/**
+ * S3: walk-in (counter) sales recorded by the vendor — POS, sales history, void. Off → the
+ * /vendor/sales endpoints answer 404 feature_disabled.
+ */
+export function vendorWalkInSalesOn() {
+  return vendorToolsFlag('VENDOR_WALKIN_SALES');
+}

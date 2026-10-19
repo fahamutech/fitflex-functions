@@ -635,7 +635,7 @@ test('GET /vendor/me: 404 feature_disabled unless VENDOR_TOOLS + VENDOR_PORTAL; 
     assert.equal(me.status, 200, JSON.stringify(me.body));
     assert.deepEqual(Object.keys(me.body).sort(), ['accountStatus', 'approvalStatus', 'businessName', 'permissions', 'tools', 'userType', 'vendorId', 'vendorRole']);
     assert.deepEqual([me.body.vendorId, me.body.businessName, me.body.userType, me.body.vendorRole, me.body.approvalStatus, me.body.accountStatus], [vendor, 'Me Shop', 'vendor', null, 'pending_approval', 'active']);
-    assert.deepEqual(me.body.permissions, ['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
+    assert.deepEqual(me.body.permissions, ['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff']);
     assert.deepEqual([me.body.tools.portal, me.body.tools.buyerContact, me.body.tools.stockLedger, me.body.tools.canSeeCost], [true, false, false, true]);
     const options = await hit('GET', '/vendor/tools/options', vendorClaims(vendor));
     assert.deepEqual(me.body.tools, options.body, 'tools = /vendor/tools/options');
