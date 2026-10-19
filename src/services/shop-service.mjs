@@ -101,6 +101,20 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function getVendorProfile(vendorId) {
     return (await users.findByIdAsync(vendorId))?.vendorProfile || null;
   }
+  /**
+   * GET /vendor/profile for the caller. The vendor and admins get the whole profile; vendor_staff get it
+   * without the money fields (settlementAccount, commissionPct) unless they hold `payments` or are a
+   * vendor admin (vendorRole 'admin'). Staff rights are read from the staff record, not the token.
+   */
+  async function vendorProfileFor(claims) {
+    const profile = await getVendorProfile(claims.vendorId || claims.sub);
+    if (!profile || claims.userType !== 'vendor_staff') return profile;
+    const staff = await activeStaffOf(claims);
+    const seesMoney = !!staff && (staff.vendorRole === 'admin' || (Array.isArray(staff.vendorPermissions) && staff.vendorPermissions.includes('payments')));
+    if (seesMoney) return profile;
+    const { settlementAccount, commissionPct, ...rest } = profile;
+    return rest;
+  }
 
   async function saveVendorProfile({ vendorId, body }) {
     const current = await users.findByIdAsync(vendorId);
@@ -1132,13 +1146,23 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { staff: staffView(staff), status: 201 };
   }
   const canStaff = (staff, permission) => staff?.userType === 'vendor' || staff?.userType === 'vendor_staff' && staff.accountStatus !== 'suspended' && Array.isArray(staff.vendorPermissions) && staff.vendorPermissions.includes(permission);
-  async function authorizeStaff(claims, permission) {
-    const staff = await users.findByIdAsync(claims.sub);
-    return staff?.userType === 'vendor_staff' && staff.vendorId === claims.vendorId &&
-      staff.accountStatus === 'active' && canStaff(staff, permission);
+  /** The caller's own staff record when it is an active vendor_staff of the vendor in its token, else null. */
+  async function activeStaffOf(claims) {
+    const staff = claims?.sub ? await users.findByIdAsync(claims.sub) : null;
+    return staff?.userType === 'vendor_staff' && claims.vendorId && staff.vendorId === claims.vendorId &&
+      staff.accountStatus === 'active' ? staff : null;
   }
+  async function authorizeStaff(claims, permission) {
+    const staff = await activeStaffOf(claims);
+    return !!staff && canStaff(staff, permission);
+  }
+  /** Any active staff member of the vendor (no particular permission): read-only vendor context. */
+  const isActiveStaff = async claims => !!(await activeStaffOf(claims));
   const staffView = ({ passwordHash, ...staff }) => staff;
-  const listVendorStaff = async vendorId => (await users.filterAsync(user => user.userType === 'vendor_staff' && user.vendorId === vendorId)).map(staffView);
+  // GET /vendor/staff returns only these fields per staff member (vendor and staff callers alike).
+  const STAFF_LIST_FIELDS = ['id', 'displayName', 'email', 'phone', 'vendorRole', 'vendorPermissions', 'accountStatus', 'createdAt'];
+  const staffListView = staff => Object.fromEntries(STAFF_LIST_FIELDS.map(key => [key, staff[key] ?? null]));
+  const listVendorStaff = async vendorId => (await users.filterAsync(user => user.userType === 'vendor_staff' && user.vendorId === vendorId)).map(staffListView);
   async function disableVendorStaff({ vendorId, staffId }) {
     const staff = await users.findByIdAsync(staffId);
     if (!staff) return { error: 'staff_not_found', status: 404 };
@@ -1171,5 +1195,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, reviewProduct, orderInvoice, reorder, notifications };
+  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
 }

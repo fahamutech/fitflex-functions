@@ -782,8 +782,15 @@ test('admins on /vendor/* endpoints get cost rights (canSeeCost) like the vendor
   assert.equal(created.body.costTzs, 500);
   const mine = (await call(vendorMyProducts, admin)).body.find(x => x.id === created.body.id);
   assert.equal(mine.costTzs, 500);
+  // An admin without the shop scope is stopped by the route's own guard (as bfast-function already did,
+  // through the GET /vendor/products guard it applied to every /vendor/products request) ...
   const refused = await call(vendorCreateProduct, otherAdmin(), { body: { name: 'No scope', priceTzs: 1_000, stock: 1, costTzs: 500 } });
-  assert.deepEqual([refused.status, refused.body.error], [403, 'cost_forbidden']);
+  assert.deepEqual([refused.status, refused.body.error], [403, 'acl_forbidden']);
+  // ... and has no cost rights either, should the service be reached another way.
+  const other = otherAdmin();
+  assert.equal(await shopService.canSeeCost(other), false);
+  const direct = await shopService.upsertProduct({ vendorId: other.sub, actorId: other.sub, body: { name: 'No scope', priceTzs: 1_000, stock: 1, costTzs: 500 }, costAllowed: false });
+  assert.deepEqual([direct.status, direct.error], [403, 'cost_forbidden']);
 });
 
 test('admin listing update is atomic: a failed private-field write rolls back the listing change and both audit rows', async () => {
@@ -896,4 +903,74 @@ test('schema: reason and kind are checked, adjustments need no order, an order l
   await assert.rejects(db('ShopStockMovement').insert({ ...base, id: uid('stk'), reason: 'restock', kind: 'adjustment', clientRef: 'ref-unique-1' }), /shopstockmovement_vendor_client_ref_unique/);
   const d5 = (await db.raw(`SELECT convalidated FROM pg_constraint WHERE conname = 'product_stock_non_negative'`)).rows[0];
   assert.equal(d5.convalidated, true);
+});
+
+// ── low stock: opening stock is not a crossing (UAT 2026-10-19: a new product at 0 sent "Only 0 left") ──
+
+test('low stock: a product created at or below its reorder level sends no alert; the next downward crossing does', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const empty = await listed(v, { name: 'Empty at start', stock: 0, reorderLevel: 3 });
+  const atLevel = await listed(v, { name: 'At level at start', stock: 3, reorderLevel: 3 });
+  assert.equal((await lowAlerts(v)).length, 0, 'opening stock at or below the level is not a crossing');
+  // Still listed as low: the alert is skipped, the state is not hidden.
+  assert.deepEqual((await call(vendorLowStock, as(v))).body.map(x => x.productId).sort(), [empty.id, atLevel.id].sort());
+  await adjust(v, atLevel.id, { reason: 'lost', quantity: 1 }); // 3 → 2: still low, never been above since creation
+  assert.equal((await lowAlerts(v)).length, 0);
+  await adjust(v, empty.id, { reason: 'restock', quantity: 10 }); // 0 → 10: above, re-armed
+  await adjust(v, empty.id, { reason: 'damaged', quantity: 8 }); // 10 → 2: a real downward crossing
+  const alerts = await lowAlerts(v);
+  assert.equal(alerts.length, 1);
+  assert.deepEqual(alerts[0].data, { productId: empty.id, productName: 'Empty at start', variant: null, stock: 2, reorderLevel: 3 });
+});
+
+test('low stock: variants created at 0 (own or inherited level) and a variant added later at 0 send no alert; an existing variant crossing in the same save does', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { name: 'Gloves', reorderLevel: 2, variants: [{ name: 'S', stock: 0 }, { name: 'M', stock: 5 }, { name: 'L', stock: 1, reorderLevel: 1 }] });
+  assert.equal((await lowAlerts(v)).length, 0, 'S (0 ≤ inherited 2) and L (1 ≤ own 1) start low: no alert');
+  // One save: M is counted down to 1 (crosses 2) and a new variant XL starts at 0.
+  const saved = await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { variants: [{ name: 'S', stock: 0 }, { name: 'M', stock: 1 }, { name: 'L', stock: 1 }, { name: 'XL', stock: 0 }] } });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const alerts = await lowAlerts(v);
+  assert.deepEqual(alerts.map(a => a.data.variant), ['M'], 'only the existing variant that went down alerts');
+  assert.deepEqual(alerts[0].data, { productId: p.id, productName: 'Gloves', variant: 'M', stock: 1, reorderLevel: 2 });
+  // XL is still listed as low, and alerts after it has been above its level and come down again.
+  assert.ok((await call(vendorLowStock, as(v))).body.some(x => x.productId === p.id && x.variant === 'XL'));
+  await adjust(v, p.id, { variant: 'XL', reason: 'restock', quantity: 4 }); // 0 → 4
+  await adjust(v, p.id, { variant: 'XL', reason: 'damaged', quantity: 3 }); // 4 → 1: crosses
+  assert.deepEqual((await lowAlerts(v)).map(a => a.data.variant).sort(), ['M', 'XL']);
+});
+
+test('low stock: raising the reorder level to or above the stock still alerts once (owner decision kept), from the vendor form and from the admin listing', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { name: 'Bands', stock: 4, reorderLevel: 2 });
+  assert.equal((await lowAlerts(v)).length, 0);
+  assert.equal((await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { reorderLevel: 5 } })).status, 200);
+  assert.equal((await lowAlerts(v)).length, 1, 'level 2 → 5 with 4 in stock: one alert');
+  assert.equal((await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { reorderLevel: 6 } })).status, 200);
+  assert.equal((await lowAlerts(v)).length, 1, 'already reported: raising it again does not repeat');
+
+  // A product created at 0 with no level, then given one: that is a raise, so it alerts.
+  const q = await listed(v, { name: 'Mats', stock: 0 });
+  assert.equal((await lowAlerts(v)).length, 1);
+  assert.equal((await call(vendorUpdateProduct, as(v), { params: { id: q.id }, body: { reorderLevel: 1 } })).status, 200);
+  assert.equal((await lowAlerts(v)).length, 2);
+  assert.deepEqual((await lowAlerts(v)).find(a => a.data.productId === q.id).data, { productId: q.id, productName: 'Mats', variant: null, stock: 0, reorderLevel: 1 });
+
+  // From the admin listing too.
+  const r = await listed(v, { name: 'Rope', stock: 3, reorderLevel: 1 });
+  const out = await call(adminUpdateProductListing, shopAdmin(), { params: { id: r.id }, body: { reorderLevel: 3 } });
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+  assert.equal((await lowAlerts(v)).filter(a => a.data.productId === r.id).length, 1);
+});
+
+test('low stock: an admin-created product at or below its level sends no alert', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const out = await call(adminCreateProduct, shopAdmin(), { body: { vendorId: v, name: 'Admin empty', category: 'supplements_nutrition', priceTzs: 9_000, stock: 0, reorderLevel: 2, variants: [{ name: 'One', stock: 0 }] } });
+  assert.equal(out.status, 201, JSON.stringify(out.body));
+  made.products.push(out.body.id);
+  assert.equal((await lowAlerts(v)).length, 0);
 });

@@ -182,7 +182,13 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
         }
         if (plan.removed?.length) await trx('ProductPrivate').where({ productId }).whereIn('variant', plan.removed).del();
         await writePrivates(trx, productId, vendorId, plan.privates || [], at);
-        return { product: plain(await trx('Product').where({ id: productId }).first()), value: plan.value };
+        const saved = plain(await trx('Product').where({ id: productId }).first());
+        // A variant counted for the first time (new, or newly given a stock) that starts at or below its
+        // level is not a crossing either; units that were already counted follow the normal rule.
+        const countedBefore = new Set(variantsOf(current).filter(isTracked).map(v => v.name));
+        const startingNow = variantsOf(saved).filter(v => isTracked(v) && !countedBefore.has(v.name)).map(v => v.name);
+        if (startingNow.length) await markStartingLow(trx, saved, startingNow, at);
+        return { product: saved, value: plan.value };
       });
     } catch (err) {
       if (err.code === CHECK_VIOLATION && /product_stock_non_negative/.test(err.constraint || err.message)) return fail('insufficient_stock', 409);
@@ -203,7 +209,11 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
         })));
       }
       await writePrivates(trx, productId, vendorId, privates, at);
-      return plain(await trx('Product').where({ id: productId }).first());
+      const created = plain(await trx('Product').where({ id: productId }).first());
+      // Opening stock is not a crossing: a unit that starts at or below its level is marked as already
+      // reported, so the vendor hears about it only after it has been above its level again.
+      await markStartingLow(trx, created, null, at);
+      return created;
     });
   }
 
@@ -259,9 +269,9 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
    * Private fields, by product id: Map(productId → Map(variant → row)). `vendorId` scopes the read to one
    * vendor; null (FitFlex admins, across vendors) needs the product ids, so nothing reads the whole table.
    */
-  async function privatesOf(vendorId, productIds = null) {
+  async function privatesOf(vendorId, productIds = null, q0 = db) {
     if (vendorId == null && !productIds) throw new Error('privatesOf: vendorId or productIds required');
-    let q = db('ProductPrivate');
+    let q = q0('ProductPrivate');
     if (vendorId != null) q = q.where({ vendorId });
     if (productIds) q = q.whereIn('productId', productIds);
     const out = new Map();
@@ -354,6 +364,23 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       }
     }
     return out.sort((a, b) => String(a.name).localeCompare(String(b.name)) || String(a.variant || '').localeCompare(String(b.variant || '')));
+  }
+
+  /**
+   * A unit that starts out at or below its reorder level (a new product's opening stock, a variant
+   * counted for the first time) is not a downward crossing: mark it as already reported, inside the
+   * caller's transaction, so checkLow stays quiet until the unit has been above its level again.
+   * `names`: only these variants ('' = the product itself); null = every unit of the product.
+   */
+  async function markStartingLow(q, product, names, at) {
+    const privates = (await privatesOf(product.vendorId, [product.id], q)).get(product.id);
+    for (const unit of unitsOf(product, privates)) {
+      if (names && !names.includes(unit.variant)) continue;
+      if (unit.reorderLevel == null || unit.stock > unit.reorderLevel) continue;
+      await q('ProductPrivate')
+        .insert({ productId: product.id, variant: unit.variant, vendorId: product.vendorId, lowStockAlertedAt: at, updatedAt: at })
+        .onConflict(['productId', 'variant']).merge({ lowStockAlertedAt: at, updatedAt: at });
+    }
   }
 
   /**
