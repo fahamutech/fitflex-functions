@@ -221,11 +221,38 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
   }
 
   /**
-   * Cost price / reorder level written outside the product form (an admin, from
-   * PUT /admin/products/:id/listing). Same rules as the form: only the keys present are written, null clears.
+   * PUT /admin/products/:id/listing with the ledger on — one transaction under the product's row lock:
+   * the listing fields, the cost price / reorder level (only the keys present; null clears) and both audit
+   * rows (before-values read inside the transaction). All or nothing.
+   * decide(current) → { error, status, ... } | { patch, privates }.
+   * → { product, prior } or { error, status, ... }.
    */
-  async function savePrivates({ productId, vendorId, privates }) {
-    await writePrivates(db, productId, vendorId, privates, now());
+  async function adminUpdateListing({ productId, actorId, decide }) {
+    const at = now();
+    const audit = (trx, action, before, after) => trx('AuditLog').insert({
+      id: randomUUID(), at, actor: actorId ?? null, action, target: productId,
+      before: JSON.stringify(before), after: JSON.stringify(after),
+    });
+    return db.transaction(async (trx) => {
+      const prior = plain(await trx('Product').where({ id: productId }).forUpdate().first());
+      if (!prior) return fail('product_not_found', 404);
+      const plan = decide(prior);
+      if (plan.error) return plan;
+      const update = await productRow(trx, plan.patch);
+      if (Object.keys(update).length) await trx('Product').where({ id: productId }).update(update);
+      await audit(trx, 'product_listing_updated', {
+        homepageVisible: prior.homepageVisible ?? true, homepagePriority: Number(prior.homepagePriority || 0), approvalStatus: prior.approvalStatus || 'pending',
+      }, plan.patch);
+      if (plan.privates.length) {
+        const rows = await trx('ProductPrivate').where({ productId }).whereIn('variant', plan.privates.map(p => p.variant || ''));
+        const was = variant => rows.find(r => r.variant === (variant || '')) || null;
+        await writePrivates(trx, productId, prior.vendorId, plan.privates, at);
+        await audit(trx, 'admin_product_private_updated',
+          plan.privates.map(p => ({ variant: p.variant || '', costTzs: was(p.variant)?.costTzs ?? null, reorderLevel: was(p.variant)?.reorderLevel ?? null })),
+          plan.privates);
+      }
+      return { product: plain(await trx('Product').where({ id: productId }).first()), prior };
+    });
   }
 
   /**
@@ -384,5 +411,5 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     return inserted.length;
   }
 
-  return { adjust, applyProductForm, createProduct, privatesOf, savePrivates, movements, lowStock, checkLow, snapshotOrderCosts };
+  return { adjust, applyProductForm, createProduct, privatesOf, adminUpdateListing, movements, lowStock, checkLow, snapshotOrderCosts };
 }

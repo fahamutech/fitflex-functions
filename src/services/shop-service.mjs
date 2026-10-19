@@ -442,6 +442,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const v = body.variants;
       const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && !invalidPrivateField(x));
       if (!ok) return { error: 'invalid_field', status: 400, field: 'variants' };
+      // Same rule as the vendor form: one entry per variant name (case and spaces ignored).
+      const seen = new Set();
+      for (const x of v) {
+        const key = x.name.trim().toLowerCase();
+        if (seen.has(key)) return { error: 'duplicate_variant', status: 400, variant: x.name.trim() };
+        seen.add(key);
+      }
       const names = variantsOf(product).map(x => x.name);
       const unknown = v.find(x => !names.includes(String(x.name).trim()));
       if (unknown) return { error: 'variant_not_found', status: 404, variant: unknown.name, variants: names };
@@ -476,32 +483,34 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { product: (await vendorProductsView(null, [product], { costAllowed: true }))[0], status: 201 };
   }
   async function adminUpdateProductListing({ productId, body, actorId }) {
+    const patch = { ...(typeof body?.homepageVisible === 'boolean' ? { homepageVisible: body.homepageVisible } : {}), ...(body?.homepagePriority !== undefined ? { homepagePriority: Number(body.homepagePriority) || 0 } : {}), ...(['approved', 'pending', 'rejected'].includes(body?.approvalStatus) ? { approvalStatus: body.approvalStatus } : {}), updatedAt: nowIso() };
+    if (ledgerOn()) {
+      // With the ledger on an admin may also set cost price / reorder level. Listing fields, private fields
+      // and both audit rows are one transaction under the product's row lock (variant names checked there too).
+      let privates = [];
+      const saved = await stockLedger.adminUpdateListing({
+        productId, actorId,
+        decide: (current) => {
+          const parsed = adminPrivatesFrom(body, current);
+          if (parsed.error) return parsed;
+          privates = parsed.privates;
+          return { patch, privates };
+        },
+      });
+      if (saved.error) return saved;
+      if (patch.approvalStatus) await notifyVendor(saved.prior.vendorId, `product_${patch.approvalStatus}`, { productId });
+      // A reorder level raised to or above the stock alerts the vendor once, as from the vendor's own form.
+      if (privates.length) await afterStockMoved([productId]);
+      return { product: (await vendorProductsView(null, [saved.product], { costAllowed: true }))[0] };
+    }
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
-    // With the ledger on an admin may also set cost price / reorder level; checked before anything is written.
-    let privates = [];
-    if (ledgerOn()) {
-      const parsed = adminPrivatesFrom(body, prior);
-      if (parsed.error) return parsed;
-      privates = parsed.privates;
-    }
-    const patch = { ...(typeof body?.homepageVisible === 'boolean' ? { homepageVisible: body.homepageVisible } : {}), ...(body?.homepagePriority !== undefined ? { homepagePriority: Number(body.homepagePriority) || 0 } : {}), ...(['approved', 'pending', 'rejected'].includes(body?.approvalStatus) ? { approvalStatus: body.approvalStatus } : {}), updatedAt: nowIso() };
     const product = await products.updateByIdAsync(productId, patch);
     await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_listing_updated', target: productId, before: { homepageVisible: prior.homepageVisible ?? true, homepagePriority: Number(prior.homepagePriority || 0), approvalStatus: prior.approvalStatus || 'pending' }, after: patch });
     if (patch.approvalStatus) await notifyVendor(prior.vendorId, `product_${patch.approvalStatus}`, { productId });
-    if (privates.length) {
-      const before = (await stockLedger.privatesOf(null, [productId])).get(productId);
-      await stockLedger.savePrivates({ productId, vendorId: prior.vendorId, privates });
-      await auditLog.insertAsync({
-        id: randomUUID(), at: nowIso(), actor: actorId, action: 'admin_product_private_updated', target: productId,
-        before: privates.map(p => ({ variant: p.variant, costTzs: before?.get(p.variant)?.costTzs ?? null, reorderLevel: before?.get(p.variant)?.reorderLevel ?? null })),
-        after: privates,
-      });
-      // A reorder level raised to or above the stock alerts the vendor once, as from the vendor's own form.
-      await afterStockMoved([productId]);
-    }
-    return { product: (await vendorProductsView(null, [product], { costAllowed: true }))[0] };
+    return { product };
   }
+
 
   async function adminListVendors() {
     const vendors = await users.filterAsync(user => user.userType === 'vendor');

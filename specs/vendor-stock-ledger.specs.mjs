@@ -12,6 +12,7 @@ import { partnerSettlementAccounts } from '../src/bootstrap/collections.mjs';
 import { createPayoutEligibility } from '../src/services/payout-eligibility.mjs';
 import { createVendorSettlementService } from '../src/services/vendor-settlement-service.mjs';
 import { vendorShareOfOrder } from '../src/shared/marketplace-pricing.mjs';
+import { createPgVendorStockStore } from '../src/infra/vendor-stock-store-pg.mjs';
 import {
   vendorToolsOptionsRoute, vendorStockAdjustment, vendorStockMovements, vendorLowStock, vendorMyProducts,
   vendorCreateProduct, vendorUpdateProduct, listShopProducts, getShopProduct, getVendorStore, createShopOrder,
@@ -722,11 +723,16 @@ test('PUT /admin/products/:id/listing: an admin sets cost / reorder level (audit
   const p = await listed(v, { name: 'Listing tee', stock: 5, costTzs: 1_000, variants: [{ name: 'S', stock: 5 }] });
   const admin = superAdmin();
   const listing = body => call(adminUpdateProductListing, admin, { params: { id: p.id }, body });
+  const audits = async () => Number((await db('AuditLog').where({ target: p.id }).whereIn('action', ['product_listing_updated', 'admin_product_private_updated']).count('* as n').first()).n);
+  const auditsBefore = await audits(); // listed() approved it: one listing row already
 
   const bad = await listing({ homepagePriority: 9, costTzs: -1 });
   assert.deepEqual([bad.status, bad.body], [400, { error: 'invalid_field', field: 'costTzs' }]);
   const unknown = await listing({ homepagePriority: 9, variants: [{ name: 'XXL', costTzs: 5 }] });
   assert.deepEqual([unknown.status, unknown.body], [404, { error: 'variant_not_found', variant: 'XXL', variants: ['S'] }]);
+  const dup = await listing({ homepagePriority: 9, variants: [{ name: 'S', costTzs: 5 }, { name: ' s ', costTzs: 6 }] });
+  assert.deepEqual([dup.status, dup.body], [400, { error: 'duplicate_variant', variant: 's' }]);
+  assert.equal(await audits(), auditsBefore, 'no audit rows for refused requests');
   assert.equal(Number((await row(p.id)).homepagePriority || 0), 0, 'nothing written on a refused request');
 
   const ok = await listing({ costTzs: 4_321, variants: [{ name: 'S', costTzs: 4_400, reorderLevel: 1, stock: 999 }] });
@@ -778,6 +784,50 @@ test('admins on /vendor/* endpoints get cost rights (canSeeCost) like the vendor
   assert.equal(mine.costTzs, 500);
   const refused = await call(vendorCreateProduct, otherAdmin(), { body: { name: 'No scope', priceTzs: 1_000, stock: 1, costTzs: 500 } });
   assert.deepEqual([refused.status, refused.body.error], [403, 'cost_forbidden']);
+});
+
+test('admin listing update is atomic: a failed private-field write rolls back the listing change and both audit rows', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { name: 'Atomic tee', stock: 5, costTzs: 1_000 });
+  const store = createPgVendorStockStore({ db });
+  const auditCount = async () => Number((await db('AuditLog').where({ target: p.id }).whereIn('action', ['product_listing_updated', 'admin_product_private_updated']).count('* as n').first()).n);
+  const before = await auditCount();
+  // costTzs -5 passes no service validation here (decide is called directly) and is refused by the
+  // productprivate_cost_non_negative CHECK after the Product update and the listing audit row were written.
+  await assert.rejects(store.adminUpdateListing({
+    productId: p.id, actorId: 'adm_atomic',
+    decide: () => ({ patch: { homepagePriority: 77, updatedAt: new Date().toISOString() }, privates: [{ variant: '', costTzs: -5 }] }),
+  }), /productprivate_cost_non_negative/);
+  assert.equal(Number((await row(p.id)).homepagePriority || 0), 0, 'listing change rolled back');
+  assert.equal(await auditCount(), before, 'no audit rows left behind');
+  assert.equal((await db('ProductPrivate').where({ productId: p.id, variant: '' }).first()).costTzs, 1_000);
+  // A product that does not exist: 404 from inside the transaction.
+  assert.deepEqual(await store.adminUpdateListing({ productId: 'prd_missing', actorId: 'adm_atomic', decide: () => ({ patch: {}, privates: [] }) }), { error: 'product_not_found', status: 404 });
+});
+
+test('admins without the shop scope get 403 on /vendor/products, stock-adjustments, stock-movements and stock/low', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { stock: 3 });
+  const noScope = otherAdmin();
+  for (const [route, opts] of [
+    [vendorMyProducts, {}],
+    [vendorStockAdjustment, { params: { id: p.id }, body: { reason: 'found', quantity: 1, clientRef: randomUUID() } }],
+    [vendorStockMovements, { params: { id: p.id } }],
+    [vendorLowStock, {}],
+  ]) {
+    const out = await call(route, noScope, opts);
+    assert.deepEqual([out.status, out.body], [403, { error: 'acl_forbidden', requiredScope: 'shop' }]);
+  }
+  // A shop-scoped admin and a super-admin pass the guard (scoped to their own id: nothing of this vendor's).
+  for (const claims of [shopAdmin(), superAdmin()]) {
+    assert.equal((await call(vendorMyProducts, claims)).status, 200);
+    assert.equal((await call(vendorLowStock, claims)).status, 200);
+    assert.deepEqual((await call(vendorStockMovements, claims, { params: { id: p.id } })).body, { error: 'not_your_product' });
+  }
+  // Vendors and vendor staff are not affected by the admin guard.
+  assert.equal((await call(vendorLowStock, as(v))).status, 200);
 });
 
 // ── cost snapshot and settlement ─────────────────────────────────────────────

@@ -60,7 +60,7 @@ export const getVendorStore = {
 export const vendorMyProducts = {
   created, method: 'get', path: '/vendor/products',
   description: 'Vendor: list own products (including archived). With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
-  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope],
   onRequest: async (req, res) => {
     res.json(await shopService.vendorListProducts(req.user.vendorId || req.user.sub, { costAllowed: await shopService.canSeeCost(req.user) }));
   }
@@ -86,7 +86,7 @@ export const vendorStockAdjustment = {
   created, method: 'post', path: '/vendor/products/:id/stock-adjustments',
   description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): change a product\'s (or a variant\'s) stock with a reason. Body { variant?, reason: count|damaged|expired|lost|found|returned|restock|other, quantity, expectedStock? (count: the stock the vendor saw), direction? (other: in|out), note? (≤200; required for other), clientRef (8–100 chars, reuse it on retries) }. count sets the stock to `quantity`; the others add or remove `quantity`. → 201 { movement, product }; a replayed clientRef → 200 with the same movement. 409 stock_changed { currentStock } (count, stale expectedStock), 409 insufficient_stock { currentStock }, 409 client_ref_reused, 400 invalid_reason | invalid_quantity | note_too_long | note_required | invalid_direction | expected_stock_required | invalid_client_ref | variant_required { variants }, 404 product_not_found | variant_not_found, 403 not_your_product. Flag off: 404 feature_disabled.',
   requestSample: { reason: 'count', quantity: 12, expectedStock: 15, note: 'Shelf count', clientRef: '3b0c8f6e-2c1a-4c55-9a51-7c1f3b2d9e10' },
-  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope],
   onRequest: async (req, res) => {
     if (!vendorStockLedgerOn()) return ledgerDisabled(res);
     const result = await shopService.adjustStock({
@@ -100,7 +100,7 @@ export const vendorStockAdjustment = {
 export const vendorStockMovements = {
   created, method: 'get', path: '/vendor/products/:id/stock-movements',
   description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): one product\'s stock history, newest first. Query: from, to (EAT days YYYY-MM-DD, inclusive; optional), variant (optional), limit (1–200, default 50), cursor. → { productId, variant, openingStock, closingStock, rows:[{ id, productId, variant, reason, kind, delta, stockBefore, stockAfter, note, actor:{id,name}|null, orderId, document:{type:\'order\',id,number:null}|null, createdAt }], nextCursor }. Flag off: 404 feature_disabled.',
-  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope],
   onRequest: async (req, res) => {
     if (!vendorStockLedgerOn()) return ledgerDisabled(res);
     const result = await shopService.stockMovements({ vendorId: req.user.vendorId || req.user.sub, productId: req.params.id, query: req.query || {} });
@@ -112,7 +112,7 @@ export const vendorStockMovements = {
 export const vendorLowStock = {
   created, method: 'get', path: '/vendor/stock/low',
   description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): products and variants at or below their reorder level (a variant without its own level uses the product\'s). → [{ productId, name, variant|null, stock, reorderLevel }]. Flag off: 404 feature_disabled.',
-  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope],
   onRequest: async (req, res) => {
     if (!vendorStockLedgerOn()) return ledgerDisabled(res);
     res.json(await shopService.lowStock(req.user.vendorId || req.user.sub));
@@ -191,7 +191,7 @@ export const vendorSaveProfile = {
 
 export const adminListProducts = {
   created, method: 'get', path: '/admin/products',
-  description: 'Admin: list every product with homepage visibility and priority controls. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries the vendor\'s private costTzs and reorderLevel (null when not set) and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — the same shape as GET /vendor/products for the vendor account. Never on /shop/*.',
+  description: 'Admin: list every product with homepage visibility and priority controls. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries the vendor\'s private costTzs and reorderLevel (null when not set) and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — the same shape as GET /vendor/products for the vendor account. Never on /shop/*. Portal: show cost/reorder fields only when they are present (flag off → absent).',
   onGuard: [requireAuth('admin'), requireAcl('shop')],
   onRequest: async (_req, res) => res.json(await shopService.adminListProducts()),
 };
@@ -209,7 +209,7 @@ export const adminCreateProduct = {
 
 export const adminUpdateProductListing = {
   created, method: 'put', path: '/admin/products/:id/listing',
-  description: 'Admin: control whether a product is listed and its homepage priority. With VENDOR_STOCK_LEDGER on, also optional costTzs, reorderLevel and variants: [{ name, costTzs?, reorderLevel? }] (null clears; other variant keys are ignored; 400 invalid_field { field }, 404 variant_not_found { variant, variants }); recorded in the audit log with the admin as actor (admin_product_private_updated). A reorder level raised to or above the stock sends the vendor one low-stock alert. The response carries the private fields as GET /admin/products does.',
+  description: 'Admin: control whether a product is listed and its homepage priority. With VENDOR_STOCK_LEDGER on, also optional costTzs, reorderLevel and variants: [{ name, costTzs?, reorderLevel? }] (null clears; other variant keys are ignored; 400 invalid_field { field }, 400 duplicate_variant { variant }, 404 variant_not_found { variant, variants }); listing fields, private fields and audit rows are written in one transaction; recorded in the audit log with the admin as actor (admin_product_private_updated). A reorder level raised to or above the stock sends the vendor one low-stock alert. The response carries the private fields as GET /admin/products does.',
   onGuard: [requireAuth('admin'), requireAcl('shop')],
   onRequest: async (req, res) => {
     const result = await shopService.adminUpdateProductListing({
