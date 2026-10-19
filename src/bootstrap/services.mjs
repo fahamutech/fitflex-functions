@@ -56,6 +56,8 @@ import { createTrainerEngagementService } from '../services/trainer-engagement-s
 import { createTermsService } from '../services/terms-service.mjs';
 import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
+import { createPgVendorSaleStore } from '../infra/vendor-sale-store-pg.mjs';
+import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
@@ -275,6 +277,13 @@ export const shopService = createShopService({
   // A paid order is credited to the promotion the buyer opened (promotionEventsService is defined below; this only runs later).
   onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
+});
+// Vendor tools · S3: walk-in (counter) sales — no commission, no ShopOrder, no settlement
+// (dormant behind VENDOR_TOOLS + VENDOR_WALKIN_SALES; the routes check the flag).
+export const vendorSaleService = createVendorSaleService({
+  store: createPgVendorSaleStore({ db }),
+  afterStockMoved: productIds => shopService.afterStockMoved(productIds),
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const corporateService = createCorporateService({

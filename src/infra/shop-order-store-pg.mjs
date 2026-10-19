@@ -48,13 +48,14 @@ const shopError = (error, status, productId) => Object.assign(new Error(error), 
 
 // A product's `variants` is a jsonb array of { name, stock? }. Only a variant that carries a numeric
 // stock has its own count; its units are reserved in the same statement as the product's.
-const VARIANT_HAS_STOCK = `EXISTS (SELECT 1 FROM jsonb_array_elements("Product".variants) v
+// Exported for walk-in sales (S3), which take stock from the same pool with the same statement.
+export const VARIANT_HAS_STOCK = `EXISTS (SELECT 1 FROM jsonb_array_elements("Product".variants) v
   WHERE v->>'name' = ? AND jsonb_typeof(v->'stock') = 'number' AND (v->>'stock')::numeric >= ?)`;
-const variantStockAdjusted = (sign) => `(SELECT COALESCE(jsonb_agg(CASE WHEN v->>'name' = ? AND jsonb_typeof(v->'stock') = 'number'
+export const variantStockAdjusted = (sign) => `(SELECT COALESCE(jsonb_agg(CASE WHEN v->>'name' = ? AND jsonb_typeof(v->'stock') = 'number'
   THEN jsonb_set(v, '{stock}', to_jsonb((v->>'stock')::numeric ${sign} ?)) ELSE v END ORDER BY ord), '[]'::jsonb)
   FROM jsonb_array_elements("Product".variants) WITH ORDINALITY AS t(v, ord))`;
 
-const variantStockOf = (variants, name) => {
+export const variantStockOf = (variants, name) => {
   const list = typeof variants === 'string' ? JSON.parse(variants) : variants;
   const found = Array.isArray(list) ? list.find(v => v?.name === name) : null;
   return typeof found?.stock === 'number' ? found.stock : null;

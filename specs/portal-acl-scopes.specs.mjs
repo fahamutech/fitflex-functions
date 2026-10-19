@@ -32,7 +32,7 @@ test('create() accepts every guarded scope and still rejects unknown ones', asyn
     users: { findAsync: async () => ({ id: 'exists' }) },
     auditLog: {}, initFirebaseAdmin() {}, getAdminAuth() {}, isConfiguredAdminEmail: () => false,
   });
-  const base = { email: 'a@b.co', password: 'x' };
+  const base = { email: 'a@b.co', password: 'x', actor: { id: 'usr_super', portalUser: false } };
   // Passing validation reaches the duplicate-email check.
   const ok = await svc.create({ ...base, aclPermissions: [...requireAclScopes().keys()] });
   assert.equal(ok.error, 'email_already_exists');

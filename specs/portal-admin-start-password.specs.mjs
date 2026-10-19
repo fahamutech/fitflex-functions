@@ -66,7 +66,13 @@ async function call(route, { token, body = {}, params = {}, query = {} } = {}) {
   return out;
 }
 
-const superAdmin = sign({ sub: uniq('usr_super'), userType: 'admin', portalUser: false, aclPermissions: [] });
+// Create re-reads the caller from the DB (escalation fix), so the creator is a real super-admin row.
+const superAdminRow = {
+  id: uniq('usr_super'), userType: 'admin', email: `${uniq('super')}@example.com`, portalUser: false,
+  aclPermissions: [], accountStatus: 'active', approvalStatus: 'approved', createdAt: new Date().toISOString(),
+};
+await users.upsertAsync(u => u.id === superAdminRow.id, superAdminRow);
+const superAdmin = sign({ sub: superAdminRow.id, userType: 'admin', portalUser: false, aclPermissions: [] });
 
 async function createAdmin({ email = `${uniq('newadmin')}@example.com`, password = START } = {}) {
   const out = await call(adminCreatePortalUser, {
@@ -260,7 +266,7 @@ test('without the server key, creating a portal admin fails closed before Fireba
     users, auditLog, isConfiguredAdminEmail: () => false, pepper: () => null,
     initFirebaseAdmin: () => {}, getAdminAuth: () => ({ createUser: async a => { calls.push(a); return { uid: 'x' }; } }),
   });
-  const out = await service.create({ email: `${uniq('nokey')}@example.com`, password: START, actorId: 'usr_x' });
+  const out = await service.create({ email: `${uniq('nokey')}@example.com`, password: START, actor: { id: superAdminRow.id, portalUser: false } });
   assert.equal(out.status, 503);
   assert.equal(out.error, 'start_password_not_configured');
   assert.equal(calls.length, 0);

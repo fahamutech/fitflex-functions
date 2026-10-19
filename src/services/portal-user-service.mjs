@@ -24,6 +24,21 @@ export const PORTAL_ACL_SCOPES = [
 /** Shortest password accepted when an admin replaces the start password (Firebase's own floor is 6). */
 export const PORTAL_PASSWORD_MIN_LENGTH = 10;
 
+// Who may change portal access (security fix 2026-10-19):
+//   - The caller comes from the verified token (req.user), never the body, and
+//     is re-read from the DB so a stale token can't keep powers since removed.
+//   - A super-admin is a caller with portalUser falsy (token AND row), or an
+//     env-configured admin (FITFLEX_ADMIN_EMAILS). Super-admins may do anything
+//     below; requireAcl's semantics are unchanged.
+//   - Only a super-admin may change anyone's portalUser flag, or edit a
+//     super-admin account at all.
+//   - Nobody changes their OWN aclPermissions, portalUser or accountStatus
+//     (displayName is fine).
+//   - Portal staff may only add or remove scopes they hold themselves; scopes
+//     outside their own stay as they are. The same applies to create().
+//   - "Change" means a value different from the stored one, so a form that
+//     re-sends unchanged values (the portal's edit dialog does) is not refused.
+//   - Every refusal is audited (portal_user_create_refused / _update_refused).
 export function createPortalUserService({
   users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail,
   // The server key the start password is mixed with (PIN_PEPPER). Null = not configured: fail closed.
@@ -39,6 +54,29 @@ export function createPortalUserService({
     const y = Buffer.from(String(b || ''), 'hex');
     return x.length > 0 && x.length === y.length && timingSafeEqual(x, y);
   };
+  const sameSet = (a, b) => a.length === b.length && a.every(x => b.includes(x));
+
+  /** The caller's effective access: the tighter of the token claims and the stored row. */
+  async function resolveActor(actor) {
+    if (!actor?.id) return null;
+    const row = await users.findAsync(u => u.id === actor.id);
+    if (!row) return null;
+    const envAdmin = Boolean((row.email && isConfiguredAdminEmail(row.email)));
+    const superAdmin = envAdmin || (!actor.portalUser && !row.portalUser);
+    const tokenScopes = Array.isArray(actor.aclPermissions) ? actor.aclPermissions : [];
+    const rowScopes = Array.isArray(row.aclPermissions) ? row.aclPermissions : [];
+    return { id: row.id, superAdmin, scopes: tokenScopes.filter(s => rowScopes.includes(s)) };
+  }
+
+  // `target` is the user id for updates, the requested email for creates (the column is NOT NULL).
+  async function refuse(action, { actorId, target, requested, error, status = 403, message, extra = {} }) {
+    await auditLog.insertAsync({
+      id: randomUUID(), at: new Date().toISOString(),
+      actor: actorId ?? null, action, target: target ?? 'unknown',
+      before: null, after: { refused: error, requested },
+    });
+    return { error, status, message, ...extra };
+  }
 
   function slim(u) {
     return {
@@ -61,12 +99,27 @@ export function createPortalUserService({
     return rows.map(slim);
   }
 
-  async function create({ email: rawEmail, password, displayName, aclPermissions = [], actorId }) {
+  async function create({ email: rawEmail, password, displayName, aclPermissions = [], actor, actorId = actor?.id }) {
     const email = normalizeEmail(rawEmail);
     if (!email || !password) return { error: 'email_and_password_required', status: 400 };
     if (!Array.isArray(aclPermissions)) return { error: 'aclPermissions_must_be_array', status: 400 };
     const invalid = aclPermissions.filter(p => !PORTAL_ACL_SCOPES.includes(p));
     if (invalid.length) return { error: 'invalid_acl_scopes', status: 400, invalid };
+    aclPermissions = [...new Set(aclPermissions)];
+    const caller = await resolveActor(actor);
+    const requested = { email, aclPermissions };
+    if (!caller) {
+      return refuse('portal_user_create_refused', { actorId, target: email, requested, error: 'actor_not_found', message: 'The signed-in account could not be found.' });
+    }
+    if (!caller.superAdmin) {
+      const exceeding = aclPermissions.filter(p => !caller.scopes.includes(p));
+      if (exceeding.length) {
+        return refuse('portal_user_create_refused', {
+          actorId: caller.id, target: email, requested, error: 'acl_grant_exceeds_own',
+          message: 'You can only grant permissions you hold yourself.', extra: { exceeding },
+        });
+      }
+    }
     const existing = await users.findAsync(u => sameEmail(u.email, email) && u.userType === 'admin');
     if (existing) return { error: 'email_already_exists', status: 409 };
     // The start password must be changed at first sign-in; without the key it can't be checked, so refuse.
@@ -174,7 +227,7 @@ export function createPortalUserService({
     return { user: updated };
   }
 
-  async function update({ id, aclPermissions, accountStatus, displayName, portalUser, actorId }) {
+  async function update({ id, aclPermissions, accountStatus, displayName, portalUser, actor, actorId = actor?.id }) {
     const target = await users.findAsync(u => u.id === id && u.userType === 'admin');
     if (!target) return { error: 'portal_user_not_found', status: 404 };
     if (target.email && isConfiguredAdminEmail(target.email)) {
@@ -184,11 +237,42 @@ export function createPortalUserService({
     if (Array.isArray(aclPermissions)) {
       const invalid = aclPermissions.filter(p => !PORTAL_ACL_SCOPES.includes(p));
       if (invalid.length) return { error: 'invalid_acl_scopes', status: 400, invalid };
-      patch.aclPermissions = aclPermissions;
+      patch.aclPermissions = [...new Set(aclPermissions)];
     }
     if (accountStatus && ['active', 'suspended'].includes(accountStatus)) patch.accountStatus = accountStatus;
     if (displayName) patch.displayName = displayName;
     if (typeof portalUser === 'boolean') patch.portalUser = portalUser;
+
+    // Only real changes count, so re-sent unchanged values pass.
+    const currentScopes = Array.isArray(target.aclPermissions) ? target.aclPermissions : [];
+    const currentStatus = target.accountStatus || 'active';
+    const currentPortalUser = target.portalUser === true;
+    const scopesChange = 'aclPermissions' in patch && !sameSet(patch.aclPermissions, currentScopes);
+    const statusChange = 'accountStatus' in patch && patch.accountStatus !== currentStatus;
+    const portalUserChange = 'portalUser' in patch && patch.portalUser !== currentPortalUser;
+    const requested = { ...patch };
+    const refused = (error, message, extra) => refuse('portal_user_update_refused', {
+      actorId: caller?.id ?? actorId, target: target.id, requested, error, message, extra,
+    });
+
+    const caller = await resolveActor(actor);
+    if (!caller) return refused('actor_not_found', 'The signed-in account could not be found.');
+    if (caller.id === target.id && (scopesChange || statusChange || portalUserChange)) {
+      return refused('cannot_change_own_access', 'You cannot change your own permissions, role or status.');
+    }
+    if (!caller.superAdmin) {
+      if (portalUserChange) return refused('super_admin_required', 'Only a super-admin can change whether an account is a super-admin.');
+      if (!currentPortalUser) return refused('super_admin_required', 'Only a super-admin can change a super-admin account.');
+      if (scopesChange) {
+        const added = patch.aclPermissions.filter(p => !currentScopes.includes(p));
+        const removed = currentScopes.filter(p => !patch.aclPermissions.includes(p));
+        const exceeding = [...added, ...removed].filter(p => !caller.scopes.includes(p));
+        if (exceeding.length) {
+          return refused('acl_grant_exceeds_own', 'You can only grant or remove permissions you hold yourself.', { exceeding });
+        }
+      }
+    }
+
     const updated = await users.upsertAsync(u => u.id === target.id, { ...target, ...patch, updatedAt: new Date().toISOString() });
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
