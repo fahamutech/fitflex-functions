@@ -14,6 +14,7 @@
 //   statement releases its sessions, so the next statement picks them up.
 // - The payout check: the trainer needs approved KYC and a verified payout
 //   account past its 48-hour hold.
+import { formatTsh } from '../shared/money-display.mjs';
 import { randomUUID } from 'node:crypto';
 import { db as defaultDb } from '../infra/knex-store.mjs';
 import {
@@ -46,7 +47,7 @@ export function createTrainerSettlementService({
   now = () => new Date(),
 } = {}) {
   const trainerOf = (id) => trainers?.find((t) => t.id === id) || null;
-  const money = (n) => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
+  const money = formatTsh;
 
   const workflow = createStatementWorkflow({
     db, now, table: 'TrainerSettlement', lineTable: 'TrainerSettlementLine', lineKey: 'trainerSettlementId', auditPrefix: 'trainer_settlement',

@@ -169,7 +169,7 @@ test('delivered orders are prepared, approved by a second person, paid, and mark
   // The vendor is told; the orders are settled.
   const note = inbox.find(n => n.userId === a);
   assert.equal(note.type, 'vendor_payout_paid');
-  assert.match(note.body, /TZS 81,000 for 2 order\(s\).*CRDB-V1/);
+  assert.match(note.body, /TSh 81,000 for 2 order\(s\).*CRDB-V1/);
   assert.equal((await db('ShopOrder').where({ id: solo }).first()).settlementStatus, 'settled');
 
   // The vendor sees it, without staff ids or the buyer's id.

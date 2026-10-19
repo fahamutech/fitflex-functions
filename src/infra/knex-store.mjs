@@ -627,7 +627,7 @@ const ALLOWED_FIELDS = {
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed',
                               'status','statusReason','statusChangedBy','statusChangedAt','voidedAt','voidedBy','voidReason','subscriptionId','businessDate','source']),
-  payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','orderId','currency','tier','plan','gymId','amountTzs','status','provider','reference','memberReference','memberReferenceKey','payerPhone','note','requestedAt','decidedAt','decidedBy']),
+  payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','orderId','currency','tier','plan','gymId','amountTzs','status','provider','reference','memberReference','memberReferenceKey','payerPhone','note','requestedAt','decidedAt','decidedBy','verifiedBy','verifiedAt','changeRequestedStatus','changeRequestedBy','changeRequestedAt','changeRequestReason']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
   trainers:         new Set(['id','userId','email','phone','displayName','fullName','nickname','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','regionId','cityId','availability','socialLinks','createdAt','updatedAt']),
@@ -798,7 +798,7 @@ function prepareForKnex(name, data, isUpdate = false) {
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
     'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'termsAcceptedAt', 'statusChangedAt', 'voidedAt',
     'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt', 'enrolledAt', 'removedAt',
-    'heldAt', 'rejectedAt', 'payableAt', 'startsAt', 'endsAt', 'pausedAt', 'activatedAt', 'submittedAt'];
+    'heldAt', 'rejectedAt', 'payableAt', 'startsAt', 'endsAt', 'pausedAt', 'activatedAt', 'submittedAt', 'changeRequestedAt'];
   for (const f of DATE_FIELDS) {
     if (CALENDAR_DATE_COLLECTIONS.has(name) && CALENDAR_DATE_FIELDS.has(f)) continue;
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {

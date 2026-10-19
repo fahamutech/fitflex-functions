@@ -24,7 +24,11 @@ export const adminUpdateSettings = {
   onGuard: [requireAuth('admin'), requireAcl('settings')],
   onRequest: async (req, res) => {
     const result = await settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub });
-    if (result?.error) return res.status(result.status).json({ error: result.error, field: result.field });
+    // An incomplete pass tier is refused, naming the tier and the field.
+    if (result?.error) {
+      const { status, ...body } = result;
+      return res.status(status).json(body);
+    }
     res.json(result);
   }
 };

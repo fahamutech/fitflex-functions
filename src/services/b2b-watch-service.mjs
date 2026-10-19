@@ -21,6 +21,7 @@
 // The settlement tables belong to the settlement engines and are only read.
 // With gym settlement in shadow mode there are no live runs, so the provider
 // checks have nothing to compare against and report nothing.
+import { formatTsh } from '../shared/money-display.mjs';
 import { localDay, addDays } from '../shared/member-progress.mjs';
 import { OPEN_STATUSES, outstandingTzs, daysOverdue } from '../shared/b2b-billing.mjs';
 import { agreementInForce } from './b2b-finance-service.mjs';
@@ -35,7 +36,7 @@ export const WATCH = Object.freeze({
   holdDays: 30,                 // an organisation left on hold
   trainerSettlementLagDays: 14, // a sponsored session not yet on a trainer statement
 });
-const tzs = n => `TZS ${Number(n).toLocaleString('en-US')}`;
+const tzs = formatTsh;
 const n = v => Number(v) || 0;
 
 export function createB2BWatchService({

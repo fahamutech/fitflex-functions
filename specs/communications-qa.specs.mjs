@@ -288,7 +288,7 @@ test('campaign — lists, history and results show a readable name, never {{plac
   assert.equal(labelText('We miss you, {{member_name}}', {}), 'We miss you');
   assert.equal(labelText('Hi {{member_name}}, renew at {{gym_name}}', {}, { gymName: 'Kilele Gym' }), 'Hi, renew at Kilele Gym');
   assert.equal(labelText('{{discount}} off: {{offer_name}}', {}), '… off: …', 'values not typed yet');
-  assert.equal(labelText('Pay {{amount}} today', { amountTzs: 45000 }), 'Pay TZS 45,000 today');
+  assert.equal(labelText('Pay {{amount}} today', { amountTzs: 45000 }), 'Pay TSh 45,000 today');
 
   const g = await gym('Label Gym');
   const owner = await user({ userType: 'gym_operator', gymIds: [g] });
@@ -507,7 +507,7 @@ test('automation — 7, 3 and 1 day, expired, payment failed and inactive: each 
     expiring_1: ['membership_final_reminder', /./],
     expired: ['membership_expired', /./],
     inactive_14: ['we_miss_you', /./],
-    payment_failed: ['payment_failed', /TZS 45,000/],
+    payment_failed: ['payment_failed', /TSh 45,000/],
   };
   for (const [key, [templateKey, body]] of Object.entries(expected)) {
     const runs = await db('AutomationRun as r').join('CommunicationAutomation as a', 'a.id', 'r.automationId')

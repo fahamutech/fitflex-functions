@@ -58,28 +58,28 @@ export const requestRefund = {
 
 export const adminListRefunds = {
   created, method: 'get', path: '/admin/refunds',
-  description: 'Admin: refunds with who they are for. ?status=requested|approved|paid|rejected',
+  description: 'Admin: refunds with who they are for. ?status=requested|approved|paid|rejected. With MONEY_SECOND_APPROVER on each row also has secondApproverRequired, approvalStage, approveNotBy, payNotBy.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => send(res, await refundService.adminList({ status: req.query?.status || undefined })),
 };
 
 export const adminRaiseRefund = {
   created, method: 'post', path: '/admin/refunds',
-  description: 'Admin: raise a refund for a confirmed pass or plan payment (approved at once). Body { paymentRequestId, amountTzs?, reasonCode?, note? }.',
+  description: 'Admin: raise a refund for a confirmed pass or plan payment (approved at once; with MONEY_SECOND_APPROVER on it is left requested for another admin to approve). Body { paymentRequestId, amountTzs?, reasonCode?, note? }.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => send(res, await refundService.adminRaise({ body: req.body || {}, actorId: req.user.sub }), 201),
 };
 
 export const adminDecideRefund = {
   created, method: 'post', path: '/admin/refunds/:id/decision',
-  description: 'Admin: approve or reject a requested refund. Body { decision: approve | reject, note? (required to reject; the member sees it), amountTzs? (approve less than asked), endAccess? (end the pass or plan now) }.',
+  description: 'Admin: approve or reject a requested refund. Body { decision: approve | reject, note? (required to reject; the member sees it), amountTzs? (approve less than asked), endAccess? (end the pass or plan now) }. With MONEY_SECOND_APPROVER on, the admin who raised a refund cannot approve it (403 cannot_approve_own_request).',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => send(res, await refundService.decide({ id: req.params.id, body: req.body || {}, actorId: req.user.sub })),
 };
 
 export const adminMarkRefundPaid = {
   created, method: 'post', path: '/admin/refunds/:id/paid',
-  description: 'Admin: record that an approved refund was sent. Body { paymentReference, paidTo? }.',
+  description: 'Admin: record that an approved refund was sent. Body { paymentReference, paidTo? }. With MONEY_SECOND_APPROVER on, the admin who approved it cannot mark it paid (403 cannot_pay_own_approval), and a refund approved by policy that an admin started (cancelling a paid session or order, re-raising a shop refund) cannot be marked paid by that admin (403 cannot_pay_own_request).',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => send(res, await refundService.markPaid({ id: req.params.id, body: req.body || {}, actorId: req.user.sub })),
 };

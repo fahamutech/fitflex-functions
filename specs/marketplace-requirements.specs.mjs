@@ -316,5 +316,5 @@ test('marketplace: buyer can review delivered products, download invoice data an
   assert.equal(review.review.rating, 5);
   assert.match(await service.orderInvoice({ buyerId: 'owner-1', orderId: placed.order.id }), /FitFlex Marketplace Invoice/);
   const reorder = await service.reorder({ buyerId: 'owner-1', orderId: placed.order.id });
-  assert.deepEqual(reorder.items, [{ productId, qty: 1 }]);
+  assert.deepEqual(reorder.items, [{ productId, variant: null, qty: 1 }]);
 });

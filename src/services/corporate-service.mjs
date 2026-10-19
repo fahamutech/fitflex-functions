@@ -50,7 +50,8 @@ export function createCorporateService({
     if (!WORKFORCE_BRACKETS[workforceBracket]) return { error: 'invalid_workforce_bracket', status: 400 };
     if (SUBSIDY_MODELS[subsidyModel] === undefined) return { error: 'invalid_subsidy_model', status: 400 };
     if (!BILLING_CYCLES.includes(billingCycle)) return { error: 'invalid_billing_cycle', status: 400 };
-    if (!settingsService.getTierConfig(passTier)) return { error: 'invalid_pass_tier', status: 400 };
+    // Only a tier sold today, as configured in Settings (owner decision 2026-10-19).
+    if (!settingsService.isTierSellable(passTier)) return { error: 'invalid_pass_tier', status: 400 };
 
     const unknownObjectives = (objectives || []).filter(o => !HR_OBJECTIVES.includes(o));
     if (unknownObjectives.length) {
@@ -112,7 +113,7 @@ export function createCorporateService({
       patch.subsidyModel = body.subsidyModel;
     }
     if (body.passTier !== undefined) {
-      if (!settingsService.getTierConfig(body.passTier)) return { error: 'invalid_pass_tier', status: 400 };
+      if (!settingsService.isTierSellable(body.passTier)) return { error: 'invalid_pass_tier', status: 400 };
       patch.passTier = body.passTier;
     }
     if (body.billingCycle !== undefined) {
@@ -407,6 +408,8 @@ export function createCorporateService({
       b => b.corporateId === corporateId && b.period === billingPeriod,
     );
     if (existing) return { bill: existing, idempotent: true };
+    // Seats are sold on the account's pass tier: only while it is sold (Settings, fail closed).
+    if (!settingsService.isTierSellable(account.passTier)) return { error: 'tier_not_available', status: 409, tier: account.passTier ?? null };
 
     const roster = await corporateEmployees.filterByColumnAsync('corporateId', corporateId);
     const seatCount = roster.filter(e => e.status === 'active').length;

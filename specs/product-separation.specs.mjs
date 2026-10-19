@@ -4,6 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 import { createSubscriptionService } from '../src/services/subscription-service.mjs';
 import { createWebhookService } from '../src/services/webhook-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
@@ -35,11 +36,8 @@ const TIERS = [
   { key: 'premium', label: 'Premium', monthlyPrice: 200000, visits: 20, gymAccess: 'premium' },
   { key: 'executive', label: 'Executive', monthlyPrice: 350000, visits: -1, gymAccess: 'luxury_executive' },
 ];
-const settingsService = {
-  publicTiers: () => TIERS,
-  priceForTier: (k) => TIERS.find(t => t.key === k)?.monthlyPrice ?? 0,
-  visitCapForTier: () => null,
-};
+// A real settings service over these tiers: Settings is the only price source.
+const settingsService = settingsWithTiers(TIERS);
 
 const gymA = { id: 'gym_a', name: 'Alpha Gym', tier: 'standard', status: 'active', ratePerDay: 5000, ratePerWeek: 25000, ratePerMonth: 80000 };
 const gymMonthlyOnly = { id: 'gym_m', name: 'Monthly Only', tier: 'standard', status: 'active', ratePerMonth: 90000 };
@@ -97,7 +95,8 @@ test('a suspended gym sells nothing', async () => {
 
 test('unknown tier, missing tier and unknown type are refused', async () => {
   const { service, subscriptions } = setup();
-  assert.equal((await service.subscribe({ memberId: 'u1', tier: 'diamond' })).error, 'invalid_tier');
+  // Owner decision 2026-10-19: a tier not configured in Settings → 409 tier_not_available.
+  assert.deepEqual(await service.subscribe({ memberId: 'u1', tier: 'diamond' }), { error: 'tier_not_available', status: 409, tier: 'diamond' });
   assert.equal((await service.subscribe({ memberId: 'u1' })).error, 'invalid_tier');
   assert.equal((await service.subscribe({ memberId: 'u1', type: 'trainer_pass', tier: 'pro' })).error, 'invalid_type');
   assert.equal((await service.subscribe({ memberId: 'u1', type: 'bogus' })).error, 'invalid_type');
@@ -108,16 +107,16 @@ test('a tier the admin removed from the catalogue is not sellable even if built 
   const subscriptions = memStore();
   const service = createSubscriptionService({
     subscriptions, paymentRequests: memStore(), checkins: memStore(), gyms: [],
-    settingsService: { ...settingsService, publicTiers: () => TIERS.filter(t => t.key !== 'executive') },
+    settingsService: settingsWithTiers(TIERS.filter(t => t.key !== 'executive')),
     publicUserId: async () => 'x',
   });
-  assert.equal((await service.subscribe({ memberId: 'u1', tier: 'executive' })).error, 'invalid_tier');
+  assert.equal((await service.subscribe({ memberId: 'u1', tier: 'executive' })).error, 'tier_not_available');
 });
 
 test('a tier configured at price 0 is not for sale', async () => {
   const service = createSubscriptionService({
     subscriptions: memStore(), paymentRequests: memStore(), checkins: memStore(), gyms: [],
-    settingsService: { ...settingsService, publicTiers: () => [{ key: 'pro' }], priceForTier: () => 0 },
+    settingsService: settingsWithTiers([{ key: 'pro', label: 'Pro', monthlyPrice: 0, visits: 12, gymAccess: 'midtier' }]),
     publicUserId: async () => 'x',
   });
   assert.equal((await service.subscribe({ memberId: 'u1', tier: 'pro' })).error, 'tier_not_available');

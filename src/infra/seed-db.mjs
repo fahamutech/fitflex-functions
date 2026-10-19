@@ -3,17 +3,14 @@
 // Idempotent — safe to call on every startup.
 import { db } from './knex-store.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
+import { defaultSubscriptionTiers } from '../shared/default-subscription-tiers.mjs';
 
 const PILOT_ADMIN_EMAIL = process.env.FITFLEX_ADMIN_EMAILS?.split(',')[0]?.trim() || 'mama27j@gmail.com';
 
 const DEFAULT_SETTINGS = {
   id: 'platform',
-  subscriptionTiers: [
-    { key: 'basic',     label: 'Basic',     monthlyPrice: 30000,  visits: 12, gymAccess: 'standard' },
-    { key: 'pro',       label: 'Pro',        monthlyPrice: 60000,  visits: 30, gymAccess: 'midtier' },
-    { key: 'premium',   label: 'Premium',   monthlyPrice: 100000, visits: 30, gymAccess: 'premium' },
-    { key: 'executive', label: 'Executive', monthlyPrice: 200000, visits: 30, gymAccess: 'luxury_executive' },
-  ],
+  // The one default tier list (same values as before; see the module).
+  subscriptionTiers: defaultSubscriptionTiers(),
   payoutBands: [
     { key: 'band1', label: 'Band 1 (0-49)',    minVisits: 0,   maxVisits: 49,  payoutTiming: 'monthly',  commissionPct: 20 },
     { key: 'band2', label: 'Band 2 (50-99)',   minVisits: 50,  maxVisits: 99,  payoutTiming: 'biweekly', commissionPct: 15 },

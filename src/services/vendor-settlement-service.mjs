@@ -14,6 +14,7 @@
 // - Paying a statement marks its orders settled.
 // - The payout check: the vendor needs approved KYC and a verified payout
 //   account past its 48-hour hold.
+import { formatTsh } from '../shared/money-display.mjs';
 import { randomUUID } from 'node:crypto';
 import { db as defaultDb } from '../infra/knex-store.mjs';
 import { vendorShareOfOrder } from '../shared/marketplace-pricing.mjs';
@@ -37,7 +38,7 @@ export function createVendorSettlementService({
   notify = async () => {},   // (userId, { type, title, body, data })
   now = () => new Date(),
 } = {}) {
-  const money = (n) => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
+  const money = formatTsh;
 
   const workflow = createStatementWorkflow({
     db, now, table: 'VendorSettlement', lineTable: 'VendorSettlementLine', lineKey: 'vendorSettlementId', auditPrefix: 'vendor_settlement',

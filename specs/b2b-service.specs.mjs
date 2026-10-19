@@ -381,7 +381,7 @@ test('corporate HR logins reach their own mapped organisation as hr, and only th
 
 test('corporate onboarding maps the new company through the hook; a failing hook never breaks onboarding', async () => {
   const s = setup();
-  const settingsService = { getTierConfig: t => (t === 'pro' ? { key: 'pro' } : null), priceForTier: () => 150000 };
+  const settingsService = { getTierConfig: t => (t === 'pro' ? { key: 'pro' } : null), isTierSellable: t => t === 'pro', priceForTier: () => 150000 };
   const body = { companyName: 'Vodacom', industrySector: 'telecom', workforceBracket: '1000+', subsidyModel: 'fully_funded', passTier: 'pro' };
 
   const corp = createCorporateService({

@@ -20,6 +20,7 @@
 //
 // There is no payment gateway, no interest or penalty, and nothing is put on
 // hold automatically (decisions P6-01 to P6-04, 4 Oct 2026).
+import { formatTsh } from '../shared/money-display.mjs';
 import { randomUUID } from 'node:crypto';
 import { PAYMENT_METHODS, OPEN_STATUSES, outstandingTzs, daysOverdue, isDay } from '../shared/b2b-billing.mjs';
 import { localDay, addDays } from '../shared/member-progress.mjs';
@@ -39,7 +40,7 @@ const INSTRUCTION_FIELDS = Object.freeze({ bankName: 120, accountName: 160, acco
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const newId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const text = (v, max = 500) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
-const tzs = n => `TZS ${Number(n).toLocaleString('en-US')}`;
+const tzs = formatTsh;
 
 /**
  * The reminder an invoice is due on `today`, or null. Stages do not pile up:
