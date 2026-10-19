@@ -24,10 +24,10 @@ import { heroImageService } from '../src/bootstrap/services.mjs';
 import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
 import { HERO_AREAS, HERO_SLOTS, heroSlot, textZoneFor } from '../src/shared/hero-slots.mjs';
 import { HERO_LIMITS, HERO_VARIANT_BUDGETS, prepareHeroUpload, buildHeroVariants, measureTextZones, isBright } from '../src/infra/hero-image-file.mjs';
-import { createHeroImageService, HERO_MANIFEST_CACHE_MS } from '../src/services/hero-image-service.mjs';
+import { createHeroImageService, HERO_MANIFEST_CACHE_MS, ALLOWED_PEOPLE, HERO_AUDIT_PREVIEWS } from '../src/services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../src/infra/hero-image-store-pg.mjs';
 import { PORTAL_ACL_SCOPES } from '../src/services/portal-user-service.mjs';
-import { etagMatches } from '../functions/hero-images.mjs';
+import { etagMatches, HERO_MANIFEST_CACHE_CONTROL } from '../functions/hero-images.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
 await ensureInit();
@@ -76,7 +76,7 @@ function memoryStores() {
 
 const UPLOAD_FIELDS = {
   source: 'FitFlex shoot, Mikocheni', photographer: 'Asha Photographer', licence: 'FitFlex owned',
-  licenceRef: 'SHOOT-2026-10', people: 'hands_backs', rightsConfirmed: 'true', noFacesConfirmed: 'true',
+  licenceRef: 'SHOOT-2026-10', people: 'none', rightsConfirmed: 'true', noFacesConfirmed: 'true',
 };
 
 async function clearHeroTables() {
@@ -365,9 +365,13 @@ test('service: private until published, publish, the 60 s cache, rollback and au
   assert.equal((await svcA.rollback({ publicationId: back.publication.id }, 'adm_svc')).error, 'already_current');
   assert.equal((await svcA.rollback({ publicationId: 999999 }, 'adm_svc')).error, 'publication_not_found');
 
-  // Retire: out of the drafts at once, still live until the next publish, and no rollback to it.
+  // Retire: refused while in a draft (spec AC-N14); once out of the drafts it is retired, still
+  // live until the next publish, and no rollback to it.
+  assert.deepEqual(await svcA.update(image.id, { status: 'retired' }, 'adm_svc'), { error: 'image_in_draft', status: 409, slotIds: ['gyms'] });
+  assert.equal((await db('HeroImage').where({ id: image.id }).first()).status, 'published', 'refused retire changed nothing');
+  await svcA.setSlot('gyms', { imageIds: [] }, 'adm_svc');
   const retired = await svcA.update(image.id, { status: 'retired' }, 'adm_svc');
-  assert.deepEqual(retired.removedFromDraftSlots, ['gyms']);
+  assert.equal(retired.image.status, 'retired');
   assert.equal(retired.inLiveSnapshot, true);
   assert.equal((await svcA.update(image.id, { source: 'x' }, 'adm_svc')).error, 'image_retired');
   assert.equal((await svcA.setSlot('shop', { imageIds: [image.id] }, 'adm_svc')).error, 'image_retired');
@@ -377,9 +381,9 @@ test('service: private until published, publish, the 60 s cache, rollback and au
 
   const actions = (await heroAudit()).map(a => a.action);
   assert.deepEqual(actions, [
-    'hero_image_uploaded', 'hero_slot_updated', 'hero_image_published', 'hero_published',
+    'hero_image_uploaded', 'hero_slot_updated', 'hero_image_public_files_created', 'hero_image_published', 'hero_published',
     'hero_image_updated', 'hero_published', 'hero_slot_updated', 'hero_published', 'hero_rolled_back',
-    'hero_image_retired', 'hero_published',
+    'hero_slot_updated', 'hero_image_retired', 'hero_published',
   ]);
   for (const a of await heroAudit()) {
     assert.ok(a.after, `${a.action} has after`);
@@ -406,7 +410,8 @@ test('service: slot rules and edit validation', async () => {
   assert.equal((await svc.update(a.id, { people: 'faces' }, 'x')).error, 'invalid_people');
   assert.equal((await svc.update(a.id, {}, 'x')).error, 'nothing_to_change');
   assert.equal((await svc.update('hero_missing', { source: 'y' }, 'x')).error, 'image_not_found');
-  const ok = await svc.update(a.id, { consentRef: 'GYM-CONSENT-7', licenceRef: null }, 'x');
+  assert.equal((await svc.update(a.id, { consentRef: 'GYM-CONSENT-7', licenceRef: null }, 'x')).error, 'rights_confirmation_required');
+  const ok = await svc.update(a.id, { consentRef: 'GYM-CONSENT-7', licenceRef: null, rightsConfirmed: true }, 'x');
   assert.deepEqual([ok.image.consentRef, ok.image.licenceRef], ['GYM-CONSENT-7', null]);
   // Storage outage: nothing is half published.
   const broken = service({ ...stores, publicStore: { async put() { throw new Error('down'); } } });
@@ -420,7 +425,7 @@ test('service: slot rules and edit validation', async () => {
 const ADMIN_ROUTES = [
   ['GET', '/admin/hero-images'], ['POST', '/admin/hero-images'], ['GET', '/admin/hero-images/hero_x/preview'],
   ['PATCH', '/admin/hero-images/hero_x'], ['PUT', '/admin/hero-slots/gyms'], ['POST', '/admin/hero-slots/publish'],
-  ['POST', '/admin/hero-slots/rollback'],
+  ['POST', '/admin/hero-slots/rollback'], ['POST', '/admin/hero-images/hero_x/unpublish'],
 ];
 
 test('flag off: admin routes 404 before sign-in, the manifest is empty', async () => {
@@ -435,7 +440,7 @@ test('flag off: admin routes 404 before sign-in, the manifest is empty', async (
   assert.equal(m.status, 200);
   assert.deepEqual(m.body, { version: 0, slots: {} });
   assert.equal(m.headers.get('etag'), '"hp_0"');
-  assert.equal(m.headers.get('cache-control'), 'public, max-age=300, stale-while-revalidate=86400');
+  assert.equal(m.headers.get('cache-control'), 'public, max-age=300');
 });
 
 test('flag on: only admins with brand_media (or super-admins) reach the admin routes', async () => {
@@ -525,7 +530,7 @@ test('routes: upload checks, private preview, drafts not public, publish, ETag/3
   assert.equal(m.status, 200);
   assert.equal(m.body.version, pub.body.publication.id);
   assert.equal(m.headers.get('etag'), `"hp_${pub.body.publication.id}"`);
-  assert.equal(m.headers.get('cache-control'), 'public, max-age=300, stale-while-revalidate=86400');
+  assert.equal(m.headers.get('cache-control'), 'public, max-age=300');
   assert.deepEqual(Object.keys(m.body.slots).sort(), ['footerPool', 'gyms']);
   assert.deepEqual(m.body.slots.footerPool.map(e => e.sourceId), [second.id, img.id], 'order kept');
   const text = JSON.stringify(m.body);
@@ -594,10 +599,15 @@ test('routes: upload checks, private preview, drafts not public, publish, ETag/3
   const rows = await heroAudit();
   assert.deepEqual(rows.map(r => r.action).sort(), [
     'hero_image_uploaded', 'hero_image_uploaded', 'hero_slot_updated', 'hero_slot_updated',
-    'hero_image_published', 'hero_image_published', 'hero_published',
+    'hero_image_public_files_created', 'hero_image_public_files_created',
+    'hero_image_published', 'hero_image_published', 'hero_published', 'hero_image_previewed', 'hero_image_previewed',
     'hero_image_updated', 'hero_slot_updated', 'hero_published', 'hero_rolled_back',
   ].sort());
   assert.ok(rows.every(r => r.actor === brand.sub));
+  // Preview views are audited with their size (full or thumbnail width), never the storage key.
+  const previews = rows.filter(r => r.action === 'hero_image_previewed');
+  assert.ok(previews.every(r => r.target === img.id && r.after.imageId === img.id && r.before === null));
+  assert.deepEqual(previews.map(r => String(r.after.size)).sort(), ['480', 'full']);
   const slotRow = rows.find(r => r.action === 'hero_slot_updated' && r.target === 'slot:gyms' && r.before.imageIds.length === 0);
   assert.deepEqual([slotRow.before, slotRow.after], [{ imageIds: [] }, { imageIds: [img.id] }]);
   const edit = rows.find(r => r.action === 'hero_image_updated');
@@ -612,4 +622,241 @@ test('routes: upload checks, private preview, drafts not public, publish, ETag/3
   // Turning the flag off empties the manifest straight away (apps purge).
   flag(false);
   assert.deepEqual((await hit('GET', '/app/hero-images')).body, { version: 0, slots: {} });
+});
+
+// ── Security-review fixes ───────────────────────────────────────────────────
+
+/** Noise cannot meet the 2× budget even at quality 50: publish must refuse it. */
+const noisePhoto = () => sharp(randomBytes(1600 * 1100 * 3), { raw: { width: 1600, height: 1100, channels: 3 } }).webp({ quality: 95 }).toBuffer();
+const publicationCount = async () => Number((await db('HeroPublication').count({ n: '*' }))[0].n);
+
+test('publish: a failure building the second photo uploads nothing for the first', async () => {
+  await clearHeroTables();
+  const stores = memoryStores();
+  const svc = service(stores);
+  const good = (await uploadVia(svc, await photo(1600, 1000))).image;
+  const bad = (await uploadVia(svc, await noisePhoto())).image;
+  assert.ok(bad, 'the noise photo is a valid upload');
+  await svc.setSlot('gyms', { imageIds: [good.id, bad.id] }, 'x');
+  const r = await svc.publish({}, 'x');
+  assert.deepEqual([r.error, r.status, r.imageId], ['variant_over_budget', 422, bad.id]);
+  assert.equal(stores.pub.size, 0, 'no public file for either photo');
+  assert.equal(await publicationCount(), 0);
+  const row = await db('HeroImage').where({ id: good.id }).first();
+  assert.deepEqual([row.status, row.variants], ['draft', null]);
+
+  // A broken private master (sha mismatch) on one photo: same, nothing public.
+  const third = (await uploadVia(svc, await photo(1600, 1000))).image;
+  const key = (await db('HeroImage').where({ id: third.id }).first()).privateKey;
+  stores.priv.set(key, Buffer.from('tampered'));
+  await svc.setSlot('gyms', { imageIds: [good.id, third.id] }, 'x');
+  const r2 = await svc.publish({}, 'x');
+  assert.deepEqual([r2.error, r2.imageId], ['stored_file_mismatch', third.id]);
+  assert.equal(stores.pub.size, 0);
+  assert.equal(await publicationCount(), 0);
+});
+
+test('publish: an upload failing part-way keeps whole photos, records the orphans, no snapshot; retry reuses', async () => {
+  await clearHeroTables();
+  const stores = memoryStores();
+  const svc = service(stores);
+  const a = (await uploadVia(svc, await photo(1600, 1000))).image;
+  const b = (await uploadVia(svc, await photo(1600, 1000))).image;
+  await svc.setSlot('gyms', { imageIds: [a.id, b.id] }, 'x');
+  let puts = 0;
+  const flaky = { async put(...args) { puts += 1; if (puts === 6) throw new Error('zebra down'); return stores.publicStore.put(...args); } };
+  const r = await service({ ...stores, publicStore: flaky }).publish({}, 'x');
+  assert.deepEqual([r.error, r.status, r.imageId], ['storage_service_unavailable', 503, b.id]);
+  assert.equal(stores.pub.size, 5, 'a: 4 files, b: 1 before the failure');
+  assert.equal(await publicationCount(), 0, 'no snapshot');
+  const state = await svc.adminState();
+  const view = id => state.images.find(i => i.id === id);
+  assert.deepEqual([view(a.id).status, view(a.id).hasPublicFiles, view(a.id).live], ['draft', true, false], 'not "Published": never live');
+  assert.deepEqual([view(b.id).status, view(b.id).hasPublicFiles], ['draft', false]);
+  const orphan = (await heroAudit()).find(x => x.action === 'hero_image_orphaned_public_files');
+  assert.equal(orphan.target, b.id);
+  assert.equal(orphan.after.urls.length, 1);
+
+  const ok = await svc.publish({}, 'x');
+  assert.ok(ok.publication);
+  assert.equal(stores.pub.size, 9, 'only b uploaded again; a reused');
+  const after = await svc.adminState();
+  for (const id of [a.id, b.id]) {
+    const i = after.images.find(x => x.id === id);
+    assert.deepEqual([i.status, i.hasPublicFiles, i.live], ['published', true, true]);
+  }
+});
+
+test('publish: re-checks under the lock; a photo retired meanwhile is never uploaded', async () => {
+  await clearHeroTables();
+  const stores = memoryStores();
+  const other = service(stores); // a second admin, racing
+  const a = (await uploadVia(other, await photo(1600, 1000))).image;
+  await other.setSlot('gyms', { imageIds: [a.id] }, 'x');
+  // While publish is building outside the lock, the other admin takes the photo out and retires it.
+  let raced = false;
+  const racingDocs = {
+    ...stores.documentStore,
+    async get(key) {
+      const buf = await stores.documentStore.get(key);
+      if (!raced) {
+        raced = true;
+        await other.setSlot('gyms', { imageIds: [] }, 'y');
+        assert.ok((await other.update(a.id, { status: 'retired' }, 'y')).image);
+      }
+      return buf;
+    },
+  };
+  const r = await service({ ...stores, documentStore: racingDocs }).publish({}, 'x');
+  assert.ok(r.publication, JSON.stringify(r));
+  assert.deepEqual(r.publication.slots, {});
+  assert.equal(stores.pub.size, 0, 'the retired photo got no public files');
+  assert.equal((await db('HeroImage').where({ id: a.id }).first()).variants, null);
+
+  // A photo drafted after the build step: drafts_changed, still nothing uploaded.
+  const b = (await uploadVia(other, await photo(1600, 1000))).image;
+  const c = (await uploadVia(other, await photo(1600, 1000))).image;
+  await other.setSlot('gyms', { imageIds: [b.id] }, 'x');
+  let added = false;
+  const addingDocs = {
+    ...stores.documentStore,
+    async get(key) {
+      const buf = await stores.documentStore.get(key);
+      if (!added) { added = true; await other.setSlot('shop', { imageIds: [c.id] }, 'y'); }
+      return buf;
+    },
+  };
+  const r2 = await service({ ...stores, documentStore: addingDocs }).publish({}, 'x');
+  assert.deepEqual([r2.error, r2.status, r2.imageIds], ['drafts_changed', 409, [c.id]]);
+  assert.equal(stores.pub.size, 0);
+});
+
+test('PATCH: changing rights details needs a fresh confirmation by the session admin', async () => {
+  await clearHeroTables();
+  const stores = memoryStores();
+  const svc = service(stores);
+  const img = (await uploadVia(svc, await photo(1600, 1000), 'adm_uploader')).image;
+  for (const change of [{ licence: 'CC BY 4.0' }, { licenceRef: 'NEW-REF' }, { source: 'Elsewhere' }, { photographer: 'Juma' }, { consentRef: 'C-1' }]) {
+    assert.deepEqual(await svc.update(img.id, change, 'adm_editor'), { error: 'rights_confirmation_required', status: 400 }, JSON.stringify(change));
+    assert.deepEqual(await svc.update(img.id, { ...change, rightsConfirmed: 'false' }, 'adm_editor'), { error: 'rights_confirmation_required', status: 400 });
+  }
+  // Unchanged values sent back with a focal edit need no confirmation and keep the confirmer.
+  const focal = await svc.update(img.id, { focal: { x: 0.1, y: 0 }, licence: UPLOAD_FIELDS.licence, people: 'none' }, 'adm_editor');
+  assert.equal(focal.image.rightsConfirmedBy, 'adm_uploader');
+  assert.equal((await svc.update(img.id, { licence: UPLOAD_FIELDS.licence, rightsConfirmed: true }, 'adm_editor')).error, 'nothing_to_change');
+
+  const ok = await svc.update(img.id, { licence: 'CC BY 4.0', rightsConfirmed: true }, 'adm_editor');
+  assert.equal(ok.image.licence, 'CC BY 4.0');
+  assert.equal(ok.image.rightsConfirmedBy, 'adm_editor');
+  assert.ok(ok.image.rightsConfirmedAt > img.rightsConfirmedAt);
+  assert.equal(ok.image.noFacesConfirmedBy, 'adm_uploader', 'no-faces confirmation only moves with people');
+
+  // people: needs both confirmations. (A legacy row with hands_backs, as uploads now only take none.)
+  await db('HeroImage').where({ id: img.id }).update({ people: 'hands_backs' });
+  assert.equal((await svc.update(img.id, { people: 'none' }, 'adm_editor2')).error, 'rights_confirmation_required');
+  assert.deepEqual(await svc.update(img.id, { people: 'none', rightsConfirmed: 'true' }, 'adm_editor2'), { error: 'no_faces_confirmation_required', status: 400 });
+  const ppl = await svc.update(img.id, { people: 'none', rightsConfirmed: 'true', noFacesConfirmed: 'true' }, 'adm_editor2');
+  assert.deepEqual([ppl.image.people, ppl.image.rightsConfirmedBy, ppl.image.noFacesConfirmedBy], ['none', 'adm_editor2', 'adm_editor2']);
+  const audits = (await heroAudit()).filter(r => r.action === 'hero_image_updated');
+  assert.equal(audits.at(-1).after.noFacesConfirmedBy, 'adm_editor2');
+});
+
+test('people: only "none" is accepted for now (owner 2026-10-19), on upload and PATCH', async () => {
+  flag(true);
+  await clearHeroTables();
+  assert.deepEqual(ALLOWED_PEOPLE, ['none']);
+  const fixture = await photo(1600, 1000);
+  for (const people of ['hands_backs', 'unclear_faces']) {
+    const r = await uploadReq(fixture, { ...UPLOAD_FIELDS, people });
+    assert.deepEqual([r.status, r.body], [400, { error: 'people_not_allowed', allowed: ['none'] }], people);
+  }
+  assert.equal((await uploadReq(fixture, { ...UPLOAD_FIELDS, people: 'faces' })).body.error, 'invalid_people');
+  // The no-faces confirmation is still required with none.
+  assert.equal((await uploadReq(fixture, { ...UPLOAD_FIELDS, noFacesConfirmed: undefined })).body.error, 'no_faces_confirmation_required');
+  assert.equal(await db('HeroImage').count({ n: '*' }).then(r => r[0].n), '0');
+  const up = await uploadReq(fixture);
+  assert.deepEqual([up.status, up.body.image.people], [201, 'none']);
+  for (const people of ['hands_backs', 'unclear_faces']) {
+    const r = await hit('PATCH', `/admin/hero-images/${up.body.image.id}`, { claims: brand, body: { people, rightsConfirmed: true, noFacesConfirmed: true } });
+    assert.deepEqual([r.status, r.body.error], [400, 'people_not_allowed'], people);
+  }
+  const fine = await hit('PATCH', `/admin/hero-images/${up.body.image.id}`, { claims: brand, body: { people: 'none', focal: { x: 0.2, y: 0 } } });
+  assert.equal(fine.status, 200);
+});
+
+test('unpublish: takes one photo out of the live snapshot at once; drafts untouched; audited', async () => {
+  flag(true);
+  await clearHeroTables();
+  assert.equal(HERO_MANIFEST_CACHE_CONTROL, 'public, max-age=300', 'no stale-while-revalidate');
+  const a = (await uploadReq(await photo(1600, 1000))).body.image;
+  const b = (await uploadReq(await photo(1600, 1000))).body.image;
+  await hit('PUT', '/admin/hero-slots/gyms', { claims: brand, body: { imageIds: [a.id] } });
+  await hit('PUT', '/admin/hero-slots/footerPool', { claims: brand, body: { imageIds: [b.id, a.id] } });
+  assert.deepEqual((await hit('POST', `/admin/hero-images/${a.id}/unpublish`, { claims: brand, body: {} })).body, { error: 'image_not_live' });
+  const pub = (await hit('POST', '/admin/hero-slots/publish', { claims: brand, body: {} })).body.publication;
+  assert.equal((await hit('GET', '/app/hero-images')).body.version, pub.id, 'manifest cached at this version');
+  const zebraBefore = zebraFiles.size;
+
+  const un = await hit('POST', `/admin/hero-images/${a.id}/unpublish`, { claims: brand, body: { note: 'takedown' } });
+  assert.equal(un.status, 201);
+  assert.deepEqual(un.body.removedFromSlots, ['footerPool', 'gyms']);
+  assert.deepEqual(un.body.publication.slots, { footerPool: [b.id] });
+  assert.equal(un.body.publication.note, 'takedown');
+  assert.equal(zebraFiles.size, zebraBefore, 'no new files');
+  // This server answers the new snapshot straight away (its 60 s memory was cleared).
+  const m = await hit('GET', '/app/hero-images');
+  assert.equal(m.body.version, un.body.publication.id);
+  assert.deepEqual(Object.keys(m.body.slots), ['footerPool']);
+  assert.deepEqual(m.body.slots.footerPool.map(e => e.sourceId), [b.id]);
+  assert.equal(m.headers.get('cache-control'), 'public, max-age=300');
+  // Drafts untouched.
+  const state = (await hit('GET', '/admin/hero-images', { claims: brand })).body;
+  assert.deepEqual(state.slots.find(s => s.id === 'gyms').draft, [a.id]);
+  assert.deepEqual(state.slots.find(s => s.id === 'footerPool').draft, [b.id, a.id]);
+  assert.deepEqual(state.slots.find(s => s.id === 'gyms').published, []);
+  assert.deepEqual([state.images.find(i => i.id === a.id).live, state.images.find(i => i.id === b.id).live], [false, true]);
+  // Audited, by the acting admin, with before and after.
+  const row = (await heroAudit()).find(r => r.action === 'hero_image_unpublished');
+  assert.deepEqual([row.actor, row.target, row.before.publicationId, row.after.publicationId, row.after.removedFromSlots],
+    [brand.sub, a.id, pub.id, un.body.publication.id, ['footerPool', 'gyms']]);
+  assert.deepEqual(row.before.slots, { gyms: [a.id], footerPool: [b.id, a.id] });
+  // Again: not live any more. Unknown photo: 404.
+  assert.deepEqual([(await hit('POST', `/admin/hero-images/${a.id}/unpublish`, { claims: brand, body: {} })).status], [409]);
+  assert.equal((await hit('POST', '/admin/hero-images/hero_missing/unpublish', { claims: brand, body: {} })).status, 404);
+  // Retire through the route while drafted: refused.
+  const rt = await hit('PATCH', `/admin/hero-images/${a.id}`, { claims: brand, body: { status: 'retired' } });
+  assert.deepEqual([rt.status, rt.body], [409, { error: 'image_in_draft', slotIds: ['footerPool', 'gyms'] }]);
+});
+
+test('upload: a private file whose row cannot be saved is logged and audited, not silently lost', async () => {
+  await clearHeroTables();
+  const stores = memoryStores();
+  const pg = createPgHeroImageStore({ db });
+  let fail = true;
+  const store = {
+    ...pg,
+    transaction: fn => pg.transaction(q => fn({ ...q, async insertImage(row) { if (fail) throw new Error('db write failed'); return q.insertImage(row); } })),
+  };
+  const logged = [];
+  const svc = createHeroImageService({ store, documentStore: stores.documentStore, publicStore: stores.publicStore, now: steppingNow, logger: { error: (...a) => logged.push(a.join(' ')) } });
+  const r = await uploadVia(svc, await photo(1600, 1000), 'adm_orphan');
+  assert.deepEqual(r, { error: 'image_save_failed', status: 500 });
+  assert.equal(stores.priv.size, 1, 'the private file was stored');
+  const [key] = [...stores.priv.keys()];
+  assert.equal(await db('HeroImage').count({ n: '*' }).then(x => x[0].n), '0');
+  assert.ok(logged.some(l => l.includes('ORPHANED private file') && l.includes(key)), 'the log names the key');
+  const rows = (await heroAudit()).filter(x => x.action === 'hero_image_orphaned_private_file');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].actor, 'adm_orphan');
+  assert.ok(rows[0].after.sha256 && rows[0].after.privateKeyHash);
+  assert.ok(!JSON.stringify(rows[0]).includes(key), 'the audit row never holds the key');
+  fail = false;
+  assert.ok((await uploadVia(svc, await photo(1600, 1000))).image);
+});
+
+test('preview audit can be switched off with one constant', () => {
+  assert.equal(HERO_AUDIT_PREVIEWS, true);
+  const src = fs.readFileSync(path.join(root, 'src/services/hero-image-service.mjs'), 'utf8');
+  assert.match(src, /export const HERO_AUDIT_PREVIEWS = true;/);
+  assert.match(src, /if \(HERO_AUDIT_PREVIEWS\)/);
 });

@@ -21,7 +21,9 @@ const created = new Date().toISOString();
 const heroImagesCmsEnabled = (_req, res, next) => (heroImagesCmsOn() ? next() : res.status(404).json({ error: 'feature_disabled' }));
 const heroAdminGuard = [heroImagesCmsEnabled, requireAuth('admin'), requireAcl('brand_media')];
 
-export const HERO_MANIFEST_CACHE_CONTROL = 'public, max-age=300, stale-while-revalidate=86400';
+// No stale-while-revalidate: a photo taken down (unpublish) must stop being served within
+// max-age (5 min) plus this server's 60 s memory, not linger in caches for up to a day.
+export const HERO_MANIFEST_CACHE_CONTROL = 'public, max-age=300';
 
 function send(res, result, okStatus = 200) {
   if (result.error) {
@@ -41,7 +43,7 @@ export function etagMatches(header, etag) {
 
 export const appHeroImages = {
   created, method: 'get', path: '/app/hero-images',
-  description: 'Public, no sign-in: the published app photos per slot. → { version, publishedAt, slots: { [slotId]: [{ id, sourceId, url, url1x, urlWide, urlAvif, width, height, bytes, focal: { x, y } }] } }. url/url1x/urlWide/urlAvif are root-relative /storage/:cid/:filename addresses (as gym photos). version is the publication id and the ETag is "hp_<version>"; send If-None-Match to get 304. An empty answer { version: 0, slots: {} } means "use the bundled photos and delete saved ones" (nothing published, or HERO_IMAGES_CMS off). Cache-Control: public, max-age=300, stale-while-revalidate=86400; the server keeps the answer for 60 s.',
+  description: 'Public, no sign-in: the published app photos per slot. → { version, publishedAt, slots: { [slotId]: [{ id, sourceId, url, url1x, urlWide, urlAvif, width, height, bytes, focal: { x, y } }] } }. url/url1x/urlWide/urlAvif are root-relative /storage/:cid/:filename addresses (as gym photos). version is the publication id and the ETag is "hp_<version>"; send If-None-Match to get 304. An empty answer { version: 0, slots: {} } means "use the bundled photos and delete saved ones" (nothing published, or HERO_IMAGES_CMS off). Cache-Control: public, max-age=300 (no stale-while-revalidate, so a takedown reaches the apps within about 6 minutes); the server keeps the answer for 60 s.',
   responseSample: {
     version: 12, publishedAt: '2026-10-19T08:00:00.000Z',
     slots: { gyms: [{ id: 'hero_ab12cd34ef56ab78-1a2b3c4d5e6f', sourceId: 'hero_ab12cd34ef56ab78', url: '/storage/bafy.../hero_ab12cd34ef56ab78-2x.webp', url1x: '/storage/bafy.../hero_ab12cd34ef56ab78-1x.webp', urlWide: '/storage/bafy.../hero_ab12cd34ef56ab78-wide.webp', urlAvif: '/storage/bafy.../hero_ab12cd34ef56ab78-wide.avif', width: 1080, height: 720, bytes: 98304, focal: { x: -0.3, y: 0 } }] },
@@ -76,7 +78,7 @@ export const adminHeroImages = {
 
 export const adminUploadHeroImage = {
   created, method: 'post', path: '/admin/hero-images',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): upload a photo. multipart/form-data: file (JPEG, PNG, WebP or HEIF/AVIF; ≤ 15 MB, ≤ 50 MP, ≥ 1080 px wide upright) + source, photographer, licence, licenceRef?, people (none | hands_backs | unclear_faces), consentRef?, rightsConfirmed=true, noFacesConfirmed=true. The photo is rotated upright and stripped of EXIF/GPS, then kept private until published. → 201 { image }. Errors: 400 rights_confirmation_required | no_faces_confirmation_required | licence_details_required | invalid_people | invalid_reference | no_file_provided | image_too_small | unsupported_file_type; 413 file_too_large; 503 storage_service_unavailable.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): upload a photo. multipart/form-data: file (JPEG, PNG, WebP or HEIF/AVIF; ≤ 15 MB, ≤ 50 MP, ≥ 1080 px wide upright) + source, photographer, licence, licenceRef?, people (only none for now; hands_backs | unclear_faces are refused with people_not_allowed until Zebra can delete files), consentRef?, rightsConfirmed=true, noFacesConfirmed=true. The photo is rotated upright and stripped of EXIF/GPS, then kept private until published. → 201 { image }. Errors: 400 rights_confirmation_required | no_faces_confirmation_required | licence_details_required | invalid_people | people_not_allowed | invalid_reference | no_file_provided | image_too_small | unsupported_file_type; 413 file_too_large; 500 image_save_failed (the private file was stored but not recorded; logged and audited); 503 storage_service_unavailable.',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => {
     let parsed;
@@ -94,10 +96,10 @@ export const adminUploadHeroImage = {
 
 export const adminHeroImagePreview = {
   created, method: 'get', path: '/admin/hero-images/:id/preview',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): the cleaned private photo (rotated, no metadata, long edge ≤ 2560; never the raw upload), streamed (Cache-Control: no-store, private). Optional ?w=240|480|960 for thumbnails. 400 invalid_width; 404 image_not_found; 502 stored_file_mismatch; 503 storage_service_unavailable.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): the cleaned private photo (rotated, no metadata, long edge ≤ 2560; never the raw upload), streamed (Cache-Control: no-store, private). Optional ?w=240|480|960 for thumbnails. Each successful view is audited (hero_image_previewed: actor, image, size). 400 invalid_width; 404 image_not_found; 502 stored_file_mismatch; 503 storage_service_unavailable.',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => {
-    const result = await svc.preview(req.params.id, { width: req.query?.w });
+    const result = await svc.preview(req.params.id, { width: req.query?.w, actorId: req.user.sub });
     if (result.error) return send(res, result);
     const { buffer, mimeType, fileName } = result.file;
     res.status(200);
@@ -112,9 +114,16 @@ export const adminHeroImagePreview = {
 
 export const adminUpdateHeroImage = {
   created, method: 'patch', path: '/admin/hero-images/:id',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): change a photo { focal?: { x, y } (each -1..1), source?, photographer?, licence?, licenceRef?, people?, consentRef?, status?: "retired" }. Retiring takes it out of every draft (the live photos change at the next publish; the answer says inLiveSnapshot). → { image }. Errors: 400 unknown_field | invalid_focal | licence_details_required | invalid_reference | invalid_people | invalid_status | nothing_to_change; 404 image_not_found; 409 image_retired.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): change a photo { focal?: { x, y } (each -1..1), source?, photographer?, licence?, licenceRef?, people?, consentRef?, status?: "retired", rightsConfirmed?, noFacesConfirmed? }. Changing source, photographer, licence, licenceRef, people or consentRef needs rightsConfirmed: true (people also noFacesConfirmed: true) and records the session admin as the confirmer; unchanged values sent back need neither. people must be none for now. A photo in any slot draft cannot be retired (409 image_in_draft { slotIds }); a retired photo still shows until unpublished or the next publish (the answer says inLiveSnapshot). → { image }. Errors: 400 unknown_field | invalid_focal | licence_details_required | invalid_reference | invalid_people | people_not_allowed | rights_confirmation_required | no_faces_confirmation_required | invalid_status | nothing_to_change; 404 image_not_found; 409 image_retired | image_in_draft.',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => send(res, await svc.update(req.params.id, req.body || {}, req.user.sub)),
+};
+
+export const adminUnpublishHeroImage = {
+  created, method: 'post', path: '/admin/hero-images/:id/unpublish',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): fast takedown. Publishes the current live snapshot again without this photo { note? } (drafts are not touched: take it out of the drafts too, or the next publish brings it back). This server answers the new manifest at once; other servers within 60 s; apps within Cache-Control max-age 300. → 201 { publication, removedFromSlots[slotId] }. Errors: 400 invalid_note; 404 image_not_found; 409 image_not_live.',
+  onGuard: heroAdminGuard,
+  onRequest: async (req, res) => send(res, await svc.unpublish(req.params.id, req.body || {}, req.user.sub), 201),
 };
 
 export const adminSetHeroSlot = {
@@ -126,7 +135,7 @@ export const adminSetHeroSlot = {
 
 export const adminPublishHeroSlots = {
   created, method: 'post', path: '/admin/hero-slots/publish',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): publish every slot\'s draft as a new snapshot { note? }. Photos used for the first time get their public files now (WebP 1080 ≤ 150 KB, 540 ≤ 60 KB, wide ≤ 1600, AVIF). → 201 { publication }. Errors: 400 invalid_note; 409 drafts_changed; 422 variant_over_budget; 502 stored_file_mismatch; 503 storage_service_unavailable.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): publish every slot\'s draft as a new snapshot { note? }. Photos used for the first time get their public files now (WebP 1080 ≤ 150 KB, 540 ≤ 60 KB, wide ≤ 1600, AVIF): all are built first and uploaded only if every one succeeds (Zebra cannot delete). → 201 { publication }. Errors: 400 invalid_note; 409 drafts_changed; 422 variant_over_budget { imageId }; 502 stored_file_mismatch { imageId }; 503 storage_service_unavailable { imageId? }.',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => send(res, await svc.publish(req.body || {}, req.user.sub), 201),
 };

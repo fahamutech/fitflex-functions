@@ -65,11 +65,6 @@ function bind(q) {
         await q('HeroSlotDraft').insert(imageIds.map((imageId, position) => forWrite('HeroSlotDraft', { slotId, imageId, position, updatedBy: actorId, updatedAt: at })));
       }
     },
-    /** Take a photo out of every draft; → the slots it was in. */
-    async removeFromDrafts(imageId) {
-      const rows = await q('HeroSlotDraft').where({ imageId }).del().returning('slotId');
-      return rows.map(r => r.slotId).sort();
-    },
     async latestPublication() {
       return publicationFromDb(await q('HeroPublication').orderBy('id', 'desc').first());
     },
