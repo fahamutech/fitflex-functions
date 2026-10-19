@@ -89,9 +89,14 @@ export const updateMemberProfile = {
 
 export const memberCheckIns = {
   created, method: 'get', path: '/me/checkins',
-  description: 'Member: recent check-in history for profile and QR screens.',
+  description: 'Member: own check-in history. No query: the newest 50 (profile and QR screens). Optional ?from=&to= (ISO date-times): every check-in with from <= timestamp < to, newest first, capped at 1000 rows; to defaults to now, from to to minus 90 days; window at most 366 days. 400 invalid_date | invalid_range | range_too_long.',
   onGuard: requireAuth('member'),
-  onRequest: async (req, res) => res.json(await subscriptionService.memberCheckIns(req.user.sub))
+  onRequest: async (req, res) => {
+    const { from, to } = req.query || {};
+    const result = await subscriptionService.memberCheckIns(req.user.sub, { from, to });
+    if (result && !Array.isArray(result) && result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  }
 };
 
 export const memberPaymentHistory = {

@@ -10,6 +10,14 @@ import { fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { PRODUCT_TYPES, MEMBER_ACCESS_PRODUCTS, productTypeOfPayment } from '../shared/payment-product.mjs';
 import { upgradeNote, upgradeOf, upgradeDifference, isSponsoredPassId } from '../shared/pass-upgrade.mjs';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+// GET /me/checkins: rows without a date range (unchanged for older app builds).
+export const CHECKIN_DEFAULT_LIMIT = 50;
+// With a date range: default window, longest window, and a defensive row cap.
+export const CHECKIN_RANGE_DEFAULT_DAYS = 90;
+export const CHECKIN_RANGE_MAX_DAYS = 366;
+export const CHECKIN_RANGE_MAX_ROWS = 1000;
+
 export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
 }) {
@@ -406,11 +414,37 @@ export function createSubscriptionService({
     return { user: { ...toSessionUser(user), publicId: pubId, userCode: pubId }, subscription: sub, pendingPayment, pendingPayments, entitlements, visitsUsed, visitCap };
   }
 
-  async function memberCheckIns(memberId) {
-    return (await checkins.filterAsync(c => c.memberId === memberId))
-      .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
-      .slice(0, 50)
-      .map(c => ({ ...c, gym: hideTrainerPass(publicGym(gyms.find(g => g.id === c.gymId) || null)) }));
+  // GET /me/checkins. Without from/to: the newest 50 (what older app builds
+  // expect). With from and/or to: every check-in with from <= timestamp < to,
+  // newest first, capped at CHECKIN_RANGE_MAX_ROWS as a guard. A missing `to`
+  // is now; a missing `from` is `to` minus 90 days; the window is at most 366 days.
+  async function memberCheckIns(memberId, { from, to } = {}) {
+    const withGym = c => ({ ...c, gym: hideTrainerPass(publicGym(gyms.find(g => g.id === c.gymId) || null)) });
+    const newestFirst = (a, b) => +new Date(b.timestamp) - +new Date(a.timestamp);
+    const given = v => v !== undefined && v !== null && v !== '';
+    if (!given(from) && !given(to)) {
+      return (await checkins.filterAsync(c => c.memberId === memberId))
+        .sort(newestFirst)
+        .slice(0, CHECKIN_DEFAULT_LIMIT)
+        .map(withGym);
+    }
+    const parse = v => {
+      if (typeof v !== 'string') return null;
+      const d = new Date(v);
+      return Number.isNaN(+d) ? null : d;
+    };
+    const end = given(to) ? parse(to) : new Date();
+    if (!end) return { error: 'invalid_date', status: 400 };
+    const start = given(from) ? parse(from) : new Date(+end - CHECKIN_RANGE_DEFAULT_DAYS * DAY_MS);
+    if (!start) return { error: 'invalid_date', status: 400 };
+    if (start > end) return { error: 'invalid_range', status: 400 };
+    if (+end - +start > CHECKIN_RANGE_MAX_DAYS * DAY_MS) return { error: 'range_too_long', status: 400 };
+    return (await checkins.filterByColumnAsync('memberId', memberId))
+      .filter(c => c.memberId === memberId)
+      .filter(c => { const t = new Date(c.timestamp); return t >= start && t < end; })
+      .sort(newestFirst)
+      .slice(0, CHECKIN_RANGE_MAX_ROWS)
+      .map(withGym);
   }
 
   async function memberPaymentHistory(memberId) {
