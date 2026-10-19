@@ -335,3 +335,30 @@ test('GET /owner/members/:memberId/activity keeps exactly the access it had: tok
     });
   }
 });
+
+test('GET /owner/members/:memberId/communications: `communications` in the token always, plus an active `communications` membership under org-authz enforce (declared on the route)', async () => {
+  const gymId = await gym();
+  const both = await user('gym_staff', { gymId, gymIds: [gymId], aclPermissions: ['communications'] });
+  await membership(both, gymId, 'staff', ['communications']);
+  const membersMembership = await user('gym_staff', { gymId, gymIds: [gymId], aclPermissions: ['communications'] });
+  await membership(membersMembership, gymId, 'staff', ['members']);
+  const noMembership = await user('gym_staff', { gymId, gymIds: [gymId], aclPermissions: ['communications'] });
+  const url = `/owner/members/${uid('m')}/communications`;
+  assert.equal(functions['communications.mjs:ownerMemberCommunications'].onGuard.length, 3, 'requireAuth, requireGymAcl, requireGymAccess');
+  const handlerReached = r => r.status !== 403 || r.body.error === 'not_your_member';
+
+  await withAuthzMode('off', async () => {
+    for (const id of [both, membersMembership, noMembership]) {
+      const got = await hit(realUrl, 'GET', url, staffClaims(id, ['communications']));
+      assert.ok(handlerReached(got), JSON.stringify(got.body));
+    }
+  });
+  await withAuthzMode('enforce', async () => {
+    const got = await hit(realUrl, 'GET', url, staffClaims(both, ['communications']));
+    assert.ok(handlerReached(got), JSON.stringify(got.body));
+    assert.deepEqual([got.status, got.body.error], [403, 'not_your_member'], 'the handler still scopes to the gym\'s members');
+    assert.deepEqual(await hit(realUrl, 'GET', url, staffClaims(noMembership, ['communications'])), { status: 403, body: acl('communications') }, 'no active membership');
+    assert.deepEqual(await hit(realUrl, 'GET', url, staffClaims(membersMembership, ['communications'])), { status: 403, body: acl('communications') }, 'membership without communications');
+    assert.deepEqual(await hit(realUrl, 'GET', url, staffClaims(both, [])), { status: 403, body: acl('communications') }, 'token without communications');
+  });
+});

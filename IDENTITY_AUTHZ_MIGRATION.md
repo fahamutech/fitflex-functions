@@ -74,11 +74,15 @@ A decision under the membership model therefore considers Person + persona + org
 | Gym, trainer and payment management (`functions/owner-gyms.mjs`) | 12 | `requireGymAcl('gyms' \| 'trainers' \| 'payments' \| 'checkins')` + row `gymIds` |
 | Communications (`functions/communications.mjs`) | owner routes | `requireGymAcl('communications')` + row `gymIds` |
 | Gym sharing, reviews, challenges, social groups | 5 | `requireGymAcl('members' \| 'gyms')` |
-
-`GET /owner/members/:memberId/activity` (gym sharing) is the exception: it carries `requireGymAcl('members')` **and** `requireGymAccess('members', …)`, so under `enforce` it also needs an active `members` membership (its gym set is still the row's `gymIds`). Before the route-guard fix (#199) it got that check from `GET /owner/members/:memberId`'s guard, which ran on the sub-path; declaring it on the route keeps access as it was.
 | Vendor (`functions/shop.mjs`) | all | `requireVendorPermission` (JWT) and `req.user.vendorId \|\| req.user.sub` |
 | Vendor invitations (`functions/invitations.mjs`, I6 slice C) | 5 | `requireAuth('vendor')` and `:vendorId` = the caller's own id (the vendor persona is the owner; staff cannot invite) |
 | Corporate / B2B | all | The B2B module's own organisation-user rules (not `OrgMembership`) |
 | Platform admin | all | `requireAcl` (portal staff ACL in the JWT) |
+
+Two routes in this table are exceptions. Each carries its legacy guard **and** `requireGymAccess`, so under `enforce` it also needs an active membership with the scope (its gym set is still the row's `gymIds`):
+- `GET /owner/members/:memberId/activity` (gym sharing): `requireGymAcl('members')` + `requireGymAccess('members', …)`.
+- `GET /owner/members/:memberId/communications` (communications): `requireGymAcl('communications')` + `requireGymAccess('communications', …)`.
+
+Before the route-guard fix (#199) both got a membership check (with `members`) from `GET /owner/members/:memberId`'s guard, which ran on the sub-paths. Declaring it on the routes keeps them membership-checked under `enforce`.
 
 Migrate these one group at a time, each after its predecessor has run clean in `shadow`.
