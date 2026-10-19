@@ -92,7 +92,8 @@ export function planStock(current, input, { ledger = false } = {}) {
   let merged = null;
   let removed = [];
 
-  if (ledger) {
+  // What the form showed, checked with the ledger on or off (the app sends it on every edit).
+  {
     if (input.stockSeen != null && Number(input.stockSeen) !== currentStock) return { error: 'stock_changed', status: 409, currentStock };
     for (const v of Array.isArray(input.variants) ? input.variants : []) {
       const old = byName.get(String(v.name).trim());

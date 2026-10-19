@@ -447,7 +447,7 @@ export const marketplaceInvoice = {
   },
 };
 export const marketplaceReorder = {
-  created, method: 'post', path: '/me/shop-orders/:id/reorder', description: 'Buyer: return a prior order as a cart payload.',
+  created, method: 'post', path: '/me/shop-orders/:id/reorder', description: 'Buyer: return a prior order as a cart payload → { items: [{ productId, variant|null, qty }] }.',
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     const result = await shopService.reorder({ buyerId: req.user.sub, orderId: req.params.id });

@@ -283,6 +283,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       }
       // Variants are merged by name and keep their stored stock when the body leaves it out (F3).
       const plan = planStock(prior, input, { ledger: false });
+      if (plan.error) return plan; // stockSeen: the count moved since the form opened
       if (plan.variants) patch.variants = plan.variants;
       if (plan.stock !== undefined) patch.stock = plan.stock;
       // Back to review only when something FitFlex reviews actually changed (F1).
@@ -1108,7 +1109,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function reorder({ buyerId, orderId }) {
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order || order.buyerId !== buyerId) return { error: 'order_not_found', status: 404 };
-    return { items: (order.items || []).map(item => ({ productId: item.productId, qty: item.qty })) };
+    return { items: (order.items || []).map(item => ({ productId: item.productId, variant: item.variant ?? null, qty: item.qty })) };
   }
   async function notifications(userId) {
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));

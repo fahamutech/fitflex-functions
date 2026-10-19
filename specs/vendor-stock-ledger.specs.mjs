@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { ensureInit } from '../functions/index.mjs';
-import { users, gyms, partnerGate, trainers, shopService, adminPaymentService } from '../src/bootstrap/services.mjs';
+import { users, gyms, partnerGate, trainers, shopService, adminPaymentService, partnerNotifier } from '../src/bootstrap/services.mjs';
 import { partnerSettlementAccounts } from '../src/bootstrap/collections.mjs';
 import { createPayoutEligibility } from '../src/services/payout-eligibility.mjs';
 import { createVendorSettlementService } from '../src/services/vendor-settlement-service.mjs';
@@ -96,6 +96,7 @@ after(async () => {
   await db('ShopStockMovement').whereIn('productId', made.products).del();
   await db('MarketplaceNotification').whereIn('userId', made.users).del();
   await db('Notification').whereIn('userId', made.users).del();
+  await db('CommunicationPreference').whereIn('id', made.users).del();
   await db('PaymentRequest').whereIn('orderId', made.orders).del();
   await db('AuditLog').whereIn('target', [...made.orders, ...made.products]).del();
   await db('ShopOrder').whereIn('id', made.orders).del();
@@ -475,6 +476,22 @@ test('M2: stockSeen on PUT — a count that moved since the form opened is refus
   assert.deepEqual([bad.status, bad.body.field], [400, 'stockSeen']);
 });
 
+test('M2 with the ledger OFF: stockSeen is honoured too (the new app sends stock + stockSeen on edit)', async () => {
+  ledgerOff();
+  const v = await vendor();
+  const p = await listed(v, { stock: 10, variants: [{ name: 'S', stock: 4 }] });
+  const stale = await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { stock: 8, stockSeen: 9 } });
+  assert.deepEqual([stale.status, stale.body], [409, { error: 'stock_changed', currentStock: 10 }]);
+  const staleVariant = await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { variants: [{ name: 'S', stockSeen: 3 }] } });
+  assert.deepEqual([staleVariant.status, staleVariant.body], [409, { error: 'stock_changed', variant: 'S', currentStock: 4 }]);
+  assert.equal((await row(p.id)).stock, 10, 'nothing written');
+  const ok = await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { stock: 8, stockSeen: 10, variants: [{ name: 'S', stockSeen: 4 }] } });
+  assert.equal(ok.status, 200);
+  assert.equal((await row(p.id)).stock, 8);
+  assert.deepEqual((await row(p.id)).variants, [{ name: 'S', stock: 4 }], 'stockSeen is never stored');
+  assert.equal((await ledgerOf(p.id)).length, 0, 'flag off: no ledger rows');
+});
+
 test('L4: a variant that an open order still holds units of cannot be removed', async () => {
   ledgerOn();
   const v = await vendor();
@@ -599,12 +616,32 @@ test('low stock: vendor_low_stock fires once per crossing (adjustments and check
   assert.equal(inbox[0].data.bodySw, 'Zimebaki 3 tu. Ni wakati wa kuongeza Stock.');
   assert.equal(inbox[0].data.productId, p.id);
 
+  // The push is in the vendor's language: Swahili when their preference says so (drafts, for native review).
+  await db('CommunicationPreference').insert({ id: v, locale: 'sw' });
+  await adjust(v, p.id, { reason: 'restock', quantity: 10 }); // 3 → 13, re-armed
+  await adjust(v, p.id, { reason: 'lost', quantity: 11 }); // 13 → 2, crosses
+  const sw = (await db('Notification').where({ userId: v, type: 'vendor_low_stock' }).orderBy('createdAt')).at(-1);
+  assert.deepEqual([sw.title, sw.body], ['Stock inakaribia kuisha: Creatine', 'Zimebaki 2 tu. Ni wakati wa kuongeza Stock.']);
+  assert.equal(sw.data.titleSw, 'Stock inakaribia kuisha: Creatine');
+
   // Q-3: with the ledger off, stock that crosses the level tells nobody.
   ledgerOn();
   await adjust(v, p.id, { reason: 'restock', quantity: 10 }); // 3 → 13, re-armed
   ledgerOff();
   assert.equal((await place(buyer, [{ productId: p.id, qty: 11 }])).status, 201); // 13 → 2
-  assert.equal((await lowAlerts(v)).length, 2);
+  assert.equal((await lowAlerts(v)).length, 3);
+});
+
+test('vendor_low_stock without a product name: English "A product", Swahili "Bidhaa"; variant in brackets', async () => {
+  const v = await vendor();
+  await partnerNotifier.vendorEvent(v, 'vendor_low_stock', { productId: 'prd_none', stock: 1 });
+  const en = await db('Notification').where({ userId: v, type: 'vendor_low_stock' }).first();
+  assert.deepEqual([en.title, en.data.titleSw], ['Low stock: A product', 'Stock inakaribia kuisha: Bidhaa']);
+  const sw = await vendor();
+  await db('CommunicationPreference').insert({ id: sw, locale: 'sw' });
+  await partnerNotifier.vendorEvent(sw, 'vendor_low_stock', { productId: 'prd_none', variant: 'XL', stock: 0 });
+  const row2 = await db('Notification').where({ userId: sw, type: 'vendor_low_stock' }).first();
+  assert.deepEqual([row2.title, row2.body], ['Stock inakaribia kuisha: Bidhaa (XL)', 'Zimebaki 0 tu. Ni wakati wa kuongeza Stock.']);
 });
 
 // ── cost snapshot and settlement ─────────────────────────────────────────────
