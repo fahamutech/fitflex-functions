@@ -10,6 +10,8 @@ import { PASS_TIERS } from '../src/shared/constants.mjs';
 import { DEFAULT_SUBSCRIPTION_TIERS } from '../src/shared/default-subscription-tiers.mjs';
 import { settingsWithTiers, memoryPlatformSettings, TEST_TIERS } from './fixtures/tier-settings.mjs';
 import { createSettingsService } from '../src/services/settings-service.mjs';
+import { PASS_GYM_ACCESS } from '../src/shared/check-in-rules.mjs';
+import { adminUpdateSettings } from '../functions/admin-settings.mjs';
 
 function memStore(rows = []) {
   return {
@@ -168,4 +170,45 @@ test('mobile money: a pass request on a tier no longer sold is not sent to the p
   const ok = await svc.pay({ memberId: 'm1', paymentRequestId: 'pay_2', phone: '0712345678' });
   assert.equal(ok.error, undefined);
   assert.equal(sent.length, 1);
+});
+
+// ── Security review M3: complete tier rows only ──
+
+test('the live seed tiers all have a valid gymAccess', () => {
+  for (const t of DEFAULT_SUBSCRIPTION_TIERS) assert.ok(PASS_GYM_ACCESS.includes(t.gymAccess), `${t.key}: ${t.gymAccess}`);
+});
+
+test('PUT /admin/settings refuses an incomplete tier row with 400, naming the tier and field; nothing is saved', async () => {
+  const s = settingsWithTiers(DEFAULT_SUBSCRIPTION_TIERS);
+  const good = DEFAULT_SUBSCRIPTION_TIERS.map(t => ({ ...t }));
+  const cases = [
+    [[{ ...good[0], monthlyPrice: 0 }], 'basic', 'monthlyPrice'],
+    [[{ ...good[0], monthlyPrice: 1.5 }], 'basic', 'monthlyPrice'],
+    [[{ ...good[0], monthlyPrice: undefined }], 'basic', 'monthlyPrice'],
+    [[{ ...good[0], visits: undefined }], 'basic', 'visits'],
+    [[{ ...good[0], visits: 0 }], 'basic', 'visits'],
+    [[{ ...good[0], visits: -2 }], 'basic', 'visits'],
+    [[good[0], { ...good[1], gymAccess: undefined }], 'pro', 'gymAccess'],
+    [[good[0], { ...good[1], gymAccess: 'everything' }], 'pro', 'gymAccess'],
+    [[good[0], { ...good[0] }], 'basic', 'key'],
+    [[{ ...good[0], key: '' }], '#1', 'key'],
+  ];
+  for (const [rows, tier, field] of cases) {
+    const out = await s.adminUpdate({ body: { subscriptionTiers: rows }, actorId: 'adm' });
+    assert.deepEqual([out.error, out.status, out.tier, out.field], ['invalid_subscription_tier', 400, tier, field], JSON.stringify(rows));
+  }
+  assert.equal((await s.adminUpdate({ body: { subscriptionTiers: 'nope' }, actorId: 'adm' })).field, 'subscriptionTiers');
+  assert.deepEqual(s.sellableTierKeys(), ['basic', 'pro', 'premium', 'executive'], 'unchanged');
+  // A complete set is saved; other settings can still be saved on their own.
+  const ok = await s.adminUpdate({ body: { subscriptionTiers: [{ ...good[0], visits: -1 }] }, actorId: 'adm' });
+  assert.equal(ok.error, undefined);
+  assert.deepEqual(s.sellableTierKeys(), ['basic']);
+  assert.equal((await s.adminUpdate({ body: { paymentPeriodDays: 7 }, actorId: 'adm' })).paymentPeriodDays, 7);
+});
+
+test('the PUT /admin/settings route answers an incomplete tier with 400 and the problem', async () => {
+  const out = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await adminUpdateSettings.onRequest({ user: { sub: 'adm' }, body: { subscriptionTiers: [{ key: 'basic', label: 'Basic', monthlyPrice: 30000, visits: 12 }] } }, out);
+  assert.equal(out.statusCode, 400);
+  assert.deepEqual([out.body.error, out.body.tier, out.body.field], ['invalid_subscription_tier', 'basic', 'gymAccess']);
 });

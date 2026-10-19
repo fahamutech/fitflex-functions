@@ -195,6 +195,8 @@ export const trainerService = createTrainerService({
 export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
   subscriptions, paymentRequests, partnerGate,
+  // The Pass trainer discount only for a tier configured in Settings.
+  getTierConfig: settingsService.getTierConfig,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
   // promotionEventsService is defined at the end of this file; this only runs later.
   onBookingConversion: ({ action, groupId, bookings }) => (action === 'credit' ? promotionEventsService.recordBooking(bookings) : promotionEventsService.reverseBooking(groupId)),

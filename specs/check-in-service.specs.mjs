@@ -75,7 +75,7 @@ test('check-in at a different gym the same day consumes a second visit, so that 
 });
 
 test('a second gym the same day is refused when no visits are left', async () => {
-  svc = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig: tier => tier === 'pro' ? { visitCap: 1, multiGymPerDay: true } : null });
+  svc = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig: tier => tier === 'pro' ? { visitCap: 1, gymAccess: 'midtier', multiGymPerDay: true } : null });
   assert.equal((await svc.perform({ memberId: 'm1', gymId: 'g1' })).ok, true);
   const r = await svc.perform({ memberId: 'm1', gymId: 'g2' });
   assert.equal(r.ok, false);
@@ -108,7 +108,7 @@ test('configured tier cap overrides hard-coded pass constants', async () => {
     gyms,
     subscriptions,
     checkins,
-    getTierConfig: tier => tier === 'pro' ? { visitCap: 2, multiGymPerDay: true } : null,
+    getTierConfig: tier => tier === 'pro' ? { visitCap: 2, gymAccess: 'midtier', multiGymPerDay: true } : null,
   });
 
   const r = await svc.perform({ memberId: 'm1', gymId: 'g1', now: new Date('2026-01-04T00:00:00Z') });
@@ -129,7 +129,7 @@ test('configured unlimited tier never exhausts', async () => {
     gyms,
     subscriptions,
     checkins,
-    getTierConfig: tier => tier === 'executive' ? { visitCap: Infinity, multiGymPerDay: true } : null,
+    getTierConfig: tier => tier === 'executive' ? { visitCap: Infinity, gymAccess: 'luxury_executive', multiGymPerDay: true } : null,
   });
 
   const r = await svc.perform({ memberId: 'm1', gymId: 'g2', now: new Date('2026-02-15T00:00:00Z') });

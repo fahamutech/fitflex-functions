@@ -22,7 +22,15 @@ export const adminUpdateSettings = {
   created, method: 'put', path: '/admin/settings',
   description: 'Admin: update platform settings.',
   onGuard: [requireAuth('admin'), requireAcl('settings')],
-  onRequest: async (req, res) => res.json(await settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub }))
+  onRequest: async (req, res) => {
+    const result = await settingsService.adminUpdate({ body: req.body || {}, actorId: req.user.sub });
+    // An incomplete pass tier is refused, naming the tier and the field.
+    if (result?.error) {
+      const { status, ...body } = result;
+      return res.status(status).json(body);
+    }
+    res.json(result);
+  }
 };
 
 export const publicGetSpecialties = {

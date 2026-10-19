@@ -161,7 +161,7 @@ test('B4: an explicitly unlimited configuration (visitCap=Infinity) never exhaus
     gyms,
     subscriptions,
     checkins,
-    getTierConfig: (tier) => (tier === 'executive' ? { visitCap: Infinity, multiGymPerDay: true } : null),
+    getTierConfig: (tier) => (tier === 'executive' ? { visitCap: Infinity, gymAccess: 'luxury_executive', multiGymPerDay: true } : null),
   });
   subscribe({ tier: 'executive', startedAt: '2026-01-01T00:00:00Z' });
 

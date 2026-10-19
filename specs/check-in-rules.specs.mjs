@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateCheckIn as validateRaw, classifyVisit, CHECKIN_FAILURE, subscriptionCoversGym, pickSubscriptionForGym } from '../src/shared/check-in-rules.mjs';
+import { validateCheckIn as validateRaw, classifyVisit, CHECKIN_FAILURE, subscriptionCoversGym, pickSubscriptionForGym, PASS_GYM_ACCESS, gymAccessTiers } from '../src/shared/check-in-rules.mjs';
 import { settingsWithTiers, TEST_TIERS } from './fixtures/tier-settings.mjs';
 
 // Settings is the only source of tier caps and gym access: pass the
@@ -204,4 +204,39 @@ test('gym plans and trainer passes carry no tier and need no tier config', () =>
   assert.equal(r.ok, true);
   const t = validateRaw({ subscription: trainerPassAtG1, gym: stdGym, todaysCheckins: [], cycleUsage: { visitsUsedInCycle: 999 } });
   assert.equal(t.ok, true);
+});
+
+// ── Security review M3: gym access must be a known value (fail closed) ──
+
+test('a tier with a missing or unknown gymAccess is not configured, and never covers every gym', () => {
+  const s = settingsWithTiers([
+    { key: 'pro', label: 'Pro', monthlyPrice: 60_000, visits: 30 },                          // no gymAccess
+    { key: 'premium', label: 'Premium', monthlyPrice: 100_000, visits: 30, gymAccess: 'all' }, // unknown
+  ]);
+  const luxury = { id: 'gl', tier: 'luxury_executive' };
+  for (const tier of ['pro', 'premium']) {
+    assert.equal(s.getTierConfig(tier), null, tier);
+    assert.equal(s.isTierSellable(tier), false, tier);
+    const r = validateRaw({ subscription: { status: 'active', tier, expiresAt: '2099-01-01' }, gym: luxury,
+                            todaysCheckins: [], cycleUsage: { visitsUsedInCycle: 0 }, tierConfig: s.getTierConfig(tier) });
+    assert.equal(r.failure, CHECKIN_FAILURE.TIER_NOT_CONFIGURED, tier);
+  }
+});
+
+test('a tier config handed in without a known gymAccess is refused at check-in (no "all gyms" fallback)', () => {
+  for (const tierConfig of [{ visitCap: 30 }, { visitCap: 30, gymAccess: 'everywhere' }, { visitCap: Infinity, gymAccess: '' }]) {
+    const r = validateRaw({ subscription: activePro, gym: { id: 'gl', tier: 'luxury_executive' }, todaysCheckins: [],
+                            cycleUsage: { visitsUsedInCycle: 0 }, tierConfig });
+    assert.equal(r.failure, CHECKIN_FAILURE.TIER_NOT_CONFIGURED, JSON.stringify(tierConfig));
+  }
+  // A gym plan labelled with such a tier stays a plain gym plan at its own gym.
+  const r = validateRaw({ subscription: { ...directAtG1, tier: 'pro' }, gym: stdGym, todaysCheckins: [],
+                          cycleUsage: { visitsUsedInCycle: 0 }, tierConfig: { visitCap: 30 } });
+  assert.equal(r.ok, true);
+});
+
+test('PASS_GYM_ACCESS lists the known gym access values; each covers only its tiers', () => {
+  assert.deepEqual([...PASS_GYM_ACCESS].sort(), ['luxury_executive', 'midtier', 'online', 'premium', 'standard']);
+  assert.deepEqual(gymAccessTiers('midtier'), ['standard', 'midtier']);
+  for (const v of [undefined, null, '', 'all', 'toString', '__proto__']) assert.equal(gymAccessTiers(v), null, String(v));
 });

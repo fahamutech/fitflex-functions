@@ -71,27 +71,21 @@ const isGymOpen = (gym, now) => {
   return m >= openH * 60 + openM && m < closeH * 60 + closeM;
 };
 
-const gymAccessTiers = (access) => {
-  switch (access) {
-    case 'online':
-      return ['online'];
-    case 'standard':
-      return ['standard'];
-    case 'midtier':
-      return ['standard', 'midtier'];
-    case 'premium':
-      return ['standard', 'midtier', 'premium'];
-    case 'luxury_executive':
-      return ['standard', 'midtier', 'premium', 'luxury_executive'];
-    default:
-      return null;
-  }
-};
+// What each Settings `gymAccess` value lets a pass into (gym tiers covered).
+const GYM_ACCESS_COVERS = Object.freeze({
+  online: Object.freeze(['online']),
+  standard: Object.freeze(['standard']),
+  midtier: Object.freeze(['standard', 'midtier']),
+  premium: Object.freeze(['standard', 'midtier', 'premium']),
+  luxury_executive: Object.freeze(['standard', 'midtier', 'premium', 'luxury_executive']),
+});
 
-const tierCoversGym = (tierCfg, gym) => {
-  const tiers = gymAccessTiers(tierCfg.gymAccess);
-  return !tiers || tiers.includes(gym.tier);
-};
+/** The only valid values of a pass tier's `gymAccess` in Settings. */
+export const PASS_GYM_ACCESS = Object.freeze(Object.keys(GYM_ACCESS_COVERS));
+
+/** The gym tiers a `gymAccess` value covers, or null when it is missing or unknown. */
+export const gymAccessTiers = (access) =>
+  (typeof access === 'string' && Object.hasOwn(GYM_ACCESS_COVERS, access) ? GYM_ACCESS_COVERS[access] : null);
 
 // A gym's own plan (direct_sub) or a trainer pass is the gym's product, bought
 // for that one gym: not a FitFlex Pass tier. Plans sold at the gym desk may
@@ -106,9 +100,19 @@ const UNTIERED_GYM_PLAN = Object.freeze({ visitCap: Infinity });
  * tier is not configured in Settings: the check-in must be refused.
  */
 function tierRulesFor(subscription, tierConfig) {
-  if (GYM_BOUND_TYPES.has(subscription.type)) return tierConfig ?? UNTIERED_GYM_PLAN;
-  return tierConfig ?? null;
+  // A tier config whose gymAccess is missing or unknown is not configured:
+  // it must never be read as "covers every gym" (fail closed).
+  const usable = tierConfig && gymAccessTiers(tierConfig.gymAccess) ? tierConfig : null;
+  if (GYM_BOUND_TYPES.has(subscription.type)) return usable ?? UNTIERED_GYM_PLAN;
+  return usable;
 }
+
+/** Does this tier's gym access cover the gym? A gym plan (no tier) covers its own gym. */
+const tierCoversGym = (tierCfg, gym) => {
+  if (tierCfg === UNTIERED_GYM_PLAN) return true;   // gym-bound: subscriptionCoversGym already checked the gym
+  const tiers = gymAccessTiers(tierCfg.gymAccess);
+  return Boolean(tiers) && tiers.includes(gym.tier);
+};
 
 /**
  * BL-010 / BL-011: determine whether THIS check-in consumes a visit slot.

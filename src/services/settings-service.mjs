@@ -6,6 +6,7 @@
 // in Settings; fail closed). There is no fallback to built-in constants.
 import { randomUUID } from 'node:crypto';
 import { defaultSubscriptionTiers } from '../shared/default-subscription-tiers.mjs';
+import { PASS_GYM_ACCESS } from '../shared/check-in-rules.mjs';
 
 const DEFAULT_SPECIALTIES = [
   'Yoga', 'Cardio', 'Aerobics', 'Weight Loss', 'Muscle Gain', 'Dance',
@@ -76,11 +77,15 @@ export function createSettingsService({ platformSettings, auditLog }) {
   /**
    * The tier as configured in Settings, for using a pass already held
    * (check-in, visit counts): present, not switched off, with an explicit
-   * visits value. Otherwise null — never a built-in fallback.
+   * visits value and a known gymAccess. Otherwise null — never a built-in
+   * fallback.
    */
   function getTierConfig(tierKey) {
     const row = tierRow(tierKey);
     if (!row || switchedOff(row)) return null;
+    // Gym access must be a known value: a missing or unknown one would
+    // otherwise read as "every gym" (fail closed).
+    if (!PASS_GYM_ACCESS.includes(row.gymAccess)) return null;
     const visitCap = visitCapOf(row);
     if (visitCap === null) return null;
     return normalise(row, tierKey, visitCap);
@@ -130,7 +135,34 @@ export function createSettingsService({ platformSettings, auditLog }) {
     return ensureDefaultSettings();
   }
 
+  /**
+   * Every pass tier row an admin saves must be complete, so nothing is sold
+   * or checked in on half a setting: a unique key, a positive whole price, a
+   * visits value (-1 = unlimited or a whole number > 0) and a known gymAccess.
+   * Returns the first problem as { error, status: 400, tier, field } or null.
+   */
+  function invalidTiers(rows) {
+    const bad = (tier, field, extra = {}) => ({ error: 'invalid_subscription_tier', status: 400, tier, field, ...extra });
+    if (!Array.isArray(rows)) return bad(null, 'subscriptionTiers');
+    const seen = new Set();
+    for (const [i, row] of rows.entries()) {
+      const tier = typeof row?.key === 'string' && row.key.trim() ? row.key : null;
+      if (!tier) return bad(`#${i + 1}`, 'key');
+      if (seen.has(tier)) return bad(tier, 'key', { reason: 'duplicate' });
+      seen.add(tier);
+      const price = Number(row.monthlyPrice);
+      if (row.monthlyPrice === null || row.monthlyPrice === '' || !Number.isInteger(price) || price <= 0) return bad(tier, 'monthlyPrice');
+      if (visitCapOf(row) === null) return bad(tier, 'visits', { hint: '-1 for unlimited, or a whole number above 0' });
+      if (!PASS_GYM_ACCESS.includes(row.gymAccess)) return bad(tier, 'gymAccess', { allowed: PASS_GYM_ACCESS });
+    }
+    return null;
+  }
+
   async function adminUpdate({ body, actorId }) {
+    if (body.subscriptionTiers !== undefined) {
+      const invalid = invalidTiers(body.subscriptionTiers);
+      if (invalid) return invalid;
+    }
     const current = ensureDefaultSettings();
     const before = { ...current };
     const allowed = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency', 'trainerSpecialties'];
