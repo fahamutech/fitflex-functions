@@ -51,5 +51,8 @@ jobs:
       - name: Create and migrate the CI database
         run: npm run db:setup:ci
 
+      # `npm test` also runs scripts/test-completeness-reporter.mjs, which
+      # fails the job if any spec file or announced test reported no result
+      # (a cut-short run otherwise looks like a smaller all-pass run).
       - name: Run tests
         run: npm test
