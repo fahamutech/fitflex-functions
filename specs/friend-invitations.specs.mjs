@@ -129,9 +129,11 @@ test('not on FitFlex: share link + message, token only hashed, attaches after th
   const s = setup();
   const r = await s.svc.invite('neema', { email: 'new.person@example.com' });
   assert.equal(r.invitation.status, 'pending');
-  assert.match(r.share.link, /^https:\/\/app\.example\/friend-invite\/[A-Za-z0-9_-]{20,}$/);
+  // Token in the fragment so hosting/CDN logs never see it; path kept for the App Link.
+  assert.match(r.share.link, /^https:\/\/app\.example\/friend-invite\/#[A-Za-z0-9_-]{20,}$/);
+  assert.equal(new URL(r.share.link).pathname, '/friend-invite/', 'the path the Android App Link matches');
   assert.ok(r.share.text.includes('@neema_star') && r.share.text.includes(r.share.link));
-  const token = r.share.link.split('/').pop();
+  const token = r.share.link.split('#').pop();
   assert.ok(!JSON.stringify(s.invites.rows).includes(token), 'plain token is not stored');
   assert.equal(s.sent.length, 0, 'nothing sent by FitFlex');
 
@@ -243,6 +245,7 @@ test('WhatsApp first: when it accepts the message, no SMS goes', async () => {
   assert.equal(r.delivery.whatsapp, 'sent');
   assert.equal(r.delivery.sms, 'skipped:whatsapp_sent');
   assert.deepEqual(s.delivered.map(d => d.channel), ['whatsapp']);
+  assert.match(s.delivered[0].link, /^https:\/\/app\.example\/friend-invite\/#[A-Za-z0-9_-]{20,}$/, 'WhatsApp gets the fragment link too');
   const row = s.invites.rows[0];
   assert.equal(row.waState, 'pending');
   assert.equal(row.waMessageId, 'wamid.1');
@@ -281,8 +284,8 @@ test('no WhatsApp on the number: WhatsApp reports failed, the job sends one SMS 
   assert.deepEqual(await s.svc.resolveFallbacks(), { checked: 1, sms: 1 });
   const sms = s.delivered.at(-1);
   assert.equal(sms.channel, 'sms');
-  assert.match(sms.text, /friend-invite\/[A-Za-z0-9_-]{20,}/);
-  assert.notEqual(sms.text.match(/friend-invite\/(\S+)/)[1], r.share.link.split('/').pop(), 'a new link, the old token is gone');
+  assert.match(sms.text, /friend-invite\/#[A-Za-z0-9_-]{20,}/);
+  assert.notEqual(sms.text.match(/friend-invite\/#(\S+)/)[1], r.share.link.split('#').pop(), 'a new link, the old token is gone');
   // running again sends nothing more
   assert.deepEqual(await s.svc.resolveFallbacks(), { checked: 0, sms: 0 });
   assert.equal(s.delivered.length, 2);
@@ -290,7 +293,7 @@ test('no WhatsApp on the number: WhatsApp reports failed, the job sends one SMS 
   assert.deepEqual(mine.sentBy, ['whatsapp', 'sms']);
   assert.equal(mine.whatsappFailed, true);
   // the new link works
-  const token = sms.text.match(/friend-invite\/(\S+)/)[1];
+  const token = sms.text.match(/friend-invite\/#(\S+)/)[1];
   assert.equal((await s.svc.preview(token)).invitation.status, 'pending');
 });
 
@@ -337,4 +340,18 @@ test('daily cap on messages FitFlex sends', async () => {
     assert.equal((await s.svc.invite('neema', { phone: '0650000002' })).delivery.sms, 'skipped:daily_limit');
     assert.equal(s.delivered.length, 1);
   } finally { delete process.env.FRIEND_INVITE_SEND_PER_DAY; delete process.env.FRIEND_INVITE_CREATE_PER_HOUR; }
+});
+
+test('link format: /friend-invite/#<token> in the share link and in both languages of the message', async () => {
+  for (const locale of ['en', 'sw']) {
+    const s = setup();
+    const r = await s.svc.invite('neema', { email: `fmt.${locale}@example.com` }, { locale });
+    const link = new URL(r.share.link);
+    assert.equal(link.pathname, '/friend-invite/');
+    assert.match(link.hash, /^#[A-Za-z0-9_-]{20,}$/);
+    assert.equal(link.search, '');
+    assert.ok(r.share.text.includes(r.share.link), `${locale} text carries the link`);
+    assert.ok(!/friend-invite\/[A-Za-z0-9_-]/.test(r.share.text), `${locale} text never puts the token in the path`);
+    assert.equal((await s.svc.preview(link.hash.slice(1))).invitation.status, 'pending');
+  }
 });

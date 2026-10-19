@@ -26,8 +26,28 @@ export const approveFriendInvitation = route('post', '/me/friend-invitations/:id
 export const rejectFriendInvitation = route('post', '/me/friend-invitations/:id/reject', 'Member: reject a request addressed to you. Creates no friendship. Idempotent.', req => svc.reject(me(req), req.params.id));
 export const revokeFriendInvitation = route('delete', '/me/friend-invitations/:id', 'Member: withdraw an invitation you sent.', req => svc.revoke(me(req), req.params.id));
 export const claimFriendInvitation = route('post', '/me/friend-invitations/claim', 'Member: opened an invitation link. { token } — attaches it to you only if you have verified the email / phone it was made for.', req => svc.claim(me(req), req.body?.token));
+// Invitation links carry the token in the URL fragment (/friend-invite/#<token>),
+// so it never reaches the hosting/CDN logs. The app reads it and asks here.
+// POST keeps the token in the body: bfast-function's request logger (morgan
+// 'dev') prints method + URL only, never the body.
+export const previewFriendInvitationByBody = {
+  created, method: 'post', path: '/friend-invitations/preview',
+  description: 'Public: what an invitation link is for (status and inviter name only). Body { token }. Preferred over GET /friend-invitations/preview/:token so the token stays out of URL logs.',
+  onRequest: async (req, res) => {
+    const token = req.body?.token;
+    if (typeof token !== 'string' || !token.trim()) return res.status(400).json({ error: 'token_required' });
+    return send(res, await svc.preview(token.trim()));
+  },
+};
+// Deprecated: kept for installed app builds that still call it. The token is
+// in the path, so hide it from the in-process request logger (it logs
+// req.originalUrl when the response finishes; routing is already done).
 export const previewFriendInvitation = {
   created, method: 'get', path: '/friend-invitations/preview/:token',
-  description: 'Public: what an invitation link is for (status and inviter name only).',
-  onRequest: async (req, res) => send(res, await svc.preview(req.params.token)),
+  description: 'Deprecated (use POST /friend-invitations/preview with { token }). Public: what an invitation link is for (status and inviter name only).',
+  onRequest: async (req, res) => {
+    const token = req.params?.token;
+    if (typeof req.originalUrl === 'string') req.originalUrl = '/friend-invitations/preview/[redacted]';
+    return send(res, await svc.preview(token));
+  },
 };
