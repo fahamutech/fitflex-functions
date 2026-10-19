@@ -24,7 +24,9 @@ const PROFILE_REQUIRED = ['businessName', 'logo', 'banner', 'description', 'busi
 const PROFILE_OPTIONAL = ['productCategories', 'returnsPolicy', 'email', 'deliveryRegions'];
 const PROFILE_FIELDS = new Set([...PROFILE_REQUIRED, ...PROFILE_OPTIONAL]);
 export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
-export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'customers', 'reports', 'payments', 'staff']);
+// `sales` (vendor tools · S3): walk-in sales — record, history, void. Backfilled onto existing staff
+// with vendorRole admin or sales by migration 20261230120000-vendor-walkin-sales.
+export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff']);
 const PRODUCT_REVIEW_FIELDS = new Set(['name', 'description', 'category', 'brand', 'priceTzs', 'discountPriceTzs', 'images', 'variants']);
 const PUBLIC_PROFILE_FIELDS = ['vendorId', 'businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'status'];
 const publicProfile = profile => profile?.status === 'published'
@@ -1222,7 +1224,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (missing.length) return { error: 'staff_fields_missing', status: 400, missing };
     if (!STAFF_ROLES.has(body.role)) return { error: 'invalid_staff_role', status: 400 };
     if (await users.findAsync(user => user.userType === 'vendor_staff' && user.email === body.email && user.vendorId === vendorId)) return { error: 'duplicate_staff_email', status: 409 };
-    const permissions = body.role === 'admin' ? [...STAFF_PERMISSIONS] : (Array.isArray(body.permissions) ? body.permissions : []).filter(value => STAFF_PERMISSIONS.has(value));
+    const permissions = body.role === 'admin' ? [...STAFF_PERMISSIONS] : [...new Set((Array.isArray(body.permissions) ? body.permissions : []).filter(value => STAFF_PERMISSIONS.has(value)))];
+    // Vendor tools · S3: a `sales` role always carries the `sales` permission (as admin carries all).
+    if (body.role === 'sales' && !permissions.includes('sales')) permissions.push('sales');
     const at = nowIso();
     const staff = await users.insertAsync({ id: makeId('usr'), userType: 'vendor_staff', vendorId, displayName: body.name.trim(), email: body.email.trim().toLowerCase(), phone: body.phone.trim(), passwordHash: await hashPassword(body.password), vendorRole: body.role, vendorPermissions: permissions, accountStatus: 'active', approvalStatus: 'approved', onboardingCompleted: true, createdAt: at, updatedAt: at });
     return { staff: staffView(staff), status: 201 };
@@ -1311,5 +1315,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
+  return { canSeeCost, afterStockMoved, notifyVendor, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
 }
