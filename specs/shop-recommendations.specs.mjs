@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveShoppingMode, buildNeeds, parseRecentIds, filterEligible, assembleSections, salesStats, parseSectionList,
-  describeSections, categoriesFor, buildShopHome, SECTION_KEYS, NEEDS_PHASE2_FIELDS, DEFAULT_ROLE_CATEGORIES,
+  describeSections, categoriesFor, buildShopHome, SECTION_KEYS, NEEDS_PHASE2_FIELDS, DEFAULT_ROLE_CATEGORIES, ALLOCATION_ORDER, onSale,
 } from '../src/services/shop-recommendations.mjs';
 import { PRODUCT_CATEGORY_KEYS } from '../src/shared/product-categories.mjs';
 
@@ -129,7 +129,7 @@ test('assembly: no product appears in two sections; the first section in order w
   });
   const all = sections.flatMap(s => s.productIds);
   assert.equal(new Set(all).size, all.length, 'unique across sections');
-  assert.deepEqual(sections[0], { key: 'featured', productIds: rows.slice(0, 4).map(p => p.id), hasMore: false });
+  assert.deepEqual(sections[0], { key: 'featured', productIds: rows.slice(0, 4).map(p => p.id), hasMore: false, viewAll: { path: '/shop/products', query: { category: 'equipment' } } });
   for (const s of sections) assert.ok(s.productIds.length >= 4 && s.productIds.length <= 12, s.key);
 });
 
@@ -211,8 +211,11 @@ test('assembly: SHOP_HOME_SECTIONS chooses and orders sections; unknown keys are
   assert.deepEqual(parseSectionList('deals, featured,nope,deals'), ['deals', 'featured']);
   assert.ok(!SECTION_KEYS.includes('popular_near_you'), 'Phase 2');
   const rows = many(8, { discountPriceTzs: 5_000, createdAt: daysAgo(1) });
+  // Display order follows the setting; allocation does not: deals is allocated before new arrivals, takes all 8, and new arrivals has nothing left.
   const keys = assembleSections({ needs: needsFor('member'), eligible: rows, now: NOW, config: { sections: parseSectionList('new_arrivals,deals') } }).map(s => s.key);
-  assert.deepEqual(keys, ['new_arrivals']); // took all 8; deals had nothing left
+  assert.deepEqual(keys, ['deals']);
+  const both = assembleSections({ needs: needsFor('member'), eligible: [...rows, ...many(4, { createdAt: daysAgo(1) })], now: NOW, config: { sections: parseSectionList('new_arrivals,deals') } }).map(s => s.key);
+  assert.deepEqual(both, ['new_arrivals', 'deals'], 'shown in the configured order');
 });
 
 test('copy: every section has English and Swahili title and reason for every mode', () => {
@@ -226,6 +229,12 @@ test('copy: every section has English and Swahili title and reason for every mod
       assert.equal(s.viewAll.path, '/shop/products');
       assert.ok(Array.isArray(s.reasonCodes) && s.reasonCodes.length);
     }
+  }
+  const self = describeSections([{ key: 'essentials', productIds: [], hasMore: false }], needsFor('vendor_personal'))[0];
+  assert.deepEqual(self.reason, { en: "You're shopping for yourself.", sw: 'Unanunua kwa ajili yako mwenyewe.' });
+  for (const mode of ['member', 'trainer', 'owner', 'vendor_personal']) {
+    const all = describeSections(SECTION_KEYS.map(key => ({ key, productIds: [], hasMore: false })), needsFor(mode));
+    if (mode === 'vendor_personal') assert.ok(all.every(s => !/as a member/.test(s.reason.en) && !/kama mwanachama/.test(s.reason.sw)), 'vendor never told they shop as a member');
   }
   const owner = describeSections([{ key: 'featured', productIds: [], hasMore: false }], needsFor('owner'))[0];
   assert.equal(owner.title.en, 'Featured equipment');
@@ -262,4 +271,115 @@ test('all layers: same input, same page', () => {
   const rows = many(25, { discountPriceTzs: 4_000, createdAt: daysAgo(2) });
   const input = { sessionUserType: 'member', products: rows, orders: rows.slice(0, 6).map(p => order([{ productId: p.id, qty: 1 }])), now: NOW };
   assert.deepEqual(buildShopHome(input), buildShopHome({ ...input, products: [...rows].reverse() }));
+});
+
+// ── QA round 1 ───────────────────────────────────────────────────────────────
+
+test('order: Featured, Best sellers, then Recommended (design §5.1 / DD-7), so top sellers stay in Best sellers', () => {
+  assert.deepEqual(SECTION_KEYS.slice(0, 3), ['featured', 'best_sellers', 'recommended']);
+  assert.deepEqual(ALLOCATION_ORDER.slice(0, 3), ['featured', 'best_sellers', 'recently_viewed']);
+  // Every product sells, in the role's category: recommended would rank the same top sellers first.
+  const rows = many(20, { category: 'equipment' });
+  const orders = rows.slice(0, 10).flatMap((p, i) => Array.from({ length: 10 - i }, () => order([{ productId: p.id, qty: 1 }])));
+  const out = buildShopHome({ sessionUserType: 'member', products: rows, orders, now: NOW, config: { sections: ['best_sellers', 'recommended'] } });
+  assert.deepEqual(out.sections.map(x => x.key), ['best_sellers', 'recommended']);
+  assert.deepEqual(out.sections[0].productIds.slice(0, 4), rows.slice(0, 4).map(p => p.id), 'the four top sellers are in Best sellers');
+  for (const id of out.sections[0].productIds) assert.ok(!out.sections[1].productIds.includes(id));
+});
+
+test('recently viewed takes its products before the suggestion sections but is shown in its own place', () => {
+  const rows = many(30, { discountPriceTzs: 5_000, createdAt: daysAgo(1), category: 'equipment' });
+  const recent = rows.slice(10, 15).map(p => p.id);
+  const out = buildShopHome({ sessionUserType: 'member', recentIds: recent.join(','), products: rows, orders: [], now: NOW });
+  const keys = out.sections.map(x => x.key);
+  const rv = out.sections.find(x => x.key === 'recently_viewed');
+  assert.ok(rv, 'recently viewed is shown even though every product also fits recommended, essentials, deals and new arrivals');
+  assert.deepEqual(rv.productIds, recent);
+  assert.ok(keys.indexOf('recommended') < keys.indexOf('recently_viewed') && keys.indexOf('essentials') < keys.indexOf('recently_viewed'), 'display order per spec');
+  const all = out.sections.flatMap(x => x.productIds);
+  assert.equal(new Set(all).size, all.length, 'still no duplicates');
+  // Featured and Best sellers still win over recently viewed (DD-7).
+  const sold = rows.slice(10, 14);
+  const withSales = buildShopHome({ sessionUserType: 'member', recentIds: recent.join(','), products: rows, orders: sold.map(p => order([{ productId: p.id, qty: 1 }])), now: NOW });
+  assert.deepEqual(withSales.sections.find(x => x.key === 'best_sellers').productIds, sold.map(p => p.id));
+  assert.equal(withSales.sections.find(x => x.key === 'recently_viewed'), undefined, 'only one recent product left: below the minimum');
+});
+
+/** Would GET /shop/products with this query list this product? (the filters the home uses) */
+const listMatches = (query, p) => (!query.category || p.category === query.category) && (query.promotions !== 'true' || onSale(p));
+
+test('view all: every section\'s query lists every product it shows; mixed categories carry no category', () => {
+  const mixed = [
+    ...many(15, { category: 'equipment', createdAt: daysAgo(1) }),
+    ...many(15, { category: 'accessories_gear', discountPriceTzs: 5_000, createdAt: daysAgo(1) }),
+    ...many(15, { category: 'supplements_nutrition', discountPriceTzs: 5_000 }),
+    ...many(15, { category: 'events', createdAt: daysAgo(1) }),
+  ];
+  const orders = mixed.slice(0, 5).map(p => order([{ productId: p.id, qty: 1 }]));
+  const byId = new Map(mixed.map(p => [p.id, p]));
+  for (const mode of ['member', 'trainer', 'owner']) {
+    const out = buildShopHome({ sessionUserType: { member: 'member', trainer: 'trainer', owner: 'gym_operator' }[mode], recentIds: mixed.slice(16, 20).map(p => p.id).join(','),
+      products: mixed, featured: mixed.slice(26, 30).map(p => ({ productId: p.id })), orders, now: NOW, config: { minItems: 1 } });
+    assert.deepEqual(out.sections.map(x => x.key), SECTION_KEYS, `${mode}: every section present`);
+    for (const sec of out.sections) {
+      assert.equal(sec.viewAll.path, '/shop/products');
+      const shown = sec.productIds.map(id => byId.get(id));
+      for (const p of shown) assert.ok(listMatches(sec.viewAll.query, p), `${mode}.${sec.key}: ${p.id} not in its view all`);
+      const cats = new Set(shown.map(p => p.category));
+      if (cats.size > 1) assert.equal(sec.viewAll.query.category, undefined, `${mode}.${sec.key} mixes categories`);
+      else assert.equal(sec.viewAll.query.category, [...cats][0], `${mode}.${sec.key} is one category`);
+    }
+  }
+  // The reported case (UAT D5): a member's rail with equipment, accessories and supplements said {category:'equipment'}.
+  const small = [...many(2, { category: 'equipment' }), ...many(2, { category: 'accessories_gear' }), ...many(2, { category: 'supplements_nutrition' })];
+  const rec = buildShopHome({ sessionUserType: 'member', products: small, orders: [], now: NOW, config: { sections: ['recommended'] } }).sections[0];
+  assert.equal(new Set(rec.productIds.map(id => small.find(p => p.id === id).category)).size, 3);
+  assert.deepEqual(rec.viewAll.query, { sort: 'popularity' });
+  // And a rail that is all one category says so.
+  const oneCat = buildShopHome({ sessionUserType: 'member', products: mixed, orders: [], now: NOW, config: { sections: ['recommended'] } }).sections[0];
+  assert.deepEqual(oneCat.viewAll.query, { category: 'equipment', sort: 'popularity' });
+});
+
+test('view all: sections the list cannot reproduce never claim more', () => {
+  const rows = many(40, { createdAt: daysAgo(1), discountPriceTzs: 5_000 });
+  const cats = ['equipment', 'accessories_gear'];
+  rows.forEach((p, i) => { p.category = cats[i % 2]; });
+  const out = buildShopHome({ sessionUserType: 'gym_operator', recentIds: rows.slice(0, 20).map(p => p.id).join(','), products: rows,
+    featured: rows.slice(20, 34).map(p => ({ productId: p.id })), orders: [], now: NOW, config: { sections: ['featured', 'recently_viewed', 'essentials', 'new_arrivals', 'deals'], minItems: 1 } });
+  const get = k => out.sections.find(x => x.key === k);
+  for (const k of ['featured', 'recently_viewed', 'new_arrivals']) assert.equal(get(k)?.hasMore ?? false, false, k);
+  assert.equal(get('featured').productIds.length, 12, 'more were featured, but the list cannot show "all featured"');
+  // Essentials across several categories cannot be reproduced either; a single-category one can.
+  const ess = get('essentials');
+  if (ess && new Set(ess.productIds.map(id => rows.find(p => p.id === id).category)).size > 1) assert.equal(ess.hasMore, false);
+  const one = many(20, { category: 'equipment' });
+  const single = buildShopHome({ sessionUserType: 'gym_operator', products: one, orders: [], now: NOW, config: { sections: ['essentials'] } }).sections[0];
+  assert.deepEqual(single.viewAll.query, { category: 'equipment' });
+  assert.equal(single.hasMore, true);
+});
+
+test('featured: same set for every role, ordered by the role\'s category order', () => {
+  const sw = product({ category: 'sportswear_footwear' });
+  const eq = product({ category: 'equipment' });
+  const acc = product({ category: 'accessories_gear' });
+  const sup = product({ category: 'supplements_nutrition' });
+  const featured = [sw, eq, acc, sup].map(p => ({ productId: p.id }));
+  const ids = userType => buildShopHome({ sessionUserType: userType, products: [sw, eq, acc, sup], featured, orders: [], now: NOW, config: { sections: ['featured'] } }).sections[0].productIds;
+  assert.deepEqual(ids('gym_operator'), [eq, acc, sup, sw].map(p => p.id));
+  assert.deepEqual(ids('trainer'), [acc, eq, sw, sup].map(p => p.id));
+  assert.deepEqual(ids('member'), [sw, sup, acc, eq].map(p => p.id));
+  for (const t of ['gym_operator', 'trainer', 'member']) assert.deepEqual([...ids(t)].sort(), [sw, eq, acc, sup].map(p => p.id).sort());
+  // Within a category the Featured system's own order is kept.
+  const e2 = product({ category: 'equipment' });
+  const kept = buildShopHome({ sessionUserType: 'gym_operator', products: [eq, e2, sw, acc], featured: [e2, sw, eq, acc].map(p => ({ productId: p.id })), orders: [], now: NOW, config: { sections: ['featured'] } });
+  assert.deepEqual(kept.sections[0].productIds, [e2, eq, acc, sw].map(p => p.id));
+});
+
+test('small catalogue: no section reaches the minimum, categories and allProductsCount still come back', () => {
+  const rows = [product({ category: 'equipment' }), product({ category: 'other' }), product({ category: 'equipment', stock: 0 })];
+  const out = buildShopHome({ sessionUserType: 'member', products: rows, orders: [], now: NOW });
+  assert.deepEqual(out.sections, []);
+  assert.deepEqual(out.categories.map(c => [c.key, c.count]), [['equipment', 1], ['other', 1]]);
+  assert.equal(out.allProductsCount, 3, 'everything GET /shop/products lists, out of stock included');
+  assert.equal(buildShopHome({ sessionUserType: 'member', products: [], orders: [], now: NOW }).allProductsCount, 0);
 });

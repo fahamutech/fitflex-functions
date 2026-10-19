@@ -17,7 +17,7 @@ import {
 } from '../shared/promotion-config.mjs';
 import {
   validatePromotionInput, checkPromotionRules, effectiveStatus, canTransition, capacityCheck, slotLimit,
-  normaliseGeoScope, geoMatches, disclosureLabel, placementsFor, isModerationBlocking,
+  normaliseGeoScope, geoMatches, disclosureLabel, disclosureText, placementsFor, isModerationBlocking,
 } from '../shared/promotion-rules.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -80,6 +80,7 @@ export function createPromotionService({
     ...p,
     effectiveStatus: effectiveStatus(p, now()),
     label: PROMOTION_TYPES[p.type] ? disclosureLabel(p) : null,
+    disclosure: PROMOTION_TYPES[p.type] ? disclosureText(p) : null,
     entity: summary,
   });
 
@@ -558,7 +559,7 @@ export function createPromotionService({
         const el = await entities.eligibility(p.entityType, entity, mod);
         if (!el.ok) continue;
       }
-      out.push({ ...p, entityKey: `${p.entityType}:${p.entityId}`, label: disclosureLabel(p), commercial: p.isCommercial });
+      out.push({ ...p, entityKey: `${p.entityType}:${p.entityId}`, label: disclosureLabel(p), disclosure: disclosureText(p), commercial: p.isCommercial });
     }
     return out.sort((a, b) => a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
   }

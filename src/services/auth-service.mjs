@@ -2,7 +2,7 @@
 // dev-only mock login. Owns role/approval-status normalization rules.
 import { randomUUID } from 'node:crypto';
 import { verifyPassword } from '../auth/password-credentials.mjs';
-import { buildDevIdentity, DEV_GYM_ID, DEV_OWNER_GYM_ID } from '../shared/dev-login.mjs';
+import { buildDevIdentity, devMarketplaceProduct, DEV_GYM_ID, DEV_OWNER_GYM_ID } from '../shared/dev-login.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { identityFlag } from '../shared/feature-flags.mjs';
@@ -434,17 +434,7 @@ export function createAuthService({
         createdAt: nowIso, updatedAt: nowIso,
       });
       if (products) {
-        await products.upsertAsync(p => p.id === 'prd_dev_marketplace', {
-          id: 'prd_dev_marketplace', vendorId: identity.id,
-          name: 'FitFlex Resistance Bands', description: 'Five-band training set for home or gym workouts.',
-          category: 'Equipment', brand: 'FitFlex', priceTzs: 45000, discountPriceTzs: 39000,
-          stock: 25, sku: 'FF-RB-5', weightKg: 0.7, distanceKm: 3.2,
-          variants: [{ name: 'Five-band set', stock: 25 }],
-          images: ['https://images.unsplash.com/photo-1598289431512-b97b0917affc?w=800'],
-          visibility: 'visible', deliveryAvailable: true, status: 'active', approvalStatus: 'approved',
-          rating: 4.8, reviewCount: 12, soldCount: 64,
-          homepageVisible: true, homepagePriority: 5000, createdAt: nowIso, updatedAt: nowIso,
-        });
+        await products.upsertAsync(p => p.id === 'prd_dev_marketplace', devMarketplaceProduct(identity.id, nowIso));
       }
     } else {
       user = await users.upsertAsync(u => u.id === identity.id, {

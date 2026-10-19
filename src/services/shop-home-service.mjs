@@ -128,6 +128,7 @@ export function createShopHomeService({
         personalised: false,
         signalsUsed: out.signalsUsed,
         categories: out.categories,
+        allProductsCount: out.allProductsCount,
         sections: out.sections,
         products,
       },

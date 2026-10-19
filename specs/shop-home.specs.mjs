@@ -51,7 +51,7 @@ function setup({ personas = [], unverifiedVendors = [], blockedProducts = [], bl
   const calls = { orders: 0 };
   const service = createShopHomeService({
     shopService,
-    discoveryService: { discover: async () => ({ featured: featured.map(f => ({ id: f.productId, promotion: { id: f.promotionId, type: 'featured', label: 'Featured', commercial: true } })) }) },
+    discoveryService: { discover: async () => ({ featured: featured.map(f => ({ id: f.productId, promotion: { id: f.promotionId, type: 'featured', label: 'Featured · Sponsored', disclosure: { codes: ['featured', 'sponsored'], en: 'Featured · Sponsored', sw: 'Iliyoangaziwa · Iliyodhaminiwa' }, commercial: true } })) }) },
     promotionService: promotionService || { listLive: async () => live.map(id => ({ entityType: 'product', entityId: id })) },
     users,
     trainerService: { findProfileByUser: id => trainers.find(t => t.userId === id) || null },
@@ -96,12 +96,13 @@ test('service: response shape, product rows as GET /shop/products returns them, 
   const s = setup();
   for (let i = 0; i < 6; i += 1) s.add({ discountPriceTzs: i < 3 ? 5_000 : null });
   const out = await s.service.home({ claims: { sub: 'm1', userType: 'member' } });
-  assert.deepEqual(Object.keys(out.body).sort(), ['categories', 'currency', 'mode', 'personalised', 'products', 'sections', 'serverNow', 'signalsUsed'].sort());
+  assert.deepEqual(Object.keys(out.body).sort(), ['allProductsCount', 'categories', 'currency', 'mode', 'personalised', 'products', 'sections', 'serverNow', 'signalsUsed'].sort());
   assert.equal(out.body.serverNow, NOW.toISOString());
   assert.equal(out.body.currency, 'TZS');
   assert.equal(out.body.mode, 'member');
   assert.equal(out.body.personalised, false);
   assert.deepEqual(out.body.signalsUsed, ['role']);
+  assert.equal(out.body.allProductsCount, 6);
   const listed = new Map((await s.shopService.listProducts({})).map(p => [p.id, p]));
   for (const [id, row] of Object.entries(out.body.products)) assert.deepEqual(row, listed.get(id));
   for (const sec of out.body.sections) {
@@ -120,7 +121,8 @@ test('service: Featured keeps its disclosure and gets a token for the session; r
   const featured = out.body.sections.find(x => x.key === 'featured');
   assert.deepEqual(featured.productIds, ['prd_001']);
   const tag = out.body.products.prd_001.promotion;
-  assert.equal(tag.label, 'Featured');
+  assert.equal(tag.label, 'Featured · Sponsored', 'English string kept for older apps');
+  assert.deepEqual(tag.disclosure, { codes: ['featured', 'sponsored'], en: 'Featured · Sponsored', sw: 'Iliyoangaziwa · Iliyodhaminiwa' });
   assert.ok(verifyServedToken(tag.token, { promotionId: 'promo_1', entityType: 'product', entityId: 'prd_001', sessionId: session, at: NOW, now: NOW }).ok);
   const rec = out.body.sections.find(x => x.key === 'recommended');
   assert.ok(!rec.productIds.includes('prd_002') && !rec.productIds.includes('prd_001'));
