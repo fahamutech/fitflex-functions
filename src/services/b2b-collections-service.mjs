@@ -92,7 +92,7 @@ export function createB2BCollectionsService({
     const instructions = readInstructions(row);
     const proposed = parseJson(row?.pendingChange);
     const pendingChange = proposed
-      ? { instructions: readInstructions(proposed), requestedBy: row.changeRequestedBy ?? null, requestedAt: row.changeRequestedAt ?? null }
+      ? { changeId: row.changeId ?? null, instructions: readInstructions(proposed), requestedBy: row.changeRequestedBy ?? null, requestedAt: row.changeRequestedAt ?? null }
       : null;
     return { instructions: { ...instructions, updatedAt: row?.updatedAt ?? null }, configured: !!(instructions.accountNumber || instructions.lipaNamba), pendingChange };
   }
@@ -101,7 +101,8 @@ export function createB2BCollectionsService({
    * Two admins change where organisations pay: one asks (this), a different
    * one confirms. Nothing shown to organisations changes until then. Every
    * field is optional; send them all, a missing one is cleared. A new request
-   * replaces one still waiting.
+   * replaces one still waiting and gets a new changeId, so a confirmation
+   * meant for the old one is refused.
    */
   async function requestInstructionsChange({ body = {}, actorId }) {
     if (!actorId) return fail('actor_required', 403);
@@ -109,32 +110,34 @@ export function createB2BCollectionsService({
     await db.transaction(async (trx) => {
       const prior = await trx(INSTRUCTION).where({ id: 'default' }).forUpdate().first();
       const at = stamp();
-      const pending = { pendingChange: JSON.stringify(proposed), changeRequestedBy: actorId, changeRequestedAt: at };
+      const pending = { pendingChange: JSON.stringify(proposed), changeId: newId('pic'), changeRequestedBy: actorId, changeRequestedAt: at };
       if (prior) await trx(INSTRUCTION).where({ id: 'default' }).update(pending);
       else await trx(INSTRUCTION).insert({ id: 'default', ...pending, updatedAt: at }).onConflict('id').merge(pending);
       const replaced = parseJson(prior?.pendingChange);
       await audit(trx, {
         actor: actorId, action: 'b2b.payment_instructions.request', target: 'default',
-        before: { instructions: readInstructions(prior), ...(replaced ? { replacedRequest: { instructions: replaced, requestedBy: prior.changeRequestedBy } } : {}) },
-        after: proposed,
+        before: { instructions: readInstructions(prior), ...(replaced ? { replacedRequest: { changeId: prior.changeId, instructions: replaced, requestedBy: prior.changeRequestedBy } } : {}) },
+        after: { changeId: pending.changeId, ...proposed },
       });
     });
     return getInstructions();
   }
 
-  /** The second admin puts the requested change in force. Not the one who asked. */
-  async function confirmInstructionsChange({ actorId }) {
+  /** The second admin puts the requested change they checked (by changeId) in force. Not the one who asked. */
+  async function confirmInstructionsChange({ changeId, actorId }) {
     if (!actorId) return fail('actor_required', 403);
+    if (typeof changeId !== 'string' || !changeId) return fail('change_id_required', 400);
     const out = await db.transaction(async (trx) => {
       const prior = await trx(INSTRUCTION).where({ id: 'default' }).forUpdate().first();
       const proposed = parseJson(prior?.pendingChange);
       if (!proposed) return fail('no_pending_change', 409);
+      if (prior.changeId !== changeId) return fail('change_superseded', 409, { changeId: prior.changeId });
       if (prior.changeRequestedBy === actorId) return fail('cannot_confirm_own_request', 403);
       const next = readInstructions(proposed);
-      await trx(INSTRUCTION).where({ id: 'default' }).update({ ...next, updatedBy: actorId, updatedAt: stamp(), pendingChange: null, changeRequestedBy: null, changeRequestedAt: null });
+      await trx(INSTRUCTION).where({ id: 'default' }).update({ ...next, updatedBy: actorId, updatedAt: stamp(), pendingChange: null, changeId: null, changeRequestedBy: null, changeRequestedAt: null });
       await audit(trx, {
         actor: actorId, action: 'b2b.payment_instructions.update', target: 'default',
-        before: readInstructions(prior), after: { ...next, requestedBy: prior.changeRequestedBy, requestedAt: prior.changeRequestedAt },
+        before: readInstructions(prior), after: { ...next, changeId, requestedBy: prior.changeRequestedBy, requestedAt: prior.changeRequestedAt },
       });
       return null;
     });
@@ -142,16 +145,18 @@ export function createB2BCollectionsService({
   }
 
   /** Drop a change still waiting: the one who asked withdraws it, or another admin declines it. */
-  async function cancelInstructionsChange({ actorId, reason }) {
+  async function cancelInstructionsChange({ changeId, actorId, reason }) {
     if (!actorId) return fail('actor_required', 403);
+    if (typeof changeId !== 'string' || !changeId) return fail('change_id_required', 400);
     const out = await db.transaction(async (trx) => {
       const prior = await trx(INSTRUCTION).where({ id: 'default' }).forUpdate().first();
       const proposed = parseJson(prior?.pendingChange);
       if (!proposed) return fail('no_pending_change', 409);
-      await trx(INSTRUCTION).where({ id: 'default' }).update({ pendingChange: null, changeRequestedBy: null, changeRequestedAt: null });
+      if (prior.changeId !== changeId) return fail('change_superseded', 409, { changeId: prior.changeId });
+      await trx(INSTRUCTION).where({ id: 'default' }).update({ pendingChange: null, changeId: null, changeRequestedBy: null, changeRequestedAt: null });
       await audit(trx, {
         actor: actorId, action: 'b2b.payment_instructions.cancel', target: 'default',
-        before: { instructions: proposed, requestedBy: prior.changeRequestedBy, requestedAt: prior.changeRequestedAt }, after: { reason: text(reason, 500) },
+        before: { changeId, instructions: proposed, requestedBy: prior.changeRequestedBy, requestedAt: prior.changeRequestedAt }, after: { reason: text(reason, 500) },
       });
       return null;
     });

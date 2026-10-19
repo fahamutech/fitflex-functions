@@ -5,7 +5,7 @@
 
 const MAX = 1000;
 
-/** null for none, the trimmed URL when it is acceptable, or undefined when it is not. */
+/** null for none, the URL as parsed (normalised) when it is acceptable, or undefined when it is not. */
 export function readReceiptUrl(value) {
   if (value == null || value === '') return null;
   if (typeof value !== 'string') return undefined;
@@ -15,5 +15,5 @@ export function readReceiptUrl(value) {
   let url;
   try { url = new URL(raw); } catch { return undefined; }
   if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return undefined;
-  return raw;
+  return url.href.length > MAX ? undefined : url.href;
 }

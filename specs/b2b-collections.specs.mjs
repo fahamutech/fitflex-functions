@@ -22,6 +22,8 @@ import {
 
 await ensureInit();
 
+const agreementVersion = async id => (await db('B2BCommercialAgreement').where({ id }).first()).updatedAt.toISOString();
+
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
 const made = { users: [], orgs: [], gyms: [] };
 const TODAY = localDay(new Date());
@@ -56,7 +58,7 @@ const as = (orgId, claims) => access(orgId, { userType: claims.userType, userId:
 /** An issued fee invoice, due `termsDays` after today. */
 async function feeInvoice(orgId, amountTzs, { termsDays = 0, period = PERIOD } = {}) {
   const { agreement } = await finance.createAgreement({ organizationId: orgId, body: { effectiveFrom: `${period}-01`, platformFeeTzs: amountTzs, prepaidTermsDays: termsDays }, actorId: BILLER });
-  const live = await finance.activateAgreement({ agreementId: agreement.id, actorId: CASHIER });
+  const live = await finance.activateAgreement({ agreementId: agreement.id, version: await agreementVersion(agreement.id), actorId: CASHIER });
   assert.ok(live.agreement, JSON.stringify(live));
   const prepared = await finance.prepareFee({ organizationId: orgId, period, actorId: BILLER });
   assert.ok(prepared.invoice, JSON.stringify(prepared));
@@ -127,13 +129,16 @@ test('payment details: one admin asks, a different one confirms, then the organi
   assert.deepEqual([waiting.instructions.accountNumber, 'pendingChange' in waiting], [before.instructions.accountNumber, false]);
 
   // The admin who asked cannot confirm it.
-  assert.deepEqual(await collections.confirmInstructionsChange({ actorId: BILLER }), { error: 'cannot_confirm_own_request', status: 403 });
+  const changeId = asked.pendingChange.changeId;
+  assert.match(changeId, /^pic_/);
+  assert.deepEqual(await collections.confirmInstructionsChange({ actorId: CASHIER }), { error: 'change_id_required', status: 400 });
+  assert.deepEqual(await collections.confirmInstructionsChange({ changeId, actorId: BILLER }), { error: 'cannot_confirm_own_request', status: 403 });
   assert.equal((await collections.getInstructions()).instructions.accountNumber, before.instructions.accountNumber);
-  const set = await collections.confirmInstructionsChange({ actorId: CASHIER });
+  const set = await collections.confirmInstructionsChange({ changeId, actorId: CASHIER });
   assert.deepEqual([set.configured, set.instructions.accountNumber, set.instructions.branch, set.pendingChange, 'somethingElse' in set.instructions], [true, '0150000000001', null, null, false]);
   const paying = await collections.organizationPaying({ access: await as(orgId, fin) });
   assert.deepEqual([paying.instructions.bankName, paying.instructions.lipaNamba, paying.canPay, paying.onHold, paying.notices], ['CRDB Bank', '5550001', true, false, []]);
-  assert.deepEqual(await collections.confirmInstructionsChange({ actorId: CASHIER }), { error: 'no_pending_change', status: 409 });
+  assert.deepEqual(await collections.confirmInstructionsChange({ changeId, actorId: CASHIER }), { error: 'no_pending_change', status: 409 });
 
   // Both steps are audited, by who did them.
   const trail = await db('AuditLog').where({ target: 'default' }).whereIn('action', ['b2b.payment_instructions.request', 'b2b.payment_instructions.update']).whereIn('actor', [BILLER, CASHIER]).orderBy('at');
@@ -141,13 +146,21 @@ test('payment details: one admin asks, a different one confirms, then the organi
   const applied = trail.at(-1).after;
   assert.deepEqual([(typeof applied === 'string' ? JSON.parse(applied) : applied).requestedBy], [BILLER]);
 
+  // A request swapped after the second admin checked it is not confirmed by that check:
+  // CASHIER asks, BILLER looks at it, then CASHIER replaces it with another account.
+  const genuine = await collections.requestInstructionsChange({ body: { lipaNamba: '5559999', accountNumber: '0150000000001' }, actorId: CASHIER });
+  const swapped = await collections.requestInstructionsChange({ body: { lipaNamba: '5558888', accountNumber: '0159999999999' }, actorId: CASHIER });
+  assert.notEqual(swapped.pendingChange.changeId, genuine.pendingChange.changeId);
+  assert.deepEqual(await collections.confirmInstructionsChange({ changeId: genuine.pendingChange.changeId, actorId: BILLER }), { error: 'change_superseded', status: 409, changeId: swapped.pendingChange.changeId });
+  assert.equal((await collections.getInstructions()).instructions.accountNumber, '0150000000001');
   // A new request replaces one still waiting; a request can be withdrawn or declined, and the details in force stay.
-  await collections.requestInstructionsChange({ body: { lipaNamba: '5559999' }, actorId: CASHIER });
   const replaced = await collections.requestInstructionsChange({ body: { lipaNamba: '5558888', accountNumber: '0150000000001' }, actorId: BILLER });
   assert.deepEqual([replaced.pendingChange.instructions.lipaNamba, replaced.pendingChange.requestedBy], ['5558888', BILLER]);
-  const dropped = await collections.cancelInstructionsChange({ actorId: CASHIER, reason: 'Wrong number' });
+  assert.deepEqual(await collections.cancelInstructionsChange({ changeId: swapped.pendingChange.changeId, actorId: CASHIER }), { error: 'change_superseded', status: 409, changeId: replaced.pendingChange.changeId });
+  assert.deepEqual(await collections.cancelInstructionsChange({ actorId: CASHIER }), { error: 'change_id_required', status: 400 });
+  const dropped = await collections.cancelInstructionsChange({ changeId: replaced.pendingChange.changeId, actorId: CASHIER, reason: 'Wrong number' });
   assert.deepEqual([dropped.pendingChange, dropped.instructions.lipaNamba], [null, '5550001']);
-  assert.deepEqual(await collections.cancelInstructionsChange({ actorId: CASHIER }), { error: 'no_pending_change', status: 409 });
+  assert.deepEqual(await collections.cancelInstructionsChange({ changeId: replaced.pendingChange.changeId, actorId: CASHIER }), { error: 'no_pending_change', status: 409 });
   assert.equal((await db('AuditLog').where({ action: 'b2b.payment_instructions.cancel', actor: CASHIER })).length, 1);
   assert.deepEqual(await collections.requestInstructionsChange({ body: {}, actorId: null }), { error: 'actor_required', status: 403 });
 
@@ -157,10 +170,11 @@ test('payment details: one admin asks, a different one confirms, then the organi
   assert.deepEqual([put.statusCode, put.body.instructions.accountNumber, put.body.pendingChange.instructions.accountNumber], [202, '0150000000001', '0150000000002']);
   const read = await call(adminB2BPaymentInstructions, { claims: staff(['b2b_payments']) });
   assert.equal(read.body.pendingChange.instructions.lipaNamba, '5550002');
-  assert.deepEqual([(await call(adminConfirmB2BPaymentInstructions, { claims: approver(BILLER) })).body.error], ['cannot_confirm_own_request']);
+  const putId = put.body.pendingChange.changeId;
+  assert.deepEqual([(await call(adminConfirmB2BPaymentInstructions, { claims: approver(BILLER), body: { changeId: putId } })).body.error], ['cannot_confirm_own_request']);
   assert.equal((await call(adminConfirmB2BPaymentInstructions, { claims: staff(['b2b_billing', 'b2b_payments']) })).body.requiredScope, 'b2b_billing_approve');
   assert.equal((await call(adminCancelB2BPaymentInstructions, { claims: staff(['b2b_billing', 'b2b_payments']) })).body.requiredScope, 'b2b_billing_approve');
-  const confirmed = await call(adminConfirmB2BPaymentInstructions, { claims: approver(CASHIER) });
+  const confirmed = await call(adminConfirmB2BPaymentInstructions, { claims: approver(CASHIER), body: { changeId: putId } });
   assert.deepEqual([confirmed.statusCode, confirmed.body.instructions.accountNumber, confirmed.body.pendingChange], [200, '0150000000002', null]);
 });
 

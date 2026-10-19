@@ -109,7 +109,7 @@ test('a statement goes draft → submitted → approved → payable → paid, an
     assert.deepEqual([bad.error, bad.status], ['invalid_receipt_url', 400], String(receiptUrl));
   }
   assert.equal((await trx('GymPayout').where({ gymSettlementId: id })).length, 0);
-  const paid = await workflow.pay({ id, paymentReference: ' MPESA-QK7H2L9 ', receiptUrl: 'https://x/receipt.png', actorId: 'payer' });
+  const paid = await workflow.pay({ id, paymentReference: ' MPESA-QK7H2L9 ', receiptUrl: ' HTTPS://X/receipt.png ', actorId: 'payer' });
   assert.deepEqual([paid.statement.status, paid.statement.paidBy, paid.statement.paymentReference, paid.statement.receiptUrl], ['paid', 'payer', 'MPESA-QK7H2L9', 'https://x/receipt.png']);
   const payouts = await trx('GymPayout').where({ gymSettlementId: id });
   assert.equal(payouts.length, 1);

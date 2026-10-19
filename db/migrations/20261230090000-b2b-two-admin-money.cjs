@@ -1,21 +1,24 @@
 // Two admins on B2B money (owner decision 19 Oct 2026; security review 19 Oct).
 //
-//   B2BCommercialAgreement.updatedBy
-//       the admin who last changed a draft agreement. The agreement is put in
-//       force by someone other than its creator and its last editor
-//       (403 cannot_activate_own_agreement).
-//   B2BPaymentInstruction.pendingChange / changeRequestedBy / changeRequestedAt
+//   B2BCommercialAgreement.updatedBy / editors
+//       the admin who last changed a draft agreement, and everyone who did.
+//       The agreement is put in force by someone other than its creator and
+//       its editors (403 cannot_activate_own_agreement), naming the version
+//       they checked (409 agreement_changed when it has moved on).
+//   B2BPaymentInstruction.pendingChange / changeId / changeRequestedBy / changeRequestedAt
 //       a requested change to where organisations pay FitFlex (bank account,
-//       Lipa Namba). It takes effect only when a different admin confirms it
-//       (403 cannot_confirm_own_request). Both steps are in the AuditLog.
+//       Lipa Namba). It takes effect only when a different admin confirms that
+//       very request by its changeId (403 cannot_confirm_own_request,
+//       409 change_superseded). Every step is in the AuditLog.
 //
 // Additive: nullable columns only, nothing backfilled. Down drops them (a
 // pending change is lost; the payment details in force are untouched).
 
 const COLUMNS = {
-  B2BCommercialAgreement: { updatedBy: t => t.text('updatedBy') },
+  B2BCommercialAgreement: { updatedBy: t => t.text('updatedBy'), editors: t => t.jsonb('editors') },
   B2BPaymentInstruction: {
     pendingChange: t => t.jsonb('pendingChange'),
+    changeId: t => t.text('changeId'),
     changeRequestedBy: t => t.text('changeRequestedBy'),
     changeRequestedAt: t => t.timestamp('changeRequestedAt', { precision: 3 }),
   },
