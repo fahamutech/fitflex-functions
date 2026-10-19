@@ -15,6 +15,7 @@ import { vendorShareOfOrder } from '../src/shared/marketplace-pricing.mjs';
 import {
   vendorToolsOptionsRoute, vendorStockAdjustment, vendorStockMovements, vendorLowStock, vendorMyProducts,
   vendorCreateProduct, vendorUpdateProduct, listShopProducts, getShopProduct, getVendorStore, createShopOrder,
+  adminListProducts, adminCreateProduct, adminUpdateProductListing,
 } from '../functions/shop.mjs';
 import { shopHome, resetShopHomeLimits } from '../functions/shop-home.mjs';
 
@@ -592,7 +593,7 @@ test('cost price and reorder level never appear in /shop/products, /shop/product
 
 // ── low stock ────────────────────────────────────────────────────────────────
 
-test('low stock: vendor_low_stock fires once per crossing (adjustments and checkout), in English with Swahili, and only with the ledger on', async () => {
+test('low stock: vendor_low_stock fires once per crossing (adjustments and checkout), Swahili by default with English on request, and only with the ledger on', async () => {
   ledgerOn();
   const v = await vendor();
   const p = await listed(v, { name: 'Creatine', stock: 5, reorderLevel: 3 });
@@ -610,19 +611,20 @@ test('low stock: vendor_low_stock fires once per crossing (adjustments and check
   assert.deepEqual(alerts.at(-1).data, { productId: p.id, productName: 'Creatine', variant: null, stock: 3, reorderLevel: 3 });
   const inbox = await db('Notification').where({ userId: v, type: 'vendor_low_stock' }).orderBy('createdAt');
   assert.equal(inbox.length, 2);
-  assert.equal(inbox[0].title, 'Low stock: Creatine');
-  assert.equal(inbox[0].body, 'Only 3 left. Time to restock.');
+  // No saved language preference: Swahili, as the SMS reminders (owner 2026-10-19; drafts, for native review).
+  assert.equal(inbox[0].title, 'Stock inakaribia kuisha: Creatine');
+  assert.equal(inbox[0].body, 'Zimebaki 3 tu. Ni wakati wa kuongeza Stock.');
   assert.equal(inbox[0].data.titleSw, 'Stock inakaribia kuisha: Creatine');
   assert.equal(inbox[0].data.bodySw, 'Zimebaki 3 tu. Ni wakati wa kuongeza Stock.');
   assert.equal(inbox[0].data.productId, p.id);
 
-  // The push is in the vendor's language: Swahili when their preference says so (drafts, for native review).
-  await db('CommunicationPreference').insert({ id: v, locale: 'sw' });
+  // A vendor who chose English gets English; the Swahili text stays in data.
+  await db('CommunicationPreference').insert({ id: v, locale: 'en' });
   await adjust(v, p.id, { reason: 'restock', quantity: 10 }); // 3 → 13, re-armed
   await adjust(v, p.id, { reason: 'lost', quantity: 11 }); // 13 → 2, crosses
-  const sw = (await db('Notification').where({ userId: v, type: 'vendor_low_stock' }).orderBy('createdAt')).at(-1);
-  assert.deepEqual([sw.title, sw.body], ['Stock inakaribia kuisha: Creatine', 'Zimebaki 2 tu. Ni wakati wa kuongeza Stock.']);
-  assert.equal(sw.data.titleSw, 'Stock inakaribia kuisha: Creatine');
+  const en = (await db('Notification').where({ userId: v, type: 'vendor_low_stock' }).orderBy('createdAt')).at(-1);
+  assert.deepEqual([en.title, en.body], ['Low stock: Creatine', 'Only 2 left. Time to restock.']);
+  assert.equal(en.data.titleSw, 'Stock inakaribia kuisha: Creatine');
 
   // Q-3: with the ledger off, stock that crosses the level tells nobody.
   ledgerOn();
@@ -632,16 +634,150 @@ test('low stock: vendor_low_stock fires once per crossing (adjustments and check
   assert.equal((await lowAlerts(v)).length, 3);
 });
 
-test('vendor_low_stock without a product name: English "A product", Swahili "Bidhaa"; variant in brackets', async () => {
-  const v = await vendor();
-  await partnerNotifier.vendorEvent(v, 'vendor_low_stock', { productId: 'prd_none', stock: 1 });
-  const en = await db('Notification').where({ userId: v, type: 'vendor_low_stock' }).first();
-  assert.deepEqual([en.title, en.data.titleSw], ['Low stock: A product', 'Stock inakaribia kuisha: Bidhaa']);
+test('vendor_low_stock without a product name: English "A product", Swahili "Bidhaa"; variant in brackets; no preference → Swahili, sw → Swahili, en → English', async () => {
+  const none = await vendor();
+  await partnerNotifier.vendorEvent(none, 'vendor_low_stock', { productId: 'prd_none', stock: 1 });
+  const row0 = await db('Notification').where({ userId: none, type: 'vendor_low_stock' }).first();
+  assert.deepEqual([row0.title, row0.body, row0.data.titleSw], ['Stock inakaribia kuisha: Bidhaa', 'Zimebaki 1 tu. Ni wakati wa kuongeza Stock.', 'Stock inakaribia kuisha: Bidhaa']);
+  const en = await vendor();
+  await db('CommunicationPreference').insert({ id: en, locale: 'en' });
+  await partnerNotifier.vendorEvent(en, 'vendor_low_stock', { productId: 'prd_none', stock: 1 });
+  const row1 = await db('Notification').where({ userId: en, type: 'vendor_low_stock' }).first();
+  assert.deepEqual([row1.title, row1.body, row1.data.titleSw], ['Low stock: A product', 'Only 1 left. Time to restock.', 'Stock inakaribia kuisha: Bidhaa']);
   const sw = await vendor();
   await db('CommunicationPreference').insert({ id: sw, locale: 'sw' });
   await partnerNotifier.vendorEvent(sw, 'vendor_low_stock', { productId: 'prd_none', variant: 'XL', stock: 0 });
   const row2 = await db('Notification').where({ userId: sw, type: 'vendor_low_stock' }).first();
   assert.deepEqual([row2.title, row2.body], ['Stock inakaribia kuisha: Bidhaa (XL)', 'Zimebaki 0 tu. Ni wakati wa kuongeza Stock.']);
+  // A preference row with no language set is the same as none.
+  const blank = await vendor();
+  await db('CommunicationPreference').insert({ id: blank, locale: null });
+  await partnerNotifier.vendorEvent(blank, 'vendor_low_stock', { productId: 'prd_none', stock: 2 });
+  assert.equal((await db('Notification').where({ userId: blank, type: 'vendor_low_stock' }).first()).title, 'Stock inakaribia kuisha: Bidhaa');
+});
+
+// ── FitFlex admins (owner decision 2026-10-19: admins see everything) ───────────
+
+const superAdmin = () => ({ sub: uid('adm'), userType: 'admin' }); // not a portal user: every scope
+const shopAdmin = () => ({ sub: uid('adm'), userType: 'admin', portalUser: true, aclPermissions: ['shop'] });
+const otherAdmin = () => ({ sub: uid('adm'), userType: 'admin', portalUser: true, aclPermissions: ['payments'] });
+
+test('admins: canSeeCost is true for a super-admin and a shop-scoped admin, false without the shop scope', async () => {
+  for (const claims of [superAdmin(), shopAdmin()]) {
+    const out = await call(vendorToolsOptionsRoute, claims);
+    assert.equal(out.status, 200);
+    assert.equal(out.body.canSeeCost, true);
+  }
+  assert.equal((await call(vendorToolsOptionsRoute, otherAdmin())).body.canSeeCost, false);
+  assert.equal(await shopService.canSeeCost(otherAdmin()), false);
+  // Vendor staff rule unchanged: a staff member whose token says admin-like things is still read from the account.
+  assert.equal(await shopService.canSeeCost({ sub: uid('usr'), userType: 'vendor_staff', vendorId: 'x', portalUser: false }), false);
+});
+
+test('GET /admin/products: private fields (cost included) with the ledger on, none with it off; scope `shop` required', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { name: 'Admin view tee', costTzs: 9_000, reorderLevel: 2, variants: [{ name: 'S', stock: 3, costTzs: 10_000 }, { name: 'M', stock: 3, reorderLevel: 1 }] });
+  const plainOne = await listed(v, { name: 'Admin view bar', stock: 4 });
+  for (const claims of [superAdmin(), shopAdmin()]) {
+    const out = await call(adminListProducts, claims);
+    assert.equal(out.status, 200);
+    const seen = out.body.find(x => x.id === p.id);
+    assert.deepEqual([seen.costTzs, seen.reorderLevel], [9_000, 2]);
+    assert.deepEqual(seen.variants, [
+      { name: 'S', stock: 3, costTzs: 10_000, reorderLevel: null, effectiveCostTzs: 10_000, effectiveReorderLevel: 2 },
+      { name: 'M', stock: 3, costTzs: null, reorderLevel: 1, effectiveCostTzs: 9_000, effectiveReorderLevel: 1 },
+    ]);
+    const bare = out.body.find(x => x.id === plainOne.id);
+    assert.deepEqual([bare.costTzs, bare.reorderLevel], [null, null]);
+  }
+  assert.deepEqual((await call(adminListProducts, otherAdmin())).body, { error: 'acl_forbidden', requiredScope: 'shop' });
+  ledgerOff();
+  const off = (await call(adminListProducts, superAdmin())).body.find(x => x.id === p.id);
+  assert.equal('costTzs' in off || 'reorderLevel' in off, false, 'flag off: the response is as before');
+});
+
+test('POST /admin/products: an admin may set cost and reorder level; the admin is the actor; the response carries them', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const admin = shopAdmin();
+  const out = await call(adminCreateProduct, admin, { body: { vendorId: v, name: 'Admin made', category: 'supplements_nutrition', priceTzs: 12_000, stock: 6, costTzs: 7_000, reorderLevel: 2, variants: [{ name: 'Red', stock: 6, costTzs: 7_500 }] } });
+  assert.equal(out.status, 201, JSON.stringify(out.body));
+  made.products.push(out.body.id);
+  assert.deepEqual([out.body.costTzs, out.body.reorderLevel, out.body.variants[0].costTzs, out.body.variants[0].effectiveReorderLevel], [7_000, 2, 7_500, 2]);
+  const opening = await ledgerOf(out.body.id);
+  assert.equal(opening.length > 0, true);
+  assert.equal(opening.every(r => r.actorId === admin.sub), true, 'opening stock rows name the admin');
+  const audit = await db('AuditLog').where({ target: out.body.id, action: 'admin_product_created' }).first();
+  assert.equal(audit.actor, admin.sub);
+  assert.deepEqual(audit.after.privates, [{ variant: '', costTzs: 7_000, reorderLevel: 2 }, { variant: 'Red', costTzs: 7_500 }]);
+  // The vendor sees what the admin set.
+  const mine = (await call(vendorMyProducts, as(v))).body.find(x => x.id === out.body.id);
+  assert.deepEqual([mine.costTzs, mine.variants[0].costTzs], [7_000, 7_500]);
+});
+
+test('PUT /admin/products/:id/listing: an admin sets cost / reorder level (audited, admin as actor); bad input refused before any write; public shop still clean', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await listed(v, { name: 'Listing tee', stock: 5, costTzs: 1_000, variants: [{ name: 'S', stock: 5 }] });
+  const admin = superAdmin();
+  const listing = body => call(adminUpdateProductListing, admin, { params: { id: p.id }, body });
+
+  const bad = await listing({ homepagePriority: 9, costTzs: -1 });
+  assert.deepEqual([bad.status, bad.body], [400, { error: 'invalid_field', field: 'costTzs' }]);
+  const unknown = await listing({ homepagePriority: 9, variants: [{ name: 'XXL', costTzs: 5 }] });
+  assert.deepEqual([unknown.status, unknown.body], [404, { error: 'variant_not_found', variant: 'XXL', variants: ['S'] }]);
+  assert.equal(Number((await row(p.id)).homepagePriority || 0), 0, 'nothing written on a refused request');
+
+  const ok = await listing({ costTzs: 4_321, variants: [{ name: 'S', costTzs: 4_400, reorderLevel: 1, stock: 999 }] });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.deepEqual([ok.body.costTzs, ok.body.variants[0].costTzs, ok.body.variants[0].reorderLevel, ok.body.variants[0].stock], [4_321, 4_400, 1, 5]);
+  assert.equal((await row(p.id)).stock, 5, 'stock is not set through the listing endpoint');
+  const audit = await db('AuditLog').where({ target: p.id, action: 'admin_product_private_updated' }).first();
+  assert.equal(audit.actor, admin.sub);
+  assert.deepEqual(audit.before, [{ variant: '', costTzs: 1_000, reorderLevel: null }, { variant: 'S', costTzs: null, reorderLevel: null }]);
+  assert.deepEqual(audit.after, [{ variant: '', costTzs: 4_321 }, { variant: 'S', costTzs: 4_400, reorderLevel: 1 }]);
+  assert.equal((await lowAlerts(v)).length, 0, '5 > 1: not low');
+
+  // Raising the reorder level to the stock sends one alert (kept from S1), however often it is saved.
+  await listing({ variants: [{ name: 'S', reorderLevel: 5 }] });
+  await listing({ variants: [{ name: 'S', reorderLevel: 6 }] });
+  assert.equal((await lowAlerts(v)).length, 1);
+
+  // null clears.
+  const cleared = await listing({ costTzs: null });
+  assert.deepEqual([cleared.body.costTzs, cleared.body.variants[0].effectiveCostTzs], [null, 4_400]);
+
+  // Whatever an admin set, the public shop shows none of it.
+  const member = { sub: await user('member'), userType: 'member' };
+  const leaks = body => ['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel', '4400', '4321'].filter(k => JSON.stringify(body).includes(k));
+  const list = await call(listShopProducts, member, { query: { vendorId: v } });
+  assert.equal(list.body.some(x => x.id === p.id), true);
+  assert.deepEqual(leaks(list.body), []);
+  assert.deepEqual(leaks((await call(getShopProduct, member, { params: { id: p.id } })).body), []);
+  assert.deepEqual(leaks((await call(getVendorStore, member, { params: { id: v } })).body), []);
+
+  // Flag off: cost keys on the listing endpoint are ignored, as before S1.
+  ledgerOff();
+  const offOut = await listing({ costTzs: 1, homepagePriority: 2 });
+  assert.equal(offOut.status, 200);
+  assert.equal('costTzs' in offOut.body, false);
+  ledgerOn();
+  assert.equal((await call(adminListProducts, admin)).body.find(x => x.id === p.id).variants[0].effectiveCostTzs, 4_400);
+});
+
+test('admins on /vendor/* endpoints get cost rights (canSeeCost) like the vendor account', async () => {
+  ledgerOn();
+  const admin = { ...shopAdmin(), sub: await user('admin') };
+  // An admin's own /vendor/products is scoped to their own id (no vendor selection exists); cost is not stripped.
+  const created = await call(vendorCreateProduct, admin, { body: { name: 'Admin-owned', priceTzs: 1_000, stock: 1, costTzs: 500 } });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  made.products.push(created.body.id);
+  assert.equal(created.body.costTzs, 500);
+  const mine = (await call(vendorMyProducts, admin)).body.find(x => x.id === created.body.id);
+  assert.equal(mine.costTzs, 500);
+  const refused = await call(vendorCreateProduct, otherAdmin(), { body: { name: 'No scope', priceTzs: 1_000, stock: 1, costTzs: 500 } });
+  assert.deepEqual([refused.status, refused.body.error], [403, 'cost_forbidden']);
 });
 
 // ── cost snapshot and settlement ─────────────────────────────────────────────

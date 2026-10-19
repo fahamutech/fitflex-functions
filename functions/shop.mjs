@@ -59,7 +59,7 @@ export const getVendorStore = {
 
 export const vendorMyProducts = {
   created, method: 'get', path: '/vendor/products',
-  description: 'Vendor: list own products (including archived). With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account or vendor_staff with vendorRole admin.',
+  description: 'Vendor: list own products (including archived). With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
   onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
   onRequest: async (req, res) => {
     res.json(await shopService.vendorListProducts(req.user.vendorId || req.user.sub, { costAllowed: await shopService.canSeeCost(req.user) }));
@@ -76,7 +76,7 @@ const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' }
 
 export const vendorToolsOptionsRoute = {
   created, method: 'get', path: '/vendor/tools/options',
-  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, or vendor_staff with vendorRole admin).',
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`).',
   responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off' },
   onGuard: requireAuth('vendor', 'vendor_staff', 'admin'),
   onRequest: async (req, res) => res.json({ ...vendorToolsOptions(), canSeeCost: await shopService.canSeeCost(req.user) }),
@@ -191,14 +191,14 @@ export const vendorSaveProfile = {
 
 export const adminListProducts = {
   created, method: 'get', path: '/admin/products',
-  description: 'Admin: list every product with homepage visibility and priority controls.',
+  description: 'Admin: list every product with homepage visibility and priority controls. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries the vendor\'s private costTzs and reorderLevel (null when not set) and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — the same shape as GET /vendor/products for the vendor account. Never on /shop/*.',
   onGuard: [requireAuth('admin'), requireAcl('shop')],
   onRequest: async (_req, res) => res.json(await shopService.adminListProducts()),
 };
 
 export const adminCreateProduct = {
   created, method: 'post', path: '/admin/products',
-  description: 'Admin: create a product for a selected vendor.',
+  description: 'Admin: create a product for a selected vendor. With VENDOR_STOCK_LEDGER on, costTzs / reorderLevel (product and per variant) are accepted and stored privately, the admin is the actor of the opening stock rows and the audit entry, and the response carries the private fields as GET /admin/products does.',
   onGuard: [requireAuth('admin'), requireAcl('shop')],
   onRequest: async (req, res) => {
     const result = await shopService.adminCreateProduct({ body: req.body || {}, actorId: req.user.sub });
@@ -209,7 +209,7 @@ export const adminCreateProduct = {
 
 export const adminUpdateProductListing = {
   created, method: 'put', path: '/admin/products/:id/listing',
-  description: 'Admin: control whether a product is listed and its homepage priority.',
+  description: 'Admin: control whether a product is listed and its homepage priority. With VENDOR_STOCK_LEDGER on, also optional costTzs, reorderLevel and variants: [{ name, costTzs?, reorderLevel? }] (null clears; other variant keys are ignored; 400 invalid_field { field }, 404 variant_not_found { variant, variants }); recorded in the audit log with the admin as actor (admin_product_private_updated). A reorder level raised to or above the stock sends the vendor one low-stock alert. The response carries the private fields as GET /admin/products does.',
   onGuard: [requireAuth('admin'), requireAcl('shop')],
   onRequest: async (req, res) => {
     const result = await shopService.adminUpdateProductListing({
@@ -217,7 +217,7 @@ export const adminUpdateProductListing = {
       body: req.body || {},
       actorId: req.user.sub,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) return sendError(res, result);
     res.json(result.product);
   },
 };

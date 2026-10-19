@@ -220,9 +220,22 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     }
   }
 
-  /** The vendor's private fields, by product id: Map(productId → Map(variant → row)). */
+  /**
+   * Cost price / reorder level written outside the product form (an admin, from
+   * PUT /admin/products/:id/listing). Same rules as the form: only the keys present are written, null clears.
+   */
+  async function savePrivates({ productId, vendorId, privates }) {
+    await writePrivates(db, productId, vendorId, privates, now());
+  }
+
+  /**
+   * Private fields, by product id: Map(productId → Map(variant → row)). `vendorId` scopes the read to one
+   * vendor; null (FitFlex admins, across vendors) needs the product ids, so nothing reads the whole table.
+   */
   async function privatesOf(vendorId, productIds = null) {
-    let q = db('ProductPrivate').where({ vendorId });
+    if (vendorId == null && !productIds) throw new Error('privatesOf: vendorId or productIds required');
+    let q = db('ProductPrivate');
+    if (vendorId != null) q = q.where({ vendorId });
     if (productIds) q = q.whereIn('productId', productIds);
     const out = new Map();
     for (const row of await q) {
@@ -371,5 +384,5 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     return inserted.length;
   }
 
-  return { adjust, applyProductForm, createProduct, privatesOf, movements, lowStock, checkLow, snapshotOrderCosts };
+  return { adjust, applyProductForm, createProduct, privatesOf, savePrivates, movements, lowStock, checkLow, snapshotOrderCosts };
 }

@@ -194,14 +194,15 @@ export function createPartnerNotifier({
     vendor_approved: () => ({ type: 'vendor_shop_approved', title: 'Your shop is approved', body: 'You can now sell on FitFlex.', data: {} }),
     vendor_rejected: d => ({ type: 'vendor_shop_rejected', title: 'Your shop was not approved', body: d.approvalNote || 'Open your shop profile to see what is needed.', data: {} }),
     vendor_suspended: d => ({ type: 'vendor_shop_suspended', title: 'Your shop is suspended', body: d.approvalNote || 'Your products are hidden until this is resolved.', data: {} }),
-    // Vendor tools · S1. Sent in the vendor's language (their communication preference: sw → Swahili,
-    // otherwise English); `titleSw` / `bodySw` are always in `data` for the app's inbox.
+    // Vendor tools · S1. Sent in the vendor's language (their communication preference: en → English,
+    // otherwise — including no saved preference — Swahili, as the SMS reminders; owner 2026-10-19);
+    // `titleSw` / `bodySw` are always in `data` for the app's inbox.
     // Swahili texts (incl. the 'Bidhaa' fallback) are DRAFTS for native review (plan §4, design spec §8.5).
     vendor_low_stock: (d, locale) => {
       const named = fallback => (d.variant ? `${d.productName || fallback} (${d.variant})` : d.productName || fallback);
       const en = { title: `Low stock: ${named('A product')}`, body: `Only ${d.stock} left. Time to restock.` };
       const sw = { title: `Stock inakaribia kuisha: ${named('Bidhaa')}`, body: `Zimebaki ${d.stock} tu. Ni wakati wa kuongeza Stock.` };
-      const text = locale === 'sw' ? sw : en;
+      const text = locale === 'en' ? en : sw;
       return {
         type: 'vendor_low_stock',
         title: text.title,
