@@ -118,7 +118,7 @@ test('billing watch: each kind of waiting work is found once per organisation, w
   const by = Object.fromEntries(found.map(f => [f.kind, f]));
   assert.deepEqual([by.drafts_not_issued.detail.count, by.drafts_not_issued.detail.totalTzs, by.drafts_not_issued.severity], [2, 100000, 'medium']);
   assert.deepEqual([by.long_overdue.detail.outstandingTzs, by.long_overdue.detail.onHold, by.long_overdue.severity], [150000, true, 'high']);
-  assert.match(by.long_overdue.title, /^Waiting: 1 invoice more than 30 days overdue \(TZS 150,000\), on hold$/);
+  assert.match(by.long_overdue.title, /^Waiting: 1 invoice more than 30 days overdue \(TSh 150,000\), on hold$/);
   assert.equal(by.payment_not_applied.detail.unappliedTzs, 40000);
   assert.deepEqual([by.payment_notices_unchecked.detail.totalTzs, by.payment_notices_unchecked.severity], [150000, 'high']);
   assert.equal(by.agreement_ending.detail.reference, 'AGR-W');

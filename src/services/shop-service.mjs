@@ -1,4 +1,5 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
+import { formatTsh } from '../shared/money-display.mjs';
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
@@ -939,7 +940,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function orderInvoice({ buyerId, orderId }) {
     const order = await shopOrders.findByIdAsync(orderId);
     if (!order || order.buyerId !== buyerId) return null;
-    return `${['FitFlex Marketplace Invoice', `Order: ${order.id}`, `Date: ${order.createdAt}`, ...order.items.map(item => `${item.qty} x ${item.name} @ TZS ${item.priceTzs}`), `Total: TZS ${order.totalTzs}`, `Payment: ${order.paymentStatus} (${order.paymentMethod})`].join('\n')}\n`;
+    return `${['FitFlex Marketplace Invoice', `Order: ${order.id}`, `Date: ${order.createdAt}`, ...order.items.map(item => `${item.qty} x ${item.name} @ ${formatTsh(item.priceTzs)}`), `Total: ${formatTsh(order.totalTzs)}`, `Payment: ${order.paymentStatus} (${order.paymentMethod})`].join('\n')}\n`;
   }
   async function reorder({ buyerId, orderId }) {
     const order = await shopOrders.findByIdAsync(orderId);

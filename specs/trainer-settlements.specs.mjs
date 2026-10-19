@@ -167,7 +167,7 @@ test('prepare, submit, approve by a second person, clear and pay; the trainer is
   assert.deepEqual([paid.statement.status, paid.statement.paymentReference, paid.statement.paidBy], ['paid', 'MPESA-TR1', checker]);
   const note = inbox.find(n => n.userId === a.userId);
   assert.equal(note.type, 'trainer_payout_paid');
-  assert.match(note.body, /TZS 34,000 for 2 session\(s\).*MPESA-TR1/);
+  assert.match(note.body, /TSh 34,000 for 2 session\(s\).*MPESA-TR1/);
 
   // The trainer sees it, without staff ids, and with where it went.
   const view = await svc.listMine({ trainerId: a.id });

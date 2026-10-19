@@ -6,7 +6,9 @@
 // Nothing here may fail the thing it reports on, so every send is
 // best-effort.
 
-const tzs = n => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
+import { formatTsh } from '../shared/money-display.mjs';
+
+const tzs = formatTsh;
 
 // A membership activated this recently is a new one, not a renewal of an old one.
 const NEW_MEMBERSHIP_MS = 10 * 60 * 1000;

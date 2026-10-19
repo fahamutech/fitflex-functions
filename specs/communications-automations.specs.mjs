@@ -268,7 +268,7 @@ test('a rejected payment sends a recovery message with the amount — from the e
   assert.equal(run.occurrenceKey, `payment:${pay}`);
   assert.deepEqual(run.context, { amountTzs: 50000 });
   const [msg] = await messagesOf(run.id);
-  assert.match(msg.body, /TZS 50,000/);
+  assert.match(msg.body, /TSh 50,000/);
   assert.equal((await automations.runDue({ gymIds: [g] })).fired, 0, 'the sweep finds it already sent');
 
   // An event that never arrived: the sweep sends it.

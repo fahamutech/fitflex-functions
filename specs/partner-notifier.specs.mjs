@@ -88,7 +88,7 @@ test('a first membership is news for the gym; a renewal is a payment notice for 
   assert.deepEqual(s.to('gym_membership_renewed'), ['owner_1'], 'money: the owner only');
   assert.deepEqual(s.to('gym_member_joined'), []);
   assert.equal(s.sent[0].title, 'Membership renewed');
-  assert.equal(s.sent[0].body, 'Asha renewed at Kilimanjaro Fitness and paid TZS 60,000. It now runs to 2026-12-12.');
+  assert.equal(s.sent[0].body, 'Asha renewed at Kilimanjaro Fitness and paid TSh 60,000. It now runs to 2026-12-12.');
   assert.deepEqual(s.sent[0].data, { gymId: 'g1', memberId: 'm1', subscriptionId: 'sub_1', amountTzs: 60000 });
 
   // Reported twice for the same period: the same id, so it is told once.
@@ -144,8 +144,8 @@ test('a trainer\'s request and money matters go to the owner only', async () => 
   assert.deepEqual(s.to('gym_statement_approved'), ['owner_1']);
   assert.deepEqual(s.to('gym_payout_paid'), ['owner_1']);
   assert.equal(s.sent.length, 3);
-  assert.match(s.sent[1].body, /TZS 1,250,000 to be paid/);
-  assert.match(s.sent[2].body, /TZS 1,250,000 for 2026-09-01 – 2026-09-30 has been paid/);
+  assert.match(s.sent[1].body, /TSh 1,250,000 to be paid/);
+  assert.match(s.sent[2].body, /TSh 1,250,000 for 2026-09-01 – 2026-09-30 has been paid/);
   assert.notEqual(s.sent[1].id, s.sent[2].id);
 });
 
