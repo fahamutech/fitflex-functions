@@ -574,7 +574,10 @@ test('cost price and reorder level never appear in /shop/products, /shop/product
   const p = await listed(v, { name: 'Private cost whey', stock: 50, costTzs: 7_777, reorderLevel: 5, variants: [{ name: 'Big', stock: 50, costTzs: 8_888, reorderLevel: 4 }] });
   for (let i = 0; i < 4; i += 1) await listed(v, { name: `Cost item ${i}`, stock: 20, costTzs: 1_000 + i, reorderLevel: 1 });
   const member = { sub: await user('member'), userType: 'member' };
-  const leaks = body => ['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel', 'lowStockAlertedAt', '7777', '8888'].filter(k => JSON.stringify(body).includes(k));
+  // Field names by key; the cost values by exact leaf value (random ids can contain "8888").
+  const leafValues = v => (Array.isArray(v) ? v.flatMap(leafValues) : v && typeof v === 'object' ? Object.values(v).flatMap(leafValues) : [String(v)]);
+  const leaks = body => [...['costTzs', 'reorderLevel', 'effectiveCostTzs', 'effectiveReorderLevel', 'lowStockAlertedAt'].filter(k => JSON.stringify(body).includes(`"${k}"`)),
+    ...['7777', '8888'].filter(n => leafValues(body).includes(n))];
   const list = await call(listShopProducts, member, { query: { vendorId: v } });
   assert.equal(list.body.some(x => x.id === p.id), true, 'the product is listed (not a vacuous check)');
   assert.deepEqual(leaks(list.body), []);

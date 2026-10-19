@@ -104,6 +104,20 @@ after(async () => {
   await db('User').whereIn('id', made.users).del();
 });
 
+// Every leaf value as a string; strings are also split into CSV cells, so a value
+// is found only when it is a whole field or cell.
+const leafCells = value => {
+  const out = [];
+  const walk = v => {
+    if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+    else if (typeof v === 'string') for (const cell of [v, ...v.split(/[,\r\n]/)]) out.push(cell.trim().replace(/^"|"$/g, ''));
+    else if (v != null) out.push(String(v));
+  };
+  walk(value);
+  return out;
+};
+
 test('every screen agrees with figures worked out independently, and with every other screen', async () => {
   const gymA = await gym('Validation Gym A', 5000);
   const gymB = await gym('Validation Gym B', 7000);
@@ -346,8 +360,12 @@ test('no analytics response carries a field an organisation must never receive',
     walk(name === 'person' ? { ...body, notShown: undefined } : body, name, hits);
     assert.deepEqual(hits, [], name);
     // And none of the values themselves, whatever key they sit under.
-    const text = JSON.stringify(name === 'person' ? { ...body, notShown: [] } : body);
-    for (const secret of ['secret-note', '411', me.email, me.phone, '"weightKg"', '175']) assert.equal(text.includes(secret), false, `${name} contains ${secret}`);
+    const shown = name === 'person' ? { ...body, notShown: [] } : body;
+    const text = JSON.stringify(shown);
+    for (const secret of ['secret-note', me.email, me.phone, '"weightKg"']) assert.equal(text.includes(secret), false, `${name} contains ${secret}`);
+    // Numbers are compared as whole values (or whole CSV cells), not substrings: random ids can contain "175".
+    const cells = leafCells(shown);
+    for (const secret of ['411', '175']) assert.equal(cells.includes(secret), false, `${name} contains ${secret}`);
   }
   assert.equal(responses.person.activities.length, 1);
   assert.equal(responses['csv:activity'].rows, 1);
