@@ -10,7 +10,7 @@ import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions } from '../shared/feature-flags.mjs';
-import { vendorOrderView, ownLines, eatDate, eatDayBounds } from '../shared/vendor-order-view.mjs';
+import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
 
@@ -954,6 +954,30 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function vendorOrders(vendorId, { seesMoney = false } = {}) {
     return vendorViews(await ordersOfVendor(vendorId), vendorId, { seesMoney });
   }
+  /**
+   * One page of a vendor's orders, newest first (createdAt desc, id desc). `limit` 1–200 (default 50;
+   * larger is capped at 200), `cursor` = the nextCursor of the previous page.
+   * → { orders, nextCursor|null } | { error: invalid_limit | invalid_cursor, status: 400 }
+   */
+  async function vendorOrdersPage(vendorId, { limit, cursor, seesMoney = false } = {}) {
+    let size = ORDERS_PAGE_DEFAULT;
+    if (limit !== undefined && limit !== null && limit !== '') {
+      const n = Number(limit);
+      if (!Number.isInteger(n) || n < 1) return { error: 'invalid_limit', status: 400 };
+      size = Math.min(n, ORDERS_PAGE_MAX);
+    }
+    let after = null;
+    if (cursor !== undefined && cursor !== null && cursor !== '') {
+      after = decodeOrderCursor(cursor);
+      if (!after) return { error: 'invalid_cursor', status: 400 };
+    }
+    const rows = await orderStore.ordersForVendor(vendorId, { limit: size + 1, after });
+    const page = rows.slice(0, size);
+    return {
+      orders: await vendorViews(page, vendorId, { seesMoney }),
+      nextCursor: rows.length > size ? encodeOrderCursor(page[page.length - 1]) : null,
+    };
+  }
   /** One order as its vendor sees it; 404 when it has no line of theirs (another vendor's order looks absent). */
   async function vendorOrder(vendorId, orderId, { seesMoney = false } = {}) {
     const order = orderId ? await shopOrders.findByIdAsync(String(orderId)) : null;
@@ -978,7 +1002,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const vendors = await vendorsOfOrder(order);
     let target;
     if (!isAdmin) {
-      if (!vendors.includes(actorId)) return { error: 'order_not_owned_by_vendor', status: 403 };
+      // A vendor (or their staff) acts only on orders they can see: a line that names them (S2). Lines
+      // without a vendorId are resolved through product ownership for FitFlex admins only. An order with
+      // no line of theirs looks absent, as on GET /vendor/orders/:id.
+      if (!ownLines(order, actorId).length) return { error: 'order_not_found', status: 404 };
       const vendor = await users.findByIdAsync(actorId);
       if (vendor?.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 403 };
       target = actorId;
@@ -1009,7 +1036,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (current.paymentStatus && current.paymentStatus !== 'paid') return { error: 'order_not_paid', status: 409 };
       const all = fulfilmentsOf(current, vendors);
       const mine = all.find(f => f.vendorId === target);
-      if (!mine) return { error: 'order_not_owned_by_vendor', status: 403 };
+      if (!mine) return isAdmin ? { error: 'order_not_owned_by_vendor', status: 403 } : { error: 'order_not_found', status: 404 };
       const decision = decideTransition({ from: mine.status, to: status, deliveryMethod: current.deliveryMethod });
       if (!decision.ok) {
         return { error: decision.error === 'status_is_final' ? 'order_status_final' : 'invalid_transition', status: 409, from: canonicalStatus(mine.status), to: status, allowed: decision.allowed };
@@ -1268,5 +1295,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
+  return { canSeeCost, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
 }

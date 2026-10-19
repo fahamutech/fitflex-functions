@@ -65,6 +65,8 @@ test('shortRef: the last 6 characters of the id, uppercase (Q-8)', () => {
 test('eatDate: the EAT calendar day (UTC+3)', () => {
   assert.equal(eatDate('2026-10-19T20:59:59.999Z'), '2026-10-19');
   assert.equal(eatDate('2026-10-19T21:00:00.000Z'), '2026-10-20');
+  assert.equal(eatDate(null), null);
+  assert.equal(eatDate('not a date'), null);
 });
 
 const deliveredOrder = (deliveredAtIso, extra = {}) => ({
@@ -102,6 +104,36 @@ test('contact window: 7 EAT days after the EAT day of delivery, through 23:59:59
   const again = deliveredOrder('2026-10-12T20:59:00.000Z');
   again.fulfilments[0].timeline.push({ status: 'delivered', at: '2026-10-15T10:00:00.000Z' });
   assert.equal(contactWindow(again, 'v1').until, '2026-10-22T23:59:59+03:00');
+});
+
+test('contact window (security review of #200): the delivery time comes from delivered/fulfilled timeline entries only, never updatedAt; unknown → closed', () => {
+  const now = new Date('2026-10-19T09:00:00.000Z');
+  // An older order (no fulfilments) delivered long ago, touched yesterday by settlement: closed.
+  const old = {
+    id: 'ord_old', status: 'fulfilled', paymentStatus: 'paid', deliveryMethod: 'home_delivery', deliveryAddress: 'Old street',
+    items: [{ productId: 'p1', vendorId: 'v1', qty: 1, priceTzs: 1000 }],
+    timeline: [{ status: 'pending', at: '2026-08-01T08:00:00.000Z' }, { status: 'fulfilled', at: '2026-08-02T08:00:00.000Z' }],
+    createdAt: '2026-08-01T08:00:00.000Z', updatedAt: '2026-10-18T12:00:00.000Z', settlementStatus: 'settled',
+  };
+  assert.deepEqual(contactWindow(old, 'v1', now), { open: false, until: '2026-08-09T23:59:59+03:00' });
+  const view = vendorOrderView(old, 'v1', { buyer: { phone: '+255700000001' }, contactOn: true, now });
+  assert.equal('deliveryAddress' in view, false);
+  assert.equal('phone' in view.buyer, false);
+  // No delivered entry anywhere (only a recent updatedAt): closed, no end date.
+  const noEntry = { ...old, timeline: [{ status: 'pending', at: '2026-08-01T08:00:00.000Z' }] };
+  assert.deepEqual(contactWindow(noEntry, 'v1', now), { open: false, until: null });
+  const noEntryView = vendorOrderView(noEntry, 'v1', { buyer: { phone: '+255700000001' }, contactOn: true, now });
+  assert.equal('deliveryAddress' in noEntryView, false);
+  assert.equal('phone' in noEntryView.buyer, false);
+  // A fulfilment that is delivered but has no delivered entry and a fresh updatedAt: closed.
+  const bare = { ...old, timeline: [], fulfilments: [{ vendorId: 'v1', status: 'delivered', timeline: [{ status: 'pending', at: '2026-08-01T08:00:00.000Z' }], updatedAt: '2026-10-18T12:00:00.000Z' }] };
+  assert.deepEqual(contactWindow(bare, 'v1', now), { open: false, until: null });
+  // Another vendor's delivered entry on the order timeline does not count for v1.
+  const otherVendors = { ...noEntry, timeline: [{ status: 'delivered', at: '2026-10-18T08:00:00.000Z', vendorId: 'v2' }] };
+  assert.equal(contactWindow(otherVendors, 'v1', now).open, false);
+  // This vendor's (or an untagged) recent delivered entry on the order timeline: open.
+  const recent = { ...noEntry, timeline: [{ status: 'delivered', at: '2026-10-18T08:00:00.000Z', vendorId: 'v1' }] };
+  assert.deepEqual(contactWindow(recent, 'v1', now), { open: true, until: '2026-10-25T23:59:59+03:00' });
 });
 
 test('vendorOrderView: allowlist only — own lines (never lines without a vendorId), no buyer id/role/email/payment reference/internals', () => {
@@ -423,8 +455,17 @@ test('POST /vendor/orders/:id/status: the vendor gets the allowlisted order back
   const shared = await hit('POST', `/vendor/orders/${w.shared}/status`, vendorClaims(w.a), { status: 'accepted' });
   assert.deepEqual(shared.body.items.map(i => i.productId), [w.pa]);
   assert.equal(JSON.stringify(shared.body).includes('MPESA-REF-SECRET'), false);
-  // Another vendor's order: refused as before.
-  assert.equal((await hit('POST', `/vendor/orders/${w.onlyB}/status`, vendorClaims(w.a), { status: 'accepted' })).status, 403);
+  // Another vendor's order looks absent (404), to the vendor and to their staff; nothing moves.
+  assert.deepEqual(await hit('POST', `/vendor/orders/${w.onlyB}/status`, vendorClaims(w.a), { status: 'accepted' }), { status: 404, body: { error: 'order_not_found' } });
+  assert.deepEqual(await hit('POST', `/vendor/orders/${w.onlyB}/status`, staffClaims(clerk, w.a), { status: 'accepted' }), { status: 404, body: { error: 'order_not_found' } });
+  assert.deepEqual(await hit('POST', `/vendor/orders/${uid('ord')}/status`, vendorClaims(w.a), { status: 'accepted' }), { status: 404, body: { error: 'order_not_found' } });
+  assert.equal((await db('ShopOrder').where({ id: w.onlyB }).first()).fulfilments[0].status, 'pending');
+  // The shared order's legacy line (no vendorId) does not let A reach B's part, and a vendor cannot act on an order whose only line has no vendorId.
+  const legacyOnly = uid('ord');
+  made.orders.push(legacyOnly);
+  await db('ShopOrder').insert({ id: legacyOnly, buyerId: w.buyer, items: JSON.stringify([{ productId: w.pa, name: 'Old', qty: 1, priceTzs: 10_000 }]), totalTzs: 10_000, status: 'pending', paymentStatus: 'paid', deliveryMethod: 'home_delivery', timeline: JSON.stringify([{ status: 'pending' }]), stockState: 'reserved' });
+  assert.deepEqual(await hit('POST', `/vendor/orders/${legacyOnly}/status`, vendorClaims(w.a), { status: 'accepted' }), { status: 404, body: { error: 'order_not_found' } });
+  assert.deepEqual(await hit('GET', `/vendor/orders/${legacyOnly}`, vendorClaims(w.a)), { status: 404, body: { error: 'order_not_found' } });
   // FitFlex admin (scope shop): the stored order, as before.
   const admin = await hit('POST', `/vendor/orders/${w.onlyB}/status`, { sub: uid('adm'), userType: 'admin' }, { status: 'accepted' });
   assert.equal(admin.status, 200, JSON.stringify(admin.body));
@@ -440,6 +481,66 @@ test('a vendor cancelling their (single-vendor) order gets the allowlisted order
   assert.ok(refunds.some(r => r.orderId === w.pickup), 'the refund is still raised');
   assert.equal(out.refund?.orderId, w.pickup, 'the server\'s own callers still get the refund; the route sends only `order`');
   assert.equal(JSON.stringify(out.order).includes(w.buyer), false);
+});
+
+test('older delivered order touched recently (settlement): no address or phone over HTTP (security review of #200)', async () => {
+  const w = await world();
+  await withEnv(CONTACT_ON, async () => {
+    await deliveredAgo(w.shared, w.a, 30);
+    await db('ShopOrder').where({ id: w.shared }).update({ updatedAt: new Date(), settlementStatus: 'settled' });
+    const view = (await hit('GET', `/vendor/orders/${w.shared}`, vendorClaims(w.a))).body;
+    assert.deepEqual(Object.keys(view.buyer).sort(), ['customerId', 'displayName']);
+    assert.equal('deliveryAddress' in view, false);
+  });
+});
+
+test('GET /vendor/orders paging: no params → the whole array (older apps); limit/cursor → { orders, nextCursor }, newest first, no gaps or repeats; bad params → 400', async () => {
+  const vendor = await user('vendor');
+  const buyer = await user('member', { phone: `+2557${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}` });
+  const pid = await product(vendor);
+  const ids = [];
+  for (let i = 0; i < 5; i++) ids.push(await paidOrder(buyer, [{ productId: pid, qty: 1 }]));
+  // Two orders at the same instant: the id breaks the tie.
+  await db('ShopOrder').whereIn('id', [ids[3], ids[4]]).update({ createdAt: new Date('2026-10-19T10:00:00.000Z') });
+  const expected = (await db('ShopOrder').whereIn('id', ids).orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id', order: 'desc' }]).select('id')).map(r => r.id);
+
+  const all = await hit('GET', '/vendor/orders', vendorClaims(vendor));
+  assert.ok(Array.isArray(all.body));
+  assert.deepEqual(all.body.map(o => o.id), expected);
+
+  const seen = [];
+  let cursor = null;
+  let pages = 0;
+  do {
+    const url = `/vendor/orders?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const page = await hit('GET', url, vendorClaims(vendor));
+    assert.equal(page.status, 200, JSON.stringify(page.body));
+    assert.deepEqual(Object.keys(page.body).sort(), ['nextCursor', 'orders']);
+    assert.ok(page.body.orders.length <= 2);
+    for (const o of page.body.orders) assertAllowlisted(o, { money: true });
+    seen.push(...page.body.orders.map(o => o.id));
+    cursor = page.body.nextCursor;
+    pages++;
+  } while (cursor && pages < 10);
+  assert.equal(pages, 3);
+  assert.deepEqual(seen, expected);
+
+  const first = await hit('GET', '/vendor/orders?cursor=', vendorClaims(vendor));
+  assert.deepEqual([first.body.orders.length, first.body.nextCursor], [5, null], 'cursor alone → default limit 50');
+  const capped = await hit('GET', '/vendor/orders?limit=5000', vendorClaims(vendor));
+  assert.equal(capped.status, 200);
+  assert.equal(capped.body.orders.length, 5);
+  for (const bad of ['0', '-1', '2.5', 'abc']) {
+    assert.deepEqual(await hit('GET', `/vendor/orders?limit=${bad}`, vendorClaims(vendor)), { status: 400, body: { error: 'invalid_limit' } }, bad);
+  }
+  assert.deepEqual(await hit('GET', '/vendor/orders?cursor=not-a-cursor', vendorClaims(vendor)), { status: 400, body: { error: 'invalid_cursor' } });
+  // Another vendor's pages never hold this vendor's orders.
+  const other = await user('vendor');
+  assert.deepEqual((await hit('GET', '/vendor/orders?limit=10', vendorClaims(other))).body, { orders: [], nextCursor: null });
+  // Staff without money rights: paged orders without commission.
+  const clerk = await staffOf(vendor, ['orders']);
+  const clerkPage = await hit('GET', '/vendor/orders?limit=1', staffClaims(clerk, vendor));
+  assertAllowlisted(clerkPage.body.orders[0], { money: false });
 });
 
 // ── GET /vendor/me ───────────────────────────────────────────────────────────

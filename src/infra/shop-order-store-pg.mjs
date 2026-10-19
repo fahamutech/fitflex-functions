@@ -310,12 +310,15 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
    * query on the items GIN index (jsonb containment), not a whole-table load. Lines without a
    * vendorId (older rows) never match.
    */
-  async function ordersForVendor(vendorId) {
+  async function ordersForVendor(vendorId, { limit = null, after = null } = {}) {
     if (!vendorId) return [];
-    const rows = await db('ShopOrder')
+    const query = db('ShopOrder')
       .whereRaw('"items" @> ?::jsonb', [JSON.stringify([{ vendorId: String(vendorId) }])])
       .orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id', order: 'desc' }]);
-    return rows.map(out);
+    // Keyset: strictly after the cursor's (createdAt, id) in that order.
+    if (after) query.whereRaw('("createdAt", "id") < (?::timestamptz, ?)', [after.createdAt, after.id]);
+    if (limit) query.limit(limit);
+    return (await query).map(out);
   }
 
   return { placeOrder, findReplay: ({ buyerId, key, fingerprint }) => replay(buyerId, key, fingerprint), cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor };

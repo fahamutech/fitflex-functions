@@ -13,6 +13,7 @@ export const CONTACT_DAYS_AFTER_DELIVERY = 7;
 
 /** The EAT calendar day ("YYYY-MM-DD") an instant falls on. */
 export function eatDate(instant) {
+  if (instant === null || instant === undefined || instant === '') return null;
   const t = +new Date(instant);
   return Number.isFinite(t) ? new Date(t + EAT_OFFSET_MS).toISOString().slice(0, 10) : null;
 }
@@ -29,20 +30,26 @@ export const shortRef = id => String(id || '').slice(-6).toUpperCase();
 /** This vendor's own lines: only lines that name this vendor (lines without a vendorId are never shown). */
 export const ownLines = (order, vendorId) => (order?.items || []).filter(item => item && item.vendorId != null && item.vendorId === vendorId);
 
-/** The own fulfilment's delivered instant (latest delivered entry of its timeline), or null. */
-function deliveredAt(own, order) {
-  const timeline = Array.isArray(own?.timeline) && own.timeline.length ? own.timeline : [];
-  const hit = [...timeline].reverse().find(entry => canonicalStatus(entry?.status) === 'delivered' && entry.at);
-  if (hit) return hit.at;
-  // An older order without a delivered entry: the fulfilment's (else the order's) last change.
-  return own?.updatedAt || order?.updatedAt || order?.createdAt || null;
+const latestDelivered = entries => [...entries].reverse().find(entry => canonicalStatus(entry?.status) === 'delivered' && entry.at)?.at || null;
+
+/**
+ * When this vendor's part was delivered: the latest delivered (or legacy fulfilled) entry of their
+ * fulfilment's timeline, else of the order's timeline (entries with no vendorId or this vendor's).
+ * Never a last-change time (updatedAt): settlement or any other write must not reopen the window.
+ * null = unknown → the window is closed.
+ */
+function deliveredAt(own, order, vendorId) {
+  const fromOwn = latestDelivered(Array.isArray(own?.timeline) ? own.timeline : []);
+  if (fromOwn) return fromOwn;
+  const orderEntries = (Array.isArray(order?.timeline) ? order.timeline : []).filter(entry => entry && (entry.vendorId == null || entry.vendorId === vendorId));
+  return latestDelivered(orderEntries);
 }
 
 /**
  * O-3 contact window for this vendor's part of the order.
  *  - own part open (not delivered, not cancelled) and the order paid → open, no end date yet (until null);
  *  - own part delivered and the order paid → open through the end of the 7th EAT day after the
- *    EAT day of delivery: until = that day at 23:59:59 EAT (inclusive);
+ *    EAT day of delivery: until = that day at 23:59:59 EAT (inclusive); delivery time unknown → closed;
  *  - otherwise (unpaid, refund pending/refunded, cancelled) → closed.
  * → { open: boolean, until: string|null }  (until = ISO with +03:00 offset)
  */
@@ -52,7 +59,7 @@ export function contactWindow(order, vendorId, now = new Date()) {
   const status = canonicalStatus(own?.status || order.status);
   if (status === 'cancelled') return { open: false, until: null };
   if (status !== 'delivered') return { open: true, until: null };
-  const day = eatDate(deliveredAt(own, order));
+  const day = eatDate(deliveredAt(own, order, vendorId));
   if (!day) return { open: false, until: null };
   const lastDay = new Date(Date.parse(`${day}T00:00:00.000Z`) + CONTACT_DAYS_AFTER_DELIVERY * DAY_MS).toISOString().slice(0, 10);
   const { end } = eatDayBounds(lastDay);
@@ -117,4 +124,19 @@ export function vendorOrderView(order, vendorId, { customerId = null, buyer = nu
     }
   }
   return view;
+}
+
+// ── paging (GET /vendor/orders?limit=&cursor=) ───────────────────────────────
+export const ORDERS_PAGE_DEFAULT = 50;
+export const ORDERS_PAGE_MAX = 200;
+
+/** Opaque cursor for keyset paging over (createdAt desc, id desc). */
+export const encodeOrderCursor = order => Buffer.from(JSON.stringify({ c: order.createdAt, i: order.id })).toString('base64url');
+/** → { createdAt, id } or null when it is not a cursor this server made. */
+export function decodeOrderCursor(cursor) {
+  try {
+    const { c, i } = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
+    if (typeof i !== 'string' || !i || typeof c !== 'string' || !Number.isFinite(Date.parse(c))) return null;
+    return { createdAt: new Date(c).toISOString(), id: i };
+  } catch { return null; }
 }
