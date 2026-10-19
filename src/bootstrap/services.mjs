@@ -56,8 +56,11 @@ import { createTrainerEngagementService } from '../services/trainer-engagement-s
 import { createTermsService } from '../services/terms-service.mjs';
 import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
+import { createPgVendorSaleStore } from '../infra/vendor-sale-store-pg.mjs';
+import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
+import { createProductStatsRecomputeService } from '../services/product-stats-recompute-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -77,6 +80,7 @@ import { createExerciseAdminService } from '../services/training/exercise-admin-
 import { createSocialService } from '../services/social-service.mjs';
 import { createUsernameService } from '../services/username-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
+import { createVerifiedContacts } from '../services/friend-invitation-contacts.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createChallengeService } from '../services/challenge-service.mjs';
@@ -256,7 +260,15 @@ export const shopService = createShopService({
   onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
 });
+// Vendor tools · S3: walk-in (counter) sales — no commission, no ShopOrder, no settlement
+// (dormant behind VENDOR_TOOLS + VENDOR_WALKIN_SALES; the routes check the flag).
+export const vendorSaleService = createVendorSaleService({
+  store: createPgVendorSaleStore({ db }),
+  afterStockMoved: productIds => shopService.afterStockMoved(productIds),
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
 export const shopReconciliationService = createShopReconciliationService({ db });
+export const productStatsRecomputeService = createProductStatsRecomputeService({ db });
 export const corporateService = createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
   // Every new company gets its employer B2B organisation. b2bService is defined
@@ -561,35 +573,9 @@ export const socialService = createSocialService({
 export const friendInvitationService = createFriendInvitationService({
   users, follows, blocks, invites: friendInvitations, notifications,
   notify: (userId, message) => notificationService.notify(userId, message),
-  // The member behind a verified email / number. The number can live only in
-  // LoginIdentifier (User.phone is null when another persona of the same
-  // person holds it), so look there first, then at the member row itself.
-  findMember: async ({ type, value }) => {
-    const live = () => db('User').where({ userType: 'member' }).whereNot('accountStatus', 'suspended');
-    const viaIdentifier = await db('LoginIdentifier')
-      .where({ type, normalizedValue: value, status: 'active' }).whereNotNull('verifiedAt')
-      .first('personId');
-    if (viaIdentifier?.personId) {
-      const m = await live().where({ personId: viaIdentifier.personId }).first('id', 'displayName');
-      if (m) return m;
-    }
-    const q = live();
-    if (type === 'email') q.whereRaw('lower("email") = ?', [value]);
-    else {
-      const digits = value.replace('+', '');
-      q.whereIn('phone', [value, digits, `0${digits.slice(3)}`]);
-    }
-    return (await q.first('id', 'displayName')) ?? null;
-  },
-  // Every verified email / number of the person behind a member, for attaching invitations.
-  contactsFor: async (userId) => {
-    const u = await db('User').where({ id: userId }).first('personId');
-    if (!u?.personId) return [];
-    const rows = await db('LoginIdentifier')
-      .where({ personId: u.personId, status: 'active' }).whereIn('type', ['email', 'phone']).whereNotNull('verifiedAt')
-      .select('type', 'normalizedValue');
-    return rows.map(r => ({ type: r.type, value: r.normalizedValue }));
-  },
+  // Verified evidence only (LoginIdentifier.verifiedAt): never User.email /
+  // User.phone, which are unverified and self-editable. See friend-invitation-contacts.mjs.
+  ...createVerifiedContacts(db),
   // FitFlex sends the invitation itself only when these are switched on
   // (FRIEND_INVITE_SMS / FRIEND_INVITE_WHATSAPP = on). SMS goes through the
   // shared SMS service and its registered sender name; WhatsApp needs an

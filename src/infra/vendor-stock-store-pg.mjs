@@ -34,7 +34,10 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       orderId: r.orderId ?? null,
       // Q-4: an order-linked row points at its order. Orders have no human reference number yet; shortRef
       // is the same short reference the Orders screens show (last 6 characters of the id, uppercase).
-      document: r.orderId ? { type: 'order', id: r.orderId, number: null, shortRef: shortRef(r.orderId) } : null,
+      document: r.orderId ? { type: 'order', id: r.orderId, number: null, shortRef: shortRef(r.orderId) }
+        // S3: a walk-in sale (or its void) points at the sale and its receipt number.
+        : ['sale', 'sale_void'].includes(r.kind) && r.sourceId ? { type: 'sale', id: r.sourceId, number: r.saleNumber ?? null }
+          : null,
       createdAt: r.createdAt,
     };
   }
@@ -328,7 +331,10 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       if (to) q.where('m.createdAt', '<', to);
       return q;
     });
-    let q = scope(db('ShopStockMovement as m').leftJoin('User as u', 'u.id', 'm.actorId').select('m.*', 'u.displayName as actorName'));
+    let q = scope(db('ShopStockMovement as m').leftJoin('User as u', 'u.id', 'm.actorId')
+      // Only this vendor's sales: a ledger row of their product names a sale of theirs.
+      .leftJoin('VendorSale as s', function joinSale() { this.on('s.id', '=', 'm.sourceId').andOn('s.vendorId', '=', db.raw('?', [vendorId])); })
+      .select('m.*', 'u.displayName as actorName', 's.number as saleNumber'));
     if (from) q = q.where('m.createdAt', '>=', from);
     if (to) q = q.where('m.createdAt', '<', to);
     if (after) q = q.where(w => w.where('m.createdAt', '<', after.t).orWhere(x => x.where('m.createdAt', '=', after.t).andWhere('m.id', '<', after.id)));

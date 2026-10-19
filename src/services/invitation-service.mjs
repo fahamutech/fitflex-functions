@@ -130,6 +130,8 @@ export function createInvitationService({
     const permissions = vendorRole === 'admin'
       ? [...vendorStaffPermissions]
       : [...new Set(Array.isArray(body.permissions) ? body.permissions : [])];
+    // Vendor tools · S3: a `sales` role always carries the `sales` permission (as admin carries all).
+    if (vendorRole === 'sales' && vendorStaffPermissions.includes('sales') && !permissions.includes('sales')) permissions.push('sales');
     const invalid = permissions.filter(p => !vendorStaffPermissions.includes(p));
     if (invalid.length) return { error: 'invalid_staff_permissions', status: 400, invalid };
     return { payload: { vendorRole }, aclPermissions: permissions };
