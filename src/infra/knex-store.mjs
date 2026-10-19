@@ -127,6 +127,10 @@ const TABLE_MAP = {
   settlement_visits:           { table: 'SettlementVisit' },
   settlement_adjustments:      { table: 'SettlementAdjustment' },
   refunds:                     { table: 'Refund' },
+  // Admin-managed app photos (HERO_IMAGES_CMS). Written through src/infra/hero-image-store-pg.mjs,
+  // which uses the allowlists below; HeroSlotDraft has a composite key, so it has no collection.
+  hero_images:                 { table: 'HeroImage' },
+  hero_publications:           { table: 'HeroPublication' },
 };
 
 const TRAINER_GYM_TABLE = 'TrainerProfileGym';
@@ -177,7 +181,7 @@ const AUTO_UPDATED_AT = new Set([
   'partner_checks', 'partner_agreements',
   'pass_tier_versions', 'settlement_rules', 'gym_rate_cards',
   'settlement_runs', 'gym_settlements', 'settlement_adjustments',
-  'refunds',
+  'refunds', 'hero_images',
 ]);
 
 // Collections retained for legacy synchronous service call sites. New service
@@ -718,7 +722,17 @@ const ALLOWED_FIELDS = {
   settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt','appliedAt','rejectedBy','rejectReason','sourceMemberCycleSettlementId']),
   refunds:                     new Set(['id','memberId','kind','subscriptionId','bookingId','orderId','paymentRequestId','amountTzs','currency','reasonCode','note','status','requestedBy','requestedRole','decidedBy','decidedAt','decisionNote','paidBy','paidAt','paymentReference','paidTo','createdAt','updatedAt']),
   partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
+  hero_images:                 new Set(['id','privateProvider','privateKey','sha256','status','width','height','focalX','focalY','variants','textZoneLuminance','source','photographer','licence','licenceRef','people','consentRef','rightsConfirmedBy','rightsConfirmedAt','noFacesConfirmedBy','noFacesConfirmedAt','createdBy','createdAt','updatedAt','unpublishedInPublication']),
+  hero_slot_drafts:            new Set(['slotId','imageId','position','updatedBy','updatedAt']),
+  hero_publications:           new Set(['id','slots','publishedBy','publishedAt','note','rolledBackFrom']),
 };
+
+/** Column allowlists for the app-photo tables (used by hero-image-store-pg.mjs). */
+export const HERO_ALLOWED_FIELDS = Object.freeze({
+  hero_images: ALLOWED_FIELDS.hero_images,
+  hero_slot_drafts: ALLOWED_FIELDS.hero_slot_drafts,
+  hero_publications: ALLOWED_FIELDS.hero_publications,
+});
 
 // jsonb columns that may hold array-shaped (or otherwise non-object) JSON —
 // node-postgres serializes plain JS arrays as Postgres ARRAY literals rather
@@ -770,6 +784,8 @@ const JSON_FIELDS = {
   promotion_campaigns: ['geoScope'],
   promotions: ['geoScope', 'audience', 'categories'],
   b2b_benefits: ['eligibility', 'providerRules'],
+  hero_images: ['variants', 'textZoneLuminance'],
+  hero_publications: ['slots'],
 };
 
 // Collections whose effectiveFrom / effectiveTo are EAT calendar days stored
@@ -803,7 +819,7 @@ function prepareForKnex(name, data, isUpdate = false) {
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
     'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'termsAcceptedAt', 'statusChangedAt', 'voidedAt',
     'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt', 'enrolledAt', 'removedAt',
-    'heldAt', 'rejectedAt', 'payableAt', 'startsAt', 'endsAt', 'pausedAt', 'activatedAt', 'submittedAt', 'changeRequestedAt'];
+    'heldAt', 'rejectedAt', 'payableAt', 'publishedAt', 'rightsConfirmedAt', 'noFacesConfirmedAt', 'startsAt', 'endsAt', 'pausedAt', 'activatedAt', 'submittedAt', 'changeRequestedAt'];
   for (const f of DATE_FIELDS) {
     if (CALENDAR_DATE_COLLECTIONS.has(name) && CALENDAR_DATE_FIELDS.has(f)) continue;
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {

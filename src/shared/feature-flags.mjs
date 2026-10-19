@@ -183,6 +183,16 @@ export function vendorBuyerContactOn() {
 }
 
 /**
+ * Admin-managed app photos (plan docs/plans/photo-hero-sections-footer-admin-plan.md, slice 4).
+ * Off unless HERO_IMAGES_CMS is set: every /admin/hero-images and /admin/hero-slots route answers
+ * 404 feature_disabled (before sign-in is checked), and the public GET /app/hero-images answers
+ * { version: 0, slots: {} }, which tells the apps to drop saved photos and use the bundled ones.
+ */
+export function heroImagesCmsOn() {
+  return on('HERO_IMAGES_CMS');
+}
+
+/**
  * S3: walk-in (counter) sales recorded by the vendor — POS, sales history, void. Off → the
  * /vendor/sales endpoints answer 404 feature_disabled.
  */

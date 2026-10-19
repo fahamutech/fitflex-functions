@@ -19,6 +19,8 @@ export const PORTAL_ACL_SCOPES = [
   'settlements_prepare', 'settlements_approve', 'settlements_pay',
   // Moderation & Promotion: seeing and deciding moderation are separate, as are running promotions and approving them.
   'moderation', 'moderation_decide', 'promotions', 'promotions_approve', 'campaigns', 'promotion_analytics',
+  // Admin-managed app photos: upload, edit and publish (one admin publishes alone, owner decision D-4).
+  'brand_media',
 ];
 
 // Who may change portal access (security fix 2026-10-19):

@@ -131,7 +131,9 @@ import { createShopHomeService } from '../services/shop-home-service.mjs';
 import { signServedToken } from '../auth/promotion-token.mjs';
 import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
 import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
-import { createZebraDocumentStore } from '../infra/storage-client.mjs';
+import { createZebraDocumentStore, createZebraPublicStore } from '../infra/storage-client.mjs';
+import { createHeroImageService } from '../services/hero-image-service.mjs';
+import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
 import {
   moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
@@ -907,4 +909,12 @@ export const shopHomeService = createShopHomeService({
     .orderBy('createdAt', 'desc').limit(SHOP_HOME_MAX_ORDERS)
     .select('id', 'buyerRole', 'items', 'status', 'paymentStatus', 'createdAt'),
   signToken: signServedToken,
+});
+
+// Admin-managed app photos (HERO_IMAGES_CMS, plan slice 4). Uploads stay private on Zebra (the
+// KYC document store); public files are made only on publish.
+export const heroImageService = createHeroImageService({
+  store: createPgHeroImageStore({ db }),
+  documentStore: createZebraDocumentStore(),
+  publicStore: createZebraPublicStore(),
 });
