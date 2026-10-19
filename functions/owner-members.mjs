@@ -2,6 +2,7 @@
 import '../src/bootstrap/init.mjs';
 import { randomUUID } from 'node:crypto';
 import { requireAuth } from '../src/auth/jwt.mjs';
+import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireGymAccess, effectiveOperator } from '../src/auth/org-authz.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 import { memberManagement, resolveRequestUser, auditLog } from '../src/bootstrap/services.mjs';
@@ -11,7 +12,7 @@ const created = new Date().toISOString();
 export const ownerCreateMember = {
   created, method: 'post', path: '/owner/members',
   description: 'Owner: register a new member under their gym with payment info and create a gym-linked subscription.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'POST /owner/members')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'POST /owner/members')]),
   onRequest: async (req, res) => {
     // With invitations on, a gym no longer creates accounts or sets credentials
     // for people: it invites them, and the plan starts when they accept.
@@ -45,7 +46,7 @@ export const ownerListMembers = {
     members: [{ id: 'usr_x', publicId: 'FM001', displayName: 'Amina Said', memberType: 'direct', tier: 'premium', status: 'active' }],
     stats: { totalMembers: 128, activeToday: 24, expiringSoon: 8 },
   },
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -56,7 +57,7 @@ export const ownerListMembers = {
 export const ownerMemberDetail = {
   created, method: 'get', path: '/owner/members/:memberId',
   description: 'Owner: member details — profile, check-in summary, membership plan, recent check-ins and payment history.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members/:memberId')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members/:memberId')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -70,7 +71,7 @@ export const ownerMemberCheckInSummary = {
   created, method: 'get', path: '/owner/members/:memberId/checkin-summary',
   description: 'Owner: member check-in summary (visits/lastCheckin/streak) for a period preset (week|month|year) or a custom from/to range.',
   responseSample: { period: 'month', from: '2026-06-01T00:00:00.000Z', to: null, visits: 12, lastCheckinAt: '2026-06-27T08:30:00.000Z', streakDays: 4 },
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members/:memberId/checkin-summary')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members/:memberId/checkin-summary')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -87,7 +88,7 @@ export const ownerMemberCheckins = {
   created, method: 'get', path: '/owner/members/:memberId/checkins',
   description: 'Owner: paginated member check-in history with optional from/to date range and search. Query: cursor (offset), limit, from, to, search.',
   responseSample: { items: [{ id: 'ci_1', timestamp: '2026-06-27T08:30:00.000Z', gymId: 'gym_1', gymName: 'Vik100 Gym' }], total: 42, nextCursor: 20 },
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members/:memberId/checkins')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members/:memberId/checkins')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -101,7 +102,7 @@ export const ownerMemberPayments = {
   created, method: 'get', path: '/owner/members/:memberId/payments',
   description: 'Owner: paginated member payment history with optional from/to date range and search. Query: cursor (offset), limit, from, to, search.',
   responseSample: { items: [{ id: 'pay_1', amountTzs: 180000, tier: 'premium', status: 'approved', requestedAt: '2026-01-12T00:00:00.000Z' }], total: 6, nextCursor: 20 },
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members/:memberId/payments')],
+  onGuard: routeGuard('get', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'GET /owner/members/:memberId/payments')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -114,7 +115,7 @@ export const ownerMemberPayments = {
 export const ownerCheckInMember = {
   created, method: 'post', path: '/owner/members/:memberId/checkin',
   description: 'Owner: manually check a member in at one of their gyms.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('checkins', 'POST /owner/members/:memberId/checkin')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('checkins', 'POST /owner/members/:memberId/checkin')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -127,7 +128,7 @@ export const ownerCheckInMember = {
 export const ownerRenewMember = {
   created, method: 'post', path: '/owner/members/:memberId/renew',
   description: 'Owner: renew/extend a member subscription and record the payment.',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'POST /owner/members/:memberId/renew')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'POST /owner/members/:memberId/renew')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -140,7 +141,7 @@ export const ownerRenewMember = {
 export const ownerUpdateMember = {
   created, method: 'patch', path: '/owner/members/:memberId',
   description: 'Owner: update a direct member profile fields (displayName, phone, tier).',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'PATCH /owner/members/:memberId')],
+  onGuard: routeGuard('patch', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'PATCH /owner/members/:memberId')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
@@ -153,7 +154,7 @@ export const ownerUpdateMember = {
 export const ownerSuspendMember = {
   created, method: 'post', path: '/owner/members/:memberId/suspend',
   description: 'Owner: suspend or reactivate a member (body { suspend: true|false }).',
-  onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'POST /owner/members/:memberId/suspend')],
+  onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAccess('members', 'POST /owner/members/:memberId/suspend')]),
   onRequest: async (req, res) => {
     const owner = effectiveOperator(req, await resolveRequestUser(req));
     if (!owner) return res.status(404).json({ error: 'user_not_found' });
