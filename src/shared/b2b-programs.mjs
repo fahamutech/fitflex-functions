@@ -7,6 +7,7 @@
 //
 // Money is whole TZS, shares are basis points, days are EAT "YYYY-MM-DD"
 // with inclusive ends (same as challenges and settlement configuration).
+import { formatTsh } from './money-display.mjs';
 import { addDays, weekStart } from './member-progress.mjs';
 import { GYM_TIERS } from './constants.mjs';
 
@@ -207,7 +208,7 @@ export function calculateResponsibility({ benefit, priceTzs }) {
 
 /** One-line description of a benefit's funding, for lists. */
 export function describeFunding(b) {
-  const tzs = n => `TZS ${Number(n).toLocaleString('en-US')}`;
+  const tzs = formatTsh;
   switch (b.fundingType) {
     case 'full': return 'Sponsor pays 100%';
     case 'sponsor_fixed': return `Sponsor pays up to ${tzs(b.sponsorAmountTzs)}; beneficiary pays the rest`;

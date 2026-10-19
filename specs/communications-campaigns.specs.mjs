@@ -101,7 +101,7 @@ test('message content: variables must exist and sender values must be filled in'
 test('rendering fills each member\'s own values and tidies empty ones', () => {
   const values = messageValues({ amountTzs: 50000 }, { displayName: 'Asha', plan: 'monthly', expiresOn: '2026-10-05' }, { gymName: 'Kilele' });
   assert.equal(renderText('Hi {{member_name}}, {{plan_name}} at {{gym_name}} ends {{expiry_date}}: {{amount}}', values),
-    'Hi Asha, Monthly at Kilele ends 05/10/2026: TZS 50,000');
+    'Hi Asha, Monthly at Kilele ends 05/10/2026: TSh 50,000');
   assert.equal(renderText('Hi {{member_name}} , welcome!', messageValues({}, { displayName: '' }, {})), 'Hi, welcome!');
 });
 
