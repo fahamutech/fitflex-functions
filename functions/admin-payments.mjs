@@ -14,7 +14,7 @@ export const adminPaymentRequests = {
 
 export const adminDecidePaymentRequest = {
   created, method: 'post', path: '/admin/payment-requests/:id/decision',
-  description: 'Admin: approve or reject a pilot payment request. Approval activates the subscription (or pays the shop order). Optional amountTzs is the amount actually received: a mismatch is refused (409 amount_mismatch). A reference confirms one shop order only (409 reference_already_used). A request already decided is 409 already_decided. With MONEY_SECOND_APPROVER on, approving needs a verification first (409 verification_required) by a different admin (403 cannot_approve_own_verification), with the verified reference (409 reference_differs_from_verification); rejecting stays single-admin.',
+  description: 'Admin: approve or reject a pilot payment request. Approval activates the subscription (or pays the shop order). Optional amountTzs is the amount actually received: a mismatch is refused (409 amount_mismatch). A reference confirms one shop order only (409 reference_already_used). A request already decided is 409 already_decided. With MONEY_SECOND_APPROVER on, approving needs a verification first (409 verification_required) by a different admin (403 cannot_approve_own_verification), with the verified reference (409 reference_differs_from_verification), and a reference already on another approved payment is refused (409 reference_already_used); rejecting stays single-admin.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => {
     const { decision, reference, note, amountTzs } = req.body || {};
@@ -29,7 +29,7 @@ export const adminDecidePaymentRequest = {
 
 export const adminUpdatePaymentRequest = {
   created, method: 'post', path: '/admin/payment-requests/:id',
-  description: 'Admin: update pilot payment request status, reference, and note. With MONEY_SECOND_APPROVER on: a decided payment only takes note edits (status or reference change is 409 change_requires_confirmation: use /change-request); pending → approved follows the verify rule (409 verification_required, 403 cannot_approve_own_verification); a verified payment keeps its reference (409 reference_differs_from_verification).',
+  description: 'Admin: update pilot payment request status, reference, and note. With MONEY_SECOND_APPROVER on: a decided payment only takes note edits (status or reference change is 409 change_requires_confirmation: use /change-request); pending → approved follows the verify rule (409 verification_required, 403 cannot_approve_own_verification); a verified payment keeps its reference (409 reference_differs_from_verification); a mobile-money payment keeps its provider reference (409 reference_locked_provider); approving with a reference already on another approved payment is 409 reference_already_used.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => {
     const { status, reference, note, amountTzs } = req.body || {};
@@ -54,7 +54,7 @@ const reply = (res, result) => {
 
 export const adminVerifyPaymentRequest = {
   created, method: 'post', path: '/admin/payment-requests/:id/verify',
-  description: 'Admin (MONEY_SECOND_APPROVER on): record that a pending manual payment arrived. Body { reference?, note? }. A different admin then approves it (403 cannot_approve_own_verification). 409 already_decided | already_verified | payment_changed; 404 not_found | feature_disabled. → paymentRequest',
+  description: 'Admin (MONEY_SECOND_APPROVER on): record that a pending manual payment arrived. Body { reference?, note? }. A different admin then approves it (403 cannot_approve_own_verification). A mobile-money payment keeps its provider reference (409 reference_locked_provider). 409 already_decided | already_verified | payment_changed; 404 not_found | feature_disabled. → paymentRequest',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => {
     const { reference, note } = req.body || {};
@@ -74,9 +74,9 @@ export const adminRequestPaymentChange = {
 
 export const adminConfirmPaymentChange = {
   created, method: 'post', path: '/admin/payment-requests/:id/change-request/confirm',
-  description: 'Admin (MONEY_SECOND_APPROVER on): confirm a requested change; it takes effect now (plan activated or reversed as with a decision). 403 cannot_confirm_own_request; 409 change_not_requested | payment_already_confirmed | payment_changed | reference_already_used | upgrade errors; 404 not_found | feature_disabled. → paymentRequest',
+  description: 'Admin (MONEY_SECOND_APPROVER on): confirm a requested change; it takes effect now (plan activated or reversed as with a decision). Body { amountTzs? } (required when a shop-order payment becomes approved: 400 amount_required; 409 amount_mismatch). 403 cannot_confirm_own_request; 409 change_not_requested | payment_already_confirmed | payment_changed | reference_already_used | upgrade errors; 404 not_found | feature_disabled. → paymentRequest',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
-  onRequest: async (req, res) => reply(res, await adminPaymentService.confirmChange({ id: req.params.id, actorId: req.user.sub }))
+  onRequest: async (req, res) => reply(res, await adminPaymentService.confirmChange({ id: req.params.id, amountTzs: req.body?.amountTzs ?? null, actorId: req.user.sub }))
 };
 
 export const adminCancelPaymentChange = {

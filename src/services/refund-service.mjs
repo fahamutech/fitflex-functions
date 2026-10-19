@@ -202,6 +202,12 @@ export function createRefundService({
     if (prior.status !== 'approved') return fail('refund_not_approved', 409, { refundStatus: prior.status });
     // Flag on: whoever approved a refund does not also record it paid. Policy approvals ('policy') are not people.
     if (secondApprover() && prior.decidedBy && prior.decidedBy === actorId) return fail('cannot_pay_own_approval', 403);
+    // A refund approved by policy but started by a staff member (admin cancelling a paid session or
+    // order, re-raising a missing shop refund) had one person behind it: someone else records it paid.
+    // Refunds a member, vendor or trainer started stay payable by any admin.
+    if (secondApprover() && prior.decidedBy === 'policy' && prior.requestedBy && prior.requestedBy === actorId) {
+      return fail('cannot_pay_own_request', 403);
+    }
     const reference = text(body.paymentReference, 120);
     if (!reference) return fail('payment_reference_required');
     const at = nowIso();
@@ -240,7 +246,10 @@ export function createRefundService({
    */
   function secondApproval(r) {
     const approveNotBy = r.status === 'requested' && r.requestedRole === 'admin' ? (r.requestedBy || null) : null;
-    const payNotBy = r.status === 'approved' && r.decidedBy && r.decidedBy !== 'policy' ? r.decidedBy : null;
+    // Who may not record it paid: the approver, or (policy approval) the staff member who started it.
+    const payNotBy = r.status !== 'approved' ? null
+      : r.decidedBy && r.decidedBy !== 'policy' ? r.decidedBy
+        : (r.requestedRole === 'admin' ? (r.requestedBy || null) : null);
     const approvalStage = r.status === 'requested' ? 'awaiting_approval' : r.status === 'approved' ? 'awaiting_payment' : null;
     return { secondApproverRequired: true, approvalStage, approveNotBy, payNotBy };
   }

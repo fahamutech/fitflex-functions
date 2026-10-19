@@ -79,7 +79,7 @@ export const adminDecideRefund = {
 
 export const adminMarkRefundPaid = {
   created, method: 'post', path: '/admin/refunds/:id/paid',
-  description: 'Admin: record that an approved refund was sent. Body { paymentReference, paidTo? }. With MONEY_SECOND_APPROVER on, the admin who approved it cannot mark it paid (403 cannot_pay_own_approval).',
+  description: 'Admin: record that an approved refund was sent. Body { paymentReference, paidTo? }. With MONEY_SECOND_APPROVER on, the admin who approved it cannot mark it paid (403 cannot_pay_own_approval), and a refund approved by policy that an admin started (cancelling a paid session or order, re-raising a shop refund) cannot be marked paid by that admin (403 cannot_pay_own_request).',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => send(res, await refundService.markPaid({ id: req.params.id, body: req.body || {}, actorId: req.user.sub })),
 };

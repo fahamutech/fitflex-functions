@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
 import { createRefundService } from '../src/services/refund-service.mjs';
+import { createMobileMoneyService } from '../src/services/mobile-money-service.mjs';
 import { moneySecondApproverOn } from '../src/shared/feature-flags.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { ensureInit } from '../functions/index.mjs';
@@ -43,11 +44,11 @@ const pendingSub = () => ({
   startedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * DAY).toISOString(),
 });
 
-function payments(flag, rows = {}) {
+function payments(flag, rows = {}, { others = [], beforeOrderPayment } = {}) {
   const paymentRequests = memStore([{
     id: 'pr1', memberId: 'm1', subscriptionId: 'sub1', tier: 'basic', amountTzs: 60_000, status: 'pending',
     provider: 'admin_approved', reference: 'MPESA1', requestedAt: new Date().toISOString(), ...rows,
-  }]);
+  }, ...others]);
   const subscriptions = memStore([pendingSub()]);
   const auditLog = memStore();
   const activated = [];
@@ -57,6 +58,7 @@ function payments(flag, rows = {}) {
     onSubscriptionActivated: async s => { activated.push(s.id); },
     onSubscriptionPaymentReversed: async s => { reversed.push(s.status); },
     secondApprover: () => flag,
+    ...(beforeOrderPayment ? { beforeOrderPayment } : {}),
   });
   return { svc, paymentRequests, subscriptions, auditLog, activated, reversed, row: () => paymentRequests.rows[0] };
 }
@@ -253,6 +255,93 @@ test('payments, flag on: a change request can be withdrawn; pending and order pa
   assert.equal((await order.svc.requestChange({ id: 'pr1', status: 'rejected', reason: 'x', actorId: 'a1' })).error, 'payment_already_confirmed');
 });
 
+// ── Security review fixes (functions#184) ───────────────────────────────────
+
+test('fix 2, flag on: a mobile-money payment keeps its provider reference (verify and update)', async () => {
+  const p = payments(true, { provider: 'tunzaa', reference: 'TXN_REAL' });
+  assert.deepEqual(await p.svc.verify({ id: 'pr1', reference: 'TXN_OTHER', actorId: 'a1' }), { error: 'reference_locked_provider', status: 409 });
+  assert.deepEqual(await p.svc.update({ id: 'pr1', reference: 'TXN_OTHER', actorId: 'a1' }), { error: 'reference_locked_provider', status: 409 });
+  assert.equal(p.row().reference, 'TXN_REAL');
+  // verifying without touching the reference is fine
+  assert.equal((await p.svc.verify({ id: 'pr1', actorId: 'a1' })).paymentRequest.reference, 'TXN_REAL');
+  // flag off: unchanged (staff can still edit it)
+  const off = payments(false, { provider: 'tunzaa', reference: 'TXN_REAL' });
+  assert.equal((await off.svc.update({ id: 'pr1', reference: 'TXN_OTHER', actorId: 'a1' })).paymentRequest.reference, 'TXN_OTHER');
+});
+
+test('fix 2, flag on: a reference already on another approved payment is refused on every approval path', async () => {
+  const other = { id: 'pr0', memberId: 'm2', subscriptionId: 'subX', amountTzs: 60_000, status: 'approved', provider: 'admin_approved', reference: 'DUP' };
+  // manual decide
+  const a = payments(true, { reference: 'DUP', verifiedBy: 'a1' }, { others: [other] });
+  assert.deepEqual(await a.svc.decide({ id: 'pr1', decision: 'approve', actorId: 'a2' }), { error: 'reference_already_used', status: 409 });
+  // update → approved
+  assert.deepEqual(await a.svc.update({ id: 'pr1', status: 'approved', actorId: 'a2' }), { error: 'reference_already_used', status: 409 });
+  // automated (provider) decide
+  const b = payments(true, { provider: 'tunzaa', reference: 'DUP' }, { others: [other] });
+  assert.deepEqual(await b.svc.decide({ id: 'pr1', decision: 'approve', reference: 'DUP', actorId: 'tunzaa', automated: true }), { error: 'reference_already_used', status: 409 });
+  // confirmChange → approved
+  const c = payments(true, { status: 'rejected', decidedBy: 'a2', reference: 'DUP' }, { others: [other] });
+  await c.svc.requestChange({ id: 'pr1', status: 'approved', reason: 'money found', actorId: 'a1' });
+  assert.deepEqual(await c.svc.confirmChange({ id: 'pr1', actorId: 'a2' }), { error: 'reference_already_used', status: 409 });
+  assert.deepEqual(a.activated.concat(b.activated, c.activated), []);
+  // ADMIN_ placeholders are not transaction ids
+  const d = payments(true, { reference: 'ADMIN_x', verifiedBy: 'a1' }, { others: [{ ...other, reference: 'ADMIN_x' }] });
+  assert.equal((await d.svc.decide({ id: 'pr1', decision: 'approve', actorId: 'a2' })).paymentRequest.status, 'approved');
+  // flag off: unchanged
+  const off = payments(false, { reference: 'DUP' }, { others: [other] });
+  assert.equal((await off.svc.decide({ id: 'pr1', decision: 'approve', actorId: 'a1' })).paymentRequest.status, 'approved');
+});
+
+test('fix 2, flag on: mobile money cannot settle a request on a transaction another payment already used', async () => {
+  const paymentRequests = memStore([
+    { id: 'pay_old', memberId: 'm2', subscriptionId: 'subX', amountTzs: 60_000, status: 'approved', provider: 'tunzaa', reference: 'TXN_9' },
+    { id: 'pay_1', memberId: 'm1', subscriptionId: 'sub1', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'tunzaa', reference: 'TXN_9', requestedAt: new Date().toISOString() },
+  ]);
+  const subscriptions = memStore([pendingSub()]);
+  const auditLog = memStore();
+  const admin = createAdminPaymentService({ paymentRequests, subscriptions, users: memStore(), auditLog, secondApprover: () => true });
+  const client = {
+    environment: 'sandbox',
+    async initiatePayment() { throw new Error('not used'); },
+    async checkStatus(id) { return { status: 'COMPLETED', amountTzs: 60_000, transactionId: id, remark: null }; },
+  };
+  const mm = createMobileMoneyService({ paymentRequests, subscriptions, adminPaymentService: admin, auditLog, client, enabled: () => true });
+  const out = await mm.refresh({ memberId: 'm1', paymentRequestId: 'pay_1' });
+  assert.equal(out.state, 'held');
+  assert.equal(out.reason, 'reference_already_used');
+  assert.equal(paymentRequests.rows[1].status, 'pending');
+  assert.equal(subscriptions.rows[0].status, 'payment_pending');
+});
+
+test('fix 5, flag on: an update from a stale read cannot overwrite a payment verified meanwhile', async () => {
+  const p = payments(true);
+  const stale = { ...p.row() };                 // read before anyone verified it
+  await p.svc.verify({ id: 'pr1', actorId: 'a1' });
+  const realFind = p.paymentRequests.findAsync;
+  p.paymentRequests.findAsync = async () => stale;   // the next read is the stale one
+  const out = await p.svc.update({ id: 'pr1', reference: 'SWAPPED', actorId: 'a2' });
+  p.paymentRequests.findAsync = realFind;
+  assert.deepEqual(out, { error: 'payment_changed', status: 409 });
+  assert.equal(p.row().reference, 'MPESA1');
+  assert.equal(p.row().verifiedBy, 'a1');
+});
+
+test('fix 7, flag on: confirming a shop-order payment as approved needs the amount received, checked like a decision', async () => {
+  const checked = [];
+  const beforeOrderPayment = async (_req, { amountTzs }) => {
+    checked.push(amountTzs);
+    return amountTzs != null && Number(amountTzs) !== 60_000 ? { error: 'amount_mismatch', status: 409, expectedTzs: 60_000 } : null;
+  };
+  const order = { status: 'rejected', decidedBy: 'a2', orderId: 'ord1', subscriptionId: null };
+  const p = payments(true, order, { beforeOrderPayment });
+  await p.svc.requestChange({ id: 'pr1', status: 'approved', reason: 'money found', actorId: 'a1' });
+  assert.deepEqual(await p.svc.confirmChange({ id: 'pr1', actorId: 'a2' }), { error: 'amount_required', status: 400 });
+  assert.deepEqual(await p.svc.confirmChange({ id: 'pr1', actorId: 'a2', amountTzs: 50_000 }), { error: 'amount_mismatch', status: 409, expectedTzs: 60_000 });
+  const ok = await p.svc.confirmChange({ id: 'pr1', actorId: 'a2', amountTzs: 60_000 });
+  assert.equal(ok.paymentRequest.status, 'approved');
+  assert.deepEqual(checked, [50_000, 60_000]);
+});
+
 // ── Refunds ──────────────────────────────────────────────────────────────────
 
 function refundsFixture(flag) {
@@ -328,6 +417,31 @@ test('refunds, flag on: member-raised — one admin approves, a different admin 
   const [row] = (await g.svc.adminList()).refunds;
   assert.equal(row.payNotBy, null);
   assert.equal((await g.svc.markPaid({ id: pol.refund.id, body: { paymentReference: 'R' }, actorId: 'a1' })).refund.status, 'paid');
+});
+
+test('fix 1, flag on: a policy refund an admin started cannot be marked paid by that admin', async () => {
+  const f = refundsFixture(true);
+  // e.g. an admin cancelling a paid trainer session (trainer-booking-service adminUpdateStatus)
+  const { refund } = await f.svc.raise({ memberId: 'm1', kind: 'trainer_booking', sourceId: 'bk1', amountTzs: 20_000,
+    reasonCode: 'cancelled_by_fitflex', requestedBy: 'a1', requestedRole: 'admin', approved: true });
+  assert.equal(refund.decidedBy, 'policy');
+  const [row] = (await f.svc.adminList()).refunds;
+  assert.equal(row.payNotBy, 'a1');
+  assert.deepEqual(await f.svc.markPaid({ id: refund.id, body: { paymentReference: 'R' }, actorId: 'a1' }), { error: 'cannot_pay_own_request', status: 403 });
+  assert.equal((await f.svc.markPaid({ id: refund.id, body: { paymentReference: 'R' }, actorId: 'a2' })).refund.status, 'paid');
+
+  // a member's in-time cancellation (policy) stays payable by any admin
+  const g = refundsFixture(true);
+  const mem = await g.svc.raise({ memberId: 'm1', kind: 'trainer_booking', sourceId: 'bk2', amountTzs: 20_000,
+    reasonCode: 'member_cancelled', requestedBy: 'm1', requestedRole: 'member', approved: true });
+  assert.equal((await g.svc.adminList()).refunds[0].payNotBy, null);
+  assert.equal((await g.svc.markPaid({ id: mem.refund.id, body: { paymentReference: 'R' }, actorId: 'a1' })).refund.status, 'paid');
+
+  // flag off: unchanged
+  const h = refundsFixture(false);
+  const own = await h.svc.raise({ memberId: 'm1', kind: 'shop_order', sourceId: 'o1', amountTzs: 5_000,
+    reasonCode: 'payment_error', requestedBy: 'a1', requestedRole: 'admin', approved: true });
+  assert.equal((await h.svc.markPaid({ id: own.refund.id, body: { paymentReference: 'R' }, actorId: 'a1' })).refund.status, 'paid');
 });
 
 // ── Database + endpoints (isolated CI DB) ────────────────────────────────────

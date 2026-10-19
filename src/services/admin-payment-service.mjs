@@ -9,6 +9,8 @@ import { updateIf } from '../shared/conditional-update.mjs';
 import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
 
 const DECIDED = ['approved', 'rejected', 'cancelled'];
+/** A payment FitFlex staff confirm by hand. Any other provider's reference is the provider's transaction. */
+const MANUAL_PROVIDER = 'admin_approved';
 const STATUSES = ['pending', ...DECIDED];
 const CHANGE_CLEARED = { changeRequestedStatus: null, changeRequestedBy: null, changeRequestedAt: null, changeRequestReason: null };
 const text = (v, max = 500) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
@@ -151,6 +153,20 @@ export function createAdminPaymentService({
     return same.some(p => p.id !== request.id && p.orderId && p.status === 'approved');
   }
 
+  /**
+   * Flag on: a reference (mobile-money or bank transaction id) confirms one payment only, whatever
+   * it pays for. App-level check (no index: live data may already hold duplicates).
+   */
+  async function referenceUsedElsewhere(request, reference) {
+    if (!secondApprover() || !reference || String(reference).startsWith('ADMIN_')) return false;
+    const same = await paymentRequests.filterByColumnAsync('reference', reference);
+    return same.some(p => p.id !== request.id && p.status === 'approved');
+  }
+
+  /** Flag on: a provider's payment keeps the provider's transaction as its reference. */
+  const referenceLocked = (request, reference) => secondApprover()
+    && (request.provider || MANUAL_PROVIDER) !== MANUAL_PROVIDER && referenceChanged(request, reference);
+
   /** Checks that must hold before a shop order's payment is confirmed. */
   async function checkConfirmation(request, { reference, amountTzs }) {
     if (!request.orderId) return null;
@@ -198,6 +214,7 @@ export function createAdminPaymentService({
       if (!can.ok) return { error: can.error, status: 409 };
       const problem = await checkConfirmation(request, { reference: reference || request.reference, amountTzs });
       if (problem) return problem;
+      if (await referenceUsedElsewhere(request, reference || request.reference)) return { error: 'reference_already_used', status: 409 };
     }
 
     const now = new Date().toISOString();
@@ -242,6 +259,7 @@ export function createAdminPaymentService({
       if (request.status === 'pending' && request.verifiedBy && referenceChanged(request, reference)) {
         return { error: 'reference_differs_from_verification', status: 409 };
       }
+      if (referenceLocked(request, reference)) return { error: 'reference_locked_provider', status: 409 };
     }
     // A confirmed shop-order payment is not edited back: the order is paid, maybe fulfilled.
     // Getting the money back is the refund workflow.
@@ -253,6 +271,7 @@ export function createAdminPaymentService({
       if (!can.ok) return { error: can.error, status: 409 };
       const problem = await checkConfirmation(request, { reference: reference ?? request.reference, amountTzs });
       if (problem) return problem;
+      if (await referenceUsedElsewhere(request, reference ?? request.reference)) return { error: 'reference_already_used', status: 409 };
     }
     const now = new Date().toISOString();
     const twoAdmins = secondApprover();
@@ -264,7 +283,8 @@ export function createAdminPaymentService({
       note: upgradeOf(request) ? request.note : (note ?? request.note ?? null),
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
       decidedBy: nextStatus === 'pending' ? null : (keepDecider ? request.decidedBy : actorId)
-    }, (twoAdmins && nextStatus === 'approved' && request.status === 'pending') ? { verifiedBy: request.verifiedBy } : {});
+    // Flag on: only while the verification read still stands (a stale read cannot overwrite a verified payment).
+    }, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {});
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'payment_changed', status: 409 };
     await applyPaymentStatusToSubscription(request, nextStatus, reference ?? request.reference);
@@ -287,6 +307,7 @@ export function createAdminPaymentService({
     if (!request) return { error: 'not_found', status: 404 };
     if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
     if (request.verifiedBy) return { error: 'already_verified', status: 409, verifiedBy: request.verifiedBy };
+    if (referenceLocked(request, text(reference, 120))) return { error: 'reference_locked_provider', status: 409 };
     const at = new Date().toISOString();
     const updated = await updateIf(paymentRequests, request.id, { status: 'pending', verifiedBy: null }, {
       verifiedBy: actorId, verifiedAt: at,
@@ -335,7 +356,7 @@ export function createAdminPaymentService({
   }
 
   /** Flag on: a different admin confirms a requested change; it takes effect now. */
-  async function confirmChange({ id, actorId }) {
+  async function confirmChange({ id, actorId, amountTzs = null }) {
     if (!secondApprover()) return off;
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
@@ -347,8 +368,11 @@ export function createAdminPaymentService({
     if (nextStatus === 'approved') {
       const can = await upgradeApprovable(subscriptions, request);
       if (!can.ok) return { error: can.error, status: 409 };
-      const problem = await checkConfirmation(request, { reference: request.reference, amountTzs: null });
+      // A shop order approved this way is checked against the amount received, as at a decision.
+      if (request.orderId && amountTzs == null) return { error: 'amount_required', status: 400 };
+      const problem = await checkConfirmation(request, { reference: request.reference, amountTzs });
       if (problem) return problem;
+      if (await referenceUsedElsewhere(request, request.reference)) return { error: 'reference_already_used', status: 409 };
     }
     const at = new Date().toISOString();
     const patch = {
