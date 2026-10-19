@@ -120,8 +120,20 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { profile };
   }
 
+  /**
+   * Of these vendor ids, those an admin has suspended on their account (User.accountStatus).
+   * Separate from moderation suspension (publicGate): either one takes a vendor off sale.
+   */
+  async function accountSuspendedVendorIds(vendorIds) {
+    const ids = [...new Set((vendorIds || []).filter(Boolean))];
+    if (!ids.length) return new Set();
+    const rows = users.filterByColumnInAsync ? await users.filterByColumnInAsync('id', ids) : await users.filterAsync(user => ids.includes(user.id));
+    return new Set(rows.filter(user => user.accountStatus === 'suspended').map(user => user.id));
+  }
+
   async function getVendorStore(vendorId) {
     if (!(await partnerGate.isOperational(vendorId))) return null;
+    if ((await accountSuspendedVendorIds([vendorId])).has(vendorId)) return null;
     if (await publicGate.isBlocked('vendor', vendorId)) return null;
     const profile = publicProfile(await getVendorProfile(vendorId));
     if (!profile) return null;
@@ -138,11 +150,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       return product.status === 'active' && !['pending', 'rejected'].includes(product.approvalStatus) && product.visibility !== 'hidden' && product.homepageVisible !== false;
     });
     if (vendorId) rows = rows.filter(product => product.vendorId === vendorId);
-    // Buyers only see products from vendors who may sell (new vendors: once verified).
+    // Buyers only see products from vendors who may sell (new vendors: once verified), and never
+    // from a vendor suspended in moderation or on their account.
     if (!includeArchived) {
-      const ok = await partnerGate.operationalUserIds(rows.map(product => product.vendorId));
-      const [blockedProducts, blockedVendors] = await Promise.all([publicGate.blocked('product'), publicGate.blocked('vendor')]);
-      rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId));
+      const vendorIds = rows.map(product => product.vendorId);
+      const [ok, blockedProducts, blockedVendors, suspendedVendors] = await Promise.all([
+        partnerGate.operationalUserIds(vendorIds), publicGate.blocked('product'), publicGate.blocked('vendor'), accountSuspendedVendorIds(vendorIds),
+      ]);
+      rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId));
     }
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
@@ -410,6 +425,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (!(await partnerGate.isOperational(product.vendorId))) return { error: 'product_not_found', status: 404, productId };
       // Hidden or suspended in moderation: it is not sold, even to someone with an old link.
       if (await publicGate.isBlocked('product', product.id) || await publicGate.isBlocked('vendor', product.vendorId)) return { error: 'product_not_found', status: 404, productId };
+      // The vendor's account is suspended by an admin: refused with its own code so the app can say why.
+      // Orders placed before the suspension are left as they are (see updateOrderStatus).
+      if ((await accountSuspendedVendorIds([product.vendorId])).has(product.vendorId)) return { error: 'vendor_unavailable', status: 409, productId };
       const variants = Array.isArray(product.variants) ? product.variants.filter(v => v && typeof v === 'object') : [];
       const chosen = variant ? variants.find(v => v.name === variant) : null;
       if (variant && !chosen) return { error: 'variant_not_found', status: 404, productId };
@@ -684,6 +702,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   /**
    * Move one vendor's fulfilment of an order to `status`.
    * - A vendor (or their staff) moves only their own fulfilment, and never while suspended.
+   *   Suspending a vendor's account does not cancel their open orders: an unpaid one keeps its
+   *   reservation until it is paid or expires, a paid one waits; an admin may move or cancel either
+   *   (cancelling a paid one raises the refund as usual).
    * - An admin (FitFlex) names the vendor when the order has several; every move follows the same matrix.
    * - The move is decided under the order's row lock, so two requests cannot both win.
    */
