@@ -5,9 +5,11 @@
 // - Editing a slot changes its draft only. Publish freezes every slot into a snapshot and is the
 //   only step that makes public files (WebP 2×/1×/wide + AVIF), for photos used for the first time:
 //   all are built in memory first and uploaded only if every one succeeded (Zebra cannot delete).
-//   Unpublish takes one photo out of the live snapshot at once (a new snapshot; drafts untouched).
+//   Unpublish takes one photo out of the live snapshot at once (a new snapshot; drafts untouched)
+//   and stops rollback to any older snapshot holding it.
 //   The apps read the latest snapshot (GET /app/hero-images). Rollback re-publishes an earlier one
-//   and puts the drafts back to it.
+//   and puts the drafts back to it. Setting a draft, publishing and rolling back all refuse photos
+//   whose `people` value is not allowed now (older rows): people_not_allowed.
 // - Any admin with the brand_media scope publishes alone (owner decision D-4); every write adds an
 //   AuditLog row with before and after (never the private storage key).
 // - The public manifest carries only what the apps draw with: no licence, uploader, drafts or keys.
@@ -26,6 +28,10 @@ export const HERO_AUDIT_PREVIEWS = true;
 export const HERO_MANIFEST_CACHE_MS = 60_000;
 export const HERO_PUBLICATIONS_LISTED = 20;
 export const HERO_PREVIEW_WIDTHS = Object.freeze([240, 480, 960]);
+// Each public file upload made under the publish lock gets this long; a hung Zebra call must not
+// hold the lock (and every other hero write) indefinitely. On timeout the publish aborts like a
+// failed upload (no snapshot); the file may still land later and is logged as an orphan.
+export const HERO_PUBLIC_UPLOAD_TIMEOUT_MS = 30_000;
 const TEXT_MAX = 200;
 const NOTE_MAX = 500;
 
@@ -46,6 +52,9 @@ const newImageId = () => `hero_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
 const peopleError = v => (!HERO_PEOPLE.includes(v) ? fail('invalid_people', 400, { allowed: ALLOWED_PEOPLE })
   : !ALLOWED_PEOPLE.includes(v) ? fail('people_not_allowed', 400, { allowed: ALLOWED_PEOPLE }) : null);
 const confirmed = v => v === true || v === 'true';
+/** Photos (older rows, from before only "none" was accepted) whose people value is not allowed now. */
+const peopleNotAllowed = images => images.filter(i => i && !ALLOWED_PEOPLE.includes(i.people)).map(i => i.id);
+const failPeople = imageIds => fail('people_not_allowed', 400, { imageIds, allowed: ALLOWED_PEOPLE });
 
 function parseFocal(focal) {
   if (!focal || typeof focal !== 'object') return null;
@@ -74,6 +83,9 @@ export function adminImageView(img, names = {}, { live = null } = {}) {
     brightWarning: { vertical: isBright(lum?.vertical), horizontal: isBright(lum?.horizontal) },
     source: img.source, photographer: img.photographer, licence: img.licence, licenceRef: img.licenceRef ?? null,
     people: img.people, consentRef: img.consentRef ?? null,
+    // Publication id of the latest unpublish of this photo: snapshots older than it that hold the
+    // photo can no longer be rolled back to (409 image_unpublished). null = never unpublished.
+    unpublishedInPublication: img.unpublishedInPublication ?? null,
     rightsConfirmedBy: img.rightsConfirmedBy, rightsConfirmedByName: names[img.rightsConfirmedBy] ?? null, rightsConfirmedAt: img.rightsConfirmedAt,
     noFacesConfirmedBy: img.noFacesConfirmedBy, noFacesConfirmedByName: names[img.noFacesConfirmedBy] ?? null, noFacesConfirmedAt: img.noFacesConfirmedAt,
     createdBy: img.createdBy, createdByName: names[img.createdBy] ?? null, createdAt: img.createdAt, updatedAt: img.updatedAt,
@@ -126,6 +138,7 @@ const draftsBySlot = rows => {
 export function createHeroImageService({
   store, documentStore = null, publicStore = null,
   now = () => new Date(), nowMs = () => Date.now(), logger = console,
+  uploadTimeoutMs = HERO_PUBLIC_UPLOAD_TIMEOUT_MS,
 }) {
   let cache = null; // { at, value }
   const invalidate = () => { cache = null; };
@@ -341,6 +354,8 @@ export function createHeroImageService({
       if (missing.length) return fail('image_not_found', 400, { imageIds: missing });
       const retired = ids.filter(i => found.get(i).status === 'retired');
       if (retired.length) return fail('image_retired', 400, { imageIds: retired });
+      const badPeople = peopleNotAllowed(ids.map(i => found.get(i)));
+      if (badPeople.length) return failPeople(badPeople);
       const before = draftsBySlot(await q.drafts())[slot.id] || [];
       await q.replaceSlot(slot.id, ids, actorId, now());
       await audit(q, 'hero_slot_updated', actorId, `slot:${slot.id}`, { imageIds: before }, { imageIds: ids });
@@ -381,6 +396,8 @@ export function createHeroImageService({
    *  3. If an upload fails part-way, photos whose four files all uploaded keep them (hasPublicFiles,
    *     status unchanged) so a retry does not upload them again; a photo's partial files are logged
    *     and audited as orphans. No snapshot is written.
+   *     Each upload has HERO_PUBLIC_UPLOAD_TIMEOUT_MS; a timeout counts as a failed upload.
+   *  4. Photos whose people value is no longer allowed (older rows) are refused: people_not_allowed.
    * Uploading under the lock holds hero writes for a few seconds; admin traffic is tiny.
    */
   async function publish(body = {}, actorId) {
@@ -390,7 +407,8 @@ export function createHeroImageService({
     const drafted = [...new Set((await store.drafts()).map(r => r.imageId))];
     const prebuilt = new Map();
     for (const img of await store.getImages(drafted)) {
-      if (img.variants || img.status === 'retired') continue;
+      // Retired or not-allowed photos are refused under the lock; no point building them.
+      if (img.variants || img.status === 'retired' || !ALLOWED_PEOPLE.includes(img.people)) continue;
       if (!publicStore) return fail('storage_service_unavailable', 503);
       const r = await buildInMemory(img);
       if (r.error) return r;
@@ -410,6 +428,27 @@ export function createHeroImageService({
     return { publication: publicationView(result, await store.displayNames([result.publishedBy])) };
   }
 
+  /**
+   * publicStore.put with a time limit (HERO_PUBLIC_UPLOAD_TIMEOUT_MS). Zebra calls cannot be
+   * cancelled, so a timed-out upload may still finish later: its URL is then logged as an orphan.
+   */
+  function putWithTimeout(file, filename, imageId) {
+    let timer;
+    let timedOut = false;
+    const put = Promise.resolve().then(() => publicStore.put(file.buffer, filename, file.mimeType));
+    put.then(
+      r => { if (timedOut) logger.error?.(`[hero-images] ORPHANED public file for ${imageId} (landed after timeout): ${r?.url}`); },
+      () => {},
+    );
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(Object.assign(new Error(`public upload timed out after ${uploadTimeoutMs} ms`), { code: 'hero_upload_timeout', filename }));
+      }, uploadTimeoutMs);
+    });
+    return Promise.race([put, timeout]).finally(() => clearTimeout(timer));
+  }
+
   function publishLocked(prebuilt, uploaded, note, actorId) {
     return store.transaction(async (q) => {
       const drafts = draftsBySlot(await q.drafts());
@@ -417,6 +456,8 @@ export function createHeroImageService({
       const byId = new Map((await q.getImages(ids)).map(i => [i.id, i]));
       const retired = ids.filter(i => !byId.get(i) || byId.get(i).status === 'retired');
       if (retired.length) return fail('drafts_changed', 409, { imageIds: retired });
+      const badPeople = peopleNotAllowed(ids.map(i => byId.get(i)));
+      if (badPeople.length) return failPeople(badPeople);
       const toUpload = ids.filter(i => !byId.get(i).variants);
       const notBuilt = toUpload.filter(i => !prebuilt.has(i));
       if (notBuilt.length) return fail('drafts_changed', 409, { imageIds: notBuilt });
@@ -427,17 +468,20 @@ export function createHeroImageService({
         const urls = {};
         try {
           for (const [name, suffix] of VARIANT_FILES) {
-            urls[name] = (await publicStore.put(built[name].buffer, `${imageId}-${suffix}.${built[name].ext}`, built[name].mimeType)).url;
+            urls[name] = (await putWithTimeout(built[name], `${imageId}-${suffix}.${built[name].ext}`, imageId)).url;
             uploaded.push(urls[name]);
           }
         } catch (err) {
+          const timedOut = err?.code === 'hero_upload_timeout';
           logger.error?.('[hero-images] public upload failed:', err?.message);
           const partial = Object.values(urls);
-          if (partial.length) {
-            logger.error?.(`[hero-images] ORPHANED public files for ${imageId}: ${partial.join(' ')}`);
-            await audit(q, 'hero_image_orphaned_public_files', actorId, imageId, null, { imageId, urls: partial });
+          if (partial.length || timedOut) {
+            logger.error?.(`[hero-images] ORPHANED public files for ${imageId}: ${partial.join(' ')}${timedOut ? ` (+ ${err.filename} timed out; it may still land)` : ''}`);
+            await audit(q, 'hero_image_orphaned_public_files', actorId, imageId, null, {
+              imageId, urls: partial, ...(timedOut ? { timedOutFile: err.filename, timeoutMs: uploadTimeoutMs } : {}),
+            });
           }
-          uploadFailed = imageId;
+          uploadFailed = { imageId, timedOut };
           break;
         }
         const current = byId.get(imageId);
@@ -446,7 +490,9 @@ export function createHeroImageService({
         byId.set(imageId, saved);
       }
       // Commit what was uploaded (so a retry reuses it) but write no snapshot.
-      if (uploadFailed) return fail('storage_service_unavailable', 503, { imageId: uploadFailed });
+      if (uploadFailed) {
+        return fail('storage_service_unavailable', 503, { imageId: uploadFailed.imageId, ...(uploadFailed.timedOut ? { reason: 'upload_timeout' } : {}) });
+      }
 
       for (const i of ids) {
         const img = byId.get(i);
@@ -470,6 +516,9 @@ export function createHeroImageService({
    * Fast takedown: publish the CURRENT live snapshot without one photo. Drafts are not touched
    * (the photo may still be in a draft; the next publish would bring it back unless it is removed).
    * Clears this server's manifest memory; other servers follow within HERO_MANIFEST_CACHE_MS.
+   * The photo's unpublishedInPublication is set to the new snapshot's id: rollback refuses any
+   * older snapshot holding the photo (409 image_unpublished), so a takedown cannot be undone by
+   * accident. Publishing it again (draft + publish) makes a newer snapshot that can be restored.
    */
   async function unpublish(id, body = {}, actorId) {
     const note = optionalText(body.note, NOTE_MAX);
@@ -487,6 +536,8 @@ export function createHeroImageService({
         if (kept.length) slots[s.id] = kept;
       }
       const saved = await q.insertPublication({ slots, publishedBy: actorId, publishedAt: now(), note: note.value });
+      // Remember the takedown so rollback cannot bring the photo back from an older snapshot.
+      await q.updateImage(id, { unpublishedInPublication: saved.id, updatedAt: now() });
       await audit(q, 'hero_image_unpublished', actorId, id,
         { publicationId: live.id, slots: slotImageIds(live.slots) },
         { publicationId: saved.id, slots: slotImageIds(saved.slots), imageId: id, removedFromSlots, note: saved.note });
@@ -494,7 +545,13 @@ export function createHeroImageService({
     });
     if (result.error) return result;
     invalidate();
-    return { publication: publicationView(result.saved, await store.displayNames([result.saved.publishedBy])), removedFromSlots: result.removedFromSlots };
+    return {
+      publication: publicationView(result.saved, await store.displayNames([result.saved.publishedBy])),
+      removedFromSlots: result.removedFromSlots,
+      // Hint for the portal: snapshots older than this one that hold the photo cannot be rolled
+      // back to any more (409 image_unpublished). Publishing the photo again makes newer ones.
+      rollbackBlockedBefore: result.saved.id,
+    };
   }
 
   async function rollback(body = {}, actorId) {
@@ -511,6 +568,10 @@ export function createHeroImageService({
       const byId = new Map((await q.getImages(ids)).map(i => [i.id, i]));
       const unusable = ids.filter(i => !byId.get(i) || byId.get(i).status === 'retired');
       if (unusable.length) return fail('image_retired', 409, { imageIds: unusable });
+      const takenDown = ids.filter(i => (byId.get(i).unpublishedInPublication ?? 0) > target.id);
+      if (takenDown.length) return fail('image_unpublished', 409, { imageIds: takenDown });
+      const badPeople = peopleNotAllowed(ids.map(i => byId.get(i)));
+      if (badPeople.length) return failPeople(badPeople);
 
       const slots = {};
       for (const s of HERO_SLOTS) if (target.slots?.[s.id]?.length) slots[s.id] = target.slots[s.id];

@@ -24,7 +24,7 @@ import { heroImageService } from '../src/bootstrap/services.mjs';
 import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
 import { HERO_AREAS, HERO_SLOTS, heroSlot, textZoneFor } from '../src/shared/hero-slots.mjs';
 import { HERO_LIMITS, HERO_VARIANT_BUDGETS, prepareHeroUpload, buildHeroVariants, measureTextZones, isBright } from '../src/infra/hero-image-file.mjs';
-import { createHeroImageService, HERO_MANIFEST_CACHE_MS, ALLOWED_PEOPLE, HERO_AUDIT_PREVIEWS } from '../src/services/hero-image-service.mjs';
+import { createHeroImageService, HERO_MANIFEST_CACHE_MS, ALLOWED_PEOPLE, HERO_AUDIT_PREVIEWS, HERO_PUBLIC_UPLOAD_TIMEOUT_MS } from '../src/services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../src/infra/hero-image-store-pg.mjs';
 import { PORTAL_ACL_SCOPES } from '../src/services/portal-user-service.mjs';
 import { etagMatches, HERO_MANIFEST_CACHE_CONTROL } from '../functions/hero-images.mjs';
@@ -81,6 +81,7 @@ const UPLOAD_FIELDS = {
 
 async function clearHeroTables() {
   await db('HeroPublication').update({ rolledBackFrom: null });
+  await db('HeroImage').update({ unpublishedInPublication: null });
   await db('HeroPublication').del();
   await db('HeroSlotDraft').del();
   await db('HeroImage').del();
@@ -802,6 +803,7 @@ test('unpublish: takes one photo out of the live snapshot at once; drafts untouc
   assert.deepEqual(un.body.removedFromSlots, ['footerPool', 'gyms']);
   assert.deepEqual(un.body.publication.slots, { footerPool: [b.id] });
   assert.equal(un.body.publication.note, 'takedown');
+  assert.equal(un.body.rollbackBlockedBefore, un.body.publication.id);
   assert.equal(zebraFiles.size, zebraBefore, 'no new files');
   // This server answers the new snapshot straight away (its 60 s memory was cleared).
   const m = await hit('GET', '/app/hero-images');
@@ -859,4 +861,124 @@ test('preview audit can be switched off with one constant', () => {
   const src = fs.readFileSync(path.join(root, 'src/services/hero-image-service.mjs'), 'utf8');
   assert.match(src, /export const HERO_AUDIT_PREVIEWS = true;/);
   assert.match(src, /if \(HERO_AUDIT_PREVIEWS\)/);
+});
+
+// ── Re-review fixes (PR #216) ───────────────────────────────────────────────
+
+test('people: older photos with a people value no longer allowed are refused by setSlot, publish and rollback', async () => {
+  await clearHeroTables();
+  const stores = memoryStores();
+  const svc = service(stores);
+  const a = (await uploadVia(svc, await photo(1600, 1000))).image;
+  const b = (await uploadVia(svc, await photo(1600, 1000))).image;
+  await svc.setSlot('gyms', { imageIds: [a.id] }, 'x');
+  const p1 = (await svc.publish({}, 'x')).publication;
+  assert.equal(stores.pub.size, 4);
+
+  // Rows from before the owner's 2026-10-19 rule (or a widened then narrowed list).
+  await db('HeroImage').whereIn('id', [a.id, b.id]).update({ people: 'hands_backs' });
+  assert.deepEqual(await svc.setSlot('shop', { imageIds: [b.id] }, 'x'),
+    { error: 'people_not_allowed', status: 400, imageIds: [b.id], allowed: ['none'] });
+  assert.deepEqual((await svc.setSlot('footerPool', { imageIds: [a.id, b.id] }, 'x')).imageIds, [a.id, b.id]);
+  assert.deepEqual((await svc.adminState()).slots.find(s => s.id === 'shop').draft, [], 'refused setSlot changed nothing');
+
+  // Publish: a still drafted in gyms; b drafted directly (as an older draft would be). Refused under
+  // the lock, nothing uploaded, no snapshot.
+  await db('HeroSlotDraft').insert({ slotId: 'shop', imageId: b.id, position: 0, updatedBy: 'x', updatedAt: new Date() });
+  const count = await publicationCount();
+  const r = await svc.publish({}, 'x');
+  assert.deepEqual([r.error, r.status, [...r.imageIds].sort()], ['people_not_allowed', 400, [a.id, b.id].sort()]);
+  assert.equal(stores.pub.size, 4, 'b got no public files');
+  assert.equal(await publicationCount(), count, 'no snapshot');
+
+  // Rollback to a snapshot holding a: refused, listing it.
+  await svc.setSlot('gyms', { imageIds: [] }, 'x');
+  await svc.setSlot('shop', { imageIds: [] }, 'x');
+  assert.ok((await svc.publish({}, 'x')).publication);
+  assert.deepEqual(await svc.rollback({ publicationId: p1.id }, 'x'),
+    { error: 'people_not_allowed', status: 400, imageIds: [a.id], allowed: ['none'] });
+  assert.deepEqual((await svc.manifest()).body.slots, {}, 'nothing restored');
+
+  // Re-confirmed as no people: allowed again.
+  assert.ok((await svc.update(a.id, { people: 'none', rightsConfirmed: true, noFacesConfirmed: true }, 'x')).image);
+  assert.ok((await svc.rollback({ publicationId: p1.id }, 'x')).publication);
+  assert.ok((await svc.setSlot('shop', { imageIds: [a.id] }, 'x')).slot);
+});
+
+test('rollback cannot bring back a photo unpublished after that snapshot (409 image_unpublished)', async () => {
+  await clearHeroTables();
+  const stores = memoryStores();
+  const svc = service(stores);
+  const a = (await uploadVia(svc, await photo(1600, 1000))).image;
+  const b = (await uploadVia(svc, await photo(1600, 1000))).image;
+  await svc.setSlot('gyms', { imageIds: [a.id, b.id] }, 'x');
+  const p1 = (await svc.publish({}, 'x')).publication;
+  await svc.setSlot('shop', { imageIds: [b.id] }, 'x');
+  const p1b = (await svc.publish({}, 'x')).publication;
+
+  const un = await svc.unpublish(a.id, { note: 'takedown' }, 'x');
+  assert.equal(un.rollbackBlockedBefore, un.publication.id);
+  assert.equal((await db('HeroImage').where({ id: a.id }).first()).unpublishedInPublication, String(un.publication.id));
+  assert.equal((await svc.adminState()).images.find(i => i.id === a.id).unpublishedInPublication, un.publication.id);
+  assert.equal((await svc.adminState()).images.find(i => i.id === b.id).unpublishedInPublication, null);
+
+  for (const p of [p1, p1b]) {
+    assert.deepEqual(await svc.rollback({ publicationId: p.id }, 'x'), { error: 'image_unpublished', status: 409, imageIds: [a.id] });
+  }
+  const live = await svc.manifest();
+  assert.equal(live.body.version, un.publication.id, 'still the takedown snapshot');
+  assert.deepEqual(live.body.slots.gyms.map(e => e.sourceId), [b.id]);
+  assert.deepEqual((await svc.adminState()).slots.find(s => s.id === 'gyms').draft, [a.id, b.id], 'refused rollback left the drafts alone');
+
+  // Published again on purpose (still in the gyms draft): that newer snapshot can be restored.
+  const p3 = (await svc.publish({}, 'x')).publication;
+  assert.deepEqual(p3.slots.gyms, [a.id, b.id]);
+  await svc.setSlot('gyms', { imageIds: [b.id] }, 'x');
+  await svc.publish({}, 'x');
+  assert.ok((await svc.rollback({ publicationId: p3.id }, 'x')).publication);
+  assert.equal((await svc.rollback({ publicationId: p1.id }, 'x')).error, 'image_unpublished', 'older ones stay blocked');
+  // A second takedown moves the line forward.
+  const un2 = await svc.unpublish(a.id, {}, 'x');
+  assert.equal((await svc.rollback({ publicationId: p3.id }, 'x')).error, 'image_unpublished');
+  assert.equal(un2.rollbackBlockedBefore, un2.publication.id);
+});
+
+test('publish: a hung public upload times out, releases the lock, writes no snapshot and records the orphans', async () => {
+  assert.equal(HERO_PUBLIC_UPLOAD_TIMEOUT_MS, 30_000);
+  await clearHeroTables();
+  const stores = memoryStores();
+  const a = (await uploadVia(service(stores), await photo(1600, 1000))).image;
+  await service(stores).setSlot('gyms', { imageIds: [a.id] }, 'x');
+  let puts = 0;
+  let land;
+  let hungAt = 0;
+  const hanging = {
+    async put(...args) {
+      puts += 1;
+      if (puts === 2) { hungAt = Date.now(); await new Promise((resolve) => { land = resolve; }); } // hangs until released
+      return stores.publicStore.put(...args);
+    },
+  };
+  const logged = [];
+  const svc = service({ ...stores, publicStore: hanging }, { uploadTimeoutMs: 100, logger: { error: (...x) => logged.push(x.join(' ')) } });
+  const r = await svc.publish({}, 'x');
+  assert.ok(hungAt && Date.now() - hungAt < 5_000, 'gave up on the hung upload (100 ms limit), did not wait for it');
+  assert.deepEqual([r.error, r.status, r.imageId, r.reason], ['storage_service_unavailable', 503, a.id, 'upload_timeout']);
+  assert.equal(await publicationCount(), 0, 'no snapshot');
+  assert.deepEqual([(await db('HeroImage').where({ id: a.id }).first()).variants, (await db('HeroImage').where({ id: a.id }).first()).status], [null, 'draft']);
+  const orphan = (await heroAudit()).find(x => x.action === 'hero_image_orphaned_public_files');
+  assert.equal(orphan.target, a.id);
+  assert.equal(orphan.after.urls.length, 1, 'the 2x file made before the hang');
+  assert.equal(orphan.after.timedOutFile, `${a.id}-1x.webp`);
+  assert.equal(orphan.after.timeoutMs, 100);
+
+  // The lock was released: another hero write and a clean publish go through at once.
+  assert.ok((await service(stores).setSlot('shop', { imageIds: [a.id] }, 'x')).slot);
+  const ok = await service(stores).publish({}, 'x');
+  assert.ok(ok.publication, JSON.stringify(ok));
+
+  // The hung upload finally lands: logged as an orphan.
+  land();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(logged.some(l => l.includes('landed after timeout') && l.includes(a.id)), logged.join('\n'));
 });

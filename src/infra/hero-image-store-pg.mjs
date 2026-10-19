@@ -29,6 +29,7 @@ const imageFromDb = r => (r ? {
   ...r, focalX: Number(r.focalX), focalY: Number(r.focalY),
   rightsConfirmedAt: iso(r.rightsConfirmedAt), noFacesConfirmedAt: iso(r.noFacesConfirmedAt),
   createdAt: iso(r.createdAt), updatedAt: iso(r.updatedAt),
+  unpublishedInPublication: r.unpublishedInPublication == null ? null : Number(r.unpublishedInPublication),
 } : null);
 const publicationFromDb = r => (r ? {
   id: Number(r.id), slots: r.slots || {}, publishedBy: r.publishedBy, publishedAt: iso(r.publishedAt),

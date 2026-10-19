@@ -717,7 +717,7 @@ const ALLOWED_FIELDS = {
   settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt','appliedAt','rejectedBy','rejectReason','sourceMemberCycleSettlementId']),
   refunds:                     new Set(['id','memberId','kind','subscriptionId','bookingId','orderId','paymentRequestId','amountTzs','currency','reasonCode','note','status','requestedBy','requestedRole','decidedBy','decidedAt','decisionNote','paidBy','paidAt','paymentReference','paidTo','createdAt','updatedAt']),
   partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
-  hero_images:                 new Set(['id','privateProvider','privateKey','sha256','status','width','height','focalX','focalY','variants','textZoneLuminance','source','photographer','licence','licenceRef','people','consentRef','rightsConfirmedBy','rightsConfirmedAt','noFacesConfirmedBy','noFacesConfirmedAt','createdBy','createdAt','updatedAt']),
+  hero_images:                 new Set(['id','privateProvider','privateKey','sha256','status','width','height','focalX','focalY','variants','textZoneLuminance','source','photographer','licence','licenceRef','people','consentRef','rightsConfirmedBy','rightsConfirmedAt','noFacesConfirmedBy','noFacesConfirmedAt','createdBy','createdAt','updatedAt','unpublishedInPublication']),
   hero_slot_drafts:            new Set(['slotId','imageId','position','updatedBy','updatedAt']),
   hero_publications:           new Set(['id','slots','publishedBy','publishedAt','note','rolledBackFrom']),
 };

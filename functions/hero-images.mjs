@@ -121,28 +121,28 @@ export const adminUpdateHeroImage = {
 
 export const adminUnpublishHeroImage = {
   created, method: 'post', path: '/admin/hero-images/:id/unpublish',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): fast takedown. Publishes the current live snapshot again without this photo { note? } (drafts are not touched: take it out of the drafts too, or the next publish brings it back). This server answers the new manifest at once; other servers within 60 s; apps within Cache-Control max-age 300. → 201 { publication, removedFromSlots[slotId] }. Errors: 400 invalid_note; 404 image_not_found; 409 image_not_live.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): fast takedown. Publishes the current live snapshot again without this photo { note? } (drafts are not touched: take it out of the drafts too, or the next publish brings it back). This server answers the new manifest at once; other servers within 60 s; apps within Cache-Control max-age 300. Rollback to any older snapshot holding the photo is refused from now on (409 image_unpublished); rollbackBlockedBefore is the new snapshot id. → 201 { publication, removedFromSlots[slotId], rollbackBlockedBefore }. Errors: 400 invalid_note; 404 image_not_found; 409 image_not_live.',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => send(res, await svc.unpublish(req.params.id, req.body || {}, req.user.sub), 201),
 };
 
 export const adminSetHeroSlot = {
   created, method: 'put', path: '/admin/hero-slots/:slotId',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): set a slot\'s draft photos in order { imageIds: [...] } ([] = use the bundled photo). Nothing changes in the apps until publish. → { slot: { id, draft } }. Errors: 400 unknown_slot | invalid_image_ids | duplicate_image | too_many_images | image_not_found | image_retired.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): set a slot\'s draft photos in order { imageIds: [...] } ([] = use the bundled photo). Nothing changes in the apps until publish. → { slot: { id, draft } }. Errors: 400 unknown_slot | invalid_image_ids | duplicate_image | too_many_images | image_not_found { imageIds } | image_retired { imageIds } | people_not_allowed { imageIds, allowed } (older photos whose people value is no longer accepted).',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => send(res, await svc.setSlot(req.params.slotId, req.body || {}, req.user.sub)),
 };
 
 export const adminPublishHeroSlots = {
   created, method: 'post', path: '/admin/hero-slots/publish',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): publish every slot\'s draft as a new snapshot { note? }. Photos used for the first time get their public files now (WebP 1080 ≤ 150 KB, 540 ≤ 60 KB, wide ≤ 1600, AVIF): all are built first and uploaded only if every one succeeds (Zebra cannot delete). → 201 { publication }. Errors: 400 invalid_note; 409 drafts_changed; 422 variant_over_budget { imageId }; 502 stored_file_mismatch { imageId }; 503 storage_service_unavailable { imageId? }.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): publish every slot\'s draft as a new snapshot { note? }. Photos used for the first time get their public files now (WebP 1080 ≤ 150 KB, 540 ≤ 60 KB, wide ≤ 1600, AVIF): all are built first and uploaded only if every one succeeds (Zebra cannot delete). → 201 { publication }. Each upload has 30 s; a timeout aborts like a failed upload. Errors: 400 invalid_note | people_not_allowed { imageIds, allowed }; 409 drafts_changed { imageIds }; 422 variant_over_budget { imageId }; 502 stored_file_mismatch { imageId }; 503 storage_service_unavailable { imageId?, reason?: "upload_timeout" }.',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => send(res, await svc.publish(req.body || {}, req.user.sub), 201),
 };
 
 export const adminRollbackHeroSlots = {
   created, method: 'post', path: '/admin/hero-slots/rollback',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): put an earlier snapshot back { publicationId, note? }: it is published again as a new snapshot and the drafts are set to it. → 201 { publication }. Errors: 400 invalid_publication_id | invalid_note; 404 publication_not_found; 409 already_current | image_retired.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): put an earlier snapshot back { publicationId, note? }: it is published again as a new snapshot and the drafts are set to it. → 201 { publication }. Errors: 400 invalid_publication_id | invalid_note | people_not_allowed { imageIds, allowed }; 404 publication_not_found; 409 already_current | image_retired { imageIds } | image_unpublished { imageIds } (a photo in that snapshot was unpublished after it).',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => send(res, await svc.rollback(req.body || {}, req.user.sub), 201),
 };
