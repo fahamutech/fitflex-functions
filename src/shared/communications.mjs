@@ -2,6 +2,8 @@
 // (platform) messages to members. Pure functions only; services and the
 // segment/dispatch code build on these so every path applies the same rules.
 
+import { formatTsh } from './money-display.mjs';
+
 export const SENDER_TYPES = ['gym', 'platform'];
 export const CHANNELS = ['in_app', 'push', 'whatsapp', 'sms'];
 export const CATEGORIES = ['transactional', 'marketing'];
@@ -226,7 +228,7 @@ export function contentFor(content, locale) {
   return tr ? { title: tr.title, body: tr.body, ctaLabel: tr.ctaLabel || null, locale } : main;
 }
 
-const formatTzs = (n) => `TZS ${Math.round(n).toLocaleString('en-US')}`;
+const formatTzs = (n) => formatTsh(Math.round(n));
 // Numeric day/month/year reads the same in English and Swahili.
 const formatDay = (day) => (day ? `${day.slice(8, 10)}/${day.slice(5, 7)}/${day.slice(0, 4)}` : '');
 const titleCase = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');

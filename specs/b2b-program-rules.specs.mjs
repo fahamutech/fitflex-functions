@@ -51,7 +51,7 @@ test('funding validation carries exactly the numbers each type needs', () => {
   // Stray numbers from another type are dropped, not stored.
   assert.deepEqual(readFunding({ fundingType: 'full', sponsorAmountTzs: 999 }).patch,
     { fundingType: 'full', sponsorAmountTzs: null, sponsorShareBps: null, sponsorCapTzs: null, beneficiaryAmountTzs: null });
-  assert.equal(describeFunding({ fundingType: 'sponsor_percentage', sponsorShareBps: 6000, sponsorCapTzs: 3000 }), 'Sponsor pays 60% (max TZS 3,000); beneficiary pays the rest');
+  assert.equal(describeFunding({ fundingType: 'sponsor_percentage', sponsorShareBps: 6000, sponsorCapTzs: 3000 }), 'Sponsor pays 60% (max TSh 3,000); beneficiary pays the rest');
 });
 
 // ── Usage limits ─────────────────────────────────────────────────────────────

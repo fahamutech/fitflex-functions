@@ -12,6 +12,7 @@
 //
 //   requested ──approve──▶ approved ──paid──▶ paid
 //       └──────reject────▶ rejected
+import { formatTsh } from '../shared/money-display.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -32,7 +33,7 @@ export function createRefundService({
   notify = async () => {},          // (userId, { type, title, body, data })
   onPaid = async () => {},          // (refund) → e.g. mark the order refunded
 }) {
-  const money = n => `TZS ${Number(n || 0).toLocaleString('en-US')}`;
+  const money = formatTsh;
 
   async function tell(refund, type, title, body) {
     try {
