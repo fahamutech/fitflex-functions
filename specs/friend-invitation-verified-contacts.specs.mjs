@@ -6,16 +6,21 @@
 //   - an unverified Firebase email sign-up gets no invitations for that email
 //     (inbox attach, link claim) and inviters don't find them by it;
 //   - an email / number typed onto the User row (profile edit) proves nothing;
-//   - a verified sign-in records the email as a verified LoginIdentifier even
-//     with Identity V2 linking off, and then everything works;
+//   - with Identity V2 linking off, a verified sign-in records its evidence
+//     only when IDENTITY_RECORD_FIREBASE_EVIDENCE is on (default off: nothing
+//     is recorded and Firebase-only members stay unmatched, fail-closed);
+//   - evidence is never recorded onto a row owned by another Firebase account
+//     (an email planted on someone's own row through POST /me/profile);
 //   - a legacy member with a verified LoginIdentifier (reconcile backfill)
-//     keeps working; one without it is covered at their next verified sign-in.
+//     keeps working; one without it is covered at their next verified sign-in
+//     once recording is on.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
-import { authService, friendInvitationService as fi } from '../src/bootstrap/services.mjs';
+import { authService, friendInvitationService as fi, identityLinkService } from '../src/bootstrap/services.mjs';
+import { updateMemberProfile } from '../functions/subscriptions.mjs';
 import { createVerifiedContacts } from '../src/services/friend-invitation-contacts.mjs';
 
 await ensureInit();
@@ -26,8 +31,14 @@ const mail = name => `fivc.${name}.${tag}@example.com`;
 const phoneNo = () => `+2557${String(10000000 + Math.floor(Math.random() * 89999999)).slice(0, 8)}`;
 const devToken = claims => `dev:${Buffer.from(JSON.stringify(claims)).toString('base64url')}`;
 
-// No Identity V2 flags: the default deployment.
-for (const k of ['IDENTITY_V2', 'V2_LINKING', 'V2_PERSONAS']) delete process.env[k];
+// No Identity V2 flags: the default deployment. Recording is off by default too.
+for (const k of ['IDENTITY_V2', 'V2_LINKING', 'V2_PERSONAS', 'IDENTITY_RECORD_FIREBASE_EVIDENCE']) delete process.env[k];
+
+/** Run with IDENTITY_RECORD_FIREBASE_EVIDENCE on, restoring it afterwards. */
+async function withEvidence(fn) {
+  process.env.IDENTITY_RECORD_FIREBASE_EVIDENCE = 'on';
+  try { return await fn(); } finally { delete process.env.IDENTITY_RECORD_FIREBASE_EVIDENCE; }
+}
 
 async function signIn({ name, email = null, verified = true, phone = null, uid = `fivc_${name}_${tag}` }) {
   if (!made.uids.includes(uid)) made.uids.push(uid);
@@ -105,7 +116,7 @@ test('email or number typed onto the User row (profile edit) proves nothing', as
   assert.equal(await findMember({ type: 'phone', value: victimPhone }), null);
 });
 
-test('verified sign-in (Identity V2 linking off) records the email; invitations attach, claim and lookup work', async () => {
+test('recording on: verified sign-in (linking off) records the email; invitations attach, claim and lookup work', () => withEvidence(async () => {
   const inviter = await signIn({ name: 'inviter3', email: mail('inviter3') });
   const email = mail('real3');
   const token = await shareToken(inviter.id, { email });
@@ -120,9 +131,9 @@ test('verified sign-in (Identity V2 linking off) records the email; invitations 
   const look = await fi.lookup(inviter.id, { email: email.toUpperCase() });
   assert.equal(look.result.kind, 'member');
   assert.equal(look.result.userId, real.id);
-});
+}));
 
-test('new unverified sign-up: the email waits on the row; a later verified sign-in makes it count', async () => {
+test('new unverified sign-up: the email waits on the row; a later verified sign-in makes it count', () => withEvidence(async () => {
   const inviter = await signIn({ name: 'inviter4', email: mail('inviter4') });
   const email = mail('late4');
   await shareToken(inviter.id, { email });
@@ -137,9 +148,9 @@ test('new unverified sign-up: the email waits on the row; a later verified sign-
   assert.equal(again.id, first.id, 'same account');
   assert.deepEqual((await verifiedRows(first.id, 'email')).map(r => r.normalizedValue), [email]);
   assert.equal(await fi.attachFor(first.id), 1);
-});
+}));
 
-test('Firebase phone sign-in records the number; the member is found and gets number invitations', async () => {
+test('Firebase phone sign-in records the number; the member is found and gets number invitations', () => withEvidence(async () => {
   const inviter = await signIn({ name: 'inviter5', email: mail('inviter5') });
   const phone = phoneNo();
   await shareToken(inviter.id, { phone });
@@ -148,9 +159,9 @@ test('Firebase phone sign-in records the number; the member is found and gets nu
   assert.equal(await fi.attachFor(member.id), 1);
   const local = `0${phone.slice(4)}`;
   assert.equal((await fi.lookup(inviter.id, { phone: local })).result.userId, member.id);
-});
+}));
 
-test('legacy member: verified LoginIdentifier (reconcile backfill) works; without it, covered at the next verified sign-in', async () => {
+test('legacy member: verified LoginIdentifier (reconcile backfill) works; without it, covered at the next verified sign-in once recording is on', () => withEvidence(async () => {
   const inviter = await signIn({ name: 'inviter6', email: mail('inviter6') });
   const backfilled = mail('legacy6a');
   const notYet = mail('legacy6b');
@@ -182,4 +193,76 @@ test('legacy member: verified LoginIdentifier (reconcile backfill) works; withou
   assert.equal(signedIn.id, b);
   assert.equal(await fi.attachFor(b), 1);
   assert.equal((await fi.lookup(inviter.id, { email: notYet })).result.userId, b);
+}));
+
+test('recording off (default): a verified sign-in records nothing and Firebase-only members stay unmatched', async () => {
+  assert.equal(process.env.IDENTITY_RECORD_FIREBASE_EVIDENCE, undefined);
+  const inviter = await signIn({ name: 'inviter7', email: mail('inviter7') });
+  const email = mail('off7');
+  const phone = phoneNo();
+  await shareToken(inviter.id, { email });
+  await shareToken(inviter.id, { phone });
+  const member = await signIn({ name: 'off7', email });
+  const byPhone = await signIn({ name: 'off7p', phone });
+  const persons = (await db('User').whereIn('id', [member.id, byPhone.id]).select('personId')).map(r => r.personId);
+  assert.equal((await db('LoginIdentifier').whereIn('personId', persons).whereIn('type', ['email', 'phone']).count('* as n').first()).n * 1, 0,
+    'no email / phone identifier written by a Firebase session');
+  // The only uid row is the one the user_person_guard trigger has always
+  // written for a new row's own Firebase uid (pre-existing, not this code).
+  const uidRows = await db('LoginIdentifier').where({ type: 'firebase_uid', normalizedValue: member.uid }).select('personId');
+  assert.ok(uidRows.every(x => x.personId === persons[0]), 'uid only on their own person');
+  assert.equal(await fi.attachFor(member.id), 0, 'fail-closed');
+  assert.equal(await fi.attachFor(byPhone.id), 0, 'fail-closed');
+  assert.equal((await fi.lookup(inviter.id, { email })).result.kind, 'unregistered');
+});
+
+test('planted email: a verified sign-in that lands on a row owned by another Firebase account records nothing on that person', () => withEvidence(async () => {
+  const inviter = await signIn({ name: 'inviter8', email: mail('inviter8') });
+  const victimEmail = mail('victim8');
+  const token = await shareToken(inviter.id, { email: victimEmail });
+
+  const attacker = await signIn({ name: 'attacker8', email: mail('attacker8') });
+  const attackerPerson = (await db('User').where({ id: attacker.id }).first('personId')).personId;
+  // Types a case variant of the victim's email onto their own row (real route).
+  const out = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await updateMemberProfile.onRequest({ user: { sub: attacker.id, userType: 'member' }, body: { email: victimEmail.toUpperCase() } }, out);
+  assert.equal(out.statusCode, 200, JSON.stringify(out.body));
+
+  const victimUid = `fivc_victim8_${tag}`;
+  made.uids.push(victimUid);
+  const r = await authService.firebaseSession({
+    idToken: devToken({ uid: victimUid, email: victimEmail, email_verified: true, name: 'FIVC victim8', sign_in_provider: 'password' }),
+    requestedRole: 'member',
+  });
+  if (r.user?.id && !made.userIds.includes(r.user.id)) made.userIds.push(r.user.id);
+
+  const onAttacker = await db('LoginIdentifier').where({ personId: attackerPerson, status: 'active' })
+    .where(b => b.where({ type: 'firebase_uid', normalizedValue: victimUid }).orWhere({ type: 'email', normalizedValue: victimEmail }));
+  assert.equal(onAttacker.length, 0, "the victim's uid / email are not on the attacker's person");
+  assert.equal((await db('LoginIdentifier').where({ type: 'firebase_uid', normalizedValue: victimUid }).whereNot({ personId: attackerPerson }).count('* as n').first()).n * 1,
+    r.user?.id === attacker.id ? 0 : 1, 'only ever recorded on a row the victim owns');
+  assert.equal(await fi.attachFor(attacker.id), 0);
+  assert.equal((await fi.claim(attacker.id, token)).error, 'contact_mismatch');
+  const look = (await fi.lookup(inviter.id, { email: victimEmail })).result;
+  assert.ok(look.kind !== 'member' || look.userId !== attacker.id, 'never routed to the attacker');
+}));
+
+test('linkOnVerifiedSignIn attachOnly: nothing attached to a row of another Firebase account; FitFlex codes (no uid) still attach', async () => {
+  const owner = await signIn({ name: 'guard9', email: mail('guard9') });
+  const person = (await db('User').where({ id: owner.id }).first('personId')).personId;
+  const foreignUid = `fivc_foreign9_${tag}`;
+  const foreignEmail = mail('foreign9');
+  const res = await identityLinkService.linkOnVerifiedSignIn({
+    anchorUserId: owner.id, uid: foreignUid, email: foreignEmail, provider: 'password', attachOnly: true,
+  });
+  assert.equal(res.personId, null);
+  assert.equal((await db('LoginIdentifier').where({ type: 'firebase_uid', normalizedValue: foreignUid }).count('* as n').first()).n * 1, 0);
+  assert.equal((await db('LoginIdentifier').where({ type: 'email', normalizedValue: foreignEmail }).count('* as n').first()).n * 1, 0);
+
+  const codeEmail = mail('code9');
+  const viaCode = await identityLinkService.linkOnVerifiedSignIn({
+    anchorUserId: owner.id, uid: null, email: codeEmail, provider: 'fitflex_email', trigger: 'identifier_verify', attachOnly: true,
+  });
+  assert.equal(viaCode.personId, person);
+  assert.deepEqual((await verifiedRows(owner.id, 'email')).map(x => x.normalizedValue), [codeEmail]);
 });

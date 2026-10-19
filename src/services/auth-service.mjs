@@ -5,7 +5,7 @@ import { verifyPassword } from '../auth/password-credentials.mjs';
 import { buildDevIdentity, devMarketplaceProduct, DEV_GYM_ID, DEV_OWNER_GYM_ID } from '../shared/dev-login.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
-import { identityFlag } from '../shared/feature-flags.mjs';
+import { identityFlag, recordFirebaseEvidenceOn } from '../shared/feature-flags.mjs';
 
 const configuredAdminEmails = new Set(
   (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
@@ -314,27 +314,30 @@ export function createAuthService({
     }
 
     // Identity V2 · I2: link this person's personas on verified evidence only.
-    // With V2_LINKING off, still RECORD what this sign-in proved (verified
-    // email / Firebase phone / uid) as LoginIdentifier rows on the person,
-    // without moving any persona (attachOnly) — the same thing the FitFlex
-    // code paths (registration, PIN, recovery, identifier change) already do
-    // unflagged. Matching by contact (friend invitations, org invitations)
-    // trusts only those rows, never User.email, so this is how a member whose
-    // email Firebase verifies becomes reachable by it. Writes to the identity
-    // tables are not flagged (decision C2). Must never block a sign-in.
+    // Linking must never block a sign-in, so a failure is logged and skipped.
+    //
+    // With V2_LINKING off and IDENTITY_RECORD_FIREBASE_EVIDENCE on, only RECORD
+    // what this sign-in proved (uid, verified email, Firebase phone) on the
+    // person, without moving any persona (attachOnly), and only when the row
+    // this sign-in resolved to belongs to this Firebase account. A row reached
+    // through its User.email (which anyone can type in) but owned by another
+    // Firebase account must never receive this account's uid or email.
     if (identityLink) {
       const linking = identityFlag('V2_LINKING');
-      try {
-        await identityLink.linkOnVerifiedSignIn({
-          anchorUserId: user.id, uid: fb.uid,
-          email: emailVerified ? fbEmail : null,
-          phone: fb.phoneNumber || null,
-          provider: fb.signInProvider || null,
-          attachOnly: !linking,
-        });
-        if (linking) user = (await users.findByIdAsync(user.id)) || user;
-      } catch (err) {
-        console.warn('[identity] linking skipped:', err?.message);
+      const recordOnly = !linking && recordFirebaseEvidenceOn() && user.firebaseUid === fb.uid;
+      if (linking || recordOnly) {
+        try {
+          await identityLink.linkOnVerifiedSignIn({
+            anchorUserId: user.id, uid: fb.uid,
+            email: emailVerified ? fbEmail : null,
+            phone: fb.phoneNumber || null,
+            provider: fb.signInProvider || null,
+            attachOnly: !linking,
+          });
+          if (linking) user = (await users.findByIdAsync(user.id)) || user;
+        } catch (err) {
+          console.warn('[identity] linking skipped:', err?.message);
+        }
       }
     }
 
