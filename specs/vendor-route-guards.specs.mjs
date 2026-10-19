@@ -128,7 +128,7 @@ async function user(userType, extra = {}) {
   made.push(id);
   return id;
 }
-const PERMS = ['products', 'orders', 'customers', 'reports', 'payments', 'staff'];
+const PERMS = ['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff'];
 const staff = (vendorId, permissions, accountStatus = 'active') => user('vendor_staff', { vendorId, vendorPermissions: permissions, accountStatus, vendorRole: 'staff' });
 const vendorClaims = id => ({ sub: id, userType: 'vendor' });
 const staffClaims = (id, vendorId) => ({ sub: id, userType: 'vendor_staff', vendorId });

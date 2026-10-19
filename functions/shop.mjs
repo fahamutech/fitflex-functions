@@ -22,6 +22,23 @@ function requireVendorPermission(permission) {
   };
 }
 
+/**
+ * vendor_staff holding ANY of these permissions (read from the stored staff record). The 403 keeps
+ * `requiredPermission` (the first one) for older clients and lists every accepted permission.
+ */
+function requireAnyVendorPermission(...permissions) {
+  return async (req, res, next) => {
+    if (req.user?.userType !== 'vendor_staff') return next();
+    try {
+      for (const permission of permissions) if (await shopService.authorizeStaff(req.user, permission)) return next();
+    } catch (error) {
+      console.error('[marketplace] staff authorization lookup failed', { staffId: req.user.sub, error: error.message });
+      return res.status(503).json({ error: 'authorization_unavailable' });
+    }
+    return res.status(403).json({ error: 'vendor_permission_forbidden', requiredPermission: permissions[0], acceptedPermissions: permissions });
+  };
+}
+
 // An administrator acts on marketplace orders only with the `shop` scope (a super-admin has all).
 const requireAdminShopScope = (req, res, next) => (req.user?.userType === 'admin' ? requireAcl('shop')(req, res, next) : next());
 
@@ -77,8 +94,8 @@ export const getVendorStore = {
 
 export const vendorMyProducts = {
   created, method: 'get', path: '/vendor/products',
-  description: 'Vendor: list own products (including archived). With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
-  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
+  description: 'Vendor / staff with `products` OR `sales` (S3: the POS loads the products to sell; read only — every write and stock route still needs `products`): list own products (including archived). Staff with neither → 403 vendor_permission_forbidden { requiredPermission: products, acceptedPermissions: [products, sales] }. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireAnyVendorPermission('products', 'sales'), requireAdminShopScope]),
   onRequest: async (req, res) => {
     res.json(await shopService.vendorListProducts(req.user.vendorId || req.user.sub, { costAllowed: await shopService.canSeeCost(req.user) }));
   }

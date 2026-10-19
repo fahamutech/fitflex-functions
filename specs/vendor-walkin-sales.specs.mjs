@@ -716,9 +716,43 @@ test('as mounted by bfast-function: each /vendor/sales route lets in exactly who
     assert.deepEqual(await hit(method, url, staffOf(productsOnly, v), body), { status: 403, body: { error: 'vendor_permission_forbidden', requiredPermission: 'sales' } }, `${method} ${url}`);
     assert.equal((await hit(method, url, null, body)).status, 401);
   }
-  // The S1 product routes keep their own `products` guard.
   assert.equal((await hit('GET', '/vendor/products', staffOf(productsOnly, v))).status, 200);
-  assert.equal((await hit('GET', '/vendor/products', staffOf(seller, v))).status, 403);
+});
+
+test('GET /vendor/products: staff with only `sales` may load products for the POS (same list, no cost); every product write and stock route still needs `products`', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await product(v, { priceTzs: 1_000, stock: 5, costTzs: 600, variants: [{ name: 'S', stock: 2, costTzs: 650 }, { name: 'M', stock: 3 }] });
+  const seller = await staff(v, ['sales']);
+  const nothing = await staff(v, ['orders']);
+  const productsStaff = await staff(v, ['products']);
+  const list = await hit('GET', '/vendor/products', staffOf(seller, v));
+  assert.equal(list.status, 200, JSON.stringify(list.body));
+  const mine = list.body.find(x => x.id === p.id);
+  assert.ok(mine, 'the vendor\'s product is listed');
+  assert.deepEqual(mine.variants.map(x => [x.name, x.stock]), [['S', 2], ['M', 3]]);
+  assert.equal(JSON.stringify(list.body).includes('costTzs'), false, 'no cost fields without cost rights');
+  assert.equal(JSON.stringify(list.body).includes('CostTzs'), false);
+  // Same response as staff with `products` (also without cost rights).
+  assert.deepEqual((await hit('GET', '/vendor/products', staffOf(productsStaff, v))).body, list.body);
+  // The vendor account still sees the cost.
+  assert.equal((await hit('GET', '/vendor/products', as(v))).body.find(x => x.id === p.id).costTzs, 600);
+  assert.deepEqual(await hit('GET', '/vendor/products', staffOf(nothing, v)), { status: 403, body: { error: 'vendor_permission_forbidden', requiredPermission: 'products', acceptedPermissions: ['products', 'sales'] } });
+
+  const productsOnly = { status: 403, body: { error: 'vendor_permission_forbidden', requiredPermission: 'products' } };
+  for (const [method, url, body] of [
+    ['PUT', `/vendor/products/${p.id}`, { name: 'Renamed by sales' }],
+    ['POST', `/vendor/products/${p.id}/stock-adjustments`, { reason: 'restock', quantity: 1, clientRef: randomUUID() }],
+    ['GET', `/vendor/products/${p.id}/stock-movements`],
+    ['GET', '/vendor/stock/low'],
+    ['POST', '/vendor/products', { name: 'New', category: 'supplements_nutrition', priceTzs: 1_000, stock: 1 }],
+    ['POST', `/vendor/products/${p.id}/duplicate`, {}],
+    ['DELETE', `/vendor/products/${p.id}`],
+  ]) {
+    assert.deepEqual(await hit(method, url, staffOf(seller, v), body), productsOnly, `${method} ${url}`);
+  }
+  const after = await row(p.id);
+  assert.deepEqual([after.name, after.stock, after.deletedAt], ['Whey 1kg', 5, null], 'nothing changed');
 });
 
 test('staff permission `sales`: new admin staff get it; the backfill adds it to existing admin- and sales-role staff, their vendor memberships and pending invitations, once', async () => {
