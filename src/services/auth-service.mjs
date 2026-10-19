@@ -135,6 +135,9 @@ export function createAuthService({
     if (!usable.length) {
       // Vendor tools · S2 (Q-2): a person whose only profile is vendor staff that the vendor turned off
       // is told so, instead of being sent to onboarding as if they had no business at all.
+      // UAT D3: the same for a vendor (business owner) whose account FitFlex suspended: 403 account_suspended.
+      // Reached only after the person proved who they are (PIN checked), so it tells a stranger nothing.
+      if (personas.some(p => p.userType === 'vendor' && p.accountStatus === 'suspended')) return { error: 'account_suspended', status: 403 };
       if (personas.some(p => p.userType === 'vendor_staff' && p.accountStatus === 'suspended')) return { error: 'vendor_staff_inactive', status: 403 };
       return { error: 'no_profile', status: 409 };
     }

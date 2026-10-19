@@ -140,3 +140,35 @@ export function decodeOrderCursor(cursor) {
     return { createdAt: new Date(c).toISOString(), id: i };
   } catch { return null; }
 }
+
+// ── tabs and counts (GET /vendor/orders?limit=… → counts) ────────────────────
+/**
+ * Which Orders tab one order falls in for this vendor (their own part), first rule that matches:
+ *   'cancelled' — own status cancelled, or the order cancelled, or paymentStatus refund_pending | refunded
+ *   'delivered' — own status delivered (legacy: fulfilled)
+ *   'open'      — paid (paymentStatus 'paid') and own status anything else
+ *   'unpaid'    — the rest (payment not confirmed yet): shown under All only
+ * The Postgres store counts with the same rules in SQL (shop-order-store-pg countsForVendor).
+ */
+export function orderTab(order, vendorId) {
+  const own = fulfilmentsOf(order).find(f => f.vendorId === vendorId);
+  const status = own?.status || order.status;
+  if (status === 'cancelled' || order.status === 'cancelled' || ['refund_pending', 'refunded'].includes(order.paymentStatus)) return 'cancelled';
+  if (canonicalStatus(status) === 'delivered') return 'delivered';
+  if (order.paymentStatus === 'paid') return 'open';
+  return 'unpaid';
+}
+/** waitingAccept: an 'open' order whose own status is still pending (paid, not accepted yet). */
+export const isWaitingAccept = (order, vendorId) => orderTab(order, vendorId) === 'open'
+  && (fulfilmentsOf(order).find(f => f.vendorId === vendorId)?.status || order.status) === 'pending';
+/** Counts over a list of orders (memory store; the Postgres store does this in SQL). */
+export function countOrders(orders, vendorId) {
+  const counts = { open: 0, delivered: 0, cancelled: 0, all: 0, waitingAccept: 0 };
+  for (const order of orders) {
+    counts.all++;
+    const tab = orderTab(order, vendorId);
+    if (tab !== 'unpaid') counts[tab]++;
+    if (isWaitingAccept(order, vendorId)) counts.waitingAccept++;
+  }
+  return counts;
+}

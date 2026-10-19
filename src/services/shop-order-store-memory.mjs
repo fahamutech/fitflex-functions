@@ -20,6 +20,9 @@
 //   findExpired({ before, limit }) → orders
 //   ordersForVendor(vendorId, { limit?, after?: { createdAt, id } }) → orders with a line naming this vendor,
 //     newest first (createdAt desc, id desc), strictly after `after` when given
+//   countsForVendor(vendorId) → { open, delivered, cancelled, all, waitingAccept } over all of them (rules: orderTab)
+
+import { countOrders } from '../shared/vendor-order-view.mjs';
 
 export function createMemoryShopOrderStore({ products, shopOrders, paymentRequests = null, now = () => new Date() }) {
   const nowIso = () => now().toISOString();
@@ -177,5 +180,9 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     return limit ? rows.slice(0, limit) : rows;
   }
 
-  return { placeOrder, findReplay, cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor };
+  async function countsForVendor(vendorId) {
+    return countOrders(await ordersForVendor(vendorId), vendorId);
+  }
+
+  return { placeOrder, findReplay, cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor, countsForVendor };
 }

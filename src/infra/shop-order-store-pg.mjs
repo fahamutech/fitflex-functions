@@ -321,5 +321,38 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     return (await query).map(out);
   }
 
-  return { placeOrder, findReplay: ({ buyerId, key, fingerprint }) => replay(buyerId, key, fingerprint), cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor };
+  /**
+   * Orders-tab counts over ALL of this vendor's orders, in one parameterised aggregate. The rules are
+   * orderTab() in src/shared/vendor-order-view.mjs: own status = this vendor's fulfilment status, else the
+   * order's status (orders from before fulfilments).
+   */
+  async function countsForVendor(vendorId) {
+    const empty = { open: 0, delivered: 0, cancelled: 0, all: 0, waitingAccept: 0 };
+    if (!vendorId) return empty;
+    const { rows } = await db.raw(`
+      WITH mine AS (
+        SELECT o."status" AS order_status, o."paymentStatus" AS pay,
+               COALESCE((SELECT f->>'status' FROM jsonb_array_elements(
+                          CASE WHEN jsonb_typeof(o."fulfilments") = 'array' THEN o."fulfilments" ELSE '[]'::jsonb END) f
+                         WHERE f->>'vendorId' = ? LIMIT 1), o."status") AS own
+          FROM "ShopOrder" o
+         WHERE o."items" @> ?::jsonb
+      ), tabbed AS (
+        SELECT own, CASE
+                 WHEN own = 'cancelled' OR order_status = 'cancelled' OR pay IN ('refund_pending', 'refunded') THEN 'cancelled'
+                 WHEN own IN ('delivered', 'fulfilled') THEN 'delivered'
+                 WHEN pay = 'paid' THEN 'open'
+                 ELSE 'unpaid' END AS tab
+          FROM mine
+      )
+      SELECT count(*) FILTER (WHERE tab = 'open')::int AS "open",
+             count(*) FILTER (WHERE tab = 'delivered')::int AS "delivered",
+             count(*) FILTER (WHERE tab = 'cancelled')::int AS "cancelled",
+             count(*)::int AS "all",
+             count(*) FILTER (WHERE tab = 'open' AND own = 'pending')::int AS "waitingAccept"
+        FROM tabbed`, [String(vendorId), JSON.stringify([{ vendorId: String(vendorId) }])]);
+    return { ...empty, ...rows[0] };
+  }
+
+  return { placeOrder, findReplay: ({ buyerId, key, fingerprint }) => replay(buyerId, key, fingerprint), cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor, countsForVendor };
 }
