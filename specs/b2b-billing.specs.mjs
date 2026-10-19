@@ -2,6 +2,7 @@
 // (nominate, invoice in advance, pay, unlock), per-use invoices with credits,
 // VAT, voiding, organisation views and the Corporate seat conversion.
 import { test, after } from 'node:test';
+import { platformSettings } from '../src/bootstrap/collections.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
@@ -582,14 +583,17 @@ test('a company\'s seats become a programme: same tier and split, real passes, a
 // ── Owner decision 2026-10-19: only tiers configured in Settings are sold ──
 
 /** Run fn with `tier` taken out of Settings, then put Settings back as it was. */
+// Takes the tier out of Settings directly: PUT /admin/settings now refuses to remove a tier
+// people hold (409 tier_in_use), but data saved before that rule can still lack one.
 async function withoutTier(tier, fn) {
   const before = settingsService.adminGet().subscriptionTiers.map(t => ({ ...t }));
-  await settingsService.adminUpdate({ body: { subscriptionTiers: before.filter(t => t.key !== tier) }, actorId: ADMIN.userId });
+  const write = rows => platformSettings.updateAsync(s => s.id === 'platform', { subscriptionTiers: rows, updatedAt: new Date().toISOString() });
+  await write(before.filter(t => t.key !== tier));
   try {
     assert.equal(settingsService.isTierSellable(tier), false);
     return await fn();
   } finally {
-    await settingsService.adminUpdate({ body: { subscriptionTiers: before }, actorId: ADMIN.userId });
+    await write(before);
     assert.equal(settingsService.isTierSellable(tier), true);
   }
 }

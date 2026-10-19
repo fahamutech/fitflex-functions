@@ -111,6 +111,7 @@ import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
+import { createTierHolders } from '../services/tier-holders.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createCompanyDirectory } from '../services/company-directory.mjs';
 import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
@@ -185,7 +186,8 @@ export const partnerVerifiedFor = async user => (
 );
 const { resolveRequestUser, publicUserId } = identityService;
 
-export const settingsService = createSettingsService({ platformSettings, auditLog });
+// A tier members still hold cannot be removed, renamed or switched off in Settings (409 tier_in_use).
+export const settingsService = createSettingsService({ platformSettings, auditLog, tierHolders: createTierHolders({ db }) });
 export const gymService = createGymService({ gyms, users, checkins, auditLog });
 // Tells gym owners, staff and vendors what happens at their gym or shop (inbox + push).
 export const partnerNotifier = createPartnerNotifier({
