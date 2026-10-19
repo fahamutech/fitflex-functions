@@ -6,6 +6,7 @@ import { activationDates } from '../shared/subscription-status.mjs';
 import { productTypeOfPayment } from '../shared/payment-product.mjs';
 import { upgradeOf, upgradeApprovable, applyUpgradeStatus } from '../shared/pass-upgrade.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
+import { referenceKey, memoryReferenceStore } from '../shared/manual-payment.mjs';
 
 export function createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog,
@@ -22,7 +23,12 @@ export function createAdminPaymentService({
   onSubscriptionPaymentReversed = async () => {},
   // A pass was upgraded in place: (subscription, request) => void. Best-effort.
   onPassUpgraded = async () => {},
+  // Slice A3: reference lookups (database in production) and whether every approval's
+  // final reference is checked for reuse (MANUAL_PAY_INSTRUCTIONS).
+  referenceStore = null,
+  manualReferenceChecks = () => false,
 }) {
+  const references = referenceStore || memoryReferenceStore({ paymentRequests });
   function slimMember(u) {
     if (!u) return null;
     return { id: u.id, displayName: u.displayName || null, email: u.email || null, phone: u.phone || null, photoUrl: u.photoUrl || null };
@@ -132,6 +138,24 @@ export function createAdminPaymentService({
     return null;
   }
 
+  /**
+   * Slice A3 (review L1): the reference an approval will record — after the member's
+   * transaction ID has been copied in — must not be on another pending or approved
+   * request (same letters+digits key, member ID or admin/provider reference). Checked
+   * for requests that carry a member ID, and for every approval while
+   * MANUAL_PAY_INSTRUCTIONS is on; otherwise approvals behave as before.
+   */
+  async function finalReferenceTaken(request, finalRef) {
+    if (!request.memberReference && !manualReferenceChecks()) return false;
+    if (!finalRef || String(finalRef).startsWith('ADMIN_')) return false;
+    const key = referenceKey(finalRef);
+    if (!key) return false;
+    return (await references.holders(key, { excludeId: request.id })).length > 0;
+  }
+
+  /** The member's ID, when an approval has no reference typed and none recorded yet. */
+  const memberRefFor = (request, typedOrRecorded) => (!typedOrRecorded ? (request.memberReference || null) : null);
+
   /** Write the decision only if the request is still in the state it was read in. */
   async function writeDecision(request, patch) {
     try {
@@ -147,22 +171,24 @@ export function createAdminPaymentService({
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
+    // Approving with no reference typed, and none recorded yet (e.g. by a verifying admin),
+    // confirms the transaction ID the member gave (slice A3). A recorded or typed one wins.
+    const memberRef = decision === 'approve' ? memberRefFor(request, reference || request.reference) : null;
+    const finalRef = reference || request.reference || memberRef;
     if (decision === 'approve') {
       const can = await upgradeApprovable(subscriptions, request);
       if (!can.ok) return { error: can.error, status: 409 };
       const problem = await checkConfirmation(request, { reference: reference || request.reference, amountTzs });
       if (problem) return problem;
+      if (await finalReferenceTaken(request, finalRef)) return { error: 'reference_already_used', status: 409 };
     }
 
     const now = new Date().toISOString();
     const status = decision === 'approve' ? 'approved' : 'rejected';
-    // Approving with no reference typed, and none recorded yet (e.g. by a verifying admin),
-    // confirms the transaction ID the member gave (slice A3). A recorded or typed one wins.
-    const memberRef = decision === 'approve' && !request.reference ? (request.memberReference || null) : null;
     const confirmedRef = reference || memberRef;
     const updated = await writeDecision(request, {
       status,
-      reference: reference || request.reference || memberRef,
+      reference: finalRef,
       // An upgrade's note names the plan it upgrades: it stays as it is.
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
@@ -190,23 +216,27 @@ export function createAdminPaymentService({
     if (request.orderId && request.status === 'approved' && nextStatus !== 'approved') {
       return { error: 'payment_already_confirmed', status: 409 };
     }
-    if (nextStatus === 'approved' && request.status !== 'approved') {
+    const approving = nextStatus === 'approved' && request.status !== 'approved';
+    const memberRef = approving ? memberRefFor(request, reference ?? request.reference) : null;
+    const finalRef = (reference ?? request.reference) || memberRef || (reference ?? request.reference);
+    if (approving) {
       const can = await upgradeApprovable(subscriptions, request);
       if (!can.ok) return { error: can.error, status: 409 };
       const problem = await checkConfirmation(request, { reference: reference ?? request.reference, amountTzs });
       if (problem) return problem;
+      if (await finalReferenceTaken(request, finalRef)) return { error: 'reference_already_used', status: 409 };
     }
     const now = new Date().toISOString();
     const updated = await writeDecision(request, {
       status: nextStatus,
-      reference: reference ?? request.reference,
+      reference: finalRef,
       note: upgradeOf(request) ? request.note : (note ?? request.note ?? null),
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
       decidedBy: nextStatus === 'pending' ? null : actorId
     });
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'payment_changed', status: 409 };
-    await applyPaymentStatusToSubscription(request, nextStatus, reference ?? request.reference);
+    await applyPaymentStatusToSubscription(request, nextStatus, finalRef);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: 'payment_updated', target: request.id, before: request, after: updated

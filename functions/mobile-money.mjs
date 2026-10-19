@@ -13,7 +13,7 @@ function send(res, result) {
 
 export const paymentOptions = {
   created, method: 'get', path: '/payments/options',
-  description: 'Whether paying by mobile money is available, and in which environment (sandbox shows a test-mode notice in the app). While MANUAL_PAY_INSTRUCTIONS is on, also `manual` { enabled, lipaNamba, accountName, network, instructions, referenceRequired }: enabled only when the Lipa Namba and account name are configured.',
+  description: 'Whether paying by mobile money is available, and in which environment (sandbox shows a test-mode notice in the app). While MANUAL_PAY_INSTRUCTIONS is on, also `manual` { enabled, lipaNamba, accountName, network, instructions, referenceRequired, payerPhoneRequired }: enabled only when the Lipa Namba and account name are configured.',
   onGuard: requireAuth(),
   onRequest: async (_, res) => res.json({
     ...mobileMoneyService.options(),

@@ -9,7 +9,9 @@ import { toSessionUser } from '../shared/session-user.mjs';
 import { fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { PRODUCT_TYPES, MEMBER_ACCESS_PRODUCTS, productTypeOfPayment } from '../shared/payment-product.mjs';
 import { upgradeNote, upgradeOf, upgradeDifference, isSponsoredPassId } from '../shared/pass-upgrade.mjs';
-import { normalizePaymentReference, REFERENCE_HOLDING_STATUSES } from '../shared/manual-payment.mjs';
+import {
+  normalizePaymentReference, normalizePayerPhone, memoryReferenceStore, DUPLICATE_ATTEMPT_ACTION, DUPLICATE_ATTEMPT_LIMIT,
+} from '../shared/manual-payment.mjs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // GET /me/checkins: rows without a date range (unchanged for older app builds).
@@ -23,7 +25,12 @@ export function createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
   // Slice A3: required() is true when MANUAL_PAY_INSTRUCTIONS is on and the Lipa Namba is configured.
   manualPayment = { required: () => false },
+  auditLog = null,
+  // Reference lookups (holders of a key, refused attempts per member); the database one in production.
+  referenceStore = null,
+  now = () => Date.now(),
 }) {
+  const references = referenceStore || memoryReferenceStore({ paymentRequests, auditLog });
   // A7: the member-facing catalogue must not offer the "Online Free" option.
   function listPasses() {
     return Object.entries(PASS_TIERS)
@@ -55,31 +62,44 @@ export function createSubscriptionService({
     return rows[0] || null;
   }
 
-  /** A transaction ID already on another request that is pending or approved. */
-  async function referenceTaken(ref) {
-    const holding = r => REFERENCE_HOLDING_STATUSES.includes(r.status);
-    if (paymentRequests.filterByColumnAsync) {
-      const [mine, admin] = await Promise.all([
-        paymentRequests.filterByColumnAsync('memberReference', ref),
-        paymentRequests.filterByColumnAsync('reference', ref),
-      ]);
-      return [...mine, ...admin].some(holding);
-    }
-    return (await paymentRequests.filterAsync(r => r.memberReference === ref || r.reference === ref)).some(holding);
+  /** Record a refused duplicate (security review M1): admins see it; it also feeds the rate limit. */
+  async function auditDuplicate(memberId, key, product) {
+    try {
+      await auditLog?.insertAsync?.({
+        id: randomUUID(), at: new Date(now()).toISOString(), actor: memberId,
+        action: DUPLICATE_ATTEMPT_ACTION, target: memberId, before: null, after: { referenceKey: key, product },
+      });
+    } catch { /* the refusal stands even if the audit write fails */ }
   }
 
   /**
    * Slice A3: while manual payment is on, the member's mobile-money transaction
-   * ID — required, well formed, not used already. {} when not required (flag
-   * off or no Lipa Namba configured): nothing changes then.
+   * ID — required, well formed, not used already (judged on its letters+digits
+   * key, against member IDs and admin/provider references alike) — and the
+   * number they paid from (+255…). A member who keeps offering IDs that are
+   * taken is stopped for a while (429). {} when not required (flag off or no
+   * Lipa Namba configured): nothing changes then.
    */
-  async function memberReferenceFor(raw) {
+  async function memberReferenceFor(raw, rawPhone, memberId, product) {
     if (!manualPayment.required()) return {};
     const out = normalizePaymentReference(raw);
     if (out.error) return { error: out.error, status: 400 };
-    if (await referenceTaken(out.reference)) return { error: 'payment_reference_duplicate', status: 409 };
-    return { memberReference: out.reference };
+    const payer = normalizePayerPhone(rawPhone);
+    if (payer.error) return { error: payer.error, status: 400 };
+    const since = new Date(now() - DUPLICATE_ATTEMPT_LIMIT.windowMs);
+    if (await references.duplicateAttemptsSince(memberId, since) >= DUPLICATE_ATTEMPT_LIMIT.max) {
+      return { error: 'too_many_attempts', status: 429 };
+    }
+    if ((await references.holders(out.key)).length) {
+      await auditDuplicate(memberId, out.key, product);
+      return { error: 'payment_reference_duplicate', status: 409 };
+    }
+    return { memberReference: out.reference, memberReferenceKey: out.key, payerPhone: payer.phone };
   }
+
+  /** The member-reference fields of a new payment request (none when not required). */
+  const referenceFields = (ref) => (ref.memberReference
+    ? { memberReference: ref.memberReference, memberReferenceKey: ref.memberReferenceKey, payerPhone: ref.payerPhone } : {});
 
   /**
    * Insert a payment request. Two requests racing with the same transaction ID:
@@ -92,11 +112,12 @@ export function createSubscriptionService({
     } catch (err) {
       if (err?.code !== '23505' || !row.memberReference) throw err;
       if (newSubscriptionId) await subscriptions.updateByIdAsync(newSubscriptionId, { status: 'payment_cancelled' });
+      await auditDuplicate(row.memberId, row.memberReferenceKey, row.note || row.tier || row.plan || null);
       return { error: 'payment_reference_duplicate', status: 409 };
     }
   }
 
-  async function subscribeDirect({ memberId, homeGymId, plan, reference, manual = false }) {
+  async function subscribeDirect({ memberId, homeGymId, plan, reference, payerPhone, manual = false }) {
     if (!homeGymId) return { error: 'homeGymId_required', status: 400 };
     const gym = gyms.find(g => g.id === homeGymId);
     if (!gym) return { error: 'gym_not_found', status: 404 };
@@ -112,7 +133,7 @@ export function createSubscriptionService({
     const open = await pendingSubscription(memberId, 'direct_sub', homeGymId);
     if (open) return { error: 'payment_already_pending', status: 409 };
     // Member-bought plans only (POST /me/subscribe); a trainer's member plan is unchanged.
-    const ref = manual ? await memberReferenceFor(reference) : {};
+    const ref = manual ? await memberReferenceFor(reference, payerPhone, memberId, 'gym_plan') : {};
     if (ref.error) return ref;
 
     const now = new Date();
@@ -144,7 +165,7 @@ export function createSubscriptionService({
       status: 'pending',
       provider: 'admin_approved',
       reference: null,
-      ...(ref.memberReference ? { memberReference: ref.memberReference } : {}),
+      ...referenceFields(ref),
       requestedAt: now.toISOString(),
       decidedAt: null,
       decidedBy: null,
@@ -272,8 +293,8 @@ export function createSubscriptionService({
     return { status: 200, subscription: updated };
   }
 
-  async function subscribe({ memberId, tier, type = 'platform_pass', homeGymId, plan, reference }) {
-    if (type === 'direct_sub') return subscribeDirect({ memberId, homeGymId, plan, reference, manual: true });
+  async function subscribe({ memberId, tier, type = 'platform_pass', homeGymId, plan, reference, payerPhone }) {
+    if (type === 'direct_sub') return subscribeDirect({ memberId, homeGymId, plan, reference, payerPhone, manual: true });
     // Only the two member products are bought here (trainer passes and sessions have their own routes).
     if (type !== 'platform_pass') return { error: 'invalid_type', status: 400 };
     // The tier must be one the platform sells today: the configured catalogue
@@ -285,7 +306,7 @@ export function createSubscriptionService({
     const isFreeOnline = amountTzs === 0 && PASS_TIERS[tier]?.accessMode === 'free_online';
     if (!isFreeOnline && !positiveTzs(amountTzs)) return { error: 'tier_not_available', status: 400 };
     if (await openPassPayment(memberId)) return { error: 'payment_already_pending', status: 409 };
-    const ref = isFreeOnline ? {} : await memberReferenceFor(reference);
+    const ref = isFreeOnline ? {} : await memberReferenceFor(reference, payerPhone, memberId, 'fitflex_pass');
     if (ref.error) return ref;
     const now = new Date();
     const renewsAt = new Date(+now + 30 * 86_400_000);
@@ -314,7 +335,7 @@ export function createSubscriptionService({
       status: 'pending',
       provider: 'admin_approved',
       reference: null,
-      ...(ref.memberReference ? { memberReference: ref.memberReference } : {}),
+      ...referenceFields(ref),
       requestedAt: now.toISOString(),
       decidedAt: null,
       decidedBy: null,
@@ -365,7 +386,7 @@ export function createSubscriptionService({
    * plan is upgraded in place when the payment is approved: it keeps its end
    * date and its visit counter, so an upgrade never extends a plan.
    */
-  async function upgradePass({ memberId, tier, reference }) {
+  async function upgradePass({ memberId, tier, reference, payerPhone }) {
     const held = await upgradableCurrentPass(memberId);
     if (held.error) return held;
     const configured = settingsService.publicTiers?.().map(t => t.key);
@@ -374,7 +395,7 @@ export function createSubscriptionService({
     const amountTzs = upgradeDifference(held.fromPrice, settingsService.priceForTier(tier));
     if (!amountTzs) return { error: 'not_an_upgrade', status: 409 };
     if (await openPassPayment(memberId)) return { error: 'payment_already_pending', status: 409 };
-    const ref = await memberReferenceFor(reference);
+    const ref = await memberReferenceFor(reference, payerPhone, memberId, 'pass_upgrade');
     if (ref.error) return ref;
 
     const inserted = await insertPaymentRequest({
@@ -387,7 +408,7 @@ export function createSubscriptionService({
       status: 'pending',
       provider: 'admin_approved',
       reference: null,
-      ...(ref.memberReference ? { memberReference: ref.memberReference } : {}),
+      ...referenceFields(ref),
       requestedAt: new Date().toISOString(),
       decidedAt: null,
       decidedBy: null,
