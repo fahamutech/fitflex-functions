@@ -219,15 +219,13 @@ test('pass request stays payment_pending and cannot issue QR before admin approv
   assert.equal(qr.body.error, 'active_subscription_required');
 });
 
-test('online free plan activates without creating a payment request', async () => {
+test('online free plan is not activated unless Settings sells it (owner decision 2026-10-19)', async () => {
   const userId = `usr_online_${Date.now()}`;
   await updateMemberProfile.onRequest({ user: { sub: userId, userType: 'member' }, body: { displayName: 'Online Test' } }, res());
   const req = { user: { sub: userId, userType: 'member' }, body: { tier: 'online_free', type: 'platform_pass' } };
   const created = res();
   await subscribe.onRequest(req, created);
 
-  assert.equal(created.statusCode, 201);
-  assert.equal(created.body.subscription.status, 'active');
-  assert.equal(created.body.subscription.paymentRef, 'FREE_ONLINE');
-  assert.equal(created.body.paymentRequest, null);
+  assert.equal(created.statusCode, 409);
+  assert.equal(created.body.error, 'tier_not_available');
 });

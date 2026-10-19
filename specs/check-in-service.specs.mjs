@@ -1,6 +1,10 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCheckInService } from '../src/services/check-in-service.mjs';
+import { settingsWithTiers } from './fixtures/tier-settings.mjs';
+
+// Tier caps come from Settings only (no built-in fallback): wire Settings in.
+const { getTierConfig } = settingsWithTiers();
 
 // In-memory collection mock matching the json-store / knex-store contract.
 const mkCol = (initial = []) => {
@@ -38,7 +42,7 @@ beforeEach(() => {
     expiresAt: '2099-01-01T00:00:00Z'
   }]);
   checkins = mkCol([]);
-  svc = createCheckInService({ users, gyms, subscriptions, checkins });
+  svc = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig });
 });
 
 test('first check-in of the day consumes a visit and logs all 8 fields', async () => {
@@ -140,7 +144,7 @@ test('a direct plan bought at g1 is refused at g2 with wrong_gym', async () => {
     status: 'active', startedAt: '2026-01-01T00:00:00Z',
     cycleStartedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z'
   }]);
-  svc = createCheckInService({ users, gyms, subscriptions, checkins });
+  svc = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig });
   const r = await svc.perform({ memberId: 'm1', gymId: 'g2' });
   assert.equal(r.ok, false);
   assert.equal(r.failure, 'wrong_gym');
@@ -154,8 +158,31 @@ test('a newer direct plan elsewhere does not hide an older platform pass', async
     { id: 'sd', memberId: 'm1', type: 'direct_sub', tier: null, homeGymId: 'g1', status: 'active',
       startedAt: '2026-02-01T00:00:00Z', cycleStartedAt: '2026-02-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' },
   ]);
-  svc = createCheckInService({ users, gyms, subscriptions, checkins });
+  svc = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig });
   const r = await svc.perform({ memberId: 'm1', gymId: 'g2' });
   assert.equal(r.ok, true);
   assert.equal(r.checkin.subscriptionType, 'platform_pass');
+});
+
+// ── Owner decision 2026-10-19: a tier not configured in Settings is refused ──
+
+test('a pass on a tier not configured in Settings is refused with tier_not_configured, nothing recorded', async () => {
+  subscriptions = mkCol([{
+    id: 'sx', memberId: 'm1', type: 'platform_pass', tier: 'gold', status: 'active',
+    startedAt: '2026-01-01T00:00:00Z', cycleStartedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z'
+  }]);
+  svc = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig });
+  const r = await svc.perform({ memberId: 'm1', gymId: 'g1' });
+  assert.equal(r.ok, false);
+  assert.equal(r.failure, 'tier_not_configured');
+  assert.equal(checkins.all().length, 0);
+});
+
+test('a tier taken out of Settings stops check-ins on passes already held; with no Settings lookup at all, refused too', async () => {
+  const noPro = settingsWithTiers([{ key: 'basic', label: 'Basic', monthlyPrice: 30_000, visits: 12, gymAccess: 'standard' }]);
+  svc = createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig: noPro.getTierConfig });
+  assert.equal((await svc.perform({ memberId: 'm1', gymId: 'g1' })).failure, 'tier_not_configured');
+  svc = createCheckInService({ users, gyms, subscriptions, checkins });
+  assert.equal((await svc.perform({ memberId: 'm1', gymId: 'g1' })).failure, 'tier_not_configured');
+  assert.equal(checkins.all().length, 0);
 });

@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
 import { createCheckInService } from '../src/services/check-in-service.mjs';
+import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 import { fundedBySubscription } from '../src/shared/check-in-rules.mjs';
 import { calculateMemberSettlement, VISIT_ELIGIBILITY, VISIT_OUTCOME, SETTLEABLE_SUBSCRIPTION_TYPES } from '../src/shared/settlement-engine.mjs';
 import { createSettlementConfigService } from '../src/services/settlement-config-service.mjs';
@@ -43,6 +44,8 @@ describe('a pass counts only its own check-ins', () => {
       gyms: mkCol([{ id: 'g1', tier: 'standard' }, { id: 'g2', tier: 'standard' }]),
       subscriptions: mkCol([{ id: 'pass-1', memberId: 'm1', type: 'platform_pass', tier, status: 'active', startedAt: '2026-10-01T07:00:00Z', cycleStartedAt: '2026-10-01T07:00:00Z', expiresAt: '2099-01-01T00:00:00Z' }]),
       checkins,
+      // Tier rules come from Settings only.
+      getTierConfig: settingsWithTiers().getTierConfig,
     });
     return { checkins, svc };
   };

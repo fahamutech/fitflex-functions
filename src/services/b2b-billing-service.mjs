@@ -29,7 +29,6 @@ import {
   passFeeTzs, vatContainedTzs, isMonth, monthBounds, eatDayStart,
 } from '../shared/b2b-programs.mjs';
 import { SUBSIDY_MODELS } from '../shared/corporate-constants.mjs';
-import { PASS_TIERS } from '../shared/constants.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 import { dueDateFor, termsSnapshot, outstandingTzs, NOTE_KINDS, DOCUMENT_SERIES } from '../shared/b2b-billing.mjs';
 import { nextDocumentNumber, agreementInForce } from './b2b-finance-service.mjs';
@@ -131,6 +130,9 @@ export function createB2BBillingService({
       return v.startDate <= endDate && (v.endDate === null || v.endDate >= startDate);   // valid at some point in the month
     });
     if (!passBenefits.length) return fail('no_sponsored_pass', 409);
+    // A pass on a tier no longer sold (not configured in Settings) is not invoiced (fail closed).
+    const unsold = passBenefits.find(b => !settingsService.isTierSellable(b.passTier));
+    if (unsold) return fail('tier_not_available', 409, { tier: unsold.passTier, benefitId: unsold.id });
     // A month the company was already sent a seat bill for is not invoiced here as well.
     const seatBill = await seatBillFor(program.organizationId, period);
     if (seatBill) return fail('period_seat_billed', 409, { billId: seatBill.id, billStatus: seatBill.status, period });
@@ -415,6 +417,8 @@ export function createB2BBillingService({
     if (!e || e.userId !== userId) return fail('entitlement_not_found', 404);
     if (e.status === 'active') return fail('already_unlocked', 409);
     if (e.status !== 'awaiting_member') return fail('not_ready_to_unlock', 409, { entitlementStatus: e.status });
+    // The member's share buys a pass on this tier: only while it is sold (Settings).
+    if (!settingsService.isTierSellable(e.passTier)) return fail('tier_not_available', 409, { tier: e.passTier });
     const { nextStartDate, endDate } = monthBounds(e.period);
     if (localDay(now()) > endDate) return fail('period_ended', 409);
 
@@ -592,7 +596,9 @@ export function createB2BBillingService({
     const account = await corporateAccounts.findByIdAsync(corporateId);
     if (!account) return fail('corporate_not_found', 404);
     const share = SUBSIDY_MODELS[account.subsidyModel];
-    if (share === undefined || !PASS_TIERS[account.passTier]) return fail('corporate_not_convertible', 409);
+    if (share === undefined || !account.passTier) return fail('corporate_not_convertible', 409);
+    // The programme would sell this tier: it must be sold today (Settings).
+    if (!settingsService.isTierSellable(account.passTier)) return fail('tier_not_available', 409, { tier: account.passTier });
     const ensured = await b2bService.ensureOrganizationForCorporate({ corporateId, actorId });
     if (ensured.error) return ensured;
     const access = await b2bService.resolveAccess({ organizationId: ensured.organization.id, userId: actorId, userType: 'admin' });

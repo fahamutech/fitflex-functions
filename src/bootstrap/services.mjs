@@ -464,6 +464,8 @@ export const mobileMoneyService = createMobileMoneyService({
   canSettle: () => tunzaaConfig?.environment === 'live' || tunzaaSandboxSettlesOn(),
   // Sandbox only (the client ignores it on live): 'success' or 'failure' to rehearse an outcome.
   scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
+  // Only tiers configured in Settings are sold (owner decision 2026-10-19).
+  tierSellable: settingsService.isTierSellable,
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
