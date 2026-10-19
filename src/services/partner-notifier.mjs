@@ -194,6 +194,20 @@ export function createPartnerNotifier({
     vendor_approved: () => ({ type: 'vendor_shop_approved', title: 'Your shop is approved', body: 'You can now sell on FitFlex.', data: {} }),
     vendor_rejected: d => ({ type: 'vendor_shop_rejected', title: 'Your shop was not approved', body: d.approvalNote || 'Open your shop profile to see what is needed.', data: {} }),
     vendor_suspended: d => ({ type: 'vendor_shop_suspended', title: 'Your shop is suspended', body: d.approvalNote || 'Your products are hidden until this is resolved.', data: {} }),
+    // Vendor tools · S1. Swahili is a DRAFT for native review (plan §4, design spec §8.5); the push shows
+    // English, and `titleSw` / `bodySw` let the app show Swahili in its inbox.
+    vendor_low_stock: (d) => {
+      const label = d.variant ? `${d.productName || 'A product'} (${d.variant})` : d.productName || 'A product';
+      return {
+        type: 'vendor_low_stock',
+        title: `Low stock: ${label}`,
+        body: `Only ${d.stock} left. Time to restock.`,
+        data: {
+          productId: d.productId ?? '', variant: d.variant ?? '', stock: d.stock ?? '',
+          titleSw: `Stock inakaribia kuisha: ${label}`, bodySw: `Zimebaki ${d.stock} tu. Ni wakati wa kuongeza Stock.`,
+        },
+      };
+    },
   };
 
   /** Something happened in a vendor's shop. Events with no message here stay in the shop's own list only. */

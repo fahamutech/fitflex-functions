@@ -54,6 +54,12 @@ const variantStockAdjusted = (sign) => `(SELECT COALESCE(jsonb_agg(CASE WHEN v->
   THEN jsonb_set(v, '{stock}', to_jsonb((v->>'stock')::numeric ${sign} ?)) ELSE v END ORDER BY ord), '[]'::jsonb)
   FROM jsonb_array_elements("Product".variants) WITH ORDINALITY AS t(v, ord))`;
 
+const variantStockOf = (variants, name) => {
+  const list = typeof variants === 'string' ? JSON.parse(variants) : variants;
+  const found = Array.isArray(list) ? list.find(v => v?.name === name) : null;
+  return typeof found?.stock === 'number' ? found.stock : null;
+};
+
 export function createPgShopOrderStore({ db, now = () => new Date() }) {
   const out = plain;
 
@@ -67,7 +73,10 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     return { order: existing, paymentRequest, replayed: true };
   }
 
-  /** Take `qty` units of a line from stock. Returns the product's new stock, or null if it could not be taken. */
+  /**
+   * Take `qty` units of a line from stock. Returns { stock, vendorId } — the line's new stock (the
+   * variant's own when it keeps one, else the product's) and whose it is — or null if it could not be taken.
+   */
   async function reserveLine(trx, line, { requirePrice, atTime }) {
     let query = trx('Product')
       .where({ id: line.productId, status: 'active' })
@@ -83,8 +92,9 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
       query = query.whereRaw(VARIANT_HAS_STOCK, [line.variant, line.qty]);
       update.variants = trx.raw(variantStockAdjusted('-'), [line.variant, line.qty]);
     }
-    const rows = await query.update(update).returning(['stock']);
-    return rows.length ? rows[0].stock : null;
+    const rows = await query.update(update).returning(['stock', 'vendorId', 'variants']);
+    if (!rows.length) return null;
+    return { stock: line.variantTracked ? variantStockOf(rows[0].variants, line.variant) ?? rows[0].stock : rows[0].stock, vendorId: rows[0].vendorId };
   }
 
   async function whyNotReservable(trx, line, requirePrice) {
@@ -101,10 +111,13 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     return requirePrice ? shopError('price_changed', 409, line.productId) : shopError('insufficient_stock', 409, line.productId);
   }
 
-  const ledgerRow = (orderId, line, reason, cycle, delta, atTime, stockAfter = null) => ({
+  // Bookkeeping for the vendor's stock history: whose stock it is, and that an order moved it.
+  const ledgerRow = (orderId, line, reason, cycle, delta, atTime, stockAfter = null, vendorId = null) => ({
     id: `stk_${randomUUID().slice(0, 12)}`, orderId, productId: line.productId, variant: line.variant || '',
-    cycle, reason, delta, stockAfter, createdAt: atTime,
+    cycle, reason, delta, stockAfter, createdAt: atTime, kind: 'order', vendorId: vendorId || line.vendorId || null,
   });
+  // The double-release guard: one row per order, product, variant, reason and cycle (a partial unique index).
+  const ORDER_LINE_CONFLICT = db.raw('("orderId", "productId", "variant", "reason", "cycle") WHERE "orderId" IS NOT NULL');
 
   /**
    * Reserve stock, create the order and its payment request — all or nothing.
@@ -121,9 +134,9 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
       return await db.transaction(async (trx) => {
         // Always in the same order, so two checkouts never wait on each other in a circle.
         for (const line of [...lines].sort(byLine)) {
-          const stockAfter = await reserveLine(trx, line, { requirePrice: true, atTime });
-          if (stockAfter == null) throw await whyNotReservable(trx, line, true);
-          await trx('ShopStockMovement').insert(ledgerRow(order.id, line, 'reserve', 1, -line.qty, atTime, stockAfter));
+          const taken = await reserveLine(trx, line, { requirePrice: true, atTime });
+          if (taken == null) throw await whyNotReservable(trx, line, true);
+          await trx('ShopStockMovement').insert(ledgerRow(order.id, line, 'reserve', 1, -line.qty, atTime, taken.stock, taken.vendorId));
         }
         await trx('ShopOrder').insert(orderRow({
           ...order,
@@ -152,6 +165,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
 
   const lineOf = (item) => ({
     productId: item.productId, variant: item.variant || null, variantTracked: Boolean(item.variantStockReserved), qty: Number(item.qty || 0),
+    vendorId: item.vendorId || null,
   });
 
   /**
@@ -180,7 +194,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
           // The ledger's unique key means a second release of the same order, product and cycle cannot be written.
           const inserted = await trx('ShopStockMovement')
             .insert(ledgerRow(orderId, line, 'release', cycle, line.qty, atTime))
-            .onConflict(['orderId', 'productId', 'variant', 'reason', 'cycle']).ignore()
+            .onConflict(ORDER_LINE_CONFLICT).ignore()
             .returning('id');
           if (!inserted.length) continue;
           const update = {
@@ -189,11 +203,12 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
             updatedAt: atTime,
           };
           if (line.variantTracked) update.variants = trx.raw(variantStockAdjusted('+'), [line.variant, line.qty]);
-          const restocked = await trx('Product').where({ id: line.productId }).update(update).returning('stock');
+          const restocked = await trx('Product').where({ id: line.productId }).update(update).returning(['stock', 'vendorId', 'variants']);
           if (restocked.length) {
+            const after = line.variantTracked ? variantStockOf(restocked[0].variants, line.variant) ?? restocked[0].stock : restocked[0].stock;
             await trx('ShopStockMovement')
               .where({ orderId, productId: line.productId, variant: line.variant || '', reason: 'release', cycle })
-              .update({ stockAfter: restocked[0].stock });
+              .update({ stockAfter: after, vendorId: restocked[0].vendorId });
           }
         }
         released = true;
@@ -257,9 +272,9 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
         const applied = typeof patch === 'function' ? patch(current) : patch;
         const cycle = (current.reservationCycle || 1) + 1;
         for (const line of (current.items || []).map(lineOf).filter(l => l.qty > 0).sort(byLine)) {
-          const stockAfter = await reserveLine(trx, line, { requirePrice: false, atTime });
-          if (stockAfter == null) throw Object.assign(new Error('not_reservable'), { why: await whyNotReservable(trx, line, false), order: current });
-          await trx('ShopStockMovement').insert(ledgerRow(orderId, line, 'reserve', cycle, -line.qty, atTime, stockAfter));
+          const taken = await reserveLine(trx, line, { requirePrice: false, atTime });
+          if (taken == null) throw Object.assign(new Error('not_reservable'), { why: await whyNotReservable(trx, line, false), order: current });
+          await trx('ShopStockMovement').insert(ledgerRow(orderId, line, 'reserve', cycle, -line.qty, atTime, taken.stock, taken.vendorId));
         }
         await trx('ShopOrder').where({ id: orderId }).update(orderRow({
           ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved', reservationCycle: cycle, reservationExpiresAt: null, updatedAt: atTime,

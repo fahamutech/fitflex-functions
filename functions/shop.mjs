@@ -4,7 +4,7 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { shopService, vendorSettlementService, shopReconciliationService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
-import { identityFlag } from '../src/shared/feature-flags.mjs';
+import { identityFlag, vendorStockLedgerOn, vendorToolsOptions } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
 
@@ -59,11 +59,64 @@ export const getVendorStore = {
 
 export const vendorMyProducts = {
   created, method: 'get', path: '/vendor/products',
-  description: 'Vendor: list own products (including archived).',
+  description: 'Vendor: list own products (including archived). With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s.',
   onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
   onRequest: async (req, res) => {
-    res.json(await shopService.listProducts({ vendorId: req.user.vendorId || req.user.sub, includeArchived: true }));
+    res.json(await shopService.vendorListProducts(req.user.vendorId || req.user.sub));
   }
+};
+
+// ── vendor tools · S1: stock ledger ──────────────────────────────────────────
+
+const sendError = (res, result) => {
+  const { error, status, ...extra } = result;
+  return res.status(status).json({ error, ...extra });
+};
+const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' });
+
+export const vendorToolsOptionsRoute = {
+  created, method: 'get', path: '/vendor/tools/options',
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd).',
+  responseSample: { stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off' },
+  onGuard: requireAuth('vendor', 'vendor_staff', 'admin'),
+  onRequest: async (_req, res) => res.json(vendorToolsOptions()),
+};
+
+export const vendorStockAdjustment = {
+  created, method: 'post', path: '/vendor/products/:id/stock-adjustments',
+  description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): change a product\'s (or a variant\'s) stock with a reason. Body { variant?, reason: count|damaged|expired|lost|found|returned|restock|other, quantity, expectedStock? (count: the stock the vendor saw), direction? (other: in|out), note? (≤200; required for other), clientRef (8–100 chars, reuse it on retries) }. count sets the stock to `quantity`; the others add or remove `quantity`. → 201 { movement, product }; a replayed clientRef → 200 with the same movement. 409 stock_changed { currentStock } (count, stale expectedStock), 409 insufficient_stock { currentStock }, 409 client_ref_reused, 400 invalid_reason | invalid_quantity | note_too_long | note_required | invalid_direction | expected_stock_required | invalid_client_ref | variant_required { variants }, 404 product_not_found | variant_not_found, 403 not_your_product. Flag off: 404 feature_disabled.',
+  requestSample: { reason: 'count', quantity: 12, expectedStock: 15, note: 'Shelf count', clientRef: '3b0c8f6e-2c1a-4c55-9a51-7c1f3b2d9e10' },
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
+  onRequest: async (req, res) => {
+    if (!vendorStockLedgerOn()) return ledgerDisabled(res);
+    const result = await shopService.adjustStock({
+      vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, productId: req.params.id, body: req.body || {},
+    });
+    if (result.error) return sendError(res, result);
+    res.status(result.status).json({ movement: result.movement, product: result.product });
+  },
+};
+
+export const vendorStockMovements = {
+  created, method: 'get', path: '/vendor/products/:id/stock-movements',
+  description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): one product\'s stock history, newest first. Query: from, to (EAT days YYYY-MM-DD, inclusive; optional), variant (optional), limit (1–200, default 50), cursor. → { productId, variant, openingStock, closingStock, rows:[{ id, productId, variant, reason, kind, delta, stockBefore, stockAfter, note, actor:{id,name}|null, orderId, document:{type:\'order\',id,number:null}|null, createdAt }], nextCursor }. Flag off: 404 feature_disabled.',
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
+  onRequest: async (req, res) => {
+    if (!vendorStockLedgerOn()) return ledgerDisabled(res);
+    const result = await shopService.stockMovements({ vendorId: req.user.vendorId || req.user.sub, productId: req.params.id, query: req.query || {} });
+    if (result.error) return sendError(res, result);
+    res.json(result);
+  },
+};
+
+export const vendorLowStock = {
+  created, method: 'get', path: '/vendor/stock/low',
+  description: 'Vendor / staff with `products` (VENDOR_STOCK_LEDGER): products and variants at or below their reorder level (a variant without its own level uses the product\'s). → [{ productId, name, variant|null, stock, reorderLevel }]. Flag off: 404 feature_disabled.',
+  onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
+  onRequest: async (req, res) => {
+    if (!vendorStockLedgerOn()) return ledgerDisabled(res);
+    res.json(await shopService.lowStock(req.user.vendorId || req.user.sub));
+  },
 };
 
 export const shopCategories = {
@@ -79,21 +132,21 @@ export const vendorCreateProduct = {
   requestSample: { name: 'Whey Protein 1kg', category: 'supplements', priceTzs: 85000, stock: 20 },
   onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
   onRequest: async (req, res) => {
-    const result = await shopService.upsertProduct({ vendorId: req.user.vendorId || req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, allowed: result.allowed });
+    const result = await shopService.upsertProduct({ vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, body: req.body || {} });
+    if (result.error) return sendError(res, result);
     res.status(201).json(result.product);
   }
 };
 
 export const vendorUpdateProduct = {
   created, method: 'put', path: '/vendor/products/:id',
-  description: 'Vendor: update own product (price, stock, status...).',
+  description: 'Vendor: update own product (price, stock, status...). The product goes back to review only when a reviewed field (name, description, category, brand, price, discount, images, variant names) actually changes. `variants` are merged by name: a variant sent without `stock` keeps its stored stock. With VENDOR_STOCK_LEDGER on: a `stock` that differs is recorded as a `count` adjustment (note product_form); costTzs / reorderLevel (product and per variant; null clears) are stored privately; when variants keep stock, every variant must (400 variant_stock_mixed) and stock = their sum; dropping a variant that still has stock → 409 variant_has_stock { variant, stock }; duplicate names → 400 duplicate_variant.',
   onGuard: [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products')],
   onRequest: async (req, res) => {
     const result = await shopService.upsertProduct({
-      vendorId: req.user.vendorId || req.user.sub, body: req.body || {}, productId: req.params.id,
+      vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, body: req.body || {}, productId: req.params.id,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) return sendError(res, result);
     res.json(result.product);
   }
 };
