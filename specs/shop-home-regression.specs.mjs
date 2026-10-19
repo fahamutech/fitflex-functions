@@ -43,13 +43,14 @@ async function call(route, claims, { params = {}, query = {}, body = {}, headers
 function mask(value, ids) {
   if (Array.isArray(value)) return value.map(v => mask(v, ids));
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, mask(v, ids)]));
+    // shortRef (S2) is derived from the order id, which differs per journey.
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, k === 'shortRef' ? '<shortRef>' : mask(v, ids)]));
   }
   if (typeof value === 'string') {
     if (/^\d{4}-\d{2}-\d{2}T/.test(value)) return '<time>';
     let s = value;
     for (const [real, alias] of ids) s = s.split(real).join(alias);
-    return s.replace(/\b(ord|pay|ntf)_[0-9a-f]{8}\b/g, '<$1>').replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<time>');
+    return s.replace(/\b(ord|pay|ntf)_[0-9a-f]{8}\b/g, '<$1>').replace(/\bcus_[0-9a-f]{16}\b/g, '<cus>').replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<time>');
   }
   return value;
 }
@@ -104,6 +105,7 @@ after(async () => {
   await db('PaymentRequest').whereIn('orderId', made.orders).del();
   await db('AuditLog').whereIn('target', [...made.orders, ...made.products]).del();
   await db('MarketplaceNotification').whereIn('userId', made.users).del();
+  await db('VendorBuyerRef').whereIn('vendorId', made.users).del();
   await db('ShopOrder').whereIn('id', made.orders).del();
   await db('Product').whereIn('id', made.products).del();
   await db('User').whereIn('id', made.users).del();

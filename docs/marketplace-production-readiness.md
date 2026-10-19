@@ -282,6 +282,7 @@ Written: `marketplace-order-state-machine.md` (PR 2), `marketplace-payment-and-r
 8. PR 3 migration `20261224123000` creates a unique index on confirmed order payment references **only if no duplicates exist**; otherwise it prints them and skips it (resolve, then create the index by hand: statement in the migration output). No downtime either way.
 9. PR 3 adds `GET /admin/marketplace/reconciliation` and two repair endpoints, and an hourly job `shopReconciliation` (read-only). Nothing alerts on it yet (D-12).
 7. PR 2 changes what `GET /vendor/orders` returns for a vendor: their own lines and subtotal, `status` = their own fulfilment's status, plus `orderStatus` and `nextStatuses`. Identical for single-vendor orders. The vendor app needs no change.
+   Vendor tools S2 (2026-10-19) replaces that view with an allowlist (plan `docs/plans/vendor-business-tools-plan.md` §3, shared in `src/shared/vendor-order-view.mjs`): no buyerId, buyerRole, paymentReference or internals, only lines that name the vendor (older lines without a vendorId are no longer shown), `buyer { customerId, displayName }`, `pickupGym { id, name }`, `shortRef`; the same shape from `GET /vendor/orders/:id` and the vendor's `POST /vendor/orders/:id/status` response. `todaySalesTzs` counts paid orders placed on the EAT day.
 
 ## Outcome
 

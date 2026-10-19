@@ -247,7 +247,7 @@ test('marketplace: gym pickup requires a gym and supports ready-for-pickup', asy
   assert.equal(ready.order.status, 'ready_for_pickup');
 });
 
-test('marketplace: sales dashboard and statement count delivered paid orders only', async () => {
+test('marketplace: sales dashboard and statement count delivered paid orders only (today\'s sales: paid orders placed today, EAT — S2 Q-3)', async () => {
   const { service, shopOrders } = makeService();
   const now = new Date().toISOString();
   shopOrders.rows.push(
@@ -256,7 +256,8 @@ test('marketplace: sales dashboard and statement count delivered paid orders onl
     { id: 'other', items: [{ productId: 'p3', vendorId: 'vendor-2', qty: 1, priceTzs: 7000 }], totalTzs: 7000, paymentStatus: 'paid', status: 'delivered', createdAt: now, updatedAt: now },
   );
   const dashboard = await service.vendorPayments('vendor-1');
-  assert.equal(dashboard.todaySalesTzs, 9000);
+  // Q-3 (S2): today's sales count every paid order placed today (EAT), delivered or not.
+  assert.equal(dashboard.todaySalesTzs, 14000);
   assert.equal(dashboard.pendingSettlementTzs, 9000);
   assert.match(await service.vendorStatement('vendor-1'), /paid,9000,delivered/);
 });
