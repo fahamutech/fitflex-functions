@@ -103,7 +103,7 @@ export function createB2BFinanceService({
       if (prior.status !== 'draft') return fail('agreement_in_force', 409, { hint: 'End it and activate a new agreement.' });
       const read = readAgreement({ ...prior, ...body });
       if (read.error) return read;
-      const [agreement] = await trx(AGREEMENT).where({ id: agreementId }).update({ ...read.patch, updatedAt: stamp() }).returning('*');
+      const [agreement] = await trx(AGREEMENT).where({ id: agreementId }).update({ ...read.patch, updatedBy: actorId ?? null, updatedAt: stamp() }).returning('*');
       await audit(trx, { actor: actorId, action: 'b2b.agreement.update', target: agreementId, before: prior, after: agreement });
       return { agreement };
     });
@@ -113,6 +113,8 @@ export function createB2BFinanceService({
    * Put a draft in force. The agreement it replaces is closed the day before
    * the new one starts, so exactly one applies to any day. Dates that overlap
    * an agreement already ended are refused: history is not rewritten.
+   * Two admins: whoever drafted it or last changed it cannot put it in force,
+   * since its terms (fee, pass rates) set what is charged and what gyms are paid.
    */
   async function activateAgreement({ agreementId, actorId }) {
     if (!actorId) return fail('actor_required', 403);
@@ -122,6 +124,7 @@ export function createB2BFinanceService({
       await organizationRow(trx, draft.organizationId).forUpdate().first();   // one activation at a time per organisation
       const prior = await trx(AGREEMENT).where({ id: agreementId }).forUpdate().first();
       if (prior.status !== 'draft') return fail('invalid_transition', 409, { from: prior.status, to: 'active' });
+      if (actorId === prior.createdBy || actorId === prior.updatedBy) return fail('cannot_activate_own_agreement', 403);
       const at = stamp();
       const others = await trx(AGREEMENT).where({ organizationId: prior.organizationId }).whereIn('status', ['active', 'ended']).forUpdate();
       const end = prior.effectiveTo ?? '9999-12-31';

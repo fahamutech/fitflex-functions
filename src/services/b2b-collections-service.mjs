@@ -83,22 +83,79 @@ export function createB2BCollectionsService({
 
   // ── Payment details ───────────────────────────────────────────────────────
 
+  const readInstructions = row => Object.fromEntries(Object.keys(INSTRUCTION_FIELDS).map(k => [k, row?.[k] ?? null]));
+  const parseJson = v => (v == null ? null : typeof v === 'string' ? JSON.parse(v) : v);
+
+  /** The details in force, and a change waiting for a second admin, if any. */
   async function getInstructions() {
     const row = await db(INSTRUCTION).where({ id: 'default' }).first();
-    const instructions = Object.fromEntries(Object.keys(INSTRUCTION_FIELDS).map(k => [k, row?.[k] ?? null]));
-    return { instructions: { ...instructions, updatedAt: row?.updatedAt ?? null }, configured: !!(instructions.accountNumber || instructions.lipaNamba) };
+    const instructions = readInstructions(row);
+    const proposed = parseJson(row?.pendingChange);
+    const pendingChange = proposed
+      ? { instructions: readInstructions(proposed), requestedBy: row.changeRequestedBy ?? null, requestedAt: row.changeRequestedAt ?? null }
+      : null;
+    return { instructions: { ...instructions, updatedAt: row?.updatedAt ?? null }, configured: !!(instructions.accountNumber || instructions.lipaNamba), pendingChange };
   }
 
-  async function setInstructions({ body = {}, actorId }) {
-    const patch = Object.fromEntries(Object.entries(INSTRUCTION_FIELDS).map(([k, max]) => [k, text(body[k], max)]));
+  /**
+   * Two admins change where organisations pay: one asks (this), a different
+   * one confirms. Nothing shown to organisations changes until then. Every
+   * field is optional; send them all, a missing one is cleared. A new request
+   * replaces one still waiting.
+   */
+  async function requestInstructionsChange({ body = {}, actorId }) {
+    if (!actorId) return fail('actor_required', 403);
+    const proposed = Object.fromEntries(Object.entries(INSTRUCTION_FIELDS).map(([k, max]) => [k, text(body[k], max)]));
     await db.transaction(async (trx) => {
       const prior = await trx(INSTRUCTION).where({ id: 'default' }).forUpdate().first();
-      const row = { ...patch, updatedBy: actorId ?? null, updatedAt: stamp() };
-      if (prior) await trx(INSTRUCTION).where({ id: 'default' }).update(row);
-      else await trx(INSTRUCTION).insert({ id: 'default', ...row }).onConflict('id').merge(row);
-      await audit(trx, { actor: actorId, action: 'b2b.payment_instructions.update', target: 'default', before: prior ?? null, after: patch });
+      const at = stamp();
+      const pending = { pendingChange: JSON.stringify(proposed), changeRequestedBy: actorId, changeRequestedAt: at };
+      if (prior) await trx(INSTRUCTION).where({ id: 'default' }).update(pending);
+      else await trx(INSTRUCTION).insert({ id: 'default', ...pending, updatedAt: at }).onConflict('id').merge(pending);
+      const replaced = parseJson(prior?.pendingChange);
+      await audit(trx, {
+        actor: actorId, action: 'b2b.payment_instructions.request', target: 'default',
+        before: { instructions: readInstructions(prior), ...(replaced ? { replacedRequest: { instructions: replaced, requestedBy: prior.changeRequestedBy } } : {}) },
+        after: proposed,
+      });
     });
     return getInstructions();
+  }
+
+  /** The second admin puts the requested change in force. Not the one who asked. */
+  async function confirmInstructionsChange({ actorId }) {
+    if (!actorId) return fail('actor_required', 403);
+    const out = await db.transaction(async (trx) => {
+      const prior = await trx(INSTRUCTION).where({ id: 'default' }).forUpdate().first();
+      const proposed = parseJson(prior?.pendingChange);
+      if (!proposed) return fail('no_pending_change', 409);
+      if (prior.changeRequestedBy === actorId) return fail('cannot_confirm_own_request', 403);
+      const next = readInstructions(proposed);
+      await trx(INSTRUCTION).where({ id: 'default' }).update({ ...next, updatedBy: actorId, updatedAt: stamp(), pendingChange: null, changeRequestedBy: null, changeRequestedAt: null });
+      await audit(trx, {
+        actor: actorId, action: 'b2b.payment_instructions.update', target: 'default',
+        before: readInstructions(prior), after: { ...next, requestedBy: prior.changeRequestedBy, requestedAt: prior.changeRequestedAt },
+      });
+      return null;
+    });
+    return out ?? getInstructions();
+  }
+
+  /** Drop a change still waiting: the one who asked withdraws it, or another admin declines it. */
+  async function cancelInstructionsChange({ actorId, reason }) {
+    if (!actorId) return fail('actor_required', 403);
+    const out = await db.transaction(async (trx) => {
+      const prior = await trx(INSTRUCTION).where({ id: 'default' }).forUpdate().first();
+      const proposed = parseJson(prior?.pendingChange);
+      if (!proposed) return fail('no_pending_change', 409);
+      await trx(INSTRUCTION).where({ id: 'default' }).update({ pendingChange: null, changeRequestedBy: null, changeRequestedAt: null });
+      await audit(trx, {
+        actor: actorId, action: 'b2b.payment_instructions.cancel', target: 'default',
+        before: { instructions: proposed, requestedBy: prior.changeRequestedBy, requestedAt: prior.changeRequestedAt }, after: { reason: text(reason, 500) },
+      });
+      return null;
+    });
+    return out ?? getInstructions();
   }
 
   // ── Payment notices ───────────────────────────────────────────────────────
@@ -421,8 +478,10 @@ export function createB2BCollectionsService({
   async function organizationPaying({ access }) {
     if (!can(access, BILLING_READ)) return refuse(BILLING_READ);
     const account = await db(ACCOUNT).where({ organizationId: access.org.id }).first();
+    // Only the details in force: a change waiting for a second admin is not shown.
+    const { pendingChange, ...inForce } = await getInstructions();
     return {
-      ...(await getInstructions()),
+      ...inForce,
       canPay: can(access, BILLING_PAY),
       onHold: account?.onHold === true,
       holdReason: account?.onHold ? account.holdReason : null,
@@ -431,7 +490,7 @@ export function createB2BCollectionsService({
   }
 
   return {
-    getInstructions, setInstructions,
+    getInstructions, requestInstructionsChange, confirmInstructionsChange, cancelInstructionsChange,
     submitNotice, withdrawNotice, listNotices, organizationNotices, confirmNotice, rejectNotice,
     runReminders, remindNow, onHold, setHold, queue, organizationPaying,
   };

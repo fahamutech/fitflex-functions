@@ -24,6 +24,8 @@ import {
 
 await ensureInit();
 
+const pick = r => [r.error, r.status];
+
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
 const made = { users: [], orgs: [], gyms: [], corporates: [] };
 const TODAY = localDay(new Date());
@@ -72,7 +74,7 @@ const VISITS = { name: 'Gym visits', benefitType: 'gym_access', fundingType: 'fu
 /** An issued fee invoice of `amountTzs` for a month: the simplest invoice to pay against. */
 async function feeInvoice(orgId, amountTzs, period = PERIOD, { effectiveFrom = `${period}-01` } = {}) {
   const { agreement } = await finance.createAgreement({ organizationId: orgId, body: { effectiveFrom, platformFeeTzs: amountTzs }, actorId: BILLER });
-  const live = await finance.activateAgreement({ agreementId: agreement.id, actorId: BILLER });
+  const live = await finance.activateAgreement({ agreementId: agreement.id, actorId: APPROVER });
   assert.ok(live.agreement, JSON.stringify(live));
   const prepared = await finance.prepareFee({ organizationId: orgId, period, actorId: BILLER });
   assert.ok(prepared.invoice, JSON.stringify(prepared));
@@ -140,6 +142,22 @@ test('rules: terms, due dates, what is owed and aging', () => {
 
 // ── Commercial agreement ─────────────────────────────────────────────────────
 
+test('agreement: put in force by a second admin, not by whoever drafted or last changed it', async () => {
+  const orgId = await sponsor();
+  const third = await user('admin');
+  // A low pass rate lowers what gyms are paid: the admin who sets it cannot also put it in force.
+  const { agreement: draft } = await finance.createAgreement({ organizationId: orgId, body: { effectiveFrom: '2026-01-01', passRates: { pro: 1000 } }, actorId: BILLER });
+  assert.deepEqual(pick(await finance.activateAgreement({ agreementId: draft.id, actorId: BILLER })), ['cannot_activate_own_agreement', 403]);
+  // Whoever changed it last cannot either; the creator still cannot.
+  await finance.updateAgreement({ agreementId: draft.id, body: { passRates: { pro: 500 } }, actorId: APPROVER });
+  assert.deepEqual(pick(await finance.activateAgreement({ agreementId: draft.id, actorId: APPROVER })), ['cannot_activate_own_agreement', 403]);
+  assert.deepEqual(pick(await finance.activateAgreement({ agreementId: draft.id, actorId: BILLER })), ['cannot_activate_own_agreement', 403]);
+  assert.equal((await db('B2BCommercialAgreement').where({ id: draft.id }).first()).status, 'draft');
+  assert.deepEqual(pick(await finance.activateAgreement({ agreementId: draft.id, actorId: null })), ['actor_required', 403]);
+  const live = await finance.activateAgreement({ agreementId: draft.id, actorId: third });
+  assert.deepEqual([live.agreement.status, live.agreement.activatedBy, live.agreement.passRates], ['active', third, { pro: 500 }]);
+});
+
 test('agreement: drafted, changed while a draft, put in force, replaced without rewriting history', async () => {
   const orgId = await sponsor();
   const other = await sponsor('other');
@@ -154,13 +172,15 @@ test('agreement: drafted, changed while a draft, put in force, replaced without 
   const changed = await finance.updateAgreement({ agreementId: draft.id, body: { usageTermsDays: 30, platformFeeTzs: 500000 }, actorId: BILLER });
   assert.deepEqual([changed.agreement.usageTermsDays, changed.agreement.platformFeeTzs, changed.agreement.contractReference], [30, 500000, 'CRDB/FF/01']);
 
-  const live = await finance.activateAgreement({ agreementId: draft.id, actorId: BILLER });
-  assert.deepEqual([live.agreement.status, live.agreement.activatedBy], ['active', BILLER]);
+  // Two admins: the one who drafted and changed it cannot put it in force.
+  assert.deepEqual(pick(await finance.activateAgreement({ agreementId: draft.id, actorId: BILLER })), ['cannot_activate_own_agreement', 403]);
+  const live = await finance.activateAgreement({ agreementId: draft.id, actorId: APPROVER });
+  assert.deepEqual([live.agreement.status, live.agreement.activatedBy, live.agreement.createdBy, live.agreement.updatedBy], ['active', APPROVER, BILLER, BILLER]);
   assert.equal((await finance.listAgreements({ organizationId: orgId })).inForce.id, draft.id);
   // In force: not edited, in the service or in the database.
   assert.equal((await finance.updateAgreement({ agreementId: draft.id, body: { platformFeeTzs: 1 }, actorId: BILLER })).error, 'agreement_in_force');
   await assert.rejects(db('B2BCommercialAgreement').where({ id: draft.id }).update({ platformFeeTzs: 1 }), /cannot be changed/);
-  assert.equal((await finance.activateAgreement({ agreementId: draft.id, actorId: BILLER })).error, 'invalid_transition');
+  assert.equal((await finance.activateAgreement({ agreementId: draft.id, actorId: APPROVER })).error, 'invalid_transition');
 
   // New terms from a later date: the old agreement closes the day before, and each still answers for its own days.
   const next = months(2);
@@ -171,7 +191,7 @@ test('agreement: drafted, changed while a draft, put in force, replaced without 
   assert.equal(inForce.id, draft.id);   // today is still under the first
   // History is not rewritten: nothing may start inside a period already covered.
   const { agreement: clash } = await finance.createAgreement({ organizationId: orgId, body: { effectiveFrom: '2026-03-01', effectiveTo: '2026-04-30' }, actorId: BILLER });
-  assert.deepEqual([(await finance.activateAgreement({ agreementId: clash.id, actorId: BILLER })).error], ['agreement_dates_overlap']);
+  assert.deepEqual([(await finance.activateAgreement({ agreementId: clash.id, actorId: APPROVER })).error], ['agreement_dates_overlap']);
 
   assert.equal((await finance.endAgreement({ agreementId: second.id, effectiveTo: '2020-01-01', actorId: BILLER })).error, 'invalid_effective_to');
   assert.equal((await finance.endAgreement({ agreementId: second.id, effectiveTo: `${next}-28`, actorId: BILLER })).agreement.status, 'ended');
@@ -206,7 +226,7 @@ test('platform fee: one invoice per organisation and month, numbered and dated o
   const orgId = await sponsor();
   assert.deepEqual(await finance.prepareFee({ organizationId: orgId, period: PERIOD, actorId: BILLER }), { invoice: null, added: 0, reason: 'no_agreement' });
   const { agreement } = await finance.createAgreement({ organizationId: orgId, body: { effectiveFrom: `${PERIOD}-01`, platformFeeTzs: 500000, vatRateBps: 1800, prepaidTermsDays: 5 }, actorId: BILLER });
-  await finance.activateAgreement({ agreementId: agreement.id, actorId: BILLER });
+  await finance.activateAgreement({ agreementId: agreement.id, actorId: APPROVER });
 
   // Asked for many times at once: one draft.
   const drafts = await Promise.all([1, 2, 3, 4].map(() => finance.prepareFee({ organizationId: orgId, period: PERIOD, actorId: BILLER })));
@@ -238,7 +258,7 @@ test('platform fee: one invoice per organisation and month, numbered and dated o
   // A month with no fee on its agreement drafts nothing; a suspended organisation is not invoiced.
   const noFee = await sponsor('nofee');
   const plain = await finance.createAgreement({ organizationId: noFee, body: { effectiveFrom: `${PERIOD}-01` }, actorId: BILLER });
-  await finance.activateAgreement({ agreementId: plain.agreement.id, actorId: BILLER });
+  await finance.activateAgreement({ agreementId: plain.agreement.id, actorId: APPROVER });
   assert.equal((await finance.prepareFee({ organizationId: noFee, period: PERIOD, actorId: BILLER })).reason, 'no_platform_fee');
   await b2bService.setOrganizationStatus({ organizationId: orgId, status: 'suspended', actorId: BILLER });
   assert.equal((await finance.prepareFee({ organizationId: orgId, period: months(1), actorId: BILLER })).error, 'organization_not_active');
