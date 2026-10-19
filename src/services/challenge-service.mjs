@@ -14,9 +14,10 @@
 //   fitflex / corporate — totals only (joined, completed, average progress),
 //                   never individuals
 //
-// Leaderboards (opt-in):
-//   - A participant appears in a challenge's ranking only if they switch
-//     `leaderboardOptIn` on (off by default), shown as first name + last
+// Leaderboards (on by default — owner decision 2026-10-19):
+//   - A participant appears in a challenge's ranking while
+//     `leaderboardOptIn` is on (on when they join unless they say otherwise;
+//     they can switch it off at any time), shown as first name + last
 //     initial, ranked by progress toward the challenge goal. Everyone can
 //     see where they would place without being listed.
 //   - Team standings rank teams by average completion, so team size
@@ -29,7 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { challengeProgress, localDay } from '../shared/member-progress.mjs';
 import { normalizePermissions } from './trainer-client-service.mjs';
 import { shortName } from '../shared/public-name.mjs';
-import { normalizeGymPermissions } from './gym-sharing-service.mjs';
+import { gymPermissionsFor } from './gym-sharing-service.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
 import { createCompanyDirectory, isCompanyType } from './company-directory.mjs';
 
@@ -290,8 +291,11 @@ export function createChallengeService({
     const fields = {
       status: 'joined', joinedAt: stamp, leftAt: null,
       teamId: team.teamId,
-      // Off unless the member explicitly chooses to appear in the ranking.
-      leaderboardOptIn: body.leaderboardOptIn === true,
+      // On unless the member explicitly chooses to stay off the ranking.
+      // Rejoining without saying keeps the choice they made last time.
+      leaderboardOptIn: body.leaderboardOptIn === undefined && existing
+        ? existing.leaderboardOptIn !== false
+        : body.leaderboardOptIn !== false,
     };
     if (existing) {
       await participants.updateByIdAsync(existing.id, fields);
@@ -756,7 +760,7 @@ export function createChallengeService({
     if (c.creatorType === 'gym') {
       const rows = await gymMemberSharing.filterByColumnAsync('memberId', memberId);
       const row = rows.find(x => x.gymId === c.creatorId);
-      return normalizeGymPermissions(row?.permissions).challenges;
+      return gymPermissionsFor(row).challenges;
     }
     return false;
   }

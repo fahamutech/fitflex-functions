@@ -1,9 +1,9 @@
 // Gym ↔ member activity sharing.
 //
 // A gym always sees its own records of a member: check-ins (needed for
-// entry) and the visit patterns derived from them. Anything from the
-// member's activity log is private unless the member switches it on for
-// that gym:
+// entry) and the visit patterns derived from them. From the member's
+// activity log, these are shared with each of their gyms by default (owner
+// decision 2026-10-19) and the member can switch any of them off per gym:
 //   classAttendance — group classes the member logged at this gym
 //   gymWorkouts     — workouts done at this gym (type, date, duration;
 //                     never sets, weights or notes)
@@ -28,6 +28,17 @@ export function normalizeGymPermissions(input, base = {}) {
   }
   return out;
 }
+
+/**
+ * What a gym may see, given the member's sharing row for it (if any). No
+ * row means the member never changed anything for that gym: all on. A row
+ * is honoured exactly. Every reader of GymMemberSharing goes through this.
+ */
+export function gymPermissionsFor(row) {
+  return normalizeGymPermissions(row?.permissions, row ? {} : allGymPermissionsOn());
+}
+
+const allGymPermissionsOn = () => Object.fromEntries(GYM_PERMISSIONS.map(k => [k, true]));
 
 /**
  * Visit patterns from a member's check-ins at one gym. `status` bands:
@@ -100,7 +111,7 @@ export function createGymSharingService({
       const gym = await gyms.findByIdAsync(gymId);
       if (!gym) continue;
       const row = rows.find(r => r.gymId === gymId);
-      out.push({ gym: gymCard(gym), reasons: why, permissions: normalizeGymPermissions(row?.permissions) });
+      out.push({ gym: gymCard(gym), reasons: why, permissions: gymPermissionsFor(row) });
     }
     out.sort((a, b) => (a.gym.name ?? '').localeCompare(b.gym.name ?? ''));
     return { gyms: out };
@@ -111,7 +122,8 @@ export function createGymSharingService({
     const reasons = await memberGymIds(memberId);
     if (!reasons.has(gymId)) return { error: 'not_your_gym', status: 404 };
     const existing = (await sharing.filterByColumnAsync('memberId', memberId)).find(r => r.gymId === gymId);
-    const permissions = normalizeGymPermissions(body.permissions, existing?.permissions);
+    // The first change starts from the defaults (all on), not from nothing.
+    const permissions = normalizeGymPermissions(body.permissions, gymPermissionsFor(existing));
     const stamp = now().toISOString();
     if (existing) {
       await sharing.updateByIdAsync(existing.id, { permissions, updatedAt: stamp });
@@ -142,7 +154,7 @@ export function createGymSharingService({
     let acts = null;
     const out = [];
     for (const gymId of gymIds) {
-      const perms = normalizeGymPermissions(rows.find(r => r.gymId === gymId)?.permissions);
+      const perms = gymPermissionsFor(rows.find(r => r.gymId === gymId));
       const entry = {
         gym: gymCard(await gyms.findByIdAsync(gymId)),
         permissions: perms,

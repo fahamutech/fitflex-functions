@@ -3,8 +3,9 @@
 // Consent rules:
 // - Only a member starts a connection (from the trainer's profile); the
 //   trainer accepts or declines. Either side can end it.
-// - Every permission starts off. The member switches on exactly what the
-//   trainer may see, and can change it at any time.
+// - Every permission starts on (owner decision 2026-10-19) unless the
+//   member's request says otherwise. The member can switch any of it off,
+//   and back on, at any time.
 // - The trainer's client view is built here and contains only permitted
 //   data — raw activity never leaves the server unless steps, distance or
 //   active minutes is shared.
@@ -48,6 +49,9 @@ export function normalizePermissions(input, base = {}) {
   if (!out.workoutHistory) out.workoutDetails = false;
   return out;
 }
+
+/** What a new connection starts with: everything on. */
+export const allPermissionsOn = () => Object.fromEntries(PERMISSIONS.map(k => [k, true]));
 
 export function createTrainerClientService({
   usernames = null, relationships, trainers, users, workouts, workoutPlans, activities, goals,
@@ -112,7 +116,10 @@ export function createTrainerClientService({
       trainerId,
       memberId,
       status: 'pending',
-      permissions: normalizePermissions(body.permissions),
+      // All on unless the member chose in the connect sheet; then exactly that.
+      permissions: body.permissions && typeof body.permissions === 'object'
+        ? normalizePermissions(body.permissions)
+        : allPermissionsOn(),
       requestedAt: t,
       connectedAt: null,
       endedAt: null,

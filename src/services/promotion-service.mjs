@@ -17,7 +17,7 @@ import {
 } from '../shared/promotion-config.mjs';
 import {
   validatePromotionInput, checkPromotionRules, effectiveStatus, canTransition, capacityCheck, slotLimit,
-  normaliseGeoScope, geoMatches, disclosureLabel, placementsFor, isModerationBlocking,
+  normaliseGeoScope, geoMatches, disclosureLabel, disclosureText, placementsFor, isModerationBlocking,
 } from '../shared/promotion-rules.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -80,6 +80,7 @@ export function createPromotionService({
     ...p,
     effectiveStatus: effectiveStatus(p, now()),
     label: PROMOTION_TYPES[p.type] ? disclosureLabel(p) : null,
+    disclosure: PROMOTION_TYPES[p.type] ? disclosureText(p) : null,
     entity: summary,
   });
 
@@ -539,7 +540,9 @@ export function createPromotionService({
    * entity that is still approved and eligible, reaching this viewer. This is
    * the only thing discovery should ask; ranking applies the (bounded) boost.
    */
-  async function listLive({ placement, entityType, viewer = {}, type, checkEntities = true } = {}) {
+  // anyLocation: every live promotion wherever it is targeted (area or radius), e.g. to keep all paid
+  // placements out of an organic list. Default false: only those that reach this viewer.
+  async function listLive({ placement, entityType, viewer = {}, type, checkEntities = true, anyLocation = false } = {}) {
     const areas = await areasById();
     const rows = (await withPlacements(await promotions.allAsync())).filter(p => p.status === 'scheduled' || p.status === 'active');
     const out = [];
@@ -548,7 +551,7 @@ export function createPromotionService({
       if (placement && !p.placements.includes(placement)) continue;
       if (entityType && p.entityType !== entityType) continue;
       if (type && p.type !== type) continue;
-      if (!geoMatches(p.geoScope, viewer, areas)) continue;
+      if (!anyLocation && !geoMatches(p.geoScope, viewer, areas)) continue;
       // Discovery already holds the listings it may show, so it checks them itself and skips these lookups.
       if (checkEntities) {
         const entity = await entities.get(p.entityType, p.entityId);
@@ -556,7 +559,7 @@ export function createPromotionService({
         const el = await entities.eligibility(p.entityType, entity, mod);
         if (!el.ok) continue;
       }
-      out.push({ ...p, entityKey: `${p.entityType}:${p.entityId}`, label: disclosureLabel(p), commercial: p.isCommercial });
+      out.push({ ...p, entityKey: `${p.entityType}:${p.entityId}`, label: disclosureLabel(p), disclosure: disclosureText(p), commercial: p.isCommercial });
     }
     return out.sort((a, b) => a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
   }

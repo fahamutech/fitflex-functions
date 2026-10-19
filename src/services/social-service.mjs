@@ -6,7 +6,12 @@
 //   public    — any member, when their profile is public
 //   groups    — members of those groups who are members themselves
 //   company   — colleagues at the same company (members, never HR)
-// Everything is private until the member shares it. Following is instant;
+// Sharing is on by default (owner decision 2026-10-19): a profile is public
+// and new activities go to Public and every group the member is in when the
+// activity is created — including a member who never opened the settings
+// (no SocialProfile row yet). The member can switch any of it off, and that
+// choice is kept. Activities already saved keep who they were shared with.
+// Following is instant;
 // a follow on its own shows only Followers and Public posts. A block hides
 // both people from each other entirely. Owners of trainer, gym or company
 // groups manage the group; they don't see anyone's activity through it.
@@ -36,6 +41,13 @@ const DAY_MS = 86_400_000;
 const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
 const id = prefix => `${prefix}_${randomUUID().slice(0, 12)}`;
 const code = () => randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase();
+
+/**
+ * Everyone's starting default for new activities: Public, plus every group
+ * they're in at the time (`allGroups`, expanded when an activity is saved).
+ */
+export const DEFAULT_SHARE = Object.freeze({ friends: false, followers: false, public: true, groups: Object.freeze([]), company: false, allGroups: true });
+const defaultShareCopy = () => ({ ...DEFAULT_SHARE, groups: [] });
 
 /** What a viewer may see of someone else's activity. */
 export function publicActivity(a) {
@@ -119,8 +131,22 @@ export function createSocialService({
     return false;
   }
 
+  /** Public unless the member switched it off; no profile row yet counts as public. */
   async function isPublic(userId) {
-    return (await profiles.findByIdAsync(userId))?.publicProfile === true;
+    const p = await profiles.findByIdAsync(userId);
+    return p ? p.publicProfile === true : true;
+  }
+
+  /**
+   * Ids of public profiles: rows that say so, plus members who have no
+   * profile row yet (public by default).
+   */
+  async function publicProfileIds() {
+    const rows = await profiles.allAsync();
+    const out = new Set(rows.filter(p => p.publicProfile === true).map(p => p.id));
+    const known = new Set(rows.map(p => p.id));
+    for (const u of await users.filterByColumnAsync('userType', 'member')) if (!known.has(u.id)) out.add(u.id);
+    return out;
   }
 
   /** What other people see: the member's username when they have one, else their name. */
@@ -159,7 +185,7 @@ export function createSocialService({
     const existing = await profiles.findByIdAsync(userId);
     if (existing) return existing;
     const stamp = now().toISOString();
-    const row = { id: userId, defaultShare: null, inviteCode: code(), createdAt: stamp, updatedAt: stamp };
+    const row = { id: userId, publicProfile: true, defaultShare: defaultShareCopy(), inviteCode: code(), createdAt: stamp, updatedAt: stamp };
     try {
       await profiles.insertAsync(row);
     } catch (err) {
@@ -171,26 +197,34 @@ export function createSocialService({
 
   /**
    * Checks a share setting against what this member can actually use.
-   * Returns null for private, or { followers, groups, company }.
+   * Returns null for private, or { friends, followers, public, groups, company }.
+   * `allGroups` means every group the member is in: for a default
+   * ([asDefault]) it is kept as is and expanded each time an activity is
+   * saved; for one activity it is expanded now into the concrete groups.
    */
-  async function normalizeShare(userId, raw) {
+  async function normalizeShare(userId, raw, { asDefault = false } = {}) {
     if (raw == null || raw === false) return { share: null };
     if (typeof raw !== 'object') return { error: 'invalid_share', status: 400 };
     // Apps before followers/public (no `v: 2`) sent `followers` meaning
     // mutual friends; read it that way so nothing reaches more people than
-    // its owner chose.
-    const legacy = raw.v !== 2 && raw.friends === undefined;
+    // its owner chose. Those apps never sent `allGroups`.
+    const legacy = raw.v !== 2 && raw.friends === undefined && raw.allGroups === undefined;
     const friendsOn = legacy ? raw.followers === true : raw.friends === true;
     const followersOn = legacy ? false : raw.followers === true;
     const publicOn = legacy ? false : raw.public === true;
     if (publicOn && !(await isPublic(userId))) return { error: 'profile_not_public', status: 400 };
-    const wanted = Array.isArray(raw.groups) ? [...new Set(raw.groups.filter(g => typeof g === 'string'))] : [];
+    let wanted = Array.isArray(raw.groups) ? [...new Set(raw.groups.filter(g => typeof g === 'string'))] : [];
     const mine = await activeGroupIds(userId);
     if (wanted.some(g => !mine.has(g))) return { error: 'not_in_group', status: 400 };
+    // Saved without `allGroups`: the member chose specific groups (or none).
+    const allGroups = raw.allGroups === true;
+    if (allGroups && !asDefault) wanted = [...mine];
     const company = raw.company === true;
     if (company && !(await companiesOf(userId)).size) return { error: 'no_company', status: 400 };
-    if (!friendsOn && !followersOn && !publicOn && !wanted.length && !company) return { share: null };
-    return { share: { friends: friendsOn, followers: followersOn, public: publicOn, groups: wanted, company } };
+    const keepAll = allGroups && asDefault;
+    if (!friendsOn && !followersOn && !publicOn && !wanted.length && !company && !keepAll) return { share: null };
+    const share = { friends: friendsOn, followers: followersOn, public: publicOn, groups: wanted, company };
+    return { share: asDefault ? { ...share, allGroups } : share };
   }
 
   async function settings(userId) {
@@ -217,26 +251,32 @@ export function createSocialService({
       }
     }
     if (body.defaultShare !== undefined) {
-      const n = await normalizeShare(userId, body.defaultShare);
+      const n = await normalizeShare(userId, body.defaultShare, { asDefault: true });
       if (n.error) return n;
       await profiles.updateByIdAsync(p.id, { defaultShare: n.share, updatedAt: now().toISOString() });
     }
     return { settings: await settings(userId) };
   }
 
-  /** The member's default for a new activity (used when one is created). */
+  /**
+   * The member's default for a new activity (used when one is created).
+   * Always concrete: `allGroups` becomes the groups they're in right now,
+   * so a group joined later gets what they log after joining.
+   */
   async function defaultShareFor(userId) {
     const p = await profiles.findByIdAsync(userId);
-    if (!p?.defaultShare) return null;
+    // No row yet: they never changed anything, so the starting default.
+    const d = p ? p.defaultShare : defaultShareCopy();
+    if (!d) return null;
     // Groups they've since left drop out; a company they've left does too.
     const mine = await activeGroupIds(userId);
     const n = await normalizeShare(userId, {
       v: 2,
-      friends: p.defaultShare.friends === true,
-      followers: p.defaultShare.followers === true,
-      public: p.defaultShare.public === true && (await isPublic(userId)),
-      groups: (p.defaultShare.groups ?? []).filter(g => mine.has(g)),
-      company: p.defaultShare.company === true && (await companiesOf(userId)).size > 0,
+      friends: d.friends === true,
+      followers: d.followers === true,
+      public: d.public === true && (await isPublic(userId)),
+      groups: d.allGroups === true ? [...mine] : (d.groups ?? []).filter(g => mine.has(g)),
+      company: d.company === true && (await companiesOf(userId)).size > 0,
     });
     return n.error ? null : n.share;
   }
@@ -342,7 +382,7 @@ export function createSocialService({
     }
     for (const id of await directory.colleaguesOf(userId)) contacts.add(id);
     // Public profiles can be found by anyone.
-    for (const p of await profiles.allAsync()) if (p.publicProfile === true) pool.add(p.id);
+    for (const pid of await publicProfileIds()) pool.add(pid);
     for (const id of contacts) pool.add(id);
     pool.delete(userId);
     for (const uid of pool) {
@@ -481,7 +521,7 @@ export function createSocialService({
     const since = +now() - EXPLORE_DAYS * DAY_MS;
     const cutoff = before ? Date.parse(before) : Infinity;
     const mine = await following(viewerId);
-    const publicIds = (await profiles.allAsync()).filter(p => p.publicProfile === true && p.id !== viewerId).map(p => p.id);
+    const publicIds = [...(await publicProfileIds())].filter(pid => pid !== viewerId);
     const candidates = [];
     for (const uid of publicIds) {
       if (await isBlocked(viewerId, uid)) continue;

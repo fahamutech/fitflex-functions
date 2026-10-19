@@ -103,12 +103,14 @@ test('marketplace: public vendor responses exclude settlement data and unpublish
 });
 
 test('marketplace: rich products are approval gated, filterable and sortable', async () => {
-  const { service } = makeService();
+  const { service, products } = makeService();
   const productId = await approvedProduct(service);
-  await approvedProduct(service, {
+  const matId = await approvedProduct(service, {
     name: 'Yoga Mat', category: 'equipment', brand: 'Zen', priceTzs: 30000,
-    discountPriceTzs: null, soldCount: 50, rating: 4.9,
+    discountPriceTzs: null,
   });
+  // Sold count and rating are server-maintained (a vendor cannot send them), so they are set on the row.
+  await products.updateByIdAsync(matId, { soldCount: 50, rating: 4.9 });
 
   const filtered = await service.listProducts({
     category: 'supplements_nutrition', brand: 'fit fuel', minPrice: 70000, maxPrice: 80000,

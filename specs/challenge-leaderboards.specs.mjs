@@ -1,4 +1,4 @@
-// Opt-in challenge leaderboards and team challenges.
+// Challenge leaderboards (on by default, members can opt out) and team challenges.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createChallengeService, MIN_TEAM_SIZE } from '../src/services/challenge-service.mjs';
@@ -59,22 +59,35 @@ const CORP = { creatorType: 'corporate', creatorId: 'corp_1', createdBy: 'hr' };
 const GYM = { creatorType: 'gym', creatorId: 'g1', createdBy: 'o1' };
 const base = { name: '50K Step Challenge', type: 'steps', target: 50000, startDate: '2026-09-20', endDate: '2026-09-28' };
 
-test('joining leaves you off the leaderboard unless you opt in', async () => {
+test('joining puts you on the leaderboard by name unless you say no', async () => {
   const s = setup();
   const { challenge } = await s.svc.create(FITFLEX, base);
   const joined = await s.svc.join('m1', challenge.id);
+  assert.equal(joined.challenge.leaderboardOptIn, true);
+  assert.equal(s.participants.rows[0].leaderboardOptIn, true);
+  const lb = await s.svc.leaderboard({ memberId: 'm1' }, challenge.id);
+  assert.deepEqual(lb.individuals.map(i => [i.name, i.you]), [['Aisha M.', true]]);
+  assert.deepEqual(lb.you, { optedIn: true, rank: 1, of: 1, progress: 40000, teamId: null });
+});
+
+test('joining with leaderboardOptIn false keeps you off the leaderboard', async () => {
+  const s = setup();
+  const { challenge } = await s.svc.create(FITFLEX, base);
+  const joined = await s.svc.join('m1', challenge.id, { leaderboardOptIn: false });
   assert.equal(joined.challenge.leaderboardOptIn, false);
-  assert.equal(s.participants.rows[0].leaderboardOptIn, false);
   const lb = await s.svc.leaderboard({ memberId: 'm1' }, challenge.id);
   assert.deepEqual(lb.individuals, []);
   assert.deepEqual(lb.you, { optedIn: false, rank: 1, of: 1, progress: 40000, teamId: null });
+  // Leaving and rejoining without saying keeps that choice.
+  await s.svc.leave('m1', challenge.id);
+  assert.equal((await s.svc.join('m1', challenge.id)).challenge.leaderboardOptIn, false);
 });
 
 test('ranking lists only people who opted in, by first name and initial', async () => {
   const s = setup();
   const { challenge: c } = await s.svc.create(FITFLEX, base);
   await s.svc.join('m1', c.id, { leaderboardOptIn: true });
-  await s.svc.join('m2', c.id); // not opted in
+  await s.svc.join('m2', c.id, { leaderboardOptIn: false }); // chose to stay off
   await s.svc.join('m3', c.id, { leaderboardOptIn: true });
   await s.svc.join('m4', c.id, { leaderboardOptIn: true });
 
@@ -129,8 +142,9 @@ test('teams: creator-named teams; members must pick one', async () => {
   const blue = c.teams.find(t => t.name === 'Blue').id;
   assert.equal((await s.svc.join('m1', c.id)).error, 'team_required');
   assert.equal((await s.svc.join('m1', c.id, { teamId: 'nope' })).error, 'invalid_team');
-  for (const m of ['m1', 'm2', 'm3']) await s.svc.join(m, c.id, { teamId: red });
-  await s.svc.join('m5', c.id, { teamId: blue });
+  // Nobody here chose to be listed by name.
+  for (const m of ['m1', 'm2', 'm3']) await s.svc.join(m, c.id, { teamId: red, leaderboardOptIn: false });
+  await s.svc.join('m5', c.id, { teamId: blue, leaderboardOptIn: false });
   const lb = await s.svc.leaderboard({ memberId: 'm1' }, c.id);
   assert.equal(lb.you.teamId, red);
   // Red has 3 members: (40k + 25k + 50k capped at 1) / 3.

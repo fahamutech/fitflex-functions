@@ -118,6 +118,7 @@ import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
+import { createShopHomeService } from '../services/shop-home-service.mjs';
 import { signServedToken } from '../auth/promotion-token.mjs';
 import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
 import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
@@ -875,4 +876,16 @@ export const discoveryService = createDiscoveryService({
 export const promotionEventsService = createPromotionEventsService({ db, promotions });
 export const promotionAnalyticsService = createPromotionAnalyticsService({
   db, promotions, campaigns: promotionCampaigns, entities: entityResolver,
+});
+
+// Shop home (GET /shop/home, behind SHOP_HOME_V2): role sections over the same catalogue, Featured system and orders.
+// Sales are read from paid, not cancelled orders of the last 30 days only, newest first and capped, so memory stays bounded.
+const SHOP_HOME_MAX_ORDERS = 20_000;
+export const shopHomeService = createShopHomeService({
+  shopService, discoveryService, promotionService, users, trainerService, identityLink: identityLinkService,
+  recentPaidOrders: ({ since }) => db('ShopOrder')
+    .where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
+    .orderBy('createdAt', 'desc').limit(SHOP_HOME_MAX_ORDERS)
+    .select('id', 'buyerRole', 'items', 'status', 'paymentStatus', 'createdAt'),
+  signToken: signServedToken,
 });
