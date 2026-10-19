@@ -4,6 +4,7 @@
 // conditional UPDATE of stock (and the variant's stock in the same statement), and a ledger row
 // is written with it. Queries are vendor- or product-scoped and parameterised; nothing loads a
 // whole table.
+import { shortRef } from '../shared/vendor-order-view.mjs';
 import { randomUUID } from 'node:crypto';
 import { variantsOf, isTracked, effectiveLevel } from '../shared/vendor-stock.mjs';
 
@@ -31,8 +32,9 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       delta: Number(r.delta), stockBefore: after == null ? null : after - Number(r.delta), stockAfter: after,
       note: r.note ?? null, actor: r.actorId ? { id: r.actorId, name: actorName ?? r.actorName ?? null } : null,
       orderId: r.orderId ?? null,
-      // Q-4: an order-linked row points at its order. Orders have no human reference number yet.
-      document: r.orderId ? { type: 'order', id: r.orderId, number: null } : null,
+      // Q-4: an order-linked row points at its order. Orders have no human reference number yet; shortRef
+      // is the same short reference the Orders screens show (last 6 characters of the id, uppercase).
+      document: r.orderId ? { type: 'order', id: r.orderId, number: null, shortRef: shortRef(r.orderId) } : null,
       createdAt: r.createdAt,
     };
   }
