@@ -90,19 +90,20 @@ test('a vendor with no line in the order cannot touch it, whoever they are', asy
   const { orderId } = await twoVendorOrder();
   const stranger = await user('vendor');
   const out = await move(orderId, 'accepted', stranger);
-  assert.equal(out.error, 'order_not_owned_by_vendor');
-  assert.equal(out.status, 403);
+  // S2: an order with no line of theirs looks absent to a vendor (as on GET /vendor/orders/:id).
+  assert.equal(out.error, 'order_not_found');
+  assert.equal(out.status, 404);
   assert.deepEqual((await row(orderId)).fulfilments.map(f => f.status), ['pending', 'pending']);
   assert.equal((await service.vendorOrders(stranger)).length, 0);
 });
 
 test('a vendor sees only their own lines, subtotal and status; never another vendor\'s lines or commission', async () => {
-  const { a, b, orderId } = await twoVendorOrder();
+  const { a, b, pa, orderId } = await twoVendorOrder();
   await move(orderId, 'accepted', a);
   const [viewA] = await service.vendorOrders(a);
   assert.equal(viewA.id, orderId);
   assert.equal(viewA.items.length, 1);
-  assert.ok(viewA.items.every(i => i.vendorId === a));
+  assert.deepEqual(viewA.items.map(i => i.productId), [pa]);
   assert.equal(viewA.totalTzs, 10_000);
   assert.equal(viewA.status, 'accepted');
   assert.equal(viewA.orderStatus, 'pending');
@@ -190,8 +191,8 @@ test('the route: staff need the orders permission and act only for their own ven
     return res;
   };
   const foreign = await call({ sub: otherStaff, userType: 'vendor_staff', vendorId: other }, { status: 'accepted' });
-  assert.equal(foreign.code, 403);
-  assert.equal(foreign.body.error, 'order_not_owned_by_vendor');
+  assert.equal(foreign.code, 404);
+  assert.equal(foreign.body.error, 'order_not_found');
   const own = await call({ sub: withOrders, userType: 'vendor_staff', vendorId: vendor }, { status: 'accepted' });
   assert.equal(own.code, 200);
   assert.equal(own.body.status, 'accepted');
@@ -331,7 +332,7 @@ test('two vendors moving their own parts at once both succeed and the order refl
 
 // ── older orders and revival ─────────────────────────────────────────────────
 
-test('an order made before fulfilments existed (legacy status, no vendor on its lines) still works', async () => {
+test('an order made before fulfilments existed (legacy status, no vendor on its lines): FitFlex moves it; a vendor cannot see or move it (S2)', async () => {
   const vendor = await user('vendor');
   const buyer = await user();
   const productId = await product(vendor);
@@ -341,15 +342,19 @@ test('an order made before fulfilments existed (legacy status, no vendor on its 
     id, buyerId: buyer, items: JSON.stringify([{ productId, name: 'Old', qty: 1, priceTzs: 10_000 }]), totalTzs: 10_000,
     status: 'confirmed', paymentStatus: 'paid', deliveryMethod: 'home_delivery', timeline: JSON.stringify([{ status: 'confirmed' }]), stockState: 'reserved',
   });
-  assert.equal((await service.vendorOrders(vendor))[0].status, 'confirmed');
-  assert.equal((await move(id, 'accepted', vendor)).unchanged, true, 'confirmed already is accepted');
-  assert.equal((await move(id, 'dispatched', vendor)).order.status, 'dispatched');
-  assert.equal((await move(id, 'fulfilled', vendor)).order.status, 'delivered');
+  // S2 privacy rule (plan §3): lines without a vendorId are never shown to a vendor, so the order is not listed.
+  assert.equal((await service.vendorOrders(vendor)).some(o => o.id === id), false);
+  // S2 (security review of #200): a vendor acts only on orders they can see.
+  assert.deepEqual(await move(id, 'accepted', vendor), { error: 'order_not_found', status: 404 });
+  // FitFlex still resolves the line's vendor through the product and moves it; legacy statuses still read right.
+  assert.equal((await adminMove(id, 'accepted')).unchanged, true, 'confirmed already is accepted');
+  assert.equal((await adminMove(id, 'dispatched')).order.status, 'dispatched');
+  assert.equal((await adminMove(id, 'fulfilled')).order.status, 'delivered');
   const stored = await row(id);
   assert.equal(stored.status, 'delivered');
   assert.deepEqual(stored.fulfilments.map(f => f.vendorId), [vendor]);
   const stranger = await user('vendor');
-  assert.equal((await move(id, 'accepted', stranger)).error, 'order_not_owned_by_vendor');
+  assert.equal((await move(id, 'accepted', stranger)).error, 'order_not_found');
 });
 
 test('an order revived by a late payment starts every vendor\'s part again', async () => {

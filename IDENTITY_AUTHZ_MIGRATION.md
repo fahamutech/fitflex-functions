@@ -79,4 +79,10 @@ A decision under the membership model therefore considers Person + persona + org
 | Corporate / B2B | all | The B2B module's own organisation-user rules (not `OrgMembership`) |
 | Platform admin | all | `requireAcl` (portal staff ACL in the JWT) |
 
+Two routes in this table are exceptions. Each carries its legacy guard **and** `requireGymAccess`, so under `enforce` it also needs an active membership with the scope (its gym set is still the row's `gymIds`):
+- `GET /owner/members/:memberId/activity` (gym sharing): `requireGymAcl('members')` + `requireGymAccess('members', …)`.
+- `GET /owner/members/:memberId/communications` (communications): `requireGymAcl('communications')` + `requireGymAccess('communications', …)`.
+
+Before the route-guard fix (#199) both got a membership check (with `members`) from `GET /owner/members/:memberId`'s guard, which ran on the sub-paths. Declaring it on the routes keeps them membership-checked under `enforce`.
+
 Migrate these one group at a time, each after its predecessor has run clean in `shadow`.

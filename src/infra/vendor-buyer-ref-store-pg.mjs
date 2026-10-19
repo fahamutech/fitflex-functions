@@ -1,0 +1,43 @@
+// Vendor tools · S2 — vendor-scoped buyer pseudonyms (table VendorBuyerRef).
+//
+// refsFor(vendorId, buyerIds) → Map(buyerId → customerId). Missing pairs are created (random id,
+// ON CONFLICT DO NOTHING, then read back), so two requests at once agree on one customerId.
+import { randomUUID } from 'node:crypto';
+
+export const newCustomerId = () => `cus_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
+
+export function createPgVendorBuyerRefStore({ db }) {
+  async function read(vendorId, buyerIds) {
+    const rows = await db('VendorBuyerRef').where({ vendorId }).whereIn('buyerId', buyerIds).select('buyerId', 'customerId');
+    return new Map(rows.map(r => [r.buyerId, r.customerId]));
+  }
+  async function refsFor(vendorId, buyerIds) {
+    const ids = [...new Set((buyerIds || []).filter(Boolean).map(String))];
+    if (!vendorId || !ids.length) return new Map();
+    const found = await read(vendorId, ids);
+    const missing = ids.filter(id => !found.has(id));
+    if (!missing.length) return found;
+    await db('VendorBuyerRef')
+      .insert(missing.map(buyerId => ({ vendorId, buyerId, customerId: newCustomerId() })))
+      .onConflict(['vendorId', 'buyerId']).ignore();
+    return read(vendorId, ids);
+  }
+  return { refsFor };
+}
+
+/** Same contract, in memory (unit specs and wiring without a database). */
+export function createMemoryVendorBuyerRefStore() {
+  const refs = new Map();
+  return {
+    async refsFor(vendorId, buyerIds) {
+      const out = new Map();
+      if (!vendorId) return out;
+      for (const buyerId of new Set((buyerIds || []).filter(Boolean).map(String))) {
+        const key = `${vendorId}\u0000${buyerId}`;
+        if (!refs.has(key)) refs.set(key, newCustomerId());
+        out.set(buyerId, refs.get(key));
+      }
+      return out;
+    },
+  };
+}

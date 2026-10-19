@@ -18,6 +18,8 @@
 //   markPaid(orderId, { patch }) → { outcome: 'paid'|'already_paid'|'cancelled'|'missing', order }
 //   markLatePayment(orderId) → { marked, order }
 //   findExpired({ before, limit }) → orders
+//   ordersForVendor(vendorId, { limit?, after?: { createdAt, id } }) → orders with a line naming this vendor,
+//     newest first (createdAt desc, id desc), strictly after `after` when given
 
 export function createMemoryShopOrderStore({ products, shopOrders, paymentRequests = null, now = () => new Date() }) {
   const nowIso = () => now().toISOString();
@@ -165,5 +167,15 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       && (order.stockState || 'reserved') === 'reserved' && order.reservationExpiresAt && +new Date(order.reservationExpiresAt) <= cutoff)).slice(0, limit);
   }
 
-  return { placeOrder, findReplay, cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired };
+  async function ordersForVendor(vendorId, { limit = null, after = null } = {}) {
+    if (!vendorId) return [];
+    const key = order => [+new Date(order.createdAt || 0), String(order.id)];
+    const before = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
+    let rows = (await shopOrders.filterAsync(order => (order.items || []).some(item => item?.vendorId != null && item.vendorId === vendorId)))
+      .sort((a, b) => (before(key(a), key(b)) ? 1 : before(key(b), key(a)) ? -1 : 0));
+    if (after) rows = rows.filter(order => before(key(order), [+new Date(after.createdAt), String(after.id)]));
+    return limit ? rows.slice(0, limit) : rows;
+  }
+
+  return { placeOrder, findReplay, cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor };
 }

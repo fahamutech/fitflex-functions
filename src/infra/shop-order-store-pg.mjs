@@ -305,5 +305,21 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     return rows.map(out);
   }
 
-  return { placeOrder, findReplay: ({ buyerId, key, fingerprint }) => replay(buyerId, key, fingerprint), cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired };
+  /**
+   * Every order with a line of this vendor's, newest first (vendor tools · S2). One parameterised
+   * query on the items GIN index (jsonb containment), not a whole-table load. Lines without a
+   * vendorId (older rows) never match.
+   */
+  async function ordersForVendor(vendorId, { limit = null, after = null } = {}) {
+    if (!vendorId) return [];
+    const query = db('ShopOrder')
+      .whereRaw('"items" @> ?::jsonb', [JSON.stringify([{ vendorId: String(vendorId) }])])
+      .orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id', order: 'desc' }]);
+    // Keyset: strictly after the cursor's (createdAt, id) in that order.
+    if (after) query.whereRaw('("createdAt", "id") < (?::timestamptz, ?)', [after.createdAt, after.id]);
+    if (limit) query.limit(limit);
+    return (await query).map(out);
+  }
+
+  return { placeOrder, findReplay: ({ buyerId, key, fingerprint }) => replay(buyerId, key, fingerprint), cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor };
 }
