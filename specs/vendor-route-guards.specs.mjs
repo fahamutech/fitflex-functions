@@ -255,3 +255,69 @@ test('every shop.mjs route: as mounted by bfast-function, it lets in exactly who
   }
   assert.deepEqual(mismatches, []);
 });
+
+// ── security review of #193 ──────────────────────────────────────────────────
+
+const MONEY_PROFILE = { businessName: 'Money Shop', status: 'published', settlementAccount: { bank: 'CRDB', accountNumber: '0150001111' }, commissionPct: 12 };
+
+test('GET /vendor/profile: staff without `payments` (and not vendor admin) get no settlementAccount / commissionPct; payments staff, vendor admins, the vendor and FitFlex admins get the full profile', async () => {
+  const vendorId = await user('vendor', { vendorProfile: JSON.stringify(MONEY_PROFILE) });
+  const orders = await staff(vendorId, ['orders', 'products', 'reports', 'customers', 'staff']);
+  const payments = await staff(vendorId, ['payments']);
+  const vendorAdmin = await user('vendor_staff', { vendorId, vendorPermissions: [], accountStatus: 'active', vendorRole: 'admin' });
+
+  const limited = await hit(realUrl, 'GET', '/vendor/profile', staffClaims(orders, vendorId));
+  assert.equal(limited.status, 200, JSON.stringify(limited.body));
+  assert.equal(limited.body.businessName, 'Money Shop');
+  assert.equal('settlementAccount' in limited.body, false);
+  assert.equal('commissionPct' in limited.body, false);
+  assert.equal(JSON.stringify(limited.body).includes('0150001111'), false);
+  // Rights come from the staff record, not from claims the token might carry.
+  const forged = await hit(realUrl, 'GET', '/vendor/profile', { ...staffClaims(orders, vendorId), vendorRole: 'admin', vendorPermissions: ['payments'], aclPermissions: ['payments'] });
+  assert.equal('settlementAccount' in forged.body, false);
+
+  for (const claims of [staffClaims(payments, vendorId), staffClaims(vendorAdmin, vendorId), vendorClaims(vendorId)]) {
+    const full = await hit(realUrl, 'GET', '/vendor/profile', claims);
+    assert.equal(full.status, 200, JSON.stringify(full.body));
+    assert.deepEqual([full.body.settlementAccount, full.body.commissionPct], [MONEY_PROFILE.settlementAccount, 12], JSON.stringify(claims));
+  }
+  // A FitFlex admin reads their own (admin) record as before: the whole of it, nothing removed.
+  const adminId = await user('admin', { vendorProfile: JSON.stringify(MONEY_PROFILE) });
+  const admin = await hit(realUrl, 'GET', '/vendor/profile', { sub: adminId, userType: 'admin' });
+  assert.deepEqual([admin.body.settlementAccount, admin.body.commissionPct], [MONEY_PROFILE.settlementAccount, 12]);
+});
+
+test('GET /vendor/staff: each entry is exactly the allow-list, for the vendor and for staff callers', async () => {
+  const vendorId = await user('vendor');
+  const lead = await staff(vendorId, ['staff']);
+  await db('User').where({ id: lead }).update({ email: 'lead@example.com', phone: '+255700000002', passwordHash: 'secret-hash', createdAt: new Date('2026-10-01T00:00:00Z') });
+  const keys = ['id', 'displayName', 'email', 'phone', 'vendorRole', 'vendorPermissions', 'accountStatus', 'createdAt'];
+  for (const claims of [vendorClaims(vendorId), staffClaims(lead, vendorId)]) {
+    const list = await hit(realUrl, 'GET', '/vendor/staff', claims);
+    assert.equal(list.status, 200, JSON.stringify(list.body));
+    assert.equal(list.body.length, 1);
+    assert.deepEqual(Object.keys(list.body[0]).sort(), [...keys].sort());
+    const entry = list.body[0];
+    assert.deepEqual([entry.id, entry.email, entry.phone, entry.vendorRole, entry.vendorPermissions, entry.accountStatus], [lead, 'lead@example.com', '+255700000002', 'staff', ['staff'], 'active']);
+    assert.equal(new Date(entry.createdAt).toISOString(), '2026-10-01T00:00:00.000Z');
+    assert.equal(JSON.stringify(entry).includes('hash'), false);
+  }
+});
+
+test('GET /vendor/tools/options: suspended, other-vendor and unknown staff get 403 vendor_staff_inactive; active staff and the vendor still read it', async () => {
+  const vendorId = await user('vendor');
+  const otherVendor = await user('vendor');
+  const active = await staff(vendorId, []);
+  const suspended = await staff(vendorId, PERMS, 'suspended');
+  const moved = await staff(otherVendor, PERMS);
+  assert.equal((await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(active, vendorId))).status, 200);
+  assert.equal((await hit(realUrl, 'GET', '/vendor/tools/options', vendorClaims(vendorId))).status, 200);
+  const s = await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(suspended, vendorId));
+  assert.equal(s.status, 403);
+  assert.ok(['account_suspended', 'vendor_staff_inactive'].includes(s.body.error), JSON.stringify(s.body));
+  // Bypass requireAuth's suspension check (cached per user) to prove this guard refuses too.
+  await db('User').where({ id: active }).update({ accountStatus: 'disabled' });
+  assert.deepEqual(await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(active, vendorId)), { status: 403, body: { error: 'vendor_staff_inactive' } });
+  assert.deepEqual(await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(moved, vendorId)), { status: 403, body: { error: 'vendor_staff_inactive' } });
+  assert.deepEqual(await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(uid('ghost'), vendorId)), { status: 403, body: { error: 'vendor_staff_inactive' } });
+});

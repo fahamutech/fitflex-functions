@@ -94,9 +94,9 @@ const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' }
 
 export const vendorToolsOptionsRoute = {
   created, method: 'get', path: '/vendor/tools/options',
-  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`).',
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
   responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off' },
-  onGuard: routeGuard('get', requireAuth('vendor', 'vendor_staff', 'admin')),
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
   onRequest: async (req, res) => res.json({ ...vendorToolsOptions(), canSeeCost: await shopService.canSeeCost(req.user) }),
 };
 
@@ -193,9 +193,9 @@ export const vendorDeleteProduct = {
 };
 
 export const vendorProfile = {
-  created, method: 'get', path: '/vendor/profile', description: 'Vendor, or any active staff member of the vendor (read-only, no permission needed): view the business profile. Staff no longer active → 403 vendor_staff_inactive.',
+  created, method: 'get', path: '/vendor/profile', description: 'Vendor, or any active staff member of the vendor (read-only, no permission needed): view the business profile. Staff without `payments` (and not vendorRole admin) get it without settlementAccount and commissionPct. Staff no longer active → 403 vendor_staff_inactive.',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
-  onRequest: async (req, res) => res.json(await shopService.getVendorProfile(req.user.vendorId || req.user.sub) || {}),
+  onRequest: async (req, res) => res.json(await shopService.vendorProfileFor(req.user) || {}),
 };
 export const vendorSaveProfile = {
   created, method: 'put', path: '/vendor/profile', description: 'Vendor (account holder) or admin only: create, edit or publish business profile. vendor_staff → 403.',
@@ -415,7 +415,7 @@ export const vendorResolveEnquiry = {
 };
 
 export const vendorStaff = {
-  created, method: 'get', path: '/vendor/staff', description: 'Vendor: list staff.',
+  created, method: 'get', path: '/vendor/staff', description: 'Vendor / staff with `staff`: list staff. Each entry is exactly { id, displayName, email, phone, vendorRole, vendorPermissions, accountStatus, createdAt } (missing → null).',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('staff')]),
   onRequest: async (req, res) => res.json(await shopService.listVendorStaff(req.user.vendorId || req.user.sub)),
 };
