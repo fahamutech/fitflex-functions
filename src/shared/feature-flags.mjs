@@ -181,3 +181,13 @@ export function vendorPortalOn() {
 export function vendorBuyerContactOn() {
   return vendorToolsFlag('VENDOR_ORDER_BUYER_CONTACT');
 }
+
+/**
+ * Admin-managed app photos (plan docs/plans/photo-hero-sections-footer-admin-plan.md, slice 4).
+ * Off unless HERO_IMAGES_CMS is set: every /admin/hero-images and /admin/hero-slots route answers
+ * 404 feature_disabled (before sign-in is checked), and the public GET /app/hero-images answers
+ * { version: 0, slots: {} }, which tells the apps to drop saved photos and use the bundled ones.
+ */
+export function heroImagesCmsOn() {
+  return on('HERO_IMAGES_CMS');
+}
