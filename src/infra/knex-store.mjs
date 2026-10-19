@@ -19,10 +19,15 @@ const connectionString = process.env.FITFLEX_USE_CI_DB === '1'
   : process.env.DATABASE_URL;
 if (!connectionString) throw new Error('FATAL: DATABASE_URL must be set. Create a .env file or export it.');
 
+// An idle pooled connection keeps the process alive until it is reaped
+// (30 s by default). `npm test` shortens this so each spec file's process
+// exits on its own soon after its last query, without --test-force-exit.
+const idleTimeoutMillis = Number(process.env.DB_POOL_IDLE_TIMEOUT_MS) || 30000;
+
 const db = knexFactory({
   client: 'pg',
   connection: connectionString,
-  pool: { min: 0, max: 10 },
+  pool: { min: 0, max: 10, idleTimeoutMillis },
 });
 export { db };
 

@@ -107,7 +107,8 @@ async function withAuthzMode(mode, fn) {
 }
 
 after(async () => {
-  for (const s of servers) s.close();
+  // close() waits for fetch's idle keep-alive connections; drop them so the process can exit.
+  for (const s of servers) { s.close(); s.closeAllConnections(); }
   await db('OrgMembership').whereIn('personaId', made.users).del();
   await db('Person').whereIn('id', made.users).del();
   for (const id of made.gyms) await gyms.removeAsync(g => g.id === id);
