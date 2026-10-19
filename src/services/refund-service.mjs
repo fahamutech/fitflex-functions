@@ -16,6 +16,7 @@ import { formatTsh } from '../shared/money-display.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
 import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
+import { staffNameLookup } from '../shared/staff-names.mjs';
 
 export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order'];
 export const REFUND_STATUSES = ['requested', 'approved', 'paid', 'rejected'];
@@ -265,6 +266,8 @@ export function createRefundService({
     const rows = (status ? await refunds.filterByColumnAsync('status', status) : await refunds.allAsync()).sort(byNewest);
     const people = await users.filterByColumnInAsync('id', [...new Set(rows.map(r => r.memberId))]);
     const byId = new Map(people.map(u => [u.id, u]));
+    // Staff who acted on each row, by name (null for members, 'policy' and anyone not portal/admin staff).
+    const nameOf = await staffNameLookup(users, rows, ['requestedBy', 'decidedBy', 'paidBy']);
     const twoAdmins = secondApprover();
     return {
       refunds: rows.map((r) => {
@@ -272,6 +275,9 @@ export function createRefundService({
         return {
           ...r,
           member: u ? { id: u.id, displayName: u.displayName || null, phone: u.phone || null, email: u.email || null } : null,
+          requestedByName: nameOf(r.requestedBy),
+          decidedByName: nameOf(r.decidedBy),
+          paidByName: nameOf(r.paidBy),
           ...(twoAdmins ? secondApproval(r) : {}),
         };
       }),

@@ -26,11 +26,15 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
     return { startUtc, endUtc };
   }
 
+  // A voided visit never happened as far as the member is concerned: it does not use an
+  // allowance, count toward today's gyms, or answer a rescan as the same-day repeat.
+  const live = (c) => c.status !== CHECKIN_STATUS.VOIDED;
+
   async function visitsUsedInCycle(memberId, sub) {
     if (!sub) return 0;
     const since = +new Date(sub.cycleStartedAt || sub.startedAt);
     const own = fundedBySubscription(sub);
-    const rows = await checkins.filterAsync(c => c.memberId === memberId && +new Date(c.timestamp) >= since && c.visitConsumed && own(c));
+    const rows = await checkins.filterAsync(c => c.memberId === memberId && +new Date(c.timestamp) >= since && c.visitConsumed && live(c) && own(c));
     return rows.length;
   }
 
@@ -39,7 +43,8 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
     return checkins.filterAsync(c =>
       c.memberId === memberId &&
       new Date(c.timestamp) >= startUtc &&
-      new Date(c.timestamp) <  endUtc
+      new Date(c.timestamp) <  endUtc &&
+      live(c)
     );
   }
 

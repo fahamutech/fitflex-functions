@@ -75,7 +75,7 @@ export const operatorVerifyQr = {
 
 export const operatorCheckIn = {
   created, method: 'post', path: '/operator/checkins',
-  description: 'Operator scans a member QR and triggers BL-012 validation + logging.',
+  description: 'Operator scans a member QR and triggers BL-012 validation + logging. 200 body carries idempotent: true when the member already had a visit at this gym today (the existing check-in is returned, no visit used), else false.',
   requestSample: { qrToken: 'usr_x.123456.signature' },
   onGuard: [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('checkins')],
   onRequest: async (req, res) => {
