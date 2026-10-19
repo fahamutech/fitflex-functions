@@ -124,6 +124,9 @@ export async function measureTextZones(buffer) {
 /** True when a zone is brighter than spec §8.3 asks (the app still reads it: the scrim guarantee holds). */
 export const isBright = zone => Boolean(zone) && (zone.mean > TEXT_ZONE_LIMITS.mean || zone.maxPatch > TEXT_ZONE_LIMITS.patch);
 
+/** A smaller copy of the master for admin previews (WebP q75, no metadata, never enlarged). */
+export const previewAt = (master, width) => sharp(master).resize({ width, withoutEnlargement: true }).webp({ quality: 75 }).toBuffer();
+
 async function stepWebp(master, { width, maxBytes, strict }) {
   let last = null;
   for (const quality of HERO_QUALITY_STEPS) {

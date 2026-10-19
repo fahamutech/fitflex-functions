@@ -83,6 +83,13 @@ function bind(q) {
       const [saved] = await q('HeroPublication').insert(forWrite('HeroPublication', row)).returning('*');
       return publicationFromDb(saved);
     },
+    /** { userId: name } for showing who uploaded or published (display name, else email). */
+    async displayNames(ids) {
+      const wanted = [...new Set(ids.filter(Boolean))];
+      if (!wanted.length) return {};
+      const rows = await q('User').whereIn('id', wanted).select('id', 'displayName', 'email');
+      return Object.fromEntries(rows.map(r => [r.id, r.displayName || r.email || null]));
+    },
     async audit(row) {
       await q('AuditLog').insert(forWrite('AuditLog', row));
     },

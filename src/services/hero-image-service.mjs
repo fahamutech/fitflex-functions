@@ -10,12 +10,13 @@
 //   AuditLog row with before and after (never the private storage key).
 // - The public manifest carries only what the apps draw with: no licence, uploader, drafts or keys.
 import { createHash, randomUUID } from 'node:crypto';
-import { HERO_SLOTS, heroSlot, textZoneFor } from '../shared/hero-slots.mjs';
-import { prepareHeroUpload, buildHeroVariants, isBright, sha256 } from '../infra/hero-image-file.mjs';
+import { HERO_AREAS, HERO_SLOTS, heroSlot, textZoneFor } from '../shared/hero-slots.mjs';
+import { prepareHeroUpload, buildHeroVariants, previewAt, isBright, sha256 } from '../infra/hero-image-file.mjs';
 
 export const HERO_PEOPLE = Object.freeze(['none', 'hands_backs', 'unclear_faces']);
 export const HERO_MANIFEST_CACHE_MS = 60_000;
 export const HERO_PUBLICATIONS_LISTED = 20;
+export const HERO_PREVIEW_WIDTHS = Object.freeze([240, 480, 960]);
 const TEXT_MAX = 200;
 const NOTE_MAX = 500;
 
@@ -40,24 +41,33 @@ function parseFocal(focal) {
   return { x: round3(x), y: round3(y) };
 }
 
-/** An image as admins see it (and as the audit log records it): never the private storage key. */
-export function adminImageView(img) {
+/**
+ * An image as admins see it (and as the audit log records it): never the private storage key.
+ * `names` ({ userId: name }) fills createdByName etc. for the portal; missing → null.
+ * `sourceId` is the scene id the apps use so a footer never repeats the top photo's scene; each
+ * upload is its own scene for now (design spec O-32), so it is the image id.
+ */
+export function adminImageView(img, names = {}) {
   const lum = img.textZoneLuminance || null;
   return {
-    id: img.id, status: img.status, width: img.width, height: img.height,
-    focal: { x: img.focalX, y: img.focalY },
+    id: img.id, sourceId: img.id, status: img.status, width: img.width, height: img.height,
+    focal: { x: img.focalX, y: img.focalY }, focalX: img.focalX, focalY: img.focalY,
     variants: img.variants || null,
     textZoneLuminance: lum,
     brightWarning: { vertical: isBright(lum?.vertical), horizontal: isBright(lum?.horizontal) },
     source: img.source, photographer: img.photographer, licence: img.licence, licenceRef: img.licenceRef ?? null,
     people: img.people, consentRef: img.consentRef ?? null,
-    rightsConfirmedBy: img.rightsConfirmedBy, rightsConfirmedAt: img.rightsConfirmedAt,
-    noFacesConfirmedBy: img.noFacesConfirmedBy, noFacesConfirmedAt: img.noFacesConfirmedAt,
-    createdBy: img.createdBy, createdAt: img.createdAt, updatedAt: img.updatedAt,
+    rightsConfirmedBy: img.rightsConfirmedBy, rightsConfirmedByName: names[img.rightsConfirmedBy] ?? null, rightsConfirmedAt: img.rightsConfirmedAt,
+    noFacesConfirmedBy: img.noFacesConfirmedBy, noFacesConfirmedByName: names[img.noFacesConfirmedBy] ?? null, noFacesConfirmedAt: img.noFacesConfirmedAt,
+    createdBy: img.createdBy, createdByName: names[img.createdBy] ?? null, createdAt: img.createdAt, updatedAt: img.updatedAt,
     previewUrl: `/admin/hero-images/${encodeURIComponent(img.id)}/preview`,
   };
 }
-const auditImage = img => { const { previewUrl, ...rest } = adminImageView(img); return rest; };
+const imagePeople = img => [img.createdBy, img.rightsConfirmedBy, img.noFacesConfirmedBy];
+const auditImage = img => {
+  const { previewUrl, createdByName, rightsConfirmedByName, noFacesConfirmedByName, ...rest } = adminImageView(img);
+  return rest;
+};
 
 /** One photo in a snapshot: exactly the fields the public manifest may carry. */
 function snapshotEntry(img) {
@@ -85,8 +95,9 @@ function publicSlots(slots) {
   return out;
 }
 const slotImageIds = slots => Object.fromEntries(Object.entries(slots || {}).map(([k, list]) => [k, (list || []).map(e => e.sourceId)]));
-const publicationView = p => (p ? {
-  id: p.id, publishedBy: p.publishedBy, publishedAt: p.publishedAt, note: p.note, rolledBackFrom: p.rolledBackFrom,
+const publicationView = (p, names = {}) => (p ? {
+  id: p.id, publishedBy: p.publishedBy, publishedByName: names[p.publishedBy] ?? null,
+  publishedAt: p.publishedAt, note: p.note, rolledBackFrom: p.rolledBackFrom,
   slots: slotImageIds(p.slots),
 } : null);
 const draftsBySlot = rows => {
@@ -112,14 +123,16 @@ export function createHeroImageService({
     const byId = new Map(images.map(i => [i.id, i]));
     const draft = draftsBySlot(drafts);
     const live = slotImageIds(publications[0]?.slots);
+    const names = await store.displayNames([...images.flatMap(imagePeople), ...publications.map(p => p.publishedBy)]);
     return {
-      images: images.map(adminImageView),
+      areas: HERO_AREAS,
+      images: images.map(i => adminImageView(i, names)),
       slots: HERO_SLOTS.map(s => ({
-        id: s.id, surface: s.surface, variant: s.variant, aspectHint: s.aspectHint, maxImages: s.maxImages,
+        id: s.id, area: s.area, surface: s.surface, variant: s.variant, aspectHint: s.aspectHint, maxImages: s.maxImages,
         draft: draft[s.id] || [], published: live[s.id] || [],
         brightWarning: (draft[s.id] || []).some(id => isBright(byId.get(id)?.textZoneLuminance?.[textZoneFor(s)])),
       })),
-      publications: publications.map(publicationView),
+      publications: publications.map(p => publicationView(p, names)),
     };
   }
 
@@ -164,7 +177,7 @@ export function createHeroImageService({
       await audit(q, 'hero_image_uploaded', actorId, saved.id, null, auditImage(saved));
       return saved;
     });
-    return { image: adminImageView(image) };
+    return { image: adminImageView(image, await store.displayNames(imagePeople(image))) };
   }
 
   async function readPrivate(img) {
@@ -180,12 +193,22 @@ export function createHeroImageService({
     return { buffer };
   }
 
-  async function preview(id) {
+  /**
+   * The cleaned private master (never the raw upload). `width` (optional) is one of
+   * HERO_PREVIEW_WIDTHS for Library thumbnails (design spec O-30); anything else is invalid_width.
+   */
+  async function preview(id, { width = null } = {}) {
+    let w = null;
+    if (width != null && width !== '') {
+      w = Number(width);
+      if (!HERO_PREVIEW_WIDTHS.includes(w)) return fail('invalid_width', 400, { allowed: HERO_PREVIEW_WIDTHS });
+    }
     const img = await store.getImage(id);
     if (!img) return fail('image_not_found', 404);
     const r = await readPrivate(img);
     if (r.error) return r;
-    return { file: { buffer: r.buffer, mimeType: 'image/webp', fileName: `${img.id}.webp` } };
+    const buffer = w ? await previewAt(r.buffer, w) : r.buffer;
+    return { file: { buffer, mimeType: 'image/webp', fileName: `${img.id}${w ? `-${w}` : ''}.webp` } };
   }
 
   // ── Admin: edit details / retire ───────────────────────────────────────────
@@ -232,7 +255,7 @@ export function createHeroImageService({
       await audit(q, retiring ? 'hero_image_retired' : 'hero_image_updated', actorId, id, auditImage(before),
         { ...auditImage(saved), ...(retiring ? { removedFromDraftSlots } : {}) });
       // A retired photo still shows until the next publish: the admin screen should offer one.
-      return { image: adminImageView(saved), ...(retiring ? { removedFromDraftSlots, inLiveSnapshot } : {}) };
+      return { image: adminImageView(saved, await q.displayNames(imagePeople(saved))), ...(retiring ? { removedFromDraftSlots, inLiveSnapshot } : {}) };
     });
   }
 
@@ -323,7 +346,7 @@ export function createHeroImageService({
     });
     if (publication.error) return publication;
     invalidate();
-    return { publication: publicationView(publication) };
+    return { publication: publicationView(publication, await store.displayNames([publication.publishedBy])) };
   }
 
   async function rollback(body = {}, actorId) {
@@ -358,7 +381,7 @@ export function createHeroImageService({
     });
     if (result.error) return result;
     invalidate();
-    return { publication: publicationView(result) };
+    return { publication: publicationView(result, await store.displayNames([result.publishedBy])) };
   }
 
   // ── Public: the manifest the apps read ─────────────────────────────────────

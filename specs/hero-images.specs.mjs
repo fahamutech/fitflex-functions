@@ -22,7 +22,7 @@ import { sign } from '../src/auth/jwt.mjs';
 import { ensureInit } from '../functions/index.mjs';
 import { heroImageService } from '../src/bootstrap/services.mjs';
 import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
-import { HERO_SLOTS, heroSlot, textZoneFor } from '../src/shared/hero-slots.mjs';
+import { HERO_AREAS, HERO_SLOTS, heroSlot, textZoneFor } from '../src/shared/hero-slots.mjs';
 import { HERO_LIMITS, HERO_VARIANT_BUDGETS, prepareHeroUpload, buildHeroVariants, measureTextZones, isBright } from '../src/infra/hero-image-file.mjs';
 import { createHeroImageService, HERO_MANIFEST_CACHE_MS } from '../src/services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../src/infra/hero-image-store-pg.mjs';
@@ -128,6 +128,7 @@ before(async () => {
   const server = app.listen(0);
   servers.push(server);
   base = `http://127.0.0.1:${server.address().port}`;
+  await db('User').insert({ id: BRAND_ID, userType: 'admin', displayName: 'Brand Admin', portalUser: true, aclPermissions: ['brand_media'], updatedAt: new Date() });
   await clearHeroTables();
 });
 
@@ -137,13 +138,16 @@ after(async () => {
   for (const s of servers) s.close();
   await new Promise(resolve => zebra.close(resolve));
   await clearHeroTables();
+  await db('User').where({ id: BRAND_ID }).del();
   await db.destroy();
 });
 
 beforeEach(() => { zebraDown = false; heroImageService.invalidateManifest(); });
 
 const flag = on => { if (on) process.env.HERO_IMAGES_CMS = 'true'; else delete process.env.HERO_IMAGES_CMS; };
-const brand = { sub: 'adm_brand_media', userType: 'admin', portalUser: true, aclPermissions: ['brand_media'] };
+// A real User row, so display names can be checked.
+const BRAND_ID = `adm_hero_${randomBytes(4).toString('hex')}`;
+const brand = { sub: BRAND_ID, userType: 'admin', portalUser: true, aclPermissions: ['brand_media'] };
 const superAdmin = { sub: 'adm_super', userType: 'admin', portalUser: false };
 const otherStaff = { sub: 'adm_gyms_only', userType: 'admin', portalUser: true, aclPermissions: ['gyms', 'settings'] };
 const member = { sub: 'usr_member', userType: 'member' };
@@ -186,6 +190,16 @@ test('slots mirror the app\'s FFHeroPhoto names plus sections, footer pool and p
   assert.equal(textZoneFor('gyms'), 'vertical');
   assert.equal(heroSlot('nope'), null);
   assert.ok(PORTAL_ACL_SCOPES.includes('brand_media'));
+  // Grouped and ordered as the portal's Places tab lists them (design spec §36.2).
+  assert.deepEqual(HERO_AREAS, ['preSignIn', 'members', 'partners', 'footers', 'portal']);
+  const byArea = area => HERO_SLOTS.filter(s => s.area === area).map(s => s.id);
+  assert.deepEqual(byArea('preSignIn'), ['language', 'signIn', 'signUp', 'role', 'pin']);
+  assert.deepEqual(byArea('members'), ['homeStart', 'homePass', 'profile', 'upgrade', 'activityToday', 'activityTraining',
+    'activityChallenges', 'activityProgress', 'gyms', 'trainers', 'shop']);
+  assert.deepEqual(byArea('partners'), ['trainer', 'vendor', 'owner']);
+  assert.deepEqual(byArea('footers'), ['footerPool']);
+  assert.deepEqual(byArea('portal'), ['portalLogin']);
+  assert.deepEqual(HERO_SLOTS.map(s => s.area), [...HERO_SLOTS.map(s => s.area)].sort((a, b) => HERO_AREAS.indexOf(a) - HERO_AREAS.indexOf(b)));
 });
 
 test('If-None-Match matching honours lists, weak tags and *', () => {
@@ -482,6 +496,16 @@ test('routes: upload checks, private preview, drafts not public, publish, ETag/3
   assert.equal(pvMeta.exif, undefined, 'EXIF/GPS stripped');
   assert.ok(!pv.raw.includes(Buffer.from('PhoneCo')));
   assert.equal((await hit('GET', '/admin/hero-images/hero_missing/preview', { claims: brand })).status, 404);
+  // Thumbnails (spec O-30): a fixed set of widths, also without metadata.
+  const thumb = await hit('GET', `${img.previewUrl}?w=480`, { claims: brand });
+  assert.equal(thumb.status, 200);
+  assert.equal(thumb.headers.get('cache-control'), 'no-store, private');
+  const thumbMeta = await sharp(thumb.raw).metadata();
+  assert.deepEqual([thumbMeta.width, thumbMeta.exif], [480, undefined]);
+  assert.ok(thumb.raw.length < pv.raw.length);
+  assert.deepEqual((await hit('GET', `${img.previewUrl}?w=5000`, { claims: brand })).body, { error: 'invalid_width', allowed: [240, 480, 960] });
+  // The upload answer already names the uploader and carries the scene id.
+  assert.deepEqual([img.createdByName, img.rightsConfirmedByName, img.sourceId, img.focalX, img.focalY], ['Brand Admin', 'Brand Admin', img.id, 0, 0]);
 
   // Slots.
   assert.deepEqual((await hit('PUT', '/admin/hero-slots/nope', { claims: brand, body: { imageIds: [] } })).body, { error: 'unknown_slot' });
@@ -536,7 +560,14 @@ test('routes: upload checks, private preview, drafts not public, publish, ETag/3
   assert.ok(!JSON.stringify(state).includes('privateKey'));
   const gyms = state.slots.find(s => s.id === 'gyms');
   assert.deepEqual([gyms.draft, gyms.published], [[img.id], [img.id]]);
+  assert.deepEqual([gyms.area, gyms.surface, gyms.variant, gyms.aspectHint, gyms.maxImages], ['members', 'mobile', 'compact', 1.5, 3]);
+  assert.deepEqual(state.slots.find(s => s.id === 'footerPool').maxImages, 8);
+  assert.deepEqual(state.areas, HERO_AREAS);
+  assert.deepEqual(state.slots.map(s => s.id), HERO_SLOTS.map(s => s.id), 'display order');
   assert.equal(state.publications[0].note, 'launch');
+  assert.equal(state.publications[0].publishedByName, 'Brand Admin');
+  assert.equal(pub.body.publication.publishedByName, 'Brand Admin');
+  assert.ok(state.images.every(i => i.createdByName === 'Brand Admin' && i.sourceId === i.id));
   assert.equal(state.slots.length, HERO_SLOTS.length);
 
   // Edit, publish again, then roll back to the first snapshot.
@@ -575,6 +606,8 @@ test('routes: upload checks, private preview, drafts not public, publish, ETag/3
   assert.equal(rbRow.before.publicationId, pub2.body.publication.id);
   assert.equal(rbRow.after.rolledBackFrom, pub.body.publication.id);
   for (const r of rows) for (const k of privateKeys) assert.ok(!JSON.stringify(r).includes(k), 'audit never records storage keys');
+  // The manifest's sourceId is the scene id (each upload its own scene for now: the image id).
+  assert.deepEqual(m3.body.slots.gyms.map(e => e.sourceId), [img.id]);
 
   // Turning the flag off empties the manifest straight away (apps purge).
   flag(false);

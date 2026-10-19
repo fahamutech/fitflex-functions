@@ -14,33 +14,41 @@
 //
 // An empty slot is allowed: it means "use the bundled photo".
 
-const slot = (id, surface, variant, aspectHint, maxImages = 3) => Object.freeze({ id, surface, variant, aspectHint, maxImages });
+// - area:       the group the portal's "App photos" screen lists the slot under (design spec §36.2):
+//               preSignIn | members | partners | footers | portal, in that order (HERO_AREAS).
+export const HERO_AREAS = Object.freeze(['preSignIn', 'members', 'partners', 'footers', 'portal']);
 
+const slot = (id, area, surface, variant, aspectHint, maxImages = 3) => Object.freeze({ id, area, surface, variant, aspectHint, maxImages });
+
+// In the order the portal lists them (spec §36.2).
 export const HERO_SLOTS = Object.freeze([
-  slot('language', 'mobile', 'full', 4 / 5),
-  slot('signIn', 'mobile', 'full', 4 / 5),
-  slot('signUp', 'mobile', 'full', 4 / 5),
-  slot('role', 'mobile', 'compact', 16 / 9),
-  slot('homeStart', 'mobile', 'full', 4 / 5),
-  slot('homePass', 'mobile', 'compact', 3 / 2),
-  slot('profile', 'mobile', 'compact', 3 / 2),
-  slot('pin', 'mobile', 'compact', 1005 / 670),
-  slot('upgrade', 'mobile', 'compact', 3 / 2),
-  slot('activityToday', 'mobile', 'compact', 3 / 2),
-  slot('activityTraining', 'mobile', 'compact', 800 / 533),
-  slot('activityChallenges', 'mobile', 'compact', 900 / 580),
-  slot('activityProgress', 'mobile', 'compact', 3 / 2),
-  slot('trainer', 'mobile', 'compact', 840 / 530),
-  slot('vendor', 'mobile', 'compact', 880 / 587),
-  slot('owner', 'mobile', 'compact', 3 / 2),
+  // Before sign-in.
+  slot('language', 'preSignIn', 'mobile', 'full', 4 / 5),
+  slot('signIn', 'preSignIn', 'mobile', 'full', 4 / 5),
+  slot('signUp', 'preSignIn', 'mobile', 'full', 4 / 5),
+  slot('role', 'preSignIn', 'mobile', 'compact', 16 / 9),
+  slot('pin', 'preSignIn', 'mobile', 'compact', 1005 / 670),
+  // Members.
+  slot('homeStart', 'members', 'mobile', 'full', 4 / 5),
+  slot('homePass', 'members', 'mobile', 'compact', 3 / 2),
+  slot('profile', 'members', 'mobile', 'compact', 3 / 2),
+  slot('upgrade', 'members', 'mobile', 'compact', 3 / 2),
+  slot('activityToday', 'members', 'mobile', 'compact', 3 / 2),
+  slot('activityTraining', 'members', 'mobile', 'compact', 800 / 533),
+  slot('activityChallenges', 'members', 'mobile', 'compact', 900 / 580),
+  slot('activityProgress', 'members', 'mobile', 'compact', 3 / 2),
   // Section heroes (slice 1).
-  slot('gyms', 'mobile', 'compact', 3 / 2),
-  slot('trainers', 'mobile', 'compact', 3 / 2),
-  slot('shop', 'mobile', 'compact', 3 / 2),
-  // Footer band (slice 2): a pool the app picks from, never the same photo as the screen's top hero.
-  slot('footerPool', 'mobile', 'band', 3 / 1, 8),
+  slot('gyms', 'members', 'mobile', 'compact', 3 / 2),
+  slot('trainers', 'members', 'mobile', 'compact', 3 / 2),
+  slot('shop', 'members', 'mobile', 'compact', 3 / 2),
+  // Partners.
+  slot('trainer', 'partners', 'mobile', 'compact', 840 / 530),
+  slot('vendor', 'partners', 'mobile', 'compact', 880 / 587),
+  slot('owner', 'partners', 'mobile', 'compact', 3 / 2),
+  // Footer band (slice 2): a pool the app picks from, never the same scene (sourceId) as the screen's top hero.
+  slot('footerPool', 'footers', 'mobile', 'band', 3 / 1, 8),
   // Portal login panel (slice 5).
-  slot('portalLogin', 'portal', 'panel', 3 / 2, 1),
+  slot('portalLogin', 'portal', 'portal', 'panel', 3 / 2, 1),
 ]);
 
 const BY_ID = new Map(HERO_SLOTS.map(s => [s.id, s]));

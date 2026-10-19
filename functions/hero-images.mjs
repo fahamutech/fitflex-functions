@@ -69,7 +69,7 @@ export const appHeroImages = {
 
 export const adminHeroImages = {
   created, method: 'get', path: '/admin/hero-images',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): the photo library and every slot. → { images[] (licence, uploader, brightness, previewUrl; never the storage key), slots[{ id, surface, variant, aspectHint, maxImages, draft[imageId], published[imageId], brightWarning }], publications[last 20 { id, publishedBy, publishedAt, note, rolledBackFrom, slots{ slotId: [imageId] } }] }.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): the photo library and every slot. → { areas[preSignIn, members, partners, footers, portal], images[{ id, sourceId, status, width, height, focal{x,y}, focalX, focalY, variants, textZoneLuminance{vertical,horizontal}{mean,maxPatch}, brightWarning{vertical,horizontal}, source, photographer, licence, licenceRef, people, consentRef, rightsConfirmedBy(+Name, At), noFacesConfirmedBy(+Name, At), createdBy, createdByName, createdAt, updatedAt, previewUrl }] (never the storage key), slots[{ id, area, surface, variant, aspectHint, maxImages, draft[imageId], published[imageId], brightWarning }] in display order, publications[last 20 { id, publishedBy, publishedByName, publishedAt, note, rolledBackFrom, slots{ slotId: [imageId] } }] }.',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => send(res, await svc.adminState()),
 };
@@ -94,10 +94,10 @@ export const adminUploadHeroImage = {
 
 export const adminHeroImagePreview = {
   created, method: 'get', path: '/admin/hero-images/:id/preview',
-  description: 'Admin (brand_media; HERO_IMAGES_CMS): the cleaned private photo, streamed (Cache-Control: no-store, private). 404 image_not_found; 503 storage_service_unavailable.',
+  description: 'Admin (brand_media; HERO_IMAGES_CMS): the cleaned private photo (rotated, no metadata, long edge ≤ 2560; never the raw upload), streamed (Cache-Control: no-store, private). Optional ?w=240|480|960 for thumbnails. 400 invalid_width; 404 image_not_found; 502 stored_file_mismatch; 503 storage_service_unavailable.',
   onGuard: heroAdminGuard,
   onRequest: async (req, res) => {
-    const result = await svc.preview(req.params.id);
+    const result = await svc.preview(req.params.id, { width: req.query?.w });
     if (result.error) return send(res, result);
     const { buffer, mimeType, fileName } = result.file;
     res.status(200);
