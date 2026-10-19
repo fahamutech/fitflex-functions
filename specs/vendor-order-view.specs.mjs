@@ -18,7 +18,7 @@ import { pinAuthService } from '../src/bootstrap/services.mjs';
 import { createShopService } from '../src/services/shop-service.mjs';
 import { createPgShopOrderStore } from '../src/infra/shop-order-store-pg.mjs';
 import { createPgVendorBuyerRefStore } from '../src/infra/vendor-buyer-ref-store-pg.mjs';
-import { contactWindow, vendorOrderView, eatDate, shortRef } from '../src/shared/vendor-order-view.mjs';
+import { contactWindow, vendorOrderView, eatDate, shortRef, orderTab, countOrders } from '../src/shared/vendor-order-view.mjs';
 
 await ensureInit();
 
@@ -515,7 +515,8 @@ test('GET /vendor/orders paging: no params → the whole array (older apps); lim
     const url = `/vendor/orders?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
     const page = await hit('GET', url, vendorClaims(vendor));
     assert.equal(page.status, 200, JSON.stringify(page.body));
-    assert.deepEqual(Object.keys(page.body).sort(), ['nextCursor', 'orders']);
+    assert.deepEqual(Object.keys(page.body).sort(), ['counts', 'nextCursor', 'orders']);
+    assert.equal(page.body.counts.all, 5, 'counts are over all orders, not the page');
     assert.ok(page.body.orders.length <= 2);
     for (const o of page.body.orders) assertAllowlisted(o, { money: true });
     seen.push(...page.body.orders.map(o => o.id));
@@ -536,11 +537,86 @@ test('GET /vendor/orders paging: no params → the whole array (older apps); lim
   assert.deepEqual(await hit('GET', '/vendor/orders?cursor=not-a-cursor', vendorClaims(vendor)), { status: 400, body: { error: 'invalid_cursor' } });
   // Another vendor's pages never hold this vendor's orders.
   const other = await user('vendor');
-  assert.deepEqual((await hit('GET', '/vendor/orders?limit=10', vendorClaims(other))).body, { orders: [], nextCursor: null });
+  assert.deepEqual((await hit('GET', '/vendor/orders?limit=10', vendorClaims(other))).body, { orders: [], nextCursor: null, counts: { open: 0, delivered: 0, cancelled: 0, all: 0, waitingAccept: 0 } });
   // Staff without money rights: paged orders without commission.
   const clerk = await staffOf(vendor, ['orders']);
   const clerkPage = await hit('GET', '/vendor/orders?limit=1', staffClaims(clerk, vendor));
   assertAllowlisted(clerkPage.body.orders[0], { money: false });
+});
+
+// ── UAT D2: tab counts on the paged list ─────────────────────────────────────
+
+test('orderTab / countOrders: cancelled (own part, order, refund_pending, refunded) → delivered → open (paid) → unpaid (all only); waitingAccept = open and own part pending', () => {
+  const o = (id, extra) => ({ id, items: [{ vendorId: 'v1' }, { vendorId: 'v2' }], status: 'pending', paymentStatus: 'paid',
+    fulfilments: [{ vendorId: 'v1', status: 'pending', timeline: [] }, { vendorId: 'v2', status: 'accepted', timeline: [] }], ...extra });
+  const orders = [
+    o('pending_paid'),
+    o('accepted', { fulfilments: [{ vendorId: 'v1', status: 'accepted', timeline: [] }] }),
+    o('delivered', { fulfilments: [{ vendorId: 'v1', status: 'delivered', timeline: [] }] }),
+    o('delivered_refunded', { paymentStatus: 'refunded', fulfilments: [{ vendorId: 'v1', status: 'delivered', timeline: [] }] }),
+    o('refund_pending', { status: 'cancelled', paymentStatus: 'refund_pending' }),
+    o('own_cancelled', { fulfilments: [{ vendorId: 'v1', status: 'cancelled', timeline: [] }] }),
+    o('unpaid', { paymentStatus: 'pending' }),
+    o('expired', { status: 'cancelled', paymentStatus: 'failed' }),
+    { id: 'legacy_fulfilled', items: [{ vendorId: 'v1' }], status: 'fulfilled', paymentStatus: 'paid' },
+    { id: 'legacy_confirmed', items: [{ vendorId: 'v1' }], status: 'confirmed', paymentStatus: 'paid' },
+  ];
+  assert.deepEqual(orders.map(x => [x.id, orderTab(x, 'v1')]), [
+    ['pending_paid', 'open'], ['accepted', 'open'], ['delivered', 'delivered'], ['delivered_refunded', 'cancelled'],
+    ['refund_pending', 'cancelled'], ['own_cancelled', 'cancelled'], ['unpaid', 'unpaid'], ['expired', 'cancelled'],
+    ['legacy_fulfilled', 'delivered'], ['legacy_confirmed', 'open'],
+  ]);
+  assert.deepEqual(countOrders(orders, 'v1'), { open: 3, delivered: 2, cancelled: 4, all: 10, waitingAccept: 1 });
+  // Vendor B's own part of the first order is accepted: open, not waiting.
+  assert.equal(orderTab(orders[0], 'v2'), 'open');
+});
+
+test('GET /vendor/orders?limit=…: counts are over all my orders (SQL), not the page; the same rules as orderTab; the plain array has none', async () => {
+  const w = await world(); // A: shared (pending, paid), pickup (pending, paid); B: shared, onlyB
+  const ids = { shared: w.shared, pickup: w.pickup };
+  ids.accepted = await paidOrder(w.buyer, [{ productId: w.pa, qty: 1 }]);
+  await local.updateOrderStatus({ orderId: ids.accepted, status: 'accepted', actorId: w.a });
+  ids.delivered = await paidOrder(w.buyer, [{ productId: w.pa, qty: 1 }]);
+  await deliveredAgo(ids.delivered, w.a, 1);
+  ids.refunded = await paidOrder(w.buyer, [{ productId: w.pa, qty: 1 }]);
+  await deliveredAgo(ids.refunded, w.a, 2);
+  await db('ShopOrder').where({ id: ids.refunded }).update({ paymentStatus: 'refunded' });
+  ids.cancelled = await paidOrder(w.buyer, [{ productId: w.pa, qty: 1 }]);
+  assert.ok((await local.updateOrderStatus({ orderId: ids.cancelled, status: 'cancelled', actorId: w.a, reason: 'x' })).order);
+  const unpaid = await local.createOrder({ buyerId: w.buyer, body: { items: [{ productId: w.pa, qty: 1 }], deliveryMethod: 'home_delivery', deliveryAddress: 'x', paymentMethod: 'mpesa' } });
+  made.orders.push(unpaid.order.id);
+  // An older order (no fulfilments) whose line names A, delivered under the legacy name.
+  const legacy = uid('ord');
+  made.orders.push(legacy);
+  await db('ShopOrder').insert({ id: legacy, buyerId: w.buyer, items: JSON.stringify([{ productId: w.pa, vendorId: w.a, name: 'Old', qty: 1, priceTzs: 1000 }]), totalTzs: 1000, status: 'fulfilled', paymentStatus: 'paid', deliveryMethod: 'home_delivery', timeline: JSON.stringify([]), stockState: 'reserved' });
+  // B accepts the shared order: A's own part is still pending (waiting).
+  await local.updateOrderStatus({ orderId: w.shared, status: 'accepted', actorId: w.b });
+
+  const expected = { open: 3, delivered: 2, cancelled: 2, all: 8, waitingAccept: 2 };
+  const page = await hit('GET', '/vendor/orders?limit=1', vendorClaims(w.a));
+  assert.equal(page.status, 200, JSON.stringify(page.body));
+  assert.equal(page.body.orders.length, 1);
+  assert.deepEqual(page.body.counts, expected);
+  // Same counts on every page, and the same rules as the JS orderTab over the stored rows.
+  const next = await hit('GET', `/vendor/orders?limit=1&cursor=${encodeURIComponent(page.body.nextCursor)}`, vendorClaims(w.a));
+  assert.deepEqual(next.body.counts, expected);
+  const rows = (await db('ShopOrder').whereIn('id', made.orders)).map(r => JSON.parse(JSON.stringify(r)));
+  const mineRows = rows.filter(r => (r.items || []).some(i => i.vendorId === w.a));
+  assert.deepEqual(countOrders(mineRows, w.a), expected);
+  // The whole list in one page agrees with the counts.
+  const full = await hit('GET', '/vendor/orders?limit=200', vendorClaims(w.a));
+  assert.equal(full.body.orders.length, expected.all);
+  // Vendor B: shared accepted (open, not waiting), onlyB pending (open, waiting).
+  assert.deepEqual((await hit('GET', '/vendor/orders?limit=5', vendorClaims(w.b))).body.counts, { open: 2, delivered: 0, cancelled: 0, all: 2, waitingAccept: 1 });
+  // Staff with `orders` see the same counts; the plain array (no params) is unchanged.
+  const clerk = await staffOf(w.a, ['orders']);
+  assert.deepEqual((await hit('GET', '/vendor/orders?cursor=', staffClaims(clerk, w.a))).body.counts, expected);
+  const plain = await hit('GET', '/vendor/orders', vendorClaims(w.a));
+  assert.ok(Array.isArray(plain.body));
+  assert.equal(plain.body.length, expected.all);
+  // A vendor with no orders.
+  const none = await user('vendor');
+  assert.deepEqual((await hit('GET', '/vendor/orders?limit=10', vendorClaims(none))).body, { orders: [], nextCursor: null, counts: { open: 0, delivered: 0, cancelled: 0, all: 0, waitingAccept: 0 } });
 });
 
 // ── GET /vendor/me ───────────────────────────────────────────────────────────
@@ -642,5 +718,28 @@ test('PIN sign-in: vendor staff whose only profile was turned off get 403 vendor
     assert.equal(session.body.user.id, memberId);
     const staffPersona = session.body.personas.find(p => p.userType === 'vendor_staff');
     assert.equal(staffPersona.accountStatus, 'suspended', 'the portal can tell the staff persona is off');
+  });
+});
+
+test('PIN sign-in (UAT D3): a suspended vendor owner with the right PIN gets 403 account_suspended, not onboarding; a wrong PIN still says invalid_credentials', async () => {
+  await withEnv(PIN_ON, async () => {
+    const owner = await personWithPin('vendor', { accountStatus: 'suspended' });
+    const wrong = await pinPost({ phone: owner.phone, pin: '1111' });
+    assert.deepEqual([wrong.statusCode, wrong.body.error], [401, 'invalid_credentials'], 'nothing about the account before the PIN is right');
+    const refused = await pinPost({ phone: owner.phone, pin: '4821' });
+    assert.deepEqual([refused.statusCode, refused.body], [403, { error: 'account_suspended' }]);
+    // Suspended owner who is also a working member: signs in as the member; the vendor persona shows suspended.
+    const both = await personWithPin('vendor', { accountStatus: 'suspended' });
+    const memberId = uid('usr_s2pin');
+    await db('User').insert({ id: memberId, userType: 'member', personId: both.personId, accountStatus: 'active', approvalStatus: 'approved', updatedAt: new Date() });
+    const session = await pinPost({ phone: both.phone, pin: '4821' });
+    assert.equal(session.statusCode, 200, JSON.stringify(session.body));
+    assert.equal(session.body.user.id, memberId);
+    assert.equal(session.body.personas.find(p => p.userType === 'vendor').accountStatus, 'suspended');
+    // An active vendor owner signs in as before.
+    const active = await personWithPin('vendor');
+    const ok = await pinPost({ phone: active.phone, pin: '4821' });
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.user.userType, 'vendor');
   });
 });
