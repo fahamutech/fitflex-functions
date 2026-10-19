@@ -103,7 +103,18 @@ export function createAuthService({
       corporateId: user.corporateId,
       // Identity V2 · I2 (C3a): the Person rides along; nothing reads it as `sub`.
       ...(identityFlag('V2_PERSONAS') && user.personId ? { pid: user.personId, ver: 2 } : {}),
+      // A portal admin still on the start password another admin chose: every
+      // route but the change-password one refuses this session (2026-10-19).
+      ...(user.passwordChangeRequired === true ? { pwc: true } : {}),
     };
+  }
+
+  /**
+   * A session for a profile that just proved who it is some other way (the
+   * forced start-password change): the same shape as a sign-in.
+   */
+  function sessionFor(user) {
+    return { token: signJwt(sessionClaims(user)), user: toSessionUser(user), pendingApproval: user.approvalStatus === 'pending_approval' };
   }
 
   /** Person + personas payload for Identity V2 clients. */
@@ -186,7 +197,7 @@ export function createAuthService({
       await users.upsertAsync(u => u.id === user.id, user);
     }
     await otps.upsertAsync(o => o.phone === phone, { ...otp, code: null });
-    const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone });
+    const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone, ...(user.passwordChangeRequired === true ? { pwc: true } : {}) });
     return { token, user: toSessionUser(user) };
   }
 
@@ -564,5 +575,5 @@ export function createAuthService({
     return { memberships: await orgMemberships.membershipsOfPerson(user.personId, { includeEnded }) };
   }
 
-  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships, sessionForPerson };
+  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships, sessionForPerson, sessionFor };
 }

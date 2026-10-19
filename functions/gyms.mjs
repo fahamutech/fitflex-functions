@@ -1,6 +1,6 @@
 // Gym catalogue REST surface — public discovery + admin CRUD.
 import '../src/bootstrap/init.mjs';
-import { requireAuth, requireAcl, bearerFrom, verify } from '../src/auth/jwt.mjs';
+import { requireAuth, requireAcl, optionalSessionClaims } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
 import { gymService, partnerGate, moderationGate } from '../src/bootstrap/services.mjs';
 
@@ -11,8 +11,7 @@ const created = new Date().toISOString();
 // get gyms without it. (Owners read their gyms via /owner/gyms, admins via
 // /admin/gyms.)
 function forViewer(req, gym) {
-  const token = bearerFrom(req);
-  const claims = token ? verify(token) : null;
+  const claims = optionalSessionClaims(req);
   const shown = gymService.publicGym(gym);
   return canSeeTrainerPass(claims?.userType) ? shown : hideTrainerPass(shown);
 }

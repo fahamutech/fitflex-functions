@@ -160,6 +160,13 @@ export {
   corporateAccounts, corporateEmployees, corporateBills,
 };
 
+// The key PINs (and portal start passwords) are mixed with before hashing. It
+// must be set in production and never change afterwards, or every stored PIN
+// stops matching. Null in production when unset: callers fail closed.
+function pinPepper() {
+  return process.env.PIN_PEPPER || (process.env.NODE_ENV === 'production' ? null : 'fitflex-dev-pin-pepper');
+}
+
 // requireAuth rejects tokens of suspended accounts (the JWT alone can't know).
 // A suspended Person (FitFlex-level only) suspends every persona; a suspended
 // persona never suspends the Person (invariant 30).
@@ -167,11 +174,23 @@ registerAccountStatusLookup(async id => {
   const user = await users.findByIdAsync(id);
   if (!user) return null;
   if (user.accountStatus === 'suspended') return 'suspended';
+  // Sessions issued before this are over: the later of the profile's own cut-off
+  // (a portal admin changed their start password) and the Person's (I7a: a PIN
+  // reset or change).
+  let validAfter = user.sessionsValidAfter ? +new Date(user.sessionsValidAfter) : null;
   if (user.personId) {
     const person = await db('Person').where({ id: user.personId }).first();
     if (person?.status === 'suspended') return 'suspended';
-    // I7a: sessions issued before a PIN reset or change are over.
-    if (person?.sessionsValidAfter) return { status: user.accountStatus ?? null, sessionsValidAfter: person.sessionsValidAfter };
+    if (person?.sessionsValidAfter) validAfter = Math.max(validAfter ?? 0, +new Date(person.sessionsValidAfter));
+  }
+  const passwordChangeRequired = user.passwordChangeRequired === true;
+  if (validAfter || passwordChangeRequired) {
+    return {
+      status: user.accountStatus ?? null,
+      sessionsValidAfter: validAfter ? new Date(validAfter) : null,
+      // Still on the start password another admin chose: held to the change-password route.
+      passwordChangeRequired,
+    };
   }
   return user.accountStatus ?? null;
 });
@@ -525,7 +544,14 @@ export const settlementClawbackService = createSettlementClawbackService({ confi
 export const invoiceService = createInvoiceService({
   invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
 });
-export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
+// Replaceable, so specs can stand in for the Firebase admin SDK.
+export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth };
+export const portalUserService = createPortalUserService({
+  users, auditLog, isConfiguredAdminEmail,
+  initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
+  // The start password is checked with the same server key as PINs.
+  pepper: () => pinPepper(), forgetSession: invalidateAccountStatus,
+});
 export const webhookService = createWebhookService({
   subscriptions, webhookSeen, paymentRequests,
   onSubscriptionActivated: lifecycle.activated,
@@ -730,7 +756,7 @@ export const pinAuthService = createPinAuthService({
   linkingEnabled: () => identityFlag('V2_LINKING'),
   // The key the PIN is mixed with before hashing. It must be set in production
   // and never change afterwards, or every stored PIN stops matching.
-  pepper: () => process.env.PIN_PEPPER || (process.env.NODE_ENV === 'production' ? null : 'fitflex-dev-pin-pepper'),
+  pepper: () => pinPepper(),
 });
 // Identity V2 · I7b: register with a number or email, a code, then a PIN.
 export const registrationService = createRegistrationService({

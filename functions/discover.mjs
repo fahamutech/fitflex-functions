@@ -3,7 +3,7 @@
 // Featured and Sponsored are labelled, and an explicit sort switches promotion off.
 // Additive: the plain /gyms, /trainers and /shop/products lists are unchanged.
 import '../src/bootstrap/init.mjs';
-import { requireAuth, bearerFrom, verify } from '../src/auth/jwt.mjs';
+import { requireAuth, optionalSessionClaims } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
 import { isTokenSession } from '../src/auth/promotion-token.mjs';
 import { discoveryService, trainerService } from '../src/bootstrap/services.mjs';
@@ -12,7 +12,7 @@ import { publicGym } from '../src/services/gym-service.mjs';
 const created = new Date().toISOString();
 
 const FILTERS = ['tier', 'verified', 'specialty', 'category', 'brand', 'minPrice', 'maxPrice', 'minRating', 'delivery', 'maxDistanceKm'];
-const claimsOf = req => { const t = bearerFrom(req); return t ? verify(t) : null; };
+const claimsOf = req => optionalSessionClaims(req);
 const number = v => (v === undefined || v === '' ? undefined : (Number.isFinite(Number(v)) ? Number(v) : undefined));
 
 async function run(entityType, req, res, shape) {
