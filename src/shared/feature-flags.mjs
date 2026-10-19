@@ -155,3 +155,16 @@ export function vendorToolsOptions() {
     fiscal,
   };
 }
+
+/** S2: the vendor web portal (GET /vendor/me opens it). */
+export function vendorPortalOn() {
+  return vendorToolsFlag('VENDOR_PORTAL');
+}
+
+/**
+ * S2: a vendor sees the buyer's phone (and the contact window's end) on an order while their part
+ * is open and paid, and for 7 EAT days after they delivered it (O-3).
+ */
+export function vendorBuyerContactOn() {
+  return vendorToolsFlag('VENDOR_ORDER_BUYER_CONTACT');
+}

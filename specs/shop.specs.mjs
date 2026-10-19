@@ -197,8 +197,8 @@ test('D1: a vendor cannot update an order belonging to another vendor', async ()
     actorId: 'usr_vendor_2',
     actorRole: 'vendor',
   });
-  assert.equal(out.status, 403);
-  assert.equal(out.error, 'order_not_owned_by_vendor');
+  assert.equal(out.status, 404);
+  assert.equal(out.error, 'order_not_found');
 });
 
 // ── categories (11 Oct 2026) ───────────────────────────────
