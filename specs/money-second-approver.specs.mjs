@@ -348,11 +348,13 @@ function refundsFixture(flag) {
   const refunds = memStore();
   const paymentRequests = memStore([{ id: 'pr1', memberId: 'm1', subscriptionId: 'sub1', amountTzs: 60_000, status: 'approved' }]);
   const auditLog = memStore();
+  const inbox = [];
   const svc = createRefundService({
     refunds, paymentRequests, subscriptions: memStore([{ id: 'sub1' }]), users: memStore([{ id: 'm1', displayName: 'Asha' }]),
     auditLog, secondApprover: () => flag,
+    notify: async (userId, message) => { inbox.push({ userId, ...message }); },
   });
-  return { svc, refunds, auditLog };
+  return { svc, refunds, auditLog, inbox };
 }
 
 test('refunds, flag off: admin-raised is approved at once and the same admin can mark it paid', async () => {
@@ -442,6 +444,48 @@ test('fix 1, flag on: a policy refund an admin started cannot be marked paid by 
   const own = await h.svc.raise({ memberId: 'm1', kind: 'shop_order', sourceId: 'o1', amountTzs: 5_000,
     reasonCode: 'payment_error', requestedBy: 'a1', requestedRole: 'admin', approved: true });
   assert.equal((await h.svc.markPaid({ id: own.refund.id, body: { paymentReference: 'R' }, actorId: 'a1' })).refund.status, 'paid');
+});
+
+test('flag on: an admin-raised refund tells the member FitFlex is preparing it, not that we have their request', async () => {
+  const f = refundsFixture(true);
+  const { refund } = await f.svc.adminRaise({ body: { paymentRequestId: 'pr1' }, actorId: 'a1' });
+  assert.equal(refund.status, 'requested');
+  assert.equal(f.inbox.length, 1);
+  assert.equal(f.inbox[0].userId, 'm1');
+  assert.equal(f.inbox[0].type, 'refund_preparing');
+  assert.equal(f.inbox[0].id, `ntf_refund_preparing_${refund.id}`);
+  assert.match(f.inbox[0].body, /FitFlex is preparing a refund of TZS 60,000/);
+  assert.doesNotMatch(f.inbox[0].body, /your request/i);
+  // a member's own request keeps the "request received" wording
+  const g = refundsFixture(true);
+  await g.svc.requestForPayment({ memberId: 'm1', body: { paymentRequestId: 'pr1', reasonCode: 'charged_twice' } });
+  assert.equal(g.inbox[0].type, 'refund_requested');
+  // flag off: unchanged (approved at once, "on its way")
+  const h = refundsFixture(false);
+  await h.svc.adminRaise({ body: { paymentRequestId: 'pr1' }, actorId: 'a1' });
+  assert.equal(h.inbox[0].type, 'refund_approved');
+});
+
+test('flag on: verify with no reference typed keeps the payment reference, else uses memberReference when present', async () => {
+  // memberReference (added by functions#188) fills an empty reference
+  const a = payments(true, { reference: null, memberReference: 'MEMBER-TX1' });
+  assert.equal((await a.svc.verify({ id: 'pr1', actorId: 'a1' })).paymentRequest.reference, 'MEMBER-TX1');
+  // a typed reference wins
+  const b = payments(true, { reference: null, memberReference: 'MEMBER-TX1' });
+  assert.equal((await b.svc.verify({ id: 'pr1', reference: 'TYPED-1', actorId: 'a1' })).paymentRequest.reference, 'TYPED-1');
+  // an existing reference is kept
+  const c = payments(true, { reference: 'EXISTING', memberReference: 'MEMBER-TX1' });
+  assert.equal((await c.svc.verify({ id: 'pr1', actorId: 'a1' })).paymentRequest.reference, 'EXISTING');
+  // no memberReference field at all (today): harmless
+  const d = payments(true, { reference: null });
+  assert.equal((await d.svc.verify({ id: 'pr1', actorId: 'a1' })).paymentRequest.reference, null);
+  // the final reference is checked against other approved payments
+  const used = { id: 'pr0', memberId: 'm2', subscriptionId: 'subX', amountTzs: 60_000, status: 'approved', provider: 'admin_approved', reference: 'MEMBER-TX1' };
+  const e = payments(true, { reference: null, memberReference: 'MEMBER-TX1' }, { others: [used] });
+  assert.deepEqual(await e.svc.verify({ id: 'pr1', actorId: 'a1' }), { error: 'reference_already_used', status: 409 });
+  assert.equal(e.row().verifiedBy, undefined);
+  const f = payments(true, { reference: null }, { others: [{ ...used, reference: 'TYPED-DUP' }] });
+  assert.deepEqual(await f.svc.verify({ id: 'pr1', reference: 'TYPED-DUP', actorId: 'a1' }), { error: 'reference_already_used', status: 409 });
 });
 
 // ── Database + endpoints (isolated CI DB) ────────────────────────────────────

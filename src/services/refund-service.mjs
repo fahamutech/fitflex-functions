@@ -89,6 +89,10 @@ export function createRefundService({
     await audit('refund_raised', requestedBy, null, refund);
     if (approved) {
       await tell(refund, 'refund_approved', 'Refund on its way', `Your refund of ${money(amount)} is approved. FitFlex will send it to the account you paid from.`);
+    } else if (requestedRole === 'admin' && secondApprover()) {
+      // Flag on: FitFlex raised it and a second admin still has to approve it. The member never asked,
+      // so "we have your request" would be wrong. (Server notifications are English only: known gap.)
+      await tell(refund, 'refund_preparing', 'Refund being prepared', `FitFlex is preparing a refund of ${money(amount)} for your payment. We will tell you when it is sent.`);
     } else {
       await tell(refund, 'refund_requested', 'Refund request received', `We have your request for ${money(amount)} and will reply soon.`);
     }

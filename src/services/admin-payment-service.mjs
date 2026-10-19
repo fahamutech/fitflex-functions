@@ -307,11 +307,16 @@ export function createAdminPaymentService({
     if (!request) return { error: 'not_found', status: 404 };
     if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
     if (request.verifiedBy) return { error: 'already_verified', status: 409, verifiedBy: request.verifiedBy };
-    if (referenceLocked(request, text(reference, 120))) return { error: 'reference_locked_provider', status: 409 };
+    const typed = text(reference, 120);
+    if (referenceLocked(request, typed)) return { error: 'reference_locked_provider', status: 409 };
+    // Nothing typed: keep the reference the payment has, else the one the member gave when paying
+    // (memberReference, once that field exists; absent today, so this is a no-op).
+    const finalReference = typed ?? request.reference ?? text(request.memberReference, 120) ?? null;
+    if (await referenceUsedElsewhere(request, finalReference)) return { error: 'reference_already_used', status: 409 };
     const at = new Date().toISOString();
     const updated = await updateIf(paymentRequests, request.id, { status: 'pending', verifiedBy: null }, {
       verifiedBy: actorId, verifiedAt: at,
-      reference: text(reference, 120) ?? request.reference,
+      reference: finalReference,
       note: upgradeOf(request) ? request.note : (text(note) ?? request.note ?? null),
     });
     if (!updated) return { error: 'payment_changed', status: 409 };

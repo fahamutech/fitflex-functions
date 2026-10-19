@@ -54,7 +54,7 @@ const reply = (res, result) => {
 
 export const adminVerifyPaymentRequest = {
   created, method: 'post', path: '/admin/payment-requests/:id/verify',
-  description: 'Admin (MONEY_SECOND_APPROVER on): record that a pending manual payment arrived. Body { reference?, note? }. A different admin then approves it (403 cannot_approve_own_verification). A mobile-money payment keeps its provider reference (409 reference_locked_provider). 409 already_decided | already_verified | payment_changed; 404 not_found | feature_disabled. → paymentRequest',
+  description: 'Admin (MONEY_SECOND_APPROVER on): record that a pending manual payment arrived. Body { reference?, note? }. A different admin then approves it (403 cannot_approve_own_verification). A mobile-money payment keeps its provider reference (409 reference_locked_provider). With no reference typed, the payment keeps its reference, else takes the one the member gave (memberReference, when present). A reference already on another approved payment is 409 reference_already_used. 409 already_decided | already_verified | payment_changed; 404 not_found | feature_disabled. → paymentRequest',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => {
     const { reference, note } = req.body || {};
