@@ -373,13 +373,15 @@ export const accountService = createAccountService({
   onAccountDeleted: async userId => { await promotionEventsService.forgetUser(userId); await usernameService.forgetUser(userId); },
 });
 
+// Until a gym's owner is verified, only the gym's own members check in there.
+// One check for the check-in and the scanner preview.
+const gymOpenToPass = gymId => partnerGate.isGymOperational(gymId);
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
   onCheckin: checkin => partnerNotifier.gymCheckin(checkin),
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
-  // Until a gym's owner is verified, only the gym's own members check in there.
-  gymOpenToPass: gymId => partnerGate.isGymOperational(gymId),
+  gymOpenToPass,
 });
 // Gym settlement configuration (settlement Phase 2): not used by any payout flow yet.
 export const settlementConfigService = createSettlementConfigService();
@@ -428,6 +430,8 @@ export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
   b2bFunding: b2bConsumptionService,
   settlementSummary: (args) => settlementViewService.ownerDashboard(args),
+  // The scanner preview refuses as the check-in would (gym_not_verified).
+  gymOpenToPass,
 });
 
 export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate });

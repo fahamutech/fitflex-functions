@@ -167,3 +167,54 @@ export function validateTrainerHomeEntry({ gym, now = new Date() }) {
   if (!isGymOpen(gym, now)) return { ok: false, failure: CHECKIN_FAILURE.GYM_CLOSED };
   return { ok: true, visitConsumed: false, sameDaySameGym: false };
 }
+
+/**
+ * Until a gym's owner is verified, only the gym's own people get in: its home
+ * trainers and its direct members (a gym plan for this gym). FitFlex Pass
+ * members and sponsor-paid visits wait for verification. True when THIS
+ * visitor needs the gym to be verified. Used by the check-in itself and by the
+ * scanner's preview (operator verify), so both decide the same way.
+ */
+export function visitNeedsVerifiedGym({ subscription, gym, homeTrainer = false }) {
+  if (homeTrainer) return false;
+  const gymsOwnMember = subscription?.type === 'direct_sub' && subscriptionCoversGym(subscription, gym);
+  return !gymsOwnMember;
+}
+
+/**
+ * Every refusal code a check-in or a scanner preview can return, for docs,
+ * app translations and tests. Response shapes are unchanged: these appear as
+ * `failure` (check-in) / `reason` (preview, eligible = false) or `error`.
+ *   Rule failures (CHECKIN_FAILURE): see above.
+ *   member_not_found              the QR's member does not exist
+ *   gym_not_found                 the gym does not exist
+ *   gym_not_verified              the gym's owner is not verified yet; only its own members and home trainers get in
+ *   gym_required                  a staff member of several gyms must pick the gym first
+ *   invalid_or_expired_qr         the member's QR is invalid or has expired
+ *   not_your_gym                  the staff member does not manage this gym
+ *   operator_not_assigned_to_gym  the staff member manages no gym
+ *   invalid_gym_qr                the entrance QR the member scanned is invalid
+ *   active_subscription_required  no active pass or benefit, so no member QR is issued
+ */
+export const CHECKIN_REFUSAL_CODES = Object.freeze([...new Set([
+  ...Object.values(CHECKIN_FAILURE),
+  'member_not_found',
+  'gym_not_found',
+  'gym_not_verified',
+  'gym_required',
+  'invalid_or_expired_qr',
+  'not_your_gym',
+  'operator_not_assigned_to_gym',
+  'invalid_gym_qr',
+  'active_subscription_required',
+])]);
+
+/**
+ * The scanner preview's other `reason` values (POST /operator/verify-qr):
+ * eligible ones, and the two "not yet" states that are not check-in refusals.
+ * A preview with eligible = false otherwise carries a CHECKIN_REFUSAL_CODES code.
+ */
+export const VERIFY_PREVIEW_REASONS = Object.freeze({
+  eligible: Object.freeze(['pass_valid', 'trainer_home_gym', 'sponsor_benefit']),
+  notEligible: Object.freeze(['no_active_pass', 'select_gym']),
+});
