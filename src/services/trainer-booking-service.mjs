@@ -21,6 +21,8 @@ export const OUTCOME_STATUSES = Object.freeze(['completed', 'no_show']);
 const HAPPENED = new Set(OUTCOME_STATUSES);
 /** A trainer may record a no-show from the session's start until this many hours after it. */
 export const NO_SHOW_WINDOW_HOURS = 48;
+// What an admin may move to confirmed / completed / no_show from: a paid session, never an unpaid one.
+const ADMIN_OUTCOME_FROM = new Set(['confirmed', 'completed', 'no_show']);
 // Statement states after which a session's outcome is frozen (the line has left draft).
 const LOCKING_STATEMENT_STATUSES = ['submitted', 'approved', 'payable', 'paid'];
 
@@ -368,6 +370,29 @@ export function createTrainerBookingService({
     };
   }
 
+  /** The group's payment_rejected sessions whose slot someone else holds now. */
+  async function rebookedRejected(groupId) {
+    const group = await trainerBookings.filterAsync(b => b.groupId === groupId && b.status === 'payment_rejected');
+    const out = [];
+    for (const b of group) {
+      const taken = await trainerBookings.findAsync(o => o.id !== b.id && o.groupId !== groupId && o.trainerId === b.trainerId
+        && o.date === b.date && o.slot === b.slot && !SLOT_RELEASING.has(o.status));
+      if (taken) out.push(b.id);
+    }
+    return out;
+  }
+
+  /**
+   * Before a group's payment is approved (owner decision 2026-10-20): a rejected session whose slot
+   * has been booked by someone else since cannot come back, so a payment covering it is refused —
+   * staff adjust or reject it instead. → null | { error: 'group_slot_rebooked', status: 409, bookingIds }.
+   */
+  async function checkGroupPayment(groupId, paymentStatus) {
+    if (!groupId || paymentStatus !== 'approved') return null;
+    const bookingIds = await rebookedRejected(groupId);
+    return bookingIds.length ? { error: 'group_slot_rebooked', status: 409, bookingIds } : null;
+  }
+
   /** Payment decided by an admin: move every booking in the group with it. */
   async function applyPaymentToGroup(groupId, paymentStatus) {
     const next = {
@@ -387,9 +412,10 @@ export function createTrainerBookingService({
       if (b.status === 'cancelled') continue;
       // A whole group whose payment was rejected follows the payment if staff change their decision —
       // except a slot someone else has booked since the rejection freed it.
+      // An approval is refused up front in that case (checkGroupPayment); this guards a race or another path.
       if (b.status === 'payment_rejected' && next !== 'payment_rejected') {
-        const taken = await trainerBookings.findAsync(o => o.id !== b.id && o.trainerId === b.trainerId && o.date === b.date
-          && o.slot === b.slot && !SLOT_RELEASING.has(o.status));
+        const taken = await trainerBookings.findAsync(o => o.id !== b.id && o.groupId !== groupId && o.trainerId === b.trainerId
+          && o.date === b.date && o.slot === b.slot && !SLOT_RELEASING.has(o.status));
         if (taken) {
           console.warn(`[trainer-booking] ${b.id} stays payment_rejected: its slot was booked again (${taken.id})`);
           continue;
@@ -435,11 +461,16 @@ export function createTrainerBookingService({
         if (status !== prior.status && line && LOCKING_STATEMENT_STATUSES.includes(line.status)) {
           return { error: 'booking_on_trainer_statement', status: 409, statementId: line.statementId, statementStatus: line.status };
         }
-        if (status === 'no_show' && prior.status !== 'no_show') {
-          if (!['confirmed', 'completed'].includes(prior.status)) return { error: 'invalid_transition', status: 409, from: prior.status };
-          const start = startOf(prior);
-          if (Number.isNaN(start)) return { error: 'invalid_booking_time', status: 400 };
-          if (start > +clock()) return { error: 'session_not_started', status: 409, startsAt: new Date(start).toISOString() };
+        // Owner decision 2026-10-20, flag or not (money safety): a session that was never paid for
+        // (payment_pending / payment_rejected) is only ever confirmed by the payment approval flow, and
+        // only a session that has started can be marked completed or no-show.
+        if (['confirmed', 'completed', 'no_show'].includes(status) && status !== prior.status) {
+          if (!ADMIN_OUTCOME_FROM.has(prior.status)) return { error: 'invalid_transition', status: 409, from: prior.status };
+          if (status !== 'confirmed') {
+            const start = startOf(prior);
+            if (Number.isNaN(start)) return { error: 'invalid_booking_time', status: 400 };
+            if (start > +clock()) return { error: 'session_not_started', status: 409, startsAt: new Date(start).toISOString() };
+          }
         }
         const cancelling = status === 'cancelled' && prior.status !== 'cancelled';
         return { to: status, patch: cancelling ? { cancelledAt: at, cancelledBy: 'admin' } : {} };
@@ -825,7 +856,7 @@ export function createTrainerBookingService({
   return {
     publicSchedule, trainerSchedule,
     hydrateBooking, quoteBooking, createBooking, applyPaymentToGroup, adminList, adminUpdateStatus,
-    trainerMyBookings, trainerCompleteBooking, trainerMarkNoShow, memberMyBookings,
+    trainerMyBookings, trainerCompleteBooking, trainerMarkNoShow, memberMyBookings, checkGroupPayment,
     memberCancelBooking, trainerCancelBooking,
     createManualSession, trainerSessionsForDate, trainerEarnings,
   };

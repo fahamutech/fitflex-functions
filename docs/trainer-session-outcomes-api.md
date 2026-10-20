@@ -19,8 +19,13 @@ Flag: `TRAINER_SESSION_OUTCOMES` (off by default). Times are East Africa Time; a
 Each completion writes an audit row (`trainer_booking_completed_by_trainer`). The status change is one
 locked, conditional write; a draft statement line for the session is re-based in the same transaction.
 
-Admin (`POST /admin/trainer-bookings/:id`), flag or not: a **cancelled** booking is final — moving it to
-any other status is `409 { error: "booking_cancelled" }` (its refund may already be raised and the slot booked again).
+Admin (`POST /admin/trainer-bookings/:id`), flag or not (owner decision 2026-10-20, money safety):
+- a **cancelled** booking is final — moving it to any other status is `409 { error: "booking_cancelled" }`;
+- `confirmed`, `completed` (and `no_show`) only from `confirmed`, `completed` or `no_show` — an unpaid
+  (`payment_pending` / `payment_rejected`) booking is `409 { error: "invalid_transition", from }`; it is paid
+  and confirmed through the payment approval flow instead;
+- `completed` (and `no_show`) only once the session has started: `409 { error: "session_not_started", startsAt }`
+  (`400 invalid_booking_time` if its date/slot can't be read). Setting the status it already has changes nothing.
 
 Booking (`POST /me/trainer-bookings`, `/quote`), flag or not: a trainer cannot book their own sessions, from
 the same account or another account of the same person — `403 { error: "cannot_book_own_sessions" }`.
@@ -87,7 +92,13 @@ Show the buttons from `actions`; do not compute windows on the device. Treat a m
 
 Approving (or otherwise deciding) a group's payment moves its sessions with it, except: `completed` /
 `no_show` sessions stay; a **cancelled** session stays cancelled (it was dropped and the payment shrunk);
-a `payment_rejected` session follows a changed decision unless its slot has been booked by someone else since.
+a `payment_rejected` session follows a changed decision.
+
+Approving a payment for a group with a `payment_rejected` session whose slot someone else has booked since is
+refused, on every approval path (`POST /admin/payment-requests/:id/decision`, `POST /admin/payment-requests/:id`,
+`POST /admin/payment-requests/:id/change-request/confirm`):
+`409 { error: "group_slot_rebooked", bookingIds: ["tbk_…"] }` (the group's sessions that can't come back). The
+payment request is left unchanged; staff adjust or reject it.
 
 ## Reconciliation (read-only)
 

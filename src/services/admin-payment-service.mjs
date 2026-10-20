@@ -25,6 +25,9 @@ export function createAdminPaymentService({
   // Before a shop order's payment is confirmed: (request, { amountTzs }) → null | { error, status }.
   // Checks the payment against the order (buyer, currency, amount).
   beforeOrderPayment = async () => null,
+  // Before a trainer booking group's payment is approved: (request) → null | { error, status, ... }.
+  // Refuses a payment covering a rejected session whose slot someone else has booked since.
+  beforeBookingPayment = async () => null,
   onSubscriptionActivated = async () => {},
   // A rejected payment for a membership (lifecycle automations).
   onPaymentRejected = async () => {},
@@ -180,8 +183,12 @@ export function createAdminPaymentService({
   const referenceLocked = (request, reference) => secondApprover()
     && (request.provider || MANUAL_PROVIDER) !== MANUAL_PROVIDER && referenceChanged(request, reference);
 
-  /** Checks that must hold before a shop order's payment is confirmed. */
+  /** Checks that must hold before a shop order's (or a trainer booking group's) payment is confirmed. */
   async function checkConfirmation(request, { reference, amountTzs }) {
+    if (request.bookingGroupId) {
+      const problem = await beforeBookingPayment(request);
+      if (problem?.error) return problem;
+    }
     if (!request.orderId) return null;
     const problem = await beforeOrderPayment(request, { amountTzs });
     if (problem?.error) return problem;

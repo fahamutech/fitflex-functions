@@ -76,10 +76,13 @@ test('cancelling every session takes the booking back; cancelling one of two kee
   assert.equal(f.calls.at(-1).action, 'reverse');
 });
 
-test('the trainer or staff cancelling, or staff confirming, moves the booking in and out of the count', async () => {
+test('the trainer or staff cancelling, or the payment being approved, moves the booking in and out of the count', async () => {
   const f = fixture();
   f.seed('tbg_adm', ['payment_pending']);
-  await f.svc.adminUpdateStatus({ id: 'tbg_adm_0', status: 'confirmed', actorId: 'admin_1' });
+  // Owner decision 2026-10-20: staff can't confirm an unpaid booking by hand — the payment approval does.
+  const refused = await f.svc.adminUpdateStatus({ id: 'tbg_adm_0', status: 'confirmed', actorId: 'admin_1' });
+  assert.deepEqual([refused.error, refused.from], ['invalid_transition', 'payment_pending']);
+  await f.svc.applyPaymentToGroup('tbg_adm', 'approved');
   assert.equal(f.calls.at(-1).action, 'credit');
   await f.svc.adminUpdateStatus({ id: 'tbg_adm_0', status: 'cancelled', actorId: 'admin_1' });
   assert.equal(f.calls.at(-1).action, 'reverse');

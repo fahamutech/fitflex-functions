@@ -236,7 +236,8 @@ test('completing and cancelling a booking answer with the same cards', async () 
 
 test("FitFlex staff read the full trainer and how to reach the member, but not the member's account", async () => {
   const s = await scene();
-  const bookingId = await makeBooking({ ...s, slot: '09:00' });
+  // Completed by staff below, so a session that has already taken place (owner decision 2026-10-20).
+  const bookingId = await makeBooking({ ...s, slot: '09:00', date: '2026-01-06' });
   const account = await users.findByIdAsync(s.memberId);
   const hidden = MEMBER_SECRETS.filter(x => !x.includes('@') && !x.startsWith('+'));
 

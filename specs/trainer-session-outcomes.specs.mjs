@@ -21,6 +21,7 @@ import {
   gyms, trainers, b2bService, b2bProgramService, trainerBookingService, trainerSettlementService, trainerReviewService,
 } from '../src/bootstrap/services.mjs';
 import { trainerSessionsForDate } from '../functions/trainer-engagements.mjs';
+import { adminDecidePaymentRequest, adminUpdatePaymentRequest } from '../functions/admin-payments.mjs';
 import {
   createTrainerBooking, trainerCompleteBooking, trainerNoShowBooking, trainerMyBookings, memberMyBookings, adminListTrainerBookings, adminUpdateTrainerBooking,
 } from '../functions/trainer-bookings.mjs';
@@ -185,9 +186,9 @@ test('flag off: Complete refuses a session that has not started, completes a sta
 
   const adminNoShow = await call(adminUpdateTrainerBooking, { claims: s.admin, params: { id: future }, body: { status: 'no_show' } });
   assert.deepEqual([adminNoShow.statusCode, adminNoShow.body.error], [400, 'invalid_status']);
-  // Admins may still complete any session, as before.
+  // Owner decision 2026-10-20: admins can't complete a session before it starts either.
   const adminDone = await call(adminUpdateTrainerBooking, { claims: s.admin, params: { id: future }, body: { status: 'completed' } });
-  assert.equal(adminDone.body.status, 'completed');
+  assert.deepEqual([adminDone.statusCode, adminDone.body.error], [409, 'session_not_started']);
 });
 
 // ── Flag on: the trainer ────────────────────────────────────────────────────
@@ -714,4 +715,74 @@ test('finding 5: the read-only reconciliation lists outcomes that disagree with 
   // It changed nothing.
   assert.equal(await statusOf(id), 'cancelled');
   assert.equal((await db('TrainerSettlementLine').where({ bookingId: id, voided: false })).length, 1);
+});
+
+// ── Owner decisions 2026-10-20 ──────────────────────────────────────────────
+
+test('admin: an unpaid session is never confirmed, completed or no-showed by hand; completion needs the start (flag on or off)', async () => {
+  for (const flag of [flagOn, flagOff]) {
+    flag();
+    const s = await scene();
+    const statuses = process.env[FLAG] ? ['confirmed', 'completed', 'no_show'] : ['confirmed', 'completed'];
+    for (const from of ['payment_pending', 'payment_rejected']) {
+      const id = await booking(s, { offsetMs: -3 * HOUR, status: from });
+      for (const to of statuses) {
+        const out = await set(s, id, to);
+        assert.deepEqual([out.statusCode, out.body], [409, { error: 'invalid_transition', from }], `${from} → ${to}`);
+      }
+      assert.equal(await statusOf(id), from);
+    }
+    const future = await booking(s, { offsetMs: 4 * HOUR });
+    const early = await set(s, future, 'completed');
+    assert.deepEqual([early.statusCode, early.body.error], [409, 'session_not_started']);
+    assert.ok(early.body.startsAt);
+    const broken = await booking(s, { at: { date: '2025-02-30x', slot: '9' } });
+    assert.deepEqual([(await set(s, broken, 'completed')).statusCode, (await set(s, broken, 'completed')).body.error], [400, 'invalid_booking_time']);
+
+    // Still allowed: a paid session that has started, and back to confirmed from an outcome.
+    const past = await booking(s, { offsetMs: -2 * HOUR });
+    assert.equal((await set(s, past, 'completed')).body.status, 'completed');
+    assert.equal((await set(s, past, 'confirmed')).body.status, 'confirmed');
+    assert.equal((await set(s, past, 'completed')).body.status, 'completed');
+    assert.equal((await set(s, past, 'completed')).statusCode, 200, 'the same status again changes nothing');
+    // An unpaid session can still be cancelled by staff.
+    const unpaid = await booking(s, { offsetMs: 30 * HOUR, status: 'payment_pending' });
+    assert.equal((await set(s, unpaid, 'cancelled')).body.status, 'cancelled');
+  }
+});
+
+test('group payment: re-approving a rejected group is refused when one of its slots was booked by someone else since', async () => {
+  const s = await scene();
+  const at = eatSlot(5 * 24 * HOUR);
+  const second = { date: at.date, slot: at.slot === '23:00' ? '22:00' : '23:00' };
+  const adminClaims = s.admin;
+  const book = async (memberId, slots) => {
+    const out = await call(createTrainerBooking, { claims: { sub: memberId, userType: 'member' }, body: { trainerId: s.trainerId, gymId: s.gymId, slots } });
+    assert.equal(out.statusCode, 201, JSON.stringify(out.body));
+    return out.body;
+  };
+  const first = await book(s.memberId, [at, second]);
+  const requestId = first.paymentRequest.id;
+  const reject = await call(adminDecidePaymentRequest, { claims: adminClaims, params: { id: requestId }, body: { decision: 'reject', note: 'bounced' } });
+  assert.equal(reject.statusCode, 200, JSON.stringify(reject.body));
+  assert.deepEqual(await Promise.all(first.bookings.map(b => statusOf(b.id))), ['payment_rejected', 'payment_rejected']);
+
+  // The rejection freed the slots; someone else books one of them.
+  const otherMember = await user('member');
+  const other = await book(otherMember, [second]);
+  const takenId = first.bookings.find(b => b.slot === second.slot).id;
+
+  const approve = await call(adminUpdatePaymentRequest, { claims: adminClaims, params: { id: requestId }, body: { status: 'approved', reference: 'MPESA-B1A-REBOOK' } });
+  assert.deepEqual([approve.statusCode, approve.body], [409, { error: 'group_slot_rebooked', bookingIds: [takenId] }]);
+  const request = await db('PaymentRequest').where({ id: requestId }).first();
+  assert.equal(request.status, 'rejected', 'the payment decision did not change');
+  assert.deepEqual(await Promise.all(first.bookings.map(b => statusOf(b.id))), ['payment_rejected', 'payment_rejected']);
+  assert.equal(await statusOf(other.bookings[0].id), 'payment_pending', 'the other member keeps the slot');
+
+  // Once the other booking lets the slot go, the same approval goes through and the whole group follows.
+  await db('TrainerBooking').where({ id: other.bookings[0].id }).update({ status: 'cancelled' });
+  const ok = await call(adminUpdatePaymentRequest, { claims: adminClaims, params: { id: requestId }, body: { status: 'approved', reference: 'MPESA-B1A-REBOOK' } });
+  assert.equal(ok.statusCode, 200, JSON.stringify(ok.body));
+  assert.deepEqual(await Promise.all(first.bookings.map(b => statusOf(b.id))), ['confirmed', 'confirmed']);
+  await db('PaymentRequest').whereIn('memberId', [s.memberId, otherMember]).del();
 });

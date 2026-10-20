@@ -533,6 +533,8 @@ export const adminPaymentService = createAdminPaymentService({
   onPassUpgraded: sub => notificationService.notifySubscriptionActivated(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
+  // 409 group_slot_rebooked { bookingIds } when a rejected session's slot was booked by someone else since.
+  beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
   beforeOrderPayment: (request, opts) => shopService.checkOrderPayment(request, opts),
 });
