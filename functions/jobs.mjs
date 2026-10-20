@@ -2,6 +2,7 @@
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
+import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
 
@@ -78,8 +79,9 @@ export const kycExpiryReminders = {
 
 export const trainerSettlementDrafts = {
   created, rule: '0 3 * * 3', // every Wednesday 03:00 UTC = 06:00 EAT, once Sunday's sessions are 48 hours old
-  description: 'Trainer payouts: prepare draft statements for the week that ended on Sunday. Drafts only; staff submit, approve and pay. Safe to rerun: drafts are rebuilt, submitted statements are left alone.',
+  description: 'Trainer payouts: prepare draft statements for the week that ended on Sunday. Drafts only; staff submit, approve and pay. Safe to rerun: drafts are rebuilt, submitted statements are left alone. TRAINER_STATEMENT_DRAFTS=off pauses it (default on); the first run after it is back on picks up every session the paused weeks missed.',
   onJob: async () => {
+    if (!trainerStatementDraftsOn()) { console.log('[trainer-statements] paused by TRAINER_STATEMENT_DRAFTS'); return { paused: true }; }
     const r = await trainerSettlementService.prepare({ actorId: 'system:weekly-trainer-statements' });
     if (r.error) console.warn(`[trainer-settlements] ${r.error}`);
     else if (r.prepared || r.rebuilt) console.log(`[trainer-settlements] ${r.periodStartDate}: prepared=${r.prepared} rebuilt=${r.rebuilt} skipped=${r.skipped}`);
@@ -88,8 +90,9 @@ export const trainerSettlementDrafts = {
 
 export const vendorSettlementDrafts = {
   created, rule: '0 3 * * 1', // every Monday 03:00 UTC = 06:00 EAT, once the week has ended
-  description: 'Vendor payouts: prepare draft statements for the week that ended on Sunday. Drafts only; staff submit, approve and pay. Safe to rerun: drafts are rebuilt, submitted statements are left alone.',
+  description: 'Vendor payouts: prepare draft statements for the week that ended on Sunday. Drafts only; staff submit, approve and pay. Safe to rerun: drafts are rebuilt, submitted statements are left alone. VENDOR_STATEMENT_DRAFTS=off pauses it (default on); the first run after it is back on picks up every delivered sale the paused weeks missed.',
   onJob: async () => {
+    if (!vendorStatementDraftsOn()) { console.log('[vendor-statements] paused by VENDOR_STATEMENT_DRAFTS'); return { paused: true }; }
     const r = await vendorSettlementService.prepare({ actorId: 'system:weekly-vendor-statements' });
     if (r.error) console.warn(`[vendor-settlements] ${r.error}`);
     else if (r.prepared || r.rebuilt) console.log(`[vendor-settlements] ${r.periodStartDate}: prepared=${r.prepared} rebuilt=${r.rebuilt} skipped=${r.skipped}`);
