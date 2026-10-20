@@ -231,7 +231,8 @@ approved template yet (see `src/integrations/whatsapp/provider.mjs`).
 
 | A row for… | Becomes |
 |---|---|
-| someone with a member account (matched by email, else mobile number) | enrolled now, through the same service a single "add person" uses |
+| someone with a member account who has **verified** that email or number (matched by email, else mobile number) | enrolled now, through the same service a single "add person" uses |
+| someone whose account holds the email or number only on their profile (not verified) | an invite, matched once they verify it |
 | someone already on the list, or already invited | left as is (an invite's name, group and reference are updated) |
 | someone who has not joined FitFlex | an invite (`B2BBeneficiaryInvite`) |
 | no email or number, a bad email or number, an unknown type, the same person twice in the file | rejected, with the line and the reason |
@@ -242,17 +243,31 @@ twice (unique indexes on a live invite's email and number per organisation).
 A company managed under Corporate is refused here and keeps
 `/corporate/staff/bulk`.
 
+The response includes `emailCodesAvailable` (boolean, same source as
+`emailCodes` in `GET /auth/options`). When it is false, someone listed by
+email only cannot verify that address in the app (Mailgun is not set up), so
+the portal should ask for a mobile number as well.
+
 ### Joining
 
-An invite waits for a **member** account with its email or number. Matching
+An invite waits for a **member** whose person has **verified** its email or
+number (a `LoginIdentifier` row with `verifiedAt`; see
+`src/shared/verified-contacts.mjs`). Matching
 runs every 10 minutes, and at once when a member opens their benefits. The
 person is enrolled as active with the group, reference and type the
 organisation listed, the invite is closed, and they get one in-app message.
 Enrolment goes through `b2bService.enrollBeneficiary`, so "already on the
 list" closes the invite without a second row. A cancelled invite enrols nobody.
 
-Matching trusts the email or number on the account, exactly as adding a
-person by email or number already does.
+Matching never uses `User.email` / `User.phone`: anyone can type a
+colleague's email or number into their own profile. Since 20 Oct 2026
+(security fix) only verified contacts match, here and when adding a person,
+an organisation user or a company employee link by email or number (an
+unverified match answers `user_not_found`). Members with no verified record
+are not matched (fail closed). The invitation email and SMS tell existing
+users to confirm their email / number in Profile > Contact details. Past
+enrolments are not reversed; `scripts/unverified-contact-audit.mjs` counts
+them (read only, counts only).
 
 ### Messages
 
@@ -270,8 +285,9 @@ over, not within an hour of the last message of that kind.
 address, a link to the app when `FITFLEX_APP_LINK` is set (none is invented),
 and what the organisation will be able to see of their activity. English only.
 
-**SMS** is one segment (160 plain characters): who added them and to join as a
-member with that number, with the app link when it fits. It has no room for
+**SMS** is one segment (160 plain characters): who added them, to join as a
+member with that number or confirm it in Profile > Contact details, with the
+app link when it fits (the confirm line is never dropped for the link). It has no room for
 the visibility statement; the person gets that in the app once they join.
 SMS goes through the shared SMS service (`SMS.md`): it is sent only when
 `SMS_PROVIDER` is set, is written to `SmsLog` as kind `invitation`, and
@@ -314,8 +330,9 @@ active). Nothing is lost: the invite stays and is tried again every run.
 - No WhatsApp (no account or approved template). SMS is sent to the number the
   organisation supplied; whether that needs the person's prior consent under
   Tanzanian rules is a question for counsel.
-- An account whose email was saved in mixed case before emails were
-  normalised is matched when its owner opens Benefits, not by the 10-minute run.
+- Someone listed by email only can be matched only once that email is
+  verified; with FitFlex email codes off (no Mailgun) that means a verified
+  Firebase email sign-in. Listing a mobile number as well avoids the wait.
 - Invited people are not counted in analytics until they join.
 - The invitation email has no Swahili version.
 

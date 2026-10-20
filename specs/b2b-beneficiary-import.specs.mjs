@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { purgeB2BBilling } from './fixtures/ledger-cleanup.mjs';
+import { verifyContacts, purgeIdentity } from './fixtures/verified-contacts.mjs';
 import { b2bService, b2bProgramService, corporateService, signJwt as sign } from '../src/bootstrap/services.mjs';
 import {
   createB2BBeneficiaryImportService, parseImportText, readImportRow, MAX_IMPORT_ROWS, MAX_EMAILS_PER_INVITE, MAX_SMS_PER_INVITE, SMS_MAX_LENGTH,
@@ -27,10 +28,13 @@ let phoneSeq = Math.floor(Math.random() * 800000) + 100000;
 const phone = () => `+255712${String(phoneSeq += 1).padStart(6, '0')}`;
 const mail = name => `${name}.${tag}@import.test`;
 
-async function user({ userType = 'member', email = null, phone: p = null, name = null } = {}) {
+// Accounts here have verified their email / number (LoginIdentifier rows), as
+// people who signed up properly have; only verified contacts match invites.
+async function user({ userType = 'member', email = null, phone: p = null, name = null, verified = true } = {}) {
   const id = uid('usr');
   await db('User').insert({ id, userType, displayName: name ?? `Import ${id.slice(-4)}`, email, phone: p, updatedAt: new Date() });
   made.users.push(id);
+  if (verified && (email || p)) await verifyContacts(db, id, { email, phone: p });
   return id;
 }
 const OPERATOR = await user({ userType: 'admin' });
@@ -99,7 +103,9 @@ after(async () => {
     await db('CorporateAccount').whereIn('id', made.corporates).del();
   }
   await db('AuditLog').whereIn('actor', [...made.users, 'system:b2b-beneficiary-invites']).del();
+  const persons = await purgeIdentity(db, made.users);
   await db('User').whereIn('id', made.users).del();
+  if (persons?.length) await db('Person').whereIn('id', persons).del().catch(() => {});
 });
 
 // ── Rules ────────────────────────────────────────────────────────────────────
@@ -370,7 +376,8 @@ test('SMS: people listed with a mobile number get the invitation and one reminde
   await run();
   assert.deepEqual([texts(p1).length, texts(p2).length, h.sent.email.filter(e => e.to === mail('both')).length, h.sent.email.filter(e => e.to === mail('eonly')).length, h.sent.sms.length], [1, 1, 1, 1, 2]);
   const first = texts(p1)[0].text;
-  assert.equal(first, 'Import Kilimanjaro Breweries & added you to its wellness programme on FitFlex. Join as a member with this number: https://example.test/get-fitflex');
+  // With a 30-character name the link and the confirm-your-number line don't both fit: the link is left out, never the line.
+  assert.equal(first, 'Import Kilimanjaro Breweries & added you to its wellness programme on FitFlex. Join as a member with this number, or confirm it in Profile > Contact details.');
   assert.ok(first.length <= SMS_MAX_LENGTH && /^[\x20-\x7E]+$/.test(first), first);
   await run();
   assert.equal(h.sent.sms.length, 2);                                                 // nothing due again yet
@@ -427,7 +434,7 @@ test('SMS: switched off or not set up, nothing is sent by SMS and nothing else c
   await bare.svc.importPeople({ access: a, body: { rows: [{ phone: p }] }, actorId: OPERATOR });
   await bare.svc.sendDue({ limit: 1000 });
   const [m] = bare.sent.sms.filter(x => x.to === p);
-  assert.deepEqual([/https?:/.test(m.text), m.text.length <= SMS_MAX_LENGTH, /Get the FitFlex app and join as a member with this number\.$/.test(m.text)], [false, true, true]);
+  assert.deepEqual([/https?:/.test(m.text), m.text.length <= SMS_MAX_LENGTH, /Join as a member with this number, or confirm it in Profile > Contact details\.$/.test(m.text)], [false, true, true]);
   // A long link that would not fit is left out rather than cut in half.
   const long = harness({ appLink: `https://example.test/${'x'.repeat(120)}` });
   const p2 = phone();
