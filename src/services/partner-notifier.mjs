@@ -184,6 +184,46 @@ export function createPartnerNotifier({
 
   // ── Vendors ───────────────────────────────────────────────────────────────
 
+  // dd/mm/yyyy HH:mm in Tanzania time: the same in both languages.
+  const eatDate = (v) => {
+    const t = new Date(v);
+    if (Number.isNaN(t.getTime())) return '';
+    return new Intl.DateTimeFormat('en-GB', { timeZone: 'Africa/Dar_es_Salaam', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(t).replace(',', '');
+  };
+  function bannerMessage(kind, d, locale) {
+    const en = d.headline || 'your banner';
+    const sw = d.headlineSw || d.headline || 'bango lako';
+    const when = eatDate(d.startsAt);
+    const texts = {
+      approved: {
+        en: { title: 'Banner approved', body: `Your banner "${en}" is approved. It goes live ${when}.` },
+        sw: { title: 'Bango limeidhinishwa', body: `Bango lako "${sw}" limeidhinishwa. Litaanza ${when}.` },
+      },
+      rejected: {
+        en: { title: 'Banner not approved', body: `Your banner "${en}" wasn't approved. See why.` },
+        sw: { title: 'Bango halikuidhinishwa', body: `Bango lako "${sw}" halikuidhinishwa. Tazama sababu.` },
+      },
+      expired: {
+        en: { title: 'Banner expired', body: `Your banner "${en}" expired before review.` },
+        sw: { title: 'Bango limeisha muda', body: `Bango lako "${sw}" limeisha muda kabla ya kukaguliwa.` },
+      },
+      ended: {
+        en: { title: 'Banner ended by FitFlex', body: `FitFlex ended your banner "${en}".` },
+        sw: { title: 'FitFlex imesimamisha bango', body: `FitFlex imesimamisha bango lako "${sw}".` },
+      },
+    }[kind];
+    const text = locale === 'en' ? texts.en : texts.sw;
+    return {
+      type: `vendor_shop_banner_${kind}`,
+      title: text.title,
+      body: text.body,
+      data: {
+        bannerId: d.bannerId ?? '', open: 'merch', item: d.bannerId ?? '', reason: d.reason ?? '',
+        titleSw: texts.sw.title, bodySw: texts.sw.body,
+      },
+    };
+  }
+
   // The shop's own event → what the vendor is told.
   const VENDOR_MESSAGES = {
     new_order: d => ({ type: 'vendor_new_order', title: 'New order', body: 'You have a new paid order to prepare.', data: { orderId: d.orderId ?? '' } }),
@@ -259,6 +299,16 @@ export function createPartnerNotifier({
       };
     },
   };
+
+  // Shop home banners (SHOP_BANNERS; design spec shop-home-phase2 §4.3). Same language rule as
+  // vendor_low_stock. Opens /vendor/merch?item=<bannerId>. Swahili is a DRAFT for native review
+  // (banner = bango, glossary O-10).
+  Object.assign(VENDOR_MESSAGES, {
+    shop_banner_approved: (d, locale) => bannerMessage('approved', d, locale),
+    shop_banner_rejected: (d, locale) => bannerMessage('rejected', d, locale),
+    shop_banner_expired: (d, locale) => bannerMessage('expired', d, locale),
+    shop_banner_ended: (d, locale) => bannerMessage('ended', d, locale),
+  });
 
   /** Something happened in a vendor's shop. Events with no message here stay in the shop's own list only. */
   async function vendorEvent(vendorUserId, event, data = {}) {

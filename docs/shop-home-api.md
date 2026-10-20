@@ -5,6 +5,8 @@ Scope (owner, 2026-10-19): Phase 1 = UI + foundations, with role-based rules onl
 
 ## `GET /shop/home`
 
+Phase 2 · slice 1 adds one key, `banners`, only when `SHOP_BANNERS` is on: see `docs/shop-banners-api.md`. With it off the answer below is unchanged.
+
 Signed in (any role). With `SHOP_HOME_V2` off the answer is `404 {"error":"feature_disabled"}`; signed out is `401 {"error":"unauthenticated"}`. More than 60 calls a minute by one user is `429 {"error":"rate_limited"}`. The limit is kept in memory per server, so with several servers the real allowance is that many times 60.
 
 ### Query
