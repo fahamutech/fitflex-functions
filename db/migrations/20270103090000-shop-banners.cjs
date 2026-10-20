@@ -28,6 +28,10 @@ exports.up = async function up(knex) {
     if (!(await knex.schema.hasColumn('HeroImage', 'vendorId'))) {
       await knex.schema.alterTable('HeroImage', (t) => { t.text('vendorId'); });
     }
+    // The version of the rights / people confirmation text the uploader accepted (banner photos).
+    if (!(await knex.schema.hasColumn('HeroImage', 'confirmationVersion'))) {
+      await knex.schema.alterTable('HeroImage', (t) => { t.text('confirmationVersion'); });
+    }
     await knex.raw('ALTER TABLE "HeroImage" DROP CONSTRAINT IF EXISTS heroimage_people_chk');
     await knex.raw(`ALTER TABLE "HeroImage" ADD CONSTRAINT heroimage_people_chk CHECK ("people" IN ('none','hands_backs','unclear_faces','product_models'))`);
     // Models in product shots are a banner rule only; app photos keep their own list.
@@ -46,6 +50,7 @@ exports.up = async function up(knex) {
       t.jsonb('headlineLead');
       t.jsonb('headlineAccent');
       t.jsonb('subline');
+      t.text('ctaKey');
       t.jsonb('ctaLabel');
       t.jsonb('imageAlt');
       // { type: product | vendor_store | category | results, value }
@@ -54,9 +59,14 @@ exports.up = async function up(knex) {
       t.timestamp('startsAt', { precision: 3, useTz: true });
       t.timestamp('endsAt', { precision: 3, useTz: true });
       t.integer('position');
+      // +1 on every change of content or photo: approve/reject must name the revision reviewed.
+      t.integer('revision').notNullable().defaultTo(1);
+      // Everyone who created, edited, replaced the photo of or sent the banner: none of them may
+      // approve, reject or reorder it (two-person rule).
+      t.jsonb('editors').notNullable().defaultTo('[]');
       t.text('status').notNullable().defaultTo('draft');
+      t.text('statusReasonNote');
       t.text('statusReason');
-      t.text('statusReasonCode');
       t.timestamp('statusChangedAt', { precision: 3, useTz: true });
       t.timestamp('expiresAt', { precision: 3, useTz: true });
       t.text('createdBy').notNullable();
@@ -99,4 +109,5 @@ exports.down = async function down(knex) {
   await knex.raw('ALTER TABLE "HeroImage" DROP CONSTRAINT IF EXISTS heroimage_purpose_chk');
   if (await knex.schema.hasColumn('HeroImage', 'purpose')) await knex.schema.alterTable('HeroImage', (t) => { t.dropColumn('purpose'); });
   if (await knex.schema.hasColumn('HeroImage', 'vendorId')) await knex.schema.alterTable('HeroImage', (t) => { t.dropColumn('vendorId'); });
+  if (await knex.schema.hasColumn('HeroImage', 'confirmationVersion')) await knex.schema.alterTable('HeroImage', (t) => { t.dropColumn('confirmationVersion'); });
 };

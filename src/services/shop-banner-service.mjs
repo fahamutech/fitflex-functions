@@ -18,7 +18,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   BANNER_AUDIENCES, BANNER_EFFECTIVE_STATUSES, BANNER_PEOPLE, BANNER_IMAGE_LIMITS, REVIEW_CHECKS, REJECT_CODES, REASON_MAX,
-  bannerConfigFromEnv, completenessError, effectiveStatus, headlineError, parseBannerInput, proposalExpiry, windowError, ctaFor,
+  BANNER_CONFIRMATION, bannerConfigFromEnv, completenessError, effectiveStatus, headlineError, parseBannerInput, proposalExpiry, windowError,
+  ctaFor, ctaKeyFor,
 } from '../shared/shop-banner-rules.mjs';
 import { prepareHeroUpload, buildHeroVariants, previewAt, sha256 } from '../infra/hero-image-file.mjs';
 
@@ -35,6 +36,14 @@ const text = (v, max) => (typeof v === 'string' && v.trim() && v.trim().length <
 const round3 = n => Math.round(n * 1000) / 1000;
 const confirmed = v => v === true || v === 'true';
 const vendorName = v => v?.vendorProfile?.businessName || v?.displayName || null;
+const withEditor = (b, actorId) => [...new Set([...(b?.editors || []), actorId].filter(Boolean))];
+/**
+ * Two-person rule: anyone who created, edited, replaced the photo of, or sent a banner (and the
+ * photo's uploader) has had a hand in it and may not approve, reject or reorder it.
+ */
+const isContributor = (b, actorId, img = null) => Boolean(actorId) && (
+  actorId === b.createdBy || actorId === b.submittedBy || (b.editors || []).includes(actorId)
+  || (img && (actorId === img.createdBy || actorId === img.rightsConfirmedBy || actorId === img.noFacesConfirmedBy)));
 const headlineOf = (b, lang) => [b.headlineLead?.[lang], b.headlineAccent?.[lang]].filter(Boolean).join(' ');
 
 function page(rows, query = {}) {
@@ -79,9 +88,9 @@ export function createShopBannerService({
     id: randomUUID(), at: auditAt(), actor, action: `shop_banner.${action}`, target: banner.id, before, after,
   });
   const snapshot = b => (b ? {
-    status: b.status, imageId: b.imageId, headlineLead: b.headlineLead, headlineAccent: b.headlineAccent, subline: b.subline,
+    status: b.status, revision: b.revision, imageId: b.imageId, ctaKey: b.ctaKey ?? null, headlineLead: b.headlineLead, headlineAccent: b.headlineAccent, subline: b.subline,
     ctaLabel: b.ctaLabel, imageAlt: b.imageAlt, target: b.target, audienceRoles: b.audienceRoles, startsAt: b.startsAt,
-    endsAt: b.endsAt, position: b.position, statusReason: b.statusReason, statusReasonCode: b.statusReasonCode, expiresAt: b.expiresAt,
+    endsAt: b.endsAt, position: b.position, statusReasonNote: b.statusReasonNote, statusReason: b.statusReason, expiresAt: b.expiresAt,
   } : null);
 
   // ── Who may do what ─────────────────────────────────────────────────────────
@@ -147,7 +156,9 @@ export function createShopBannerService({
   /** The uploader confirmed rights and the people rule on the photo (spec O-3). */
   function imageConfirmed(img) {
     return Boolean(img && img.rightsConfirmedBy && img.rightsConfirmedAt && img.noFacesConfirmedBy && img.noFacesConfirmedAt
-      && BANNER_PEOPLE.includes(img.people) && img.status !== 'retired');
+      && BANNER_PEOPLE.includes(img.people) && img.status !== 'retired' && Boolean(img.confirmationVersion)
+      // Models need the consent (model release) reference the uploader gave.
+      && (img.people !== 'product_models' || Boolean(img.consentRef)));
   }
 
   // ── Views ───────────────────────────────────────────────────────────────────
@@ -163,15 +174,17 @@ export function createShopBannerService({
     const owns = side === 'vendor' || (b.origin === 'staff' && canManage);
     if (owns) {
       if (['draft', 'pending_approval', 'rejected', 'approved', 'live'].includes(eff)) out.push('edit');
-      if (['draft', 'pending_approval', 'approved'].includes(eff)) out.push('image');
+      // Same states as edit: a new photo is an edit (rejected → draft, approved/live → pending).
+      if (['draft', 'pending_approval', 'rejected', 'approved', 'live'].includes(eff)) out.push('image');
       if (eff === 'draft') out.push('submit');
       if (['draft', 'pending_approval', 'approved'].includes(eff)) out.push('withdraw');
       if (side === 'vendor' && eff === 'live') out.push('end');
     }
     if (side === 'admin' && canApprove) {
-      const own = actorId && (actorId === b.createdBy || actorId === b.submittedBy);
+      const own = isContributor(b, actorId);
       if (eff === 'pending_approval' && !own) out.push('approve', 'reject');
-      if (['approved', 'live'].includes(eff)) out.push('end', 'position');
+      if (['approved', 'live'].includes(eff)) out.push('end');
+      if (['approved', 'live'].includes(eff) && !own) out.push('position');
     }
     return [...new Set(out)];
   }
@@ -182,7 +195,9 @@ export function createShopBannerService({
       id: img.id, width: img.width, height: img.height, people: img.people,
       focal: { x: img.focalX, y: img.focalY },
       rightsConfirmedAt: img.rightsConfirmedAt, peopleConfirmedAt: img.noFacesConfirmedAt,
+      confirmationVersion: img.confirmationVersion ?? null, consentRef: img.consentRef ?? null, licenceRef: img.licenceRef ?? null,
       ...(names ? {
+        uploadedBy: img.createdBy, uploadedByName: names[img.createdBy] ?? null,
         rightsConfirmedBy: img.rightsConfirmedBy, rightsConfirmedByName: names[img.rightsConfirmedBy] ?? null,
         peopleConfirmedBy: img.noFacesConfirmedBy, peopleConfirmedByName: names[img.noFacesConfirmedBy] ?? null,
       } : {}),
@@ -196,9 +211,11 @@ export function createShopBannerService({
       id: b.id, origin: b.origin, vendorId: b.vendorId ?? null,
       status: b.status, effectiveStatus: effectiveStatus(b, now()),
       headlineLead: b.headlineLead ?? null, headlineAccent: b.headlineAccent ?? null, subline: b.subline ?? null,
+      revision: b.revision,
+      ctaKey: b.target ? ctaKeyFor(b) : (b.ctaKey ?? null),
       ctaLabel: b.target ? ctaFor(b) : (b.ctaLabel ?? null), ctaLabelCustom: Boolean(b.ctaLabel), imageAlt: b.imageAlt ?? null,
       target: b.target ?? null, audienceRoles: b.audienceRoles || [], startsAt: b.startsAt, endsAt: b.endsAt,
-      position: b.position, statusReason: b.statusReason ?? null, statusReasonCode: b.statusReasonCode ?? null,
+      position: b.position, statusReasonNote: b.statusReasonNote ?? null, statusReason: b.statusReason ?? null,
       expiresAt: b.status === 'pending_approval' ? b.expiresAt : null,
       submittedAt: b.submittedAt, approvedAt: b.approvedAt, decidedAt: b.decidedAt, endedAt: b.endedAt,
       createdAt: b.createdAt, updatedAt: b.updatedAt,
@@ -210,14 +227,14 @@ export function createShopBannerService({
     return {
       ...commonView(b),
       targetName: productName ?? null,
-      endedByFitflex: b.status === 'ended' && b.statusReasonCode === 'ended_by_fitflex',
+      endedByFitflex: b.status === 'ended' && b.statusReason === 'ended_by_fitflex',
       image: imageView(image, `/vendor/shop-banners/${encodeURIComponent(b.id)}`, null),
       allowedActions: actionsFor(b, { side: 'vendor' }),
     };
   }
 
   function adminView(b, { image, names, vendor, productName, viewer }) {
-    const own = viewer?.actorId && (viewer.actorId === b.createdBy || viewer.actorId === b.submittedBy);
+    const own = isContributor(b, viewer?.actorId, image);
     return {
       ...commonView(b),
       vendorName: vendor ? vendorName(vendor) : null,
@@ -229,6 +246,8 @@ export function createShopBannerService({
       decidedBy: b.decidedBy ?? null, decidedByName: names[b.decidedBy] ?? null,
       endedBy: b.endedBy ?? null, endedByName: names[b.endedBy] ?? null,
       ownItem: Boolean(own),
+      // Everyone who created, edited, replaced the photo of or sent it (two-person rule): none may decide it.
+      editedBy: b.editors || [],
       image: imageView(image, `/admin/shop-banners/${encodeURIComponent(b.id)}`, names),
       allowedActions: actionsFor(b, { side: 'admin', ...viewer }),
     };
@@ -242,7 +261,7 @@ export function createShopBannerService({
     if (side === 'vendor') return rows.map(r => vendorView(r, { image: images.get(r.imageId), productName: productName(r) }));
     const vendors = new Map((await q.vendors(rows.map(r => r.vendorId))).map(v => [v.id, v]));
     const ids = rows.flatMap(r => [r.createdBy, r.submittedBy, r.approvedBy, r.decidedBy, r.endedBy]);
-    for (const img of images.values()) ids.push(img.rightsConfirmedBy, img.noFacesConfirmedBy);
+    for (const img of images.values()) ids.push(img.rightsConfirmedBy, img.noFacesConfirmedBy, img.createdBy);
     const names = await q.displayNames(ids);
     return rows.map(r => adminView(r, { image: images.get(r.imageId), names, vendor: vendors.get(r.vendorId), productName: productName(r), viewer }));
   }
@@ -270,20 +289,23 @@ export function createShopBannerService({
     const parsed = parseBannerInput(body, { origin: scope.origin, vendorId: scope.vendorId });
     if (parsed.error) return parsed;
     const v = parsed.value;
-    const shapeErr = headlineError(v) || windowError(v);
-    if (shapeErr) return shapeErr;
     const at = stamp();
     const row = {
       id: newBannerId(), origin: scope.origin, vendorId: scope.origin === 'vendor' ? scope.vendorId : null, imageId: null,
       headlineLead: v.headlineLead ?? null, headlineAccent: v.headlineAccent ?? null, subline: v.subline ?? null,
-      ctaLabel: v.ctaLabel ?? null, imageAlt: v.imageAlt ?? null, target: v.target ?? null,
+      ctaKey: v.ctaKey ?? null, ctaLabel: v.ctaLabel ?? null, imageAlt: v.imageAlt ?? null, target: v.target ?? null,
       audienceRoles: v.audienceRoles ?? [...BANNER_AUDIENCES], startsAt: v.startsAt ?? null, endsAt: v.endsAt ?? null,
-      position: null, status: 'draft', statusChangedAt: at, createdBy: actorId, createdAt: at, updatedAt: at,
+      position: null, revision: 1, editors: [actorId],
+      status: 'draft', statusChangedAt: at, createdBy: actorId, createdAt: at, updatedAt: at,
     };
+    const shapeErr = headlineError(v) || windowError(v) || ctaKeyError(row);
+    if (shapeErr) return shapeErr;
     const saved = await store.transaction(async (q) => {
       if (scope.origin === 'vendor') {
         const blocked = await vendorMayPropose(q, scope.vendorId);
         if (blocked) return blocked;
+        const full = await openProposalsFull(q, scope.vendorId);
+        if (full) return full;
       }
       const owned = await targetOwnership(q, row.target, row);
       if (owned) return owned;
@@ -293,6 +315,20 @@ export function createShopBannerService({
     });
     if (saved.error) return saved;
     return { banner: (await decorate(store, [saved], scope.origin === 'vendor' ? 'vendor' : 'admin', viewer || { actorId, canManage: true }))[0] };
+  }
+
+  /** A vendor's button must be the one for its target ("View product" / "Visit store"). */
+  function ctaKeyError(b) {
+    if (b.origin !== 'vendor' || !b.ctaKey || !b.target) return null;
+    const want = { product: 'view_product', vendor_store: 'visit_store' }[b.target.type];
+    return b.ctaKey === want ? null : fail('invalid_cta_key', 422, { field: 'ctaKey', allowed: [want] });
+  }
+
+  /** SHOP_BANNER_MAX_OPEN: a vendor's drafts + pending proposals at once (abuse limit). */
+  async function openProposalsFull(q, vendorId) {
+    const max = config().maxOpenProposals;
+    const open = await q.openProposals(vendorId, stamp());
+    return open >= max ? fail('too_many_open_proposals', 409, { max, open }) : null;
   }
 
   /**
@@ -305,13 +341,18 @@ export function createShopBannerService({
     const eff = effectiveStatus(b, now());
     if (['ended', 'expired', 'withdrawn'].includes(eff)) return fail('not_editable', 409, { currentStatus: eff });
     const merged = { ...b, ...patch };
-    const shapeErr = headlineError(merged) || windowError(merged);
+    const shapeErr = headlineError(merged) || windowError(merged) || ctaKeyError(merged);
     if (shapeErr) return shapeErr;
     const owned = await targetOwnership(q, patch.target, b);
     if (owned) return owned;
     const at = stamp();
-    const next = { ...patch, updatedAt: at };
+    // Every change of content or photo is a new revision, and its author joins the editors.
+    const next = { ...patch, revision: b.revision + 1, editors: withEditor(b, actorId), updatedAt: at };
     if (eff === 'rejected') {
+      if (b.origin === 'vendor') {
+        const full = await openProposalsFull(q, b.vendorId);
+        if (full) return full;
+      }
       Object.assign(next, { status: 'draft', statusChangedAt: at, submittedBy: null, submittedAt: null, expiresAt: null, decidedBy: null, decidedAt: null });
     } else if (eff === 'pending_approval') {
       const err = completenessError(merged, { now: now(), checkStart: 'startsAt' in patch });
@@ -325,7 +366,7 @@ export function createShopBannerService({
         if (blocked) return blocked;
       }
       Object.assign(next, {
-        status: 'pending_approval', statusChangedAt: at, statusReason: null, statusReasonCode: null,
+        status: 'pending_approval', statusChangedAt: at, statusReasonNote: null, statusReason: null,
         submittedBy: actorId, submittedAt: at, expiresAt: proposalExpiry(at, merged.startsAt, config().proposalExpiryDays).toISOString(),
         approvedBy: null, approvedAt: null, decidedBy: null, decidedAt: null, position: null,
       });
@@ -357,6 +398,9 @@ export function createShopBannerService({
 
   // ── Photo ───────────────────────────────────────────────────────────────────
 
+  const REF_MAX = 200;
+  const refField = v => (v == null || v === '' ? { value: null } : typeof v === 'string' && v.trim() && v.trim().length <= REF_MAX ? { value: v.trim() } : { invalid: true });
+
   function parseFocalField(v) {
     if (v == null || v === '') return { value: 0 };
     const n = Number(v);
@@ -371,8 +415,16 @@ export function createShopBannerService({
   async function uploadImage({ scope, id, file, fields = {}, actorId, viewer = null }) {
     if (!actorId) return fail('actor_required', 403);
     if (!BANNER_PEOPLE.includes(fields.people)) return fail('invalid_people', 400, { field: 'people', allowed: BANNER_PEOPLE });
+    if (fields.confirmationVersion !== BANNER_CONFIRMATION.version) {
+      return fail('confirmation_version_mismatch', 400, { field: 'confirmationVersion', current: BANNER_CONFIRMATION.version });
+    }
     if (!confirmed(fields.rightsConfirmed)) return fail('rights_confirmation_required', 400, { field: 'rightsConfirmed' });
-    if (fields.people === 'product_models' && !confirmed(fields.peopleConfirmed)) return fail('people_confirmation_required', 400, { field: 'peopleConfirmed' });
+    const models = fields.people === 'product_models';
+    if (models && !confirmed(fields.peopleConfirmed)) return fail('people_confirmation_required', 400, { field: 'peopleConfirmed' });
+    const consentRef = refField(fields.consentRef);
+    const licenceRef = refField(fields.licenceRef);
+    if (consentRef.invalid || licenceRef.invalid) return fail('invalid_reference', 400, { field: consentRef.invalid ? 'consentRef' : 'licenceRef', maxLength: REF_MAX });
+    if (models && !consentRef.value) return fail('consent_reference_required', 400, { field: 'consentRef' });
     const fx = parseFocalField(fields.focalX); const fy = parseFocalField(fields.focalY);
     if (fx.invalid || fy.invalid) return fail('invalid_focal', 400);
     if (!file?.buffer?.length) return fail('no_file_provided', 400);
@@ -398,37 +450,43 @@ export function createShopBannerService({
       logger.error?.('[shop-banners] private upload failed:', err?.message);
       return fail('storage_service_unavailable', 503);
     }
+    // From here the private file exists (Zebra cannot delete it): any outcome without a saved row is audited.
     const at = stamp();
+    const refuse = out => { throw Object.assign(new Error(out.error), { refusal: out }); };
     let saved;
     try {
       saved = await store.transaction(async (q) => {
         const b = await load(q, id, scope);
-        if (!b) return notFound();
+        if (!b) refuse(notFound());
         const img = await q.insertImage({
           id: imageId, privateProvider: stored.provider, privateKey: stored.key, sha256: prepared.sha256, status: 'draft',
           width: prepared.width, height: prepared.height, focalX: fx.value, focalY: fy.value, variants: null,
           textZoneLuminance: prepared.luminance,
           source: b.origin === 'vendor' ? 'vendor_upload' : 'staff_upload', photographer: 'uploader', licence: 'uploader_confirmed_rights',
-          licenceRef: null, people: fields.people, consentRef: null,
+          licenceRef: licenceRef.value, people: fields.people, consentRef: consentRef.value,
+          confirmationVersion: BANNER_CONFIRMATION.version,
           // The people confirmation: the "models showing the product" tick, or the "No people" choice itself.
           rightsConfirmedBy: actorId, rightsConfirmedAt: at, noFacesConfirmedBy: actorId, noFacesConfirmedAt: at,
           createdBy: actorId, createdAt: at, updatedAt: at, vendorId: b.vendorId ?? null,
         });
-        const out = await applyEdit(q, b, { imageId: img.id }, actorId, 'image_uploaded', { image: { id: img.id, people: img.people, width: img.width, height: img.height } });
+        const out = await applyEdit(q, b, { imageId: img.id }, actorId, 'image_uploaded', {
+          image: { id: img.id, people: img.people, width: img.width, height: img.height, confirmationVersion: img.confirmationVersion, consentRef: img.consentRef },
+        });
         // A refused edit (e.g. not_editable) rolls the row back with the transaction.
-        if (out.error) throw Object.assign(new Error(out.error), { refusal: out });
+        if (out.error) refuse(out);
         if (b.imageId && b.imageId !== img.id) await q.updateImage(b.imageId, { status: 'retired', updatedAt: at });
         return out;
       });
     } catch (err) {
-      if (err?.refusal) return err.refusal;
       logger.error?.(`[shop-banners] ORPHANED private file: image ${imageId} not saved (${err?.message}); provider=${stored.provider} key=${stored.key}`);
       try {
-        await store.audit({ id: randomUUID(), at, actor: actorId, action: 'shop_banner.image_orphaned', target: id, before: null, after: { imageId, privateKeyHash: shortHash(stored.key), sha256: prepared.sha256 } });
+        await store.audit({
+          id: randomUUID(), at: auditAt(), actor: actorId, action: 'shop_banner.image_orphaned', target: id, before: null,
+          after: { imageId, privateKeyHash: shortHash(stored.key), sha256: prepared.sha256, reason: err?.refusal?.error || String(err?.message || 'insert_failed').slice(0, 200) },
+        });
       } catch { /* logged above */ }
-      return fail('image_save_failed', 500);
+      return err?.refusal || fail('image_save_failed', 500);
     }
-    if (saved.error) return saved;
     return { banner: (await decorate(store, [saved], scope.origin === 'vendor' ? 'vendor' : 'admin', viewer || { actorId, canManage: true }))[0] };
   }
 
@@ -473,9 +531,13 @@ export function createShopBannerService({
     return Promise.race([put, timeout]).finally(() => clearTimeout(timer));
   }
 
-  /** Make the public files of an approved banner's photo (once). → { image } or { error }. */
-  async function publishImage(q, img, actorId) {
-    if (img.variants) return { image: img };
+  /**
+   * Build and upload the public files of a photo, OUTSIDE the banner lock (seconds of image work and
+   * Zebra calls must not hold every banner write). Writes nothing to the database except, on a
+   * part-way failure, an audit row naming the public files already made (Zebra cannot delete them).
+   * → { variants, urls } or { error }.
+   */
+  async function buildPublicFiles(img, bannerId, actorId) {
     if (!publicStore) return fail('storage_service_unavailable', 503);
     const master = await readPrivate(img);
     if (master.error) return master;
@@ -487,18 +549,32 @@ export function createShopBannerService({
         urls[name] = (await putWithTimeout(built[name], `${img.id}-${suffix}.${built[name].ext}`, img.id)).url;
       }
     } catch (err) {
-      logger.error?.(`[shop-banners] public upload failed for ${img.id} (${err?.message}); ORPHANED: ${Object.values(urls).join(' ')}`);
+      await recordOrphanedPublicFiles(bannerId, img.id, Object.values(urls), actorId, `upload_failed: ${err?.message}`);
       return fail('storage_service_unavailable', 503);
     }
-    const variants = {
-      url2x: urls.x2, url1x: urls.x1, urlWide: urls.wide, urlAvif: urls.avif,
-      bytes2x: built.x2.bytes, bytes1x: built.x1.bytes, bytesWide: built.wide.bytes, bytesAvif: built.avif.bytes,
-      width2x: built.x2.width, height2x: built.x2.height, width1x: built.x1.width, height1x: built.x1.height,
-      widthWide: built.wide.width, heightWide: built.wide.height,
+    return {
+      urls: Object.values(urls),
+      variants: {
+        url2x: urls.x2, url1x: urls.x1, urlWide: urls.wide, urlAvif: urls.avif,
+        bytes2x: built.x2.bytes, bytes1x: built.x1.bytes, bytesWide: built.wide.bytes, bytesAvif: built.avif.bytes,
+        width2x: built.x2.width, height2x: built.x2.height, width1x: built.x1.width, height1x: built.x1.height,
+        widthWide: built.wide.width, heightWide: built.wide.height,
+      },
     };
-    const saved = await q.updateImage(img.id, { variants, status: 'published', updatedAt: stamp() });
-    await q.audit({ id: randomUUID(), at: auditAt(), actor: actorId, action: 'shop_banner.image_published', target: img.id, before: null, after: { imageId: img.id, urls: [urls.x2, urls.x1, urls.wide, urls.avif] } });
-    return { image: saved };
+  }
+
+  /** Public files that no banner uses (a failed or overtaken approval): logged and audited, never silent. */
+  async function recordOrphanedPublicFiles(bannerId, imageId, urls, actorId, reason) {
+    if (!urls.length) return;
+    logger.error?.(`[shop-banners] ORPHANED public files for ${imageId} (${reason}): ${urls.join(' ')}`);
+    try {
+      await store.audit({
+        id: randomUUID(), at: auditAt(), actor: actorId, action: 'shop_banner.public_files_orphaned', target: bannerId, before: null,
+        after: { imageId, urls, reason: String(reason).slice(0, 200) },
+      });
+    } catch (err) {
+      logger.error?.(`[shop-banners] could not audit orphaned public files for ${imageId}:`, err?.message);
+    }
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
@@ -520,8 +596,8 @@ export function createShopBannerService({
     const at = stamp();
     const saved = await q.updateBanner(b.id, { status: to, statusChangedAt: at, updatedAt: at, ...extra });
     await audit(q, action, actorId, saved, { status: b.status, effectiveStatus: effectiveStatus(b, now()) }, {
-      status: to, ...(extra.statusReason !== undefined ? { reason: extra.statusReason } : {}),
-      ...(extra.statusReasonCode ? { code: extra.statusReasonCode } : {}), ...(extra.position != null ? { position: extra.position } : {}),
+      status: to, ...(extra.statusReasonNote !== undefined ? { reason: extra.statusReasonNote } : {}),
+      ...(extra.statusReason ? { code: extra.statusReason } : {}), ...(extra.position != null ? { position: extra.position } : {}),
     });
     return saved;
   }
@@ -543,7 +619,7 @@ export function createShopBannerService({
     if (!imageConfirmed(await q.getImage(b.imageId))) return fail('image_people_unconfirmed', 422, { field: 'image' });
     const at = stamp();
     const saved = await move(q, b, 'pending_approval', actorId, 'submitted', {
-      submittedBy: actorId, submittedAt: at, statusReason: null, statusReasonCode: null,
+      submittedBy: actorId, submittedAt: at, editors: withEditor(b, actorId), statusReasonNote: null, statusReason: null,
       expiresAt: proposalExpiry(at, b.startsAt, config().proposalExpiryDays).toISOString(),
     });
     return { saved };
@@ -560,59 +636,118 @@ export function createShopBannerService({
   /** The proposer stops a live banner ("End now"). */
   const vendorEnd = ({ scope, id, actorId }) => act(id, scope, actorId, async (q, b) => {
     if (effectiveStatus(b, now()) !== 'live') return invalid(b, 'ended');
-    return { saved: await move(q, b, 'ended', actorId, 'ended', { endedBy: actorId, endedAt: stamp(), statusReason: null, statusReasonCode: 'ended_by_vendor' }) };
+    return { saved: await move(q, b, 'ended', actorId, 'ended', { endedBy: actorId, endedAt: stamp(), statusReasonNote: null, statusReason: 'ended_by_vendor' }) };
   });
 
-  const ownSubmission = (b, actorId) => actorId === b.createdBy || actorId === b.submittedBy;
+  /**
+   * The decision must be about what the reviewer saw: { revision, imageId } of the banner they
+   * reviewed. Missing → 400 revision_required; anything changed since → 409 banner_changed with the
+   * current values (reload and review again).
+   */
+  function sameRevision(b, { revision, updatedAt, imageId }) {
+    // `revision` is the contract; `updatedAt` (as shown in the view) is accepted when a client has no revision.
+    const hasRevision = !(revision == null || revision === '');
+    const hasUpdatedAt = typeof updatedAt === 'string' && updatedAt !== '';
+    const missing = [!hasRevision && !hasUpdatedAt ? 'revision' : null, imageId == null || imageId === '' ? 'imageId' : null].filter(Boolean);
+    if (missing.length) return fail('revision_required', 400, { fields: missing });
+    const sameContent = hasRevision ? Number(revision) === b.revision : ms(updatedAt) === ms(b.updatedAt);
+    if (!sameContent || imageId !== b.imageId) return fail('banner_changed', 409, { revision: b.revision, updatedAt: b.updatedAt, imageId: b.imageId });
+    return null;
+  }
 
   /**
-   * Approve a pending banner. Needs promotions_approve (the route), someone who neither created nor
-   * sent it, the review checks { checks: ['people','text','languages'] }, the uploader's photo
-   * confirmations, a vendor still allowed to sell and a target still on sale. Makes the photo's
-   * public files. Optional position (0–9999, lower first).
+   * Everything approval needs, read from `q`. Run twice: before the public files are made (outside
+   * the lock) and again under the lock right before the state changes.
+   * → { img, pos } or { error }.
    */
-  const approve = ({ id, actorId, checks, position }) => act(id, { any: true }, actorId, async (q, b) => {
+  async function approvalCheck(q, b, { actorId, checks, position, revision, updatedAt, imageId }) {
     const eff = effectiveStatus(b, now());
     if (eff === 'expired') return fail('proposal_expired', 409, { expiresAt: b.expiresAt });
     if (eff !== 'pending_approval') return invalid(b, 'approved');
-    if (ownSubmission(b, actorId)) return fail('cannot_approve_own_submission', 403);
+    const changed = sameRevision(b, { revision, updatedAt, imageId });
+    if (changed) return changed;
+    const img = await q.getImage(b.imageId);
+    if (isContributor(b, actorId, img)) return fail('cannot_approve_own_submission', 403);
     const pos = position == null || position === '' ? null : Number(position);
     if (pos !== null && !(Number.isInteger(pos) && pos >= 0 && pos <= 9999)) return fail('invalid_position', 400, { field: 'position' });
     const ticked = Array.isArray(checks) ? checks : [];
-    const img = await q.getImage(b.imageId);
     if (!imageConfirmed(img) || !ticked.includes('people')) return fail('image_people_unconfirmed', 422, { field: 'checks', required: REVIEW_CHECKS });
     const missing = REVIEW_CHECKS.filter(c => !ticked.includes(c));
     if (missing.length) return fail('review_checks_required', 422, { field: 'checks', missing, required: REVIEW_CHECKS });
     const err = completenessError(b, { now: now(), checkStart: false });
     if (err) return err;
     if (b.origin === 'vendor') {
-      const s = (await vendorStates(q, [b.vendorId])).get(b.vendorId);
-      if (!s.ok) return fail(s.reason, 409);
+      const st = (await vendorStates(q, [b.vendorId])).get(b.vendorId);
+      if (!st.ok) return fail(st.reason, 409);
     }
     const owned = await targetOwnership(q, b.target, b);
     if (owned) return owned;
     const elig = await targetEligibility(q, b.target);
     if (elig) return elig;
-    const pub = await publishImage(q, img, actorId);
-    if (pub.error) return pub;
-    const at = stamp();
-    const saved = await move(q, b, 'approved', actorId, 'approved', {
-      approvedBy: actorId, approvedAt: at, decidedBy: actorId, decidedAt: at, position: pos, expiresAt: null, statusReason: null, statusReasonCode: null,
-    });
-    return { saved, notice: 'approved' };
-  });
+    return { img, pos };
+  }
 
-  const reject = ({ id, actorId, reason, code }) => act(id, { any: true }, actorId, async (q, b) => {
+  /**
+   * Approve a pending banner: promotions_approve (the route), someone who had no hand in it (two-person
+   * rule), the revision and photo the reviewer saw, the review checks, the uploader's confirmations, a
+   * vendor still allowed to sell, a target still on sale. The public files are made outside the lock;
+   * the state changes under it after every check is run again. Optional position (0–9999).
+   */
+  async function approve({ id, actorId, checks, position, revision, updatedAt, imageId }) {
+    if (!actorId) return fail('actor_required', 403);
+    const args = { actorId, checks, position, revision, updatedAt, imageId };
+    const b0 = await load(store, id, { any: true });
+    if (!b0) return notFound();
+    const pre = await approvalCheck(store, b0, args);
+    if (pre.error) return pre;
+    let built = null;
+    if (!pre.img.variants) {
+      built = await buildPublicFiles(pre.img, b0.id, actorId);
+      if (built.error) return built;
+    }
+    const result = await store.transaction(async (q) => {
+      const b = await load(q, id, { any: true });
+      if (!b) return notFound();
+      const chk = await approvalCheck(q, b, args);
+      if (chk.error) return chk;
+      if (!chk.img.variants) {
+        if (!built || chk.img.id !== pre.img.id) return fail('banner_changed', 409, { revision: b.revision, imageId: b.imageId });
+        await q.updateImage(chk.img.id, { variants: built.variants, status: 'published', updatedAt: stamp() });
+        await q.audit({ id: randomUUID(), at: auditAt(), actor: actorId, action: 'shop_banner.image_published', target: b.id, before: null, after: { imageId: chk.img.id, urls: built.urls } });
+        built.used = true;
+      }
+      const at = stamp();
+      const saved = await move(q, b, 'approved', actorId, 'approved', {
+        approvedBy: actorId, approvedAt: at, decidedBy: actorId, decidedAt: at, position: chk.pos, expiresAt: null,
+        statusReasonNote: null, statusReason: null,
+      });
+      return { saved, notice: 'approved' };
+    });
+    if (built && !built.used) await recordOrphanedPublicFiles(b0.id, pre.img.id, built.urls, actorId, result.error || 'not_used');
+    if (result.error) return result;
+    await notice(result.saved, 'approved');
+    return result;
+  }
+
+  /**
+   * Reject a pending banner { code (one of REJECT_CODES), note (the vendor sees it; required for
+   * "other", else optional; ≤ 500), revision | updatedAt, imageId }.
+   */
+  const reject = ({ id, actorId, code, note, revision, updatedAt, imageId }) => act(id, { any: true }, actorId, async (q, b) => {
     const eff = effectiveStatus(b, now());
     if (eff === 'expired') return fail('proposal_expired', 409, { expiresAt: b.expiresAt });
     if (eff !== 'pending_approval') return invalid(b, 'rejected');
-    if (ownSubmission(b, actorId)) return fail('cannot_approve_own_submission', 403);
-    const why = text(reason, REASON_MAX);
-    if (!why) return fail('reason_required', 400, { field: 'reason', maxLength: REASON_MAX });
-    if (code != null && !REJECT_CODES.includes(code)) return fail('invalid_reason_code', 400, { field: 'code', allowed: REJECT_CODES });
+    const changed = sameRevision(b, { revision, updatedAt, imageId });
+    if (changed) return changed;
+    if (isContributor(b, actorId, await q.getImage(b.imageId))) return fail('cannot_approve_own_submission', 403);
+    if (code == null || code === '') return fail('reason_code_required', 400, { field: 'code', allowed: REJECT_CODES });
+    if (!REJECT_CODES.includes(code)) return fail('invalid_reason_code', 400, { field: 'code', allowed: REJECT_CODES });
+    if (note != null && (typeof note !== 'string' || note.trim().length > REASON_MAX)) return fail('invalid_note', 400, { field: 'note', maxLength: REASON_MAX });
+    const why = text(note, REASON_MAX);
+    if (code === 'other' && !why) return fail('note_required', 400, { field: 'note', maxLength: REASON_MAX });
     const at = stamp();
     const saved = await move(q, b, 'rejected', actorId, 'rejected', {
-      statusReason: why, statusReasonCode: code ?? null, decidedBy: actorId, decidedAt: at, expiresAt: null,
+      statusReasonNote: why, statusReason: code, decidedBy: actorId, decidedAt: at, expiresAt: null,
     });
     return { saved, notice: 'rejected' };
   });
@@ -623,7 +758,7 @@ export function createShopBannerService({
     if (!['approved', 'live'].includes(eff)) return invalid(b, 'ended');
     const why = text(reason, REASON_MAX);
     if (!why) return fail('reason_required', 400, { field: 'reason', maxLength: REASON_MAX });
-    const saved = await move(q, b, 'ended', actorId, 'ended', { endedBy: actorId, endedAt: stamp(), statusReason: why, statusReasonCode: 'ended_by_fitflex' });
+    const saved = await move(q, b, 'ended', actorId, 'ended', { endedBy: actorId, endedAt: stamp(), statusReasonNote: why, statusReason: 'ended_by_fitflex' });
     return { saved, notice: b.origin === 'vendor' ? 'ended' : null };
   });
 
@@ -631,6 +766,7 @@ export function createShopBannerService({
   const setPosition = ({ id, actorId, position }) => act(id, { any: true }, actorId, async (q, b) => {
     const eff = effectiveStatus(b, now());
     if (!['approved', 'live'].includes(eff)) return invalid(b, eff);
+    if (isContributor(b, actorId, await q.getImage(b.imageId))) return fail('cannot_approve_own_submission', 403);
     const pos = position == null ? null : Number(position);
     if (pos !== null && !(Number.isInteger(pos) && pos >= 0 && pos <= 9999)) return fail('invalid_position', 400, { field: 'position' });
     const saved = await q.updateBanner(b.id, { position: pos, updatedAt: stamp() });
@@ -651,9 +787,9 @@ export function createShopBannerService({
       for (const b of expired) {
         // expiresAt is the earlier of sent + N days and the start: which one it was is the reason.
         const code = ms(b.startsAt) <= ms(b.expiresAt) ? 'start_passed' : 'not_reviewed_in_time';
-        out.expired.push(await move(q, b, 'expired', SYSTEM_ACTOR, 'expired', { statusReason: null, statusReasonCode: code }));
+        out.expired.push(await move(q, b, 'expired', SYSTEM_ACTOR, 'expired', { statusReasonNote: null, statusReason: code }));
       }
-      for (const b of ended) out.ended.push(await move(q, b, 'ended', SYSTEM_ACTOR, 'ended', { endedAt: b.endsAt, statusReason: null, statusReasonCode: 'window_passed' }));
+      for (const b of ended) out.ended.push(await move(q, b, 'ended', SYSTEM_ACTOR, 'ended', { endedAt: b.endsAt, statusReasonNote: null, statusReason: 'window_passed' }));
       return out;
     });
     for (const b of done.expired) await notice(b, 'expired');
@@ -665,7 +801,7 @@ export function createShopBannerService({
     try {
       await notifyVendor(b.vendorId, `shop_banner_${kind}`, {
         bannerId: b.id, headline: headlineOf(b, 'en'), headlineSw: headlineOf(b, 'sw'),
-        startsAt: b.startsAt, reason: kind === 'rejected' || kind === 'ended' ? (b.statusReason || '') : '',
+        startsAt: b.startsAt, reason: kind === 'rejected' || kind === 'ended' ? (b.statusReasonNote || '') : '',
       });
     } catch (err) {
       logger.error?.(`[shop-banners] could not tell vendor ${b.vendorId} about ${b.id} (${kind}):`, err?.message);
@@ -687,6 +823,9 @@ export function createShopBannerService({
       // The app shows the suspended alert / "available once approved" state from this.
       vendor: { canPropose: s.ok, reason: s.reason },
       proposalExpiryDays: config().proposalExpiryDays,
+      openProposals: { open: await store.openProposals(vendorId, stamp()), max: config().maxOpenProposals },
+      // The exact texts the photo form shows and sends back as confirmationVersion.
+      confirmation: BANNER_CONFIRMATION,
     };
   }
 
@@ -723,13 +862,19 @@ export function createShopBannerService({
     // Requests: oldest sent first (the one closest to expiring on top). Everything else: newest first.
     if (query.tab === 'requests' || query.status === 'pending_approval') decorated.sort((a, b) => ms(a.expiresAt) - ms(b.expiresAt) || a.id.localeCompare(b.id));
     const p = page(decorated, query);
-    return { items: p.items, total: p.total, nextCursor: p.nextCursor, counts };
+    return { items: p.items, total: p.total, nextCursor: p.nextCursor, counts, confirmation: BANNER_CONFIRMATION };
   }
 
   async function adminGet({ id, viewer }) {
     const b = await load(store, id, { any: true });
     if (!b) return notFound();
-    return { banner: (await decorate(store, [b], 'admin', viewer))[0], history: await store.history(id) };
+    const history = await store.history(id);
+    const names = await store.displayNames(history.map(r => r.actor));
+    return {
+      banner: (await decorate(store, [b], 'admin', viewer))[0],
+      // actorName: display name (else email); null for the system (lifecycle job).
+      history: history.map(r => ({ ...r, actorName: r.actor === SYSTEM_ACTOR ? null : names[r.actor] ?? null })),
+    };
   }
 
   // ── The shop home ───────────────────────────────────────────────────────────

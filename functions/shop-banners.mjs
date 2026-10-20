@@ -15,6 +15,7 @@ import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
 import { BANNER_IMAGE_LIMITS } from '../src/shared/shop-banner-rules.mjs';
 import { shopBannersOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
+import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 
 const created = new Date().toISOString();
 
@@ -38,6 +39,12 @@ const adminView = method => routeGuard(method, [bannersEnabled, requireAuth('adm
 const adminManage = method => routeGuard(method, [bannersEnabled, requireAuth('admin'), requireAcl('promotions')]);
 const adminApprove = method => routeGuard(method, [bannersEnabled, requireAuth('admin'), requireAcl('promotions_approve')]);
 
+// Per vendor, per minute, in memory per server (vendor-rate-limit.mjs): 429 rate_limited { retryAfterSeconds }.
+export const BANNER_RATE_LIMITS = Object.freeze({ create: 20, upload: 10, submit: 20 });
+const limiters = Object.fromEntries(Object.entries(BANNER_RATE_LIMITS).map(([k, perMinute]) => [k, createVendorLimiter({ perMinute })]));
+export const resetShopBannerLimits = () => Object.values(limiters).forEach(l => l.reset());
+const limited = (kind, req, res) => limitOrNull(limiters[kind], vendorIdOf(req), res);
+
 const vendorIdOf = req => (req.user.userType === 'vendor' ? req.user.sub : req.user.vendorId);
 const vendorScope = req => ({ origin: 'vendor', vendorId: vendorIdOf(req) });
 const STAFF = Object.freeze({ origin: 'staff' });
@@ -57,7 +64,7 @@ async function sendBanner(res, result, read) {
 
 async function readUpload(req) {
   // One byte over the limit marks the file truncated (→ 413).
-  const parsed = await parseMultipartRequest(req, { fileSize: BANNER_IMAGE_LIMITS.maxBytes, files: 1, fields: 8, parts: 9, fieldSize: 1024 });
+  const parsed = await parseMultipartRequest(req, { fileSize: BANNER_IMAGE_LIMITS.maxBytes, files: 1, fields: 12, parts: 13, fieldSize: 1024 });
   const fields = {};
   for (const { name, value } of parsed.fields) if (!(name in fields)) fields[name] = value;
   return { fields, file: parsed.files.find(f => f.fieldname === 'file') || parsed.files[0] || null };
@@ -83,7 +90,7 @@ async function streamPreview(res, result) {
   return res.end(buffer);
 }
 
-const BANNER_BODY = 'Body (all optional on create/PATCH; all needed to send): headlineLead {en,sw}, headlineAccent {en,sw} (lead + accent ≤ 32 EN / 42 SW), subline? {en,sw} (≤ 70 / 90; null clears), ctaLabel? {en,sw} (≤ 24 / 30; left out → "View product"/"Visit store"/"Shop now"/"View all" by target), imageAlt {en,sw}, target {type, value}, audienceRoles [member|trainer|owner] (default all three), startsAt, endsAt (ISO). Text in either language with a price, percentage or amount → 422 price_claim_in_text { field }; a link or phone number → 422 contact_in_text { field }; one language missing → 422 missing_translation { field, missing }.';
+const BANNER_BODY = 'Body (all optional on create/PATCH; all needed to send): headlineLead {en,sw}, headlineAccent {en,sw} (lead + accent ≤ 32 EN / 42 SW), subline? {en,sw} (≤ 70 / 90; null clears), ctaKey? (view_product | visit_store | shop_now | view_all; vendors: only the key of their target, else 422 invalid_cta_key; left out → by target), ctaLabel? {en,sw} (FitFlex staff only, ≤ 24 / 30; from a vendor → 422 cta_label_not_allowed), imageAlt {en,sw}, target {type, value}, audienceRoles [member|trainer|owner] (default all three), startsAt, endsAt (ISO). Text in either language with a price, percentage or amount → 422 price_claim_in_text { field }; a link or phone number → 422 contact_in_text { field }; one language missing → 422 missing_translation { field, missing }.';
 
 // ── Vendor ───────────────────────────────────────────────────────────────────
 
@@ -98,9 +105,9 @@ export const vendorListShopBanners = {
 
 export const vendorCreateShopBanner = {
   created, method: 'post', path: '/vendor/shop-banners',
-  description: `Vendor / staff with \`products\` (SHOP_BANNERS): start a banner (a draft only the vendor sees). ${BANNER_BODY} target.type: product (value = one of my products) | vendor_store (value = my vendor id, or left out). Another vendor's product or store → 403 target_not_owned; category/results → 403 target_type_not_allowed. Vendor suspended → 403 vendor_suspended; not approved / not operational → 403 vendor_not_approved. → 201 { banner }.`,
+  description: `Vendor / staff with \`products\` (SHOP_BANNERS): start a banner (a draft only the vendor sees). ${BANNER_BODY} target.type: product (value = one of my products) | vendor_store (value = my vendor id, or left out). Another vendor's product or store → 403 target_not_owned; category/results → 403 target_type_not_allowed. Vendor suspended → 403 vendor_suspended; not approved / not operational → 403 vendor_not_approved. More than SHOP_BANNER_MAX_OPEN (10) drafts + pending → 409 too_many_open_proposals { max, open }. 20 a minute per vendor (429 rate_limited). → 201 { banner }.`,
   onGuard: vendorGuard('post'),
-  onRequest: async (req, res) => send(res, await svc.create({ scope: vendorScope(req), actorId: req.user.sub, body: req.body || {} }), 201),
+  onRequest: async (req, res) => limited('create', req, res) || send(res, await svc.create({ scope: vendorScope(req), actorId: req.user.sub, body: req.body || {} }), 201),
 };
 
 export const vendorGetShopBanner = {
@@ -119,9 +126,9 @@ export const vendorUpdateShopBanner = {
 
 export const vendorUploadShopBannerImage = {
   created, method: 'post', path: '/vendor/shop-banners/:id/image',
-  description: 'Vendor / staff with `products` (SHOP_BANNERS): the banner photo. multipart/form-data: file (JPEG, PNG or WebP; ≤ 5 MB; ≥ 1600 × 1000 upright), people = none | product_models, rightsConfirmed=true, peopleConfirmed=true (needed for product_models), focalX?, focalY? (-1..1). Rotated upright and stripped of EXIF/GPS, kept private until approved. Replaces any earlier photo; counts as an edit (see PATCH). → { banner }. Errors: 400 invalid_people | rights_confirmation_required | people_confirmation_required | invalid_focal | no_file_provided | unsupported_file_type | image_too_small { minWidth, minHeight, width, height } | invalid_multipart; 413 file_too_large { maxBytes }; 409 not_editable; 503 storage_service_unavailable.',
+  description: 'Vendor / staff with `products` (SHOP_BANNERS): the banner photo. multipart/form-data: file (JPEG, PNG or WebP; ≤ 5 MB; ≥ 1600 × 1000 upright), people = none | product_models, confirmationVersion (= confirmation.version from the list; else 400 confirmation_version_mismatch { current }), rightsConfirmed=true, peopleConfirmed=true + consentRef (model release reference; both needed for product_models), licenceRef?, focalX?, focalY? (-1..1). 10 a minute per vendor (429 rate_limited). Rotated upright and stripped of EXIF/GPS, kept private until approved. Replaces any earlier photo; counts as an edit (see PATCH). → { banner }. Errors: 400 invalid_people | rights_confirmation_required | people_confirmation_required | invalid_focal | no_file_provided | unsupported_file_type | image_too_small { minWidth, minHeight, width, height } | invalid_multipart; 413 file_too_large { maxBytes }; 409 not_editable; 503 storage_service_unavailable.',
   onGuard: vendorGuard('post'),
-  onRequest: async (req, res) => upload(req, res, vendorScope(req)),
+  onRequest: async (req, res) => limited('upload', req, res) || upload(req, res, vendorScope(req)),
 };
 
 export const vendorShopBannerImage = {
@@ -135,7 +142,7 @@ export const vendorSubmitShopBanner = {
   created, method: 'post', path: '/vendor/shop-banners/:id/submit',
   description: 'Vendor / staff with `products` (SHOP_BANNERS): send a draft for approval. Needs every text in both languages, a target that is mine and on sale (422 target_not_eligible { reason }), audienceRoles, startsAt ≥ 1 hour from now (422 start_too_soon { earliestStart }), endsAt after it (422 end_before_start), and a photo with its confirmations (422 image_required | image_people_unconfirmed). → { banner } (pending_approval, expiresAt = the earlier of now + SHOP_PROPOSAL_EXPIRY_DAYS (14) and startsAt). Not a draft → 409 invalid_transition.',
   onGuard: vendorGuard('post'),
-  onRequest: async (req, res) => sendBanner(res, await svc.submit({ scope: vendorScope(req), id: req.params.id, actorId: req.user.sub }), vendorRead(req)),
+  onRequest: async (req, res) => limited('submit', req, res) || sendBanner(res, await svc.submit({ scope: vendorScope(req), id: req.params.id, actorId: req.user.sub }), vendorRead(req)),
 };
 
 export const vendorWithdrawShopBanner = {
@@ -214,23 +221,23 @@ export const adminWithdrawShopBanner = {
 
 export const adminApproveShopBanner = {
   created, method: 'post', path: '/admin/shop-banners/:id/approve',
-  description: 'Admin (promotions_approve; SHOP_BANNERS): approve a pending banner { checks: ["people","text","languages"], position?: 0–9999 (lower shows first) }. The approver must not have created or sent it (403 cannot_approve_own_submission). Without the photo confirmations or the "people" check → 422 image_people_unconfirmed; other checks missing → 422 review_checks_required { missing }. Vendor suspended / not operational now → 409 vendor_suspended | vendor_not_approved; target no longer on sale → 422 target_not_eligible; past its expiry → 409 proposal_expired. Makes the photo\'s public files (503 storage_service_unavailable if that fails: nothing changes). The vendor is notified. → { banner }.',
+  description: 'Admin (promotions_approve; SHOP_BANNERS): approve a pending banner { revision (or updatedAt), imageId (both as reviewed; changed since → 409 banner_changed { revision, imageId }, missing → 400 revision_required), checks: ["people","text","languages"], position?: 0–9999 (lower shows first) }. The approver must have had no hand in it — created, edited, replaced the photo of or sent it (403 cannot_approve_own_submission). Without the photo confirmations or the "people" check → 422 image_people_unconfirmed; other checks missing → 422 review_checks_required { missing }. Vendor suspended / not operational now → 409 vendor_suspended | vendor_not_approved; target no longer on sale → 422 target_not_eligible; past its expiry → 409 proposal_expired. Makes the photo\'s public files (503 storage_service_unavailable if that fails: nothing changes). The vendor is notified. → { banner }.',
   onGuard: adminApprove('post'),
-  onRequest: async (req, res) => sendBanner(res, await svc.approve({ id: req.params.id, actorId: req.user.sub, checks: req.body?.checks, position: req.body?.position }), adminRead(req)),
+  onRequest: async (req, res) => sendBanner(res, await svc.approve({ id: req.params.id, actorId: req.user.sub, checks: req.body?.checks, position: req.body?.position, revision: req.body?.revision, updatedAt: req.body?.updatedAt, imageId: req.body?.imageId }), adminRead(req)),
 };
 
 export const adminRejectShopBanner = {
   created, method: 'post', path: '/admin/shop-banners/:id/reject',
-  description: 'Admin (promotions_approve; SHOP_BANNERS): reject a pending banner { reason (1–500, the vendor sees it), code?: image|people|text|claim|link|other }. Not one\'s own (403 cannot_approve_own_submission). The vendor is notified. → { banner }.',
+  description: 'Admin (promotions_approve; SHOP_BANNERS): reject a pending banner { code: image|people|text|claim|link|other (required; 400 reason_code_required | invalid_reason_code), note (the vendor sees it; required for other → 400 note_required; ≤ 500), revision (or updatedAt), imageId (as reviewed; 409 banner_changed / 400 revision_required) }. Stored as statusReason = code, statusReasonNote = note. Not one\'s own (403 cannot_approve_own_submission). The vendor is notified. → { banner }.',
   onGuard: adminApprove('post'),
-  onRequest: async (req, res) => sendBanner(res, await svc.reject({ id: req.params.id, actorId: req.user.sub, reason: req.body?.reason, code: req.body?.code }), adminRead(req)),
+  onRequest: async (req, res) => sendBanner(res, await svc.reject({ id: req.params.id, actorId: req.user.sub, code: req.body?.code, note: req.body?.note, revision: req.body?.revision, updatedAt: req.body?.updatedAt, imageId: req.body?.imageId }), adminRead(req)),
 };
 
 export const adminEndShopBanner = {
   created, method: 'post', path: '/admin/shop-banners/:id/end',
-  description: 'Admin (promotions_approve; SHOP_BANNERS): end an approved banner, scheduled or live { reason (1–500, the vendor sees it) }. Allowed on one\'s own too (stopping is always safe). Vendor banners: the vendor is notified. → { banner }.',
+  description: 'Admin (promotions_approve; SHOP_BANNERS): end an approved banner, scheduled or live { note (1–500, the vendor sees it; `reason` accepted too) } → statusReason ended_by_fitflex, statusReasonNote = note. Allowed on one\'s own too (stopping is always safe). Vendor banners: the vendor is notified. → { banner }.',
   onGuard: adminApprove('post'),
-  onRequest: async (req, res) => sendBanner(res, await svc.end({ id: req.params.id, actorId: req.user.sub, reason: req.body?.reason }), adminRead(req)),
+  onRequest: async (req, res) => sendBanner(res, await svc.end({ id: req.params.id, actorId: req.user.sub, reason: req.body?.note ?? req.body?.reason }), adminRead(req)),
 };
 
 export const adminPositionShopBanner = {

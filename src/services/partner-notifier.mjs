@@ -200,8 +200,9 @@ export function createPartnerNotifier({
         sw: { title: 'Bango limeidhinishwa', body: `Bango lako "${sw}" limeidhinishwa. Litaanza ${when}.` },
       },
       rejected: {
-        en: { title: 'Banner not approved', body: `Your banner "${en}" wasn't approved. See why.` },
-        sw: { title: 'Bango halikuidhinishwa', body: `Bango lako "${sw}" halikuidhinishwa. Tazama sababu.` },
+        en: { title: 'Banner rejected', body: `Your banner "${en}" wasn't approved. See why.` },
+        // Glossary 2026-10-20 (provisional): rejected = Limekataliwa, matching the status "Imekataliwa".
+        sw: { title: 'Bango limekataliwa', body: `Bango lako "${sw}" limekataliwa. Tazama sababu.` },
       },
       expired: {
         en: { title: 'Banner expired', body: `Your banner "${en}" expired before review.` },
@@ -209,7 +210,8 @@ export function createPartnerNotifier({
       },
       ended: {
         en: { title: 'Banner ended by FitFlex', body: `FitFlex ended your banner "${en}".` },
-        sw: { title: 'FitFlex imesimamisha bango', body: `FitFlex imesimamisha bango lako "${sw}".` },
+        // Glossary 2026-10-20 (provisional): End = sitisha / limesitishwa; "simamisha" is reserved for Suspended.
+        sw: { title: 'Bango limesitishwa na FitFlex', body: `FitFlex imesitisha bango lako "${sw}".` },
       },
     }[kind];
     const text = locale === 'en' ? texts.en : texts.sw;

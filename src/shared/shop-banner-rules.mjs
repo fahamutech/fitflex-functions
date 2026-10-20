@@ -35,23 +35,55 @@ export const MIN_LEAD_MS = 60 * 60 * 1000;
 export const DEFAULT_PROPOSAL_EXPIRY_DAYS = 14;
 export const BANNER_IMAGE_LIMITS = Object.freeze({ maxBytes: 5 * 1024 * 1024, minWidth: 1600, minHeight: 1000, formats: ['jpeg', 'png', 'webp'] });
 
-/** Button text when the proposer does not give one: by target (spec DD-P2-1, §10.1). */
-export const DEFAULT_CTA = Object.freeze({
-  product: { en: 'View product', sw: 'Tazama bidhaa' },
-  vendor_store: { en: 'Visit store', sw: 'Tembelea duka' },
-  category: { en: 'Shop now', sw: 'Nunua sasa' },
-  results: { en: 'View all', sw: 'Tazama zote' },
+/**
+ * Button texts come from a fixed list (spec DD-P2-1): vendors pick a `ctaKey` (or leave it out),
+ * never free text; FitFlex staff may also write their own `ctaLabel`. ("See the sale" arrives
+ * with flash sales, slice 4.)
+ */
+export const CTA_LABELS = Object.freeze({
+  view_product: Object.freeze({ en: 'View product', sw: 'Tazama bidhaa' }),
+  visit_store: Object.freeze({ en: 'Visit store', sw: 'Tembelea duka' }),
+  shop_now: Object.freeze({ en: 'Shop now', sw: 'Nunua sasa' }),
+  view_all: Object.freeze({ en: 'View all', sw: 'Tazama zote' }),
+});
+/** The key used when none is given, by target; for vendors it is also the only key allowed. */
+export const DEFAULT_CTA_KEY = Object.freeze({ product: 'view_product', vendor_store: 'visit_store', category: 'shop_now', results: 'view_all' });
+/** Button text when the proposer gives none: by target (kept for callers of slice 1). */
+export const DEFAULT_CTA = Object.freeze(Object.fromEntries(Object.entries(DEFAULT_CTA_KEY).map(([t, k]) => [t, CTA_LABELS[k]])));
+
+/**
+ * What the uploader confirms, versioned: the version accepted is stored on the photo. DRAFT
+ * wording pending Tanzanian counsel (and Swahili native review); a new version makes clients that
+ * send an old one get 400 confirmation_version_mismatch, so they show the current text.
+ */
+export const BANNER_CONFIRMATION = Object.freeze({
+  version: '2026-10-20.draft1',
+  status: 'draft_pending_counsel',
+  rights: Object.freeze({
+    en: 'I have the right to use this image, and FitFlex may show it in its apps and portal.',
+    sw: 'Nina haki ya kutumia picha hii, na FitFlex inaweza kuionyesha kwenye app na portal zake.',
+  }),
+  models: Object.freeze({
+    en: 'The people are models showing the product. The banner does not present them as FitFlex members, trainers or partners, and has no names or quotes from them. I hold their consent (model release) and give its reference.',
+    sw: 'Watu hawa ni wanamitindo wanaoonyesha bidhaa. Bango haliwaonyeshi kama wanachama, ma-trainer au washirika wa FitFlex, na halina majina wala maneno yao. Nina ridhaa yao (model release) na ninatoa kumbukumbu yake.',
+  }),
 });
 
 const DAY_MS = 86_400_000;
 const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
 const nonNegativeInt = (v, fallback) => (v != null && v !== '' && Number.isInteger(Number(v)) && Number(v) >= 0 ? Number(v) : fallback);
 
-/** SHOP_PROPOSAL_EXPIRY_DAYS (default 14) and SHOP_BANNER_MAX_LIVE (display limit, default 0 = no limit). */
+export const DEFAULT_MAX_OPEN_PROPOSALS = 10;
+
+/**
+ * SHOP_PROPOSAL_EXPIRY_DAYS (default 14), SHOP_BANNER_MAX_LIVE (display limit, default 0 = no
+ * limit) and SHOP_BANNER_MAX_OPEN (a vendor's drafts + pending proposals at once, default 10).
+ */
 export function bannerConfigFromEnv(env = process.env) {
   return {
     proposalExpiryDays: positiveInt(env.SHOP_PROPOSAL_EXPIRY_DAYS, DEFAULT_PROPOSAL_EXPIRY_DAYS),
     maxLive: nonNegativeInt(env.SHOP_BANNER_MAX_LIVE, 0),
+    maxOpenProposals: positiveInt(env.SHOP_BANNER_MAX_OPEN, DEFAULT_MAX_OPEN_PROPOSALS),
   };
 }
 
@@ -78,38 +110,50 @@ export function effectiveStatus(b, now = new Date()) {
 
 // ── Text rules ──────────────────────────────────────────────────────────────
 
+/**
+ * The form every text is checked and stored in: NFKC (fullwidth ％ → %, fullwidth digits → ASCII,
+ * ligatures split), format characters removed (zero-width spaces/joiners, bidi controls, soft
+ * hyphens: \p{Cf}), whitespace collapsed. Checking the cleaned text closes "2​0%"-style bypasses.
+ */
+export const normaliseText = v => (typeof v === 'string'
+  ? v.normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/\s+/g, ' ').trim()
+  : v);
+
 // Prices, percentages and amounts (owner: none in banner text, either language). Kept deliberately
 // strict: a false positive costs the proposer one rewrite; a stale price painted into a banner
-// cannot be enforced at checkout.
+// cannot be enforced at checkout. \p{Nd} = any decimal digit (Arabic-Indic too).
+const NOT_LETTER_BEFORE = '(?<![\\p{L}])';
+const NOT_LETTER_AFTER = '(?![\\p{L}])';
 const PRICE_PATTERNS = [
-  /\d\s*%/,                                              // 20% · 20 %
-  /%\s*\d/,                                              // %20
-  /%/,                                                   // "% off", "punguzo la %" (any percent sign)
-  /\/=/,                                                 // 5,000/=
-  /\b(?:tsh|tshs|tzs|shs?|sh)\.?\s*\d/i,                 // TSh 50,000 · TZS5000 · Sh. 500
-  /\d[\d,.\s]*\s*(?:tsh|tshs|tzs|shs?|shilingi|bob)\b/i,  // 50,000 TSh · 500 shilingi
-  /\b(?:shilingi|asilimia)\s*\d/i,                       // shilingi 500 · asilimia 20
-  /\d+\s*(?:percent|per\s*cent|pct|asilimia)\b/i,        // 20 percent · 20 asilimia
-  /\b(?:percent|per\s*cent|asilimia)\b/i,                // "percent off", "punguzo la asilimia"
-  /\b(?:bei|price)\s*:?\s*\d/i,                          // bei 5000 · price: 5000
-  /\b\d{1,3}(?:[,.]\d{3})+\b/,                           // 50,000 · 1.200.000 (an amount)
+  /[%٪﹪]/u,                                                     // any percent sign: 20% · % off · punguzo la %
+  /\/=/u,                                                        // 5,000/=
+  /\p{Nd}\s*\/-/u,                                               // 5000/-
+  new RegExp(`${NOT_LETTER_BEFORE}(?:tsh|tshs|tzs|ksh|kshs|shs?|sh)\\.?\\s*\\p{Nd}`, 'iu'),          // TSh 50,000 · Sh. 500
+  new RegExp(`\\p{Nd}[\\p{Nd},.\\s]*\\s*(?:tsh|tshs|tzs|ksh|shs?|shilingi|bob)${NOT_LETTER_AFTER}`, 'iu'), // 500 shilingi
+  new RegExp(`${NOT_LETTER_BEFORE}(?:shilingi|asilimia|percent|per\\s*cent|pct|elfu|laki|milioni|million|punguzo|bure|nusu\\s*bei|half\\s*price|discount)${NOT_LETTER_AFTER}`, 'iu'),
+  new RegExp(`${NOT_LETTER_BEFORE}(?:bei|price)\\s*:?\\s*\\p{Nd}`, 'iu'),                              // bei 5000 · price: 5000
+  /\p{Nd}{1,3}(?:[,.]\p{Nd}{3})+/u,                              // 50,000 · 1.200.000
+  /\p{Nd}{4,}/u,                                                 // a bare amount of 4+ digits (also blocks years: "Since 2019")
   // "50k" is not blocked: "5K run" is an event name, not a price.
 ];
-// Links and phone numbers (spec banner_text_has_contact): the banner's button is the only way out.
+// Links, handles and phone numbers (spec banner_text_has_contact): the banner's button is the only way out.
+const TLDS = 'com|net|org|info|biz|shop|store|app|io|me|co|tz|ke|ug|rw|bi|africa|online|site|website|xyz|link|ly|tv|club|fit|fitness';
 const CONTACT_PATTERNS = [
-  /https?:\/\//i,
-  /\bwww\./i,
-  /\b[a-z0-9-]+\.(?:com|co\.tz|tz|net|org|shop|store|app|io|me)\b/i,
-  /\+?\s*255[\s-]?\d{2,3}[\s-]?\d{3}[\s-]?\d{3}/,
-  /\b0[67]\d{2}[\s-]?\d{3}[\s-]?\d{3}\b/,
-  /\d(?:[\s-]?\d){8,}/,                                   // any 9+ digit run
+  /https?:\/\//iu,
+  /www\./iu,
+  new RegExp(`[\\p{L}\\p{Nd}-]+\\.(?:${TLDS})(?![\\p{L}\\p{Nd}-])`, 'iu'),                         // shop.co.tz · x.app · y.co.ke
+  new RegExp(`${NOT_LETTER_BEFORE}(?:dot|nukta)\\s*(?:${TLDS})${NOT_LETTER_AFTER}`, 'iu'),          // "dot com"
+  /(?:^|[^\p{L}\p{Nd}])@[\p{L}\p{Nd}_.]{2,}/u,                   // @handle
+  /\+?\s*25[45][\s-]?\p{Nd}{2,3}[\s-]?\p{Nd}{3}[\s-]?\p{Nd}{3}/u, // +255 / +254 numbers
+  /(?<!\p{Nd})0[167]\p{Nd}{2}[\s-]?\p{Nd}{3}[\s-]?\p{Nd}{3}(?!\p{Nd})/u,
+  /\p{Nd}(?:[\s-]?\p{Nd}){8,}/u,                                 // any 9+ digit run
 ];
 
-export const hasPriceClaim = s => typeof s === 'string' && PRICE_PATTERNS.some(re => re.test(s));
-export const hasContact = s => typeof s === 'string' && CONTACT_PATTERNS.some(re => re.test(s));
+export const hasPriceClaim = s => typeof s === 'string' && PRICE_PATTERNS.some(re => re.test(normaliseText(s)));
+export const hasContact = s => typeof s === 'string' && CONTACT_PATTERNS.some(re => re.test(normaliseText(s)));
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
-const clean = v => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : v);
+const clean = normaliseText;
 
 /**
  * One { en, sw } text from a request. undefined = not sent; null = cleared (optional fields only).
@@ -127,10 +171,9 @@ function pair(field, raw, { optional = false } = {}) {
   for (const [lang, v] of [['en', en], ['sw', sw]]) if (v != null && typeof v !== 'string') return fail('invalid_field', 400, { field: `${field}.${lang}` });
   const missing = [['en', en], ['sw', sw]].filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) return fail('missing_translation', 422, { field: `${field}.${missing[0]}`, missing });
-  for (const [lang, v] of [['en', en], ['sw', sw]]) {
-    if (hasPriceClaim(v)) return fail('price_claim_in_text', 422, { field: `${field}.${lang}` });
-    if (hasContact(v)) return fail('contact_in_text', 422, { field: `${field}.${lang}` });
-  }
+  // Contacts first: a phone number is also a run of digits, and "remove the number" is the better message.
+  for (const [lang, v] of [['en', en], ['sw', sw]]) if (hasContact(v)) return fail('contact_in_text', 422, { field: `${field}.${lang}` });
+  for (const [lang, v] of [['en', en], ['sw', sw]]) if (hasPriceClaim(v)) return fail('price_claim_in_text', 422, { field: `${field}.${lang}` });
   return { value: { en, sw } };
 }
 
@@ -196,7 +239,8 @@ function parseDate(field, raw) {
   return { value: new Date(t).toISOString() };
 }
 
-export const EDITABLE_FIELDS = Object.freeze(['headlineLead', 'headlineAccent', 'subline', 'ctaLabel', 'imageAlt', 'target', 'audienceRoles', 'startsAt', 'endsAt']);
+export const VENDOR_CTA_KEYS = Object.freeze(['view_product', 'visit_store']);
+export const EDITABLE_FIELDS = Object.freeze(['headlineLead', 'headlineAccent', 'subline', 'ctaKey', 'ctaLabel', 'imageAlt', 'target', 'audienceRoles', 'startsAt', 'endsAt']);
 
 /**
  * The fields of a create or PATCH body, checked for shape and the text rules (not completeness:
@@ -208,6 +252,16 @@ export function parseBannerInput(body = {}, { origin, vendorId }) {
   const unknown = Object.keys(body).filter(k => !EDITABLE_FIELDS.includes(k));
   if (unknown.length) return fail('unknown_field', 400, { fields: unknown });
   const out = {};
+  // Vendors choose the button from the fixed list; only FitFlex staff write their own text.
+  if (origin === 'vendor' && body.ctaLabel !== undefined && body.ctaLabel !== null) {
+    return fail('cta_label_not_allowed', 422, { field: 'ctaLabel', allowed: VENDOR_CTA_KEYS });
+  }
+  if (body.ctaKey !== undefined) {
+    if (body.ctaKey === null) out.ctaKey = null;
+    else if (!Object.hasOwn(CTA_LABELS, body.ctaKey) || (origin === 'vendor' && !VENDOR_CTA_KEYS.includes(body.ctaKey))) {
+      return fail('invalid_cta_key', 422, { field: 'ctaKey', allowed: origin === 'vendor' ? VENDOR_CTA_KEYS : Object.keys(CTA_LABELS) });
+    } else out.ctaKey = body.ctaKey;
+  }
   for (const [field, optional] of [['headlineLead', false], ['headlineAccent', false], ['subline', true], ['ctaLabel', true], ['imageAlt', false]]) {
     const r = pair(field, body[field], { optional });
     if (r.error) return r;
@@ -253,6 +307,10 @@ export function windowError(b) {
  * hour from now (only checked when sending), and a photo. → null or { error, status, field? }.
  */
 export function completenessError(b, { now = new Date(), checkStart = true } = {}) {
+  // A vendor's button must be the one for its target ("View product" / "Visit store").
+  if (b.origin === 'vendor' && b.ctaKey && b.target && b.ctaKey !== DEFAULT_CTA_KEY[b.target.type]) {
+    return fail('invalid_cta_key', 422, { field: 'ctaKey', allowed: [DEFAULT_CTA_KEY[b.target.type]] });
+  }
   for (const field of ['headlineLead', 'headlineAccent', 'imageAlt']) {
     if (!b[field]) return fail('missing_translation', 422, { field: `${field}.en`, missing: ['en', 'sw'] });
   }
@@ -276,4 +334,6 @@ export function completenessError(b, { now = new Date(), checkStart = true } = {
 }
 
 /** The CTA a banner shows: its own, else the default for its target. */
-export const ctaFor = b => b.ctaLabel || DEFAULT_CTA[b.target?.type] || DEFAULT_CTA.results;
+export const ctaFor = b => b.ctaLabel || CTA_LABELS[b.ctaKey] || CTA_LABELS[DEFAULT_CTA_KEY[b.target?.type]] || CTA_LABELS.view_all;
+/** The key of the button in effect (null when staff wrote their own text). */
+export const ctaKeyFor = b => (b.ctaLabel ? null : b.ctaKey || DEFAULT_CTA_KEY[b.target?.type] || 'view_all');

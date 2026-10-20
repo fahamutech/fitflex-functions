@@ -9,12 +9,12 @@ import { HERO_ALLOWED_FIELDS } from './knex-store.mjs';
 
 const LOCK_KEY = 'shop_banners';
 const BANNER_FIELDS = new Set([
-  'id', 'origin', 'vendorId', 'imageId', 'headlineLead', 'headlineAccent', 'subline', 'ctaLabel', 'imageAlt', 'target',
-  'audienceRoles', 'startsAt', 'endsAt', 'position', 'status', 'statusReason', 'statusReasonCode', 'statusChangedAt',
+  'id', 'origin', 'vendorId', 'imageId', 'ctaKey', 'revision', 'editors', 'headlineLead', 'headlineAccent', 'subline', 'ctaLabel', 'imageAlt', 'target',
+  'audienceRoles', 'startsAt', 'endsAt', 'position', 'status', 'statusReasonNote', 'statusReason', 'statusChangedAt',
   'expiresAt', 'createdBy', 'submittedBy', 'submittedAt', 'approvedBy', 'approvedAt', 'decidedBy', 'decidedAt',
   'endedBy', 'endedAt', 'createdAt', 'updatedAt',
 ]);
-const BANNER_JSON = ['headlineLead', 'headlineAccent', 'subline', 'ctaLabel', 'imageAlt', 'target', 'audienceRoles'];
+const BANNER_JSON = ['headlineLead', 'headlineAccent', 'subline', 'ctaLabel', 'imageAlt', 'target', 'audienceRoles', 'editors'];
 const IMAGE_JSON = ['variants', 'textZoneLuminance'];
 const AUDIT_FIELDS = new Set(['id', 'at', 'actor', 'action', 'target', 'before', 'after']);
 const DATE_FIELDS = ['startsAt', 'endsAt', 'statusChangedAt', 'expiresAt', 'submittedAt', 'approvedAt', 'decidedAt', 'endedAt', 'createdAt', 'updatedAt'];
@@ -32,7 +32,7 @@ function forWrite(allowed, json, data) {
 const iso = v => (v instanceof Date ? v.toISOString() : v ?? null);
 const bannerFromDb = (r) => {
   if (!r) return null;
-  const out = { ...r, position: r.position == null ? null : Number(r.position) };
+  const out = { ...r, position: r.position == null ? null : Number(r.position), revision: Number(r.revision ?? 1), editors: Array.isArray(r.editors) ? r.editors : [] };
   for (const k of DATE_FIELDS) out[k] = iso(r[k]);
   return out;
 };
@@ -114,6 +114,13 @@ function bind(q) {
     async history(id) {
       return (await q('AuditLog').where({ target: id }).where('action', 'like', 'shop_banner.%').orderBy('at', 'asc'))
         .map(r => ({ ...r, at: iso(r.at) }));
+    },
+    /** How many of a vendor's banners are open proposals (draft, or pending and not yet expired at `at`). */
+    async openProposals(vendorId, at) {
+      const [{ n }] = await banners().where({ origin: 'vendor', vendorId })
+        .where(w => w.where({ status: 'draft' }).orWhere(p => p.where({ status: 'pending_approval' }).where('expiresAt', '>', at)))
+        .count({ n: '*' });
+      return Number(n);
     },
   };
 }

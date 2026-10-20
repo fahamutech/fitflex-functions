@@ -30,8 +30,9 @@ import { createPgShopBannerStore } from '../src/infra/shop-banner-store-pg.mjs';
 import { createShopHomeService, shopHomeConfigFromEnv } from '../src/services/shop-home-service.mjs';
 import { createPartnerNotifier } from '../src/services/partner-notifier.mjs';
 import { resetShopHomeLimits } from '../functions/shop-home.mjs';
+import { resetShopBannerLimits, BANNER_RATE_LIMITS } from '../functions/shop-banners.mjs';
 import {
-  hasPriceClaim, hasContact, parseBannerInput, effectiveStatus, proposalExpiry, bannerConfigFromEnv, DEFAULT_CTA,
+  hasPriceClaim, hasContact, parseBannerInput, effectiveStatus, proposalExpiry, bannerConfigFromEnv, DEFAULT_CTA, BANNER_CONFIRMATION, normaliseText,
 } from '../src/shared/shop-banner-rules.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
@@ -98,7 +99,7 @@ function harness({ unverified = [], blocked = [] } = {}) {
   const notices = [];
   const stores = memoryStores();
   const gate = { unverified: new Set(unverified), blocked: new Set(blocked) };
-  const svc = createShopBannerService({
+  const raw = createShopBannerService({
     store: createPgShopBannerStore({ db }),
     documentStore: stores.documentStore, publicStore: stores.publicStore,
     partnerGate: { operationalUserIds: async ids => new Set(ids.filter(id => !gate.unverified.has(id))) },
@@ -107,7 +108,17 @@ function harness({ unverified = [], blocked = [] } = {}) {
     now: () => new Date(clock),
     logger: { error() {}, warn() {} },
   });
-  return { svc, notices, stores, gate, tick: msAhead => { clock += msAhead; }, now: () => new Date(clock) };
+  // Decisions name the revision and photo reviewed; unless a test passes its own, use the current ones.
+  const fresh = async (id) => {
+    const r = await db('ShopBanner').where({ id }).first();
+    return r ? { revision: r.revision, imageId: r.imageId } : {};
+  };
+  const svc = {
+    ...raw,
+    approve: async a => raw.approve({ ...(await fresh(a.id)), ...a }),
+    reject: async a => raw.reject({ ...(await fresh(a.id)), ...a }),
+  };
+  return { svc, raw, fresh, notices, stores, gate, tick: msAhead => { clock += msAhead; }, now: () => new Date(clock) };
 }
 
 const TEXT = {
@@ -119,7 +130,8 @@ const TEXT = {
 const windowFrom = (now, startInMs = 2 * HOUR, lengthMs = 3 * DAY) => ({
   startsAt: new Date(now.getTime() + startInMs).toISOString(), endsAt: new Date(now.getTime() + startInMs + lengthMs).toISOString(),
 });
-const GOOD_FIELDS = { people: 'none', rightsConfirmed: 'true' };
+const GOOD_FIELDS = { people: 'none', rightsConfirmed: 'true', confirmationVersion: BANNER_CONFIRMATION.version };
+const MODEL_FIELDS = { ...GOOD_FIELDS, people: 'product_models', peopleConfirmed: 'true', consentRef: 'MR-2026-001' };
 const ALL_CHECKS = ['people', 'text', 'languages'];
 
 /** A vendor banner sent for approval. → { id, vendor, productId, h }. */
@@ -198,6 +210,8 @@ after(async () => {
 beforeEach(() => {
   delete process.env.SHOP_BANNER_MAX_LIVE;
   delete process.env.SHOP_PROPOSAL_EXPIRY_DAYS;
+  delete process.env.SHOP_BANNER_MAX_OPEN;
+  resetShopBannerLimits();
 });
 
 async function hit(method, url, { claims, body } = {}) {
@@ -225,7 +239,7 @@ test('text rule: prices, percentages and amounts are refused in either language,
   for (const t of ['20% off', 'Punguzo la %', 'TSh 50,000', 'TZS5000', '50,000/=', 'Sh. 500 tu', 'Bei 5000', 'asilimia 20', '10 percent off', '1.200.000', '500 shilingi']) {
     assert.equal(hasPriceClaim(t), true, t);
   }
-  for (const t of ['New whey in stock', 'Buy 2, get 1', '5K fun run tickets', 'Since 2019', 'Mpya kwa msimu huu']) assert.equal(hasPriceClaim(t), false, t);
+  for (const t of ['New whey in stock', 'Buy 2, get 1', '5K fun run tickets', 'Sugar-free whey', 'Co-op gear', 'Mpya kwa msimu huu']) assert.equal(hasPriceClaim(t), false, t);
   for (const t of ['call 0712 345 678', '+255 712 345 678', 'www.mydeals.com', 'https://x.co', 'shop.co.tz']) assert.equal(hasContact(t), true, t);
 
   const sw = parseBannerInput({ ...TEXT, headlineAccent: { en: 'new gear', sw: 'punguzo la 30%' } }, { origin: 'vendor', vendorId: 'v' });
@@ -246,7 +260,7 @@ test('text rule: both languages are required (missing_translation), an optional 
   assert.deepEqual([halfSub.error, halfSub.field], ['missing_translation', 'subline.sw']);
   assert.equal(parseBannerInput({ subline: { en: '', sw: '' } }, ctx).value.subline, null, 'both empty clears it');
   assert.equal(parseBannerInput({ subline: null }, ctx).value.subline, null);
-  const cta = parseBannerInput({ ctaLabel: { en: 'Shop' } }, ctx);
+  const cta = parseBannerInput({ ctaLabel: { en: 'Shop' } }, { origin: 'staff' });
   assert.equal(cta.error, 'missing_translation');
   assert.deepEqual(parseBannerInput({ nope: 1 }, ctx).error, 'unknown_field');
 });
@@ -288,7 +302,7 @@ test('state machine: draft → pending → approved → live (by time) → ended
   const live = (await h.svc.vendorGet({ vendorId: vendor, id })).banner;
   assert.equal(live.status, 'approved');
   assert.equal(live.effectiveStatus, 'live');
-  assert.deepEqual(live.allowedActions.sort(), ['edit', 'end']);
+  assert.deepEqual(live.allowedActions.sort(), ['edit', 'end', 'image'], 'a new photo is an edit, like PATCH');
   const noWithdraw = await h.svc.withdraw({ scope, id, actorId: vendor });
   assert.deepEqual([noWithdraw.error, noWithdraw.status, noWithdraw.hint], ['invalid_transition', 409, 'end']);
   const ended = await h.svc.vendorEnd({ scope, id, actorId: vendor });
@@ -298,11 +312,13 @@ test('state machine: draft → pending → approved → live (by time) → ended
   assert.deepEqual([again.error, again.status], ['not_editable', 409]);
 
   const detail = await h.svc.adminGet({ id, viewer: { actorId: approver, canApprove: true } });
-  assert.deepEqual(detail.history.map(r => r.action), ['shop_banner.created', 'shop_banner.image_uploaded', 'shop_banner.submitted', 'shop_banner.approved', 'shop_banner.ended']);
+  assert.deepEqual(detail.history.map(r => r.action), ['shop_banner.created', 'shop_banner.image_uploaded', 'shop_banner.submitted', 'shop_banner.image_published', 'shop_banner.approved', 'shop_banner.ended']);
   assert.equal(detail.banner.approvedByName, 'Approver Y');
   assert.equal(detail.banner.image.rightsConfirmedBy, vendor);
   assert.ok(detail.banner.image.rightsConfirmedAt && detail.banner.image.peopleConfirmedAt);
   assert.equal(detail.banner.vendorName, 'Dar Gear');
+  assert.equal(detail.history.find(r => r.action === 'shop_banner.approved').actorName, 'Approver Y');
+  assert.equal(detail.history[0].actorName, 'Banner vendor');
 });
 
 test('state machine: edits — pending stays pending, approved goes back to pending, rejected back to draft; withdraw; reject needs a reason', async () => {
@@ -321,14 +337,19 @@ test('state machine: edits — pending stays pending, approved goes back to pend
   assert.equal(row.approvedBy, null);
   assert.equal(row.submittedBy, vendor);
 
-  assert.deepEqual((await h.svc.reject({ id, actorId: approver, reason: '  ' })).error, 'reason_required');
-  assert.deepEqual((await h.svc.reject({ id, actorId: approver, reason: 'Blurry', code: 'nope' })).error, 'invalid_reason_code');
-  const rej = await h.svc.reject({ id, actorId: approver, reason: 'The photo is blurry.', code: 'image' });
+  assert.deepEqual((await h.svc.reject({ id, actorId: approver, note: 'Blurry' })).error, 'reason_code_required');
+  assert.deepEqual((await h.svc.reject({ id, actorId: approver, note: 'Blurry', code: 'nope' })).error, 'invalid_reason_code');
+  assert.deepEqual((await h.svc.reject({ id, actorId: approver, code: 'other', note: '  ' })).error, 'note_required');
+  // updatedAt is accepted in place of revision (portal fallback); a stale one is refused.
+  const seenRow = await db('ShopBanner').where({ id }).first();
+  const staleAt = await h.raw.reject({ id, actorId: approver, code: 'image', updatedAt: '2020-01-01T00:00:00.000Z', imageId: seenRow.imageId });
+  assert.equal(staleAt.error, 'banner_changed');
+  const rej = await h.raw.reject({ id, actorId: approver, code: 'image', note: 'The photo is blurry.', updatedAt: seenRow.updatedAt.toISOString(), imageId: seenRow.imageId });
   assert.equal(rej.saved.status, 'rejected');
   assert.equal(h.notices.at(-1).type, 'shop_banner_rejected');
   assert.equal(h.notices.at(-1).data.reason, 'The photo is blurry.');
   const vendorSees = (await h.svc.vendorGet({ vendorId: vendor, id })).banner;
-  assert.deepEqual([vendorSees.statusReason, vendorSees.statusReasonCode], ['The photo is blurry.', 'image']);
+  assert.deepEqual([vendorSees.statusReasonNote, vendorSees.statusReason], ['The photo is blurry.', 'image']);
   assert.equal(vendorSees.approvedBy, undefined, 'vendors never see staff ids');
 
   const fixed = await h.svc.update({ scope, id, actorId: vendor, body: { imageAlt: { en: 'A rack of dumbbells', sw: 'Rafu ya dumbbell' } } });
@@ -379,7 +400,7 @@ test('self-approval: the creator and the sender can never approve or reject; ano
   for (const who of [x, y]) {
     const a = await h.svc.approve({ id: c.banner.id, actorId: who, checks: ALL_CHECKS });
     assert.deepEqual([a.error, a.status], ['cannot_approve_own_submission', 403]);
-    const r = await h.svc.reject({ id: c.banner.id, actorId: who, reason: 'Nope, wrong.' });
+    const r = await h.svc.reject({ id: c.banner.id, actorId: who, code: 'other', note: 'Nope, wrong.' });
     assert.deepEqual([r.error, r.status], ['cannot_approve_own_submission', 403]);
   }
   const viewX = (await h.svc.adminGet({ id: c.banner.id, viewer: { actorId: x, canApprove: true, canManage: true } })).banner;
@@ -434,9 +455,9 @@ test('photo: rights and people confirmations are required; limits; EXIF/GPS stri
   const scope = { origin: 'vendor', vendorId: vendor };
   const c = await h.svc.create({ scope, actorId: vendor, body: { ...TEXT, target: { type: 'product', value: p }, ...windowFrom(h.now()) } });
   const up = (fields, buffer = PHOTO) => h.svc.uploadImage({ scope, id: c.banner.id, file: { buffer }, fields, actorId: vendor });
-  assert.equal((await up({ people: 'none' })).error, 'rights_confirmation_required');
-  assert.equal((await up({ people: 'product_models', rightsConfirmed: 'true' })).error, 'people_confirmation_required');
-  assert.equal((await up({ people: 'members', rightsConfirmed: 'true' })).error, 'invalid_people');
+  assert.equal((await up({ ...GOOD_FIELDS, rightsConfirmed: undefined })).error, 'rights_confirmation_required');
+  assert.equal((await up({ ...GOOD_FIELDS, people: 'product_models' })).error, 'people_confirmation_required');
+  assert.equal((await up({ ...GOOD_FIELDS, people: 'members' })).error, 'invalid_people');
   const small = await up(GOOD_FIELDS, await photo(1200, 800));
   assert.deepEqual([small.error, small.minWidth, small.minHeight], ['image_too_small', 1600, 1000]);
   assert.equal((await up(GOOD_FIELDS, await photo(1800, 900))).error, 'image_too_small', 'too short');
@@ -447,7 +468,11 @@ test('photo: rights and people confirmations are required; limits; EXIF/GPS stri
 
   const withGps = await photo(1600, 1000, { gps: true });
   assert.ok((await sharp(withGps).metadata()).exif, 'fixture carries EXIF');
-  const ok = await up({ people: 'product_models', rightsConfirmed: 'true', peopleConfirmed: 'true', focalX: '0.25' }, withGps);
+  assert.deepEqual((await up({ ...MODEL_FIELDS, consentRef: undefined }, withGps)).error, 'consent_reference_required');
+  const old = await up({ ...GOOD_FIELDS, confirmationVersion: '2026-01-01' });
+  assert.deepEqual([old.error, old.current], ['confirmation_version_mismatch', BANNER_CONFIRMATION.version]);
+  assert.equal((await up({ ...GOOD_FIELDS, confirmationVersion: undefined })).error, 'confirmation_version_mismatch');
+  const ok = await up({ ...MODEL_FIELDS, focalX: '0.25', licenceRef: 'Own shoot' }, withGps);
   assert.equal(ok.error, undefined, JSON.stringify(ok));
   assert.equal(ok.banner.image.people, 'product_models');
   assert.deepEqual(ok.banner.image.focal, { x: 0.25, y: 0 });
@@ -459,6 +484,8 @@ test('photo: rights and people confirmations are required; limits; EXIF/GPS stri
   assert.equal(h.stores.pub.size, 0);
   const row = await db('HeroImage').where({ id: ok.banner.image.id }).first();
   assert.deepEqual([row.purpose, row.vendorId, row.rightsConfirmedBy, row.noFacesConfirmedBy], ['shop_banner', vendor, vendor, vendor]);
+  assert.deepEqual([row.consentRef, row.licenceRef, row.confirmationVersion], ['MR-2026-001', 'Own shoot', BANNER_CONFIRMATION.version]);
+  assert.equal(BANNER_CONFIRMATION.status, 'draft_pending_counsel');
 
   // A second photo replaces the first (retired).
   const second = await up(GOOD_FIELDS);
@@ -534,14 +561,14 @@ test('expiry: an undecided proposal expires after 14 days or at its start, which
   const r1 = await h.svc.runLifecycle();
   assert.equal(r1.expired, 1);
   const soonAfter = await db('ShopBanner').where({ id: soon.id }).first();
-  assert.deepEqual([soonAfter.status, soonAfter.statusReasonCode], ['expired', 'start_passed']);
+  assert.deepEqual([soonAfter.status, soonAfter.statusReason], ['expired', 'start_passed']);
   assert.deepEqual(h.notices.filter(n => n.type === 'shop_banner_expired').map(n => n.data.bannerId), [soon.id]);
 
   h.tick(11 * DAY);
   const r2 = await h.svc.runLifecycle();
   assert.equal(r2.expired, 1);
   const lateAfter = await db('ShopBanner').where({ id: late.id }).first();
-  assert.deepEqual([lateAfter.status, lateAfter.statusReasonCode], ['expired', 'not_reviewed_in_time']);
+  assert.deepEqual([lateAfter.status, lateAfter.statusReason], ['expired', 'not_reviewed_in_time']);
   assert.equal((await h.svc.runLifecycle()).expired, 0, 'idempotent');
   assert.equal((await h.svc.withdraw({ scope: late.scope, id: late.id, actorId: late.vendor })).error, 'invalid_transition');
 });
@@ -556,7 +583,7 @@ test('lifecycle: approved banners past their end are written down as ended (wind
   const r = await h.svc.runLifecycle();
   assert.ok(r.ended >= 1);
   const row = await db('ShopBanner').where({ id: b.id }).first();
-  assert.deepEqual([row.status, row.statusReasonCode], ['ended', 'window_passed']);
+  assert.deepEqual([row.status, row.statusReason], ['ended', 'window_passed']);
 });
 
 // ── The shop home feed ──────────────────────────────────────────────────────
@@ -700,6 +727,10 @@ test('vendor notices: approved, rejected, expired and ended by FitFlex, in the v
   assert.deepEqual(sent.map(s => s.type), ['vendor_shop_banner_approved', 'vendor_shop_banner_rejected', 'vendor_shop_banner_expired', 'vendor_shop_banner_ended', 'vendor_shop_banner_approved']);
   assert.equal(sent[0].body, 'Your banner "Train with new gear" is approved. It goes live 21/10/2026 10:00.');
   assert.equal(sent[4].body, 'Bango lako "Mazoezi na vifaa vipya" limeidhinishwa. Litaanza 21/10/2026 10:00.');
+  // Glossary 2026-10-20: rejected = limekataliwa; End = sitisha (simamisha is reserved for Suspended).
+  assert.deepEqual([sent[1].data.titleSw, sent[1].data.bodySw], ['Bango limekataliwa', 'Bango lako "Mazoezi na vifaa vipya" limekataliwa. Tazama sababu.']);
+  assert.deepEqual([sent[3].data.titleSw, sent[3].data.bodySw], ['Bango limesitishwa na FitFlex', 'FitFlex imesitisha bango lako "Mazoezi na vifaa vipya".']);
+  assert.ok(!JSON.stringify(sent).includes('simamish'));
   for (const s of sent) {
     assert.ok(s.data.titleSw && s.data.bodySw, 'Swahili always in data');
     assert.deepEqual([s.data.open, s.data.item], ['merch', 'sbn_1']);
@@ -804,7 +835,7 @@ test('routes: vendor and staff permissions, admin scopes, the whole flow over HT
     const missing = await hit('PATCH', `/vendor/shop-banners/${id}`, { claims: asVendor, body: { subline: { en: 'Fresh stock' } } });
     assert.deepEqual([missing.status, missing.body.error, missing.body.field], [422, 'missing_translation', 'subline.sw']);
 
-    const up = await uploadReq(`/vendor/shop-banners/${id}/image`, PHOTO, { people: 'none', rightsConfirmed: 'true' }, asStaff);
+    const up = await uploadReq(`/vendor/shop-banners/${id}/image`, PHOTO, GOOD_FIELDS, asStaff);
     assert.equal(up.status, 200, JSON.stringify(up.body));
     const pv = await hit('GET', `/vendor/shop-banners/${id}/image?w=240`, { claims: asVendor });
     assert.deepEqual([pv.status, pv.headers.get('content-type'), pv.headers.get('cache-control')], [200, 'image/webp', 'no-store, private']);
@@ -815,11 +846,14 @@ test('routes: vendor and staff permissions, admin scopes, the whole flow over HT
     const queue = await hit('GET', '/admin/shop-merch?tab=requests', { claims: asRunner });
     assert.deepEqual(queue.body.items.map(i => i.id), [id]);
     assert.ok(!queue.body.items[0].allowedActions.includes('approve'), 'promotions alone cannot approve');
-    const runnerTry = await hit('POST', `/admin/shop-banners/${id}/approve`, { claims: asRunner, body: { checks: ALL_CHECKS } });
+    const reviewed = { revision: sub.body.banner.revision, imageId: sub.body.banner.image.id };
+    const runnerTry = await hit('POST', `/admin/shop-banners/${id}/approve`, { claims: asRunner, body: { checks: ALL_CHECKS, ...reviewed } });
     assert.deepEqual([runnerTry.status, runnerTry.body.error], [403, 'acl_forbidden']);
     const adminPv = await hit('GET', `/admin/shop-banners/${id}/image`, { claims: asApprover });
     assert.equal(adminPv.status, 200);
-    const appr = await hit('POST', `/admin/shop-banners/${id}/approve`, { claims: asApprover, body: { checks: ALL_CHECKS, position: 1 } });
+    const noRev = await hit('POST', `/admin/shop-banners/${id}/approve`, { claims: asApprover, body: { checks: ALL_CHECKS } });
+    assert.deepEqual([noRev.status, noRev.body.error, noRev.body.fields], [400, 'revision_required', ['revision', 'imageId']]);
+    const appr = await hit('POST', `/admin/shop-banners/${id}/approve`, { claims: asApprover, body: { checks: ALL_CHECKS, position: 1, ...reviewed } });
     assert.equal(appr.status, 200, JSON.stringify(appr.body));
     assert.equal(appr.body.banner.status, 'approved');
     assert.ok(appr.body.banner.image.public.url2x.startsWith('/storage/bafyzebra'));
@@ -830,18 +864,201 @@ test('routes: vendor and staff permissions, admin scopes, the whole flow over HT
     const both = { sub: runner, userType: 'admin', portalUser: true, aclPermissions: ['promotions', 'promotions_approve'] };
     const sb = await hit('POST', '/admin/shop-banners', { claims: asRunner, body: { ...TEXT, target: { type: 'results', value: { category: 'equipment', sort: 'popularity' } }, ...windowFrom(now) } });
     assert.equal(sb.status, 201, JSON.stringify(sb.body));
-    await uploadReq(`/admin/shop-banners/${sb.body.banner.id}/image`, PHOTO, { people: 'none', rightsConfirmed: 'true' }, asRunner);
+    await uploadReq(`/admin/shop-banners/${sb.body.banner.id}/image`, PHOTO, GOOD_FIELDS, asRunner);
     assert.equal((await hit('POST', `/admin/shop-banners/${sb.body.banner.id}/submit`, { claims: asRunner })).body.banner.status, 'pending_approval');
-    const self = await hit('POST', `/admin/shop-banners/${sb.body.banner.id}/approve`, { claims: both, body: { checks: ALL_CHECKS } });
+    const sbNow = (await hit('GET', `/admin/shop-banners/${sb.body.banner.id}`, { claims: both })).body.banner;
+    const self = await hit('POST', `/admin/shop-banners/${sb.body.banner.id}/approve`, { claims: both, body: { checks: ALL_CHECKS, revision: sbNow.revision, imageId: sbNow.image.id } });
     assert.deepEqual([self.status, self.body.error], [403, 'cannot_approve_own_submission']);
     const detail = await hit('GET', `/admin/shop-banners/${sb.body.banner.id}`, { claims: both });
     assert.equal(detail.body.banner.ownItem, true);
     const ended = await hit('POST', `/admin/shop-banners/${id}/end`, { claims: asApprover, body: { reason: 'Seller asked us to stop it.' } });
     assert.equal(ended.body.banner.status, 'ended');
     const vendorView = await hit('GET', `/vendor/shop-banners/${id}`, { claims: asVendor });
-    assert.deepEqual([vendorView.body.banner.endedByFitflex, vendorView.body.banner.statusReason], [true, 'Seller asked us to stop it.']);
+    assert.deepEqual([vendorView.body.banner.endedByFitflex, vendorView.body.banner.statusReasonNote], [true, 'Seller asked us to stop it.']);
     assert.equal(vendorView.body.banner.endedBy, undefined);
   } finally {
     delete process.env.SHOP_BANNERS;
   }
+});
+
+// ── Review round 1 (security, contract, i18n) ───────────────────────────────
+
+test('H1 two-person rule: whoever edited the text or replaced the photo of a pending banner cannot approve, reject or reorder it', async () => {
+  await cleanBanners();
+  const h = harness();
+  const x = await user('admin'); const y = await user('admin'); const z = await user('admin'); const w = await user('admin');
+  await product(await vendorUser('Category seller'));
+  const scope = { origin: 'staff' };
+  const c = await h.svc.create({ scope, actorId: x, body: { ...TEXT, target: { type: 'category', value: 'equipment' }, ...windowFrom(h.now()) } });
+  await h.svc.uploadImage({ scope, id: c.banner.id, file: { buffer: PHOTO }, fields: GOOD_FIELDS, actorId: x });
+  await h.svc.submit({ scope, id: c.banner.id, actorId: x });
+  // y changes the words of x's pending banner; z only swaps the photo.
+  const edited = await h.svc.update({ scope, id: c.banner.id, actorId: y, body: { subline: { en: 'Gear for every gym', sw: 'Vifaa kwa kila gym' } } });
+  assert.equal(edited.banner.status, 'pending_approval');
+  await h.svc.uploadImage({ scope, id: c.banner.id, file: { buffer: PHOTO }, fields: GOOD_FIELDS, actorId: z });
+  for (const who of [x, y, z]) {
+    const a = await h.svc.approve({ id: c.banner.id, actorId: who, checks: ALL_CHECKS });
+    assert.deepEqual([a.error, a.status], ['cannot_approve_own_submission', 403], `approve by ${who}`);
+    const r = await h.svc.reject({ id: c.banner.id, actorId: who, code: 'text', note: 'Not this one.' });
+    assert.equal(r.error, 'cannot_approve_own_submission', `reject by ${who}`);
+    const view = (await h.svc.adminGet({ id: c.banner.id, viewer: { actorId: who, canApprove: true, canManage: true } })).banner;
+    assert.equal(view.ownItem, true);
+    assert.ok(!view.allowedActions.includes('approve') && !view.allowedActions.includes('reject'));
+  }
+  assert.deepEqual((await db('ShopBanner').where({ id: c.banner.id }).first()).editors, [x, y, z]);
+  const viewW = (await h.svc.adminGet({ id: c.banner.id, viewer: { actorId: w, canApprove: true } })).banner;
+  assert.deepEqual([viewW.editedBy, viewW.image.uploadedBy, viewW.ownItem], [[x, y, z], z, false]);
+  assert.equal((await h.svc.approve({ id: c.banner.id, actorId: w, checks: ALL_CHECKS })).saved.status, 'approved');
+  // L2: reordering is a decision too.
+  const pz = await h.svc.setPosition({ id: c.banner.id, actorId: z, position: 1 });
+  assert.deepEqual([pz.error, pz.status], ['cannot_approve_own_submission', 403]);
+  assert.ok(!(await h.svc.adminGet({ id: c.banner.id, viewer: { actorId: z, canApprove: true } })).banner.allowedActions.includes('position'));
+  assert.equal((await h.svc.setPosition({ id: c.banner.id, actorId: w, position: 1 })).saved.position, 1);
+});
+
+test('H2 a decision names the revision and photo reviewed: anything changed since → 409 banner_changed; missing → 400', async () => {
+  const h = harness();
+  const approver = await user('admin');
+  const b = await pendingVendorBanner(h);
+  const seen = await h.fresh(b.id);
+  await h.svc.update({ scope: b.scope, id: b.id, actorId: b.vendor, body: { subline: { en: 'Changed after review', sw: 'Imebadilika baada ya ukaguzi' } } });
+  const stale = await h.raw.approve({ id: b.id, actorId: approver, checks: ALL_CHECKS, ...seen });
+  assert.deepEqual([stale.error, stale.status, stale.revision, stale.imageId], ['banner_changed', 409, seen.revision + 1, seen.imageId]);
+  const staleReject = await h.raw.reject({ id: b.id, actorId: approver, code: 'image', note: 'Blurry photo.', ...seen });
+  assert.equal(staleReject.error, 'banner_changed');
+  // A new photo is a new revision too; and the photo id must match on its own as well.
+  await h.svc.uploadImage({ scope: b.scope, id: b.id, file: { buffer: PHOTO }, fields: GOOD_FIELDS, actorId: b.vendor });
+  const now2 = await h.fresh(b.id);
+  assert.equal(now2.revision, seen.revision + 2);
+  assert.equal((await h.raw.approve({ id: b.id, actorId: approver, checks: ALL_CHECKS, revision: now2.revision, imageId: seen.imageId })).error, 'banner_changed');
+  const missing = await h.raw.approve({ id: b.id, actorId: approver, checks: ALL_CHECKS });
+  assert.deepEqual([missing.error, missing.status, missing.fields], ['revision_required', 400, ['revision', 'imageId']]);
+  assert.equal(h.stores.pub.size, 0, 'no public files for refused decisions');
+  assert.equal((await db('ShopBanner').where({ id: b.id }).first()).status, 'pending_approval');
+  assert.equal((await h.raw.approve({ id: b.id, actorId: approver, checks: ALL_CHECKS, ...now2 })).saved.status, 'approved');
+});
+
+test('M3 public files are made outside the banner lock; a change while they upload refuses the approval and records the files', async () => {
+  const h = harness();
+  const approver = await user('admin');
+  const b = await pendingVendorBanner(h);
+  const realPut = h.stores.publicStore.put.bind(h.stores.publicStore);
+  let release; const gate = new Promise((r) => { release = r; });
+  let started; const startedP = new Promise((r) => { started = r; });
+  h.stores.publicStore.put = async (...a) => { started(); await gate; return realPut(...a); };
+  const approving = h.svc.approve({ id: b.id, actorId: approver, checks: ALL_CHECKS });
+  await startedP;
+  // Under the lock this would wait for the upload; outside it, it goes straight through.
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('banner write blocked by a publish')), 4000));
+  const edit = await Promise.race([
+    h.svc.update({ scope: b.scope, id: b.id, actorId: b.vendor, body: { subline: { en: 'Edited during upload', sw: 'Imehaririwa wakati wa kupakia' } } }),
+    timeout,
+  ]);
+  assert.equal(edit.banner.revision, 3, 'created 1, photo 2, edit 3');
+  release();
+  const out = await approving;
+  assert.deepEqual([out.error, out.status], ['banner_changed', 409]);
+  const row = await db('ShopBanner').where({ id: b.id }).first();
+  assert.equal(row.status, 'pending_approval');
+  assert.equal((await db('HeroImage').where({ id: row.imageId }).first()).variants, null, 'nothing points at the files');
+  const orphan = await db('AuditLog').where({ target: b.id, action: 'shop_banner.public_files_orphaned' }).first();
+  assert.equal(orphan.after.urls.length, 4);
+  assert.equal(orphan.after.reason, 'banner_changed');
+  h.stores.publicStore.put = realPut;
+  assert.equal((await h.svc.approve({ id: b.id, actorId: approver, checks: ALL_CHECKS })).saved.status, 'approved');
+});
+
+test('M1 a public upload that fails part-way leaves the banner pending and records the files already made', async () => {
+  const h = harness();
+  const approver = await user('admin');
+  const b = await pendingVendorBanner(h);
+  const realPut = h.stores.publicStore.put.bind(h.stores.publicStore);
+  let n = 0;
+  h.stores.publicStore.put = async (...a) => { n += 1; if (n === 3) throw new Error('zebra down'); return realPut(...a); };
+  const out = await h.svc.approve({ id: b.id, actorId: approver, checks: ALL_CHECKS });
+  assert.deepEqual([out.error, out.status], ['storage_service_unavailable', 503]);
+  assert.equal((await db('ShopBanner').where({ id: b.id }).first()).status, 'pending_approval');
+  const orphan = await db('AuditLog').where({ target: b.id, action: 'shop_banner.public_files_orphaned' }).first();
+  assert.equal(orphan.after.urls.length, 2);
+  assert.match(orphan.after.reason, /^upload_failed/);
+});
+
+test('M2 open proposals are capped per vendor (SHOP_BANNER_MAX_OPEN); a refused photo upload is audited, never a silent orphan', async () => {
+  assert.equal(bannerConfigFromEnv({}).maxOpenProposals, 10);
+  const h = harness();
+  const approver = await user('admin');
+  const b = await pendingVendorBanner(h);
+  await h.svc.reject({ id: b.id, actorId: approver, code: 'image', note: 'Try a sharper photo.' });
+  process.env.SHOP_BANNER_MAX_OPEN = '2';
+  await h.svc.create({ scope: b.scope, actorId: b.vendor, body: {} });
+  await h.svc.create({ scope: b.scope, actorId: b.vendor, body: {} });
+  const third = await h.svc.create({ scope: b.scope, actorId: b.vendor, body: {} });
+  assert.deepEqual([third.error, third.status, third.max, third.open], ['too_many_open_proposals', 409, 2, 2]);
+  // A new photo would turn the rejected banner back into a draft: refused after the private file was stored.
+  const before = await db('HeroImage').where({ purpose: 'shop_banner', vendorId: b.vendor }).count({ n: '*' });
+  const up = await h.svc.uploadImage({ scope: b.scope, id: b.id, file: { buffer: PHOTO }, fields: GOOD_FIELDS, actorId: b.vendor });
+  assert.equal(up.error, 'too_many_open_proposals');
+  const after = await db('HeroImage').where({ purpose: 'shop_banner', vendorId: b.vendor }).count({ n: '*' });
+  assert.equal(after[0].n, before[0].n, 'no row for the refused photo');
+  const orphan = await db('AuditLog').where({ target: b.id, action: 'shop_banner.image_orphaned' }).first();
+  assert.equal(orphan.after.reason, 'too_many_open_proposals');
+  assert.ok(orphan.after.privateKeyHash && !JSON.stringify(orphan.after).includes('bafypriv'), 'the audit row never holds the storage key');
+  assert.equal((await h.svc.update({ scope: b.scope, id: b.id, actorId: b.vendor, body: { subline: null } })).error, 'too_many_open_proposals');
+  const list = await h.svc.vendorList({ vendorId: b.vendor });
+  assert.deepEqual(list.openProposals, { open: 2, max: 2 });
+  assert.equal(list.confirmation.version, BANNER_CONFIRMATION.version);
+});
+
+test('M2 vendor create, photo and send are rate limited per vendor (429 rate_limited)', async () => {
+  process.env.SHOP_BANNERS = '1';
+  process.env.SHOP_BANNER_MAX_OPEN = '1000';
+  try {
+    const vendor = await vendorUser('Busy Vendor');
+    const other = await vendorUser('Quiet Vendor');
+    const claims = { sub: vendor, userType: 'vendor' };
+    for (let i = 0; i < BANNER_RATE_LIMITS.create; i += 1) assert.equal((await hit('POST', '/vendor/shop-banners', { claims, body: {} })).status, 201);
+    const over = await hit('POST', '/vendor/shop-banners', { claims, body: {} });
+    assert.deepEqual([over.status, over.body.error], [429, 'rate_limited']);
+    assert.ok(over.body.retryAfterSeconds >= 1 && over.headers.get('retry-after'));
+    assert.equal((await hit('POST', '/vendor/shop-banners', { claims: { sub: other, userType: 'vendor' }, body: {} })).status, 201, 'other vendors are not affected');
+    const id = (await db('ShopBanner').where({ vendorId: other }).first()).id;
+    for (let i = 0; i < BANNER_RATE_LIMITS.upload; i += 1) await uploadReq(`/vendor/shop-banners/${id}/image`, null, GOOD_FIELDS, { sub: other, userType: 'vendor' });
+    const upOver = await uploadReq(`/vendor/shop-banners/${id}/image`, PHOTO, GOOD_FIELDS, { sub: other, userType: 'vendor' });
+    assert.deepEqual([upOver.status, upOver.body.error], [429, 'rate_limited']);
+  } finally {
+    delete process.env.SHOP_BANNERS;
+  }
+});
+
+test('L1 text rules: normalised before checking (NFKC, format characters removed); the review bypass list is refused', () => {
+  assert.equal(normaliseText('Tr​ain‮ hard­'), 'Train hard');
+  assert.equal(normaliseText('ＧＥＡＲ　２０'), 'GEAR 20');
+  const prices = ['2​0% off', '20％ off', '٢٠٪', '‮20%', '5000/-', '5,000/=', 'Elfu kumi tu', 'Laki mbili', 'Milioni moja', 'Nusu bei', 'Bure kabisa', 'Punguzo kubwa',
+    'Half price', 'Big discount', 'Since 2019', '١٢٣٤', 'TSh​ 500', 'KSh 500'];
+  for (const t of prices) assert.equal(hasPriceClaim(t), true, JSON.stringify(t));
+  const contacts = ['follow @darfit', 'shop dot com', 'shop dot co dot tz', 'gear.app', 'gear.co.ke', 'fit.io', 'best.me', 'w​ww.x.com', 'darfit.africa', '+254 712 345 678'];
+  for (const t of contacts) assert.equal(hasContact(t), true, JSON.stringify(t));
+  for (const t of ['Get fit. Me first', 'Co-op gear', 'Sugar-free whey', 'Buy 2, get 1']) assert.equal(hasPriceClaim(t) || hasContact(t), false, t);
+  const parsed = parseBannerInput({ headlineLead: { en: 'Train​ hard', sw: 'Fanya‍ mazoezi' } }, { origin: 'vendor', vendorId: 'v' });
+  assert.deepEqual(parsed.value.headlineLead, { en: 'Train hard', sw: 'Fanya mazoezi' }, 'stored cleaned');
+  const sneaky = parseBannerInput({ subline: { en: 'Fresh stock', sw: 'Punguzo la ２０％' } }, { origin: 'vendor', vendorId: 'v' });
+  assert.deepEqual([sneaky.error, sneaky.field], ['price_claim_in_text', 'subline.sw']);
+});
+
+test('CTA: vendors pick from the fixed list (ctaKey) and never write a label; staff may', async () => {
+  const h = harness();
+  const vendor = await vendorUser('CTA Vendor');
+  const p = await product(vendor);
+  const scope = { origin: 'vendor', vendorId: vendor };
+  const label = await h.svc.create({ scope, actorId: vendor, body: { ctaLabel: { en: 'Grab it', sw: 'Chukua' } } });
+  assert.deepEqual([label.error, label.status, label.field], ['cta_label_not_allowed', 422, 'ctaLabel']);
+  assert.equal((await h.svc.create({ scope, actorId: vendor, body: { ctaKey: 'shop_now' } })).error, 'invalid_cta_key');
+  const wrong = await h.svc.create({ scope, actorId: vendor, body: { ctaKey: 'visit_store', target: { type: 'product', value: p } } });
+  assert.deepEqual([wrong.error, wrong.allowed], ['invalid_cta_key', ['view_product']]);
+  const ok = await h.svc.create({ scope, actorId: vendor, body: { ctaKey: 'view_product', target: { type: 'product', value: p } } });
+  assert.deepEqual([ok.banner.ctaKey, ok.banner.ctaLabel, ok.banner.ctaLabelCustom], ['view_product', DEFAULT_CTA.product, false]);
+  const staff = await h.svc.create({ scope: { origin: 'staff' }, actorId: 'adm_cta', body: { ctaLabel: { en: 'Get moving', sw: 'Anza mazoezi' }, target: { type: 'results', value: {} } } });
+  assert.deepEqual([staff.banner.ctaKey, staff.banner.ctaLabel.en, staff.banner.ctaLabelCustom], [null, 'Get moving', true]);
+  const staffKey = await h.svc.create({ scope: { origin: 'staff' }, actorId: 'adm_cta', body: { ctaKey: 'shop_now', target: { type: 'results', value: {} } } });
+  assert.deepEqual(staffKey.banner.ctaLabel, { en: 'Shop now', sw: 'Nunua sasa' });
 });
