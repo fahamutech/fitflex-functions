@@ -70,7 +70,7 @@ test('a vendor is checked on business, representative and marketplace', () => {
   const c = evaluateKyc('vendor', { now: NOW });
   assert.deepEqual(keys(c), [
     ['business', ['business.legalName', 'business.tradingName', 'business.registrationNumber', 'business.tin', 'business.registeredAddress',
-      'business.registration_certificate', 'business.tin_certificate', 'business.licence', 'business.contact']],
+      'business.registration_certificate', 'business.tin_certificate', 'business.licence', 'business.vat_certificate', 'business.contact']],
     ['representative', ['representative.fullName', 'representative.idNumber', 'representative.nationality', 'representative.position',
       'representative.id_document']],
     ['marketplace', ['marketplace.product_categories', 'marketplace.settlement']],
@@ -301,9 +301,11 @@ test('a vendor with the TIN, their own details and ID, and marketplace details c
   const optional = c.sections.flatMap(s => s.items).filter(i => i.optional).map(i => i.key);
   assert.deepEqual(optional.sort(), [
     'business.legalName', 'business.licence', 'business.registeredAddress', 'business.registrationNumber',
-    'business.registration_certificate', 'business.tin_certificate', 'business.tradingName',
+    'business.registration_certificate', 'business.tin_certificate', 'business.tradingName', 'business.vat_certificate',
   ]);
   assert.equal(item(c, 'business.licence').status, 'missing'); // collected if given, never required
+  // S5: the VAT certificate is optional (VAT is optional for vendors) and never blocks submitting.
+  assert.equal(item(c, 'business.vat_certificate').status, 'missing');
 });
 
 test('a vendor without the TIN or the representative\'s ID can\'t submit', () => {

@@ -302,6 +302,23 @@ export function createPartnerNotifier({
     },
   };
 
+  // Vendor tools · S5 (design spec §10.6): a KYC reviewer decided the vendor's VAT registration. Opens
+  // /vendor/settings/tax (data.open = 'tax'). Same language rule as vendor_low_stock; Swahili is a DRAFT.
+  Object.assign(VENDOR_MESSAGES, {
+    vendor_vat_verified: (d, locale) => {
+      const en = { title: 'VAT details verified', body: 'Your TIN and VRN now show on your receipts and invoices.' };
+      const sw = { title: 'Taarifa za VAT zimethibitishwa', body: 'TIN na VRN yako sasa zinaonekana kwenye risiti na ankara zako.' };
+      const text = locale === 'en' ? en : sw;
+      return { type: 'vendor_vat_verified', title: text.title, body: text.body, data: { open: 'tax', titleSw: sw.title, bodySw: sw.body } };
+    },
+    vendor_vat_rejected: (d, locale) => {
+      const en = { title: 'VAT details not accepted', body: 'Open Tax details to see why and send them again.' };
+      const sw = { title: 'Taarifa za VAT hazikukubaliwa', body: 'Fungua Taarifa za kodi uone sababu na uzitume tena.' };
+      const text = locale === 'en' ? en : sw;
+      return { type: 'vendor_vat_rejected', title: text.title, body: text.body, data: { open: 'tax', reason: d.reason ?? '', titleSw: sw.title, bodySw: sw.body } };
+    },
+  });
+
   // Shop home banners (SHOP_BANNERS; design spec shop-home-phase2 §4.3). Same language rule as
   // vendor_low_stock. Opens /vendor/merch?item=<bannerId>. Swahili is a DRAFT for native review
   // (banner = bango, glossary O-10).

@@ -221,3 +221,33 @@ export function vendorWalkInSalesOn() {
 export function vendorCustomersOn() {
   return vendorToolsFlag('VENDOR_CUSTOMERS');
 }
+
+/**
+ * S5: vendor documents — share links (VendorDocumentLink), the public page /d/:token and its PDF,
+ * the logged-in document views, order invoices for vendors and the buyer's invoice in json/html/pdf.
+ * Off → those endpoints answer 404 feature_disabled, /d/:token answers the same "not available" page as
+ * an unknown token, and GET /me/shop-orders/:id/invoice keeps its plain-text answer only.
+ * Links are also refused (503 public_url_not_configured) while PUBLIC_API_URL is not set (Q-1).
+ */
+export function vendorDocumentsOn() {
+  return vendorToolsFlag('VENDOR_DOCUMENTS');
+}
+
+/**
+ * S5: VAT — the vendor tax profile and its KYC review, product VAT codes, admin tax rates (maker ≠
+ * checker) and VAT worked out on walk-in sales and on the vendor's part of paid app orders. Off →
+ * those endpoints answer 404 feature_disabled and no sale or order gets VAT. Marketplace prices,
+ * commission and payouts never change (O-10).
+ */
+export function vendorVatOn() {
+  return vendorToolsFlag('VENDOR_VAT');
+}
+
+/**
+ * S5 Q-10 (owner pending): also print the vendor's TIN on documents when they are NOT VAT-registered but
+ * their KYC TIN certificate is accepted. Off unless VENDOR_DOCUMENTS_TIN_WITHOUT_VAT is set (and documents
+ * are on): by default the TIN appears only together with a verified VRN (O-12).
+ */
+export function vendorDocumentsTinWithoutVatOn() {
+  return vendorDocumentsOn() && on('VENDOR_DOCUMENTS_TIN_WITHOUT_VAT');
+}

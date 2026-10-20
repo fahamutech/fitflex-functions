@@ -31,7 +31,7 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, vendorVatOn } from '../shared/feature-flags.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
@@ -61,6 +61,12 @@ import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
 import { createPgVendorCustomerStore } from '../infra/vendor-customer-store-pg.mjs';
 import { createVendorCustomerService } from '../services/vendor-customer-service.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
+import { createPgVendorTaxStore } from '../infra/vendor-tax-store-pg.mjs';
+import { createVendorTaxService } from '../services/vendor-tax-service.mjs';
+import { createPgVendorDocumentStore } from '../infra/vendor-document-store-pg.mjs';
+import { createVendorDocumentService } from '../services/vendor-document-service.mjs';
+import { renderDocumentHtml, renderDocumentsHtml } from '../shared/vendor-document-html.mjs';
+import { renderDocumentPdf } from '../shared/vendor-document-pdf.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
 import { createProductStatsRecomputeService } from '../services/product-stats-recompute-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
@@ -267,6 +273,23 @@ export const shopService = createShopService({
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
   // Vendor tools · S4: the buyer becomes (or is refreshed as) an app customer of each vendor (defined below; runs later).
   onVendorCustomerOrder: order => vendorCustomerService.marketplaceOrderPaid(order),
+  // Vendor tools · S5: each vendor's invoice for the paid order is numbered (defined below; runs later).
+  onVendorOrderInvoices: order => vendorDocumentService.orderPaid(order),
+  // Vendor tools · S5: product VAT codes (VENDOR_TOOLS + VENDOR_VAT).
+  productVat: {
+    on: vendorVatOn,
+    allowedCodes: async () => (await vendorTaxStore.codes()).filter(c => c.inUse).map(c => c.code),
+    set: input => vendorTaxStore.setProductVatCode(input),
+    codesOf: (vendorId, ids) => vendorTaxStore.vatCodesOf(vendorId, ids),
+    codesById: ids => vendorTaxStore.vatCodesById(ids),
+  },
+});
+// Vendor tools · S5: VAT — tax profile + KYC review, tax rates (maker ≠ checker), product VAT codes
+// (dormant behind VENDOR_TOOLS + VENDOR_VAT; the routes check the flag).
+const vendorTaxStore = createPgVendorTaxStore({ db });
+export const vendorTaxService = createVendorTaxService({
+  store: vendorTaxStore,
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
 // Vendor tools · S3: walk-in (counter) sales — no commission, no ShopOrder, no settlement
 // (dormant behind VENDOR_TOOLS + VENDOR_WALKIN_SALES; the routes check the flag).
@@ -278,13 +301,22 @@ export const vendorSaleService = createVendorSaleService({
 });
 // Vendor tools · S4: customers, pay-later balances, customer payments, aging and the overdue digest
 // (dormant behind VENDOR_TOOLS + VENDOR_CUSTOMERS; the routes and the digest job check the flag).
+const vendorCustomerStore = createPgVendorCustomerStore({ db });
 export const vendorCustomerService = createVendorCustomerService({
-  store: createPgVendorCustomerStore({ db }),
+  store: vendorCustomerStore,
   saleStore: vendorSaleStore,
   saleService: vendorSaleService,
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
   // The digest goes to the vendor and to staff: each person gets their own push + inbox, in their language.
   notifyPerson: (userId, type, data) => partnerNotifier.vendorEvent(userId, type, data),
+});
+// Vendor tools · S5: share links, public page, PDF, order invoices (dormant behind VENDOR_TOOLS +
+// VENDOR_DOCUMENTS; order invoice numbering on payment is bookkeeping and runs regardless).
+export const vendorDocumentService = createVendorDocumentService({
+  store: createPgVendorDocumentStore({ db, customerStore: vendorCustomerStore, vatOn: vendorVatOn }),
+  renderHtml: renderDocumentHtml,
+  renderManyHtml: renderDocumentsHtml,
+  renderPdf: renderDocumentPdf,
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const productStatsRecomputeService = createProductStatsRecomputeService({ db });

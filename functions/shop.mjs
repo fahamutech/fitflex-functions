@@ -2,9 +2,9 @@
 import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService } from '../src/bootstrap/services.mjs';
+import { shopService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
-import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn } from '../src/shared/feature-flags.mjs';
+import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 
 const created = new Date().toISOString();
@@ -533,9 +533,29 @@ export const reviewMarketplaceProduct = {
   },
 };
 export const marketplaceInvoice = {
-  created, method: 'get', path: '/me/shop-orders/:id/invoice', description: 'Buyer: download an invoice or receipt.',
+  created, method: 'get', path: '/me/shop-orders/:id/invoice',
+  description: 'Buyer: download an invoice or receipt. Without `format` (or format=text): plain text, exactly as before. Vendor tools · S5 (VENDOR_TOOLS + VENDOR_DOCUMENTS; off → 404 feature_disabled for json/html/pdf): one invoice PER SELLER (the vendor is the seller of record, O-11), numbered INV-… in that vendor\'s series when the order was paid. format=json → { invoices: [document JSON (as GET /vendor/documents/:docType/:docId) + vendorId] } (only my own order; each invoice has only that vendor\'s lines, "Seller: {business}. Sold through the FitFlex app.", never commission or payout); format=html → one page with every invoice; format=pdf → one vendor\'s PDF (&vendorId= required when the order has several sellers → else 400 vendor_required { vendors }; 404 vendor_not_in_order). lang = en | sw, paper = a4 | 80mm. 404 order_not_found (not mine) | invoice_not_ready (not paid yet), 400 invalid_format | invalid_paper.',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => {
+    const format = req.query?.format == null || req.query.format === '' || req.query.format === 'text' ? null : String(req.query.format);
+    if (format) {
+      if (!['json', 'html', 'pdf'].includes(format)) return res.status(400).json({ error: 'invalid_format', allowed: ['text', 'json', 'html', 'pdf'] });
+      if (!vendorDocumentsOn()) return res.status(404).json({ error: 'feature_disabled' });
+      const result = await vendorDocumentService.buyerInvoices({ buyerId: req.user.sub, orderId: req.params.id, query: req.query || {} });
+      if (result.error) return sendError(res, result);
+      res.set?.('Cache-Control', 'no-store, private');
+      if (result.html) {
+        res.set?.('Content-Type', 'text/html; charset=utf-8');
+        res.set?.('Content-Security-Policy', "default-src 'none'; img-src https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
+        return res.status(200).send(result.html);
+      }
+      if (result.pdf) {
+        res.set?.('Content-Type', 'application/pdf');
+        res.set?.('Content-Disposition', `attachment; filename="${String(result.fileName).replace(/[^A-Za-z0-9._-]/g, '_')}"`);
+        return res.status(200).send(result.pdf);
+      }
+      return res.json(result);
+    }
     const invoice = await shopService.orderInvoice({ buyerId: req.user.sub, orderId: req.params.id });
     if (!invoice) return res.status(404).json({ error: 'order_not_found' });
     res.type('text/plain').send(invoice);

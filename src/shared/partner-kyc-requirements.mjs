@@ -49,6 +49,10 @@ export const DOCUMENT_REQUIREMENTS = Object.freeze({
   certification: { types: ['certification'], fields: ['issuer', 'documentNumber', 'issuedOn'], expires: true },
   liability_insurance: { types: ['liability_insurance'], fields: ['issuer', 'documentNumber'], expires: true },
   representative_authority: { types: ['letter_of_authority', 'board_resolution'], fields: [] },
+  // Vendor tools · S5 (O-12): the VAT registration certificate. Optional — VAT is optional for vendors; it
+  // is checked in the VAT registration section of the case (VendorTaxProfile), which never changes the
+  // KYC decision. The VRN itself is entered on the tax profile.
+  vat_certificate: { types: ['vat_certificate'], fields: [] },
 });
 
 // The one person each partner type must name, and which of their details
@@ -77,7 +81,7 @@ export const DOCUMENTS_FOR = Object.freeze({
   gym_owner: ['owner_id', 'business_registration', 'tin_certificate', 'business_licence'],
   // Liability cover is no longer asked of trainers (product owner, 11 Oct 2026).
   trainer: ['trainer_id', 'certification'],
-  vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
+  vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id', 'vat_certificate'],
   corporate: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
 });
 
@@ -89,6 +93,7 @@ export const OPTIONAL_ITEMS = Object.freeze({
   vendor: new Set([
     'business.legalName', 'business.tradingName', 'business.registrationNumber', 'business.registeredAddress',
     'business.registration_certificate', 'business.tin_certificate', 'business.licence',
+    'business.vat_certificate',
   ]),
   corporate: new Set([
     'company.legalName', 'company.registrationNumber', 'company.registeredAddress', 'company.businessActivity',
@@ -264,6 +269,8 @@ function vendorSections(s) {
     { key: 'business', items: [
       ...businessItems('business', 'vendor', s.case, s.documents, s.now),
       documentItem('business.licence', s.documents, 'business_licence', s.now),
+      // S5: optional; only VAT-registered vendors upload it.
+      documentItem('business.vat_certificate', s.documents, 'vat_certificate', s.now),
       // Email is optional (11 Oct 2026): a contact number is enough.
       { key: 'business.contact', by: BY_PARTNER, status: filled(profile.contactNumber) ? 'complete' : 'missing' },
     ] },
