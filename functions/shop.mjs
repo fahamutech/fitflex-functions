@@ -2,9 +2,9 @@
 import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService } from '../src/bootstrap/services.mjs';
+import { shopService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService, vendorTaxService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
-import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn } from '../src/shared/feature-flags.mjs';
+import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 
 const created = new Date().toISOString();
@@ -111,22 +111,26 @@ const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' }
 
 export const vendorToolsOptionsRoute = {
   created, method: 'get', path: '/vendor/tools/options',
-  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
-  responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false } },
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
+  responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
-  onRequest: async (req, res) => res.json({ ...vendorToolsOptions(), canSeeCost: await shopService.canSeeCost(req.user) }),
+  onRequest: async (req, res) => {
+    const vendorId = req.user.userType === 'vendor' ? req.user.sub : req.user.userType === 'vendor_staff' ? req.user.vendorId : null;
+    res.json({ ...vendorToolsOptions(), canSeeCost: await shopService.canSeeCost(req.user), vatInForce: await vendorTaxService.vatInForce(vendorId) });
+  },
 };
 
 export const vendorMeRoute = {
   created, method: 'get', path: '/vendor/me',
-  description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|sales|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
+  description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|sales|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost and vatInForce }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
   responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false } } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
     const me = await shopService.vendorMe(req.user);
     if (!me) return res.status(403).json({ error: 'vendor_staff_inactive' });
     if (!vendorPortalOn()) return res.status(404).json({ error: 'feature_disabled' });
-    res.json(me);
+    // Same object as GET /vendor/tools/options, including S5 vatInForce.
+    res.json({ ...me, tools: { ...me.tools, vatInForce: await vendorTaxService.vatInForce(me.vendorId) } });
   },
 };
 
@@ -533,9 +537,38 @@ export const reviewMarketplaceProduct = {
   },
 };
 export const marketplaceInvoice = {
-  created, method: 'get', path: '/me/shop-orders/:id/invoice', description: 'Buyer: download an invoice or receipt.',
+  created, method: 'get', path: '/me/shop-orders/:id/invoice',
+  description: 'Buyer: download an invoice or receipt. Without `format` (or format=text): plain text, exactly as before. Vendor tools · S5 (VENDOR_TOOLS + VENDOR_DOCUMENTS; off → 404 feature_disabled for json/html/pdf): one invoice PER SELLER (the vendor is the seller of record, O-11), numbered INV-… in that vendor\'s series when the order was paid. format=json → { invoices: [document JSON (as GET /vendor/documents/:docType/:docId) + vendorId] } (only my own order; each invoice has only that vendor\'s lines, "Seller: {business}. Sold through the FitFlex app.", never commission or payout); format=html → one page with every invoice; format=pdf → one vendor\'s PDF (&vendorId= required when the order has several sellers → else 400 vendor_required { vendors }; 404 vendor_not_in_order). lang = en | sw, paper = a4 | 80mm. 404 order_not_found (not mine) | invoice_not_ready (not paid yet), 400 invalid_format | invalid_paper, 503 pdf_unavailable (format=pdf while the PDF library cannot be loaded).',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => {
+    const format = req.query?.format == null || req.query.format === '' || req.query.format === 'text' ? null : String(req.query.format);
+    if (format) {
+      if (!['json', 'html', 'pdf'].includes(format)) return res.status(400).json({ error: 'invalid_format', allowed: ['text', 'json', 'html', 'pdf'] });
+      if (!vendorDocumentsOn()) return res.status(404).json({ error: 'feature_disabled' });
+      let result;
+      try {
+        result = await vendorDocumentService.buyerInvoices({ buyerId: req.user.sub, orderId: req.params.id, query: req.query || {} });
+      } catch (error) {
+        if (error.code === 'pdf_unavailable') return res.status(503).json({ error: 'pdf_unavailable' });
+        throw error;
+      }
+      if (result.error) return sendError(res, result);
+      res.set?.('Cache-Control', 'no-store, private');
+      if (result.html) {
+        res.set?.('Content-Type', 'text/html; charset=utf-8');
+        res.set?.('Content-Security-Policy', "default-src 'none'; img-src https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+        res.set?.('X-Content-Type-Options', 'nosniff');
+        res.set?.('Referrer-Policy', 'no-referrer');
+        return res.status(200).send(result.html);
+      }
+      if (result.pdf) {
+        res.set?.('Content-Type', 'application/pdf');
+        res.set?.('Content-Disposition', `attachment; filename="${String(result.fileName).replace(/[^A-Za-z0-9._-]/g, '_')}"`);
+        res.set?.('X-Content-Type-Options', 'nosniff');
+        return res.status(200).send(result.pdf);
+      }
+      return res.json(result);
+    }
     const invoice = await shopService.orderInvoice({ buyerId: req.user.sub, orderId: req.params.id });
     if (!invoice) return res.status(404).json({ error: 'order_not_found' });
     res.type('text/plain').send(invoice);

@@ -49,6 +49,10 @@ export const DOCUMENT_REQUIREMENTS = Object.freeze({
   certification: { types: ['certification'], fields: ['issuer', 'documentNumber', 'issuedOn'], expires: true },
   liability_insurance: { types: ['liability_insurance'], fields: ['issuer', 'documentNumber'], expires: true },
   representative_authority: { types: ['letter_of_authority', 'board_resolution'], fields: [] },
+  // Vendor tools · S5 (O-12): the VAT registration certificate. Optional — VAT is optional for vendors; it
+  // is checked in the VAT registration section of the case (VendorTaxProfile), which never changes the
+  // KYC decision. The VRN itself is entered on the tax profile.
+  vat_certificate: { types: ['vat_certificate'], fields: [] },
 });
 
 // The one person each partner type must name, and which of their details
@@ -81,6 +85,12 @@ export const DOCUMENTS_FOR = Object.freeze({
   corporate: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
 });
 
+// Vendor tools · S5: documents a partner type may add only while VENDOR_VAT is on (contract check #229:
+// old app builds cannot upload them, so with the flag off they are neither listed nor accepted).
+export const VAT_DOCUMENTS_FOR = Object.freeze({ vendor: ['vat_certificate'] });
+/** The documents a partner type may upload: DOCUMENTS_FOR, plus the VAT certificate while VENDOR_VAT is on. */
+export const documentsFor = (partnerType, { vatOn = false } = {}) => [...(DOCUMENTS_FOR[partnerType] || []), ...(vatOn ? VAT_DOCUMENTS_FOR[partnerType] || [] : [])];
+
 // Collected but not required for verification (owner decision D6, 28 Sep
 // 2026): for vendors and companies only the TIN and the representative's ID
 // are mandatory. Optional items show in the checklist and are reviewed if
@@ -89,6 +99,7 @@ export const OPTIONAL_ITEMS = Object.freeze({
   vendor: new Set([
     'business.legalName', 'business.tradingName', 'business.registrationNumber', 'business.registeredAddress',
     'business.registration_certificate', 'business.tin_certificate', 'business.licence',
+    'business.vat_certificate',
   ]),
   corporate: new Set([
     'company.legalName', 'company.registrationNumber', 'company.registeredAddress', 'company.businessActivity',
@@ -264,6 +275,8 @@ function vendorSections(s) {
     { key: 'business', items: [
       ...businessItems('business', 'vendor', s.case, s.documents, s.now),
       documentItem('business.licence', s.documents, 'business_licence', s.now),
+      // S5: optional; only VAT-registered vendors upload it. Shown only while VENDOR_VAT is on (snapshot.vatOn).
+      ...(s.vatOn ? [documentItem('business.vat_certificate', s.documents, 'vat_certificate', s.now)] : []),
       // Email is optional (11 Oct 2026): a contact number is enough.
       { key: 'business.contact', by: BY_PARTNER, status: filled(profile.contactNumber) ? 'complete' : 'missing' },
     ] },
@@ -305,7 +318,7 @@ const SECTIONS = { gym_owner: gymOwnerSections, trainer: trainerSections, vendor
  * Evaluate a partner's KYC.
  * @param {string} partnerType gym_owner | trainer | vendor | corporate
  * @param {object} snapshot { case, people, documents, checks, settlementAccounts, agreements,
- *   gyms, trainer, vendorProfile, corporate, now }
+ *   gyms, trainer, vendorProfile, corporate, now, vatOn (S5: VENDOR_VAT — adds the optional vendor VAT certificate) }
  * @returns {{ partnerType, tier, sections, missing: string[], awaitingReview: string[], readyToSubmit: boolean, complete: boolean }}
  *   missing: partner items not yet provided. awaitingReview: anything provided but not yet accepted,
  *   plus reviewer items not yet done. readyToSubmit: the partner has provided everything.

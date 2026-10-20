@@ -18,6 +18,8 @@ import { newCustomerId } from './vendor-buyer-ref-store-pg.mjs';
 import { dayOf } from './vendor-sale-store-pg.mjs';
 import { PAYMENT_DOC_TYPE, paymentNumber, allocateOldestFirst, phoneLast3, AGING_BUCKETS, encodeOffset } from '../shared/vendor-customer.mjs';
 import { ownLines, orderTab, shortRef } from '../shared/vendor-order-view.mjs';
+import { taxContextOf, sellerSnapshotOf } from './vendor-tax-store-pg.mjs';
+import { vendorVatOn } from '../shared/feature-flags.mjs';
 
 const UNIQUE_VIOLATION = '23505';
 const PAID_STATES = ['paid', 'refund_pending', 'refunded'];
@@ -73,7 +75,7 @@ export function customerView(row) {
 /** The POS picker row for staff with `sales` only: no money, no full phone. */
 export const pickerView = c => ({ id: c.id, source: c.source, name: c.name ?? null, phoneLast3: c.source === 'manual' ? phoneLast3(c.phone) : null, forgotten: c.forgottenAt != null });
 
-export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
+export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn = vendorVatOn }) {
   async function namesOf(q, ids) {
     const wanted = [...new Set(ids.filter(Boolean))];
     if (!wanted.length) return new Map();
@@ -268,7 +270,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
     if (!row) return null;
     const [owed, open, shop] = await Promise.all([
       owedOf(db, vendorId, customerId, today),
-      db.raw(`SELECT s.id, s.number, s."soldAt", s."dueDate"::text AS "dueDate", s."totalTzs", s."balanceTzs", (?::date - s."dueDate")::int AS "daysPastDue"
+      db.raw(`SELECT s.id, s.number, s."invoiceNumber", s."soldAt", s."dueDate"::text AS "dueDate", s."totalTzs", s."balanceTzs", (?::date - s."dueDate")::int AS "daysPastDue"
                 FROM "VendorSale" s
                WHERE s."vendorId" = ? AND s."customerId" = ? AND s.kind = 'credit' AND s.status = 'completed' AND s."balanceTzs" > 0
                ORDER BY s."dueDate", s."soldAt", s.id`, [today, vendorId, customerId]),
@@ -290,7 +292,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
       customer: plain(row),
       money: owed,
       openSales: open.rows.map(plain).map(s => ({
-        id: s.id, number: s.number, soldAt: iso(s.soldAt), dueDate: s.dueDate, totalTzs: s.totalTzs, balanceTzs: s.balanceTzs,
+        id: s.id, number: s.number, invoiceNumber: s.invoiceNumber ?? null, soldAt: iso(s.soldAt), dueDate: s.dueDate, totalTzs: s.totalTzs, balanceTzs: s.balanceTzs,
         daysOverdue: Math.max(0, s.daysPastDue), overdue: s.daysPastDue >= 1,
       })),
       totals: {
@@ -372,11 +374,18 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
                                  THEN c."buyerUserId" ELSE NULL END
        WHERE c.source = 'marketplace' AND c."buyerUserId" = ?
        RETURNING c.id, c."vendorId", c."buyerUserId"`, [at, at, String(userId)]);
+    let snapshotsScrubbed = 0;
     for (const r of rows) {
       await audit(db, { actor: 'system:account_deleted', action: 'vendor_customer_forgotten', target: r.id, after: { vendorId: r.vendorId, unlinked: r.buyerUserId == null } });
+      // S5 (security review #229 M1): statement links shared earlier froze the customer's name in their
+      // snapshot; it is cleared there too (the page also checks forgottenAt). Links stay valid, nameless.
+      const scrubbed = await db.raw(`UPDATE "VendorDocumentLink"
+           SET snapshot = jsonb_set(snapshot, '{customer}', jsonb_build_object('name', NULL::text), true)
+         WHERE "vendorId" = ? AND "docId" = ? AND "docType" = 'statement' AND snapshot IS NOT NULL`, [r.vendorId, r.id]);
+      snapshotsScrubbed += scrubbed.rowCount || 0;
     }
     const refsDeleted = await db('VendorBuyerRef').where({ buyerId: String(userId) }).del();
-    return { forgotten: rows.length, unlinked: rows.filter(r => r.buyerUserId == null).length, refsDeleted };
+    return { forgotten: rows.length, unlinked: rows.filter(r => r.buyerUserId == null).length, refsDeleted, snapshotsScrubbed };
   }
 
   // ── payments ──────────────────────────────────────────────────────────────
@@ -457,10 +466,13 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
           ON CONFLICT ("vendorId", "docType") DO UPDATE SET "next" = "VendorDocumentSequence"."next" + 1, "updatedAt" = EXCLUDED."updatedAt"
           RETURNING "next" - 1 AS seq`, [vendorId, PAYMENT_DOC_TYPE, at]);
         const seq = Number(issued.rows[0].seq);
+        // S5 (Q-8): the seller details printed on the PMT receipt, as they are now (TIN/VRN only while VAT is in force).
+        const tax = vatOn() ? await taxContextOf(trx, vendorId) : null;
+        const sellerSnapshot = await sellerSnapshotOf(trx, vendorId, { vat: tax?.inForce ? { applied: true, tax } : null });
         await trx('VendorCustomerPayment').insert({
           id: paymentId, vendorId, customerId, seq, number: paymentNumber(seq), amountTzs: payment.amountTzs, method: payment.method,
           reference: payment.reference, receivedOn: payment.receivedOn, note: payment.note, clientRef: payment.clientRef, fingerprint,
-          status: 'recorded', recordedBy: actorId, createdAt: at, updatedAt: at,
+          status: 'recorded', recordedBy: actorId, createdAt: at, updatedAt: at, sellerSnapshot: JSON.stringify(sellerSnapshot),
         });
         await trx('VendorPaymentAllocation').insert(plan.map((a, i) => ({
           id: newId('pal'), vendorId, paymentId, saleId: a.saleId, position: i + 1, amountTzs: a.amountTzs, createdAt: at,
