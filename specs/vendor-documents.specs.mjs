@@ -792,6 +792,8 @@ test('#229 M2: malformed tokens skip every limiter; per-link counting only for r
   assert.equal(clientAddress(req('6.6.6.6, 10.0.0.9'), 0), '127.0.0.9', '0 hops: X-Forwarded-For ignored');
   assert.equal(clientAddress(req(''), 1), '127.0.0.9');
   assert.equal(clientAddress(req('10.0.0.9')), '10.0.0.9');
+  process.env.PUBLIC_DOCS_TRUSTED_PROXY_HOPS = '';
+  try { assert.equal(clientAddress(req('6.6.6.6, 10.0.0.9')), '10.0.0.9', 'empty setting = default 1, never 0'); } finally { delete process.env.PUBLIC_DOCS_TRUSTED_PROXY_HOPS; }
 
   resetVendorDocumentLimits();
   const ip = '10.77.0.1';

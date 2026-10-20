@@ -174,7 +174,8 @@ function sendPdf(res, buffer, fileName, disposition = 'inline') {
  * Hosting / the bfast front — saw connect to it). Anything to the left of it is client-supplied and
  * ignored. 0 = no proxy in front: the socket's own address, X-Forwarded-For ignored entirely.
  */
-export function clientAddress(req, hops = Number(process.env.PUBLIC_DOCS_TRUSTED_PROXY_HOPS ?? 1)) {
+const trustedHops = (raw = process.env.PUBLIC_DOCS_TRUSTED_PROXY_HOPS) => (raw == null || String(raw).trim() === '' ? 1 : Number(raw));
+export function clientAddress(req, hops = trustedHops()) {
   const direct = req.socket?.remoteAddress || req.ip || 'unknown';
   const n = Number.isInteger(hops) && hops >= 0 ? hops : 1;
   if (n === 0) return direct;
