@@ -32,7 +32,15 @@ async function refreshDraft(q, statementId, at) {
   return { removed: false };
 }
 
-export function createPgTrainerOutcomeStore({ db, now = () => new Date() }) {
+// Postgres: deadlock detected / serialization failure. Another writer got in the way; nothing was written.
+const CONFLICT_CODES = new Set(['40P01', '40001']);
+const CHANGED = Object.freeze({ error: 'booking_changed', status: 409 });
+
+/**
+ * @param {object} deps
+ * @param {() => Promise<void>} [deps.beforeBookingLock]  test seam: runs between the first line read and the booking lock
+ */
+export function createPgTrainerOutcomeStore({ db, now = () => new Date(), beforeBookingLock = async () => {} }) {
   /**
    * @param {object} a
    * @param {string} a.bookingId
@@ -43,17 +51,30 @@ export function createPgTrainerOutcomeStore({ db, now = () => new Date() }) {
    * @param {(prior, to) => string} a.action  audit action
    * @returns {{ notFound: true } | { error, status } | { prior, updated, draftLine }}
    */
-  async function transition({ bookingId, trainerId = null, decide, actorId, action }) {
+  async function transition(args) {
+    try {
+      return await locked(args);
+    } catch (err) {
+      if (CONFLICT_CODES.has(err?.code)) return { ...CHANGED };
+      throw err;
+    }
+  }
+
+  async function locked({ bookingId, trainerId = null, decide, actorId, action }) {
     return db.transaction(async (q) => {
       const at = now();
       // Statement first (see the lock order above), then the booking.
       const seen = await liveLine(q, bookingId);
       if (seen) await q('TrainerSettlement').where({ id: seen.statementId }).forUpdate().first();
+      await beforeBookingLock();
       const booked = q('TrainerBooking').where({ id: bookingId });
       if (trainerId) booked.where({ trainerId });
       const prior = await booked.forUpdate().first();
       if (!prior) return { notFound: true };
       const line = await liveLine(q, bookingId);
+      // A prepare put the session on a statement (or another one) between the two reads: that statement
+      // is not locked here, so stop rather than decide on it (re-review finding 4). Nothing is written.
+      if ((line?.statementId ?? null) !== (seen?.statementId ?? null)) return { ...CHANGED };
 
       const d = await decide(prior, line ? { statementId: line.statementId, status: line.status, basis: line.basis } : null);
       if (d.error) return d;

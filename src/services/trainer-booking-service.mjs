@@ -382,6 +382,19 @@ export function createTrainerBookingService({
     const updated = [];
     for (const b of group) {
       if (HAPPENED.has(b.status)) { updated.push(b); continue; }
+      // A cancelled slot was dropped from the group and its payment shrunk (releaseUnpaidSlot): approving
+      // the rest must not bring it back as confirmed and later payable (re-review finding 3).
+      if (b.status === 'cancelled') continue;
+      // A whole group whose payment was rejected follows the payment if staff change their decision —
+      // except a slot someone else has booked since the rejection freed it.
+      if (b.status === 'payment_rejected' && next !== 'payment_rejected') {
+        const taken = await trainerBookings.findAsync(o => o.id !== b.id && o.trainerId === b.trainerId && o.date === b.date
+          && o.slot === b.slot && !SLOT_RELEASING.has(o.status));
+        if (taken) {
+          console.warn(`[trainer-booking] ${b.id} stays payment_rejected: its slot was booked again (${taken.id})`);
+          continue;
+        }
+      }
       updated.push(await trainerBookings.updateByIdAsync(b.id, { status: next, updatedAt: now }));
     }
     if (next === 'confirmed' && updated.length) {
@@ -418,7 +431,8 @@ export function createTrainerBookingService({
       decide: (prior, line) => {
         if (prior.status === 'cancelled' && status !== 'cancelled') return { error: 'booking_cancelled', status: 409 };
         // Once a statement carrying this session has left draft, its outcome is what was (or will be) paid.
-        if (outcomes && status !== prior.status && line && LOCKING_STATEMENT_STATUSES.includes(line.status)) {
+        // Not behind the flag: freezing a money-bearing outcome does not depend on it (re-review finding 2).
+        if (status !== prior.status && line && LOCKING_STATEMENT_STATUSES.includes(line.status)) {
           return { error: 'booking_on_trainer_statement', status: 409, statementId: line.statementId, statementStatus: line.status };
         }
         if (status === 'no_show' && prior.status !== 'no_show') {

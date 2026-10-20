@@ -618,3 +618,100 @@ test('the no-show push is in the member\'s chosen language; English when none is
     assert.ok(n.data.bodyEn && n.data.bodySw);
   }
 });
+
+// ── Re-review of #231 (5a0a44b) ─────────────────────────────────────────────
+
+test('finding 2: with the flag OFF an admin still cannot change a session on a submitted statement', async () => {
+  flagOff();
+  const s = await scene();
+  const id = await booking(s, { at: { date: '2025-04-08', slot: '10:00' }, status: 'completed' });
+  const statementId = await prepareWeek(s, '2025-04-07');
+  assert.equal((await trainerSettlementService.submit({ id: statementId, actorId: s.adminId })).statement.status, 'submitted');
+  for (const to of ['cancelled', 'confirmed']) {
+    const out = await set(s, id, to);
+    assert.deepEqual([out.statusCode, out.body], [409, { error: 'booking_on_trainer_statement', statementId, statementStatus: 'submitted' }], to);
+  }
+  assert.equal(await statusOf(id), 'completed');
+  assert.equal((await db('Refund').where({ bookingId: id })).length, 0, 'no refund raised behind a submitted payout');
+});
+
+test('finding 3: approving a shrunk group payment leaves its cancelled slots cancelled; a re-approved rejected slot comes back unless rebooked', async () => {
+  const s = await scene();
+  const groupId = uid('tbg');
+  const mk = async (slot, status, group = groupId) => {
+    const id = await booking(s, { at: { date: '2031-05-06', slot }, status });
+    await db('TrainerBooking').where({ id }).update({ groupId: group });
+    return id;
+  };
+  const kept = await mk('09:00', 'payment_pending');
+  const dropped = await mk('10:00', 'cancelled');
+  const updated = await trainerBookingService.applyPaymentToGroup(groupId, 'approved');
+  assert.deepEqual(updated.map(b => b.id), [kept]);
+  assert.deepEqual(await Promise.all([kept, dropped].map(statusOf)), ['confirmed', 'cancelled']);
+
+  // A whole group's payment rejected, then approved after all: back to confirmed — but not a slot booked again meanwhile.
+  const other = uid('tbg');
+  const free = await mk('12:00', 'payment_rejected', other);
+  const rebooked = await mk('13:00', 'payment_rejected', other);
+  const someoneElse = await mk('13:00', 'confirmed', uid('tbg'));
+  const again = await trainerBookingService.applyPaymentToGroup(other, 'approved');
+  assert.deepEqual(again.map(b => b.id), [free]);
+  assert.deepEqual(await Promise.all([free, rebooked, someoneElse].map(statusOf)), ['confirmed', 'payment_rejected', 'confirmed']);
+});
+
+test('finding 4: a statement line that appears between the two reads stops the change (booking_changed); nothing is written', async () => {
+  const s = await scene();
+  const id = await booking(s, { at: { date: '2025-04-15', slot: '10:00' } }); // confirmed, long past → took_place candidate
+  const { createPgTrainerOutcomeStore } = await import('../src/infra/trainer-outcome-store-pg.mjs');
+  let decided = false;
+  const store = createPgTrainerOutcomeStore({
+    db,
+    // Another connection prepares the week right then: the session is now on a draft this transaction never locked.
+    beforeBookingLock: async () => { await prepareWeek(s, '2025-04-14'); },
+  });
+  const out = await store.transition({
+    bookingId: id, actorId: s.adminId, action: () => 'trainer_booking_cancelled',
+    decide: () => { decided = true; return { to: 'cancelled' }; },
+  });
+  assert.deepEqual(out, { error: 'booking_changed', status: 409 });
+  assert.equal(decided, false);
+  assert.equal(await statusOf(id), 'confirmed');
+  assert.equal((await db('TrainerSettlementLine').where({ bookingId: id, voided: false })).length, 1, 'the prepared line stands');
+  assert.equal((await auditFor(id, 'trainer_booking_cancelled')).length, 0);
+});
+
+test('finding 4: a Postgres deadlock or serialization failure answers booking_changed; other errors still throw', async () => {
+  const { createPgTrainerOutcomeStore } = await import('../src/infra/trainer-outcome-store-pg.mjs');
+  const failing = code => createPgTrainerOutcomeStore({ db: { transaction: async () => { throw Object.assign(new Error('pg'), { code }); } } });
+  const args = { bookingId: 'x', actorId: 'a', action: () => 'x', decide: () => ({ to: 'completed' }) };
+  assert.deepEqual(await failing('40P01').transition(args), { error: 'booking_changed', status: 409 });
+  assert.deepEqual(await failing('40001').transition(args), { error: 'booking_changed', status: 409 });
+  await assert.rejects(failing('23505').transition(args), /pg/);
+  // Through the service the route answers 409, not 500.
+  const { createTrainerBookingService } = await import('../src/services/trainer-booking-service.mjs');
+  const svc = createTrainerBookingService({
+    outcomeStore: failing('40P01'), trainerService: { findProfileByUser: () => ({ id: 't' }) },
+    trainerBookings: {}, auditLog: {}, trainers: [], gyms: [], users: {}, trainerSessions: {},
+  });
+  assert.deepEqual(await svc.trainerCompleteBooking({ userId: 'u', bookingId: 'x' }), { error: 'booking_changed', status: 409 });
+});
+
+test('finding 5: the read-only reconciliation lists outcomes that disagree with statements, usage and refunds', async () => {
+  const { createTrainerOutcomeReconciliation } = await import('../src/services/trainer-outcome-reconciliation.mjs');
+  const recon = createTrainerOutcomeReconciliation({ db });
+  const s = await scene();
+  const id = await booking(s, { at: { date: '2025-04-22', slot: '10:00' }, status: 'completed' });
+  await prepareWeek(s, '2025-04-21');
+  const before = await recon.run({ only: ['cancelled_on_statement'] });
+  assert.ok(!before.checks[0].sample.includes(id));
+  // Cancelled behind the statement's back (what a failed after-commit step could leave).
+  await db('TrainerBooking').where({ id }).update({ status: 'cancelled' });
+  const after = await recon.run();
+  assert.deepEqual(after.checks.map(c => c.key), recon.keys);
+  const found = after.checks.find(c => c.key === 'cancelled_on_statement');
+  assert.ok(found.count >= 1 && found.sample.includes(id), JSON.stringify(found));
+  assert.equal(after.ok, false);
+  // It changed nothing.
+  assert.equal(await statusOf(id), 'cancelled');
+  assert.equal((await db('TrainerSettlementLine').where({ bookingId: id, voided: false })).length, 1);
+});

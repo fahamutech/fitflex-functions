@@ -64,8 +64,10 @@ exactly as for a completed session). The member can still review the trainer.
 - A draft statement line follows the change in the same transaction: re-based, or removed (and the draft's
   totals recomputed; an emptied draft is deleted).
 - Any status change to a session on a `submitted`, `approved`, `payable` or `paid` trainer statement:
-  409 `{ error: "booking_on_trainer_statement", statementId, statementStatus }`. A draft does not lock.
-- One admin is enough. Flag off: `no_show` is 400 `invalid_status` and there is no statement lock (as before).
+  409 `{ error: "booking_on_trainer_statement", statementId, statementStatus }` â€” **flag on or off**. A draft does not lock.
+- One admin is enough. Flag off: `no_show` is 400 `invalid_status`.
+- A change that races a statement being prepared, or a database deadlock, answers 409 `booking_changed`
+  (nothing was written; reload and retry).
 
 ### `actions` on every booking
 
@@ -80,3 +82,17 @@ cancel endpoints: `actions: { canComplete: boolean, canMarkNoShow: boolean }` â€
   both `false` once on a submitted/approved/payable/paid statement.
 
 Show the buttons from `actions`; do not compute windows on the device. Treat a missing `actions` as "flag off".
+
+## Payment approval of a booking group
+
+Approving (or otherwise deciding) a group's payment moves its sessions with it, except: `completed` /
+`no_show` sessions stay; a **cancelled** session stays cancelled (it was dropped and the payment shrunk);
+a `payment_rejected` session follows a changed decision unless its slot has been booked by someone else since.
+
+## Reconciliation (read-only)
+
+`node scripts/trainer-outcome-reconcile.mjs [--json]` compares booking outcomes with sponsor usage, live
+refunds and statement lines and prints each mismatch (count + up to 50 booking ids). It runs in a READ ONLY
+transaction and changes nothing; exit code 2 when something is found. Checks: `sponsor_usage_without_outcome`,
+`sponsored_outcome_without_refund`, `outcome_with_member_refund`, `cancelled_on_statement`,
+`cancelled_paid_without_refund`, `released_usage_still_happened`.
