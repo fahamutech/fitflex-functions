@@ -11,7 +11,8 @@
 //   buyerUserId, cost price, commission, payout, internal note, void reason or a staff surname. App
 //   buyers appear by display name only. `documentJson` builds the document from an allowlist.
 // - "This is not a TRA fiscal receipt." on every document until S10.
-// - Money reads "TSh 95,000"; dates are the EAT calendar; Swahili uses Swahili time ("saa 8:05 mchana").
+// - Money reads "TSh 95,000"; dates are the EAT calendar; Swahili time is the apps' rule (glossary §5a, owner
+//   2026-10-04; fitflexmobile lib/shared/formatters.dart): a 12-hour clock + the part of the day, "2:05 mchana".
 // Every Swahili string here is a DRAFT for native review; legal-ish wording (soldVia, notFiscal) is a
 // draft pending Tanzanian counsel (Q-12).
 import { randomBytes, createHash } from 'node:crypto';
@@ -58,6 +59,7 @@ export const DOC_LABELS = {
     receipt: 'Receipt', invoice: 'Invoice', payment_receipt: 'Payment receipt', statement: 'Statement', order_invoice: 'Invoice', credit_note: 'Credit note',
     saleRef: 'Sale ref {number}', orderRef: 'Order {ref}', forReceipt: 'For receipt {number}', date: 'Date', customer: 'Customer: {name}',
     servedBy: 'Served by {name}', dueBy: 'Due by {date}', soldVia: 'Seller: {business}. Sold through the FitFlex app.', paidBy: 'Paid by {method}',
+    statusCancelledOrder: 'Cancelled', cancelledOrder: 'Cancelled on {date}. This order was cancelled.', watermarkOrder: 'CANCELLED · IMEGHAIRIWA',
     item: 'Item', qty: 'Qty', price: 'Price', discount: 'Discount', amount: 'Amount', vat: 'VAT', subtotal: 'Subtotal', discounts: 'Discounts', total: 'Total',
     includesVat: 'Includes VAT {amount}', vatSummary: 'VAT summary', vatCode: 'Code', vatRate: 'Rate', vatNet: 'Before VAT', exempt: 'Exempt', zeroRated: 'Zero-rated',
     payments: 'Payments', change: 'Change', paidNow: 'Paid now', statusOn: 'Status on {date}', balanceDue: 'Balance due', paidInFull: 'Paid in full on {date}',
@@ -78,12 +80,14 @@ export const DOC_LABELS = {
   sw: {
     receipt: 'Risiti', invoice: 'Ankara', payment_receipt: 'Risiti ya malipo', statement: 'Taarifa ya akaunti', order_invoice: 'Ankara', credit_note: 'Hati ya marejesho',
     saleRef: 'Kumb. ya mauzo {number}', orderRef: 'Oda {ref}', forReceipt: 'Kwa risiti {number}', date: 'Tarehe', customer: 'Mteja: {name}',
-    servedBy: 'Muhudumu: {name}', dueBy: 'Tarehe ya mwisho ya kulipa: {date}', soldVia: 'Muuzaji: {business}. Imeuzwa kupitia app ya FitFlex.', paidBy: 'Imelipwa kwa {method}',
+    servedBy: 'Mhudumu: {name}', dueBy: 'Tarehe ya mwisho ya kulipa: {date}', soldVia: 'Muuzaji: {business}. Imeuzwa kupitia app ya FitFlex.', paidBy: 'Imelipwa kwa {method}',
+    // A cancelled ORDER is "imeghairiwa"; a voided sale or payment stays "imebatilishwa" (Swahili audit #229).
+    statusCancelledOrder: 'Imeghairiwa', cancelledOrder: 'Imeghairiwa tarehe {date}. Oda hii imeghairiwa.', watermarkOrder: 'CANCELLED · IMEGHAIRIWA',
     item: 'Bidhaa', qty: 'Idadi', price: 'Bei', discount: 'Punguzo', amount: 'Kiasi', vat: 'VAT', subtotal: 'Jumla ndogo', discounts: 'Mapunguzo', total: 'Jumla',
     includesVat: 'Inajumuisha VAT {amount}', vatSummary: 'Muhtasari wa VAT', vatCode: 'Msimbo', vatRate: 'Kiwango', vatNet: 'Kabla ya VAT', exempt: 'Msamaha', zeroRated: 'Kiwango sifuri',
     payments: 'Malipo', change: 'Chenji', paidNow: 'Imelipwa sasa', statusOn: 'Hali kufikia {date}', balanceDue: 'Kiasi kinachodaiwa', paidInFull: 'Imelipwa yote tarehe {date}',
-    paidWith: 'Imelipwa kwa {numbers}', paidTowards: 'Imelipia', stillOwed: 'Bado anadaiwa', asOf: 'Hadi {date}', openSales: 'Mauzo ya mkopo ambayo hayajalipwa',
-    recentPayments: 'Malipo (siku 90 zilizopita)', totalOwed: 'Jumla ya deni', daysOverdue: 'Imechelewa siku {n}', sold: 'Imeuzwa', due: 'Mwisho', balance: 'Salio',
+    paidWith: 'Imelipwa kwa {numbers}', paidTowards: 'Imelipia', stillOwed: 'Bado anadaiwa', asOf: 'Kufikia {date}', openSales: 'Mauzo ya mkopo ambayo hayajalipwa',
+    recentPayments: 'Malipo (siku 90 zilizopita)', totalOwed: 'Jumla inayodaiwa', daysOverdue: 'Imechelewa siku {n}', sold: 'Imeuzwa', due: 'Mwisho wa kulipa', balance: 'Salio',
     statusPaid: 'Imelipwa', statusPayLater: 'Mkopo', statusPaidInFull: 'Imelipwa yote', statusCancelled: 'Imebatilishwa',
     cancelled: 'Imebatilishwa tarehe {date}. {business} imebatilisha hati hii.', watermark: 'CANCELLED · IMEBATILISHWA',
     refunded: 'Imerejeshwa {amount} kwa {method}', receivedBy: 'Malipo yamepokelewa na {business}.', notFiscal: 'Hii si risiti ya kodi ya TRA.',
@@ -91,7 +95,7 @@ export const DOC_LABELS = {
     unavailableTitle: 'Kiungo hiki hakipatikani', unavailableBody: 'Huenda muuzaji amekizima. Mwombe akutumie tena.',
     rateLimited: 'Maombi ni mengi mno. Jaribu tena baada ya dakika moja.', serverError: 'Kuna hitilafu. Jaribu tena baadaye.',
     pdfFailedPage: 'PDF imeshindikana kutengenezwa. Bado unaweza kuona ukurasa.', backToPage: 'Rudi kwenye hati', downloadPdf: 'Pakua PDF',
-    tin: 'TIN {tin}', vrn: 'VRN {vrn}', aging: 'Bado haijafika {current} · Siku 1–30 {d1_30} · Siku 31–60 {d31_60} · Siku 61–90 {d61_90} · Zaidi ya siku 90 {d90plus}',
+    tin: 'TIN {tin}', vrn: 'VRN {vrn}', aging: 'Bado muda haujafika {current} · Siku 1–30 {d1_30} · Siku 31–60 {d31_60} · Siku 61–90 {d61_90} · Zaidi ya siku 90 {d90plus}',
     waText: '{business}: {title} {number}, {amount}. Itazame hapa: {url}', smsText: '{business} {title} {number} {amount}: {url}',
     method: { cash: 'Taslimu', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Kadi', bank: 'Benki', other: 'Nyingine' },
     months: ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'],
@@ -111,14 +115,21 @@ const parts = (instant) => {
   const d = new Date(+new Date(instant) + EAT_MS);
   return { y: d.getUTCFullYear(), m: d.getUTCMonth(), day: d.getUTCDate(), h: d.getUTCHours(), min: d.getUTCMinutes() };
 };
+/** The part of the day — the apps' rule (fitflexmobile lib/shared/formatters.dart `_swDayPeriod`). */
+export function swahiliDayPeriod(h) {
+  if (h >= 5 && h < 12) return 'asubuhi';
+  if (h >= 12 && h < 16) return 'mchana';
+  if (h >= 16 && h < 19) return 'jioni';
+  return 'usiku';
+}
 /**
- * Swahili time (glossary §5a "Time of day: Swahili style"): the day starts at 06:00 = saa 12, so
- * 07:00 = saa 1 and 14:05 = saa 8:05; the part of the day disambiguates. Draft for native review.
+ * Swahili time of day as the apps write it (glossary §5a, owner 2026-10-04; formatters.dart
+ * `formatTimeOfDay`): a 12-hour clock with the part of the day — 14:05 → "2:05 mchana", 05:30 →
+ * "5:30 asubuhi", 00:15 → "12:15 usiku". Not the six-hour Swahili offset. Draft for native review.
  */
 export function swahiliTime(h, min) {
-  const hour = ((h + 6) % 12) || 12;
-  const period = h < 4 ? 'usiku' : h < 7 ? 'alfajiri' : h < 12 ? 'asubuhi' : h < 16 ? 'mchana' : h < 19 ? 'jioni' : 'usiku';
-  return `saa ${hour}:${String(min).padStart(2, '0')} ${period}`;
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(min).padStart(2, '0')} ${swahiliDayPeriod(h)}`;
 }
 /** "19 Oct 2026" / "19 Okt 2026" for an instant, or for a YYYY-MM-DD day. */
 export function formatDay(value, lang = 'en') {
@@ -131,7 +142,7 @@ export function formatDay(value, lang = 'en') {
   const p = parts(value);
   return `${p.day} ${months[p.m]} ${p.y}`;
 }
-/** "19 Oct 2026, 14:05" / "19 Okt 2026, saa 8:05 mchana" (EAT). */
+/** "19 Oct 2026, 14:05" / "19 Okt 2026, 2:05 mchana" (EAT). */
 export function formatDateTime(instant, lang = 'en') {
   if (instant == null) return '';
   const p = parts(instant);
@@ -320,15 +331,51 @@ export function orderInvoiceDocument(src, lang = 'en') {
 /** The document's title in a language: "Receipt", "Ankara", … */
 export const titleOf = (doc, lang) => label(lang, doc.docType);
 
+/** Status label key; a cancelled app ORDER reads "Imeghairiwa", a voided sale/payment "Imebatilishwa". */
+export const STATUS_KEYS = { paid: 'statusPaid', pay_later: 'statusPayLater', paid_in_full: 'statusPaidInFull', cancelled: 'statusCancelled' };
+export const statusKeyOf = doc => (doc.status === 'cancelled' && doc.docType === 'order_invoice' ? 'statusCancelledOrder' : STATUS_KEYS[doc.status]);
+/** The cancelled banner and watermark for a document (order: "imeghairiwa"; sale/payment: "imebatilishwa"). */
+export function cancelledBanner(doc, lang) {
+  const date = doc.cancelledAt ? formatDay(doc.cancelledAt, lang) : '';
+  return doc.docType === 'order_invoice' ? label(lang, 'cancelledOrder', { date }) : label(lang, 'cancelled', { date, business: doc.seller?.businessName || '' });
+}
+export const watermarkOf = doc => DOC_LABELS.en[doc.docType === 'order_invoice' ? 'watermarkOrder' : 'watermark'];
+
+// ── GSM-7 (SMS) ─────────────────────────────────────────────────────────────
+
+const GSM_BASIC = new Set([...'@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà']);
+const GSM_EXTENDED = new Set([...'^{}\\[~]|€']);
+const GSM_REPLACE = [[/[‘’‚‛′]/g, "'"], [/[“”„‟″]/g, '"'], [/[–—―−]/g, '-'], [/…/g, '...'], [/[\u00A0\u2000-\u200B\u202F]/g, ' ']];
+/**
+ * Text that stays in the GSM-7 alphabet (Swahili audit #229 item 12): curly quotes and dashes become
+ * straight ones, the ellipsis three dots, and anything else outside GSM-7 (emoji, other scripts) is removed.
+ */
+export function gsmSafe(text) {
+  let s = String(text ?? '');
+  for (const [re, to] of GSM_REPLACE) s = s.replace(re, to);
+  return [...s].filter(c => GSM_BASIC.has(c) || GSM_EXTENDED.has(c)).join('').replace(/ {2,}/g, ' ').trim();
+}
+/** GSM-7 length (extension characters take 2), or null when the text is not GSM-7 at all. */
+export function gsmLength(text) {
+  let n = 0;
+  for (const c of String(text)) {
+    if (GSM_BASIC.has(c)) n += 1;
+    else if (GSM_EXTENDED.has(c)) n += 2;
+    else return null;
+  }
+  return n;
+}
+
 // ── share texts (§2.5; the client never builds them) ────────────────────────
 
 /** The amount a share message names: total owed for a statement, else the total. */
 const shareAmount = doc => (doc.docType === 'statement' ? doc.statement?.totalOwedTzs ?? doc.totalTzs : doc.totalTzs);
 
 /**
- * WhatsApp and SMS texts in one language. SMS targets ≤ 160 GSM-7 characters: the business name is cut to
- * 24 characters with "..." (three dots: "…" is not GSM-7 and would make the SMS UCS-2, 70 characters),
- * then the amount is left out if still too long.
+ * WhatsApp and SMS texts in one language. SMS stays one GSM-7 segment (≤ 160) where possible: the business
+ * name is first made GSM-safe (gsmSafe: straight quotes, no emoji — any non-GSM character would turn the
+ * whole SMS into UCS-2, 70 per segment), cut to 24 characters with "..." (three dots: "…" is not GSM-7),
+ * then the amount is left out if still too long. Lengths are counted in GSM-7 units (gsmLength).
  */
 export function shareTexts(doc, url, lang) {
   const l = langOf(lang);
@@ -337,8 +384,10 @@ export function shareTexts(doc, url, lang) {
   const number = doc.number || formatDay(doc.statement?.asOf || doc.issuedAt, l);
   const amount = money(shareAmount(doc));
   const whatsapp = label(l, 'waText', { business, title, number, amount, url });
-  const shortBusiness = business.length > SMS_BUSINESS_MAX ? `${business.slice(0, SMS_BUSINESS_MAX - 3).trimEnd()}...` : business;
-  let sms = label(l, 'smsText', { business: shortBusiness, title, number, amount, url });
-  if (sms.length > SMS_MAX) sms = label(l, 'smsText', { business: shortBusiness, title, number, amount: '', url }).replace(/\s+:/, ':').replace(/ {2,}/g, ' ');
+  const safeBusiness = gsmSafe(business) || 'FitFlex';
+  const shortBusiness = safeBusiness.length > SMS_BUSINESS_MAX ? `${safeBusiness.slice(0, SMS_BUSINESS_MAX - 3).trimEnd()}...` : safeBusiness;
+  const smsNumber = gsmSafe(number);
+  let sms = label(l, 'smsText', { business: shortBusiness, title, number: smsNumber, amount, url });
+  if ((gsmLength(sms) ?? Infinity) > SMS_MAX) sms = label(l, 'smsText', { business: shortBusiness, title, number: smsNumber, amount: '', url }).replace(/\s+:/, ':').replace(/ {2,}/g, ' ');
   return { whatsapp, sms };
 }

@@ -23,8 +23,11 @@ import {
 } from '../functions/vendor-documents.mjs';
 import { createVendorLimiter } from '../src/shared/vendor-rate-limit.mjs';
 import {
-  newToken, hashToken, validToken, publicBaseUrl, swahiliTime, formatDateTime, formatDay, shareTexts, pdfFileName, invoiceNumber,
+  newToken, hashToken, validToken, publicBaseUrl, swahiliTime, formatDateTime, formatDay, shareTexts, pdfFileName, invoiceNumber, gsmSafe, gsmLength,
+  saleDocument,
 } from '../src/shared/vendor-documents.mjs';
+import { renderDocumentPdf } from '../src/shared/vendor-document-pdf.mjs';
+import PDFDocument from 'pdfkit';
 import { renderUnavailable } from '../src/shared/vendor-document-html.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
@@ -232,14 +235,19 @@ test('PUBLIC_API_URL: no value (or a bad one) is null — never the bfast/smarts
   assert.equal(/bfast|smartstock/i.test(src), false, 'no fallback host in the documents code');
 });
 
-test('dates: EAT calendar; Swahili time (14:05 → saa 8:05 mchana) and Swahili months', () => {
-  assert.equal(swahiliTime(14, 5), 'saa 8:05 mchana');
-  assert.equal(swahiliTime(7, 0), 'saa 1:00 asubuhi');
-  assert.equal(swahiliTime(18, 30), 'saa 12:30 jioni');
-  assert.equal(swahiliTime(21, 15), 'saa 3:15 usiku');
-  assert.equal(swahiliTime(5, 0), 'saa 11:00 alfajiri');
+test('dates: EAT calendar; Swahili time is the apps\' rule — 12-hour clock + part of the day (formatters.dart)', () => {
+  // Same boundaries as fitflexmobile lib/shared/formatters.dart: 5–11 asubuhi, 12–15 mchana, 16–18 jioni, else usiku.
+  assert.equal(swahiliTime(14, 5), '2:05 mchana');
+  assert.equal(swahiliTime(5, 30), '5:30 asubuhi');
+  assert.equal(swahiliTime(4, 59), '4:59 usiku');
+  assert.equal(swahiliTime(11, 59), '11:59 asubuhi');
+  assert.equal(swahiliTime(12, 0), '12:00 mchana');
+  assert.equal(swahiliTime(16, 0), '4:00 jioni');
+  assert.equal(swahiliTime(18, 59), '6:59 jioni');
+  assert.equal(swahiliTime(19, 0), '7:00 usiku');
+  assert.equal(swahiliTime(0, 15), '12:15 usiku');
   assert.equal(formatDateTime('2026-10-19T11:05:00Z', 'en'), '19 Oct 2026, 14:05');
-  assert.equal(formatDateTime('2026-10-19T11:05:00Z', 'sw'), '19 Okt 2026, saa 8:05 mchana');
+  assert.equal(formatDateTime('2026-10-19T11:05:00Z', 'sw'), '19 Okt 2026, 2:05 mchana');
   assert.equal(formatDay('2026-08-03', 'sw'), '3 Ago 2026');
   // 21:30 UTC is already the next EAT day.
   assert.equal(formatDay('2026-10-19T21:30:00Z', 'en'), '20 Oct 2026');
@@ -260,6 +268,14 @@ test('share texts: both languages, SMS ≤ 160 GSM-7 characters (business cut wi
   assert.equal(pdfFileName({ docType: 'receipt', number: 'R-000123', seller: { businessName: 'Dar Fitness & Gear!' } }), 'R-000123_dar-fitness-gear.pdf');
   assert.equal(pdfFileName({ docType: 'statement', customer: { name: 'Juma Ali Mussa' }, statement: { asOf: '2026-10-19T21:30:00Z' } }), 'statement_JAM_2026-10-20.pdf');
   assert.equal(invoiceNumber(45), 'INV-000045');
+  // Swahili audit #229 item 12: a curly quote or emoji in the business name never turns the SMS into UCS-2.
+  const fancy = shareTexts({ ...doc, seller: { businessName: 'Mama’s “Best” 💪 Shop' } }, url, 'sw');
+  assert.equal(fancy.sms, `Mama's "Best" Shop Risiti R-000123 TSh 95,000: ${url}`);
+  assert.notEqual(gsmLength(fancy.sms), null, 'all GSM-7');
+  assert.ok(gsmLength(fancy.sms) <= 160);
+  assert.match(fancy.whatsapp, /^Mama’s “Best” 💪 Shop:/, 'WhatsApp keeps the name as written');
+  assert.equal(gsmSafe('Duka – la “Juma”…'), 'Duka - la "Juma"...');
+  assert.equal(gsmLength('[a]'), 5, 'extension characters count twice');
 });
 
 // ── gating ───────────────────────────────────────────────────────────────────
@@ -330,7 +346,9 @@ test('share a receipt: one link, token returned once, only its hash stored; publ
   assert.match(sw.text, /<html lang="sw">/);
   assert.match(sw.text, new RegExp(`<h1>Risiti ${sale.number}</h1>`));
   assert.match(sw.text, /Hii si risiti ya kodi ya TRA\./);
-  assert.match(sw.text, /saa \d{1,2}:\d{2} (asubuhi|mchana|jioni|usiku|alfajiri)/);
+  assert.match(sw.text, /Tarehe: \d+ \w+ \d{4}, \d{1,2}:\d{2} (asubuhi|mchana|jioni|usiku)</);
+  assert.equal(/saa \d/.test(sw.text), false, 'not the six-hour Swahili clock');
+  assert.match(sw.text, /Mhudumu: Asha/);
   assert.match(sw.text, /Taslimu/);
   assert.equal(/>Receipt</.test(sw.text), false, 'no English label left on the Swahili page');
   const odd = await open(`/d/${token}?lang=fr`);
@@ -847,3 +865,95 @@ test('#229 L5: the buyer HTML invoice carries nosniff, frame-ancestors none and 
   assert.equal(html.headers['Referrer-Policy'], 'no-referrer');
   assert.equal(html.headers['Cache-Control'], 'no-store, private');
 });
+
+// ── Swahili audit #229 ───────────────────────────────────────────────────────
+
+test('#229 Swahili: statement labels (Kufikia, Mwisho wa kulipa, Jumla inayodaiwa, Bado muda haujafika); a cancelled ORDER reads Imeghairiwa, a voided sale Imebatilishwa', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v, { name: 'Ball', priceTzs: 30_000, stock: 50 });
+  const customer = await addCustomer(as(v), { name: 'Saidi Ally' });
+  await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], [], { kind: 'credit', customerId: customer.id }));
+  const st = await call(vendorShareStatement, as(v), { params: { id: customer.id }, body: { lang: 'sw' } });
+  const page = (await open(`/d/${tokenOf(st.body.url)}`)).text;
+  for (const text of ['Kufikia ', 'Mwisho wa kulipa', 'Jumla inayodaiwa', 'Bado muda haujafika']) assert.ok(page.includes(text), text);
+  for (const old of ['Hadi ', 'Jumla ya deni', 'Bado haijafika']) assert.equal(page.includes(old), false, old);
+
+  const buyer = await user('member', { displayName: 'Cancel Buyer' });
+  const order = await paidOrder(buyer, [{ productId: p.id, qty: 1 }]);
+  const link = await call(vendorShareOrder, as(v), { params: { id: order.id }, body: { lang: 'sw' } });
+  assert.equal(link.status, 201);
+  const cancelled = await shopService.updateOrderStatus({ orderId: order.id, status: 'cancelled', actorId: v, reason: 'out of stock' });
+  assert.equal(cancelled.error, undefined, JSON.stringify(cancelled));
+  const orderPage = (await open(`/d/${tokenOf(link.body.url)}`)).text;
+  assert.match(orderPage, /class="badge cancelled">Imeghairiwa</);
+  assert.match(orderPage, /Imeghairiwa tarehe \d+ \w+ \d{4}\. Oda hii imeghairiwa\./);
+  assert.equal(orderPage.includes('Imebatilishwa'), false);
+  assert.equal(orderPage.includes('out of stock'), false, 'never the reason');
+  assert.match(pdfText((await open(`/d/${tokenOf(link.body.url)}.pdf?lang=sw`)).buffer), /CANCELLED ·[\s\S]*IMEGHAIRIWA/);
+  assert.match((await open(`/d/${tokenOf(link.body.url)}?lang=en`)).text, /Cancelled on \d+ \w+ \d{4}\. This order was cancelled\./);
+});
+
+/** Every text run of a pdfkit PDF with its box: { page, x, y, w, text } (fonts read from the page resources). */
+function pdfRuns(buffer) {
+  const s = buffer.toString('latin1');
+  const objects = new Map([...s.matchAll(/\n(\d+) 0 obj\n([\s\S]*?)\nendobj/g)].map(m => [m[1], m[2]]));
+  const measure = new PDFDocument({ autoFirstPage: false });
+  const runs = [];
+  let page = 0;
+  for (const [, body] of objects) {
+    if (!/\/Type \/Page\b/.test(body)) continue;
+    page += 1;
+    const fonts = new Map();
+    const res = objects.get(body.match(/\/Resources (\d+) 0 R/)?.[1]) || body;
+    const fontDict = res.match(/\/Font <<([\s\S]*?)>>/)?.[1] || objects.get(res.match(/\/Font (\d+) 0 R/)?.[1]) || '';
+    for (const f of fontDict.matchAll(/\/(F\d+) (\d+) 0 R/g)) fonts.set(f[1], objects.get(f[2]).match(/\/BaseFont \/([\w-]+)/)[1]);
+    for (const ref of (body.match(/\/Contents \[?([\d\s0R]+)\]?/)?.[1] || '').matchAll(/(\d+) 0 R/g)) {
+      const obj = objects.get(ref[1]);
+      const raw = obj.slice(obj.indexOf('stream') + 7, obj.lastIndexOf('endstream')).replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+      const data = zlib.inflateSync(Buffer.from(raw, 'latin1')).toString('latin1');
+      let font = 'Helvetica', size = 10, x = 0, y = 0;
+      for (const op of data.matchAll(/\/(F\d+) ([\d.]+) Tf|1 0 0 1 ([-\d.]+) ([-\d.]+) Tm|\[(.*?)\] TJ/g)) {
+        if (op[1]) { font = fonts.get(op[1]); size = Number(op[2]); continue; }
+        if (op[3]) { x = Number(op[3]); y = Number(op[4]); continue; }
+        const text = [...op[5].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join('');
+        const kern = [...op[5].matchAll(/>\s*(-?[\d.]+)\s*</g)].reduce((t, k) => t + Number(k[1]), 0);
+        measure.font(font).fontSize(size);
+        runs.push({ page, x, y, w: measure.widthOfString(text) - (kern / 1000) * size, text });
+      }
+    }
+  }
+  return runs;
+}
+
+test('#229 PDF layout: a Swahili A4 PDF with 7-digit amounts and a long payment reference has no overlapping text on any line', async () => {
+  const lines = [
+    { lineNo: 1, nameSnapshot: 'Mashine ya kukimbia ya kisasa yenye skrini kubwa', variant: 'Nyeusi', qty: 1, unitPriceTzs: 7_654_321, discountTzs: 1_234_567, lineTotalTzs: 6_419_754, saleDiscountShareTzs: 0, vatCode: 'A', vatRatePct: 18, vatTzs: includedVatOf(6_419_754) },
+    { lineNo: 2, nameSnapshot: 'Kamba', variant: '', qty: 3, unitPriceTzs: 1_000_000, discountTzs: 0, lineTotalTzs: 3_000_000, saleDiscountShareTzs: 0, vatCode: 'E', vatRatePct: 0, vatTzs: 0 },
+  ];
+  const sale = { kind: 'credit', status: 'completed', number: 'R-000999', invoiceNumber: 'INV-000999', balanceTzs: 1_419_754, dueDate: '2026-11-30', soldAt: '2026-10-20T11:05:00Z', subtotalTzs: 10_654_321, lineDiscountTzs: 1_234_567, discountTzs: 0, totalTzs: 9_419_754, paidTzs: 8_000_000, allocatedTzs: 0, changeTzs: 0 };
+  const doc = saleDocument({
+    sale, lines, today: '2026-10-20', allocations: [], customer: { name: 'Mteja Mwenye Jina Refu Sana' }, servedByName: 'Neema',
+    payments: [{ position: 1, method: 'airtel_money', reference: 'AIRTEL-REF-00012345678901234567890', amountTzs: 7_000_000 }, { position: 2, method: 'bank', reference: 'CRDB TT 2026/10/20 KARIAKOO BRANCH 0001', amountTzs: 1_000_000 }],
+    seller: { businessName: 'Duka Kubwa la Vifaa vya Mazoezi Kariakoo', contactNumber: '+255700000000', tin: '123456789', vrn: '40012345X' },
+  }, 'sw');
+  const pdf = await renderDocumentPdf(doc, { lang: 'sw' });
+  const runs = pdfRuns(pdf);
+  const all = runs.map(r => r.text).join('|');
+  assert.match(all, /Inajumuisha VAT TSh 979,285/);
+  assert.match(all, /Airtel Money \(AIRTEL-\|?REF-0001/, 'the long reference wraps inside its column');
+  assert.match(all, /TSh 9,419,754/);
+  const byLine = new Map();
+  for (const r of runs) {
+    const key = `${r.page}:${Math.round(r.y)}`;
+    byLine.set(key, [...(byLine.get(key) || []), r]);
+  }
+  for (const [key, row] of byLine) {
+    row.sort((a, b) => a.x - b.x);
+    for (let i = 1; i < row.length; i += 1) {
+      const prev = row[i - 1];
+      assert.ok(prev.x + prev.w <= row[i].x + 0.5, `overlap on ${key}: "${prev.text}" (${prev.x.toFixed(1)}+${prev.w.toFixed(1)}) runs into "${row[i].text}" at ${row[i].x.toFixed(1)}`);
+    }
+  }
+});
+const includedVatOf = net => Math.floor((2 * net * 1800 + 11800) / (2 * 11800));

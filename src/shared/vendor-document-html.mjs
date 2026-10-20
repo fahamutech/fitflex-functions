@@ -2,7 +2,7 @@
 // view the portal shows in a sandboxed iframe) and the error pages. One template for every document type,
 // from the document JSON (src/shared/vendor-documents.mjs). No JavaScript, no third-party requests (only
 // the vendor's https logo), every value escaped. Design spec §4, §5, §9.
-import { DOC_LABELS, label, langOf, money, formatDay, formatDateTime, methodLabel, titleOf } from './vendor-documents.mjs';
+import { DOC_LABELS, label, langOf, money, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner } from './vendor-documents.mjs';
 
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ESC[c]);
@@ -45,7 +45,6 @@ function page({ lang, title, body, bar = '' }) {
 <title>${esc(title)}</title><style>${STYLE}</style></head><body>${bar}${body}</body></html>`;
 }
 
-const statusKey = { paid: 'statusPaid', pay_later: 'statusPayLater', paid_in_full: 'statusPaidInFull', cancelled: 'statusCancelled' };
 
 function sellerBlock(doc, lang) {
   const s = doc.seller || {};
@@ -171,9 +170,8 @@ function documentBody(doc, l, mode) {
     doc.dueDate ? `<div>${L(l, 'dueBy', { date: formatDay(doc.dueDate, l) })}</div>` : '',
     doc.servedBy?.firstName ? `<div>${L(l, 'servedBy', { name: doc.servedBy.firstName })}</div>` : '',
   ].join('');
-  const status = doc.status ? `<span class="badge ${esc(doc.status)}">${L(l, statusKey[doc.status])}</span>` : '';
-  const banner = doc.status === 'cancelled'
-    ? `<div class="banner" role="note">${L(l, 'cancelled', { date: doc.cancelledAt ? formatDay(doc.cancelledAt, l) : '', business })}</div>` : '';
+  const status = doc.status ? `<span class="badge ${esc(doc.status)}">${L(l, statusKeyOf(doc))}</span>` : '';
+  const banner = doc.status === 'cancelled' ? `<div class="banner" role="note">${esc(cancelledBanner(doc, l))}</div>` : '';
   const footer = [
     ['receipt', 'payment_receipt'].includes(doc.docType) && doc.status !== 'cancelled' ? `<div>${L(l, 'receivedBy', { business })}</div>` : '',
     `<div>${L(l, 'notFiscal')}</div>`,

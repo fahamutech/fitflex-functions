@@ -5,16 +5,17 @@
 // logo is NOT embedded: that would make the server fetch a vendor-supplied URL (SSRF); the HTML page
 // shows it instead. Design spec §8.
 import PDFDocument from 'pdfkit';
-import { label, langOf, money, formatDay, formatDateTime, methodLabel, titleOf, DOC_LABELS } from './vendor-documents.mjs';
+import { label, langOf, money, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf } from './vendor-documents.mjs';
 
 const MM = 72 / 25.4;
 const GREEN = '#1F7A3A';
 const GREY = '#4B5563';
 const BLACK = '#111111';
-const statusKey = { paid: 'statusPaid', pay_later: 'statusPayLater', paid_in_full: 'statusPaidInFull', cancelled: 'statusCancelled' };
 const vatRate = (lang, code, ratePct) => (code === 'E' || ratePct == null ? label(lang, 'exempt') : `${Number(ratePct)}%`);
 const lineName = l => `${l.name}${l.variant ? ` (${l.variant})` : ''}`;
 const amountOnly = v => Number(v || 0).toLocaleString('en-US');
+/** A4 totals/payments rows: label column (wraps) and a fixed amount column on the right, 12pt apart. */
+export const PAIR_COLUMNS = (left, width) => ({ labelX: left + width * 0.3, labelW: width * 0.45 - 12, amountX: left + width * 0.75, amountW: width * 0.25 });
 
 function collect(doc) {
   return new Promise((resolve, reject) => {
@@ -61,7 +62,7 @@ function renderA4(doc, d, lang, root) {
   for (const t of [d.saleRef && label(lang, 'saleRef', { number: d.saleRef }), d.orderShortRef && label(lang, 'orderRef', { ref: d.orderShortRef })]) {
     if (t) P(t, { x: left + width / 2 + 8, width: half, align: 'right' });
   }
-  if (d.status) { doc.font('Helvetica-Bold').fillColor(d.status === 'cancelled' ? '#B91C1C' : BLACK); P(label(lang, statusKey[d.status]), { x: left + width / 2 + 8, width: half, align: 'right' }); }
+  if (d.status) { doc.font('Helvetica-Bold').fillColor(d.status === 'cancelled' ? '#B91C1C' : BLACK); P(label(lang, statusKeyOf(d)), { x: left + width / 2 + 8, width: half, align: 'right' }); }
   doc.y = Math.max(leftEnd, doc.y) + 6;
   doc.save().moveTo(left, doc.y).lineTo(left + width, doc.y).lineWidth(1.5).strokeColor(GREEN).stroke().restore();
   doc.y += 8;
@@ -77,7 +78,7 @@ function renderA4(doc, d, lang, root) {
   doc.y += 6;
 
   if (d.status === 'cancelled') {
-    const text = label(lang, 'cancelled', { date: d.cancelledAt ? formatDay(d.cancelledAt, lang) : '', business });
+    const text = cancelledBanner(d, lang);
     const h = doc.heightOfString(text, { width: width - 16 }) + 12;
     ensure(h);
     doc.save().rect(left, doc.y, width, h).lineWidth(1.5).strokeColor('#B91C1C').stroke().restore();
@@ -119,15 +120,19 @@ function renderA4(doc, d, lang, root) {
     doc.x = left;
   }
   const heading2 = (text) => { ensure(30); doc.y += 6; doc.font('Helvetica-Bold').fontSize(11).fillColor(BLACK); P(text, {}, 'H2'); doc.font('Helvetica').fontSize(10); };
+  // A label and its amount (Swahili audit #229 item 13): the label wraps inside its own column, the amount
+  // has a fixed column on the right, and the row is as tall as the taller of the two — they never overlap.
   const pair = (a, b, { bold = false } = {}) => {
-    ensure(16);
     doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 12 : 10).fillColor(BLACK);
+    const { labelX, labelW, amountX, amountW } = PAIR_COLUMNS(left, width);
+    const h = Math.max(doc.heightOfString(a || ' ', { width: labelW }), b ? doc.heightOfString(b, { width: amountW }) : 0);
+    ensure(h + 3);
     const y = doc.y;
     root.add(doc.struct('P', () => {
-      doc.text(a, left + width / 2, y, { width: width / 4, lineBreak: false });
-      doc.text(b, left + (3 * width) / 4, y, { width: width / 4, align: 'right', lineBreak: false });
+      doc.text(a, labelX, y, { width: labelW });
+      if (b) doc.text(b, amountX, y, { width: amountW, align: 'right' });
     }));
-    doc.y = y + (bold ? 17 : 14);
+    doc.y = y + h + (bold ? 5 : 3);
     doc.x = left;
     doc.font('Helvetica').fontSize(10);
   };
@@ -224,7 +229,7 @@ function finishPages(doc, d, lang, { footer = true } = {}) {
       doc.save();
       doc.rotate(-35, { origin: [doc.page.width / 2, doc.page.height / 2] });
       doc.fillOpacity(0.12).fillColor('#B91C1C').font('Helvetica-Bold').fontSize(doc.page.width > 400 ? 44 : 16);
-      doc.text(DOC_LABELS.en.watermark, 0, doc.page.height / 2 - 20, { width: doc.page.width, align: 'center', lineBreak: false });
+      doc.text(watermarkOf(d), 0, doc.page.height / 2 - 20, { width: doc.page.width, align: 'center', lineBreak: false });
       doc.restore();
     }
     if (footer) {
@@ -265,8 +270,8 @@ function render80(doc, d, lang, root) {
   P(d.number ? `${titleOf(d, lang)} ${d.number}` : titleOf(d, lang), { bold: true, size: 9 }, 'H1');
   if (d.saleRef) P(label(lang, 'saleRef', { number: d.saleRef }));
   if (d.orderShortRef) P(label(lang, 'orderRef', { ref: d.orderShortRef }));
-  if (d.status) P(label(lang, statusKey[d.status]), { bold: true });
-  if (d.status === 'cancelled') P(label(lang, 'cancelled', { date: d.cancelledAt ? formatDay(d.cancelledAt, lang) : '', business }), { bold: true });
+  if (d.status) P(label(lang, statusKeyOf(d)), { bold: true });
+  if (d.status === 'cancelled') P(cancelledBanner(d, lang), { bold: true });
   P(formatDateTime(d.docType === 'statement' ? d.statement.asOf : d.issuedAt, lang));
   if (d.customer?.name) P(label(lang, 'customer', { name: d.customer.name }));
   if (d.dueDate) P(label(lang, 'dueBy', { date: formatDay(d.dueDate, lang) }));
