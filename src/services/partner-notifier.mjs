@@ -228,6 +228,36 @@ export function createPartnerNotifier({
         data: { saleId: d.saleId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
       };
     },
+    // Vendor tools · S4 (Q-9): the daily overdue digest — pay-later sales that became overdue today, to the
+    // vendor and their staff with `customers` only (never to the customer). Opens Customers → Owed.
+    // Same language rule as vendor_low_stock. Swahili is a DRAFT for native review (spec §11.7).
+    vendor_customers_overdue: (d, locale) => {
+      const n = Number(d.count || 0);
+      const amount = tzs(Number(d.totalTzs || 0));
+      const en = { title: n === 1 ? '1 pay-later sale is now overdue' : `${n} pay-later sales are now overdue`, body: `${amount} is past its due date. See who owes you.` };
+      const sw = { title: `Mauzo ${n} ya mkopo yamechelewa`, body: `${amount} imepita tarehe ya mwisho. Ona wanaokudai.` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_customers_overdue',
+        title: text.title,
+        body: text.body,
+        data: { count: String(n), totalTzs: String(Number(d.totalTzs || 0)), open: 'customers', view: 'owed', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
+    // Vendor tools · S4: a staff member voided a customer payment (as vendor_sale_voided). Swahili is a DRAFT.
+    vendor_customer_payment_voided: (d, locale) => {
+      const who = d.voidedByName || null;
+      const amount = tzs(Number(d.amountTzs || 0));
+      const en = { title: `Payment ${d.number} voided`, body: `${who || 'A staff member'} voided payment ${d.number} (${amount}). Reason: ${d.reason || '-'}` };
+      const sw = { title: `Malipo ${d.number} yamebatilishwa`, body: `${who || 'Mfanyakazi'} amebatilisha malipo ${d.number} (${amount}). Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_customer_payment_voided',
+        title: text.title,
+        body: text.body,
+        data: { customerId: d.customerId ?? '', paymentId: d.paymentId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
   };
 
   /** Something happened in a vendor's shop. Events with no message here stay in the shop's own list only. */

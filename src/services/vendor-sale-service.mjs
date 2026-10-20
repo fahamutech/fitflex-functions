@@ -9,6 +9,8 @@
 import { parseSale, saleFingerprint, soldAtOutOfRange, clampSoldAt, parseVoid, SALES_PAGE_DEFAULT, SALES_PAGE_MAX } from '../shared/vendor-sale.mjs';
 import { eatDayStart } from '../shared/vendor-stock.mjs';
 import { eatDate } from '../shared/vendor-order-view.mjs';
+import { addDays, dueDateOutOfRange, DEFAULT_DUE_DAYS } from '../shared/vendor-customer.mjs';
+import { vendorCustomersOn } from '../shared/feature-flags.mjs';
 
 const DAY_MS = 86_400_000;
 const STATUSES = new Set(['completed', 'voided']);
@@ -19,16 +21,25 @@ export function createVendorSaleService({
   afterStockMoved = async () => {},
   // Tell the vendor account something (shopService.notifyVendor: shop list + push). Best effort.
   notifyVendor = async () => {},
+  // S4: customers and pay later (VENDOR_TOOLS + VENDOR_CUSTOMERS).
+  customersOn = vendorCustomersOn,
   now = () => new Date(),
 }) {
   async function lowStockCheck(productIds) {
     try { await afterStockMoved(productIds); } catch (err) { console.warn('[vendor-sales] low-stock check failed:', err?.message); }
   }
 
-  /** POST /vendor/sales → { sale, status: 201 | 200 (replay) } or { error, status, ... }. */
-  async function recordSale({ vendorId, actorId, body }) {
+  /**
+   * POST /vendor/sales → { sale, status: 201 | 200 (replay) } or { error, status, ... }.
+   * S4: `canCredit` = the caller also holds `customers` (the vendor account always does). A sale that
+   * names a customer or is pay later needs VENDOR_CUSTOMERS (off → 404 feature_disabled); pay later
+   * without `customers` → 403 credit_not_allowed. Both are checked before a replay is answered.
+   */
+  async function recordSale({ vendorId, actorId, body, canCredit = false }) {
     const sale = parseSale(body || {});
     if (sale.error) return sale;
+    if ((sale.kind === 'credit' || sale.customerId) && !customersOn()) return { error: 'feature_disabled', status: 404, feature: 'customers' };
+    if (sale.kind === 'credit' && !canCredit) return { error: 'credit_not_allowed', status: 403, requiredPermission: 'customers' };
     const fingerprint = saleFingerprint(sale);
     // A retry of a sale already recorded gets that sale, even if it is now older than the window.
     const earlier = await store.replayOf(vendorId, sale.clientRef, fingerprint);
@@ -39,6 +50,13 @@ export function createVendorSaleService({
     const outOfRange = soldAtOutOfRange(sale.soldAt, at);
     if (outOfRange) return outOfRange;
     Object.assign(sale, clampSoldAt(sale.soldAt, at));
+    if (sale.kind === 'credit') {
+      // Due date: from the sale's EAT day up to a year later; default that day + 7 (Q-10).
+      const saleDay = eatDate(sale.soldAt);
+      sale.dueDate ||= addDays(saleDay, DEFAULT_DUE_DAYS);
+      const outOfRange = dueDateOutOfRange(sale.dueDate, saleDay);
+      if (outOfRange) return outOfRange;
+    }
     const out = await store.record({ vendorId, actorId, sale, fingerprint });
     if (out.error) return out;
     if (!out.replayed) await lowStockCheck(out.productIds);
@@ -55,6 +73,13 @@ export function createVendorSaleService({
     if (from && to && from >= to) return { error: 'invalid_date', status: 400, field: 'to' };
     const status = query.status == null || query.status === '' || query.status === 'all' ? null : String(query.status);
     if (status && !STATUSES.has(status)) return { error: 'invalid_status', status: 400, allowed: ['completed', 'voided', 'all'] };
+    let customerId = null;
+    if (query.customerId != null && query.customerId !== '') {
+      if (!customersOn()) return { error: 'feature_disabled', status: 404, feature: 'customers' };
+      customerId = String(query.customerId);
+    }
+    const kind = query.kind == null || query.kind === '' || query.kind === 'all' ? null : String(query.kind);
+    if (kind && !['cash', 'credit'].includes(kind)) return { error: 'invalid_kind', status: 400, allowed: ['cash', 'credit', 'all'] };
     let createdBy = null;
     if (query.createdBy != null && query.createdBy !== '') {
       if (query.createdBy !== 'me') return { error: 'invalid_created_by', status: 400, allowed: ['me'] };
@@ -62,7 +87,7 @@ export function createVendorSaleService({
     }
     const limit = query.limit == null || query.limit === '' ? SALES_PAGE_DEFAULT : Number(query.limit);
     if (!Number.isInteger(limit) || limit < 1) return { error: 'invalid_limit', status: 400, max: SALES_PAGE_MAX };
-    return store.list({ vendorId, from, to, status, createdBy, limit: Math.min(limit, SALES_PAGE_MAX), cursor: query.cursor || null });
+    return store.list({ vendorId, from, to, status, createdBy, customerId, kind, limit: Math.min(limit, SALES_PAGE_MAX), cursor: query.cursor || null });
   }
 
   /** GET /vendor/sales/:id. Another vendor's sale → 404 (not found). */

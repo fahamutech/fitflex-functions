@@ -7,9 +7,11 @@
 //   Σ qty × unit price, before any discount; the sale discount comes off after line discounts.
 // - Payment references are required for mobile money and bank, optional for card and other.
 // - A sale whose total is 0 is allowed, with no payments. Only cash may exceed its share
-//   (it gives change); Σ payments below the total → 409 payment_short (no pay-later before S4).
+//   (it gives change); Σ payments below the total → 409 payment_short (a cash sale; S4 pay later is kind credit).
 // - soldAt from 7 days in the past (offline sales sync late) to 24 hours in the future: a device clock
 //   that runs ahead is clamped to the server's now and the device's value kept as clientSoldAt (contract check #214).
+// - S4 (2026-10-20): kind credit = pay later. A credit sale names a customer and a due date, is paid
+//   less than its total (possibly nothing), never gives change; balanceTzs = total − paid.
 import { createHash } from 'node:crypto';
 
 export const PAYMENT_METHODS = ['cash', 'mpesa', 'airtel_money', 'mixx', 'halopesa', 'card', 'bank', 'other'];
@@ -110,7 +112,33 @@ export function parseSale(body = {}) {
   const note = typeof body.note === 'string' && body.note.trim() ? body.note.trim() : null;
   if (note && note.length > MAX_NOTE) return fail('note_too_long', 400, { max: MAX_NOTE });
 
-  return { clientRef, soldAtInput, soldAt, lines, discountTzs, payments, note };
+  const credit = parseCreditFields(body);
+  if (credit.error) return credit;
+
+  return { clientRef, soldAtInput, soldAt, lines, discountTzs, payments, note, ...credit };
+}
+
+/**
+ * S4 pay-later fields: kind cash (default) | credit; customerId (required for credit); dueDate
+ * YYYY-MM-DD, credit only (default: the sale's EAT day + 7, set by the service).
+ */
+function parseCreditFields(body) {
+  const kind = body.kind == null || body.kind === '' ? 'cash' : body.kind;
+  if (!['cash', 'credit'].includes(kind)) return fail('invalid_field', 400, { field: 'kind', allowed: ['cash', 'credit'] });
+  let customerId = null;
+  if (body.customerId != null && body.customerId !== '') {
+    if (typeof body.customerId !== 'string' || body.customerId.length > 100) return fail('invalid_field', 400, { field: 'customerId' });
+    customerId = body.customerId;
+  }
+  let dueDate = null;
+  if (body.dueDate != null && body.dueDate !== '') {
+    if (kind !== 'credit') return fail('invalid_field', 400, { field: 'dueDate', reason: 'credit_only' });
+    const t = typeof body.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.dueDate) ? Date.parse(`${body.dueDate}T00:00:00Z`) : NaN;
+    if (Number.isNaN(t) || new Date(t).toISOString().slice(0, 10) !== body.dueDate) return fail('invalid_field', 400, { field: 'dueDate' });
+    dueDate = body.dueDate;
+  }
+  if (kind === 'credit' && !customerId) return fail('customer_required', 400);
+  return { kind, customerId, dueDate };
 }
 
 /** What makes two requests with the same clientRef "the same sale" (a retry, not a reuse). */
@@ -121,6 +149,8 @@ export function saleFingerprint(sale) {
     discountTzs: sale.discountTzs || 0,
     payments: sale.payments.map(p => [p.method, p.amountTzs, p.reference || null]),
     note: sale.note || null,
+    // S4 fields only when used, so fingerprints of S3 sales (and their retries) do not change.
+    ...(sale.kind === 'credit' || sale.customerId ? { kind: sale.kind, customerId: sale.customerId, dueDate: sale.dueDate || null } : {}),
   })).digest('hex');
 }
 
@@ -143,7 +173,7 @@ export function soldAtOutOfRange(soldAt, now) {
  * → { error, status, ... } or { lines (with unitPriceTzs, lineTotalTzs, saleDiscountShareTzs), subtotalTzs,
  *   lineDiscountTzs, discountTzs, totalTzs, paidTzs, changeTzs }.
  */
-export function priceSale(priced, discountTzs, payments) {
+export function priceSale(priced, discountTzs, payments, { credit = false } = {}) {
   const lines = priced.map((l) => {
     const unitPriceTzs = l.unitPriceTzs ?? l.listPriceTzs;
     return { ...l, unitPriceTzs, gross: l.qty * unitPriceTzs };
@@ -164,6 +194,12 @@ export function priceSale(priced, discountTzs, payments) {
   const out = lines.map(({ gross, ...l }, i) => ({ ...l, lineTotalTzs: gross - l.discountTzs, saleDiscountShareTzs: shares[i] }));
 
   const paidTzs = payments.reduce((s, p) => s + p.amountTzs, 0);
+  if (credit) {
+    // Pay later (S4): something must be left owing, and nothing is given back as change.
+    if (paidTzs > totalTzs) return fail('change_not_allowed', 400, { totalTzs, paidTzs });
+    if (paidTzs === totalTzs) return fail('credit_fully_paid', 400, { totalTzs, paidTzs });
+    return { lines: out, subtotalTzs, lineDiscountTzs, discountTzs, totalTzs, paidTzs, changeTzs: 0, balanceTzs: totalTzs - paidTzs };
+  }
   if (totalTzs === 0 && payments.length) return fail('invalid_payment', 400, { reason: 'nothing_to_pay' });
   if (paidTzs > MAX_SALE_TZS) return fail('invalid_payment', 400, { reason: 'paid_too_large', max: MAX_SALE_TZS });
   if (paidTzs < totalTzs) return fail('payment_short', 409, { totalTzs, paidTzs, shortTzs: totalTzs - paidTzs });
@@ -172,7 +208,7 @@ export function priceSale(priced, discountTzs, payments) {
   // Only cash gives change: the other methods together may not pay more than the total.
   if (changeTzs > cashTzs) return fail('invalid_payment', 400, { reason: 'non_cash_over_total', totalTzs, nonCashTzs: paidTzs - cashTzs });
   if (changeTzs > totalTzs + MAX_CHANGE_OVER_TOTAL_TZS) return fail('invalid_payment', 400, { reason: 'change_too_large', maxChangeTzs: totalTzs + MAX_CHANGE_OVER_TOTAL_TZS });
-  return { lines: out, subtotalTzs, lineDiscountTzs, discountTzs, totalTzs, paidTzs, changeTzs };
+  return { lines: out, subtotalTzs, lineDiscountTzs, discountTzs, totalTzs, paidTzs, changeTzs, balanceTzs: 0 };
 }
 
 /**

@@ -609,7 +609,9 @@ test('GET /vendor/sales: newest first, paged, filters (dates, status, createdBy=
   const all = await call(vendorListSales, as(v));
   assert.equal(all.status, 200, JSON.stringify(all.body));
   assert.deepEqual(all.body.sales.map(s => s.number), [e.number, d.number, c.number, b.number, a.number]);
-  assert.deepEqual(Object.keys(all.body.sales[0]).sort(), ['createdBy', 'discountTzs', 'hasOverride', 'id', 'itemCount', 'lateRecorded', 'methods', 'number', 'recordedAt', 'soldAt', 'status', 'totalTzs']);
+  // S4 added kind, balanceTzs, dueDate and customer to each row.
+  assert.deepEqual(Object.keys(all.body.sales[0]).sort(), ['balanceTzs', 'createdBy', 'customer', 'discountTzs', 'dueDate', 'hasOverride', 'id', 'itemCount', 'kind', 'lateRecorded', 'methods', 'number', 'recordedAt', 'soldAt', 'status', 'totalTzs']);
+  assert.deepEqual([all.body.sales[0].kind, all.body.sales[0].balanceTzs, all.body.sales[0].dueDate, all.body.sales[0].customer], ['cash', 0, null, null]);
   const bRow = all.body.sales.find(s => s.id === b.id);
   assert.deepEqual([bRow.itemCount, bRow.methods, bRow.createdBy, bRow.totalTzs, bRow.hasOverride, bRow.discountTzs, bRow.lateRecorded], [3, ['cash', 'mpesa'], { id: seller, name: 'Juma Seller' }, 3_000, false, 0, true]);
   const eRow = all.body.sales[0];
@@ -617,6 +619,7 @@ test('GET /vendor/sales: newest first, paged, filters (dates, status, createdBy=
   assert.deepEqual(all.body.summary, {
     count: 4, totalTzs: 9_800, voidedCount: 1, discountTzs: 100, overrideCount: 1, lateCount: 4,
     byMethod: [{ method: 'cash', amountTzs: 3_000 }, { method: 'mpesa', amountTzs: 6_000 }, { method: 'card', amountTzs: 800 }],
+    payLaterTzs: 0, owedTzs: 0, // S4: no pay-later sales here
   });
   assert.equal(all.body.summary.byMethod.reduce((s, m) => s + m.amountTzs, 0), all.body.summary.totalTzs);
   assert.equal(all.body.nextCursor, null);
@@ -640,7 +643,7 @@ test('GET /vendor/sales: newest first, paged, filters (dates, status, createdBy=
   const inRange = await call(vendorListSales, as(v), { query: { from: eatDay(t0), to: today } });
   assert.equal(inRange.body.sales.length, 5);
   const longAgo = await call(vendorListSales, as(v), { query: { from: '2026-01-01', to: '2026-01-02' } });
-  assert.deepEqual([longAgo.body.sales, longAgo.body.summary], [[], { count: 0, totalTzs: 0, voidedCount: 0, discountTzs: 0, overrideCount: 0, lateCount: 0, byMethod: [] }]);
+  assert.deepEqual([longAgo.body.sales, longAgo.body.summary], [[], { count: 0, totalTzs: 0, voidedCount: 0, discountTzs: 0, overrideCount: 0, lateCount: 0, byMethod: [], payLaterTzs: 0, owedTzs: 0 }]);
 
   for (const [query, error] of [[{ from: '2026-13-01' }, 'invalid_date'], [{ from: '2026-10-02', to: '2026-10-01' }, 'invalid_date'], [{ status: 'refunded' }, 'invalid_status'], [{ createdBy: seller }, 'invalid_created_by'], [{ limit: '0' }, 'invalid_limit'], [{ cursor: 'garbage' }, 'invalid_cursor']]) {
     const out = await call(vendorListSales, as(v), { query });
