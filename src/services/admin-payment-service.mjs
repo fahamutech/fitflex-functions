@@ -28,6 +28,9 @@ export function createAdminPaymentService({
   // Before a trainer booking group's payment is approved: (request) → null | { error, status, ... }.
   // Refuses a payment covering a rejected session whose slot someone else has booked since.
   beforeBookingPayment = async () => null,
+  // The booking group refused a decision already written (a rejected session's slot was booked by someone
+  // else between the check and the write): ({ request, refusal, rolledBack, actorId }) → void. Wired to an ops alert.
+  onBookingPaymentRefused = async () => {},
   onSubscriptionActivated = async () => {},
   // A rejected payment for a membership (lifecycle automations).
   onPaymentRejected = async () => {},
@@ -61,10 +64,11 @@ export function createAdminPaymentService({
   }
 
   // A request pays for a subscription, a trainer booking group or a shop order.
-  async function applyPaymentStatusToSubscription(request, status, reference) {
+  // → { error, ... } only when a booking group refused the decision (nothing on its side moved).
+  async function applyPaymentStatusToSubscription(request, status, reference, actorId = null) {
     if (request.bookingGroupId) {
-      await onBookingPayment(request.bookingGroupId, status);
-      return;
+      const out = await onBookingPayment(request.bookingGroupId, status, { actorId });
+      return out?.error ? out : null;
     }
     if (request.orderId) {
       await onOrderPayment(request.orderId, status);
@@ -238,6 +242,27 @@ export function createAdminPaymentService({
     return null;
   }
 
+  /**
+   * The decision is written but its booking group refused it (security review of #231, race 1): put the
+   * payment request back as it was read, record it and tell staff. The fields put back are the ones the
+   * decision wrote, and only while the request still shows that decision.
+   */
+  async function undoRefusedDecision(request, updated, patch, refusal, actorId) {
+    const restore = Object.fromEntries(Object.keys(patch).map(k => [k, request[k] ?? null]));
+    const back = await updateIf(paymentRequests, request.id, { status: updated.status }, restore);
+    const at = new Date().toISOString();
+    await auditLog.insertAsync({
+      id: randomUUID(), at, actor: actorId, action: 'payment_decision_rolled_back', target: request.id,
+      before: updated, after: { paymentRequest: back || null, rolledBack: Boolean(back), refusal },
+    });
+    try {
+      await onBookingPaymentRefused({ request, refusal, rolledBack: Boolean(back), actorId });
+    } catch (err) {
+      console.error(`[admin-payment] ops alert for ${request.id} failed: ${err?.message || err}`);
+    }
+    return back ? refusal : { ...refusal, rolledBack: false };
+  }
+
   const referenceChanged = (request, reference) => reference != null && reference !== '' && reference !== request.reference;
 
   async function decide({ id, decision, reference, note, actorId, amountTzs = null, automated = false }) {
@@ -267,20 +292,22 @@ export function createAdminPaymentService({
     const status = decision === 'approve' ? 'approved' : 'rejected';
     // Approved by a second admin: only while the verification it was checked against still stands.
     const guard = (decision === 'approve' && !automated && secondApprover()) ? { verifiedBy: request.verifiedBy } : {};
-    const updated = await writeDecision(request, {
+    const patch = {
       status,
       reference: finalRef,
       // An upgrade's note names the plan it upgrades: it stays as it is.
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
       decidedBy: actorId
-    }, guard);
+    };
+    const updated = await writeDecision(request, patch, guard);
     // Another decision got there first (two staff members, or a double click).
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'already_decided', status: 409 };
     // The plan records the reference the payment request now carries (typed, else verified/recorded,
     // else the member's transaction ID); ADMIN_<id> only when there is none at all.
-    await applyPaymentStatusToSubscription(request, status, updated.reference || finalRef || `ADMIN_${request.id}`);
+    const refused = await applyPaymentStatusToSubscription(request, status, updated.reference || finalRef || `ADMIN_${request.id}`, actorId);
+    if (refused) return undoRefusedDecision(request, updated, patch, refused, actorId);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: `payment_${status}`, target: request.id, before: request, after: updated
@@ -332,17 +359,19 @@ export function createAdminPaymentService({
     const twoAdmins = secondApprover();
     // Flag on: a note-only edit of a decided payment keeps who decided it.
     const keepDecider = twoAdmins && DECIDED.includes(request.status) && nextStatus === request.status;
-    const updated = await writeDecision(request, {
+    const patch = {
       status: nextStatus,
       reference: finalRef,
       note: upgradeOf(request) ? request.note : (note ?? request.note ?? null),
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
       decidedBy: nextStatus === 'pending' ? null : (keepDecider ? request.decidedBy : actorId)
+    };
     // Flag on: only while the verification read still stands (a stale read cannot overwrite a verified payment).
-    }, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {});
+    const updated = await writeDecision(request, patch, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {});
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'payment_changed', status: 409 };
-    await applyPaymentStatusToSubscription(request, nextStatus, updated.reference || finalRef);
+    const refused = await applyPaymentStatusToSubscription(request, nextStatus, updated.reference || finalRef, actorId);
+    if (refused) return undoRefusedDecision(request, updated, patch, refused, actorId);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: 'payment_updated', target: request.id, before: request, after: updated
@@ -454,7 +483,8 @@ export function createAdminPaymentService({
     const updated = await writeDecision(request, patch, { changeRequestedBy: request.changeRequestedBy });
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (!updated) return { error: 'payment_changed', status: 409 };
-    await applyPaymentStatusToSubscription(request, nextStatus, updated.reference || request.reference);
+    const refused = await applyPaymentStatusToSubscription(request, nextStatus, updated.reference || request.reference, actorId);
+    if (refused) return undoRefusedDecision(request, updated, patch, refused, actorId);
     await audit('payment_change_confirmed', actorId, request, {
       ...updated, requestedBy: request.changeRequestedBy, requestedAt: request.changeRequestedAt, reason: request.changeRequestReason,
     }, at);

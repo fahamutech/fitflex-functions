@@ -49,6 +49,10 @@ export function createMobileMoneyService({
   // A pass or upgrade request for a tier that is no longer sold is not sent
   // to the phone. Wired to settingsService.isTierSellable in bootstrap.
   tierSellable = null,
+  // (request) → null | { error, status, ... }: would approving this request be refused right now?
+  // Wired to the trainer booking check (409 group_slot_rebooked), so money is not taken for a
+  // booking payment that cannot be approved and would only sit in `held`.
+  approvable = async () => null,
 }) {
   const fail = (error, status, extra = {}) => ({ error, status, ...extra });
   const audit = (action, target, before, after) => auditLog?.insertAsync?.({
@@ -105,6 +109,13 @@ export function createMobileMoneyService({
     if (request.status !== 'pending') return fail('payment_not_pending', 409);
     // The member says they paid the Lipa Namba already (slice A3): a prompt now would charge twice.
     if (request.memberReference) return fail('manual_payment_submitted', 409);
+    // A booking group with a rejected session whose slot someone else has booked since cannot be approved
+    // (security review of #231): refuse before the phone is asked for money that would only be held.
+    const refusal = await approvable(request);
+    if (refusal?.error) {
+      const { error, status, ...extra } = refusal;
+      return fail(error, status || 409, extra);
+    }
     const product = await productOf(request);
     if (!PAYABLE.has(product)) return fail('not_payable_this_way', 409);
     // Owner decision 2026-10-19: a tier not configured in Settings is not sold,
