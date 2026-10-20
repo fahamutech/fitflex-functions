@@ -6,7 +6,7 @@ export function createAdminApprovalService({ users, auditLog, partnerKycCases = 
   /** Strip internal/sensitive fields from user records for list responses. */
   function slimApprovalRow(u) {
     if (!u) return u;
-    const { passwordHash, firebaseUid, aclPermissions, memberProfile, portalUser, onboardingCompleted, ...rest } = u;
+    const { passwordHash, startPasswordHash, firebaseUid, aclPermissions, memberProfile, portalUser, onboardingCompleted, ...rest } = u;
     return rest;
   }
 
