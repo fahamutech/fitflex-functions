@@ -20,7 +20,7 @@ import { createPgVendorCustomerStore } from '../src/infra/vendor-customer-store-
 import { createPgVendorSaleStore } from '../src/infra/vendor-sale-store-pg.mjs';
 import { createVendorCustomerService } from '../src/services/vendor-customer-service.mjs';
 import { createPartnerNotifier } from '../src/services/partner-notifier.mjs';
-import { vendorToolsOptionsRoute, vendorCreateProduct, vendorOrders, vendorPayments } from '../functions/shop.mjs';
+import { vendorToolsOptionsRoute, vendorCreateProduct, vendorOrders, vendorOrderDetail, vendorPayments } from '../functions/shop.mjs';
 import { vendorRecordSale, vendorListSales, vendorGetSale, vendorVoidSale, resetVendorSalesLimits } from '../functions/vendor-sales.mjs';
 import {
   vendorCustomersList, vendorCustomersCreate, vendorCustomerGet, vendorCustomerUpdate, vendorCustomerSales, vendorCustomerSale,
@@ -684,7 +684,8 @@ test('account deletion (H1): the buyer is forgotten at every vendor — name cle
   // Reading the vendor's orders (S2) does not create a new pseudonym for the deleted buyer.
   const orderRows = (await call(vendorOrders, as(clear))).body;
   assert.equal(orderRows.length, 1);
-  assert.deepEqual([orderRows[0].buyer.customerId, orderRows[0].buyer.displayName], [null, null]);
+  assert.deepEqual([orderRows[0].buyer.customerId, orderRows[0].buyer.displayName, orderRows[0].buyer.forgotten], [null, null, true], 'UAT D7: shown as a deleted member');
+  assert.equal((await call(vendorOrderDetail, as(clear), { params: { id: orderRows[0].id } })).body.buyer.forgotten, true, 'detail too');
   assert.equal(await db('VendorBuyerRef').where({ buyerId: buyer }).first(), undefined, 'still none after an order read');
   const prof = (await profile(as(owes), atOwes.id)).body.customer;
   assert.deepEqual([prof.name, prof.forgotten, prof.owedTzs], [null, true, 6_000]);
@@ -757,7 +758,7 @@ test('A-02: a paid app order makes an app customer with only a name; no phone, e
   const ref = await db('VendorBuyerRef').where({ vendorId: v, buyerId: buyer }).first();
   assert.equal(row.id, ref.customerId, 'the customer id is the buyer.customerId vendors already see on orders');
   const fromOrder = (await call(vendorOrders, as(v))).body.find(o => o.id === order.id);
-  assert.deepEqual([fromOrder.buyer.customerId, fromOrder.buyer.customerLinked], [row.id, true], 'the profile link opens');
+  assert.deepEqual([fromOrder.buyer.customerId, fromOrder.buyer.customerLinked, fromOrder.buyer.forgotten], [row.id, true, false], 'the profile link opens');
   const unpaidRow = (await call(vendorOrders, as(v))).body.find(o => o.id === placed.order.id);
   assert.deepEqual([typeof unpaidRow.buyer.customerId, unpaidRow.buyer.customerLinked], ['string', false], 'no customer record yet: no link');
   delete process.env.VENDOR_CUSTOMERS;

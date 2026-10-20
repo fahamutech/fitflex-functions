@@ -49,7 +49,7 @@ function assertAllowlisted(order, { money = false } = {}) {
   for (const item of order.items) {
     assert.deepEqual(Object.keys(item).sort(), [...ITEM_KEYS, ...(money ? MONEY_KEYS : [])].sort());
   }
-  assert.deepEqual(Object.keys(order.buyer).filter(k => !['customerId', 'displayName', 'customerLinked', 'phone', 'contactVisibleUntil'].includes(k)), []);
+  assert.deepEqual(Object.keys(order.buyer).filter(k => !['customerId', 'displayName', 'customerLinked', 'forgotten', 'phone', 'contactVisibleUntil'].includes(k)), []);
   const deep = keysDeep(order);
   assert.deepEqual(FORBIDDEN_KEYS.filter(k => deep.has(k)), [], 'no forbidden key anywhere');
 }
@@ -161,7 +161,7 @@ test('vendorOrderView: allowlist only — own lines (never lines without a vendo
   assert.equal(plain.status, 'accepted');
   assert.equal(plain.orderStatus, 'pending');
   assert.deepEqual(plain.timeline, [{ status: 'pending', at: 'a' }, { status: 'accepted', at: 'b', reason: 'ok' }]);
-  assert.deepEqual(plain.buyer, { customerId: 'cus_1', displayName: 'Neema', customerLinked: false }, 'no phone with the flag off');
+  assert.deepEqual(plain.buyer, { customerId: 'cus_1', displayName: 'Neema', customerLinked: false, forgotten: false }, 'no phone with the flag off');
   assert.equal(plain.deliveryAddress, 'Mikocheni B', 'address while the part is open and paid (needed to deliver)');
   assert.equal(plain.shortRef, '_VIEW1');
   for (const secret of ['usr_buyer', 'MPESA-SECRET', 'x@y.z', 'n@x.y', 'p_theirs', 'Theirs', 'p_legacy', 'Legacy', 'usr_staff', '99999']) {
@@ -171,9 +171,10 @@ test('vendorOrderView: allowlist only — own lines (never lines without a vendo
   assertAllowlisted(money, { money: true });
   assert.deepEqual([money.items[0].commissionTzs, money.items[0].vendorPayoutTzs], [200, 1800]);
   const contact = vendorOrderView(order, 'v1', { customerId: 'cus_1', buyer: { displayName: 'Neema', phone: '+255700000009' }, contactOn: true });
-  assert.deepEqual(contact.buyer, { customerId: 'cus_1', displayName: 'Neema', customerLinked: false, phone: '+255700000009', contactVisibleUntil: null });
+  assert.deepEqual(contact.buyer, { customerId: 'cus_1', displayName: 'Neema', customerLinked: false, forgotten: false, phone: '+255700000009', contactVisibleUntil: null });
   assert.equal(vendorOrderView(order, 'v1', { customerId: 'cus_1', customerLinked: true }).buyer.customerLinked, true);
   assert.equal(vendorOrderView(order, 'v1', { customerId: null, customerLinked: true }).buyer.customerLinked, false, 'never linked without an id');
+  assert.deepEqual(vendorOrderView(order, 'v1', { customerId: null, buyerForgotten: true }).buyer, { customerId: null, displayName: null, customerLinked: false, forgotten: true }, 'UAT D7: a deleted buyer');
   // Unpaid: no address, no phone, no next steps.
   const unpaid = vendorOrderView({ ...order, paymentStatus: 'pending' }, 'v1', { buyer: { phone: '+255700000009' }, contactOn: true });
   assert.equal('deliveryAddress' in unpaid, false);
@@ -405,7 +406,7 @@ test('buyer phone: only with VENDOR_ORDER_BUYER_CONTACT, while open and paid, an
   const w = await world();
   await withEnv(CONTACT_OFF, async () => {
     const off = (await hit('GET', `/vendor/orders/${w.shared}`, vendorClaims(w.a))).body;
-    assert.deepEqual(Object.keys(off.buyer).sort(), ['customerId', 'customerLinked', 'displayName']);
+    assert.deepEqual(Object.keys(off.buyer).sort(), ['customerId', 'customerLinked', 'displayName', 'forgotten']);
   });
   await withEnv(CONTACT_ON, async () => {
     const open = (await hit('GET', `/vendor/orders/${w.shared}`, vendorClaims(w.a))).body;
@@ -422,7 +423,7 @@ test('buyer phone: only with VENDOR_ORDER_BUYER_CONTACT, while open and paid, an
     // Delivered 8 days ago: gone, phone and address.
     await deliveredAgo(w.shared, w.a, 8);
     const old = (await hit('GET', `/vendor/orders/${w.shared}`, vendorClaims(w.a))).body;
-    assert.deepEqual(Object.keys(old.buyer).sort(), ['customerId', 'customerLinked', 'displayName']);
+    assert.deepEqual(Object.keys(old.buyer).sort(), ['customerId', 'customerLinked', 'displayName', 'forgotten']);
     assert.equal('deliveryAddress' in old, false);
     // Vendor B's part of the same order is still open: B still sees the phone.
     const forB = (await hit('GET', `/vendor/orders/${w.shared}`, vendorClaims(w.b))).body;
@@ -432,7 +433,7 @@ test('buyer phone: only with VENDOR_ORDER_BUYER_CONTACT, while open and paid, an
     made.orders.push(unpaid.order.id);
     const u = (await hit('GET', `/vendor/orders/${unpaid.order.id}`, vendorClaims(w.a))).body;
     assert.equal(u.paymentStatus, 'pending');
-    assert.deepEqual(Object.keys(u.buyer).sort(), ['customerId', 'customerLinked', 'displayName']);
+    assert.deepEqual(Object.keys(u.buyer).sort(), ['customerId', 'customerLinked', 'displayName', 'forgotten']);
     assert.equal('deliveryAddress' in u, false);
     assert.deepEqual(u.nextStatuses, []);
   });
@@ -491,7 +492,7 @@ test('older delivered order touched recently (settlement): no address or phone o
     await deliveredAgo(w.shared, w.a, 30);
     await db('ShopOrder').where({ id: w.shared }).update({ updatedAt: new Date(), settlementStatus: 'settled' });
     const view = (await hit('GET', `/vendor/orders/${w.shared}`, vendorClaims(w.a))).body;
-    assert.deepEqual(Object.keys(view.buyer).sort(), ['customerId', 'customerLinked', 'displayName']);
+    assert.deepEqual(Object.keys(view.buyer).sort(), ['customerId', 'customerLinked', 'displayName', 'forgotten']);
     assert.equal('deliveryAddress' in view, false);
   });
 });
