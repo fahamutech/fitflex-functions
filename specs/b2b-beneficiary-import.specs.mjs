@@ -377,7 +377,7 @@ test('SMS: people listed with a mobile number get the invitation and one reminde
   assert.deepEqual([texts(p1).length, texts(p2).length, h.sent.email.filter(e => e.to === mail('both')).length, h.sent.email.filter(e => e.to === mail('eonly')).length, h.sent.sms.length], [1, 1, 1, 1, 2]);
   const first = texts(p1)[0].text;
   // With a 30-character name the link and the confirm-your-number line don't both fit: the link is left out, never the line.
-  assert.equal(first, 'Import Kilimanjaro Breweries & added you to its wellness programme on FitFlex. Join as a member with this number, or confirm it in Profile > Contact details.');
+  assert.equal(first, 'Import Kilimanjaro Breweries & added you to its wellness programme on FitFlex. Join as a member with this number, or confirm it under Mobile number and email.');
   assert.ok(first.length <= SMS_MAX_LENGTH && /^[\x20-\x7E]+$/.test(first), first);
   await run();
   assert.equal(h.sent.sms.length, 2);                                                 // nothing due again yet
@@ -434,7 +434,7 @@ test('SMS: switched off or not set up, nothing is sent by SMS and nothing else c
   await bare.svc.importPeople({ access: a, body: { rows: [{ phone: p }] }, actorId: OPERATOR });
   await bare.svc.sendDue({ limit: 1000 });
   const [m] = bare.sent.sms.filter(x => x.to === p);
-  assert.deepEqual([/https?:/.test(m.text), m.text.length <= SMS_MAX_LENGTH, /Join as a member with this number, or confirm it in Profile > Contact details\.$/.test(m.text)], [false, true, true]);
+  assert.deepEqual([/https?:/.test(m.text), m.text.length <= SMS_MAX_LENGTH, /Join as a member with this number, or confirm it under Mobile number and email\.$/.test(m.text)], [false, true, true]);
   // A long link that would not fit is left out rather than cut in half.
   const long = harness({ appLink: `https://example.test/${'x'.repeat(120)}` });
   const p2 = phone();

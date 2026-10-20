@@ -7,10 +7,13 @@
 // query runs in a READ ONLY transaction. Nothing is reversed (owner decision
 // D-7: past enrolments are reported, not undone).
 //
-// Which database is never guessed and .env is not read. Give one of:
-//   node scripts/unverified-contact-audit.mjs --database-url=postgres://…
-//   FITFLEX_USE_CI_DB=1 DATABASE_URL_CI=postgres://… node scripts/unverified-contact-audit.mjs
+// Which database is never guessed and .env is not read. Prefer the
+// environment (export it from a file or a prompt, so the password doesn't end
+// up in shell history):
 //   DATABASE_URL=postgres://… node scripts/unverified-contact-audit.mjs
+//   FITFLEX_USE_CI_DB=1 DATABASE_URL_CI=postgres://… node scripts/unverified-contact-audit.mjs
+// --database-url=postgres://… also works, but leaves the password in shell
+// history and the process list; the script warns when it is used.
 // The database name is printed before anything else.
 //
 // What is counted:
@@ -28,8 +31,13 @@
 import knex from 'knex';
 
 const arg = process.argv.slice(2).find(a => a.startsWith('--database-url='));
-const url = arg ? arg.slice('--database-url='.length)
-  : process.env.FITFLEX_USE_CI_DB === '1' ? process.env.DATABASE_URL_CI : process.env.DATABASE_URL;
+const fromEnv = process.env.FITFLEX_USE_CI_DB === '1' ? process.env.DATABASE_URL_CI : process.env.DATABASE_URL;
+const url = fromEnv || (arg ? arg.slice('--database-url='.length) : null);
+if (!fromEnv && arg) {
+  console.warn('Warning: --database-url= leaves the password in shell history and the process list. Prefer DATABASE_URL in the environment.');
+} else if (fromEnv && arg) {
+  console.warn('Note: using the database from the environment; --database-url= was ignored.');
+}
 if (!url) {
   console.error('Refusing to run: give --database-url=… or set DATABASE_URL (or FITFLEX_USE_CI_DB=1 with DATABASE_URL_CI).');
   process.exit(2);
@@ -40,10 +48,22 @@ const db = knex({ client: 'pg', connection: url, pool: { min: 0, max: 1 } });
 // Verified, active email / number of the account's (any-status) person.
 const VERIFIED = `SELECT 1 FROM "LoginIdentifier" li
   WHERE li."personId" = u."personId" AND li.status = 'active' AND li."verifiedAt" IS NOT NULL`;
+// User.phone normalised the way src/shared/identifiers.mjs normalizePhone
+// does (Tanzania default): strip spaces, dots, dashes and brackets; 00… → +…;
+// 255 + 9 digits, 0 + 9 digits and bare 9 digits → +255…. Anything else is
+// compared as it is (and so counts as unverified).
+const PHONE_DIGITS = `regexp_replace(btrim(u.phone), '[[:space:]().-]', '', 'g')`;
+const NORMALIZED_PHONE = `(CASE
+  WHEN ${PHONE_DIGITS} ~ '^00[0-9]+$' THEN '+' || substr(${PHONE_DIGITS}, 3)
+  WHEN ${PHONE_DIGITS} ~ '^\\+[0-9]+$' THEN ${PHONE_DIGITS}
+  WHEN ${PHONE_DIGITS} ~ '^255[0-9]{9}$' THEN '+' || ${PHONE_DIGITS}
+  WHEN ${PHONE_DIGITS} ~ '^0[0-9]{9}$' THEN '+255' || substr(${PHONE_DIGITS}, 2)
+  WHEN ${PHONE_DIGITS} ~ '^[1-9][0-9]{8}$' THEN '+255' || ${PHONE_DIGITS}
+  ELSE btrim(u.phone) END)`;
 // User.email / User.phone set but not verified by their person.
 const UNVERIFIED_ROW_CONTACT = `(
   (u.email IS NOT NULL AND btrim(u.email) <> '' AND NOT EXISTS (${VERIFIED} AND li.type = 'email' AND li."normalizedValue" = lower(btrim(u.email))))
-  OR (u.phone IS NOT NULL AND btrim(u.phone) <> '' AND NOT EXISTS (${VERIFIED} AND li.type = 'phone' AND li."normalizedValue" = u.phone))
+  OR (u.phone IS NOT NULL AND btrim(u.phone) <> '' AND NOT EXISTS (${VERIFIED} AND li.type = 'phone' AND li."normalizedValue" = ${NORMALIZED_PHONE}))
 )`;
 const NO_VERIFIED_AT_ALL = `NOT EXISTS (${VERIFIED} AND li.type IN ('email', 'phone'))`;
 

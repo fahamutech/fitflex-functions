@@ -369,7 +369,7 @@ export function createB2BBeneficiaryImportService({
         : `A reminder: ${name} has added you to its wellness programme on FitFlex, and your benefits are waiting.`,
       '',
       `To use it, get the FitFlex app and sign up as a member with this email address (${invite.email}). Your benefits appear under Benefits as soon as you have joined.`,
-      'Already on FitFlex? Confirm this email address in the app under Profile > Contact details, and your benefits will appear.',
+      confirmLine(invite),
       link ? `Get the app: ${link}` : null,
       '',
       `What ${name} can see: once you join, ${name} can see your FitFlex activity (gym visits, trainer sessions, the workouts and steps you record, and your progress in its challenges). It cannot see your weight, height, or anything another sponsor gives you.`,
@@ -379,14 +379,26 @@ export function createB2BBeneficiaryImportService({
     return { subject: count === 0 ? `${name} has added you to FitFlex` : `Reminder: your FitFlex benefits from ${name}`, text: lines.join('\n') };
   }
 
+  /**
+   * For people who already have an account: the invite matches only a
+   * verified email or number. The in-app tile is "Mobile number and email".
+   * An email can be confirmed in the app only while FitFlex email codes are
+   * on, so with them off the email doesn't promise that.
+   */
+  function confirmLine(invite) {
+    if (emailCodes() === true) return 'Already on FitFlex? Confirm this email address or your mobile number under Mobile number and email in the FitFlex app, and your benefits will appear.';
+    if (invite.phone) return 'Already on FitFlex? Confirm your mobile number under Mobile number and email in the FitFlex app, and your benefits will appear.';
+    return 'Already on FitFlex? Your benefits appear once this email address is confirmed on your FitFlex account.';
+  }
+
   /** One SMS segment in plain characters: who added them, what to do, and the link when there is one. */
   function smsFor(invite, org, count) {
     const link = appLink();
     const name = orgName(org).replace(/[^\x20-\x7E]/g, '').trim().slice(0, 30) || 'Your organisation';
     const lead = count === 0 ? `${name} added you to its wellness programme on FitFlex.` : `Reminder: ${name} added you to FitFlex.`;
     // Existing users must confirm the number before the invite can match them.
-    const plain = `${lead} Join as a member with this number, or confirm it in Profile > Contact details.`;
-    const withLink = link ? `${lead} Join with this number (or confirm it in Profile > Contact details): ${link}` : null;
+    const plain = `${lead} Join as a member with this number, or confirm it under Mobile number and email.`;
+    const withLink = link ? `${lead} Join with this number (or confirm it under Mobile number and email): ${link}` : null;
     // A link that does not fit is left out, never cut in half.
     const text = withLink && withLink.length <= SMS_MAX_LENGTH ? withLink : plain;
     return { text: text.slice(0, SMS_MAX_LENGTH) };

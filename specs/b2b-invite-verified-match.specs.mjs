@@ -135,7 +135,7 @@ test('a verified member is enrolled straight away by an import, and by the job o
   assert.deepEqual([out.enrolled, out.invited], [1, 0]);
   assert.equal(await enrolled(orgId, member), 1);
 
-  // Phone on the profile only, then verified later (Contact details): Benefits matches them there and then.
+  // Phone on the profile only, then verified later (Mobile number and email): Benefits matches them there and then.
   const p = phone();
   const late = await user({ phone: p });
   await svc.importPeople({ access: a, body: { rows: [{ phone: p }] }, actorId: OPERATOR });
@@ -190,16 +190,41 @@ test('the import says whether email codes are available; the messages tell exist
 
   await on.svc.sendDue({ limit: 1000 });
   const email = on.sent.email.find(e => e.to === mail('codes2'));
-  assert.match(email.text, /Already on FitFlex\? Confirm this email address in the app under Profile > Contact details/);
+  assert.match(email.text, /Already on FitFlex\? Confirm this email address or your mobile number under Mobile number and email in the FitFlex app/);
+  // Email codes off: the email never promises that the address can be confirmed in the app.
+  const offOrg = await sponsor('Off Ltd');
+  const p2 = phone();
+  await off.svc.importPeople({ access: await access(offOrg), body: { rows: [{ email: mail('off-email') }, { email: mail('off-both'), phone: p2 }] }, actorId: OPERATOR });
+  await off.svc.sendDue({ limit: 1000 });
+  const emailOnly = off.sent.email.find(e => e.to === mail('off-email')).text;
+  const withPhone = off.sent.email.find(e => e.to === mail('off-both')).text;
+  assert.match(emailOnly, /Already on FitFlex\? Your benefits appear once this email address is confirmed on your FitFlex account\./);
+  assert.match(withPhone, /Already on FitFlex\? Confirm your mobile number under Mobile number and email in the FitFlex app/);
+  for (const t of [emailOnly, withPhone]) assert.doesNotMatch(t, /Confirm this email address/);
   const sms = on.sent.sms.find(m => m.to === p);
   assert.ok(sms.text.length <= SMS_MAX_LENGTH, `${sms.text.length}: ${sms.text}`);
-  assert.equal(sms.text, 'Asha Ltd added you to its wellness programme on FitFlex. Join with this number (or confirm it in Profile > Contact details): https://example.test/app');
+  assert.equal(sms.text, 'Asha Ltd added you to its wellness programme on FitFlex. Join with this number (or confirm it under Mobile number and email): https://example.test/app');
 });
 
 test('the audit script refuses without a database, reports counts only and changes nothing', async () => {
   const script = fileURLToPath(new URL('../scripts/unverified-contact-audit.mjs', import.meta.url));
-  const run = env => promisify(execFile)(process.execPath, [script], { env: { PATH: process.env.PATH, ...env } });
+  const run = (env, args = []) => promisify(execFile)(process.execPath, [script, ...args], { env: { PATH: process.env.PATH, ...env } });
   await assert.rejects(run({}), e => e.code === 2 && /Refusing to run/.test(e.stderr));
+  const ciEnv = { FITFLEX_USE_CI_DB: '1', DATABASE_URL_CI: process.env.DATABASE_URL_CI };
+  // The flag works but warns about shell history; the environment wins when both are given.
+  const byFlag = await run({}, [`--database-url=${process.env.DATABASE_URL_CI}`]);
+  assert.match(byFlag.stderr, /leaves the password in shell history/);
+  assert.match((await run(ciEnv, ['--database-url=postgres://nobody@127.0.0.1:1/none'])).stderr, /--database-url= was ignored/);
+  const count = (out, key) => Number(new RegExp(`^${key}\\s+(\\d+)$`, 'm').exec(out)?.[1]);
+
+  // A number saved in local form on the row but verified (E.164) is not counted as unverified.
+  const baseline = count((await run(ciEnv)).stdout, 'beneficiariesWithUnverifiedRowContact');
+  const localForm = phone();
+  const honest = await user({ phone: `0${localForm.slice(4, 7)} ${localForm.slice(7)}` });
+  await verifyContacts(db, honest, { phone: localForm });
+  const honestOrg = await sponsor('Honest');
+  await b2bService.enrollBeneficiary({ access: await access(honestOrg), body: { userId: honest, status: 'active' }, actorId: OPERATOR });
+  assert.equal(count((await run(ciEnv)).stdout, 'beneficiariesWithUnverifiedRowContact'), baseline, 'normalised phone compared');
 
   // A past enrolment made through a planted email: the invite's contact is not verified by the enrolled member.
   const orgId = await sponsor('Audit');
@@ -211,7 +236,7 @@ test('the audit script refuses without a database, reports counts only and chang
     invitedBy: OPERATOR, invitedAt: at, enrolledAt: at, createdAt: at, updatedAt: at });
   const before = await db('B2BBeneficiary').where({ organizationId: orgId }).select('id', 'status');
 
-  const { stdout } = await run({ FITFLEX_USE_CI_DB: '1', DATABASE_URL_CI: process.env.DATABASE_URL_CI });
+  const { stdout } = await run(ciEnv);
   const dbName = (await db.raw('SELECT current_database() AS name')).rows[0].name;
   assert.match(stdout, new RegExp(`^Database: ${dbName} \\(read only\\)`));
   const value = key => Number(new RegExp(`^${key}\\s+(\\d+)$`, 'm').exec(stdout)?.[1]);

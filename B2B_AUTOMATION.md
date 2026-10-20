@@ -265,7 +265,8 @@ colleague's email or number into their own profile. Since 20 Oct 2026
 an organisation user or a company employee link by email or number (an
 unverified match answers `user_not_found`). Members with no verified record
 are not matched (fail closed). The invitation email and SMS tell existing
-users to confirm their email / number in Profile > Contact details. Past
+users to confirm their email / number under "Mobile number and email" in the app
+(the email asks for the mobile number instead when email codes are off). Past
 enrolments are not reversed; `scripts/unverified-contact-audit.mjs` counts
 them (read only, counts only).
 
@@ -286,7 +287,7 @@ address, a link to the app when `FITFLEX_APP_LINK` is set (none is invented),
 and what the organisation will be able to see of their activity. English only.
 
 **SMS** is one segment (160 plain characters): who added them, to join as a
-member with that number or confirm it in Profile > Contact details, with the
+member with that number or confirm it under Mobile number and email, with the
 app link when it fits (the confirm line is never dropped for the link). It has no room for
 the visibility statement; the person gets that in the app once they join.
 SMS goes through the shared SMS service (`SMS.md`): it is sent only when

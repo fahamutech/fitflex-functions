@@ -41,7 +41,7 @@ export async function findUserByContact(users, { userId, email, phone } = {}, { 
     candidates = await verifiedAccounts(users, contacts, { type: 'phone', value });
   }
   candidates = candidates.filter(u => u.accountStatus !== 'deleted');
-  if (!candidates.length) return fail('user_not_found', 404, { hint: 'They need a FitFlex account with this email or number confirmed (Profile > Contact details).' });
+  if (!candidates.length) return fail('user_not_found', 404, { hint: 'They need a FitFlex account with this email or number confirmed (in the app: Mobile number and email).' });
 
   const ofType = type => candidates.find(u => u.userType === type);
   if (require) {
