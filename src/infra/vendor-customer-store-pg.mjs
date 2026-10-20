@@ -374,11 +374,18 @@ export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn 
                                  THEN c."buyerUserId" ELSE NULL END
        WHERE c.source = 'marketplace' AND c."buyerUserId" = ?
        RETURNING c.id, c."vendorId", c."buyerUserId"`, [at, at, String(userId)]);
+    let snapshotsScrubbed = 0;
     for (const r of rows) {
       await audit(db, { actor: 'system:account_deleted', action: 'vendor_customer_forgotten', target: r.id, after: { vendorId: r.vendorId, unlinked: r.buyerUserId == null } });
+      // S5 (security review #229 M1): statement links shared earlier froze the customer's name in their
+      // snapshot; it is cleared there too (the page also checks forgottenAt). Links stay valid, nameless.
+      const scrubbed = await db.raw(`UPDATE "VendorDocumentLink"
+           SET snapshot = jsonb_set(snapshot, '{customer}', jsonb_build_object('name', NULL::text), true)
+         WHERE "vendorId" = ? AND "docId" = ? AND "docType" = 'statement' AND snapshot IS NOT NULL`, [r.vendorId, r.id]);
+      snapshotsScrubbed += scrubbed.rowCount || 0;
     }
     const refsDeleted = await db('VendorBuyerRef').where({ buyerId: String(userId) }).del();
-    return { forgotten: rows.length, unlinked: rows.filter(r => r.buyerUserId == null).length, refsDeleted };
+    return { forgotten: rows.length, unlinked: rows.filter(r => r.buyerUserId == null).length, refsDeleted, snapshotsScrubbed };
   }
 
   // ── payments ──────────────────────────────────────────────────────────────

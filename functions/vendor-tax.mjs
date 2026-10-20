@@ -37,7 +37,7 @@ function requireStaff(...permissions) {
 }
 const vendorOf = user => (user.userType === 'vendor_staff' ? user.vendorId : user.sub);
 
-const PROFILE = '{ vatRegistered, tin|null (from the KYC case when it has one: tinFromKyc true, read-only), tinFromKyc, vrn|null, certificateDocumentId|null (KYC document, requirement vat_certificate), pricesIncludeVat: true (locked), status: none|pending|verified|rejected, rejectReason|null (unreadable|number_mismatch|name_mismatch|not_vat_certificate|other), rejectNote|null, verifiedAt|null, inForce (VAT, TIN and VRN are on new documents and sales), changePending (verified + new details waiting: the verified ones stay in force), verified { tin, vrn, certificateDocumentId, verifiedAt }|null, pending { tin, vrn, certificateDocumentId, submittedAt }|null, updatedAt|null }';
+const PROFILE = '{ vatRegistered, tin|null (from the KYC case when it has one: tinFromKyc true, read-only), tinFromKyc, vrn|null, certificateDocumentId|null (KYC document, requirement vat_certificate), pricesIncludeVat: true (locked), status: none|pending|verified|rejected, rejectReason|null (unreadable|number_mismatch|name_mismatch|not_vat_certificate|other), rejectNote|null, verifiedAt|null, inForce (VAT, TIN and VRN are on new documents and sales: registered, verified, and the verified certificate still stands — a reviewer rejecting it later turns VAT off at once), changePending (verified + new details waiting: the verified ones stay in force), verified { tin, vrn, certificateDocumentId, verifiedAt, certificateStands }|null, pending { tin, vrn, certificateDocumentId, submittedAt }|null, updatedAt|null }';
 
 export const vendorGetTaxProfile = {
   created, method: 'get', path: '/vendor/tax-profile',
@@ -135,7 +135,7 @@ export const adminVendorVat = {
 
 export const adminVerifyVendorVat = {
   created, method: 'post', path: '/admin/kyc/vendors/:id/vat/verify',
-  description: `KYC reviewer, scope \`kyc\` (${FLAG}): verify the pending VAT details. They come into force at once (verifiedBy/At; VAT, TIN and VRN on new sales and documents from now on; past ones unchanged), the certificate document is accepted, and the vendor is told (push vendor_vat_verified, EN/SW). → ${CASE}. 404 tax_profile_not_found, 409 nothing_to_review { currentStatus }.`,
+  description: `KYC reviewer, scope \`kyc\` (${FLAG}): verify the pending VAT details. They come into force at once (verifiedBy/At; VAT, TIN and VRN on new sales and documents from now on; past ones unchanged), the certificate document is accepted, and the vendor is told (push vendor_vat_verified, EN/SW). → ${CASE}. 404 tax_profile_not_found, 409 nothing_to_review { currentStatus }, 409 certificate_not_current (the submitted certificate was replaced, rejected or lost its file since — the vendor must submit again).`,
   onGuard: adminKyc('post'),
   onRequest: async (req, res) => {
     if (!vendorVatOn()) return disabled(res);

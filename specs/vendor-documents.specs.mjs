@@ -13,14 +13,15 @@ import { randomUUID, createHash } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { ensureInit } from '../functions/index.mjs';
-import { shopService, adminPaymentService, vendorDocumentService } from '../src/bootstrap/services.mjs';
+import { shopService, adminPaymentService, vendorDocumentService, vendorCustomerService } from '../src/bootstrap/services.mjs';
 import { vendorToolsOptionsRoute, vendorCreateProduct, marketplaceInvoice } from '../functions/shop.mjs';
 import { vendorRecordSale, vendorVoidSale, resetVendorSalesLimits } from '../functions/vendor-sales.mjs';
 import { vendorCustomersCreate, vendorCustomerRecordPayment, resetVendorCustomerLimits } from '../functions/vendor-customers.mjs';
 import {
   vendorShareSale, vendorShareOrder, vendorSharePayment, vendorShareStatement, vendorDocumentLinks, vendorRevokeDocumentLinks,
-  vendorRevokeDocumentLink, vendorDocumentView, resetVendorDocumentLimits, VENDOR_DOCUMENT_LIMITS,
+  vendorRevokeDocumentLink, vendorDocumentView, resetVendorDocumentLimits, VENDOR_DOCUMENT_LIMITS, clientAddress, publicLimiterSizes,
 } from '../functions/vendor-documents.mjs';
+import { createVendorLimiter } from '../src/shared/vendor-rate-limit.mjs';
 import {
   newToken, hashToken, validToken, publicBaseUrl, swahiliTime, formatDateTime, formatDay, shareTexts, pdfFileName, invoiceNumber,
 } from '../src/shared/vendor-documents.mjs';
@@ -220,6 +221,10 @@ test('PUBLIC_API_URL: no value (or a bad one) is null — never the bfast/smarts
   assert.equal(publicBaseUrl(undefined), null);
   assert.equal(publicBaseUrl(''), null);
   assert.equal(publicBaseUrl('ftp://x.example'), null);
+  // #229 L4: https only; plain http only while NODE_ENV=test.
+  assert.equal(publicBaseUrl('http://fitflex.co.tz', { nodeEnv: 'production' }), null);
+  assert.equal(publicBaseUrl('http://fitflex.co.tz', { nodeEnv: undefined }), null);
+  assert.equal(publicBaseUrl('http://localhost:3000', { nodeEnv: 'test' }), 'http://localhost:3000');
   assert.equal(publicBaseUrl('not a url'), null);
   assert.equal(publicBaseUrl('https://fitflex.co.tz/'), 'https://fitflex.co.tz');
   assert.equal(publicBaseUrl('https://fitflex.co.tz/api/'), 'https://fitflex.co.tz/api');
@@ -741,4 +746,102 @@ test('buyer invoice: text default unchanged; json/html/pdf behind VENDOR_DOCUMEN
   const late = await call(marketplaceInvoice, me, { params: { id: order.id }, query: { format: 'json' } });
   assert.equal(late.body.invoices.length, 2);
   assert.equal((await db('VendorOrderInvoice').where({ orderId: order.id, vendorId: a }).first()).lateIssued, true);
+});
+
+// ── security review #229 ─────────────────────────────────────────────────────
+
+test('#229 M1: a member who deletes their account is not named on statement links shared earlier (snapshot scrubbed, page checks too)', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v, { name: 'Bar', priceTzs: 20_000, stock: 50 });
+  const buyer = await user('member', { displayName: 'Forget Me Please' });
+  await paidOrder(buyer, [{ productId: p.id, qty: 1 }]);
+  const customer = await db('VendorCustomer').where({ vendorId: v, buyerUserId: buyer }).first();
+  assert.equal(customer.name, 'Forget Me Please');
+  await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], [], { kind: 'credit', customerId: customer.id }));
+  const link = await call(vendorShareStatement, as(v), { params: { id: customer.id } });
+  assert.equal(link.status, 201, JSON.stringify(link.body));
+  const token = tokenOf(link.body.url);
+  assert.match((await open(`/d/${token}`)).text, /Forget Me Please/);
+  const out = await vendorCustomerService.forgetBuyer(buyer);
+  assert.equal(out.snapshotsScrubbed, 1);
+  const snap = (await db('VendorDocumentLink').where({ id: link.body.linkId }).first()).snapshot;
+  assert.deepEqual(snap.customer, { name: null });
+  assert.equal(snap.totalOwedTzs, 20_000, 'the figures stay; only the name goes');
+  const page = await open(`/d/${token}`);
+  assert.equal(page.status, 200);
+  assert.equal(page.text.includes('Forget Me'), false);
+  assert.equal(pdfText((await open(`/d/${token}.pdf`)).buffer).includes('Forget Me'), false);
+  // Even a snapshot that still carried the name (e.g. written in a race) is rendered nameless.
+  await db('VendorDocumentLink').where({ id: link.body.linkId }).update({ snapshot: JSON.stringify({ ...snap, customer: { name: 'Forget Me Please' } }) });
+  assert.equal((await open(`/d/${token}`)).text.includes('Forget Me'), false);
+});
+
+test('#229 M2: malformed tokens skip every limiter; per-link counting only for real links; true cap; IP from the trusted proxy hop', async () => {
+  on();
+  // Limiter cap is a hard cap (oldest evicted).
+  const capped = createVendorLimiter({ perMinute: 1, maxTracked: 3 });
+  for (const k of ['a', 'b', 'c', 'd', 'e']) assert.equal(capped.allow(k, 1000).ok, true);
+  assert.equal(capped.size(), 3);
+  assert.equal(capped.allow('e', 1001).ok, false, 'the newest key is still tracked');
+  assert.equal(capped.allow('a', 1001).ok, true, 'the oldest was evicted');
+  // Trusted hop: the entry our nearest proxy appended (rightmost by default).
+  const req = xff => ({ headers: { 'x-forwarded-for': xff }, socket: { remoteAddress: '127.0.0.9' } });
+  assert.equal(clientAddress(req('6.6.6.6, 10.0.0.9'), 1), '10.0.0.9');
+  assert.equal(clientAddress(req('6.6.6.6, 10.0.0.9'), 2), '6.6.6.6');
+  assert.equal(clientAddress(req('6.6.6.6, 10.0.0.9'), 0), '127.0.0.9', '0 hops: X-Forwarded-For ignored');
+  assert.equal(clientAddress(req(''), 1), '127.0.0.9');
+  assert.equal(clientAddress(req('10.0.0.9')), '10.0.0.9');
+
+  resetVendorDocumentLimits();
+  const ip = '10.77.0.1';
+  for (let i = 0; i < 80; i += 1) assert.equal((await open('/d/bad-token', { ip })).status, 404);
+  assert.deepEqual(publicLimiterSizes(), { ip: 0, token: 0 }, 'malformed tokens touch no limiter');
+  for (let i = 0; i < 10; i += 1) assert.equal((await open(`/d/${newToken().token}`, { ip })).status, 404);
+  assert.deepEqual(publicLimiterSizes(), { ip: 1, token: 0 }, 'unknown well-formed tokens count per address, never per token');
+  // A client cannot escape the address limit by forging the left part of X-Forwarded-For.
+  resetVendorDocumentLimits();
+  for (let i = 0; i < VENDOR_DOCUMENT_LIMITS.publicPerIpPerMinute; i += 1) {
+    assert.equal((await open(`/d/${newToken().token}`, { ip: `9.9.9.${i % 250}, 10.77.0.2` })).status, 404);
+  }
+  assert.equal((await open(`/d/${newToken().token}`, { ip: '1.1.1.1, 10.77.0.2' })).status, 429);
+  // A real link is counted per token.
+  resetVendorDocumentLimits();
+  const v = await vendor();
+  const p = await product(v);
+  const sale = await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(45_000)));
+  const token = tokenOf((await shareSale(as(v), sale.id)).body.url);
+  assert.equal((await open(`/d/${token}`)).status, 200);
+  assert.equal(publicLimiterSizes().token, 1);
+});
+
+test('#229 L2: staff without the permission get 403 before anything is loaded — no id probing, no invoice numbered', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v);
+  const ordersOnly = await staff(v, ['orders']);
+  const salesOnly = await staff(v, ['sales']);
+  const unknown = await call(vendorDocumentView, staffOf(ordersOnly, v), { params: { docType: 'sale', docId: 'sal_does_not_exist' } });
+  assert.deepEqual([unknown.status, unknown.body.error, unknown.body.acceptedPermissions], [403, 'vendor_permission_forbidden', ['sales', 'customers']]);
+  assert.equal((await shareSale(staffOf(ordersOnly, v), 'sal_does_not_exist')).status, 403);
+  assert.equal((await call(vendorShareStatement, staffOf(salesOnly, v), { params: { id: 'cus_nope' } })).status, 403);
+  const order = await paidOrder(await user('member'), [{ productId: p.id, qty: 1 }]);
+  await db('VendorOrderInvoice').where({ orderId: order.id }).del(); // as for an order paid before S5
+  assert.equal((await call(vendorShareOrder, staffOf(salesOnly, v), { params: { id: order.id } })).status, 403);
+  assert.equal((await call(vendorDocumentView, staffOf(salesOnly, v), { params: { docType: 'order', docId: order.id } })).status, 403);
+  assert.equal((await db('VendorOrderInvoice').where({ orderId: order.id })).length, 0, 'no invoice was numbered by a forbidden call');
+});
+
+test('#229 L5: the buyer HTML invoice carries nosniff, frame-ancestors none and no-referrer', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v);
+  const buyer = await user('member', { displayName: 'Header Buyer' });
+  const order = await paidOrder(buyer, [{ productId: p.id, qty: 1 }]);
+  const html = await call(marketplaceInvoice, { sub: buyer, userType: 'member' }, { params: { id: order.id }, query: { format: 'html' } });
+  assert.equal(html.status, 200);
+  assert.equal(html.headers['X-Content-Type-Options'], 'nosniff');
+  assert.match(html.headers['Content-Security-Policy'], /frame-ancestors 'none'/);
+  assert.equal(html.headers['Referrer-Policy'], 'no-referrer');
+  assert.equal(html.headers['Cache-Control'], 'no-store, private');
 });

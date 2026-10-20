@@ -546,12 +546,15 @@ export const marketplaceInvoice = {
       res.set?.('Cache-Control', 'no-store, private');
       if (result.html) {
         res.set?.('Content-Type', 'text/html; charset=utf-8');
-        res.set?.('Content-Security-Policy', "default-src 'none'; img-src https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
+        res.set?.('Content-Security-Policy', "default-src 'none'; img-src https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+        res.set?.('X-Content-Type-Options', 'nosniff');
+        res.set?.('Referrer-Policy', 'no-referrer');
         return res.status(200).send(result.html);
       }
       if (result.pdf) {
         res.set?.('Content-Type', 'application/pdf');
         res.set?.('Content-Disposition', `attachment; filename="${String(result.fileName).replace(/[^A-Za-z0-9._-]/g, '_')}"`);
+        res.set?.('X-Content-Type-Options', 'nosniff');
         return res.status(200).send(result.pdf);
       }
       return res.json(result);

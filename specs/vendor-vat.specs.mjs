@@ -493,3 +493,35 @@ test('marketplace: a VAT-verified vendor\'s order has the same price, commission
   assert.ok((await statement(vatV.id)).length === 1);
   assert.deepEqual((await shopService.vendorPayments(vatV.id)).weeklySalesTzs, (await shopService.vendorPayments(plainV.id)).weeklySalesTzs);
 });
+
+// ── security review #229 L3 ──────────────────────────────────────────────────
+
+test('#229 L3: verify refuses a certificate that is no longer the current one; a rejected verified certificate stops VAT at once (fail closed)', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v.id);
+  assert.equal((await call(vendorPutTaxProfile, as(v.id), { body: { vatRegistered: true, vrn: '40012345X' } })).status, 200);
+  // The vendor uploads a newer certificate after submitting: the submitted one is no longer current.
+  const newer = uid('pdoc');
+  await db('PartnerDocument').insert({
+    id: newer, caseId: v.caseId, requirementKey: 'vat_certificate', docType: 'vat_certificate', storageProvider: 'spec', storageKey: `spec/${newer}.pdf`,
+    mimeType: 'application/pdf', sizeBytes: 100, sha256: randomUUID().replace(/-/g, ''), status: 'pending', supersedesId: v.certId,
+    createdAt: new Date(Date.now() + 1000), updatedAt: new Date(),
+  });
+  assert.deepEqual((await call(adminVerifyVendorVat, adminClaims('adm_kyc'), { params: { id: v.id } })).body, { error: 'certificate_not_current' });
+  assert.equal((await db('VendorTaxProfile').where({ vendorId: v.id }).first()).status, 'pending', 'nothing verified');
+  // Re-submitted with the newer certificate → verified.
+  assert.equal((await call(vendorPutTaxProfile, as(v.id), { body: { vatRegistered: true, vrn: '40012345X' } })).body.taxProfile.certificateDocumentId, newer);
+  assert.equal((await call(adminVerifyVendorVat, adminClaims('adm_kyc'), { params: { id: v.id } })).status, 200);
+  assert.equal((await sell(as(v.id), saleBody([{ productId: p.id, qty: 1 }], cash(10_000)))).vatIncludedTzs, 1525);
+  // A KYC reviewer later rejects that certificate: VAT, TIN and VRN stop on new sales; the profile says so.
+  await db('PartnerDocument').where({ id: newer }).update({ status: 'rejected', reviewNote: 'forged' });
+  const profile = (await call(vendorGetTaxProfile, as(v.id))).body.taxProfile;
+  assert.deepEqual([profile.inForce, profile.verified.certificateStands, profile.status], [false, false, 'verified']);
+  const after1 = await sell(as(v.id), saleBody([{ productId: p.id, qty: 1 }], cash(10_000)));
+  const row = await db('VendorSale').where({ id: after1.id }).first();
+  assert.deepEqual([row.vatIncludedTzs, row.sellerSnapshot.vrn, row.sellerSnapshot.tin], [0, null, null]);
+  // An accepted renewal (old one superseded) keeps VAT in force.
+  await db('PartnerDocument').where({ id: newer }).update({ status: 'superseded' });
+  assert.equal((await call(vendorGetTaxProfile, as(v.id))).body.taxProfile.inForce, true, 'superseded by an accepted renewal still stands');
+});

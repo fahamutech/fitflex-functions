@@ -16,10 +16,18 @@ const dayText = v => (v == null ? null : typeof v === 'string' ? v.slice(0, 10)
 
 // ── helpers used inside other stores' transactions ──────────────────────────
 
+/**
+ * Security review #229 L3 (fail closed): the verified VAT certificate must still stand. If a KYC reviewer
+ * later rejects it (or it expires, or the document is gone), VAT, TIN and VRN stop on NEW sales and
+ * documents at once — the vendor must submit again. A certificate superseded by an accepted renewal still stands.
+ */
+export const certificateStands = status => status != null && !['rejected', 'expired'].includes(status);
+
 /** The vendor's VAT in force now: { inForce, verifiedAt|null, tin|null, vrn|null }. */
 export async function taxContextOf(q, vendorId) {
-  const p = await q('VendorTaxProfile').where({ vendorId }).first('vatRegistered', 'verifiedAt', 'verifiedTin', 'verifiedVrn');
-  const inForce = Boolean(p?.vatRegistered && p?.verifiedAt);
+  const p = await q('VendorTaxProfile as t').leftJoin('PartnerDocument as d', 'd.id', 't.verifiedCertificateDocumentId')
+    .where('t.vendorId', vendorId).first('t.vatRegistered', 't.verifiedAt', 't.verifiedTin', 't.verifiedVrn', 'd.status as certificateStatus');
+  const inForce = Boolean(p?.vatRegistered && p?.verifiedAt && certificateStands(p?.certificateStatus));
   return { inForce, verifiedAt: inForce ? iso(p.verifiedAt) : null, tin: inForce ? p.verifiedTin : null, vrn: inForce ? p.verifiedVrn : null };
 }
 
@@ -105,11 +113,13 @@ export function createPgVendorTaxStore({ db, now = () => new Date() }) {
     return plain(await query.orderBy('createdAt', 'desc').first('id', 'status', 'fileName', 'mimeType', 'createdAt'));
   }
 
-  /** Everything the tax profile screen and the KYC section need. */
+  /** Everything the tax profile screen and the KYC section need (verifiedCertificateStatus: #229 L3). */
   async function load(vendorId) {
     const [row, kyc] = await Promise.all([profileRow(db, vendorId), kycTinOf(db, vendorId)]);
     const cert = kyc ? await certificateOf(db, kyc.caseId) : null;
-    return { row, kyc, certificate: cert };
+    const verifiedCert = row?.verifiedCertificateDocumentId
+      ? await db('PartnerDocument').where({ id: row.verifiedCertificateDocumentId }).first('status') : null;
+    return { row, kyc, certificate: cert, verifiedCertificateStatus: verifiedCert?.status ?? null };
   }
 
   /**
@@ -180,6 +190,14 @@ export function createPgVendorTaxStore({ db, now = () => new Date() }) {
         if (!row) throw refusal('tax_profile_not_found', 404);
         if (row.status !== 'pending') throw refusal('nothing_to_review', 409, { currentStatus: row.status });
         const at = now();
+        if (decision === 'verify') {
+          // #229 L3: the certificate submitted must still be the vendor's current one, with its file, not rejected.
+          const kyc = await kycTinOf(trx, vendorId);
+          const cert = kyc ? await trx('PartnerDocument').where({ id: row.submittedCertificateDocumentId, caseId: kyc.caseId, requirementKey: 'vat_certificate' })
+            .whereIn('status', ['pending', 'accepted']).whereNotNull('storageKey').first('id') : null;
+          const current = cert ? await certificateOf(trx, kyc.caseId) : null;
+          if (!cert || current?.id !== cert.id) throw refusal('certificate_not_current', 409);
+        }
         // The document's reviewer column references User; record the admin only when they have a User row.
         const reviewer = (await trx('User').where({ id: actorId }).first('id')) ? actorId : null;
         if (decision === 'verify') {

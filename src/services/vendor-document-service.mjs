@@ -27,6 +27,18 @@ export const KIND_DOC_TYPES = Object.freeze({
 });
 const KIND_OF = { receipt: 'sale', invoice: 'sale', sale: 'sale', payment: 'payment', payment_receipt: 'payment', statement: 'statement', order: 'order', order_invoice: 'order' };
 const NOT_FOUND = { sale: 'sale_not_found', payment: 'payment_not_found', statement: 'customer_not_found', order: 'order_not_found' };
+/**
+ * Security review #229 L2: what a caller needs to even ASK for a kind, checked before anything is loaded
+ * (so staff without it cannot probe ids or make an order invoice get numbered). A sale needs any of its
+ * document permissions; the exact one (receipt → sales, invoice → sales or customers) is checked after.
+ */
+const KIND_PERMISSIONS = Object.freeze({ sale: ['sales', 'customers'], payment: ['customers'], statement: ['customers'], order: ['orders'] });
+function precheck(kind, access) {
+  const k = KIND_OF[kind];
+  if (!k) return { error: 'invalid_doc_type', status: 400, allowed: Object.keys(KIND_OF) };
+  const needs = KIND_PERMISSIONS[k];
+  return needs.some(p => access?.[p]) ? null : { error: 'vendor_permission_forbidden', status: 403, requiredPermission: needs[0], acceptedPermissions: needs };
+}
 const allowed = (docType, access) => (DOC_PERMISSIONS[docType] || []).some(p => access?.[p]);
 const forbidden = docType => ({ error: 'vendor_permission_forbidden', status: 403, requiredPermission: DOC_PERMISSIONS[docType][0], acceptedPermissions: DOC_PERMISSIONS[docType] });
 
@@ -71,6 +83,8 @@ export function createVendorDocumentService({ store, renderHtml, renderManyHtml,
     if (!['json', 'html', 'pdf'].includes(format)) return { error: 'invalid_format', status: 400, allowed: ['json', 'html', 'pdf'] };
     const paper = query.paper == null || query.paper === '' ? 'a4' : String(query.paper);
     if (!PAPERS.includes(paper)) return { error: 'invalid_paper', status: 400, allowed: PAPERS };
+    const refused = precheck(kind, access);
+    if (refused) return refused;
     const out = await load({ vendorId, kind, id, lang });
     if (out.error) return out;
     if (!allowed(out.docType, access)) return forbidden(out.docType);
@@ -86,6 +100,8 @@ export function createVendorDocumentService({ store, renderHtml, renderManyHtml,
     if (!base) return { error: 'public_url_not_configured', status: 503 };
     if (body?.lang != null && !LANGS.includes(body.lang)) return { error: 'invalid_lang', status: 400, allowed: LANGS };
     const lang = langOf(body?.lang);
+    const refused = precheck(kind, access);
+    if (refused) return refused;
     const out = await load({ vendorId, kind, id, lang, customerId });
     if (out.error) return out;
     if (!allowed(out.docType, access)) return forbidden(out.docType);
@@ -153,13 +169,22 @@ export function createVendorDocumentService({ store, renderHtml, renderManyHtml,
    * GET /d/:token[.pdf] — the public page. → { status: 200, doc, lang } | { status: 404 } (unknown, revoked,
    * vendor or document gone: one answer for all). Each open sets lastOpenedAt.
    */
-  async function publicDocument({ token, lang: queryLang }) {
+  async function publicDocument({ token, lang: queryLang, onLink = () => ({ ok: true }) }) {
     if (!validToken(token)) return { status: 404 };
-    const link = await store.liveLinkByHash(hashToken(token));
+    const tokenHash = hashToken(token);
+    const link = await store.liveLinkByHash(tokenHash);
     if (!link) return { status: 404 };
+    // Security review #229 M2: the per-link limit counts only hashes of real, live links.
+    const allowed = onLink(tokenHash);
+    if (!allowed.ok) return { status: 429, retryAfterSeconds: allowed.retryAfterSeconds };
     const lang = LANGS.includes(queryLang) ? queryLang : link.lang;
     let doc;
-    if (link.docType === 'statement') doc = statementDocument(link.snapshot, lang);
+    if (link.docType === 'statement') {
+      // Security review #229 M1: a member who deleted their account is never named, even on an old snapshot.
+      const forgotten = await store.customerForgotten(link.vendorId, link.docId);
+      const snapshot = forgotten ? { ...link.snapshot, customer: { name: null } } : link.snapshot;
+      doc = statementDocument(snapshot, lang);
+    }
     else {
       const kind = KIND_OF[link.docType];
       const out = await load({ vendorId: link.vendorId, kind, id: link.docId, lang });

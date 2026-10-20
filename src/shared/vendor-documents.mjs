@@ -37,13 +37,16 @@ export const hashToken = token => createHash('sha256').update(String(token)).dig
 export const validToken = token => typeof token === 'string' && TOKEN_PATTERN.test(token);
 export const langOf = (value, fallback = 'en') => (LANGS.includes(value) ? value : fallback);
 
-/** PUBLIC_API_URL as an https/http origin + path without a trailing slash, or null when unset/invalid (Q-1: no fallback). */
-export function publicBaseUrl(raw = process.env.PUBLIC_API_URL) {
+/**
+ * PUBLIC_API_URL as an origin + path without a trailing slash, or null when unset/invalid (Q-1: no fallback).
+ * https only (security review #229 L4); plain http is accepted only while NODE_ENV=test (local UAT).
+ */
+export function publicBaseUrl(raw = process.env.PUBLIC_API_URL, { nodeEnv = process.env.NODE_ENV } = {}) {
   const value = typeof raw === 'string' ? raw.trim() : '';
   if (!value) return null;
   try {
     const url = new URL(value);
-    if (!['https:', 'http:'].includes(url.protocol)) return null;
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && nodeEnv === 'test')) return null;
     return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
   } catch { return null; }
 }

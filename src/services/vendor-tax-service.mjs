@@ -9,19 +9,24 @@
 // commission or payouts (O-10).
 // The routes check the flag (VENDOR_TOOLS + VENDOR_VAT) and who may call before calling in here.
 import { parseTaxProfile, parseVatRejection, parseTaxRateProposal, rateStatuses, normaliseTin } from '../shared/vendor-vat.mjs';
+import { certificateStands } from '../infra/vendor-tax-store-pg.mjs';
 import { eatDate } from '../shared/vendor-order-view.mjs';
 import { addDays } from '../shared/vendor-customer.mjs';
 
 const iso = v => (v == null ? null : new Date(v).toISOString());
 
 /** The tax profile as the vendor (and the KYC reviewer) see it — design spec §11 GET /vendor/tax-profile. */
-export function taxProfileView(row, kyc = null, certificate = null) {
+export function taxProfileView(row, kyc = null, certificate = null, verifiedCertificateStatus = null) {
   const r = row || { status: 'none', vatRegistered: false };
   const pending = r.status === 'pending'
     ? { tin: r.submittedTin, vrn: r.submittedVrn, certificateDocumentId: r.submittedCertificateDocumentId, submittedAt: iso(r.submittedAt) }
     : null;
   const verified = r.verifiedAt
-    ? { tin: r.verifiedTin, vrn: r.verifiedVrn, certificateDocumentId: r.verifiedCertificateDocumentId, verifiedAt: iso(r.verifiedAt) }
+    ? {
+      tin: r.verifiedTin, vrn: r.verifiedVrn, certificateDocumentId: r.verifiedCertificateDocumentId, verifiedAt: iso(r.verifiedAt),
+      // #229 L3: false once a reviewer rejected that certificate (or it expired): VAT is off until re-submitted.
+      certificateStands: certificateStands(verifiedCertificateStatus),
+    }
     : null;
   const rejected = r.status === 'rejected' ? { tin: r.submittedTin, vrn: r.submittedVrn, certificateDocumentId: r.submittedCertificateDocumentId } : null;
   const shown = pending || rejected || verified;
@@ -37,7 +42,7 @@ export function taxProfileView(row, kyc = null, certificate = null) {
     rejectNote: r.status === 'rejected' ? r.rejectNote ?? null : null,
     verifiedAt: verified?.verifiedAt ?? null,
     // VAT, TIN and VRN are on new documents: registered and verified (the verified values, even while a change is pending).
-    inForce: Boolean(r.vatRegistered && r.verifiedAt),
+    inForce: Boolean(r.vatRegistered && r.verifiedAt && verified?.certificateStands),
     changePending: Boolean(pending && verified),
     verified,
     pending,
@@ -49,8 +54,8 @@ export function createVendorTaxService({ store, notifyVendor = async () => {}, n
   const today = () => eatDate(now());
 
   async function getProfile({ vendorId }) {
-    const { row, kyc, certificate } = await store.load(vendorId);
-    return { taxProfile: taxProfileView(row, kyc, certificate) };
+    const { row, kyc, certificate, verifiedCertificateStatus } = await store.load(vendorId);
+    return { taxProfile: taxProfileView(row, kyc, certificate, verifiedCertificateStatus) };
   }
 
   /** PUT /vendor/tax-profile (vendor account only; the route refuses staff with 403 owner_only). */
@@ -71,8 +76,8 @@ export function createVendorTaxService({ store, notifyVendor = async () => {}, n
 
   /** The VAT registration section of a vendor's KYC case (§7.4). */
   async function adminVatCase({ vendorId }) {
-    const { row, kyc, certificate } = await store.load(vendorId);
-    const view = taxProfileView(row, kyc, certificate);
+    const { row, kyc, certificate, verifiedCertificateStatus } = await store.load(vendorId);
+    const view = taxProfileView(row, kyc, certificate, verifiedCertificateStatus);
     const submittedTin = view.pending?.tin ?? view.tin;
     return {
       vendorId,

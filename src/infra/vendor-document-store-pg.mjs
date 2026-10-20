@@ -231,9 +231,11 @@ export function createPgVendorDocumentStore({ db, customerStore, vatOn = () => f
     return { ...row, snapshot: json(row.snapshot) };
   }
   const touch = linkId => db('VendorDocumentLink').where({ id: linkId }).update({ lastOpenedAt: now() });
+  /** The customer behind a statement link deleted their FitFlex account (#229 M1). */
+  const customerForgotten = async (vendorId, customerId) => Boolean(await db('VendorCustomer').where({ id: customerId, vendorId }).whereNotNull('forgottenAt').first('id'));
 
   return {
     saleSource, paymentSource, statementSource, issueOrderInvoice, orderInvoiceSource, orderVendorsForBuyer, vendorsOf,
-    createLink, listLinks, getLink, revoke, liveLinkByHash, touch, vendorExists,
+    createLink, listLinks, getLink, revoke, liveLinkByHash, touch, vendorExists, customerForgotten,
   };
 }

@@ -10,7 +10,7 @@ import { shopService, vendorDocumentService, users } from '../src/bootstrap/serv
 import { vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
-import { hashToken, langOf, PAPERS, pdfFileName } from '../src/shared/vendor-documents.mjs';
+import { langOf, PAPERS, pdfFileName, validToken } from '../src/shared/vendor-documents.mjs';
 import { renderDocumentHtml, renderUnavailable, renderRateLimited, renderServerError, renderPdfFailed } from '../src/shared/vendor-document-html.mjs';
 import { renderDocumentPdf } from '../src/shared/vendor-document-pdf.mjs';
 
@@ -56,6 +56,8 @@ const shareLimiter = createVendorLimiter({ perMinute: VENDOR_DOCUMENT_LIMITS.sha
 const ipLimiter = createVendorLimiter({ perMinute: VENDOR_DOCUMENT_LIMITS.publicPerIpPerMinute, maxTracked: 20_000 });
 const tokenLimiter = createVendorLimiter({ perMinute: VENDOR_DOCUMENT_LIMITS.publicPerTokenPerHour, windowMs: 3_600_000, maxTracked: 20_000 });
 export const resetVendorDocumentLimits = () => { shareLimiter.reset(); ipLimiter.reset(); tokenLimiter.reset(); };
+/** For specs: how many keys each public limiter tracks (both are hard-capped). */
+export const publicLimiterSizes = () => ({ ip: ipLimiter.size(), token: tokenLimiter.size() });
 
 const FLAG = 'VENDOR_TOOLS + VENDOR_DOCUMENTS; off → 404 feature_disabled';
 const STAFF = 'Staff of a suspended vendor → 403 vendor_suspended; staff without the document\'s permission → 403 vendor_permission_forbidden { requiredPermission, acceptedPermissions }.';
@@ -165,7 +167,21 @@ function sendPdf(res, buffer, fileName, disposition = 'inline') {
 
 // ── public page ─────────────────────────────────────────────────────────────
 
-const addressOf = req => String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || req.socket?.remoteAddress || 'unknown';
+/**
+ * The client address for the per-address limit (security review #229 M2). X-Forwarded-For is trusted only
+ * as far as our own proxies: each proxy APPENDS the address it saw, so the client is the entry
+ * PUBLIC_DOCS_TRUSTED_PROXY_HOPS from the right (default 1 = the address our nearest proxy — Firebase
+ * Hosting / the bfast front — saw connect to it). Anything to the left of it is client-supplied and
+ * ignored. 0 = no proxy in front: the socket's own address, X-Forwarded-For ignored entirely.
+ */
+export function clientAddress(req, hops = Number(process.env.PUBLIC_DOCS_TRUSTED_PROXY_HOPS ?? 1)) {
+  const direct = req.socket?.remoteAddress || req.ip || 'unknown';
+  const n = Number.isInteger(hops) && hops >= 0 ? hops : 1;
+  if (n === 0) return direct;
+  const chain = String(req.headers?.['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!chain.length) return direct;
+  return chain[Math.max(0, chain.length - n)];
+}
 
 function publicHeaders(res, { logoUrl = null } = {}) {
   let img = '';
@@ -185,25 +201,30 @@ function htmlPage(res, status, content, opts) {
 
 export const publicVendorDocument = {
   created, method: 'get', path: '/d/:token',
-  description: 'Public (no sign-in), opened from a link a vendor shared: the document page, or its PDF when the path ends in .pdf (/d/{token}.pdf). Query lang = en | sw (default: the link\'s language; anything else → the default), paper = a4 | 80mm (PDF only). HTML with no JavaScript; headers Cache-Control: no-store, X-Robots-Tag: noindex, nofollow, Referrer-Policy: no-referrer, X-Frame-Options: DENY, a strict Content-Security-Policy. An unknown, mistyped, turned-off link (and VENDOR_DOCUMENTS off, or the vendor or document gone) → 404 with the SAME page every time (depends only on ?lang=). 429 + Retry-After over 60 requests a minute from one address or 300 an hour for one link. 500 on a server error; a PDF that fails → 500 page with a link back to the HTML page. Each open sets the link\'s lastOpenedAt (no IP or count is stored). Never shows a customer\'s phone, email or address.',
+  description: 'Public (no sign-in), opened from a link a vendor shared: the document page, or its PDF when the path ends in .pdf (/d/{token}.pdf). Query lang = en | sw (default: the link\'s language; anything else → the default), paper = a4 | 80mm (PDF only). HTML with no JavaScript; headers Cache-Control: no-store, X-Robots-Tag: noindex, nofollow, Referrer-Policy: no-referrer, X-Frame-Options: DENY, a strict Content-Security-Policy. An unknown, mistyped, turned-off link (and VENDOR_DOCUMENTS off, or the vendor or document gone) → 404 with the SAME page every time (depends only on ?lang=). 429 + Retry-After over 60 requests a minute from one address (the address our nearest proxy saw: PUBLIC_DOCS_TRUSTED_PROXY_HOPS, default 1, counted from the right of X-Forwarded-For) or 300 an hour for one live link (only real links are counted; a malformed token is answered before any limiter). 500 on a server error; a PDF that fails → 500 page with a link back to the HTML page. Each open sets the link\'s lastOpenedAt (no IP or count is stored). Never shows a customer\'s phone, email or address.',
   onRequest: async (req, res) => {
     const raw = String(req.params?.token || '');
     const pdf = raw.endsWith('.pdf');
     const token = pdf ? raw.slice(0, -4) : raw;
     const qlang = typeof req.query?.lang === 'string' ? req.query.lang : null;
-    const ip = ipLimiter.allow(addressOf(req));
-    const byToken = ip.ok ? tokenLimiter.allow(hashToken(token)) : ip;
-    if (!ip.ok || !byToken.ok) {
-      setHeader(res, 'Retry-After', String((ip.ok ? byToken : ip).retryAfterSeconds));
+    // A malformed token is answered at once, before any limiter or database work (#229 M2).
+    if (!validToken(token)) return htmlPage(res, 404, renderUnavailable(qlang));
+    const ip = ipLimiter.allow(clientAddress(req));
+    if (!ip.ok) {
+      setHeader(res, 'Retry-After', String(ip.retryAfterSeconds));
       return htmlPage(res, 429, renderRateLimited(qlang));
     }
     if (!vendorDocumentsOn()) return htmlPage(res, 404, renderUnavailable(qlang));
     let out;
     try {
-      out = await vendorDocumentService.publicDocument({ token, lang: qlang });
+      out = await vendorDocumentService.publicDocument({ token, lang: qlang, onLink: tokenHash => tokenLimiter.allow(tokenHash) });
     } catch (error) {
       console.error('[vendor-documents] public page failed', { error: error.message });
       return htmlPage(res, 500, renderServerError(qlang));
+    }
+    if (out.status === 429) {
+      setHeader(res, 'Retry-After', String(out.retryAfterSeconds));
+      return htmlPage(res, 429, renderRateLimited(qlang));
     }
     if (out.status !== 200) return htmlPage(res, 404, renderUnavailable(qlang));
     const lang = langOf(out.lang);
