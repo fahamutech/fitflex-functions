@@ -8,7 +8,10 @@
 //
 // Rows found through that evidence move onto the signer's Person (decision
 // D1: automatic, no prompt) — but only rows with no Firebase account of their
-// own, or this same one. Everything ambiguous becomes an IdentityConflict for
+// own, or this same one. A row with no Firebase account is moved only when it
+// is genuinely unclaimed (src/shared/unclaimed-row.mjs): a PIN-registered row
+// or one whose Person proved something else is someone's, whatever email or
+// phone was typed into it (20 Oct 2026). Everything ambiguous becomes an IdentityConflict for
 // review, never a merge:
 //   - a row on a different Firebase account with the same email/phone (Case D/E)
 //   - an email/phone already verified on another Person (Case G)
@@ -17,7 +20,8 @@
 // previous personId, so a link can be reversed. No User id or history row
 // changes: only User.personId and identity-table rows.
 import { randomUUID } from 'node:crypto';
-import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
+import { normalizeEmail, normalizePhone, sameEmail } from '../shared/identifiers.mjs';
+import { holdsVerified, isUnclaimed } from '../shared/unclaimed-row.mjs';
 
 const shortId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const LIVE = u => u.accountStatus !== 'closed';
@@ -118,7 +122,14 @@ export function createIdentityLinkService({ db }) {
             userIds: otherAccounts.map(u => u.id).sort(),
           });
         }
-        for (const u of rows) if (!u.firebaseUid || u.firebaseUid === uid) candidates.set(u.id, u);
+        for (const u of rows) {
+          // This Firebase account's own rows (also found by uid).
+          if (uid && u.firebaseUid === uid) { candidates.set(u.id, u); continue; }
+          if (u.firebaseUid) continue;
+          // A uid-less row reached through a typed-in email/phone: only an
+          // unclaimed one (O7), or one already on this Person.
+          if (u.personId === personId || await isUnclaimed(trx, u)) candidates.set(u.id, u);
+        }
       }
 
       // Rows already on another Person that holds this email/phone verified are
@@ -205,6 +216,84 @@ export function createIdentityLinkService({ db }) {
     });
   }
 
+  /**
+   * Firebase sign-in (security fix, 20 Oct 2026): which rows found only by
+   * their User.email (another Firebase account's, or none) this sign-in may
+   * use. `unclaimed`: an organisation-made row nobody has claimed yet (O7).
+   * `trusted`: unclaimed, or on a Person that already holds this email
+   * verified, or on the Person this Firebase uid belongs to.
+   * @param {{ rows: object[], email: string|null, uid: string|null }} p
+   * @returns {Promise<Map<string, { unclaimed: boolean, trusted: boolean }>>}
+   */
+  async function emailOnlyTrust({ rows, email, uid }) {
+    const out = new Map();
+    if (!rows.length) return out;
+    const normalized = normalizeEmail(email);
+    const uidOwner = uid ? await db('LoginIdentifier')
+      .where({ type: 'firebase_uid', normalizedValue: uid, status: 'active' }).first('personId') : null;
+    for (const row of rows) {
+      const unclaimed = await isUnclaimed(db, row);
+      const trusted = unclaimed
+        || Boolean(uidOwner?.personId && row.personId === uidOwner.personId)
+        || await holdsVerified(db, row.personId, 'email', normalized);
+      out.set(row.id, { unclaimed, trusted });
+    }
+    return out;
+  }
+
+  /**
+   * Decision D-5 (20 Oct 2026): a verified-email sign-in needs a new profile,
+   * but another row of that role holds the email without anyone having proved
+   * it. The email is taken off that row (User.email = null), with an AuditLog
+   * entry `contact_released_to_verified_owner` and an IdentityConflict for
+   * review, and the new row is inserted, all in one transaction. A row whose
+   * Person holds the email verified, or an unclaimed one (O7), is never
+   * released; if one still holds the exact value, the new row goes in without
+   * the email rather than failing the sign-in.
+   * @param {{ row: object, email: string, releaseUserIds: string[] }} p
+   * @returns {Promise<{ row: object, releasedUserIds: string[] }>}
+   */
+  async function insertReleasingEmail({ row, email, releaseUserIds }) {
+    const normalized = normalizeEmail(email);
+    return db.transaction(async trx => {
+      const released = [];
+      let keepEmail = true;
+      for (const id of releaseUserIds) {
+        const held = await trx('User').where({ id }).forUpdate().first();
+        if (!held || !sameEmail(held.email, normalized)) continue;
+        if (await holdsVerified(trx, held.personId, 'email', normalized) || await isUnclaimed(trx, held)) {
+          if (held.userType === row.userType && held.email === row.email) keepEmail = false;
+          continue;
+        }
+        await trx('User').where({ id }).update({ email: null, updatedAt: trx.fn.now() });
+        released.push(held);
+      }
+      const now = new Date();
+      await trx('User').insert({
+        ...row, email: keepEmail ? row.email : null,
+        createdAt: row.createdAt ?? now, updatedAt: now,
+      });
+      const fresh = await trx('User').where({ id: row.id }).first();
+      for (const held of released) {
+        await trx('AuditLog').insert({
+          id: randomUUID(), at: now, actor: fresh.id,
+          action: 'contact_released_to_verified_owner', target: held.id,
+          before: JSON.stringify({ email: held.email, userType: held.userType, personId: held.personId }),
+          after: JSON.stringify({ email: null, verifiedOwnerUserId: fresh.id, verifiedOwnerPersonId: fresh.personId, evidence: 'firebase_email_verified' }),
+        });
+      }
+      if (released.length) {
+        await recordConflict(trx, {
+          kind: 'unverified_contact_released', identifierType: 'email', normalizedValue: normalized,
+          personIds: [...new Set([fresh.personId, ...released.map(u => u.personId)].filter(Boolean))].sort(),
+          userIds: [fresh.id, ...released.map(u => u.id)].sort(),
+          details: JSON.stringify({ releasedUserIds: released.map(u => u.id), verifiedOwnerUserId: fresh.id }),
+        });
+      }
+      return { row: fresh, releasedUserIds: released.map(u => u.id) };
+    });
+  }
+
   /** Live personas of a Person, oldest first, in the shape sessions return. */
   async function personasOf(personId) {
     if (!personId) return [];
@@ -262,5 +351,8 @@ export function createIdentityLinkService({ db }) {
     return { row: await db('User').where({ id }).first() };
   }
 
-  return { linkOnVerifiedSignIn, personasOf, personOf, rememberPersona, createPersona };
+  return {
+    linkOnVerifiedSignIn, personasOf, personOf, rememberPersona, createPersona,
+    emailOnlyTrust, insertReleasingEmail,
+  };
 }
