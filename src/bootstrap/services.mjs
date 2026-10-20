@@ -58,6 +58,8 @@ import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
 import { createPgVendorSaleStore } from '../infra/vendor-sale-store-pg.mjs';
 import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
+import { createPgVendorCustomerStore } from '../infra/vendor-customer-store-pg.mjs';
+import { createVendorCustomerService } from '../services/vendor-customer-service.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
 import { createProductStatsRecomputeService } from '../services/product-stats-recompute-service.mjs';
@@ -261,13 +263,26 @@ export const shopService = createShopService({
   // A paid order is credited to the promotion the buyer opened (promotionEventsService is defined below; this only runs later).
   onOrderPaid: order => promotionEventsService.recordPaidOrder(order),
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
+  // Vendor tools · S4: the buyer becomes (or is refreshed as) an app customer of each vendor (defined below; runs later).
+  onVendorCustomerOrder: order => vendorCustomerService.marketplaceOrderPaid(order),
 });
 // Vendor tools · S3: walk-in (counter) sales — no commission, no ShopOrder, no settlement
 // (dormant behind VENDOR_TOOLS + VENDOR_WALKIN_SALES; the routes check the flag).
+const vendorSaleStore = createPgVendorSaleStore({ db });
 export const vendorSaleService = createVendorSaleService({
-  store: createPgVendorSaleStore({ db }),
+  store: vendorSaleStore,
   afterStockMoved: productIds => shopService.afterStockMoved(productIds),
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
+// Vendor tools · S4: customers, pay-later balances, customer payments, aging and the overdue digest
+// (dormant behind VENDOR_TOOLS + VENDOR_CUSTOMERS; the routes and the digest job check the flag).
+export const vendorCustomerService = createVendorCustomerService({
+  store: createPgVendorCustomerStore({ db }),
+  saleStore: vendorSaleStore,
+  saleService: vendorSaleService,
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+  // The digest goes to the vendor and to staff: each person gets their own push + inbox, in their language.
+  notifyPerson: (userId, type, data) => partnerNotifier.vendorEvent(userId, type, data),
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const productStatsRecomputeService = createProductStatsRecomputeService({ db });
@@ -406,7 +421,19 @@ export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
   // promotionEventsService is defined at the end of this file; this only runs later.
   // A deleted account lets its username go (held 90 days). usernameService is defined further down.
-  onAccountDeleted: async userId => { await promotionEventsService.forgetUser(userId); await usernameService.forgetUser(userId); },
+  // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
+  // their link to the account unless money is owed. Each step runs even if another fails.
+  onAccountDeleted: async (userId) => {
+    const errors = [];
+    for (const step of [
+      () => promotionEventsService.forgetUser(userId),
+      () => usernameService.forgetUser(userId),
+      () => vendorCustomerService.forgetBuyer(userId),
+    ]) {
+      try { await step(); } catch (err) { errors.push(err); }
+    }
+    if (errors.length) throw errors[0];
+  },
 });
 
 // Until a gym's owner is verified, only the gym's own members check in there.

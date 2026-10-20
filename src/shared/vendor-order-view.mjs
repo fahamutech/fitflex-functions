@@ -77,7 +77,7 @@ export function contactWindow(order, vendorId, now = new Date()) {
  * @param ctx.contactOn    VENDOR_ORDER_BUYER_CONTACT
  * @param ctx.now
  */
-export function vendorOrderView(order, vendorId, { customerId = null, buyer = null, gym = null, seesMoney = false, contactOn = false, now = new Date() } = {}) {
+export function vendorOrderView(order, vendorId, { customerId = null, buyer = null, gym = null, seesMoney = false, contactOn = false, customerLinked = false, now = new Date() } = {}) {
   const mine = ownLines(order, vendorId);
   const own = fulfilmentsOf(order).find(f => f.vendorId === vendorId);
   const status = own?.status || order.status;
@@ -112,7 +112,8 @@ export function vendorOrderView(order, vendorId, { customerId = null, buyer = nu
     // Kept for app builds that read it (they show the id); new clients use pickupGym.
     pickupGymId: order.pickupGymId ?? null,
     pickupGym: order.pickupGymId ? { id: order.pickupGymId, name: gym?.name ?? null } : null,
-    buyer: { customerId, displayName: buyer?.displayName ?? null },
+    // customerLinked (S4): a vendor customer record exists for this buyer and VENDOR_CUSTOMERS is on.
+    buyer: { customerId, displayName: buyer?.displayName ?? null, customerLinked: !!(customerId && customerLinked) },
   };
   if (window.open) {
     // The delivery address is what the vendor needs to deliver: shown while their part is open and

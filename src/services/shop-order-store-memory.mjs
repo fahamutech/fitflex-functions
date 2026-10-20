@@ -170,18 +170,19 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       && (order.stockState || 'reserved') === 'reserved' && order.reservationExpiresAt && +new Date(order.reservationExpiresAt) <= cutoff)).slice(0, limit);
   }
 
-  async function ordersForVendor(vendorId, { limit = null, after = null } = {}) {
+  async function ordersForVendor(vendorId, { limit = null, after = null, buyerId = null } = {}) {
     if (!vendorId) return [];
     const key = order => [+new Date(order.createdAt || 0), String(order.id)];
     const before = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
-    let rows = (await shopOrders.filterAsync(order => (order.items || []).some(item => item?.vendorId != null && item.vendorId === vendorId)))
+    let rows = (await shopOrders.filterAsync(order => (!buyerId || String(order.buyerId) === String(buyerId))
+      && (order.items || []).some(item => item?.vendorId != null && item.vendorId === vendorId)))
       .sort((a, b) => (before(key(a), key(b)) ? 1 : before(key(b), key(a)) ? -1 : 0));
     if (after) rows = rows.filter(order => before(key(order), [+new Date(after.createdAt), String(after.id)]));
     return limit ? rows.slice(0, limit) : rows;
   }
 
-  async function countsForVendor(vendorId) {
-    return countOrders(await ordersForVendor(vendorId), vendorId);
+  async function countsForVendor(vendorId, { buyerId = null } = {}) {
+    return countOrders(await ordersForVendor(vendorId, { buyerId }), vendorId);
   }
 
   return { placeOrder, findReplay, cancelAndRelease, updateWithLock, markPaid, reviveOrder, markLatePayment, findExpired, ordersForVendor, countsForVendor };

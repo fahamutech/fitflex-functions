@@ -13,6 +13,13 @@
 //
 // Nothing here writes ShopOrder, PaymentRequest, commission or settlement rows.
 // Every query is vendor-scoped and parameterised.
+//
+// S4 (pay later): a sale may name a customer of the vendor (VendorCustomer). Its row is locked
+// FOR SHARE before any product (so archiving cannot race the sale, and the lock order customer →
+// products matches customer payments: customer → sales). A credit sale stores balanceTzs = total −
+// paid at the counter and its due date. Later customer payments move money from balanceTzs to
+// paidTzs (and allocatedTzs) in their own transaction (src/infra/vendor-customer-store-pg.mjs);
+// a sale with live payment allocations cannot be voided (409 sale_has_payments).
 import { randomUUID } from 'node:crypto';
 import { VARIANT_HAS_STOCK, variantStockAdjusted, variantStockOf } from './shop-order-store-pg.mjs';
 import { variantsOf, isTracked } from '../shared/vendor-stock.mjs';
@@ -30,6 +37,17 @@ const person = (id, name) => (id ? { id, name: name ?? null } : null);
 const keyOf = (productId, variant) => `${productId}\u0000${variant || ''}`;
 /** Reached FitFlex more than 5 minutes after it was made (security review L4). */
 const lateRecorded = s => +new Date(s.createdAt) - +new Date(s.soldAt) > LATE_RECORDED_MS;
+/**
+ * A DATE column as YYYY-MM-DD. node-pg returns DATE as a Date at LOCAL midnight (and JSON turns that
+ * into a UTC instant, e.g. 2026-10-19T21:00:00Z on an EAT machine), so the local calendar parts are
+ * read back; a plain YYYY-MM-DD string passes through. Correct whatever the server's time zone.
+ */
+export const dayOf = (v) => {
+  if (v == null) return null;
+  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const d = new Date(v);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 export function createPgVendorSaleStore({ db, now = () => new Date() }) {
   // ── views ─────────────────────────────────────────────────────────────────
@@ -42,10 +60,15 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
   }
 
   /** The sale as vendors see it. Never the unit cost (S6), never internals (fingerprint, seq). */
-  function saleView(sale, lines, payments, names) {
+  function saleView(sale, lines, payments, names, { customer = null, allocations = [] } = {}) {
     const s = plain(sale);
     return {
       id: s.id, number: s.number, status: s.status, kind: s.kind,
+      // S4: the customer (name only, never contact details), the due date and what is still owed.
+      // paidTzs = paid at the counter + later customer payments; paidAtSaleTzs = at the counter only.
+      customer: s.customerId ? { id: s.customerId, name: customer?.name ?? null, forgotten: customer?.forgottenAt != null } : null,
+      dueDate: dayOf(sale.dueDate), balanceTzs: s.balanceTzs, paidAtSaleTzs: s.paidTzs - (s.allocatedTzs || 0),
+      allocations: allocations.map(a => ({ paymentId: a.paymentId, number: a.number, amountTzs: a.amountTzs, receivedOn: dayOf(a.receivedOn), voided: a.voidedAt != null })),
       soldAt: iso(s.soldAt), clientSoldAt: iso(s.clientSoldAt), recordedAt: iso(s.createdAt), lateRecorded: lateRecorded(s), clientRef: s.clientRef,
       subtotalTzs: s.subtotalTzs, lineDiscountTzs: s.lineDiscountTzs, discountTzs: s.discountTzs,
       totalTzs: s.totalTzs, paidTzs: s.paidTzs, changeTzs: s.changeTzs,
@@ -67,18 +90,22 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
   async function load(q, where) {
     const sale = await q('VendorSale').where(where).first();
     if (!sale) return null;
-    const [lines, payments] = await Promise.all([
+    const [lines, payments, customer, allocations] = await Promise.all([
       q('VendorSaleLine').where({ saleId: sale.id }),
       q('VendorSalePayment').where({ saleId: sale.id }),
+      sale.customerId ? q('VendorCustomer').where({ id: sale.customerId, vendorId: sale.vendorId }).first('name', 'forgottenAt') : null,
+      q('VendorPaymentAllocation as a').join('VendorCustomerPayment as p', function joinPayment() { this.on('p.id', 'a.paymentId').andOn('p.vendorId', 'a.vendorId'); })
+        .where({ 'a.saleId': sale.id, 'a.vendorId': sale.vendorId })
+        .orderBy([{ column: 'p.seq' }]).select('a.paymentId', 'p.number', 'a.amountTzs', 'p.receivedOn', 'a.voidedAt'),
     ]);
     const names = await namesOf(q, [sale.createdBy, sale.voidedBy, ...lines.map(l => l.priceChangedBy)]);
-    return { row: plain(sale), view: saleView(sale, lines, payments, names), lines: lines.map(plain) };
+    return { row: plain(sale), view: saleView(sale, lines, payments, names, { customer, allocations }), lines: lines.map(plain) };
   }
 
-  /** A sale of this vendor by id; another vendor's sale is not found. */
-  async function get(vendorId, saleId) {
+  /** A sale of this vendor by id (of this customer, when given); another vendor's sale is not found. */
+  async function get(vendorId, saleId, { customerId = null } = {}) {
     if (typeof saleId !== 'string' || !saleId) return null;
-    return (await load(db, { id: saleId, vendorId }))?.view ?? null;
+    return (await load(db, { id: saleId, vendorId, ...(customerId ? { customerId } : {}) }))?.view ?? null;
   }
 
   /** A sale already recorded under this clientRef: the same request → it; a different one → 409. */
@@ -119,6 +146,13 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
     const saleId = newId('sal');
     try {
       return await db.transaction(async (trx) => {
+        // S4: the customer first (FOR SHARE: other sales for them may run alongside; archiving and
+        // customer payments, which lock it FOR UPDATE, wait). Another vendor's customer is not found.
+        if (sale.customerId) {
+          const customer = await trx('VendorCustomer').where({ id: sale.customerId, vendorId }).forShare().first('id', 'archivedAt');
+          if (!customer) throw refusal('customer_not_found', 404);
+          if (customer.archivedAt) throw refusal('customer_archived', 409);
+        }
         // Lock every product once, in id order (app orders take rows in the same order).
         const productIds = [...new Set(sale.lines.map(l => l.productId))].sort();
         const products = new Map();
@@ -130,7 +164,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
           const facts = checkLine(products.get(line.productId), line);
           return { ...line, ...facts };
         });
-        const totals = priceSale(priced, sale.discountTzs, sale.payments);
+        const totals = priceSale(priced, sale.discountTzs, sale.payments, { credit: sale.kind === 'credit' });
         if (totals.error) throw Object.assign(new Error(totals.error), { refusal: totals });
 
         // Units per product/variant, taken in a fixed order.
@@ -190,9 +224,10 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
         const seq = Number(issued.rows[0].seq);
 
         await trx('VendorSale').insert({
-          id: saleId, vendorId, seq, number: receiptNumber(seq), kind: 'cash', status: 'completed', customerId: null,
+          id: saleId, vendorId, seq, number: receiptNumber(seq), kind: sale.kind || 'cash', status: 'completed', customerId: sale.customerId || null,
           soldAt: sale.soldAt, clientSoldAt: sale.clientSoldAt ?? null, subtotalTzs: totals.subtotalTzs, lineDiscountTzs: totals.lineDiscountTzs, discountTzs: totals.discountTzs,
-          vatTzs: 0, totalTzs: totals.totalTzs, paidTzs: totals.paidTzs, changeTzs: totals.changeTzs, balanceTzs: 0,
+          vatTzs: 0, totalTzs: totals.totalTzs, paidTzs: totals.paidTzs, changeTzs: totals.changeTzs, balanceTzs: totals.balanceTzs,
+          dueDate: sale.kind === 'credit' ? sale.dueDate : null,
           clientRef: sale.clientRef, fingerprint, note: sale.note, createdBy: actorId, createdAt: at, updatedAt: at,
         });
         await trx('VendorSaleLine').insert(totals.lines.map((l, i) => ({
@@ -251,6 +286,12 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
         const refused = canVoid(sale);
         if (refused) throw Object.assign(new Error(refused.error), { refusal: refused });
         if (sale.status === 'voided') throw refusal('already_voided', 409, { voidedAt: iso(sale.voidedAt) });
+        // S4 (Q-2): customer payments allocated to this sale must be voided first; no money moves silently.
+        const live = await trx('VendorPaymentAllocation as a')
+          .join('VendorCustomerPayment as p', function joinPayment() { this.on('p.id', 'a.paymentId').andOn('p.vendorId', 'a.vendorId'); })
+          .where({ 'a.saleId': saleId, 'a.vendorId': vendorId }).whereNull('a.voidedAt')
+          .orderBy('p.seq').select('p.id', 'p.number');
+        if (live.length) throw refusal('sale_has_payments', 409, { payments: live.map(p => ({ id: p.id, number: p.number })) });
         const at = now();
         const lines = await trx('VendorSaleLine').where({ saleId });
         const groups = new Map();
@@ -285,7 +326,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
           .update({ status: 'voided', voidedBy: actorId, voidedAt: at, voidReason: reason, updatedAt: at });
         await trx('AuditLog').insert({
           id: randomUUID(), at, actor: actorId, action: 'vendor_sale_voided', target: saleId,
-          before: JSON.stringify({ status: 'completed', number: sale.number, totalTzs: sale.totalTzs }),
+          before: JSON.stringify({ status: 'completed', number: sale.number, totalTzs: sale.totalTzs, kind: sale.kind, balanceTzs: sale.balanceTzs }),
           after: JSON.stringify({ status: 'voided', vendorId, reason }),
         });
         const saved = await load(trx, { id: saleId });
@@ -313,7 +354,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
    * GET /vendor/sales: newest sale first (soldAt desc, id desc), one page, plus the summary of the
    * whole range (completed sales; status filter not applied to it). from/to are instants (to exclusive).
    */
-  async function list({ vendorId, from = null, to = null, status = null, createdBy = null, limit = 50, cursor = null }) {
+  async function list({ vendorId, from = null, to = null, status = null, createdBy = null, customerId = null, kind = null, limit = 50, cursor = null }) {
     let after = null;
     if (cursor) {
       after = decodeCursor(cursor);
@@ -324,6 +365,8 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
       if (from) q.where(`${alias}.soldAt`, '>=', from);
       if (to) q.where(`${alias}.soldAt`, '<', to);
       if (createdBy) q.where(`${alias}.createdBy`, createdBy);
+      if (customerId) q.where(`${alias}.customerId`, customerId);
+      if (kind) q.where(`${alias}.kind`, kind);
       return q;
     };
     let q = scope(db('VendorSale'));
@@ -333,12 +376,15 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
     const page = rows.slice(0, limit);
     const ids = page.map(r => r.id);
 
-    const [items, overridden, pays, names] = await Promise.all([
+    const customerIds = [...new Set(page.map(r => r.customerId).filter(Boolean))];
+    const [items, overridden, pays, names, customers] = await Promise.all([
       ids.length ? db('VendorSaleLine').whereIn('saleId', ids).groupBy('saleId').select('saleId').sum({ n: 'qty' }) : [],
       ids.length ? db('VendorSaleLine').whereIn('saleId', ids).whereRaw('"unitPriceTzs" <> "listPriceTzs"').distinct('saleId') : [],
       ids.length ? db('VendorSalePayment').whereIn('saleId', ids).orderBy(['saleId', 'position']).select('saleId', 'method') : [],
       namesOf(db, page.map(r => r.createdBy)),
+      customerIds.length ? db('VendorCustomer').where({ vendorId }).whereIn('id', customerIds).select('id', 'name', 'forgottenAt') : [],
     ]);
+    const customerNames = new Map(customers.map(c => [c.id, { name: c.name ?? null, forgotten: c.forgottenAt != null }]));
     const itemCount = new Map(items.map(r => [r.saleId, Number(r.n)]));
     const withOverride = new Set(overridden.map(r => r.saleId));
     const methods = new Map();
@@ -357,6 +403,9 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
       db.raw(`count(*) FILTER (WHERE status = 'completed' AND EXISTS (SELECT 1 FROM "VendorSaleLine" l
         WHERE l."saleId" = "VendorSale".id AND l."unitPriceTzs" <> l."listPriceTzs"))::int AS "overrideCount"`),
       db.raw(`count(*) FILTER (WHERE "createdAt" - "soldAt" > make_interval(secs => ?))::int AS "lateCount"`, [LATE_RECORDED_MS / 1000]),
+      // S4: sold on credit = what was left owing at the counter (total − paid at the sale); byMethod + this = totalTzs.
+      db.raw(`COALESCE(sum("totalTzs" - ("paidTzs" - "allocatedTzs")) FILTER (WHERE status = 'completed' AND kind = 'credit'), 0)::bigint AS "payLaterTzs"`),
+      db.raw(`COALESCE(sum("balanceTzs") FILTER (WHERE status = 'completed' AND kind = 'credit'), 0)::bigint AS "owedTzs"`),
     );
     const byMethodRows = await scope(db('VendorSalePayment as p').join('VendorSale as s', 's.id', 'p.saleId'), 's')
       .where('s.status', 'completed').groupBy('p.method').select('p.method').sum({ amount: 'p.amountTzs' });
@@ -371,11 +420,14 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
         totalTzs: r.totalTzs, discountTzs: r.lineDiscountTzs + r.discountTzs, hasOverride: withOverride.has(r.id), lateRecorded: lateRecorded(r),
         itemCount: itemCount.get(r.id) || 0, methods: methods.get(r.id) || [],
         createdBy: person(r.createdBy, names.get(r.createdBy)),
+        kind: r.kind, balanceTzs: r.balanceTzs, dueDate: dayOf(r.dueDate),
+        customer: r.customerId ? { id: r.customerId, name: customerNames.get(r.customerId)?.name ?? null, forgotten: customerNames.get(r.customerId)?.forgotten ?? false } : null,
       })),
       nextCursor: rows.length > limit ? encodeCursor(page[page.length - 1]) : null,
       summary: {
         count: Number(totals.count), totalTzs: Number(totals.totalTzs), voidedCount: Number(totals.voidedCount),
         discountTzs: Number(totals.discountTzs), overrideCount: Number(totals.overrideCount), lateCount: Number(totals.lateCount), byMethod,
+        payLaterTzs: Number(totals.payLaterTzs), owedTzs: Number(totals.owedTzs),
       },
     };
   }

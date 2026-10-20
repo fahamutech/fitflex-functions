@@ -311,10 +311,12 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
    * query on the items GIN index (jsonb containment), not a whole-table load. Lines without a
    * vendorId (older rows) never match.
    */
-  async function ordersForVendor(vendorId, { limit = null, after = null } = {}) {
+  async function ordersForVendor(vendorId, { limit = null, after = null, buyerId = null } = {}) {
     if (!vendorId) return [];
     const query = db('ShopOrder')
       .whereRaw('"items" @> ?::jsonb', [JSON.stringify([{ vendorId: String(vendorId) }])])
+      // S4: one customer's orders (GET /vendor/orders?customerId=, resolved to the buyer by the route).
+      .modify(q => { if (buyerId) q.where('buyerId', String(buyerId)); })
       .orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id', order: 'desc' }]);
     // Keyset: strictly after the cursor's (createdAt, id) in that order.
     if (after) query.whereRaw('("createdAt", "id") < (?::timestamptz, ?)', [after.createdAt, after.id]);
@@ -327,7 +329,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
    * orderTab() in src/shared/vendor-order-view.mjs: own status = this vendor's fulfilment status, else the
    * order's status (orders from before fulfilments).
    */
-  async function countsForVendor(vendorId) {
+  async function countsForVendor(vendorId, { buyerId = null } = {}) {
     const empty = { open: 0, delivered: 0, cancelled: 0, all: 0, waitingAccept: 0 };
     if (!vendorId) return empty;
     const { rows } = await db.raw(`
@@ -337,7 +339,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
                           CASE WHEN jsonb_typeof(o."fulfilments") = 'array' THEN o."fulfilments" ELSE '[]'::jsonb END) f
                          WHERE f->>'vendorId' = ? LIMIT 1), o."status") AS own
           FROM "ShopOrder" o
-         WHERE o."items" @> ?::jsonb
+         WHERE o."items" @> ?::jsonb AND (?::text IS NULL OR o."buyerId" = ?::text)
       ), tabbed AS (
         SELECT own, CASE
                  WHEN own = 'cancelled' OR order_status = 'cancelled' OR pay IN ('refund_pending', 'refunded') THEN 'cancelled'
@@ -351,7 +353,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
              count(*) FILTER (WHERE tab = 'cancelled')::int AS "cancelled",
              count(*)::int AS "all",
              count(*) FILTER (WHERE tab = 'open' AND own = 'pending')::int AS "waitingAccept"
-        FROM tabbed`, [String(vendorId), JSON.stringify([{ vendorId: String(vendorId) }])]);
+        FROM tabbed`, [String(vendorId), JSON.stringify([{ vendorId: String(vendorId) }]), buyerId ? String(buyerId) : null, buyerId ? String(buyerId) : null]);
     return { ...empty, ...rows[0] };
   }
 
