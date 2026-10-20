@@ -36,17 +36,22 @@ const publicationFromDb = r => (r ? {
   note: r.note ?? null, rolledBackFrom: r.rolledBackFrom == null ? null : Number(r.rolledBackFrom),
 } : null);
 
+// Shop banner photos (purpose 'shop_banner', migration shop-banners) share the HeroImage table and
+// its cleaning pipeline but are not app photos: the library never lists them, and a slot, publish or
+// rollback never finds them (they read as image_not_found).
+const appPhotos = qb => qb.where(w => w.whereNull('purpose').orWhere('purpose', 'hero'));
+
 function bind(q) {
   return {
     async listImages() {
-      return (await q('HeroImage').select('*').orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id' }])).map(imageFromDb);
+      return (await appPhotos(q('HeroImage').select('*')).orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id' }])).map(imageFromDb);
     },
     async getImage(id) {
-      return imageFromDb(await q('HeroImage').where({ id: String(id) }).first());
+      return imageFromDb(await appPhotos(q('HeroImage').where({ id: String(id) })).first());
     },
     async getImages(ids) {
       if (!ids.length) return [];
-      return (await q('HeroImage').whereIn('id', ids)).map(imageFromDb);
+      return (await appPhotos(q('HeroImage').whereIn('id', ids))).map(imageFromDb);
     },
     async insertImage(row) {
       const [saved] = await q('HeroImage').insert(forWrite('HeroImage', row)).returning('*');

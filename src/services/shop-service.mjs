@@ -960,6 +960,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return orders.map(order => vendorOrderView(order, vendorId, {
       customerId: refs.get(String(order.buyerId)) ?? null, buyer: buyers.get(order.buyerId) || null,
       customerLinked: linked.has(refs.get(String(order.buyerId))),
+      // No account row any more = the buyer deleted their account (account deletion removes the User row).
+      buyerForgotten: !!order.buyerId && !buyers.has(order.buyerId),
       gym: pickupGyms.get(order.pickupGymId) || null, seesMoney, contactOn, now: at,
     }));
   }

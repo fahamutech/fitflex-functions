@@ -1,6 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService } from '../src/bootstrap/services.mjs';
+import { shopBannersOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -115,6 +116,16 @@ export const shopReservationExpiry = {
     if (process.env.SHOP_RESERVATION_EXPIRY !== 'on') return;
     const r = await shopService.expireStaleReservations({});
     if (r.expired) console.log(`[shop] reservations expired=${r.expired} due=${r.due}`);
+  }
+};
+
+export const shopBannerLifecycle = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'Shop home banners: write down what time has decided — proposals not reviewed within SHOP_PROPOSAL_EXPIRY_DAYS (14) or by their start become expired (the vendor is told), approved banners past their end become ended. Every read already works the state out from the time, so a late run changes nothing anyone sees. Does nothing unless SHOP_BANNERS is on. Idempotent.',
+  onJob: async () => {
+    if (!shopBannersOn()) return;
+    const r = await shopBannerService.runLifecycle();
+    if (r.expired || r.ended) console.log(`[shop-banners] expired=${r.expired} ended=${r.ended}`);
   }
 };
 

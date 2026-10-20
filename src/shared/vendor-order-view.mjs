@@ -75,9 +75,10 @@ export function contactWindow(order, vendorId, now = new Date()) {
  * @param ctx.gym          the pickup gym row (or null) — only id and name are read
  * @param ctx.seesMoney    commissionTzs / vendorPayoutTzs on lines (Q-5)
  * @param ctx.contactOn    VENDOR_ORDER_BUYER_CONTACT
+ * @param ctx.buyerForgotten  the buyer's account is gone (deleted; vendor customer records forgotten)
  * @param ctx.now
  */
-export function vendorOrderView(order, vendorId, { customerId = null, buyer = null, gym = null, seesMoney = false, contactOn = false, customerLinked = false, now = new Date() } = {}) {
+export function vendorOrderView(order, vendorId, { customerId = null, buyer = null, gym = null, seesMoney = false, contactOn = false, customerLinked = false, buyerForgotten = false, now = new Date() } = {}) {
   const mine = ownLines(order, vendorId);
   const own = fulfilmentsOf(order).find(f => f.vendorId === vendorId);
   const status = own?.status || order.status;
@@ -113,7 +114,8 @@ export function vendorOrderView(order, vendorId, { customerId = null, buyer = nu
     pickupGymId: order.pickupGymId ?? null,
     pickupGym: order.pickupGymId ? { id: order.pickupGymId, name: gym?.name ?? null } : null,
     // customerLinked (S4): a vendor customer record exists for this buyer and VENDOR_CUSTOMERS is on.
-    buyer: { customerId, displayName: buyer?.displayName ?? null, customerLinked: !!(customerId && customerLinked) },
+    // forgotten (S4 UAT D7): the buyer deleted their FitFlex account — show "Deleted member", not a fallback name.
+    buyer: { customerId, displayName: buyer?.displayName ?? null, customerLinked: !!(customerId && customerLinked), forgotten: !!buyerForgotten },
   };
   if (window.open) {
     // The delivery address is what the vendor needs to deliver: shown while their part is open and

@@ -44,11 +44,18 @@ const open = buffer => sharp(buffer, { limitInputPixels: HERO_LIMITS.maxPixels, 
 
 /**
  * Check and clean an uploaded photo.
+ * `limits` (optional) narrows the checks for another use of the same pipeline (shop banners:
+ * ≤ 5 MB, JPEG/PNG/WebP, at least 1600 × 1000): { maxBytes, minWidth, minHeight, formats }.
+ * The cleaning (rotate, sRGB, re-encode, no metadata) is always the same.
  * → { buffer, mimeType: 'image/webp', width, height, sha256, luminance } or { error, status }.
  */
-export async function prepareHeroUpload(input) {
+export async function prepareHeroUpload(input, limits = {}) {
+  const maxBytes = limits.maxBytes ?? HERO_LIMITS.maxBytes;
+  const minWidth = limits.minWidth ?? HERO_LIMITS.minWidth;
+  const minHeight = limits.minHeight ?? 0;
+  const formats = limits.formats ? new Set(limits.formats) : ACCEPTED_FORMATS;
   if (!Buffer.isBuffer(input) || !input.length) return fail('no_file_provided', 400);
-  if (input.length > HERO_LIMITS.maxBytes) return fail('file_too_large', 413, { maxBytes: HERO_LIMITS.maxBytes });
+  if (input.length > maxBytes) return fail('file_too_large', 413, { maxBytes });
   let meta;
   try {
     // Reads the header only; the pixel limit is checked again when decoding.
@@ -56,11 +63,13 @@ export async function prepareHeroUpload(input) {
   } catch {
     return fail('unsupported_file_type', 400, { reason: 'not_an_image' });
   }
-  if (!ACCEPTED_FORMATS.has(meta.format)) return fail('unsupported_file_type', 400, { reason: 'format_not_accepted' });
+  if (!formats.has(meta.format)) return fail('unsupported_file_type', 400, { reason: 'format_not_accepted' });
   if (!meta.width || !meta.height) return fail('unsupported_file_type', 400, { reason: 'not_an_image' });
   if (meta.width * meta.height > HERO_LIMITS.maxPixels) return fail('file_too_large', 413, { maxPixels: HERO_LIMITS.maxPixels });
   const upright = uprightSize(meta);
-  if (upright.width < HERO_LIMITS.minWidth) return fail('image_too_small', 400, { minWidth: HERO_LIMITS.minWidth, width: upright.width });
+  if (upright.width < minWidth || upright.height < minHeight) {
+    return fail('image_too_small', 400, { minWidth, ...(minHeight ? { minHeight, height: upright.height } : {}), width: upright.width });
+  }
 
   let buffer; let info;
   try {
