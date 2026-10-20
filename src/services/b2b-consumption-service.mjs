@@ -424,9 +424,12 @@ export function createB2BConsumptionService({
     return result.consumed ? result : null;
   }
 
-  /** Trainer booking marked completed: the session happened, so it may consume a trainer benefit. */
+  /**
+   * Trainer booking marked completed — or no-show, which uses the benefit as if
+   * the session happened (owner decision 2026-10-20) — may consume a trainer benefit.
+   */
   async function consumeTrainerSession({ booking }) {
-    if (!booking?.memberId || booking.status !== 'completed') return { consumed: false, reason: 'session_not_completed' };
+    if (!booking?.memberId || !['completed', 'no_show'].includes(booking.status)) return { consumed: false, reason: 'session_not_completed' };
     if (!(Number(booking.amountTzs) > 0)) return { consumed: false, reason: 'nothing_to_fund' };
     return consume({
       userId: booking.memberId, sourceType: 'trainer_booking', sourceId: booking.id,

@@ -26,6 +26,7 @@ export function createNotificationService({
   logger = console,
   onOpened = async () => {},  // (notifications[]) → after a member reads them
   onClicked = async () => {}, // (notification, { via }) → after a member taps its button
+  localeOf = async () => null, // (userId) → 'sw' | 'en' | null: the language the person chose for messages
 }) {
   async function registerDevice({ userId, token, platform }) {
     if (!token || typeof token !== 'string' || token.length > 4096) return { error: 'token_required', status: 400 };
@@ -224,6 +225,27 @@ export function createNotificationService({
           type: 'trainer_booking_cancelled', data,
           title: 'Session cancelled',
           body: `${memberName} cancelled: ${fmtSlots(bookings)}. The slot is free again.`,
+        });
+      } else if (event === 'trainer_booking_no_show') {
+        // Sent in the member's chosen language (CommunicationPreference.locale): 'sw' → Swahili,
+        // otherwise (en or nothing saved) English as before. Both are always in `data` for the inbox.
+        // Swahili is a DRAFT for native review.
+        const en = {
+          title: 'Missed session',
+          body: `${trainer?.displayName || 'Your trainer'} recorded that you missed your session: ${fmtSlots(bookings)}. Missed sessions are not refunded. If this is wrong, contact FitFlex.`,
+        };
+        const sw = {
+          title: 'Hukuhudhuria kipindi',
+          body: `${trainer?.displayName || 'Trainer wako'} amerekodi kwamba hukuhudhuria kipindi chako: ${fmtSlots(bookings)}. Hutarejeshewa pesa za kipindi hiki. Ukiona si sahihi, wasiliana na FitFlex.`,
+        };
+        let locale = null;
+        try { locale = await localeOf(memberId); } catch { locale = null; }
+        const text = locale === 'sw' ? sw : en;
+        await notify(memberId, {
+          type: event,
+          data: { ...data, bookingId: bookings[0]?.id || '', locale: locale === 'sw' ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body },
+          title: text.title,
+          body: text.body,
         });
       } else if (event === 'trainer_booking_cancelled_by_trainer') {
         await notify(memberId, {

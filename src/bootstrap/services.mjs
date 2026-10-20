@@ -31,7 +31,7 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, vendorVatOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn } from '../shared/feature-flags.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
@@ -145,6 +145,7 @@ import { createZebraDocumentStore, createZebraPublicStore } from '../infra/stora
 import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
+import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
 import {
   moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
@@ -239,6 +240,17 @@ export const trainerBookingService = createTrainerBookingService({
   // The Pass trainer discount only for a tier configured in Settings.
   getTierConfig: settingsService.getTierConfig,
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
+  // Phase B · B1a: no-show, admin no_show and `actions` (dormant unless TRAINER_SESSION_OUTCOMES).
+  outcomesOn: trainerSessionOutcomesOn,
+  // Outcome changes lock the statement and the booking, write conditionally and keep draft lines in step.
+  outcomeStore: createPgTrainerOutcomeStore({ db }),
+  // Sessions on a live trainer statement line, with that statement's status.
+  statementLines: async (bookingIds) => {
+    const rows = await db('TrainerSettlementLine as l').join('TrainerSettlement as s', 's.id', 'l.trainerSettlementId')
+      .whereIn('l.bookingId', bookingIds).where('l.voided', false).whereNot('s.status', 'voided')
+      .select('l.bookingId', 's.id as statementId', 's.status');
+    return new Map(rows.map(r => [r.bookingId, { statementId: r.statementId, status: r.status }]));
+  },
   // promotionEventsService is defined at the end of this file; this only runs later.
   onBookingConversion: ({ action, groupId, bookings }) => (action === 'credit' ? promotionEventsService.recordBooking(bookings) : promotionEventsService.reverseBooking(groupId)),
   // refundService is defined below; this only runs later.
@@ -250,13 +262,15 @@ export const trainerBookingService = createTrainerBookingService({
   // A completed session may use a B2B trainer benefit; un-completing it gives the benefit back.
   // b2bConsumptionService is defined below; this only runs later.
   // The member paid the booking in full; once a sponsor covers it, that money goes back to the member.
+  // A no-show uses the benefit as if the session happened (owner decision 2026-10-20).
   onStatusChanged: async ({ booking, from, actorId }) => {
-    if (booking.status === 'completed') {
+    const happened = status => status === 'completed' || status === 'no_show';
+    if (happened(booking.status)) {
       const used = await b2bConsumptionService.consumeTrainerSession({ booking });
       if (used.consumed) await b2bSponsorRefundService.onSessionConsumed({ booking, consumption: used.consumption });
       return used;
     }
-    if (from !== 'completed') return null;
+    if (!happened(from)) return null;
     const released = await b2bConsumptionService.releaseForSource({ sourceType: 'trainer_booking', sourceId: booking.id, reason: `booking ${booking.status}`, actorId });
     if (released.released) await b2bSponsorRefundService.onSessionReleased({ booking, actorId });
     return released;
@@ -570,6 +584,8 @@ export const adminPaymentService = createAdminPaymentService({
   onPassUpgraded: sub => notificationService.notifySubscriptionActivated(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
+  // 409 group_slot_rebooked { bookingIds } when a rejected session's slot was booked by someone else since.
+  beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
   beforeOrderPayment: (request, opts) => shopService.checkOrderPayment(request, opts),
 });
@@ -771,6 +787,8 @@ export const notificationService = createNotificationService({
   // deliveryService is defined further down; these only run later.
   onOpened: (rows) => deliveryService.onOpened(rows),
   onClicked: (row, opts) => deliveryService.onClicked(row, opts),
+  // The member's chosen message language (trainer_booking_no_show is sent in it).
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
 });
 
 // Refunds: raised by cancellations the terms allow or by request; paid by FitFlex staff.

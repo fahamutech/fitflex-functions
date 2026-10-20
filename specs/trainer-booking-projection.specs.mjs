@@ -68,10 +68,10 @@ async function makeTrainer(userId, gymId, pendingGymId) {
   return id;
 }
 
-async function makeBooking({ memberId, trainerId, gymId, slot, status = 'confirmed' }) {
+async function makeBooking({ memberId, trainerId, gymId, slot, status = 'confirmed', date = DAY }) {
   const id = uid('tbk');
   await trainerBookings.insertAsync({
-    id, groupId: id, memberId, trainerId, gymId, date: DAY, slot, status, amountTzs: 30000, createdAt: now(), updatedAt: now(),
+    id, groupId: id, memberId, trainerId, gymId, date, slot, status, amountTzs: 30000, createdAt: now(), updatedAt: now(),
   });
   created.bookings.push(id);
   return id;
@@ -213,7 +213,8 @@ test("a trainer's bookings and day carry a small card of the member, never the m
 
 test('completing and cancelling a booking answer with the same cards', async () => {
   const s = await scene();
-  const toComplete = await makeBooking({ ...s, slot: '09:00' });
+  // A session can only be completed once it has started (B1a), so this one is in the past.
+  const toComplete = await makeBooking({ ...s, slot: '09:00', date: '2026-01-05' });
   const memberCancels = await makeBooking({ ...s, slot: '10:00', status: 'payment_pending' });
   const trainerCancels = await makeBooking({ ...s, slot: '11:00', status: 'payment_pending' });
 
@@ -235,7 +236,8 @@ test('completing and cancelling a booking answer with the same cards', async () 
 
 test("FitFlex staff read the full trainer and how to reach the member, but not the member's account", async () => {
   const s = await scene();
-  const bookingId = await makeBooking({ ...s, slot: '09:00' });
+  // Completed by staff below, so a session that has already taken place (owner decision 2026-10-20).
+  const bookingId = await makeBooking({ ...s, slot: '09:00', date: '2026-01-06' });
   const account = await users.findByIdAsync(s.memberId);
   const hidden = MEMBER_SECRETS.filter(x => !x.includes('@') && !x.startsWith('+'));
 

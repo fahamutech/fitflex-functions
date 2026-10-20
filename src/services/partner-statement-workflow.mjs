@@ -38,9 +38,11 @@ const text = (v) => (typeof v === 'string' ? v.trim() : '');
  * @param {string} deps.auditPrefix  e.g. 'trainer_settlement'
  * @param {(statement: object, at: Date) => Promise<{ok: boolean, reason?: string, until?: string, destination?: object}>} deps.payoutCheck
  * @param {(statement: object, q: import('knex').Knex) => Promise<void>} [deps.onPaid]  inside the paying transaction
+ * @param {(statement: object, q: import('knex').Knex) => Promise<object|null>} [deps.beforeSubmit]  inside the submit
+ *        transaction (statement locked): a fail(...) refuses the submit; null lets it through
  * @param {() => Date} [deps.now]
  */
-export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPrefix, payoutCheck, onPaid = async () => {}, now = () => new Date() }) {
+export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPrefix, payoutCheck, onPaid = async () => {}, beforeSubmit = async () => null, now = () => new Date() }) {
   async function audit(q, action, actorId, target, before, after) {
     await q('AuditLog').insert({ id: randomUUID(), at: now(), actor: actorId, action: `${auditPrefix}_${action}`, target, before: before ? JSON.stringify(before) : null, after: JSON.stringify(after) });
   }
@@ -65,10 +67,12 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
   const notPayable = (check) => fail('not_payable', 409, { reason: check.reason, ...(check.until ? { until: check.until } : {}) });
 
   /** draft → submitted: the amounts are frozen. */
-  const submit = ({ id, actorId }) => step(id, 'submitted', actorId, async (s) => {
+  const submit = ({ id, actorId }) => step(id, 'submitted', actorId, async (s, q) => {
     if (s.status !== 'draft') return wrongStatus(s, 'draft');
     if (s.voidRequestedBy) return fail('void_requested');
     if (!(s.finalNetTzs > 0)) return fail('nothing_to_pay');
+    const refused = await beforeSubmit(s, q);
+    if (refused?.error) return refused;
     return { patch: { status: 'submitted', submittedBy: actorId, submittedAt: now(), rejectedBy: null, rejectedAt: null, rejectReason: null } };
   });
 
