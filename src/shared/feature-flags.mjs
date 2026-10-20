@@ -221,3 +221,15 @@ export function vendorWalkInSalesOn() {
 export function vendorCustomersOn() {
   return vendorToolsFlag('VENDOR_CUSTOMERS');
 }
+
+/**
+ * Phase B · B1a: trainer session outcomes (Complete + No-show). Off unless
+ * TRAINER_SESSION_OUTCOMES is set. Off: POST /trainer/bookings/:id/no-show
+ * answers 404 feature_disabled, admins cannot set no_show, and bookings carry
+ * no `actions` key. The start-time check on POST /trainer/bookings/:id/complete
+ * is NOT behind this flag: completing a session that has not started is
+ * always refused (it made a future session payable at once).
+ */
+export function trainerSessionOutcomesOn() {
+  return on('TRAINER_SESSION_OUTCOMES');
+}

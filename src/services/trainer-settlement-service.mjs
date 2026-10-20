@@ -2,7 +2,8 @@
 // path (partner-statement-workflow): draft → submitted → approved → payable
 // → paid, or voided.
 //
-// What a trainer is paid for: a session they marked completed, or a paid
+// What a trainer is paid for: a session they marked completed or no-show
+// (the member did not come — paid in full, not refunded), or a paid
 // session that was never cancelled and whose time passed more than 48 hours
 // ago (it took place, or the member did not show — which is not refunded).
 // Each session's payout was fixed when it was booked (trainerPayoutTzs).
@@ -30,11 +31,13 @@ export const TOOK_PLACE_AFTER_HOURS = 48;
 
 /**
  * Why a booking is payable now, or null. `completed`: the trainer marked it.
+ * `no_show`: the member did not come (TRAINER_SESSION_OUTCOMES) — paid in full.
  * `took_place`: paid, never cancelled, and its time passed long enough ago.
  */
 export function payableBasis(booking, now = new Date()) {
   if (!(Number(booking.trainerPayoutTzs) > 0)) return null;
   if (booking.status === 'completed') return 'completed';
+  if (booking.status === 'no_show') return 'no_show';
   if (booking.status !== 'confirmed') return null;
   const start = Date.parse(`${booking.date}T${booking.slot || '00:00'}:00.000+03:00`);
   if (Number.isNaN(start)) return null;
@@ -75,7 +78,7 @@ export function createTrainerSettlementService({
       if (draftIds.length) await q('TrainerSettlementLine').whereIn('trainerSettlementId', draftIds).del();
 
       const candidates = await q('TrainerBooking as b')
-        .whereIn('b.status', ['completed', 'confirmed']).where('b.date', '<=', week.periodEndDate).where('b.trainerPayoutTzs', '>', 0)
+        .whereIn('b.status', ['completed', 'no_show', 'confirmed']).where('b.date', '<=', week.periodEndDate).where('b.trainerPayoutTzs', '>', 0)
         .whereNotExists(q('TrainerSettlementLine as l').whereRaw('l."bookingId" = b."id"').where('l.voided', false).select(1))
         .select('b.*').orderBy(['b.date', 'b.slot']);
 

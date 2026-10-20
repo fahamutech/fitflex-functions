@@ -144,7 +144,7 @@ export function createB2BWatchService({
           .select('v.id')),
       check('trainer_usage_missing_from_settlement', 'medium', `Sponsored trainer sessions completed over ${WATCH.trainerSettlementLagDays} days ago that are on no trainer statement`,
         db('B2BBenefitConsumption as u').join('TrainerBooking as b', 'b.id', 'u.sourceId')
-          .where({ 'u.status': 'approved', 'u.sourceType': 'trainer_booking', 'b.status': 'completed' }).where('u.businessDate', '<', lagDay)
+          .where({ 'u.status': 'approved', 'u.sourceType': 'trainer_booking' }).whereIn('b.status', ['completed', 'no_show']).where('u.businessDate', '<', lagDay)
           .whereNotExists(db('TrainerSettlementLine as l').whereRaw('l."bookingId" = u."sourceId"').where({ 'l.voided': false }).select(db.raw('1')))
           .select('u.id')),
     ]);

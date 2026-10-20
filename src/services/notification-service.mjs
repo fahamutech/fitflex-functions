@@ -225,6 +225,15 @@ export function createNotificationService({
           title: 'Session cancelled',
           body: `${memberName} cancelled: ${fmtSlots(bookings)}. The slot is free again.`,
         });
+      } else if (event === 'trainer_booking_no_show') {
+        // Swahili is a DRAFT for native review. English title/body; Swahili in data for the inbox.
+        const name = trainer?.displayName || 'Your trainer';
+        await notify(memberId, {
+          type: event,
+          data: { ...data, bookingId: bookings[0]?.id || '', titleSw: 'Hukuhudhuria kipindi', bodySw: `${trainer?.displayName || 'Trainer wako'} amerekodi kwamba hukuhudhuria kipindi chako: ${fmtSlots(bookings)}. Hutarejeshewa pesa za kipindi hiki. Ukiona si sahihi, wasiliana na FitFlex.` },
+          title: 'Missed session',
+          body: `${name} recorded that you missed your session: ${fmtSlots(bookings)}. Missed sessions are not refunded. If this is wrong, contact FitFlex.`,
+        });
       } else if (event === 'trainer_booking_cancelled_by_trainer') {
         await notify(memberId, {
           type: 'trainer_booking_cancelled', data,
