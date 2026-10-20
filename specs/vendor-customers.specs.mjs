@@ -660,12 +660,22 @@ test('account deletion (H1): the buyer is forgotten at every vendor — name cle
   const atClear = await db('VendorCustomer').where({ vendorId: clear, buyerUserId: buyer }).first();
   assert.ok(atOwes && atClear);
   assert.equal((await credit(as(owes), atOwes.id, 6_000, po.id)).status, 201);
+  for (const [vendorId, id] of [[owes, atOwes.id], [clear, atClear.id]]) {
+    assert.equal((await call(vendorCustomerUpdate, as(vendorId), { params: { id }, body: { note: 'Asked for delivery after 6pm' } })).status, 200);
+  }
+  assert.equal(await db('VendorBuyerRef').where({ buyerId: buyer }).count('* as n').first().then(r => Number(r.n)), 2);
 
   const deleted = await accountService.deleteMyAccount({ id: buyer, userType: 'member' });
   assert.equal(deleted.ok, true, JSON.stringify(deleted));
   const [o, c] = await Promise.all([db('VendorCustomer').where({ id: atOwes.id }).first(), db('VendorCustomer').where({ id: atClear.id }).first()]);
-  assert.deepEqual([o.name, o.buyerUserId, o.forgottenAt != null], [null, buyer, true], 'money owed: nameless, still linked');
-  assert.deepEqual([c.name, c.buyerUserId, c.forgottenAt != null], [null, null, true], 'nothing owed: nameless and unlinked');
+  assert.deepEqual([o.name, o.note, o.buyerUserId, o.forgottenAt != null], [null, null, buyer, true], 'money owed: nameless, note cleared, still linked');
+  assert.deepEqual([c.name, c.note, c.buyerUserId, c.forgottenAt != null], [null, null, null, true], 'nothing owed: nameless, note cleared, unlinked');
+  assert.equal(await db('VendorBuyerRef').where({ buyerId: buyer }).count('* as n').first().then(r => Number(r.n)), 0, 'S2 buyer pseudonyms deleted at every vendor');
+  // Reading the vendor's orders (S2) does not create a new pseudonym for the deleted buyer.
+  const orderRows = (await call(vendorOrders, as(clear))).body;
+  assert.equal(orderRows.length, 1);
+  assert.deepEqual([orderRows[0].buyer.customerId, orderRows[0].buyer.displayName], [null, null]);
+  assert.equal(await db('VendorBuyerRef').where({ buyerId: buyer }).first(), undefined, 'still none after an order read');
   const prof = (await profile(as(owes), atOwes.id)).body.customer;
   assert.deepEqual([prof.name, prof.forgotten, prof.owedTzs], [null, true, 6_000]);
   assert.equal((await call(vendorCustomersList, as(clear))).body.customers.find(x => x.id === atClear.id).forgotten, true);
@@ -677,7 +687,7 @@ test('account deletion (H1): the buyer is forgotten at every vendor — name cle
   await migration.backfillMarketplaceCustomers(db);
   await store.marketplaceOrderPaid({ buyerId: buyer, items: [{ vendorId: clear }] });
   const rows = await db('VendorCustomer').whereIn('vendorId', [owes, clear]);
-  assert.deepEqual(rows.map(r => [r.name, r.buyerUserId]).sort(), [[null, null], [null, null]]);
+  assert.deepEqual(rows.map(r => [r.name, r.note, r.buyerUserId]).sort(), [[null, null, null], [null, null, null]]);
 });
 
 // ── aging (fixed clock) ──────────────────────────────────────────────────────

@@ -332,6 +332,8 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
     if (!order?.buyerId || !vendorIds.length) return { customers: 0 };
     const at = now();
     const buyer = await db('User').where({ id: order.buyerId }).first('displayName');
+    // A deleted account (e.g. a late payment on an old order) is never brought back as a customer (#224 H1).
+    if (!buyer) return { customers: 0 };
     const name = typeof buyer?.displayName === 'string' && buyer.displayName.trim() ? buyer.displayName.trim().slice(0, 120) : null;
     for (const vendorId of vendorIds) {
       await db('VendorBuyerRef').insert({ vendorId, buyerId: String(order.buyerId), customerId: newCustomerId(), createdAt: at })
@@ -352,16 +354,18 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
 
   /**
    * The buyer deleted their FitFlex account (security review #224 H1): at every vendor, their app
-   * customer loses its name (forgottenAt set; clients show "Deleted member"). Where nothing is owed the
+   * customer loses its name and the vendor's note about them (lead decision 2026-10-20, privacy first;
+   * forgottenAt set; clients show "Deleted member"), and their S2 buyer pseudonyms (VendorBuyerRef) are
+   * deleted at every vendor. Where nothing is owed the
    * link to the account (buyerUserId) is dropped too; where pay-later money is still owed it is kept,
    * nameless, until that is paid off (recordPayment then drops it). The row itself stays: sales and
-   * payments reference it. Audited without personal data. → { forgotten, unlinked }
+   * payments reference it. Audited without personal data. → { forgotten, unlinked, refsDeleted }
    */
   async function forgetBuyer(userId) {
-    if (!userId) return { forgotten: 0, unlinked: 0 };
+    if (!userId) return { forgotten: 0, unlinked: 0, refsDeleted: 0 };
     const at = now();
     const { rows } = await db.raw(`UPDATE "VendorCustomer" c
-         SET name = NULL, "forgottenAt" = COALESCE(c."forgottenAt", ?), "updatedAt" = ?,
+         SET name = NULL, note = NULL, "forgottenAt" = COALESCE(c."forgottenAt", ?), "updatedAt" = ?,
              "buyerUserId" = CASE WHEN EXISTS (SELECT 1 FROM "VendorSale" s
                                   WHERE s."vendorId" = c."vendorId" AND s."customerId" = c.id AND s.kind = 'credit'
                                     AND s.status = 'completed' AND s."balanceTzs" > 0)
@@ -371,7 +375,8 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
     for (const r of rows) {
       await audit(db, { actor: 'system:account_deleted', action: 'vendor_customer_forgotten', target: r.id, after: { vendorId: r.vendorId, unlinked: r.buyerUserId == null } });
     }
-    return { forgotten: rows.length, unlinked: rows.filter(r => r.buyerUserId == null).length };
+    const refsDeleted = await db('VendorBuyerRef').where({ buyerId: String(userId) }).del();
+    return { forgotten: rows.length, unlinked: rows.filter(r => r.buyerUserId == null).length, refsDeleted };
   }
 
   // ── payments ──────────────────────────────────────────────────────────────
