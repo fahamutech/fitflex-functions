@@ -20,8 +20,9 @@ import { notifications, trainerReviews } from '../src/bootstrap/collections.mjs'
 import {
   gyms, trainers, b2bService, b2bProgramService, trainerBookingService, trainerSettlementService, trainerReviewService,
 } from '../src/bootstrap/services.mjs';
+import { trainerSessionsForDate } from '../functions/trainer-engagements.mjs';
 import {
-  trainerCompleteBooking, trainerNoShowBooking, trainerMyBookings, memberMyBookings, adminListTrainerBookings, adminUpdateTrainerBooking,
+  createTrainerBooking, trainerCompleteBooking, trainerNoShowBooking, trainerMyBookings, memberMyBookings, adminListTrainerBookings, adminUpdateTrainerBooking,
 } from '../functions/trainer-bookings.mjs';
 import { sessionActions, NO_SHOW_WINDOW_HOURS } from '../src/services/trainer-booking-service.mjs';
 import { payableBasis } from '../src/services/trainer-settlement-service.mjs';
@@ -113,6 +114,7 @@ after(async () => {
   await db('AuditLog').whereIn('target', db('TrainerBooking').whereIn('memberId', made.users).select('id')).del();
   await db('TrainerBooking').whereIn('memberId', made.users).del();
   for (const id of made.users) await notifications.removeAsync(n => n.userId === id);
+  await db('CommunicationPreference').whereIn('id', made.users).del();
   for (const id of made.trainers) await trainers.removeAsync(t => t.id === id);
   for (const id of made.gyms) await gyms.removeAsync(g => g.id === id);
   await db('AuditLog').whereIn('actor', made.users).del();
@@ -381,4 +383,238 @@ test('flag on: admin overturns within the rules, and not once the session is on 
   // Flag off: today's behaviour (no statement lock; no_show not settable).
   flagOff();
   assert.equal((await set(onStatement, 'no_show')).statusCode, 400);
+});
+
+// ── Security review of functions#231 ────────────────────────────────────────
+
+const set = (s, id, status) => call(adminUpdateTrainerBooking, { claims: s.admin, params: { id }, body: { status } });
+const prepareWeek = async (s, periodStart) => {
+  const out = await trainerSettlementService.prepare({ periodStart, actorId: s.adminId });
+  assert.ok(!out.error, JSON.stringify(out));
+  return out.statements.find(x => x.trainerId === s.trainerId)?.id || null;
+};
+
+test('HIGH 1: a cancelled session is final for admins — no no-show, completion or reinstatement (flag on or off)', async () => {
+  for (const flag of [flagOn, flagOff]) {
+    flag();
+    const s = await scene();
+    const id = await booking(s, { offsetMs: -3 * HOUR });
+    const cancelled = await set(s, id, 'cancelled');
+    assert.equal(cancelled.body.status, 'cancelled');
+    assert.deepEqual((await db('Refund').where({ bookingId: id })).map(r => [r.reasonCode, r.status]), [['cancelled_by_fitflex', 'approved']]);
+    for (const to of [...(process.env[FLAG] ? ['no_show'] : []), 'completed', 'confirmed']) {
+      const out = await set(s, id, to);
+      assert.deepEqual([out.statusCode, out.body.error], [409, 'booking_cancelled'], `${to} (flag ${process.env[FLAG] || 'off'})`);
+    }
+    assert.equal(await statusOf(id), 'cancelled');
+    assert.equal((await set(s, id, 'cancelled')).statusCode, 200, 'cancelling again changes nothing');
+    assert.equal((await db('Refund').where({ bookingId: id })).length, 1);
+  }
+});
+
+test('M2: an admin overturn keeps the draft statement in step — re-based, line removed, empty draft removed', async () => {
+  flagOn();
+  const s = await scene();
+  const a = await booking(s, { at: { date: '2025-03-11', slot: '10:00' }, status: 'no_show' });
+  const b = await booking(s, { at: { date: '2025-03-12', slot: '10:00' }, status: 'completed' });
+  const draftId = await prepareWeek(s, '2025-03-10');
+  const lineOf = id => db('TrainerSettlementLine').where({ bookingId: id, voided: false }).first();
+  const draft = () => db('TrainerSettlement').where({ id: draftId }).first();
+  assert.deepEqual([(await draft()).sessionCount, (await draft()).finalNetTzs], [2, 34000]);
+
+  assert.equal((await set(s, a, 'completed')).body.status, 'completed');
+  assert.equal((await lineOf(a)).basis, 'completed', 're-based with the session');
+
+  const out = await trainerBookingService.adminUpdateStatus({ id: a, status: 'cancelled', actorId: s.adminId });
+  assert.deepEqual(out.draftLine, { statementId: draftId, removed: true, statementRemoved: false });
+  assert.equal(await lineOf(a), undefined, 'the cancelled session is off the draft');
+  assert.deepEqual([(await draft()).sessionCount, (await draft()).finalNetTzs, (await draft()).listTzs], [1, 17000, 20000]);
+  const [audit] = await auditFor(a, 'trainer_booking_cancelled');
+  assert.deepEqual(audit.after.draftLine, { statementId: draftId, removed: true, statementRemoved: false });
+
+  // completed → confirmed: a session 48h+ past stays payable as took_place; one that is not yet is removed.
+  assert.equal((await set(s, b, 'confirmed')).body.status, 'confirmed');
+  assert.equal((await lineOf(b)).basis, 'took_place');
+});
+
+test('M2: an emptied draft is removed', async () => {
+  flagOn();
+  const s = await scene();
+  const only = await booking(s, { at: { date: '2025-03-19', slot: '10:00' }, status: 'no_show' });
+  const draftId = await prepareWeek(s, '2025-03-17');
+  const out = await trainerBookingService.adminUpdateStatus({ id: only, status: 'cancelled', actorId: s.adminId });
+  assert.deepEqual(out.draftLine, { statementId: draftId, removed: true, statementRemoved: true });
+  assert.equal(await db('TrainerSettlement').where({ id: draftId }).first(), undefined);
+});
+
+test('M2: submit refuses a draft whose session no longer pays as prepared, and says which lines', async () => {
+  const s = await scene();
+  const ok = await booking(s, { at: { date: '2025-03-25', slot: '10:00' }, status: 'completed' });
+  const gone = await booking(s, { at: { date: '2025-03-26', slot: '10:00' }, status: 'no_show' });
+  const draftId = await prepareWeek(s, '2025-03-24');
+  // Changed behind the draft's back (e.g. a write that raced the prepare).
+  await db('TrainerBooking').where({ id: gone }).update({ status: 'cancelled' });
+  const refused = await trainerSettlementService.submit({ id: draftId, actorId: s.adminId });
+  assert.deepEqual(refused, {
+    error: 'stale_statement_lines', status: 409,
+    lines: [{ bookingId: gone, basis: 'no_show', bookingStatus: 'cancelled', payableBasis: null }],
+  });
+  assert.equal((await db('TrainerSettlement').where({ id: draftId }).first()).status, 'draft');
+  // Preparing again rebuilds the draft without it; then it submits.
+  assert.equal(await prepareWeek(s, '2025-03-24'), draftId);
+  assert.deepEqual((await db('TrainerSettlementLine').where({ trainerSettlementId: draftId })).map(l => l.bookingId), [ok]);
+  assert.equal((await trainerSettlementService.submit({ id: draftId, actorId: s.adminId })).statement.status, 'submitted');
+});
+
+test('M3 + L4: neither a trainer nor an admin can change a session on a submitted statement', async () => {
+  flagOn();
+  const s = await scene();
+  // Confirmed and long past: on the statement as took_place.
+  const id = await booking(s, { at: { date: '2025-04-01', slot: '10:00' } });
+  const draftId = await prepareWeek(s, '2025-03-31');
+  assert.equal((await trainerSettlementService.submit({ id: draftId, actorId: s.adminId })).statement.status, 'submitted');
+  const locked = { error: 'booking_on_trainer_statement', statementId: draftId, statementStatus: 'submitted' };
+  const done = await call(trainerCompleteBooking, { claims: s.trainer, params: { id } });
+  assert.deepEqual([done.statusCode, done.body], [409, locked]);
+  flagOff();
+  assert.deepEqual((await call(trainerCompleteBooking, { claims: s.trainer, params: { id } })).body, locked, 'flag off too');
+  flagOn();
+  assert.deepEqual((await set(s, id, 'cancelled')).body, locked);
+  assert.equal(await statusOf(id), 'confirmed');
+});
+
+test('M3: concurrent Complete and No-show — exactly one wins', async () => {
+  flagOn();
+  const s = await scene();
+  for (let i = 0; i < 3; i += 1) {
+    const id = await booking(s, { offsetMs: -(i + 1) * HOUR });
+    const results = await Promise.all([
+      call(trainerCompleteBooking, { claims: s.trainer, params: { id } }),
+      call(trainerNoShowBooking, { claims: s.trainer, params: { id } }),
+      call(trainerCompleteBooking, { claims: s.trainer, params: { id } }),
+    ]);
+    const won = results.filter(r => r.statusCode === 200);
+    assert.equal(won.length, 1, JSON.stringify(results.map(r => [r.statusCode, r.body?.error])));
+    for (const r of results.filter(x => x.statusCode !== 200)) {
+      assert.equal(r.statusCode, 409);
+      assert.ok(['booking_not_confirmable', 'booking_not_confirmed', 'booking_changed'].includes(r.body.error), r.body.error);
+    }
+    assert.equal(await statusOf(id), won[0].body.status);
+    const audits = await db('AuditLog').where({ target: id }).whereIn('action', ['trainer_booking_completed_by_trainer', 'trainer_booking_no_show']);
+    assert.equal(audits.length, 1, 'one outcome, one audit row');
+  }
+});
+
+test('M3: without the database store, the write is still conditional (booking_changed)', async () => {
+  const { createTrainerBookingService } = await import('../src/services/trainer-booking-service.mjs');
+  const row = { id: 'tbk_x', trainerId: 'trn_x', memberId: 'm', gymId: 'g', date: '2025-01-06', slot: '09:00', status: 'confirmed' };
+  const audits = [];
+  const svc = createTrainerBookingService({
+    trainerBookings: {
+      findAsync: async pred => (pred(row) ? row : null),
+      // Someone else changed the row first: the conditional update matches nothing.
+      updateByIdWhereAsync: async () => null,
+    },
+    trainerService: { findProfileByUser: () => ({ id: 'trn_x' }) },
+    auditLog: { insertAsync: async r => audits.push(r) },
+    trainers: [], gyms: [], users: { findByIdAsync: async () => null }, trainerSessions: {},
+  });
+  assert.deepEqual(await svc.trainerCompleteBooking({ userId: 'u', bookingId: 'tbk_x' }), { error: 'booking_changed', status: 409 });
+  assert.equal(audits.length, 0);
+});
+
+test('L5: an unreadable date or slot is refused, never treated as started', async () => {
+  flagOn();
+  const s = await scene();
+  const id = await booking(s, { at: { date: '2025-13-45', slot: 'soon' } });
+  const done = await call(trainerCompleteBooking, { claims: s.trainer, params: { id } });
+  assert.deepEqual([done.statusCode, done.body.error], [400, 'invalid_booking_time']);
+  const noShow = await call(trainerNoShowBooking, { claims: s.trainer, params: { id } });
+  assert.deepEqual([noShow.statusCode, noShow.body.error], [400, 'invalid_booking_time']);
+  const admin = await set(s, id, 'no_show');
+  assert.deepEqual([admin.statusCode, admin.body.error], [400, 'invalid_booking_time']);
+  const listed = (await call(trainerMyBookings, { claims: s.trainer })).body.find(b => b.id === id);
+  assert.deepEqual(listed.actions, { canComplete: false, canMarkNoShow: false });
+  assert.equal(await statusOf(id), 'confirmed');
+});
+
+test('L6: an admin-recorded no-show tells the member too', async () => {
+  flagOn();
+  const s = await scene();
+  const id = await booking(s, { offsetMs: -60 * HOUR });
+  assert.equal((await set(s, id, 'no_show')).body.status, 'no_show');
+  const inbox = await notifications.filterAsync(n => n.userId === s.memberId && n.type === 'trainer_booking_no_show');
+  assert.deepEqual(inbox.map(n => n.data.bookingId), [id]);
+});
+
+test('new rule: a trainer cannot book their own sessions, from the same account or a linked one', async () => {
+  const s = await scene();
+  const slot = eatSlot(72 * HOUR);
+  const body = { trainerId: s.trainerId, gymId: s.gymId, slots: [{ date: slot.date, slot: slot.slot }] };
+  const self = await call(createTrainerBooking, { claims: { sub: s.trainerUserId, userType: 'member' }, body });
+  assert.deepEqual([self.statusCode, self.body.error], [403, 'cannot_book_own_sessions']);
+
+  // Two accounts of one person: the member account is linked to the trainer's person (as identity linking does).
+  const linkedMember = await user('member');
+  const { personId } = await db('User').where({ id: s.trainerUserId }).first('personId');
+  assert.ok(personId, 'every account has a person');
+  await db.transaction(async (trx) => {
+    await trx.raw("SET LOCAL fitflex.identity_relink = 'on'");
+    await trx('User').where({ id: linkedMember }).update({ personId });
+  });
+  const linked = await call(createTrainerBooking, { claims: { sub: linkedMember, userType: 'member' }, body });
+  assert.deepEqual([linked.statusCode, linked.body.error], [403, 'cannot_book_own_sessions']);
+  assert.equal((await trainerBookingService.quoteBooking({ memberId: linkedMember, body })).error, 'cannot_book_own_sessions');
+
+  // Someone else is not affected by the rule.
+  const other = await trainerBookingService.quoteBooking({ memberId: s.memberId, body });
+  assert.notEqual(other.error, 'cannot_book_own_sessions');
+});
+
+// ── Mobile slice (mobile#209) ───────────────────────────────────────────────
+
+test('GET /trainer/sessions: each booking carries actions with the flag on; none with it off; manual sessions never', async () => {
+  const s = await scene();
+  const at = eatSlot(-2 * HOUR);
+  const later = { date: at.date, slot: at.slot === '23:59' ? '23:58' : '23:59' };
+  const started = await booking(s, { at });
+  const notYet = await booking(s, { at: later });
+  await trainerBookingService.createManualSession({ userId: s.trainerUserId, body: { date: at.date, slot: '06:00', customerName: 'Walk-in', gymId: s.gymId } });
+
+  flagOff();
+  const off = await call(trainerSessionsForDate, { claims: s.trainer, query: { date: at.date } });
+  assert.equal(off.statusCode, 200, JSON.stringify(off.body));
+  assert.ok(off.body.sessions.every(x => !('actions' in x)));
+
+  flagOn();
+  const on = await call(trainerSessionsForDate, { claims: s.trainer, query: { date: at.date } });
+  const byId = Object.fromEntries(on.body.sessions.map(x => [x.id, x]));
+  assert.deepEqual(byId[started].actions, { canComplete: true, canMarkNoShow: true });
+  const laterStart = Date.parse(`${later.date}T${later.slot}:00.000+03:00`);
+  assert.deepEqual(byId[notYet].actions, laterStart <= Date.now() ? { canComplete: true, canMarkNoShow: true } : { canComplete: false, canMarkNoShow: false });
+  const manual = on.body.sessions.find(x => x.source === 'manual');
+  assert.ok(manual && !('actions' in manual));
+  await db('TrainerSession').where({ trainerId: s.trainerId }).del();
+});
+
+test('the no-show push is in the member\'s chosen language; English when none is saved', async () => {
+  flagOn();
+  const s = await scene();
+  const swMember = await user('member');
+  const enMember = await user('member');
+  await db('CommunicationPreference').insert([{ id: swMember, locale: 'sw' }, { id: enMember, locale: 'en' }]);
+  const sent = {};
+  for (const [label, memberId] of [['sw', swMember], ['en', enMember], ['none', s.memberId]]) {
+    const id = await booking(s, { offsetMs: -1 * HOUR, memberId });
+    assert.equal((await trainerBookingService.trainerMarkNoShow({ userId: s.trainerUserId, bookingId: id })).booking.status, 'no_show');
+    [sent[label]] = await notifications.filterAsync(n => n.userId === memberId && n.type === 'trainer_booking_no_show');
+  }
+  assert.deepEqual([sent.sw.title, sent.sw.data.locale], ['Hukuhudhuria kipindi', 'sw']);
+  assert.match(sent.sw.body, /hukuhudhuria kipindi chako/);
+  assert.deepEqual([sent.en.title, sent.en.data.locale], ['Missed session', 'en']);
+  assert.deepEqual([sent.none.title, sent.none.data.locale], ['Missed session', 'en']);
+  for (const n of Object.values(sent)) {
+    assert.deepEqual([n.data.titleEn, n.data.titleSw], ['Missed session', 'Hukuhudhuria kipindi']);
+    assert.ok(n.data.bodyEn && n.data.bodySw);
+  }
 });

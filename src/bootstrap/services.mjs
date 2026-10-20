@@ -139,6 +139,7 @@ import { createZebraDocumentStore, createZebraPublicStore } from '../infra/stora
 import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
+import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
 import {
   moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
@@ -216,6 +217,8 @@ export const trainerBookingService = createTrainerBookingService({
   notify: (event, payload) => notificationService.notifyTrainerBooking(event, payload),
   // Phase B · B1a: no-show, admin no_show and `actions` (dormant unless TRAINER_SESSION_OUTCOMES).
   outcomesOn: trainerSessionOutcomesOn,
+  // Outcome changes lock the statement and the booking, write conditionally and keep draft lines in step.
+  outcomeStore: createPgTrainerOutcomeStore({ db }),
   // Sessions on a live trainer statement line, with that statement's status.
   statementLines: async (bookingIds) => {
     const rows = await db('TrainerSettlementLine as l').join('TrainerSettlement as s', 's.id', 'l.trainerSettlementId')
@@ -724,6 +727,8 @@ export const notificationService = createNotificationService({
   // deliveryService is defined further down; these only run later.
   onOpened: (rows) => deliveryService.onOpened(rows),
   onClicked: (row, opts) => deliveryService.onClicked(row, opts),
+  // The member's chosen message language (trainer_booking_no_show is sent in it).
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
 });
 
 // Refunds: raised by cancellations the terms allow or by request; paid by FitFlex staff.

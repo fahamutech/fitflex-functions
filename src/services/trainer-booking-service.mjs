@@ -32,7 +32,8 @@ const LOCKING_STATEMENT_STATUSES = ['submitted', 'approved', 'payable', 'paid'];
  *   member:  never (members do not record outcomes).
  */
 export function sessionActions(booking, { viewer = 'trainer', now = new Date(), locked = false } = {}) {
-  const start = slotStartMs(booking?.date, booking?.slot || '00:00');
+  // An unreadable date/slot is never "started" (review L5).
+  const start = slotStartMs(booking?.date, booking?.slot);
   const started = !Number.isNaN(start) && start <= +now;
   if (viewer === 'member') return { canComplete: false, canMarkNoShow: false };
   if (viewer === 'admin') {
@@ -98,7 +99,32 @@ export function createTrainerBookingService({
   // (bookingIds[]) → Map(bookingId → { statementId, status }) for sessions on a live trainer statement line.
   statementLines = async () => new Map(),
   now: clock = () => new Date(),
+  // Locked, conditional status changes that keep draft statement lines in step (src/infra/trainer-outcome-store-pg.mjs).
+  // Without one (unit specs on in-memory stores) a conditional update on the collection is used instead.
+  outcomeStore: injectedOutcomeStore = null,
 }) {
+  /** The fallback: same decisions and audit, a conditional update, no statement-line upkeep. */
+  function collectionOutcomeStore() {
+    return {
+      async transition({ bookingId, trainerId = null, decide, actorId, action }) {
+        const prior = await trainerBookings.findAsync(b => b.id === bookingId && (!trainerId || b.trainerId === trainerId));
+        if (!prior) return { notFound: true };
+        const line = (await statementLines([prior.id])).get(prior.id) || null;
+        const d = await decide(prior, line);
+        if (d.error) return d;
+        const at = new Date().toISOString();
+        const patch = { status: d.to, updatedAt: at, ...(d.patch || {}) };
+        const updated = typeof trainerBookings.updateByIdWhereAsync === 'function'
+          ? await trainerBookings.updateByIdWhereAsync(prior.id, { status: prior.status }, patch)
+          : await trainerBookings.updateByIdAsync(prior.id, patch);
+        if (!updated) return { error: 'booking_changed', status: 409 };
+        await auditLog.insertAsync({ id: randomUUID(), at, actor: actorId, action: action(prior, d.to), target: prior.id, before: prior, after: updated });
+        return { prior, updated, draftLine: null };
+      },
+    };
+  }
+  const outcomeStore = injectedOutcomeStore || collectionOutcomeStore();
+
   /** Live statement lines that freeze a booking's outcome (statement past draft). */
   async function lockedLines(ids) {
     if (!ids.length) return new Map();
@@ -114,9 +140,6 @@ export function createTrainerBookingService({
     return rows.map(r => ({ ...r, actions: sessionActions(r, { viewer, now: at, locked: locks.has(r.id) }) }));
   }
 
-  async function audit(actor, action, before, after, at) {
-    await auditLog.insertAsync({ id: randomUUID(), at, actor, action, target: before.id, before, after });
-  }
   /**
    * Keep promotion analytics in step with a booking request: while any session in it is confirmed or done it counts
    * as a conversion; when none is (rejected, cancelled, refunded) the conversion is taken back. Never throws.
@@ -172,6 +195,14 @@ export function createTrainerBookingService({
     };
   }
 
+  /** Same account, or two accounts of one person (Identity V2 personId). */
+  async function sameHolder(memberId, trainerUserId) {
+    if (!memberId || !trainerUserId) return false;
+    if (memberId === trainerUserId) return true;
+    const [member, coach] = await Promise.all([users.findByIdAsync(memberId), users.findByIdAsync(trainerUserId)]);
+    return Boolean(member?.personId && coach?.personId && member.personId === coach.personId);
+  }
+
   /** The member's active Platform Pass tier, if any (drives the trainer discount). */
   async function activePassTier(memberId) {
     if (!subscriptions) return null;
@@ -205,6 +236,8 @@ export function createTrainerBookingService({
     const { trainerId, gymId } = body || {};
     const trainer = trainers.find(t => t.id === trainerId && t.status === 'active');
     if (!trainer) return { error: 'trainer_not_found', status: 404 };
+    // A trainer can't book (and so be paid for) their own sessions, from this account or another of theirs.
+    if (await sameHolder(memberId, trainer.userId)) return { error: 'cannot_book_own_sessions', status: 403 };
     // An unverified trainer is listed but cannot be booked yet.
     if (!(await partnerGate.isOperational(trainer.userId))) return { error: 'trainer_not_verified', status: 403 };
     if (!trainer.gymIds?.includes(gymId)) return { error: 'trainer_not_available_at_gym', status: 400 };
@@ -369,38 +402,49 @@ export function createTrainerBookingService({
     return withActions(rows, 'admin');
   }
 
+  /**
+   * Admin: set a booking's status. A cancelled session is final (review HIGH 1:
+   * moving it on would leave its refund live while the trainer is paid and the
+   * slot may be booked again) — 409 booking_cancelled, flag or not.
+   */
   async function adminUpdateStatus({ id, status, actorId }) {
     const outcomes = outcomesOn();
     const allowed = outcomes ? ['confirmed', 'completed', 'cancelled', 'no_show'] : ['confirmed', 'completed', 'cancelled'];
     if (!allowed.includes(status)) return { error: 'invalid_status', status: 400 };
-    const prior = await trainerBookings.findAsync(b => b.id === id);
-    if (!prior) return { error: 'not_found', status: 404 };
-    if (outcomes && status !== prior.status) {
-      // Once a statement carrying this session has left draft, its outcome is what was (or will be) paid.
-      const line = (await lockedLines([prior.id])).get(prior.id);
-      if (line) return { error: 'booking_on_trainer_statement', status: 409, statementId: line.statementId, statementStatus: line.status };
-    }
-    if (status === 'no_show' && prior.status !== 'no_show') {
-      if (!['confirmed', 'completed', 'cancelled'].includes(prior.status)) return { error: 'invalid_transition', status: 409, from: prior.status };
-      if (!isPastSlot(prior.date, prior.slot || '00:00', clock())) return { error: 'session_not_started', status: 409 };
-    }
     const at = new Date().toISOString();
+    const out = await outcomeStore.transition({
+      bookingId: id, actorId,
+      action: (_, to) => `trainer_booking_${to}`,
+      decide: (prior, line) => {
+        if (prior.status === 'cancelled' && status !== 'cancelled') return { error: 'booking_cancelled', status: 409 };
+        // Once a statement carrying this session has left draft, its outcome is what was (or will be) paid.
+        if (outcomes && status !== prior.status && line && LOCKING_STATEMENT_STATUSES.includes(line.status)) {
+          return { error: 'booking_on_trainer_statement', status: 409, statementId: line.statementId, statementStatus: line.status };
+        }
+        if (status === 'no_show' && prior.status !== 'no_show') {
+          if (!['confirmed', 'completed'].includes(prior.status)) return { error: 'invalid_transition', status: 409, from: prior.status };
+          const start = startOf(prior);
+          if (Number.isNaN(start)) return { error: 'invalid_booking_time', status: 400 };
+          if (start > +clock()) return { error: 'session_not_started', status: 409, startsAt: new Date(start).toISOString() };
+        }
+        const cancelling = status === 'cancelled' && prior.status !== 'cancelled';
+        return { to: status, patch: cancelling ? { cancelledAt: at, cancelledBy: 'admin' } : {} };
+      },
+    });
+    if (out.notFound) return { error: 'not_found', status: 404 };
+    if (out.error) return out;
+    const { prior } = out;
+    const updated = await trainerBookings.findByIdAsync(prior.id) || out.updated;
     const cancelling = status === 'cancelled' && prior.status !== 'cancelled';
-    const updated = await trainerBookings.updateByIdAsync(prior.id, {
-      status, updatedAt: at, ...(cancelling ? { cancelledAt: at, cancelledBy: 'admin' } : {}),
-    });
-    await auditLog.insertAsync({
-      id: randomUUID(), at,
-      actor: actorId, action: `trainer_booking_${status}`,
-      target: prior.id, before: prior, after: updated
-    });
     await statusChanged(updated, prior.status, actorId);
     await syncConversion(prior.groupId);
     // FitFlex cancelling a session the member paid for owes them the money back.
     const refund = cancelling && wasPaid(prior)
       ? await refundFor(updated, 'cancelled_by_fitflex', actorId, 'admin') : null;
+    // The member hears of a no-show however it was recorded (review L6).
+    if (status === 'no_show' && prior.status !== 'no_show') await notifyNoShow(updated);
     const [booking] = await withActions([await adminHydrateBooking(updated)], 'admin');
-    return { booking, refund };
+    return { booking, refund, ...(out.draftLine ? { draftLine: out.draftLine } : {}) };
   }
 
   async function trainerMyBookings(userId) {
@@ -415,19 +459,26 @@ export function createTrainerBookingService({
     return { bookings: await withActions(bookings, 'trainer') };
   }
 
-  /** The trainer's own booking, or the error to answer with. */
-  async function ownBooking(userId, bookingId) {
+  /** When the slot starts (epoch ms), NaN when date/slot cannot be read — never "already started". */
+  const startOf = b => slotStartMs(b?.date, b?.slot);
+
+  const lockedBy = line => (line && LOCKING_STATEMENT_STATUSES.includes(line.status)
+    ? { error: 'booking_on_trainer_statement', status: 409, statementId: line.statementId, statementStatus: line.status } : null);
+
+  /** A trainer's outcome on their own confirmed booking, decided and written in one locked step. */
+  async function trainerOutcome({ userId, bookingId, to, action, check }) {
     const profile = trainerService.findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
-    const booking = await trainerBookings.findAsync(b => b.id === bookingId && b.trainerId === profile.id);
-    if (!booking) return { error: 'booking_not_found', status: 404 };
-    return { booking };
+    const out = await outcomeStore.transition({
+      bookingId, trainerId: profile.id, actorId: userId, action: () => action,
+      decide: (prior, line) => check(prior) || lockedBy(line) || { to },
+    });
+    if (out.notFound) return { error: 'booking_not_found', status: 404 };
+    if (out.error) return out;
+    const updated = await trainerBookings.findByIdAsync(out.prior.id) || out.updated;
+    await statusChanged(updated, out.prior.status, userId);
+    return { prior: out.prior, updated };
   }
-
-  const startsAtIso = b => {
-    const start = slotStartMs(b.date, b.slot || '00:00');
-    return Number.isNaN(start) ? null : new Date(start).toISOString();
-  };
 
   /**
    * Trainer: the session took place. Only a confirmed session, and only once it
@@ -435,19 +486,25 @@ export function createTrainerBookingService({
    * never be completed (this check is not behind TRAINER_SESSION_OUTCOMES).
    */
   async function trainerCompleteBooking({ userId, bookingId }) {
-    const own = await ownBooking(userId, bookingId);
-    if (own.error) return own;
-    const { booking } = own;
-    if (booking.status !== 'confirmed') return { error: 'booking_not_confirmable', status: 409 };
-    if (!isPastSlot(booking.date, booking.slot || '00:00', clock())) {
-      return { error: 'session_not_started', status: 409, startsAt: startsAtIso(booking) };
-    }
-    const at = new Date().toISOString();
-    const updated = await trainerBookings.updateByIdAsync(booking.id, { status: 'completed', updatedAt: at });
-    await audit(userId, 'trainer_booking_completed_by_trainer', booking, updated, at);
-    await statusChanged(updated, booking.status, userId);
-    const [shown] = await withActions([await hydrateBooking(updated)], 'trainer');
+    const out = await trainerOutcome({
+      userId, bookingId, to: 'completed', action: 'trainer_booking_completed_by_trainer',
+      check: (b) => {
+        if (b.status !== 'confirmed') return { error: 'booking_not_confirmable', status: 409 };
+        const start = startOf(b);
+        if (Number.isNaN(start)) return { error: 'invalid_booking_time', status: 400 };
+        if (start > +clock()) return { error: 'session_not_started', status: 409, startsAt: new Date(start).toISOString() };
+        return null;
+      },
+    });
+    if (out.error) return out;
+    await syncConversion(out.prior.groupId);
+    const [shown] = await withActions([await hydrateBooking(out.updated)], 'trainer');
     return { booking: shown };
+  }
+
+  async function notifyNoShow(booking) {
+    const trainer = trainers.find(t => t.id === booking.trainerId);
+    await notify('trainer_booking_no_show', { trainer, memberId: booking.memberId, bookings: [booking] });
   }
 
   /**
@@ -458,23 +515,23 @@ export function createTrainerBookingService({
    */
   async function trainerMarkNoShow({ userId, bookingId }) {
     if (!outcomesOn()) return { error: 'feature_disabled', status: 404 };
-    const own = await ownBooking(userId, bookingId);
-    if (own.error) return own;
-    const { booking } = own;
-    if (booking.status !== 'confirmed') return { error: 'booking_not_confirmed', status: 409 };
-    const now = clock();
-    const start = slotStartMs(booking.date, booking.slot || '00:00');
-    if (Number.isNaN(start) || start > +now) return { error: 'session_not_started', status: 409, startsAt: startsAtIso(booking) };
-    const closes = start + NO_SHOW_WINDOW_HOURS * 3_600_000;
-    if (+now > closes) return { error: 'no_show_window_passed', status: 409, closedAt: new Date(closes).toISOString() };
-    const at = new Date().toISOString();
-    const updated = await trainerBookings.updateByIdAsync(booking.id, { status: 'no_show', updatedAt: at });
-    await audit(userId, 'trainer_booking_no_show', booking, updated, at);
-    await statusChanged(updated, booking.status, userId);
-    await syncConversion(booking.groupId);
-    const trainer = trainers.find(t => t.id === booking.trainerId);
-    await notify('trainer_booking_no_show', { trainer, memberId: booking.memberId, bookings: [updated] });
-    const [shown] = await withActions([await hydrateBooking(updated)], 'trainer');
+    const out = await trainerOutcome({
+      userId, bookingId, to: 'no_show', action: 'trainer_booking_no_show',
+      check: (b) => {
+        if (b.status !== 'confirmed') return { error: 'booking_not_confirmed', status: 409 };
+        const start = startOf(b);
+        if (Number.isNaN(start)) return { error: 'invalid_booking_time', status: 400 };
+        const now = +clock();
+        if (start > now) return { error: 'session_not_started', status: 409, startsAt: new Date(start).toISOString() };
+        const closes = start + NO_SHOW_WINDOW_HOURS * 3_600_000;
+        if (now > closes) return { error: 'no_show_window_passed', status: 409, closedAt: new Date(closes).toISOString() };
+        return null;
+      },
+    });
+    if (out.error) return out;
+    await syncConversion(out.prior.groupId);
+    await notifyNoShow(out.updated);
+    const [shown] = await withActions([await hydrateBooking(out.updated)], 'trainer');
     return { booking: shown };
   }
 
@@ -627,6 +684,9 @@ export function createTrainerBookingService({
       s => s.trainerId === profile.id && s.date === day && s.status !== 'cancelled',
     );
 
+    // TRAINER_SESSION_OUTCOMES: what the trainer may do with each booking (manual sessions have none).
+    const showActions = outcomesOn();
+    const at = clock();
     const sessions = [
       ...await Promise.all(dayBookings.map(async (b) => ({
         id: b.id,
@@ -639,6 +699,7 @@ export function createTrainerBookingService({
         status: b.status,
         member: memberCard(await users.findByIdAsync(b.memberId)),
         customerName: null,
+        ...(showActions ? { actions: sessionActions(b, { viewer: 'trainer', now: at }) } : {}),
       }))),
       ...manualSessions.map((s) => ({
         id: s.id,

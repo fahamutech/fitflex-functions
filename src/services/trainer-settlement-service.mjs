@@ -18,6 +18,7 @@
 import { formatTsh } from '../shared/money-display.mjs';
 import { randomUUID } from 'node:crypto';
 import { db as defaultDb } from '../infra/knex-store.mjs';
+import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
 import {
   createStatementWorkflow, fail, weekOf, lastEndedWeek, weekToPrepare, eatDate, partnerView, STATEMENT_STATUSES, VISIBLE_TO_PARTNER,
 } from './partner-statement-workflow.mjs';
@@ -52,9 +53,16 @@ export function createTrainerSettlementService({
   const trainerOf = (id) => trainers?.find((t) => t.id === id) || null;
   const money = formatTsh;
 
+  const outcomes = createPgTrainerOutcomeStore({ db, now });
   const workflow = createStatementWorkflow({
     db, now, table: 'TrainerSettlement', lineTable: 'TrainerSettlementLine', lineKey: 'trainerSettlementId', auditPrefix: 'trainer_settlement',
     payoutCheck: (s, at) => payoutEligibility.forTrainer(s.trainerId, { at }),
+    // A session whose outcome changed after the draft was prepared (cancelled, re-based) must not be paid
+    // as it was: refuse the submit and say which lines; preparing the week again rebuilds the draft.
+    beforeSubmit: async (s, q) => {
+      const stale = await outcomes.staleLines(q, s.id, now());
+      return stale.length ? fail('stale_statement_lines', 409, { lines: stale }) : null;
+    },
   });
 
   // ── preparing ───────────────────────────────────────────────────────────────
