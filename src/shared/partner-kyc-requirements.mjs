@@ -81,9 +81,15 @@ export const DOCUMENTS_FOR = Object.freeze({
   gym_owner: ['owner_id', 'business_registration', 'tin_certificate', 'business_licence'],
   // Liability cover is no longer asked of trainers (product owner, 11 Oct 2026).
   trainer: ['trainer_id', 'certification'],
-  vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id', 'vat_certificate'],
+  vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
   corporate: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
 });
+
+// Vendor tools · S5: documents a partner type may add only while VENDOR_VAT is on (contract check #229:
+// old app builds cannot upload them, so with the flag off they are neither listed nor accepted).
+export const VAT_DOCUMENTS_FOR = Object.freeze({ vendor: ['vat_certificate'] });
+/** The documents a partner type may upload: DOCUMENTS_FOR, plus the VAT certificate while VENDOR_VAT is on. */
+export const documentsFor = (partnerType, { vatOn = false } = {}) => [...(DOCUMENTS_FOR[partnerType] || []), ...(vatOn ? VAT_DOCUMENTS_FOR[partnerType] || [] : [])];
 
 // Collected but not required for verification (owner decision D6, 28 Sep
 // 2026): for vendors and companies only the TIN and the representative's ID
@@ -269,8 +275,8 @@ function vendorSections(s) {
     { key: 'business', items: [
       ...businessItems('business', 'vendor', s.case, s.documents, s.now),
       documentItem('business.licence', s.documents, 'business_licence', s.now),
-      // S5: optional; only VAT-registered vendors upload it.
-      documentItem('business.vat_certificate', s.documents, 'vat_certificate', s.now),
+      // S5: optional; only VAT-registered vendors upload it. Shown only while VENDOR_VAT is on (snapshot.vatOn).
+      ...(s.vatOn ? [documentItem('business.vat_certificate', s.documents, 'vat_certificate', s.now)] : []),
       // Email is optional (11 Oct 2026): a contact number is enough.
       { key: 'business.contact', by: BY_PARTNER, status: filled(profile.contactNumber) ? 'complete' : 'missing' },
     ] },
@@ -312,7 +318,7 @@ const SECTIONS = { gym_owner: gymOwnerSections, trainer: trainerSections, vendor
  * Evaluate a partner's KYC.
  * @param {string} partnerType gym_owner | trainer | vendor | corporate
  * @param {object} snapshot { case, people, documents, checks, settlementAccounts, agreements,
- *   gyms, trainer, vendorProfile, corporate, now }
+ *   gyms, trainer, vendorProfile, corporate, now, vatOn (S5: VENDOR_VAT — adds the optional vendor VAT certificate) }
  * @returns {{ partnerType, tier, sections, missing: string[], awaitingReview: string[], readyToSubmit: boolean, complete: boolean }}
  *   missing: partner items not yet provided. awaitingReview: anything provided but not yet accepted,
  *   plus reviewer items not yet done. readyToSubmit: the partner has provided everything.

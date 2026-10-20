@@ -136,11 +136,17 @@ const DOC_SHAPE = '{ docType: receipt|invoice|payment_receipt|statement|order_in
 
 export const vendorDocumentView = {
   created, method: 'get', path: '/vendor/documents/:docType/:docId',
-  description: `Vendor / staff (${FLAG}): one document, for the in-app view, the portal (format=html inside a sandboxed iframe) and "Send PDF" — no link is made. :docType = sale | receipt | invoice | payment | payment_receipt | statement | order | order_invoice; :docId = the sale, payment, customer (statement: LIVE, as of now) or order id. Query format = json (default) → { doc: ${DOC_SHAPE} } | html (text/html, no script) | pdf (application/pdf; Content-Disposition attachment; filename {number}_{business}.pdf, statement_{initials}_{date}.pdf), lang = en (default) | sw, paper = a4 (default) | 80mm (receipt printer). 404 sale_not_found | payment_not_found | customer_not_found | order_not_found, 409 invoice_not_ready (order not paid), 400 invalid_doc_type | invalid_format | invalid_paper. ${STAFF}`,
+  description: `Vendor / staff (${FLAG}): one document, for the in-app view, the portal (format=html inside a sandboxed iframe) and "Send PDF" — no link is made. :docType = sale | receipt | invoice | payment | payment_receipt | statement | order | order_invoice; :docId = the sale, payment, customer (statement: LIVE, as of now) or order id. Query format = json (default) → { doc: ${DOC_SHAPE} } | html (text/html, no script) | pdf (application/pdf; Content-Disposition attachment; filename {number}_{business}.pdf, statement_{initials}_{date}.pdf), lang = en (default) | sw, paper = a4 (default) | 80mm (receipt printer). 404 sale_not_found | payment_not_found | customer_not_found | order_not_found, 409 invoice_not_ready (order not paid), 400 invalid_doc_type | invalid_format | invalid_paper, 503 pdf_unavailable (format=pdf while the PDF library cannot be loaded). ${STAFF}`,
   onGuard: guards('get'),
   onRequest: async (req, res) => {
     if (!vendorDocumentsOn()) return disabled(res);
-    const result = await vendorDocumentService.view({ vendorId: vendorOf(req.user), access: req.vendorAccess, kind: req.params.docType, id: req.params.docId, query: req.query || {} });
+    let result;
+    try {
+      result = await vendorDocumentService.view({ vendorId: vendorOf(req.user), access: req.vendorAccess, kind: req.params.docType, id: req.params.docId, query: req.query || {} });
+    } catch (error) {
+      if (error.code === 'pdf_unavailable') return res.status(503).json({ error: 'pdf_unavailable' });
+      throw error;
+    }
     if (result.error) return send(res, result);
     setHeader(res, 'Cache-Control', 'no-store, private');
     if (result.html) {
@@ -202,7 +208,7 @@ function htmlPage(res, status, content, opts) {
 
 export const publicVendorDocument = {
   created, method: 'get', path: '/d/:token',
-  description: 'Public (no sign-in), opened from a link a vendor shared: the document page, or its PDF when the path ends in .pdf (/d/{token}.pdf). Query lang = en | sw (default: the link\'s language; anything else → the default), paper = a4 | 80mm (PDF only). HTML with no JavaScript; headers Cache-Control: no-store, X-Robots-Tag: noindex, nofollow, Referrer-Policy: no-referrer, X-Frame-Options: DENY, a strict Content-Security-Policy. An unknown, mistyped, turned-off link (and VENDOR_DOCUMENTS off, or the vendor or document gone) → 404 with the SAME page every time (depends only on ?lang=). 429 + Retry-After over 60 requests a minute from one address (the address our nearest proxy saw: PUBLIC_DOCS_TRUSTED_PROXY_HOPS, default 1, counted from the right of X-Forwarded-For) or 300 an hour for one live link (only real links are counted; a malformed token is answered before any limiter). 500 on a server error; a PDF that fails → 500 page with a link back to the HTML page. Each open sets the link\'s lastOpenedAt (no IP or count is stored). Never shows a customer\'s phone, email or address.',
+  description: 'Public (no sign-in), opened from a link a vendor shared: the document page, or its PDF when the path ends in .pdf (/d/{token}.pdf). Query lang = en | sw (default: the link\'s language; anything else → the default), paper = a4 | 80mm (PDF only). HTML with no JavaScript; headers Cache-Control: no-store, X-Robots-Tag: noindex, nofollow, Referrer-Policy: no-referrer, X-Frame-Options: DENY, a strict Content-Security-Policy. An unknown, mistyped, turned-off link (and VENDOR_DOCUMENTS off, or the vendor or document gone) → 404 with the SAME page every time (depends only on ?lang=). 429 + Retry-After over 60 requests a minute from one address (the address our nearest proxy saw: PUBLIC_DOCS_TRUSTED_PROXY_HOPS, default 1, counted from the right of X-Forwarded-For) or 300 an hour for one live link (only real links are counted; a malformed token is answered before any limiter). 500 on a server error; a PDF that fails → 500 page (503 while the PDF library cannot be loaded) with a link back to the HTML page. Each open sets the link\'s lastOpenedAt (no IP or count is stored). Never shows a customer\'s phone, email or address.',
   onRequest: async (req, res) => {
     const raw = String(req.params?.token || '');
     const pdf = raw.endsWith('.pdf');
@@ -236,7 +242,7 @@ export const publicVendorDocument = {
         buffer = await renderDocumentPdf(out.doc, { lang, paper });
       } catch (error) {
         console.error('[vendor-documents] public PDF failed', { error: error.message });
-        return htmlPage(res, 500, renderPdfFailed(lang, token));
+        return htmlPage(res, error.code === 'pdf_unavailable' ? 503 : 500, renderPdfFailed(lang, token));
       }
       publicHeaders(res);
       return sendPdf(res, buffer, pdfFileName(out.doc), 'inline');

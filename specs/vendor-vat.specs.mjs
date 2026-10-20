@@ -20,6 +20,7 @@ import {
   vendorGetTaxProfile, vendorPutTaxProfile, vendorTaxRates, adminListTaxRates, adminProposeTaxRate, adminApproveTaxRate, adminRejectTaxRate,
   adminWithdrawTaxRate, adminVendorVat, adminVerifyVendorVat, adminRejectVendorVat,
 } from '../functions/vendor-tax.mjs';
+import { myKycDocument, myKyc } from '../functions/partner-kyc.mjs';
 import { includedVat, lineVat, vatForLines, vatSummary, normaliseVrn, normaliseTin, parseTaxRateProposal, rateStatuses } from '../src/shared/vendor-vat.mjs';
 import { ratesOn, vatForSale } from '../src/infra/vendor-tax-store-pg.mjs';
 import { eatDate } from '../src/shared/vendor-order-view.mjs';
@@ -550,4 +551,19 @@ test('GET /vendor/tools/options vatInForce: true only with VENDOR_VAT on and the
   on();
   await db('PartnerDocument').where({ id: v.certId }).update({ status: 'rejected' });
   assert.equal((await opts(as(v.id))).vatInForce, false, 'certificate rejected later: not in force (fail closed)');
+});
+
+// ── contract check #229 item 2: old app builds never see the VAT certificate item ──
+
+test('KYC vat_certificate: not listed or accepted with VENDOR_VAT off; listed (optional) and accepted with it on', async () => {
+  const v = await vendor();
+  const put = () => call(myKycDocument, as(v.id), { params: { requirementKey: 'vat_certificate' }, body: {} });
+  const items = async () => (await call(myKyc, as(v.id))).body.checklist.sections.flatMap(x => x.items).map(i => i.key);
+  const off = await put();
+  assert.deepEqual([off.status, off.body.error, off.body.allowed.includes('vat_certificate')], [400, 'invalid_requirement', false]);
+  assert.equal((await items()).includes('business.vat_certificate'), false);
+  on();
+  const ok = await put();
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal((await items()).includes('business.vat_certificate'), true);
 });

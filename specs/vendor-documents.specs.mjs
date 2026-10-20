@@ -26,7 +26,7 @@ import {
   newToken, hashToken, validToken, publicBaseUrl, swahiliTime, formatDateTime, formatDay, shareTexts, pdfFileName, invoiceNumber, gsmSafe, gsmLength,
   saleDocument,
 } from '../src/shared/vendor-documents.mjs';
-import { renderDocumentPdf } from '../src/shared/vendor-document-pdf.mjs';
+import { renderDocumentPdf, setPdfkitLoaderForTests } from '../src/shared/vendor-document-pdf.mjs';
 import PDFDocument from 'pdfkit';
 import { renderUnavailable } from '../src/shared/vendor-document-html.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
@@ -957,3 +957,30 @@ test('#229 PDF layout: a Swahili A4 PDF with 7-digit amounts and a long payment 
   }
 });
 const includedVatOf = net => Math.floor((2 * net * 1800 + 11800) / (2 * 11800));
+
+test('#229 contract: pdfkit is loaded lazily — without it the backend runs, HTML works, and every PDF route answers 503 pdf_unavailable', async () => {
+  for (const dir of ['src', 'functions']) {
+    const files = fs.readdirSync(path.join(root, dir), { recursive: true }).filter(f => String(f).endsWith('.mjs'));
+    for (const f of files) assert.equal(/^import [^;]*from 'pdfkit'/m.test(fs.readFileSync(path.join(root, dir, String(f)), 'utf8')), false, `${dir}/${f} imports pdfkit at start-up`);
+  }
+  on();
+  const v = await vendor();
+  const p = await product(v);
+  const sale = await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(45_000)));
+  const token = tokenOf((await shareSale(as(v), sale.id)).body.url);
+  const buyer = await user('member');
+  const order = await paidOrder(buyer, [{ productId: p.id, qty: 1 }]);
+  setPdfkitLoaderForTests(async () => { throw new Error("Cannot find package 'pdfkit'"); });
+  try {
+    assert.deepEqual((await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id }, query: { format: 'pdf' } })).body, { error: 'pdf_unavailable' });
+    assert.equal((await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id }, query: { format: 'pdf' } })).status, 503);
+    const pub = await open(`/d/${token}.pdf`);
+    assert.equal(pub.status, 503);
+    assert.match(pub.text, /The PDF couldn&#39;t be made/);
+    assert.equal((await open(`/d/${token}`)).status, 200, 'the page itself still works');
+    const bp = await call(marketplaceInvoice, { sub: buyer, userType: 'member' }, { params: { id: order.id }, query: { format: 'pdf' } });
+    assert.deepEqual([bp.status, bp.body], [503, { error: 'pdf_unavailable' }]);
+    assert.equal((await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id }, query: { format: 'html' } })).status, 200);
+  } finally { setPdfkitLoaderForTests(null); }
+  assert.equal((await open(`/d/${token}.pdf`)).status, 200, 'loads again once available');
+});

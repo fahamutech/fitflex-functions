@@ -4,7 +4,25 @@
 // receipt" and "Page n of m"; a diagonal CANCELLED watermark at 12% on cancelled documents. The vendor's
 // logo is NOT embedded: that would make the server fetch a vendor-supplied URL (SSRF); the HTML page
 // shows it instead. Design spec §8.
-import PDFDocument from 'pdfkit';
+// pdfkit is loaded on the first PDF only (contract check #229): if it is missing or broken, the backend still
+// starts and every other route works; PDF requests then fail with code pdf_unavailable (routes answer 503).
+let PDFDocument = null;
+let loadPdfkit = async () => (await import('pdfkit')).default;
+/** For specs: replace how pdfkit is loaded (null = the real one again). */
+export function setPdfkitLoaderForTests(loader) {
+  PDFDocument = null;
+  loadPdfkit = loader || (async () => (await import('pdfkit')).default);
+}
+async function pdfkit() {
+  if (PDFDocument) return PDFDocument;
+  try {
+    PDFDocument = await loadPdfkit();
+  } catch (err) {
+    throw Object.assign(new Error(`pdf_unavailable: ${err?.message || err}`), { code: 'pdf_unavailable' });
+  }
+  if (typeof PDFDocument !== 'function') { PDFDocument = null; throw Object.assign(new Error('pdf_unavailable'), { code: 'pdf_unavailable' }); }
+  return PDFDocument;
+}
 import { label, langOf, money, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf } from './vendor-documents.mjs';
 
 const MM = 72 / 25.4;
@@ -328,6 +346,7 @@ function render80(doc, d, lang, root) {
  * 80mm is continuous: the page is as tall as the content (measured in a first pass).
  */
 export async function renderDocumentPdf(document, { lang = document.lang, paper = 'a4' } = {}) {
+  await pdfkit();
   const l = langOf(lang);
   if (paper === '80mm') {
     const margins = { top: 4 * MM, bottom: 4 * MM, left: 4 * MM, right: 4 * MM };

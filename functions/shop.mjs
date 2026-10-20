@@ -537,14 +537,20 @@ export const reviewMarketplaceProduct = {
 };
 export const marketplaceInvoice = {
   created, method: 'get', path: '/me/shop-orders/:id/invoice',
-  description: 'Buyer: download an invoice or receipt. Without `format` (or format=text): plain text, exactly as before. Vendor tools · S5 (VENDOR_TOOLS + VENDOR_DOCUMENTS; off → 404 feature_disabled for json/html/pdf): one invoice PER SELLER (the vendor is the seller of record, O-11), numbered INV-… in that vendor\'s series when the order was paid. format=json → { invoices: [document JSON (as GET /vendor/documents/:docType/:docId) + vendorId] } (only my own order; each invoice has only that vendor\'s lines, "Seller: {business}. Sold through the FitFlex app.", never commission or payout); format=html → one page with every invoice; format=pdf → one vendor\'s PDF (&vendorId= required when the order has several sellers → else 400 vendor_required { vendors }; 404 vendor_not_in_order). lang = en | sw, paper = a4 | 80mm. 404 order_not_found (not mine) | invoice_not_ready (not paid yet), 400 invalid_format | invalid_paper.',
+  description: 'Buyer: download an invoice or receipt. Without `format` (or format=text): plain text, exactly as before. Vendor tools · S5 (VENDOR_TOOLS + VENDOR_DOCUMENTS; off → 404 feature_disabled for json/html/pdf): one invoice PER SELLER (the vendor is the seller of record, O-11), numbered INV-… in that vendor\'s series when the order was paid. format=json → { invoices: [document JSON (as GET /vendor/documents/:docType/:docId) + vendorId] } (only my own order; each invoice has only that vendor\'s lines, "Seller: {business}. Sold through the FitFlex app.", never commission or payout); format=html → one page with every invoice; format=pdf → one vendor\'s PDF (&vendorId= required when the order has several sellers → else 400 vendor_required { vendors }; 404 vendor_not_in_order). lang = en | sw, paper = a4 | 80mm. 404 order_not_found (not mine) | invoice_not_ready (not paid yet), 400 invalid_format | invalid_paper, 503 pdf_unavailable (format=pdf while the PDF library cannot be loaded).',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => {
     const format = req.query?.format == null || req.query.format === '' || req.query.format === 'text' ? null : String(req.query.format);
     if (format) {
       if (!['json', 'html', 'pdf'].includes(format)) return res.status(400).json({ error: 'invalid_format', allowed: ['text', 'json', 'html', 'pdf'] });
       if (!vendorDocumentsOn()) return res.status(404).json({ error: 'feature_disabled' });
-      const result = await vendorDocumentService.buyerInvoices({ buyerId: req.user.sub, orderId: req.params.id, query: req.query || {} });
+      let result;
+      try {
+        result = await vendorDocumentService.buyerInvoices({ buyerId: req.user.sub, orderId: req.params.id, query: req.query || {} });
+      } catch (error) {
+        if (error.code === 'pdf_unavailable') return res.status(503).json({ error: 'pdf_unavailable' });
+        throw error;
+      }
       if (result.error) return sendError(res, result);
       res.set?.('Cache-Control', 'no-store, private');
       if (result.html) {
