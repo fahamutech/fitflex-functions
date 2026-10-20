@@ -204,13 +204,15 @@ test('recording off (default): a verified sign-in records nothing and Firebase-o
   await shareToken(inviter.id, { phone });
   const member = await signIn({ name: 'off7', email });
   const byPhone = await signIn({ name: 'off7p', phone });
-  const persons = (await db('User').whereIn('id', [member.id, byPhone.id]).select('personId')).map(r => r.personId);
+  // Picked by id: whereIn returns the rows in no fixed order.
+  const personOf = new Map((await db('User').whereIn('id', [member.id, byPhone.id]).select('id', 'personId')).map(r => [r.id, r.personId]));
+  const persons = [personOf.get(member.id), personOf.get(byPhone.id)];
   assert.equal((await db('LoginIdentifier').whereIn('personId', persons).whereIn('type', ['email', 'phone']).count('* as n').first()).n * 1, 0,
     'no email / phone identifier written by a Firebase session');
   // The only uid row is the one the user_person_guard trigger has always
   // written for a new row's own Firebase uid (pre-existing, not this code).
   const uidRows = await db('LoginIdentifier').where({ type: 'firebase_uid', normalizedValue: member.uid }).select('personId');
-  assert.ok(uidRows.every(x => x.personId === persons[0]), 'uid only on their own person');
+  assert.ok(uidRows.every(x => x.personId === personOf.get(member.id)), 'uid only on their own person');
   assert.equal(await fi.attachFor(member.id), 0, 'fail-closed');
   assert.equal(await fi.attachFor(byPhone.id), 0, 'fail-closed');
   assert.equal((await fi.lookup(inviter.id, { email })).result.kind, 'unregistered');
