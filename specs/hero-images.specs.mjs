@@ -185,7 +185,8 @@ test('slots mirror the app\'s FFHeroPhoto names plus sections, footer pool and p
   for (const id of [...ffHeroPhoto, 'gyms', 'trainers', 'shop', 'footerPool', 'portalLogin']) assert.ok(ids.includes(id), id);
   assert.equal(new Set(ids).size, ids.length);
   assert.equal(heroSlot('footerPool').maxImages, 8);
-  assert.equal(heroSlot('footerPool').variant, 'band');
+  assert.equal(heroSlot('footerPool').variant, 'footer');
+  assert.equal(textZoneFor('footerPool'), 'vertical');
   assert.equal(heroSlot('portalLogin').surface, 'portal');
   assert.equal(textZoneFor('portalLogin'), 'horizontal');
   assert.equal(textZoneFor('gyms'), 'vertical');
@@ -201,6 +202,44 @@ test('slots mirror the app\'s FFHeroPhoto names plus sections, footer pool and p
   assert.deepEqual(byArea('footers'), ['footerPool']);
   assert.deepEqual(byArea('portal'), ['portalLogin']);
   assert.deepEqual(HERO_SLOTS.map(s => s.area), [...HERO_SLOTS.map(s => s.area)].sort((a, b) => HERO_AREAS.indexOf(a) - HERO_AREAS.indexOf(b)));
+});
+
+// The bundled crops on fitflexmobile release-candidate (FFHeroPhoto.aspect in
+// lib/shared/components/ff_photo_hero.dart, the footer pool in ff_photo_footer.dart) and the
+// portal login panel (750×1000, src/components/photo-panel.tsx). Change both sides together.
+const APP_CROPS = {
+  language: ['full', 4 / 5], signIn: ['full', 4 / 5], signUp: ['full', 4 / 5],
+  role: ['compact', 1080 / 1100], pin: ['compact', 1005 / 670],
+  homeStart: ['full', 4 / 5], homePass: ['compact', 3 / 2], profile: ['compact', 1], upgrade: ['compact', 3 / 2],
+  activityToday: ['compact', 3 / 2], activityTraining: ['compact', 800 / 533], activityChallenges: ['compact', 900 / 580],
+  activityProgress: ['compact', 3 / 2],
+  gyms: ['compact', 1080 / 609], trainers: ['compact', 1000 / 350], shop: ['compact', 1080 / 691],
+  trainer: ['compact', 840 / 530], vendor: ['compact', 880 / 587], owner: ['compact', 3 / 2],
+  footerPool: ['footer', 1080 / 1000],
+  portalLogin: ['panel', 3 / 4],
+};
+
+test('every slot\'s variant and aspectHint match the app\'s bundled crop', () => {
+  assert.deepEqual(HERO_SLOTS.map(s => s.id).sort(), Object.keys(APP_CROPS).sort(), 'all 21 slots covered');
+  assert.equal(HERO_SLOTS.length, 21);
+  for (const s of HERO_SLOTS) {
+    const [variant, aspect] = APP_CROPS[s.id];
+    assert.equal(s.variant, variant, `${s.id} variant`);
+    assert.ok(Math.abs(s.aspectHint - aspect) < 1e-9, `${s.id} aspectHint ${s.aspectHint} vs app ${aspect}`);
+  }
+  // `band` meant the old 3:1 footer band; nothing emits it any more (older portals read it as "footer").
+  assert.ok(!HERO_SLOTS.some(s => s.variant === 'band'));
+  // The footer crops are about 1:1, never the old 3:1 band.
+  assert.ok(heroSlot('footerPool').aspectHint > 0.9 && heroSlot('footerPool').aspectHint < 1.2);
+});
+
+test('uploads accept the app\'s footer crops (1080 wide, about 1:1) and the tallest hero crops', async () => {
+  // Shape is never checked, only width: the footer pool's own crop sizes and the portrait heroes pass.
+  for (const [w, h] of [[1080, 1000], [1080, 1080], [1080, 972], [1080, 1100], [1080, 1350], [1080, 378]]) {
+    const out = await prepareHeroUpload(await photo(w, h));
+    assert.equal(out.error, undefined, `${w}x${h}: ${out.error}`);
+    assert.deepEqual([out.width, out.height], [w, h]);
+  }
 });
 
 test('If-None-Match matching honours lists, weak tags and *', () => {
@@ -566,7 +605,7 @@ test('routes: upload checks, private preview, drafts not public, publish, ETag/3
   assert.ok(!JSON.stringify(state).includes('privateKey'));
   const gyms = state.slots.find(s => s.id === 'gyms');
   assert.deepEqual([gyms.draft, gyms.published], [[img.id], [img.id]]);
-  assert.deepEqual([gyms.area, gyms.surface, gyms.variant, gyms.aspectHint, gyms.maxImages], ['members', 'mobile', 'compact', 1.5, 3]);
+  assert.deepEqual([gyms.area, gyms.surface, gyms.variant, gyms.aspectHint, gyms.maxImages], ['members', 'mobile', 'compact', 1080 / 609, 3]);
   assert.deepEqual(state.slots.find(s => s.id === 'footerPool').maxImages, 8);
   assert.deepEqual(state.areas, HERO_AREAS);
   assert.deepEqual(state.slots.map(s => s.id), HERO_SLOTS.map(s => s.id), 'display order');
