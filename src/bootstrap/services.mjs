@@ -121,6 +121,7 @@ import { createCommunicationAccess } from '../services/communication-access.mjs'
 import { whatsappParameter } from '../shared/message-render.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
+import { createPartnerProgressService } from '../services/partner-progress-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
@@ -946,6 +947,8 @@ export const partnerKycService = createPartnerKycService({
   // KYC documents stay private on Zebra; the API streams them after its own checks.
   documentStore: createZebraDocumentStore(),
 });
+// Phase B · B4a: one partner progress tracker on GET /me/kyc (flag PARTNER_PROGRESS; read-only).
+export const partnerProgressService = createPartnerProgressService({ gyms, trainers, partnerGate, payoutEligibility });
 export const termsService = createTermsService({ users, partnerKycService, auditLog });
 
 // Moderation & Promotion. Moderation decides what may be shown; promotions decide
