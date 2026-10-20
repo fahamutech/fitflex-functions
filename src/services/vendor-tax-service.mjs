@@ -10,6 +10,7 @@
 // The routes check the flag (VENDOR_TOOLS + VENDOR_VAT) and who may call before calling in here.
 import { parseTaxProfile, parseVatRejection, parseTaxRateProposal, rateStatuses, normaliseTin } from '../shared/vendor-vat.mjs';
 import { certificateStands } from '../infra/vendor-tax-store-pg.mjs';
+import { vendorVatOn } from '../shared/feature-flags.mjs';
 import { eatDate } from '../shared/vendor-order-view.mjs';
 import { addDays } from '../shared/vendor-customer.mjs';
 
@@ -50,7 +51,7 @@ export function taxProfileView(row, kyc = null, certificate = null, verifiedCert
   };
 }
 
-export function createVendorTaxService({ store, notifyVendor = async () => {}, now = () => new Date() }) {
+export function createVendorTaxService({ store, notifyVendor = async () => {}, vatOn = vendorVatOn, now = () => new Date() }) {
   const today = () => eatDate(now());
 
   async function getProfile({ vendorId }) {
@@ -166,5 +167,14 @@ export function createVendorTaxService({ store, notifyVendor = async () => {}, n
     });
   }
 
-  return { getProfile, saveProfile, adminVatCase, verifyVat, rejectVat, vendorTaxRates, adminTaxRates, proposeRate, decideRate };
+  /**
+   * GET /vendor/tools/options `vatInForce` (any active staff, e.g. `products` only, for the product VAT code
+   * field): true only with VENDOR_VAT on and the vendor's VAT in force now. No other tax detail.
+   */
+  async function vatInForce(vendorId) {
+    if (!vatOn() || !vendorId) return false;
+    return store.inForce(vendorId);
+  }
+
+  return { vatInForce, getProfile, saveProfile, adminVatCase, verifyVat, rejectVat, vendorTaxRates, adminTaxRates, proposeRate, decideRate };
 }

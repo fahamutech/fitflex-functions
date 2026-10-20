@@ -314,6 +314,7 @@ export function createPgVendorTaxStore({ db, now = () => new Date() }) {
 
   return {
     load, save, decide, codes, rates, rate, historyOf, propose, decideRate,
+    inForce: async vendorId => (await taxContextOf(db, vendorId)).inForce,
     setProductVatCode, vatCodesOf, vatCodesById,
     ratesOn: day => ratesOn(db, day),
   };

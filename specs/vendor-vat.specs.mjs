@@ -525,3 +525,29 @@ test('#229 L3: verify refuses a certificate that is no longer the current one; a
   await db('PartnerDocument').where({ id: newer }).update({ status: 'superseded' });
   assert.equal((await call(vendorGetTaxProfile, as(v.id))).body.taxProfile.inForce, true, 'superseded by an accepted renewal still stands');
 });
+
+// ── tools options: vatInForce (mobile product form) ─────────────────────────
+
+test('GET /vendor/tools/options vatInForce: true only with VENDOR_VAT on and the VAT in force; staff with only `products` see it; no other tax detail', async () => {
+  const v = await vendor();
+  const productsOnly = await user('vendor_staff', { vendorId: v.id, vendorPermissions: ['products'], accountStatus: 'active', vendorRole: 'inventory_manager' });
+  const opts = async claims => (await call(vendorToolsOptionsRoute, claims)).body;
+  assert.equal((await opts(as(v.id))).vatInForce, false, 'all off');
+  on();
+  assert.equal((await opts(as(v.id))).vatInForce, false, 'not registered');
+  assert.equal((await call(vendorPutTaxProfile, as(v.id), { body: { vatRegistered: true, vrn: '40012345X' } })).status, 200);
+  assert.equal((await opts(staffOf(productsOnly, v.id))).vatInForce, false, 'pending is not in force');
+  assert.equal((await call(adminVerifyVendorVat, adminClaims('adm_kyc'), { params: { id: v.id } })).status, 200);
+  const staffView = await opts(staffOf(productsOnly, v.id));
+  assert.equal(staffView.vatInForce, true, 'products-only staff learn it');
+  assert.equal((await opts(as(v.id))).vatInForce, true);
+  for (const leak of ['40012345X', '123456789', 'vrn', 'tin', 'taxProfile', 'verifiedAt']) assert.equal(JSON.stringify(staffView).includes(leak), false, `no ${leak}`);
+  assert.equal((await opts(adminClaims('adm_any'))).vatInForce, false, 'a FitFlex admin has no vendor here');
+  const other = await vendor();
+  assert.equal((await opts(as(other.id))).vatInForce, false, 'per vendor');
+  delete process.env.VENDOR_VAT;
+  assert.equal((await opts(as(v.id))).vatInForce, false, 'flag off');
+  on();
+  await db('PartnerDocument').where({ id: v.certId }).update({ status: 'rejected' });
+  assert.equal((await opts(as(v.id))).vatInForce, false, 'certificate rejected later: not in force (fail closed)');
+});

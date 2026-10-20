@@ -118,7 +118,7 @@ test('GET /vendor/tools/options: everything off by default; a tool needs the umb
   assert.equal(off.status, 200);
   assert.deepEqual(off.body, {
     canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false,
-    vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false },
+    vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false },
   });
   process.env.VENDOR_STOCK_LEDGER = '1';
   assert.equal((await call(vendorToolsOptionsRoute, as(v))).body.stockLedger, false, 'no umbrella, no tool');
