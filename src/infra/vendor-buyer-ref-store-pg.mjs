@@ -2,6 +2,8 @@
 //
 // refsFor(vendorId, buyerIds) → Map(buyerId → customerId). Missing pairs are created (random id,
 // ON CONFLICT DO NOTHING, then read back), so two requests at once agree on one customerId.
+// S4 (#224): a buyer whose account was deleted gets no new pseudonym (their refs are deleted on account
+// deletion): only buyers who still have a User row are created; others stay absent (customerId null).
 import { randomUUID } from 'node:crypto';
 
 export const newCustomerId = () => `cus_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
@@ -17,12 +19,22 @@ export function createPgVendorBuyerRefStore({ db }) {
     const found = await read(vendorId, ids);
     const missing = ids.filter(id => !found.has(id));
     if (!missing.length) return found;
+    const existing = new Set((await db('User').whereIn('id', missing).select('id')).map(u => u.id));
+    const creatable = missing.filter(id => existing.has(id));
+    if (!creatable.length) return found;
     await db('VendorBuyerRef')
-      .insert(missing.map(buyerId => ({ vendorId, buyerId, customerId: newCustomerId() })))
+      .insert(creatable.map(buyerId => ({ vendorId, buyerId, customerId: newCustomerId() })))
       .onConflict(['vendorId', 'buyerId']).ignore();
     return read(vendorId, ids);
   }
-  return { refsFor };
+  /** S4: which of these customerIds have a VendorCustomer record at this vendor (so a profile link opens). */
+  async function linkedCustomerIds(vendorId, customerIds) {
+    const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
+    if (!vendorId || !ids.length) return new Set();
+    const rows = await db('VendorCustomer').where({ vendorId }).whereIn('id', ids).select('id');
+    return new Set(rows.map(r => r.id));
+  }
+  return { refsFor, linkedCustomerIds };
 }
 
 /** Same contract, in memory (unit specs and wiring without a database). */
@@ -39,5 +51,6 @@ export function createMemoryVendorBuyerRefStore() {
       }
       return out;
     },
+    async linkedCustomerIds() { return new Set(); },
   };
 }

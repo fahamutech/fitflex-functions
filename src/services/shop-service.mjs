@@ -9,7 +9,7 @@ import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../s
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
-import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions } from '../shared/feature-flags.mjs';
+import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn } from '../shared/feature-flags.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
@@ -70,6 +70,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   onOrderPaid = async () => null,
   // A cancelled order, for promotion analytics: (order) → void; takes back what the paid order was credited for.
   onOrderCancelled = async () => null,
+  // Vendor tools · S4 (Q-6): a paid order makes or refreshes the buyer as an app customer of each of its
+  // vendors (bookkeeping, not flagged: buyerUserId + name only). Never allowed to fail the order.
+  onVendorCustomerOrder = async () => null,
   // Something the vendor should hear about now, not only find in their list: (vendorUserId, event, data) → void.
   onVendorEvent = async () => null,
   // The order store: reserves stock and writes orders atomically. Production passes the Postgres
@@ -91,6 +94,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   gyms = null,
   buyerRefs = null,
   buyerContactOn = vendorBuyerContactOn,
+  // S4: buyer.customerLinked on vendor orders only while VENDOR_TOOLS + VENDOR_CUSTOMERS are on.
+  customersOn = vendorCustomersOn,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
   buyerRefs ||= createMemoryVendorBuyerRefStore();
@@ -732,6 +737,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       try { await stockLedger.snapshotOrderCosts(order); } catch (err) { console.warn('[shop] order line costs not recorded:', order?.id, err?.message); }
     }
     try { await onOrderPaid(order); } catch (err) { console.warn('[shop] order not credited to a promotion:', err?.message); }
+    try { await onVendorCustomerOrder(order); } catch (err) { console.warn('[shop] app customer not recorded:', order?.id, err?.message); }
     for (const vendorId of new Set((order.items || []).map(item => item.vendorId))) await notifyVendor(vendorId, 'new_order', { orderId: order.id });
     await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
   }
@@ -948,8 +954,12 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       buyerRefs.refsFor(vendorId, orders.map(o => o.buyerId)),
     ]);
     const contactOn = buyerContactOn(), at = now();
+    // S4 (contract check #224): true only when a customer record exists, so the client's link opens.
+    const linked = customersOn() && typeof buyerRefs.linkedCustomerIds === 'function'
+      ? await buyerRefs.linkedCustomerIds(vendorId, [...refs.values()]) : new Set();
     return orders.map(order => vendorOrderView(order, vendorId, {
       customerId: refs.get(String(order.buyerId)) ?? null, buyer: buyers.get(order.buyerId) || null,
+      customerLinked: linked.has(refs.get(String(order.buyerId))),
       gym: pickupGyms.get(order.pickupGymId) || null, seesMoney, contactOn, now: at,
     }));
   }
@@ -962,7 +972,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * `counts` (UAT D2): tab counts over ALL of the vendor's orders, not this page (rules: orderTab).
    * → { orders, nextCursor|null, counts } | { error: invalid_limit | invalid_cursor, status: 400 }
    */
-  async function vendorOrdersPage(vendorId, { limit, cursor, seesMoney = false } = {}) {
+  async function vendorOrdersPage(vendorId, { limit, cursor, seesMoney = false, buyerId = null } = {}) {
     let size = ORDERS_PAGE_DEFAULT;
     if (limit !== undefined && limit !== null && limit !== '') {
       const n = Number(limit);
@@ -975,8 +985,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (!after) return { error: 'invalid_cursor', status: 400 };
     }
     const [rows, counts] = await Promise.all([
-      orderStore.ordersForVendor(vendorId, { limit: size + 1, after }),
-      orderStore.countsForVendor(vendorId),
+      orderStore.ordersForVendor(vendorId, { limit: size + 1, after, buyerId }),
+      orderStore.countsForVendor(vendorId, { buyerId }),
     ]);
     const page = rows.slice(0, size);
     return {

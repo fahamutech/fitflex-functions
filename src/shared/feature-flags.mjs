@@ -199,3 +199,12 @@ export function heroImagesCmsOn() {
 export function vendorWalkInSalesOn() {
   return vendorToolsFlag('VENDOR_WALKIN_SALES');
 }
+
+/**
+ * S4: vendor customers, pay-later (credit) sales, customer payments, balances and aging, and the
+ * daily overdue digest. Off → the /vendor/customers and /vendor/receivables endpoints answer 404
+ * feature_disabled, POST /vendor/sales refuses a customer or pay later, and the digest job sends nothing.
+ */
+export function vendorCustomersOn() {
+  return vendorToolsFlag('VENDOR_CUSTOMERS');
+}

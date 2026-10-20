@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService } from '../src/bootstrap/services.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 
 const created = new Date().toISOString();
@@ -93,6 +93,15 @@ export const vendorSettlementDrafts = {
     const r = await vendorSettlementService.prepare({ actorId: 'system:weekly-vendor-statements' });
     if (r.error) console.warn(`[vendor-settlements] ${r.error}`);
     else if (r.prepared || r.rebuilt) console.log(`[vendor-settlements] ${r.periodStartDate}: prepared=${r.prepared} rebuilt=${r.rebuilt} skipped=${r.skipped}`);
+  }
+};
+
+export const vendorCustomersOverdueDigest = {
+  created, rule: '0 6 * * *', // every day 06:00 UTC = 09:00 EAT
+  description: 'Vendor tools · S4: tell each vendor (the vendor account and active staff with `customers`) about pay-later sales that became overdue today (due yesterday, EAT): push + inbox vendor_customers_overdue { count, totalTzs }, in their language. Once per vendor per EAT day (VendorOverdueDigest); nothing on days with no newly overdue sale. Never to the customer. Does nothing unless VENDOR_TOOLS and VENDOR_CUSTOMERS are on. Safe to rerun.',
+  onJob: async () => {
+    const r = await vendorCustomerService.sendOverdueDigests();
+    if (r.vendors) console.log(`[vendor-customers] overdue digest ${r.day}: vendors=${r.vendors} sent=${r.sent}`);
   }
 };
 
