@@ -128,6 +128,8 @@ import { createModerationGate } from '../services/moderation-gate.mjs';
 import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
+import { createShopBannerService } from '../services/shop-banner-service.mjs';
+import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
 import { createShopHomeService } from '../services/shop-home-service.mjs';
 import { signServedToken } from '../auth/promotion-token.mjs';
@@ -929,7 +931,17 @@ export const promotionAnalyticsService = createPromotionAnalyticsService({
 // Shop home (GET /shop/home, behind SHOP_HOME_V2): role sections over the same catalogue, Featured system and orders.
 // Sales are read from paid, not cancelled orders of the last 30 days only, newest first and capped, so memory stays bounded.
 const SHOP_HOME_MAX_ORDERS = 20_000;
+// Shop home banners (SHOP_BANNERS, Phase 2 slice 1): vendor proposals, staff approval, the live
+// list for GET /shop/home. Photos use the app-photo pipeline: private on Zebra until approved.
+export const shopBannerService = createShopBannerService({
+  store: createPgShopBannerStore({ db }),
+  documentStore: createZebraDocumentStore(),
+  publicStore: createZebraPublicStore(),
+  partnerGate, moderationGate,
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
 export const shopHomeService = createShopHomeService({
+  bannerFeed: args => shopBannerService.feed(args),
   shopService, discoveryService, promotionService, users, trainerService, identityLink: identityLinkService,
   recentPaidOrders: ({ since }) => db('ShopOrder')
     .where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)

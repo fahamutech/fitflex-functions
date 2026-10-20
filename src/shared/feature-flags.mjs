@@ -97,6 +97,16 @@ export function shopHomeV2On() {
 }
 
 /**
+ * Shop home Phase 2 · slice 1: hero banners (docs/shop-banners-api.md). Off unless SHOP_BANNERS is
+ * set: every /vendor/shop-banners, /admin/shop-banners and /admin/shop-merch route answers 404
+ * feature_disabled (before sign-in is checked), GET /shop/home has no `banners` key (byte-identical
+ * to before), the lifecycle job does nothing, and /vendor/tools/options says merch.banners: false.
+ */
+export function shopBannersOn() {
+  return on('SHOP_BANNERS');
+}
+
+/**
  * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
  * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
  * carries no `manual` block and subscribe / upgrade take no reference, exactly
@@ -166,6 +176,9 @@ export function vendorToolsOptions() {
     barcodes: vendorToolsFlag('VENDOR_BARCODES'),
     purchases: vendorToolsFlag('VENDOR_PURCHASES'),
     fiscal,
+    // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
+    // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
+    merch: { banners: shopBannersOn() },
   };
 }
 
