@@ -66,11 +66,11 @@ async function programme(orgId, body, benefitBodies = []) {
 }
 const VISITS = { name: 'Gym visits', benefitType: 'gym_access', fundingType: 'full', usagePeriod: 'unlimited' };
 
-/** The lifecycle service on a day of its own, with what it sent kept. */
-function onDay(day = TODAY, { email = true } = {}) {
+/** The lifecycle service on a day of its own (or at an exact instant), with what it sent kept. */
+function onDay(day = TODAY, { email = true, at = null } = {}) {
   const sent = { inbox: [], email: [] };
   const svc = createB2BLifecycleService({
-    db, b2bService, programs: b2bPrograms, benefits: b2bBenefits, b2bProgramService, usage, now: () => new Date(`${day}T06:00:00.000Z`),
+    db, b2bService, programs: b2bPrograms, benefits: b2bBenefits, b2bProgramService, usage, now: () => new Date(at ?? `${day}T06:00:00.000Z`),
     notify: async (userId, m) => { sent.inbox.push({ userId, ...m }); await db('Notification').insert({ id: m.id, userId, type: m.type, title: m.title, body: m.body, data: JSON.stringify(m.data ?? {}), createdAt: new Date() }); },
     emailSender: () => (email ? { configured: true, send: async (to, m) => { sent.email.push({ to, ...m }); return { ok: true }; } } : { configured: false }),
   });
@@ -193,15 +193,21 @@ test('members: an allowance nearly used and used up are each told once per windo
   const g = uid('gym');
   await gyms.insertAsync({ id: g, name: 'Lifecycle Gym', tier: 'standard', location: 'Dar es Salaam', status: 'active', ratePerDay: 5000 });
   made.gyms.push(g);
+  // One clock for the visits and the job: the database's. The job looks at
+  // usage the database stamped (updatedAt) in the 45 minutes before its own
+  // "now", so a "now" of 06:00Z on the Dar day missed the visits whenever the
+  // run was after 21:00Z (the Dar day is already tomorrow) or before 06:45Z.
+  const { rows: [{ at }] } = await db.raw('SELECT now() AS at');
+  const day = localDay(at);
   const orgId = await sponsor('Allowance Co');
   const five = await enrol(orgId, 'Five');
   const two = await enrol(orgId, 'Two');
-  await programme(orgId, {}, [
+  await programme(orgId, { startDate: addDays(day, -60) }, [
     { ...VISITS, name: 'Five visits', usagePeriod: 'month', usageLimit: 5, eligibility: { groups: ['Five'] } },
     { ...VISITS, name: 'Two visits', usagePeriod: 'month', usageLimit: 2, eligibility: { groups: ['Two'] } },
   ]);
-  const visit = userId => usage.consume({ userId, sourceType: 'gym_checkin', sourceId: uid('chk'), provider: { type: 'gym', id: g, tier: 'standard' }, grossTzs: 5000 });
-  const h = onDay();
+  const visit = userId => usage.consume({ userId, sourceType: 'gym_checkin', sourceId: uid('chk'), provider: { type: 'gym', id: g, tier: 'standard' }, grossTzs: 5000, at });
+  const h = onDay(day, { at });
   const mine = id => to(h.sent, [id]).map(m => [m.type, m.body]);
 
   for (let i = 0; i < 3; i += 1) assert.equal((await visit(five.userId)).consumed, true);
@@ -228,7 +234,7 @@ test('members: an allowance nearly used and used up are each told once per windo
   await h.svc.allowanceNotices();
   assert.deepEqual(mine(two.userId).map(x => x[0]), ['b2b_allowance_used_up']);
   // Usage from long ago is not looked at again.
-  assert.deepEqual(await onDay(addDays(TODAY, 2)).svc.allowanceNotices(), { due: 0, sent: 0, failed: 0 });
+  assert.deepEqual(await onDay(addDays(day, 2)).svc.allowanceNotices(), { due: 0, sent: 0, failed: 0 });
 });
 
 // ── Organisations ────────────────────────────────────────────────────────────

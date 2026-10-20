@@ -6,10 +6,16 @@
 // (gyms, trainers, shop) and the footer band pool. `portalLogin` is the portal's login panel.
 //
 // - surface:    'mobile' | 'portal'
-// - variant:    the layout the slot is mostly drawn in on a phone (full | compact | band) or
+// - variant:    the layout the slot is mostly drawn in on a phone (full | compact | footer) or
 //               on desktop (panel). It decides which text zone the brightness check reads:
-//               the bottom 55% for full/compact/band, the left 50% for panel (spec §8.3, crops table).
-// - aspectHint: width / height of the bundled photo, for the admin's crop previews.
+//               the bottom 55% for full/compact/footer, the left 50% for panel (spec §8.3, crops table).
+//               `footer` is the full-width footer (footerPool). The app's inset section and partner
+//               bands (FFHeroBand: gyms, trainers, shop, upgrade, trainer, vendor, owner) use the
+//               same vertical text zone as compact, so they stay `compact` here; `band` is no longer
+//               emitted (older portals map `band` to the footer preview).
+// - aspectHint: width / height of the bundled photo (fitflexmobile FFHeroPhoto.aspect; the portal
+//               login panel's 750×1000 crop for portalLogin), for the admin's crop previews.
+//               It is a hint only: uploads are checked for width (≥ 1080 px), never for shape.
 // - maxImages:  how many photos the slot rotates through (rotation is per day, D-5).
 //
 // An empty slot is allowed: it means "use the bundled photo".
@@ -26,29 +32,31 @@ export const HERO_SLOTS = Object.freeze([
   slot('language', 'preSignIn', 'mobile', 'full', 4 / 5),
   slot('signIn', 'preSignIn', 'mobile', 'full', 4 / 5),
   slot('signUp', 'preSignIn', 'mobile', 'full', 4 / 5),
-  slot('role', 'preSignIn', 'mobile', 'compact', 16 / 9),
+  slot('role', 'preSignIn', 'mobile', 'compact', 1080 / 1100),
   slot('pin', 'preSignIn', 'mobile', 'compact', 1005 / 670),
   // Members.
   slot('homeStart', 'members', 'mobile', 'full', 4 / 5),
   slot('homePass', 'members', 'mobile', 'compact', 3 / 2),
-  slot('profile', 'members', 'mobile', 'compact', 3 / 2),
+  slot('profile', 'members', 'mobile', 'compact', 1),
   slot('upgrade', 'members', 'mobile', 'compact', 3 / 2),
   slot('activityToday', 'members', 'mobile', 'compact', 3 / 2),
   slot('activityTraining', 'members', 'mobile', 'compact', 800 / 533),
   slot('activityChallenges', 'members', 'mobile', 'compact', 900 / 580),
   slot('activityProgress', 'members', 'mobile', 'compact', 3 / 2),
   // Section heroes (slice 1).
-  slot('gyms', 'members', 'mobile', 'compact', 3 / 2),
-  slot('trainers', 'members', 'mobile', 'compact', 3 / 2),
-  slot('shop', 'members', 'mobile', 'compact', 3 / 2),
+  slot('gyms', 'members', 'mobile', 'compact', 1080 / 609),
+  slot('trainers', 'members', 'mobile', 'compact', 1000 / 350),
+  slot('shop', 'members', 'mobile', 'compact', 1080 / 691),
   // Partners.
   slot('trainer', 'partners', 'mobile', 'compact', 840 / 530),
   slot('vendor', 'partners', 'mobile', 'compact', 880 / 587),
   slot('owner', 'partners', 'mobile', 'compact', 3 / 2),
-  // Footer band (slice 2): a pool the app picks from, never the same scene (sourceId) as the screen's top hero.
-  slot('footerPool', 'footers', 'mobile', 'band', 3 / 1, 8),
+  // Full-width footer (slice 2, edge to edge since 2026-10-20): a pool the app picks from, never the same
+  // scene (sourceId) as the screen's top hero. The app's footer crops are 1080 wide and about 1:1
+  // (1080/1000, 1080/1080, 1080/972, 1080/1000); the hint is the most common one.
+  slot('footerPool', 'footers', 'mobile', 'footer', 1080 / 1000, 8),
   // Portal login panel (slice 5).
-  slot('portalLogin', 'portal', 'portal', 'panel', 3 / 2, 1),
+  slot('portalLogin', 'portal', 'portal', 'panel', 3 / 4, 1),
 ]);
 
 const BY_ID = new Map(HERO_SLOTS.map(s => [s.id, s]));

@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  evaluateKyc, documentStatus, currentDocument, addressComplete, KYC_TIERS,
+  evaluateKyc, documentStatus, currentDocument, addressComplete, KYC_TIERS, documentsFor, DOCUMENTS_FOR,
 } from '../src/shared/partner-kyc-requirements.mjs';
 import { gymProfileGaps, gymRateCardGaps } from '../src/shared/gym-profile.mjs';
 import { requiredAgreements } from '../src/shared/partner-agreements.mjs';
@@ -304,6 +304,18 @@ test('a vendor with the TIN, their own details and ID, and marketplace details c
     'business.registration_certificate', 'business.tin_certificate', 'business.tradingName',
   ]);
   assert.equal(item(c, 'business.licence').status, 'missing'); // collected if given, never required
+  // S5: with VENDOR_VAT on (vatOn) the VAT certificate is listed, optional, and never blocks submitting.
+  const withVat = evaluateKyc('vendor', {
+    case: { tin: '123456789' }, people: [rep], documents: [doc('representative_id')],
+    vendorProfile: { contactNumber: '+255700000000', businessCategory: 'Gear', productCategories: ['accessories_gear'] },
+    settlementAccounts: [verifiedAccount], agreements: signed('vendor'), now: NOW, vatOn: true,
+  });
+  assert.deepEqual([withVat.readyToSubmit, withVat.complete], [true, true]);
+  assert.deepEqual([item(withVat, 'business.vat_certificate').status, item(withVat, 'business.vat_certificate').optional], ['missing', true]);
+  assert.equal(c.sections.flatMap(s => s.items).some(i => i.key === 'business.vat_certificate'), false, 'flag off: not listed');
+  assert.deepEqual(documentsFor('vendor'), DOCUMENTS_FOR.vendor);
+  assert.deepEqual(documentsFor('vendor', { vatOn: true }), [...DOCUMENTS_FOR.vendor, 'vat_certificate']);
+  assert.deepEqual(documentsFor('gym_owner', { vatOn: true }), DOCUMENTS_FOR.gym_owner);
 });
 
 test('a vendor without the TIN or the representative\'s ID can\'t submit', () => {

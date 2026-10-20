@@ -9,7 +9,7 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
   /** Strip internal/sensitive fields from owner records for list responses. */
   function slimOwnerRow(row) {
     if (!row) return row;
-    const { passwordHash, firebaseUid, aclPermissions, memberProfile, portalUser, onboardingCompleted, ...rest } = row;
+    const { passwordHash, startPasswordHash, firebaseUid, aclPermissions, memberProfile, portalUser, onboardingCompleted, ...rest } = row;
     return rest;
   }
 

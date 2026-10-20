@@ -115,6 +115,7 @@ export const DOCUMENT_TYPES = [
   'business_registration', 'business_licence', 'tin_certificate', 'memorandum_articles',
   'board_resolution', 'certification', 'liability_insurance',
   'letter_of_authority', 'bank_proof', 'mobile_money_proof', 'site_photo', 'signed_agreement', 'other',
+  'vat_certificate', // vendor tools · S5 (optional, vendors)
 ];
 
 // Only these file types may be stored as KYC documents.

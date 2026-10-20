@@ -22,6 +22,8 @@ import {
 
 await ensureInit();
 
+const agreementVersion = async id => (await db('B2BCommercialAgreement').where({ id }).first()).updatedAt.toISOString();
+
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
 const made = { users: [], orgs: [], gyms: [], corporates: [] };
 const ADMIN = { userType: 'admin' };
@@ -385,7 +387,7 @@ test('an agreed rate per tier on the agreement is the default fee for that organ
   await billing.preparePrepaid({ programId: a.programId, period: PERIOD, actorId: ADMIN.userId });
   assert.deepEqual((await entitlements({ benefitId: a.benefitId })).map(e => [e.feeTzs, e.priceBasis]), [[discountedFeeTzs(PRO, 1000), 'programme_discount']]);
 
-  const active = await finance.activateAgreement({ agreementId: draft.agreement.id, actorId: FINANCE.userId });
+  const active = await finance.activateAgreement({ agreementId: draft.agreement.id, version: await agreementVersion(draft.agreement.id), actorId: FINANCE.userId });
   assert.equal(active.agreement?.status, 'active', JSON.stringify(active));
   // In force: a new programme's pro pass is charged the agreed rate; a tier with no rate keeps the usual price.
   const b = await programme(orgId, PASS, { discountBps: 1000 });

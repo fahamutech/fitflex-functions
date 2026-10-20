@@ -34,7 +34,8 @@ const statusCache = new Map();
 
 /**
  * Register `async (userId) => accountStatus | null`, or an object
- * `{ status, sessionsValidAfter }` when sessions can also be ended early.
+ * `{ status, sessionsValidAfter, passwordChangeRequired }` when sessions can
+ * also be ended early or are held until a start password is changed.
  */
 export function registerAccountStatusLookup(fn) {
   accountStatusLookup = fn;
@@ -59,15 +60,26 @@ async function accountStatusOf(userId) {
     return null;
   }
   const entry = found && typeof found === 'object'
-    ? { status: found.status ?? null, validAfter: found.sessionsValidAfter ? +new Date(found.sessionsValidAfter) : null, at: Date.now() }
-    : { status: found, validAfter: null, at: Date.now() };
+    ? {
+      status: found.status ?? null,
+      validAfter: found.sessionsValidAfter ? +new Date(found.sessionsValidAfter) : null,
+      passwordChangeRequired: found.passwordChangeRequired === true,
+      at: Date.now(),
+    }
+    : { status: found, validAfter: null, passwordChangeRequired: false, at: Date.now() };
   if (statusCache.size >= STATUS_CACHE_MAX) statusCache.clear();
   statusCache.set(userId, entry);
   return entry;
 }
 
-/** Express middleware factory. Pass allowed user_type roles. Empty = any authenticated. */
-export function requireAuth(...roles) {
+/**
+ * A session that still has to change the start password another admin chose
+ * for it (owner decision 2026-10-19): the token says so (`pwc: true`), or the
+ * account does (in case some sign-in route ever forgets the claim).
+ */
+export const PASSWORD_CHANGE_REQUIRED = 'password_change_required';
+
+function authGuard(roles, { allowPasswordChange }) {
   return async (req, res, next) => {
     const token = bearerFrom(req);
     const claims = token && verify(token);
@@ -80,13 +92,44 @@ export function requireAuth(...roles) {
     if (account?.status === 'suspended') {
       return res.status(403).json({ error: 'account_suspended' });
     }
-    // Sessions issued before the person reset or changed their PIN are over.
+    // Sessions issued before the person reset or changed their PIN (or an
+    // admin changed their start password) are over.
     if (account?.validAfter && Number(claims.iat) * 1000 < account.validAfter) {
       return res.status(401).json({ error: 'session_ended' });
+    }
+    // Fail closed: only routes that opt in serve a session that must change its start password.
+    if (!allowPasswordChange && (claims.pwc === true || account?.passwordChangeRequired === true)) {
+      return res.status(403).json({ error: PASSWORD_CHANGE_REQUIRED });
     }
     req.user = claims;
     next();
   };
+}
+
+/** Express middleware factory. Pass allowed user_type roles. Empty = any authenticated. */
+export function requireAuth(...roles) {
+  return authGuard(roles, { allowPasswordChange: false });
+}
+
+/**
+ * The same checks as requireAuth, but a session that must still change its
+ * start password (`pwc`) is let through. Use ONLY on the change-password route
+ * (and any read the portal strictly needs to show that screen).
+ */
+export function requireAuthAllowingPasswordChange(...roles) {
+  return authGuard(roles, { allowPasswordChange: true });
+}
+
+/**
+ * Claims of a bearer token for open routes that only tailor what they show to
+ * the caller. Single-step tokens and sessions that must still change their
+ * start password count as anonymous.
+ */
+export function optionalSessionClaims(req) {
+  const token = bearerFrom(req);
+  const claims = token ? verify(token) : null;
+  if (!claims || claims.purpose || claims.pwc === true) return null;
+  return claims;
 }
 
 /**

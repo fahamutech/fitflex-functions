@@ -251,16 +251,18 @@ test('scenarios 7, 8, 9 — invoice and payment figures come from the ledgers; t
   const { programId } = await programme(orgId, [VISITS]);
   const { startDate, endDate } = monthBounds(LAST);
   for (const day of [startDate, addDays(startDate, 1), endDate]) assert.equal((await visit(m.userId, g, day)).consumed, true);
-  const range = { from: startDate, to: TODAY };
+  // Up to the Dar day as it is when asked: TODAY was fixed when the file
+  // loaded, and an invoice issued after midnight in Dar is dated the next day.
+  const range = () => ({ from: startDate, to: localDay(new Date()) });
 
   // Scenario 7: usage → sponsor responsibility → invoice.
   const drafted = await billing.prepareUsage({ programId, period: LAST, actorId: BILLER });
   assert.ok(drafted.invoice, JSON.stringify(drafted));
-  let f = await analytics.financeAnalytics({ access: await access(orgId), query: range });
+  let f = await analytics.financeAnalytics({ access: await access(orgId), query: range() });
   assert.deepEqual([f.billing.invoicedTzs, f.billing.outstandingTzs], [0, 0]);                                   // a draft is not invoiced
   const issued = await billing.issueInvoice({ invoiceId: drafted.invoice.id, vatRateBps: 0, actorId: BILLER });
   assert.equal(issued.invoice.status, 'issued');
-  f = await analytics.financeAnalytics({ access: await access(orgId), query: range });
+  f = await analytics.financeAnalytics({ access: await access(orgId), query: range() });
   const usageMonth = f.months.find(x => x.month === LAST);
   assert.deepEqual([usageMonth.sponsorPerUseTzs, usageMonth.serviceValueTzs, f.billing.invoicedTzs, f.billing.invoices, f.billing.outstandingTzs], [15000, 15000, 15000, 1, 15000]);
   assert.equal(f.months.reduce((t, x) => t + x.invoicedTzs, 0), issued.invoice.totalTzs);
@@ -268,7 +270,7 @@ test('scenarios 7, 8, 9 — invoice and payment figures come from the ledgers; t
   // Scenario 8: invoice → payment → balance.
   const paid = await finance.recordPayment({ organizationId: orgId, body: { amountTzs: 10000, method: 'bank_transfer', reference: uid('AN'), allocations: [{ invoiceId: issued.invoice.id, amountTzs: 10000 }] }, actorId: CASHIER });
   assert.ok(paid.payment, JSON.stringify(paid));
-  f = await analytics.financeAnalytics({ access: await access(orgId), query: range });
+  f = await analytics.financeAnalytics({ access: await access(orgId), query: range() });
   assert.deepEqual([f.billing.paidTzs, f.billing.payments, f.billing.outstandingTzs, f.months.reduce((t, x) => t + x.collectedTzs, 0)], [10000, 1, 5000, 10000]);
   const statement = await finance.statement({ organizationId: orgId });
   assert.equal(f.billing.outstandingTzs, statement.outstandingTzs);                                              // the same figure the statement shows
@@ -282,8 +284,8 @@ test('scenarios 7, 8, 9 — invoice and payment figures come from the ledgers; t
   assert.deepEqual(theirs.items.map(x => [x.visits, 'settlement' in x]), [[3, false]]);
   // Billing is for the roles that see billing; HR gets the dashboard without it.
   const hr = await orgUser(orgId, 'hr');
-  assert.equal('billing' in (await analytics.dashboard({ access: await as(orgId, hr), query: range })), false);
-  assert.equal((await analytics.financeAnalytics({ access: await as(orgId, hr), query: range })).requiredPermission, 'billing.read');
+  assert.equal('billing' in (await analytics.dashboard({ access: await as(orgId, hr), query: range() })), false);
+  assert.equal((await analytics.financeAnalytics({ access: await as(orgId, hr), query: range() })).requiredPermission, 'billing.read');
 });
 
 // ── What an organisation sees of a person ────────────────────────────────────

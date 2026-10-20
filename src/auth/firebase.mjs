@@ -59,7 +59,9 @@ export async function verifyFirebaseIdToken(idToken) {
         phoneNumber: payload.phone_number ?? null,
         signInProvider: payload.sign_in_provider ?? 'dev',
         name: payload.name ?? null,
-        picture: payload.picture ?? null
+        picture: payload.picture ?? null,
+        // When the person last actually signed in (seconds), as Firebase's auth_time.
+        authTime: Number.isFinite(payload.auth_time) ? payload.auth_time : null,
       };
     } catch {
       return null;
@@ -76,7 +78,9 @@ export async function verifyFirebaseIdToken(idToken) {
       phoneNumber: decoded.phone_number ?? null,
       signInProvider: decoded.firebase?.sign_in_provider ?? null,
       name: decoded.name ?? null,
-      picture: decoded.picture ?? null
+      picture: decoded.picture ?? null,
+      // Seconds; kept across ID-token refreshes, so a pre-change sign-in stays recognisable.
+      authTime: Number.isFinite(decoded.auth_time) ? decoded.auth_time : null,
     };
   } catch (err) {
     console.warn('[firebase-auth] ID token verification failed:', err?.code || err?.message || err);

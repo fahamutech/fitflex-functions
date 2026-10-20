@@ -233,3 +233,63 @@ export function vendorCustomersOn() {
 export function trainerSessionOutcomesOn() {
   return on('TRAINER_SESSION_OUTCOMES');
 }
+
+/**
+ * S5: vendor documents — share links (VendorDocumentLink), the public page /d/:token and its PDF,
+ * the logged-in document views, order invoices for vendors and the buyer's invoice in json/html/pdf.
+ * Off → those endpoints answer 404 feature_disabled, /d/:token answers the same "not available" page as
+ * an unknown token, and GET /me/shop-orders/:id/invoice keeps its plain-text answer only.
+ * Links are also refused (503 public_url_not_configured) while PUBLIC_API_URL is not set (Q-1).
+ */
+export function vendorDocumentsOn() {
+  return vendorToolsFlag('VENDOR_DOCUMENTS');
+}
+
+/**
+ * S5: VAT — the vendor tax profile and its KYC review, product VAT codes, admin tax rates (maker ≠
+ * checker) and VAT worked out on walk-in sales and on the vendor's part of paid app orders. Off →
+ * those endpoints answer 404 feature_disabled and no sale or order gets VAT. Marketplace prices,
+ * commission and payouts never change (O-10).
+ */
+export function vendorVatOn() {
+  return vendorToolsFlag('VENDOR_VAT');
+}
+
+/**
+ * S5 Q-10 (owner pending): also print the vendor's TIN on documents when they are NOT VAT-registered but
+ * their KYC TIN certificate is accepted. Off unless VENDOR_DOCUMENTS_TIN_WITHOUT_VAT is set (and documents
+ * are on): by default the TIN appears only together with a verified VRN (O-12).
+ */
+export function vendorDocumentsTinWithoutVatOn() {
+  return vendorDocumentsOn() && on('VENDOR_DOCUMENTS_TIN_WITHOUT_VAT');
+}
+
+// ── Default-ON switches ──────────────────────────────────────────────────────
+// The exception to "off unless set": these switches keep work that already
+// runs today running, so a deploy changes nothing. Only an explicit off value
+// pauses them; unset, empty or anything else leaves them on.
+const OFF_VALUES = new Set(['0', 'false', 'off', 'no']);
+const onUnlessOff = name => !OFF_VALUES.has(String(process.env[name] ?? '').trim().toLowerCase());
+
+/**
+ * Phase B · B2: the weekly trainer statement-draft job (functions/jobs.mjs
+ * trainerSettlementDrafts, Wednesdays 03:00 UTC). DEFAULT ON — owner decision
+ * 2026-10-20. TRAINER_STATEMENT_DRAFTS=off|false|0|no pauses the scheduled job
+ * only; staff can still prepare a week by hand (POST /admin/trainer-settlements/prepare).
+ * Turning it back on loses nothing: every payable session not yet on a live
+ * statement is picked up by the next run.
+ */
+export function trainerStatementDraftsOn() {
+  return onUnlessOff('TRAINER_STATEMENT_DRAFTS');
+}
+
+/**
+ * Phase B · B2: the weekly vendor statement-draft job (vendorSettlementDrafts,
+ * Mondays 03:00 UTC). DEFAULT ON, same rules as TRAINER_STATEMENT_DRAFTS:
+ * VENDOR_STATEMENT_DRAFTS=off|false|0|no pauses the scheduled job only
+ * (POST /admin/vendor-settlements/prepare is unaffected), and the next run
+ * after turning it back on picks up every delivered sale not yet on a statement.
+ */
+export function vendorStatementDraftsOn() {
+  return onUnlessOff('VENDOR_STATEMENT_DRAFTS');
+}

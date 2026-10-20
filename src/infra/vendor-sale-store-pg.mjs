@@ -20,10 +20,20 @@
 // paid at the counter and its due date. Later customer payments move money from balanceTzs to
 // paidTzs (and allocatedTzs) in their own transaction (src/infra/vendor-customer-store-pg.mjs);
 // a sale with live payment allocations cannot be voided (409 sale_has_payments).
+//
+// S5 (documents + VAT): inside the same transaction a credit sale gets its INV number from the vendor's
+// `invoice` sequence (continuous, shared with order invoices, Q-7), the seller details are snapshotted
+// (Q-8), and — only with VENDOR_VAT on and the vendor's VRN verified at or before soldAt — each line gets
+// its VAT snapshot (code, rate, VAT contained in the price, rounded half-up per line, Q-6). Prices include
+// VAT, so the total never changes: the VAT goes in VendorSale.vatIncludedTzs and vatTzs stays 0.
 import { randomUUID } from 'node:crypto';
 import { VARIANT_HAS_STOCK, variantStockAdjusted, variantStockOf } from './shop-order-store-pg.mjs';
 import { variantsOf, isTracked } from '../shared/vendor-stock.mjs';
 import { walkInPrice, priceSale, receiptNumber, RECEIPT_DOC_TYPE, PAYMENT_METHODS, LATE_RECORDED_MS } from '../shared/vendor-sale.mjs';
+import { vatForSale, sellerSnapshotOf } from './vendor-tax-store-pg.mjs';
+import { vatSummary } from '../shared/vendor-vat.mjs';
+import { INVOICE_DOC_TYPE, invoiceNumber } from '../shared/vendor-documents.mjs';
+import { vendorVatOn } from '../shared/feature-flags.mjs';
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
@@ -49,7 +59,7 @@ export const dayOf = (v) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-export function createPgVendorSaleStore({ db, now = () => new Date() }) {
+export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = vendorVatOn }) {
   // ── views ─────────────────────────────────────────────────────────────────
 
   async function namesOf(q, ids) {
@@ -64,6 +74,10 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
     const s = plain(sale);
     return {
       id: s.id, number: s.number, status: s.status, kind: s.kind,
+      // S5: credit sales carry an INV number (the document number; R- stays the sale ref). VAT is contained
+      // in the prices (vatIncludedTzs; the total is unchanged); vatSummary is empty when VAT did not apply.
+      invoiceNumber: s.invoiceNumber ?? null, vatIncludedTzs: s.vatIncludedTzs ?? 0,
+      vatSummary: vatSummary(lines.map(plain).map(l => ({ vatCode: l.vatCode, vatRatePct: Number(l.vatRatePct), vatTzs: l.vatTzs, netTzs: l.lineTotalTzs - l.saleDiscountShareTzs }))).rows,
       // S4: the customer (name only, never contact details), the due date and what is still owed.
       // paidTzs = paid at the counter + later customer payments; paidAtSaleTzs = at the counter only.
       customer: s.customerId ? { id: s.customerId, name: customer?.name ?? null, forgotten: customer?.forgottenAt != null } : null,
@@ -80,6 +94,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
         listPriceTzs: l.listPriceTzs, unitPriceTzs: l.unitPriceTzs, priceChanged: l.unitPriceTzs !== l.listPriceTzs,
         priceChangedBy: person(l.priceChangedBy, names.get(l.priceChangedBy)),
         discountTzs: l.discountTzs, lineTotalTzs: l.lineTotalTzs,
+        vatCode: l.vatCode ?? null, vatRatePct: Number(l.vatRatePct || 0), vatTzs: l.vatTzs ?? 0,
       })),
       payments: payments.map(plain).sort((a, b) => a.position - b.position).map(p => ({
         method: p.method, amountTzs: p.amountTzs, reference: p.reference ?? null,
@@ -222,11 +237,28 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
           ON CONFLICT ("vendorId", "docType") DO UPDATE SET "next" = "VendorDocumentSequence"."next" + 1, "updatedAt" = EXCLUDED."updatedAt"
           RETURNING "next" - 1 AS seq`, [vendorId, RECEIPT_DOC_TYPE, at]);
         const seq = Number(issued.rows[0].seq);
+        // S5: a pay-later sale is also an invoice: the next INV number, under the same kind of lock.
+        let invoiceSeq = null;
+        if (sale.kind === 'credit') {
+          const inv = await trx.raw(`INSERT INTO "VendorDocumentSequence" ("vendorId", "docType", "next", "updatedAt")
+            VALUES (?, ?, 2, ?)
+            ON CONFLICT ("vendorId", "docType") DO UPDATE SET "next" = "VendorDocumentSequence"."next" + 1, "updatedAt" = EXCLUDED."updatedAt"
+            RETURNING "next" - 1 AS seq`, [vendorId, INVOICE_DOC_TYPE, at]);
+          invoiceSeq = Number(inv.rows[0].seq);
+        }
+        // S5: VAT contained in each line's net (after its discount and its share of the sale discount).
+        const vat = await vatForSale(trx, {
+          vendorId, at: sale.soldAt, vatOn: vatOn(),
+          lines: totals.lines.map(l => ({ productId: l.productId, netTzs: l.lineTotalTzs - l.saleDiscountShareTzs })),
+        });
+        const vatIncludedTzs = vat.lines.reduce((s2, v) => s2 + (v?.vatTzs || 0), 0);
+        const sellerSnapshot = await sellerSnapshotOf(trx, vendorId, { vat });
 
         await trx('VendorSale').insert({
           id: saleId, vendorId, seq, number: receiptNumber(seq), kind: sale.kind || 'cash', status: 'completed', customerId: sale.customerId || null,
           soldAt: sale.soldAt, clientSoldAt: sale.clientSoldAt ?? null, subtotalTzs: totals.subtotalTzs, lineDiscountTzs: totals.lineDiscountTzs, discountTzs: totals.discountTzs,
           vatTzs: 0, totalTzs: totals.totalTzs, paidTzs: totals.paidTzs, changeTzs: totals.changeTzs, balanceTzs: totals.balanceTzs,
+          invoiceSeq, invoiceNumber: invoiceSeq == null ? null : invoiceNumber(invoiceSeq), vatIncludedTzs, sellerSnapshot: JSON.stringify(sellerSnapshot),
           dueDate: sale.kind === 'credit' ? sale.dueDate : null,
           clientRef: sale.clientRef, fingerprint, note: sale.note, createdBy: actorId, createdAt: at, updatedAt: at,
         });
@@ -235,6 +267,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
           nameSnapshot: l.name, qty: l.qty, listPriceTzs: l.listPriceTzs, unitPriceTzs: l.unitPriceTzs, discountTzs: l.discountTzs,
           saleDiscountShareTzs: l.saleDiscountShareTzs, lineTotalTzs: l.lineTotalTzs, unitCostTzs: costOf(l.productId, l.variant),
           priceChangedBy: l.unitPriceTzs !== l.listPriceTzs ? actorId : null, discountBy: l.discountTzs > 0 ? actorId : null, createdAt: at,
+          vatCode: vat.lines[i]?.vatCode ?? null, vatRatePct: vat.lines[i]?.vatRatePct ?? 0, vatTzs: vat.lines[i]?.vatTzs ?? 0,
         })));
         if (sale.payments.length) {
           await trx('VendorSalePayment').insert(sale.payments.map((p, i) => ({

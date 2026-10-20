@@ -31,7 +31,7 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn } from '../shared/feature-flags.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
@@ -61,6 +61,12 @@ import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
 import { createPgVendorCustomerStore } from '../infra/vendor-customer-store-pg.mjs';
 import { createVendorCustomerService } from '../services/vendor-customer-service.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
+import { createPgVendorTaxStore } from '../infra/vendor-tax-store-pg.mjs';
+import { createVendorTaxService } from '../services/vendor-tax-service.mjs';
+import { createPgVendorDocumentStore } from '../infra/vendor-document-store-pg.mjs';
+import { createVendorDocumentService } from '../services/vendor-document-service.mjs';
+import { renderDocumentHtml, renderDocumentsHtml } from '../shared/vendor-document-html.mjs';
+import { renderDocumentPdf } from '../shared/vendor-document-pdf.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
 import { createProductStatsRecomputeService } from '../services/product-stats-recompute-service.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
@@ -170,6 +176,13 @@ export {
   corporateAccounts, corporateEmployees, corporateBills,
 };
 
+// The key PINs (and portal start passwords) are mixed with before hashing. It
+// must be set in production and never change afterwards, or every stored PIN
+// stops matching. Null in production when unset: callers fail closed.
+function pinPepper() {
+  return process.env.PIN_PEPPER || (process.env.NODE_ENV === 'production' ? null : 'fitflex-dev-pin-pepper');
+}
+
 // requireAuth rejects tokens of suspended accounts (the JWT alone can't know).
 // A suspended Person (FitFlex-level only) suspends every persona; a suspended
 // persona never suspends the Person (invariant 30).
@@ -177,11 +190,23 @@ registerAccountStatusLookup(async id => {
   const user = await users.findByIdAsync(id);
   if (!user) return null;
   if (user.accountStatus === 'suspended') return 'suspended';
+  // Sessions issued before this are over: the later of the profile's own cut-off
+  // (a portal admin changed their start password) and the Person's (I7a: a PIN
+  // reset or change).
+  let validAfter = user.sessionsValidAfter ? +new Date(user.sessionsValidAfter) : null;
   if (user.personId) {
     const person = await db('Person').where({ id: user.personId }).first();
     if (person?.status === 'suspended') return 'suspended';
-    // I7a: sessions issued before a PIN reset or change are over.
-    if (person?.sessionsValidAfter) return { status: user.accountStatus ?? null, sessionsValidAfter: person.sessionsValidAfter };
+    if (person?.sessionsValidAfter) validAfter = Math.max(validAfter ?? 0, +new Date(person.sessionsValidAfter));
+  }
+  const passwordChangeRequired = user.passwordChangeRequired === true;
+  if (validAfter || passwordChangeRequired) {
+    return {
+      status: user.accountStatus ?? null,
+      sessionsValidAfter: validAfter ? new Date(validAfter) : null,
+      // Still on the start password another admin chose: held to the change-password route.
+      passwordChangeRequired,
+    };
   }
   return user.accountStatus ?? null;
 });
@@ -281,6 +306,23 @@ export const shopService = createShopService({
   onOrderCancelled: order => promotionEventsService.reversePaidOrder(order),
   // Vendor tools · S4: the buyer becomes (or is refreshed as) an app customer of each vendor (defined below; runs later).
   onVendorCustomerOrder: order => vendorCustomerService.marketplaceOrderPaid(order),
+  // Vendor tools · S5: each vendor's invoice for the paid order is numbered (defined below; runs later).
+  onVendorOrderInvoices: order => vendorDocumentService.orderPaid(order),
+  // Vendor tools · S5: product VAT codes (VENDOR_TOOLS + VENDOR_VAT).
+  productVat: {
+    on: vendorVatOn,
+    allowedCodes: async () => (await vendorTaxStore.codes()).filter(c => c.inUse).map(c => c.code),
+    set: input => vendorTaxStore.setProductVatCode(input),
+    codesOf: (vendorId, ids) => vendorTaxStore.vatCodesOf(vendorId, ids),
+    codesById: ids => vendorTaxStore.vatCodesById(ids),
+  },
+});
+// Vendor tools · S5: VAT — tax profile + KYC review, tax rates (maker ≠ checker), product VAT codes
+// (dormant behind VENDOR_TOOLS + VENDOR_VAT; the routes check the flag).
+const vendorTaxStore = createPgVendorTaxStore({ db });
+export const vendorTaxService = createVendorTaxService({
+  store: vendorTaxStore,
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
 // Vendor tools · S3: walk-in (counter) sales — no commission, no ShopOrder, no settlement
 // (dormant behind VENDOR_TOOLS + VENDOR_WALKIN_SALES; the routes check the flag).
@@ -292,13 +334,22 @@ export const vendorSaleService = createVendorSaleService({
 });
 // Vendor tools · S4: customers, pay-later balances, customer payments, aging and the overdue digest
 // (dormant behind VENDOR_TOOLS + VENDOR_CUSTOMERS; the routes and the digest job check the flag).
+const vendorCustomerStore = createPgVendorCustomerStore({ db });
 export const vendorCustomerService = createVendorCustomerService({
-  store: createPgVendorCustomerStore({ db }),
+  store: vendorCustomerStore,
   saleStore: vendorSaleStore,
   saleService: vendorSaleService,
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
   // The digest goes to the vendor and to staff: each person gets their own push + inbox, in their language.
   notifyPerson: (userId, type, data) => partnerNotifier.vendorEvent(userId, type, data),
+});
+// Vendor tools · S5: share links, public page, PDF, order invoices (dormant behind VENDOR_TOOLS +
+// VENDOR_DOCUMENTS; order invoice numbering on payment is bookkeeping and runs regardless).
+export const vendorDocumentService = createVendorDocumentService({
+  store: createPgVendorDocumentStore({ db, customerStore: vendorCustomerStore, vatOn: vendorVatOn }),
+  renderHtml: renderDocumentHtml,
+  renderManyHtml: renderDocumentsHtml,
+  renderPdf: renderDocumentPdf,
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const productStatsRecomputeService = createProductStatsRecomputeService({ db });
@@ -583,7 +634,14 @@ export const settlementClawbackService = createSettlementClawbackService({ confi
 export const invoiceService = createInvoiceService({
   invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
 });
-export const portalUserService = createPortalUserService({ users, auditLog, initFirebaseAdmin, getAdminAuth, isConfiguredAdminEmail });
+// Replaceable, so specs can stand in for the Firebase admin SDK.
+export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth };
+export const portalUserService = createPortalUserService({
+  users, auditLog, isConfiguredAdminEmail, db,
+  initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
+  // The start password is checked with the same server key as PINs.
+  pepper: () => pinPepper(), forgetSession: invalidateAccountStatus,
+});
 export const webhookService = createWebhookService({
   subscriptions, webhookSeen, paymentRequests,
   onSubscriptionActivated: lifecycle.activated,
@@ -790,7 +848,7 @@ export const pinAuthService = createPinAuthService({
   linkingEnabled: () => identityFlag('V2_LINKING'),
   // The key the PIN is mixed with before hashing. It must be set in production
   // and never change afterwards, or every stored PIN stops matching.
-  pepper: () => process.env.PIN_PEPPER || (process.env.NODE_ENV === 'production' ? null : 'fitflex-dev-pin-pepper'),
+  pepper: () => pinPepper(),
 });
 // Identity V2 · I7b: register with a number or email, a code, then a PIN.
 export const registrationService = createRegistrationService({

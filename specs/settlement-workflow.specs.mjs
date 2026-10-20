@@ -103,7 +103,13 @@ test('a statement goes draft → submitted → approved → payable → paid, an
   assert.deepEqual(payable.statement.destinationSnapshot, DESTINATION);
   assert.ok(payable.statement.payableAt);
 
-  const paid = await workflow.pay({ id, paymentReference: ' MPESA-QK7H2L9 ', receiptUrl: 'https://x/receipt.png', actorId: 'payer' });
+  // The receipt link is shown to the gym: https only.
+  for (const receiptUrl of ['javascript:alert(1)', 'http://x/receipt.png', 'data:text/html,hi', 'https://user:pw@x/r.png', 'not a url', 42, `https://x/${'a'.repeat(1000)}`]) {
+    const bad = await workflow.pay({ id, paymentReference: 'MPESA-QK7H2L9', receiptUrl, actorId: 'payer' });
+    assert.deepEqual([bad.error, bad.status], ['invalid_receipt_url', 400], String(receiptUrl));
+  }
+  assert.equal((await trx('GymPayout').where({ gymSettlementId: id })).length, 0);
+  const paid = await workflow.pay({ id, paymentReference: ' MPESA-QK7H2L9 ', receiptUrl: ' HTTPS://X/receipt.png ', actorId: 'payer' });
   assert.deepEqual([paid.statement.status, paid.statement.paidBy, paid.statement.paymentReference, paid.statement.receiptUrl], ['paid', 'payer', 'MPESA-QK7H2L9', 'https://x/receipt.png']);
   const payouts = await trx('GymPayout').where({ gymSettlementId: id });
   assert.equal(payouts.length, 1);
