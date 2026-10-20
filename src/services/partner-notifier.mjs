@@ -235,7 +235,7 @@ export function createPartnerNotifier({
       const n = Number(d.count || 0);
       const amount = tzs(Number(d.totalTzs || 0));
       const en = { title: n === 1 ? '1 pay-later sale is now overdue' : `${n} pay-later sales are now overdue`, body: `${amount} is past its due date. See who owes you.` };
-      const sw = { title: `Mauzo ${n} ya mkopo yamechelewa`, body: `${amount} imepita tarehe ya mwisho. Ona wanaokudai.` };
+      const sw = { title: `Mauzo ${n} ya mkopo yamechelewa`, body: `${amount} imepita tarehe ya mwisho. Ona wateja wanaodaiwa.` };
       const text = locale === 'en' ? en : sw;
       return {
         type: 'vendor_customers_overdue',

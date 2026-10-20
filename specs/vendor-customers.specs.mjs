@@ -917,5 +917,7 @@ test('overdue digest at 09:00 EAT: sales that became overdue today (due yesterda
   assert.match(texts[0].title, /^2 pay-later sales are now overdue$/);
   assert.match(texts[0].body, /45,000 is past its due date/);
   assert.match(texts[1].title, /^Mauzo 1 ya mkopo yamechelewa$/, 'Swahili when no language is set');
+  assert.match(texts[1].body, /9,000 imepita tarehe ya mwisho\. Ona wateja wanaodaiwa\.$/, 'customers who owe the vendor (Swahili audit #224; draft)');
+  assert.doesNotMatch(texts[0].data.bodySw, /wanaokudai\b/, 'never "wanaokudai" (people the vendor owes)');
   assert.deepEqual([texts[0].data.open, texts[0].data.view, texts[0].type], ['customers', 'owed', 'vendor_customers_overdue']);
 });
