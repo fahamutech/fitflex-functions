@@ -16,11 +16,13 @@ import { ROLE_PERMISSIONS } from '../src/shared/b2b.mjs';
 import { monthBounds } from '../src/shared/b2b-programs.mjs';
 import { localDay, addDays } from '../src/shared/member-progress.mjs';
 import {
-  adminB2BCollections, adminSetB2BPaymentInstructions, adminConfirmB2BPaymentNotice, adminRejectB2BPaymentNotice, adminRemindB2BInvoice,
+  adminB2BCollections, adminSetB2BPaymentInstructions, adminConfirmB2BPaymentInstructions, adminCancelB2BPaymentInstructions, adminB2BPaymentInstructions, adminConfirmB2BPaymentNotice, adminRejectB2BPaymentNotice, adminRemindB2BInvoice,
   adminSetB2BBillingHold, getB2BOrganizationPaying, submitB2BPaymentNotice, withdrawB2BPaymentNotice,
 } from '../functions/b2b.mjs';
 
 await ensureInit();
+
+const agreementVersion = async id => (await db('B2BCommercialAgreement').where({ id }).first()).updatedAt.toISOString();
 
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
 const made = { users: [], orgs: [], gyms: [] };
@@ -56,7 +58,7 @@ const as = (orgId, claims) => access(orgId, { userType: claims.userType, userId:
 /** An issued fee invoice, due `termsDays` after today. */
 async function feeInvoice(orgId, amountTzs, { termsDays = 0, period = PERIOD } = {}) {
   const { agreement } = await finance.createAgreement({ organizationId: orgId, body: { effectiveFrom: `${period}-01`, platformFeeTzs: amountTzs, prepaidTermsDays: termsDays }, actorId: BILLER });
-  const live = await finance.activateAgreement({ agreementId: agreement.id, actorId: BILLER });
+  const live = await finance.activateAgreement({ agreementId: agreement.id, version: await agreementVersion(agreement.id), actorId: CASHIER });
   assert.ok(live.agreement, JSON.stringify(live));
   const prepared = await finance.prepareFee({ organizationId: orgId, period, actorId: BILLER });
   assert.ok(prepared.invoice, JSON.stringify(prepared));
@@ -115,13 +117,65 @@ test('rules: which reminder an invoice is due, and who may send a payment notice
   assert.deepEqual(Object.entries(ROLE_PERMISSIONS).filter(([, p]) => p.includes('billing.pay')).map(([r]) => r).sort(), ['admin', 'finance', 'owner']);
 });
 
-test('payment details: set by staff, shown to the organisation', async () => {
+test('payment details: one admin asks, a different one confirms, then the organisation sees them', async () => {
   const orgId = await sponsor();
   const fin = await orgUser(orgId, 'finance');
-  const set = await collections.setInstructions({ body: { bankName: 'CRDB Bank', accountName: 'FitFlex Africa Ltd', accountNumber: '0150000000001', lipaNamba: '5550001', somethingElse: 'x' }, actorId: BILLER });
-  assert.deepEqual([set.configured, set.instructions.accountNumber, set.instructions.branch, 'somethingElse' in set.instructions], [true, '0150000000001', null, false]);
+  const before = await collections.getInstructions();
+  const asked = await collections.requestInstructionsChange({ body: { bankName: 'CRDB Bank', accountName: 'FitFlex Africa Ltd', accountNumber: '0150000000001', lipaNamba: '5550001', somethingElse: 'x' }, actorId: BILLER });
+  // Nothing changes until it is confirmed.
+  assert.deepEqual([asked.instructions.accountNumber, asked.pendingChange.instructions.accountNumber, asked.pendingChange.instructions.branch, asked.pendingChange.requestedBy, 'somethingElse' in asked.pendingChange.instructions],
+    [before.instructions.accountNumber, '0150000000001', null, BILLER, false]);
+  const waiting = await collections.organizationPaying({ access: await as(orgId, fin) });
+  assert.deepEqual([waiting.instructions.accountNumber, 'pendingChange' in waiting], [before.instructions.accountNumber, false]);
+
+  // The admin who asked cannot confirm it.
+  const changeId = asked.pendingChange.changeId;
+  assert.match(changeId, /^pic_/);
+  assert.deepEqual(await collections.confirmInstructionsChange({ actorId: CASHIER }), { error: 'change_id_required', status: 400 });
+  assert.deepEqual(await collections.confirmInstructionsChange({ changeId, actorId: BILLER }), { error: 'cannot_confirm_own_request', status: 403 });
+  assert.equal((await collections.getInstructions()).instructions.accountNumber, before.instructions.accountNumber);
+  const set = await collections.confirmInstructionsChange({ changeId, actorId: CASHIER });
+  assert.deepEqual([set.configured, set.instructions.accountNumber, set.instructions.branch, set.pendingChange, 'somethingElse' in set.instructions], [true, '0150000000001', null, null, false]);
   const paying = await collections.organizationPaying({ access: await as(orgId, fin) });
   assert.deepEqual([paying.instructions.bankName, paying.instructions.lipaNamba, paying.canPay, paying.onHold, paying.notices], ['CRDB Bank', '5550001', true, false, []]);
+  assert.deepEqual(await collections.confirmInstructionsChange({ changeId, actorId: CASHIER }), { error: 'no_pending_change', status: 409 });
+
+  // Both steps are audited, by who did them.
+  const trail = await db('AuditLog').where({ target: 'default' }).whereIn('action', ['b2b.payment_instructions.request', 'b2b.payment_instructions.update']).whereIn('actor', [BILLER, CASHIER]).orderBy('at');
+  assert.deepEqual(trail.slice(-2).map(a => [a.action, a.actor]), [['b2b.payment_instructions.request', BILLER], ['b2b.payment_instructions.update', CASHIER]]);
+  const applied = trail.at(-1).after;
+  assert.deepEqual([(typeof applied === 'string' ? JSON.parse(applied) : applied).requestedBy], [BILLER]);
+
+  // A request swapped after the second admin checked it is not confirmed by that check:
+  // CASHIER asks, BILLER looks at it, then CASHIER replaces it with another account.
+  const genuine = await collections.requestInstructionsChange({ body: { lipaNamba: '5559999', accountNumber: '0150000000001' }, actorId: CASHIER });
+  const swapped = await collections.requestInstructionsChange({ body: { lipaNamba: '5558888', accountNumber: '0159999999999' }, actorId: CASHIER });
+  assert.notEqual(swapped.pendingChange.changeId, genuine.pendingChange.changeId);
+  assert.deepEqual(await collections.confirmInstructionsChange({ changeId: genuine.pendingChange.changeId, actorId: BILLER }), { error: 'change_superseded', status: 409, changeId: swapped.pendingChange.changeId });
+  assert.equal((await collections.getInstructions()).instructions.accountNumber, '0150000000001');
+  // A new request replaces one still waiting; a request can be withdrawn or declined, and the details in force stay.
+  const replaced = await collections.requestInstructionsChange({ body: { lipaNamba: '5558888', accountNumber: '0150000000001' }, actorId: BILLER });
+  assert.deepEqual([replaced.pendingChange.instructions.lipaNamba, replaced.pendingChange.requestedBy], ['5558888', BILLER]);
+  assert.deepEqual(await collections.cancelInstructionsChange({ changeId: swapped.pendingChange.changeId, actorId: CASHIER }), { error: 'change_superseded', status: 409, changeId: replaced.pendingChange.changeId });
+  assert.deepEqual(await collections.cancelInstructionsChange({ actorId: CASHIER }), { error: 'change_id_required', status: 400 });
+  const dropped = await collections.cancelInstructionsChange({ changeId: replaced.pendingChange.changeId, actorId: CASHIER, reason: 'Wrong number' });
+  assert.deepEqual([dropped.pendingChange, dropped.instructions.lipaNamba], [null, '5550001']);
+  assert.deepEqual(await collections.cancelInstructionsChange({ changeId: replaced.pendingChange.changeId, actorId: CASHIER }), { error: 'no_pending_change', status: 409 });
+  assert.equal((await db('AuditLog').where({ action: 'b2b.payment_instructions.cancel', actor: CASHIER })).length, 1);
+  assert.deepEqual(await collections.requestInstructionsChange({ body: {}, actorId: null }), { error: 'actor_required', status: 403 });
+
+  // Over HTTP: PUT asks (202), a different admin confirms.
+  const approver = sub => ({ sub, userType: 'admin', portalUser: true, aclPermissions: ['b2b_billing_approve'] });
+  const put = await call(adminSetB2BPaymentInstructions, { claims: approver(BILLER), body: { accountNumber: '0150000000002', lipaNamba: '5550002' } });
+  assert.deepEqual([put.statusCode, put.body.instructions.accountNumber, put.body.pendingChange.instructions.accountNumber], [202, '0150000000001', '0150000000002']);
+  const read = await call(adminB2BPaymentInstructions, { claims: staff(['b2b_payments']) });
+  assert.equal(read.body.pendingChange.instructions.lipaNamba, '5550002');
+  const putId = put.body.pendingChange.changeId;
+  assert.deepEqual([(await call(adminConfirmB2BPaymentInstructions, { claims: approver(BILLER), body: { changeId: putId } })).body.error], ['cannot_confirm_own_request']);
+  assert.equal((await call(adminConfirmB2BPaymentInstructions, { claims: staff(['b2b_billing', 'b2b_payments']) })).body.requiredScope, 'b2b_billing_approve');
+  assert.equal((await call(adminCancelB2BPaymentInstructions, { claims: staff(['b2b_billing', 'b2b_payments']) })).body.requiredScope, 'b2b_billing_approve');
+  const confirmed = await call(adminConfirmB2BPaymentInstructions, { claims: approver(CASHIER), body: { changeId: putId } });
+  assert.deepEqual([confirmed.statusCode, confirmed.body.instructions.accountNumber, confirmed.body.pendingChange], [200, '0150000000002', null]);
 });
 
 test('payment notice: sent once, checked by FitFlex, and confirming it records the payment', async () => {
@@ -318,7 +372,7 @@ test('security: only the right roles send a notice, only their own organisation,
   assert.equal((await call(withdrawB2BPaymentNotice, { claims: financeB, params: { id: orgB, noticeId: sentA.body.notice.id } })).body.error, 'notice_not_found');
 
   // An organisation user is not FitFlex staff.
-  for (const route of [adminConfirmB2BPaymentNotice, adminRejectB2BPaymentNotice, adminB2BCollections, adminSetB2BBillingHold, adminSetB2BPaymentInstructions, adminRemindB2BInvoice]) {
+  for (const route of [adminConfirmB2BPaymentNotice, adminRejectB2BPaymentNotice, adminB2BCollections, adminSetB2BBillingHold, adminSetB2BPaymentInstructions, adminConfirmB2BPaymentInstructions, adminCancelB2BPaymentInstructions, adminRemindB2BInvoice]) {
     assert.equal((await call(route, { claims: financeA, params: { id: orgA, noticeId: sentA.body.notice.id, invoiceId: invB.id }, body: { onHold: false } })).statusCode, 403, route.path);
   }
   // Staff grants are separate: payments confirms, billing reminds, approval holds and sets the payment details.

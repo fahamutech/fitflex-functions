@@ -163,7 +163,12 @@ test('prepare, submit, approve by a second person, clear and pay; the trainer is
   await svc.markPayable({ id: draft.id, actorId: checker });
 
   assert.equal((await svc.pay({ id: draft.id, actorId: checker })).error, 'payment_reference_required');
-  const paid = await svc.pay({ id: draft.id, paymentReference: 'MPESA-TR1', actorId: checker });
+  for (const receiptUrl of ['javascript:alert(1)', 'http://x/r.png', 'https://user:pw@x/r.png']) {
+    const bad = await svc.pay({ id: draft.id, paymentReference: 'MPESA-TR1', receiptUrl, actorId: checker });
+    assert.deepEqual([bad.error, bad.status], ['invalid_receipt_url', 400], receiptUrl);
+  }
+  const paid = await svc.pay({ id: draft.id, paymentReference: 'MPESA-TR1', receiptUrl: ' https://files.fitflex.test/r.png ', actorId: checker });
+  assert.equal(paid.statement.receiptUrl, 'https://files.fitflex.test/r.png');
   assert.deepEqual([paid.statement.status, paid.statement.paymentReference, paid.statement.paidBy], ['paid', 'MPESA-TR1', checker]);
   const note = inbox.find(n => n.userId === a.userId);
   assert.equal(note.type, 'trainer_payout_paid');

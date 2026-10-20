@@ -20,6 +20,7 @@
 //
 // Each step is one transaction with the row locked, and is audited.
 import { randomUUID } from 'node:crypto';
+import { readReceiptUrl } from '../shared/receipt-url.mjs';
 
 export const STATEMENT_STATUSES = ['draft', 'submitted', 'approved', 'payable', 'paid', 'voided'];
 const HOLDABLE = ['draft', 'submitted', 'approved', 'payable'];
@@ -115,11 +116,13 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
   const pay = ({ id, paymentReference, receiptUrl, actorId }) => step(id, 'paid', actorId, async (s) => {
     if (s.status !== 'payable') return wrongStatus(s, 'payable');
     if (!text(paymentReference)) return fail('payment_reference_required', 400);
+    const receipt = readReceiptUrl(receiptUrl);
+    if (receipt === undefined) return fail('invalid_receipt_url', 400, { hint: 'an https:// link' });
     // The partner's standing may have changed since the statement was cleared.
     const check = await payoutCheck(s, now());
     if (!check.ok) return notPayable(check);
     return {
-      patch: { status: 'paid', paidBy: actorId, paidAt: now(), paymentReference: text(paymentReference), receiptUrl: receiptUrl || null, destinationSnapshot: JSON.stringify(check.destination) },
+      patch: { status: 'paid', paidBy: actorId, paidAt: now(), paymentReference: text(paymentReference), receiptUrl: receipt, destinationSnapshot: JSON.stringify(check.destination) },
       audit: { amountTzs: s.finalNetTzs, paymentReference: text(paymentReference), destination: check.destination },
       after: onPaid,
     };
