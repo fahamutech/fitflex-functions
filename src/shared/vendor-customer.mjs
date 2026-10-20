@@ -139,6 +139,9 @@ export function parsePayment(body, { today }) {
 
   const earliest = addDays(today, -RECEIVED_ON_BACK_DAYS);
   let receivedOn = today;
+  // The raw input (null when absent) is what the fingerprint uses, so a retry that crosses 00:00 EAT
+  // (its default "today" moved) still replays (review #224 L6).
+  const receivedOnInput = body.receivedOn == null || body.receivedOn === '' ? null : body.receivedOn;
   if (body.receivedOn != null && body.receivedOn !== '') {
     receivedOn = validDay(body.receivedOn);
     if (!receivedOn || receivedOn < earliest || receivedOn > today) return fail('received_on_invalid', 400, { earliest, latest: today });
@@ -163,13 +166,24 @@ export function parsePayment(body, { today }) {
     const sum = allocations.reduce((s, a) => s + a.amountTzs, 0);
     if (sum !== body.amountTzs) return fail('allocation_mismatch', 400, { amountTzs: body.amountTzs, allocatedTzs: sum });
   }
-  return { clientRef: body.clientRef, amountTzs: body.amountTzs, method: body.method, reference, receivedOn, note, allocations };
+  return { clientRef: body.clientRef, amountTzs: body.amountTzs, method: body.method, reference, receivedOn, receivedOnInput, note, allocations };
 }
+
+/** Optional clientRef of POST /vendor/customers: absent → null; malformed → error. */
+export function parseClientRef(value) {
+  if (value == null || value === '') return { clientRef: null };
+  if (typeof value !== 'string' || !CLIENT_REF.test(value)) return fail('invalid_client_ref', 400);
+  return { clientRef: value };
+}
+/** What makes two POST /vendor/customers with the same clientRef "the same customer". */
+export const customerFingerprint = fields => createHash('sha256').update(JSON.stringify(
+  ['name', 'phone', 'email', 'address', 'note'].map(k => fields[k] ?? null),
+)).digest('hex');
 
 /** What makes two payment requests with the same clientRef "the same payment". */
 export function paymentFingerprint(customerId, p) {
   return createHash('sha256').update(JSON.stringify({
-    customerId, amountTzs: p.amountTzs, method: p.method, reference: p.reference || null, receivedOn: p.receivedOn,
+    customerId, amountTzs: p.amountTzs, method: p.method, reference: p.reference || null, receivedOn: p.receivedOnInput ?? null,
     note: p.note || null, allocations: p.allocations ? p.allocations.map(a => [a.saleId, a.amountTzs]) : null,
   })).digest('hex');
 }

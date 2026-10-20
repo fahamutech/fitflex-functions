@@ -9,6 +9,7 @@ import { requireAuth } from '../src/auth/jwt.mjs';
 import { shopService, vendorCustomerService, users } from '../src/bootstrap/services.mjs';
 import { vendorCustomersOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
+import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 
 const created = new Date().toISOString();
 
@@ -43,6 +44,21 @@ function requireVendorAccess(...permissions) {
     return next();
   };
 }
+/**
+ * Review #224 L8: per vendor per minute, in memory per server (as S3's sales limit): writes (add customer,
+ * record or void a payment) and customer searches. Over it: 429 rate_limited { retryAfterSeconds } + Retry-After.
+ */
+export const VENDOR_CUSTOMER_LIMITS = Object.freeze({ writesPerMinute: 60, searchesPerMinute: 240 });
+const writeLimiter = createVendorLimiter({ perMinute: VENDOR_CUSTOMER_LIMITS.writesPerMinute });
+const searchLimiter = createVendorLimiter({ perMinute: VENDOR_CUSTOMER_LIMITS.searchesPerMinute });
+export const resetVendorCustomerLimits = () => { writeLimiter.reset(); searchLimiter.reset(); };
+
+/** The vendor account and vendorRole admin staff (stored record) void any payment (M2, as S3 sales). */
+async function voidsAny(user) {
+  if (user.userType === 'vendor') return true;
+  const staff = await users.findByIdAsync(user.sub);
+  return staff?.userType === 'vendor_staff' && staff.vendorId === user.vendorId && staff.accountStatus === 'active' && staff.vendorRole === 'admin';
+}
 const guards = (method, ...permissions) => routeGuard(method, [requireAuth('vendor', 'vendor_staff'), requireVendorAccess(...permissions)]);
 const vendorOf = user => (user.userType === 'vendor_staff' ? user.vendorId : user.sub);
 const send = (res, result) => {
@@ -55,15 +71,16 @@ const STAFF = 'Staff of a suspended vendor → 403 vendor_suspended; staff witho
 
 const AGING = 'aging { current (not due yet; due today counts here), d1_30, d31_60, d61_90, d90plus } — daysOverdue = EAT today − dueDate (day boundary 00:00 EAT)';
 const MONEY = `owedTzs, overdueTzs (balance of sales past their due date), oldestDueDate|null (YYYY-MM-DD), maxDaysOverdue (0 when nothing overdue), ${AGING}`;
-const CUSTOMER = '{ id, source: manual (walk-in, owned by the vendor) | marketplace (app buyer), name|null (app customers: their FitFlex name, may be null), phone|null (+255…; walk-in only), email|null (walk-in only), address|null (walk-in only), note|null, archived, archivedAt|null, createdAt, updatedAt } — an app customer never has phone, email, address or user id (A-02)';
+const CUSTOMER = '{ id, source: manual (walk-in, owned by the vendor) | marketplace (app buyer), name|null (app customers: their FitFlex name, may be null), forgotten (the app buyer deleted their FitFlex account: name is null, show "Deleted member"), phone|null (+255…; walk-in only), email|null (walk-in only), address|null (walk-in only), note|null, archived, archivedAt|null, createdAt, updatedAt } — an app customer never has phone, email, address or user id (A-02)';
 const PAYMENT = '{ id, number (PMT-000001, continuous per vendor), customerId, status: recorded|voided, amountTzs, method, reference|null, receivedOn (EAT day), note|null, clientRef, recordedAt, recordedBy {id,name}, allocations:[{ saleId, saleNumber, amountTzs }], voidedAt|null, voidedBy {id,name}|null, voidReason|null }';
 
 export const vendorCustomersList = {
   created, method: 'get', path: '/vendor/customers',
-  description: `Vendor / staff with \`customers\`, or staff with \`sales\` only for the POS picker (${FLAG}). Query: q (name, or ≥ 3 phone digits — walk-in customers only; ≤ 80 chars), filter all (not archived; default) | owes | overdue | manual | marketplace | archived, bucket current|d1_30|d31_60|d61_90|d90plus (customers with money in it), sort name (A–Z, default) | owed | overdue (most days overdue first) | recent (last purchase), limit (1–200, default 50), cursor (nextCursor). With \`customers\` → { customers:[{ id, source, name|null, phone|null (walk-in only), archived, lastPurchaseAt|null (latest shop sale or paid app order), ${MONEY} }], nextCursor|null, asOf (EAT day) }. Staff with \`sales\` only → { customers:[{ id, source, name|null, phoneLast3|null }], nextCursor|null } — never amounts, never archived customers; filter only all|manual|marketplace, sort only name|recent, no bucket (else 403 vendor_permission_forbidden { requiredPermission: customers, field }). 400 invalid_query { max } | invalid_filter | invalid_sort | invalid_bucket | invalid_limit | invalid_cursor. ${STAFF}`,
+  description: `Vendor / staff with \`customers\`, or staff with \`sales\` only for the POS picker (${FLAG}). Query: q (name, or ≥ 3 phone digits — walk-in customers only; ≤ 80 chars), filter all (not archived; default) | owes | overdue | manual | marketplace | archived, bucket current|d1_30|d31_60|d61_90|d90plus (customers with money in it), sort name (A–Z, default) | owed | overdue (most days overdue first) | recent (last purchase), limit (1–200, default 50), cursor (nextCursor). With \`customers\` → { customers:[{ id, source, name|null, phone|null (walk-in only), archived, forgotten (app buyer deleted their account: name null — show "Deleted member"), lastPurchaseAt|null (latest shop sale or paid app order), ${MONEY} }], nextCursor|null, asOf (EAT day) }. Staff with \`sales\` only → { customers:[{ id, source, name|null, phoneLast3|null, forgotten }], nextCursor|null } — never amounts, never archived customers; their phone search matches only the START of the number and needs ≥ 7 digits (shorter digit strings search names only); filter only all|manual|marketplace, sort only name|recent, no bucket (else 403 vendor_permission_forbidden { requiredPermission: customers, field }). 400 invalid_query { max } | invalid_filter | invalid_sort | invalid_bucket | invalid_limit | invalid_cursor. 429 rate_limited { retryAfterSeconds } (more than 240 searches a minute for the vendor; Retry-After header). ${STAFF}`,
   onGuard: guards('get', 'customers', 'sales'),
   onRequest: async (req, res) => {
     if (!vendorCustomersOn()) return disabled(res);
+    if (limitOrNull(searchLimiter, vendorOf(req.user), res)) return;
     const result = await vendorCustomerService.listCustomers({ vendorId: vendorOf(req.user), access: req.vendorAccess, query: req.query || {} });
     if (result.error) return send(res, result);
     res.json(result);
@@ -72,14 +89,17 @@ export const vendorCustomersList = {
 
 export const vendorCustomersCreate = {
   created, method: 'post', path: '/vendor/customers',
-  description: `Vendor / staff with \`customers\` or \`sales\` (${FLAG}): add a walk-in customer. Body { name (2–80), phone? (Tanzanian mobile: 07…, 06…, 7…, +255…; stored +255XXXXXXXXX), email?, address? (≤ 200), note? (≤ 500) }. Staff with \`sales\` only: name and phone only (others → 403 vendor_permission_forbidden { requiredPermission: customers, field }). → 201 { customer, phoneDuplicate: { id, name }|null } (customer = ${CUSTOMER}; for \`sales\`-only staff the picker shape { id, source, name, phoneLast3 }). A phone another customer of the vendor already has is saved anyway and reported in phoneDuplicate (Q-7). 400 name_invalid { min, max } | phone_invalid | email_invalid | address_too_long { max } | note_too_long { max } | invalid_field { field } | invalid_body. ${STAFF}`,
-  requestSample: { name: 'Juma Mussa', phone: '0712345678', note: 'Buys protein every month' },
+  description: `Vendor / staff with \`customers\` or \`sales\` (${FLAG}): add a walk-in customer. Body { clientRef? (8–100 chars [A-Za-z0-9._:-]; a retry with the same clientRef and body → 200 with the customer already created, header Idempotent-Replay; another body → 409 client_ref_reused), name (2–80), phone? (Tanzanian mobile: 07…, 06…, 7…, +255…; stored +255XXXXXXXXX), email?, address? (≤ 200), note? (≤ 500) }. Staff with \`sales\` only: name and phone only (others → 403 vendor_permission_forbidden { requiredPermission: customers, field }). → 201 { customer, phoneDuplicate: { id, name }|null } (customer = ${CUSTOMER}; for \`sales\`-only staff the picker shape { id, source, name, phoneLast3 }). A phone another customer of the vendor already has is saved anyway and reported in phoneDuplicate (Q-7). 400 name_invalid { min, max } | phone_invalid | email_invalid | address_too_long { max } | note_too_long { max } | invalid_field { field } | invalid_client_ref | invalid_body. 429 rate_limited { retryAfterSeconds } (more than 60 customer/payment writes a minute for the vendor). ${STAFF}`,
+  requestSample: { clientRef: '6f1d2c3b-7a8e-4f90-b1c2-d3e4f5a6b7c8', name: 'Juma Mussa', phone: '0712345678', note: 'Buys protein every month' },
   onGuard: guards('post', 'customers', 'sales'),
   onRequest: async (req, res) => {
     if (!vendorCustomersOn()) return disabled(res);
+    if (limitOrNull(writeLimiter, vendorOf(req.user), res)) return;
     const result = await vendorCustomerService.createCustomer({ vendorId: vendorOf(req.user), actorId: req.user.sub, access: req.vendorAccess, body: req.body || {} });
     if (result.error) return send(res, result);
-    res.status(201).json(result);
+    const { status, ...body } = result;
+    if (status === 200) res.set?.('Idempotent-Replay', 'true');
+    res.status(status).json(body);
   },
 };
 
@@ -158,11 +178,12 @@ export const vendorCustomerPayments = {
 
 export const vendorCustomerRecordPayment = {
   created, method: 'post', path: '/vendor/customers/:id/payments',
-  description: `Vendor / staff with \`customers\` (${FLAG}; \`sales\` alone is not enough — Q-3): record money this customer paid towards pay-later sales. FitFlex never holds it. Body { clientRef (8–100 chars [A-Za-z0-9._:-]; reuse it on every retry), amountTzs (≥ 1, ≤ what is owed), method: cash|mpesa|airtel_money|mixx|halopesa|card|bank|other (one per payment), reference? (≤ 100; required for mpesa, airtel_money, mixx, halopesa, bank; ignored for cash), receivedOn? (EAT day YYYY-MM-DD, today … 30 days back; default today), note? (≤ 200), allocations?: [{ saleId, amountTzs }] (manual; must add up to amountTzs, each ≤ that sale's balance; omitted → oldest due first) }. → 201 { payment: ${PAYMENT}, customer: { ${MONEY}, asOf } }; a replay (same clientRef, same body) → 200 with the same payment. Errors: 409 overpayment { owedTzs } (more than owed; nothing recorded — O-8, no customer credit), 409 allocation_stale { saleId, balanceTzs } (a chosen sale was paid or voided meanwhile), 409 customer_archived, 409 client_ref_reused, 400 allocation_mismatch { amountTzs, allocatedTzs } | invalid_allocation { index?, field?, reason? } | reference_required { method } | invalid_payment { field } | received_on_invalid { earliest, latest } | note_too_long | invalid_client_ref | invalid_body, 404 customer_not_found. ${STAFF}`,
+  description: `Vendor / staff with \`customers\` (${FLAG}; \`sales\` alone is not enough — Q-3): record money this customer paid towards pay-later sales. FitFlex never holds it. Body { clientRef (8–100 chars [A-Za-z0-9._:-]; reuse it on every retry), amountTzs (≥ 1, ≤ what is owed), method: cash|mpesa|airtel_money|mixx|halopesa|card|bank|other (one per payment), reference? (≤ 100; required for mpesa, airtel_money, mixx, halopesa, bank; ignored for cash), receivedOn? (EAT day YYYY-MM-DD, today … 30 days back; default today), note? (≤ 200), allocations?: [{ saleId, amountTzs }] (manual; must add up to amountTzs, each ≤ that sale's balance; omitted → oldest due first) }. → 201 { payment: ${PAYMENT}, customer: { ${MONEY}, asOf } }; a replay (same clientRef, same body) → 200 with the same payment. Errors: 409 overpayment { owedTzs } (more than owed; nothing recorded — O-8, no customer credit), 409 allocation_stale { saleId, balanceTzs } (a chosen sale was paid or voided meanwhile), 409 customer_archived, 409 client_ref_reused, 400 allocation_mismatch { amountTzs, allocatedTzs } | invalid_allocation { index?, field?, reason? } | reference_required { method } | invalid_payment { field } | received_on_invalid { earliest, latest } | note_too_long | invalid_client_ref | invalid_body, 404 customer_not_found, 429 rate_limited { retryAfterSeconds } (more than 60 customer/payment writes a minute for the vendor). A retry is matched on the receivedOn you SENT (absent stays absent), so a retry after 00:00 EAT still replays. ${STAFF}`,
   requestSample: { clientRef: '0b7f4c2e-9a1d-4f6b-8c3e-2d5a7e9f1b20', amountTzs: 25000, method: 'mpesa', reference: 'QK12AB34', receivedOn: '2026-10-20' },
   onGuard: guards('post', 'customers'),
   onRequest: async (req, res) => {
     if (!vendorCustomersOn()) return disabled(res);
+    if (limitOrNull(writeLimiter, vendorOf(req.user), res)) return;
     const result = await vendorCustomerService.recordPayment({ vendorId: vendorOf(req.user), customerId: req.params.id, actorId: req.user.sub, body: req.body || {} });
     if (result.error) return send(res, result);
     if (result.status === 200) res.set?.('Idempotent-Replay', 'true');
@@ -184,12 +205,15 @@ export const vendorCustomerPayment = {
 
 export const vendorCustomerVoidPayment = {
   created, method: 'post', path: '/vendor/customers/:id/payments/:paymentId/void',
-  description: `Vendor / staff with \`customers\` (${FLAG}): void a payment (audited as vendor_customer_payment_voided). Body { reason (3–200) }. Its allocations are reversed: the sales it paid owe again. The payment stays listed as voided with who, when and why. A void by staff is reported to the vendor account (notification vendor_customer_payment_voided { customerId, paymentId, number }, EN/SW). → { payment, customer: { ${MONEY}, asOf } }. 409 already_voided { voidedAt }, 400 reason_required { min } | reason_too_long { max }, 404 customer_not_found | payment_not_found. ${STAFF}`,
+  description: `Vendor / staff with \`customers\` (${FLAG}): void a payment (audited as vendor_customer_payment_voided). Body { reason (3–200) }. The vendor account and vendorRole admin staff may void any payment; other staff only a payment they recorded, on the EAT day of its receivedOn → else 403 void_not_allowed { reason: not_own | too_old } (checked before already_voided). The customer must not be archived (409 customer_archived — restore first). Its allocations are reversed: the sales it paid owe again. The payment stays listed as voided with who, when and why. A void by staff is reported to the vendor account (notification vendor_customer_payment_voided { customerId, paymentId, number }, EN/SW). → { payment, customer: { ${MONEY}, asOf } }. 409 already_voided { voidedAt }, 409 customer_archived, 403 void_not_allowed { reason }, 400 reason_required { min } | reason_too_long { max }, 404 customer_not_found | payment_not_found, 429 rate_limited. ${STAFF}`,
   requestSample: { reason: 'Recorded against the wrong customer' },
   onGuard: guards('post', 'customers'),
   onRequest: async (req, res) => {
     if (!vendorCustomersOn()) return disabled(res);
-    const result = await vendorCustomerService.voidPayment({ vendorId: vendorOf(req.user), customerId: req.params.id, paymentId: req.params.paymentId, actorId: req.user.sub, body: req.body || {} });
+    if (limitOrNull(writeLimiter, vendorOf(req.user), res)) return;
+    const result = await vendorCustomerService.voidPayment({
+      vendorId: vendorOf(req.user), customerId: req.params.id, paymentId: req.params.paymentId, actorId: req.user.sub, body: req.body || {}, voidsAny: await voidsAny(req.user),
+    });
     if (result.error) return send(res, result);
     res.json(result);
   },

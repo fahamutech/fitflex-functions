@@ -7,6 +7,7 @@ import { requireAuth } from '../src/auth/jwt.mjs';
 import { shopService, vendorSaleService, users } from '../src/bootstrap/services.mjs';
 import { vendorWalkInSalesOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
+import { createVendorLimiter } from '../src/shared/vendor-rate-limit.mjs';
 
 const created = new Date().toISOString();
 
@@ -35,19 +36,9 @@ async function requireSalesPermission(req, res, next) {
 // GET /shop/home, functions/shop-home.mjs): with several servers the real allowance is servers × this.
 // A device syncing its offline queue sends one sale at a time, far below it.
 export const VENDOR_SALES_LIMIT = Object.freeze({ perMinute: 120, maxTracked: 5000 });
-const windows = new Map(); // vendorId → { count, resetAt }
-export function allowVendorSale(vendorId, nowMs = Date.now()) {
-  let w = windows.get(vendorId);
-  if (!w || w.resetAt <= nowMs) {
-    if (windows.size >= VENDOR_SALES_LIMIT.maxTracked) for (const [k, v] of windows) if (v.resetAt <= nowMs) windows.delete(k);
-    w = { count: 0, resetAt: nowMs + 60_000 };
-    windows.set(vendorId, w);
-  }
-  if (w.count >= VENDOR_SALES_LIMIT.perMinute) return { ok: false, retryAfterSeconds: Math.max(1, Math.ceil((w.resetAt - nowMs) / 1000)) };
-  w.count += 1;
-  return { ok: true };
-}
-export const resetVendorSalesLimits = () => windows.clear();
+const salesLimiter = createVendorLimiter(VENDOR_SALES_LIMIT);
+export const allowVendorSale = (vendorId, nowMs = Date.now()) => salesLimiter.allow(vendorId, nowMs);
+export const resetVendorSalesLimits = () => salesLimiter.reset();
 
 /** M2: the vendor account and vendorRole admin staff (stored record) may void any sale of the vendor. */
 async function voidsAny(user) {
@@ -56,6 +47,21 @@ async function voidsAny(user) {
   return staff?.userType === 'vendor_staff' && staff.vendorId === user.vendorId && staff.accountStatus === 'active' && staff.vendorRole === 'admin';
 }
 const guards = method => routeGuard(method, [requireAuth('vendor', 'vendor_staff'), requireSalesPermission]);
+
+/**
+ * S4 (security review #224 M3): customer money — payment allocations on a sale, the customerId filter and
+ * the pay-later summary figures — is for callers who also hold `customers` (the vendor account does).
+ * Per-row kind / balanceTzs / dueDate / customer {id, name} stay for every `sales` caller (AC-23).
+ */
+async function seesCustomers(user) {
+  if (user.userType === 'vendor') return true;
+  return shopService.authorizeStaff(user, 'customers');
+}
+const forCaller = (sale, sees) => {
+  if (sees || !sale) return sale;
+  const { allocations, ...rest } = sale;
+  return rest;
+};
 // The vendor account acts for itself; staff for the vendor their (checked) staff record belongs to.
 const vendorOf = user => (user.userType === 'vendor_staff' ? user.vendorId : user.sub);
 const send = (res, result) => {
@@ -64,7 +70,7 @@ const send = (res, result) => {
 };
 const disabled = res => res.status(404).json({ error: 'feature_disabled' });
 
-const SALE_SHAPE = '{ id, number (R-000001, continuous per vendor), status: completed|voided, kind: cash|credit (credit = pay later, S4), customer { id, name|null }|null (never contact details), dueDate (YYYY-MM-DD)|null (credit only), balanceTzs (still owed now; 0 for cash), paidAtSaleTzs (paid at the counter), allocations:[{ paymentId, number (PMT-…), amountTzs, receivedOn, voided }] (customer payments towards this sale), soldAt, clientSoldAt (the soldAt the device sent when it was ahead of the server, else null), recordedAt (when it reached FitFlex), lateRecorded (recordedAt − soldAt > 5 min), clientRef, subtotalTzs (Σ qty × unitPriceTzs, before discounts), lineDiscountTzs (Σ line discounts), discountTzs (sale discount), totalTzs (= subtotal − line discounts − sale discount), paidTzs (at the counter + later customer payments; paidTzs − changeTzs + balanceTzs = totalTzs), changeTzs (0 for credit), note|null, createdBy {id,name}, voidedBy {id,name}|null, voidedAt|null, voidReason|null, lines:[{ id, productId, variant|null, nameSnapshot, qty, listPriceTzs (the shop\'s walk-in price: discount price if set, else price), unitPriceTzs (charged), priceChanged, priceChangedBy {id,name}|null, discountTzs (for the whole line), lineTotalTzs (qty × unitPriceTzs − discountTzs) }], payments:[{ method, amountTzs, reference|null }] }. Never unitCostTzs.';
+const SALE_SHAPE = '{ id, number (R-000001, continuous per vendor), status: completed|voided, kind: cash|credit (credit = pay later, S4), customer { id, name|null }|null (never contact details), dueDate (YYYY-MM-DD)|null (credit only), balanceTzs (still owed now; 0 for cash), paidAtSaleTzs (paid at the counter), allocations:[{ paymentId, number (PMT-…), amountTzs, receivedOn, voided }] (customer payments towards this sale; only for callers who also hold \`customers\`, omitted otherwise), soldAt, clientSoldAt (the soldAt the device sent when it was ahead of the server, else null), recordedAt (when it reached FitFlex), lateRecorded (recordedAt − soldAt > 5 min), clientRef, subtotalTzs (Σ qty × unitPriceTzs, before discounts), lineDiscountTzs (Σ line discounts), discountTzs (sale discount), totalTzs (= subtotal − line discounts − sale discount), paidTzs (at the counter + later customer payments; paidTzs − changeTzs + balanceTzs = totalTzs), changeTzs (0 for credit), note|null, createdBy {id,name}, voidedBy {id,name}|null, voidedAt|null, voidReason|null, lines:[{ id, productId, variant|null, nameSnapshot, qty, listPriceTzs (the shop\'s walk-in price: discount price if set, else price), unitPriceTzs (charged), priceChanged, priceChangedBy {id,name}|null, discountTzs (for the whole line), lineTotalTzs (qty × unitPriceTzs − discountTzs) }], payments:[{ method, amountTzs, reference|null }] }. Never unitCostTzs.';
 
 export const vendorRecordSale = {
   created, method: 'post', path: '/vendor/sales',
@@ -93,18 +99,26 @@ export const vendorRecordSale = {
     const result = await vendorSaleService.recordSale({ vendorId: vendorOf(req.user), actorId: req.user.sub, body: req.body || {}, canCredit });
     if (result.error) return send(res, result);
     if (result.status === 200) res.set?.('Idempotent-Replay', 'true');
-    res.status(result.status).json({ sale: result.sale });
+    res.status(result.status).json({ sale: forCaller(result.sale, canCredit || await seesCustomers(req.user)) });
   },
 };
 
 export const vendorListSales = {
   created, method: 'get', path: '/vendor/sales',
-  description: 'Vendor / staff with `sales` (VENDOR_TOOLS + VENDOR_WALKIN_SALES; off → 404 feature_disabled): every walk-in sale of the vendor (whoever recorded it), newest first (soldAt desc, id desc). Query: from, to (EAT days YYYY-MM-DD, inclusive, on soldAt; optional), status (completed | voided | all; default all), createdBy=me (only sales I recorded), limit (≥ 1, default 50, capped at 200), cursor (the previous page\'s nextCursor). → { sales:[{ id, number, soldAt, recordedAt, lateRecorded, status, totalTzs, discountTzs (line discounts + sale discount), hasOverride (a line sold at another price than the shop\'s), itemCount (Σ qty), methods[] (distinct, in payment order), createdBy {id,name}, kind, balanceTzs, dueDate|null, customer {id,name}|null }], nextCursor|null, summary { payLaterTzs (completed pay-later sales: what was left owing at the counter — byMethod + payLaterTzs = totalTzs), owedTzs (completed pay-later sales in the range: still owed now), count (completed), totalTzs (completed), voidedCount, discountTzs (completed: line + sale discounts), overrideCount (completed sales with a changed price), lateCount (all sales in the range, voided too, recorded > 5 min after soldAt), byMethod:[{ method, amountTzs }] (completed; cash net of change, so the methods add up to totalTzs) } } — the summary covers the whole from/to/createdBy range (not the page, not the status filter). 400 invalid_date { field } | invalid_status | invalid_kind | invalid_created_by | invalid_limit | invalid_cursor. S4 query: kind (cash | credit | all), customerId (one customer of mine; needs VENDOR_TOOLS + VENDOR_CUSTOMERS, else 404 feature_disabled; an unknown id simply has no sales). Staff of a suspended vendor → 403 vendor_suspended.',
+  description: 'Vendor / staff with `sales` (VENDOR_TOOLS + VENDOR_WALKIN_SALES; off → 404 feature_disabled): every walk-in sale of the vendor (whoever recorded it), newest first (soldAt desc, id desc). Query: from, to (EAT days YYYY-MM-DD, inclusive, on soldAt; optional), status (completed | voided | all; default all), createdBy=me (only sales I recorded), limit (≥ 1, default 50, capped at 200), cursor (the previous page\'s nextCursor). → { sales:[{ id, number, soldAt, recordedAt, lateRecorded, status, totalTzs, discountTzs (line discounts + sale discount), hasOverride (a line sold at another price than the shop\'s), itemCount (Σ qty), methods[] (distinct, in payment order), createdBy {id,name}, kind, balanceTzs, dueDate|null, customer {id,name}|null }], nextCursor|null, summary { payLaterTzs (completed pay-later sales: what was left owing at the counter — byMethod + payLaterTzs = totalTzs), owedTzs (completed pay-later sales in the range: still owed now) — these two only for callers who also hold \`customers\`, omitted otherwise; count (completed), totalTzs (completed), voidedCount, discountTzs (completed: line + sale discounts), overrideCount (completed sales with a changed price), lateCount (all sales in the range, voided too, recorded > 5 min after soldAt), byMethod:[{ method, amountTzs }] (completed; cash net of change, so the methods add up to totalTzs) } } — the summary covers the whole from/to/createdBy range (not the page, not the status filter). 400 invalid_date { field } | invalid_status | invalid_kind | invalid_created_by | invalid_limit | invalid_cursor. S4 query: kind (cash | credit | all), customerId (one customer of mine; needs \`customers\` too, else 403 vendor_permission_forbidden { requiredPermission: customers, field: customerId }; needs VENDOR_TOOLS + VENDOR_CUSTOMERS, else 404 feature_disabled; an unknown id simply has no sales). Staff of a suspended vendor → 403 vendor_suspended.',
   onGuard: guards('get'),
   onRequest: async (req, res) => {
     if (!vendorWalkInSalesOn()) return disabled(res);
+    const sees = await seesCustomers(req.user);
+    if (!sees && req.query?.customerId != null && req.query.customerId !== '') {
+      return res.status(403).json({ error: 'vendor_permission_forbidden', requiredPermission: 'customers', field: 'customerId' });
+    }
     const result = await vendorSaleService.listSales({ vendorId: vendorOf(req.user), actorId: req.user.sub, query: req.query || {} });
     if (result.error) return send(res, result);
+    if (!sees) {
+      const { payLaterTzs, owedTzs, ...summary } = result.summary;
+      return res.json({ ...result, summary });
+    }
     res.json(result);
   },
 };
@@ -117,7 +131,7 @@ export const vendorGetSale = {
     if (!vendorWalkInSalesOn()) return disabled(res);
     const result = await vendorSaleService.getSale({ vendorId: vendorOf(req.user), saleId: req.params.id });
     if (result.error) return send(res, result);
-    res.json({ sale: result.sale });
+    res.json({ sale: forCaller(result.sale, await seesCustomers(req.user)) });
   },
 };
 
@@ -132,6 +146,6 @@ export const vendorVoidSale = {
       vendorId: vendorOf(req.user), actorId: req.user.sub, saleId: req.params.id, body: req.body || {}, voidsAny: await voidsAny(req.user),
     });
     if (result.error) return send(res, result);
-    res.json({ sale: result.sale });
+    res.json({ sale: forCaller(result.sale, await seesCustomers(req.user)) });
   },
 };

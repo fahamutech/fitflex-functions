@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { ensureInit } from '../functions/index.mjs';
-import { users, gyms, partnerGate, trainers, shopService, adminPaymentService, vendorSaleService } from '../src/bootstrap/services.mjs';
+import { users, gyms, partnerGate, trainers, shopService, adminPaymentService, vendorSaleService, accountService } from '../src/bootstrap/services.mjs';
 import { partnerSettlementAccounts } from '../src/bootstrap/collections.mjs';
 import { createPayoutEligibility } from '../src/services/payout-eligibility.mjs';
 import { createVendorSettlementService } from '../src/services/vendor-settlement-service.mjs';
@@ -25,10 +25,12 @@ import { vendorRecordSale, vendorListSales, vendorGetSale, vendorVoidSale, reset
 import {
   vendorCustomersList, vendorCustomersCreate, vendorCustomerGet, vendorCustomerUpdate, vendorCustomerSales, vendorCustomerSale,
   vendorCustomerOrders, vendorCustomerPayments, vendorCustomerRecordPayment, vendorCustomerPayment, vendorCustomerVoidPayment, vendorReceivablesAging,
+  resetVendorCustomerLimits, VENDOR_CUSTOMER_LIMITS,
 } from '../functions/vendor-customers.mjs';
+import { createVendorLimiter } from '../src/shared/vendor-rate-limit.mjs';
 import { vendorCustomersOverdueDigest } from '../functions/jobs.mjs';
 import {
-  normalisePhone, agingBucket, daysBetween, addDays, allocateOldestFirst, parsePayment, parseCustomer, dueDateOutOfRange, eatToday, paymentNumber,
+  normalisePhone, agingBucket, daysBetween, addDays, allocateOldestFirst, parsePayment, parseCustomer, dueDateOutOfRange, eatToday, paymentNumber, paymentFingerprint,
 } from '../src/shared/vendor-customer.mjs';
 import { priceSale, parseSale, saleFingerprint } from '../src/shared/vendor-sale.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
@@ -41,7 +43,7 @@ const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
 const made = { users: [], products: [], orders: [] };
 const FLAGS = ['VENDOR_TOOLS', 'VENDOR_WALKIN_SALES', 'VENDOR_CUSTOMERS'];
 const on = () => { for (const f of FLAGS) process.env[f] = '1'; };
-afterEach(() => { for (const f of FLAGS) delete process.env[f]; resetVendorSalesLimits(); });
+afterEach(() => { for (const f of FLAGS) delete process.env[f]; resetVendorSalesLimits(); resetVendorCustomerLimits(); });
 
 function res() {
   return {
@@ -221,6 +223,12 @@ test('rules: phone normalised to +255, EAT aging buckets, oldest-first allocatio
   assert.deepEqual(allocateOldestFirst([{ id: 'r1', balanceTzs: 20_000 }, { id: 'r2', balanceTzs: 30_000 }], 25_000), [{ saleId: 'r1', amountTzs: 20_000 }, { saleId: 'r2', amountTzs: 5_000 }]);
   assert.deepEqual(allocateOldestFirst([{ id: 'r1', balanceTzs: 20_000 }], 20_000), [{ saleId: 'r1', amountTzs: 20_000 }]);
   assert.equal(paymentNumber(1), 'PMT-000001');
+  // L6: a retry without receivedOn that crosses 00:00 EAT has the same fingerprint (it replays).
+  const noDate = { clientRef: 'abcdefgh', amountTzs: 5_000, method: 'cash' };
+  assert.equal(paymentFingerprint('c1', parsePayment(noDate, { today: '2026-10-20' })), paymentFingerprint('c1', parsePayment(noDate, { today: '2026-10-21' })));
+  assert.notEqual(paymentFingerprint('c1', parsePayment(noDate, { today: '2026-10-20' })), paymentFingerprint('c1', parsePayment({ ...noDate, receivedOn: '2026-10-20' }, { today: '2026-10-20' })));
+  const limiter = createVendorLimiter({ perMinute: 2 });
+  assert.deepEqual([limiter.allow('v', 0).ok, limiter.allow('v', 1).ok, limiter.allow('v', 2), limiter.allow('w', 2).ok, limiter.allow('v', 60_000).ok], [true, true, { ok: false, retryAfterSeconds: 60 }, true, true]);
 
   const today = '2026-10-20';
   const ok = parsePayment({ clientRef: 'abcdefgh', amountTzs: 5_000, method: 'mpesa', reference: ' qk12 ', receivedOn: '2026-09-20' }, { today });
@@ -296,7 +304,7 @@ test('walk-in customers: phone saved as +255…, duplicate phone warns but saves
   const p = await product(v);
   const juma = await call(vendorCustomersCreate, as(v), { body: { name: '  Juma Mussa ', phone: '0712 345 678', email: 'Juma@Example.com', address: 'Sinza', note: 'Pays monthly' } });
   assert.equal(juma.status, 201, JSON.stringify(juma.body));
-  assert.deepEqual(Object.keys(juma.body.customer).sort(), ['address', 'archived', 'archivedAt', 'createdAt', 'email', 'id', 'name', 'note', 'phone', 'source', 'updatedAt']);
+  assert.deepEqual(Object.keys(juma.body.customer).sort(), ['address', 'archived', 'archivedAt', 'createdAt', 'email', 'forgotten', 'id', 'name', 'note', 'phone', 'source', 'updatedAt']);
   assert.deepEqual([juma.body.customer.name, juma.body.customer.phone, juma.body.customer.email, juma.body.customer.source, juma.body.phoneDuplicate], ['Juma Mussa', '+255712345678', 'juma@example.com', 'manual', null]);
   assert.match(juma.body.customer.id, /^cus_[0-9a-f]{16}$/, 'unguessable id');
   const twin = await call(vendorCustomersCreate, as(v), { body: { name: 'Juma M. (shop 2)', phone: '+255712345678' } });
@@ -357,7 +365,7 @@ test('list: search by name and by phone digits, filters and sorts, paging; summa
   assert.deepEqual((await list({ filter: 'owes' })).body.customers.map(x => x.id).sort(), [a.id, b.id, c.id].sort());
   assert.deepEqual((await list({ bucket: 'd90plus' })).body.customers.map(x => x.id), [c.id]);
   const row = (await list({ q: 'Baraka' })).body.customers[0];
-  assert.deepEqual(Object.keys(row).sort(), ['aging', 'archived', 'id', 'lastPurchaseAt', 'maxDaysOverdue', 'name', 'oldestDueDate', 'overdueTzs', 'owedTzs', 'phone', 'source'].sort());
+  assert.deepEqual(Object.keys(row).sort(), ['aging', 'archived', 'forgotten', 'id', 'lastPurchaseAt', 'maxDaysOverdue', 'name', 'oldestDueDate', 'overdueTzs', 'owedTzs', 'phone', 'source'].sort());
   assert.deepEqual([row.owedTzs, row.overdueTzs, row.aging.current], [30_000, 0, 30_000]);
   assert.ok(row.lastPurchaseAt, 'last purchase from the shop sale');
   const first = await list({ limit: 2 });
@@ -385,13 +393,18 @@ test('permissions: `sales` only gets the picker without amounts and quick-add (n
   // Picker: names and the last 3 phone digits, never money (also not on the wire).
   const picker = await call(vendorCustomersList, staffOf(seller, v), { query: { q: 'Rehema' } });
   assert.equal(picker.status, 200, JSON.stringify(picker.body));
-  assert.deepEqual(picker.body, { customers: [{ id: owed.id, source: 'manual', name: 'Rehema Owes', phoneLast3: '999' }], nextCursor: null });
+  assert.deepEqual(picker.body, { customers: [{ id: owed.id, source: 'manual', name: 'Rehema Owes', phoneLast3: '999', forgotten: false }], nextCursor: null });
   assert.doesNotMatch(JSON.stringify(picker.body), /owed|Tzs|aging|712000/);
+  // L7: the picker searches phones by the start of the number, ≥ 7 digits; never a short substring.
+  const pick = async q => (await call(vendorCustomersList, staffOf(seller, v), { query: { q } })).body.customers.map(c => c.id);
+  // ≥ 7 digits of the local number (after a leading 0 or 255): 0712000 is 6, 07120009 is 7.
+  assert.deepEqual([await pick('999'), await pick('000999'), await pick('0712000'), await pick('07120009'), await pick('+255712000999')], [[], [], [], [owed.id], [owed.id]]);
+  assert.deepEqual((await call(vendorCustomersList, as(v), { query: { q: '000999' } })).body.customers.map(c => c.id), [owed.id], 'customers: digit substring still works');
   for (const query of [{ filter: 'owes' }, { filter: 'archived' }, { sort: 'owed' }, { bucket: 'd1_30' }]) {
     assert.equal((await call(vendorCustomersList, staffOf(seller, v), { query })).body.error, 'vendor_permission_forbidden', JSON.stringify(query));
   }
   const quick = await call(vendorCustomersCreate, staffOf(seller, v), { body: { name: 'Quick Add', phone: '0713000111' } });
-  assert.deepEqual([quick.status, quick.body.customer], [201, { id: quick.body.customer.id, source: 'manual', name: 'Quick Add', phoneLast3: '111' }]);
+  assert.deepEqual([quick.status, quick.body.customer], [201, { id: quick.body.customer.id, source: 'manual', name: 'Quick Add', phoneLast3: '111', forgotten: false }]);
   assert.deepEqual((await call(vendorCustomersCreate, staffOf(seller, v), { body: { name: 'Quick Add', address: 'Kariakoo' } })).body, { error: 'vendor_permission_forbidden', requiredPermission: 'customers', field: 'address' });
   for (const [route, opts] of [[vendorCustomerGet, { params: { id: owed.id } }], [vendorCustomerUpdate, { params: { id: owed.id }, body: { note: 'x' } }], [vendorReceivablesAging, {}], [vendorCustomerPayments, { params: { id: owed.id } }]]) {
     assert.equal((await call(route, staffOf(seller, v), opts)).status, 403, route.path);
@@ -401,7 +414,18 @@ test('permissions: `sales` only gets the picker without amounts and quick-add (n
   // A paid sale with a customer: `sales` is enough. Pay later: refused without `customers`.
   assert.equal((await sell(staffOf(seller, v), saleBody([{ productId: p.id, qty: 1 }], cash(45_000), { customerId: owed.id }))).status, 201);
   assert.deepEqual((await credit(staffOf(seller, v), owed.id, 9_000, p.id)).body, { error: 'credit_not_allowed', requiredPermission: 'customers' });
-  assert.equal((await credit(staffOf(both, v), owed.id, 9_000, p.id)).status, 201, 'sales + customers may sell on credit');
+  const bothSale = await credit(staffOf(both, v), owed.id, 9_000, p.id);
+  assert.equal(bothSale.status, 201, 'sales + customers may sell on credit');
+  assert.ok(Array.isArray(bothSale.body.sale.allocations));
+  // M3: `sales` without `customers` sees each sale's balance and due date, never payment allocations,
+  // the customerId filter or the pay-later summary.
+  const seen = (await call(vendorGetSale, staffOf(seller, v), { params: { id: bothSale.body.sale.id } })).body.sale;
+  assert.deepEqual([seen.allocations, seen.balanceTzs, seen.dueDate != null, seen.customer.id], [undefined, 9_000, true, owed.id]);
+  const sellerList = await call(vendorListSales, staffOf(seller, v));
+  assert.equal(sellerList.status, 200);
+  assert.deepEqual([sellerList.body.summary.owedTzs, sellerList.body.summary.payLaterTzs, typeof sellerList.body.sales[0].balanceTzs], [undefined, undefined, 'number']);
+  assert.deepEqual((await call(vendorListSales, staffOf(seller, v), { query: { customerId: owed.id } })).body, { error: 'vendor_permission_forbidden', requiredPermission: 'customers', field: 'customerId' });
+  assert.equal((await call(vendorListSales, staffOf(both, v), { query: { customerId: owed.id } })).body.summary.owedTzs > 0, true);
   // `customers` only: everything about customers, no POS.
   assert.equal((await call(vendorCustomerGet, staffOf(keeper, v), { params: { id: owed.id } })).status, 200);
   assert.equal((await pay(staffOf(keeper, v), owed.id, { amountTzs: 1_000 })).status, 201);
@@ -457,7 +481,7 @@ test('pay later: paid now + balance, default due = sale EAT day + 7, range check
   assert.equal((await db('Product').where({ id: p.id }).first()).stock, 8, 'refusals moved nothing');
 
   const list = await call(vendorListSales, as(v), { query: { kind: 'credit' } });
-  assert.deepEqual(list.body.sales.map(r => [r.kind, r.balanceTzs, r.customer?.name]), [['credit', 95_000, 'Juma M.'], ['credit', 75_000, 'Juma M.']]);
+  assert.deepEqual(list.body.sales.map(r => [r.kind, r.balanceTzs, r.customer?.name]).sort(), [['credit', 75_000, 'Juma M.'], ['credit', 95_000, 'Juma M.']]);
   assert.deepEqual([list.body.summary.totalTzs, list.body.summary.payLaterTzs, list.body.summary.owedTzs], [190_000, 170_000, 170_000]);
   const byMethod = list.body.summary.byMethod.reduce((sum, m) => sum + m.amountTzs, 0);
   assert.equal(byMethod + list.body.summary.payLaterTzs, list.body.summary.totalTzs, 'methods + left owing = total');
@@ -554,7 +578,7 @@ test('voids: a credit sale with live payments is refused (sale_has_payments); vo
   const keeper = await staff(v, ['customers'], { displayName: 'Neema Keeper' });
   const c = await addCustomer(as(v), { name: 'Void Customer' });
   const s = (await credit(as(v), c.id, 30_000, p.id, cash(5_000))).body.sale;
-  const pm = (await pay(as(v), c.id, { amountTzs: 10_000 })).body.payment;
+  const pm = (await pay(staffOf(keeper, v), c.id, { amountTzs: 10_000 })).body.payment;
   const refused = await call(vendorVoidSale, as(v), { params: { id: s.id }, body: { reason: 'customer returned it' } });
   assert.deepEqual([refused.status, refused.body], [409, { error: 'sale_has_payments', payments: [{ id: pm.id, number: pm.number }] }]);
   assert.equal((await saleRow(s.id)).status, 'completed');
@@ -567,10 +591,23 @@ test('voids: a credit sale with live payments is refused (sale_has_payments); vo
   const reopened = await assertSaleAddsUp(s.id);
   assert.deepEqual([reopened.balanceTzs, reopened.paidTzs, reopened.allocatedTzs], [25_000, 5_000, 0]);
   assert.deepEqual((await call(vendorCustomerVoidPayment, as(v), { params: { id: c.id, paymentId: pm.id }, body: { reason: 'again' } })).body.error, 'already_voided');
+  // M2: other staff void only their own payments, on the EAT day received; vendor-admin staff any.
+  const other = await staff(v, ['customers'], { displayName: 'Other Keeper' });
+  const admin = await staff(v, ['customers'], { vendorRole: 'admin', displayName: 'Admin Staff' });
+  const byVendor = (await pay(as(v), c.id, { amountTzs: 1_000 })).body.payment;
+  const backdated = (await pay(staffOf(keeper, v), c.id, { amountTzs: 1_000, receivedOn: addDays(eatToday(), -1) })).body.payment;
+  const voidAs = (claims, payment) => call(vendorCustomerVoidPayment, claims, { params: { id: c.id, paymentId: payment.id }, body: { reason: 'Mistake here' } });
+  assert.deepEqual((await voidAs(staffOf(keeper, v), byVendor)).body, { error: 'void_not_allowed', reason: 'not_own' });
+  assert.deepEqual((await voidAs(staffOf(other, v), backdated)).body, { error: 'void_not_allowed', reason: 'not_own' });
+  assert.deepEqual((await voidAs(staffOf(keeper, v), backdated)).body, { error: 'void_not_allowed', reason: 'too_old' });
+  assert.equal((await voidAs(staffOf(keeper, v), pm)).body.error, 'already_voided', 'own payment, already voided');
+  assert.equal((await voidAs(staffOf(admin, v), byVendor)).status, 200, 'vendor-admin staff void any');
+  assert.equal((await voidAs(as(v), backdated)).status, 200, 'the vendor account voids any');
   const note = await db('MarketplaceNotification').where({ userId: v, type: 'vendor_customer_payment_voided' }).first();
   assert.equal(note?.data?.number ?? JSON.parse(note?.data || '{}').number, pm.number, 'a staff void is reported to the vendor');
   const saleView = (await call(vendorGetSale, as(v), { params: { id: s.id } })).body.sale;
-  assert.deepEqual(saleView.allocations.map(a => [a.number, a.voided]), [[pm.number, true]]);
+  assert.equal(saleView.allocations[0].number, pm.number);
+  assert.equal(saleView.allocations.every(a => a.voided), true, 'every payment towards it is voided');
 
   const ok = await call(vendorVoidSale, as(v), { params: { id: s.id }, body: { reason: 'customer returned it' } });
   assert.deepEqual([ok.status, ok.body.sale.status, ok.body.sale.balanceTzs], [200, 'voided', 25_000], 'the balance it had is kept, never counted');
@@ -579,6 +616,68 @@ test('voids: a credit sale with live payments is refused (sale_has_payments); vo
   assert.deepEqual([prof.owedTzs, prof.openSales], [0, []]);
   assert.equal((await call(vendorReceivablesAging, as(v))).body.rows.length, 0);
   assert.equal((await pay(as(v), c.id, { amountTzs: 1 })).body.error, 'overpayment', 'nothing left to pay');
+
+  // L4: an archived customer's payments cannot be voided; restore first.
+  const d = await addCustomer(as(v), { name: 'Archived Payer' });
+  assert.equal((await credit(as(v), d.id, 4_000, p.id)).status, 201);
+  const dp = (await pay(as(v), d.id, { amountTzs: 4_000 })).body.payment;
+  assert.equal((await call(vendorCustomerUpdate, as(v), { params: { id: d.id }, body: { archived: true } })).status, 200);
+  assert.deepEqual((await call(vendorCustomerVoidPayment, as(v), { params: { id: d.id, paymentId: dp.id }, body: { reason: 'Mistake here' } })).body, { error: 'customer_archived' });
+  await call(vendorCustomerUpdate, as(v), { params: { id: d.id }, body: { archived: false } });
+  assert.equal((await call(vendorCustomerVoidPayment, as(v), { params: { id: d.id, paymentId: dp.id }, body: { reason: 'Mistake here' } })).status, 200);
+});
+
+test('add customer: optional clientRef replays (200, same customer), another body → 409; per-vendor write limit → 429 with Retry-After', async () => {
+  on();
+  const v = await vendor();
+  const body = { clientRef: randomUUID(), name: 'Idem Potent', phone: '0715000111' };
+  const both = await Promise.all([1, 2].map(() => call(vendorCustomersCreate, as(v), { body })));
+  assert.deepEqual(both.map(r => r.status).sort(), [200, 201]);
+  assert.equal(both[0].body.customer.id, both[1].body.customer.id);
+  const again = await call(vendorCustomersCreate, as(v), { body });
+  assert.deepEqual([again.status, again.headers['Idempotent-Replay'], again.body.customer.id], [200, 'true', both[0].body.customer.id]);
+  assert.deepEqual((await call(vendorCustomersCreate, as(v), { body: { ...body, name: 'Other Name' } })).body, { error: 'client_ref_reused' });
+  assert.equal((await call(vendorCustomersCreate, as(v), { body: { clientRef: 'short', name: 'Bad Ref' } })).body.error, 'invalid_client_ref');
+  assert.equal(await db('VendorCustomer').where({ vendorId: v, name: 'Idem Potent' }).count('* as n').first().then(r => Number(r.n)), 1);
+  resetVendorCustomerLimits();
+  for (let i = 0; i < VENDOR_CUSTOMER_LIMITS.writesPerMinute; i += 1) assert.equal((await call(vendorCustomersCreate, as(v), { body: { name: `Bulk ${i}` } })).status, 201);
+  const limited = await call(vendorCustomersCreate, as(v), { body: { name: 'One too many' } });
+  assert.deepEqual([limited.status, limited.body.error, Number(limited.headers['Retry-After']) > 0], [429, 'rate_limited', true]);
+  const otherVendor = await vendor();
+  assert.equal((await call(vendorCustomersCreate, as(otherVendor), { body: { name: 'Other Shop' } })).status, 201, 'per vendor');
+  assert.equal(await db('VendorCustomer').where({ vendorId: v, name: 'One too many' }).first(), undefined, 'nothing written');
+});
+
+test('account deletion (H1): the buyer is forgotten at every vendor — name cleared; link dropped unless money is owed, then dropped once paid off; never recreated', async () => {
+  on();
+  const owes = await vendor();
+  const clear = await vendor();
+  const po = await product(owes, { priceTzs: 10_000 });
+  const pc = await product(clear, { priceTzs: 10_000 });
+  const buyer = await user('member', { displayName: 'Deleting Buyer', phone: '+255766000222' });
+  await paidOrder(buyer, [{ productId: po.id, qty: 1 }, { productId: pc.id, qty: 1 }]);
+  const atOwes = await db('VendorCustomer').where({ vendorId: owes, buyerUserId: buyer }).first();
+  const atClear = await db('VendorCustomer').where({ vendorId: clear, buyerUserId: buyer }).first();
+  assert.ok(atOwes && atClear);
+  assert.equal((await credit(as(owes), atOwes.id, 6_000, po.id)).status, 201);
+
+  const deleted = await accountService.deleteMyAccount({ id: buyer, userType: 'member' });
+  assert.equal(deleted.ok, true, JSON.stringify(deleted));
+  const [o, c] = await Promise.all([db('VendorCustomer').where({ id: atOwes.id }).first(), db('VendorCustomer').where({ id: atClear.id }).first()]);
+  assert.deepEqual([o.name, o.buyerUserId, o.forgottenAt != null], [null, buyer, true], 'money owed: nameless, still linked');
+  assert.deepEqual([c.name, c.buyerUserId, c.forgottenAt != null], [null, null, true], 'nothing owed: nameless and unlinked');
+  const prof = (await profile(as(owes), atOwes.id)).body.customer;
+  assert.deepEqual([prof.name, prof.forgotten, prof.owedTzs], [null, true, 6_000]);
+  assert.equal((await call(vendorCustomersList, as(clear))).body.customers.find(x => x.id === atClear.id).forgotten, true);
+  assert.ok(await db('AuditLog').where({ target: atClear.id, action: 'vendor_customer_forgotten' }).first());
+
+  assert.equal((await pay(as(owes), atOwes.id, { amountTzs: 6_000 })).status, 201);
+  assert.equal((await db('VendorCustomer').where({ id: atOwes.id }).first()).buyerUserId, null, 'paid off → unlinked');
+  // The backfill and the paid-order hook never bring a deleted buyer back, nor reuse a forgotten id.
+  await migration.backfillMarketplaceCustomers(db);
+  await store.marketplaceOrderPaid({ buyerId: buyer, items: [{ vendorId: clear }] });
+  const rows = await db('VendorCustomer').whereIn('vendorId', [owes, clear]);
+  assert.deepEqual(rows.map(r => [r.name, r.buyerUserId]).sort(), [[null, null], [null, null]]);
 });
 
 // ── aging (fixed clock) ──────────────────────────────────────────────────────

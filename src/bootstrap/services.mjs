@@ -421,7 +421,19 @@ export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
   // promotionEventsService is defined at the end of this file; this only runs later.
   // A deleted account lets its username go (held 90 days). usernameService is defined further down.
-  onAccountDeleted: async userId => { await promotionEventsService.forgetUser(userId); await usernameService.forgetUser(userId); },
+  // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
+  // their link to the account unless money is owed. Each step runs even if another fails.
+  onAccountDeleted: async (userId) => {
+    const errors = [];
+    for (const step of [
+      () => promotionEventsService.forgetUser(userId),
+      () => usernameService.forgetUser(userId),
+      () => vendorCustomerService.forgetBuyer(userId),
+    ]) {
+      try { await step(); } catch (err) { errors.push(err); }
+    }
+    if (errors.length) throw errors[0];
+  },
 });
 
 // Until a gym's owner is verified, only the gym's own members check in there.

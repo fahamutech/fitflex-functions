@@ -65,11 +65,13 @@ export function customerView(row) {
     id: c.id, source: c.source, name: c.name ?? null,
     phone: manual ? c.phone ?? null : null, email: manual ? c.email ?? null : null, address: manual ? c.address ?? null : null,
     note: c.note ?? null, archived: c.archivedAt != null, archivedAt: iso(c.archivedAt),
+    // The app buyer deleted their FitFlex account: name is null; clients show "Deleted member".
+    forgotten: c.forgottenAt != null,
     createdAt: iso(c.createdAt), updatedAt: iso(c.updatedAt),
   };
 }
 /** The POS picker row for staff with `sales` only: no money, no full phone. */
-export const pickerView = c => ({ id: c.id, source: c.source, name: c.name ?? null, phoneLast3: c.source === 'manual' ? phoneLast3(c.phone) : null });
+export const pickerView = c => ({ id: c.id, source: c.source, name: c.name ?? null, phoneLast3: c.source === 'manual' ? phoneLast3(c.phone) : null, forgotten: c.forgottenAt != null });
 
 export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
   async function namesOf(q, ids) {
@@ -107,18 +109,42 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
     return row ? plain(row) : null;
   }
 
-  /** POST /vendor/customers: a manual (walk-in) customer. → { customer, phoneDuplicate } */
-  async function create({ vendorId, actorId, fields }) {
+  /** An earlier POST /vendor/customers with this clientRef: same body → it; another body → 409. */
+  async function createReplay(vendorId, clientRef, fingerprint) {
+    if (!clientRef) return null;
+    const row = await db('VendorCustomer').where({ vendorId, clientRef }).first();
+    if (!row) return null;
+    if (row.clientFingerprint !== fingerprint) return fail('client_ref_reused', 409);
+    return { customer: plain(row), phoneDuplicate: await phoneDuplicate(db, vendorId, row.phone, row.id), replayed: true };
+  }
+
+  /**
+   * POST /vendor/customers: a manual (walk-in) customer. `clientRef` (optional) makes a retry return the
+   * customer it already created. → { customer, phoneDuplicate, replayed } | 409 client_ref_reused
+   */
+  async function create({ vendorId, actorId, fields, clientRef = null, fingerprint = null }) {
+    const earlier = await createReplay(vendorId, clientRef, fingerprint);
+    if (earlier) return earlier;
     const at = now();
     const id = newCustomerId();
-    await db('VendorCustomer').insert({
-      id, vendorId, source: 'manual', buyerUserId: null, name: fields.name, phone: fields.phone ?? null, email: fields.email ?? null,
-      address: fields.address ?? null, note: fields.note ?? null, createdBy: actorId, createdAt: at, updatedAt: at,
-    });
+    try {
+      await db('VendorCustomer').insert({
+        id, vendorId, source: 'manual', buyerUserId: null, name: fields.name, phone: fields.phone ?? null, email: fields.email ?? null,
+        address: fields.address ?? null, note: fields.note ?? null, clientRef, clientFingerprint: clientRef ? fingerprint : null,
+        createdBy: actorId, createdAt: at, updatedAt: at,
+      });
+    } catch (err) {
+      // The same clientRef twice at once: the other request created it.
+      if (clientRef && err.code === UNIQUE_VIOLATION && /client_ref/.test(`${err.constraint || ''} ${err.message}`)) {
+        const replay = await createReplay(vendorId, clientRef, fingerprint);
+        if (replay) return replay;
+      }
+      throw err;
+    }
     // Audit without personal data: which fields were given, not their values.
     await audit(db, { actor: actorId, action: 'vendor_customer_created', target: id, after: { vendorId, fields: Object.keys(fields).filter(k => fields[k] != null) } });
     const row = await find(db, vendorId, id);
-    return { customer: plain(row), phoneDuplicate: await phoneDuplicate(db, vendorId, row.phone, id) };
+    return { customer: plain(row), phoneDuplicate: await phoneDuplicate(db, vendorId, row.phone, id), replayed: false };
   }
 
   /**
@@ -165,7 +191,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
    * bucket (customers with money in it); sort name | owed | overdue | recent; q = name, or phone digits
    * (≥ 3). → { rows: [row + money + lastPurchaseAt], nextCursor }
    */
-  async function list({ vendorId, today, q = null, filter = 'all', bucket = null, sort = 'name', limit = 50, offset = 0 }) {
+  async function list({ vendorId, today, q = null, filter = 'all', bucket = null, sort = 'name', limit = 50, offset = 0, phoneSearch = 'substring' }) {
     if (bucket && !AGING_BUCKETS.includes(bucket)) throw new Error(`unknown aging bucket ${bucket}`);
     const where = [];
     const binds = [];
@@ -181,7 +207,12 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
       let digits = q.replace(/\D/g, '');
       if (digits.startsWith('255') && digits.length > 3) digits = digits.slice(3);
       else if (digits.startsWith('0')) digits = digits.slice(1);
-      if (digits.length >= 3 && /^[\d\s+\-()]+$/.test(q)) { parts.push('c.phone LIKE ?'); binds.push(`%${digits}%`); }
+      const phoneLike = /^[\d\s+\-()]+$/.test(q);
+      if (phoneSearch === 'prefix7') {
+        // POS picker for staff without `customers` (security review #224 L7): the start of the number,
+        // at least 7 digits — never a short substring that would enumerate customers' numbers.
+        if (phoneLike && digits.length >= 7) { parts.push('c.phone LIKE ?'); binds.push(`+255${digits}%`); }
+      } else if (phoneLike && digits.length >= 3) { parts.push('c.phone LIKE ?'); binds.push(`%${digits}%`); }
       where.push(`(${parts.join(' OR ')})`);
     }
     const order = {
@@ -194,7 +225,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
       WITH o AS (${OWED_SQL('')}),
            ls AS (SELECT "customerId", max("soldAt") AS at FROM "VendorSale"
                    WHERE "vendorId" = ? AND status = 'completed' AND "customerId" IS NOT NULL GROUP BY 1)
-      SELECT c.id, c.source, c.name, c.phone, c."archivedAt",
+      SELECT c.id, c.source, c.name, c.phone, c."archivedAt", c."forgottenAt",
              GREATEST(c."lastPurchaseAt", ls.at) AS "lastPurchaseAt",
              o."owedTzs", o."overdueTzs", o."oldestDueDate", o."maxDaysOverdue", o.current, o.d1_30, o.d31_60, o.d61_90, o.d90plus
         FROM "VendorCustomer" c
@@ -306,14 +337,41 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
       await db('VendorBuyerRef').insert({ vendorId, buyerId: String(order.buyerId), customerId: newCustomerId(), createdAt: at })
         .onConflict(['vendorId', 'buyerId']).ignore();
       const ref = await db('VendorBuyerRef').where({ vendorId, buyerId: String(order.buyerId) }).first('customerId');
+      // A customer id whose buyer was forgotten (account deleted) is never reused or relinked.
       await db.raw(`INSERT INTO "VendorCustomer" (id, "vendorId", source, "buyerUserId", name, "lastPurchaseAt", "createdBy", "createdAt", "updatedAt")
-        VALUES (?, ?, 'marketplace', ?, ?, ?, 'system:order', ?, ?)
+        SELECT ?, ?, 'marketplace', ?, ?, ?, 'system:order', ?, ?
+         WHERE NOT EXISTS (SELECT 1 FROM "VendorCustomer" f WHERE f.id = ? AND f."forgottenAt" IS NOT NULL)
         ON CONFLICT ("vendorId", "buyerUserId") WHERE "buyerUserId" IS NOT NULL DO UPDATE
           SET name = EXCLUDED.name,
               "lastPurchaseAt" = GREATEST("VendorCustomer"."lastPurchaseAt", EXCLUDED."lastPurchaseAt"),
-              "updatedAt" = EXCLUDED."updatedAt"`, [ref.customerId, vendorId, String(order.buyerId), name, at, at, at]);
+              "updatedAt" = EXCLUDED."updatedAt"
+          WHERE "VendorCustomer"."forgottenAt" IS NULL`, [ref.customerId, vendorId, String(order.buyerId), name, at, at, at, ref.customerId]);
     }
     return { customers: vendorIds.length };
+  }
+
+  /**
+   * The buyer deleted their FitFlex account (security review #224 H1): at every vendor, their app
+   * customer loses its name (forgottenAt set; clients show "Deleted member"). Where nothing is owed the
+   * link to the account (buyerUserId) is dropped too; where pay-later money is still owed it is kept,
+   * nameless, until that is paid off (recordPayment then drops it). The row itself stays: sales and
+   * payments reference it. Audited without personal data. → { forgotten, unlinked }
+   */
+  async function forgetBuyer(userId) {
+    if (!userId) return { forgotten: 0, unlinked: 0 };
+    const at = now();
+    const { rows } = await db.raw(`UPDATE "VendorCustomer" c
+         SET name = NULL, "forgottenAt" = COALESCE(c."forgottenAt", ?), "updatedAt" = ?,
+             "buyerUserId" = CASE WHEN EXISTS (SELECT 1 FROM "VendorSale" s
+                                  WHERE s."vendorId" = c."vendorId" AND s."customerId" = c.id AND s.kind = 'credit'
+                                    AND s.status = 'completed' AND s."balanceTzs" > 0)
+                                 THEN c."buyerUserId" ELSE NULL END
+       WHERE c.source = 'marketplace' AND c."buyerUserId" = ?
+       RETURNING c.id, c."vendorId", c."buyerUserId"`, [at, at, String(userId)]);
+    for (const r of rows) {
+      await audit(db, { actor: 'system:account_deleted', action: 'vendor_customer_forgotten', target: r.id, after: { vendorId: r.vendorId, unlinked: r.buyerUserId == null } });
+    }
+    return { forgotten: rows.length, unlinked: rows.filter(r => r.buyerUserId == null).length };
   }
 
   // ── payments ──────────────────────────────────────────────────────────────
@@ -361,7 +419,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
     const paymentId = newId('cpm');
     try {
       return await db.transaction(async (trx) => {
-        const customer = await trx('VendorCustomer').where({ id: customerId, vendorId }).forUpdate().first('id', 'archivedAt');
+        const customer = await trx('VendorCustomer').where({ id: customerId, vendorId }).forUpdate().first('id', 'archivedAt', 'forgottenAt', 'buyerUserId');
         if (!customer) throw refusal('customer_not_found', 404);
         // A retry racing its first attempt waited on the customer lock: answer it as a replay, not as
         // an over-payment against the balance the first attempt just paid.
@@ -412,6 +470,10 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
             });
           if (n !== 1) throw refusal('allocation_stale', 409, { saleId: a.saleId });
         }
+        // A forgotten buyer (account deleted) kept only while money was owed: paid off → unlinked (H1).
+        if (customer.forgottenAt && customer.buyerUserId && payment.amountTzs === owedTzs) {
+          await trx('VendorCustomer').where({ id: customerId, vendorId }).update({ buyerUserId: null, updatedAt: at });
+        }
         await audit(trx, {
           actor: actorId, action: 'vendor_customer_payment_recorded', target: paymentId,
           after: { vendorId, customerId, number: paymentNumber(seq), amountTzs: payment.amountTzs, method: payment.method, receivedOn: payment.receivedOn, allocations: plan },
@@ -430,15 +492,23 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
   }
 
   /** Void a payment: its allocations are reversed, the sales owe again. → { payment, customer: money } | refusal. */
-  async function voidPayment({ vendorId, customerId, paymentId, actorId, reason, today }) {
+  /**
+   * `canVoid(payment)` → null or a refusal, judged on the locked row (review #224 M2: who may void which
+   * payment). Order: customer_not_found, payment_not_found, void_not_allowed, already_voided, customer_archived.
+   */
+  async function voidPayment({ vendorId, customerId, paymentId, actorId, reason, today, canVoid = () => null }) {
     if (typeof paymentId !== 'string' || !paymentId) return fail('payment_not_found', 404);
     try {
       return await db.transaction(async (trx) => {
-        const customer = await trx('VendorCustomer').where({ id: customerId, vendorId }).forUpdate().first('id');
+        const customer = await trx('VendorCustomer').where({ id: customerId, vendorId }).forUpdate().first('id', 'archivedAt');
         if (!customer) throw refusal('customer_not_found', 404);
         const p = plain(await trx('VendorCustomerPayment').where({ id: paymentId, vendorId, customerId }).forUpdate().first());
         if (!p) throw refusal('payment_not_found', 404);
+        const refused = canVoid({ ...p, receivedOn: dayOf(p.receivedOn) });
+        if (refused) throw Object.assign(new Error(refused.error), { refusal: refused });
         if (p.status === 'voided') throw refusal('already_voided', 409, { voidedAt: iso(p.voidedAt) });
+        // L4: an archived customer's payments stay as they are; restore the customer first.
+        if (customer.archivedAt) throw refusal('customer_archived', 409);
         const at = now();
         const allocs = (await trx('VendorPaymentAllocation').where({ paymentId, vendorId }).whereNull('voidedAt').orderBy('saleId')).map(plain);
         for (const a of allocs) {
@@ -545,7 +615,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
   const markDigestSent = (vendorId, day, recipients) => db('VendorOverdueDigest').where({ vendorId, day }).update({ recipients });
 
   return {
-    get, create, update, list, profile, ordersOf, buyerOf, marketplaceOrderPaid,
+    get, create, update, list, profile, ordersOf, buyerOf, marketplaceOrderPaid, forgetBuyer,
     getPayment, recordPayment, voidPayment, listPayments, aging,
     claimOverdueDigests, digestRecipients, markDigestSent,
   };

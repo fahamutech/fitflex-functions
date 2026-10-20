@@ -12,7 +12,7 @@
 //
 // The routes check the flag (VENDOR_TOOLS + VENDOR_CUSTOMERS) and the permissions before calling in here.
 import {
-  parseCustomer, parsePayment, paymentFingerprint, parsePaymentVoid, eatToday, pageLimit, decodeOffset,
+  parseCustomer, parsePayment, paymentFingerprint, parsePaymentVoid, eatToday, pageLimit, decodeOffset, parseClientRef, customerFingerprint,
   CUSTOMER_FILTERS, CUSTOMER_SORTS, AGING_SORTS, AGING_BUCKETS, validDay,
 } from '../shared/vendor-customer.mjs';
 import { customerView, pickerView } from '../infra/vendor-customer-store-pg.mjs';
@@ -40,7 +40,7 @@ export function createVendorCustomerService({
   /** The list row for staff with `customers`: no buyerUserId; phone only on walk-in customers. */
   const listRow = r => ({
     id: r.id, source: r.source, name: r.name ?? null, phone: r.source === 'manual' ? r.phone ?? null : null,
-    archived: r.archivedAt != null, lastPurchaseAt: r.lastPurchaseAt,
+    archived: r.archivedAt != null, forgotten: r.forgottenAt != null, lastPurchaseAt: r.lastPurchaseAt,
     owedTzs: r.owedTzs, overdueTzs: r.overdueTzs, oldestDueDate: r.oldestDueDate, maxDaysOverdue: r.maxDaysOverdue, aging: r.aging,
   });
 
@@ -65,19 +65,28 @@ export function createVendorCustomerService({
       // POS picker (staff with `sales` only): never money, never archived customers.
       if (!['all', 'manual', 'marketplace'].includes(filter) || bucket) return forbidden({ field: bucket ? 'bucket' : 'filter' });
       if (!['name', 'recent'].includes(sort)) return forbidden({ field: 'sort' });
-      const out = await store.list({ vendorId, today: today(), q: q || null, filter, sort, limit, offset });
+      // Phone search: the start of the number, ≥ 7 digits (review #224 L7).
+      const out = await store.list({ vendorId, today: today(), q: q || null, filter, sort, limit, offset, phoneSearch: 'prefix7' });
       return { customers: out.rows.map(pickerView), nextCursor: out.nextCursor };
     }
     const out = await store.list({ vendorId, today: today(), q: q || null, filter, bucket, sort, limit, offset });
     return { customers: out.rows.map(listRow), nextCursor: out.nextCursor, asOf: today() };
   }
 
-  /** POST /vendor/customers: a walk-in customer. Staff with `sales` only: name + phone; answer in picker shape. */
+  /**
+   * POST /vendor/customers: a walk-in customer. Staff with `sales` only: name + phone; answer in picker
+   * shape. Optional clientRef: a retry returns the customer already created (status 200).
+   */
   async function createCustomer({ vendorId, actorId, access, body }) {
-    const parsed = parseCustomer(body || {}, { fields: access.customers ? null : PICKER_FIELDS });
+    const { clientRef, ...rest } = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+    const ref = parseClientRef(clientRef);
+    if (ref.error) return ref;
+    const parsed = parseCustomer(rest, { fields: access.customers ? null : PICKER_FIELDS });
     if (parsed.error) return parsed;
-    const out = await store.create({ vendorId, actorId, fields: parsed.fields });
+    const out = await store.create({ vendorId, actorId, fields: parsed.fields, clientRef: ref.clientRef, fingerprint: customerFingerprint(parsed.fields) });
+    if (out.error) return out;
     return {
+      status: out.replayed ? 200 : 201,
       customer: access.customers ? customerView(out.customer) : pickerView(out.customer),
       phoneDuplicate: out.phoneDuplicate,
     };
@@ -180,12 +189,23 @@ export function createVendorCustomerService({
     return { payment: out.payment, customer: { ...out.customer, asOf }, status: out.replayed ? 200 : 201 };
   }
 
-  /** POST /vendor/customers/:id/payments/:paymentId/void { reason }. A void by staff is reported to the vendor account. */
-  async function voidPayment({ vendorId, customerId, paymentId, actorId, body }) {
+  /**
+   * POST /vendor/customers/:id/payments/:paymentId/void { reason }. Review #224 M2 (the S3 sale rule):
+   * `voidsAny` (the vendor account, staff with vendorRole admin) may void any payment; other `customers`
+   * staff only a payment they recorded, on the EAT day of its receivedOn → else 403 void_not_allowed
+   * { reason: not_own | too_old }. A void by staff is reported to the vendor account.
+   */
+  async function voidPayment({ vendorId, customerId, paymentId, actorId, body, voidsAny = false }) {
     const parsed = parsePaymentVoid(body || {});
     if (parsed.error) return parsed;
     const asOf = today();
-    const out = await store.voidPayment({ vendorId, customerId, paymentId, actorId, reason: parsed.reason, today: asOf });
+    const canVoid = (p) => {
+      if (voidsAny) return null;
+      if (p.recordedBy !== actorId) return { error: 'void_not_allowed', status: 403, reason: 'not_own' };
+      if (p.receivedOn !== asOf) return { error: 'void_not_allowed', status: 403, reason: 'too_old' };
+      return null;
+    };
+    const out = await store.voidPayment({ vendorId, customerId, paymentId, actorId, reason: parsed.reason, today: asOf, canVoid });
     if (out.error) return out;
     if (actorId !== vendorId) {
       try {
@@ -210,6 +230,14 @@ export function createVendorCustomerService({
     if (offset == null) return { error: 'invalid_cursor', status: 400 };
     const asOf = today();
     return { asOf, ...(await store.aging({ vendorId, today: asOf, bucket, sort, limit, offset })) };
+  }
+
+  /** The buyer deleted their FitFlex account (account-service onAccountDeleted, review #224 H1). Never fails the deletion. */
+  async function forgetBuyer(userId) {
+    try { return await store.forgetBuyer(userId); } catch (err) {
+      console.warn('[vendor-customers] deleted buyer not forgotten', { error: err?.message });
+      throw err;
+    }
   }
 
   /** A paid app order (shop service hook): make or refresh the app customer at each vendor. Never fails the order. */
@@ -245,6 +273,6 @@ export function createVendorCustomerService({
 
   return {
     listCustomers, createCustomer, getCustomer, updateCustomer, customerSales, customerSale, customerOrders, buyerOf,
-    listPayments, getPayment, recordPayment, voidPayment, aging, marketplaceOrderPaid, sendOverdueDigests,
+    listPayments, getPayment, recordPayment, voidPayment, aging, marketplaceOrderPaid, forgetBuyer, sendOverdueDigests,
   };
 }

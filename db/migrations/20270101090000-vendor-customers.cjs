@@ -8,6 +8,9 @@
 //   `buyer.customerId` on a vendor's order opens this record. Archive only (no delete, Q-8).
 //   Unique (id, vendorId) lets every child row reference (customerId, vendorId): a sale or a
 //   payment can never point at another vendor's customer.
+//   forgottenAt: the buyer deleted their FitFlex account (security review #224 H1). The name is
+//   cleared; buyerUserId is dropped too unless money is still owed. Shown as a deleted member.
+//   clientRef / clientFingerprint: optional idempotency key of POST /vendor/customers (unique per vendor).
 // - VendorSale (S3) gains:
 //     allocatedTzs = Σ live customer-payment allocations to the sale.
 //   Balance is KEPT ON THE SALE, in the same transaction as each payment, allocation and void:
@@ -50,6 +53,9 @@ exports.up = async function up(knex) {
     table.timestamp('lastPurchaseAt', { precision: 3 });
     table.timestamp('archivedAt', { precision: 3 });
     table.text('archivedBy');
+    table.timestamp('forgottenAt', { precision: 3 });
+    table.text('clientRef');
+    table.text('clientFingerprint');
     table.text('createdBy').notNullable();
     table.timestamp('createdAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
     table.timestamp('updatedAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
@@ -59,8 +65,10 @@ exports.up = async function up(knex) {
   await knex.raw(`ALTER TABLE "VendorCustomer"
     ADD CONSTRAINT vendorcustomer_source_check CHECK (source IN ('manual', 'marketplace')),
     ADD CONSTRAINT vendorcustomer_a02 CHECK (
-      (source = 'marketplace' AND "buyerUserId" IS NOT NULL AND phone IS NULL AND email IS NULL AND address IS NULL)
-      OR (source = 'manual' AND "buyerUserId" IS NULL AND name IS NOT NULL)),
+      (source = 'marketplace' AND ("buyerUserId" IS NOT NULL OR "forgottenAt" IS NOT NULL) AND phone IS NULL AND email IS NULL AND address IS NULL)
+      OR (source = 'manual' AND "buyerUserId" IS NULL AND name IS NOT NULL AND "forgottenAt" IS NULL)),
+    ADD CONSTRAINT vendorcustomer_forgotten_nameless CHECK ("forgottenAt" IS NULL OR name IS NULL),
+    ADD CONSTRAINT vendorcustomer_client_ref CHECK ("clientRef" IS NULL OR ("clientFingerprint" IS NOT NULL AND char_length("clientRef") BETWEEN 8 AND 100)),
     ADD CONSTRAINT vendorcustomer_name_length CHECK (name IS NULL OR char_length(name) BETWEEN 1 AND 120),
     ADD CONSTRAINT vendorcustomer_phone_format CHECK (phone IS NULL OR phone ~ '^\\+255[0-9]{9}$'),
     ADD CONSTRAINT vendorcustomer_email_length CHECK (email IS NULL OR char_length(email) <= 254),
@@ -68,6 +76,7 @@ exports.up = async function up(knex) {
     ADD CONSTRAINT vendorcustomer_note_length CHECK (note IS NULL OR char_length(note) <= 500),
     ADD CONSTRAINT vendorcustomer_archived_complete CHECK (("archivedAt" IS NULL) = ("archivedBy" IS NULL))`);
   await knex.raw(`CREATE UNIQUE INDEX vendorcustomer_vendor_buyer_unique ON "VendorCustomer" ("vendorId", "buyerUserId") WHERE "buyerUserId" IS NOT NULL`);
+  await knex.raw(`CREATE UNIQUE INDEX vendorcustomer_vendor_client_ref_unique ON "VendorCustomer" ("vendorId", "clientRef") WHERE "clientRef" IS NOT NULL`);
   await knex.raw(`CREATE INDEX vendorcustomer_vendor_name_idx ON "VendorCustomer" ("vendorId", lower(name), id)`);
 
   await knex.schema.alterTable('VendorSale', (table) => {
@@ -168,12 +177,14 @@ exports.backfillMarketplaceCustomers = async function backfillMarketplaceCustome
      GROUP BY 1, 2`;
   const refs = await knex.raw(`INSERT INTO "VendorBuyerRef" ("vendorId", "buyerId", "customerId", "createdAt")
     SELECT p."vendorId", p."buyerId", 'cus_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 16), now() FROM (${PAIRS}) p
+     WHERE EXISTS (SELECT 1 FROM "User" u WHERE u.id = p."buyerId")
     ON CONFLICT ("vendorId", "buyerId") DO NOTHING RETURNING "customerId"`);
   const customers = await knex.raw(`INSERT INTO "VendorCustomer" (id, "vendorId", source, "buyerUserId", name, "lastPurchaseAt", "createdBy", "createdAt", "updatedAt")
     SELECT r."customerId", p."vendorId", 'marketplace', p."buyerId", left(NULLIF(btrim(u."displayName"), ''), 120), p."lastAt", 'system:backfill', now(), now()
       FROM (${PAIRS}) p
       JOIN "VendorBuyerRef" r ON r."vendorId" = p."vendorId" AND r."buyerId" = p."buyerId"
-      LEFT JOIN "User" u ON u.id = p."buyerId"
+      JOIN "User" u ON u.id = p."buyerId" -- a deleted account is not brought back (H1)
+     WHERE NOT EXISTS (SELECT 1 FROM "VendorCustomer" f WHERE f.id = r."customerId" AND f."buyerUserId" IS NULL)
     ON CONFLICT ("vendorId", "buyerUserId") WHERE "buyerUserId" IS NOT NULL DO UPDATE
       SET name = EXCLUDED.name,
           "lastPurchaseAt" = GREATEST("VendorCustomer"."lastPurchaseAt", EXCLUDED."lastPurchaseAt"),
