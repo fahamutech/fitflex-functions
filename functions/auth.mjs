@@ -1,7 +1,7 @@
 // Auth REST surface — thin controllers delegating to authService.
 import '../src/bootstrap/init.mjs';
-import { authService, partnerVerifiedFor } from '../src/bootstrap/services.mjs';
-import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import { authService, partnerVerifiedFor, portalUserService } from '../src/bootstrap/services.mjs';
+import { requireAuth, requireAcl, requireAuthAllowingPasswordChange } from '../src/auth/jwt.mjs';
 import { orgAuthzStats } from '../src/auth/org-authz.mjs';
 
 const created = new Date().toISOString();
@@ -79,6 +79,32 @@ export const authFirebaseSession = {
     // A trainer or gym owner learns at sign-in whether they are verified yet.
     res.json({ ...result, partnerVerified: await partnerVerifiedFor(result.user) });
   }
+};
+
+// ───────────────────────────── Portal admins: forced start-password change ──────────────────
+// Owner decision 2026-10-19: an admin created by another admin replaces the
+// start password before doing anything else. Until then every other route
+// answers 403 password_change_required; this is the one route that lets that
+// session through.
+
+export const authPortalChangeStartPassword = {
+  created, method: 'post', path: '/auth/portal/password',
+  description: 'Portal admin: replace the start password another admin chose, at first sign-in (the only route a session with pwc: true may use). Body { newPassword } (at least 10 characters, not the start password). Sets the Firebase password, ends every earlier session of this profile, and returns a new session { token, user } without pwc. Also revokes the Firebase refresh tokens of the identity; a Firebase ID token from before the change can no longer open a session (401 session_ended at /auth/firebase/session). 400 password_too_short | password_unchanged; 409 password_change_not_required | password_change_in_progress (another change is running); 502 firebase_update_failed (nothing changed); 500 password_changed_session_failed (the password WAS changed but the session could not be finished: sign in again with the new password).',
+  requestSample: { newPassword: 'a-new-long-password' },
+  responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'admin', passwordChangeRequired: false } },
+  onGuard: requireAuthAllowingPasswordChange('admin'),
+  onRequest: async (req, res) => {
+    const result = await portalUserService.changeStartPassword({
+      userId: req.user.sub, newPassword: req.body?.newPassword,
+      ip: String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || req.socket?.remoteAddress || null,
+      userAgent: req.headers?.['user-agent'] ? String(req.headers['user-agent']).slice(0, 300) : null,
+    });
+    if (result.error) {
+      return res.status(result.status).json({ error: result.error, ...(result.minLength ? { minLength: result.minLength } : {}) });
+    }
+    const session = authService.sessionFor(result.user);
+    res.json({ ...session, partnerVerified: await partnerVerifiedFor(session.user) });
+  },
 };
 
 // ───────────────────────────── Identity V2 · I2: personas ─────────────────────────────────

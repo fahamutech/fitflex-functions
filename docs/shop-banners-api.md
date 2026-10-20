@@ -177,7 +177,7 @@ The vendor view (with `previewUrl` `/admin/shop-banners/:id/image`, no `endedByF
 ## Vendor endpoints
 
 Who: the vendor account (`userType: vendor`) or vendor staff (`vendor_staff`) whose **stored** staff record holds `products`. Staff without it → `403 vendor_permission_forbidden { requiredPermission: "products" }`; the staff lookup failing → `503 authorization_unavailable`; other roles → `403 forbidden`; signed out → `401 unauthenticated`. A vendor only ever sees their own banners: anyone else's id → `404 banner_not_found`.
-Proposing (create, PATCH, photo, submit) needs a vendor that is not suspended (`403 vendor_suspended`, also when suspended in moderation), is approved and operational (KYC gate; `403 vendor_not_approved`) and exists (`404 vendor_not_found`). Withdraw and end are always allowed. A suspended vendor *account* is already stopped at sign-in (`403 account_suspended`); `vendor_suspended` is what their still-active staff get.
+Proposing (create, PATCH, photo, submit) needs a vendor that is not suspended (`403 vendor_suspended`, also when suspended in moderation), has `approvalStatus` exactly `approved` **and** is operational (KYC gate) (`403 vendor_not_approved`), and exists (`404 vendor_not_found`). Fail closed (QA round 2): `pending_approval` (what new vendors get), `pending`, `rejected` and any other value are not approved, whatever the KYC gate says. The same rule decides whether a live banner stays in the shop, whether a pending one can be approved (`409 vendor_not_approved`) and whether a `product` / `vendor_store` target is eligible. Withdraw and end are always allowed. A suspended vendor *account* is already stopped at sign-in (`403 account_suspended`); `vendor_suspended` is what their still-active staff get.
 
 | Method | Path | Body | → |
 |---|---|---|---|
@@ -255,7 +255,8 @@ With `SHOP_BANNERS` on (and `SHOP_HOME_V2` on, as before) the body gains **one k
 - Worked out on every request (not cached): approved, `startsAt ≤ now < endsAt`, the request's `mode` in `audienceRoles` (`vendor_personal` mode gets none), the vendor not suspended (account or moderation) and operational, the target eligible (see Targets; product targets use the same catalogue the rest of the page uses), never the viewer's own vendor, photo published.
 - Order: `position` ascending (unset last), then staff before vendor, then `startsAt`, then id. Then cut to `SHOP_BANNER_MAX_LIVE` if it is above 0. The client renders in the order received.
 - If reading banners fails, `banners` is `[]` and the rest of the page is unaffected.
-- Target handling in the app: `product` → product sheet `?product=<id>`; `vendor_store` → Results `?vendorId=<id>`; `category` → Results `?category=<key>`; `results` → Results with `value` as the query.
+- `vendorName` uses the same rule as the `vendorName` on product rows (business name, else display name), so a Visit-store heading read from either matches.
+- Target handling in the app: `product` → product sheet `?product=<id>`; `vendor_store` → Results `?vendorId=<id>` (the heading can be kept after a reload from `vendorName` on any returned product row); `category` → Results `?category=<key>`; `results` → Results with `value` as the query.
 
 ## Vendor notifications
 
@@ -302,6 +303,11 @@ Zebra cannot delete, so public files are permanent:
 7. `start_too_soon` (≥ 1 h ahead when sending) is kept from spec §5.2.3.
 8. `merch` in `/vendor/tools/options` is always present (`banners: false` when off); it also appears in `/vendor/me` `tools`.
 9. `editedBy` lists everyone with a hand in the banner over its whole life, not only edits made while pending (stricter; same field name as portal#127).
+
+## Changes in QA round 2 (2026-10-20)
+
+- **Additive, outside the banner routes:** every buyer-facing product row now has `vendorName` (string \| null): `GET /shop/products`, `GET /shop/products/:id` (and its `similarProducts`), `GET /shop/vendors/:id` `products`, `GET /discover/products` (`items` and `featured`), and `GET /shop/home` `products`. The vendor's own list (`GET /vendor/products`) and admin lists are unchanged.
+- Vendor eligibility for banners now requires `approvalStatus = approved` (fail closed; see Vendor endpoints).
 
 ## Changes from revision 1 (review round 1, for portal and mobile)
 

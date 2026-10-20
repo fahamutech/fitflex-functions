@@ -63,7 +63,7 @@ async function requireActiveVendorStaff(req, res, next) {
 
 export const listShopProducts = {
   created, method: 'get', path: '/shop/products',
-  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=.',
+  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither).',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => {
     const { category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = req.query || {};
@@ -73,7 +73,7 @@ export const listShopProducts = {
 
 export const getShopProduct = {
   created, method: 'get', path: '/shop/products/:id',
-  description: 'Buyer: product details, vendor, reviews and similar products.',
+  description: 'Buyer: product details (with vendorName), vendor, reviews and similar products (rows as in GET /shop/products).',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => {
     const product = await shopService.getProduct(req.params.id);

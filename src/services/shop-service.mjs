@@ -2,6 +2,7 @@
 import { formatTsh } from '../shared/money-display.mjs';
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
 import { randomUUID, createHash } from 'node:crypto';
+import { storeNameOf } from '../shared/vendor-name.mjs';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { decideTransition, combinedStatus, fulfilmentsOf, anyAtLeast, canonicalStatus, nextStatuses, STATUSES, LEGACY_INPUTS } from '../shared/order-lifecycle.mjs';
@@ -167,11 +168,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * Of these vendor ids, those an admin has suspended on their account (User.accountStatus).
    * Separate from moderation suspension (publicGate): either one takes a vendor off sale.
    */
-  async function accountSuspendedVendorIds(vendorIds) {
+  async function vendorAccounts(vendorIds) {
     const ids = [...new Set((vendorIds || []).filter(Boolean))];
-    if (!ids.length) return new Set();
-    const rows = users.filterByColumnInAsync ? await users.filterByColumnInAsync('id', ids) : await users.filterAsync(user => ids.includes(user.id));
-    return new Set(rows.filter(user => user.accountStatus === 'suspended').map(user => user.id));
+    if (!ids.length) return [];
+    return users.filterByColumnInAsync ? users.filterByColumnInAsync('id', ids) : users.filterAsync(user => ids.includes(user.id));
+  }
+  async function accountSuspendedVendorIds(vendorIds) {
+    return new Set((await vendorAccounts(vendorIds)).filter(user => user.accountStatus === 'suspended').map(user => user.id));
   }
 
   async function getVendorStore(vendorId) {
@@ -197,10 +200,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     // from a vendor suspended in moderation or on their account.
     if (!includeArchived) {
       const vendorIds = rows.map(product => product.vendorId);
-      const [ok, blockedProducts, blockedVendors, suspendedVendors] = await Promise.all([
-        partnerGate.operationalUserIds(vendorIds), publicGate.blocked('product'), publicGate.blocked('vendor'), accountSuspendedVendorIds(vendorIds),
+      const [ok, blockedProducts, blockedVendors, accounts] = await Promise.all([
+        partnerGate.operationalUserIds(vendorIds), publicGate.blocked('product'), publicGate.blocked('vendor'), vendorAccounts(vendorIds),
       ]);
-      rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId));
+      const suspendedVendors = new Set(accounts.filter(user => user.accountStatus === 'suspended').map(user => user.id));
+      const names = new Map(accounts.map(user => [user.id, storeNameOf(user)]));
+      rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId))
+        // Buyer-facing rows carry the seller's store name (QA round 2: the Visit-store heading survives a reload).
+        .map(product => ({ ...product, vendorName: names.get(product.vendorId) ?? null }));
     }
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
@@ -225,7 +232,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!product || product.deletedAt) return null;
     if (!includeUnlisted && !(await listProducts({})).some(row => row.id === productId)) return null;
     const reviews = (await productReviews.filterAsync(review => review.productId === productId)).map(publicReview);
-    return { ...product, vendor: publicProfile(await getVendorProfile(product.vendorId)), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
+    const vendorUser = await users.findByIdAsync(product.vendorId);
+    return { ...product, vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
   }
 
   /** Shape and size limits on what a vendor may store; null when fine. */

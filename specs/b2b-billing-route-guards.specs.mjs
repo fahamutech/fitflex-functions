@@ -156,7 +156,7 @@ test('billing grants work on their own: biller raises the agreement and fee invo
     const list = await hit(realUrl, 'GET', `${org}/agreements`, reader);
     assert.equal(list.status, 200, `${reader.aclPermissions}: ${JSON.stringify(list.body)}`);
   }
-  const live = await finance.activateAgreement({ agreementId: created.body.agreement.id, actorId: approver.sub });
+  const live = await finance.activateAgreement({ agreementId: created.body.agreement.id, version: new Date(created.body.agreement.updatedAt).toISOString(), actorId: approver.sub });
   assert.ok(live.agreement, JSON.stringify(live));
 
   // Fee invoice: prepared over HTTP by `billerCashier`, who then issues it.
