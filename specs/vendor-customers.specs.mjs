@@ -459,7 +459,13 @@ test('pay later: paid now + balance, default due = sale EAT day + 7, range check
   assert.equal(out.status, 201, JSON.stringify(out.body));
   const s = out.body.sale;
   const day = eatToday(new Date(s.soldAt));
-  assert.deepEqual([s.kind, s.totalTzs, s.paidTzs, s.paidAtSaleTzs, s.balanceTzs, s.changeTzs, s.dueDate, s.customer, s.allocations], ['credit', 95_000, 20_000, 20_000, 75_000, 0, addDays(day, 7), { id: c.id, name: 'Juma M.' }, []]);
+  assert.deepEqual([s.kind, s.totalTzs, s.paidTzs, s.paidAtSaleTzs, s.balanceTzs, s.changeTzs, s.dueDate, s.customer, s.allocations], ['credit', 95_000, 20_000, 20_000, 75_000, 0, addDays(day, 7), { id: c.id, name: 'Juma M.', forgotten: false }, []]);
+  // Contract check #224 item 7: a replay is answered before the customers flag is checked.
+  delete process.env.VENDOR_CUSTOMERS;
+  const queued = await sell(as(v), { clientRef: s.clientRef, lines: [{ productId: p.id, qty: 1 }], payments: cash(20_000), kind: 'credit', customerId: c.id });
+  assert.deepEqual([queued.status, queued.body.sale?.id], [200, s.id], 'replayed with the flag off');
+  assert.equal((await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(20_000), { kind: 'credit', customerId: c.id }))).body.error, 'feature_disabled', 'a new one is still refused');
+  process.env.VENDOR_CUSTOMERS = '1';
   assert.doesNotMatch(JSON.stringify(s), /712345678/, 'no customer phone on the sale');
   assert.equal((await db('Product').where({ id: p.id }).first()).stock, 9, 'stock left as for any sale');
   await assertSaleAddsUp(s.id);
@@ -645,6 +651,10 @@ test('add customer: optional clientRef replays (200, same customer), another bod
   assert.deepEqual([limited.status, limited.body.error, Number(limited.headers['Retry-After']) > 0], [429, 'rate_limited', true]);
   const otherVendor = await vendor();
   assert.equal((await call(vendorCustomersCreate, as(otherVendor), { body: { name: 'Other Shop' } })).status, 201, 'per vendor');
+  // Searches (with q) are limited; plain page loads are not (contract check #224 item 8).
+  for (let i = 0; i < VENDOR_CUSTOMER_LIMITS.searchesPerMinute; i += 1) assert.equal((await call(vendorCustomersList, as(otherVendor), { query: { q: 'Oth' } })).status, 200);
+  assert.equal((await call(vendorCustomersList, as(otherVendor), { query: { q: 'Oth' } })).status, 429);
+  assert.equal((await call(vendorCustomersList, as(otherVendor), { query: { limit: '20' } })).status, 200, 'a page load is not a search');
   assert.equal(await db('VendorCustomer').where({ vendorId: v, name: 'One too many' }).first(), undefined, 'nothing written');
 });
 
@@ -678,6 +688,10 @@ test('account deletion (H1): the buyer is forgotten at every vendor — name cle
   assert.equal(await db('VendorBuyerRef').where({ buyerId: buyer }).first(), undefined, 'still none after an order read');
   const prof = (await profile(as(owes), atOwes.id)).body.customer;
   assert.deepEqual([prof.name, prof.forgotten, prof.owedTzs], [null, true, 6_000]);
+  assert.equal((await call(vendorReceivablesAging, as(owes))).body.rows.find(r => r.customerId === atOwes.id).forgotten, true, 'aging row says deleted');
+  const owedSale = (await call(vendorCustomerSales, as(owes), { params: { id: atOwes.id } })).body.sales[0];
+  assert.deepEqual(owedSale.customer, { id: atOwes.id, name: null, forgotten: true });
+  assert.equal((await call(vendorGetSale, as(owes), { params: { id: owedSale.id } })).body.sale.customer.forgotten, true);
   assert.equal((await call(vendorCustomersList, as(clear))).body.customers.find(x => x.id === atClear.id).forgotten, true);
   assert.ok(await db('AuditLog').where({ target: atClear.id, action: 'vendor_customer_forgotten' }).first());
 
@@ -743,7 +757,12 @@ test('A-02: a paid app order makes an app customer with only a name; no phone, e
   const ref = await db('VendorBuyerRef').where({ vendorId: v, buyerId: buyer }).first();
   assert.equal(row.id, ref.customerId, 'the customer id is the buyer.customerId vendors already see on orders');
   const fromOrder = (await call(vendorOrders, as(v))).body.find(o => o.id === order.id);
-  assert.equal(fromOrder.buyer.customerId, row.id);
+  assert.deepEqual([fromOrder.buyer.customerId, fromOrder.buyer.customerLinked], [row.id, true], 'the profile link opens');
+  const unpaidRow = (await call(vendorOrders, as(v))).body.find(o => o.id === placed.order.id);
+  assert.deepEqual([typeof unpaidRow.buyer.customerId, unpaidRow.buyer.customerLinked], ['string', false], 'no customer record yet: no link');
+  delete process.env.VENDOR_CUSTOMERS;
+  assert.equal((await call(vendorOrders, as(v))).body.find(o => o.id === order.id).buyer.customerLinked, false, 'flag off: never linked');
+  process.env.VENDOR_CUSTOMERS = '1';
 
   // Pay later and a payment for the app customer, so every view has something in it.
   assert.equal((await credit(as(v), row.id, 12_000, p.id)).status, 201);

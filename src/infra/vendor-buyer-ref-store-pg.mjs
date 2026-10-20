@@ -27,7 +27,14 @@ export function createPgVendorBuyerRefStore({ db }) {
       .onConflict(['vendorId', 'buyerId']).ignore();
     return read(vendorId, ids);
   }
-  return { refsFor };
+  /** S4: which of these customerIds have a VendorCustomer record at this vendor (so a profile link opens). */
+  async function linkedCustomerIds(vendorId, customerIds) {
+    const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
+    if (!vendorId || !ids.length) return new Set();
+    const rows = await db('VendorCustomer').where({ vendorId }).whereIn('id', ids).select('id');
+    return new Set(rows.map(r => r.id));
+  }
+  return { refsFor, linkedCustomerIds };
 }
 
 /** Same contract, in memory (unit specs and wiring without a database). */
@@ -44,5 +51,6 @@ export function createMemoryVendorBuyerRefStore() {
       }
       return out;
     },
+    async linkedCustomerIds() { return new Set(); },
   };
 }

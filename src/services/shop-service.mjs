@@ -9,7 +9,7 @@ import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../s
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
-import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions } from '../shared/feature-flags.mjs';
+import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn } from '../shared/feature-flags.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
@@ -94,6 +94,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   gyms = null,
   buyerRefs = null,
   buyerContactOn = vendorBuyerContactOn,
+  // S4: buyer.customerLinked on vendor orders only while VENDOR_TOOLS + VENDOR_CUSTOMERS are on.
+  customersOn = vendorCustomersOn,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
   buyerRefs ||= createMemoryVendorBuyerRefStore();
@@ -952,8 +954,12 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       buyerRefs.refsFor(vendorId, orders.map(o => o.buyerId)),
     ]);
     const contactOn = buyerContactOn(), at = now();
+    // S4 (contract check #224): true only when a customer record exists, so the client's link opens.
+    const linked = customersOn() && typeof buyerRefs.linkedCustomerIds === 'function'
+      ? await buyerRefs.linkedCustomerIds(vendorId, [...refs.values()]) : new Set();
     return orders.map(order => vendorOrderView(order, vendorId, {
       customerId: refs.get(String(order.buyerId)) ?? null, buyer: buyers.get(order.buyerId) || null,
+      customerLinked: linked.has(refs.get(String(order.buyerId))),
       gym: pickupGyms.get(order.pickupGymId) || null, seesMoney, contactOn, now: at,
     }));
   }

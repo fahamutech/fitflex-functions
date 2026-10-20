@@ -35,6 +35,10 @@
 // Down: drops the new tables, constraints, column and indexes. Credit sales cannot exist before
 // this migration, so down refuses while any credit sale exists (it would break the S3 schema).
 
+const { randomUUID } = require('node:crypto');
+/** Same shape as src/infra/vendor-buyer-ref-store-pg.mjs newCustomerId (cus_ + 16 hex). */
+const newCustomerId = () => `cus_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+
 const METHODS = ['cash', 'mpesa', 'airtel_money', 'mixx', 'halopesa', 'card', 'bank', 'other'];
 const list = values => values.map(v => `'${v}'`).join(', ');
 
@@ -170,29 +174,39 @@ exports.up = async function up(knex) {
  * @param {import('knex').Knex} knex
  */
 exports.backfillMarketplaceCustomers = async function backfillMarketplaceCustomers(knex) {
-  const PAIRS = `SELECT item->>'vendorId' AS "vendorId", o."buyerId", max(o."createdAt") AS "lastAt"
+  // Ids are made here in JS (crypto.randomUUID): the database's own uuid function needs PG 13+ (contract check #224).
+  const { rows: pairs } = await knex.raw(`SELECT item->>'vendorId' AS "vendorId", o."buyerId", max(o."createdAt") AS "lastAt"
       FROM "ShopOrder" o
       CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(o.items) = 'array' THEN o.items ELSE '[]'::jsonb END) item
+      JOIN "User" u ON u.id = o."buyerId" -- a deleted account is not brought back (H1)
      WHERE o."paymentStatus" IN ('paid', 'refund_pending', 'refunded') AND COALESCE(item->>'vendorId', '') <> ''
-     GROUP BY 1, 2`;
-  const refs = await knex.raw(`INSERT INTO "VendorBuyerRef" ("vendorId", "buyerId", "customerId", "createdAt")
-    SELECT p."vendorId", p."buyerId", 'cus_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 16), now() FROM (${PAIRS}) p
-     WHERE EXISTS (SELECT 1 FROM "User" u WHERE u.id = p."buyerId")
-    ON CONFLICT ("vendorId", "buyerId") DO NOTHING RETURNING "customerId"`);
-  const customers = await knex.raw(`INSERT INTO "VendorCustomer" (id, "vendorId", source, "buyerUserId", name, "lastPurchaseAt", "createdBy", "createdAt", "updatedAt")
-    SELECT r."customerId", p."vendorId", 'marketplace', p."buyerId", left(NULLIF(btrim(u."displayName"), ''), 120), p."lastAt", 'system:backfill', now(), now()
-      FROM (${PAIRS}) p
-      JOIN "VendorBuyerRef" r ON r."vendorId" = p."vendorId" AND r."buyerId" = p."buyerId"
-      JOIN "User" u ON u.id = p."buyerId" -- a deleted account is not brought back (H1)
-     WHERE NOT EXISTS (SELECT 1 FROM "VendorCustomer" f WHERE f.id = r."customerId" AND f."buyerUserId" IS NULL)
-    ON CONFLICT ("vendorId", "buyerUserId") WHERE "buyerUserId" IS NOT NULL DO UPDATE
-      SET name = EXCLUDED.name,
-          "lastPurchaseAt" = GREATEST("VendorCustomer"."lastPurchaseAt", EXCLUDED."lastPurchaseAt"),
-          "updatedAt" = CASE WHEN "VendorCustomer".name IS DISTINCT FROM EXCLUDED.name THEN now() ELSE "VendorCustomer"."updatedAt" END
-    RETURNING (xmax = 0) AS inserted`);
-  const inserted = customers.rows.filter(r => r.inserted).length;
-  console.log(`[migrate] vendor customers: ${inserted} app customer(s) created, ${customers.rows.length - inserted} refreshed, ${refs.rows.length} buyer ref(s) created`);
-  return { created: inserted, refreshed: customers.rows.length - inserted, refs: refs.rows.length };
+     GROUP BY 1, 2 ORDER BY 1, 2`);
+  let refs = 0;
+  let created = 0;
+  let refreshed = 0;
+  for (let i = 0; i < pairs.length; i += 500) {
+    const chunk = pairs.slice(i, i + 500);
+    const inserted = await knex('VendorBuyerRef')
+      .insert(chunk.map(p => ({ vendorId: p.vendorId, buyerId: p.buyerId, customerId: newCustomerId(), createdAt: knex.fn.now() })))
+      .onConflict(['vendorId', 'buyerId']).ignore().returning('customerId');
+    refs += inserted.length;
+  }
+  for (const p of pairs) {
+    const { rows } = await knex.raw(`INSERT INTO "VendorCustomer" (id, "vendorId", source, "buyerUserId", name, "lastPurchaseAt", "createdBy", "createdAt", "updatedAt")
+      SELECT r."customerId", r."vendorId", 'marketplace', r."buyerId", left(NULLIF(btrim(u."displayName"), ''), 120), ?, 'system:backfill', now(), now()
+        FROM "VendorBuyerRef" r JOIN "User" u ON u.id = r."buyerId"
+       WHERE r."vendorId" = ? AND r."buyerId" = ?
+         AND NOT EXISTS (SELECT 1 FROM "VendorCustomer" f WHERE f.id = r."customerId" AND f."buyerUserId" IS NULL)
+      ON CONFLICT ("vendorId", "buyerUserId") WHERE "buyerUserId" IS NOT NULL DO UPDATE
+        SET name = EXCLUDED.name,
+            "lastPurchaseAt" = GREATEST("VendorCustomer"."lastPurchaseAt", EXCLUDED."lastPurchaseAt"),
+            "updatedAt" = CASE WHEN "VendorCustomer".name IS DISTINCT FROM EXCLUDED.name THEN now() ELSE "VendorCustomer"."updatedAt" END
+        WHERE "VendorCustomer"."forgottenAt" IS NULL
+      RETURNING (xmax = 0) AS inserted`, [p.lastAt, p.vendorId, p.buyerId]);
+    for (const r of rows) { if (r.inserted) created += 1; else refreshed += 1; }
+  }
+  console.log(`[migrate] vendor customers: ${created} app customer(s) created, ${refreshed} refreshed, ${refs} buyer ref(s) created`);
+  return { created, refreshed, refs };
 };
 
 /** @param {import('knex').Knex} knex */

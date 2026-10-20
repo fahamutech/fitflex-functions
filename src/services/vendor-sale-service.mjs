@@ -33,18 +33,20 @@ export function createVendorSaleService({
    * POST /vendor/sales → { sale, status: 201 | 200 (replay) } or { error, status, ... }.
    * S4: `canCredit` = the caller also holds `customers` (the vendor account always does). A sale that
    * names a customer or is pay later needs VENDOR_CUSTOMERS (off → 404 feature_disabled); pay later
-   * without `customers` → 403 credit_not_allowed. Both are checked before a replay is answered.
+   * without `customers` → 403 credit_not_allowed. Both are checked after a replay is answered.
    */
   async function recordSale({ vendorId, actorId, body, canCredit = false }) {
     const sale = parseSale(body || {});
     if (sale.error) return sale;
-    if ((sale.kind === 'credit' || sale.customerId) && !customersOn()) return { error: 'feature_disabled', status: 404, feature: 'customers' };
-    if (sale.kind === 'credit' && !canCredit) return { error: 'credit_not_allowed', status: 403, requiredPermission: 'customers' };
     const fingerprint = saleFingerprint(sale);
-    // A retry of a sale already recorded gets that sale, even if it is now older than the window.
+    // A retry of a sale already recorded gets that sale, even if it is now older than the window — and
+    // before the S4 checks below, so a queued sale recorded before VENDOR_CUSTOMERS went off still replays
+    // (contract check #224).
     const earlier = await store.replayOf(vendorId, sale.clientRef, fingerprint);
     if (earlier?.error) return earlier;
     if (earlier) return { sale: earlier.sale, status: 200 };
+    if ((sale.kind === 'credit' || sale.customerId) && !customersOn()) return { error: 'feature_disabled', status: 404, feature: 'customers' };
+    if (sale.kind === 'credit' && !canCredit) return { error: 'credit_not_allowed', status: 403, requiredPermission: 'customers' };
     const at = now();
     sale.soldAt ||= at;
     const outOfRange = soldAtOutOfRange(sale.soldAt, at);

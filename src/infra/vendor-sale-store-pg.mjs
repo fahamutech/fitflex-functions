@@ -66,7 +66,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
       id: s.id, number: s.number, status: s.status, kind: s.kind,
       // S4: the customer (name only, never contact details), the due date and what is still owed.
       // paidTzs = paid at the counter + later customer payments; paidAtSaleTzs = at the counter only.
-      customer: s.customerId ? { id: s.customerId, name: customer?.name ?? null } : null,
+      customer: s.customerId ? { id: s.customerId, name: customer?.name ?? null, forgotten: customer?.forgottenAt != null } : null,
       dueDate: dayOf(sale.dueDate), balanceTzs: s.balanceTzs, paidAtSaleTzs: s.paidTzs - (s.allocatedTzs || 0),
       allocations: allocations.map(a => ({ paymentId: a.paymentId, number: a.number, amountTzs: a.amountTzs, receivedOn: dayOf(a.receivedOn), voided: a.voidedAt != null })),
       soldAt: iso(s.soldAt), clientSoldAt: iso(s.clientSoldAt), recordedAt: iso(s.createdAt), lateRecorded: lateRecorded(s), clientRef: s.clientRef,
@@ -93,7 +93,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
     const [lines, payments, customer, allocations] = await Promise.all([
       q('VendorSaleLine').where({ saleId: sale.id }),
       q('VendorSalePayment').where({ saleId: sale.id }),
-      sale.customerId ? q('VendorCustomer').where({ id: sale.customerId, vendorId: sale.vendorId }).first('name') : null,
+      sale.customerId ? q('VendorCustomer').where({ id: sale.customerId, vendorId: sale.vendorId }).first('name', 'forgottenAt') : null,
       q('VendorPaymentAllocation as a').join('VendorCustomerPayment as p', function joinPayment() { this.on('p.id', 'a.paymentId').andOn('p.vendorId', 'a.vendorId'); })
         .where({ 'a.saleId': sale.id, 'a.vendorId': sale.vendorId })
         .orderBy([{ column: 'p.seq' }]).select('a.paymentId', 'p.number', 'a.amountTzs', 'p.receivedOn', 'a.voidedAt'),
@@ -382,9 +382,9 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
       ids.length ? db('VendorSaleLine').whereIn('saleId', ids).whereRaw('"unitPriceTzs" <> "listPriceTzs"').distinct('saleId') : [],
       ids.length ? db('VendorSalePayment').whereIn('saleId', ids).orderBy(['saleId', 'position']).select('saleId', 'method') : [],
       namesOf(db, page.map(r => r.createdBy)),
-      customerIds.length ? db('VendorCustomer').where({ vendorId }).whereIn('id', customerIds).select('id', 'name') : [],
+      customerIds.length ? db('VendorCustomer').where({ vendorId }).whereIn('id', customerIds).select('id', 'name', 'forgottenAt') : [],
     ]);
-    const customerNames = new Map(customers.map(c => [c.id, c.name ?? null]));
+    const customerNames = new Map(customers.map(c => [c.id, { name: c.name ?? null, forgotten: c.forgottenAt != null }]));
     const itemCount = new Map(items.map(r => [r.saleId, Number(r.n)]));
     const withOverride = new Set(overridden.map(r => r.saleId));
     const methods = new Map();
@@ -421,7 +421,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date() }) {
         itemCount: itemCount.get(r.id) || 0, methods: methods.get(r.id) || [],
         createdBy: person(r.createdBy, names.get(r.createdBy)),
         kind: r.kind, balanceTzs: r.balanceTzs, dueDate: dayOf(r.dueDate),
-        customer: r.customerId ? { id: r.customerId, name: customerNames.get(r.customerId) ?? null } : null,
+        customer: r.customerId ? { id: r.customerId, name: customerNames.get(r.customerId)?.name ?? null, forgotten: customerNames.get(r.customerId)?.forgotten ?? false } : null,
       })),
       nextCursor: rows.length > limit ? encodeCursor(page[page.length - 1]) : null,
       summary: {

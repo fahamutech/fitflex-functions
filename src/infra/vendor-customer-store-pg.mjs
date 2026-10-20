@@ -563,7 +563,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
       owed: 'o."owedTzs" DESC, c.id ASC',
       name: 'lower(c.name) ASC NULLS LAST, c.id ASC',
     }[sort];
-    const base = `WITH o AS (${OWED_SQL('')}) SELECT o.*, c.name, c.source FROM o JOIN "VendorCustomer" c ON c.id = o."customerId" AND c."vendorId" = ?`;
+    const base = `WITH o AS (${OWED_SQL('')}) SELECT o.*, c.name, c.source, c."forgottenAt" FROM o JOIN "VendorCustomer" c ON c.id = o."customerId" AND c."vendorId" = ?`;
     const [{ rows }, totals] = await Promise.all([
       db.raw(`${base} ${bucket ? `WHERE o."${bucket}" > 0` : ''} ORDER BY ${order} LIMIT ? OFFSET ?`, [today, vendorId, vendorId, limit + 1, offset]),
       db.raw(`WITH o AS (${OWED_SQL('')})
@@ -582,7 +582,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date() }) {
         openSaleCount: num(t.openSaleCount), overdueSaleCount: num(t.overdueSaleCount), ...agingOf(t),
       },
       rows: page.map(r => ({
-        customerId: r.customerId, name: r.name ?? null, source: r.source, owedTzs: num(r.owedTzs), overdueTzs: num(r.overdueTzs),
+        customerId: r.customerId, name: r.name ?? null, source: r.source, forgotten: r.forgottenAt != null, owedTzs: num(r.owedTzs), overdueTzs: num(r.overdueTzs),
         oldestDueDate: r.oldestDueDate, maxDaysOverdue: num(r.maxDaysOverdue), openSaleCount: num(r.openCount), overdueSaleCount: num(r.overdueCount), ...agingOf(r),
       })),
       nextCursor: rows.length > limit ? encodeOffset(offset + limit) : null,
