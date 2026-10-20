@@ -21,6 +21,7 @@ import {
   BANNER_CONFIRMATION, bannerConfigFromEnv, completenessError, effectiveStatus, headlineError, parseBannerInput, proposalExpiry, windowError,
   ctaFor, ctaKeyFor,
 } from '../shared/shop-banner-rules.mjs';
+import { storeNameOf } from '../shared/vendor-name.mjs';
 import { prepareHeroUpload, buildHeroVariants, previewAt, sha256 } from '../infra/hero-image-file.mjs';
 
 export const BANNER_PREVIEW_WIDTHS = Object.freeze([240, 480, 960]);
@@ -35,7 +36,8 @@ const shortHash = s => createHash('sha256').update(String(s)).digest('hex').slic
 const text = (v, max) => (typeof v === 'string' && v.trim() && v.trim().length <= max ? v.trim() : null);
 const round3 = n => Math.round(n * 1000) / 1000;
 const confirmed = v => v === true || v === 'true';
-const vendorName = v => v?.vendorProfile?.businessName || v?.displayName || null;
+// Same rule as vendorName on product rows (src/shared/vendor-name.mjs).
+const vendorName = storeNameOf;
 const withEditor = (b, actorId) => [...new Set([...(b?.editors || []), actorId].filter(Boolean))];
 /**
  * Two-person rule: anyone who created, edited, replaced the photo of, or sent a banner (and the
@@ -114,7 +116,10 @@ export function createShopBannerService({
       let reason = null;
       if (!row) reason = 'vendor_not_found';
       else if (row.accountStatus === 'suspended' || blocked.has(id)) reason = 'vendor_suspended';
-      else if (['pending', 'rejected'].includes(row.approvalStatus) || !operational.has(id)) reason = 'vendor_not_approved';
+      // Fail closed (QA round 2): only an explicitly approved vendor counts. New vendors are
+      // 'pending_approval'; 'pending', 'rejected', any other value and a missing one are not approved,
+      // whatever the KYC gate says.
+      else if (row.approvalStatus !== 'approved' || !operational.has(id)) reason = 'vendor_not_approved';
       out.set(id, { ok: !reason, reason, row: row || null });
     }
     return out;

@@ -1062,3 +1062,70 @@ test('CTA: vendors pick from the fixed list (ctaKey) and never write a label; st
   const staffKey = await h.svc.create({ scope: { origin: 'staff' }, actorId: 'adm_cta', body: { ctaKey: 'shop_now', target: { type: 'results', value: {} } } });
   assert.deepEqual(staffKey.banner.ctaLabel, { en: 'Shop now', sw: 'Nunua sasa' });
 });
+
+// ── QA round 2 ──────────────────────────────────────────────────────────────
+
+test('QA2 vendor eligibility fails closed: only approvalStatus "approved" may propose or stay live (pending_approval, pending, rejected, any other)', async () => {
+  await cleanBanners();
+  const h = harness(); // KYC gate open for everyone: the approval status alone must decide
+  // (User.approvalStatus is NOT NULL in the database, so "missing" cannot be stored; the code treats it as not approved too.)
+  for (const status of ['pending_approval', 'pending', 'rejected', 'under_review']) {
+    const v = await vendorUser(`Status ${status}`, { approvalStatus: status });
+    const c = await h.svc.create({ scope: { origin: 'vendor', vendorId: v }, actorId: v, body: {} });
+    assert.deepEqual([c.error, c.status], ['vendor_not_approved', 403], String(status));
+    assert.deepEqual((await h.svc.vendorList({ vendorId: v })).vendor, { canPropose: false, reason: 'vendor_not_approved' }, String(status));
+  }
+  // An approved vendor's banners: pending cannot be approved, and a live one drops, once the vendor is back to pending_approval.
+  const approver = await user('admin');
+  const live = await liveBanner(h);
+  h.tick(3 * HOUR);
+  const pending = await pendingVendorBanner(h);
+  const products = await productsOf([live.productId]);
+  assert.equal((await h.svc.feed({ mode: 'member', products, at: h.now() })).length, 1);
+  await db('User').where({ id: live.vendor }).update({ approvalStatus: 'pending_approval' });
+  assert.equal((await h.svc.feed({ mode: 'member', products, at: h.now() })).length, 0, 'live banner leaves the shop');
+  await db('User').where({ id: pending.vendor }).update({ approvalStatus: 'pending_approval' });
+  const a = await h.svc.approve({ id: pending.id, actorId: approver, checks: ALL_CHECKS });
+  assert.deepEqual([a.error, a.status], ['vendor_not_approved', 409]);
+  // A staff banner linking to such a vendor's store or product is not eligible either.
+  const x = await user('admin');
+  const s = await h.svc.create({ scope: { origin: 'staff' }, actorId: x, body: { ...TEXT, target: { type: 'vendor_store', value: pending.vendor }, ...windowFrom(h.now()) } });
+  await h.svc.uploadImage({ scope: { origin: 'staff' }, id: s.banner.id, file: { buffer: PHOTO }, fields: GOOD_FIELDS, actorId: x });
+  const sub = await h.svc.submit({ scope: { origin: 'staff' }, id: s.banner.id, actorId: x });
+  assert.deepEqual([sub.error, sub.reason], ['target_not_eligible', 'vendor_not_approved']);
+});
+
+test('QA2 product rows carry vendorName (store name, else display name) on /shop/products, /shop/products/:id, /discover/products and /shop/home', async () => {
+  process.env.SHOP_HOME_V2 = '1'; process.env.SHOP_HOME_MIN_ITEMS = '1'; process.env.SHOP_HOME_CACHE_SECONDS = '1';
+  shopHomeService.clearCache(); resetShopHomeLimits();
+  try {
+    const named = await vendorUser('Dar Fitness Gear');
+    const plain = await user('vendor', { approvalStatus: 'approved', displayName: 'Mama Neema Shop' });
+    const p1 = await product(named, { name: 'QA2 rope' });
+    const p2 = await product(plain, { name: 'QA2 mat' });
+    const member = await user('member');
+    const claims = { sub: member, userType: 'member' };
+    const list = await hit('GET', `/shop/products?vendorId=${named}`, { claims });
+    assert.deepEqual(list.body.map(r => [r.id, r.vendorName]), [[p1, 'Dar Fitness Gear']]);
+    const other = await hit('GET', `/shop/products?vendorId=${plain}`, { claims });
+    assert.equal(other.body[0].vendorName, 'Mama Neema Shop', 'falls back to the display name');
+    const detail = await hit('GET', `/shop/products/${p1}`, { claims });
+    assert.equal(detail.body.vendorName, 'Dar Fitness Gear');
+    assert.ok(detail.body.similarProducts.every(r => 'vendorName' in r));
+    const disc = await hit('GET', '/discover/products?q=QA2', { claims });
+    const cards = [...disc.body.items, ...disc.body.featured];
+    assert.deepEqual(new Map(cards.filter(c => [p1, p2].includes(c.id)).map(c => [c.id, c.vendorName])), new Map([[p1, 'Dar Fitness Gear'], [p2, 'Mama Neema Shop']]));
+    const home = await hit('GET', '/shop/home', { claims });
+    assert.equal(home.status, 200);
+    const homeRows = Object.values(home.body.products);
+    assert.ok(homeRows.length > 0 && homeRows.every(r => 'vendorName' in r), 'every home product row has the field');
+    if (home.body.products[p1]) assert.equal(home.body.products[p1].vendorName, 'Dar Fitness Gear');
+    // The vendor's own product list (vendor tools) is unchanged: no vendorName there.
+    const own = await hit('GET', '/vendor/products', { claims: { sub: named, userType: 'vendor' } });
+    assert.equal(own.status, 200);
+    const ownRows = Array.isArray(own.body) ? own.body : (own.body.products || own.body.items || []);
+    assert.ok(ownRows.length && ownRows.every(r => !('vendorName' in r)));
+  } finally {
+    for (const k of ['SHOP_HOME_V2', 'SHOP_HOME_MIN_ITEMS', 'SHOP_HOME_CACHE_SECONDS']) delete process.env[k];
+  }
+});
