@@ -98,3 +98,22 @@ export function createZebraDocumentStore() {
     },
   };
 }
+
+/**
+ * Public images on Zebra (the published app photos). put() returns the public
+ * root-relative address `/storage/<cid>/<filename>` the apps load, the same
+ * form gym and trainer photos use.
+ */
+export function createZebraPublicStore() {
+  return {
+    provider: 'zebra',
+    async put(buffer, filename, mimeType) {
+      if (!zebraBaseUrl()) throw new StorageUnavailableError();
+      const response = await uploadToZebra(buffer, filename, mimeType);
+      if (response.status < 200 || response.status >= 300) throw new StorageUnavailableError('storage_upload_failed');
+      const stored = parseZebraResponse(response.data);
+      if (!stored?.cid || !stored.filename) throw new StorageUnavailableError('storage_upload_failed');
+      return stored;
+    },
+  };
+}
