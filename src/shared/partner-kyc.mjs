@@ -78,6 +78,46 @@ export const REASON_CODES = [
   'suspected_fraud', 'duplicate_partner', 'incomplete_submission', 'other',
 ];
 
+// ── What partners are told about a reason (owner decision, 22 Oct 2026) ─────
+// Some reasons reveal what FitFlex suspects. A partner never sees them: the
+// server sends the neutral code below instead, and drops the reviewer's note
+// (it may say what was suspected). Admins keep the real code and note.
+//
+//   suspected_fraud    the reviewer suspects fraud
+//   duplicate_partner  the same person or business is already a partner
+//                      (telling them shows which identity was matched)
+//
+// Fail closed: any code that is not a known, partner-safe one (including a
+// code added to REASON_CODES later without being reviewed here) is treated
+// as sensitive too.
+export const SENSITIVE_REASON_CODES = Object.freeze(['suspected_fraud', 'duplicate_partner']);
+export const PARTNER_NEUTRAL_REASON = 'under_review';
+
+const PARTNER_SAFE_REASON_CODES = new Set(REASON_CODES.filter(c => !SENSITIVE_REASON_CODES.includes(c)));
+
+/** True when a partner must not see this reason code (or the note that came with it). */
+export function isSensitiveReason(code) {
+  return code !== null && code !== undefined && code !== '' && !PARTNER_SAFE_REASON_CODES.has(code);
+}
+
+/** The reason code a partner is shown: the code itself, or 'under_review'. */
+export function partnerReasonCode(code) {
+  if (code === null || code === undefined || code === '') return null;
+  return isSensitiveReason(code) ? PARTNER_NEUTRAL_REASON : code;
+}
+
+/** The reviewer's note as a partner may see it: none when the reason is sensitive. */
+export function partnerReasonNote(code, note) {
+  return isSensitiveReason(code) ? null : (note ?? null);
+}
+
+/** A KYC case as its partner sees it. Admin views use the case as stored. */
+export function partnerSafeCase(kycCase) {
+  if (!kycCase) return kycCase;
+  if (!isSensitiveReason(kycCase.reasonCode)) return kycCase;
+  return { ...kycCase, reasonCode: PARTNER_NEUTRAL_REASON, reasonNote: null };
+}
+
 // The existing coarse gate every app already reads (User.approvalStatus),
 // derived from the case so the two never disagree. Suspension is expressed
 // through accountStatus/payout holds, not by un-approving the role.
