@@ -1,13 +1,56 @@
 // Gym-staff roster service (RBAC) — owners create gym-level staff (e.g.
 // receptionists) scoped to their own gym(s) with a per-feature ACL.
-import { randomUUID } from 'node:crypto';
+//
+// Phase B · B3a (owner decisions 2026-10-20): the PIN an owner chooses for a
+// staff member is a start PIN. The row is marked passwordChangeRequired (the
+// column and `pwc` mechanism of functions#219); while STAFF_PIN_CHANGE_REQUIRED
+// is on, every session of that staff member is held to POST /auth/pin/change
+// until they choose their own. An owner reset (POST /owner/staff/:id/pin) sets
+// a new start PIN and holds them again. Staff who joined by invitation chose
+// their own credentials and are never marked.
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { deleteFirebaseUserIfUnshared } from '../shared/firebase-identity.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
+import { staffPinChangeRequiredOn } from '../shared/feature-flags.mjs';
+import { mustChangeStartCredential } from '../shared/credential-change.mjs';
 
 export const GYM_STAFF_ACL_SCOPES = ['members', 'checkins', 'payments', 'trainers', 'gyms', 'shop', 'communications'];
 
-export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, getAdminAuth }) {
+/** The Firebase password the app and portal derive from a PIN (mobile pin_credentials.dart, portal passwordForPin). */
+export const firebasePasswordForPin = pin => `fitflex-pin:${pin}`;
+const isPin = pin => /^\d{4}$/.test(String(pin ?? ''));
+/** A change request holds the row this long at most; after it another request may take over (as #219). */
+const CHANGE_CLAIM_MS = 60_000;
+
+export function createOwnerStaffService({
+  users, auditLog, initFirebaseAdmin, getAdminAuth,
+  // B3a. Knex handle (the change claim is one conditional UPDATE); null in unit specs that never reset or change.
+  db = null,
+  // The server key the start PIN digest is mixed with (PIN_PEPPER). Null = no digest kept ("unchanged" not checked).
+  pepper = () => null,
+  // The FitFlex-held PIN service (I7a), read lazily: { configured(), setPin(personId, pin), endSessions(personId) }.
+  pinAuth = () => null,
+  // Drop the cached session check for a profile, so ended sessions stop at once.
+  forgetSession = () => {},
+}) {
+  /** Keyed digest of the Firebase password made from the start PIN, so "new = start" can be refused. */
+  const startPinDigest = (userId, pin) => (pepper()
+    ? createHmac('sha256', String(pepper())).update(`start-password:${userId}:${firebasePasswordForPin(pin)}`).digest('hex')
+    : null);
+  /** Same digest for a raw password as the owner's app sent it (already `fitflex-pin:<pin>`). */
+  const startPasswordDigest = (userId, password) => (pepper()
+    ? createHmac('sha256', String(pepper())).update(`start-password:${userId}:${password}`).digest('hex')
+    : null);
+  const sameDigest = (a, b) => {
+    const x = Buffer.from(String(a || ''), 'hex');
+    const y = Buffer.from(String(b || ''), 'hex');
+    return x.length > 0 && x.length === y.length && timingSafeEqual(x, y);
+  };
+  const audit = (actor, action, target, before, after) => auditLog.insertAsync({
+    id: randomUUID(), at: new Date().toISOString(), actor, action, target, before, after,
+  });
+
   function hydrateStaff(u) {
     return {
       id: u.id,
@@ -18,6 +61,8 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
       gymIds: u.gymIds || [],
       aclPermissions: u.aclPermissions || [],
       createdAt: u.createdAt,
+      // B3a: still on the PIN the owner chose (only shown while the switch is on).
+      ...(staffPinChangeRequiredOn() ? { passwordChangeRequired: mustChangeStartCredential(u) } : {}),
     };
   }
 
@@ -41,10 +86,13 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
     if (existing) return { error: 'email_already_in_use', status: 409 };
 
     let firebaseUid = null;
+    // True only when this call set the Firebase password (the owner knows it).
+    let passwordSetByOwner = false;
     try {
       initFirebaseAdmin();
       const fbUser = await getAdminAuth().createUser({ email, password, displayName });
       firebaseUid = fbUser.uid;
+      passwordSetByOwner = true;
     } catch (fbErr) {
       const duplicateIdentity = ['auth/email-already-exists', 'email-already-exists']
         .includes(fbErr?.code);
@@ -60,8 +108,9 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
       }
     }
 
+    const id = `usr_${randomUUID().slice(0, 8)}`;
     const row = {
-      id: `usr_${randomUUID().slice(0, 8)}`,
+      id,
       firebaseUid,
       email,
       displayName,
@@ -73,13 +122,18 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
       gymIds: scopedGymIds,
       gymId: scopedGymIds[0],
       onboardingCompleted: true,
+      // B3a: the owner chose this credential. Always recorded; it holds the
+      // staff member's sessions only while STAFF_PIN_CHANGE_REQUIRED is on.
+      // Marked also on an identity that already existed in Firebase (as #219).
+      passwordChangeRequired: true,
+      startPasswordHash: passwordSetByOwner ? startPasswordDigest(id, password) : null,
       createdAt: new Date().toISOString(),
     };
     const created = await users.upsertAsync(u => u.id === row.id, row);
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_staff_created',
-      target: row.id, before: null, after: { email: row.email, aclPermissions, gymIds: scopedGymIds },
+      target: row.id, before: null, after: { email: row.email, aclPermissions, gymIds: scopedGymIds, passwordChangeRequired: true, existingIdentity: !passwordSetByOwner },
     });
     return { staff: hydrateStaff(created) };
   }
@@ -126,5 +180,167 @@ export function createOwnerStaffService({ users, auditLog, initFirebaseAdmin, ge
     return { ok: true };
   }
 
-  return { list, create, update, remove };
+  // ── B3a: start PIN reset and the forced change ──────────────────────────────
+
+  /** Whole seconds: session issue times (FitFlex iat, Firebase auth_time) are seconds. */
+  const secondStart = ms => new Date(Math.floor(ms / 1000) * 1000);
+
+  /**
+   * The PIN FitFlex itself holds for this Person (I7a), if any, made to match
+   * `pin`; without the PIN key it is cleared instead, so an old PIN can never
+   * keep working. Returns what was done.
+   */
+  async function alignHeldPin(personId, pin) {
+    if (!personId) return 'none';
+    const person = await db('Person').where({ id: personId }).first('id', 'pinHash');
+    if (!person?.pinHash) return 'none';
+    const service = pinAuth();
+    if (service?.configured()) { await service.setPin(personId, pin); return 'replaced'; }
+    await db('Person').where({ id: personId }).update({ pinHash: null, pinSetAt: null, updatedAt: db.fn.now() });
+    return 'cleared';
+  }
+
+  /** End every session of the Person (all its personas) and of this profile. */
+  async function endAllSessions(user, at) {
+    await db('User').where({ id: user.id }).update({ sessionsValidAfter: secondStart(at) });
+    if (user.personId && pinAuth()) await pinAuth().endSessions(user.personId);
+    forgetSession(user.id);
+  }
+
+  /**
+   * Owner: give a staff member a new start PIN (they forgot theirs). The staff
+   * member is signed out everywhere and must choose their own PIN at the next
+   * sign-in (owner decision 2026-10-20). Refused for a staff profile that
+   * shares its sign-in with another profile (joined by invitation, or an email
+   * that already had a FitFlex account): that credential is the person's own.
+   */
+  async function resetPin({ ownerGymIds, staffId, body, actorId }) {
+    const target = await users.findAsync(u => u.id === staffId && u.userType === 'gym_staff');
+    if (!target) return { error: 'staff_not_found', status: 404 };
+    if (!(target.gymIds || []).some(id => ownerGymIds.includes(id))) return { error: 'staff_not_at_your_gym', status: 403 };
+    const pin = String(body?.pin ?? '');
+    if (!isPin(pin)) return { error: 'pin_must_be_4_digits', status: 400 };
+    if (!db) return { error: 'pin_reset_not_configured', status: 503 };
+    if (!target.firebaseUid) return { error: 'staff_identity_shared', status: 409 };
+    const sharing = await db('User').whereNot({ id: target.id })
+      .andWhere(q => {
+        q.where({ firebaseUid: target.firebaseUid });
+        if (target.personId) q.orWhere({ personId: target.personId });
+      })
+      .first('id');
+    if (sharing) return { error: 'staff_identity_shared', status: 409 };
+
+    // Hold first, then change the credential: if Firebase fails the staff member
+    // is signed out and held (fail closed), never left on an unheld new PIN.
+    const at = Date.now();
+    await db('User').where({ id: target.id }).update({
+      passwordChangeRequired: true, startPasswordHash: startPinDigest(target.id, pin),
+      passwordChangeClaimedAt: null, updatedAt: new Date(at),
+    });
+    await endAllSessions(target, at);
+    try {
+      initFirebaseAdmin();
+      await getAdminAuth().updateUser(target.firebaseUid, { password: firebasePasswordForPin(pin) });
+    } catch (fbErr) {
+      console.error('[owner-staff] Firebase PIN reset failed:', fbErr?.message);
+      await audit(actorId, 'gym_staff.pin_reset_failed', target.id, null, { error: 'firebase_update_failed', sessionsEnded: true });
+      return { error: 'firebase_update_failed', status: 502 };
+    }
+    let refreshTokensRevoked = false;
+    try {
+      await getAdminAuth().revokeRefreshTokens(target.firebaseUid);
+      refreshTokensRevoked = true;
+    } catch (err) {
+      // The PIN is already changed; an older Firebase ID token is refused at sign-in by auth_time.
+      console.error('[owner-staff] Firebase refresh-token revocation failed:', err?.message);
+    }
+    const heldPin = await alignHeldPin(target.personId, pin);
+    await audit(actorId, 'gym_staff.pin_reset', target.id,
+      { passwordChangeRequired: target.passwordChangeRequired === true },
+      { passwordChangeRequired: true, sessionsEnded: true, refreshTokensRevoked, heldPin });
+    return { staff: hydrateStaff(await users.findByIdAsync(target.id)) };
+  }
+
+  /**
+   * The staff member replaces the start PIN the owner chose (POST /auth/pin/change).
+   * The same sequence as the portal admin change (#219):
+   * 1. claim the row (one conditional UPDATE): a concurrent change gets 409;
+   * 2. set the Firebase password and revoke refresh tokens (failure: claim released, flag stays);
+   * 3. make the FitFlex-held PIN match, clear the flag, end every earlier session
+   *    of the Person, and audit. The caller mints the new session.
+   */
+  async function changeStartPin({ userId, newPin, ip = null, userAgent = null }) {
+    const user = userId ? await users.findByIdAsync(userId) : null;
+    if (!user || user.userType !== 'gym_staff') return { error: 'staff_not_found', status: 404 };
+    if (!mustChangeStartCredential(user)) return { error: 'pin_change_not_required', status: 409 };
+    const pin = String(newPin ?? '');
+    if (!isPin(pin)) return { error: 'pin_must_be_4_digits', status: 400 };
+    if (user.startPasswordHash && sameDigest(startPinDigest(user.id, pin), user.startPasswordHash)) {
+      return { error: 'pin_unchanged', status: 400 };
+    }
+    if (!db) return { error: 'pin_change_not_configured', status: 503 };
+    if (!user.firebaseUid) return { error: 'firebase_update_failed', status: 502 };
+
+    // 1. Claim. Whole milliseconds, so the release and the finish can match it exactly.
+    const claimedAt = new Date(Date.now());
+    const claimed = await db('User')
+      .where({ id: user.id, passwordChangeRequired: true })
+      .andWhere(q => q.whereNull('passwordChangeClaimedAt').orWhere('passwordChangeClaimedAt', '<', new Date(+claimedAt - CHANGE_CLAIM_MS)))
+      .update({ passwordChangeClaimedAt: claimedAt })
+      .returning('id');
+    if (!claimed.length) {
+      const now = await users.findByIdAsync(user.id);
+      return now?.passwordChangeRequired === true
+        ? { error: 'pin_change_in_progress', status: 409 }
+        : { error: 'pin_change_not_required', status: 409 };
+    }
+    const mine = () => db('User').where({ id: user.id, passwordChangeClaimedAt: claimedAt });
+
+    // 2. Firebase: the credential the owner knows is the Firebase password.
+    try {
+      initFirebaseAdmin();
+      await getAdminAuth().updateUser(user.firebaseUid, { password: firebasePasswordForPin(pin) });
+    } catch (fbErr) {
+      console.error('[owner-staff] Firebase PIN update failed:', fbErr?.message);
+      await mine().update({ passwordChangeClaimedAt: null }).catch(err => console.error('[owner-staff] claim release failed:', err?.message));
+      return { error: 'firebase_update_failed', status: 502 };
+    }
+    let refreshTokensRevoked = false;
+    try {
+      await getAdminAuth().revokeRefreshTokens(user.firebaseUid);
+      refreshTokensRevoked = true;
+    } catch (err) {
+      console.error('[owner-staff] Firebase refresh-token revocation failed:', err?.message);
+    }
+
+    // 3. The PIN FitFlex holds (app PIN sign-in) must not stay the owner's either.
+    let heldPin = 'none';
+    try {
+      heldPin = await alignHeldPin(user.personId, pin);
+    } catch (err) {
+      console.error('[owner-staff] held PIN update failed:', err?.message);
+    }
+    const done = Date.now();
+    let finished = 0;
+    try {
+      finished = (await mine().update({
+        passwordChangeRequired: false, startPasswordHash: null, passwordChangeClaimedAt: null,
+        sessionsValidAfter: secondStart(done), updatedAt: new Date(done),
+      }).returning('id')).length;
+      if (finished && user.personId && pinAuth()) await pinAuth().endSessions(user.personId);
+    } catch (err) {
+      console.error('[owner-staff] clearing the start-PIN flag failed:', err?.message);
+    }
+    forgetSession(user.id);
+    // The PIN IS changed but the profile could not be updated: sign in again with the new PIN
+    // (the flag stays, so that session is still held to this route).
+    if (!finished) return { error: 'pin_changed_session_failed', status: 500 };
+
+    await audit(user.id, 'gym_staff.pin_changed', user.id,
+      { passwordChangeRequired: true },
+      { passwordChangeRequired: false, sessionsEnded: true, refreshTokensRevoked, heldPin, ip, userAgent });
+    return { user: await users.findByIdAsync(user.id) };
+  }
+
+  return { list, create, update, remove, resetPin, changeStartPin };
 }
