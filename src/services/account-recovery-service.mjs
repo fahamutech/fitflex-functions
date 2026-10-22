@@ -23,7 +23,7 @@ import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 
 const PURPOSE = 'account_recovery';
 const REQUEST_TOKEN = 'recovery_request';
-const STAFF_TYPES = new Set(['gym_staff', 'vendor_staff', 'corporate_hr']);
+const STAFF_TYPES = new Set(['gym_staff', 'vendor_staff', 'corporate_hr', 'organizer_staff']);
 const PARTNER_TYPES = ['trainer', 'gym_operator', 'vendor'];
 /** What a member is asked: facts the owner is likely to know. */
 export const EVIDENCE_KEYS = ['homeGym', 'plan', 'lastCheckin', 'paymentRef', 'other'];
