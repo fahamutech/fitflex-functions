@@ -106,7 +106,7 @@ export function createCampaignService({
     }
     if (body.audience !== undefined) {
       const { preset = null, filter = null, recipients = 'members' } = body.audience || {};
-      // FitFlex may address trainers instead of members; gyms only members.
+      // FitFlex may address trainers or vendors instead of members; gyms only members.
       const audScope = audienceScope(scope, recipients);
       if (!audScope) return { error: 'invalid_recipients', status: 400 };
       const built = buildAudienceFilter({ preset: preset ?? undefined, filter: filter ?? undefined }, audScope);
@@ -138,6 +138,16 @@ export function createCampaignService({
     const tpl = campaign.templateId && templateService ? await templateService.load(sender, campaign.templateId) : null;
     const status = tpl ? await templateService.whatsappStatus(tpl) : null;
     return status?.ready ? null : { error: 'whatsapp_template_required', status: 400 };
+  }
+
+  /**
+   * Security review of #257: the vendor app has no message settings yet, so
+   * vendors can't switch marketing off — FitFlex sends them service messages
+   * (announcement, renewal, payment) only, until it does.
+   */
+  function vendorMarketing(c) {
+    return (c.audience?.recipients === 'vendors' && c.category === 'marketing')
+      ? { error: 'vendor_marketing_not_available', status: 400 } : null;
   }
 
   function readyToSend(c) {
@@ -213,6 +223,8 @@ export function createCampaignService({
    * { members, rows, counts }. Shared by preview and send.
    */
   async function plan(sender, campaign) {
+    const vm = vendorMarketing(campaign);
+    if (vm) return vm;
     const r = await segmentService.resolveAudience({
       sender: audienceSender(sender, campaign),
       recipients: campaign.audience.recipients || 'members',
@@ -225,9 +237,12 @@ export function createCampaignService({
     const capped = campaign.category === 'marketing' ? await atMarketingCap(members.map(m => m.memberId)) : new Set();
     const name = await gymName(campaign);
     const mapping = await whatsappMappingFor(sender, campaign);
-    const locales = hasTranslations(campaign.content) || mapping.size
-      ? await segmentService.localesByMember(members.map(m => m.memberId))
-      : new Map();
+    // Vendors always get a language: English only if they chose it, else Swahili.
+    const locales = r.recipients === 'vendors'
+      ? await segmentService.vendorLocales(members.map(m => m.memberId))
+      : hasTranslations(campaign.content) || mapping.size
+        ? await segmentService.localesByMember(members.map(m => m.memberId))
+        : new Map();
     const at = now().toISOString();
     const counts = { targeted: members.length, queued: 0, skipped: {}, byChannel: {} };
     const rows = [];
@@ -255,7 +270,7 @@ export function createCampaignService({
         });
       }
     }
-    return { members, rows, counts };
+    return { members, rows, counts, recipients: r.recipients, locales };
   }
 
   // ── use cases ────────────────────────────────────────────────────────────
@@ -268,6 +283,8 @@ export function createCampaignService({
     if (body.purpose === undefined && body.templateId == null) return { error: 'invalid_purpose', status: 400 };
     const f = await draftFields(body, scope, sender);
     if (f.error) return f;
+    const vm = vendorMarketing(f.patch);
+    if (vm) return vm;
     const at = now().toISOString();
     const row = {
       id: id('cmp'), senderType: scope, gymId: gym.gymId,
@@ -320,6 +337,8 @@ export function createCampaignService({
     if (!EDITABLE.includes(c.status)) return { error: 'not_editable', status: 409 };
     const f = await draftFields(body, c.senderType, sender);
     if (f.error) return f;
+    const vm = vendorMarketing({ ...c, ...f.patch });
+    if (vm) return vm;
     if (!Object.keys(f.patch).length) return { campaign: view(c) };
     const content = f.patch.content ?? c.content;
     const gym = await gymName(c);
@@ -414,6 +433,7 @@ export function createCampaignService({
     for (const ch of c.channels) if (!p.counts.byChannel[ch]?.queued) warnings.push({ code: 'channel_reaches_no_one', channel: ch });
     if (p.counts.targeted && !p.counts.queued) warnings.push({ code: 'nobody_reachable' });
     warnings.push(...emptyValueWarnings(c, p.members, name));
+    if (p.recipients === 'vendors') warnings.push(...vendorLanguageWarnings(c, p));
     return {
       category: c.category,
       counts: p.counts,
@@ -426,7 +446,7 @@ export function createCampaignService({
   /**
    * Placeholders that would come out blank. A value like {{expiry_date}} is
    * the member's own (their membership's end date), so in a message to
-   * people without one — trainers, or members who never had a membership —
+   * people without one — trainers, vendors, or members who never had a membership —
    * it leaves a gap: "Last date to apply " with no date. One warning per
    * placeholder, with how many recipients it is blank for. And when FitFlex
    * (not a gym) uses {{gym_name}}, it reads "FitFlex" for everyone.
@@ -443,6 +463,24 @@ export function createCampaignService({
     }
     const out = used.filter(v => blank[v] > 0).map(v => ({ code: 'empty_value', variable: v, count: blank[v], of: members.length }));
     if (campaign.senderType === 'platform' && used.includes('gym_name')) out.push({ code: 'gym_name_is_fitflex' });
+    return out;
+  }
+
+  /**
+   * Vendors read Swahili unless they chose English. A vendor message with no
+   * Swahili text (neither written in Swahili nor translated) reaches those
+   * vendors in the language it was written in — said, not refused: one
+   * warning with how many recipients it affects. Likewise for English.
+   */
+  function vendorLanguageWarnings(campaign, p) {
+    const content = campaign.content;
+    const has = (loc) => (content.locale || 'en') === loc || Boolean(content.translations?.[loc]);
+    const out = [];
+    for (const loc of ['sw', 'en']) {
+      if (has(loc)) continue;
+      const count = p.members.filter(m => p.locales.get(m.memberId) === loc).length;
+      if (count) out.push({ code: loc === 'sw' ? 'no_swahili_text' : 'no_english_text', count, of: p.members.length });
+    }
     return out;
   }
 
@@ -489,7 +527,7 @@ export function createCampaignService({
       throw err;
     }
     const sent = await campaigns.findByIdAsync(c.id);
-    audit(sender, 'communication_campaign_sent', sent, { targeted: p.counts.targeted, queued: p.counts.queued });
+    audit(sender, 'communication_campaign_sent', sent, { targeted: p.counts.targeted, queued: p.counts.queued, recipients: p.recipients });
     return { campaign: view(sent) };
   }
 
@@ -664,11 +702,14 @@ export function createCampaignService({
     const trainerAudience = sender.senderType === 'platform'
       ? await segmentService.previewAudience({ sender: { senderType: 'platform' }, recipients: 'trainers', preset: 'all' })
       : null;
+    // A count only (review of #257): the full vendor facts aren't needed here.
+    const vendorCount = sender.senderType === 'platform' ? await segmentService.vendorRecipientCount() : null;
     return {
       senderType: sender.senderType,
       gymIds,
       members: audience.error ? null : audience.count,
       ...(trainerAudience ? { trainers: trainerAudience.error ? null : trainerAudience.count } : {}),
+      ...(sender.senderType === 'platform' ? { vendors: vendorCount } : {}),
       campaigns: byStatus,
       recent: recent.campaigns || [],
       channels: segmentService.channelAvailability(),

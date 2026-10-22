@@ -4,8 +4,11 @@
 // fetches the full gym (with image) on demand via GET /gyms/:id when needed.
 import { randomUUID } from 'node:crypto';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
+import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 
-export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService }) {
+// onOwnerRemoved(prior): after an admin deletes an owner row (partner DOB review L3: the Person's declared
+// date of birth and gender go once it has no personas left). Never fails the delete.
+export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService, onOwnerRemoved = async () => {} }) {
   /** Strip internal/sensitive fields from owner records for list responses. */
   function slimOwnerRow(row) {
     if (!row) return row;
@@ -80,7 +83,7 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'gym_owner_updated' : 'gym_owner_created',
-      target: id, before: prior ?? null, after: row
+      target: id, before: userAuditSnapshot(prior), after: userAuditSnapshot(row)
     });
     return { created: !prior, owner: hydrateGymOwner(row) };
   }
@@ -90,10 +93,11 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     if (!prior) return { error: 'not_found', status: 404 };
     if (prior.gymId && await checkins.findAsync(c => c.gymId === prior.gymId)) return { error: 'gym_owner_has_checkin_activity', status: 409 };
     const removed = await users.removeAsync(u => u.id === prior.id);
+    try { await onOwnerRemoved(prior); } catch (err) { console.warn('[admin-owner-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_owner_deleted',
-      target: prior.id, before: prior, after: null
+      target: prior.id, before: userAuditSnapshot(prior), after: null
     });
     return { owner: removed };
   }

@@ -13,7 +13,7 @@ import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
 import { DOCUMENT_MAX_BYTES } from '../src/shared/partner-kyc.mjs';
 
 const created = new Date().toISOString();
-const PARTNER_ROLES = ['gym_operator', 'trainer', 'vendor'];
+const PARTNER_ROLES = ['gym_operator', 'trainer', 'vendor', 'event_organizer'];
 const adminGuard = [requireAuth('admin'), requireAcl('kyc')];
 
 function send(res, result) {
@@ -68,7 +68,7 @@ const forPartner = fn => async (req, res) => {
 
 export const myKyc = {
   created, method: 'get', path: '/me/kyc',
-  description: 'Partner: my KYC case, details, payout accounts and the checklist of what is still needed. With PARTNER_PROGRESS on, also `progress`: one tracker of steps registered → approved → verified → payoutReady, the current step and a nextAction code (gym owners: plus `progress.gyms`, one per gym).',
+  description: 'Partner: my KYC case, details, payout accounts and the checklist of what is still needed. With PARTNER_PROGRESS on, also `progress`: one tracker of steps registered → approved → verified → payoutReady, the current step and a nextAction code (gym owners: plus `progress.gyms`, one per gym). A sensitive case.reasonCode (suspected_fraud, duplicate_partner) is sent as under_review, with no reasonNote.',
   onGuard: requireAuth(...PARTNER_ROLES),
   onRequest: asPartner(async partner => {
     const overview = await svc.overview(partner);
@@ -196,7 +196,7 @@ export const adminKycPartner = {
   created, method: 'get', path: '/admin/kyc/partners/:partnerType/:subjectId',
   description: 'Admin: a partner\'s KYC and checklist (partnerType gym_owner | trainer | vendor | corporate; subjectId is the user id, or the corporate account id).',
   onGuard: adminGuard,
-  onRequest: forPartner(partner => svc.overview(partner)),
+  onRequest: forPartner(partner => svc.overview(partner, { audience: 'admin' })),
 };
 
 export const adminKycPartnerBusiness = {
@@ -268,7 +268,7 @@ export const adminKycClaim = {
 
 export const adminKycDecision = {
   created, method: 'post', path: '/admin/kyc/cases/:id/decision',
-  description: 'Admin: decide a case — decision approve | reject | request_info | suspend | reinstate | reopen, reasonCode (required to reject, request info or suspend), reasonNote (shown to the partner). Approving needs a complete checklist; a super-admin may pass override: true with a reasonNote. Rejecting closes the partner role, so use request_info for anything the partner can fix.',
+  description: 'Admin: decide a case — decision approve | reject | request_info | suspend | reinstate | reopen, reasonCode (required to reject, request info or suspend), reasonNote (shown to the partner, except with a sensitive reasonCode — suspected_fraud, duplicate_partner — where the partner only sees reasonCode under_review and no note). Approving needs a complete checklist; a super-admin may pass override: true with a reasonNote. Rejecting closes the partner role, so use request_info for anything the partner can fix.',
   requestSample: { decision: 'request_info', reasonCode: 'document_unreadable', reasonNote: 'Please re-upload your certificate; the number is not readable.' },
   onGuard: adminGuard,
   onRequest: async (req, res) => send(res, await svc.decide(req.params.id, req.body || {}, adminActor(req))),

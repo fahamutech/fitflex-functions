@@ -69,14 +69,16 @@ export const ownerAudiencePreview = {
 
 export const adminCommunicationSegments = {
   created, method: 'get', path: '/admin/communications/segments',
-  description: 'Admin: preset audiences and filter fields (including area) for FitFlex-wide messages. ?recipients=trainers returns the trainer audiences instead.',
+  description: 'Admin: preset audiences and filter fields (including area) for FitFlex-wide messages. ?recipients=trainers or ?recipients=vendors returns those audiences instead.',
   onGuard: adminGuard,
-  onRequest: withSender(platformSender, async (_s, req, res) => res.json(segmentService.catalog(req.query?.recipients === 'trainers' ? 'trainers' : 'platform'))),
+  onRequest: withSender(platformSender, async (_s, req, res) => res.json(segmentService.catalog(
+    ['trainers', 'vendors'].includes(req.query?.recipients) ? req.query.recipients : 'platform',
+  ))),
 };
 
 export const adminAudiencePreview = {
   created, method: 'post', path: '/admin/communications/audience/preview',
-  description: 'Admin: how many FitFlex members (or, with recipients: "trainers", trainers) match an audience, what each channel can reach, and a few names. POST { recipients?, preset?, filter?, purpose? }.',
+  description: 'Admin: how many FitFlex members (or, with recipients: "trainers" / "vendors", trainers / vendor accounts and their admin staff) match an audience, what each channel can reach, and a few names. POST { recipients?, preset?, filter?, purpose? }.',
   requestSample: { preset: 'pass_holders', filter: { all: [{ field: 'area', op: 'contains', value: 'Arusha' }] }, purpose: 'promotion' },
   onGuard: adminGuard,
   onRequest: withSender(platformSender, async (_s, req, res) => {

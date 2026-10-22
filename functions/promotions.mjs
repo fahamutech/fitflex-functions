@@ -20,6 +20,9 @@ const isApprover = req => !req.user?.portalUser || (req.user.aclPermissions || [
 const canManage = [requireAuth('admin'), requireAcl('promotions')];
 const canApprove = [requireAuth('admin'), requireAcl('promotions_approve')];
 const canCampaign = [requireAuth('admin'), requireAcl('campaigns')];
+// Shop home slice 3: admins with `shop` map vendor areas (PUT /admin/vendors/:id), so they may READ the
+// area list too. Read-only: creating areas still needs `campaigns`. No new scope.
+const canViewAreas = [requireAuth('admin'), requireAcl('promotions', 'promotions_approve', 'campaigns', 'shop')];
 
 function send(res, result, okStatus = 200) {
   const { error, status, ...payload } = result;
@@ -162,11 +165,16 @@ export const searchPromotionPartners = {
 
 export const listGeoAreas = {
   created, method: 'get', path: '/admin/geo-areas',
-  description: 'Admin (promotions): the geographic areas promotions can target (country > region > city > district).',
-  onGuard: routeGuard('get', canView), onRequest: async (req, res) => res.json(await promotionService.listAreas()),
+  description: 'Admin (promotions, or shop for vendor area mapping; read-only): the geographic areas promotions can target and vendors sell in (country > region > city > district).',
+  onGuard: routeGuard('get', canViewAreas), onRequest: async (req, res) => res.json(await promotionService.listAreas()),
 };
 export const createGeoArea = {
   created, method: 'post', path: '/admin/geo-areas',
-  description: 'Admin (campaigns): add a region, city or district under the right parent. Body: level, name, parentId, optional lat, lng, radiusKm.',
+  description: 'Admin (campaigns): add a region, city or district under the right parent. Body: level, name, parentId, optional nameSw (Swahili name; absent = same as name), lat, lng, radiusKm. The shop uses an area as "near you" only with lat, lng and radiusKm >= 2 km (district) / 5 km (city, region).',
   onGuard: routeGuard('post', canCampaign), onRequest: async (req, res) => send(res, await promotionService.createArea({ body: req.body || {}, actorId: actor(req) }), 201),
+};
+export const updateGeoArea = {
+  created, method: 'patch', path: '/admin/geo-areas/:id',
+  description: 'Admin (campaigns): set or clear the Swahili name of an area (shop near-you). Body { nameSw: string ≤ 120 | null }. → { area }. 404 area_not_found; 422 nothing_to_update { allowed } | invalid_name_sw. Audited (promotion.geo_area_updated).',
+  onGuard: routeGuard('patch', canCampaign), onRequest: async (req, res) => send(res, await promotionService.updateArea({ id: req.params.id, body: req.body || {}, actorId: actor(req) })),
 };

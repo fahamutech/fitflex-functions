@@ -6,16 +6,20 @@
 // simply never applied while unavailable.
 import { personalisationEligibility, historyDaysFromEnv } from './shop-personalisation.mjs';
 import { buildNeeds, resolveShoppingMode } from './shop-recommendations.mjs';
-import { shopPersonalisationOn } from '../shared/feature-flags.mjs';
+import { shopPersonalisationOn, shopNearYouOn } from '../shared/feature-flags.mjs';
 
 export const PREFERENCE_SOURCES = Object.freeze(['privacy_page', 'why_sheet']);
 const usable = p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected';
 
-/** The order `uses` lists signals in (GET /shop/preferences). Location joins in slice 3. */
-export const USE_ORDER = Object.freeze(['purchase_history', 'profile_gender', 'profile_age', 'goal', 'specialty']);
+/**
+ * The order `uses` lists signals in (GET /shop/preferences). `location` (slice 3, SHOP_NEAR_YOU): the
+ * current area is used if the person allows location on the device (the server cannot know that choice).
+ */
+export const USE_ORDER = Object.freeze(['purchase_history', 'profile_gender', 'profile_age', 'location', 'goal', 'specialty']);
 
 export function createShopPreferenceService({
   store, users, identityLink, flagOn = shopPersonalisationOn, now = () => new Date(),
+  nearYouOn = shopNearYouOn,
   // (userId) → the trainer profile (declared specialties), for `uses`. Optional.
   trainerProfileOf = () => null,
   historyDays = () => historyDaysFromEnv(),
@@ -79,6 +83,8 @@ export function createShopPreferenceService({
       const trainerProfile = trainerId ? await trainerProfileOf(trainerId) : null;
       if (trainerProfile && buildNeeds({ mode: 'trainer', trainerProfile }).specialtyCategories.length) out.add('specialty');
     }
+    // Slice 3: the current area, in every mode (listed between profile_age and goal by USE_ORDER).
+    if (s.enabled && nearYouOn()) out.add('location');
     return USE_ORDER.filter(k => out.has(k));
   }
 
