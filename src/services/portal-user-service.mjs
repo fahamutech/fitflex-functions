@@ -11,6 +11,8 @@ export const PORTAL_ACL_SCOPES = [
   'kyc', 'b2b',
   // The exercise library members' training plans are made from.
   'exercises',
+  // Marathon & running events · S2: the moderation queue (/admin/events*). KYC decisions still need `kyc`.
+  'events',
   // Identity V2: deciding account recovery requests (given only to the people who should).
   'account_recovery',
   // B2B billing (Phase 5): raising invoices, approving corrections and recording payments are separate grants.

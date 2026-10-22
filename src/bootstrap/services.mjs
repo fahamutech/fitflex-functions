@@ -146,6 +146,12 @@ import { signServedToken } from '../auth/promotion-token.mjs';
 import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
 import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
 import { createZebraDocumentStore, createZebraPublicStore } from '../infra/storage-client.mjs';
+import { createPgEventCatalogueStore } from '../infra/event-catalogue-store-pg.mjs';
+import { createEventsOrganizerService } from '../services/events-organizer-service.mjs';
+import { createEventsAdminService } from '../services/events-admin-service.mjs';
+import { createEventsDiscoveryService } from '../services/events-discovery-service.mjs';
+import { registerOrganizerLookup } from '../auth/events-authz.mjs';
+import { eventsFavouritesOn, eventsRegistrationOn, eventsClosingSoonHours, eventAutoCompleteGraceHours } from '../shared/feature-flags.mjs';
 import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
@@ -848,6 +854,7 @@ export const invitationService = createInvitationService({
     hash: (invitationId, pin) => pinAuthService.startPinHash(invitationId, pin),
   },
   isRegistered: identifier => registrationService.alreadyRegistered(identifier),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
   // Placeholder until the app is in the stores: the web app.
   appLink: () => process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
   newTrainerProfile: async ({ userId, displayName, email, phone }) => {
@@ -995,6 +1002,10 @@ export const partnerKycService = createPartnerKycService({
   notify: (userId, message) => notificationService.notify(userId, message),
   // KYC documents stay private on Zebra; the API streams them after its own checks.
   documentStore: createZebraDocumentStore(),
+  // Events · S2: the organizer record its checklist reads, and the hook that keeps EventOrganizer.status
+  // derived from the case (eventsOrganizerService is declared below; only called later).
+  eventOrganizerOf: userId => eventCatalogueStore.organizerOfOwner(userId),
+  onCaseStatusChanged: (kycCase, change) => eventsOrganizerService.syncOrganizerStatus(kycCase, { reasonNote: change?.reasonNote ?? null }),
 });
 // Phase B · B4a: one partner progress tracker on GET /me/kyc (flag PARTNER_PROGRESS; read-only).
 export const partnerProgressService = createPartnerProgressService({ gyms, trainers, partnerGate, payoutEligibility });
@@ -1078,4 +1089,29 @@ export const heroImageService = createHeroImageService({
   store: createPgHeroImageStore({ db }),
   documentStore: createZebraDocumentStore(),
   publicStore: createZebraPublicStore(),
+});
+
+// Marathon & running events · S2: organizer capability, event management, admin moderation, discovery.
+// Dormant behind EVENTS_MODULE (every route but GET /events/options answers 404 feature_disabled).
+export const eventCatalogueStore = createPgEventCatalogueStore({ db });
+registerOrganizerLookup(userId => eventCatalogueStore.organizerForUser(userId));
+export const eventsOrganizerService = createEventsOrganizerService({
+  db, eventStore, catalogue: eventCatalogueStore, users, identityLink: identityLinkService, partnerKyc: partnerKycService,
+  invitations: invitationService, orgMemberships: orgMembershipService, auditLog,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  closingSoonHours: eventsClosingSoonHours, autoCompleteGraceHours: eventAutoCompleteGraceHours,
+});
+export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours });
+export const eventsDiscoveryService = createEventsDiscoveryService({
+  catalogue: eventCatalogueStore, closingSoonHours: eventsClosingSoonHours,
+  flags: { module: eventsModuleOn, favourites: eventsFavouritesOn, registration: eventsRegistrationOn },
+});
+opsService.register({
+  name: 'event-lifecycle', title: 'Event lifecycle', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  description: 'Moves events along automatically: published → registration_closed at registrationClosesAt, → in_progress at startsAt, in_progress → completed at endsAt + EVENT_AUTO_COMPLETE_GRACE_HOURS (default 6). Does nothing unless EVENTS_MODULE is on.',
+  run: async () => {
+    if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsOrganizerService.runLifecycle();
+    return { processed: r.due, succeeded: r.moved, failed: r.failed, ...r };
+  },
 });

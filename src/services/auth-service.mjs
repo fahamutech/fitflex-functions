@@ -26,6 +26,9 @@ export function normalizeRequestedRole(role) {
   if (role === 'vendor') return 'vendor';
   if (role === 'vendor_staff') return 'vendor_staff';
   if (role === 'corporate_hr') return 'corporate_hr';
+  // Marathon & running events · S2 (D3): the organizer persona and its staff, the vendor pattern mirrored.
+  if (role === 'event_organizer') return 'event_organizer';
+  if (role === 'organizer_staff') return 'organizer_staff';
   return 'member';
 }
 
@@ -115,6 +118,9 @@ export function createAuthService({
       vendorRole: user.vendorRole,
       vendorPermissions: user.vendorPermissions || [],
       corporateId: user.corporateId,
+      // Events · S2: the organizer copy (authoritative role is EventOrganizerStaff, read by events-authz).
+      organizerId: user.organizerId,
+      organizerRole: user.organizerRole,
       // Identity V2 · I2 (C3a): the Person rides along; nothing reads it as `sub`.
       ...(identityFlag('V2_PERSONAS') && user.personId ? { pid: user.personId, ver: 2 } : {}),
       // A portal admin still on the start password another admin chose: every
@@ -347,6 +353,9 @@ export function createAuthService({
       if (newUserRole === 'admin' && !isAdminEmail) return { error: 'admin_self_registration_not_allowed', status: 403 };
       // Gym staff (receptionists etc.) must be pre-created by their gym owner.
       if (newUserRole === 'gym_staff') return { error: 'gym_staff_self_registration_not_allowed', status: 403 };
+      // Events · S2: an organizer persona comes from POST /me/organizer (under the caller's Person);
+      // organizer staff only ever arrive through a staff invitation.
+      if (newUserRole === 'event_organizer' || newUserRole === 'organizer_staff') return { error: 'organizer_self_registration_not_allowed', status: 403 };
       const row = {
         id: `usr_${randomUUID().slice(0, 8)}`,
         firebaseUid: fb.uid,
