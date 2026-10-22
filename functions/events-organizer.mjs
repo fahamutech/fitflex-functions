@@ -6,8 +6,8 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { requireOrganizer, requireActiveOrganizer, requireOpenOrganizer, loadOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsModule } from '../src/shared/feature-flags.mjs';
-import { eventsOrganizerService as svc } from '../src/bootstrap/services.mjs';
+import { requireEventsModule, requireEventsRegistration } from '../src/shared/feature-flags.mjs';
+import { eventsOrganizerService as svc, eventsRegistrationService as registration } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 const ORGANIZER_TYPES = ['event_organizer', 'organizer_staff'];
@@ -110,6 +110,32 @@ export const organizerEventChanges = {
   description: 'Organizer owner / staff: the change log of an event, newest first. ?cursor&limit → { items: [{ id, at, actor { name, role }, fields[], material, note { en, sw } | null, before, after }], nextCursor, total }.',
   onGuard: anyOrganizer('get'),
   onRequest: async (req, res) => send(res, await svc.changes({ ctx: organizerOf(req), eventId: req.params.id, query: req.query || {} })),
+};
+
+// ── Registrations and orders (S3 spec §3.13; EVENTS_REGISTRATION on, else 404 feature_disabled) ──
+// Reads only (D12: no organizer cancel). Another organizer's event → 404 event_not_found (existence not revealed).
+const rosterReaders = method => routeGuard(method, [requireEventsRegistration, requireAuth(...ORGANIZER_TYPES), requireOpenOrganizer('owner', 'admin', 'ops', 'timing')]);
+const orderReaders = method => routeGuard(method, [requireEventsRegistration, requireAuth(...ORGANIZER_TYPES), requireOpenOrganizer('owner', 'admin', 'finance')]);
+
+export const organizerRegistrationsSummary = {
+  created, method: 'get', path: '/organizer/events/:id/registrations/summary',
+  description: 'Organizer owner / admin / ops / timing (EVENTS_REGISTRATION on): counts → { byStatus { reserved, confirmed, cancelled }, byCategory [{ categoryId, name, capacity, sold, held }] }. 404 event_not_found for another organizer\'s event.',
+  onGuard: rosterReaders('get'),
+  onRequest: async (req, res) => send(res, await registration.organizerRegistrationsSummary({ ctx: organizerOf(req), eventId: req.params.id })),
+};
+
+export const organizerListRegistrations = {
+  created, method: 'get', path: '/organizer/events/:id/registrations',
+  description: 'Organizer owner / admin / ops / timing (EVENTS_REGISTRATION on): the roster, created desc. ?status=reserved|confirmed|cancelled&categoryId&q (full name, confirmed rows only)&cursor&limit → { items [{ id, participant { name }, categoryName, ticketTypeName, status, orderReference, teamName, kitSize, createdAt, claimed }], nextCursor, total }. Before payment names are masked ("A*** M*****") and kitSize is null; never phone, email, DOB, gender or emergency contact. 404 event_not_found for another organizer\'s event.',
+  onGuard: rosterReaders('get'),
+  onRequest: async (req, res) => send(res, await registration.organizerListRegistrations({ ctx: organizerOf(req), eventId: req.params.id, query: req.query || {} })),
+};
+
+export const organizerListOrders = {
+  created, method: 'get', path: '/organizer/events/:id/orders',
+  description: 'Organizer owner / admin / finance (EVENTS_REGISTRATION on): orders of my event, newest first. ?status&cursor&limit → { items [{ id, reference, status, purchaser { type: member | organization, label (masked member name or organisation name) }, placesCount, totalTzs, feesTzs, currency, createdAt, holdExpiresAt, closedAt, closeReason }], nextCursor, total }. 404 event_not_found for another organizer\'s event.',
+  onGuard: orderReaders('get'),
+  onRequest: async (req, res) => send(res, await registration.organizerListOrders({ ctx: organizerOf(req), eventId: req.params.id, query: req.query || {} })),
 };
 
 // ── Staff ─────────────────────────────────────────────────────────────────

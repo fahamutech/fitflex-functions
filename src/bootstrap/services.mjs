@@ -150,6 +150,9 @@ import { createPgEventCatalogueStore } from '../infra/event-catalogue-store-pg.m
 import { createEventsOrganizerService } from '../services/events-organizer-service.mjs';
 import { createEventsAdminService } from '../services/events-admin-service.mjs';
 import { createEventsDiscoveryService } from '../services/events-discovery-service.mjs';
+import { createEventsRegistrationService } from '../services/events-registration-service.mjs';
+import { createEventsRosterService } from '../services/events-roster-service.mjs';
+import { eventsMaxParticipantsPerOrder, eventsConsentTextVersion } from '../shared/events-config.mjs';
 import { registerOrganizerLookup } from '../auth/events-authz.mjs';
 import { eventsFavouritesOn, eventsRegistrationOn, eventsClosingSoonHours, eventAutoCompleteGraceHours } from '../shared/feature-flags.mjs';
 import { createHeroImageService } from '../services/hero-image-service.mjs';
@@ -487,7 +490,12 @@ export const b2bOps = registerB2BJobs({
 // Marathon & running events · S1 (foundation): persistence, the hold primitive and the hold-expiry job.
 // Dormant behind EVENTS_MODULE — nothing here is reachable from a route; the job returns at once while
 // the flag is off. Construction is unconditional (like every other store) so the wiring is exercised.
-export const eventStore = createPgEventStore({ db });
+export const eventStore = createPgEventStore({
+  db,
+  // S3: after an expired order's release commits, the purchaser is told once (eventsRegistrationService is
+  // defined further down; the hook only runs later, from the job).
+  hooks: { afterExpire: result => eventsRegistrationService.onOrderExpired(result) },
+});
 opsService.register({
   name: 'event-hold-expiry', title: 'Event hold expiry', schedule: { type: 'every', minutes: 5 }, quiet: true,
   description: 'Gives back the places of unpaid event orders whose hold has lapsed (order expired, registrations cancelled). Does nothing unless EVENTS_MODULE is on.',
@@ -1124,12 +1132,42 @@ export const eventsOrganizerService = createEventsOrganizerService({
   invitations: invitationService, orgMemberships: orgMembershipService, auditLog,
   notify: (userId, message) => notificationService.notify(userId, message),
   closingSoonHours: eventsClosingSoonHours, autoCompleteGraceHours: eventAutoCompleteGraceHours,
+  // S3: the overview counters (eventsRegistrationService is defined below; only called later).
+  registrationTotals: organizerId => eventsRegistrationService.organizerTotals(organizerId),
 });
 export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours });
 export const eventsDiscoveryService = createEventsDiscoveryService({
   catalogue: eventCatalogueStore, closingSoonHours: eventsClosingSoonHours,
   flags: { module: eventsModuleOn, favourites: eventsFavouritesOn, registration: eventsRegistrationOn },
+  // S3 (spec §3.1): the registration keys of the probe. payment is 'none' in S3 (S4 derives manual / provider).
+  registrationOptions: () => ({
+    holdTtlMinutes: eventStore.holdTtlMinutes(), maxParticipantsPerOrder: eventsMaxParticipantsPerOrder(), payment: 'none', teams: true, corporate: true,
+    claim: { smsCodes: smsSender().configured === true, emailCodes: emailSender().configured === true },
+    consentTextVersion: eventsConsentTextVersion(),
+  }),
 });
+// Marathon & running events · S3: registration modes, checkout orders, claims, teams, corporate rosters.
+// Dormant behind EVENTS_REGISTRATION (needs EVENTS_MODULE): every route answers 404 feature_disabled otherwise.
+export const eventsRegistrationService = createEventsRegistrationService({
+  db, eventStore, catalogue: eventCatalogueStore, users, verifiedContacts, auditLog,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  closingSoonHours: eventsClosingSoonHours,
+  claimCodes: () => ({ smsCodes: smsSender().configured === true, emailCodes: emailSender().configured === true }),
+  // Claim invitations (S4 seam; nothing calls inviteClaims in S3) go through the shared SMS service like B2B invites.
+  senders: {
+    sms: () => ({
+      configured: smsProvider.configured === true,
+      send: async (to, { text }) => {
+        const out = await smsService.send({ category: 'invitation', text, recipients: [{ phone: to }], maxAttempts: 1 });
+        const r = out.results[0] ?? {};
+        return r.outcome === 'sent' ? { ok: true } : { ok: false, error: r.reason ?? r.error ?? 'not_accepted' };
+      },
+    }),
+    email: () => emailSender(),
+  },
+});
+export const eventsRosterService = createEventsRosterService({ db, registration: eventsRegistrationService, users, closingSoonHours: eventsClosingSoonHours });
 opsService.register({
   name: 'event-lifecycle', title: 'Event lifecycle', schedule: { type: 'every', minutes: 5 }, quiet: true,
   description: 'Moves events along automatically: published → registration_closed at registrationClosesAt, → in_progress at startsAt, in_progress → completed at endsAt + EVENT_AUTO_COMPLETE_GRACE_HOURS (default 6). Does nothing unless EVENTS_MODULE is on.',
