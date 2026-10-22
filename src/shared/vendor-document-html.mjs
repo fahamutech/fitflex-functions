@@ -2,7 +2,7 @@
 // view the portal shows in a sandboxed iframe) and the error pages. One template for every document type,
 // from the document JSON (src/shared/vendor-documents.mjs). No JavaScript, no third-party requests (only
 // the vendor's https logo), every value escaped. Design spec §4, §5, §9.
-import { DOC_LABELS, label, langOf, money, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner } from './vendor-documents.mjs';
+import { DOC_LABELS, label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner } from './vendor-documents.mjs';
 
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ESC[c]);
@@ -65,10 +65,10 @@ function linesBlock(doc, lang) {
   const hasVat = doc.lines.some(l => l.vatCode);
   const list = doc.lines.map((l) => {
     const name = `${l.name}${l.variant ? ` (${l.variant})` : ''}`;
-    const sub = `${l.qty} × ${money(l.unitPriceTzs)}${l.discountTzs ? ` · ${label(lang, 'discount')} -${Number(l.discountTzs).toLocaleString('en-US')}` : ''}`;
+    const sub = `${l.qty} × ${money(l.unitPriceTzs)}${l.discountTzs ? ` · ${label(lang, 'discount')} ${minusMoney(l.discountTzs)}` : ''}`;
     return `<dl class="line"><dt>${esc(name)}</dt><dd>${esc(money(l.amountTzs))}${l.vatCode ? ` ${esc(l.vatCode)}` : ''}</dd><dd class="sub">${esc(sub)}</dd></dl>`;
   }).join('');
-  const rows = doc.lines.map(l => `<tr><td>${esc(`${l.name}${l.variant ? ` (${l.variant})` : ''}`)}</td><td class="n">${esc(l.qty)}</td><td class="n">${esc(money(l.unitPriceTzs))}</td><td class="n">${l.discountTzs ? `-${esc(Number(l.discountTzs).toLocaleString('en-US'))}` : ''}</td><td class="n">${esc(money(l.amountTzs))}</td>${hasVat ? `<td>${esc(l.vatCode || '')}</td>` : ''}</tr>`).join('');
+  const rows = doc.lines.map(l => `<tr><td>${esc(`${l.name}${l.variant ? ` (${l.variant})` : ''}`)}</td><td class="n">${esc(l.qty)}</td><td class="n">${esc(money(l.unitPriceTzs))}</td><td class="n">${l.discountTzs ? esc(minusMoney(l.discountTzs)) : ''}</td><td class="n">${esc(money(l.amountTzs))}</td>${hasVat ? `<td>${esc(l.vatCode || '')}</td>` : ''}</tr>`).join('');
   return `<section aria-labelledby="h-lines"><h2 id="h-lines">${L(lang, 'item')}</h2>
 <div class="lines-list">${list}</div>
 <table class="lines-table"><thead><tr><th scope="col">${L(lang, 'item')}</th><th scope="col" class="n">${L(lang, 'qty')}</th><th scope="col" class="n">${L(lang, 'price')}</th><th scope="col" class="n">${L(lang, 'discount')}</th><th scope="col" class="n">${L(lang, 'amount')}</th>${hasVat ? `<th scope="col">${L(lang, 'vat')}</th>` : ''}</tr></thead><tbody>${rows}</tbody></table></section>`;
@@ -77,7 +77,7 @@ function linesBlock(doc, lang) {
 function totalsBlock(doc, lang) {
   if (doc.docType === 'statement' || doc.docType === 'payment_receipt') return '';
   return `<div class="totals"><div><span>${L(lang, 'subtotal')}</span><span>${esc(money(doc.subtotalTzs))}</span></div>
-${doc.discountsTzs > 0 ? `<div><span>${L(lang, 'discounts')}</span><span>-${esc(Number(doc.discountsTzs).toLocaleString('en-US'))}</span></div>` : ''}
+${doc.discountsTzs > 0 ? `<div><span>${L(lang, 'discounts')}</span><span>${esc(minusMoney(doc.discountsTzs))}</span></div>` : ''}
 <div class="grand"><span>${L(lang, 'total')}</span><span>${esc(money(doc.totalTzs))}</span></div>
 ${doc.vatSummary?.length ? `<div class="muted"><span>${L(lang, 'includesVat', { amount: money(doc.vatIncludedTzs) })}</span></div>` : ''}</div>`;
 }
@@ -197,6 +197,6 @@ function messagePage(lang, titleKey, bodyKey, extra = () => '') {
  * all of them, chosen only by ?lang= — never by anything about the link — so nothing can be learnt (§5.5).
  */
 export const renderUnavailable = queryLang => messagePage(queryLang && ['en', 'sw'].includes(queryLang) ? queryLang : null, 'unavailableTitle', 'unavailableBody');
-export const renderRateLimited = queryLang => messagePage(queryLang && ['en', 'sw'].includes(queryLang) ? queryLang : null, 'rateLimited', null);
-export const renderServerError = queryLang => messagePage(queryLang && ['en', 'sw'].includes(queryLang) ? queryLang : null, 'serverError', null);
-export const renderPdfFailed = (lang, token) => messagePage(lang, 'pdfFailedPage', null, l => `<p><a href="${esc(`${token}?lang=${l}`)}">${L(l, 'backToPage')}</a></p>`);
+export const renderRateLimited = queryLang => messagePage(queryLang && ['en', 'sw'].includes(queryLang) ? queryLang : null, 'rateLimitedTitle', 'rateLimited');
+export const renderServerError = queryLang => messagePage(queryLang && ['en', 'sw'].includes(queryLang) ? queryLang : null, 'serverErrorTitle', 'serverError');
+export const renderPdfFailed = (lang, token) => messagePage(lang, 'pdfFailedTitle', 'pdfFailedPage', l => `<p><a href="${esc(`${token}?lang=${l}`)}">${L(l, 'backToPage')}</a></p>`);

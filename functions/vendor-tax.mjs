@@ -76,7 +76,7 @@ export const vendorTaxRates = {
 // ── admin: tax rates (scope `payments`, maker ≠ checker) ────────────────────
 
 const adminRates = method => routeGuard(method, [requireAuth('admin'), requireAcl('payments')]);
-const RATE = '{ id, code, nameEn, nameSw, ratePct|null, exempt, effectiveFrom (EAT day), effectiveTo|null (the day before the next approved rate), status: active|scheduled|ended|pending|rejected|withdrawn, reason, proposedBy, proposedAt, decidedBy|null, decidedAt|null, decisionNote|null, history: [{ action, actor, at, before, after }] }';
+const RATE = '{ id, code, nameEn, nameSw, ratePct|null, exempt, effectiveFrom (EAT day), effectiveTo|null (the day before the next approved rate), status: active|scheduled|ended|pending|rejected|withdrawn, reason, proposedBy { id, name|null ("System" for the seed) }, proposedAt, decidedBy { id, name|null }|null, decidedAt|null, decisionNote|null, history: [{ action, actor { id, name|null }, at, before, after }] }';
 
 export const adminListTaxRates = {
   created, method: 'get', path: '/admin/tax-rates',
@@ -90,7 +90,7 @@ export const adminListTaxRates = {
 
 export const adminProposeTaxRate = {
   created, method: 'post', path: '/admin/tax-rates',
-  description: `Admin, scope \`payments\` (${FLAG}): propose a rate change; ANOTHER admin must approve it. Body { code (A | C | E), ratePct (0–100, ≤ 2 decimals; C must be 0) | exempt: true (E only), effectiveFrom (YYYY-MM-DD, tomorrow EAT or later), reason (3–300) }. → 201 { rate } (status pending). 400 effective_date_past { earliest } | code_not_in_use (B, D) | invalid_code | invalid_rate | invalid_field | reason_required | reason_too_long.`,
+  description: `Admin, scope \`payments\` (${FLAG}): propose a rate change; ANOTHER admin must approve it. Body { code (A | C | E), ratePct (0–100, ≤ 2 decimals; C must be 0) | exempt: true (E only), effectiveFrom (YYYY-MM-DD, tomorrow EAT or later), reason (3–300) }. → 201 { rate } (status pending; proposedBy / decidedBy as { id, name }). 400 effective_date_past { earliest } | code_not_in_use (B, D) | invalid_code | invalid_rate | invalid_field | reason_required | reason_too_long.`,
   requestSample: { code: 'A', ratePct: 16, effectiveFrom: '2026-11-01', reason: 'Finance Act 2026 (example)' },
   onGuard: adminRates('post'),
   onRequest: async (req, res) => {

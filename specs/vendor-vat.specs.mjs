@@ -403,11 +403,11 @@ test('tax rates: seeded A 18 / C 0 / E exempt, B and D not in use; maker ≠ che
   await assert.rejects(db('TaxRate').where({ id }).update({ status: 'approved', decidedBy: 'adm_maker', decidedAt: new Date() }), /taxrate_maker_checker/);
   const approved = await call(adminApproveTaxRate, adminClaims('adm_checker'), { params: { id } });
   assert.equal(approved.status, 200, JSON.stringify(approved.body));
-  assert.deepEqual([approved.body.rate.status, approved.body.rate.decidedBy], ['approved', 'adm_checker']);
+  assert.deepEqual([approved.body.rate.status, approved.body.rate.decidedBy], ['approved', { id: 'adm_checker', name: null }]);
   const after1 = await call(adminListTaxRates, adminClaims('adm_maker'));
   const row = after1.body.rates.find(r => r.id === id);
   assert.equal(row.status, 'scheduled');
-  assert.deepEqual(row.history.map(h => [h.action, h.actor]), [['tax_rate_proposed', 'adm_maker'], ['tax_rate_approved', 'adm_checker']]);
+  assert.deepEqual(row.history.map(h => [h.action, h.actor.id]), [['tax_rate_proposed', 'adm_maker'], ['tax_rate_approved', 'adm_checker']]);
   assert.equal(after1.body.rates.find(r => r.id === 'txr_seed_a').effectiveTo, today, 'the old rate ends today');
   // Today's sales keep 18%; from tomorrow 16% (rates are read for the sale's EAT day).
   assert.equal((await ratesOn(db, today)).get('A').ratePct, 18);
@@ -566,4 +566,26 @@ test('KYC vat_certificate: not listed or accepted with VENDOR_VAT off; listed (o
   const ok = await put();
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal((await items()).includes('business.vat_certificate'), true);
+});
+
+// ── UAT D3 ───────────────────────────────────────────────────────────────────
+
+test('UAT D3: admin tax rates name who proposed and decided ({ id, name }); the seed reads "System"; history actors too', async () => {
+  on();
+  const maker = await user('admin', { displayName: 'Amina Maker' });
+  const checker = await user('admin', { displayName: 'Baraka Checker' });
+  const tomorrow = addDays(eatDate(new Date()), 40);
+  const proposed = await call(adminProposeTaxRate, adminClaims(maker), { body: { code: 'C', ratePct: 0, effectiveFrom: tomorrow, reason: 'UAT D3 names' } });
+  assert.equal(proposed.status, 201, JSON.stringify(proposed.body));
+  made.rates.push(proposed.body.rate.id);
+  assert.deepEqual([proposed.body.rate.proposedBy, proposed.body.rate.decidedBy], [{ id: maker, name: 'Amina Maker' }, null]);
+  const approved = await call(adminApproveTaxRate, adminClaims(checker), { params: { id: proposed.body.rate.id } });
+  assert.deepEqual(approved.body.rate.decidedBy, { id: checker, name: 'Baraka Checker' });
+  const list = (await call(adminListTaxRates, adminClaims(checker))).body.rates;
+  const row = list.find(r => r.id === proposed.body.rate.id);
+  assert.deepEqual([row.proposedBy, row.decidedBy], [{ id: maker, name: 'Amina Maker' }, { id: checker, name: 'Baraka Checker' }]);
+  assert.deepEqual(row.history.map(h => [h.action, h.actor]), [['tax_rate_proposed', { id: maker, name: 'Amina Maker' }], ['tax_rate_approved', { id: checker, name: 'Baraka Checker' }]]);
+  const seed = list.find(r => r.id === 'txr_seed_a');
+  assert.deepEqual([seed.proposedBy, seed.decidedBy], [{ id: 'system:seed', name: 'System' }, { id: 'system:seed-approval', name: 'System' }]);
+  await db('TaxRate').where({ id: proposed.body.rate.id }).del();
 });

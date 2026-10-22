@@ -314,6 +314,12 @@ export function createPgVendorTaxStore({ db, now = () => new Date() }) {
 
   return {
     load, save, decide, codes, rates, rate, historyOf, propose, decideRate,
+    /** Display names by user id (admins on tax rates). */
+    namesOf: async (ids) => {
+      const wanted = [...new Set(ids.filter(id => id && !String(id).startsWith('system:')))];
+      if (!wanted.length) return new Map();
+      return new Map((await db('User').whereIn('id', wanted).select('id', 'displayName')).map(r => [r.id, r.displayName ?? null]));
+    },
     inForce: async vendorId => (await taxContextOf(db, vendorId)).inForce,
     setProductVatCode, vatCodesOf, vatCodesById,
     ratesOn: day => ratesOn(db, day),
