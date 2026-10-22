@@ -2,7 +2,8 @@
 //
 // - ShopPreference: one row per Person (or per user id when the account has no Person) holding the
 //   "Personalised shop" switch. No row = on (owner decision 2026-10-20: on by default, one opt-out).
-//   `source` = where the last change was made (privacy_page | why_sheet). Every change is also
+//   `source` = where the last change was made (privacy_page | why_sheet; identity_link when an
+//   opt-out came over from a Person merged into this one). Every change is also
 //   written to AuditLog (shop_preference_changed).
 // - Product.targetGender (women | men | null = everyone) and Product.targetAgeBands
 //   (subset of 18_29, 30_44, 45_59, 60_plus; empty = all ages): optional vendor tags. They only
@@ -27,7 +28,7 @@ exports.up = async function up(knex) {
       t.timestamp('updatedAt', { precision: 3, useTz: true }).notNullable().defaultTo(knex.fn.now());
     });
     await knex.raw(`ALTER TABLE "ShopPreference" ADD CONSTRAINT shoppreference_subject_chk CHECK ("subjectType" IN ('person','user'))`);
-    await knex.raw(`ALTER TABLE "ShopPreference" ADD CONSTRAINT shoppreference_source_chk CHECK ("source" IS NULL OR "source" IN ('privacy_page','why_sheet'))`);
+    await knex.raw(`ALTER TABLE "ShopPreference" ADD CONSTRAINT shoppreference_source_chk CHECK ("source" IS NULL OR "source" IN ('privacy_page','why_sheet','identity_link'))`);
   }
 
   if (await knex.schema.hasTable('Product')) {

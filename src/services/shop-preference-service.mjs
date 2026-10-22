@@ -4,13 +4,22 @@
 // `available` = SHOP_PERSONALISATION on and the person holds an adult member persona (see
 // shop-personalisation.personalisationEligibility). The switch may be saved either way; it is
 // simply never applied while unavailable.
-import { personalisationEligibility } from './shop-personalisation.mjs';
+import { personalisationEligibility, historyDaysFromEnv } from './shop-personalisation.mjs';
+import { buildNeeds } from './shop-recommendations.mjs';
 import { shopPersonalisationOn } from '../shared/feature-flags.mjs';
 
 export const PREFERENCE_SOURCES = Object.freeze(['privacy_page', 'why_sheet']);
 const usable = p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected';
 
-export function createShopPreferenceService({ store, users, identityLink, flagOn = shopPersonalisationOn, now = () => new Date() }) {
+/** The order `uses` lists signals in (GET /shop/preferences). Location joins in slice 3. */
+export const USE_ORDER = Object.freeze(['purchase_history', 'profile_gender', 'profile_age', 'goal', 'specialty']);
+
+export function createShopPreferenceService({
+  store, users, identityLink, flagOn = shopPersonalisationOn, now = () => new Date(),
+  // (userId) → the trainer profile (declared specialties), for `uses`. Optional.
+  trainerProfileOf = () => null,
+  historyDays = () => historyDaysFromEnv(),
+}) {
   /** Whose setting this is: the Person, else (an account without a Person) the user itself. */
   const subjectOf = (user, claims) => (user?.personId
     ? { personId: user.personId, subjectType: 'person' }
@@ -46,12 +55,31 @@ export function createShopPreferenceService({ store, users, identityLink, flagOn
     const stored = await store.get(subject.personId);
     const personalised = stored ? stored.personalised : true;
     const buyerIds = [...new Set([claims.sub, u?.id, ...ps.map(p => p.id)].filter(Boolean))];
-    return { flagOn: on, ...eligibility, personalised, enabled: eligibility.available && personalised, subject, buyerIds };
+    return { flagOn: on, ...eligibility, personalised, enabled: eligibility.available && personalised, subject, buyerIds, memberProfile: member.profile, personas: ps, user: u };
+  }
+
+  /**
+   * Which signals this account's shop actually uses right now, so the app's privacy text can be exact.
+   * Switched off (flag on): none. Flag off or not available: only what Phase 1 uses (declared goal, specialty).
+   */
+  async function usesOf(s, claims) {
+    const out = new Set();
+    if (s.flagOn && !s.personalised) return [];
+    if (s.enabled) {
+      out.add('purchase_history');
+      if (s.audienceAllowed && ['female', 'male'].includes(s.memberProfile?.gender)) out.add('profile_gender');
+      if (s.audienceAllowed) out.add('profile_age');
+    }
+    if (s.memberProfile && buildNeeds({ mode: 'member', memberProfile: s.memberProfile }).goalCategories.length) out.add('goal');
+    const trainerId = claims.userType === 'trainer' ? claims.sub : s.personas.find(p => p.userType === 'trainer')?.id;
+    const trainerProfile = trainerId ? await trainerProfileOf(trainerId) : null;
+    if (trainerProfile && buildNeeds({ mode: 'trainer', trainerProfile }).specialtyCategories.length) out.add('specialty');
+    return USE_ORDER.filter(k => out.has(k));
   }
 
   async function get({ claims }) {
     const s = await stateFor({ claims });
-    return { body: { personalised: s.personalised, available: s.available } };
+    return { body: { personalised: s.personalised, available: s.available, historyDays: historyDays(), uses: await usesOf(s, claims) } };
   }
 
   async function set({ claims, body = {} }) {

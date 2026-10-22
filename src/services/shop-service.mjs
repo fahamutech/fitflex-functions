@@ -1,7 +1,7 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
 import { formatTsh } from '../shared/money-display.mjs';
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
-import { parseProductTargets, withoutTargets, TARGET_FIELDS, TARGET_AGE_BANDS } from '../shared/product-targets.mjs';
+import { parseProductTargets, withoutTargets, targetsOf, TARGET_FIELDS, TARGET_AGE_BANDS } from '../shared/product-targets.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { storeNameOf } from '../shared/vendor-name.mjs';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
@@ -513,7 +513,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (targetGender !== undefined && !GENDERS.includes(targetGender)) return { error: 'invalid_filter', status: 400, field: 'targetGender', allowed: GENDERS };
     if (targetAgeBand !== undefined && !BANDS.includes(targetAgeBand)) return { error: 'invalid_filter', status: 400, field: 'targetAgeBand', allowed: BANDS };
     const genderOk = p => targetGender === undefined || (targetGender === 'everyone' ? !p.targetGender : p.targetGender === targetGender);
-    const bandsOf = p => (Array.isArray(p.targetAgeBands) ? p.targetAgeBands : []);
+    const bandsOf = p => targetsOf(p).targetAgeBands; // every band counts as all ages
     const bandOk = p => targetAgeBand === undefined || (targetAgeBand === 'all' ? bandsOf(p).length === 0 : bandsOf(p).includes(targetAgeBand));
     const rows = (await products.filterAsync(product => !product.deletedAt && genderOk(product) && bandOk(product))).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
     return vendorProductsView(null, rows, { costAllowed: true });

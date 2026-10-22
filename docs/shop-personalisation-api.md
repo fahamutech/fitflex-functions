@@ -5,6 +5,11 @@ Design spec: parent repo `docs/design/shop-home-phase2.md` §6, §10.5–10.6, �
 Builds on `docs/shop-home-api.md` (Phase 1) and `docs/shop-banners-api.md` (slice 1).
 
 Owner decisions this implements (final, 2026-10-20): purchase history and gender/age are **on by default with one opt-out** ("Personalised shop"); gender/age only **reorder** products a vendor tagged, **member mode only**, never filter, never in a title; **under-18 → personalisation fully off** (spec Q-6 recommendation accepted); nothing is ever inferred from activity, health, training, sponsor/company or KYC data; the flag may go on right after QA. The privacy text describing this is a **draft pending Tanzanian counsel**.
+Owner decision 2026-10-22: an account with **no date of birth** gets **purchase history only** (never gender or age) until a valid adult date of birth is set; trainer/owner-only accounts stay without personalisation for now (date of birth at their onboarding is a separate fix).
+
+## Release rule (must hold before the flag goes on)
+
+**`SHOP_PERSONALISATION` must not be switched on until the app build with the "Personalised shop" switch (mobile#214) is live** for members. Older builds have no opt-out (the owner's one opt-out would not exist for them) and cannot render the `bought_category` / `bought_product` reasons. The backend side may be deployed dormant at any time.
 
 ## Flag and settings
 
@@ -17,10 +22,17 @@ Fixed in code (`src/services/shop-personalisation.mjs`): non-consumables bought 
 
 ## Who can be personalised (`available`)
 
-`available` = flag on **and** the Person holds a usable **member** persona (or the signed-in account is a member) **and** that member is **not under 18**. Age is whole years on today's East Africa day from `memberProfile.dateOfBirth` of the member persona.
-- Under 18 → `available: false`: no purchase history, no gender, no age, anywhere, in every mode.
-- No date of birth → still available; only the age signal is never used.
-- No member persona (e.g. a trainer-only or owner-only account) → `available: false` (no date of birth to rule out a minor). **Deviation from spec §6.3**, which shows the switch with the partner hint in every mode: with this rule a trainer/owner sees personalisation only if the same Person also holds an adult member persona. Then purchase history applies in trainer/owner/vendor_personal mode too; gender/age never do.
+`available` = flag on **and** the Person holds a usable **member** persona (or the signed-in account is a member) **and** that member's `memberProfile.dateOfBirth` allows it. Age is whole years on today's East Africa day.
+
+| Member's stored `dateOfBirth` | `available` | Purchase history | Gender / age |
+|---|---|---|---|
+| absent (missing, null, `""`, blanks) | true | yes | **never** |
+| present but not valid (not strict `YYYY-MM-DD`, not a real day, before 1901-01-01, after today) | **false (fail closed)** | no | no |
+| valid, under 18 | false | no | no |
+| valid, 18 or over | true | yes | yes (member mode only) |
+
+Examples that count as **not valid** (fail closed): `2011/05/03`, `03/05/2011`, `2011-5-3`, ` 2011-05-03`, `2027-01-01` (future), `2023-02-30`.
+- No member persona (e.g. a trainer-only or owner-only account) → `available: false` (no date of birth to rule out a minor). **Deviation from spec §6.3**, which shows the switch with the partner hint in every mode: with this rule a trainer/owner sees personalisation only if the same Person also holds a member persona that allows it (table above). Then purchase history applies in trainer/owner/vendor_personal mode too; gender/age never do. Owner 2026-10-22: stays so in this PR.
 
 `enabled` = `available` **and** the stored preference is on.
 
@@ -29,11 +41,15 @@ Fixed in code (`src/services/shop-personalisation.mjs`): non-consumables bought 
 Signed in, any role. Always `200` (also with the flag off):
 
 ```json
-{ "personalised": true, "available": true }
+{ "personalised": true, "available": true, "historyDays": 365, "uses": ["purchase_history", "profile_gender", "profile_age", "goal"] }
 ```
 
 - `personalised`: the stored choice; **no row = `true`** (on by default, new and existing accounts).
+- `historyDays`: the configured purchase-history window (`SHOP_HISTORY_DAYS`), for the privacy text ("in the last year").
+- `uses`: the signals this account's shop **actually uses now**, in this order: `purchase_history`, `profile_gender`, `profile_age`, `goal` (declared fitness goal, member mode), `specialty` (declared trainer specialties, trainer mode). Rules: flag on + switched off → `[]`; not available or flag off → only `goal` / `specialty` (what the Phase 1 page uses); `profile_gender` only with a valid adult date of birth and gender `female`/`male`; `profile_age` only with a valid adult date of birth. Location is not listed until slice 3. Build the "What we use" list from this.
 - The setting belongs to the **Person** (all roles of the account share it). An account with no Person uses its own user id.
+- **Person link / merge** (verified sign-in links personas onto one Person): the switch follows the moved personas, and **an opt-out on either side wins** (the merged Person is opted out). The change is audited with `source: "identity_link"` (a server-only value; PUT does not accept it). The old Person's row goes when it becomes a tombstone.
+- **Account deletion**: the row is deleted once the Person has no personas left.
 
 ## `PUT /shop/preferences`
 
@@ -48,7 +64,7 @@ Signed in, any role. Flag off → `404 {"error":"feature_disabled"}`.
 | `personalised` | boolean, required | `400 {"error":"invalid_field","field":"personalised"}` |
 | `source` | `privacy_page` \| `why_sheet`, required | `400 {"error":"invalid_field","field":"source","allowed":["privacy_page","why_sheet"]}` |
 
-→ `200` same shape as GET. More than 30 calls a minute per user → `429 {"error":"rate_limited"}` (in memory per server).
+→ `200` same shape as GET (incl. `historyDays`, `uses`). More than 30 calls a minute per user → `429 {"error":"rate_limited"}` (in memory per server).
 Saving is allowed even when `available` is false (it is just never applied). Each **change** writes an audit row `shop_preference_changed` (actor = signed-in user, target = person/user key, before `{personalised}`, after `{personalised, source}`); saving the same value again writes nothing.
 
 ## `GET /shop/home` (flag on)
@@ -87,7 +103,7 @@ Everything from `docs/shop-home-api.md` stays. Additions, **only with the flag o
 - `essentials` keeps its title; reason gets `bought_category {category}` when history changed it.
 - Paid placements are still never in `recommended` or `essentials`.
 
-**Gender / age** (`profile_gender`, `profile_age`): **member mode only**, declared `memberProfile.gender` (`female` → `women`, `male` → `men`; `other`/unset → not used) and `memberProfile.dateOfBirth` (band `18_29`, `30_44`, `45_59`, `60_plus`).
+**Gender / age** (`profile_gender`, `profile_age`): **member mode only**, **only with a valid adult date of birth** (none at all when it is absent), declared `memberProfile.gender` (`female` → `women`, `male` → `men`; `other`/unset → not used) and `memberProfile.dateOfBirth` (band `18_29`, `30_44`, `45_59`, `60_plus`).
 - `profile_gender` / `profile_age` are reported only when the **final** order of that rail differs from the order without gender/age; if both tags point the same way both are reported, if they cancel out neither is.
 - Applied **after** the sections are filled, within `recommended` and `essentials` only: a stable reorder that moves products whose vendor tag matches (gender match +1, age band match +1) earlier. The **set of products in every section is identical with or without it**; untagged products and products tagged for another group stay where they are relative to each other.
 - Never in trainer, owner or vendor_personal mode.
@@ -100,7 +116,7 @@ Everything from `docs/shop-home-api.md` stays. Additions, **only with the flag o
 - `recently_viewed` still shows (it is the ids the app itself sends; the app may stop sending them when off);
 - `personalised: false`, `signalsUsed` ⊆ `role`, `recently_viewed`.
 
-### Not available (flag on; under 18, or no member persona)
+### Not available (flag on; no member persona, invalid date of birth, or under 18)
 
 `personalisation: { "available": false, "enabled": false }`; the page is the Phase 1 page (role, declared goal/specialty, recently viewed), never purchase history, gender or age. If such an account also stored `personalised: false`, the switch-off rules above apply.
 
@@ -111,12 +127,21 @@ Migration `20270105090000-shop-personalisation`: `Product.targetGender` text (`w
 | Where | Behaviour |
 |---|---|
 | `POST /vendor/products`, `PUT /vendor/products/:id` | Accepted (vendor + vendor_staff with `products`). Create: missing = null / `[]`. Update: missing = unchanged; `null` clears gender; `[]` clears bands. **Not review fields**: changing them never sends an approved product back to pending. Accepted whether or not the flag is on. |
-| Validation | `targetGender` not one of `women`, `men`, null → `400 {"error":"invalid_field","field":"targetGender","allowed":["women","men",null]}`. `targetAgeBands` not an array, an unknown value, or a repeat → `400 {"error":"invalid_field","field":"targetAgeBands","allowed":["18_29","30_44","45_59","60_plus"]}`. |
+| Validation | `targetGender` not one of `women`, `men`, null → `400 {"error":"invalid_field","field":"targetGender","allowed":["women","men",null]}`. `targetAgeBands` not an array, an unknown value, or a repeat → `400 {"error":"invalid_field","field":"targetAgeBands","allowed":["18_29","30_44","45_59","60_plus"]}`. **All four bands = all ages: stored and returned as `[]`** (the app should show "All ages" selected). |
 | Vendor rows | `GET /vendor/products` and the create/update/duplicate responses carry `targetGender` and `targetAgeBands`. Duplicate copies them. |
 | `GET /admin/products` | Rows carry both fields, **read-only**. Filters: `?targetGender=women|men|everyone` (everyone = null), `?targetAgeBand=18_29|30_44|45_59|60_plus|all` (a band = products whose list contains it; `all` = empty list). Bad value → `400 {"error":"invalid_filter","field":"targetGender"|"targetAgeBand","allowed":[...]}`. |
 | `POST /admin/products`, `PUT /admin/products/:id/listing` | Do **not** accept them (ignored; spec Q-7 says editing is in the vendor app). |
 | Buyer rows | `/shop/products`, `/shop/products/:id` (incl. `similarProducts`), `/shop/vendors/:id`, `/discover/products`, `/shop/home` **never** carry them. |
 | `GET /vendor/tools/options` | `merch.productTargets: true` when `SHOP_PERSONALISATION` is on. The app shows the "Who it's for (optional)" section only then. |
+
+## Date of birth on write (endpoint behaviour change, 2026-10-22)
+
+`POST /me/profile` (members) and `POST /admin/members` (`memberProfile.dateOfBirth`) now check the date of birth:
+- strict `"YYYY-MM-DD"`, a real calendar date, from `1901-01-01` to today (East Africa day) → saved;
+- anything else → `400 {"error":"invalid_field","field":"dateOfBirth"}` and **nothing is saved**;
+- `""` (or only spaces) → clears it (stored as null); `null` or leaving it out keeps the stored value (as before).
+
+Before this, any text was stored. Dates already stored in another format are not changed; for personalisation they count as "present but not valid" (fail closed) until the member saves a valid one. The app's free-text field (hint `YYYY-MM-DD`) must show the error for this code.
 
 ## Deviations from the design spec (stated)
 

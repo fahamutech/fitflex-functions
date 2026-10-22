@@ -5,7 +5,7 @@
 // gender/age only REORDER products a vendor tagged, member mode only, never filter, never in a
 // title; under-18 → personalisation fully off. Only the declared profile and the person's own paid
 // orders are read: never activity, health, training, sponsor/company or KYC data.
-import { ageOn } from '../shared/audience.mjs';
+import { readDateOfBirth } from '../shared/date-of-birth.mjs';
 import { ageBandOf, targetsOf } from '../shared/product-targets.mjs';
 
 /** Categories bought again and again: a recent purchase in one of these may be suggested again. */
@@ -28,17 +28,23 @@ export const eatDay = now => new Date(+new Date(now) + EAT_OFFSET_MS).toISOStrin
 const time = v => { const t = +new Date(v || 0); return Number.isFinite(t) ? t : 0; };
 
 /**
- * Who may be personalised. Needs an adult member: the member persona's declared date of birth
- * must not make them under 18. No member persona → not available (no date of birth to rule out a
- * minor). No date of birth → available, the age signal is simply never used.
- * → { available, reason: null | 'flag_off' | 'no_member' | 'under_18', age: number|null }
+ * Who may be personalised, from the member persona's declared date of birth (owner, 2026-10-22):
+ *   no member persona          → nothing (reason no_member; trainer/owner-only accounts, for now)
+ *   date of birth absent       → purchase history only; never gender or age (reason null, audienceAllowed false)
+ *   present but not a valid date (wrong format, not a real day, before 1901, in the future)
+ *                              → nothing at all: fail closed (reason invalid_dob)
+ *   valid, under 18            → nothing (reason under_18)
+ *   valid, 18 or over          → everything (purchase history, gender, age)
+ * → { available, reason: null|'flag_off'|'no_member'|'invalid_dob'|'under_18', age: number|null, audienceAllowed }
  */
 export function personalisationEligibility({ flagOn, hasMember, memberProfile, now }) {
-  if (!flagOn) return { available: false, reason: 'flag_off', age: null };
-  if (!hasMember) return { available: false, reason: 'no_member', age: null };
-  const age = ageOn(memberProfile?.dateOfBirth, eatDay(now));
-  if (age !== null && age < 18) return { available: false, reason: 'under_18', age };
-  return { available: true, reason: null, age };
+  if (!flagOn) return { available: false, reason: 'flag_off', age: null, audienceAllowed: false };
+  if (!hasMember) return { available: false, reason: 'no_member', age: null, audienceAllowed: false };
+  const dob = readDateOfBirth(memberProfile?.dateOfBirth, now);
+  if (dob.status === 'absent') return { available: true, reason: null, age: null, audienceAllowed: false };
+  if (dob.status === 'invalid') return { available: false, reason: 'invalid_dob', age: null, audienceAllowed: false };
+  if (dob.age < 18) return { available: false, reason: 'under_18', age: dob.age, audienceAllowed: false };
+  return { available: true, reason: null, age: dob.age, audienceAllowed: true };
 }
 
 /**
@@ -89,7 +95,8 @@ export function purchaseHistoryFrom(orders, { buyerIds, now, days = HISTORY_DAYS
  * → { gender: 'women'|'men'|null, ageBand: band|null }
  */
 export function audienceFrom({ mode, memberProfile, age }) {
-  if (mode !== 'member' || !memberProfile) return { gender: null, ageBand: null };
+  // Only with a valid adult age: no date of birth means no gender either (owner, 2026-10-22).
+  if (mode !== 'member' || !memberProfile || !Number.isInteger(age) || age < 18) return { gender: null, ageBand: null };
   const gender = memberProfile.gender === 'female' ? 'women' : memberProfile.gender === 'male' ? 'men' : null;
   const ageBand = Number.isInteger(age) && age >= 18 ? ageBandOf(age) : null;
   return { gender, ageBand };

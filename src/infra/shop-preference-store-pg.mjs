@@ -37,6 +37,47 @@ export function createPgShopPreferenceStore({ db }) {
   };
 }
 
+/**
+ * Identity link / merge (identity-link-service): personas moved from `fromPersonId` to `toPersonId`.
+ * The switch follows them, and an opt-out on either side wins (the merged person stays opted out).
+ * When the old Person becomes a tombstone (`removeFrom`), its row is deleted. Runs inside the link
+ * transaction; does nothing when the table does not exist yet (code deployed before the migration).
+ * Each change of the target's value is audited (source 'identity_link').
+ */
+export async function carryShopPreference(trx, { fromPersonId, toPersonId, removeFrom = false, actorId = null }) {
+  if (!fromPersonId || !toPersonId || fromPersonId === toPersonId) return { changed: false };
+  const exists = await trx.raw('SELECT to_regclass(\'"ShopPreference"\') AS t');
+  if (!exists.rows?.[0]?.t) return { changed: false };
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`shop_preference:${toPersonId}`]);
+  const from = await trx('ShopPreference').where({ personId: fromPersonId }).first();
+  const to = await trx('ShopPreference').where({ personId: toPersonId }).first();
+  let changed = false;
+  if (from && from.personalised === false && (!to || to.personalised !== false)) {
+    const at = new Date().toISOString();
+    const row = { personalised: false, source: 'identity_link', updatedBy: actorId, updatedAt: at };
+    if (to) await trx('ShopPreference').where({ personId: toPersonId }).update(row);
+    else await trx('ShopPreference').insert({ personId: toPersonId, subjectType: 'person', createdAt: at, ...row });
+    await trx('AuditLog').insert({
+      id: randomUUID(), at, actor: actorId || 'system', action: 'shop_preference_changed', target: toPersonId,
+      before: JSON.stringify({ personalised: to ? Boolean(to.personalised) : true }),
+      after: JSON.stringify({ personalised: false, source: 'identity_link', fromPersonId }),
+    });
+    changed = true;
+  }
+  if (removeFrom && from) await trx('ShopPreference').where({ personId: fromPersonId }).del();
+  return { changed };
+}
+
+/** Account deleted: drop the switch once its Person (or the account itself) has nothing left. */
+export async function forgetShopPreference(db, { userId, personId }) {
+  const exists = await db.raw('SELECT to_regclass(\'"ShopPreference"\') AS t');
+  if (!exists.rows?.[0]?.t) return;
+  if (userId) await db('ShopPreference').where({ personId: userId, subjectType: 'user' }).del();
+  if (!personId) return;
+  const left = await db('User').where({ personId }).first('id');
+  if (!left) await db('ShopPreference').where({ personId }).del();
+}
+
 /** In memory (unit specs). `audit` collects the audit rows. */
 export function createMemoryShopPreferenceStore() {
   const rows = new Map();

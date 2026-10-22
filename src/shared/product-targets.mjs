@@ -22,8 +22,9 @@ export function parseProductTargets(body = {}) {
     const v = body.targetAgeBands;
     const ok = Array.isArray(v) && v.every(b => TARGET_AGE_BANDS.includes(b)) && new Set(v).size === v.length;
     if (!ok) return { error: 'invalid_field', status: 400, field: 'targetAgeBands', allowed: [...TARGET_AGE_BANDS] };
-    // Stored in the fixed band order so the same choice always reads back the same.
-    patch.targetAgeBands = TARGET_AGE_BANDS.filter(b => v.includes(b));
+    // Stored in the fixed band order so the same choice always reads back the same. Every band = all ages = [].
+    const bands = TARGET_AGE_BANDS.filter(b => v.includes(b));
+    patch.targetAgeBands = bands.length === TARGET_AGE_BANDS.length ? [] : bands;
   }
   return { patch };
 }
@@ -39,8 +40,12 @@ export function withoutTargets(row) {
 export function targetsOf(row) {
   return {
     targetGender: TARGET_GENDERS.includes(row?.targetGender) ? row.targetGender : null,
-    targetAgeBands: Array.isArray(row?.targetAgeBands) ? row.targetAgeBands.filter(b => TARGET_AGE_BANDS.includes(b)) : [],
+    targetAgeBands: allBandsAreNone(Array.isArray(row?.targetAgeBands) ? row.targetAgeBands.filter(b => TARGET_AGE_BANDS.includes(b)) : []),
   };
+}
+/** Every band is the same as no band (all ages). */
+function allBandsAreNone(bands) {
+  return TARGET_AGE_BANDS.every(b => bands.includes(b)) ? [] : bands;
 }
 
 /** Age in whole years → band, or null under 18 / unknown. */

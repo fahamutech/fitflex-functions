@@ -13,12 +13,16 @@ import {
   vendorCreateProduct, vendorUpdateProduct, vendorMyProducts, vendorDuplicateProduct, adminListProducts, adminCreateProduct,
   adminUpdateProductListing, listShopProducts, getShopProduct, vendorToolsOptionsRoute,
 } from '../functions/shop.mjs';
-import { shopHomeService } from '../src/bootstrap/services.mjs';
+import { shopHomeService, identityLinkService, accountService } from '../src/bootstrap/services.mjs';
+import { updateMemberProfile } from '../functions/subscriptions.mjs';
+import { adminUpsertMember } from '../functions/admin-members.mjs';
 
 await ensureInit();
 
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
-const made = { users: [], products: [], persons: [], orders: [] };
+// The switch and availability only (the body also carries historyDays and uses).
+const pa = body => ({ personalised: body.personalised, available: body.available });
+const made = { users: [], products: [], persons: [], orders: [], linked: [] };
 function res() {
   return { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
 }
@@ -80,6 +84,10 @@ after(async () => {
   await db('Product').whereIn('id', made.products).del();
   await db('User').whereIn('id', made.users).del();
   if (made.persons.length) await db('Person').whereIn('id', made.persons).del();
+  // Persons of the link specs stay (IdentityEvent is append-only, as in identity-i2-linking.specs.mjs);
+  // their ShopPreference rows and audit rows are removed.
+  await db('ShopPreference').whereIn('personId', made.linked).del();
+  await db('AuditLog').whereIn('target', made.linked).del();
   await db.destroy();
 });
 
@@ -89,7 +97,7 @@ test('preferences: flag off — GET says available false, PUT is 404 feature_dis
   const m = await member();
   const get = await call(getShopPreferences, asMember(m));
   assert.equal(get.statusCode, 200);
-  assert.deepEqual(get.body, { personalised: true, available: false });
+  assert.deepEqual(pa(get.body), { personalised: true, available: false });
   const put = await call(putShopPreferences, asMember(m), { body: { personalised: false, source: 'why_sheet' } });
   assert.equal(put.statusCode, 404);
   assert.deepEqual(put.body, { error: 'feature_disabled' });
@@ -104,14 +112,14 @@ test('preferences: on by default; a change is saved per Person, shared by every 
   const per = await person();
   const m = await member({}, { personId: per });
   const owner = await user('gym_operator', { personId: per });
-  assert.deepEqual((await call(getShopPreferences, asMember(m))).body, { personalised: true, available: true });
+  assert.deepEqual(pa((await call(getShopPreferences, asMember(m))).body), { personalised: true, available: true });
   const put = await call(putShopPreferences, asMember(m), { body: { personalised: false, source: 'why_sheet' } });
   assert.equal(put.statusCode, 200, JSON.stringify(put.body));
-  assert.deepEqual(put.body, { personalised: false, available: true });
+  assert.deepEqual(pa(put.body), { personalised: false, available: true });
   const row = await db('ShopPreference').where({ personId: per }).first();
   assert.deepEqual([row.subjectType, row.personalised, row.source, row.updatedBy], ['person', false, 'why_sheet', m]);
   // Another role of the same person sees the same switch, and it is still off on reload.
-  assert.deepEqual((await call(getShopPreferences, { sub: owner, userType: 'gym_operator' })).body, { personalised: false, available: true });
+  assert.deepEqual(pa((await call(getShopPreferences, { sub: owner, userType: 'gym_operator' })).body), { personalised: false, available: true });
   // Same value again: nothing new written.
   await call(putShopPreferences, { sub: owner, userType: 'gym_operator' }, { body: { personalised: false, source: 'privacy_page' } });
   let audit = await db('AuditLog').where({ target: per, action: 'shop_preference_changed' }).orderBy('at');
@@ -147,11 +155,11 @@ test('preferences: validation, availability (under 18, no member persona) and th
   }
   assert.deepEqual((await call(putShopPreferences, asMember(m), { body: { personalised: false, source: 'x' } })).body.allowed, ['privacy_page', 'why_sheet']);
   const kid = await member({ dateOfBirth: '2011-01-01' });
-  assert.deepEqual((await call(getShopPreferences, asMember(kid))).body, { personalised: true, available: false });
+  assert.deepEqual(pa((await call(getShopPreferences, asMember(kid))).body), { personalised: true, available: false });
   const noDob = await user('member', { memberProfile: JSON.stringify({ gender: 'male' }) });
   assert.equal((await call(getShopPreferences, asMember(noDob))).body.available, true);
   const trainer = await user('trainer');
-  assert.deepEqual((await call(getShopPreferences, { sub: trainer, userType: 'trainer' })).body, { personalised: true, available: false });
+  assert.deepEqual(pa((await call(getShopPreferences, { sub: trainer, userType: 'trainer' })).body), { personalised: true, available: false });
   // Limit.
   const fresh = await member();
   const t = Date.now();
@@ -325,4 +333,131 @@ test('home: a 16-year-old member gets no personalisation even with orders and ta
   assert.equal(out.body.personalised, false);
   const codes = out.body.sections.flatMap(s => s.reasonCodes);
   for (const c of ['bought_category', 'bought_product', 'profile_gender', 'profile_age']) assert.ok(!codes.includes(c), c);
+});
+
+// ── review round 1 (2026-10-22) ─────────────────────────────────────────────
+
+const BYPASS_DOBS = ['2011/05/03', '03/05/2011', '2011-5-3', ' 2011-05-03', '2027-01-01', '2023-02-30', '1900-06-01'];
+const dobOf = async id => (await db('User').where({ id }).first()).memberProfile?.dateOfBirth ?? null;
+
+test('POST /me/profile: dateOfBirth must be a real YYYY-MM-DD from 1901 to today, else 400 and nothing saved; "" clears; null keeps', async () => {
+  const m = await member({ dateOfBirth: '1990-04-01' });
+  for (const bad of BYPASS_DOBS) {
+    const out = await call(updateMemberProfile, asMember(m), { body: { dateOfBirth: bad, displayName: 'Changed' } });
+    assert.equal(out.statusCode, 400, bad);
+    assert.deepEqual(out.body, { error: 'invalid_field', field: 'dateOfBirth' }, bad);
+  }
+  const row = await db('User').where({ id: m }).first();
+  assert.deepEqual([row.memberProfile.dateOfBirth, row.displayName], ['1990-04-01', 'Personalisation member'], 'nothing saved by a refused request');
+  assert.equal((await call(updateMemberProfile, asMember(m), { body: { dateOfBirth: '1985-12-31' } })).statusCode, 200);
+  assert.equal(await dobOf(m), '1985-12-31');
+  await call(updateMemberProfile, asMember(m), { body: { dateOfBirth: null, fitnessGoal: 'stay_fit' } });
+  assert.equal(await dobOf(m), '1985-12-31', 'null keeps it');
+  await call(updateMemberProfile, asMember(m), { body: { fitnessGoal: 'stay_fit' } });
+  assert.equal(await dobOf(m), '1985-12-31', 'left out keeps it');
+  assert.equal((await call(updateMemberProfile, asMember(m), { body: { dateOfBirth: '' } })).statusCode, 200);
+  assert.equal(await dobOf(m), null, '"" clears it');
+  // Not a member: the field is not stored for other roles and is not checked.
+  const trainer = await user('trainer');
+  assert.equal((await call(updateMemberProfile, { sub: trainer, userType: 'trainer' }, { body: { dateOfBirth: '03/05/2011' } })).statusCode, 200);
+});
+
+test('POST /admin/members: same date-of-birth rule', async () => {
+  const admin = { sub: await user('admin'), userType: 'admin' };
+  const m = await member({ dateOfBirth: '1990-04-01' });
+  for (const bad of BYPASS_DOBS) {
+    const out = await call(adminUpsertMember, admin, { body: { id: m, memberProfile: { dateOfBirth: bad } } });
+    assert.equal(out.statusCode, 400, bad);
+    assert.deepEqual(out.body, { error: 'invalid_field', field: 'dateOfBirth' }, bad);
+  }
+  assert.equal(await dobOf(m), '1990-04-01');
+  assert.equal((await call(adminUpsertMember, admin, { body: { id: m, memberProfile: { dateOfBirth: '2000-01-31' } } })).statusCode, 200);
+  assert.equal(await dobOf(m), '2000-01-31');
+  await call(adminUpsertMember, admin, { body: { id: m, memberProfile: { dateOfBirth: '' } } });
+  assert.equal(await dobOf(m), null);
+  await db('AuditLog').whereIn('target', [m]).del();
+});
+
+test('home + preferences: a stored date in another format fails closed; no date of birth gives history only', async () => {
+  process.env.SHOP_PERSONALISATION = '1';
+  const vendor = await user('vendor', { createdAt: old });
+  const p = await product(vendor, { category: 'health_recovery' });
+  // Written straight to the database, as an old row might hold it.
+  const legacy = await member({ dateOfBirth: '03/05/1990' });
+  await shopOrder(legacy, [{ productId: p, name: 'Roller', qty: 1 }]);
+  const out = await call(shopHome, asMember(legacy));
+  assert.deepEqual(out.body.personalisation, { available: false, enabled: false });
+  assert.deepEqual((await call(getShopPreferences, asMember(legacy))).body, { personalised: true, available: false, historyDays: 365, uses: [] });
+  const noDob = await user('member', { memberProfile: JSON.stringify({ gender: 'female' }) });
+  await shopOrder(noDob, [{ productId: p, name: 'Roller', qty: 1 }]);
+  assert.deepEqual((await call(getShopPreferences, asMember(noDob))).body, { personalised: true, available: true, historyDays: 365, uses: ['purchase_history'] });
+  process.env.SHOP_HISTORY_DAYS = '30';
+  assert.equal((await call(getShopPreferences, asMember(noDob))).body.historyDays, 30);
+  delete process.env.SHOP_HISTORY_DAYS;
+});
+
+test('admin list: a product stored with all four bands counts as all ages; vendors saving all four get []', async () => {
+  const vendor = await user('vendor', { createdAt: old });
+  const v = { sub: vendor, userType: 'vendor' };
+  const created = await call(vendorCreateProduct, v, { body: { name: 'Every age', priceTzs: 5_000, stock: 1, targetAgeBands: ['18_29', '30_44', '45_59', '60_plus'] } });
+  made.products.push(created.body.id);
+  assert.deepEqual(created.body.targetAgeBands, []);
+  const legacy = await product(vendor, { targetAgeBands: ['18_29', '30_44', '45_59', '60_plus'] });
+  const admin = { sub: await user('admin'), userType: 'admin' };
+  const all = (await call(adminListProducts, admin, { query: { targetAgeBand: 'all' } })).body.map(r => r.id);
+  assert.ok(all.includes(created.body.id) && all.includes(legacy));
+});
+
+// Link/merge: B's persona moves onto A's Person through a verified email; B's Person becomes a tombstone.
+async function linkScenario({ anchorPref, otherPref }) {
+  const uidA = uid('fb');
+  const email = `${uid('merge')}@example.com`;
+  const a = await user('member', { firebaseUid: uidA, email, accountStatus: 'active', approvalStatus: 'approved', memberProfile: JSON.stringify({ dateOfBirth: '1990-01-01' }) });
+  const b = await user('vendor', { email, accountStatus: 'active', approvalStatus: 'approved' });
+  const pa = (await db('User').where({ id: a }).first()).personId;
+  const pb = (await db('User').where({ id: b }).first()).personId;
+  made.linked.push(pa, pb);
+  assert.notEqual(pa, pb);
+  const at = new Date();
+  if (anchorPref !== undefined) await db('ShopPreference').insert({ personId: pa, subjectType: 'person', personalised: anchorPref, source: 'why_sheet', updatedBy: a, updatedAt: at });
+  if (otherPref !== undefined) await db('ShopPreference').insert({ personId: pb, subjectType: 'person', personalised: otherPref, source: 'privacy_page', updatedBy: b, updatedAt: at });
+  const result = await identityLinkService.linkOnVerifiedSignIn({ anchorUserId: a, uid: uidA, email });
+  return { a, b, pa, pb, result };
+}
+
+test('link/merge: an opt-out on the merged-in Person carries over (audited); the tombstone loses its row', async () => {
+  const { a, pa, pb, result } = await linkScenario({ anchorPref: undefined, otherPref: false });
+  assert.deepEqual(result.mergedPersonIds, [pb], JSON.stringify(result));
+  assert.equal((await db('Person').where({ id: pb }).first()).mergedIntoId, pa);
+  const row = await db('ShopPreference').where({ personId: pa }).first();
+  assert.deepEqual([row.personalised, row.source], [false, 'identity_link']);
+  assert.equal(await db('ShopPreference').where({ personId: pb }).first(), undefined);
+  const audit = await db('AuditLog').where({ target: pa, action: 'shop_preference_changed' });
+  assert.equal(audit.length, 1);
+  assert.deepEqual([audit[0].actor, audit[0].before, audit[0].after], [a, { personalised: true }, { personalised: false, source: 'identity_link', fromPersonId: pb }]);
+  assert.equal((await call(getShopPreferences, asMember(a))).body.personalised, false);
+});
+
+test('link/merge: the anchor\'s opt-out stays; two "on" sides stay on; nothing is invented', async () => {
+  const kept = await linkScenario({ anchorPref: false, otherPref: true });
+  assert.equal((await db('ShopPreference').where({ personId: kept.pa }).first()).personalised, false);
+  assert.equal(await db('ShopPreference').where({ personId: kept.pb }).first(), undefined);
+  assert.equal((await db('AuditLog').where({ target: kept.pa, action: 'shop_preference_changed' })).length, 0);
+  const none = await linkScenario({});
+  assert.equal(await db('ShopPreference').where({ personId: none.pa }).first(), undefined);
+  assert.equal((await call(getShopPreferences, asMember(none.a))).body.personalised, true);
+});
+
+test('account deletion: the switch is deleted once the Person has no personas left, kept while one remains', async () => {
+  const per = await person();
+  const m = await member({}, { personId: per });
+  const t = await user('trainer', { personId: per });
+  await db('ShopPreference').insert({ personId: per, subjectType: 'person', personalised: false, source: 'why_sheet', updatedBy: m, updatedAt: new Date() });
+  const deleted = await accountService.deleteMyAccount(await db('User').where({ id: m }).first());
+  assert.equal(deleted.ok, true, JSON.stringify(deleted));
+  assert.ok(await db('ShopPreference').where({ personId: per }).first(), 'the trainer persona still holds the Person');
+  const again = await accountService.deleteMyAccount(await db('User').where({ id: t }).first());
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.equal(await db('ShopPreference').where({ personId: per }).first(), undefined);
+  await db('AuditLog').whereIn('target', [m, t]).del();
 });

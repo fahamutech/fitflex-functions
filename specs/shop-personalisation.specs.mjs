@@ -6,7 +6,8 @@ import {
   purchaseHistoryFrom, personalisationEligibility, audienceFrom, reorderForAudience, historyDaysFromEnv, eatDay,
   CONSUMABLE_CATEGORIES, REBUY_WINDOW_DAYS,
 } from '../src/services/shop-personalisation.mjs';
-import { parseProductTargets, withoutTargets, ageBandOf } from '../src/shared/product-targets.mjs';
+import { parseProductTargets, withoutTargets, ageBandOf, targetsOf } from '../src/shared/product-targets.mjs';
+import { isValidDateOfBirth, readDateOfBirth, parseDateOfBirthInput } from '../src/shared/date-of-birth.mjs';
 import { buildShopHome } from '../src/services/shop-recommendations.mjs';
 import { createShopService } from '../src/services/shop-service.mjs';
 import { createShopHomeService, shopHomeConfigFromEnv } from '../src/services/shop-home-service.mjs';
@@ -15,6 +16,8 @@ import { createMemoryShopPreferenceStore } from '../src/infra/shop-preference-st
 import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 
 const NOW = new Date('2026-10-22T08:00:00Z');
+// The switch and availability only (the body also carries historyDays and uses).
+const pa = body => ({ personalised: body.personalised, available: body.available });
 const DAY = 86_400_000;
 const ago = days => new Date(NOW - days * DAY).toISOString();
 const PERSONAL_CODES = ['bought_category', 'bought_product', 'profile_gender', 'profile_age'];
@@ -81,12 +84,15 @@ test('eligibility: flag, adult member persona, under 18 and no date of birth', (
   const eighteen = `${Number(today.slice(0, 4)) - 18}${today.slice(4)}`;
   assert.equal(personalisationEligibility({ flagOn: true, hasMember: true, memberProfile: { dateOfBirth: eighteen }, now: at }).available, true);
   const noDob = personalisationEligibility({ flagOn: true, hasMember: true, memberProfile: { gender: 'female' }, now: at });
-  assert.deepEqual([noDob.available, noDob.age], [true, null]);
+  assert.deepEqual([noDob.available, noDob.age, noDob.audienceAllowed], [true, null, false], 'no date of birth: history only');
 });
 
 test('audience: member mode only; declared gender and age band; other/unset gender is not used', () => {
   assert.deepEqual(audienceFrom({ mode: 'member', memberProfile: { gender: 'female' }, age: 33 }), { gender: 'women', ageBand: '30_44' });
-  assert.deepEqual(audienceFrom({ mode: 'member', memberProfile: { gender: 'male' }, age: null }), { gender: 'men', ageBand: null });
+  assert.deepEqual(audienceFrom({ mode: 'member', memberProfile: { gender: 'male' }, age: 40 }), { gender: 'men', ageBand: '30_44' });
+  // No valid adult age: no gender either (owner, 2026-10-22).
+  assert.deepEqual(audienceFrom({ mode: 'member', memberProfile: { gender: 'male' }, age: null }), { gender: null, ageBand: null });
+  assert.deepEqual(audienceFrom({ mode: 'member', memberProfile: { gender: 'male' }, age: 17 }), { gender: null, ageBand: null });
   assert.deepEqual(audienceFrom({ mode: 'member', memberProfile: { gender: 'other' }, age: 61 }), { gender: null, ageBand: '60_plus' });
   for (const mode of ['trainer', 'owner', 'vendor_personal']) assert.deepEqual(audienceFrom({ mode, memberProfile: { gender: 'female' }, age: 30 }), { gender: null, ageBand: null }, mode);
   assert.deepEqual([17, 18, 29, 30, 44, 45, 59, 60].map(ageBandOf), [null, '18_29', '18_29', '30_44', '30_44', '45_59', '45_59', '60_plus']);
@@ -269,7 +275,7 @@ test('on, history only in a category the shop no longer has → bought_category 
 });
 
 test('on, member mode: a Women-tagged product moves earlier; nothing added or removed; profile_gender only on that rail; no gender word', async () => {
-  const s = setup({ users: [{ ...ADULT_F, memberProfile: { gender: 'female' } }], env: { SHOP_HOME_SECTIONS: 'recommended,new_arrivals' } });
+  const s = setup({ users: [ADULT_F], env: { SHOP_HOME_SECTIONS: 'recommended,new_arrivals' } });
   for (let i = 0; i < 6; i += 1) s.add({ category: 'equipment', targetGender: i === 5 ? 'women' : i === 4 ? 'men' : null });
   const off = await s.phase1.home({ claims: claimsOf(ADULT_F) });
   const on = await s.service.home({ claims: claimsOf(ADULT_F) });
@@ -280,7 +286,7 @@ test('on, member mode: a Women-tagged product moves earlier; nothing added or re
   assert.equal(b[0], 'prd_006');
   assert.ok(b.includes('prd_005'), 'Men-tagged product still shown');
   assert.ok(sec(on.body, 'recommended').reasonCodes.includes('profile_gender'));
-  assert.ok(!sec(on.body, 'recommended').reasonCodes.includes('profile_age'), 'no date of birth: no age');
+  assert.ok(!sec(on.body, 'recommended').reasonCodes.includes('profile_age'), 'no product carries an age band here');
   assert.deepEqual(on.body.signalsUsed.filter(x => PERSONAL_SIGNALS.includes(x)), ['profile_gender']);
   assert.equal(on.body.personalised, true);
   for (const x of on.body.sections) assert.ok(!GENDER_AGE_WORDS.test(`${x.title.en} ${x.title.sw} ${x.reason.en} ${x.reason.sw}`), x.key);
@@ -324,7 +330,7 @@ test('under 18: personalisation fully off — no history, no gender, no age, tag
   assert.ok(!on.body.sections.flatMap(x => x.reasonCodes).some(c => PERSONAL_CODES.includes(c)));
   assert.ok(!on.body.signalsUsed.some(x => PERSONAL_SIGNALS.includes(x)));
   assert.deepEqual(s.seen, [], 'a minor\'s orders are not even read');
-  assert.deepEqual((await s.preferences.get({ claims: claimsOf(kid) })).body, { personalised: true, available: false });
+  assert.deepEqual(pa((await s.preferences.get({ claims: claimsOf(kid) })).body), { personalised: true, available: false });
 });
 
 test('no member persona (trainer only): not available, Phase 1 page', async () => {
@@ -355,7 +361,7 @@ test('switch off: no personal reason or signal at all; "Popular in the shop"; de
   assert.deepEqual(sec(out.body, 'recommended').reasonCodes, ['generic', 'role_context']);
   // Applies across roles of the same Person.
   s.users.rows.push({ id: 'o1', userType: 'gym_operator', personId: 'per1' });
-  assert.deepEqual((await s.preferences.get({ claims: { sub: 'o1', userType: 'gym_operator' } })).body, { personalised: false, available: true });
+  assert.deepEqual(pa((await s.preferences.get({ claims: { sub: 'o1', userType: 'gym_operator' } })).body), { personalised: false, available: true });
 });
 
 test('recommended never holds a paid placement, even in a bought category', async () => {
@@ -389,10 +395,10 @@ test('isolation: another user\'s orders never leak, the shared cache holds nothi
 
 test('preferences (service): default on, validation, change audited once, same value writes nothing; flag off refuses saves', async () => {
   const s = setup({ users: [ADULT_F, { id: 'solo', userType: 'member' }] });
-  assert.deepEqual((await s.preferences.get({ claims: claimsOf(ADULT_F) })).body, { personalised: true, available: true });
+  assert.deepEqual(pa((await s.preferences.get({ claims: claimsOf(ADULT_F) })).body), { personalised: true, available: true });
   assert.deepEqual(await s.preferences.set({ claims: claimsOf(ADULT_F), body: { personalised: 'no', source: 'why_sheet' } }), { error: 'invalid_field', status: 400, field: 'personalised' });
   assert.equal((await s.preferences.set({ claims: claimsOf(ADULT_F), body: { personalised: false, source: 'settings' } })).field, 'source');
-  assert.deepEqual((await s.preferences.set({ claims: claimsOf(ADULT_F), body: { personalised: false, source: 'why_sheet' } })).body, { personalised: false, available: true });
+  assert.deepEqual(pa((await s.preferences.set({ claims: claimsOf(ADULT_F), body: { personalised: false, source: 'why_sheet' } })).body), { personalised: false, available: true });
   await s.preferences.set({ claims: claimsOf(ADULT_F), body: { personalised: false, source: 'privacy_page' } });
   assert.equal(s.store.audit.length, 1);
   assert.deepEqual([s.store.audit[0].target, s.store.audit[0].before, s.store.audit[0].after], ['per1', { personalised: true }, { personalised: false, source: 'why_sheet' }]);
@@ -401,5 +407,106 @@ test('preferences (service): default on, validation, change audited once, same v
   assert.equal(s.store.rows.get('solo').subjectType, 'user');
   s.flagState.on = false;
   assert.deepEqual(await s.preferences.set({ claims: claimsOf(ADULT_F), body: { personalised: true, source: 'why_sheet' } }), { error: 'feature_disabled', status: 404 });
-  assert.deepEqual((await s.preferences.get({ claims: claimsOf(ADULT_F) })).body, { personalised: false, available: false });
+  assert.deepEqual(pa((await s.preferences.get({ claims: claimsOf(ADULT_F) })).body), { personalised: false, available: false });
+});
+
+// ── review round 1 (2026-10-22) ─────────────────────────────────────────────
+
+// From the privacy review: inputs that must never count as a valid date of birth.
+const BYPASS_DOBS = ['2011/05/03', '03/05/2011', '2011-5-3', ' 2011-05-03', '2011-05-03 ', '2027-01-01', '2023-02-30', '2011-13-01', '1900-12-31', '20110503', '2011-05-03T00:00:00Z', 'yesterday'];
+
+test('date of birth: strict YYYY-MM-DD, a real day, 1901-01-01 to today (East Africa day)', () => {
+  for (const ok of ['1990-04-01', '2008-02-29', '1901-01-01', eatDay(NOW)]) assert.equal(isValidDateOfBirth(ok, NOW), true, ok);
+  for (const bad of [...BYPASS_DOBS, 2011, null, undefined, {}]) assert.equal(isValidDateOfBirth(bad, NOW), false, JSON.stringify(bad));
+  // Tomorrow in East Africa is the future, even when it is still "today" in UTC.
+  const lateUtc = new Date('2026-10-21T22:30:00Z'); // 01:30 on the 22nd in Dar
+  assert.equal(isValidDateOfBirth('2026-10-22', lateUtc), true);
+  assert.equal(isValidDateOfBirth('2026-10-23', lateUtc), false);
+  assert.deepEqual(readDateOfBirth(undefined, NOW), { status: 'absent' });
+  assert.deepEqual(readDateOfBirth('  ', NOW), { status: 'absent' });
+  assert.deepEqual(readDateOfBirth('2011/05/03', NOW), { status: 'invalid' });
+  assert.deepEqual(readDateOfBirth('1990-10-23', NOW), { status: 'valid', age: 35 });
+  // Write rule: not sent / null keep; '' clears; anything invalid is refused.
+  assert.deepEqual(parseDateOfBirthInput(undefined, NOW), { skip: true });
+  assert.deepEqual(parseDateOfBirthInput(null, NOW), { skip: true });
+  assert.deepEqual(parseDateOfBirthInput('', NOW), { value: null });
+  assert.deepEqual(parseDateOfBirthInput('1990-04-01', NOW), { value: '1990-04-01' });
+  for (const bad of BYPASS_DOBS) assert.deepEqual(parseDateOfBirthInput(bad, NOW), { error: 'invalid_field', status: 400, field: 'dateOfBirth' }, bad);
+});
+
+test('eligibility by date of birth: absent → history only; present but invalid or future → fail closed; under 18 → none; adult → all', () => {
+  const e = dob => personalisationEligibility({ flagOn: true, hasMember: true, memberProfile: { gender: 'female', ...(dob === undefined ? {} : { dateOfBirth: dob }) }, now: NOW });
+  for (const absent of [undefined, null, '', '   ']) {
+    assert.deepEqual([e(absent).available, e(absent).audienceAllowed, e(absent).reason], [true, false, null], JSON.stringify(absent));
+  }
+  for (const bad of BYPASS_DOBS) assert.deepEqual([e(bad).available, e(bad).audienceAllowed, e(bad).reason], [false, false, 'invalid_dob'], bad);
+  assert.deepEqual([e('2011-05-03').available, e('2011-05-03').reason], [false, 'under_18']);
+  assert.deepEqual([e('1990-04-01').available, e('1990-04-01').audienceAllowed, e('1990-04-01').age], [true, true, 36]);
+});
+
+test('no date of birth: purchase history is used, gender and age never; uses = purchase_history only', async () => {
+  const u = { id: 'm5', userType: 'member', personId: 'per5', memberProfile: { gender: 'female' } };
+  const adult = { ...u, id: 'm6', personId: 'per6', memberProfile: { gender: 'female', dateOfBirth: '1990-05-01' } };
+  const orders = [order('m5', [line('prd_009', 'Shoes')], { createdAt: ago(60) }), order('m6', [line('prd_009', 'Shoes')], { createdAt: ago(60) })];
+  const s = setup({ users: [u, adult], orders, env: { SHOP_HOME_SECTIONS: 'recommended' } });
+  for (let i = 0; i < 8; i += 1) s.add({ category: 'equipment', targetGender: i < 2 ? 'women' : null, targetAgeBands: i < 2 ? ['30_44'] : [] });
+  s.add({ category: 'sportswear_footwear' });
+  const out = await s.service.home({ claims: claimsOf(u) });
+  assert.deepEqual(out.body.personalisation, { available: true, enabled: true });
+  assert.ok(out.body.signalsUsed.includes('purchase_history'));
+  assert.ok(!out.body.signalsUsed.includes('profile_gender') && !out.body.signalsUsed.includes('profile_age'));
+  const codes = out.body.sections.flatMap(x => x.reasonCodes);
+  assert.ok(!codes.includes('profile_gender') && !codes.includes('profile_age'));
+  assert.deepEqual((await s.preferences.get({ claims: claimsOf(u) })).body, { personalised: true, available: true, historyDays: 365, uses: ['purchase_history'] });
+  // The same shop for an adult woman with a valid date of birth does reorder the tagged ones.
+  const withDob = await s.service.home({ claims: claimsOf(adult) });
+  assert.ok(withDob.body.signalsUsed.includes('profile_gender'));
+  assert.notDeepEqual(sec(withDob.body, 'recommended').productIds, sec(out.body, 'recommended').productIds);
+  assert.deepEqual([...sec(withDob.body, 'recommended').productIds].sort(), [...sec(out.body, 'recommended').productIds].sort());
+});
+
+test('a stored date of birth in another format fails closed: no history, no gender, no age (bypass inputs)', async () => {
+  for (const bad of ['2011/05/03', '03/05/2011', '2011-5-3', ' 2011-05-03', '2027-01-01']) {
+    const u = { id: 'mx', userType: 'member', personId: 'perx', memberProfile: { gender: 'female', dateOfBirth: bad } };
+    const s = setup({ users: [u], orders: [order('mx', [line('prd_006', 'Shoes')])], env: { SHOP_HOME_SECTIONS: 'recommended,essentials' } });
+    for (let i = 0; i < 5; i += 1) s.add({ targetGender: i === 4 ? 'women' : null });
+    for (let i = 0; i < 3; i += 1) s.add({ category: 'sportswear_footwear' });
+    const on = await s.service.home({ claims: claimsOf(u) });
+    const off = await s.phase1.home({ claims: claimsOf(u) });
+    assert.deepEqual(on.body.personalisation, { available: false, enabled: false }, bad);
+    assert.deepEqual(on.body.sections, off.body.sections, bad);
+    assert.deepEqual(s.seen, [], `${bad}: orders not read`);
+    assert.deepEqual((await s.preferences.get({ claims: claimsOf(u) })).body.uses, [], bad);
+  }
+});
+
+test('all four age bands mean all ages: stored and read as []', () => {
+  assert.deepEqual(parseProductTargets({ targetAgeBands: ['60_plus', '45_59', '30_44', '18_29'] }).patch, { targetAgeBands: [] });
+  assert.deepEqual(parseProductTargets({ targetAgeBands: ['45_59', '30_44', '18_29'] }).patch, { targetAgeBands: ['18_29', '30_44', '45_59'] });
+  assert.deepEqual(targetsOf({ targetAgeBands: ['18_29', '30_44', '45_59', '60_plus'] }).targetAgeBands, []);
+  // So a product tagged with every band is not boosted for anyone.
+  const rows = { a: {}, b: { targetAgeBands: ['18_29', '30_44', '45_59', '60_plus'] } };
+  assert.deepEqual(reorderForAudience(['a', 'b'], id => rows[id], { ageBand: '30_44' }), ['a', 'b']);
+});
+
+test('uses lists exactly the signals in use; historyDays follows SHOP_HISTORY_DAYS', async () => {
+  const m = { id: 'mu', userType: 'member', personId: 'peru', memberProfile: { gender: 'male', dateOfBirth: '1980-01-01', fitnessGoal: 'gain_muscle' } };
+  const t = { id: 'tu', userType: 'trainer', personId: 'peru' };
+  const s = setup({ users: [m, t] });
+  const prefs = createShopPreferenceService({
+    store: s.store, users: s.users, identityLink: { personasOf: async pid => s.users.rows.filter(u => u.personId === pid) },
+    flagOn: () => s.flagState.on, now: () => NOW,
+    trainerProfileOf: id => (id === 'tu' ? { specialties: ['Yoga flow'] } : null),
+    historyDays: () => 90,
+  });
+  assert.deepEqual((await prefs.get({ claims: claimsOf(m) })).body, { personalised: true, available: true, historyDays: 90, uses: ['purchase_history', 'profile_gender', 'profile_age', 'goal', 'specialty'] });
+  assert.deepEqual((await prefs.get({ claims: claimsOf(t) })).body.uses, ['purchase_history', 'profile_gender', 'profile_age', 'goal', 'specialty'], 'same person from the trainer role');
+  await prefs.set({ claims: claimsOf(m), body: { personalised: false, source: 'why_sheet' } });
+  assert.deepEqual((await prefs.get({ claims: claimsOf(m) })).body.uses, [], 'switched off: nothing');
+  s.flagState.on = false;
+  assert.deepEqual((await prefs.get({ claims: claimsOf(m) })).body.uses, ['goal', 'specialty'], 'flag off: the Phase 1 page still uses the declared goal and specialty');
+  const other = { id: 'mo', userType: 'member', personId: 'pero', memberProfile: { gender: 'other', dateOfBirth: '1980-01-01' } };
+  s.users.rows.push(other);
+  s.flagState.on = true;
+  assert.deepEqual((await prefs.get({ claims: claimsOf(other) })).body.uses, ['purchase_history', 'profile_age'], 'gender other is not used');
 });

@@ -124,7 +124,8 @@ export function createShopHomeService({
       personalisation = {
         optedOut: state.personalised === false,
         history,
-        audienceFor: mode => (state.enabled ? audienceFrom({ mode, memberProfile, age: state.age }) : null),
+        // Gender/age only with a valid adult date of birth (no date of birth: purchase history only).
+        audienceFor: mode => (state.enabled && state.audienceAllowed ? audienceFrom({ mode, memberProfile, age: state.age }) : null),
       };
     }
     const out = buildShopHome({

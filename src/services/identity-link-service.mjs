@@ -22,6 +22,7 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 import { holdsVerified, isUnclaimed } from '../shared/unclaimed-row.mjs';
+import { carryShopPreference } from '../infra/shop-preference-store-pg.mjs';
 
 const shortId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const LIVE = u => u.accountStatus !== 'closed';
@@ -184,6 +185,8 @@ export function createIdentityLinkService({ db }) {
           identifierType: evidence[0], normalizedValue: evidence[1], trigger, actorUserId: anchor.id,
         });
         const left = await trx('User').where({ personId: fromPersonId }).first('id');
+        // "Personalised shop" follows the moved personas; an opt-out on either side wins.
+        await carryShopPreference(trx, { fromPersonId, toPersonId: personId, removeFrom: !left, actorId: anchor.id });
         if (left) continue;
         // The old Person is now empty: its identifiers follow, and it becomes a tombstone.
         const ids = await trx('LoginIdentifier').where({ personId: fromPersonId, status: 'active' });
