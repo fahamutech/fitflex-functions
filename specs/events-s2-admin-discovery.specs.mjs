@@ -15,6 +15,7 @@ import { adminListEvents, adminEventsSummary, adminEventsAudit, adminGetEvent, a
 import { eventsOptions, eventsList, eventDetail, saveEventFavourite, removeEventFavourite } from '../functions/events-public.mjs';
 import { organizerGetEvent, organizerSubmitEvent } from '../functions/events-organizer.mjs';
 import { eventLifecycle } from '../functions/jobs.mjs';
+import { postPromotionEvents } from '../functions/promotion-events.mjs';
 
 await ensureInit();
 
@@ -163,6 +164,32 @@ test('portal ACL: the events scope is grantable; staff without it are refused, w
   assert.equal((await call(adminEventsSummary, await staffWith('events'))).status, 200);
   assert.equal((await call(adminEventsSummary, await superAdmin())).status, 200);
   assert.equal((await call(adminEventsSummary, { sub: 'm', userType: 'member' })).status, 403);
+});
+
+test('the existing POST /events (promotion analytics) keeps working next to GET /events, flag on or off; the GET guards never run for it', async () => {
+  // bfast mounts guards with app.use(path) (prefix, method-blind); routeGuard keeps them to their own method + exact path.
+  const asMounted = async (route, method, mountPath, remainder) => {
+    const req = { method, headers: {}, params: {}, query: {}, body: {}, baseUrl: mountPath, path: remainder, get: () => null };
+    const out = res();
+    let passed = false;
+    for (const guard of [route.onGuard].flat().filter(Boolean)) { passed = false; await guard(req, out, () => { passed = true; }); if (!passed) break; }
+    return { passed, status: out.statusCode, body: out.body };
+  };
+  for (const flag of [false, true]) {
+    if (flag) on(); else delete process.env.EVENTS_MODULE;
+    // A POST reaching the GET /events guard (same mount path) passes straight through, whatever the flag.
+    assert.deepEqual(await asMounted(eventsList, 'POST', '/events', '/'), { passed: true, status: 200, body: null }, `flag ${flag}`);
+    assert.deepEqual(await asMounted(eventDetail, 'POST', '/events/:idOrSlug', '/'), { passed: true, status: 200, body: null }, `flag ${flag}`);
+    // While a real GET /events is refused with the flag off and served with it on.
+    const get = await asMounted(eventsList, 'GET', '/events', '/');
+    assert.equal(get.passed, flag, `flag ${flag}`);
+    if (!flag) assert.deepEqual(get.body, { error: 'feature_disabled' });
+    // The analytics route itself (no guard) answers the same way with the module on or off.
+    const r = await call(postPromotionEvents, null, { body: { source: 'mobile', events: [{ type: 'impression', entityType: 'gym', entityId: 'gym_x', promotionId: 'prm_x', sessionId: 'sess_x' }] } });
+    assert.equal(r.status, 202, `flag ${flag}: ${JSON.stringify(r.body)}`);
+    assert.deepEqual(await call(postPromotionEvents, null, { body: { events: [] } }), { status: 400, body: { error: 'events_required' }, ended: false }, `flag ${flag}: the route's own validation is untouched`);
+  }
+  assert.equal(postPromotionEvents.onGuard, undefined, 'the analytics route carries no guard that could catch GET /events');
 });
 
 // ── Moderation ────────────────────────────────────────────────────────────

@@ -40,6 +40,10 @@ exports.up = async function up(knex) {
   await knex.raw(`CREATE INDEX IF NOT EXISTS user_organizer_idx ON "User" ("organizerId") WHERE "organizerId" IS NOT NULL`);
 
   // ── OrgMembership ─────────────────────────────────────────────────────────
+  // org_membership_org_type_check was widened to include 'organizer' by 20270110090000-events-organizers.cjs;
+  // re-asserted here (idempotent) so a round-trip of the identity migrations alone leaves it widened too.
+  await knex.raw(`ALTER TABLE "OrgMembership" DROP CONSTRAINT IF EXISTS org_membership_org_type_check`);
+  await knex.raw(`ALTER TABLE "OrgMembership" ADD CONSTRAINT org_membership_org_type_check CHECK ("orgType" IN ('gym', 'vendor', 'organizer'))`);
   await addColumn(knex, 'OrgMembership', 'organizerId', t => {
     t.text('organizerId').references('id').inTable('EventOrganizer').onDelete('RESTRICT').onUpdate('CASCADE');
     t.index(['organizerId', 'role', 'status']);
