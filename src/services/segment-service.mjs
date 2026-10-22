@@ -239,6 +239,69 @@ export function createSegmentService({
     });
   }
 
+  /**
+   * Facts for every FitFlex vendor that may be messaged, one row per person
+   * who receives it (`memberId` is that person's user id — the ledger's
+   * recipient):
+   * - the vendor account itself, unless suspended or closed;
+   * - and its active staff with vendorRole 'admin' (owner decision
+   *   2026-10-22: announcements reach the people who run the shop, not
+   *   every till operator). Staff carry their vendor's facts; a staff
+   *   persona of the vendor's own person is left out (one copy each).
+   * A suspended or closed vendor's staff get nothing either.
+   */
+  async function platformVendorFacts() {
+    const at = now();
+    const today = localDay(at);
+    const vendors = (await db('User').where('userType', 'vendor')
+      .select('id', 'personId', 'displayName', 'phone', 'accountStatus', 'approvalStatus', 'vendorProfile', 'createdAt'))
+      .filter(v => !['suspended', 'closed'].includes(v.accountStatus));
+    if (!vendors.length) return [];
+    const ids = vendors.map(v => v.id);
+    const since = new Date(+at - 30 * 86_400_000);
+    const [staff, products, walkIns] = await Promise.all([
+      inChunks(ids, part => db('User').where({ userType: 'vendor_staff', vendorRole: 'admin', accountStatus: 'active' })
+        .whereIn('vendorId', part).select('id', 'personId', 'vendorId', 'displayName', 'phone')),
+      inChunks(ids, part => db('Product').whereIn('vendorId', part).whereNull('deletedAt')
+        .groupBy('vendorId').select('vendorId')
+        .count({ total: '*' })
+        .select(db.raw(`count(*) filter (where status = 'active' and coalesce("approvalStatus", 'approved') not in ('pending', 'rejected') and coalesce(visibility, '') <> 'hidden') as live`))),
+      inChunks(ids, part => db('VendorSale').whereIn('vendorId', part).whereNot('status', 'voided')
+        .where('soldAt', '>=', since).distinct('vendorId')),
+    ]);
+    const productsBy = new Map(products.map(r => [r.vendorId, r]));
+    const walkIn = new Set(walkIns.map(r => r.vendorId));
+    const staffBy = groupBy(staff, 'vendorId');
+    const approval = (v) => (v.approvalStatus === 'pending' ? 'pending_approval' : v.approvalStatus || 'approved');
+    const out = [];
+    for (const v of vendors) {
+      const profile = v.vendorProfile || {};
+      const shared = {
+        status: 'active',
+        vendorId: v.id,
+        businessName: profile.businessName || null,
+        vendorApproval: approval(v),
+        vendorWalkInSales: walkIn.has(v.id) ? 'yes' : 'no',
+        vendorProducts: Number(productsBy.get(v.id)?.total || 0),
+        vendorLiveProducts: Number(productsBy.get(v.id)?.live || 0),
+        vendorCategory: typeof profile.businessCategory === 'string' && profile.businessCategory ? profile.businessCategory : null,
+        joinedDaysAgo: v.createdAt ? daysBetween(localDay(v.createdAt), today) : null,
+      };
+      out.push({
+        ...shared, memberId: v.id, vendorRecipient: 'account',
+        displayName: v.displayName || profile.businessName || null, phone: v.phone || null,
+      });
+      for (const st of staffBy.get(v.id) || []) {
+        if (v.personId && st.personId === v.personId) continue;
+        out.push({
+          ...shared, memberId: st.id, vendorRecipient: 'admin_staff',
+          displayName: st.displayName || null, phone: st.phone || null,
+        });
+      }
+    }
+    return out;
+  }
+
   function mostVisitedGym(rows) {
     const counts = new Map();
     for (const r of rows) counts.set(r.gymId, (counts.get(r.gymId) || 0) + 1);
@@ -258,7 +321,7 @@ export function createSegmentService({
    * Members matching an audience. `sender` is { senderType: 'gym', owner,
    * gymId? } or { senderType: 'platform' }. For a gym the scope always
    * comes from the owner's own gyms, never from the request. FitFlex can
-   * also address `recipients: 'trainers'` instead of members.
+   * also address `recipients: 'trainers'` or `'vendors'` instead of members.
    */
   async function resolveAudience({ sender, recipients = 'members', preset, filter }) {
     let scopeGymIds = null;
@@ -276,7 +339,8 @@ export function createSegmentService({
     if (built.error) return built;
     const all = scope === 'gym'
       ? await gymMemberFacts(scopeGymIds)
-      : scope === 'trainers' ? await platformTrainerFacts() : await platformMemberFacts();
+      : scope === 'trainers' ? await platformTrainerFacts()
+        : scope === 'vendors' ? await platformVendorFacts() : await platformMemberFacts();
     const ctx = await gymsContext(built.filter);
     return {
       senderType: sender.senderType,
@@ -291,6 +355,16 @@ export function createSegmentService({
   async function localesByMember(ids) {
     const prefs = await inChunks(ids, part => communicationPreferences.filterByColumnInAsync('id', part));
     return new Map(prefs.filter(p => p.locale).map(p => [p.id, p.locale]));
+  }
+
+  /**
+   * The language each vendor recipient gets: English only when they chose
+   * 'en', Swahili otherwise — including no saved preference — the rule every
+   * other vendor notification follows (partner-notifier).
+   */
+  async function vendorLocales(ids) {
+    const chosen = await localesByMember(ids);
+    return new Map(ids.map(id => [id, chosen.get(id) === 'en' ? 'en' : 'sw']));
   }
 
   /** Channels this server can send on right now. */
@@ -362,7 +436,11 @@ export function createSegmentService({
     const sample = [...r.members]
       .sort((a, b) => String(a.displayName || '').localeCompare(String(b.displayName || '')))
       .slice(0, SAMPLE_SIZE)
-      .map(m => ({ id: m.memberId, displayName: m.displayName, status: m.status }));
+      .map(m => ({
+        id: m.memberId, displayName: m.displayName, status: m.status,
+        // Vendor audiences: which shop, and whether this is the account or one of its admin staff.
+        ...(r.recipients === 'vendors' ? { businessName: m.businessName, vendorId: m.vendorId, vendorRecipient: m.vendorRecipient } : {}),
+      }));
     return {
       senderType: r.senderType,
       recipients: r.recipients,
@@ -383,6 +461,7 @@ export function createSegmentService({
     reachByMember,
     channelAvailability,
     localesByMember,
+    vendorLocales,
     // Membership facts (status, days to expiry, last visit…) — the same
     // ones audiences use — for lifecycle automations.
     gymMemberFacts,

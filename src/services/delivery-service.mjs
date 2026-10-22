@@ -155,9 +155,17 @@ export function createDeliveryService({
   // suspended or deleted since the message was queued, and a gym message
   // only ever goes to a direct member of that gym.
   async function recipientBlock(msg) {
-    const user = await db('User').where({ id: msg.memberId }).first('id', 'accountStatus');
+    const user = await db('User').where({ id: msg.memberId }).first('id', 'accountStatus', 'userType', 'vendorId');
     if (!user) return 'member_not_found';
     if (user.accountStatus === 'suspended') return 'account_suspended';
+    // Vendor messages: a closed vendor account, staff no longer active, or
+    // staff of a vendor suspended or closed since queueing get nothing.
+    if (user.userType === 'vendor' && user.accountStatus === 'closed') return 'account_suspended';
+    if (user.userType === 'vendor_staff') {
+      if ((user.accountStatus || 'active') !== 'active') return 'account_suspended';
+      const vendor = user.vendorId ? await db('User').where({ id: user.vendorId }).first('accountStatus') : null;
+      if (!vendor || ['suspended', 'closed'].includes(vendor.accountStatus)) return 'vendor_unavailable';
+    }
     if (msg.senderType === 'gym') {
       const ok = await directMemberships(db, [msg]);
       if (!ok.has(`${msg.gymId}:${msg.memberId}`)) return 'not_gym_member';

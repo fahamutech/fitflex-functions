@@ -12,15 +12,17 @@
 import { haversineM } from './run-metrics.mjs';
 import { isCalendarDay, ageOnDay } from './date-of-birth.mjs';
 
-// `trainers` is a FitFlex-only audience of trainers (not members): admins
-// send them promotions and news with the same composer.
-export const SCOPES = ['gym', 'platform', 'trainers'];
+// `trainers` and `vendors` are FitFlex-only audiences (not members): admins
+// send them promotions and news with the same composer. Gyms never address
+// either (audienceScope).
+export const SCOPES = ['gym', 'platform', 'trainers', 'vendors'];
 const BOTH = ['gym', 'platform'];
 const PLATFORM = ['platform'];
 const TRAINERS = ['trainers'];
+const VENDORS = ['vendors'];
 
 /** Who a FitFlex campaign goes to. Gym campaigns always go to members. */
-export const RECIPIENTS = Object.freeze(['members', 'trainers']);
+export const RECIPIENTS = Object.freeze(['members', 'trainers', 'vendors']);
 
 const OPS = {
   enum: ['eq', 'neq', 'in', 'not_in', 'exists'],
@@ -41,7 +43,7 @@ export const FIELDS = Object.freeze({
   expiresOn: { type: 'date', scopes: BOTH },
   daysUntilExpiry: { type: 'number', scopes: BOTH },
   daysSinceExpiry: { type: 'number', scopes: BOTH },
-  joinedDaysAgo: { type: 'number', scopes: [...BOTH, ...TRAINERS] },
+  joinedDaysAgo: { type: 'number', scopes: [...BOTH, ...TRAINERS, ...VENDORS] },
   homeGymId: { type: 'text', scopes: BOTH },
   // Engagement (from check-ins; days are East Africa Time days)
   lastVisitDaysAgo: { type: 'number', scopes: BOTH },
@@ -63,6 +65,18 @@ export const FIELDS = Object.freeze({
   trainerPass: { type: 'enum', scopes: TRAINERS, values: ['active', 'pending', 'none'] },
   // Gyms the trainer is linked to (a list: `eq` = linked to that gym).
   linkedGymId: { type: 'text', scopes: TRAINERS },
+  // Vendors (FitFlex-wide vendor audiences). A vendor's staff who receive its
+  // messages (active staff with vendorRole 'admin') carry the vendor's facts;
+  // `vendorRecipient` tells the vendor account and those staff apart.
+  vendorApproval: { type: 'enum', scopes: VENDORS, values: ['approved', 'pending_approval', 'rejected'] },
+  // Recorded at least one (not voided) walk-in sale in the last 30 days.
+  vendorWalkInSales: { type: 'enum', scopes: VENDORS, values: ['yes', 'no'] },
+  // Products listed (not deleted) and of those, approved and on sale.
+  vendorProducts: { type: 'number', scopes: VENDORS },
+  vendorLiveProducts: { type: 'number', scopes: VENDORS },
+  // The vendor's business category as typed at onboarding (vendorProfile.businessCategory).
+  vendorCategory: { type: 'text', scopes: VENDORS },
+  vendorRecipient: { type: 'enum', scopes: VENDORS, values: ['account', 'admin_staff'] },
 });
 
 const has = (field, scope) => Boolean(FIELDS[field]?.scopes.includes(scope));
@@ -105,12 +119,22 @@ export const PRESETS = Object.freeze({
     no_gym: { all: [c('trainerStatus', 'eq', 'active'), c('linkedGymId', 'exists', false)] },
     new: { all: [c('trainerStatus', 'eq', 'active'), c('joinedDaysAgo', 'lte', 30)] },
   },
+  // Suspended and closed vendors (and their staff) are never in a vendor audience;
+  // `all` also leaves out vendors whose application was rejected.
+  vendors: {
+    all: { all: [c('vendorApproval', 'in', ['approved', 'pending_approval'])] },
+    approved: { all: [c('vendorApproval', 'eq', 'approved')] },
+    pending: { all: [c('vendorApproval', 'eq', 'pending_approval')] },
+    walk_in: { all: [c('vendorApproval', 'eq', 'approved'), c('vendorWalkInSales', 'eq', 'yes')] },
+    no_live_products: { all: [c('vendorApproval', 'eq', 'approved'), c('vendorLiveProducts', 'eq', 0)] },
+    new: { all: [c('vendorApproval', 'in', ['approved', 'pending_approval']), c('joinedDaysAgo', 'lte', 30)] },
+  },
 });
 
 /** The audience scope for a sender scope + recipients (null when not allowed). */
 export function audienceScope(senderScope, recipients = 'members') {
   if (!RECIPIENTS.includes(recipients)) return null;
-  if (recipients === 'trainers') return senderScope === 'platform' ? 'trainers' : null;
+  if (recipients === 'trainers' || recipients === 'vendors') return senderScope === 'platform' ? recipients : null;
   return senderScope;
 }
 
