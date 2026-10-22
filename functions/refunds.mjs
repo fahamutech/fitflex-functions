@@ -20,14 +20,14 @@ const send = (res, result, ok = 200) => {
 
 export const memberCancelTrainerBooking = {
   created, method: 'post', path: '/me/trainer-bookings/:id/cancel',
-  description: 'Member: cancel one trainer session. Unpaid: any time before it starts. Paid: up to 24 hours before, refunded in full (409 cancellation_window_passed after that). → { booking, refund }',
+  description: 'Member: cancel one trainer session. Unpaid: any time before it starts. Paid: up to 24 hours before, refunded in full (409 cancellation_window_passed after that). 409 payment_in_progress while a mobile-money prompt is out for the session\'s payment. → { booking, refund }',
   onGuard: routeGuard('post', requireAuth('member')),
   onRequest: async (req, res) => send(res, await trainerBookingService.memberCancelBooking({ memberId: req.user.sub, bookingId: req.params.id })),
 };
 
 export const trainerCancelBooking = {
   created, method: 'post', path: '/trainer/bookings/:id/cancel',
-  description: 'Trainer: cancel a session any time before it starts. A paid session is refunded to the member in full. → { booking, refund }',
+  description: 'Trainer: cancel a session any time before it starts. A paid session is refunded to the member in full. 409 payment_in_progress while a mobile-money prompt is out for the session\'s payment. → { booking, refund }',
   onGuard: routeGuard('post', requireAuth('trainer')),
   onRequest: async (req, res) => send(res, await trainerBookingService.trainerCancelBooking({ userId: req.user.sub, bookingId: req.params.id })),
 };

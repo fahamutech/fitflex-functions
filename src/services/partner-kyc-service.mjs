@@ -55,6 +55,7 @@ const REQUIREMENT_NAMES = {
   business_licence: 'business licence', certification: 'certification', liability_insurance: 'liability cover',
   representative_authority: 'proof of authority',
   vat_certificate: 'VAT certificate', // vendor tools · S5
+  event_permit: 'event permit', // events · S2
 };
 /** What this partner type may upload now (S5: + vat_certificate for vendors while VENDOR_VAT is on). */
 const uploadable = partnerType => documentsFor(partnerType, { vatOn: vendorVatOn() });
@@ -128,6 +129,10 @@ export function createPartnerKycService({
   partnerSettlementAccounts, partnerAgreements, partnerKycEvents, auditLog,
   notify = async () => {},
   documentStore = null,     // { provider, put(buffer, name, mimeType) → { provider, key }, get(key) → Buffer }
+  // Events · S2: the organizer record the requirements read, and the hook that keeps
+  // EventOrganizer.status derived from the case (called after every status change of any case).
+  eventOrganizerOf = async () => null,
+  onCaseStatusChanged = async () => {},
 }) {
   // ── Partners and cases ────────────────────────────────────────────────────
 
@@ -222,6 +227,7 @@ export function createPartnerKycService({
     }
     if (partnerType === 'trainer') return { trainer: await trainers.findAsync(t => t.userId === user.id) };
     if (partnerType === 'vendor') return { vendorProfile: user.vendorProfile || {} };
+    if (partnerType === 'event_organizer') return { organizer: (await eventOrganizerOf(user.id)) || {} };
     return { corporate: partner.corporate };
   }
 
@@ -781,6 +787,12 @@ export function createPartnerKycService({
       eventType: 'status_changed', fromStatus: kycCase.status, toStatus: to,
       reasonCode: reasonCode || null, note: reasonNote || null, data,
     }, actor);
+    try {
+      await onCaseStatusChanged(updated, { from: kycCase.status, to, reasonCode: reasonCode || null, reasonNote: reasonNote || null, actor });
+    } catch (err) {
+      // A derived record failing to follow must not undo the decision; the sweep/next decision repairs it.
+      console.warn('[partner-kyc] status hook failed:', err?.message);
+    }
     return { case: updated };
   }
 

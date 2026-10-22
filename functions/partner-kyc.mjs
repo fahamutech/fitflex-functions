@@ -13,7 +13,7 @@ import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
 import { DOCUMENT_MAX_BYTES } from '../src/shared/partner-kyc.mjs';
 
 const created = new Date().toISOString();
-const PARTNER_ROLES = ['gym_operator', 'trainer', 'vendor'];
+const PARTNER_ROLES = ['gym_operator', 'trainer', 'vendor', 'event_organizer'];
 const adminGuard = [requireAuth('admin'), requireAcl('kyc')];
 
 function send(res, result) {

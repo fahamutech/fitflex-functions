@@ -9,7 +9,7 @@
 // people, documents, checks, settlement accounts, agreements and events.
 // What each partner type must provide lives in partner-kyc-requirements.mjs.
 
-export const PARTNER_TYPES = ['gym_owner', 'trainer', 'vendor', 'corporate'];
+export const PARTNER_TYPES = ['gym_owner', 'trainer', 'vendor', 'corporate', 'event_organizer'];
 
 // Which existing record a partner type points at.
 export const PARTNER_SUBJECT = Object.freeze({
@@ -17,6 +17,8 @@ export const PARTNER_SUBJECT = Object.freeze({
   trainer: { table: 'User', userType: 'trainer' },
   vendor: { table: 'User', userType: 'vendor' },
   corporate: { table: 'CorporateAccount' },
+  // Events · S2 (D3, D10): the organizer persona (User.userType event_organizer); its EventOrganizer row is derived from the case.
+  event_organizer: { table: 'User', userType: 'event_organizer' },
 });
 
 export function partnerTypeForUserType(userType) {
@@ -126,7 +128,8 @@ export function partnerSafeCase(kycCase) {
 export function approvalStatusForCase(caseStatus, partnerType = null) {
   if (caseStatus === 'approved' || caseStatus === 'suspended') return 'approved';
   if (caseStatus === 'rejected') return 'rejected';
-  return partnerType === 'trainer' || partnerType === 'gym_owner' ? 'approved' : 'pending_approval';
+  // Organizers too (spec §2): the persona is usable at once; what they may do follows EventOrganizer.status.
+  return partnerType === 'trainer' || partnerType === 'gym_owner' || partnerType === 'event_organizer' ? 'approved' : 'pending_approval';
 }
 
 // ── People (identity, beneficial owners, representatives) ──────────────────
@@ -156,6 +159,7 @@ export const DOCUMENT_TYPES = [
   'board_resolution', 'certification', 'liability_insurance',
   'letter_of_authority', 'bank_proof', 'mobile_money_proof', 'site_photo', 'signed_agreement', 'other',
   'vat_certificate', // vendor tools · S5 (optional, vendors)
+  'event_permit', // events · S2 (optional, organizers; D13)
 ];
 
 // Only these file types may be stored as KYC documents.
