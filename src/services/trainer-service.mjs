@@ -62,7 +62,9 @@ export function publicTrainer(trainer) {
 
 export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate = OPEN_GATE,
   // A trainer asked to work at a gym: ({ gymId, trainer }) → void. Told to the gym's owner.
-  onGymRequest = async () => {} }) {
+  onGymRequest = async () => {},
+  // After an admin deletes a trainer profile (partner DOB review L3): (prior) → void. Never fails the delete.
+  onTrainerRemoved = async () => {} }) {
   const askedToJoin = async (gymIds, trainer) => {
     for (const gymId of gymIds) { try { await onGymRequest({ gymId, trainer }); } catch { /* best effort */ } }
   };
@@ -243,6 +245,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     if (!prior) return { error: 'not_found', status: 404 };
     if (await trainerBookings.findAsync(b => b.trainerId === prior.id)) return { error: 'trainer_has_bookings', status: 409 };
     const removed = await trainers.removeAsync(t => t.id === prior.id);
+    try { await onTrainerRemoved(prior); } catch (err) { console.warn('[admin-trainer-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'trainer_deleted',
