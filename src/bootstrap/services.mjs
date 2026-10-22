@@ -31,7 +31,8 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
+import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
@@ -461,6 +462,20 @@ export const b2bOps = registerB2BJobs({
   b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService,
   // Defined further down; only called when the billing job runs.
   b2bSponsorRefundService: { repair: () => b2bSponsorRefundService.repair() },
+});
+
+// Marathon & running events · S1 (foundation): persistence, the hold primitive and the hold-expiry job.
+// Dormant behind EVENTS_MODULE — nothing here is reachable from a route; the job returns at once while
+// the flag is off. Construction is unconditional (like every other store) so the wiring is exercised.
+export const eventStore = createPgEventStore({ db });
+opsService.register({
+  name: 'event-hold-expiry', title: 'Event hold expiry', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  description: 'Gives back the places of unpaid event orders whose hold has lapsed (order expired, registrations cancelled). Does nothing unless EVENTS_MODULE is on.',
+  run: async () => {
+    if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventStore.expireHolds();
+    return { processed: r.due, succeeded: r.released, failed: 0, ...r };
+  },
 });
 
 export const identityLinkService = createIdentityLinkService({ db });

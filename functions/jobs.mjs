@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, eventsModuleOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -126,6 +126,17 @@ export const shopBannerLifecycle = {
     if (!shopBannersOn()) return;
     const r = await shopBannerService.runLifecycle();
     if (r.expired || r.ended) console.log(`[shop-banners] expired=${r.expired} ended=${r.ended}`);
+  }
+};
+
+export const eventHoldExpiry = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Events: give back the places of unpaid event orders whose hold has lapsed — the order becomes expired, its registrations cancelled, and one outbox row per registration is written. Does nothing unless EVENTS_MODULE is on. Safe to rerun and to overlap: each order is released once (FOR UPDATE SKIP LOCKED, unique inventory movement keys). The work, its run record and lock are in src/bootstrap/services.mjs (event-hold-expiry) and ops-service.mjs.',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-hold-expiry');
+    const s = r?.stats ?? {};
+    if (s.released) console.log(`[events] holds expired: released=${s.released} due=${s.due} skipped=${s.skipped}`);
   }
 };
 
