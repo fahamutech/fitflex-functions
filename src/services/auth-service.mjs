@@ -270,15 +270,35 @@ export function createAuthService({
     const emailOnlyMatches = candidates.filter(u => u.firebaseUid !== fb.uid);
     const requestedUserType = isAdminEmail ? 'admin' : selfRole;
 
-    if (!emailVerified && emailOnlyMatches.length) {
-      // Would the old email match have picked a row this uid does not own?
+    // Security fix (20 Oct 2026): a row reached only through its User.email,
+    // which anyone can type in, is someone else's unless it is genuinely
+    // unclaimed (an organisation-made profile nobody has signed into: O7) or
+    // its Person already holds this email verified. Every other email-only
+    // row is ignored, even when Firebase verified the email. The configured
+    // admin email keeps reaching admin rows. Without identity tables, none.
+    const trust = identityLink && emailOnlyMatches.length
+      ? await identityLink.emailOnlyTrust({ rows: emailOnlyMatches, email: fbEmail, uid: fb.uid })
+      : new Map();
+    const unclaimedEmailOnly = emailOnlyMatches.filter(u => trust.get(u.id)?.unclaimed);
+    const trustedEmailOnly = new Set(emailOnlyMatches
+      .filter(u => trust.get(u.id)?.trusted || (isAdminEmail && u.userType === 'admin'))
+      .map(u => u.id));
+
+    if (!emailVerified && unclaimedEmailOnly.length) {
+      // Would an email match pick an unclaimed row this uid does not own?
       const claimsEmailOnlyRow = requestedUserType
         ? !uidMatches.some(u => u.userType === requestedUserType)
-          && emailOnlyMatches.some(u => u.userType === requestedUserType)
+          && unclaimedEmailOnly.some(u => u.userType === requestedUserType)
         : uidMatches.length === 0;
       if (claimsEmailOnlyRow) return { error: 'email_verification_required', status: 409 };
     }
-    const identityMatches = emailVerified ? candidates : uidMatches;
+    const identityMatches = emailVerified
+      ? candidates.filter(u => u.firebaseUid === fb.uid || trustedEmailOnly.has(u.id))
+      : uidMatches;
+    // Rows holding this email that this sign-in ignores: a new or updated row
+    // must not collide with them on the (email, userType) index.
+    const ignoredEmailRows = candidates.filter(u => u.firebaseUid !== fb.uid
+      && !identityMatches.includes(u) && sameEmail(u.email, fbEmail));
     const v2Client = client === IDENTITY_V2_CLIENT && identityFlag('V2_PERSONAS') && Boolean(identityLink);
     const operationalMatches = identityMatches.filter(u => u.userType !== 'member');
     let user = requestedUserType
@@ -304,9 +324,12 @@ export function createAuthService({
       if (firebaseSignInEnded(user, fb)) return { error: 'session_ended', status: 401 };
       // Existing user: NEVER change their stored userType via this endpoint.
       // Only exception: configured admin email always stays admin.
+      // A row with no email takes this one, unless another row of its role
+      // already holds it (the unique index would refuse the whole sign-in).
+      const emailHeldElsewhere = ignoredEmailRows.some(u => u.userType === user.userType && u.id !== user.id);
       const patch = {
         firebaseUid: user.firebaseUid || fb.uid,
-        email: user.email || fbEmail,
+        email: user.email || (emailHeldElsewhere ? null : fbEmail),
         displayName: fb.name || user.displayName,
         photoUrl: fb.picture || user.photoUrl,
         accountStatus: user.accountStatus || 'active',
@@ -336,7 +359,19 @@ export function createAuthService({
         onboardingCompleted: false,
         createdAt: new Date().toISOString()
       };
-      user = await users.upsertAsync(u => u.id === row.id, row);
+      // Other rows of this role holding the email, which this sign-in ignored.
+      // They are never changed (D-5 as revised 22 Oct 2026): the new row goes
+      // in without the email, so the (email, userType) index can't refuse it.
+      const holders = fbEmail ? ignoredEmailRows.filter(u => u.userType === row.userType) : [];
+      user = await users.upsertAsync(u => u.id === row.id, holders.length ? { ...row, email: null } : row);
+      if (holders.length && emailVerified && identityLink) {
+        // Recorded for review only; never blocks the sign-in.
+        try {
+          await identityLink.recordEmailCollision({ newUserId: user.id, email: fbEmail, heldUserIds: holders.map(u => u.id) });
+        } catch (err) {
+          console.warn('[auth] email collision not recorded:', err?.message);
+        }
+      }
     }
 
     // Identity V2 · I2: link this person's personas on verified evidence only.

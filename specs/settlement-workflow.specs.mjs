@@ -71,6 +71,32 @@ describe('payout eligibility', () => {
   });
 });
 
+describe('payout eligibility for a gym two owners share', () => {
+  const AT = new Date('2026-12-05T09:00:00.000Z');
+  const ownerA = { id: 'owner-a', userType: 'gym_operator', gymIds: ['gym-x'] };
+  const ownerB = { id: 'owner-b', userType: 'gym_operator', gymIds: ['gym-x', 'gym-y'] };
+  const cases = { 'owner-a': { id: 'kyc-a', status: 'approved' }, 'owner-b': { id: 'kyc-b', status: 'draft' } };
+  const accounts = { 'kyc-a': [{ id: 'acc-a', caseId: 'kyc-a', status: 'verified', isPrimary: true, method: 'bank', accountNumber: '0150001234', cooldownUntil: '2026-12-06T00:00:00.000Z' }] };
+  const eligibility = createPayoutEligibility({
+    users: { findAsync: async (f) => [ownerA, ownerB].find(f) ?? null },
+    gyms: { find: () => null },
+    partnerGate: { kycCaseFor: async (userId) => cases[userId] ?? null, exempt: () => false },
+    partnerSettlementAccounts: { filterByColumnAsync: async (_c, caseId) => accounts[caseId] ?? [] },
+  });
+
+  test('without ownerId: unchanged, the first owner found decides (settlement gating)', async () => {
+    assert.deepEqual(await eligibility.forGym('gym-x', { at: AT }), { ok: false, reason: 'payout_account_cooling_off', until: '2026-12-06T00:00:00.000Z' });
+  });
+  test('with ownerId: only that owner\'s own case and accounts count', async () => {
+    assert.deepEqual(await eligibility.forGym('gym-x', { at: AT, ownerId: 'owner-b' }), { ok: false, reason: 'kyc_draft' });
+    assert.deepEqual(await eligibility.forGym('gym-x', { at: AT, ownerId: 'owner-a' }), { ok: false, reason: 'payout_account_cooling_off', until: '2026-12-06T00:00:00.000Z' });
+  });
+  test('with ownerId of someone who does not own the gym: no_owner_account', async () => {
+    assert.deepEqual(await eligibility.forGym('gym-y', { at: AT, ownerId: 'owner-a' }), { ok: false, reason: 'no_owner_account' });
+    assert.deepEqual(await eligibility.forGym('gym-x', { at: AT, ownerId: 'stranger' }), { ok: false, reason: 'no_owner_account' });
+  });
+});
+
 test('preparing, approving and paying are separate grantable scopes', () => {
   for (const scope of ['settlements_prepare', 'settlements_approve', 'settlements_pay']) assert.ok(PORTAL_ACL_SCOPES.includes(scope), scope);
 });

@@ -2,6 +2,7 @@
 // account deletion (Play Store account-deletion requirement).
 import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
+import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
 
 export function createAccountService({
   users, trainers, trainerBookings, checkins, auditLog,
@@ -46,7 +47,8 @@ export function createAccountService({
 
     if (trainerProfile) await trainers.removeAsync(t => t.id === trainerProfile.id);
     await users.removeAsync(u => u.id === user.id);
-    try { await onAccountDeleted(user.id); } catch (err) { console.warn('[account-delete] follow-up failed:', err?.message); }
+    // The stored row goes along (second argument) so follow-ups can see its Person.
+    try { await onAccountDeleted(user.id, user); } catch (err) { console.warn('[account-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: user.id, action: 'self_account_deleted',
@@ -78,6 +80,9 @@ export function createAccountService({
       return { user: toSessionUser(updated) };
     }
 
+    // Strict YYYY-MM-DD, a real date, 1901-01-01 to today; '' clears it; null / not sent keeps it.
+    const dob = parseDateOfBirthInput(body.dateOfBirth);
+    if (dob.error) return dob;
     const memberProfile = {
       ...(current.memberProfile || {}),
       fitnessGoal: body.fitnessGoal ?? current.memberProfile?.fitnessGoal ?? null,
@@ -85,7 +90,7 @@ export function createAccountService({
       fitnessLevel: body.fitnessLevel ?? current.memberProfile?.fitnessLevel ?? null,
       heightCm: body.heightCm ?? current.memberProfile?.heightCm ?? null,
       weightKg: body.weightKg ?? current.memberProfile?.weightKg ?? null,
-      dateOfBirth: body.dateOfBirth ?? current.memberProfile?.dateOfBirth ?? null,
+      dateOfBirth: dob.skip ? current.memberProfile?.dateOfBirth ?? null : dob.value,
       gender: body.gender ?? current.memberProfile?.gender ?? null,
       preferredWorkoutTimes: Array.isArray(body.preferredWorkoutTimes)
         ? body.preferredWorkoutTimes

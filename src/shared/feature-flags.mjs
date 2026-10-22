@@ -78,6 +78,19 @@ export function tunzaaPaymentsOn() {
 }
 
 /**
+ * Phase B · B6a: trainer products paid by mobile money (Malipo by Tunzaa) —
+ * TRAINER_SERVICE (a member paying for trainer sessions) and TRAINER_GYM_PASS
+ * (a trainer buying a gym's trainer pass). Off unless TUNZAA_TRAINER_PRODUCTS
+ * is set, and effective only while TUNZAA_PAYMENTS is on too. Off: trainers
+ * get 403 on the mobile-money routes as before, trainer products answer
+ * 409 not_payable_this_way, and /payments/options has no `mobileMoney` key.
+ * SHOP_ORDER is never paid this way (marketplace D-9: manual).
+ */
+export function tunzaaTrainerProductsOn() {
+  return on('TUNZAA_TRAINER_PRODUCTS') && tunzaaPaymentsOn();
+}
+
+/**
  * Sandbox payments settle real entitlements (an approved sandbox transaction
  * still activates a pass). So against Tunzaa's sandbox, paying is offered only
  * when TUNZAA_SANDBOX_SETTLES is set on purpose: a test server says so, a
@@ -104,6 +117,17 @@ export function shopHomeV2On() {
  */
 export function shopBannersOn() {
   return on('SHOP_BANNERS');
+}
+
+/**
+ * Shop home Phase 2 · slice 2: personalisation (docs/shop-personalisation-api.md). Off unless
+ * SHOP_PERSONALISATION is set: GET /shop/home is byte-identical to before (no `personalisation`
+ * key, no purchase history, gender or age), PUT /shop/preferences answers 404 feature_disabled,
+ * GET /shop/preferences says available: false and /vendor/tools/options says
+ * merch.productTargets: false. Vendor product tags (targetGender, targetAgeBands) are stored either way.
+ */
+export function shopPersonalisationOn() {
+  return on('SHOP_PERSONALISATION');
 }
 
 /**
@@ -178,7 +202,7 @@ export function vendorToolsOptions() {
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
-    merch: { banners: shopBannersOn() },
+    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn() },
   };
 }
 
@@ -264,6 +288,17 @@ export function vendorDocumentsTinWithoutVatOn() {
   return vendorDocumentsOn() && on('VENDOR_DOCUMENTS_TIN_WITHOUT_VAT');
 }
 
+/**
+ * Phase B · B4a: one partner progress tracker (registered → approved →
+ * verified → payoutReady) on GET /me/kyc as `progress`. Off unless
+ * PARTNER_PROGRESS is set: the field is absent and nothing else changes.
+ * Read-only: built from approvalStatus, the KYC case/checklist and payout
+ * eligibility (src/shared/partner-progress.mjs).
+ */
+export function partnerProgressOn() {
+  return on('PARTNER_PROGRESS');
+}
+
 // ── Default-ON switches ──────────────────────────────────────────────────────
 // The exception to "off unless set": these switches keep work that already
 // runs today running, so a deploy changes nothing. Only an explicit off value
@@ -292,4 +327,14 @@ export function trainerStatementDraftsOn() {
  */
 export function vendorStatementDraftsOn() {
   return onUnlessOff('VENDOR_STATEMENT_DRAFTS');
+}
+
+/**
+ * Marathon & running events module (docs/marathon/PRD-v1.0-2026-10-21.md; reuse map §9). EVENTS_MODULE is
+ * the umbrella: off unless set, so a deploy changes nothing. S1 ships only persistence, the domain rules
+ * and the eventHoldExpiry job; the job returns at once while this is off. Later slices add their own
+ * flags (EVENTS_DISCOVERY, EVENTS_REGISTRATION, EVENTS_PAYMENTS_MANUAL …), each on only together with this one.
+ */
+export function eventsModuleOn() {
+  return on('EVENTS_MODULE');
 }
