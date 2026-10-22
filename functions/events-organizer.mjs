@@ -39,7 +39,7 @@ export const createOrganizer = {
 
 export const organizerMe = {
   created, method: 'get', path: '/organizer/me',
-  description: 'Organizer owner / staff: who I am for the organizer portal → { organizer: { id, name, status, timezone, kycCaseId, kycStatus, statusReason }, role, permissions[] }. status is derived from the KYC case (draft | pending_review | active | rejected | suspended). 404 no_organizer when this persona holds no active organizer role.',
+  description: 'Organizer owner / staff: who I am for the organizer portal → { organizer: { id, name, status, timezone, kycCaseId, kycStatus, statusReasonCode, statusReason }, role, permissions[] }. status is derived from the KYC case (draft | pending_review | active | rejected | suspended). statusReasonCode is the KYC case reasonCode as a partner may see it: a sensitive code (suspected_fraud, duplicate_partner) is sent as under_review, and then statusReason (the reviewer\'s note) is null; statusReason is also null when the case has no reason code. 404 no_organizer when this persona holds no active organizer role.',
   onGuard: routeGuard('get', [requireEventsModule, requireAuth(...ORGANIZER_TYPES), loadOrganizer]),
   onRequest: async (req, res) => {
     const ctx = organizerOf(req);
