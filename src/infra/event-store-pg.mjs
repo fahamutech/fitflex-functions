@@ -13,8 +13,12 @@
 //                         cancelled, registrations cancelled, one OutboxEvent per registration.
 //   expireHolds           every awaiting_payment order whose hold lapsed, released one by one
 //                         (FOR UPDATE SKIP LOCKED, so two servers never release the same order).
+//   releaseRegistration   S3: one place out of an unpaid multi-place order — held − 1 on that line's ticket
+//                         type, the line reduced (never to 0: remove_whole_line), totals re-derived from the
+//                         price snapshot, the registration cancelled, one release movement keyed per registration.
 // Each movement's key `${orderId}:${cycle}:${kind}:${ticketTypeId}` is UNIQUE: a second commit or release
-// inserts nothing (ON CONFLICT DO NOTHING) and touches no counter, so retries are no-ops.
+// inserts nothing (ON CONFLICT DO NOTHING) and touches no counter, so retries are no-ops. A single-place
+// release appends `:${registrationId}` so several single releases in one cycle stay unique.
 //
 // Business refusals come back as { error, status, ...extra } (D5); inside a transaction they are thrown
 // as `refusal` so the transaction rolls back, then returned. Postgres errors 23505 (idempotency replay)
@@ -47,17 +51,24 @@ const isInt = n => Number.isInteger(n);
 const nonEmpty = s => typeof s === 'string' && s.trim().length > 0;
 /** The short order number people see: EV- + 10 hex characters of the id. */
 export const referenceOf = orderId => `EV-${orderId.slice(4, 14).toUpperCase()}`;
-export const movementKeyOf = (orderId, cycle, kind, ticketTypeId) => `${orderId}:${cycle}:${kind}:${ticketTypeId}`;
+export const movementKeyOf = (orderId, cycle, kind, ticketTypeId, suffix = null) => `${orderId}:${cycle}:${kind}:${ticketTypeId}${suffix ? `:${suffix}` : ''}`;
+/** A refusal a store hook (afterCreate) may throw so the surrounding transaction rolls back and the caller gets { error, status }. */
+export const storeRefusal = (error, status, extra = {}) => Object.assign(new Error(error), { refusal: { error, status, ...extra } });
 
 const ORGANIZER_COLUMNS = ['id', 'ownerUserId', 'name', 'legalName', 'contactPhone', 'contactEmail', 'status', 'statusReason', 'kycCaseId', 'settlementAccountId', 'commissionPct', 'timezone'];
 // S2 (20270110090800-events-document-fields.cjs) adds the rest of the document; the same rowOf() rules apply.
 const EVENT_COLUMNS = ['id', 'organizerId', 'slug', 'title', 'description', 'eventType', 'status', 'startsAt', 'endsAt', 'timezone', 'venueName', 'venueAddress', 'lat', 'lng', 'routeMeta', 'termsSnapshot', 'refundPolicySnapshot', 'registrationClosesAt', 'publishedAt', 'cancelledAt', 'version',
   'heroImageUrl', 'heroThumbUrl', 'heroImageAlt', 'routeUrl', 'routeImageUrl', 'routeImageAlt', 'descriptionSw', 'venueCity', 'venueRegion', 'accessibility', 'inclusions', 'kitProvided',
-  'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy', 'registrationOpensAt'];
+  'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy', 'registrationOpensAt',
+  'participantFields', 'duplicatePolicy'];
+/** S3 (20270110090900): what a route may set on the order besides what the store derives; never money, status or the hold. */
+const ORDER_EXTRA_COLUMNS = ['createdByUserId', 'costCentre', 'purchaserReference', 'termsAcceptedAt', 'consentTextVersion'];
+/** S3: per-registration columns the service computes (normalised contacts, consent proof, claim token hash, kit size, D19 group label). */
+const REGISTRATION_EXTRA_COLUMNS = ['kitSize', 'consentTextVersion', 'consentAt', 'phoneNormalized', 'emailNormalized', 'claimTokenHash', 'claimTokenExpiresAt', 'groupLabel'];
 const CATEGORY_COLUMNS = ['id', 'eventId', 'name', 'distanceMeters', 'routeType', 'startTime', 'eligibility', 'capacity', 'registrationClosesAt', 'resultRules', 'status', 'minAge'];
 const TICKET_TYPE_COLUMNS = ['id', 'eventId', 'categoryId', 'name', 'priceTzs', 'currency', 'capacity', 'saleOpensAt', 'saleClosesAt', 'minPerOrder', 'maxPerOrder', 'status'];
 const JSON_COLUMNS = new Set(['routeMeta', 'termsSnapshot', 'refundPolicySnapshot', 'eligibility', 'resultRules', 'priceSnapshot', 'emergencyContact', 'payload',
-  'accessibility', 'inclusions', 'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy']);
+  'accessibility', 'inclusions', 'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy', 'participantFields']);
 
 /** Only the known columns of a table, JSON columns serialised; unknown keys are dropped, never sent to SQL. */
 function rowOf(columns, input) {
@@ -258,6 +269,15 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
     return { ...(await loadOrder(db, existing.id)), replayed: true };
   }
 
+  /**
+   * S3: the earlier answer for an Idempotency-Key in its scope ({ purchaserUserId } | { organizationId } | { eventId }),
+   * before any validation runs — null when the key is new, { error: 'idempotency_key_reused' } when the body differs.
+   */
+  async function replayOrder({ purchaserUserId = null, organizationId = null, eventId = null } = {}, key, fingerprint) {
+    if (!nonEmpty(key) || !nonEmpty(fingerprint)) return null;
+    return replay(keyScope({ purchaserUserId, organizationId, eventId }, String(key)), fingerprint);
+  }
+
   /** Validate the request shape before any SQL. Returns a refusal or { lines, participants, totalQuantity }. */
   function parseOrderInput({ lines, participants, discounts }) {
     if (!Array.isArray(lines) || !lines.length) return fail('invalid_lines', 400);
@@ -306,12 +326,23 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
    *   SERVER-SIDE ONLY (a route must never forward these from the request body): discounts
    *   { [ticketTypeId]: discountTzs } worked out by the route, holdTtlMinutes (default
    *   EVENT_HOLD_TTL_MINUTES), feeRule (default the store's).
+   *   S3 additions (spec §3.5, §3.10, §8.3), all server-side:
+   *     expectedTotalTzs  the total the client was quoted; after pricing the locked rows and before any hold is
+   *                       written, a mismatch is 409 price_changed { quotedTotalTzs, totalTzs } and nothing is written.
+   *                       It never influences the price.
+   *     bulk              corporate orders: the per-line maxPerOrder check is skipped (the service caps rows itself).
+   *     orderExtra        { createdByUserId, costCentre, purchaserReference, termsAcceptedAt, consentTextVersion }.
+   *     participants may carry kitSize, consentTextVersion, consentAt, phoneNormalized, emailNormalized,
+   *                       claimTokenHash, claimTokenExpiresAt, groupLabel (REGISTRATION_EXTRA_COLUMNS); never participantUserId.
+   *     afterCreate(trx, result)  runs in the same transaction after the rows are written (teams); throw storeRefusal() to refuse.
    * → { order, lines, registrations, replayed } or { error, status, ... }.
    */
   async function createOrderWithHolds({
     eventId, purchaserUserId = null, organizationId = null, lines = [], participants = [],
     idempotencyKey = null, fingerprint = null, discounts = null, holdTtlMinutes: ttl = holdTtlMinutes(), feeRule: orderFeeRule = feeRule,
+    expectedTotalTzs = null, bulk = false, orderExtra = null, afterCreate = null,
   }) {
+    if (expectedTotalTzs != null && (!isInt(expectedTotalTzs) || expectedTotalTzs < 0)) return fail('invalid_expected_total', 400);
     if (!nonEmpty(eventId)) return fail('event_required', 400);
     const parsed = parseOrderInput({ lines, participants, discounts });
     if (parsed.error) return parsed;
@@ -348,11 +379,13 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
           if (category.registrationClosesAt && at > new Date(category.registrationClosesAt)) throw refusal('registration_closed', 409, { categoryId: category.id });
           if (tt.saleOpensAt && at < new Date(tt.saleOpensAt)) throw refusal('sale_not_open', 409, { ticketTypeId: tt.id, saleOpensAt: tt.saleOpensAt });
           if (tt.saleClosesAt && at > new Date(tt.saleClosesAt)) throw refusal('sale_closed', 409, { ticketTypeId: tt.id, saleClosesAt: tt.saleClosesAt });
-          if (line.quantity < tt.minPerOrder || line.quantity > tt.maxPerOrder) throw refusal('quantity_out_of_range', 400, { ticketTypeId: tt.id, min: tt.minPerOrder, max: tt.maxPerOrder });
+          if (line.quantity < tt.minPerOrder || (!bulk && line.quantity > tt.maxPerOrder)) throw refusal('quantity_out_of_range', 400, { ticketTypeId: tt.id, min: tt.minPerOrder, max: tt.maxPerOrder });
         }
 
         const quote = quoteLines(types, parsed.lines, { feeRule: rule });
         if (quote.error) throw refusal(quote.error, quote.status, quote);
+        // Price drift (S3 §3.5): the client's quoted total must equal what the locked rows price to — before any hold.
+        if (expectedTotalTzs != null && quote.totalTzs !== expectedTotalTzs) throw refusal('price_changed', 409, { quotedTotalTzs: expectedTotalTzs, totalTzs: quote.totalTzs });
 
         const orderId = newId('eor');
         const cycle = 1;
@@ -364,6 +397,7 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
           if (!updated) throw refusal('capacity_unavailable', 409, { ticketTypeId: line.ticketTypeId });
         }
         await trx('EventOrder').insert({
+          ...rowOf(ORDER_EXTRA_COLUMNS, orderExtra || {}),
           id: orderId, eventId, purchaserUserId, organizationId, status: 'awaiting_payment', currency: quote.currency,
           subtotalTzs: quote.subtotalTzs, discountTzs: quote.discountTzs, feesTzs: quote.feesTzs, totalTzs: quote.totalTzs,
           priceSnapshot: json(quote.snapshot), idempotencyKey: key, idempotencyFingerprint: key ? fingerprint : null,
@@ -382,6 +416,7 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
         for (const p of parsed.participants) {
           const tt = byId.get(p.ticketTypeId);
           await trx('EventRegistration').insert({
+            ...rowOf(REGISTRATION_EXTRA_COLUMNS, p),
             id: newId('erg'), eventId, categoryId: tt.categoryId, ticketTypeId: tt.id, orderId, orderLineId: lineIds.get(tt.id),
             participantUserId: p.consentBasis === 'self' ? purchaserUserId : null, purchaserUserId,
             firstName: p.firstName.trim(), lastName: p.lastName.trim(), phone: p.phone ?? null, email: p.email ?? null,
@@ -389,7 +424,12 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
             consentBasis: p.consentBasis, status: 'reserved', createdAt: at, updatedAt: at,
           });
         }
-        return { ...(await loadOrder(trx, orderId)), replayed: false };
+        const result = { ...(await loadOrder(trx, orderId)), replayed: false };
+        if (afterCreate) {
+          await afterCreate(trx, result);
+          return { ...(await loadOrder(trx, orderId)), replayed: false };
+        }
+        return result;
       });
     } catch (err) {
       if (err.refusal) return err.refusal;
@@ -446,8 +486,8 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
     });
   }
 
-  /** The release itself, under the caller's row lock on the order. */
-  async function releaseInTrx(trx, order, to, reason, at) {
+  /** The release itself, under the caller's row lock on the order. `cancelReason` (S3) is the person's own reason, stored on the registrations; the order keeps the store reason. */
+  async function releaseInTrx(trx, order, to, reason, at, cancelReason = null) {
     const cycle = order.holdCycle;
     const lines = (await trx('EventOrderLine').where({ orderId: order.id }).orderBy('ticketTypeId')).map(plain);
     for (const line of lines) {
@@ -460,7 +500,7 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
     }
     await trx('EventOrder').where({ id: order.id }).update({ status: to, holdExpiresAt: null, closedAt: at, closeReason: reason, updatedAt: at });
     const registrations = (await trx('EventRegistration').where({ orderId: order.id }).whereIn('status', ['draft', 'reserved'])
-      .update({ status: 'cancelled', cancelledAt: at, cancelReason: reason, updatedAt: at }).returning('*')).map(plain);
+      .update({ status: 'cancelled', cancelledAt: at, cancelReason: cancelReason ?? reason, updatedAt: at }).returning('*')).map(plain);
     const organizerId = await organizerOf(trx, order.eventId);
     for (const reg of registrations) {
       await appendOutbox(trx, {
@@ -472,12 +512,72 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
   }
 
   /**
+   * S3 (§3.8, D17): one place out of an unpaid order. Under FOR UPDATE on the order and the line's ticket type:
+   * held − 1, one release movement of quantity 1 keyed `${orderId}:${cycle}:release:${ticketTypeId}:${registrationId}`,
+   * the line's quantity − 1 with its money re-derived from the price snapshot (same discount per unit, fee rule
+   * re-applied), order totals updated, the registration cancelled with `cancelReason`, one registration.cancelled
+   * outbox row. Refused: order_not_found 404, registration_not_found 404 (not in this order), invalid_transition 409
+   * (order not awaiting payment), already_closed → { changed: false } (the registration is not reserved any more),
+   * remove_whole_line 409 (the last place of a line while other lines remain — cancel the whole order instead).
+   * The last live place of the whole order is also refused with remove_whole_line: callers use releaseOrder.
+   */
+  async function releaseRegistration(orderId, registrationId, reason = 'cancelled', { cancelReason = null } = {}) {
+    if (!RELEASE_REASONS.includes(reason) || reason === 'expired') return fail('invalid_reason', 400, { reason, allowed: RELEASE_REASONS.filter(r => r !== 'expired') });
+    try {
+      return await db.transaction(async (trx) => {
+        const order = plain(await trx('EventOrder').where({ id: orderId }).forUpdate().first());
+        if (!order) throw refusal('order_not_found', 404);
+        const reg = plain(await trx('EventRegistration').where({ id: registrationId, orderId }).first());
+        if (!reg) throw refusal('registration_not_found', 404);
+        if (order.status !== 'awaiting_payment') throw refusal('invalid_transition', 409, { kind: 'order', from: order.status, to: 'cancelled', allowed: [], reason: 'not_awaiting_payment', orderId });
+        if (reg.status !== 'reserved') return { ...(await loadOrder(trx, orderId)), changed: false };
+        const lines = (await trx('EventOrderLine').where({ orderId }).orderBy('ticketTypeId')).map(plain);
+        const line = lines.find(l => l.id === reg.orderLineId);
+        if (!line) throw refusal('registration_not_found', 404);
+        // A line is only ever reduced, never emptied (quantity > 0, registrations RESTRICT the line).
+        if (line.quantity <= 1) throw refusal('remove_whole_line', 409, { ticketTypeId: line.ticketTypeId, orderId });
+        await trx('EventTicketType').where({ id: line.ticketTypeId }).forUpdate().first();
+        const at = now();
+        const cycle = order.holdCycle;
+        const inserted = await trx('EventInventoryMovement').insert({
+          id: newId('eim'), ticketTypeId: line.ticketTypeId, orderId, kind: 'release', quantity: 1, cycle,
+          movementKey: movementKeyOf(orderId, cycle, 'release', line.ticketTypeId, registrationId), createdAt: at,
+        }).onConflict('movementKey').ignore().returning('id');
+        if (!inserted.length) return { ...(await loadOrder(trx, orderId)), changed: false };
+        await trx('EventTicketType').where({ id: line.ticketTypeId }).update({ held: trx.raw('held - 1'), updatedAt: at });
+        // Re-price every line from the snapshot with this line one place shorter; the per-unit discount is kept.
+        const snapshot = typeof order.priceSnapshot === 'string' ? JSON.parse(order.priceSnapshot) : order.priceSnapshot;
+        const perUnitDiscount = line.discountTzs / line.quantity;
+        const repriced = quoteLines(snapshot.ticketTypes, lines.map(l => (l.id === line.id
+          ? { ticketTypeId: l.ticketTypeId, quantity: l.quantity - 1, discountTzs: Math.round(perUnitDiscount * (l.quantity - 1)) }
+          : { ticketTypeId: l.ticketTypeId, quantity: l.quantity, discountTzs: l.discountTzs })), { feeRule: snapshot.feeRule });
+        if (repriced.error) throw refusal(repriced.error, repriced.status, repriced);
+        for (const q of repriced.lines) {
+          const current = lines.find(l => l.ticketTypeId === q.ticketTypeId);
+          await trx('EventOrderLine').where({ id: current.id }).update({ quantity: q.quantity, discountTzs: q.discountTzs, feesTzs: q.feesTzs, lineTotalTzs: q.lineTotalTzs });
+        }
+        await trx('EventOrder').where({ id: orderId }).update({ subtotalTzs: repriced.subtotalTzs, discountTzs: repriced.discountTzs, feesTzs: repriced.feesTzs, totalTzs: repriced.totalTzs, updatedAt: at });
+        await trx('EventRegistration').where({ id: registrationId }).update({ status: 'cancelled', cancelledAt: at, cancelReason: cancelReason ?? reason, updatedAt: at });
+        await appendOutbox(trx, {
+          type: 'registration.cancelled', aggregateType: 'registration', aggregateId: registrationId, organizerId: await organizerOf(trx, order.eventId), eventId: order.eventId,
+          payload: { registrationId, orderId, eventId: order.eventId, status: 'cancelled', reason },
+        });
+        return { ...(await loadOrder(trx, orderId)), changed: true };
+      });
+    } catch (err) {
+      if (err.refusal) return err.refusal;
+      if (err.code === CHECK_VIOLATION) return fail('invalid_transition', 409, { constraint: err.constraint ?? null });
+      throw err;
+    }
+  }
+
+  /**
    * Give an unpaid order's places back. `reason` is one of RELEASE_REASONS: 'expired' (the hold lapsed)
    * makes the order expired, 'cancelled' / 'payment_failed' / 'admin' make it cancelled; anything else is
    * invalid_reason. Only an order awaiting payment can be released; a confirmed order's places are sold and
    * go back through the refund flow (invalid_transition). A second call changes nothing.
    */
-  async function releaseOrder(orderId, reason = 'cancelled') {
+  async function releaseOrder(orderId, reason = 'cancelled', { cancelReason = null } = {}) {
     if (!RELEASE_REASONS.includes(reason)) return fail('invalid_reason', 400, { reason, allowed: [...RELEASE_REASONS] });
     const to = reason === 'expired' ? 'expired' : 'cancelled';
     return db.transaction(async (trx) => {
@@ -487,7 +587,7 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
       if (order.status !== 'awaiting_payment') {
         return { error: 'invalid_transition', status: 409, kind: 'order', from: order.status, to, allowed: [], reason: 'inventory_committed', orderId };
       }
-      return releaseInTrx(trx, order, to, reason, now());
+      return releaseInTrx(trx, order, to, reason, now(), cancelReason);
     });
   }
 
@@ -504,10 +604,13 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
       const done = await db.transaction(async (trx) => {
         const order = plain(await trx('EventOrder').where({ id, status: 'awaiting_payment' }).where('holdExpiresAt', '<', at).forUpdate().skipLocked().first());
         if (!order) return false;
-        await releaseInTrx(trx, order, 'expired', 'expired', now());
-        return true;
+        return releaseInTrx(trx, order, 'expired', 'expired', now());
       });
-      if (done) released += 1; else skipped += 1;
+      if (done) {
+        released += 1;
+        // S3: after the commit, tell the purchaser (notification 2) — a failure here never undoes the release.
+        if (hooks.afterExpire) { try { await hooks.afterExpire(done); } catch (err) { console.warn('[events] afterExpire hook failed:', err?.message); } }
+      } else skipped += 1;
     }
     return { due: due.length, released, skipped };
   }
@@ -518,6 +621,6 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
   return {
     createOrganizer, getOrganizer, updateOrganizer, transitionOrganizer,
     createEvent, getEvent, updateEvent, transitionEvent, createCategory, createTicketType, getTicketType, updateTicketType,
-    appendOutbox, createOrderWithHolds, getOrder, commitOrder, releaseOrder, expireHolds, movementsOf, holdTtlMinutes,
+    appendOutbox, createOrderWithHolds, replayOrder, getOrder, commitOrder, releaseOrder, releaseRegistration, expireHolds, movementsOf, holdTtlMinutes,
   };
 }

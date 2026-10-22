@@ -385,6 +385,12 @@ export function requireEventsModule(req, res, next) {
   next();
 }
 
+/** S3: the guard of every registration route (quote, orders, registrations, claims, teams, corporate, organizer / admin order reads): 404 feature_disabled unless EVENTS_MODULE and EVENTS_REGISTRATION are both on. */
+export function requireEventsRegistration(req, res, next) {
+  if (!eventsRegistrationOn()) return res.status(404).json({ error: 'feature_disabled' });
+  next();
+}
+
 /**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
  * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and
