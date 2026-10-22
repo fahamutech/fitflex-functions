@@ -72,7 +72,8 @@ function world({
   const activated = [];
   const trainerBookingService = createTrainerBookingService({
     trainerBookings, trainerSessions: memStore(), trainers: [{ id: 'tr_1', userId: 't9', displayName: 'Coach' }], gyms: [],
-    users: memStore(), auditLog, trainerService: null, subscriptions, paymentRequests,
+    users: memStore(), auditLog, subscriptions, paymentRequests,
+    trainerService: { hydrateTrainer: (t) => t, findProfileByUser: (userId) => (userId === 't9' ? { id: 'tr_1', userId: 't9', gymIds: ['gym_1'] } : null) },
   });
   const adminPaymentService = createAdminPaymentService({
     paymentRequests, subscriptions, users: memStore(), auditLog,
@@ -105,7 +106,7 @@ function world({
       ? (request) => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved')
       : null,
   });
-  return { subscriptions, paymentRequests, trainerBookings, audit, activated, service, remote, flags };
+  return { subscriptions, paymentRequests, trainerBookings, audit, activated, service, remote, flags, trainerBookingService };
 }
 
 const reqOf = (w, id) => w.paymentRequests.rows.find((r) => r.id === id);
@@ -150,7 +151,8 @@ test('flag combinations: what each role may pay, and what options report', async
   const s = await base.service.pay({ memberId: 'm1', paymentRequestId: 'pay_s', phone: PHONE });
   assert.deepEqual([s.status, s.error], [409, 'not_payable_this_way']);
   assert.equal((await base.service.pay({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t', phone: PHONE })).error, 'feature_disabled');
-  assert.equal((await base.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' })).error, 'feature_disabled');
+  // No prompt out for the trainer: refresh answers as the member-only route did.
+  assert.deepEqual(await base.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' }), { error: 'forbidden', status: 403, requiredRoles: ['member'] });
   assert.equal(base.remote.initiated.length, 0);
 
   // Both on: members pay sessions, trainers pay their pass.
@@ -359,13 +361,138 @@ test('MONEY_SECOND_APPROVER on: a provider-confirmed payment needs no second adm
   assert.deepEqual(dup.activated, []);
 });
 
-test('flag turned off while a prompt is out: the signed callback still settles it', async () => {
+test('flag turned off while a trainer\'s prompt is out: they can refresh it (not start one); the callback settles too', async () => {
   const t = trainerPass();
-  const w = world({ subs: [t.sub], requests: [t.req] });
+  const other = trainerPass();
+  const w = world({
+    subs: [t.sub, { ...other.sub, id: 'sub_t2', memberId: 't2' }],
+    requests: [t.req, { ...other.req, id: 'pay_t2', memberId: 't2', subscriptionId: 'sub_t2' }],
+  });
   await w.service.pay({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t', phone: PHONE });
+  await w.service.pay({ memberId: 't2', role: 'trainer', paymentRequestId: 'pay_t2', phone: '0754000222' });
   w.flags.trainerProducts = false;
-  assert.equal((await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' })).error, 'feature_disabled');
+  const forbidden = { error: 'forbidden', status: 403, requiredRoles: ['member'] };
+
+  // Starting is closed; asking how the live prompt went is not.
+  assert.equal((await w.service.pay({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t', phone: PHONE })).error, 'feature_disabled');
+  assert.equal((await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' })).state, 'in_progress');
+  // Not their own, or unknown: as the member-only route answered before.
+  assert.deepEqual(await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t2' }), forbidden);
+  assert.deepEqual(await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'nope' }), forbidden);
+
   w.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '15000.00' };
-  assert.equal((await w.service.handleCallback({ transaction_id: 'TXN_1', reference_id: 'pay_t.a', status: 'COMPLETED' })).state, 'completed');
+  assert.equal((await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' })).state, 'completed');
   assert.equal(subOf(w, 'sub_t').status, 'active');
+  // Settled: nothing live any more, so the trainer is back to 403.
+  assert.deepEqual(await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' }), forbidden);
+
+  // The other trainer's prompt settles through its signed callback.
+  w.remote.statusOf.TXN_2 = { status: 'COMPLETED', amount: '15000.00' };
+  assert.equal((await w.service.handleCallback({ transaction_id: 'TXN_2', reference_id: 'pay_t2.a', status: 'COMPLETED' })).state, 'completed');
+  assert.equal(subOf(w, 'sub_t2').status, 'active');
+});
+
+// ── review fixes: cancelling under a live prompt; transaction checks on settle ──
+
+test('a session cannot be cancelled (member, trainer or admin) while a prompt is out for its payment', async () => {
+  const w = world({ requests: [sessionRequest()], bookings: [booking('bk_1'), booking('bk_2', { slot: '08:00' })] });
+  await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_s', phone: PHONE });
+  const before = { ...reqOf(w, 'pay_s') };
+  const refused = { error: 'payment_in_progress', status: 409 };
+  assert.deepEqual(await w.trainerBookingService.memberCancelBooking({ memberId: 'm1', bookingId: 'bk_1' }), refused);
+  assert.deepEqual(await w.trainerBookingService.trainerCancelBooking({ userId: 't9', bookingId: 'bk_2' }), refused);
+  assert.deepEqual(await w.trainerBookingService.adminUpdateStatus({ id: 'bk_1', status: 'cancelled', actorId: 'adm' }), refused);
+  assert.deepEqual(statuses(w), ['payment_pending', 'payment_pending'], 'nothing cancelled');
+  assert.deepEqual(reqOf(w, 'pay_s'), before, 'the payment under the prompt is untouched');
+
+  // The prompt completes for the full amount: both sessions confirmed, nothing held.
+  w.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '40000.00' };
+  assert.equal((await w.service.refresh({ memberId: 'm1', paymentRequestId: 'pay_s' })).state, 'completed');
+  assert.deepEqual(statuses(w), ['confirmed', 'confirmed']);
+});
+
+test('once the prompt has failed (or its claim expired), cancelling works and shrinks the payment as before', async () => {
+  const w = world({ requests: [sessionRequest()], bookings: [booking('bk_1'), booking('bk_2', { slot: '08:00' })] });
+  await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_s', phone: PHONE });
+  w.remote.statusOf.TXN_1 = { status: 'FAILED', remark: 'Cancelled by user' };
+  assert.equal((await w.service.refresh({ memberId: 'm1', paymentRequestId: 'pay_s' })).state, 'failed');
+  const out = await w.trainerBookingService.memberCancelBooking({ memberId: 'm1', bookingId: 'bk_1' });
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(statuses(w), ['cancelled', 'payment_pending']);
+  assert.deepEqual([reqOf(w, 'pay_s').status, reqOf(w, 'pay_s').amountTzs], ['pending', 20_000]);
+  // the last slot withdraws the request
+  assert.equal((await w.trainerBookingService.trainerCancelBooking({ userId: 't9', bookingId: 'bk_2' })).error, undefined);
+  assert.equal(reqOf(w, 'pay_s').status, 'cancelled');
+
+  // A claim that never produced a prompt and has expired does not block (the app may retry anyway).
+  const stale = world({
+    requests: [sessionRequest({ provider: 'tunzaa', reference: `pending:${Date.now() - 10 * 60_000}` })],
+    bookings: [booking('bk_1'), booking('bk_2', { slot: '08:00' })],
+  });
+  assert.equal((await stale.trainerBookingService.memberCancelBooking({ memberId: 'm1', bookingId: 'bk_1' })).error, undefined);
+  assert.equal(reqOf(stale, 'pay_s').amountTzs, 20_000);
+  // A recent claim does block.
+  const fresh = world({
+    requests: [sessionRequest({ provider: 'tunzaa', reference: `pending:${Date.now()}` })],
+    bookings: [booking('bk_1')],
+  });
+  assert.equal((await fresh.trainerBookingService.memberCancelBooking({ memberId: 'm1', bookingId: 'bk_1' })).error, 'payment_in_progress');
+});
+
+test('a prompt claimed between the cancel\'s read and its write: the payment is left alone and the session stays', async () => {
+  const w = world({ requests: [sessionRequest()], bookings: [booking('bk_1'), booking('bk_2', { slot: '08:00' })] });
+  // The cancel reads the request as it was; by the time it writes, a prompt has been claimed.
+  const realFind = w.paymentRequests.findByIdAsync;
+  const snapshot = { ...reqOf(w, 'pay_s') };
+  let first = true;
+  w.paymentRequests.findByIdAsync = async (id) => {
+    if (id === 'pay_s' && first) {
+      first = false;
+      Object.assign(w.paymentRequests.rows[0], { provider: 'tunzaa', reference: 'TXN_RACE' });
+      return snapshot;
+    }
+    return realFind(id);
+  };
+  assert.deepEqual(await w.trainerBookingService.memberCancelBooking({ memberId: 'm1', bookingId: 'bk_1' }), { error: 'payment_in_progress', status: 409 });
+  assert.deepEqual(statuses(w), ['payment_pending', 'payment_pending']);
+  assert.deepEqual([reqOf(w, 'pay_s').amountTzs, reqOf(w, 'pay_s').reference], [40_000, 'TXN_RACE']);
+});
+
+test('settle holds money confirmed for a different transaction than the one the request is waiting on', async () => {
+  const w = world({ requests: [sessionRequest()], bookings: [booking('bk_1')] });
+  await w.service.pay({ memberId: 'm1', paymentRequestId: 'pay_s', phone: PHONE }); // waiting on TXN_1
+  w.remote.statusOf.TXN_OTHER = { status: 'COMPLETED', amount: '40000.00' };
+  const out = await w.service.handleCallback({ transaction_id: 'TXN_OTHER', reference_id: 'pay_s.a', status: 'COMPLETED' });
+  assert.deepEqual([out.status, out.state], [200, 'held']);
+  assert.deepEqual([reqOf(w, 'pay_s').status, reqOf(w, 'pay_s').reference], ['pending', 'TXN_1']);
+  assert.deepEqual(statuses(w), ['payment_pending']);
+  assert.ok(w.audit.some((a) => a.action === 'payment_mobile_money_held' && a.after?.error === 'transaction_mismatch' && a.after?.transactionId === 'TXN_OTHER'));
+
+  // The transaction it is waiting on still settles it.
+  w.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '40000.00' };
+  assert.equal((await w.service.handleCallback({ transaction_id: 'TXN_1', reference_id: 'pay_s.a', status: 'COMPLETED' })).state, 'completed');
+  assert.deepEqual(statuses(w), ['confirmed']);
+});
+
+test('a transaction already used on another approved payment is held whatever MONEY_SECOND_APPROVER / MANUAL_PAY_INSTRUCTIONS say', async () => {
+  const t = trainerPass();
+  const w = world({
+    secondApprover: false, subs: [t.sub],
+    requests: [t.req, { id: 'pay_old', memberId: 'm7', subscriptionId: null, amountTzs: 15_000, status: 'approved', provider: 'tunzaa', reference: 'TXN_1' }],
+  });
+  await w.service.pay({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t', phone: PHONE });
+  w.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '15000.00' };
+  const held = await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' });
+  assert.deepEqual([held.state, held.reason], ['held', 'reference_already_used']);
+  assert.equal(reqOf(w, 'pay_t').status, 'pending');
+  assert.equal(subOf(w, 'sub_t').status, 'payment_pending');
+  assert.ok(w.audit.some((a) => a.action === 'payment_mobile_money_held' && a.after?.error === 'reference_already_used'));
+  // A pending or cancelled request carrying the same id does not count.
+  const ok = world({
+    subs: [t.sub],
+    requests: [t.req, { id: 'pay_c', memberId: 'm7', amountTzs: 15_000, status: 'cancelled', provider: 'tunzaa', reference: 'TXN_1' }],
+  });
+  await ok.service.pay({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t', phone: PHONE });
+  ok.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '15000.00' };
+  assert.equal((await ok.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' })).state, 'completed');
 });

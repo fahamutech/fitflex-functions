@@ -49,9 +49,18 @@ In the Malipo merchant settings set the callback URL (sandbox and live) to `<PUB
   trainer pass becomes `active`. `MONEY_SECOND_APPROVER` does not apply (the provider is the verification), but a
   transaction already used on another approved payment is held (`reference_already_used`).
 - Request currency must be TZS (`409 unsupported_currency`).
+- While a prompt is out for a group's payment (provider `tunzaa` with a transaction id, or a claim under 2 minutes old),
+  its sessions cannot be cancelled by the member, the trainer or an admin: `409 payment_in_progress`. Once the prompt
+  completes, fails or its claim expires, cancelling works as before (an unpaid slot shrinks or withdraws the payment;
+  that write is conditional, so a prompt claimed at the same moment leaves the payment untouched).
+- If `TUNZAA_TRAINER_PRODUCTS` is turned off while a trainer's own pass prompt is out, the trainer can still
+  `/refresh` it (not start a new one). Otherwise a trainer's refresh answers `403 forbidden` as before.
 
 ## Held for staff (money in, not applied)
-Amount differs from the request or is not reported, the sandbox is not opted in, or an upgrade's plan ended meanwhile.
+Amount differs from the request or is not reported; the request is waiting on a different transaction than the one
+confirmed (`transaction_mismatch`); the transaction already confirmed another approved payment (`reference_already_used`,
+checked on every settlement whatever `MONEY_SECOND_APPROVER` / `MANUAL_PAY_INSTRUCTIONS` say); a trainer session's slot
+was rebooked (`group_slot_rebooked`); the sandbox is not opted in; or an upgrade's plan ended meanwhile.
 Money arriving for a request that was cancelled or rejected meanwhile writes `payment_mobile_money_orphaned`: look for it.
 A plan with a live prompt cannot be cancelled by the member (`payment_in_progress`); the Selcom webhook ignores it. The request stays pending; an audit row
 (`payment_mobile_money_amount_mismatch` / `payment_mobile_money_held`) says why. The member sees "we received your payment".
@@ -65,4 +74,7 @@ A plan with a live prompt cannot be cancelled by the member (`payment_in_progres
 - The Selcom webhook remains, unchanged.
 - Tunzaa's merchant reference is not matched on status: `check-status` is read for the transaction id and its status and
   amount are checked, but the reference Tunzaa holds for that transaction is not compared with ours
-  (`<request id>.<attempt>`). A signed callback naming a different transaction of the same amount would settle the request.
+  (`<request id>.<attempt>`). Mitigations: a request already waiting on a transaction id is held if a different one is
+  confirmed (`transaction_mismatch`), and a transaction already used on an approved payment is held
+  (`reference_already_used`). Remaining exposure: a signed callback naming another unused transaction of the same amount
+  while the request has no transaction id yet (only a claim, e.g. after a timeout) would settle it.

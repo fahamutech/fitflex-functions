@@ -33,15 +33,27 @@ async function guard(route, userType) {
 
 const FORBIDDEN_MEMBER_ONLY = { status: 403, body: { error: 'forbidden', requiredRoles: ['member'] } };
 
-test('guards: flags off → members only, exactly as before', async () => {
+test('guards: flags off → paying is members only, exactly as before; refresh lets trainers reach the service', async () => {
   for (const flags of [{}, { TUNZAA_PAYMENTS: 1 }, { TUNZAA_TRAINER_PRODUCTS: 1 }]) {
     setFlags(flags);
-    for (const route of [payByMobileMoney, refreshMobileMoneyPayment]) {
-      assert.equal(await guard(route, 'member'), 'next', JSON.stringify(flags));
-      assert.deepEqual(await guard(route, 'trainer'), FORBIDDEN_MEMBER_ONLY, JSON.stringify(flags));
-      assert.deepEqual(await guard(route, 'vendor'), FORBIDDEN_MEMBER_ONLY);
-    }
+    assert.equal(await guard(payByMobileMoney, 'member'), 'next', JSON.stringify(flags));
+    assert.deepEqual(await guard(payByMobileMoney, 'trainer'), FORBIDDEN_MEMBER_ONLY, JSON.stringify(flags));
+    assert.deepEqual(await guard(payByMobileMoney, 'vendor'), FORBIDDEN_MEMBER_ONLY);
+    // A trainer's own live prompt may be refreshed after the flag goes off (the service decides).
+    assert.equal(await guard(refreshMobileMoneyPayment, 'member'), 'next');
+    assert.equal(await guard(refreshMobileMoneyPayment, 'trainer'), 'next');
+    assert.equal((await guard(refreshMobileMoneyPayment, 'vendor')).status, 403);
   }
+});
+
+test('guards are scoped to their own route: the pay guard does not run on /refresh under the prefix mount', async () => {
+  setFlags({});
+  const token = sign({ sub: 'spec_b6_scoped', userType: 'trainer' });
+  let passed = false;
+  const out = res();
+  // As Express presents /me/payments/x/mobile-money/refresh to a guard mounted on /me/payments/:id/mobile-money.
+  await payByMobileMoney.onGuard({ method: 'POST', baseUrl: '/me/payments/x/mobile-money', path: '/refresh', headers: { authorization: `Bearer ${token}` } }, out, () => { passed = true; });
+  assert.equal(passed, true);
 });
 
 test('guards: both flags on → members and trainers; every other role still refused', async () => {
@@ -98,6 +110,10 @@ test('handlers: a trainer session is told feature_disabled while trainer product
   const off = res();
   await payByMobileMoney.onRequest({ user: { sub: 't1', userType: 'trainer' }, params: { id: 'pay_b6_none' }, body: { phone: '0712345678' } }, off);
   assert.deepEqual([off.statusCode, off.body], [404, { error: 'feature_disabled' }]);
+  // Refresh with nothing live: the same 403 the member-only guard gave before.
+  const refreshOff = res();
+  await refreshMobileMoneyPayment.onRequest({ user: { sub: 't1', userType: 'trainer' }, params: { id: 'pay_b6_none' } }, refreshOff);
+  assert.deepEqual([refreshOff.statusCode, refreshOff.body], [403, { error: 'forbidden', requiredRoles: ['member'] }]);
 
   setFlags({ TUNZAA_PAYMENTS: 1, TUNZAA_TRAINER_PRODUCTS: 1, TUNZAA_SANDBOX_SETTLES: 1 });
   for (const route of [payByMobileMoney, refreshMobileMoneyPayment]) {

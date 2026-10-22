@@ -41,7 +41,7 @@ export const adminListTrainerBookings = {
 
 export const adminUpdateTrainerBooking = {
   created, method: 'post', path: '/admin/trainer-bookings/:id',
-  description: 'Admin: update trainer booking status. POST { status: confirmed|completed|cancelled }. A cancelled booking is final: 409 booking_cancelled (always). (With TRAINER_SESSION_OUTCOMES on, also no_show: after the session started, from confirmed|completed|cancelled; and any change to a booking on a submitted/approved/payable/paid trainer statement is refused with 409 booking_on_trainer_statement { statementId, statementStatus }). Flag on, the booking carries actions { canComplete, canMarkNoShow }.',
+  description: 'Admin: update trainer booking status. POST { status: confirmed|completed|cancelled }. A cancelled booking is final: 409 booking_cancelled (always). Cancelling while a mobile-money prompt is out for the booking\'s payment: 409 payment_in_progress (reset or decide the payment first). (With TRAINER_SESSION_OUTCOMES on, also no_show: after the session started, from confirmed|completed|cancelled; and any change to a booking on a submitted/approved/payable/paid trainer statement is refused with 409 booking_on_trainer_statement { statementId, statementStatus }). Flag on, the booking carries actions { canComplete, canMarkNoShow }.',
   onGuard: [requireAuth('admin'), requireAcl('trainers')],
   onRequest: async (req, res) => {
     const result = await trainerBookingService.adminUpdateStatus({ id: req.params.id, status: req.body?.status, actorId: req.user?.sub });

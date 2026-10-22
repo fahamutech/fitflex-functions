@@ -3,6 +3,7 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { mobileMoneyService, manualPayment } from '../src/bootstrap/services.mjs';
 import { tunzaaTrainerProductsOn } from '../src/shared/feature-flags.mjs';
+import { routeGuard } from '../src/shared/route-guard.mjs';
 
 const created = new Date().toISOString();
 
@@ -16,11 +17,14 @@ function send(res, result) {
   return res.status(status || 200).json(body);
 }
 
-// B6a: with TUNZAA_TRAINER_PRODUCTS on (and TUNZAA_PAYMENTS), trainers may use the
-// mobile-money routes for their own trainer gym pass (the service checks the product).
-// Off: members only, exactly as before (403 forbidden for any other role).
-// Both routes share one guard so the prefix mount (/mobile-money also matches
-// /mobile-money/refresh) never applies a stricter one to the other.
+// B6a: with TUNZAA_TRAINER_PRODUCTS on (and TUNZAA_PAYMENTS), trainers may start a
+// payment for their own trainer gym pass (the service checks the product). Off: paying is
+// members only, exactly as before (403 forbidden for any other role).
+// Refresh always admits members and trainers: a trainer whose own pass prompt is out when
+// the flag is turned off may still ask how it went; for anything else the service answers
+// a trainer exactly as the member-only guard did (403 forbidden, requiredRoles ['member']).
+// Each guard is scoped to its own route (routeGuard): the prefix mount would otherwise run
+// the pay guard on /mobile-money/refresh too.
 const memberGuard = requireAuth('member');
 const memberOrTrainerGuard = requireAuth('member', 'trainer');
 const payerGuard = (req, res, next) => (tunzaaTrainerProductsOn() ? memberOrTrainerGuard : memberGuard)(req, res, next);
@@ -43,7 +47,7 @@ export const payByMobileMoney = {
   created, method: 'post', path: '/me/payments/:id/mobile-money',
   description: 'Ask the payer\'s phone to approve one of their own pending payment requests (member: pass, upgrade, gym plan and, with TUNZAA_TRAINER_PRODUCTS, trainer sessions; trainer, with TUNZAA_TRAINER_PRODUCTS: their own trainer gym pass). Body {phone}. The amount is always the request\'s own. 404 feature_disabled while off; 404 not_found for someone else\'s request; 403 not_payable_by_role; 409 payment_not_pending / manual_payment_submitted / not_payable_this_way / tier_not_available / invalid_amount / unsupported_currency / group_slot_rebooked {bookingIds}; 400 invalid_phone; 429 too_many_attempts.',
   requestSample: { phone: '0712345678' },
-  onGuard: payerGuard,
+  onGuard: routeGuard('post', payerGuard),
   onRequest: async (req, res) => send(res, await mobileMoneyService.pay({
     memberId: req.user.sub, role: payerRole(req), paymentRequestId: req.params.id, phone: req.body?.phone,
   }))
@@ -51,8 +55,8 @@ export const payByMobileMoney = {
 
 export const refreshMobileMoneyPayment = {
   created, method: 'post', path: '/me/payments/:id/mobile-money/refresh',
-  description: 'Has the mobile-money payment gone through? Reads the transaction back from Tunzaa and settles the request when it is complete. state: in_progress | completed | failed | held | none. Same roles as paying (a trainer only for their own trainer gym pass).',
-  onGuard: payerGuard,
+  description: 'Has the mobile-money payment gone through? Reads the transaction back from Tunzaa and settles the request when it is complete. state: in_progress | completed | failed | held | none. Same roles as paying (a trainer only for their own trainer gym pass); with TUNZAA_TRAINER_PRODUCTS off, a trainer may still refresh their own trainer pass while its prompt is out (anything else: 403 forbidden as before). state held comes with reason (e.g. amount_mismatch, transaction_mismatch, reference_already_used, group_slot_rebooked).',
+  onGuard: routeGuard('post', memberOrTrainerGuard),
   onRequest: async (req, res) => send(res, await mobileMoneyService.refresh({
     memberId: req.user.sub, role: payerRole(req), paymentRequestId: req.params.id,
   }))
