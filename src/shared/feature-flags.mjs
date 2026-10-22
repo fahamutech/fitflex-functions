@@ -78,6 +78,19 @@ export function tunzaaPaymentsOn() {
 }
 
 /**
+ * Phase B · B6a: trainer products paid by mobile money (Malipo by Tunzaa) —
+ * TRAINER_SERVICE (a member paying for trainer sessions) and TRAINER_GYM_PASS
+ * (a trainer buying a gym's trainer pass). Off unless TUNZAA_TRAINER_PRODUCTS
+ * is set, and effective only while TUNZAA_PAYMENTS is on too. Off: trainers
+ * get 403 on the mobile-money routes as before, trainer products answer
+ * 409 not_payable_this_way, and /payments/options has no `mobileMoney` key.
+ * SHOP_ORDER is never paid this way (marketplace D-9: manual).
+ */
+export function tunzaaTrainerProductsOn() {
+  return on('TUNZAA_TRAINER_PRODUCTS') && tunzaaPaymentsOn();
+}
+
+/**
  * Sandbox payments settle real entitlements (an approved sandbox transaction
  * still activates a pass). So against Tunzaa's sandbox, paying is offered only
  * when TUNZAA_SANDBOX_SETTLES is set on purpose: a test server says so, a
