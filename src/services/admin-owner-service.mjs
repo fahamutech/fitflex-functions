@@ -5,7 +5,9 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 
-export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService }) {
+const gymIdsOf = row => (row?.gymIds || (row?.gymId ? [row.gymId] : []));
+
+export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService, gymPayoutOwner = null }) {
   /** Strip internal/sensitive fields from owner records for list responses. */
   function slimOwnerRow(row) {
     if (!row) return row;
@@ -82,13 +84,21 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
       actor: actorId, action: prior ? 'gym_owner_updated' : 'gym_owner_created',
       target: id, before: prior ?? null, after: row
     });
-    return { created: !prior, owner: hydrateGymOwner(row) };
+    // Gym payout owner: taken off a gym they were the payout owner of → cleared
+    // (audited). A gym that now has 2+ owners and none named is reported, so
+    // the admin knows its payouts wait for a payout owner (GYM_PAYOUT_OWNER on).
+    const leftGyms = gymIdsOf(prior).filter(g => !row.gymIds.includes(g));
+    if (gymPayoutOwner && leftGyms.length) await gymPayoutOwner.clearForRemovedOwner({ ownerId: id, gymIds: leftGyms, actorId, reason: 'owner_removed_from_gym' });
+    const owner = hydrateGymOwner(row);
+    const needing = gymPayoutOwner ? await gymPayoutOwner.gymsNeedingPayoutOwner(row.gymIds) : [];
+    return { created: !prior, owner: needing.length ? { ...owner, payoutOwnerRequiredGymIds: needing } : owner };
   }
 
   async function remove({ id, actorId }) {
     const prior = await users.findAsync(u => u.id === id && u.userType === 'gym_operator');
     if (!prior) return { error: 'not_found', status: 404 };
     if (prior.gymId && await checkins.findAsync(c => c.gymId === prior.gymId)) return { error: 'gym_owner_has_checkin_activity', status: 409 };
+    if (gymPayoutOwner) await gymPayoutOwner.clearForRemovedOwner({ ownerId: prior.id, gymIds: gymIdsOf(prior), actorId, reason: 'owner_deleted' });
     const removed = await users.removeAsync(u => u.id === prior.id);
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),

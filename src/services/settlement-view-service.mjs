@@ -22,7 +22,7 @@ export const OWNER_STATEMENT_STATUS = Object.freeze({
 });
 const OWNER_VISIBLE = Object.keys(OWNER_STATEMENT_STATUS);
 
-export function createSettlementViewService({ db = defaultDb, gyms, users, publicUserId, now = () => new Date() }) {
+export function createSettlementViewService({ db = defaultDb, gyms, users, publicUserId, gymPayoutOwner = null, now = () => new Date() }) {
   const gymName = (gymId) => gyms.find((g) => g.id === gymId)?.name ?? null;
 
   /** memberId → { publicId, displayName } for the members behind some lines. */
@@ -60,11 +60,30 @@ export function createSettlementViewService({ db = defaultDb, gyms, users, publi
     return { run, statements: statements.map(withGym) };
   }
 
+  /**
+   * GYM_PAYOUT_OWNER on: who the statement is paid to. Once cleared for
+   * payment (payable / paid) it is the owner in the destination snapshot;
+   * before that, who would be paid now — or why nobody can be
+   * (payout_owner_required, no_owner_account).
+   */
+  async function payeeOf(statement) {
+    const snapshot = typeof statement.destinationSnapshot === 'string' ? JSON.parse(statement.destinationSnapshot) : statement.destinationSnapshot;
+    if (snapshot?.ownerId) {
+      const u = await users.findByIdAsync(snapshot.ownerId);
+      return { ownerId: snapshot.ownerId, displayName: u?.displayName ?? null, source: 'destination_snapshot', reason: null };
+    }
+    const r = await gymPayoutOwner.resolve(statement.gymId);
+    return r.ok
+      ? { ownerId: r.owner.id, displayName: r.owner.displayName ?? null, source: r.source, reason: null }
+      : { ownerId: null, displayName: null, source: null, reason: r.reason };
+  }
+
   async function adminStatement(id) {
     const d = await detail(id);
     if (!d) return fail('statement_not_found', 404);
     return {
       statement: withGym(d.statement),
+      ...(gymPayoutOwner?.flagOn() ? { payee: await payeeOf(d.statement) } : {}),
       lines: d.lines.map((l) => ({ ...l, member: d.members.get(l.memberId) ?? null, fundingType: d.funding.get(l.memberCycleSettlementId) ?? null })),
       visits: d.visits,
       adjustments: d.adjustments,
