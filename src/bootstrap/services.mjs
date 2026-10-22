@@ -156,6 +156,8 @@ import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
 import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
+import { createPersonalDetailsService } from '../services/personal-details-service.mjs';
+import { forgetPersonDetails } from '../infra/person-details-store-pg.mjs';
 import {
   moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
@@ -240,9 +242,17 @@ export const partnerNotifier = createPartnerNotifier({
   usernames: { handleOf: userId => usernameService.handleOf(userId) }, users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Partner DOB slice 2 (docs/partner-dob-api.md): a person's own date of birth and gender on their Person.
+export const personalDetailsService = createPersonalDetailsService({ db, auditLog, trainers });
 export const trainerService = createTrainerService({
   trainers, gyms, trainerBookings, auditLog, gymService, partnerGate,
   onGymRequest: request => partnerNotifier.gymTrainerRequest(request),
+  // Partner DOB review L3: the declared date of birth goes once the Person has no personas left
+  // (deleting only the profile leaves the trainer's account, so this usually keeps it).
+  onTrainerRemoved: async prior => {
+    const row = prior?.userId ? await db('User').where({ id: prior.userId }).first('personId') : null;
+    await forgetPersonDetails(db, { personId: row?.personId || null });
+  },
 });
 export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
@@ -502,6 +512,7 @@ export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink: identityLinkService, auditLog, orgMemberships: orgMembershipService,
+  partnerAgeGuard: ({ user }) => personalDetailsService.assertPartnerAge({ user }),
 });
 
 /**
@@ -520,6 +531,7 @@ export const subscriptionService = createSubscriptionService({
 });
 export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
+  memberDobGuard: args => personalDetailsService.assertMemberProfileAge(args),
   // promotionEventsService is defined at the end of this file; this only runs later.
   // A deleted account lets its username go (held 90 days). usernameService is defined further down.
   // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
@@ -532,6 +544,8 @@ export const accountService = createAccountService({
       () => vendorCustomerService.forgetBuyer(userId),
       // The "Personalised shop" switch goes once the Person has no personas left.
       () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
+      // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
+      () => forgetPersonDetails(db, { personId: deleted?.personId || null }),
     ]) {
       try { await step(); } catch (err) { errors.push(err); }
     }
@@ -648,7 +662,10 @@ export const mobileMoneyService = createMobileMoneyService({
   // A rejected session whose slot was booked by someone else since is not asked for (409 group_slot_rebooked).
   beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
 });
-export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
+export const adminOwnerService = createAdminOwnerService({
+  users, gyms, checkins, auditLog, gymService,
+  onOwnerRemoved: prior => forgetPersonDetails(db, { personId: prior?.personId || null }),
+});
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
 // Gym settlement workflow (settlement Phase 4): submit, approve, hold, pay.
