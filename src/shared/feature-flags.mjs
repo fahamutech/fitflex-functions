@@ -356,3 +356,37 @@ export function eventsModuleOn() {
 export function orgOnlySponsorsOn() {
   return on('ORG_ONLY_SPONSORS');
 }
+
+/** S2: saving events and the Saved filter (GET /events/options.favourites). Needs EVENTS_MODULE too. */
+export function eventsFavouritesOn() {
+  return eventsModuleOn() && on('EVENTS_FAVOURITES');
+}
+
+/** S3 (read here for the options probe only): member registration. Needs EVENTS_MODULE too. */
+export function eventsRegistrationOn() {
+  return eventsModuleOn() && on('EVENTS_REGISTRATION');
+}
+
+const positiveNumber = (name, fallback) => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+/** S2: an open event is "closing soon" this many hours before registration closes (default 72). */
+export const EVENTS_CLOSING_SOON_HOURS_DEFAULT = 72;
+export function eventsClosingSoonHours() {
+  return positiveNumber('EVENTS_CLOSING_SOON_HOURS', EVENTS_CLOSING_SOON_HOURS_DEFAULT);
+}
+
+/** S2: the eventLifecycle job marks an in-progress event completed this many hours after endsAt (default 6). */
+export const EVENT_AUTO_COMPLETE_GRACE_HOURS_DEFAULT = 6;
+export function eventAutoCompleteGraceHours() {
+  const n = Number(process.env.EVENT_AUTO_COMPLETE_GRACE_HOURS);
+  return Number.isFinite(n) && n >= 0 ? n : EVENT_AUTO_COMPLETE_GRACE_HOURS_DEFAULT;
+}
+
+/** The route guard every events route but GET /events/options uses: 404 feature_disabled while the module is off. */
+export function requireEventsModule(req, res, next) {
+  if (!eventsModuleOn()) return res.status(404).json({ error: 'feature_disabled' });
+  next();
+}

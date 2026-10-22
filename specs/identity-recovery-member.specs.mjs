@@ -280,6 +280,19 @@ test('not offered to staff, verified partners or admins; checks on the request i
     const verified = await call(recoveryStart, { body: { old: { email: trainerEmail }, new: { phone: localPhone() } } });
     assert.deepEqual([verified.statusCode, verified.body.error], [409, 'partner_recovery_not_available']);
 
+    // Events · S2: a verified event organizer is a partner too (security review #249).
+    const organizerEmail = `${uniq('o')}@example.com`;
+    const organizer = await makeUser({ userType: 'event_organizer', email: organizerEmail });
+    await verifyIdentifier(organizer.personId, 'email', organizerEmail);
+    assert.equal((await call(recoveryStart, { body: { old: { email: organizerEmail }, new: { phone: localPhone() } } })).statusCode, 200, 'an organizer not verified yet is asked for member-level proof');
+    await db('PartnerKycCase').insert({ id: uniq('kyc'), partnerType: 'event_organizer', userId: organizer.id, status: 'approved', tier: 3, updatedAt: new Date() });
+    const organizerVerified = await call(recoveryStart, { body: { old: { email: organizerEmail }, new: { phone: localPhone() } } });
+    assert.deepEqual([organizerVerified.statusCode, organizerVerified.body.error], [409, 'partner_recovery_not_available']);
+    // Leave no organizer persona behind (the events migrations refuse to roll back over one).
+    await db('PartnerKycCase').where({ userId: organizer.id }).del();
+    await db('LoginIdentifier').where({ personId: organizer.personId }).del();
+    await db('User').where({ id: organizer.id }).del();
+
     // An admin account.
     const adminEmail = `${uniq('a')}@example.com`;
     const adm = await makeUser({ userType: 'admin', email: adminEmail });
