@@ -160,12 +160,22 @@ test('admin can list and update trainer booking status', async () => {
   await adminListTrainerBookings.onRequest({}, list);
   assert.ok(list.body.some(booking => booking.id === booked.body.booking.id && booking.trainer));
 
-  const updated = res();
+  // Owner decision 2026-10-20: an admin can't complete a session that hasn't started (or wasn't paid for)…
+  const early = res();
   await adminUpdateTrainerBooking.onRequest({
     user: { sub: 'usr_admin_1', userType: 'admin' },
     params: { id: booked.body.booking.id },
     body: { status: 'completed' }
+  }, early);
+  assert.equal(early.statusCode, 409, JSON.stringify(early.body));
+  assert.ok(['session_not_started', 'invalid_transition'].includes(early.body.error), early.body.error);
+  // …but still manages it: cancelling works.
+  const updated = res();
+  await adminUpdateTrainerBooking.onRequest({
+    user: { sub: 'usr_admin_1', userType: 'admin' },
+    params: { id: booked.body.booking.id },
+    body: { status: 'cancelled' }
   }, updated);
-  assert.equal(updated.statusCode, 200);
-  assert.equal(updated.body.status, 'completed');
+  assert.equal(updated.statusCode, 200, JSON.stringify(updated.body));
+  assert.equal(updated.body.status, 'cancelled');
 });

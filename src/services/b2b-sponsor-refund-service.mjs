@@ -59,7 +59,7 @@ export function createB2BSponsorRefundService({ db, refundService, trainerBookin
     let raised = 0;
     for (const c of missing) {
       const booking = await trainerBookings.findByIdAsync(c.sourceId);
-      if (booking?.status !== 'completed') continue;
+      if (!['completed', 'no_show'].includes(booking?.status)) continue;
       try {
         if (await onSessionConsumed({ booking, consumption: c })) raised += 1;
       } catch (err) {

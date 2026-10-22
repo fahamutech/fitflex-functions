@@ -722,7 +722,7 @@ export function createB2BAnalyticsService({
           .where(q => q.whereNull('c.id').orWhereNot('c.status', 'valid')).select('u.id'), 'id'),
       check('trainer_usage_without_booking', 'high', 'Verified trainer usage whose booking is missing or not completed',
         db(`${USAGE} as u`).leftJoin('TrainerBooking as t', 't.id', 'u.sourceId').where({ 'u.status': 'approved', 'u.sourceType': 'trainer_booking' })
-          .where(q => q.whereNull('t.id').orWhereNot('t.status', 'completed')).select('u.id'), 'id'),
+          .where(q => q.whereNull('t.id').orWhereNotIn('t.status', ['completed', 'no_show'])).select('u.id'), 'id'),
       check('stale_holds', 'medium', 'Usage still on hold after two days',
         db(USAGE).where({ status: 'pending' }).where('businessDate', '<', staleDay).select('id')),
       check('usage_shares_do_not_add_up', 'high', 'Usage where the sponsor and member shares do not add up to the value',
