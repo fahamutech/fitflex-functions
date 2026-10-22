@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
+import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 
 export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr }) {
   async function latestMemberSubscription(memberId) {
@@ -110,7 +111,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'member_updated' : 'member_created',
-      target: id, before: prior ?? null, after: row
+      target: id, before: userAuditSnapshot(prior), after: userAuditSnapshot(row)
     });
     const enrichedSub = await latestMemberSubscription(id);
     const enrichedPendingPays = await paymentRequests.filterAsync(p => p.memberId === id && p.status === 'pending');
@@ -165,7 +166,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: `member_${status}`,
-      target: member.id, before, after
+      target: member.id, before: userAuditSnapshot(before), after: userAuditSnapshot(after)
     });
     return { member: after };
   }

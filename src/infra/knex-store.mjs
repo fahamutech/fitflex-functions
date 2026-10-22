@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import knexFactory from 'knex';
+import { redactAuditValue } from '../shared/audit-redact.mjs';
 import pg from 'pg';
 
 // pg returns NUMERIC/DECIMAL as strings to avoid precision loss. Ours are all
@@ -825,6 +826,13 @@ function prepareForKnex(name, data, isUpdate = false) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];
       cleaned[f] = typeof val === 'number' ? new Date(val) : new Date(val);
+    }
+  }
+
+  // Credential keys never reach AuditLog, whatever a caller passes.
+  if (name === 'audit_log') {
+    for (const f of ['before', 'after']) {
+      if (cleaned[f] && typeof cleaned[f] === 'object') cleaned[f] = redactAuditValue(cleaned[f]);
     }
   }
 
