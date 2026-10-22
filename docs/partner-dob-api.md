@@ -19,7 +19,7 @@ When the flag is off, every existing response is byte-identical to before. When 
 
 ## Storage
 
-Migration `db/migrations/20270110090700-person-declared-details.cjs` is additive. `down` drops the columns.
+Migration `db/migrations/20270110091000-person-declared-details.cjs` is additive. `down` drops the columns.
 
 | Column | Type | Meaning |
 |---|---|---|

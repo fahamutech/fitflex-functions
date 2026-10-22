@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 const LIVE = ['requested', 'invited', 'active', 'suspended'];
 const PAID_SUB_STATUSES = ['active', 'expired', 'suspended'];
 const omId = () => `om_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
-const keyOf = m => `${m.orgType}:${m.gymId ?? m.vendorId}:${m.role}`;
+const keyOf = m => `${m.orgType}:${m.gymId ?? m.vendorId ?? m.organizerId}:${m.role}`;
 const gymIdsOf = u => (Array.isArray(u.gymIds) && u.gymIds.length ? u.gymIds : (u.gymId ? [u.gymId] : []));
 const sameSet = (a = [], b = []) => a.length === b.length && [...a].sort().join('\u0000') === [...b].sort().join('\u0000');
 
@@ -65,6 +65,12 @@ export function createOrgMembershipService({ db }) {
         orgType: 'vendor', gymId: null, vendorId: user.vendorId, role: 'staff', status: accountStatus,
         aclPermissions: user.vendorPermissions || [],
       });
+    } else if (user.userType === 'event_organizer' && user.organizerId) {
+      // Events · S2 (D3): the organizer persona owns its EventOrganizer; staff hold one role each
+      // (the role itself lives on EventOrganizerStaff; the membership records the relationship).
+      out.push({ orgType: 'organizer', gymId: null, vendorId: null, organizerId: user.organizerId, role: 'owner', status: accountStatus, aclPermissions: [] });
+    } else if (user.userType === 'organizer_staff' && user.organizerId) {
+      out.push({ orgType: 'organizer', gymId: null, vendorId: null, organizerId: user.organizerId, role: 'staff', status: accountStatus, aclPermissions: user.organizerRole ? [user.organizerRole] : [] });
     }
     return out;
   }
@@ -90,6 +96,11 @@ export function createOrgMembershipService({ db }) {
     if (user.userType === 'vendor_staff') {
       const vendor = user.vendorId ? await trx('Vendor').where({ id: user.vendorId }).first('id') : null;
       if (!vendor) expected = [];
+    }
+    // Likewise an organizer persona or staff only belongs to an organizer record that exists.
+    if (user.userType === 'event_organizer' || user.userType === 'organizer_staff') {
+      const organizer = user.organizerId ? await trx('EventOrganizer').where({ id: user.organizerId }).first('id') : null;
+      if (!organizer) expected = [];
     }
 
     const existing = await trx('OrgMembership').where({ personaId: user.id });
@@ -119,7 +130,7 @@ export function createOrgMembershipService({ db }) {
       if (!apply) continue;
       await trx('OrgMembership').insert({
         id: omId(), personId: user.personId, personaId: user.id,
-        orgType: e.orgType, gymId: e.gymId, vendorId: e.vendorId, role: e.role, status: e.status,
+        orgType: e.orgType, gymId: e.gymId, vendorId: e.vendorId, organizerId: e.organizerId ?? null, role: e.role, status: e.status,
         aclPermissions: e.aclPermissions, source: e.status === 'requested' ? 'application' : 'sync',
         startedAt: e.status === 'requested' ? null : (e.startedAt ?? trx.fn.now()),
         endedAt: LIVE.includes(e.status) ? null : (e.endedAt ?? trx.fn.now()),
@@ -164,7 +175,7 @@ export function createOrgMembershipService({ db }) {
       const gymIds = await liveGymIds(trx);
       // Vendors first, so vendor staff find their organisation record.
       const users = await trx('User')
-        .whereIn('userType', ['vendor', 'gym_operator', 'gym_staff', 'trainer', 'member', 'vendor_staff'])
+        .whereIn('userType', ['vendor', 'gym_operator', 'gym_staff', 'trainer', 'member', 'vendor_staff', 'event_organizer', 'organizer_staff'])
         .orderByRaw(`CASE WHEN "userType" = 'vendor' THEN 0 ELSE 1 END`);
       for (const user of users) {
         report.users += 1;
@@ -197,7 +208,7 @@ export function createOrgMembershipService({ db }) {
       .modify(q => { if (!includeEnded) q.whereIn('status', LIVE); })
       .orderBy('createdAt');
     const out = rows.map(m => ({
-      id: m.id, orgType: m.orgType, orgId: m.gymId ?? m.vendorId, role: m.role, status: m.status,
+      id: m.id, orgType: m.orgType, orgId: m.gymId ?? m.vendorId ?? m.organizerId, role: m.role, status: m.status,
       aclPermissions: m.aclPermissions || [], personaId: m.personaId, startedAt: m.startedAt, endedAt: m.endedAt,
     }));
 

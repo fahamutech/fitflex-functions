@@ -182,6 +182,7 @@ function setup({ users = [], orders = [], flag = true, live = [], env = {} } = {
   const identityLink = { personasOf: async personId => userStore.rows.filter(u => u.personId === personId) };
   const store = createMemoryShopPreferenceStore();
   const flagState = { on: flag };
+  const salesOrders = [];
   const preferences = createShopPreferenceService({ store, users: userStore, identityLink, flagOn: () => flagState.on, now: () => NOW });
   const seen = [];
   const deps = {
@@ -189,7 +190,8 @@ function setup({ users = [], orders = [], flag = true, live = [], env = {} } = {
     discoveryService: { discover: async () => ({ featured: [] }) },
     promotionService: { listLive: async () => live.map(id => ({ entityType: 'product', entityId: id })) },
     users: userStore, trainerService: { findProfileByUser: () => null }, identityLink,
-    recentPaidOrders: async () => orders.map(o => ({ ...o, buyerRole: o.buyerRole || 'member' })),
+    // Everyone's paid orders (best sellers); `salesOrders` are other buyers' only, never the member's own history.
+    recentPaidOrders: async () => [...orders, ...salesOrders].map(o => ({ ...o, buyerRole: o.buyerRole || 'member' })),
     config: () => shopHomeConfigFromEnv({ SHOP_HOME_MIN_ITEMS: '1', SHOP_HOME_CACHE_SECONDS: '300', ...env }),
     now: () => NOW,
   };
@@ -210,7 +212,8 @@ function setup({ users = [], orders = [], flag = true, live = [], env = {} } = {
     products.rows.push(row);
     return row;
   };
-  return { service, phase1, preferences, store, add, seen, flagState, users: userStore };
+  const ordersForSales = ids => { for (const id of ids) salesOrders.push(order('someone_else', [line(id)])); };
+  return { service, phase1, preferences, store, add, seen, flagState, users: userStore, ordersForSales };
 }
 const sec = (body, key) => body.sections.find(s => s.key === key);
 const ADULT_F = { id: 'm1', userType: 'member', personId: 'per1', memberProfile: { gender: 'female', dateOfBirth: '1990-05-01' } };
@@ -457,7 +460,7 @@ test('no date of birth: purchase history is used, gender and age never; uses = p
   assert.ok(!out.body.signalsUsed.includes('profile_gender') && !out.body.signalsUsed.includes('profile_age'));
   const codes = out.body.sections.flatMap(x => x.reasonCodes);
   assert.ok(!codes.includes('profile_gender') && !codes.includes('profile_age'));
-  assert.deepEqual((await s.preferences.get({ claims: claimsOf(u) })).body, { personalised: true, available: true, historyDays: 365, uses: ['purchase_history'] });
+  assert.deepEqual((await s.preferences.get({ claims: claimsOf(u) })).body, { personalised: true, available: true, historyDays: 365, mode: 'member', uses: ['purchase_history'] });
   // The same shop for an adult woman with a valid date of birth does reorder the tagged ones.
   const withDob = await s.service.home({ claims: claimsOf(adult) });
   assert.ok(withDob.body.signalsUsed.includes('profile_gender'));
@@ -489,24 +492,93 @@ test('all four age bands mean all ages: stored and read as []', () => {
   assert.deepEqual(reorderForAudience(['a', 'b'], id => rows[id], { ageBand: '30_44' }), ['a', 'b']);
 });
 
-test('uses lists exactly the signals in use; historyDays follows SHOP_HISTORY_DAYS', async () => {
+test('uses lists exactly the signals in use IN THE CURRENT MODE; historyDays follows SHOP_HISTORY_DAYS', async () => {
   const m = { id: 'mu', userType: 'member', personId: 'peru', memberProfile: { gender: 'male', dateOfBirth: '1980-01-01', fitnessGoal: 'gain_muscle' } };
   const t = { id: 'tu', userType: 'trainer', personId: 'peru' };
-  const s = setup({ users: [m, t] });
+  const o = { id: 'ou', userType: 'gym_operator', personId: 'peru' };
+  const s = setup({ users: [m, t, o] });
   const prefs = createShopPreferenceService({
     store: s.store, users: s.users, identityLink: { personasOf: async pid => s.users.rows.filter(u => u.personId === pid) },
     flagOn: () => s.flagState.on, now: () => NOW,
     trainerProfileOf: id => (id === 'tu' ? { specialties: ['Yoga flow'] } : null),
     historyDays: () => 90,
   });
-  assert.deepEqual((await prefs.get({ claims: claimsOf(m) })).body, { personalised: true, available: true, historyDays: 90, uses: ['purchase_history', 'profile_gender', 'profile_age', 'goal', 'specialty'] });
-  assert.deepEqual((await prefs.get({ claims: claimsOf(t) })).body.uses, ['purchase_history', 'profile_gender', 'profile_age', 'goal', 'specialty'], 'same person from the trainer role');
+  // Default = the signed-in role.
+  assert.deepEqual((await prefs.get({ claims: claimsOf(m) })).body, { personalised: true, available: true, historyDays: 90, mode: 'member', uses: ['purchase_history', 'profile_gender', 'profile_age', 'goal'] });
+  assert.deepEqual((await prefs.get({ claims: claimsOf(t) })).body.uses, ['purchase_history', 'specialty'], 'trainer mode: never gender or age, no goal');
+  assert.deepEqual((await prefs.get({ claims: claimsOf(o) })).body.uses, ['purchase_history'], 'owner mode');
+  // ?mode, validated like /shop/home.
+  assert.deepEqual((await prefs.get({ claims: claimsOf(m), mode: 'trainer' })).body, { personalised: true, available: true, historyDays: 90, mode: 'trainer', uses: ['purchase_history', 'specialty'] });
+  assert.deepEqual((await prefs.get({ claims: claimsOf(t), mode: 'member' })).body.uses, ['purchase_history', 'profile_gender', 'profile_age', 'goal']);
+  assert.deepEqual((await prefs.get({ claims: claimsOf(m), mode: 'owner' })).body.uses, ['purchase_history']);
+  for (const bad of ['vendor_personal', 'admin', 'everything']) assert.deepEqual(await prefs.get({ claims: claimsOf(m), mode: bad }), { error: 'mode_not_allowed', status: 403 }, bad);
+  // A refused mode on PUT saves nothing.
+  assert.deepEqual(await prefs.set({ claims: claimsOf(m), mode: 'admin', body: { personalised: false, source: 'why_sheet' } }), { error: 'mode_not_allowed', status: 403 });
+  assert.equal(s.store.rows.size, 0);
   await prefs.set({ claims: claimsOf(m), body: { personalised: false, source: 'why_sheet' } });
-  assert.deepEqual((await prefs.get({ claims: claimsOf(m) })).body.uses, [], 'switched off: nothing');
+  for (const mode of ['member', 'trainer', 'owner']) assert.deepEqual((await prefs.get({ claims: claimsOf(m), mode })).body.uses, [], `switched off: nothing (${mode})`);
   s.flagState.on = false;
-  assert.deepEqual((await prefs.get({ claims: claimsOf(m) })).body.uses, ['goal', 'specialty'], 'flag off: the Phase 1 page still uses the declared goal and specialty');
+  assert.deepEqual((await prefs.get({ claims: claimsOf(m) })).body.uses, ['goal'], 'flag off, member mode: the Phase 1 page uses the goal');
+  assert.deepEqual((await prefs.get({ claims: claimsOf(t) })).body.uses, ['specialty'], 'flag off, trainer mode: the specialty');
   const other = { id: 'mo', userType: 'member', personId: 'pero', memberProfile: { gender: 'other', dateOfBirth: '1980-01-01' } };
   s.users.rows.push(other);
   s.flagState.on = true;
   assert.deepEqual((await prefs.get({ claims: claimsOf(other) })).body.uses, ['purchase_history', 'profile_age'], 'gender other is not used');
+});
+
+test('not available → uses is [] in every mode, and the shop home uses no goal or specialty either (a 16-year-old trainer gets nothing)', async () => {
+  const kid = { id: 'k2', userType: 'member', personId: 'perk2', memberProfile: { gender: 'female', dateOfBirth: '2010-03-01', fitnessGoal: 'gain_muscle' } };
+  const kidTrainer = { id: 'kt', userType: 'trainer', personId: 'perk2' };
+  const s = setup({ users: [kid, kidTrainer], env: { SHOP_HOME_SECTIONS: 'essentials' } });
+  const prefs = createShopPreferenceService({
+    store: s.store, users: s.users, identityLink: { personasOf: async pid => s.users.rows.filter(u => u.personId === pid) },
+    flagOn: () => s.flagState.on, now: () => NOW, trainerProfileOf: () => ({ specialties: ['Yoga flow'] }),
+  });
+  for (const [claims, mode] of [[claimsOf(kid), undefined], [claimsOf(kid), 'trainer'], [claimsOf(kidTrainer), undefined], [claimsOf(kidTrainer), 'member']]) {
+    const body = (await prefs.get({ claims, mode })).body;
+    assert.deepEqual([body.available, body.uses], [false, []], `${claims.userType} ${mode}`);
+  }
+  for (let i = 0; i < 5; i += 1) s.add({ category: i < 2 ? 'supplements_nutrition' : 'equipment' });
+  const on = await s.service.home({ claims: claimsOf(kid) });
+  assert.deepEqual(on.body.personalisation, { available: false, enabled: false });
+  assert.ok(!on.body.signalsUsed.includes('goal'), 'no declared goal for a minor with the flag on');
+  assert.ok(!on.body.sections.flatMap(x => x.reasonCodes).includes('profile_goal'));
+  // With the flag off the page is the Phase 1 page (goal used) and uses says so.
+  s.flagState.on = false;
+  const off = await s.service.home({ claims: claimsOf(kid) });
+  assert.ok(off.body.signalsUsed.includes('goal'));
+  assert.deepEqual((await prefs.get({ claims: claimsOf(kid) })).body.uses, ['goal']);
+});
+
+test('bought_category reason only names a category the rail really shows after allocation', async () => {
+  // Bought 3 days ago: the only equipment product (non-consumable, so it is left out again). History
+  // changes the rail, but the rail then holds no equipment: it must not say "You've bought equipment".
+  const s = setup({ users: [ADULT_F], orders: [order('m1', [line('prd_001', 'Dumbbell')], { createdAt: ago(3) })], env: { SHOP_HOME_SECTIONS: 'recommended,essentials' } });
+  s.add({ category: 'equipment' });
+  for (let i = 0; i < 5; i += 1) s.add({ category: 'sportswear_footwear' });
+  const out = await s.service.home({ claims: claimsOf(ADULT_F) });
+  assert.ok(out.body.signalsUsed.includes('purchase_history'), 'history did change the page');
+  assert.ok(!out.body.sections.flatMap(x => x.productIds).includes('prd_001'));
+  for (const x of out.body.sections) {
+    const cats = new Set(x.productIds.map(id => out.body.products[id].category));
+    assert.ok(!x.reasonCodes.includes('bought_category'), `${x.key}: no bought reason for a category the rail does not show (${[...cats]})`);
+    assert.ok(!('reasonParams' in x), x.key);
+  }
+  assert.notEqual(sec(out.body, 'recommended').title.en, 'Recommended for you', 'no "for you" title without a matching reason');
+  // Allocation: best sellers take every events product first, so the later rails hold none.
+  const s3 = setup({ users: [ADULT_F], orders: [order('m1', [line('gone', 'Ticket', 'events')], { createdAt: ago(100) })], env: { SHOP_HOME_SECTIONS: 'best_sellers,recommended,essentials' } });
+  const sold = [s3.add({ category: 'events' }).id, s3.add({ category: 'events' }).id];
+  for (let i = 0; i < 6; i += 1) s3.add({ category: 'equipment' });
+  s3.ordersForSales(sold);
+  const out3 = await s3.service.home({ claims: claimsOf(ADULT_F) });
+  assert.deepEqual([...sec(out3.body, 'best_sellers').productIds].sort(), [...sold].sort());
+  const later = out3.body.sections.filter(x => ['recommended', 'essentials'].includes(x.key));
+  assert.ok(later.length > 0, 'at least one later rail is shown');
+  for (const x of later) assert.ok(!x.reasonCodes.includes('bought_category'), x.key);
+  // And when the rail does show the bought category, the reason is there.
+  const s2 = setup({ users: [ADULT_F], orders: [order('m1', [line('gone', 'Ticket', 'events')], { createdAt: ago(100) })], env: { SHOP_HOME_SECTIONS: 'essentials' } });
+  for (let i = 0; i < 2; i += 1) s2.add({ category: 'events' });
+  for (let i = 0; i < 4; i += 1) s2.add({ category: 'equipment' });
+  const out2 = await s2.service.home({ claims: claimsOf(ADULT_F) });
+  assert.deepEqual(sec(out2.body, 'essentials').reasonParams, { category: 'events' });
 });
