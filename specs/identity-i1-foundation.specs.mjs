@@ -24,10 +24,11 @@ import pin from '../db/migrations/20261117090000-identity-pin.cjs';
 import startPin from '../db/migrations/20261120090000-invitation-start-pin.cjs';
 import accountRecovery from '../db/migrations/20261124090000-account-recovery.cjs';
 import invitationAtomicAccept from '../db/migrations/20261227090000-invitation-atomic-accept.cjs';
+import personDeclaredDetails from '../db/migrations/20270110090700-person-declared-details.cjs';
 
 // Later identity migrations depend on Person, so a rollback runs newest first.
 // Add each new identity migration here.
-const LATER_IDENTITY_MIGRATIONS = [linking, onePersonaPerType, orgMembership, invitations, verificationCodes, pin, startPin, accountRecovery, invitationAtomicAccept];
+const LATER_IDENTITY_MIGRATIONS = [linking, onePersonaPerType, orgMembership, invitations, verificationCodes, pin, startPin, accountRecovery, invitationAtomicAccept, personDeclaredDetails];
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
 const now = () => new Date().toISOString();
