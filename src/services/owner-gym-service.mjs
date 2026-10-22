@@ -10,7 +10,7 @@ const OWNER_TRAINER_FIELDS = Object.freeze([
   'hourlyRateTzs', 'sessionRateCurrency', 'experienceYears', 'availability', 'socialLinks',
 ]);
 
-export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE }) {
+export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE, gymPayoutOwner = null }) {
   // Set by FitFlex, never by the owner: the verified badge, commission,
   // homepage placement, status and payout/tax details. Payout details for new
   // partners come from their verified KYC payout account.
@@ -91,7 +91,8 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const owned = [];
     for (const id of ids) {
       const gym = await gyms.findByIdAsync(id);
-      if (gym) owned.push(gym);
+      // Never a co-owner's id; with GYM_PAYOUT_OWNER on, isPayoutOwner (boolean).
+      if (gym) owned.push(gymPayoutOwner ? await gymPayoutOwner.forOwner(gym, owner.id) : gym);
     }
     return owned;
   }

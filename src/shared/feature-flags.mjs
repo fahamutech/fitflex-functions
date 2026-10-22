@@ -299,6 +299,19 @@ export function partnerProgressOn() {
   return on('PARTNER_PROGRESS');
 }
 
+/**
+ * A gym shared by several owners has ONE named payout owner (owner decision
+ * 2026-10-22; Gym.payoutOwnerId). Off unless GYM_PAYOUT_OWNER is set: payout
+ * eligibility, settlement payout gating and invoice payouts keep using the
+ * first owner account found for the gym, as before. On: the named payout
+ * owner; a gym with exactly one owner uses that owner without any admin step;
+ * a gym with two or more owners and none named is not payable
+ * (payout_owner_required). See src/services/gym-payout-owner.mjs.
+ */
+export function gymPayoutOwnerOn() {
+  return on('GYM_PAYOUT_OWNER');
+}
+
 // ── Default-ON switches ──────────────────────────────────────────────────────
 // The exception to "off unless set": these switches keep work that already
 // runs today running, so a deploy changes nothing. Only an explicit off value
