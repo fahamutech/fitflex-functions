@@ -570,7 +570,7 @@ test('a company\'s seats become a programme: same tier and split, real passes, a
   assert.deepEqual([paid.invoice.totalTzs, paid.activation.awaitingLink], [Math.round(PRO * 0.7), 1]);
   // …and once linked, the daily run moves them on to pay their 30%.
   const memberId = await user('member');
-  await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId: memberId, actorId: ADMIN.userId });
+  await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId: memberId, actorId: ADMIN.userId, actorType: 'admin' });
   assert.equal((await billing.advanceEntitlements()).awaitingMember >= 1, true);
   const [e] = await entitlements({ programId: converted.program.id });
   assert.deepEqual([e.status, e.userId, e.beneficiarySource, e.memberTzs], ['awaiting_member', memberId, 'corporate_employee', PRO - Math.round(PRO * 0.7)]);

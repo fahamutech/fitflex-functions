@@ -480,9 +480,9 @@ test('a company employee uses the company programme once linked to their member 
   const memberId = await user('member');
   assert.deepEqual(await checkInService.perform({ memberId, gymId: g.id }), { ok: false, failure: 'subscription_inactive' });   // not linked yet
 
-  assert.equal((await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId: await user('trainer'), actorId: ADMIN.userId })).error, 'user_must_be_member');
+  assert.equal((await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId: await user('trainer'), actorId: ADMIN.userId, actorType: 'admin' })).error, 'user_must_be_member');
   assert.equal((await corporateService.linkEmployeeUser({ corporateId: 'corp_other', employeeId: employee.id, userId: memberId })).status, 404);
-  const linked = await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId: memberId, actorId: ADMIN.userId });
+  const linked = await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId: memberId, actorId: ADMIN.userId, actorType: 'admin' });
   assert.deepEqual([linked.employee.userId, linked.employee.pinHash], [memberId, undefined]);
 
   const result = await checkInService.perform({ memberId, gymId: g.id });

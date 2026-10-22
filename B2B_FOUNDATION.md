@@ -108,6 +108,18 @@ All B2B list endpoints return `{ items, total, nextCursor }`, taking `limit` (ma
 
 `DELETE` never deletes. It sets `removed` for a user and `inactive` for a beneficiary.
 
+### Adding someone by user id needs their consent (22 Oct 2026)
+
+A user id proves nothing: ids show in activity feeds, groups and leaderboards. So when an **organisation user** (or a company's HR, on `POST /corporate/staff/:id/link`) names someone **only by `userId`**, nobody is added. The call answers `202 { outcome: "pending_member_acceptance", memberRequest }` and a `B2BMemberRequest` row waits for the person (kinds `beneficiary`, `org_user`, `employee_link`). Until they accept there is no beneficiary row, no staff link and no role, so the organisation sees none of their activity (every A-02 read goes through those rows) and no sponsor is charged. The person is told in the app (notification type `b2b_member_request`).
+
+- Member: `GET /b2b/me/member-requests`, `POST /b2b/me/member-requests/:requestId/accept`, `POST …/decline` (any signed-in user; their own requests only, otherwise 404). `GET /b2b/me/benefits` also carries `memberRequests`. Accept is single use (409 `member_request_not_pending`); it performs the add with the requester's access as it is then.
+- Organisation: list responses carry `pendingMemberAcceptance` (users and beneficiaries); `GET /corporate/staff` gives each employee `pendingLink`. `DELETE /b2b/organizations/:id/member-requests/:requestId` withdraws one; unlinking a staff record withdraws its open link request.
+- Requests expire after `B2B_MEMBER_REQUEST_TTL_DAYS` days (default 14); job `b2b-member-request-expiry` closes them hourly.
+- Limits (each request is a notification): after a decline or a withdrawal the same organisation / company can't ask the same person again for `B2B_MEMBER_REQUEST_COOLDOWN_DAYS` (default 30; `429 member_request_cooldown { retryAfter, retryAfterSeconds }`); at most `B2B_MEMBER_REQUEST_MAX_PENDING` open requests per organisation / company (default 200; `429 member_request_limit { maxPending }`); at most `B2B_MEMBER_REQUEST_RATE_PER_HOUR` adds by user id per requester per hour (default 60; `429 rate_limited { retryAfterSeconds }`, counted in memory per server for every attempt and from stored requests across servers).
+- Probing: the organisation never sees the person's name before they accept (`displayName: null`). An id that names nobody (or, for a beneficiary or staff link, no member) gets the same `202` with `memberRequest.id: null`; nothing is stored and nobody is told. Request, accept, decline, expire and cancel are in `AuditLog` (`b2b.member_request.*`).
+- Unchanged: FitFlex platform admins add by user id directly; adds by a **verified** email or number (and bulk import / invite matching, which use verified contacts) add directly without a request.
+- Analytics (A-02): a person's own activity (workouts, steps, gym visits, challenge progress) is shown only while they are `active` or `suspended`, not while `pending` or after they leave. The Corporate dashboard (`GET /corporate/dashboard`) counts visits on the same rule.
+
 ## 6. Relationship to Identity V2
 
 `B2BOrganizationUser` and `B2BBeneficiary` are organisation relationships, which is the role Identity V2 plans for `OrgMembership` in phase I4. They key on `User.id` like every existing foreign key. When I4 lands, they can either become `OrgMembership` rows (`orgType = 'b2b'`) or reference `Person` through `User.personId`. A member's B2B relationships are always separate rows and never change their persona, so one member can be an employee of A, a policyholder of B and a personal subscriber at the same time.

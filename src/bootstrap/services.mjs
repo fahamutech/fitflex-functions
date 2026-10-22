@@ -98,6 +98,7 @@ import { createNotificationService } from '../services/notification-service.mjs'
 import { getMessaging } from 'firebase-admin/messaging';
 import { createCorporateService } from '../services/corporate-service.mjs';
 import { createB2BService } from '../services/b2b-service.mjs';
+import { createB2BMemberRequestService } from '../services/b2b-member-request-service.mjs';
 import { createB2BProgramService } from '../services/b2b-program-service.mjs';
 import { createB2BConsumptionService } from '../services/b2b-consumption-service.mjs';
 import { createB2BBillingService } from '../services/b2b-billing-service.mjs';
@@ -358,9 +359,19 @@ export const productStatsRecomputeService = createProductStatsRecomputeService({
 // (never the self-editable User.email / User.phone). Used by friend
 // invitations, B2B invite matching and import, and add-by-contact.
 export const verifiedContacts = createVerifiedContacts(db);
+// Requests a member must accept before an organisation adds them by user id
+// (b2bMemberRequestService is defined below; these only run later, per request).
+const memberRequestsLater = {
+  attempt: requestedBy => b2bMemberRequestService.attempt(requestedBy),
+  stub: args => b2bMemberRequestService.stub(args),
+  create: args => b2bMemberRequestService.create(args),
+  pendingForOrganization: args => b2bMemberRequestService.pendingForOrganization(args),
+  pendingForCorporate: args => b2bMemberRequestService.pendingForCorporate(args),
+  cancelForEmployee: args => b2bMemberRequestService.cancelForEmployee(args),
+};
 export const corporateService = createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
-  verifiedContacts,
+  verifiedContacts, memberRequests: memberRequestsLater,
   // Every new company gets its employer B2B organisation. b2bService is defined
   // below; the hook only runs later, at onboarding.
   onAccountCreated: (account, actorId) => b2bService.ensureOrganizationForCorporate({ corporateId: account.id, actorId }),
@@ -371,7 +382,7 @@ export const corporateService = createCorporateService({
 export const b2bService = createB2BService({
   users, corporateAccounts, corporateEmployees, partnerKycCases,
   organizations: b2bOrganizations, organizationUsers: b2bOrganizationUsers, beneficiaries: b2bBeneficiaries,
-  auditLog, verifiedContacts,
+  auditLog, verifiedContacts, memberRequests: memberRequestsLater,
 });
 // B2B Phase 2: wellness programmes and benefit rules (no usage counting or payouts).
 export const b2bProgramService = createB2BProgramService({
@@ -383,6 +394,14 @@ export const b2bProgramService = createB2BProgramService({
   },
   // Sponsored passes (b2bBillingService is defined below; this only runs later).
   passes: { passFor: args => b2bBillingService.passFor(args) },
+});
+// A member accepts or declines an organisation's request to add them by user id.
+export const b2bMemberRequestService = createB2BMemberRequestService({
+  db, b2bService, corporateService,
+  previewBenefits: args => b2bProgramService.previewBenefits(args),
+  // notificationService is created further down; this only runs later.
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
 });
 // B2B Phase 3: benefit evaluation and the consumption ledger (no payouts).
 export const b2bConsumptionService = createB2BConsumptionService({
@@ -454,7 +473,7 @@ export const b2bLifecycleService = createB2BLifecycleService({
 // Billing work that has waited too long, the provider-side checks, and alert emails to staff.
 export const b2bWatchService = createB2BWatchService({ db, emailSender: () => emailSender() });
 export const b2bOps = registerB2BJobs({
-  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService, b2bLifecycleService, b2bWatchService,
+  ops: opsService, db, programs: b2bPrograms, b2bBeneficiaryImportService, b2bLifecycleService, b2bWatchService, b2bMemberRequestService,
   // Defined at the end of this file; only called when the job runs.
   promotionService: { runLifecycle: args => promotionService.runLifecycle(args) },
   promotionEventsService: { purge: args => promotionEventsService.purge(args) },
