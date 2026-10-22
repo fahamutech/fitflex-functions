@@ -51,7 +51,7 @@ Signed in, any role. Always `200` (also with the flag off), except a refused mod
 - `personalised`: the stored choice; **no row = `true`** (on by default, new and existing accounts).
 - `historyDays`: the configured purchase-history window (`SHOP_HISTORY_DAYS`), for the privacy text ("in the last year").
 - `mode`: the shopping mode `uses` describes (added in QA round 1).
-- `uses`: the signals the shop **actually uses now, in that mode**, in this order: `purchase_history`, `profile_gender`, `profile_age`, `goal`, `specialty`. Build the "What we use" list from this. Location is not listed until slice 3.
+- `uses`: the signals the shop **actually uses now, in that mode**, in this order: `purchase_history`, `profile_gender`, `profile_age`, `location`, `goal`, `specialty`. Build the "What we use" list from this. `location` (slice 3) is listed in **every mode** while `SHOP_NEAR_YOU` is on and personalisation is enabled; it means the current area is used if the person allows location on the device (`docs/shop-near-you-api.md`).
 
   | Situation | `uses` |
   |---|---|

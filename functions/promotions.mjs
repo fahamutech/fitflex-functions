@@ -20,6 +20,9 @@ const isApprover = req => !req.user?.portalUser || (req.user.aclPermissions || [
 const canManage = [requireAuth('admin'), requireAcl('promotions')];
 const canApprove = [requireAuth('admin'), requireAcl('promotions_approve')];
 const canCampaign = [requireAuth('admin'), requireAcl('campaigns')];
+// Shop home slice 3: admins with `shop` map vendor areas (PUT /admin/vendors/:id), so they may READ the
+// area list too. Read-only: creating areas still needs `campaigns`. No new scope.
+const canViewAreas = [requireAuth('admin'), requireAcl('promotions', 'promotions_approve', 'campaigns', 'shop')];
 
 function send(res, result, okStatus = 200) {
   const { error, status, ...payload } = result;
@@ -162,8 +165,8 @@ export const searchPromotionPartners = {
 
 export const listGeoAreas = {
   created, method: 'get', path: '/admin/geo-areas',
-  description: 'Admin (promotions): the geographic areas promotions can target (country > region > city > district).',
-  onGuard: routeGuard('get', canView), onRequest: async (req, res) => res.json(await promotionService.listAreas()),
+  description: 'Admin (promotions, or shop for vendor area mapping; read-only): the geographic areas promotions can target and vendors sell in (country > region > city > district).',
+  onGuard: routeGuard('get', canViewAreas), onRequest: async (req, res) => res.json(await promotionService.listAreas()),
 };
 export const createGeoArea = {
   created, method: 'post', path: '/admin/geo-areas',

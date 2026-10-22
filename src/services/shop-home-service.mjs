@@ -7,10 +7,13 @@
 // `cacheSeconds`. What is about this shopper (their personas, a declared goal
 // or specialty, their own vendor products, the `recent` ids) is read per request
 // and never cached or stored. That includes, with SHOP_PERSONALISATION on, their
-// "Personalised shop" switch and their own paid orders (purchase history).
+// "Personalised shop" switch and their own paid orders (purchase history), and, with SHOP_NEAR_YOU on,
+// the `areaId` the device worked out: used for this one answer only, never cached, stored or logged.
+// The areas, vendors' areas and pickup gyms' cities (non-personal) are part of the shared cache.
 import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recommendations.mjs';
 import { purchaseHistoryFrom, audienceFrom, historyDaysFromEnv } from './shop-personalisation.mjs';
-import { shopBannersOn, shopPersonalisationOn } from '../shared/feature-flags.mjs';
+import { shopBannersOn, shopPersonalisationOn, shopNearYouOn } from '../shared/feature-flags.mjs';
+import { indexAreas, resolveViewerArea, vendorAreasOf, deliversTo, basedIn, publicAreas } from '../shared/shop-areas.mjs';
 import { withoutTargets } from '../shared/product-targets.mjs';
 
 const usable = p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected';
@@ -45,6 +48,10 @@ export function createShopHomeService({
   buyerPaidOrders = null,
   personalisationOn = shopPersonalisationOn,
   historyDays = () => historyDaysFromEnv(),
+  // Slice 3 (SHOP_NEAR_YOU): GeoArea rows ({ allAsync }) and () → [{ id, cityId, regionId }] of gyms (pickup points).
+  geoAreas = null,
+  gymAreas = null,
+  nearYouOn = shopNearYouOn,
   logger = console,
   config = () => shopHomeConfigFromEnv(),
   now = () => new Date(),
@@ -55,9 +62,22 @@ export function createShopHomeService({
   async function loadShared() {
     const cfg = config();
     const at = now().getTime();
-    if (cache && at - cache.at < cfg.cacheSeconds * 1000) return cache.value;
+    // A cache built while SHOP_NEAR_YOU was off has no area data: rebuild once it is on.
+    const fresh = cache && at - cache.at < cfg.cacheSeconds * 1000 && (!nearWanted() || cache.value.near);
+    if (fresh) return cache.value;
     if (!loading) loading = rebuild(at).finally(() => { loading = null; });
     return loading;
+  }
+
+  const nearWanted = () => Boolean(geoAreas) && nearYouOn();
+
+  /** Non-personal area data for near-you: the area index, each vendor's areas, each pickup gym's city/region. */
+  async function loadNear(vendors) {
+    const [areaRows, gymRows] = await Promise.all([geoAreas.allAsync(), gymAreas ? gymAreas() : []]);
+    const index = indexAreas(areaRows);
+    const vendorAreas = new Map(vendors.map(v => [v.id, vendorAreasOf(v.vendorProfile, index)]));
+    const gymArea = new Map((gymRows || []).map(g => [g.id, { cityId: g.cityId || null, regionId: g.regionId || null }]));
+    return { index, vendorAreas, gymArea };
   }
 
   async function rebuild(at) {
@@ -80,9 +100,46 @@ export function createShopHomeService({
       orders,
       featured,
       paidPlacementIds: [...new Set([...live.map(p => p.entityId), ...featured.map(f => f.productId)])],
+      ...(nearWanted() ? { near: await loadNear(vendors) } : {}),
     };
     cache = { at, value };
     return value;
+  }
+
+  /**
+   * needs.location for this viewer: which vendors are based in or deliver to the area, and local
+   * sales = paid orders of the last 30 days picked up at a gym in the viewer's city (region-level
+   * viewer: region). Home-delivery addresses are free text and are not read.
+   */
+  function nearLocation(shared, viewer) {
+    const vendors = new Map();
+    for (const [vendorId, areasOfVendor] of shared.near.vendorAreas) {
+      const m = { basedIn: basedIn(areasOfVendor, viewer), delivers: deliversTo(areasOfVendor, viewer) };
+      if (m.basedIn || m.delivers) vendors.set(vendorId, m);
+    }
+    const inArea = gymId => {
+      const g = gymId ? shared.near.gymArea.get(gymId) : null;
+      if (!g) return false;
+      return viewer.cityId ? g.cityId === viewer.cityId : Boolean(viewer.regionId) && g.regionId === viewer.regionId;
+    };
+    const areaSales = new Map();
+    for (const order of shared.orders || []) {
+      if (order.paymentStatus !== undefined && order.paymentStatus !== 'paid') continue;
+      if (order.status === 'cancelled' || !inArea(order.pickupGymId)) continue;
+      for (const id of new Set((order.items || []).map(i => i?.productId).filter(Boolean))) areaSales.set(id, (areaSales.get(id) || 0) + 1);
+    }
+    return { area: { areaId: viewer.areaId, name: viewer.name, cityId: viewer.cityId, regionId: viewer.regionId, chain: viewer.chain }, vendors, areaSales };
+  }
+
+  const nearYouOf = (state, viewer, shared) => ({
+    available: Boolean(state?.enabled && shared.near),
+    ...(viewer ? { areaId: viewer.areaId, areaName: { en: viewer.name, sw: viewer.name } } : {}),
+  });
+
+  /** GET /shop/areas: the usable areas (non-personal). */
+  async function areas() {
+    if (!geoAreas) return [];
+    return publicAreas(await geoAreas.allAsync());
   }
 
   /** The persona rows of this person (or just the signed-in row for an account without a Person). */
@@ -112,6 +169,7 @@ export function createShopHomeService({
     // Slice 2: read per request for this person only; never cached, never stored as a profile.
     let personalisation = null;
     let state = null;
+    let viewer = null;
     if (personalisationOn() && preferences) {
       state = await preferences.stateFor({ claims, user, personas, memberProfile });
       let history = null;
@@ -121,7 +179,10 @@ export function createShopHomeService({
         const categories = new Map(shared.products.map(p => [p.id, p.category]));
         history = purchaseHistoryFrom(orders, { buyerIds: state.buyerIds, now: at, days: historyDays(), categoryOf: id => categories.get(id) || null });
       }
+      // Slice 3: the viewer's area only when near-you is on and personalisation is on for this person.
+      if (nearYouOn() && state.enabled && shared.near) viewer = resolveViewerArea(shared.near.index, query.areaId);
       personalisation = {
+        location: viewer ? nearLocation(shared, viewer) : null,
         optedOut: state.personalised === false,
         // Not available (no member persona, invalid date of birth, under 18): no declared goal or
         // specialty either, so the page matches GET /shop/preferences `uses: []` (QA 2026-10-22).
@@ -145,14 +206,17 @@ export function createShopHomeService({
     const featuredIds = new Set(out.sections.find(s => s.key === 'featured')?.productIds || []);
     const session = typeof query.session === 'string' ? query.session : null;
     const products = {};
+    // Slice 3: the "Delivers to your area" badge. Set only to true, never false.
+    const delivers = id => Boolean(viewer) && deliversTo(shared.near.vendorAreas.get(rows.get(id)?.vendorId), viewer);
+    const badge = (id, row) => (delivers(id) ? { ...row, deliversToViewerArea: true } : row);
     for (const section of out.sections) {
       for (const id of section.productIds) {
         const row = rows.get(id);
         const tag = featuredIds.has(id) ? tags.get(id) : null;
-        if (!tag) { products[id] = withoutTargets(row); continue; }
+        if (!tag) { products[id] = badge(id, withoutTargets(row)); continue; }
         const { token, ...promotion } = tag;
         products[id] = {
-          ...withoutTargets(row),
+          ...badge(id, withoutTargets(row)),
           promotion: { ...promotion, ...(signToken && session ? { token: signToken({ promotionId: tag.id, entityType: 'product', entityId: id, sessionId: session, now: at }) } : {}) },
         };
       }
@@ -165,6 +229,8 @@ export function createShopHomeService({
       personalised: state ? out.personalised : false,
       // Slice 2: only with SHOP_PERSONALISATION on; off, the body is exactly as before.
       ...(state ? { personalisation: { available: state.available, enabled: state.enabled } } : {}),
+      // Slice 3: only with SHOP_NEAR_YOU on; off, the body is exactly as before.
+      ...(nearYouOn() ? { nearYou: nearYouOf(state, viewer, shared) } : {}),
       signalsUsed: out.signalsUsed,
       categories: out.categories,
       allProductsCount: out.allProductsCount,
@@ -184,5 +250,5 @@ export function createShopHomeService({
     return { body };
   }
 
-  return { home, clearCache: () => { cache = null; }, loadShared };
+  return { home, clearCache: () => { cache = null; }, loadShared, areas };
 }
