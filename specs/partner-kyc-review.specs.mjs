@@ -157,9 +157,11 @@ test('rejection closes the role; reopening starts a new round', async () => {
   const admin = await reviewer();
   await svc.submit(t.partner, t.actor);
   await svc.claim(t.caseId, admin);
-  await svc.decide(t.caseId, { decision: 'reject', reasonCode: 'suspected_fraud', reasonNote: 'The certificate is not genuine.' }, admin);
+  // A partner-safe reason: its note is copied to the partner's approval note.
+  // (A sensitive one such as suspected_fraud is not — partner-kyc-neutral-reasons.specs.)
+  await svc.decide(t.caseId, { decision: 'reject', reasonCode: 'document_mismatch', reasonNote: 'The certificate is for another person.' }, admin);
   const user = await userRow(t.id);
-  assert.deepEqual([user.approvalStatus, user.approvalNote], ['rejected', 'The certificate is not genuine.']);
+  assert.deepEqual([user.approvalStatus, user.approvalNote], ['rejected', 'The certificate is for another person.']);
   assert.equal((await db('TrainerProfile').where('userId', t.id).first()).approvalStatus, 'rejected');
 
   const reopened = await svc.decide(t.caseId, { decision: 'reopen' }, admin);

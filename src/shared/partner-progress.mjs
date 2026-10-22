@@ -26,6 +26,8 @@
 // 'blocked' when it can't move without FitFlex. Later steps that aren't done
 // are 'todo' (or 'blocked' when they are blocked on their own).
 
+import { isSensitiveReason, partnerReasonCode, PARTNER_NEUTRAL_REASON } from './partner-kyc.mjs';
+
 export const PROGRESS_STEPS = ['registered', 'approved', 'verified', 'payoutReady'];
 
 export const NEXT_ACTIONS = [
@@ -33,7 +35,7 @@ export const NEXT_ACTIONS = [
   'complete_kyc_items',         // { missing: [checklist keys] }
   'submit_kyc',                 // everything is in; send it for review
   'kyc_under_review',           // submitted or in review
-  'kyc_changes_requested',      // { reasonCode, missing }
+  'kyc_changes_requested',      // { reasonCode (under_review when sensitive), missing }
   'add_payout_account',         // { reason?: 'payout_account_rejected' }
   'payout_account_under_review',
   'payout_account_cooling_off', // { until }
@@ -43,7 +45,14 @@ export const NEXT_ACTIONS = [
   'none',                       // every step is done
 ];
 
-export const BLOCKED_REASONS = ['account_suspended', 'role_rejected', 'kyc_rejected', 'kyc_suspended'];
+// 'under_review' stands in for kyc_rejected / kyc_suspended (and a changes
+// request's reasonCode) when the case's reason is sensitive, such as
+// suspected_fraud: the partner reads "under review — contact support",
+// never why (owner decision, 22 Oct 2026; see shared/partner-kyc.mjs).
+export const BLOCKED_REASONS = ['account_suspended', 'role_rejected', 'kyc_rejected', 'kyc_suspended', 'under_review'];
+
+/** The blocked reason a partner sees for a rejected / suspended case. */
+const caseReason = (kycCase, reason) => (isSensitiveReason(kycCase?.reasonCode) ? PARTNER_NEUTRAL_REASON : reason);
 
 const iso = v => (v ? new Date(v).toISOString() : undefined);
 const step = (key, state, extra = {}) => {
@@ -57,9 +66,9 @@ function kycAction(kycCase, checklist) {
   const missing = checklist?.missing || [];
   const status = kycCase?.status || 'draft';
   if (status === 'submitted' || status === 'in_review') return { code: 'kyc_under_review' };
-  if (status === 'info_requested') return { code: 'kyc_changes_requested', reasonCode: kycCase.reasonCode || null, missing };
-  if (status === 'rejected') return { code: 'contact_support', reason: 'kyc_rejected' };
-  if (status === 'suspended') return { code: 'contact_support', reason: 'kyc_suspended' };
+  if (status === 'info_requested') return { code: 'kyc_changes_requested', reasonCode: partnerReasonCode(kycCase.reasonCode), missing };
+  if (status === 'rejected') return { code: 'contact_support', reason: caseReason(kycCase, 'kyc_rejected') };
+  if (status === 'suspended') return { code: 'contact_support', reason: caseReason(kycCase, 'kyc_suspended') };
   return missing.length ? { code: 'complete_kyc_items', missing } : { code: 'submit_kyc' };
 }
 
@@ -67,7 +76,7 @@ function kycAction(kycCase, checklist) {
 function approvedStep(user, kycCase) {
   if (user?.accountStatus === 'suspended') return step('approved', 'blocked', { reason: 'account_suspended' });
   const status = user?.approvalStatus || 'approved';
-  if (status === 'rejected') return step('approved', 'blocked', { reason: kycCase?.status === 'rejected' ? 'kyc_rejected' : 'role_rejected' });
+  if (status === 'rejected') return step('approved', 'blocked', { reason: kycCase?.status === 'rejected' ? caseReason(kycCase, 'kyc_rejected') : 'role_rejected' });
   if (status === 'pending_approval') return step('approved', 'todo');
   // Vendors are approved by their KYC decision; that is when it happened.
   const at = kycCase && ['approved', 'suspended'].includes(kycCase.status) && user?.userType === 'vendor' ? iso(kycCase.decidedAt) : undefined;
@@ -76,8 +85,8 @@ function approvedStep(user, kycCase) {
 
 function verifiedStep(kycCase) {
   if (kycCase?.status === 'approved') return step('verified', 'done', { at: iso(kycCase.decidedAt) });
-  if (kycCase?.status === 'rejected') return step('verified', 'blocked', { reason: 'kyc_rejected' });
-  if (kycCase?.status === 'suspended') return step('verified', 'blocked', { reason: 'kyc_suspended' });
+  if (kycCase?.status === 'rejected') return step('verified', 'blocked', { reason: caseReason(kycCase, 'kyc_rejected') });
+  if (kycCase?.status === 'suspended') return step('verified', 'blocked', { reason: caseReason(kycCase, 'kyc_suspended') });
   return step('verified', 'todo');
 }
 
@@ -85,11 +94,12 @@ function verifiedStep(kycCase) {
  * The payout step and what to do about it, from one payout-eligibility
  * answer ({ ok, reason, until }) and the partner's payout accounts.
  */
-export function payoutStep(eligibility, settlementAccounts = []) {
+export function payoutStep(eligibility, settlementAccounts = [], kycCase = null) {
   if (eligibility?.ok) return { step: step('payoutReady', 'done'), action: null };
   const reason = eligibility?.reason || 'payout_not_ready';
   if (reason === 'kyc_suspended' || reason === 'kyc_rejected') {
-    return { step: step('payoutReady', 'blocked', { reason }), action: { code: 'contact_support', reason } };
+    const shown = caseReason(kycCase, reason);
+    return { step: step('payoutReady', 'blocked', { reason: shown }), action: { code: 'contact_support', reason: shown } };
   }
   if (reason === 'payout_account_cooling_off') {
     return { step: step('payoutReady', 'todo'), action: { code: 'payout_account_cooling_off', until: eligibility.until || null } };
@@ -130,7 +140,7 @@ function finish(steps, actionFor) {
  * @param {Object|null} input.eligibility     payout eligibility { ok, reason, until }
  */
 export function buildProgress({ user, kycCase = null, checklist = null, settlementAccounts = [], kycDrivesApproval = true, eligibility = null }) {
-  const payout = payoutStep(eligibility, settlementAccounts);
+  const payout = payoutStep(eligibility, settlementAccounts, kycCase);
   const steps = [
     step('registered', 'done', { at: iso(user?.createdAt) }),
     approvedStep(user, kycCase),
