@@ -111,8 +111,8 @@ const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' }
 
 export const vendorToolsOptionsRoute = {
   created, method: 'get', path: '/vendor/tools/options',
-  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
-  responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false } },
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). merch.productTargets: SHOP_PERSONALISATION is on (show the product form "Who it is for" fields: targetGender, targetAgeBands). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
+  responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
     const vendorId = req.user.userType === 'vendor' ? req.user.sub : req.user.userType === 'vendor_staff' ? req.user.vendorId : null;
@@ -123,7 +123,7 @@ export const vendorToolsOptionsRoute = {
 export const vendorMeRoute = {
   created, method: 'get', path: '/vendor/me',
   description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|sales|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost and vatInForce }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
-  responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false } } },
+  responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false } } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
     const me = await shopService.vendorMe(req.user);
@@ -243,9 +243,14 @@ export const vendorSaveProfile = {
 
 export const adminListProducts = {
   created, method: 'get', path: '/admin/products',
-  description: 'Admin: list every product with homepage visibility and priority controls. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries the vendor\'s private costTzs and reorderLevel (null when not set) and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — the same shape as GET /vendor/products for the vendor account. Never on /shop/*. Portal: show cost/reorder fields only when they are present (flag off → absent).',
+  description: 'Admin: list every product with homepage visibility and priority controls. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries the vendor\'s private costTzs and reorderLevel (null when not set) and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — the same shape as GET /vendor/products for the vendor account. Never on /shop/*. Portal: show cost/reorder fields only when they are present (flag off → absent). Every row carries the vendor\'s optional tags targetGender (women | men | null) and targetAgeBands ([] = all ages), read-only here; filters ?targetGender=women|men|everyone and ?targetAgeBand=18_29|30_44|45_59|60_plus|all (bad value → 400 invalid_filter { field, allowed }).',
   onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('shop')]),
-  onRequest: async (_req, res) => res.json(await shopService.adminListProducts()),
+  onRequest: async (req, res) => {
+    const q = req.query || {};
+    const result = await shopService.adminListProducts({ targetGender: q.targetGender, targetAgeBand: q.targetAgeBand });
+    if (result.error) return sendError(res, result);
+    res.json(result);
+  },
 };
 
 export const adminCreateProduct = {

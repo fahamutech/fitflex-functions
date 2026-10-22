@@ -6,9 +6,12 @@
 // Featured list and which products hold a live promotion) is cached for
 // `cacheSeconds`. What is about this shopper (their personas, a declared goal
 // or specialty, their own vendor products, the `recent` ids) is read per request
-// and never cached or stored.
+// and never cached or stored. That includes, with SHOP_PERSONALISATION on, their
+// "Personalised shop" switch and their own paid orders (purchase history).
 import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recommendations.mjs';
-import { shopBannersOn } from '../shared/feature-flags.mjs';
+import { purchaseHistoryFrom, audienceFrom, historyDaysFromEnv } from './shop-personalisation.mjs';
+import { shopBannersOn, shopPersonalisationOn } from '../shared/feature-flags.mjs';
+import { withoutTargets } from '../shared/product-targets.mjs';
 
 const usable = p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected';
 const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
@@ -36,6 +39,12 @@ export function createShopHomeService({
   // ({ mode, products, ownVendorIds, at }) → live banners (SHOP_BANNERS). Read on every request, never cached.
   bannerFeed = null,
   bannersOn = shopBannersOn,
+  // Slice 2 (SHOP_PERSONALISATION): the switch (shop-preference-service.stateFor) and the person's
+  // own orders: ({ buyerIds, since }) → paid, not cancelled orders of those buyers placed since then.
+  preferences = null,
+  buyerPaidOrders = null,
+  personalisationOn = shopPersonalisationOn,
+  historyDays = () => historyDaysFromEnv(),
   logger = console,
   config = () => shopHomeConfigFromEnv(),
   now = () => new Date(),
@@ -54,7 +63,8 @@ export function createShopHomeService({
   async function rebuild(at) {
     const since = new Date(at - 30 * 86_400_000);
     const [products, orders, discovered] = await Promise.all([
-      shopService.listProducts({}),
+      // With the vendor's target tags (for the gender/age reorder); they are taken off every row before it is sent.
+      shopService.listProducts({ includeTargets: true }),
       recentPaidOrders({ since }),
       discoveryService.discover({ entityType: 'product', sort: 'relevance', limit: 1 }),
     ]);
@@ -98,11 +108,30 @@ export function createShopHomeService({
     const shared = await loadShared();
     const cfg = config();
     const at = now();
+
+    // Slice 2: read per request for this person only; never cached, never stored as a profile.
+    let personalisation = null;
+    let state = null;
+    if (personalisationOn() && preferences) {
+      state = await preferences.stateFor({ claims, user, personas, memberProfile });
+      let history = null;
+      if (state.enabled && buyerPaidOrders) {
+        const since = new Date(at.getTime() - historyDays() * 86_400_000);
+        const orders = await buyerPaidOrders({ buyerIds: state.buyerIds, since });
+        const categories = new Map(shared.products.map(p => [p.id, p.category]));
+        history = purchaseHistoryFrom(orders, { buyerIds: state.buyerIds, now: at, days: historyDays(), categoryOf: id => categories.get(id) || null });
+      }
+      personalisation = {
+        optedOut: state.personalised === false,
+        history,
+        audienceFor: mode => (state.enabled ? audienceFrom({ mode, memberProfile, age: state.age }) : null),
+      };
+    }
     const out = buildShopHome({
       mode: query.mode, sessionUserType: claims.userType, heldUserTypes,
       memberProfile, trainerProfile, recentIds: query.recent, ownVendorIds,
       products: shared.products, suspendedVendorIds: shared.suspendedVendorIds, featured: shared.featured, paidPlacementIds: shared.paidPlacementIds, orders: shared.orders,
-      config: cfg, now: at,
+      config: cfg, now: at, personalisation,
     });
     if (out.error) return { error: out.error, status: 403 };
 
@@ -116,10 +145,10 @@ export function createShopHomeService({
       for (const id of section.productIds) {
         const row = rows.get(id);
         const tag = featuredIds.has(id) ? tags.get(id) : null;
-        if (!tag) { products[id] = row; continue; }
+        if (!tag) { products[id] = withoutTargets(row); continue; }
         const { token, ...promotion } = tag;
         products[id] = {
-          ...row,
+          ...withoutTargets(row),
           promotion: { ...promotion, ...(signToken && session ? { token: signToken({ promotionId: tag.id, entityType: 'product', entityId: id, sessionId: session, now: at }) } : {}) },
         };
       }
@@ -128,8 +157,10 @@ export function createShopHomeService({
       serverNow: at.toISOString(),
       currency: 'TZS',
       mode: out.mode,
-      // Phase 1 uses no personal signals (purchase history, gender/age, location are Phase 2).
-      personalised: false,
+      // True only when a personal signal (slice 2, SHOP_PERSONALISATION) actually changed the page.
+      personalised: state ? out.personalised : false,
+      // Slice 2: only with SHOP_PERSONALISATION on; off, the body is exactly as before.
+      ...(state ? { personalisation: { available: state.available, enabled: state.enabled } } : {}),
       signalsUsed: out.signalsUsed,
       categories: out.categories,
       allProductsCount: out.allProductsCount,
