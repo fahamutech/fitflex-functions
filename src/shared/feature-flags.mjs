@@ -304,3 +304,13 @@ export function trainerStatementDraftsOn() {
 export function vendorStatementDraftsOn() {
   return onUnlessOff('VENDOR_STATEMENT_DRAFTS');
 }
+
+/**
+ * Marathon & running events module (docs/marathon/PRD-v1.0-2026-10-21.md; reuse map §9). EVENTS_MODULE is
+ * the umbrella: off unless set, so a deploy changes nothing. S1 ships only persistence, the domain rules
+ * and the eventHoldExpiry job; the job returns at once while this is off. Later slices add their own
+ * flags (EVENTS_DISCOVERY, EVENTS_REGISTRATION, EVENTS_PAYMENTS_MANUAL …), each on only together with this one.
+ */
+export function eventsModuleOn() {
+  return on('EVENTS_MODULE');
+}
