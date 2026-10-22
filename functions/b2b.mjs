@@ -8,6 +8,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
+import { orgOnlySponsorsOn } from '../src/shared/feature-flags.mjs';
 import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps, b2bBeneficiaryImportService, b2bLifecycleService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -96,6 +97,17 @@ export const myB2BOrganizations = {
   description: 'Organisations the caller administers, with their role.',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => send(res, await b2bService.listMyOrganizations({ userId: req.user.sub, userType: req.user.userType })),
+};
+
+export const myB2BOrganizationSession = {
+  created, method: 'get', path: '/b2b/me/organization-session',
+  description: 'B5a: what a sign-in would tell the portal about the caller right now, without signing in again. Always { orgOnlySponsors } (whether ORG_ONLY_SPONSORS is on); while it is on and the caller is a company HR login that reaches its organisation, also { organizationUser: true, organizationRoles, organizationIds }, computed exactly as in the sign-in response. Any other caller (or the flag off) gets orgOnlySponsors only.',
+  responseSample: { orgOnlySponsors: true, organizationUser: true, organizationRoles: ['hr'], organizationIds: ['b2bo_0123456789ab'] },
+  onGuard: routeGuard('get', requireAuth()),
+  onRequest: async (req, res) => {
+    const marks = await b2bService.organizationSessionMarks({ userId: req.user.sub, userType: req.user.userType });
+    res.json({ orgOnlySponsors: orgOnlySponsorsOn(), ...(marks ?? {}) });
+  },
 };
 
 export const getB2BOrganization = {

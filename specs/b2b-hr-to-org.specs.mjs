@@ -22,7 +22,7 @@ import { HR_CONVERSION_ACTION, HR_CONVERSION_ACTOR } from '../src/services/hr-or
 import { authLogin } from '../functions/auth.mjs';
 import { verifyContacts, purgeIdentity } from './fixtures/verified-contacts.mjs';
 import {
-  myB2BOrganizations, getB2BOrganization, listB2BOrganizationUsers, addB2BOrganizationUser, updateB2BOrganizationUser,
+  myB2BOrganizations, myB2BOrganizationSession, getB2BOrganization, listB2BOrganizationUsers, addB2BOrganizationUser, updateB2BOrganizationUser,
   listB2BBeneficiaries, enrollB2BBeneficiary, setB2BBeneficiaryStatus, deactivateB2BBeneficiary,
   linkB2BBeneficiaryAccount, importB2BBeneficiaries, adminCreateB2BOrganization, adminSetB2BOrganizationStatus,
 } from '../functions/b2b.mjs';
@@ -508,4 +508,28 @@ test('review 4: adding by name and contact answers the same whether or not a con
     const b = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { email: memberEmail } });
     assert.deepEqual([a.statusCode, a.body.error, b.statusCode, b.body.error], [400, 'display_name_required', 400, 'display_name_required']);
   });
+});
+
+test('session marks endpoint: an already signed-in HR session learns the sign-in fields; flag off or another caller gets orgOnlySponsors only', async () => {
+  const { corporateId, orgId, hr } = await company();
+  const login = () => call(authLogin, { body: { email: hr.email, password: hr.password, requestedRole: 'corporate_hr' } });
+  const marks = claims => call(myB2BOrganizationSession, { claims });
+  const pick = u => ({ organizationUser: u.organizationUser, organizationRoles: u.organizationRoles, organizationIds: u.organizationIds });
+
+  assert.equal((await marks()).statusCode, 401);
+  const off = await flagOff(() => marks(hr.claims));
+  assert.deepEqual([off.statusCode, off.body], [200, { orgOnlySponsors: false }]);
+
+  for (const step of ['read-through', 'converted']) {
+    if (step === 'converted') await hrOrgConversionService.run({ dryRun: false, corporateId });
+    const [on, signIn] = await flagOn(async () => [await marks(hr.claims), await login()]);
+    assert.equal(on.statusCode, 200);
+    assert.deepEqual(on.body, { orgOnlySponsors: true, organizationUser: true, organizationRoles: ['hr'], organizationIds: [orgId] }, step);
+    assert.deepEqual(pick(on.body), pick(signIn.body.user), 'same as the sign-in response');
+  }
+  // A member, and an HR login whose row was removed: the flag only.
+  const member = await account('member');
+  assert.deepEqual((await flagOn(() => marks({ sub: member, userType: 'member' }))).body, { orgOnlySponsors: true });
+  await db('B2BOrganizationUser').where({ userId: hr.id }).update({ status: 'removed', removedAt: new Date() });
+  assert.deepEqual((await flagOn(() => marks(hr.claims))).body, { orgOnlySponsors: true });
 });
