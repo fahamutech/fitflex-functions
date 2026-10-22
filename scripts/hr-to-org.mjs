@@ -18,7 +18,11 @@
 //
 // Uses DATABASE_URL (FITFLEX_USE_CI_DB=1 for DATABASE_URL_CI) and prints the
 // database name first so you can stop if it is the wrong one.
-import 'dotenv/config';
+import dotenv from 'dotenv';
+
+// Quiet: dotenv's banner goes to stdout and would break --json output.
+process.env.DOTENV_CONFIG_QUIET = 'true';   // modules imported below load dotenv too
+dotenv.config({ quiet: true });
 
 const args = process.argv.slice(2);
 const apply = args.includes('--apply');

@@ -191,7 +191,7 @@ test('conversion: the script runs as a dry run by default against the CI databas
   assert.equal(out.status, 0, out.stderr);
   const ciName = new URL(process.env.DATABASE_URL_CI).pathname.slice(1);
   assert.match(out.stderr, new RegExp(`database: ${ciName} · dry run`));
-  const report = JSON.parse(out.stdout.slice(out.stdout.indexOf('{')));
+  const report = JSON.parse(out.stdout.slice(out.stdout.search(/^\{/m)));
   assert.deepEqual([report.dryRun, report.total, report.items[0].userId, report.items[0].outcome], [true, 1, hr.id, 'added']);
   assert.equal((await db('B2BOrganizationUser').where({ userId: hr.id })).length, 0);
 });
