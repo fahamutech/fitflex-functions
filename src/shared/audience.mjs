@@ -10,6 +10,7 @@
 // service builds from the real subscription, check-in and payment records
 // (see src/services/segment-service.mjs). Pure functions only.
 import { haversineM } from './run-metrics.mjs';
+import { isCalendarDay, ageOnDay } from './date-of-birth.mjs';
 
 // `trainers` is a FitFlex-only audience of trainers (not members): admins
 // send them promotions and news with the same composer.
@@ -119,10 +120,10 @@ const MAX_LIST = 50;
 const MAX_TEXT = 100;
 const MAX_NUMBER = 100_000;
 const MAX_KM = 500;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const bad = (detail) => ({ error: 'invalid_audience', status: 400, detail });
-const isDay = (v) => typeof v === 'string' && DATE_RE.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
+// Strict: a real calendar day (Date.parse would roll 2023-02-31 on to 3 March).
+const isDay = isCalendarDay;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= MAX_NUMBER;
 const isText = (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_TEXT;
 
@@ -272,10 +273,9 @@ export function audienceCatalog(scope) {
   };
 }
 
-/** Whole years between a "YYYY-MM-DD" birth date and a local day, or null. */
-export function ageOn(dateOfBirth, today) {
-  if (!isDay(dateOfBirth) || !isDay(today) || dateOfBirth > today) return null;
-  const [by, bm, bd] = dateOfBirth.split('-').map(Number);
-  const [ty, tm, td] = today.split('-').map(Number);
-  return ty - by - (tm < bm || (tm === bm && td < bd) ? 1 : 0);
-}
+/**
+ * Whole years between a stored "YYYY-MM-DD" birth date and a local day, or null. The rule is the
+ * one in date-of-birth.mjs: an impossible date (2023-02-31), one before 1901-01-01 or one after
+ * `today` counts as no birth date, so it never matches an age condition (only `exists: false`).
+ */
+export const ageOn = (dateOfBirth, today) => ageOnDay(dateOfBirth, today);
