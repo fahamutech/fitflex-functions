@@ -12,8 +12,9 @@
 //
 // Which rows ("owner-made"): userType gym_staff, with a Firebase sign-in, not
 // yet marked, and NOT made by accepting an invitation (those people chose
-// their own credentials: AuditLog invitation_accepted with after.personaId =
-// the row). Unknown origin counts as owner-made (fail closed: the worst case
+// their own credentials). Origin = the earliest of the row's gym_staff_created
+// (target = row) and invitation_accepted (after.personaId = row) audit rows,
+// so an owner-made row whose person later accepted an invitation is marked. Unknown origin counts as owner-made (fail closed: the worst case
 // is someone choosing a new PIN once). Staff who already completed the change
 // (AuditLog gym_staff.pin_changed) are skipped, so re-running is a no-op.
 // New owner-made staff are marked by POST /owner/staff itself.
@@ -33,9 +34,16 @@ exports.up = async function up(knex) {
       .where('u.userType', 'gym_staff')
       .whereNotNull('u.firebaseUid')
       .where('u.passwordChangeRequired', false)
-      .whereNotExists(q => q.select(1).from('AuditLog as a')
-        .where('a.action', 'invitation_accepted')
-        .whereRaw(`a."after"->>'personaId' = u.id`))
+      // How the row came to be is the EARLIEST of its gym_staff_created and
+      // invitation_accepted audit rows (review of #260, finding 3): an owner-made
+      // staff member who later accepted an invitation keeps the owner's PIN. On a
+      // tie the owner-made reading wins (fail closed); no row at all = owner-made.
+      .whereRaw(`coalesce((
+        SELECT a.action FROM "AuditLog" a
+        WHERE (a.action = 'gym_staff_created' AND a.target = u.id)
+           OR (a.action = 'invitation_accepted' AND a."after"->>'personaId' = u.id)
+        ORDER BY a.at ASC, (a.action = 'invitation_accepted') ASC
+        LIMIT 1), 'unknown') <> 'invitation_accepted'`)
       .whereNotExists(q => q.select(1).from('AuditLog as a')
         .where('a.action', 'gym_staff.pin_changed')
         .whereRaw('a.target = u.id'))

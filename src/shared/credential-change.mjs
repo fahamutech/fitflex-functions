@@ -19,3 +19,16 @@ export function mustChangeStartCredential(user) {
   if (user?.passwordChangeRequired !== true) return false;
   return FLAGGED_CREDENTIAL_TYPES.has(user.userType) ? staffPinChangeRequiredOn() : true;
 }
+
+/**
+ * Does the token's own `pwc` claim still hold the session? For portal admins,
+ * always. For gym staff only while STAFF_PIN_CHANGE_REQUIRED is on: turning the
+ * switch off must release sessions minted while it was on, since their only
+ * way out (POST /auth/pin/change) is then 404 (review of #260, finding 2).
+ * With the switch on the claim still counts, so a failed account lookup
+ * (which fails open) cannot release a held staff session.
+ */
+export function claimHoldsSession(claims) {
+  if (claims?.pwc !== true) return false;
+  return FLAGGED_CREDENTIAL_TYPES.has(claims.userType) ? staffPinChangeRequiredOn() : true;
+}

@@ -31,6 +31,9 @@ export function createOwnerStaffService({
   pepper = () => null,
   // The FitFlex-held PIN service (I7a), read lazily: { configured(), setPin(personId, pin), endSessions(personId) }.
   pinAuth = () => null,
+  // Server-side email + password check against Firebase (src/auth/firebase-password.mjs):
+  // async (email, password) => { configured, ok, uid?, unreachable? }. Used to refuse "change" to the owner's PIN.
+  verifyFirebasePassword = async () => ({ configured: false, ok: false }),
   // Drop the cached session check for a profile, so ended sessions stop at once.
   forgetSession = () => {},
 }) {
@@ -217,7 +220,9 @@ export function createOwnerStaffService({
   async function resetPin({ ownerGymIds, staffId, body, actorId }) {
     const target = await users.findAsync(u => u.id === staffId && u.userType === 'gym_staff');
     if (!target) return { error: 'staff_not_found', status: 404 };
-    if (!(target.gymIds || []).some(id => ownerGymIds.includes(id))) return { error: 'staff_not_at_your_gym', status: 403 };
+    // A credential reset needs the owner to own EVERY gym this staff row covers (review of #260, finding 4).
+    const staffGymIds = (target.gymIds && target.gymIds.length) ? target.gymIds : (target.gymId ? [target.gymId] : []);
+    if (!staffGymIds.length || !staffGymIds.every(id => ownerGymIds.includes(id))) return { error: 'staff_not_at_your_gym', status: 403 };
     const pin = String(body?.pin ?? '');
     if (!isPin(pin)) return { error: 'pin_must_be_4_digits', status: 400 };
     if (!db) return { error: 'pin_reset_not_configured', status: 503 };
@@ -262,6 +267,33 @@ export function createOwnerStaffService({
   }
 
   /**
+   * Is `pin` the start PIN the owner chose? (security review of #260, finding 1)
+   * - The keyed digest kept at create/reset answers it when present and the key is set.
+   * - Otherwise (staff marked by the migration, a missing or changed PIN_PEPPER)
+   *   the current Firebase credential does: signing in with `fitflex-pin:<pin>`
+   *   works only if it is still the owner's. It is also asked when a digest
+   *   exists, so a changed key cannot let the owner's PIN through.
+   * - If neither can answer, refuse (503 pin_check_unavailable) rather than accept.
+   */
+  async function isStartPin(user, pin) {
+    const digest = pepper() && user.startPasswordHash ? startPinDigest(user.id, pin) : null;
+    if (digest && sameDigest(digest, user.startPasswordHash)) return { same: true };
+    let firebase = { configured: false, ok: false };
+    if (user.email) {
+      try {
+        firebase = await verifyFirebasePassword(user.email, firebasePasswordForPin(pin));
+      } catch (err) {
+        console.warn('[owner-staff] Firebase PIN check failed:', err?.message);
+        firebase = { configured: true, ok: false, unreachable: true };
+      }
+    }
+    const firebaseAnswered = firebase?.configured === true && !firebase.unreachable;
+    if (firebaseAnswered && firebase.ok) return { same: true };
+    if (firebaseAnswered || digest) return { same: false };
+    return { error: 'pin_check_unavailable', status: 503 };
+  }
+
+  /**
    * The staff member replaces the start PIN the owner chose (POST /auth/pin/change).
    * The same sequence as the portal admin change (#219):
    * 1. claim the row (one conditional UPDATE): a concurrent change gets 409;
@@ -275,9 +307,9 @@ export function createOwnerStaffService({
     if (!mustChangeStartCredential(user)) return { error: 'pin_change_not_required', status: 409 };
     const pin = String(newPin ?? '');
     if (!isPin(pin)) return { error: 'pin_must_be_4_digits', status: 400 };
-    if (user.startPasswordHash && sameDigest(startPinDigest(user.id, pin), user.startPasswordHash)) {
-      return { error: 'pin_unchanged', status: 400 };
-    }
+    const unchanged = await isStartPin(user, pin);
+    if (unchanged.error) return unchanged;
+    if (unchanged.same) return { error: 'pin_unchanged', status: 400 };
     if (!db) return { error: 'pin_change_not_configured', status: 503 };
     if (!user.firebaseUid) return { error: 'firebase_update_failed', status: 502 };
 
@@ -334,7 +366,11 @@ export function createOwnerStaffService({
     forgetSession(user.id);
     // The PIN IS changed but the profile could not be updated: sign in again with the new PIN
     // (the flag stays, so that session is still held to this route).
-    if (!finished) return { error: 'pin_changed_session_failed', status: 500 };
+    if (!finished) {
+      // Release the claim so the next attempt (with the new PIN) is not held for 60 s.
+      await mine().update({ passwordChangeClaimedAt: null }).catch(err => console.error('[owner-staff] claim release failed:', err?.message));
+      return { error: 'pin_changed_session_failed', status: 500 };
+    }
 
     await audit(user.id, 'gym_staff.pin_changed', user.id,
       { passwordChangeRequired: true },

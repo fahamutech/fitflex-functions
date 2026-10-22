@@ -623,6 +623,8 @@ export const ownerStaffService = createOwnerStaffService({
   initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
   // B3a: the start-PIN digest uses the same server key as PINs; the held PIN is the I7a service's.
   pepper: () => pinPepper(), pinAuth: () => pinAuthService, forgetSession: invalidateAccountStatus,
+  // Read at call time through the replaceable holder (defined below), as the PIN service does.
+  verifyFirebasePassword: (...args) => firebasePasswordCheck.verify(...args),
 });
 
 export const adminMemberService = createAdminMemberService({

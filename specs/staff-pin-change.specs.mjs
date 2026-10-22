@@ -5,7 +5,7 @@
 //
 // Contract, while STAFF_PIN_CHANGE_REQUIRED is on:
 //   - POST /owner/staff marks the new staff row; existing owner-made staff are
-//     marked by migration 20270112090000 (invitation-made staff never are);
+//     marked by migration 20270121090000 (invitation-made staff never are);
 //   - a marked staff member's sessions (Firebase sign-in and PIN sign-in) carry
 //     pwc: true, and every route except POST /auth/pin/change refuses them with
 //     403 password_change_required;
@@ -26,14 +26,14 @@ import { ownerCreateStaff, ownerListStaff, ownerResetStaffPin } from '../functio
 import { operatorVerifyQr, operatorCheckIn, operatorRecentCheckIns, operatorDashboard, operatorGymEntranceQr } from '../functions/checkins.mjs';
 import { pinLogin, changeMyPin } from '../functions/pin-auth.mjs';
 import { users, auditLog, portalFirebaseAdmin, pinAuthService, firebasePasswordCheck } from '../src/bootstrap/services.mjs';
-import { sign, verify, invalidateAccountStatus } from '../src/auth/jwt.mjs';
+import { sign, verify, invalidateAccountStatus, requireAuth, optionalSessionClaims } from '../src/auth/jwt.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { mustChangeStartCredential } from '../src/shared/credential-change.mjs';
 import { toSessionUser } from '../src/shared/session-user.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const marking = require('../db/migrations/20270112090000-staff-pin-change-marking.cjs');
+const marking = require('../db/migrations/20270121090000-staff-pin-change-marking.cjs');
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
 const devToken = payload => `dev:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
@@ -42,7 +42,7 @@ const OWNER_PIN = '1234';
 const NEW_PIN = '4821';
 
 // ── environment ─────────────────────────────────────────────────────────────
-const ENV_NAMES = ['STAFF_PIN_CHANGE_REQUIRED', 'IDENTITY_V2', 'V2_PIN_LOGIN', 'V2_PERSONAS', 'V2_INVITES', 'V2_LINKING', 'NODE_ENV'];
+const ENV_NAMES = ['STAFF_PIN_CHANGE_REQUIRED', 'PIN_PEPPER', 'IDENTITY_V2', 'V2_PIN_LOGIN', 'V2_PERSONAS', 'V2_INVITES', 'V2_LINKING', 'NODE_ENV'];
 async function withEnv(env, fn) {
   const saved = Object.fromEntries(ENV_NAMES.map(n => [n, process.env[n]]));
   for (const [k, v] of Object.entries(env)) { if (v === null) delete process.env[k]; else process.env[k] = v; }
@@ -538,4 +538,129 @@ test('migration marks existing owner-made staff once, with an audit row each; in
   assert.equal(await flagOf(ownerMade), false);
   assert.equal((await auditsFor(ownerMade, 'gym_staff.pin_change_required_unmarked')).length, 1);
   await marking.up(db); // leave the shared CI DB as migrated
+});
+
+// ── security review of #260 ─────────────────────────────────────────────────
+
+/** Stand in for the server-side Firebase password check: `accounts` maps email → current PIN. */
+function firebaseHasPins(accounts, { configured = true } = {}) {
+  firebasePasswordCheck.verify = async (email, password) => {
+    if (!configured) return { configured: false, ok: false };
+    return accounts[email] !== undefined && password === `fitflex-pin:${accounts[email]}`
+      ? { configured: true, ok: true, uid: 'fb' } : { configured: true, ok: false };
+  };
+}
+
+test('finding 1: staff marked by the migration (no digest) cannot "change" to the owner\'s PIN', async () => {
+  await withEnv(FLAG_ON, async () => {
+    const owner = await makeOwner();
+    const { row, email } = await createStaff(owner);
+    // As the migration leaves an existing staff member: marked, no start digest.
+    await db('User').where({ id: row.id }).update({ startPasswordHash: null });
+    const token = olderSession(row, { pwc: true, iat: nowSeconds() });
+    try {
+      firebaseHasPins({ [email]: OWNER_PIN });
+      const same = await call(authStaffChangeStartPin, { token, body: { newPin: OWNER_PIN } });
+      assert.equal(same.statusCode, 400, JSON.stringify(same.body));
+      assert.equal(same.body.error, 'pin_unchanged');
+
+      // Neither check can answer: refuse instead of accepting.
+      firebaseHasPins({}, { configured: false });
+      const blind = await call(authStaffChangeStartPin, { token, body: { newPin: NEW_PIN } });
+      assert.equal(blind.statusCode, 503);
+      assert.equal(blind.body.error, 'pin_check_unavailable');
+      firebasePasswordCheck.verify = async () => ({ configured: true, ok: false, unreachable: true });
+      const down = await call(authStaffChangeStartPin, { token, body: { newPin: NEW_PIN } });
+      assert.equal(down.body.error, 'pin_check_unavailable');
+      assert.equal((await db('User').where({ id: row.id }).first()).passwordChangeRequired, true);
+      assert.equal(fb.updated.filter(u => u.uid === row.firebaseUid).length, 0);
+
+      // Firebase says the new PIN is not the current one: the change goes through.
+      firebaseHasPins({ [email]: OWNER_PIN });
+      const ok = await call(authStaffChangeStartPin, { token, body: { newPin: NEW_PIN } });
+      assert.equal(ok.statusCode, 200, JSON.stringify(ok.body));
+    } finally {
+      firebasePasswordCheck.verify = originalPasswordCheck;
+    }
+  });
+});
+
+test('finding 1: a changed PIN_PEPPER cannot let the owner\'s PIN through', async () => {
+  const owner = await makeOwner();
+  const { row, email } = await withEnv(FLAG_ON, () => createStaff(owner));
+  assert.ok(row.startPasswordHash, 'digest kept under the original key');
+  await withEnv({ ...FLAG_ON, PIN_PEPPER: 'a-different-key' }, async () => {
+    const token = olderSession(row, { pwc: true, iat: nowSeconds() });
+    try {
+      firebaseHasPins({ [email]: OWNER_PIN });
+      const same = await call(authStaffChangeStartPin, { token, body: { newPin: OWNER_PIN } });
+      assert.equal(same.statusCode, 400, JSON.stringify(same.body));
+      assert.equal(same.body.error, 'pin_unchanged');
+    } finally {
+      firebasePasswordCheck.verify = originalPasswordCheck;
+    }
+  });
+});
+
+test('finding 2: with the flag off a staff token minted with pwc is no longer held; admins still are', async () => {
+  const owner = await makeOwner();
+  const { row } = await withEnv(FLAG_ON, () => createStaff(owner));
+  const staffToken = olderSession(row, { pwc: true, iat: nowSeconds() });
+  invalidateAccountStatus(row.id);
+  await withEnv(FLAG_ON, async () => {
+    const { passed, out } = await guardsPass(operatorRecentCheckIns, staffToken);
+    assert.equal(passed, false);
+    assert.equal(out.body.error, 'password_change_required');
+    assert.equal(optionalSessionClaims({ headers: { authorization: `Bearer ${staffToken}` } }), null);
+  });
+  invalidateAccountStatus(row.id);
+  await withEnv(FLAG_OFF, async () => {
+    assert.equal((await guardsPass(operatorRecentCheckIns, staffToken)).passed, true, 'switch off releases the held session');
+    assert.equal(optionalSessionClaims({ headers: { authorization: `Bearer ${staffToken}` } })?.sub, row.id);
+    // A portal admin's pwc claim is #219's and does not follow the staff switch.
+    const adminToken = sign({ sub: uniq('usr_admin_b3'), userType: 'admin', pwc: true });
+    const { passed, out } = await guardsPass({ onGuard: requireAuth('admin') }, adminToken);
+    assert.equal(passed, false);
+    assert.equal(out.body.error, 'password_change_required');
+    assert.equal(optionalSessionClaims({ headers: { authorization: `Bearer ${adminToken}` } }), null);
+  });
+});
+
+test('finding 3: owner-made staff who later accepted an invitation are still marked; invitation-made are not', async () => {
+  const owner = await makeOwner();
+  const insertStaff = async () => {
+    const id = uniq('usr_f3_b3');
+    await db('User').insert({
+      id, userType: 'gym_staff', firebaseUid: uniq('fbuid'), email: `${uniq('f3')}@example.com`,
+      accountStatus: 'active', approvalStatus: 'approved', onboardingCompleted: true, portalUser: false,
+      aclPermissions: ['checkins'], gymIds: [owner.gymId], gymId: owner.gymId, passwordChangeRequired: false,
+      createdAt: new Date(), updatedAt: new Date(),
+    });
+    return id;
+  };
+  const at = ms => new Date(Date.now() - ms).toISOString();
+  const ownerThenInvite = await insertStaff();
+  await auditLog.insertAsync({ id: randomUUID(), at: at(60_000), actor: owner.row.id, action: 'gym_staff_created', target: ownerThenInvite, before: null, after: {} });
+  await auditLog.insertAsync({ id: randomUUID(), at: at(1_000), actor: 'usr_x', action: 'invitation_accepted', target: uniq('inv'), before: null, after: { orgType: 'gym', personaId: ownerThenInvite } });
+  const invitedOnly = await insertStaff();
+  await auditLog.insertAsync({ id: randomUUID(), at: at(1_000), actor: 'usr_x', action: 'invitation_accepted', target: uniq('inv'), before: null, after: { orgType: 'gym', personaId: invitedOnly } });
+
+  await marking.up(db);
+  assert.equal((await db('User').where({ id: ownerThenInvite }).first()).passwordChangeRequired, true);
+  assert.equal((await db('User').where({ id: invitedOnly }).first()).passwordChangeRequired, false);
+});
+
+test('finding 4: an owner may reset only staff whose every gym they own', async () => {
+  await withEnv(FLAG_ON, async () => {
+    const ownerA = await makeOwner();
+    const ownerB = await makeOwner();
+    const { row } = await createStaff(ownerA);
+    await users.updateByIdAsync(row.id, { gymIds: [ownerA.gymId, ownerB.gymId] });
+    for (const owner of [ownerA, ownerB]) {
+      const out = await call(ownerResetStaffPin, { token: owner.token, params: { id: row.id }, body: { pin: '7777' } });
+      assert.equal(out.statusCode, 403, JSON.stringify(out.body));
+      assert.equal(out.body.error, 'staff_not_at_your_gym');
+    }
+    assert.equal(fb.updated.filter(u => u.uid === row.firebaseUid).length, 0);
+  });
 });
