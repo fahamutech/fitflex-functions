@@ -140,6 +140,17 @@ export const eventHoldExpiry = {
   }
 };
 
+export const eventLifecycle = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Events: automatic lifecycle moves — published → registration_closed at registrationClosesAt, published / registration_closed → in_progress at startsAt, in_progress → completed at endsAt + EVENT_AUTO_COMPLETE_GRACE_HOURS (default 6). Does nothing unless EVENTS_MODULE is on. Safe to rerun (each move is a guarded transition). The work, its run record and lock are in src/bootstrap/services.mjs (event-lifecycle) and ops-service.mjs.',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-lifecycle');
+    const s = r?.stats ?? {};
+    if (s.moved) console.log(`[events] lifecycle: moved=${s.moved} due=${s.due} skipped=${s.skipped} failed=${s.failed}`);
+  }
+};
+
 export const shopReconciliation = {
   created, rule: '15 * * * *', // hourly
   description: 'Marketplace: reconcile orders, confirmed payments, refunds, stock and vendor statements. Read-only; logs one line per open finding so an alert can key on "[shop-reconciliation]". The same report is at GET /admin/marketplace/reconciliation.',

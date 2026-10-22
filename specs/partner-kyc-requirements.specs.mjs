@@ -92,7 +92,7 @@ test('a company is checked on company, representative and commercial terms — n
 });
 
 test('tiers follow the canon: Tier 3 for businesses, Tier 2 for trainers', () => {
-  assert.deepEqual(KYC_TIERS, { gym_owner: 3, trainer: 2, vendor: 3, corporate: 3 });
+  assert.deepEqual(KYC_TIERS, { gym_owner: 3, trainer: 2, vendor: 3, corporate: 3, event_organizer: 3 });
   assert.throws(() => evaluateKyc('member', {}), /unknown partner type/);
 });
 

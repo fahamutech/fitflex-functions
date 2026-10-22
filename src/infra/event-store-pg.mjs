@@ -50,10 +50,14 @@ export const referenceOf = orderId => `EV-${orderId.slice(4, 14).toUpperCase()}`
 export const movementKeyOf = (orderId, cycle, kind, ticketTypeId) => `${orderId}:${cycle}:${kind}:${ticketTypeId}`;
 
 const ORGANIZER_COLUMNS = ['id', 'ownerUserId', 'name', 'legalName', 'contactPhone', 'contactEmail', 'status', 'statusReason', 'kycCaseId', 'settlementAccountId', 'commissionPct', 'timezone'];
-const EVENT_COLUMNS = ['id', 'organizerId', 'slug', 'title', 'description', 'eventType', 'status', 'startsAt', 'endsAt', 'timezone', 'venueName', 'venueAddress', 'lat', 'lng', 'routeMeta', 'termsSnapshot', 'refundPolicySnapshot', 'registrationClosesAt', 'publishedAt', 'cancelledAt', 'version'];
-const CATEGORY_COLUMNS = ['id', 'eventId', 'name', 'distanceMeters', 'routeType', 'startTime', 'eligibility', 'capacity', 'registrationClosesAt', 'resultRules', 'status'];
+// S2 (20270110090800-events-document-fields.cjs) adds the rest of the document; the same rowOf() rules apply.
+const EVENT_COLUMNS = ['id', 'organizerId', 'slug', 'title', 'description', 'eventType', 'status', 'startsAt', 'endsAt', 'timezone', 'venueName', 'venueAddress', 'lat', 'lng', 'routeMeta', 'termsSnapshot', 'refundPolicySnapshot', 'registrationClosesAt', 'publishedAt', 'cancelledAt', 'version',
+  'heroImageUrl', 'heroThumbUrl', 'heroImageAlt', 'routeUrl', 'routeImageUrl', 'routeImageAlt', 'descriptionSw', 'venueCity', 'venueRegion', 'accessibility', 'inclusions', 'kitProvided',
+  'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy', 'registrationOpensAt'];
+const CATEGORY_COLUMNS = ['id', 'eventId', 'name', 'distanceMeters', 'routeType', 'startTime', 'eligibility', 'capacity', 'registrationClosesAt', 'resultRules', 'status', 'minAge'];
 const TICKET_TYPE_COLUMNS = ['id', 'eventId', 'categoryId', 'name', 'priceTzs', 'currency', 'capacity', 'saleOpensAt', 'saleClosesAt', 'minPerOrder', 'maxPerOrder', 'status'];
-const JSON_COLUMNS = new Set(['routeMeta', 'termsSnapshot', 'refundPolicySnapshot', 'eligibility', 'resultRules', 'priceSnapshot', 'emergencyContact', 'payload']);
+const JSON_COLUMNS = new Set(['routeMeta', 'termsSnapshot', 'refundPolicySnapshot', 'eligibility', 'resultRules', 'priceSnapshot', 'emergencyContact', 'payload',
+  'accessibility', 'inclusions', 'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy']);
 
 /** Only the known columns of a table, JSON columns serialised; unknown keys are dropped, never sent to SQL. */
 function rowOf(columns, input) {

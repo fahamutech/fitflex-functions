@@ -18,6 +18,10 @@ const MIGRATIONS = [
   '20270110090400-events-tickets-ops.cjs',
   '20270110090500-events-rewards.cjs',
   '20270110090600-integration-platform.cjs',
+  // S2 builds on the organizer and event tables (FKs from OrgMembership / Invitation / EventFavourite), so
+  // its two migrations are part of the same up/down set.
+  '20270110090700-events-organizer-identity.cjs',
+  '20270110090800-events-document-fields.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');

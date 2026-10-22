@@ -53,6 +53,9 @@ export const DOCUMENT_REQUIREMENTS = Object.freeze({
   // is checked in the VAT registration section of the case (VendorTaxProfile), which never changes the
   // KYC decision. The VRN itself is entered on the tax profile.
   vat_certificate: { types: ['vat_certificate'], fields: [] },
+  // Events · S2 (D10, D13): the organizer's event permit from the local authority. Optional at organizer
+  // approval and at event submission; the admin queue shows whether one is on file (permitOnFile).
+  event_permit: { types: ['event_permit'], fields: [], expires: true },
 });
 
 // The one person each partner type must name, and which of their details
@@ -64,6 +67,8 @@ export const PERSON_REQUIREMENTS = Object.freeze({
   // name, ID number, nationality, position (owner, co-owner or employee) and ID document, all mandatory.
   vendor: { role: 'authorised_representative', fields: ['fullName', 'idNumber', 'nationality', 'position'], idDocument: 'representative_id' },
   corporate: { role: 'authorised_representative', fields: ['fullName', 'idNumber', 'position', 'phone', 'email'], idDocument: 'representative_id' },
+  // Events · S2 (spec §4.3): the organizer's representative.
+  event_organizer: { role: 'authorised_representative', fields: ['fullName', 'idNumber', 'phone', 'email', 'position'], idDocument: 'representative_id' },
 });
 
 // Business fields on the KYC case each type must complete.
@@ -72,9 +77,10 @@ export const BUSINESS_REQUIREMENTS = Object.freeze({
   trainer: [],
   vendor: ['legalName', 'tradingName', 'registrationNumber', 'tin', 'registeredAddress'],
   corporate: ['legalName', 'registrationNumber', 'tin', 'registeredAddress', 'businessActivity'],
+  event_organizer: ['legalName', 'tradingName', 'registrationNumber', 'tin', 'registeredAddress'],
 });
 
-export const KYC_TIERS = Object.freeze({ gym_owner: 3, trainer: 2, vendor: 3, corporate: 3 });
+export const KYC_TIERS = Object.freeze({ gym_owner: 3, trainer: 2, vendor: 3, corporate: 3, event_organizer: 3 });
 
 // Which documents each type needs, by requirement key.
 export const DOCUMENTS_FOR = Object.freeze({
@@ -83,6 +89,7 @@ export const DOCUMENTS_FOR = Object.freeze({
   trainer: ['trainer_id', 'certification'],
   vendor: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
   corporate: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id'],
+  event_organizer: ['business_registration', 'tin_certificate', 'business_licence', 'representative_id', 'event_permit'],
 });
 
 // Vendor tools · S5: documents a partner type may add only while VENDOR_VAT is on (contract check #229:
@@ -106,9 +113,15 @@ export const OPTIONAL_ITEMS = Object.freeze({
     'company.registration_certificate', 'company.tin_certificate', 'company.licence',
     'representative.position', 'representative.phone', 'representative.email',
   ]),
+  // Events · S2 (D10: the vendor checklist, plus the event permit which is optional per D13).
+  event_organizer: new Set([
+    'business.legalName', 'business.tradingName', 'business.registrationNumber', 'business.registeredAddress',
+    'business.registration_certificate', 'business.tin_certificate', 'business.licence', 'business.event_permit',
+    'representative.email',
+  ]),
 });
 
-export const SETTLEMENT_REQUIRED = Object.freeze({ gym_owner: true, trainer: true, vendor: true, corporate: false });
+export const SETTLEMENT_REQUIRED = Object.freeze({ gym_owner: true, trainer: true, vendor: true, corporate: false, event_organizer: true });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -312,7 +325,23 @@ function corporateSections(s) {
   ];
 }
 
-const SECTIONS = { gym_owner: gymOwnerSections, trainer: trainerSections, vendor: vendorSections, corporate: corporateSections };
+/** Events · S2 (spec §4.3): business, representative, documents (incl. the optional permit), payout account, agreements. */
+function eventOrganizerSections(s) {
+  const organizer = s.organizer || {};
+  return [
+    { key: 'business', items: [
+      ...businessItems('business', 'event_organizer', s.case, s.documents, s.now),
+      documentItem('business.licence', s.documents, 'business_licence', s.now),
+      documentItem('business.event_permit', s.documents, 'event_permit', s.now),
+      { key: 'business.contact', by: BY_PARTNER, status: filled(organizer.contactPhone) ? 'complete' : 'missing' },
+    ] },
+    { key: 'representative', items: personItems('representative', 'event_organizer', s.people, s.documents, s.now) },
+    { key: 'settlement', items: [settlementItem(s.settlementAccounts)] },
+    { key: 'agreements', items: agreementItems('event_organizer', s.agreements) },
+  ];
+}
+
+const SECTIONS = { gym_owner: gymOwnerSections, trainer: trainerSections, vendor: vendorSections, corporate: corporateSections, event_organizer: eventOrganizerSections };
 
 /**
  * Evaluate a partner's KYC.
