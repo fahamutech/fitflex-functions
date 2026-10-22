@@ -19,6 +19,10 @@ export function createCorporateService({
   // Verified-contacts helper: linking by email or number finds only a person
   // who has verified it (fail closed without it; user ids still work).
   verifiedContacts = null,
+  // Member requests (b2b-member-request-service): HR linking a member named
+  // only by user id makes a request the member must accept (security fix,
+  // 22 Oct 2026). Without it such links are refused (fail closed).
+  memberRequests = null,
 }) {
   const now = () => new Date().toISOString();
 
@@ -290,11 +294,13 @@ export function createCorporateService({
    * Link an employee to their FitFlex member account (or unlink with a null
    * userId). The link is what lets the employee use the company's benefits.
    */
-  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId }) {
+  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId, actorType = null, memberRequestId = null }) {
     const employee = await corporateEmployees.findByIdAsync(employeeId);
     if (!employee || employee.corporateId !== corporateId) return { error: 'employee_not_found', status: 404 };
     const unlink = [givenUserId, email, phone].every(v => v === null || v === undefined || v === '');
     if (unlink) {
+      // An open request to link this record goes too.
+      if (memberRequests) await memberRequests.cancelForEmployee({ corporateId, employeeId, actorId });
       const updated = await corporateEmployees.updateByIdAsync(employeeId, { userId: null, updatedAt: now() });
       await audit({ actor: actorId, action: 'corporate.staff.unlink', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId: null } });
       return { employee: (({ pinHash, ...rest }) => rest)(updated) };
@@ -308,13 +314,29 @@ export function createCorporateService({
     const taken = (await corporateEmployees.filterByColumnAsync('userId', userId))
       .find(e => e.corporateId === corporateId && e.id !== employeeId && e.status !== 'exited');
     if (taken) return { error: 'user_already_linked', status: 409, employeeId: taken.id };
+    // Named only by user id (a user id proves nothing): the member must accept
+    // before the record is linked and the company sees their activity.
+    // FitFlex platform admins (actorType 'admin') still link directly.
+    const byIdOnly = givenUserId != null && String(givenUserId).trim() !== '';
+    if (byIdOnly && actorType !== 'admin' && !memberRequestId) {
+      if (employee.userId === userId) return { employee: (({ pinHash, ...rest }) => rest)(employee), unchanged: true };
+      if (!memberRequests) return { error: 'member_consent_unavailable', status: 503 };
+      return memberRequests.create({
+        kind: 'employee_link', corporateId, employeeId, userId, requestedBy: actorId, requestedByType: actorType ?? 'corporate_hr',
+        details: { displayName: employee.displayName ?? null, department: employee.department ?? null },
+      });
+    }
     const updated = await corporateEmployees.updateByIdAsync(employeeId, { userId, updatedAt: now() });
-    await audit({ actor: actorId, action: 'corporate.staff.link', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId } });
+    // Linked another way: an open request for this record is closed.
+    if (memberRequests && !memberRequestId) await memberRequests.cancelForEmployee({ corporateId, employeeId, actorId });
+    await audit({ actor: actorId, action: 'corporate.staff.link', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId, ...(memberRequestId ? { memberRequestId } : {}) } });
     return { employee: (({ pinHash, ...rest }) => rest)(updated) };
   }
 
   async function listStaff({ corporateId, search, department, status }) {
     const rows = await corporateEmployees.filterByColumnAsync('corporateId', corporateId);
+    // Link requests the member has not answered yet (additive: pendingLink on each employee, null when none).
+    const pending = memberRequests ? await memberRequests.pendingForCorporate({ corporateId }) : new Map();
     const needle = search?.trim().toLowerCase();
     const employees = rows
       .filter(e => (status ? e.status === status : true))
@@ -324,7 +346,7 @@ export function createCorporateService({
         : true))
       .sort((a, b) => a.displayName.localeCompare(b.displayName))
       // pinHash must never leave the service.
-      .map(({ pinHash, ...rest }) => rest);
+      .map(({ pinHash, ...rest }) => ({ ...rest, pendingLink: pending.get(rest.id) ?? null }));
     return { employees };
   }
 

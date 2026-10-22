@@ -53,6 +53,12 @@ function setup() {
     beneficiaries: store([]),
     auditLog: store([]),
   };
+  // Adds by user id from organisation users become member requests (22 Oct 2026); recorded here.
+  s.requested = [];
+  s.memberRequests = {
+    create: async (r) => { s.requested.push(r); return { outcome: 'pending_member_acceptance', memberRequest: { id: `req_${s.requested.length}`, status: 'pending_member_acceptance', ...r } }; },
+    pendingForOrganization: async ({ organizationId, kind }) => s.requested.filter(r => r.organizationId === organizationId && r.kind === kind),
+  };
   s.b2b = createB2BService({ ...s });
   return s;
 }
@@ -168,7 +174,16 @@ test('organisation users: add, role assignment, duplicates, permissions and remo
 
   const asOwner = await access(s, orgId, { userId: 'owner_a', userType: 'member' });
   assert.equal(asOwner.role, 'owner');
-  const mgr = (await s.b2b.addOrganizationUser({ access: asOwner, body: { userId: 'mgr_a', role: 'manager' }, actorId: 'owner_a' })).organizationUser;
+  // An organisation user naming someone by user id only asks: no seat until they accept.
+  const asked = await s.b2b.addOrganizationUser({ access: asOwner, body: { userId: 'mgr_a', role: 'manager' }, actorId: 'owner_a' });
+  assert.equal(asked.outcome, 'pending_member_acceptance');
+  assert.equal(asked.organizationUser, undefined);
+  assert.deepEqual(s.requested.at(-1), { kind: 'org_user', organizationId: orgId, userId: 'mgr_a', requestedBy: 'owner_a', requestedByType: 'member', details: { role: 'manager', permissions: [] } });
+  assert.equal((await access(s, orgId, { userId: 'mgr_a', userType: 'member' })).status, 404);
+  assert.equal((await s.b2b.listOrganizationUsers({ access: asOwner })).pendingMemberAcceptance.length, 1);
+  // Accepting runs the same add with the request id.
+  const mgr = (await s.b2b.addOrganizationUser({ access: asOwner, body: { userId: 'mgr_a', role: 'manager' }, actorId: 'owner_a' }, { memberRequestId: 'req_1' })).organizationUser;
+  assert.equal(s.auditLog.rows.find(r => r.action === 'b2b.org_user.add' && r.target === mgr.id).after.memberRequestId, 'req_1');
   const promoted = await s.b2b.updateOrganizationUser({ access: asOwner, organizationUserId: mgr.id, body: { role: 'admin' } });
   assert.equal(promoted.organizationUser.role, 'admin');
 
@@ -180,7 +195,9 @@ test('organisation users: add, role assignment, duplicates, permissions and remo
   // Removed rows are hidden by default and can be re-added as a new seat.
   assert.equal((await s.b2b.listOrganizationUsers({ access: asOwner })).total, 1);
   assert.equal((await s.b2b.listOrganizationUsers({ access: asOwner, query: { status: 'removed' } })).total, 1);
-  assert.ok((await s.b2b.addOrganizationUser({ access: asOwner, body: { userId: 'mgr_a', role: 'viewer' } })).organizationUser);
+  assert.equal((await s.b2b.addOrganizationUser({ access: asOwner, body: { userId: 'mgr_a', role: 'viewer' } })).outcome, 'pending_member_acceptance');
+  // FitFlex platform admins still add directly.
+  assert.ok((await s.b2b.addOrganizationUser({ access: admin, body: { userId: 'mgr_a', role: 'viewer' } })).organizationUser);
 });
 
 test('permission enforcement: roles, no escalation, owners protect owners, last owner stays', async () => {
@@ -205,7 +222,7 @@ test('permission enforcement: roles, no escalation, owners protect owners, last 
   const orgAdmin = await access(s, orgId, { userId: 'owner_b', userType: 'member' });
   assert.equal((await s.b2b.addOrganizationUser({ access: orgAdmin, body: { userId: 'm1', role: 'owner' } })).requiredRole, 'owner');
   assert.equal((await s.b2b.updateOrganizationUser({ access: orgAdmin, organizationUserId: owner.id, body: { status: 'suspended' } })).requiredRole, 'owner');
-  const extra = await s.b2b.addOrganizationUser({ access: orgAdmin, body: { userId: 'm1', role: 'viewer', permissions: ['beneficiaries.read'] } });
+  const extra = await s.b2b.addOrganizationUser({ access: orgAdmin, body: { userId: 'm1', role: 'viewer', permissions: ['beneficiaries.read'] } }, { memberRequestId: 'req_x' });
   assert.deepEqual(extra.organizationUser.permissions, ['beneficiaries.read']);
   const asExtra = await access(s, orgId, { userId: 'm1', userType: 'member' });
   assert.ok(asExtra.permissions.includes('beneficiaries.read'));
