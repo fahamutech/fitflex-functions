@@ -139,6 +139,8 @@ import { createShopBannerService } from '../services/shop-banner-service.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
 import { createShopHomeService } from '../services/shop-home-service.mjs';
+import { createShopPreferenceService } from '../services/shop-preference-service.mjs';
+import { createPgShopPreferenceStore, forgetShopPreference } from '../infra/shop-preference-store-pg.mjs';
 import { signServedToken } from '../auth/promotion-token.mjs';
 import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
 import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
@@ -499,12 +501,14 @@ export const accountService = createAccountService({
   // A deleted account lets its username go (held 90 days). usernameService is defined further down.
   // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
   // their link to the account unless money is owed. Each step runs even if another fails.
-  onAccountDeleted: async (userId) => {
+  onAccountDeleted: async (userId, deleted = null) => {
     const errors = [];
     for (const step of [
       () => promotionEventsService.forgetUser(userId),
       () => usernameService.forgetUser(userId),
       () => vendorCustomerService.forgetBuyer(userId),
+      // The "Personalised shop" switch goes once the Person has no personas left.
+      () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
     ]) {
       try { await step(); } catch (err) { errors.push(err); }
     }
@@ -1027,8 +1031,20 @@ export const shopBannerService = createShopBannerService({
   partnerGate, moderationGate,
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
+// "Personalised shop" switch (SHOP_PERSONALISATION, Phase 2 slice 2): one row per Person, no row = on.
+export const shopPreferenceService = createShopPreferenceService({
+  store: createPgShopPreferenceStore({ db }), users, identityLink: identityLinkService,
+  trainerProfileOf: userId => trainerService.findProfileByUser(userId),
+});
+// Purchase history is the person's own orders only, read per request; capped so memory stays bounded.
+const SHOP_HISTORY_MAX_ORDERS = 500;
 export const shopHomeService = createShopHomeService({
   bannerFeed: args => shopBannerService.feed(args),
+  preferences: shopPreferenceService,
+  buyerPaidOrders: ({ buyerIds, since }) => (buyerIds.length ? db('ShopOrder')
+    .whereIn('buyerId', buyerIds).where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
+    .orderBy('createdAt', 'desc').limit(SHOP_HISTORY_MAX_ORDERS)
+    .select('id', 'buyerId', 'items', 'status', 'paymentStatus', 'createdAt') : []),
   shopService, discoveryService, promotionService, users, trainerService, identityLink: identityLinkService,
   recentPaidOrders: ({ since }) => db('ShopOrder')
     .where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
