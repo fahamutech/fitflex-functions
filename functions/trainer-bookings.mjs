@@ -22,7 +22,7 @@ export const quoteTrainerBooking = {
 
 export const createTrainerBooking = {
   created, method: 'post', path: '/me/trainer-bookings',
-  description: 'Member: book one or more trainer slots. POST { trainerId, gymId, slots:[{date,slot}] } (legacy { date, slot } still accepted). Bookings stay payment_pending until the payment request is approved.',
+  description: 'Member: book one or more trainer slots. POST { trainerId, gymId, slots:[{date,slot}] } (legacy { date, slot } still accepted). Bookings stay payment_pending until the payment request is approved. A trainer cannot book their own sessions (same account or same person): 403 cannot_book_own_sessions.',
   onGuard: requireAuth('member'),
   onRequest: async (req, res) => {
     if (await trainerUnavailable(req)) return res.status(409).json({ error: 'trainer_unavailable' });
@@ -41,11 +41,14 @@ export const adminListTrainerBookings = {
 
 export const adminUpdateTrainerBooking = {
   created, method: 'post', path: '/admin/trainer-bookings/:id',
-  description: 'Admin: update trainer booking status.',
+  description: 'Admin: update trainer booking status. POST { status: confirmed|completed|cancelled }. A cancelled booking is final: 409 booking_cancelled (always). (With TRAINER_SESSION_OUTCOMES on, also no_show: after the session started, from confirmed|completed|cancelled; and any change to a booking on a submitted/approved/payable/paid trainer statement is refused with 409 booking_on_trainer_statement { statementId, statementStatus }). Flag on, the booking carries actions { canComplete, canMarkNoShow }.',
   onGuard: [requireAuth('admin'), requireAcl('trainers')],
   onRequest: async (req, res) => {
     const result = await trainerBookingService.adminUpdateStatus({ id: req.params.id, status: req.body?.status, actorId: req.user?.sub });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
     res.json(result.booking);
   }
 };
@@ -63,11 +66,28 @@ export const trainerMyBookings = {
 
 export const trainerCompleteBooking = {
   created, method: 'post', path: '/trainer/bookings/:id/complete',
-  description: 'Trainer: mark a booking as completed.',
+  description: 'Trainer: mark a confirmed booking as completed, once the session has started (409 booking_not_confirmable if not confirmed; 409 session_not_started { startsAt } before its start — always, not behind a flag). Writes an audit row. → the booking (with actions { canComplete, canMarkNoShow } when TRAINER_SESSION_OUTCOMES is on).',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const result = await trainerBookingService.trainerCompleteBooking({ userId: req.user.sub, bookingId: req.params.id });
-    if (result.error) return res.status(result.status).json({ error: result.error });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
+    res.json(result.booking);
+  }
+};
+
+export const trainerNoShowBooking = {
+  created, method: 'post', path: '/trainer/bookings/:id/no-show',
+  description: 'Trainer (TRAINER_SESSION_OUTCOMES; off: 404 feature_disabled): the member did not come. Confirmed sessions only (409 booking_not_confirmed), from the start (409 session_not_started { startsAt }) until 48 hours after it (409 no_show_window_passed { closedAt }). The trainer is paid in full, the member is not refunded, a sponsor benefit is used as if the session happened, and the member is notified. → the booking with status no_show and actions.',
+  onGuard: requireAuth('trainer'),
+  onRequest: async (req, res) => {
+    const result = await trainerBookingService.trainerMarkNoShow({ userId: req.user.sub, bookingId: req.params.id });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
     res.json(result.booking);
   }
 };

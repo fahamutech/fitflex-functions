@@ -8,6 +8,7 @@
 // or specialty, their own vendor products, the `recent` ids) is read per request
 // and never cached or stored.
 import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recommendations.mjs';
+import { shopBannersOn } from '../shared/feature-flags.mjs';
 
 const usable = p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected';
 const positiveInt = (v, fallback) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : fallback);
@@ -32,6 +33,10 @@ export function createShopHomeService({
   users, trainerService, identityLink,
   recentPaidOrders,     // ({ since }) → paid, not cancelled orders placed since then: [{ buyerRole, items, createdAt }]
   signToken = null,     // ({ promotionId, entityType, entityId, sessionId, now }) → proof that a promoted card was served
+  // ({ mode, products, ownVendorIds, at }) → live banners (SHOP_BANNERS). Read on every request, never cached.
+  bannerFeed = null,
+  bannersOn = shopBannersOn,
+  logger = console,
   config = () => shopHomeConfigFromEnv(),
   now = () => new Date(),
 }) {
@@ -119,20 +124,29 @@ export function createShopHomeService({
         };
       }
     }
-    return {
-      body: {
-        serverNow: at.toISOString(),
-        currency: 'TZS',
-        mode: out.mode,
-        // Phase 1 uses no personal signals (purchase history, gender/age, location are Phase 2).
-        personalised: false,
-        signalsUsed: out.signalsUsed,
-        categories: out.categories,
-        allProductsCount: out.allProductsCount,
-        sections: out.sections,
-        products,
-      },
+    const body = {
+      serverNow: at.toISOString(),
+      currency: 'TZS',
+      mode: out.mode,
+      // Phase 1 uses no personal signals (purchase history, gender/age, location are Phase 2).
+      personalised: false,
+      signalsUsed: out.signalsUsed,
+      categories: out.categories,
+      allProductsCount: out.allProductsCount,
+      sections: out.sections,
+      products,
     };
+    // Phase 2 · slice 1: with SHOP_BANNERS off the body is exactly as before (no `banners` key).
+    if (bannerFeed && bannersOn()) {
+      try {
+        body.banners = await bannerFeed({ mode: out.mode, products: shared.products, ownVendorIds, at });
+      } catch (err) {
+        // The rest of the page still loads; the app shows its fallback slide.
+        logger.error?.('[shop-home] banners failed:', err?.message);
+        body.banners = [];
+      }
+    }
+    return { body };
   }
 
   return { home, clearCache: () => { cache = null; }, loadShared };

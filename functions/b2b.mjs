@@ -518,9 +518,10 @@ export const adminUpdateB2BAgreement = {
 
 export const adminActivateB2BAgreement = {
   created, method: 'post', path: '/admin/b2b/agreements/:agreementId/activate',
-  description: 'Admin (b2b_billing): put a draft agreement in force from its start date. The agreement it replaces is closed the day before. Invoices already issued keep the terms they were issued under.',
+  description: 'Admin (b2b_billing): put a draft agreement in force from its start date. Body { version }: the draft\'s updatedAt as checked (400 version_required; 409 agreement_changed when it has changed since). Refused to the admin who drafted or changed it (403 cannot_activate_own_agreement). The agreement it replaces is closed the day before. Invoices already issued keep the terms they were issued under.',
+  requestSample: { version: '2026-10-19T09:30:00.000Z' },
   onGuard: routeGuard('post', requireBilling),
-  onRequest: async (req, res) => send(res, await finance.activateAgreement({ agreementId: req.params.agreementId, actorId: actor(req) })),
+  onRequest: async (req, res) => send(res, await finance.activateAgreement({ agreementId: req.params.agreementId, version: req.body?.version, actorId: actor(req) })),
 };
 
 export const adminEndB2BAgreement = {
@@ -666,10 +667,26 @@ export const adminB2BPaymentInstructions = {
 
 export const adminSetB2BPaymentInstructions = {
   created, method: 'put', path: '/admin/b2b/payment-instructions',
-  description: 'Admin (b2b_billing_approve): set where organisations pay FitFlex. Every field is optional; send them all, a missing one is cleared.',
+  description: 'Admin (b2b_billing_approve): ask to change where organisations pay FitFlex. Nothing changes until a different admin confirms it (POST /admin/b2b/payment-instructions/confirm). Every field is optional; send them all, a missing one is cleared. A new request replaces one still waiting. Answers 202 with { instructions (in force), configured, pendingChange }.',
   requestSample: { bankName: 'CRDB Bank', accountName: 'FitFlex Africa Ltd', accountNumber: '0150000000000', branch: 'Mlimani City', swiftCode: 'CORUTZTZ', lipaNamba: '5550000', lipaNambaName: 'FITFLEX AFRICA', notes: 'Quote the invoice number as the reference.' },
   onGuard: routeGuard('put', requireBillingApproval),
-  onRequest: async (req, res) => send(res, await collections.setInstructions({ body: req.body || {}, actorId: actor(req) })),
+  onRequest: async (req, res) => send(res, await collections.requestInstructionsChange({ body: req.body || {}, actorId: actor(req) }), 202),
+};
+
+export const adminConfirmB2BPaymentInstructions = {
+  created, method: 'post', path: '/admin/b2b/payment-instructions/confirm',
+  description: 'Admin (b2b_billing_approve): put the requested payment details in force. Body { changeId }: the pendingChange.changeId checked (400 change_id_required; 409 change_superseded when another request replaced it). Refused to the admin who asked (403 cannot_confirm_own_request); 409 no_pending_change when nothing waits.',
+  requestSample: { changeId: 'pic_0123456789ab' },
+  onGuard: routeGuard('post', requireBillingApproval),
+  onRequest: async (req, res) => send(res, await collections.confirmInstructionsChange({ changeId: req.body?.changeId, actorId: actor(req) })),
+};
+
+export const adminCancelB2BPaymentInstructions = {
+  created, method: 'post', path: '/admin/b2b/payment-instructions/cancel',
+  description: 'Admin (b2b_billing_approve): withdraw or decline the requested payment details. The details in force stay. Body { changeId, reason? } (400 change_id_required; 409 change_superseded).',
+  requestSample: { changeId: 'pic_0123456789ab', reason: 'Wrong account number' },
+  onGuard: routeGuard('post', requireBillingApproval),
+  onRequest: async (req, res) => send(res, await collections.cancelInstructionsChange({ changeId: req.body?.changeId, actorId: actor(req), reason: req.body?.reason })),
 };
 
 export const adminB2BCollections = {

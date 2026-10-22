@@ -88,6 +88,20 @@ export function createAuthService({
     }
   }
 
+  /**
+   * A Firebase sign-in from before this profile's sessions were ended (a portal
+   * admin changed their start password): a saved ID token, or one refreshed
+   * from it, keeps the original auth_time and must not open a new session.
+   * Without auth_time it is refused too (fail closed); real Firebase tokens
+   * always carry it.
+   */
+  function firebaseSignInEnded(row, fb) {
+    if (!row?.sessionsValidAfter) return false;
+    const cutOff = +new Date(row.sessionsValidAfter);
+    if (!Number.isFinite(cutOff)) return false;
+    return !Number.isFinite(fb?.authTime) || fb.authTime * 1000 < cutOff;
+  }
+
   /** JWT claims for a persona row. `sub` stays the persona (User) id. */
   function sessionClaims(user) {
     return {
@@ -103,7 +117,18 @@ export function createAuthService({
       corporateId: user.corporateId,
       // Identity V2 · I2 (C3a): the Person rides along; nothing reads it as `sub`.
       ...(identityFlag('V2_PERSONAS') && user.personId ? { pid: user.personId, ver: 2 } : {}),
+      // A portal admin still on the start password another admin chose: every
+      // route but the change-password one refuses this session (2026-10-19).
+      ...(user.passwordChangeRequired === true ? { pwc: true } : {}),
     };
+  }
+
+  /**
+   * A session for a profile that just proved who it is some other way (the
+   * forced start-password change): the same shape as a sign-in.
+   */
+  function sessionFor(user) {
+    return { token: signJwt(sessionClaims(user)), user: toSessionUser(user), pendingApproval: user.approvalStatus === 'pending_approval' };
   }
 
   /** Person + personas payload for Identity V2 clients. */
@@ -186,7 +211,7 @@ export function createAuthService({
       await users.upsertAsync(u => u.id === user.id, user);
     }
     await otps.upsertAsync(o => o.phone === phone, { ...otp, code: null });
-    const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone });
+    const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone, ...(user.passwordChangeRequired === true ? { pwc: true } : {}) });
     return { token, user: toSessionUser(user) };
   }
 
@@ -276,6 +301,7 @@ export function createAuthService({
     }
 
     if (user) {
+      if (firebaseSignInEnded(user, fb)) return { error: 'session_ended', status: 401 };
       // Existing user: NEVER change their stored userType via this endpoint.
       // Only exception: configured admin email always stays admin.
       const patch = {
@@ -363,6 +389,8 @@ export function createAuthService({
     if (user.portalUser === true && requestedRole !== 'admin') return { error: 'portal_user_app_access_denied', status: 403 };
     if (user.accountStatus === 'suspended') return { error: 'account_suspended', status: 403 };
     if (user.approvalStatus === 'rejected') return { error: 'profile_rejected', status: 403, approvalNote: user.approvalNote || null };
+    // Again for the profile finally opened (a V2 client may land on another persona).
+    if (firebaseSignInEnded(user, fb)) return { error: 'session_ended', status: 401 };
 
     user = await settleTrainerOnboarding(user);
     const token = signJwt(sessionClaims(user));
@@ -564,5 +592,5 @@ export function createAuthService({
     return { memberships: await orgMemberships.membershipsOfPerson(user.personId, { includeEnded }) };
   }
 
-  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships, sessionForPerson };
+  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships, sessionForPerson, sessionFor };
 }

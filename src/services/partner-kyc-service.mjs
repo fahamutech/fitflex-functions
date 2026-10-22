@@ -27,8 +27,9 @@ import {
 } from '../shared/partner-kyc.mjs';
 import {
   evaluateKyc, KYC_TIERS, PERSON_REQUIREMENTS, BUSINESS_REQUIREMENTS,
-  DOCUMENTS_FOR, DOCUMENT_REQUIREMENTS, SETTLEMENT_REQUIRED, currentDocument,
+  DOCUMENTS_FOR, DOCUMENT_REQUIREMENTS, SETTLEMENT_REQUIRED, currentDocument, documentsFor,
 } from '../shared/partner-kyc-requirements.mjs';
+import { vendorVatOn } from '../shared/feature-flags.mjs';
 import { GYM_TIERS } from '../shared/constants.mjs';
 import { VENDOR_POSITIONS } from '../shared/product-categories.mjs';
 import { requiredAgreements, agreementText } from '../shared/partner-agreements.mjs';
@@ -52,7 +53,10 @@ const REQUIREMENT_NAMES = {
   business_registration: 'business registration certificate', tin_certificate: 'TIN certificate',
   business_licence: 'business licence', certification: 'certification', liability_insurance: 'liability cover',
   representative_authority: 'proof of authority',
+  vat_certificate: 'VAT certificate', // vendor tools · S5
 };
+/** What this partner type may upload now (S5: + vat_certificate for vendors while VENDOR_VAT is on). */
+const uploadable = partnerType => documentsFor(partnerType, { vatOn: vendorVatOn() });
 
 // Expiry reminders go out this many days before a document expires, and on the day.
 export const EXPIRY_REMINDER_DAYS = [30, 7, 0];
@@ -300,7 +304,7 @@ export function createPartnerKycService({
   async function evaluate(partner, kycCase) {
     const [loaded, records] = await Promise.all([caseRows(kycCase), partnerRecords(partner)]);
     const { kycCase: shownCase, rows } = shareDetails(partner.partnerType, kycCase, loaded);
-    return { rows, shownCase, checklist: evaluateKyc(partner.partnerType, { case: shownCase, ...rows, ...records }) };
+    return { rows, shownCase, checklist: evaluateKyc(partner.partnerType, { case: shownCase, ...rows, ...records, vatOn: vendorVatOn() }) };
   }
 
   const settlementView = a => ({
@@ -408,8 +412,8 @@ export function createPartnerKycService({
    * Replaces the file of a document still waiting for review.
    */
   async function attachDocumentFile(partner, requirementKey, upload = {}, actor) {
-    if (!DOCUMENTS_FOR[partner.partnerType].includes(requirementKey)) {
-      return fail('invalid_requirement', 400, { allowed: DOCUMENTS_FOR[partner.partnerType] });
+    if (!uploadable(partner.partnerType).includes(requirementKey)) {
+      return fail('invalid_requirement', 400, { allowed: uploadable(partner.partnerType) });
     }
     const spec = DOCUMENT_REQUIREMENTS[requirementKey];
     if (upload.docType !== undefined && !spec.types.includes(upload.docType)) return fail('invalid_docType', 400, { allowed: spec.types });
@@ -484,8 +488,8 @@ export function createPartnerKycService({
   // attached once private document storage is in place.
 
   async function upsertDocumentDetails(partner, requirementKey, body = {}, actor) {
-    if (!DOCUMENTS_FOR[partner.partnerType].includes(requirementKey)) {
-      return fail('invalid_requirement', 400, { allowed: DOCUMENTS_FOR[partner.partnerType] });
+    if (!uploadable(partner.partnerType).includes(requirementKey)) {
+      return fail('invalid_requirement', 400, { allowed: uploadable(partner.partnerType) });
     }
     const spec = DOCUMENT_REQUIREMENTS[requirementKey];
     const docType = body.docType ?? spec.types[0];

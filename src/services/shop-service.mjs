@@ -2,6 +2,7 @@
 import { formatTsh } from '../shared/money-display.mjs';
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
 import { randomUUID, createHash } from 'node:crypto';
+import { storeNameOf } from '../shared/vendor-name.mjs';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { decideTransition, combinedStatus, fulfilmentsOf, anyAtLeast, canonicalStatus, nextStatuses, STATUSES, LEGACY_INPUTS } from '../shared/order-lifecycle.mjs';
@@ -73,6 +74,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // Vendor tools · S4 (Q-6): a paid order makes or refreshes the buyer as an app customer of each of its
   // vendors (bookkeeping, not flagged: buyerUserId + name only). Never allowed to fail the order.
   onVendorCustomerOrder = async () => null,
+  // Vendor tools · S5 (Q-15): a paid order numbers each vendor's invoice (INV-, with the VAT snapshot when
+  // VENDOR_VAT applies). A side table only; the order, its prices, commission and payout are untouched.
+  // Never allowed to fail the order.
+  onVendorOrderInvoices = async () => null,
+  // Vendor tools · S5: the product's VAT code (ProductPrivate.vatCode; private, never on /shop/*, never
+  // re-queues approval). { on(), allowedCodes(), set({ vendorId, productId, vatCode, actorId }), codesOf(vendorId, ids), codesById(ids) }.
+  productVat = null,
   // Something the vendor should hear about now, not only find in their list: (vendorUserId, event, data) → void.
   onVendorEvent = async () => null,
   // The order store: reserves stock and writes orders atomically. Production passes the Postgres
@@ -160,11 +168,13 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * Of these vendor ids, those an admin has suspended on their account (User.accountStatus).
    * Separate from moderation suspension (publicGate): either one takes a vendor off sale.
    */
-  async function accountSuspendedVendorIds(vendorIds) {
+  async function vendorAccounts(vendorIds) {
     const ids = [...new Set((vendorIds || []).filter(Boolean))];
-    if (!ids.length) return new Set();
-    const rows = users.filterByColumnInAsync ? await users.filterByColumnInAsync('id', ids) : await users.filterAsync(user => ids.includes(user.id));
-    return new Set(rows.filter(user => user.accountStatus === 'suspended').map(user => user.id));
+    if (!ids.length) return [];
+    return users.filterByColumnInAsync ? users.filterByColumnInAsync('id', ids) : users.filterAsync(user => ids.includes(user.id));
+  }
+  async function accountSuspendedVendorIds(vendorIds) {
+    return new Set((await vendorAccounts(vendorIds)).filter(user => user.accountStatus === 'suspended').map(user => user.id));
   }
 
   async function getVendorStore(vendorId) {
@@ -190,10 +200,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     // from a vendor suspended in moderation or on their account.
     if (!includeArchived) {
       const vendorIds = rows.map(product => product.vendorId);
-      const [ok, blockedProducts, blockedVendors, suspendedVendors] = await Promise.all([
-        partnerGate.operationalUserIds(vendorIds), publicGate.blocked('product'), publicGate.blocked('vendor'), accountSuspendedVendorIds(vendorIds),
+      const [ok, blockedProducts, blockedVendors, accounts] = await Promise.all([
+        partnerGate.operationalUserIds(vendorIds), publicGate.blocked('product'), publicGate.blocked('vendor'), vendorAccounts(vendorIds),
       ]);
-      rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId));
+      const suspendedVendors = new Set(accounts.filter(user => user.accountStatus === 'suspended').map(user => user.id));
+      const names = new Map(accounts.map(user => [user.id, storeNameOf(user)]));
+      rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId))
+        // Buyer-facing rows carry the seller's store name (QA round 2: the Visit-store heading survives a reload).
+        .map(product => ({ ...product, vendorName: names.get(product.vendorId) ?? null }));
     }
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
@@ -218,7 +232,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!product || product.deletedAt) return null;
     if (!includeUnlisted && !(await listProducts({})).some(row => row.id === productId)) return null;
     const reviews = (await productReviews.filterAsync(review => review.productId === productId)).map(publicReview);
-    return { ...product, vendor: publicProfile(await getVendorProfile(product.vendorId)), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
+    const vendorUser = await users.findByIdAsync(product.vendorId);
+    return { ...product, vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
   }
 
   /** Shape and size limits on what a vendor may store; null when fine. */
@@ -271,7 +286,34 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
   const sendsCost = input => input.costTzs !== undefined || (Array.isArray(input.variants) && input.variants.some(v => v && v.costTzs !== undefined));
 
-  async function upsertProduct({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true }) {
+  const vatOn = () => Boolean(productVat) && productVat.on();
+  /** S5: the VAT code of each product row (stored, else the default A) — VENDOR_VAT on only; vendor and admin views. */
+  async function withVatCodes(vendorId, rows) {
+    if (!vatOn() || !rows.length) return rows;
+    const ids = rows.map(p => p.id);
+    const codes = vendorId ? await productVat.codesOf(vendorId, ids) : await productVat.codesById(ids);
+    return rows.map(p => ({ ...p, vatCode: codes.get(p.id) || 'A' }));
+  }
+
+  /**
+   * Save a product. S5: with VENDOR_VAT on, `vatCode` (A | C | E — the codes in use; null = back to the
+   * default A) is stored in ProductPrivate. It is not a field FitFlex reviews, so it never re-queues approval
+   * (F1) and is never on the public row. Unknown code → 400 invalid_vat_code { allowed }.
+   */
+  async function upsertProduct(args) {
+    const input = args.body || {};
+    const sendsVat = vatOn() && input.vatCode !== undefined;
+    if (sendsVat) {
+      const allowed = await productVat.allowedCodes();
+      if (input.vatCode !== null && !allowed.includes(input.vatCode)) return { error: 'invalid_vat_code', status: 400, allowed };
+    }
+    const out = await upsertProductCore(args);
+    if (out.error || !out.product) return out;
+    if (sendsVat) await productVat.set({ vendorId: args.vendorId, productId: out.product.id, vatCode: input.vatCode, actorId: args.actorId ?? args.vendorId });
+    return { ...out, product: (await withVatCodes(args.vendorId, [out.product]))[0] };
+  }
+
+  async function upsertProductCore({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
@@ -358,7 +400,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * plus the effective ones (own, else the product's: Q-1). Never used for public views.
    * vendorId null = FitFlex admin views across vendors (the rows' own ids scope the read).
    */
-  async function vendorProductsView(vendorId, rows, { costAllowed = true } = {}) {
+  async function vendorProductsView(vendorId, rows, opts = {}) {
+    return withVatCodes(vendorId, await vendorProductsViewCore(vendorId, rows, opts));
+  }
+  async function vendorProductsViewCore(vendorId, rows, { costAllowed = true } = {}) {
     if (!ledgerOn() || !rows.length) return rows;
     const privates = await stockLedger.privatesOf(vendorId, rows.map(p => p.id));
     // Without cost rights the cost fields are left out entirely (not null), so nothing hints at them.
@@ -738,6 +783,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     }
     try { await onOrderPaid(order); } catch (err) { console.warn('[shop] order not credited to a promotion:', err?.message); }
     try { await onVendorCustomerOrder(order); } catch (err) { console.warn('[shop] app customer not recorded:', order?.id, err?.message); }
+    try { await onVendorOrderInvoices(order); } catch (err) { console.warn('[shop] vendor invoices not numbered:', order?.id, err?.message); }
     for (const vendorId of new Set((order.items || []).map(item => item.vendorId))) await notifyVendor(vendorId, 'new_order', { orderId: order.id });
     await notify(order.buyerId, 'payment_received', { orderId: order.id, totalTzs: order.totalTzs });
   }

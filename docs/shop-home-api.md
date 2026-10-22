@@ -5,6 +5,8 @@ Scope (owner, 2026-10-19): Phase 1 = UI + foundations, with role-based rules onl
 
 ## `GET /shop/home`
 
+Phase 2 · slice 1 adds one key, `banners`, only when `SHOP_BANNERS` is on: see `docs/shop-banners-api.md`. With it off the answer below is unchanged.
+
 Signed in (any role). With `SHOP_HOME_V2` off the answer is `404 {"error":"feature_disabled"}`; signed out is `401 {"error":"unauthenticated"}`. More than 60 calls a minute by one user is `429 {"error":"rate_limited"}`. The limit is kept in memory per server, so with several servers the real allowance is that many times 60.
 
 ### Query
@@ -44,7 +46,7 @@ Signed in (any role). With `SHOP_HOME_V2` off the answer is `404 {"error":"featu
 - `signalsUsed` ⊆ `role`, `goal` (the member's declared `memberProfile.fitnessGoal(s)`, member mode only), `specialty` (the trainer's declared `TrainerProfile.specialties`, trainer mode only), `recently_viewed` (only when that section was shown). Phase 2 will add `purchase_history`, `gender`, `age`, `location`.
 - `categories`: the existing 8, ordered for the mode (design spec §5.2). Only categories with at least one eligible product are listed, and `other` is always last. `count` = eligible products on the home (in stock, not the viewer's own).
 - `allProductsCount` (QA round 1, additive): how many products `GET /shop/products` lists with no filter. It **includes products the home itself leaves out**: out of stock, the viewer's own products, and products of vendors suspended on their account (the list does not check account suspension; see Eligibility). So it can be above 0 while every section is empty, and the "All products" grid can show items the rails never do.
-- `products[id]` is exactly the row `GET /shop/products` returns. Products in the `featured` section also carry `promotion: { id, type, label, disclosure, commercial, token? }`, the same tag as `/discover/products`. The order of the Featured set is the mode's category order (the same order as `categories`), and within a category the Featured system's order. Every mode gets the same set.
+- `products[id]` is exactly the row `GET /shop/products` returns. Since QA round 2 of shop banners every such row also has `vendorName` (the seller's business name, else the vendor account's display name; null if neither), additively. Products in the `featured` section also carry `promotion: { id, type, label, disclosure, commercial, token? }`, the same tag as `/discover/products`. The order of the Featured set is the mode's category order (the same order as `categories`), and within a category the Featured system's order. Every mode gets the same set.
 - **Disclosure** (QA round 1, additive; also on every `/discover/*` promotion tag and on admin promotion views):
   ```json
   "promotion": { "id": "promo_1", "type": "featured", "label": "Featured · Sponsored",

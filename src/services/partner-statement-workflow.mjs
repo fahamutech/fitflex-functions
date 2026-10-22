@@ -20,6 +20,7 @@
 //
 // Each step is one transaction with the row locked, and is audited.
 import { randomUUID } from 'node:crypto';
+import { readReceiptUrl } from '../shared/receipt-url.mjs';
 
 export const STATEMENT_STATUSES = ['draft', 'submitted', 'approved', 'payable', 'paid', 'voided'];
 const HOLDABLE = ['draft', 'submitted', 'approved', 'payable'];
@@ -37,9 +38,11 @@ const text = (v) => (typeof v === 'string' ? v.trim() : '');
  * @param {string} deps.auditPrefix  e.g. 'trainer_settlement'
  * @param {(statement: object, at: Date) => Promise<{ok: boolean, reason?: string, until?: string, destination?: object}>} deps.payoutCheck
  * @param {(statement: object, q: import('knex').Knex) => Promise<void>} [deps.onPaid]  inside the paying transaction
+ * @param {(statement: object, q: import('knex').Knex) => Promise<object|null>} [deps.beforeSubmit]  inside the submit
+ *        transaction (statement locked): a fail(...) refuses the submit; null lets it through
  * @param {() => Date} [deps.now]
  */
-export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPrefix, payoutCheck, onPaid = async () => {}, now = () => new Date() }) {
+export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPrefix, payoutCheck, onPaid = async () => {}, beforeSubmit = async () => null, now = () => new Date() }) {
   async function audit(q, action, actorId, target, before, after) {
     await q('AuditLog').insert({ id: randomUUID(), at: now(), actor: actorId, action: `${auditPrefix}_${action}`, target, before: before ? JSON.stringify(before) : null, after: JSON.stringify(after) });
   }
@@ -64,10 +67,12 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
   const notPayable = (check) => fail('not_payable', 409, { reason: check.reason, ...(check.until ? { until: check.until } : {}) });
 
   /** draft → submitted: the amounts are frozen. */
-  const submit = ({ id, actorId }) => step(id, 'submitted', actorId, async (s) => {
+  const submit = ({ id, actorId }) => step(id, 'submitted', actorId, async (s, q) => {
     if (s.status !== 'draft') return wrongStatus(s, 'draft');
     if (s.voidRequestedBy) return fail('void_requested');
     if (!(s.finalNetTzs > 0)) return fail('nothing_to_pay');
+    const refused = await beforeSubmit(s, q);
+    if (refused?.error) return refused;
     return { patch: { status: 'submitted', submittedBy: actorId, submittedAt: now(), rejectedBy: null, rejectedAt: null, rejectReason: null } };
   });
 
@@ -115,11 +120,13 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
   const pay = ({ id, paymentReference, receiptUrl, actorId }) => step(id, 'paid', actorId, async (s) => {
     if (s.status !== 'payable') return wrongStatus(s, 'payable');
     if (!text(paymentReference)) return fail('payment_reference_required', 400);
+    const receipt = readReceiptUrl(receiptUrl);
+    if (receipt === undefined) return fail('invalid_receipt_url', 400, { hint: 'an https:// link' });
     // The partner's standing may have changed since the statement was cleared.
     const check = await payoutCheck(s, now());
     if (!check.ok) return notPayable(check);
     return {
-      patch: { status: 'paid', paidBy: actorId, paidAt: now(), paymentReference: text(paymentReference), receiptUrl: receiptUrl || null, destinationSnapshot: JSON.stringify(check.destination) },
+      patch: { status: 'paid', paidBy: actorId, paidAt: now(), paymentReference: text(paymentReference), receiptUrl: receipt, destinationSnapshot: JSON.stringify(check.destination) },
       audit: { amountTzs: s.finalNetTzs, paymentReference: text(paymentReference), destination: check.destination },
       after: onPaid,
     };

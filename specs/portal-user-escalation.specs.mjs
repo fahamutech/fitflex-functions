@@ -255,6 +255,8 @@ function createService() {
     users, auditLog, initFirebaseAdmin() {},
     getAdminAuth: () => ({ createUser: async () => { const uid = uniq('fb_esc'); uids.push(uid); return { uid }; } }),
     isConfiguredAdminEmail: () => false,
+    // The start-password key (PIN_PEPPER); without one, create fails closed.
+    pepper: () => 'spec-pepper',
   });
 }
 

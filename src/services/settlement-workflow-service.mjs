@@ -39,6 +39,7 @@
 //
 // Each step is one transaction with the row locked, and is audited.
 import { randomUUID } from 'node:crypto';
+import { readReceiptUrl } from '../shared/receipt-url.mjs';
 import { db as defaultDb } from '../infra/knex-store.mjs';
 import { statementNet } from '../shared/settlement-rows.mjs';
 
@@ -173,6 +174,8 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
   const pay = ({ id, paymentReference, receiptUrl, actorId }, opts) => step(id, 'paid', actorId, async (s, q) => {
     if (s.status !== 'payable') return wrongStatus(s, 'payable');
     if (!text(paymentReference)) return fail('payment_reference_required', 400);
+    const receipt = readReceiptUrl(receiptUrl);
+    if (receipt === undefined) return fail('invalid_receipt_url', 400, { hint: 'an https:// link' });
     // The gym's standing may have changed since it was cleared.
     const check = await payoutEligibility.forGym(s.gymId, { at: now() });
     if (!check.ok) return fail('not_payable', 409, { reason: check.reason, ...(check.until ? { until: check.until } : {}) });
@@ -183,7 +186,7 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
     };
     await q('GymPayout').insert(payout);
     return {
-      patch: { status: 'paid', paidBy: actorId, paidAt: at, paymentReference: text(paymentReference), receiptUrl: receiptUrl || null, destinationSnapshot: JSON.stringify(check.destination) },
+      patch: { status: 'paid', paidBy: actorId, paidAt: at, paymentReference: text(paymentReference), receiptUrl: receipt, destinationSnapshot: JSON.stringify(check.destination) },
       audit: { amountTzs: s.finalNetTzs, paymentReference: text(paymentReference), payoutId: payout.id, destination: check.destination },
       extra: { payout },
     };
