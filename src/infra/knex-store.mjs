@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import knexFactory from 'knex';
+import { redactAuditValue } from '../shared/audit-redact.mjs';
 import pg from 'pg';
 
 // pg returns NUMERIC/DECIMAL as strings to avoid precision loss. Ours are all
@@ -691,7 +692,7 @@ const ALLOWED_FIELDS = {
   b2b_programs:           new Set(['id','organizationId','name','description','programType','status','statusReason','statusChangedAt','startDate','endDate','eligibility','budgetTzs','discountBps','activatedAt','activatedBy','createdBy','createdAt','updatedAt']),
   moderation_states:    new Set(['id','entityType','entityId','status','reason','decidedBy','decidedAt','createdAt','updatedAt']),
   moderation_events:    new Set(['id','entityType','entityId','action','fromStatus','toStatus','reason','actor','at']),
-  geo_areas:            new Set(['id','level','name','parentId','lat','lng','radiusKm','active','createdAt','updatedAt']),
+  geo_areas:            new Set(['id','level','name','nameSw','parentId','lat','lng','radiusKm','active','createdAt','updatedAt']),
   promotion_campaigns:  new Set(['id','name','description','status','statusReason','startsAt','endsAt','geoScope','createdBy','createdAt','updatedAt']),
   promotions:           new Set(['id','entityType','entityId','type','status','statusReason','statusChangedAt','campaignId','partnerRef','startsAt','endsAt','priority','boostWeight','geoScope','audience','categories','isCommercial','relationshipType','commercialRef','disclosureLabel','notes','createdBy','submittedBy','submittedAt','approvedBy','approvedAt','activatedAt','pausedAt','createdAt','updatedAt']),
   promotion_placements: new Set(['id','promotionId','placement']),
@@ -825,6 +826,13 @@ function prepareForKnex(name, data, isUpdate = false) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];
       cleaned[f] = typeof val === 'number' ? new Date(val) : new Date(val);
+    }
+  }
+
+  // Credential keys never reach AuditLog, whatever a caller passes.
+  if (name === 'audit_log') {
+    for (const f of ['before', 'after']) {
+      if (cleaned[f] && typeof cleaned[f] === 'object') cleaned[f] = redactAuditValue(cleaned[f]);
     }
   }
 

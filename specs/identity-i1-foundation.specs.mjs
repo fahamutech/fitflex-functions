@@ -26,10 +26,11 @@ import accountRecovery from '../db/migrations/20261124090000-account-recovery.cj
 import invitationAtomicAccept from '../db/migrations/20261227090000-invitation-atomic-accept.cjs';
 // Events · S2: adds organizerId to OrgMembership / Invitation (and User), so it rides the same down/up.
 import organizerIdentity from '../db/migrations/20270110090700-events-organizer-identity.cjs';
+import personDeclaredDetails from '../db/migrations/20270110091000-person-declared-details.cjs';
 
 // Later identity migrations depend on Person, so a rollback runs newest first.
 // Add each new identity migration here.
-const LATER_IDENTITY_MIGRATIONS = [linking, onePersonaPerType, orgMembership, invitations, verificationCodes, pin, startPin, accountRecovery, invitationAtomicAccept, organizerIdentity];
+const LATER_IDENTITY_MIGRATIONS = [linking, onePersonaPerType, orgMembership, invitations, verificationCodes, pin, startPin, accountRecovery, invitationAtomicAccept, organizerIdentity, personDeclaredDetails];
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
 const now = () => new Date().toISOString();

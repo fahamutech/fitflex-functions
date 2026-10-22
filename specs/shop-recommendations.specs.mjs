@@ -209,7 +209,9 @@ test('assembly: SHOP_HOME_SECTIONS chooses and orders sections; unknown keys are
   assert.deepEqual(parseSectionList(undefined), [...SECTION_KEYS]);
   assert.deepEqual(parseSectionList(''), [...SECTION_KEYS]);
   assert.deepEqual(parseSectionList('deals, featured,nope,deals'), ['deals', 'featured']);
-  assert.ok(!SECTION_KEYS.includes('popular_near_you'), 'Phase 2');
+  // Slice 3: the key exists (display after Recommended) but the section is only built with needs.location.
+  assert.ok(SECTION_KEYS.includes('popular_near_you'));
+  assert.ok(!assembleSections({ needs: needsFor('member'), eligible: many(8), now: NOW, config: { minItems: 1 } }).some(s => s.key === 'popular_near_you'), 'no location → no near-you');
   const rows = many(8, { discountPriceTzs: 5_000, createdAt: daysAgo(1) });
   // Display order follows the setting; allocation does not: deals is allocated before new arrivals, takes all 8, and new arrivals has nothing left.
   const keys = assembleSections({ needs: needsFor('member'), eligible: rows, now: NOW, config: { sections: parseSectionList('new_arrivals,deals') } }).map(s => s.key);
@@ -320,7 +322,8 @@ test('view all: every section\'s query lists every product it shows; mixed categ
   for (const mode of ['member', 'trainer', 'owner']) {
     const out = buildShopHome({ sessionUserType: { member: 'member', trainer: 'trainer', owner: 'gym_operator' }[mode], recentIds: mixed.slice(16, 20).map(p => p.id).join(','),
       products: mixed, featured: mixed.slice(26, 30).map(p => ({ productId: p.id })), orders, now: NOW, config: { minItems: 1 } });
-    assert.deepEqual(out.sections.map(x => x.key), SECTION_KEYS, `${mode}: every section present`);
+    // popular_near_you needs a viewer area (slice 3), so without one every other section is present.
+    assert.deepEqual(out.sections.map(x => x.key), SECTION_KEYS.filter(k => k !== 'popular_near_you'), `${mode}: every section present`);
     for (const sec of out.sections) {
       assert.equal(sec.viewAll.path, '/shop/products');
       const shown = sec.productIds.map(id => byId.get(id));
