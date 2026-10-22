@@ -235,8 +235,8 @@ export function createB2BBeneficiaryImportService({
    * (corporate-service underneath: seat limit, billing and audit as in
    * /corporate/staff/bulk). Someone with a member account that has verified
    * the email or number is linked and made active; anyone else is added
-   * unlinked and pending, with an activation PIN returned once in
-   * `credentials` (never stored with the import). Nobody is invited. Someone
+   * unlinked and pending. Every row added gets its activation PIN once in
+   * `credentials` (never stored with the import), linked or not. Nobody is invited. Someone
    * already on the staff list (same account, email or number) is left alone,
    * so the same list can be uploaded again. All-or-nothing on seats: a list
    * needing more seats than are free adds nobody.
@@ -284,7 +284,8 @@ export function createB2BBeneficiaryImportService({
       if (out.error === 'already_enrolled') { counts.unchanged += 1; continue; }
       if (out.error) { counts.rejected += 1; problems.push({ ...where, problem: out.error }); continue; }
       counts.enrolled += 1;
-      if (!p.userId && out.pin) credentials.push({ line: p.line, employeeId: out.beneficiary.id, displayName: out.beneficiary.displayName, pin: out.pin });
+      // A PIN for every row added (linked or not), so the reply does not say who is a member.
+      if (out.pin) credentials.push({ line: p.line, employeeId: out.beneficiary.id, displayName: out.beneficiary.displayName, pin: out.pin });
     }
     const importId = newId('b2bim');
     const at = stamp();

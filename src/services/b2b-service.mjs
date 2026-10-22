@@ -375,7 +375,10 @@ export function createB2BService({
       ({ role } = membership);
       grants = membership.permissions || [];
       orgUserId = membership.id;
-    } else if (org.legacyCorporateId && userType === 'corporate_hr') {
+    } else if (org.legacyCorporateId && userType === 'corporate_hr' && !rows.length) {
+      // Read-through only while the login has no row of its own here: once it
+      // has one (scripts/hr-to-org.mjs), a suspended or removed row is final,
+      // with or without ORG_ONLY_SPONSORS.
       const user = await users.findByIdAsync(userId);
       if (user?.corporateId === org.legacyCorporateId && (user.accountStatus ?? 'active') === 'active') role = 'hr';
     }
@@ -407,7 +410,9 @@ export function createB2BService({
         rows.splice(0, rows.length, ...own);
         roleOf = new Map(own.map(o => [o.id, any.find(m => m.status === 'active')?.role ?? 'hr']));
       } else if (mapped && !orgIds.has(mapped.id)) {
-        rows.push(mapped);
+        // As in resolveAccess: a row of its own (suspended or removed) decides.
+        const own = (await organizationUsers.filterByColumnAsync('userId', userId)).some(m => m.organizationId === mapped.id);
+        if (!own) rows.push(mapped);
       }
     }
     return {
@@ -794,6 +799,11 @@ export function createB2BService({
     // they are added unlinked, as in /corporate/staff.
     let user = null;
     const given = key => body[key] != null && String(body[key]).trim() !== '';
+    // By contact, a name is required up front and the reply has the same shape
+    // whether or not a confirmed member is behind the contact (no userId, no
+    // `linked`), so the add form cannot be used to test who is a member.
+    const byContact = !given('userId');
+    if (byContact && !text(body.displayName)) return fail('display_name_required', 400);
     if (given('userId')) {
       const found = await findUserByContact(users, { userId: body.userId });
       if (found.error) return found;
@@ -808,11 +818,7 @@ export function createB2BService({
     }
     if (user && user.userType !== 'member') return fail('beneficiary_must_be_member', 400);
     const displayName = text(body.displayName, 120) ?? user?.displayName ?? null;
-    if (!displayName) {
-      return given('email') || given('phone')
-        ? fail('user_not_found', 404, { hint: 'Give their name to add them without a FitFlex account, or a contact they have confirmed in the app.' })
-        : fail('display_name_required', 400);
-    }
+    if (!displayName) return fail('display_name_required', 400);
 
     const staff = await corporateEmployees.filterByColumnAsync('corporateId', corporateId);
     if (user) {
@@ -850,7 +856,9 @@ export function createB2BService({
       actor: actorId, action: 'b2b.beneficiary.enroll_company_staff', target: employee.id,
       after: { organizationId: access.org.id, corporateId, employeeId: employee.id, userId: user?.id ?? null, status: employee.status },
     });
-    return { beneficiary: staffView(employee, access), pin: provisioned.pin, writtenThrough: 'corporate_staff' };
+    const view = staffView(employee, access);
+    if (byContact) { delete view.userId; delete view.linked; }
+    return { beneficiary: view, pin: provisioned.pin, writtenThrough: 'corporate_staff' };
   }
 
   async function setCompanyStaffStatus({ access, employee, status, actorId }) {

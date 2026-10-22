@@ -20,6 +20,7 @@ import { verify } from '../src/auth/jwt.mjs';
 import { b2bService, hrOrgConversionService, signJwt as sign } from '../src/bootstrap/services.mjs';
 import { HR_CONVERSION_ACTION, HR_CONVERSION_ACTOR } from '../src/services/hr-org-conversion-service.mjs';
 import { authLogin } from '../functions/auth.mjs';
+import { verifyContacts, purgeIdentity } from './fixtures/verified-contacts.mjs';
 import {
   myB2BOrganizations, getB2BOrganization, listB2BOrganizationUsers, addB2BOrganizationUser, updateB2BOrganizationUser,
   listB2BBeneficiaries, enrollB2BBeneficiary, setB2BBeneficiaryStatus, deactivateB2BBeneficiary,
@@ -120,7 +121,9 @@ after(async () => {
     await db('CorporateAccount').whereIn('id', made.corporates).del();
   }
   await db('AuditLog').whereIn('actor', made.users).del();
+  const persons = await purgeIdentity(db, made.users);
   await db('User').whereIn('id', made.users).del();
+  if (persons?.length) await db('Person').whereIn('id', persons).del().catch(() => {});
 });
 
 // ── 1. Conversion: dry run, apply, idempotence, mirror, removed rows, audit ──
@@ -268,7 +271,8 @@ test('people: flag on, HR in /org sees the company staff and adds, suspends, lin
     assert.equal(added.body.beneficiary.pinHash, undefined);
     const nameOnly = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'Chausiku Unlinked', email: 'nobody-yet@hr2org.example.com' } });
     assert.equal(nameOnly.statusCode, 201, JSON.stringify(nameOnly.body));
-    assert.deepEqual([nameOnly.body.beneficiary.status, nameOnly.body.beneficiary.linked, nameOnly.body.beneficiary.email], ['pending', false, 'nobody-yet@hr2org.example.com']);
+    assert.deepEqual([nameOnly.body.beneficiary.status, nameOnly.body.beneficiary.email], ['pending', 'nobody-yet@hr2org.example.com']);
+    assert.equal('linked' in nameOnly.body.beneficiary || 'userId' in nameOnly.body.beneficiary, false, 'by contact the reply does not say whether they are a member');
     assert.equal(await seats(), 3);
     const names = (await staffNow()).map(e => e.displayName).sort();
     assert.deepEqual(names, ['Asha Mollel', 'Baraka Member', 'Chausiku Unlinked'], 'HR sees the same people in /corporate/staff');
@@ -323,7 +327,7 @@ test('people: flag on, importing into a company adds staff through the company p
 
     const done = await call(importB2BBeneficiaries, { claims: hr.claims, params: P, body: { rawText } });
     assert.equal(done.statusCode, 200, JSON.stringify(done.body));
-    assert.deepEqual([done.body.enrolled, done.body.invited, done.body.credentials.length], [2, 0, 2]);
+    assert.deepEqual([done.body.enrolled, done.body.invited, done.body.credentials.length], [2, 0, 2], 'a PIN for every row added');
     assert.equal(done.body.credentials.every(c => /^\d{4}$/.test(c.pin)), true);
     const staff = await db('CorporateEmployee').where({ corporateId }).orderBy('displayName');
     assert.deepEqual(staff.map(e => [e.displayName, e.department, e.status]), [['Daudi One', 'Ops', 'pending'], ['Esther Two', 'Ops', 'pending']]);
@@ -440,5 +444,68 @@ test('flag off: people of a company stay read-only in /org (managed_by_corporate
     // The HR login still opens its organisation with role hr, as before.
     const mine = await call(myB2BOrganizations, { claims: hr.claims });
     assert.deepEqual(mine.body.organizations.map(o => [o.id, o.role]), [[orgId, 'hr']]);
+  });
+});
+
+// ── Security review fixes (functions#252) ───────────────────────────────────
+
+test('review 2: flag off, a converted HR row that is suspended or removed closes /org (the read-through no longer overrules it)', async () => {
+  const { corporateId, orgId, hr } = await company();
+  await hrOrgConversionService.run({ dryRun: false, corporateId });
+  const row = await db('B2BOrganizationUser').where({ userId: hr.id }).first();
+  await flagOff(async () => {
+    assert.equal((await call(getB2BOrganization, { claims: hr.claims, params: { id: orgId } })).statusCode, 200);
+    for (const status of ['suspended', 'removed']) {
+      const r = await call(updateB2BOrganizationUser, { claims: await admin(), params: { id: orgId, orgUserId: row.id }, body: { status: status === 'removed' ? 'suspended' : status } });
+      if (status === 'removed') await db('B2BOrganizationUser').where({ id: row.id }).update({ status: 'removed', removedAt: new Date() });
+      else assert.equal(r.statusCode, 200, JSON.stringify(r.body));
+      assert.equal((await call(getB2BOrganization, { claims: hr.claims, params: { id: orgId } })).statusCode, 404, status);
+      assert.deepEqual((await call(myB2BOrganizations, { claims: hr.claims })).body.organizations, [], status);
+    }
+    // An HR login without a row of its own still gets the read-through, as before.
+    const other = await company();
+    assert.equal((await call(getB2BOrganization, { claims: other.hr.claims, params: { id: other.orgId } })).statusCode, 200);
+  });
+});
+
+test('review 3: the script refuses --apply unless --db names the connected database', async () => {
+  const { corporateId, hr } = await company();
+  const script = fileURLToPath(new URL('../scripts/hr-to-org.mjs', import.meta.url));
+  const run = (...extra) => spawnSync(process.execPath, [script, `--corporate=${corporateId}`, ...extra], { env: { ...process.env, FITFLEX_USE_CI_DB: '1' }, encoding: 'utf8', timeout: 60_000 });
+  const ciName = new URL(process.env.DATABASE_URL_CI).pathname.slice(1);
+
+  const missing = run('--apply');
+  assert.equal(missing.status, 2, missing.stderr);
+  assert.match(missing.stderr, new RegExp(`refused: --apply needs --db=${ciName}`));
+  const wrong = run('--apply', '--db=fitflex');
+  assert.equal(wrong.status, 2, wrong.stderr);
+  assert.match(wrong.stderr, /got --db=fitflex\. Nothing written/);
+  assert.equal((await db('B2BOrganizationUser').where({ userId: hr.id })).length, 0, 'refused runs write nothing');
+
+  const ok = run('--apply', `--db=${ciName}`);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stderr, /APPLY \(writes\)/);
+  assert.deepEqual((await db('B2BOrganizationUser').where({ userId: hr.id })).map(r => r.role), ['hr']);
+});
+
+test('review 4: adding by name and contact answers the same whether or not a confirmed member is behind the contact', async () => {
+  const { orgId, hr } = await company();
+  const P = { id: orgId };
+  const memberEmail = `${uid('m')}@hr2org.example.com`;
+  const member = await account('member', { email: memberEmail });
+  await verifyContacts(db, member, { email: memberEmail });
+  await flagOn(async () => {
+    const shape = r => ({ statusCode: r.statusCode, keys: Object.keys(r.body).sort(), beneficiaryKeys: Object.keys(r.body.beneficiary ?? {}).sort(), status: r.body.beneficiary?.status });
+    const withMember = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'Has account', email: memberEmail, status: 'active' } });
+    const withoutMember = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'No account', email: `${uid('n')}@hr2org.example.com`, status: 'active' } });
+    assert.equal(withMember.statusCode, 201, JSON.stringify(withMember.body));
+    assert.deepEqual(shape(withMember), shape(withoutMember));
+    assert.equal('linked' in withMember.body.beneficiary || 'userId' in withMember.body.beneficiary, false);
+    // It was linked all the same.
+    assert.equal((await db('CorporateEmployee').where({ id: withMember.body.beneficiary.id }).first()).userId, member);
+    // By contact without a name: refused before any lookup, the same for both.
+    const a = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { phone: '0712999888' } });
+    const b = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { email: memberEmail } });
+    assert.deepEqual([a.statusCode, a.body.error, b.statusCode, b.body.error], [400, 'display_name_required', 400, 'display_name_required']);
   });
 });

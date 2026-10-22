@@ -4,7 +4,7 @@
 // src/services/hr-org-conversion-service.mjs.
 //
 //   node scripts/hr-to-org.mjs                       # dry run: says what it would do
-//   node scripts/hr-to-org.mjs --apply               # write
+//   node scripts/hr-to-org.mjs --apply --db=<name>   # write; <name> must be the connected database
 //   node scripts/hr-to-org.mjs --corporate=<id>      # one company only
 //   node scripts/hr-to-org.mjs --json                # the full report as JSON
 //
@@ -28,6 +28,9 @@ const args = process.argv.slice(2);
 const apply = args.includes('--apply');
 const asJson = args.includes('--json');
 const corporateId = args.find(a => a.startsWith('--corporate='))?.slice('--corporate='.length) || null;
+// --apply writes only when --db=<name> names the database actually connected
+// (checked against current_database()), so a wrong .env cannot be written to by accident.
+const confirmDb = args.find(a => a.startsWith('--db='))?.slice('--db='.length) || null;
 
 const url = process.env.FITFLEX_USE_CI_DB === '1' ? process.env.DATABASE_URL_CI : process.env.DATABASE_URL;
 if (!url) { console.error('DATABASE_URL is not set.'); process.exit(1); }
@@ -38,6 +41,15 @@ const { createB2BService } = await import('../src/services/b2b-service.mjs');
 const { createHrOrgConversionService } = await import('../src/services/hr-org-conversion-service.mjs');
 
 try {
+  if (apply) {
+    const { rows } = await db.raw('select current_database() as name');
+    const connected = rows[0]?.name;
+    if (!confirmDb || confirmDb !== connected) {
+      console.error(`[hr-to-org] refused: --apply needs --db=${connected} (the connected database)${confirmDb ? `; got --db=${confirmDb}` : ''}. Nothing written.`);
+      process.exitCode = 2;
+      throw Object.assign(new Error('db_not_confirmed'), { refused: true });
+    }
+  }
   console.error(`[hr-to-org] database: ${dbName} · ${apply ? 'APPLY (writes)' : 'dry run (no writes)'}${corporateId ? ` · company ${corporateId}` : ''}`);
   const users = collection('users');
   const corporateAccounts = collection('corporate_accounts');
@@ -62,6 +74,8 @@ try {
     console.log(`\n${report.total} HR login(s): ${Object.entries(report.counts).map(([k, v]) => `${k}=${v}`).join(', ')}; mirrors ${verb}created: ${report.mirrorsCreated}.`);
     if (!apply) console.log('Dry run: nothing written. Run again with --apply to write.');
   }
+} catch (err) {
+  if (!err.refused) throw err;
 } finally {
   await db.destroy();
 }
