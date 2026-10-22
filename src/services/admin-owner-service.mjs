@@ -4,6 +4,7 @@
 // fetches the full gym (with image) on demand via GET /gyms/:id when needed.
 import { randomUUID } from 'node:crypto';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
+import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 
 export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService }) {
   /** Strip internal/sensitive fields from owner records for list responses. */
@@ -80,7 +81,7 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'gym_owner_updated' : 'gym_owner_created',
-      target: id, before: prior ?? null, after: row
+      target: id, before: userAuditSnapshot(prior), after: userAuditSnapshot(row)
     });
     return { created: !prior, owner: hydrateGymOwner(row) };
   }
@@ -93,7 +94,7 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_owner_deleted',
-      target: prior.id, before: prior, after: null
+      target: prior.id, before: userAuditSnapshot(prior), after: null
     });
     return { owner: removed };
   }
