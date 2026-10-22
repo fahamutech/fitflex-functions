@@ -23,7 +23,7 @@ async function pdfkit() {
   if (typeof PDFDocument !== 'function') { PDFDocument = null; throw Object.assign(new Error('pdf_unavailable'), { code: 'pdf_unavailable' }); }
   return PDFDocument;
 }
-import { label, langOf, money, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf } from './vendor-documents.mjs';
+import { label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf } from './vendor-documents.mjs';
 
 const MM = 72 / 25.4;
 const GREEN = '#1F7A3A';
@@ -166,12 +166,12 @@ function renderA4(doc, d, lang, root) {
       { title: label(lang, 'amount'), width: 85, align: 'right' },
       ...(hasVat ? [{ title: label(lang, 'vat'), width: 34 }] : []),
     ];
-    table(cols, d.lines.map(l => [lineName(l), l.qty, money(l.unitPriceTzs), l.discountTzs ? `-${amountOnly(l.discountTzs)}` : '', money(l.amountTzs), ...(hasVat ? [l.vatCode || ''] : [])]));
+    table(cols, d.lines.map(l => [lineName(l), l.qty, money(l.unitPriceTzs), l.discountTzs ? minusMoney(l.discountTzs) : '', money(l.amountTzs), ...(hasVat ? [l.vatCode || ''] : [])]));
   }
 
   if (!['statement', 'payment_receipt'].includes(d.docType)) {
     pair(label(lang, 'subtotal'), money(d.subtotalTzs));
-    if (d.discountsTzs > 0) pair(label(lang, 'discounts'), `-${amountOnly(d.discountsTzs)}`);
+    if (d.discountsTzs > 0) pair(label(lang, 'discounts'), minusMoney(d.discountsTzs));
     pair(label(lang, 'total'), money(d.totalTzs), { bold: true });
     if (d.vatSummary?.length) pair(label(lang, 'includesVat', { amount: money(d.vatIncludedTzs) }), '');
   }
@@ -299,13 +299,13 @@ function render80(doc, d, lang, root) {
     rule();
     for (const l of d.lines) {
       P(lineName(l));
-      pair(`${l.qty} x ${amountOnly(l.unitPriceTzs)}${l.discountTzs ? ` -${amountOnly(l.discountTzs)}` : ''}`, `${amountOnly(l.amountTzs)}${l.vatCode ? ` ${l.vatCode}` : ''}`);
+      pair(`${l.qty} x ${amountOnly(l.unitPriceTzs)}${l.discountTzs ? ` ${minusMoney(l.discountTzs)}` : ''}`, `${amountOnly(l.amountTzs)}${l.vatCode ? ` ${l.vatCode}` : ''}`);
     }
   }
   if (!['statement', 'payment_receipt'].includes(d.docType)) {
     rule();
     pair(label(lang, 'subtotal'), money(d.subtotalTzs));
-    if (d.discountsTzs > 0) pair(label(lang, 'discounts'), `-${amountOnly(d.discountsTzs)}`);
+    if (d.discountsTzs > 0) pair(label(lang, 'discounts'), minusMoney(d.discountsTzs));
     pair(label(lang, 'total'), money(d.totalTzs), { bold: true });
   }
   if (d.vatSummary?.length) {

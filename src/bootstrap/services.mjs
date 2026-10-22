@@ -31,7 +31,8 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
+import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
@@ -139,6 +140,8 @@ import { createShopBannerService } from '../services/shop-banner-service.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
 import { createShopHomeService } from '../services/shop-home-service.mjs';
+import { createShopPreferenceService } from '../services/shop-preference-service.mjs';
+import { createPgShopPreferenceStore, forgetShopPreference } from '../infra/shop-preference-store-pg.mjs';
 import { signServedToken } from '../auth/promotion-token.mjs';
 import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
 import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
@@ -463,6 +466,20 @@ export const b2bOps = registerB2BJobs({
   b2bSponsorRefundService: { repair: () => b2bSponsorRefundService.repair() },
 });
 
+// Marathon & running events · S1 (foundation): persistence, the hold primitive and the hold-expiry job.
+// Dormant behind EVENTS_MODULE — nothing here is reachable from a route; the job returns at once while
+// the flag is off. Construction is unconditional (like every other store) so the wiring is exercised.
+export const eventStore = createPgEventStore({ db });
+opsService.register({
+  name: 'event-hold-expiry', title: 'Event hold expiry', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  description: 'Gives back the places of unpaid event orders whose hold has lapsed (order expired, registrations cancelled). Does nothing unless EVENTS_MODULE is on.',
+  run: async () => {
+    if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventStore.expireHolds();
+    return { processed: r.due, succeeded: r.released, failed: 0, ...r };
+  },
+});
+
 export const identityLinkService = createIdentityLinkService({ db });
 
 // Identity V2 · I4: OrgMembership follows every write to its sources.
@@ -499,12 +516,14 @@ export const accountService = createAccountService({
   // A deleted account lets its username go (held 90 days). usernameService is defined further down.
   // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
   // their link to the account unless money is owed. Each step runs even if another fails.
-  onAccountDeleted: async (userId) => {
+  onAccountDeleted: async (userId, deleted = null) => {
     const errors = [];
     for (const step of [
       () => promotionEventsService.forgetUser(userId),
       () => usernameService.forgetUser(userId),
       () => vendorCustomerService.forgetBuyer(userId),
+      // The "Personalised shop" switch goes once the Person has no personas left.
+      () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
     ]) {
       try { await step(); } catch (err) { errors.push(err); }
     }
@@ -1031,8 +1050,20 @@ export const shopBannerService = createShopBannerService({
   partnerGate, moderationGate,
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
+// "Personalised shop" switch (SHOP_PERSONALISATION, Phase 2 slice 2): one row per Person, no row = on.
+export const shopPreferenceService = createShopPreferenceService({
+  store: createPgShopPreferenceStore({ db }), users, identityLink: identityLinkService,
+  trainerProfileOf: userId => trainerService.findProfileByUser(userId),
+});
+// Purchase history is the person's own orders only, read per request; capped so memory stays bounded.
+const SHOP_HISTORY_MAX_ORDERS = 500;
 export const shopHomeService = createShopHomeService({
   bannerFeed: args => shopBannerService.feed(args),
+  preferences: shopPreferenceService,
+  buyerPaidOrders: ({ buyerIds, since }) => (buyerIds.length ? db('ShopOrder')
+    .whereIn('buyerId', buyerIds).where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
+    .orderBy('createdAt', 'desc').limit(SHOP_HISTORY_MAX_ORDERS)
+    .select('id', 'buyerId', 'items', 'status', 'paymentStatus', 'createdAt') : []),
   shopService, discoveryService, promotionService, users, trainerService, identityLink: identityLinkService,
   recentPaidOrders: ({ since }) => db('ShopOrder')
     .where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)

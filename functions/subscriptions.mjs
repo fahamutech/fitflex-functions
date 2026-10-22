@@ -79,11 +79,12 @@ export const deleteMyAccount = {
 
 export const updateMemberProfile = {
   created, method: 'post', path: '/me/profile',
-  description: 'Authenticated user: save profile details; members can also save onboarding goals and preferences.',
+  description: 'Authenticated user: save profile details; members can also save onboarding goals and preferences. Members: dateOfBirth must be "YYYY-MM-DD", a real calendar date from 1901-01-01 to today (East Africa day), else 400 invalid_field { field: "dateOfBirth" }; "" (or only spaces) clears it; null or leaving it out keeps the stored one.',
   onGuard: routeGuard('post', requireAuth()),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
     const result = await accountService.updateMemberProfile({ claims: req.user, user, body: req.body || {} });
+    if (result.error) return res.status(result.status).json({ error: result.error, field: result.field });
     res.json(result);
   }
 };

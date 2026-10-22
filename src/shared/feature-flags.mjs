@@ -120,6 +120,17 @@ export function shopBannersOn() {
 }
 
 /**
+ * Shop home Phase 2 · slice 2: personalisation (docs/shop-personalisation-api.md). Off unless
+ * SHOP_PERSONALISATION is set: GET /shop/home is byte-identical to before (no `personalisation`
+ * key, no purchase history, gender or age), PUT /shop/preferences answers 404 feature_disabled,
+ * GET /shop/preferences says available: false and /vendor/tools/options says
+ * merch.productTargets: false. Vendor product tags (targetGender, targetAgeBands) are stored either way.
+ */
+export function shopPersonalisationOn() {
+  return on('SHOP_PERSONALISATION');
+}
+
+/**
  * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
  * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
  * carries no `manual` block and subscribe / upgrade take no reference, exactly
@@ -191,7 +202,7 @@ export function vendorToolsOptions() {
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
-    merch: { banners: shopBannersOn() },
+    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn() },
   };
 }
 
@@ -316,4 +327,14 @@ export function trainerStatementDraftsOn() {
  */
 export function vendorStatementDraftsOn() {
   return onUnlessOff('VENDOR_STATEMENT_DRAFTS');
+}
+
+/**
+ * Marathon & running events module (docs/marathon/PRD-v1.0-2026-10-21.md; reuse map §9). EVENTS_MODULE is
+ * the umbrella: off unless set, so a deploy changes nothing. S1 ships only persistence, the domain rules
+ * and the eventHoldExpiry job; the job returns at once while this is off. Later slices add their own
+ * flags (EVENTS_DISCOVERY, EVENTS_REGISTRATION, EVENTS_PAYMENTS_MANUAL …), each on only together with this one.
+ */
+export function eventsModuleOn() {
+  return on('EVENTS_MODULE');
 }
