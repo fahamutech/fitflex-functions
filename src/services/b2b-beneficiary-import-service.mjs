@@ -5,10 +5,16 @@
 //              has a member account is enrolled straight away, through the
 //              same service a single "add person" uses, so the same rules
 //              apply. Someone who has not joined yet is kept as an invite.
-//   invite     waits for the person. When a member account appears with that
-//              email or number they are enrolled and the invite is closed.
-//              Matching runs every few minutes, and at once when a member
-//              opens their benefits.
+//   invite     waits for the person. When a member has VERIFIED that email or
+//              number (a LoginIdentifier with verifiedAt) they are enrolled
+//              and the invite is closed. Matching runs every few minutes, and
+//              at once when a member opens their benefits.
+//   matching   uses verified contacts only (src/shared/verified-contacts.mjs).
+//              User.email / User.phone can be typed in by anyone, so a member
+//              who holds the contact only there is treated as not joined yet:
+//              they stay invited and are matched once they verify it (security
+//              fix, 20 Oct 2026). Members with no verified record are never
+//              matched (fail closed).
 //   messages   by email: the invitation, then a reminder after 3 days and
 //              another after 10. By SMS, to people listed with a mobile
 //              number: the invitation and one reminder after 3 days (each SMS
@@ -23,6 +29,7 @@
 import { randomUUID } from 'node:crypto';
 import { BENEFICIARY_TYPES } from '../shared/b2b.mjs';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
+import { createVerifiedContacts, whereLiveAccount } from '../shared/verified-contacts.mjs';
 
 const INVITE = 'B2BBeneficiaryInvite';
 const IMPORT = 'B2BBeneficiaryImport';
@@ -100,6 +107,12 @@ export function readImportRow(raw = {}) {
 
 export function createB2BBeneficiaryImportService({
   db, b2bService,
+  // Who has verified an email / number (src/shared/verified-contacts.mjs).
+  verifiedContacts = createVerifiedContacts(db),
+  // Whether FitFlex can send email codes right now (GET /auth/options
+  // emailCodes). When it can't, someone listed by email only cannot verify
+  // that address in the app, so the portal asks for a mobile number too.
+  emailCodes = () => false,
   // { configured, send(to, { subject, text }) }; read when needed so a later configuration is picked up.
   emailSender = () => ({ configured: false }),
   // Tell one person in the app: (userId, { id, type, title, body, data })
@@ -121,14 +134,13 @@ export function createB2BBeneficiaryImportService({
   const sms = () => (smsEnabled() ? smsSender() : { configured: false });
   const inviteView = ({ invitedBy, cancelledBy, ...i }) => ({ ...i, canResend: i.status === 'invited' && ((!!i.email && i.emailsSent < MAX_EMAILS_PER_INVITE) || (!!i.phone && i.smsSent < MAX_SMS_PER_INVITE)) });
 
-  /** Member accounts behind a set of emails and numbers: two queries, whatever the size of the list. */
+  /**
+   * Member accounts behind a set of emails and numbers, by verified contacts
+   * only (one query, whatever the size of the list). Someone who has the
+   * contact only on their profile is not found and is invited instead.
+   */
   async function accountsFor(emails, phones) {
-    const byEmail = new Map();
-    const byPhone = new Map();
-    const usable = q => q.where({ userType: 'member' }).where(b => b.whereNull('accountStatus').orWhereNot('accountStatus', 'deleted'));
-    if (emails.length) for (const u of await usable(db('User').whereIn('email', emails)).select('id', 'email')) byEmail.set(normalizeEmail(u.email), u.id);
-    if (phones.length) for (const u of await usable(db('User').whereIn('phone', phones)).select('id', 'phone')) byPhone.set(u.phone, u.id);
-    return { byEmail, byPhone };
+    return verifiedContacts.findMembers({ emails, phones });
   }
 
   // ── Import ────────────────────────────────────────────────────────────────
@@ -204,7 +216,7 @@ export function createB2BBeneficiaryImportService({
       }
     }
     const summary = { ...counts, problems: problems.sort((a, b) => a.line - b.line), withoutEmail: people.filter(p => !p.email).length, withoutPhone: people.filter(p => !p.phone).length,
-      emailConfigured: emailSender().configured === true, smsConfigured: sms().configured === true };
+      emailConfigured: emailSender().configured === true, smsConfigured: sms().configured === true, emailCodesAvailable: emailCodes() === true };
     if (dryRun) return { dryRun: true, ...summary };
     await db(IMPORT).insert({ id: importId, organizationId: org.id, createdBy: actorId, total: counts.total, enrolled: counts.enrolled, invited: counts.invited, unchanged: counts.unchanged, rejected: counts.rejected,
       problems: JSON.stringify(summary.problems.slice(0, 500)), createdAt: at, updatedAt: at });
@@ -300,24 +312,32 @@ export function createB2BBeneficiaryImportService({
   }
 
   /**
-   * Enrol everyone who has joined since they were invited. With `userId`,
-   * only that person (used when a member opens their benefits, so they do
-   * not wait for the next run).
+   * Enrol everyone who has joined, and verified the invited email or number,
+   * since they were invited. With `userId`, only that person (used when a
+   * member opens their benefits, so they do not wait for the next run).
+   * Verified contacts only: User.email / User.phone match nothing.
    */
   async function matchInvites({ userId = null, limit = 500 } = {}) {
     const stats = { matched: 0, enrolled: 0, failed: 0, skipped: 0 };
     let pairs;
     if (userId) {
-      const u = await db('User').where({ id: userId, userType: 'member' }).first('id', 'email', 'phone', 'accountStatus');
-      if (!u || u.accountStatus === 'deleted') return stats;
-      const email = normalizeEmail(u.email);
-      if (!email && !u.phone) return stats;
-      const rows = await db(INVITE).where({ status: 'invited' }).where(b => { if (email) b.orWhere({ email }); if (u.phone) b.orWhere({ phone: u.phone }); });
+      const u = await whereLiveAccount(db('User').where({ id: userId, userType: 'member' })).first('id');
+      if (!u) return stats;
+      const proven = await verifiedContacts.contactsFor(u.id);
+      const emails = proven.filter(c => c.type === 'email').map(c => c.value);
+      const phones = proven.filter(c => c.type === 'phone').map(c => c.value);
+      if (!emails.length && !phones.length) return stats;
+      const rows = await db(INVITE).where({ status: 'invited' })
+        .where(b => { if (emails.length) b.orWhereIn('email', emails); if (phones.length) b.orWhereIn('phone', phones); });
       pairs = rows.map(invite => ({ invite, userId: u.id }));
     } else {
-      const rows = await db(`${INVITE} as i`).join('User as u', function on() { this.on('u.email', 'i.email').orOn('u.phone', 'i.phone'); })
-        .where({ 'i.status': 'invited', 'u.userType': 'member' }).where(b => b.whereNull('u.accountStatus').orWhereNot('u.accountStatus', 'deleted'))
-        .orderBy('i.invitedAt').limit(limit).select('i.*', 'u.id as matchedUserId');
+      // Invites joined to verified contacts of live members (never User.email / User.phone).
+      const rows = await db(`${INVITE} as i`).join(verifiedContacts.verifiedMemberRows(), function on() {
+        this.on(function email() { this.on('v.type', db.raw('?', ['email'])).andOn('v.normalizedValue', 'i.email'); })
+          .orOn(function phone() { this.on('v.type', db.raw('?', ['phone'])).andOn('v.normalizedValue', 'i.phone'); });
+      })
+        .where({ 'i.status': 'invited' })
+        .orderBy('i.invitedAt').orderBy('v.userCreatedAt').limit(limit).select('i.*', 'v.userId as matchedUserId');
       pairs = rows.map(({ matchedUserId, ...invite }) => ({ invite, userId: matchedUserId }));
     }
     const done = new Set();
@@ -349,6 +369,7 @@ export function createB2BBeneficiaryImportService({
         : `A reminder: ${name} has added you to its wellness programme on FitFlex, and your benefits are waiting.`,
       '',
       `To use it, get the FitFlex app and sign up as a member with this email address (${invite.email}). Your benefits appear under Benefits as soon as you have joined.`,
+      confirmLine(invite),
       link ? `Get the app: ${link}` : null,
       '',
       `What ${name} can see: once you join, ${name} can see your FitFlex activity (gym visits, trainer sessions, the workouts and steps you record, and your progress in its challenges). It cannot see your weight, height, or anything another sponsor gives you.`,
@@ -358,13 +379,26 @@ export function createB2BBeneficiaryImportService({
     return { subject: count === 0 ? `${name} has added you to FitFlex` : `Reminder: your FitFlex benefits from ${name}`, text: lines.join('\n') };
   }
 
+  /**
+   * For people who already have an account: the invite matches only a
+   * verified email or number. The in-app tile is "Mobile number and email".
+   * An email can be confirmed in the app only while FitFlex email codes are
+   * on, so with them off the email doesn't promise that.
+   */
+  function confirmLine(invite) {
+    if (emailCodes() === true) return 'Already on FitFlex? Confirm this email address or your mobile number under Mobile number and email in the FitFlex app, and your benefits will appear.';
+    if (invite.phone) return 'Already on FitFlex? Confirm your mobile number under Mobile number and email in the FitFlex app, and your benefits will appear.';
+    return 'Already on FitFlex? Your benefits appear once this email address is confirmed on your FitFlex account.';
+  }
+
   /** One SMS segment in plain characters: who added them, what to do, and the link when there is one. */
   function smsFor(invite, org, count) {
     const link = appLink();
     const name = orgName(org).replace(/[^\x20-\x7E]/g, '').trim().slice(0, 30) || 'Your organisation';
     const lead = count === 0 ? `${name} added you to its wellness programme on FitFlex.` : `Reminder: ${name} added you to FitFlex.`;
-    const plain = `${lead} Get the FitFlex app and join as a member with this number.`;
-    const withLink = link ? `${lead} Join as a member with this number: ${link}` : null;
+    // Existing users must confirm the number before the invite can match them.
+    const plain = `${lead} Join as a member with this number, or confirm it under Mobile number and email.`;
+    const withLink = link ? `${lead} Join with this number (or confirm it under Mobile number and email): ${link}` : null;
     // A link that does not fit is left out, never cut in half.
     const text = withLink && withLink.length <= SMS_MAX_LENGTH ? withLink : plain;
     return { text: text.slice(0, SMS_MAX_LENGTH) };
