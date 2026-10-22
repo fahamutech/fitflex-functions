@@ -109,6 +109,16 @@ test('classifyStoredDateOfBirth (audit script) names each failure', () => {
   }
 });
 
+test('classifyStoredDateOfBirth: years 0001–0099 are before 1901, not impossible days; still unreadable', () => {
+  const now = new Date(`${TODAY}T09:00:00Z`);
+  for (const d of ['0001-01-01', '0050-06-15', '0099-12-31', '0000-01-01', '1899-02-29']) {
+    assert.equal(classifyStoredDateOfBirth(d, now), 'invalid_before_1901', d);
+    assert.deepEqual(readDateOfBirth(d, now), { status: 'invalid' }, d);
+    assert.equal(ageOn(d, TODAY), null, d);
+  }
+  assert.equal(classifyStoredDateOfBirth('1901-02-29', now), 'invalid_impossible_day');
+});
+
 // ── CI database: segment facts and profile routes ───────────────────────────
 
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;

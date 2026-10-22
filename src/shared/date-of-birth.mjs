@@ -61,8 +61,10 @@ export function classifyStoredDateOfBirth(value, now = new Date()) {
   if (isAbsentDateOfBirth(value)) return 'absent';
   if (typeof value !== 'string') return 'invalid_not_text';
   if (!DAY_RE.test(value)) return 'invalid_format';
-  if (!isCalendarDay(value)) return 'invalid_impossible_day';
+  // Before the calendar check: Date.UTC maps years 0–99 to 1900–1999, so isCalendarDay says no to
+  // every day in 0001–0099; those are early dates, not impossible ones.
   if (value < DOB_MIN) return 'invalid_before_1901';
+  if (!isCalendarDay(value)) return 'invalid_impossible_day';
   return value > eatToday(now) ? 'invalid_in_future' : 'valid';
 }
 
