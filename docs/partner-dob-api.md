@@ -55,7 +55,7 @@ These rules are shared with `POST /me/profile` (`src/shared/date-of-birth.mjs`).
   Sending `""` (clearing) skips step 2. If the effective date is valid and under 18, the request gets `400 {"error":"partner_under_18"}` and nothing is saved. With no date of birth at all the request is accepted, and the app asks for one (`ask`). This is checked on:
   - `PUT /me/personal-details`, when the person holds a trainer or owner role;
   - `POST /trainer/register` and `POST /gym-owner/register`, **even when no date of birth is sent**, before any profile or gym is saved;
-  - `POST /me/personas`, when adding a `trainer` or `gym_operator`/`gym_owner` persona (Identity V2 `V2_ADD_PERSONA`; sign-in-flow code in `auth-service`);
+  - `POST /me/personas`, when adding a `trainer` or `gym_operator`/`gym_owner` persona (Identity V2 `V2_ADD_PERSONA`). In `src/services/auth-service.mjs` **only `addPersona`** carries this check. Sign-in, OTP, PIN, session and persona-switch code are unchanged;
   - `POST /me/profile`: a member date of birth under 18 for a person who also holds a trainer or owner role.
 
   Members on their own may give any valid date.
@@ -118,6 +118,13 @@ Any signed-in user. Request body (both keys optional):
 | 429 | `{"error":"rate_limited","retryAfterSeconds":N}`, also a `Retry-After` header. The limit is 10 writes per minute per account, held in memory per server. |
 
 Nothing is saved when a 400 is returned.
+
+## Registration: what happens after the check
+
+Both register routes behave the same way:
+
+1. **Check first.** The check runs on the resolved account (`resolveRequestUser`; `/gym-owner/register` first auto-provisions a missing account as before). If no account can be resolved, the request fails closed with `404 {"error":"user_not_found"}`. If a date of birth or gender is sent but the account has no Person, it gets `404 {"error":"person_not_found"}`. Every check (invalid field, under 18, 503, 404) runs **before** any trainer profile or gym is saved.
+2. **Save after.** Once the registration has succeeded, saving the date of birth or gender never turns it into an error. If that write fails (very rare, because the checks have already passed), the server logs the route and the database error code, never the value. The route then still answers success with its usual body, and the value is not stored. `GET /me/personal-details` then shows `ask: true`, so the app asks again and saves it through `PUT`.
 
 ## `POST /trainer/register` (additive body field)
 

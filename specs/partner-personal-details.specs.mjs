@@ -583,3 +583,65 @@ test('L3: an admin deleting the last persona (owner) clears the declared details
   assert.equal(delT.statusCode, 200, JSON.stringify(delT.body));
   assert.equal((await stored(await personOf(t))).dateOfBirth, '1982-02-02', 'the trainer account (persona) remains');
 });
+
+// ── contract-check round (4, 5) ─────────────────────────────────────────────
+
+test('(4) owner register checks the resolved account, not just the token subject', async () => {
+  const email = `${uid('dobowner')}@example.com`;
+  const per = await person();
+  await user('member', { personId: per, memberProfile: memberDob(yearsAgo(16)) });
+  const row = await user('gym_operator', { personId: per, email });
+  const ghost = uid('usr');
+  made.users.push(ghost);
+  // The token's subject has no row; the account is found by email (resolveRequestUser).
+  const claims = { sub: ghost, userType: 'gym_operator', email };
+  const refused = await call(gymOwnerRegister, claims, { body: ownerBody({}) });
+  assert.deepEqual([refused.statusCode, refused.body], [400, { error: 'partner_under_18' }]);
+  assert.equal((await db('User').where({ id: row }).first()).gymId ?? null, null, 'no gym assigned');
+  assert.equal(await db('User').where({ id: ghost }).first(), undefined, 'nothing provisioned for the token subject');
+
+  // An adult on the resolved account: registered, and the date lands on that account's Person.
+  const email2 = `${uid('dobowner')}@example.com`;
+  const row2 = await user('gym_operator', { email: email2 });
+  const ghost2 = uid('usr');
+  made.users.push(ghost2);
+  const ok = await call(gymOwnerRegister, { sub: ghost2, userType: 'gym_operator', email: email2 }, { body: ownerBody({ dateOfBirth: '1972-02-02' }) });
+  assert.equal(ok.statusCode, 200, JSON.stringify(ok.body));
+  made.gyms.push(...(ok.body.gymIds || []));
+  assert.equal((await stored(await personOf(row2))).dateOfBirth, '1972-02-02');
+});
+
+test('(5) a failed save after a successful registration is logged without the value; the registration still succeeds', async () => {
+  const poison = '1955-05-05';
+  await db.raw(`CREATE OR REPLACE FUNCTION dob_spec_poison() RETURNS trigger AS $$
+    BEGIN RAISE EXCEPTION 'spec poison' USING ERRCODE = 'P0001'; END; $$ LANGUAGE plpgsql`);
+  await db.raw(`CREATE TRIGGER dob_spec_poison BEFORE UPDATE ON "Person" FOR EACH ROW
+    WHEN (NEW."dateOfBirth" = DATE '${poison}') EXECUTE FUNCTION dob_spec_poison()`);
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (...args) => { warned.push(args.join(' ')); };
+  try {
+    const t = await user('trainer');
+    const reg = await call(trainerRegister, as(t, 'trainer'), { body: trainerBody({ dateOfBirth: poison }) });
+    assert.equal(reg.statusCode, 200, JSON.stringify(reg.body));
+    assert.ok(reg.body.id, 'the trainer profile comes back');
+    assert.equal((await stored(await personOf(t))).dateOfBirth, null);
+    assert.equal((await call(getMyPersonalDetails, as(t, 'trainer'))).body.ask, true, 'the app asks again');
+
+    const o = await user('gym_operator');
+    const own = await registerOwner(o, { dateOfBirth: poison, gender: 'male' });
+    assert.equal(own.statusCode, 200, JSON.stringify(own.body));
+    assert.ok(own.body.gymIds?.length);
+    assert.deepEqual([(await stored(await personOf(o))).dateOfBirth, (await stored(await personOf(o))).gender], [null, null]);
+
+    const logs = warned.filter(l => l.includes('[personal-details]'));
+    assert.equal(logs.length, 2, JSON.stringify(warned));
+    assert.ok(logs.some(l => l.includes('trainer_register') && l.includes('P0001')));
+    assert.ok(logs.some(l => l.includes('gym_owner_register')));
+    for (const l of logs) assert.ok(!l.includes('1955') && !l.includes('male'), l);
+  } finally {
+    console.warn = warn;
+    await db.raw('DROP TRIGGER IF EXISTS dob_spec_poison ON "Person"');
+    await db.raw('DROP FUNCTION IF EXISTS dob_spec_poison()');
+  }
+});

@@ -15,9 +15,6 @@ export const gymOwnerRegister = {
   onRequest: async (req, res) => {
     try {
       const body = req.body || {};
-      // Partner DOB slice 2: checked before anything is saved.
-      const declared = partnerDobRequiredOn() ? await personalDetailsService.checkRegistration({ user: { id: req.user.sub }, body, fields: ['dateOfBirth', 'gender'] }) : null;
-      if (declared?.error) return res.status(declared.status).json({ error: declared.error, ...(declared.field ? { field: declared.field } : {}) });
       let user = await resolveRequestUser(req);
       if (!user) {
         console.warn(`[gymOwnerRegister] user ${req.user.sub} missing — auto-provisioning`);
@@ -30,6 +27,10 @@ export const gymOwnerRegister = {
           createdAt: new Date().toISOString(),
         });
       }
+      // Partner DOB slice 2: checked on the resolved account (fails closed without one), before any gym
+      // is saved. Afterwards a failed save is logged without the value and the registration still succeeds.
+      const declared = partnerDobRequiredOn() ? await personalDetailsService.checkRegistration({ user, body, fields: ['dateOfBirth', 'gender'] }) : null;
+      if (declared?.error) return res.status(declared.status).json({ error: declared.error, ...(declared.field ? { field: declared.field } : {}) });
       const result = await ownerGymService.registerOwner({ user, body });
       if (result.error) return res.status(result.status).json({ error: result.error });
       if (declared) await personalDetailsService.saveRegistration({ user, changes: declared.changes, via: 'gym_owner_register' });

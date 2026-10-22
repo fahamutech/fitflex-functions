@@ -153,10 +153,10 @@ export function createPersonalDetailsService({ db, auditLog, trainers, now = () 
 
   async function write({ personId, actorId, changes, via }) {
     const fields = Object.keys(changes);
-    if (!personId || !fields.length) return;
+    if (!personId || !fields.length) return false;
     // Security review L2: before the migration has run there is nowhere to write; callers check
     // ready() first so nothing else is saved either. This is the last stop.
-    if (!(await personDetailsColumnsExist(db))) return;
+    if (!(await personDetailsColumnsExist(db))) return false;
     const before = await readPersonDetails(db, personId);
     await db('Person').where({ id: personId })
       .update({ ...changes, declaredProfileUpdatedAt: db.fn.now(), updatedAt: db.fn.now() });
@@ -166,6 +166,7 @@ export function createPersonalDetailsService({ db, auditLog, trainers, now = () 
       id: randomUUID(), at: now().toISOString(), actor: actorId, action: 'personal_details_updated',
       target: personId, before: state(before), after: { ...state(changes), via },
     });
+    return true;
   }
 
   /** PUT /me/personal-details (flag already checked by the route). */
@@ -191,16 +192,40 @@ export function createPersonalDetailsService({ db, auditLog, trainers, now = () 
    * → { error, status, field? } | { changes }
    */
   async function checkRegistration({ user, body, fields }) {
+    // Contract check (4): the resolved account, never just the token subject; fail closed without one.
+    if (!user?.id) return { error: 'user_not_found', status: 404 };
     const checked = check(body || {}, { fields, partner: true });
     if (checked.error) return checked;
     const age = await assertPartnerAge({ user, changes: checked.changes });
     if (age) return age;
-    if (Object.keys(checked.changes).length && !(await personDetailsColumnsExist(db))) return UNAVAILABLE;
+    if (Object.keys(checked.changes).length) {
+      if (!(await personDetailsColumnsExist(db))) return UNAVAILABLE;
+      if (!(await personIdOf(user.id))) return { error: 'person_not_found', status: 404 };
+    }
     return checked;
   }
+
+  /**
+   * After a successful registration (contract check 4/5). Never throws: the registration has already
+   * happened, so a failed write is logged (error code only, never the value) and reported, and the
+   * route still answers success. GET /me/personal-details then says ask: true and the app asks again.
+   * → { saved: true } | { saved: false, reason: 'nothing_to_save' | 'person_not_found' | 'unavailable' | 'write_failed' }
+   */
   async function saveRegistration({ user, changes, via }) {
-    if (!changes || !Object.keys(changes).length) return;
-    await write({ personId: await personIdOf(user.id), actorId: user.id, changes, via });
+    if (!changes || !Object.keys(changes).length) return { saved: false, reason: 'nothing_to_save' };
+    try {
+      const personId = await personIdOf(user?.id);
+      if (!personId) {
+        console.warn(`[personal-details] ${via}: no person for ${user?.id}; date of birth not saved`);
+        return { saved: false, reason: 'person_not_found' };
+      }
+      if (await write({ personId, actorId: user.id, changes, via })) return { saved: true };
+      console.warn(`[personal-details] ${via}: columns missing; date of birth not saved`);
+      return { saved: false, reason: 'unavailable' };
+    } catch (err) {
+      console.warn(`[personal-details] ${via}: save failed (${err?.code || 'error'}); date of birth not saved`);
+      return { saved: false, reason: 'write_failed' };
+    }
   }
 
   /**

@@ -63,6 +63,7 @@ export const trainerRegister = {
     if (!user) return res.status(404).json({ error: 'user_not_found' });
     const body = req.body || {};
     // Partner DOB slice 2: checked before anything is saved; gender stays the trainer profile's own.
+    // Afterwards a failed save is logged without the value and never turns the registration into an error.
     const declared = partnerDobRequiredOn() ? await personalDetailsService.checkRegistration({ user, body, fields: ['dateOfBirth'] }) : null;
     if (declared?.error) return res.status(declared.status).json({ error: declared.error, ...(declared.field ? { field: declared.field } : {}) });
     const result = await trainerService.register({ userId: req.user.sub, user, body });
