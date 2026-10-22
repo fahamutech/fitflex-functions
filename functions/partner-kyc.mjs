@@ -73,8 +73,14 @@ export const myKyc = {
   onRequest: asPartner(async partner => {
     const overview = await svc.overview(partner);
     if (overview.error || !partnerProgressOn()) return overview;
-    const progress = await partnerProgressService.forOverview(partner, overview);
-    return progress ? { ...overview, progress } : overview;
+    // The tracker is extra: if it fails, /me/kyc still answers, without it.
+    try {
+      const progress = await partnerProgressService.forOverview(partner, overview);
+      return progress ? { ...overview, progress } : overview;
+    } catch (err) {
+      console.error('[partner-progress] omitted from /me/kyc:', partner.partnerType, partner.subjectId, err?.message || err);
+      return overview;
+    }
   }),
 };
 

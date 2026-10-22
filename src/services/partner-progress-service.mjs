@@ -4,7 +4,8 @@
 //
 // Input is the partner (from partnerKycService.partnerForUser) and the
 // overview that GET /me/kyc already returns, so the case, checklist and
-// payout accounts are read once.
+// payout accounts are read once. A gym owner's gyms are judged with their own
+// case and accounts (forGym ownerId), never a co-owner's.
 import { buildProgress, buildGymOwnerProgress } from '../shared/partner-progress.mjs';
 
 const ownedGymIds = user => (user.gymIds?.length ? user.gymIds : [user.gymId]).filter(Boolean);
@@ -28,7 +29,7 @@ export function createPartnerProgressService({ gyms, trainers, partnerGate, payo
       for (const gymId of [...new Set(ownedGymIds(user))]) {
         const gym = await gyms.findByIdAsync(gymId);
         if (!gym) continue;
-        list.push({ gymId, name: gym.name ?? null, eligibility: await payoutEligibility.forGym(gymId, { at }) });
+        list.push({ gymId, name: gym.name ?? null, eligibility: await payoutEligibility.forGym(gymId, { at, ownerId: user.id }) });
       }
       return buildGymOwnerProgress({ ...input, gyms: list });
     }

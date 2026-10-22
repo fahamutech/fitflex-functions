@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
-import { trainers, gyms, gymService } from '../src/bootstrap/services.mjs';
+import { trainers, gyms, gymService, partnerProgressService } from '../src/bootstrap/services.mjs';
 import { myKyc, adminKycPartner } from '../functions/partner-kyc.mjs';
 
 await ensureInit();
@@ -253,4 +253,50 @@ test('the admin view of a partner is unchanged with the flag on', async () => {
   const r = await call(adminKycPartner, { claims: { sub: admin, userType: 'admin' }, params: { partnerType: 'vendor', subjectId: vendorId } });
   assert.equal(r.statusCode, 200);
   assert.equal('progress' in r.body, false);
+});
+
+test('two owners sharing a gym: each sees only their own KYC and payout state for it', async () => {
+  process.env.PARTNER_PROGRESS = 'on';
+  const shared = await makeGym();
+  const ownerA = await makeUser('gym_operator', { gymId: shared, gymIds: [shared] });
+  const ownerB = await makeUser('gym_operator', { gymId: shared, gymIds: [shared] });
+  // A: verified with a payable account. B: verified, payout account still waiting for review.
+  const caseA = await makeCase(ownerA, 'gym_owner', 'approved', { decidedAt: new Date() });
+  await addAccount(caseA);
+  const caseB = await makeCase(ownerB, 'gym_owner', 'approved', { decidedAt: new Date() });
+  await addAccount(caseB, { status: 'pending_verification', isPrimary: false });
+
+  // Whichever owner the gym lookup would find first, judging by the other's
+  // records shows here: A would lose "ready", or B would gain it.
+  const a = (await read(ownerA, 'gym_operator')).progress;
+  assert.equal(a.gyms[0].gymId, shared);
+  assert.equal(a.gyms[0].progress.steps[3].state, 'done');
+  assert.deepEqual(a.nextAction, { code: 'none' });
+
+  const b = (await read(ownerB, 'gym_operator')).progress;
+  assert.equal(b.gyms[0].gymId, shared);
+  assert.equal(b.gyms[0].progress.steps[3].state, 'current');
+  assert.deepEqual(b.gyms[0].progress.nextAction, { code: 'payout_account_under_review' });
+  assert.deepEqual(b.nextAction, { code: 'payout_account_under_review', gymId: shared });
+});
+
+test('flag on, the tracker fails: /me/kyc still answers, without progress', async () => {
+  process.env.PARTNER_PROGRESS = 'on';
+  const id = await makeUser('trainer');
+  const original = partnerProgressService.forOverview;
+  const originalError = console.error;
+  const logged = [];
+  partnerProgressService.forOverview = async () => { throw new Error('boom'); };
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    const r = await call(myKyc, { claims: { sub: id, userType: 'trainer' } });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body.partnerType, 'trainer');
+    assert.ok(Array.isArray(r.body.checklist.missing));
+    assert.equal('progress' in r.body, false);
+    assert.ok(logged.some(l => l.includes('[partner-progress]') && l.includes('boom')));
+  } finally {
+    partnerProgressService.forOverview = original;
+    console.error = originalError;
+  }
 });

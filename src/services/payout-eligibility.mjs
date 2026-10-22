@@ -17,10 +17,17 @@ export function createPayoutEligibility({
   legacyKycGraceEndsAt = process.env.SETTLEMENT_LEGACY_KYC_GRACE_ENDS_AT || null,
 }) {
   /**
+   * Without ownerId (settlement and payout gating): judged by the first owner
+   * account found for the gym, as before. With ownerId (a signed-in owner
+   * asking about their own gym, e.g. partner progress): judged only by that
+   * owner's own case and accounts, so an owner sharing a gym never sees
+   * another owner's KYC state or cooling-off date; no_owner_account if that
+   * owner doesn't own the gym.
    * @returns {{ ok: true, destination: Object } | { ok: false, reason: string, until?: string }}
    */
-  async function forGym(gymId, { at = new Date() } = {}) {
-    const owner = await users.findAsync((u) => u.userType === 'gym_operator' && (u.gymId === gymId || (u.gymIds || []).includes(gymId)));
+  async function forGym(gymId, { at = new Date(), ownerId = null } = {}) {
+    const owner = await users.findAsync((u) => u.userType === 'gym_operator' && (u.gymId === gymId || (u.gymIds || []).includes(gymId))
+      && (ownerId == null || u.id === ownerId));
     if (!owner) return { ok: false, reason: 'no_owner_account' };
 
     const kyc = await partnerGate.kycCaseFor(owner.id, 'gym_owner');
