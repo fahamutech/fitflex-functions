@@ -24,6 +24,7 @@ import {
   SETTLEMENT_METHODS, MOBILE_MONEY_PROVIDERS, SETTLEMENT_COOLDOWN_HOURS,
   REVIEW_DECISIONS, REASON_CODES, reasonRequired, canTransitionCase, startsNewRound,
   approvalStatusForCase, canTransitionSettlement,
+  isSensitiveReason, partnerReasonNote, partnerSafeCase,
 } from '../shared/partner-kyc.mjs';
 import {
   evaluateKyc, KYC_TIERS, PERSON_REQUIREMENTS, BUSINESS_REQUIREMENTS,
@@ -69,6 +70,8 @@ const PERSON_FIELDS = ['fullName', 'dateOfBirth', 'nationality', 'idType', 'idNu
   'phone', 'email', 'address', 'position', 'relationship', 'authority'];
 
 const fail = (error, status = 400, extra = {}) => ({ error, status, ...extra });
+/** Admins see a case as stored; everyone else gets the partner's view. */
+const audienceOf = actor => ({ audience: actor?.role === 'admin' ? 'admin' : 'partner' });
 const nowIso = () => new Date().toISOString();
 
 /** Validate and clean a patch. Returns { patch } or { error }. null clears a field. */
@@ -321,13 +324,18 @@ export function createPartnerKycService({
   // What callers see of a document: never where or how it is stored.
   const documentView = ({ storageProvider, storageKey, sha256: _hash, ...doc }) => ({ ...doc, hasFile: Boolean(storageKey) });
 
-  /** A partner's (or an admin's view of a partner's) KYC: case, details and checklist. */
-  async function overview(partner) {
+  /**
+   * A partner's (or an admin's view of a partner's) KYC: case, details and
+   * checklist. The partner's own view (the default, so a new caller fails
+   * closed) never carries a sensitive reason code or its note: it says
+   * 'under_review' instead (partnerSafeCase). Admins see the case as stored.
+   */
+  async function overview(partner, { audience = 'partner' } = {}) {
     const kycCase = await findCase(partner);
     const { rows, shownCase, checklist } = await evaluate(partner, kycCase);
     return {
       partnerType: partner.partnerType,
-      case: shownCase,
+      case: audience === 'admin' ? shownCase : partnerSafeCase(shownCase),
       people: rows.people,
       documents: rows.documents.map(documentView),
       settlementAccounts: rows.settlementAccounts.map(settlementView),
@@ -351,7 +359,7 @@ export function createPartnerKycService({
       if (field in patch) await followSharedNumber(partner.partnerType, kycCase, requirementKey, kycCase[field], patch[field]);
     }
     await record(kycCase, { eventType: 'profile_updated', targetType: 'case', data: { fields: Object.keys(patch) } }, actor);
-    return overview(partner);
+    return overview(partner, audienceOf(actor));
   }
 
   // ── People ────────────────────────────────────────────────────────────────
@@ -386,7 +394,7 @@ export function createPartnerKycService({
       await followSharedNumber(partner.partnerType, kycCase, spec.idDocument, current?.idNumber, patch.idNumber);
     }
     await record(kycCase, { eventType: 'person_updated', targetType: 'person', targetId: personId, data: { role, fields: Object.keys(patch) } }, actor);
-    return overview(partner);
+    return overview(partner, audienceOf(actor));
   }
 
   // ── Documents ─────────────────────────────────────────────────────────────
@@ -453,7 +461,7 @@ export function createPartnerKycService({
       eventType: 'document_uploaded', targetType: 'document', targetId: docId,
       data: { requirementKey, mimeType: file.mimeType, sizeBytes: file.sizeBytes, ...(elsewhere ? { sameFileOnAnotherCase: true } : {}) },
     }, actor);
-    return overview(partner);
+    return overview(partner, audienceOf(actor));
   }
 
   async function loadDocumentFile(kycCase, documentId, viewer) {
@@ -528,7 +536,7 @@ export function createPartnerKycService({
       eventType: 'document_updated', targetType: 'document', targetId: docId,
       data: { requirementKey, docType, fields: Object.keys(patch) },
     }, actor);
-    return overview(partner);
+    return overview(partner, audienceOf(actor));
   }
 
   // ── Settlement accounts ───────────────────────────────────────────────────
@@ -645,7 +653,7 @@ export function createPartnerKycService({
     const kycCase = await ensureCase(partner, actor);
     const rows = await partnerAgreements.filterByColumnAsync('caseId', kycCase.id);
     const same = rows.filter(a => a.agreementType === body.agreementType);
-    if (same.some(a => a.version === version && a.status === 'accepted')) return overview(partner);
+    if (same.some(a => a.version === version && a.status === 'accepted')) return overview(partner, audienceOf(actor));
     const at = nowIso();
     const existing = same.find(a => a.version === version); // revoked earlier: accept it again
     const fields = {
@@ -667,7 +675,7 @@ export function createPartnerKycService({
     await record(kycCase, {
       eventType: 'agreement_accepted', targetType: 'case', data: { agreementType: body.agreementType, version },
     }, actor);
-    return overview(partner);
+    return overview(partner, audienceOf(actor));
   }
 
   /** Record a signed corporate contract (FitFlex keeps the signed copy). */
@@ -699,7 +707,7 @@ export function createPartnerKycService({
     await record(kycCase, {
       eventType: 'agreement_accepted', targetType: 'case', data: { agreementType: 'corporate_contract', version, signedOn },
     }, actor);
-    return overview(partner);
+    return overview(partner, audienceOf(actor));
   }
 
   // ── Status changes ────────────────────────────────────────────────────────
@@ -715,10 +723,30 @@ export function createPartnerKycService({
     reopened: () => ({ title: 'Verification reopened', body: 'You can update your details and submit them again.' }),
   };
 
-  async function tell(kycCase, key, note) {
+  // A decision with a sensitive reason (suspected_fraud, …) is never explained
+  // to the partner: they are told it is under review and to contact support,
+  // and the reviewer's note is not sent. The type stays, so the app still
+  // opens Verification. Swahili is a draft for native review.
+  const UNDER_REVIEW_MESSAGE = {
+    title: 'Verification under review',
+    body: 'Your FitFlex partner verification is under review. Please contact FitFlex support.',
+    titleSw: 'Uthibitishaji unakaguliwa',
+    bodySw: 'Uthibitishaji wako wa mshirika wa FitFlex unakaguliwa. Tafadhali wasiliana na huduma kwa wateja ya FitFlex.',
+  };
+  const NEUTRAL_ON = new Set(['rejected', 'suspended', 'info_requested']);
+
+  async function tell(kycCase, key, note, reasonCode = null) {
     if (!kycCase.userId || !MESSAGES[key]) return;
+    const sensitive = isSensitiveReason(reasonCode);
+    let message;
+    if (sensitive && NEUTRAL_ON.has(key)) {
+      const { titleSw, bodySw, ...text } = UNDER_REVIEW_MESSAGE;
+      message = { type: `kyc_${key}`, data: { caseId: kycCase.id, reasonCode: 'under_review', titleSw, bodySw }, ...text };
+    } else {
+      message = { type: `kyc_${key}`, data: { caseId: kycCase.id }, ...MESSAGES[key](sensitive ? null : note) };
+    }
     try {
-      await notify(kycCase.userId, { type: `kyc_${key}`, data: { caseId: kycCase.id }, ...MESSAGES[key](note) });
+      await notify(kycCase.userId, message);
     } catch { /* a failed notification never fails the decision */ }
   }
 
@@ -779,7 +807,7 @@ export function createPartnerKycService({
     if (moved.error) return moved;
     await syncApproval(moved.case, 'submitted');
     await tell(moved.case, 'submitted');
-    return overview(partner);
+    return overview(partner, audienceOf(actor));
   }
 
   /** Partner: take a submitted case back before a reviewer picks it up. */
@@ -789,7 +817,7 @@ export function createPartnerKycService({
     if (kycCase.status !== 'submitted') return fail('invalid_transition', 409, { caseStatus: kycCase.status });
     const moved = await moveCase(kycCase, 'draft', actor);
     if (moved.error) return moved;
-    return overview(partner);
+    return overview(partner, audienceOf(actor));
   }
 
   async function reviewable(caseId, actor) {
@@ -872,9 +900,12 @@ export function createPartnerKycService({
     const moved = await moveCase(kycCase, decision.to, actor, { reasonCode, reasonNote, patch, data });
     if (moved.error) return moved;
     if (decision.to === 'approved' && kycCase.partnerType === 'gym_owner') await openWaitingGyms(kycCase.userId);
-    await syncApproval(moved.case, decision.to, decision.to === 'rejected' ? reasonNote : (decision.to === 'approved' ? null : undefined));
+    // User.approvalNote is shown to the partner (sign-in refusal, their own
+    // profile), so it gets the partner's version of the note: none for a
+    // sensitive reason. The case keeps the reviewer's real note for admins.
+    await syncApproval(moved.case, decision.to, decision.to === 'rejected' ? partnerReasonNote(reasonCode, reasonNote) : (decision.to === 'approved' ? null : undefined));
     const message = { approve: 'approved', reject: 'rejected', request_info: 'info_requested', suspend: 'suspended', reinstate: 'reinstated', reopen: 'reopened' }[body.decision];
-    await tell(moved.case, message, reasonNote);
+    await tell(moved.case, message, reasonNote, reasonRequired(decision.to) ? reasonCode : null);
     return caseDetail(caseId);
   }
 
@@ -1039,7 +1070,7 @@ export function createPartnerKycService({
     const partner = await resolvePartner(kycCase.partnerType, kycCase.userId || kycCase.corporateId);
     if (partner.error) return partner;
     const [view, rows, events] = await Promise.all([
-      overview(partner),
+      overview(partner, { audience: 'admin' }),
       caseRows(kycCase),
       partnerKycEvents.filterByColumnAsync('caseId', caseId),
     ]);
