@@ -34,21 +34,21 @@ const send = (res, out) => {
 
 export const getShopPreferences = {
   created, method: 'get', path: '/shop/preferences',
-  description: 'Any signed-in user: the "Personalised shop" switch → { personalised, available }. personalised: the stored choice (no row = true; one setting per Person, shared by all their roles). available: SHOP_PERSONALISATION is on and the person holds a member persona that is not under 18 (from the declared date of birth). Always 200, also with the flag off (available false).',
+  description: 'Any signed-in user: the "Personalised shop" switch → { personalised, available, historyDays, mode, uses }. Query ?mode=member|trainer|owner|vendor_personal (a role this person holds, as GET /shop/home; default the signed-in role; else 403 mode_not_allowed): `uses` lists the signals the shop uses in THAT mode (member: purchase_history, profile_gender, profile_age, goal; trainer: purchase_history, specialty; owner/vendor_personal: purchase_history; switched off or not available: []). Before: { personalised, available }. personalised: the stored choice (no row = true; one setting per Person, shared by all their roles). available: SHOP_PERSONALISATION is on and the person holds a member persona that is not under 18 (from the declared date of birth). Always 200, also with the flag off (available false).',
   responseSample: { personalised: true, available: true },
   onGuard: requireAuth(),
-  onRequest: async (req, res) => send(res, await shopPreferenceService.get({ claims: req.user })),
+  onRequest: async (req, res) => send(res, await shopPreferenceService.get({ claims: req.user, mode: req.query?.mode })),
 };
 
 export const putShopPreferences = {
   created, method: 'put', path: '/shop/preferences',
-  description: 'Any signed-in user (SHOP_PERSONALISATION): save the "Personalised shop" switch. Body { personalised: boolean, source: privacy_page | why_sheet } → { personalised, available }. 400 invalid_field { field, allowed? }. Each change is audited (shop_preference_changed); saving the same value writes nothing. Flag off: 404 feature_disabled. More than 30 saves a minute per user: 429 rate_limited.',
+  description: 'Any signed-in user (SHOP_PERSONALISATION): save the "Personalised shop" switch. Body { personalised: boolean, source: privacy_page | why_sheet }, optional ?mode as GET → { personalised, available, historyDays, mode, uses } (403 mode_not_allowed before anything is saved). 400 invalid_field { field, allowed? }. Each change is audited (shop_preference_changed); saving the same value writes nothing. Flag off: 404 feature_disabled. More than 30 saves a minute per user: 429 rate_limited.',
   requestSample: { personalised: false, source: 'why_sheet' },
   responseSample: { personalised: false, available: true },
   onGuard: requireAuth(),
   onRequest: async (req, res) => {
     if (!shopPersonalisationOn()) return res.status(404).json({ error: 'feature_disabled' });
     if (!allowPreferenceSave(req.user.sub)) return res.status(429).json({ error: 'rate_limited' });
-    return send(res, await shopPreferenceService.set({ claims: req.user, body: req.body || {} }));
+    return send(res, await shopPreferenceService.set({ claims: req.user, body: req.body || {}, mode: req.query?.mode }));
   },
 };
