@@ -123,6 +123,9 @@ export function createShopHomeService({
       }
       personalisation = {
         optedOut: state.personalised === false,
+        // Not available (no member persona, invalid date of birth, under 18): no declared goal or
+        // specialty either, so the page matches GET /shop/preferences `uses: []` (QA 2026-10-22).
+        profileSignals: state.available,
         history,
         // Gender/age only with a valid adult date of birth (no date of birth: purchase history only).
         audienceFor: mode => (state.enabled && state.audienceAllowed ? audienceFrom({ mode, memberProfile, age: state.age }) : null),
