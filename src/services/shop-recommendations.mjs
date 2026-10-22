@@ -560,15 +560,18 @@ export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProf
     let ageUsed = false;
     sections = sections.map((s) => {
       if (!PERSONAL_SECTIONS.includes(s.key)) return s;
+      const final = reorderForAudience(s.productIds, rowOf, audience);
+      // Used only when the final order differs. A signal counts when the page without it would differ
+      // from the final one, or when on its own it already gives the final order (both point the same way).
+      if (sameIds(final, s.productIds)) return s;
       const byGender = reorderForAudience(s.productIds, rowOf, { gender: audience.gender });
       const byAge = reorderForAudience(s.productIds, rowOf, { ageBand: audience.ageBand });
-      const g = !sameIds(byGender, s.productIds);
-      const a = !sameIds(byAge, s.productIds);
-      if (!g && !a) return s;
+      const g = !sameIds(final, byAge) || sameIds(final, byGender);
+      const a = !sameIds(final, byGender) || sameIds(final, byAge);
       genderUsed ||= g;
       ageUsed ||= a;
       personal[s.key] = { ...personal[s.key], gender: g, age: a };
-      return { ...s, productIds: reorderForAudience(s.productIds, rowOf, audience) };
+      return { ...s, productIds: final };
     });
     if (genderUsed) signals.push('profile_gender');
     if (ageUsed) signals.push('profile_age');

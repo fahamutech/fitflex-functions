@@ -83,11 +83,12 @@ Everything from `docs/shop-home-api.md` stays. Additions, **only with the flag o
 **Purchase history** (`purchase_history`): the Person's own orders, all their personas, `paymentStatus = paid`, `status ≠ cancelled`, placed in the last `SHOP_HISTORY_DAYS`. Read per request, never stored as a profile, never cached, never shared between users. Another user's orders are never read.
 - `recommended` and `essentials`: bought categories come first (most orders, then most recent first); within that, the Phase 1 order.
 - A **non-consumable** product bought in the last 30 days is not shown again in `recommended` / `essentials`. Consumables may come back (and are then the `bought_product` reason).
-- `recommended` title becomes **"Recommended for you" / "Zilizopendekezwa kwako"** (P1 `shop.home.recommended`) when history changed it; reason `bought_product {productName}` ("Suggested because you bought {product}." / "Imependekezwa kwa sababu ulinunua {product}.") when it shows a consumable the person bought before, else `bought_category {category}` ("You've bought {category} before." / "Uliwahi kununua {category}.") (the top bought category in the rail).
+- `recommended` title becomes **"Recommended for you" / "Zilizopendekezwa kwako"** (P1 `shop.home.recommended`) when history changed it; reason `bought_product {productName}` ("Suggested because you bought {product}." / "Imependekezwa kwa sababu ulinunua {product}.") when the rail shows a product the person bought before (a consumable at any time, anything else only once 30 days have passed), else `bought_category {category}` ("You've bought {category} before." / "Uliwahi kununua {category}.") (the top bought category in the rail).
 - `essentials` keeps its title; reason gets `bought_category {category}` when history changed it.
 - Paid placements are still never in `recommended` or `essentials`.
 
 **Gender / age** (`profile_gender`, `profile_age`): **member mode only**, declared `memberProfile.gender` (`female` → `women`, `male` → `men`; `other`/unset → not used) and `memberProfile.dateOfBirth` (band `18_29`, `30_44`, `45_59`, `60_plus`).
+- `profile_gender` / `profile_age` are reported only when the **final** order of that rail differs from the order without gender/age; if both tags point the same way both are reported, if they cancel out neither is.
 - Applied **after** the sections are filled, within `recommended` and `essentials` only: a stable reorder that moves products whose vendor tag matches (gender match +1, age band match +1) earlier. The **set of products in every section is identical with or without it**; untagged products and products tagged for another group stay where they are relative to each other.
 - Never in trainer, owner or vendor_personal mode.
 
