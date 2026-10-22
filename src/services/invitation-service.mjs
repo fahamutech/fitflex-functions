@@ -83,6 +83,8 @@ export function createInvitationService({
   // to FitFlex (agreed 3 Oct 2026). All optional: without them an invitation
   // behaves as before (the organisation shares the link).
   senders = null, startPin = null, isRegistered = null, appLink = () => null, newTrainerProfile = null,
+  // (userId) → 'sw' | 'en' | null: the language the person chose for messages (CommunicationPreference.locale).
+  localeOf = async () => null,
 }) {
   const gymOf = gymId => (gymId ? db('Gym').where({ id: gymId }).first('id', 'name') : null);
   // An invitation or membership points at its organisation through gymId or vendorId.
@@ -353,18 +355,46 @@ export function createInvitationService({
     }
   }
 
-  /** In-app notice to a known Person's personas (best effort). */
+  // The in-app notice, in both languages (as INVITE_TEXT above); the organisation kind and the role are
+  // shown as words, never as codes. The organizer staff role (admin | ops | finance | timing) is named too.
+  const NOTICE_TEXT = {
+    en: {
+      title: 'You have an invitation',
+      body: (org, role) => `${org} invited you to join as ${role}.`,
+      org: { gym: 'A gym', vendor: 'A shop', organizer: 'An event organizer' },
+      role: { staff: 'staff', trainer: 'a trainer', member: 'a member', owner: 'owner', admin: 'admin', ops: 'operations staff', finance: 'finance staff', timing: 'timing staff' },
+    },
+    sw: {
+      title: 'Una mwaliko',
+      body: (org, role) => `${org} imekualika kujiunga kama ${role}.`,
+      org: { gym: 'Gym', vendor: 'Duka', organizer: 'Mwandaaji wa matukio' },
+      role: { staff: 'mfanyakazi', trainer: 'trainer', member: 'mwanachama', owner: 'mmiliki', admin: 'msimamizi', ops: 'mfanyakazi wa uendeshaji', finance: 'mfanyakazi wa fedha', timing: 'mfanyakazi wa muda' },
+    },
+  };
+  /** { title, body } of the notice for one language. */
+  function noticeText(inv, orgName, lang) {
+    const t = NOTICE_TEXT[lang];
+    const payload = typeof inv.payload === 'string' ? JSON.parse(inv.payload) : inv.payload;
+    const roleKey = inv.orgType === 'organizer' && inv.role === 'staff' && payload?.organizerRole ? payload.organizerRole : inv.role;
+    return { title: t.title, body: t.body(orgName || t.org[inv.orgType] || t.org.gym, t.role[roleKey] || t.role.staff) };
+  }
+
+  /** In-app notice to a known Person's personas (best effort), in the language each persona chose. */
   async function tellPerson(inv) {
     if (!notify || !inv.targetPersonId) return;
     try {
       const org = await orgOf(inv);
+      const en = noticeText(inv, org?.name, 'en');
+      const sw = noticeText(inv, org?.name, 'sw');
       const personas = await db('User').where({ personId: inv.targetPersonId }).select('id');
       for (const p of personas) {
+        let locale = null;
+        try { locale = await localeOf(p.id); } catch { locale = null; }
+        const text = locale === 'sw' ? sw : en;
         await notify(p.id, {
           id: `ntf_${inv.id}_${p.id}`.slice(0, 60), type: 'org_invitation',
-          title: 'You have an invitation',
-          body: `${org?.name || (inv.orgType === 'vendor' ? 'A shop' : inv.orgType === 'organizer' ? 'An event organizer' : 'A gym')} invited you to join as ${inv.role}.`,
-          data: { invitationId: inv.id, orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role },
+          title: text.title, body: text.body,
+          data: { invitationId: inv.id, orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role, locale: locale === 'sw' ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body },
         });
       }
     } catch (err) {

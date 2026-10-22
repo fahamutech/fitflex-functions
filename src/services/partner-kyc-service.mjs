@@ -54,6 +54,7 @@ const REQUIREMENT_NAMES = {
   business_licence: 'business licence', certification: 'certification', liability_insurance: 'liability cover',
   representative_authority: 'proof of authority',
   vat_certificate: 'VAT certificate', // vendor tools · S5
+  event_permit: 'event permit', // events · S2
 };
 /** What this partner type may upload now (S5: + vat_certificate for vendors while VENDOR_VAT is on). */
 const uploadable = partnerType => documentsFor(partnerType, { vatOn: vendorVatOn() });

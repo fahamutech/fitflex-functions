@@ -854,6 +854,7 @@ export const invitationService = createInvitationService({
     hash: (invitationId, pin) => pinAuthService.startPinHash(invitationId, pin),
   },
   isRegistered: identifier => registrationService.alreadyRegistered(identifier),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
   // Placeholder until the app is in the stores: the web app.
   appLink: () => process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
   newTrainerProfile: async ({ userId, displayName, email, phone }) => {

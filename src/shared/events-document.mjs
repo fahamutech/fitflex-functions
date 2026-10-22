@@ -26,12 +26,16 @@ export const DEFAULT_CLOSING_SOON_HOURS = 72;
 export const DAY_MS = 86_400_000;
 export const HOUR_MS = 3_600_000;
 
-/** Tanzania's regions (code → name; Swahili names are the same words). The code is what venue.region stores. */
+/**
+ * Tanzania's regions. The code (kebab-case of the English name) is what venue.region stores. Mainland
+ * region names are the same word in both languages; the four Zanzibar regions have Swahili names.
+ */
+const REGION_NAMES_SW = Object.freeze({ 'Pemba North': 'Kaskazini Pemba', 'Pemba South': 'Kusini Pemba', 'Unguja North': 'Kaskazini Unguja', 'Unguja South': 'Kusini Unguja' });
 export const REGIONS = Object.freeze([
   'Arusha', 'Dar es Salaam', 'Dodoma', 'Geita', 'Iringa', 'Kagera', 'Katavi', 'Kigoma', 'Kilimanjaro', 'Lindi', 'Manyara', 'Mara',
   'Mbeya', 'Morogoro', 'Mtwara', 'Mwanza', 'Njombe', 'Pemba North', 'Pemba South', 'Pwani', 'Rukwa', 'Ruvuma', 'Shinyanga', 'Simiyu',
   'Singida', 'Songwe', 'Tabora', 'Tanga', 'Unguja North', 'Unguja South', 'Mjini Magharibi',
-].map(name => Object.freeze({ code: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), name: Object.freeze({ en: name, sw: name }) })));
+].map(name => Object.freeze({ code: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), name: Object.freeze({ en: name, sw: REGION_NAMES_SW[name] ?? name }) })));
 export const REGION_CODES = Object.freeze(REGIONS.map(r => r.code));
 
 /** Zones an organizer may schedule in (East Africa first; the apps show them from GET /events/options). */

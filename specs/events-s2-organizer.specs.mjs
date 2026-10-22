@@ -62,6 +62,8 @@ after(async () => {
   for (const t of ['PartnerKycEvent', 'PartnerDocument', 'PartnerPerson', 'PartnerSettlementAccount', 'PartnerAgreement', 'PartnerCheck']) await db(t).whereIn('caseId', caseIds).del();
   await db('PartnerKycCase').whereIn('id', caseIds).del();
   await db('AuditLog').whereIn('actor', all).del();
+  await db('Notification').whereIn('userId', all).del();
+  await db('CommunicationPreference').whereIn('id', all).del();
   await db('OrgMembership').whereIn('personaId', all).del();
   await db('User').whereIn('id', all).del();
   await db('JobRun').where({ job: 'event-lifecycle' }).del();
@@ -298,6 +300,14 @@ test('staff: invitations through the organizer org type, acceptance creates the 
   assert.match(sent.body.invitation.maskedContact, /^p•••@example\.com$/);
   const inv = await db('Invitation').where({ id: sent.body.invitation.id }).first();
   assert.equal(inv.orgType, 'organizer'); assert.equal(inv.organizerId, f.organizer.id); assert.equal(inv.role, 'staff'); assert.equal(inv.targetPersonId, invitee.personId);
+  // The in-app notice names the organizer and the role in words, in both languages (English when no locale is chosen).
+  const notice = await db('Notification').where({ id: `ntf_${inv.id}_${invitee.id}`.slice(0, 60) }).first();
+  assert.ok(notice, 'the known person is told in-app');
+  assert.equal(notice.title, 'You have an invitation');
+  assert.equal(notice.body, 'Staffed Club invited you to join as admin.');
+  assert.equal(notice.data.locale, 'en');
+  assert.equal(notice.data.titleSw, 'Una mwaliko');
+  assert.equal(notice.data.bodySw, 'Staffed Club imekualika kujiunga kama msimamizi.');
   // The staff list shows it as invited; a repeat invitation is the same open one (no duplicate).
   let list = await call(organizerListStaff, f.claims);
   assert.equal(list.status, 200);
@@ -348,7 +358,13 @@ test('staff: invitations through the organizer org type, acceptance creates the 
   assert.equal((await call(organizerChangeStaffRole, f.claims, { params: { id: opsRow.id }, body: { role: 'owner' } })).body.error, 'invalid_role');
   const second = await makeUser('member', { email: `${uid('p2')}@example.com`, firebaseUid: uid('fb') });
   await db('LoginIdentifier').insert({ id: uid('lid'), personId: second.personId, type: 'email', value: second.email, normalizedValue: second.email, verifiedAt: new Date(), status: 'active' });
+  // A person who chose Swahili for messages is told in Swahili.
+  await db('CommunicationPreference').insert({ id: second.id, locale: 'sw', updatedAt: new Date() });
   const secondSent = await call(organizerInviteStaff, f.claims, { body: { email: second.email, role: 'admin' } });
+  const swNotice = await db('Notification').where({ id: `ntf_${secondSent.body.invitation.id}_${second.id}`.slice(0, 60) }).first();
+  assert.equal(swNotice.title, 'Una mwaliko');
+  assert.equal(swNotice.body, 'Staffed Club imekualika kujiunga kama msimamizi.');
+  assert.equal(swNotice.data.bodyEn, 'Staffed Club invited you to join as admin.');
   const secondAccepted = await invitationService.accept({ user: await db('User').where({ id: second.id }).first(), invitationId: secondSent.body.invitation.id });
   assert.equal(secondAccepted.error, undefined, JSON.stringify(secondAccepted));
   const secondRow = (await call(organizerListStaff, f.claims)).body.items.find(i => i.userId === secondAccepted.personaId);

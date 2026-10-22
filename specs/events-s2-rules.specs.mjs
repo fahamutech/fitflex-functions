@@ -210,6 +210,11 @@ test('slugs, distance buckets and regions', () => {
   assert.equal(REGIONS.length, 31);
   assert.ok(REGION_CODES.includes('dar-es-salaam') && REGION_CODES.includes('kilimanjaro'));
   assert.deepEqual(REGIONS.find(r => r.code === 'dar-es-salaam').name, { en: 'Dar es Salaam', sw: 'Dar es Salaam' });
+  // The Zanzibar regions carry their Swahili names.
+  assert.deepEqual(REGIONS.find(r => r.code === 'pemba-north').name, { en: 'Pemba North', sw: 'Kaskazini Pemba' });
+  assert.deepEqual(REGIONS.find(r => r.code === 'pemba-south').name, { en: 'Pemba South', sw: 'Kusini Pemba' });
+  assert.deepEqual(REGIONS.find(r => r.code === 'unguja-north').name, { en: 'Unguja North', sw: 'Kaskazini Unguja' });
+  assert.deepEqual(REGIONS.find(r => r.code === 'unguja-south').name, { en: 'Unguja South', sw: 'Kusini Unguja' });
 });
 
 test('allowed actions per status and actor (§7.2); nothing for suspended organizers or non-editor roles', () => {
