@@ -131,6 +131,18 @@ export function shopPersonalisationOn() {
 }
 
 /**
+ * Shop home Phase 2 · slice 3: "Popular near you" (docs/shop-near-you-api.md). Off unless SHOP_NEAR_YOU
+ * is set: GET /shop/home is byte-identical to before (no `nearYou` key, no popular_near_you section,
+ * `areaId` ignored), GET /shop/areas answers 404 feature_disabled, /shop/preferences never lists
+ * `location`, and /vendor/tools/options says merch.shopAreas: false. Even on, near-you applies only when
+ * personalisation is available and switched on for the person (so SHOP_PERSONALISATION must be on too).
+ * Vendor area fields (cityId, regionId, deliveryAreaIds) are validated and stored either way.
+ */
+export function shopNearYouOn() {
+  return on('SHOP_NEAR_YOU');
+}
+
+/**
  * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
  * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
  * carries no `manual` block and subscribe / upgrade take no reference, exactly
@@ -202,7 +214,7 @@ export function vendorToolsOptions() {
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
-    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn() },
+    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn() },
   };
 }
 

@@ -293,6 +293,8 @@ export const trainerEngagementService = createTrainerEngagementService({
 });
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
+  // Shop home slice 3: vendor "Based in" / "Delivers to" are checked against usable GeoAreas.
+  geoAreas,
   // Stock reservation and cancellation are single database transactions.
   orderStore: createPgShopOrderStore({ db }),
   // Vendor tools · S1: stock ledger, cost price, reorder level (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
@@ -1079,8 +1081,13 @@ export const shopHomeService = createShopHomeService({
   recentPaidOrders: ({ since }) => db('ShopOrder')
     .where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
     .orderBy('createdAt', 'desc').limit(SHOP_HOME_MAX_ORDERS)
-    .select('id', 'buyerRole', 'items', 'status', 'paymentStatus', 'createdAt'),
+    // pickupGymId + buyerId: slice 3 counts DISTINCT buyers picking up at gyms in a city ("Popular near you",
+    // k = 5). Both are dropped from the cached rows once counted (shop-home-service loadNear).
+    .select('id', 'buyerRole', 'items', 'status', 'paymentStatus', 'createdAt', 'pickupGymId', 'buyerId'),
   signToken: signServedToken,
+  // Slice 3 (SHOP_NEAR_YOU): areas and the pickup gyms' cities. Read only while the flag is on.
+  geoAreas,
+  gymAreas: () => db('Gym').whereNotNull('cityId').orWhereNotNull('regionId').select('id', 'cityId', 'regionId'),
 });
 
 // Admin-managed app photos (HERO_IMAGES_CMS, plan slice 4). Uploads stay private on Zebra (the
