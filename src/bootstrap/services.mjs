@@ -147,6 +147,7 @@ import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
 import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
+import { createPgTrainerSlotStore } from '../infra/trainer-slot-store-pg.mjs';
 import {
   moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
@@ -245,6 +246,8 @@ export const trainerBookingService = createTrainerBookingService({
   outcomesOn: trainerSessionOutcomesOn,
   // Outcome changes lock the statement and the booking, write conditionally and keep draft lines in step.
   outcomeStore: createPgTrainerOutcomeStore({ db }),
+  // New bookings and revived sessions take the trainer slot's lock, so a slot is never held twice.
+  slotStore: createPgTrainerSlotStore({ db }),
   // Sessions on a live trainer statement line, with that statement's status.
   statementLines: async (bookingIds) => {
     const rows = await db('TrainerSettlementLine as l').join('TrainerSettlement as s', 's.id', 'l.trainerSettlementId')
@@ -584,9 +587,19 @@ export const adminPaymentService = createAdminPaymentService({
   // An upgraded pass is the same plan: tell the member, nothing else (it is no new membership or conversion).
   onPassUpgraded: sub => notificationService.notifySubscriptionActivated(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
-  onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
+  onBookingPayment: (groupId, status, opts) => trainerBookingService.applyPaymentToGroup(groupId, status, opts),
   // 409 group_slot_rebooked { bookingIds } when a rejected session's slot was booked by someone else since.
   beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
+  // The same, found only after the decision was written (a race): the decision was undone; staff must look.
+  onBookingPaymentRefused: ({ request, refusal, rolledBack, actorId }) => opsService.raise({
+    type: 'payment_conflict', severity: 'high',
+    title: rolledBack
+      ? `Trainer booking payment ${request.id} was put back: a session's slot was booked by someone else`
+      : `Trainer booking payment ${request.id} could not be put back after its group refused it — check it by hand`,
+    dedupeKey: `trainer_group_slot_rebooked:${request.id}`,
+    entityType: 'payment_request', entityId: request.id,
+    detail: { bookingGroupId: request.bookingGroupId, bookingIds: refusal.bookingIds || [], rolledBack, actorId },
+  }),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
   beforeOrderPayment: (request, opts) => shopService.checkOrderPayment(request, opts),
 });
@@ -608,6 +621,8 @@ export const mobileMoneyService = createMobileMoneyService({
   scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
   // Only tiers configured in Settings are sold (owner decision 2026-10-19).
   tierSellable: settingsService.isTierSellable,
+  // A trainer booking payment that could not be approved is not sent to the phone (409 group_slot_rebooked).
+  approvable: request => (request.bookingGroupId ? trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved') : null),
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });

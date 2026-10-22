@@ -104,6 +104,9 @@ export function createTrainerBookingService({
   // Locked, conditional status changes that keep draft statement lines in step (src/infra/trainer-outcome-store-pg.mjs).
   // Without one (unit specs on in-memory stores) a conditional update on the collection is used instead.
   outcomeStore: injectedOutcomeStore = null,
+  // Writes that make a booking hold a slot, serialised per trainer slot (src/infra/trainer-slot-store-pg.mjs).
+  // Without one (unit specs on in-memory stores) the collections are used, unserialised.
+  slotStore = null,
 }) {
   /** The fallback: same decisions and audit, a conditional update, no statement-line upkeep. */
   function collectionOutcomeStore() {
@@ -304,55 +307,57 @@ export function createTrainerBookingService({
     const paymentRequestId = needsPayment ? `pay_${randomUUID().slice(0, 8)}` : null;
     const per = pricing.perSession;
 
-    const bookings = [];
-    for (const s of slots) {
-      bookings.push(await trainerBookings.insertAsync({
-        id: `tbk_${randomUUID().slice(0, 8)}`,
-        groupId,
-        memberId,
-        trainerId: trainer.id,
-        gymId: summary.gymId,
-        date: s.date,
-        slot: s.slot,
-        currency: summary.currency,
-        listPriceTzs: per.listPrice,
-        discountPct: per.discountPct,
-        amountTzs: per.memberPrice,
-        commissionPct: per.commissionPct,
-        commissionTzs: per.commission,
-        trainerPayoutTzs: per.trainerPayout,
-        discountFundedBy: per.discountFundedBy,
-        paymentRequestId,
-        status: needsPayment ? 'payment_pending' : 'confirmed',
-        createdAt: now,
-        updatedAt: now,
-      }));
+    const bookings = slots.map(s => ({
+      id: `tbk_${randomUUID().slice(0, 8)}`,
+      groupId,
+      memberId,
+      trainerId: trainer.id,
+      gymId: summary.gymId,
+      date: s.date,
+      slot: s.slot,
+      currency: summary.currency,
+      listPriceTzs: per.listPrice,
+      discountPct: per.discountPct,
+      amountTzs: per.memberPrice,
+      commissionPct: per.commissionPct,
+      commissionTzs: per.commission,
+      trainerPayoutTzs: per.trainerPayout,
+      discountFundedBy: per.discountFundedBy,
+      paymentRequestId,
+      status: needsPayment ? 'payment_pending' : 'confirmed',
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const paymentRequest = needsPayment ? {
+      id: paymentRequestId,
+      memberId,
+      subscriptionId: null,
+      bookingGroupId: groupId,
+      tier: null,
+      plan: 'trainer_session',
+      gymId: summary.gymId,
+      currency: summary.currency,
+      amountTzs: summary.total,
+      status: 'pending',
+      provider: 'admin_approved',
+      reference: null,
+      requestedAt: now,
+      decidedAt: null,
+      decidedBy: null,
+      note: `${slots.length} session(s) with ${trainer.displayName || trainer.id}`,
+    } : null;
+
+    if (slotStore) {
+      // The free-slot check above is re-done under the slot locks, with the inserts (security review of #231, race 3).
+      const out = await slotStore.insertGroup({ bookings, paymentRequest });
+      if (out.error) return out;
+    } else {
+      for (const b of bookings) await trainerBookings.insertAsync(b);
+      if (paymentRequest) await paymentRequests.insertAsync(paymentRequest);
     }
 
     // A session that needs no payment is confirmed at once, and that is when the booking counts.
     if (!needsPayment) await syncConversion(groupId);
-
-    let paymentRequest = null;
-    if (needsPayment) {
-      paymentRequest = await paymentRequests.insertAsync({
-        id: paymentRequestId,
-        memberId,
-        subscriptionId: null,
-        bookingGroupId: groupId,
-        tier: null,
-        plan: 'trainer_session',
-        gymId: summary.gymId,
-        currency: summary.currency,
-        amountTzs: summary.total,
-        status: 'pending',
-        provider: 'admin_approved',
-        reference: null,
-        requestedAt: now,
-        decidedAt: null,
-        decidedBy: null,
-        note: `${slots.length} session(s) with ${trainer.displayName || trainer.id}`,
-      });
-    }
 
     await auditLog.insertAsync({
       id: randomUUID(), at: now,
@@ -393,8 +398,57 @@ export function createTrainerBookingService({
     return bookingIds.length ? { error: 'group_slot_rebooked', status: 409, bookingIds } : null;
   }
 
-  /** Payment decided by an admin: move every booking in the group with it. */
-  async function applyPaymentToGroup(groupId, paymentStatus) {
+  /**
+   * Which of a group's sessions follow its payment to `next`, under the slot locks when there are any.
+   * A rejected session whose slot someone else holds now cannot come back: an approval is then refused
+   * as a whole (nothing moves); any other decision leaves that session payment_rejected.
+   */
+  function planGroupMove(group, taken, next) {
+    const moves = [];
+    const kept = [];
+    const blocked = [];
+    for (const b of group) {
+      if (HAPPENED.has(b.status)) { kept.push(b); continue; }
+      // A cancelled slot was dropped from the group and its payment shrunk (releaseUnpaidSlot): approving
+      // the rest must not bring it back as confirmed and later payable (re-review finding 3).
+      if (b.status === 'cancelled') continue;
+      if (b.status === 'payment_rejected' && !SLOT_RELEASING.has(next) && taken.has(b.id)) {
+        blocked.push({ id: b.id, heldBy: taken.get(b.id) });
+        continue;
+      }
+      moves.push({ id: b.id, from: b.status, to: next });
+    }
+    if (next === 'confirmed' && blocked.length) {
+      return { error: 'group_slot_rebooked', status: 409, bookingIds: blocked.map(x => x.id) };
+    }
+    return { moves, kept, blocked };
+  }
+
+  /** Without a slot store: the same decision on the collections (no locks). */
+  async function moveGroupOnCollections(groupId, next) {
+    const group = await trainerBookings.filterAsync(b => b.groupId === groupId);
+    const taken = new Map();
+    for (const b of group) {
+      if (!SLOT_RELEASING.has(b.status)) continue;
+      const holder = await trainerBookings.findAsync(o => o.id !== b.id && o.groupId !== groupId && o.trainerId === b.trainerId
+        && o.date === b.date && o.slot === b.slot && !SLOT_RELEASING.has(o.status));
+      if (holder) taken.set(b.id, holder.id);
+    }
+    const plan = planGroupMove(group, taken, next);
+    if (plan.error) return plan;
+    const now = new Date().toISOString();
+    const updated = [];
+    for (const m of plan.moves) updated.push(await trainerBookings.updateByIdAsync(m.id, { status: m.to, updatedAt: now }));
+    return { plan, updated };
+  }
+
+  /**
+   * Payment decided by an admin: move every booking in the group with it. → the group's sessions that
+   * follow the payment, or { error: 'group_slot_rebooked', status: 409, bookingIds } when an approval
+   * would bring back a rejected session whose slot someone else booked after the check (nothing moved;
+   * the caller undoes its payment decision — security review of #231, race 1).
+   */
+  async function applyPaymentToGroup(groupId, paymentStatus, { actorId = 'system' } = {}) {
     const next = {
       approved: 'confirmed',
       rejected: 'payment_rejected',
@@ -402,27 +456,33 @@ export function createTrainerBookingService({
       pending: 'payment_pending',
     }[paymentStatus];
     if (!next || !groupId) return [];
-    const group = await trainerBookings.filterAsync(b => b.groupId === groupId);
-    const now = new Date().toISOString();
-    const updated = [];
-    for (const b of group) {
-      if (HAPPENED.has(b.status)) { updated.push(b); continue; }
-      // A cancelled slot was dropped from the group and its payment shrunk (releaseUnpaidSlot): approving
-      // the rest must not bring it back as confirmed and later payable (re-review finding 3).
-      if (b.status === 'cancelled') continue;
-      // A whole group whose payment was rejected follows the payment if staff change their decision —
-      // except a slot someone else has booked since the rejection freed it.
-      // An approval is refused up front in that case (checkGroupPayment); this guards a race or another path.
-      if (b.status === 'payment_rejected' && next !== 'payment_rejected') {
-        const taken = await trainerBookings.findAsync(o => o.id !== b.id && o.groupId !== groupId && o.trainerId === b.trainerId
-          && o.date === b.date && o.slot === b.slot && !SLOT_RELEASING.has(o.status));
-        if (taken) {
-          console.warn(`[trainer-booking] ${b.id} stays payment_rejected: its slot was booked again (${taken.id})`);
-          continue;
-        }
-      }
-      updated.push(await trainerBookings.updateByIdAsync(b.id, { status: next, updatedAt: now }));
+    let plan;
+    let moved;
+    if (slotStore) {
+      const out = await slotStore.moveGroup({
+        groupId,
+        decide: (group, taken) => {
+          plan = planGroupMove(group, taken, next);
+          return plan;
+        },
+      });
+      if (out.error) return out;
+      moved = out.updated;
+    } else {
+      const out = await moveGroupOnCollections(groupId, next);
+      if (out.error) return out;
+      ({ plan } = out);
+      moved = out.updated;
     }
+    const at = new Date().toISOString();
+    // Not an approval (e.g. back to pending): the session stays payment_rejected, on the record.
+    for (const b of plan.blocked) {
+      await auditLog.insertAsync({
+        id: randomUUID(), at, actor: actorId, action: 'trainer_booking_kept_rejected', target: b.id,
+        before: { status: 'payment_rejected' }, after: { status: 'payment_rejected', paymentStatus, slotHeldBy: b.heldBy },
+      });
+    }
+    const updated = [...plan.kept, ...moved].sort((x, y) => `${x.date} ${x.slot}`.localeCompare(`${y.date} ${y.slot}`));
     if (next === 'confirmed' && updated.length) {
       const trainer = trainers.find(t => t.id === updated[0].trainerId);
       await notify('trainer_booking_confirmed', { trainer, memberId: updated[0].memberId, bookings: updated });

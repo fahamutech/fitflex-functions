@@ -798,7 +798,7 @@ const CALENDAR_DATE_FIELDS = new Set(['effectiveFrom', 'effectiveTo']);
  * Prepare a plain object for a Knex insert/update by keeping only known
  * columns and converting types.
  */
-function prepareForKnex(name, data, isUpdate = false) {
+export function prepareForKnex(name, data, isUpdate = false) {
   const allowed = ALLOWED_FIELDS[name];
   const cleaned = {};
 
