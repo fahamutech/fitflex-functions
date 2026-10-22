@@ -338,3 +338,15 @@ export function vendorStatementDraftsOn() {
 export function eventsModuleOn() {
   return on('EVENTS_MODULE');
 }
+
+/**
+ * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
+ * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and
+ * /admin/gym-owners/:id/personal-details answer 404 feature_disabled, and /trainer/register and
+ * /gym-owner/register ignore `dateOfBirth` (and the owner's `gender`) exactly as before. On: a date of
+ * birth sent there is checked (400 invalid_field, 400 partner_under_18) and saved on the Person. The
+ * server never refuses a registration for leaving it out (old app builds keep working); the app asks.
+ */
+export function partnerDobRequiredOn() {
+  return on('PARTNER_DOB_REQUIRED');
+}

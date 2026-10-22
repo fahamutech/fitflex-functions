@@ -150,6 +150,8 @@ import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
 import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
+import { createPersonalDetailsService } from '../services/personal-details-service.mjs';
+import { forgetPersonDetails } from '../infra/person-details-store-pg.mjs';
 import {
   moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
@@ -234,6 +236,8 @@ export const partnerNotifier = createPartnerNotifier({
   usernames: { handleOf: userId => usernameService.handleOf(userId) }, users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Partner DOB slice 2 (docs/partner-dob-api.md): a person's own date of birth and gender on their Person.
+export const personalDetailsService = createPersonalDetailsService({ db, auditLog, trainers });
 export const trainerService = createTrainerService({
   trainers, gyms, trainerBookings, auditLog, gymService, partnerGate,
   onGymRequest: request => partnerNotifier.gymTrainerRequest(request),
@@ -524,6 +528,8 @@ export const accountService = createAccountService({
       () => vendorCustomerService.forgetBuyer(userId),
       // The "Personalised shop" switch goes once the Person has no personas left.
       () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
+      // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
+      () => forgetPersonDetails(db, { personId: deleted?.personId || null }),
     ]) {
       try { await step(); } catch (err) { errors.push(err); }
     }

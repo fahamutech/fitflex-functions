@@ -1,7 +1,8 @@
 // Trainer catalogue + self-service REST surface.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { trainerService, resolveRequestUser, users, moderationGate } from '../src/bootstrap/services.mjs';
+import { trainerService, resolveRequestUser, users, moderationGate, personalDetailsService } from '../src/bootstrap/services.mjs';
+import { partnerDobRequiredOn } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
 
@@ -55,12 +56,15 @@ export const adminDeleteTrainer = {
 
 export const trainerRegister = {
   created, method: 'post', path: '/trainer/register',
-  description: 'Trainer: self-register full profile (displayName, optional nickname clients see instead, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing.',
+  description: 'Trainer: self-register full profile (displayName, optional nickname clients see instead, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing. Optional dateOfBirth ("YYYY-MM-DD"): with PARTNER_DOB_REQUIRED on it is checked like PUT /me/personal-details (400 { error: "invalid_field", field: "dateOfBirth" }, 400 { error: "partner_under_18" }) and saved on the person, never on the public trainer profile; off, it is ignored. Leaving it out is always accepted.',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
     const body = req.body || {};
+    // Partner DOB slice 2: checked before anything is saved; gender stays the trainer profile's own.
+    const declared = partnerDobRequiredOn() ? personalDetailsService.checkRegistration(body, ['dateOfBirth']) : null;
+    if (declared?.error) return res.status(declared.status).json({ error: declared.error, ...(declared.field ? { field: declared.field } : {}) });
     const result = await trainerService.register({ userId: req.user.sub, user, body });
     if (result.error) {
       return res.status(result.status).json({
@@ -73,6 +77,7 @@ export const trainerRegister = {
       displayName: result.displayName,
       onboardingCompleted: true,
     });
+    if (declared) await personalDetailsService.saveRegistration({ user, changes: declared.changes, via: 'trainer_register' });
     res.json(result.trainer);
   }
 };
