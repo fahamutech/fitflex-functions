@@ -189,6 +189,8 @@ test('vendors are a FitFlex-only audience with their own fields and presets', ()
   for (const scope of ['platform', 'trainers', 'gym']) {
     assert.equal(buildAudienceFilter({ filter: { all: [{ field: 'vendorApproval', op: 'eq', value: 'approved' }] } }, scope).error, 'invalid_audience', scope);
   }
+  // Rejected vendors can't be named: they are never in a vendor audience.
+  assert.equal(buildAudienceFilter({ filter: { all: [{ field: 'vendorApproval', op: 'eq', value: 'rejected' }] } }, 'vendors').error, 'invalid_audience');
   const cat = audienceCatalog('vendors');
   assert.deepEqual(cat.presets.map(p => p.key), ['all', 'approved', 'pending', 'walk_in', 'no_live_products', 'new']);
   assert.deepEqual(cat.fields.map(f => f.key).sort(), [
@@ -211,6 +213,16 @@ test('audience counts: accounts plus active admin staff; suspended, closed, reje
     await idsOf(undefined, { all: [{ field: 'vendorCategory', op: 'eq', value: CAT }, { field: 'vendorProducts', op: 'gte', value: 2 }] }),
     [w.vA, w.vAAdmin].sort(),
   );
+  // A custom filter alone still keeps to approved / awaiting approval (review of #257) …
+  assert.deepEqual(await idsOf(undefined, ours()), [w.vA, w.vAAdmin, w.vB, w.vE, w.vF].sort());
+  const built = buildAudienceFilter({ filter: ours() }, 'vendors').filter;
+  assert.deepEqual(built.all[0], { all: [{ field: 'vendorApproval', op: 'in', value: ['approved', 'pending_approval'] }] });
+  // … and a filter that names vendorApproval decides for itself, within those two.
+  assert.deepEqual(
+    await idsOf(undefined, { all: [{ field: 'vendorCategory', op: 'eq', value: CAT }, { field: 'vendorApproval', op: 'eq', value: 'pending_approval' }] }),
+    [w.vB, w.vE].sort(),
+  );
+  assert.equal(JSON.stringify(buildAudienceFilter({ filter: { all: [{ field: 'vendorApproval', op: 'eq', value: 'approved' }] } }, 'vendors').filter).match(/vendorApproval/g).length, 1);
   // Never: sales staff, suspended staff, the vendor's own person twice, rejected/suspended/closed vendors, their staff.
   const all = await idsOf('all', undefined);
   for (const never of [w.vASales, w.vAOff, w.vASelf, w.vC, w.vD, w.vDAdmin, w.vG, w.member, w.trainer]) {
@@ -219,6 +231,7 @@ test('audience counts: accounts plus active admin staff; suspended, closed, reje
 
   const p = await preview('all');
   assert.equal(p.recipients, 'vendors');
+  assert.equal(p.category, 'transactional', 'without a purpose, vendor reach is counted for service messages');
   assert.equal(p.count, 5);
   assert.equal(p.channels.in_app.eligible, 5);
   assert.equal(p.channels.push.eligible, 1, 'push only where there is a device');
@@ -272,6 +285,36 @@ test('gym owners cannot target vendors', async () => {
   assert.ok(!audienceCatalog('platform').fields.some(f => f.key.startsWith('vendor')));
 });
 
+test('marketing to vendors is refused until the vendor app has message settings (review of #257)', async () => {
+  const body = (purpose) => ({
+    purpose, audience: { recipients: 'vendors', preset: 'all', filter: ours() },
+    content: { locale: 'sw', title: 'Ofa', body: 'Punguzo.' }, channels: ['in_app'],
+  });
+  for (const purpose of ['promotion', 'engagement', 'general']) {
+    assert.equal((await campaigns.create(w.FF, body(purpose))).error, 'vendor_marketing_not_available', purpose);
+    assert.equal((await campaigns.preview(w.FF, { body: body(purpose) })).error, 'vendor_marketing_not_available', purpose);
+    const pv = await segments.previewAudience({ sender: w.FF, recipients: 'vendors', preset: 'all', purpose });
+    assert.equal(pv.error, 'vendor_marketing_not_available', purpose);
+  }
+  // Service messages are fine.
+  for (const purpose of ['announcement', 'renewal', 'payment']) {
+    const r = await campaigns.create(w.FF, body(purpose));
+    assert.equal(r.error, undefined, purpose);
+    await db('CommunicationCampaign').where({ id: r.campaign.id }).del();
+  }
+  // Neither way round through an edit: a vendor announcement made a promotion, or a member promotion sent to vendors.
+  const ann = await campaigns.create(w.FF, body('announcement'));
+  assert.equal((await campaigns.update(w.FF, ann.campaign.id, { purpose: 'promotion' })).error, 'vendor_marketing_not_available');
+  const promo = await campaigns.create(w.FF, { ...body('promotion'), audience: { preset: 'all' } });
+  assert.equal(promo.error, undefined);
+  assert.equal((await campaigns.update(w.FF, promo.campaign.id, { audience: { recipients: 'vendors', preset: 'all', filter: ours() } })).error, 'vendor_marketing_not_available');
+  // A draft that got that way some other way still can't be sent or scheduled.
+  await db('CommunicationCampaign').where({ id: ann.campaign.id }).update({ purpose: 'promotion', category: 'marketing' });
+  assert.equal((await campaigns.send(w.FF, ann.campaign.id, { sendRequestId: uid('req') })).error, 'vendor_marketing_not_available');
+  assert.equal((await campaigns.schedule(w.FF, ann.campaign.id, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })).error, 'vendor_marketing_not_available');
+  assert.equal(await db('CommunicationMessage').where({ campaignId: ann.campaign.id }).count({ n: '*' }).then(r => Number(r[0].n)), 0);
+});
+
 test('each vendor gets the message in their language: English only if they chose it, Swahili otherwise', async () => {
   const { campaign, error } = await campaigns.create(w.FF, {
     purpose: 'announcement',
@@ -303,6 +346,10 @@ test('each vendor gets the message in their language: English only if they chose
   const overview = await campaigns.overview(w.FF, {});
   assert.equal(typeof overview.vendors, 'number');
   assert.ok(overview.vendors >= 5);
+  // The overview's count-only query agrees with the full audience for preset `all`.
+  const everyone = await segments.previewAudience({ sender: w.FF, recipients: 'vendors', preset: 'all' });
+  assert.equal(overview.vendors, everyone.count);
+  assert.equal(await segments.vendorRecipientCount(), everyone.count);
   assert.equal((await campaigns.overview(w.OWNER, {})).vendors, undefined, 'owners see no vendor count');
   w.langCampaign = campaign.id;
 });
@@ -340,21 +387,46 @@ test("delivery puts the copy in each vendor's own inbox and pushes to their devi
   assert.equal(rows.find(r => r.memberId === w.vA && r.channel === 'push').status, 'sent');
 });
 
-test("staff of a vendor suspended after queueing are skipped at delivery", async () => {
-  const { campaign } = await campaigns.create(w.FF, {
+// Queues a vendor announcement to `filter` (within this run's vendors), changes something, then delivers.
+async function queuedThen(filter, change) {
+  const { campaign, error } = await campaigns.create(w.FF, {
     purpose: 'announcement',
-    audience: { recipients: 'vendors', preset: 'approved', filter: { all: [{ field: 'vendorCategory', op: 'eq', value: CAT }, { field: 'vendorRecipient', op: 'eq', value: 'admin_staff' }] } },
+    audience: { recipients: 'vendors', filter: { all: [{ field: 'vendorCategory', op: 'eq', value: CAT }, ...filter] } },
     content: { locale: 'sw', title: 'Habari', body: 'Taarifa.' }, channels: ['in_app'],
   });
+  assert.equal(error, undefined);
   const sent = await campaigns.send(w.FF, campaign.id, { sendRequestId: uid('req') });
-  assert.equal(sent.campaign.counts.targeted, 1);
-  await db('User').where({ id: w.vA }).update({ accountStatus: 'suspended' });
+  assert.equal(sent.error, undefined, JSON.stringify(sent));
+  const undo = await change();
   try {
     await delivery.runOnce();
   } finally {
-    await db('User').where({ id: w.vA }).update({ accountStatus: 'active' });
+    await undo();
   }
-  const row = await db('CommunicationMessage').where({ campaignId: campaign.id, memberId: w.vAAdmin }).first();
-  assert.equal(row.status, 'skipped');
-  assert.equal(row.skipReason, 'vendor_unavailable');
+  return Object.fromEntries((await db('CommunicationMessage').where({ campaignId: campaign.id })).map(r => [r.memberId, r]));
+}
+const set = (id, patch, back) => async () => {
+  await db('User').where({ id }).update(patch);
+  return () => db('User').where({ id }).update(back);
+};
+
+test('delivery re-checks vendors: suspended or rejected since queueing, and their staff, get nothing', async () => {
+  const staffOnly = [{ field: 'vendorRecipient', op: 'eq', value: 'admin_staff' }];
+  let rows = await queuedThen(staffOnly, set(w.vA, { accountStatus: 'suspended' }, { accountStatus: 'active' }));
+  assert.equal(rows[w.vAAdmin].status, 'skipped');
+  assert.equal(rows[w.vAAdmin].skipReason, 'vendor_unavailable');
+
+  rows = await queuedThen([{ field: 'vendorApproval', op: 'eq', value: 'approved' }], set(w.vA, { approvalStatus: 'rejected' }, { approvalStatus: 'approved' }));
+  assert.equal(rows[w.vA].skipReason, 'vendor_unavailable', 'the rejected vendor account');
+  assert.equal(rows[w.vAAdmin].skipReason, 'vendor_unavailable', "the rejected vendor's staff");
+  assert.equal(rows[w.vF].status, 'delivered', 'another approved vendor still gets it');
+});
+
+test('delivery re-checks staff: no longer the vendor\'s admin → skipped', async () => {
+  const rows = await queuedThen(
+    [{ field: 'vendorRecipient', op: 'eq', value: 'admin_staff' }],
+    set(w.vAAdmin, { vendorRole: 'sales' }, { vendorRole: 'admin' }),
+  );
+  assert.equal(rows[w.vAAdmin].status, 'skipped');
+  assert.equal(rows[w.vAAdmin].skipReason, 'not_vendor_admin');
 });

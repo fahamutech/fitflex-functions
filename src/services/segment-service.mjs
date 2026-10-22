@@ -358,6 +358,26 @@ export function createSegmentService({
   }
 
   /**
+   * How many people the vendor preset `all` reaches, with one counting query
+   * (the admin overview): vendor accounts not suspended or closed and approved
+   * or awaiting approval, plus their active admin staff who aren't the
+   * vendor's own person. The same rules as platformVendorFacts + VENDOR_BASE.
+   */
+  async function vendorRecipientCount() {
+    const { rows } = await db.raw(`
+      WITH v AS (
+        SELECT id, "personId" FROM "User"
+         WHERE "userType" = 'vendor'
+           AND coalesce("accountStatus", 'active') NOT IN ('suspended', 'closed')
+           AND coalesce("approvalStatus", 'approved') IN ('approved', 'pending_approval', 'pending'))
+      SELECT (SELECT count(*) FROM v)
+           + (SELECT count(*) FROM "User" s JOIN v ON v.id = s."vendorId"
+               WHERE s."userType" = 'vendor_staff' AND s."vendorRole" = 'admin' AND s."accountStatus" = 'active'
+                 AND (v."personId" IS NULL OR s."personId" IS DISTINCT FROM v."personId")) AS n`);
+    return Number(rows[0]?.n || 0);
+  }
+
+  /**
    * The language each vendor recipient gets: English only when they chose
    * 'en', Swahili otherwise — including no saved preference — the rule every
    * other vendor notification follows (partner-notifier).
@@ -426,10 +446,12 @@ export function createSegmentService({
    * Without a purpose the stricter marketing rules apply.
    */
   async function previewAudience({ sender, recipients = 'members', preset, filter, purpose }) {
-    let category = 'marketing';
+    // Vendors get service messages only for now (review of #257), so their reach is counted as such.
+    let category = recipients === 'vendors' ? 'transactional' : 'marketing';
     if (purpose != null) {
       category = categoryForPurpose(purpose);
       if (!category) return { error: 'invalid_purpose', status: 400 };
+      if (recipients === 'vendors' && category === 'marketing') return { error: 'vendor_marketing_not_available', status: 400 };
     }
     const r = await resolveAudience({ sender, recipients, preset, filter });
     if (r.error) return r;
@@ -462,6 +484,7 @@ export function createSegmentService({
     channelAvailability,
     localesByMember,
     vendorLocales,
+    vendorRecipientCount,
     // Membership facts (status, days to expiry, last visit…) — the same
     // ones audiences use — for lifecycle automations.
     gymMemberFacts,

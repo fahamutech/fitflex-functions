@@ -155,16 +155,20 @@ export function createDeliveryService({
   // suspended or deleted since the message was queued, and a gym message
   // only ever goes to a direct member of that gym.
   async function recipientBlock(msg) {
-    const user = await db('User').where({ id: msg.memberId }).first('id', 'accountStatus', 'userType', 'vendorId');
+    const user = await db('User').where({ id: msg.memberId })
+      .first('id', 'accountStatus', 'userType', 'vendorId', 'vendorRole', 'approvalStatus');
     if (!user) return 'member_not_found';
     if (user.accountStatus === 'suspended') return 'account_suspended';
-    // Vendor messages: a closed vendor account, staff no longer active, or
-    // staff of a vendor suspended or closed since queueing get nothing.
-    if (user.userType === 'vendor' && user.accountStatus === 'closed') return 'account_suspended';
+    // Vendor messages, as of now rather than when queued: a vendor closed or
+    // rejected since gets nothing, nor do its staff; staff no longer active
+    // get nothing, nor staff who are no longer the vendor's admins.
+    const vendorGone = (v) => !v || ['suspended', 'closed'].includes(v.accountStatus) || v.approvalStatus === 'rejected';
+    if (user.userType === 'vendor' && vendorGone(user)) return 'vendor_unavailable';
     if (user.userType === 'vendor_staff') {
       if ((user.accountStatus || 'active') !== 'active') return 'account_suspended';
-      const vendor = user.vendorId ? await db('User').where({ id: user.vendorId }).first('accountStatus') : null;
-      if (!vendor || ['suspended', 'closed'].includes(vendor.accountStatus)) return 'vendor_unavailable';
+      if (user.vendorRole !== 'admin') return 'not_vendor_admin';
+      const vendor = user.vendorId ? await db('User').where({ id: user.vendorId }).first('accountStatus', 'approvalStatus') : null;
+      if (vendorGone(vendor)) return 'vendor_unavailable';
     }
     if (msg.senderType === 'gym') {
       const ok = await directMemberships(db, [msg]);

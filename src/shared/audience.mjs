@@ -68,7 +68,8 @@ export const FIELDS = Object.freeze({
   // Vendors (FitFlex-wide vendor audiences). A vendor's staff who receive its
   // messages (active staff with vendorRole 'admin') carry the vendor's facts;
   // `vendorRecipient` tells the vendor account and those staff apart.
-  vendorApproval: { type: 'enum', scopes: VENDORS, values: ['approved', 'pending_approval', 'rejected'] },
+  // Only these two: rejected vendors are never in a vendor audience (security review of #257).
+  vendorApproval: { type: 'enum', scopes: VENDORS, values: ['approved', 'pending_approval'] },
   // Recorded at least one (not voided) walk-in sale in the last 30 days.
   vendorWalkInSales: { type: 'enum', scopes: VENDORS, values: ['yes', 'no'] },
   // Products listed (not deleted) and of those, approved and on sale.
@@ -91,6 +92,8 @@ const INACTIVE = {
     { all: [c('lastVisitDaysAgo', 'exists', false), c('joinedDaysAgo', 'gte', 14)] },
   ],
 };
+// Every vendor audience is within these (see buildAudienceFilter).
+const VENDOR_BASE = c('vendorApproval', 'in', ['approved', 'pending_approval']);
 export const PRESETS = Object.freeze({
   gym: {
     all: { all: [c('status', 'in', ['active', 'expiring_soon', 'expired'])] },
@@ -119,8 +122,9 @@ export const PRESETS = Object.freeze({
     no_gym: { all: [c('trainerStatus', 'eq', 'active'), c('linkedGymId', 'exists', false)] },
     new: { all: [c('trainerStatus', 'eq', 'active'), c('joinedDaysAgo', 'lte', 30)] },
   },
-  // Suspended and closed vendors (and their staff) are never in a vendor audience;
-  // `all` also leaves out vendors whose application was rejected.
+  // Vendor audiences never hold suspended or closed vendors (or their staff), nor
+  // rejected ones: buildAudienceFilter ANDs VENDOR_BASE onto any vendor audience
+  // that doesn't name vendorApproval itself, and 'rejected' isn't a value it can name.
   vendors: {
     all: { all: [c('vendorApproval', 'in', ['approved', 'pending_approval'])] },
     approved: { all: [c('vendorApproval', 'eq', 'approved')] },
@@ -227,6 +231,8 @@ export function buildAudienceFilter({ preset, filter } = {}, scope) {
     parts.push(v.filter);
   }
   if (!parts.length) return bad('audience_required');
+  // Vendors: approved or awaiting approval only, unless the audience already says which.
+  if (scope === 'vendors' && !JSON.stringify(parts).includes('"field":"vendorApproval"')) parts.unshift({ all: [VENDOR_BASE] });
   return { filter: parts.length === 1 ? parts[0] : { all: parts } };
 }
 
