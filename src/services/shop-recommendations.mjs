@@ -122,7 +122,9 @@ export function parseRecentIds(value) {
  *   signalsUsed        which of these actually contributed
  *   purchaseHistory, audience, location: null (Phase 2, see NEEDS_PHASE2_FIELDS)
  */
-export function buildNeeds({ mode, memberProfile = null, trainerProfile = null, recentIds = [], config = {}, purchaseHistory = null, optedOut = false }) {
+export function buildNeeds({ mode, memberProfile = null, trainerProfile = null, recentIds = [], config = {}, purchaseHistory = null, optedOut = false, profileSignals = true }) {
+  // Declared goal / specialty: not when switched off, nor (flag on) when personalisation is not available.
+  const useProfile = !optedOut && profileSignals;
   const roleMap = config.roleCategories || DEFAULT_ROLE_CATEGORIES;
   const goalMap = config.goalCategories || DEFAULT_GOAL_CATEGORIES;
   const specialtyRules = config.specialtyCategories || DEFAULT_SPECIALTY_CATEGORIES;
@@ -130,12 +132,12 @@ export function buildNeeds({ mode, memberProfile = null, trainerProfile = null, 
 
   let goalCategories = [];
   // Switched off ("Personalised shop" off): no declared goal or specialty either; only the role.
-  if (mode === 'member' && memberProfile && !optedOut) {
+  if (mode === 'member' && memberProfile && useProfile) {
     const goals = uniq([...(Array.isArray(memberProfile.fitnessGoals) ? memberProfile.fitnessGoals : []), memberProfile.fitnessGoal].filter(g => typeof g === 'string'));
     goalCategories = uniq(goals.flatMap(g => goalMap[g] || []));
   }
   let specialtyCategories = [];
-  if (mode === 'trainer' && trainerProfile && Array.isArray(trainerProfile.specialties) && !optedOut) {
+  if (mode === 'trainer' && trainerProfile && Array.isArray(trainerProfile.specialties) && useProfile) {
     specialtyCategories = uniq(trainerProfile.specialties.filter(s => typeof s === 'string').flatMap((s) => {
       const text = s.toLowerCase();
       return specialtyRules.find(rule => rule.match.some(word => text.includes(word)))?.categories || [];
@@ -450,8 +452,9 @@ export function describeSections(sections, needs, personal = {}) {
     const hist = needs.purchaseHistory;
     if (mine.history && hist) {
       const rebought = s.productIds.find(id => hist.boughtProducts.has(id) && hist.boughtProducts.get(id).name);
-      const topCategory = hist.categories.find(c => s.categories?.includes(c)) || hist.categories[0] || null;
-      if (s.key === 'recommended') title = PERSONAL_COPY.recommendedTitle;
+      // Only a category the rail really shows after allocation (QA 2026-10-22): the reason must match the rail.
+      const topCategory = hist.categories.find(c => s.categories?.includes(c)) || null;
+      if (s.key === 'recommended' && (rebought || topCategory)) title = PERSONAL_COPY.recommendedTitle;
       if (s.key === 'recommended' && rebought) {
         const productName = hist.boughtProducts.get(rebought).name;
         reason = PERSONAL_COPY.boughtProduct(productName);
@@ -529,7 +532,7 @@ export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProf
   const identity = resolveShoppingMode({ requested: mode, sessionUserType, heldUserTypes });
   if (identity.error) return identity;
   const p = personalisation;
-  let needs = buildNeeds({ mode: identity.mode, memberProfile, trainerProfile, recentIds, config, optedOut: Boolean(p?.optedOut) });
+  let needs = buildNeeds({ mode: identity.mode, memberProfile, trainerProfile, recentIds, config, optedOut: Boolean(p?.optedOut), profileSignals: p?.profileSignals !== false });
   const { eligible } = filterEligible(products, { ownVendorIds, suspendedVendorIds });
   const sales = salesStats(orders, { now });
   const assemble = n => assembleSections({ needs: n, eligible, featured, paidPlacementIds, sales, now, config });
