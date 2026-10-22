@@ -638,16 +638,29 @@ export function createB2BService({
   // organisation too, so their rows are no longer read-only there, and those
   // who may manage people see the same contact details HR sees in /corporate/staff.
   const writesThrough = access => Boolean(orgOnlySponsors() && corporateStaff && access.org.legacyCorporateId);
+  // Owner decision (2026-10-22, review finding 5): on a company's organisation
+  // the company-staff powers — add staff (uses seats), change status / exit,
+  // link / unlink, see staff email and phone, receive activation PINs, import —
+  // belong to the organisation roles hr and admin only (a company HR login
+  // reads through as hr). Not owner, manager, finance, analyst or viewer, even
+  // with beneficiaries.manage. FitFlex platform admins keep them (they already
+  // have them through /corporate/staff?corporateId=). Other organisations are unchanged.
+  const COMPANY_STAFF_ROLES = new Set(['hr', 'admin']);
+  const companyStaffManage = access => writesThrough(access)
+    && (access.platformAdmin === true || COMPANY_STAFF_ROLES.has(access.role))
+    && can(access, 'beneficiaries.manage');
+  const notCompanyStaffRole = () => fail('forbidden', 403, { requiredRoles: [...COMPANY_STAFF_ROLES] });
 
   function staffView(e, access) {
     const view = employeeView(e, access.org.id);
     if (!writesThrough(access)) return view;
+    const manage = companyStaffManage(access);
     return {
       ...view,
-      readOnly: false,
+      readOnly: !manage,
       employeeStatus: e.status,
       linked: Boolean(e.userId),
-      ...(can(access, 'beneficiaries.manage') ? { email: e.email ?? null, phone: e.phone ?? null } : {}),
+      ...(manage ? { email: e.email ?? null, phone: e.phone ?? null } : {}),
     };
   }
 
@@ -700,7 +713,7 @@ export function createB2BService({
     if (!can(access, 'beneficiaries.manage')) return forbidden('beneficiaries.manage');
     // Employer seats are billed and seat-limited by Corporate; enrol there
     // (B5a, flag on: through the same company staff path, from here).
-    if (writesThrough(access)) return enrollCompanyStaff({ access, body, actorId });
+    if (writesThrough(access)) return companyStaffManage(access) ? enrollCompanyStaff({ access, body, actorId }) : notCompanyStaffRole();
     if (access.org.legacyCorporateId) return corporateManaged(access);
     if (access.org.status !== 'active') return fail('organization_not_active', 409, { organizationStatus: access.org.status });
 
@@ -749,6 +762,7 @@ export function createB2BService({
     if (!found) return fail('beneficiary_not_found', 404);
     if (found.employee) {
       if (!writesThrough(access)) return corporateManaged(access);
+      if (!companyStaffManage(access)) return notCompanyStaffRole();
       return setCompanyStaffStatus({ access, employee: found.employee, status, actorId });
     }
 
@@ -884,6 +898,7 @@ export function createB2BService({
     const found = await findBeneficiary(access, beneficiaryId);
     if (!found) return fail('beneficiary_not_found', 404);
     if (!found.employee || !writesThrough(access)) return fail('link_not_supported', 409);
+    if (!companyStaffManage(access)) return notCompanyStaffRole();
     const out = await corporateStaff.linkEmployeeUser({
       corporateId: access.org.legacyCorporateId, employeeId: found.employee.id,
       userId: body.userId ?? null, email: body.email ?? null, phone: body.phone ?? null, actorId,
@@ -903,6 +918,6 @@ export function createB2BService({
     listOrganizationUsers, addOrganizationUser, updateOrganizationUser, removeOrganizationUser,
     allBeneficiaries, beneficiaryRelationshipsForUser,
     listBeneficiaries, getBeneficiary, enrollBeneficiary, setBeneficiaryStatus, deactivateBeneficiary,
-    linkBeneficiaryAccount, companyStaffWritable: writesThrough,
+    linkBeneficiaryAccount, companyStaffWritable: writesThrough, companyStaffManage,
   };
 }

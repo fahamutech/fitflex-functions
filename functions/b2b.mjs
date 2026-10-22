@@ -112,10 +112,15 @@ export const myB2BOrganizationSession = {
 
 export const getB2BOrganization = {
   created, method: 'get', path: '/b2b/organizations/:id',
-  description: 'Organisation profile, KYB status and the caller\'s role and permissions.',
+  description: 'Organisation profile, KYB status and the caller\'s role and permissions. access.companyStaffManage (B5a): whether the caller may add, change, link and import a company\'s staff here (ORG_ONLY_SPONSORS on, a company\'s organisation, org role hr or admin only); false everywhere else.',
   onGuard: routeGuard('get', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, async access => ({
-    organization: access.org, access: { role: access.role, permissions: access.permissions },
+    organization: access.org,
+    access: {
+      role: access.role, permissions: access.permissions,
+      // B5a: true only where the caller may manage a company's staff from here (ORG_ONLY_SPONSORS on, a company's organisation, org role hr or admin).
+      companyStaffManage: b2bService.companyStaffManage(access),
+    },
   })),
 };
 

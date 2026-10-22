@@ -533,3 +533,72 @@ test('session marks endpoint: an already signed-in HR session learns the sign-in
   await db('B2BOrganizationUser').where({ userId: hr.id }).update({ status: 'removed', removedAt: new Date() });
   assert.deepEqual((await flagOn(() => marks(hr.claims))).body, { orgOnlySponsors: true });
 });
+
+test('owner decision (finding 5): on a company\'s organisation only org roles hr and admin get company-staff powers; per role', async () => {
+  const { orgId, hr } = await company({ seatLimit: 100 });
+  const P = { id: orgId };
+  const a = await admin();
+  const emp = await call(corporateProvisionStaff, { claims: hr.claims, body: { displayName: 'Role test staff', email: 'roles@hr2org.example.com' } });
+  const empId = emp.body.employee.id;
+  const access = await b2bService.resolveAccess({ organizationId: orgId, userId: a.sub, userType: 'admin' });
+  const asRole = async (role) => {
+    const sub = await account('member');
+    const out = await b2bService.addOrganizationUser({ access, body: { userId: sub, role }, actorId: a.sub });
+    assert.equal(out.organizationUser?.role, role, JSON.stringify(out));
+    return { sub, userType: 'member' };
+  };
+  const callers = { corporate_hr: hr.claims, platform_admin: a };
+  for (const role of ['owner', 'admin', 'manager', 'hr', 'finance', 'analyst', 'viewer']) callers[role] = await asRole(role);
+  const allowed = new Set(['corporate_hr', 'platform_admin', 'admin', 'hr']);
+
+  await flagOn(async () => {
+    for (const [who, claims] of Object.entries(callers)) {
+      const yes = allowed.has(who);
+      const org = await call(getB2BOrganization, { claims, params: P });
+      assert.equal(org.statusCode, 200, who);
+      assert.equal(org.body.access.companyStaffManage, yes, `${who}: companyStaffManage`);
+
+      const list = await call(listB2BBeneficiaries, { claims, params: P });
+      if (org.body.access.permissions.includes('beneficiaries.read')) {
+        const row = list.body.items.find(b => b.id === empId);
+        assert.equal(row.readOnly, !yes, `${who}: readOnly`);
+        assert.equal('email' in row || 'phone' in row, yes, `${who}: contact details`);
+      } else {
+        assert.equal(list.statusCode, 403, `${who}: list`);
+      }
+
+      const add = await call(enrollB2BBeneficiary, { claims, params: P, body: { displayName: `By ${who}` } });
+      const status = await call(setB2BBeneficiaryStatus, { claims, params: { ...P, beneficiaryId: empId }, body: { status: 'active' } });
+      const link = await call(linkB2BBeneficiaryAccount, { claims, params: { ...P, beneficiaryId: empId }, body: {} });
+      const imp = await call(importB2BBeneficiaries, { claims, params: P, body: { rawText: `name,email\nImport ${who},${who}@hr2org.example.com`, dryRun: true } });
+      if (yes) {
+        assert.deepEqual([add.statusCode, status.statusCode, link.statusCode, imp.statusCode], [201, 200, 200, 200], `${who}: ${JSON.stringify([add.body, status.body, link.body, imp.body])}`);
+        assert.match(add.body.pin, /^\d{4}$/);
+      } else {
+        for (const [what, r] of Object.entries({ add, status, link, imp })) {
+          assert.equal(r.statusCode, 403, `${who}: ${what} ${JSON.stringify(r.body)}`);
+          assert.equal(r.body.error, 'forbidden');
+        }
+        assert.equal('pin' in add.body, false);
+      }
+    }
+  });
+
+  // A non-company organisation is unchanged: an owner still enrols there, and companyStaffManage is false.
+  const created = await call(adminCreateB2BOrganization, { claims: a, body: { organizationType: 'insurer', legalName: `HR2Org roles insurer ${uid('o')}` } });
+  const native = created.body.organization.id;
+  made.orgs.push(native);
+  await call(adminSetB2BOrganizationStatus, { claims: a, params: { id: native }, body: { status: 'active' } });
+  const nativeAccess = await b2bService.resolveAccess({ organizationId: native, userId: a.sub, userType: 'admin' });
+  const owner = await account('member');
+  await b2bService.addOrganizationUser({ access: nativeAccess, body: { userId: owner, role: 'owner' }, actorId: a.sub });
+  const someone = await account('member');
+  await flagOn(async () => {
+    const org = await call(getB2BOrganization, { claims: { sub: owner, userType: 'member' }, params: { id: native } });
+    assert.equal(org.body.access.companyStaffManage, false);
+    const r = await call(enrollB2BBeneficiary, { claims: { sub: owner, userType: 'member' }, params: { id: native }, body: { userId: someone, status: 'active' } });
+    assert.equal(r.statusCode, 201, JSON.stringify(r.body));
+  });
+  // Flag off: companyStaffManage is false for everyone, the company's HR login included.
+  assert.equal((await flagOff(() => call(getB2BOrganization, { claims: hr.claims, params: P }))).body.access.companyStaffManage, false);
+});

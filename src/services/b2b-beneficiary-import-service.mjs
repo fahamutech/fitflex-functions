@@ -159,6 +159,8 @@ export function createB2BBeneficiaryImportService({
     // imported into from here too, through the company staff path (B5a).
     const companyStaff = Boolean(org.legacyCorporateId && b2bService.companyStaffWritable?.(access));
     if (org.legacyCorporateId && !companyStaff) return fail('managed_by_corporate', 409, { corporateId: org.legacyCorporateId, use: '/corporate/staff/bulk' });
+    // Owner decision (finding 5): importing into a company's staff list is for org roles hr and admin only.
+    if (companyStaff && !b2bService.companyStaffManage?.(access)) return fail('forbidden', 403, { requiredRoles: ['hr', 'admin'] });
     if (org.status !== 'active') return fail('organization_not_active', 409, { organizationStatus: org.status });
     const given = Array.isArray(body.rows) ? body.rows.map((r, i) => ({ line: i + 1, ...r })) : parseImportText(body.rawText);
     if (!given.length) return fail('nothing_to_import', 400, { hint: 'One person per line: name, email, phone, group, reference, type.' });
