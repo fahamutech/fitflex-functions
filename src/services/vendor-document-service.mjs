@@ -130,15 +130,36 @@ export function createVendorDocumentService({ store, renderHtml, renderManyHtml,
     return types ? { types } : { error: 'invalid_doc_type', status: 400, allowed: Object.keys(KIND_DOC_TYPES) };
   }
 
+  /**
+   * UAT D6: the link docTypes a caller may list or turn off for one document — the same permission as share
+   * and view. A sale is resolved to what it really is (cash → receipt needs `sales`; credit → invoice needs
+   * `sales` or `customers`), so customers-only staff get 403 on a cash receipt's links. Another vendor's or
+   * an unknown sale has no links (empty, as before). → { types } | error.
+   */
+  async function linkTypesFor({ vendorId, access, kind, docId }) {
+    const t = kindTypes(kind);
+    if (t.error) return t;
+    if (!docId) return { error: 'invalid_field', status: 400, field: 'docId' };
+    const refused = precheck(kind, access);
+    if (refused) return refused;
+    let types = t.types;
+    if (KIND_OF[kind] === 'sale') {
+      const actual = await store.saleDocType(vendorId, docId);
+      if (!actual) return { types: [] };
+      types = t.types.filter(dt => dt === actual);
+      if (!types.length) return { types: [] };
+    }
+    if (!types.every(dt => allowed(dt, access))) return forbidden(types.find(dt => !allowed(dt, access)));
+    return { types };
+  }
+
   /** GET /vendor/document-links?docType&docId → { links } (never the URL: only its hash exists). */
   async function links({ vendorId, access, query = {} }) {
-    const t = kindTypes(String(query.docType || ''));
-    if (t.error) return t;
     const docId = typeof query.docId === 'string' ? query.docId : '';
-    if (!docId) return { error: 'invalid_field', status: 400, field: 'docId' };
-    const types = t.types.filter(dt => allowed(dt, access));
-    if (!types.length) return forbidden(t.types[0]);
-    const rows = await store.listLinks(vendorId, types, docId);
+    const t = await linkTypesFor({ vendorId, access, kind: String(query.docType || ''), docId });
+    if (t.error) return t;
+    if (!t.types.length) return { links: [], activeCount: 0 };
+    const rows = await store.listLinks(vendorId, t.types, docId);
     return { links: rows.map(linkView), activeCount: rows.filter(r => !r.revokedAt).length };
   }
 
@@ -154,14 +175,12 @@ export function createVendorDocumentService({ store, renderHtml, renderManyHtml,
 
   /** POST /vendor/document-links/revoke { docType, docId } → { links, revokedCount }. */
   async function revokeAll({ vendorId, actorId, access, body = {} }) {
-    const t = kindTypes(String(body?.docType || ''));
-    if (t.error) return t;
     const docId = typeof body?.docId === 'string' ? body.docId : '';
-    if (!docId) return { error: 'invalid_field', status: 400, field: 'docId' };
-    const types = t.types.filter(dt => allowed(dt, access));
-    if (!types.length) return forbidden(t.types[0]);
-    const revoked = await store.revoke({ vendorId, actorId, docTypes: types, docId });
-    const rows = await store.listLinks(vendorId, types, docId);
+    const t = await linkTypesFor({ vendorId, access, kind: String(body?.docType || ''), docId });
+    if (t.error) return t;
+    if (!t.types.length) return { links: [], revokedCount: 0 };
+    const revoked = await store.revoke({ vendorId, actorId, docTypes: t.types, docId });
+    const rows = await store.listLinks(vendorId, t.types, docId);
     return { links: rows.map(linkView), revokedCount: revoked.length };
   }
 
