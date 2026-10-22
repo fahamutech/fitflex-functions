@@ -111,8 +111,8 @@ const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' }
 
 export const vendorToolsOptionsRoute = {
   created, method: 'get', path: '/vendor/tools/options',
-  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). merch.productTargets: SHOP_PERSONALISATION is on (show the product form "Who it is for" fields: targetGender, targetAgeBands). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
-  responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false } },
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). merch.productTargets: SHOP_PERSONALISATION is on (show the product form "Who it is for" fields: targetGender, targetAgeBands). merch.shopAreas: SHOP_NEAR_YOU is on (show the profile form "Where you sell" pickers: cityId, regionId, deliveryAreaIds; areas from GET /shop/areas). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
+  responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
     const vendorId = req.user.userType === 'vendor' ? req.user.sub : req.user.userType === 'vendor_staff' ? req.user.vendorId : null;
@@ -123,7 +123,7 @@ export const vendorToolsOptionsRoute = {
 export const vendorMeRoute = {
   created, method: 'get', path: '/vendor/me',
   description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|sales|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost and vatInForce }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
-  responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false } } },
+  responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false } } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
     const me = await shopService.vendorMe(req.user);
@@ -232,11 +232,11 @@ export const vendorProfile = {
   onRequest: async (req, res) => res.json(await shopService.vendorProfileFor(req.user) || {}),
 };
 export const vendorSaveProfile = {
-  created, method: 'put', path: '/vendor/profile', description: 'Vendor (account holder) or admin only: create, edit or publish business profile. vendor_staff → 403.',
+  created, method: 'put', path: '/vendor/profile', description: 'Vendor (account holder) or admin only: create, edit or publish business profile. vendor_staff → 403. Shop home slice 3 (additive, not flagged): optional cityId (a usable city or district: "Based in"), regionId (a usable region; filled from cityId when left out), deliveryAreaIds (usable areas of any level, ≤ 50; the country id = nationwide; [] = no delivery). Left out = unchanged; null clears cityId/regionId. The server sets areasSource: vendor. 400 invalid_area { field, ids, reason: unknown | inactive | wrong_level | not_in_region | too_many | not_a_list } (nothing saved). docs/shop-near-you-api.md.',
   onGuard: routeGuard('put', requireAuth('vendor', 'admin')),
   onRequest: async (req, res) => {
     const result = await shopService.saveVendorProfile({ vendorId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing, allowed: result.allowed });
+    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing, allowed: result.allowed, field: result.field, ids: result.ids, reason: result.reason });
     res.json(result.profile);
   },
 };
@@ -281,14 +281,14 @@ export const adminUpdateProductListing = {
 
 export const adminListVendors = {
   created, method: 'get', path: '/admin/vendors',
-  description: 'Admin: list and review marketplace vendors.',
+  description: 'Admin: list and review marketplace vendors. vendorProfile carries the shop areas when set: cityId, regionId, deliveryAreaIds, areasSource (vendor | admin | backfill).',
   onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('shop')]),
   onRequest: async (_req, res) => res.json(await shopService.adminListVendors()),
 };
 
 export const adminUpdateVendor = {
   created, method: 'put', path: '/admin/vendors/:id',
-  description: 'Admin: approve, verify, suspend or reactivate a marketplace vendor, or set the commission FitFlex takes on their sales (commissionPct, 0–30; applies from their next order).',
+  description: 'Admin: approve, verify, suspend or reactivate a marketplace vendor, or set the commission FitFlex takes on their sales (commissionPct, 0–30; applies from their next order). Shop home slice 3 (additive): also cityId, regionId, deliveryAreaIds with the same rules and 400 invalid_area errors as PUT /vendor/profile; sets areasSource: admin; audited (vendor_management_updated, before/after areas).',
   onGuard: routeGuard('put', [requireAuth('admin'), requireAcl('shop')]),
   onRequest: async (req, res) => {
     const result = await shopService.adminUpdateVendor({ vendorId: req.params.id, body: req.body || {}, actorId: req.user.sub });

@@ -14,6 +14,7 @@ import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn } from '../shared/feature-flags.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
+import { indexAreas, validateVendorAreas, touchesAreas } from '../shared/shop-areas.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
@@ -105,6 +106,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   buyerContactOn = vendorBuyerContactOn,
   // S4: buyer.customerLinked on vendor orders only while VENDOR_TOOLS + VENDOR_CUSTOMERS are on.
   customersOn = vendorCustomersOn,
+  // Shop home slice 3: GeoArea rows ({ allAsync }) for the vendor area fields. null → area fields are refused.
+  geoAreas = null,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
   buyerRefs ||= createMemoryVendorBuyerRefStore();
@@ -139,10 +142,28 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return rest;
   }
 
+  /**
+   * Shop home slice 3: "Based in" (cityId: a city or district; regionId: a region) and "Delivers to"
+   * (deliveryAreaIds: any usable areas; the country = nationwide). Validated against usable GeoAreas;
+   * fields left out keep their stored value. Not flagged (stored either way, like product targets).
+   * → { patch } (empty when the body has no area field) | { error: 'invalid_area', status, field, ids, reason }
+   */
+  async function vendorAreaPatch(body, prior, source) {
+    if (!touchesAreas(body)) return { patch: {} };
+    if (!geoAreas) return { error: 'invalid_area', status: 400, field: 'cityId', ids: [], reason: 'unknown' };
+    const out = validateVendorAreas(body, prior, indexAreas(await geoAreas.allAsync()));
+    if (out.error) return out;
+    return { patch: { ...out.patch, areasSource: source } };
+  }
+  const AREA_KEYS = ['cityId', 'regionId', 'deliveryAreaIds', 'areasSource'];
+  const areasOf = profile => Object.fromEntries(AREA_KEYS.map(k => [k, profile?.[k] ?? null]));
+
   async function saveVendorProfile({ vendorId, body }) {
     const current = await users.findByIdAsync(vendorId);
     const prior = current?.vendorProfile || {};
     const publish = body?.publish === true;
+    const areas = await vendorAreaPatch(body, prior, 'vendor');
+    if (areas.error) return areas;
     if (body?.productCategories !== undefined) {
       const picked = Array.isArray(body.productCategories) ? body.productCategories : [];
       const unknown = picked.filter(key => !PRODUCT_CATEGORY_KEYS.has(key));
@@ -150,7 +171,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         return { error: 'invalid_product_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
       }
     }
-    const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
+    const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), ...areas.patch, vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
     const missing = PROFILE_REQUIRED.filter(key => {
       const value = profile[key];
       if (Array.isArray(value)) return !value.length;
@@ -644,12 +665,16 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       }
       patch.vendorProfile = { ...(vendor.vendorProfile || {}), vendorId, commissionPct: pct };
     }
+    // Shop home slice 3: staff map a vendor's areas (same rules as the vendor's own profile form).
+    const areas = await vendorAreaPatch(body, vendor.vendorProfile || {}, 'admin');
+    if (areas.error) return areas;
+    if (Object.keys(areas.patch).length) patch.vendorProfile = { ...(patch.vendorProfile || vendor.vendorProfile || {}), vendorId, ...areas.patch };
     const updated = await users.updateByIdAsync(vendorId, patch);
     await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'vendor_management_updated',
       target: vendorId,
-      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor) },
-      after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined, commissionPct: patch.vendorProfile.commissionPct } : {}) },
+      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor), ...(Object.keys(areas.patch).length ? { areas: areasOf(vendor.vendorProfile) } : {}) },
+      after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined } : {}), ...(body?.commissionPct != null ? { commissionPct: patch.vendorProfile.commissionPct } : {}), ...(Object.keys(areas.patch).length ? { areas: areasOf(patch.vendorProfile) } : {}) },
     });
     if (patch.approvalStatus) await notifyVendor(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
     return { vendor: updated };
