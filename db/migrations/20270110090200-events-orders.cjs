@@ -25,7 +25,9 @@
 //   all whole TZS; priceSnapshot keeps the prices the order was quoted at, so a later price change never
 //   touches it. Idempotency: (purchaserUserId, idempotencyKey) is unique when a key is given;
 //   idempotencyFingerprint is the hash of the request body (same key + different body → 409
-//   idempotency_key_reused). holdExpiresAt is read by the eventHoldExpiry job (partial index on
+//   idempotency_key_reused). Without a purchaser (guest / corporate flow) the key is scoped by
+//   (organizationId, idempotencyKey), and without an organisation by (eventId, idempotencyKey) — three
+//   partial unique indexes, one per scope (review #242). holdExpiresAt is read by the eventHoldExpiry job (partial index on
 //   awaiting_payment orders). reference is the short human order number shown to people.
 // - EventOrderLine: one ticket type × quantity, with the unit price, discount and fees it was priced at.
 //   Composite FKs (orderId, eventId) and (ticketTypeId, eventId) keep a line inside its order's event.
@@ -35,9 +37,14 @@
 //   bibNumber, kitStatus and resultStatus are denormalised views of the ops tables (S5/S6); their own
 //   history lives there. Composite FKs fence the registration to its order's / category's event.
 // - EventTeam / EventTeamMember: club, corporate or community team of registrations (one team per
-//   registration).
+//   registration). Members and the captain are fenced to the team's event by composite FKs.
+// - EventInventoryMovement is APPEND-ONLY: a trigger refuses UPDATE, DELETE and TRUNCATE (review #242).
+//   Children of a registration (kit, bibs, results, medals, team membership) are ON DELETE RESTRICT:
+//   a registration with history is never deleted, it changes status.
 //
-// Dormant: no route reads these tables (EVENTS_MODULE off). Down drops the six tables.
+// Down: drops the six tables, and refuses while any EventOrder exists (fail closed).
+//
+// Dormant: no route reads these tables (EVENTS_MODULE off).
 
 const ORDER_STATUSES = ['draft', 'awaiting_payment', 'confirmed', 'partially_cancelled', 'cancelled', 'expired', 'refund_pending', 'refunded'];
 const REGISTRATION_STATUSES = ['draft', 'reserved', 'confirmed', 'cancelled', 'transferred', 'refunded', 'disqualified'];
@@ -92,6 +99,10 @@ exports.up = async function up(knex) {
     ADD CONSTRAINT eventorder_idempotency_check CHECK ("idempotencyKey" IS NULL OR ("idempotencyFingerprint" IS NOT NULL AND char_length("idempotencyKey") BETWEEN 8 AND 100)),
     ADD CONSTRAINT eventorder_awaiting_hold_check CHECK (status <> 'awaiting_payment' OR "holdExpiresAt" IS NOT NULL)`);
   await knex.raw(`CREATE UNIQUE INDEX eventorder_purchaser_idempotency_unique ON "EventOrder" ("purchaserUserId", "idempotencyKey") WHERE "idempotencyKey" IS NOT NULL`);
+  await knex.raw(`CREATE UNIQUE INDEX eventorder_organization_idempotency_unique ON "EventOrder" ("organizationId", "idempotencyKey")
+    WHERE "idempotencyKey" IS NOT NULL AND "purchaserUserId" IS NULL AND "organizationId" IS NOT NULL`);
+  await knex.raw(`CREATE UNIQUE INDEX eventorder_guest_idempotency_unique ON "EventOrder" ("eventId", "idempotencyKey")
+    WHERE "idempotencyKey" IS NOT NULL AND "purchaserUserId" IS NULL AND "organizationId" IS NULL`);
   await knex.raw(`CREATE INDEX eventorder_hold_expiry_idx ON "EventOrder" ("holdExpiresAt") WHERE status = 'awaiting_payment'`);
 
   await knex.schema.createTable('EventOrderLine', (t) => {
@@ -143,6 +154,7 @@ exports.up = async function up(knex) {
     t.text('cancelReason');
     stamps(t);
     t.unique(['id', 'eventId']);
+    t.unique(['id', 'categoryId']);
     t.unique(['claimTokenHash']);
     t.index(['eventId', 'status']);
     t.index(['orderId']);
@@ -167,27 +179,31 @@ exports.up = async function up(knex) {
     t.text('organizationId').references('id').inTable('B2BOrganization').onDelete('SET NULL').onUpdate('CASCADE');
     t.text('name').notNullable();
     t.text('teamType').notNullable();
-    t.text('captainRegistrationId').references('id').inTable('EventRegistration').onDelete('SET NULL').onUpdate('CASCADE');
+    t.text('captainRegistrationId');
     t.text('status').notNullable().defaultTo('active');
     stamps(t);
     t.unique(['eventId', 'name']);
     t.unique(['id', 'eventId']);
   });
   await knex.raw(`ALTER TABLE "EventTeam"
+    ADD CONSTRAINT eventteam_captain_fk FOREIGN KEY ("captainRegistrationId", "eventId") REFERENCES "EventRegistration" (id, "eventId") ON DELETE RESTRICT ON UPDATE CASCADE,
     ADD CONSTRAINT eventteam_type_check CHECK ("teamType" IN (${list(TEAM_TYPES)})),
     ADD CONSTRAINT eventteam_status_check CHECK (status IN (${list(TEAM_STATUSES)})),
     ADD CONSTRAINT eventteam_name_length_check CHECK (char_length(name) BETWEEN 1 AND 120)`);
 
   await knex.schema.createTable('EventTeamMember', (t) => {
     t.text('id').primary();
-    t.text('teamId').notNullable().references('id').inTable('EventTeam').onDelete('CASCADE').onUpdate('CASCADE');
-    t.text('registrationId').notNullable().references('id').inTable('EventRegistration').onDelete('CASCADE').onUpdate('CASCADE');
+    t.text('teamId').notNullable();
+    t.text('eventId').notNullable();
+    t.text('registrationId').notNullable();
     t.text('role').notNullable().defaultTo('member');
     t.timestamp('createdAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
     t.unique(['registrationId']);
     t.index(['teamId']);
   });
   await knex.raw(`ALTER TABLE "EventTeamMember"
+    ADD CONSTRAINT eventteammember_team_fk FOREIGN KEY ("teamId", "eventId") REFERENCES "EventTeam" (id, "eventId") ON DELETE CASCADE ON UPDATE CASCADE,
+    ADD CONSTRAINT eventteammember_registration_fk FOREIGN KEY ("registrationId", "eventId") REFERENCES "EventRegistration" (id, "eventId") ON DELETE RESTRICT ON UPDATE CASCADE,
     ADD CONSTRAINT eventteammember_role_check CHECK (role IN ('captain', 'member'))`);
 
   await knex.schema.createTable('EventInventoryMovement', (t) => {
@@ -207,11 +223,28 @@ exports.up = async function up(knex) {
     ADD CONSTRAINT eventinventorymovement_kind_check CHECK (kind IN (${list(MOVEMENT_KINDS)})),
     ADD CONSTRAINT eventinventorymovement_quantity_check CHECK (quantity > 0),
     ADD CONSTRAINT eventinventorymovement_cycle_check CHECK (cycle >= 1)`);
+  // Append-only: the ledger is the audit trail of every counter change (same pattern as PartnerKycEvent).
+  await knex.raw(`CREATE OR REPLACE FUNCTION event_inventory_movement_immutable() RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION 'EventInventoryMovement rows are append-only' USING ERRCODE = 'P0001';
+    END;
+  $$ LANGUAGE plpgsql`);
+  await knex.raw(`CREATE TRIGGER event_inventory_movement_no_update
+    BEFORE UPDATE OR DELETE ON "EventInventoryMovement"
+    FOR EACH ROW EXECUTE FUNCTION event_inventory_movement_immutable()`);
+  await knex.raw(`CREATE TRIGGER event_inventory_movement_no_truncate
+    BEFORE TRUNCATE ON "EventInventoryMovement"
+    FOR EACH STATEMENT EXECUTE FUNCTION event_inventory_movement_immutable()`);
 };
 
 /** @param {import('knex').Knex} knex */
 exports.down = async function down(knex) {
+  if (await knex.schema.hasTable('EventOrder')) {
+    const orders = (await knex.raw(`SELECT count(*)::int AS n FROM "EventOrder"`)).rows[0].n;
+    if (orders) throw new Error(`events-orders down: ${orders} EventOrder row(s) exist; orders, registrations and the inventory ledger cannot be dropped over them`);
+  }
   await knex.schema.dropTableIfExists('EventInventoryMovement');
+  await knex.raw('DROP FUNCTION IF EXISTS event_inventory_movement_immutable()');
   await knex.schema.dropTableIfExists('EventTeamMember');
   await knex.schema.dropTableIfExists('EventTeam');
   await knex.schema.dropTableIfExists('EventRegistration');

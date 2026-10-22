@@ -19,7 +19,8 @@
 //   the store moves the counters only with conditional UPDATEs (see 20270110090200-events-orders.cjs for
 //   the hold model). saleOpensAt/saleClosesAt is the sale window; min/maxPerOrder bound one order's quantity.
 // - EventCollectionPoint: where kits are collected (opening windows jsonb, instructions {en, sw}).
-// - EventChangeLog: field-level audit of organizer edits (before/after jsonb, reason, material).
+// - EventChangeLog: field-level audit of organizer edits (before/after jsonb, reason, material). ON DELETE
+//   RESTRICT: an event with an audit trail is never deleted (review #242).
 //
 // Dormant: no route reads these tables (EVENTS_MODULE off). Down drops the five tables.
 
@@ -145,7 +146,7 @@ exports.up = async function up(knex) {
 
   await knex.schema.createTable('EventChangeLog', (t) => {
     t.text('id').primary();
-    t.text('eventId').notNullable().references('id').inTable('Event').onDelete('CASCADE').onUpdate('CASCADE');
+    t.text('eventId').notNullable().references('id').inTable('Event').onDelete('RESTRICT').onUpdate('CASCADE');
     t.text('actorUserId').references('id').inTable('User').onDelete('SET NULL').onUpdate('CASCADE');
     t.text('field').notNullable();
     t.jsonb('before');

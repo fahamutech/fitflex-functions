@@ -4,7 +4,8 @@
 //   quoteLines(ticketTypes, lines, { feeRule })
 //     ticketTypes  the snapshot the order is priced from: [{ id, priceTzs, currency, name?, categoryId? }]
 //                  (the rows as they were read under lock — NEVER re-read live prices for an existing order)
-//     lines        [{ ticketTypeId, quantity, discountTzs? }]
+//     lines        [{ ticketTypeId, quantity, discountTzs? }] — discountTzs is SERVER-SIDE only: the store
+//                  merges route-computed discounts in; a client's lines never carry it (review #242)
 //     feeRule      how FitFlex's fee is worked out (configuration, not code):
 //                    { type: 'none' }                                  (default: no fee)
 //                    { type: 'percent', pct, minTzs?, maxTzs? }        per line: round(gross × pct / 100)
@@ -12,7 +13,7 @@
 //   → { currency, lines: [{ ticketTypeId, quantity, unitPriceTzs, discountTzs, feesTzs, lineTotalTzs }],
 //       subtotalTzs, discountTzs, feesTzs, totalTzs, snapshot: { ticketTypes, feeRule } }
 //   → { error, status, ...extra } on a refusal (ticket_type_not_found 404, invalid_quantity 400,
-//       invalid_discount 400, currency_mismatch 409, invalid_price_snapshot 500).
+//       invalid_discount 400, invalid_fee_rule 400, currency_mismatch 409, invalid_price_snapshot 500).
 //
 // Rounding: half up to the whole shilling (there are no cents). Every output is an integer.
 
@@ -22,22 +23,30 @@ const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 
 export const NO_FEE = Object.freeze({ type: 'none' });
 
-/** The fee rule as it will be applied (unknown shapes become no fee). Exported so a config value can be checked. */
+/**
+ * The fee rule as it will be applied. null / undefined / { type: 'none' } = no fee. Anything else must be
+ * well formed — percent 0..100 with sane bounds, flat with non-negative whole amounts — or it comes back as
+ * { error: 'invalid_fee_rule', status: 400, reason } (review #242: a bad config value is never silently
+ * turned into "no fee"). Exported so a config value can be checked.
+ */
 export function normaliseFeeRule(rule) {
-  if (!rule || typeof rule !== 'object') return NO_FEE;
+  const bad = reason => ({ error: 'invalid_fee_rule', status: 400, reason });
+  if (rule == null) return NO_FEE;
+  if (typeof rule !== 'object') return bad('shape');
+  if (rule.type === 'none') return NO_FEE;
   if (rule.type === 'percent') {
     const pct = Number(rule.pct);
-    if (!Number.isFinite(pct) || pct < 0) return NO_FEE;
-    const minTzs = isInt(rule.minTzs) && rule.minTzs >= 0 ? rule.minTzs : 0;
-    const maxTzs = isInt(rule.maxTzs) && rule.maxTzs >= minTzs ? rule.maxTzs : null;
-    return { type: 'percent', pct, minTzs, maxTzs };
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return bad('pct');
+    if (rule.minTzs != null && (!isInt(rule.minTzs) || rule.minTzs < 0)) return bad('minTzs');
+    const minTzs = rule.minTzs ?? 0;
+    if (rule.maxTzs != null && (!isInt(rule.maxTzs) || rule.maxTzs < minTzs)) return bad('maxTzs');
+    return { type: 'percent', pct, minTzs, maxTzs: rule.maxTzs ?? null };
   }
   if (rule.type === 'flat') {
-    const perTicketTzs = isInt(rule.perTicketTzs) && rule.perTicketTzs >= 0 ? rule.perTicketTzs : 0;
-    const perOrderTzs = isInt(rule.perOrderTzs) && rule.perOrderTzs >= 0 ? rule.perOrderTzs : 0;
-    return { type: 'flat', perTicketTzs, perOrderTzs };
+    for (const key of ['perTicketTzs', 'perOrderTzs']) if (rule[key] != null && (!isInt(rule[key]) || rule[key] < 0)) return bad(key);
+    return { type: 'flat', perTicketTzs: rule.perTicketTzs ?? 0, perOrderTzs: rule.perOrderTzs ?? 0 };
   }
-  return NO_FEE;
+  return bad('type');
 }
 
 /** The fee on one line's net amount (gross − discount), in whole TZS. */
@@ -55,6 +64,7 @@ function lineFee(rule, { net, quantity }) {
 export function quoteLines(ticketTypes, lines, { feeRule = NO_FEE } = {}) {
   if (!Array.isArray(ticketTypes) || !Array.isArray(lines) || lines.length === 0) return fail('invalid_lines', 400);
   const rule = normaliseFeeRule(feeRule);
+  if (rule.error) return rule;
   const byId = new Map();
   for (const tt of ticketTypes) {
     if (!tt || typeof tt.id !== 'string' || !isInt(tt.priceTzs) || tt.priceTzs < 0) return fail('invalid_price_snapshot', 500, { ticketTypeId: tt?.id ?? null });

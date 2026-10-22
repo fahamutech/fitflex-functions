@@ -22,13 +22,20 @@
 // Timestamps are timestamp(3) like the rest of the schema; money is whole TZS (D4).
 import { randomUUID } from 'node:crypto';
 import { assertTransition } from '../shared/events-lifecycle.mjs';
-import { quoteLines, NO_FEE } from '../shared/events-pricing.mjs';
+import { quoteLines, normaliseFeeRule, NO_FEE } from '../shared/events-pricing.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
+/** How long an unpaid order keeps its places: EVENT_HOLD_TTL_MINUTES (default 30), like SHOP_RESERVATION_TTL_MINUTES. */
 export const DEFAULT_HOLD_TTL_MINUTES = 30;
+export const holdTtlMinutes = () => {
+  const n = parseInt(process.env.EVENT_HOLD_TTL_MINUTES ?? '', 10);
+  return Number.isInteger(n) && n >= 1 ? n : DEFAULT_HOLD_TTL_MINUTES;
+};
 const CONSENT_BASES = ['self', 'purchaser_authorised', 'organisation'];
+/** Why an unpaid order gives its places back (closed set; 'expired' makes the order expired, the rest cancelled). */
+export const RELEASE_REASONS = Object.freeze(['cancelled', 'expired', 'payment_failed', 'admin']);
 
 export const newId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
 const plain = row => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v === 'bigint' ? Number(v) : v))) : null);
@@ -80,7 +87,8 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
     if (!nonEmpty(input?.ownerUserId)) return fail('owner_required', 400);
     if (!nonEmpty(input?.name)) return fail('name_required', 400);
     const at = now();
-    const row = rowOf(ORGANIZER_COLUMNS, { status: 'draft', ...input, id: input.id || newId('evo') });
+    // status is never taken from input: every organizer starts in draft and moves through transitionOrganizer.
+    const row = rowOf(ORGANIZER_COLUMNS, { ...input, id: input.id || newId('evo'), status: 'draft', statusReason: null });
     const [saved] = await db('EventOrganizer').insert({ ...row, createdAt: at, updatedAt: at }).returning('*');
     return plain(saved);
   }
@@ -112,7 +120,9 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
     for (const key of ['organizerId', 'slug', 'title', 'eventType']) if (!nonEmpty(input?.[key])) return fail(`${key}_required`, 400);
     if (!input.startsAt || !input.endsAt) return fail('window_required', 400);
     const at = now();
-    const row = rowOf(EVENT_COLUMNS, { status: 'draft', version: 1, ...input, id: input.id || newId('evt') });
+    // status, version, publishedAt and cancelledAt are never taken from input: an event starts as draft v1
+    // and moves through transitionEvent (review #242).
+    const row = rowOf(EVENT_COLUMNS, { ...input, id: input.id || newId('evt'), status: 'draft', version: 1, publishedAt: null, cancelledAt: null });
     try {
       const [saved] = await db('Event').insert({ ...row, createdAt: at, updatedAt: at }).returning('*');
       return plain(saved);
@@ -124,14 +134,26 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
 
   const getEvent = async id => plain(await db('Event').where({ id }).first());
 
+  /** Fields that are frozen once an event is past submitted: participants agreed to them (review #242). */
+  const FROZEN_AFTER_SUBMISSION = ['slug', 'termsSnapshot', 'refundPolicySnapshot'];
+
   /**
    * Patch an event only if it is still at `expectedVersion`; the version is bumped with the patch.
-   * { event } or { error: 'version_conflict', status: 409 } when someone else edited it first.
+   * { event } or { error: 'version_conflict', status: 409 } when someone else edited it first;
+   * { error: 'event_frozen_field', status: 409, field } when slug / terms / refund policy are patched on
+   * an event that is no longer draft or submitted. Status, version, publishedAt, cancelledAt never change here.
    */
   async function updateEvent(id, patch, { expectedVersion }) {
     if (!isInt(expectedVersion) || expectedVersion < 1) return fail('expected_version_required', 400);
+    const current = await getEvent(id);
+    if (!current) return fail('event_not_found', 404);
+    if (!['draft', 'submitted'].includes(current.status)) {
+      const frozen = FROZEN_AFTER_SUBMISSION.find(f => patch?.[f] !== undefined);
+      if (frozen) return fail('event_frozen_field', 409, { eventId: id, field: frozen, eventStatus: current.status });
+    }
     const columns = EVENT_COLUMNS.filter(c => !['id', 'organizerId', 'status', 'version', 'publishedAt', 'cancelledAt'].includes(c));
-    const saved = await updateIf(conditional('Event'), id, { version: expectedVersion }, { ...rowOf(columns, patch), version: expectedVersion + 1 });
+    // The status is re-checked in the same statement, so a publish racing this edit cannot let a frozen field through.
+    const saved = await updateIf(conditional('Event'), id, { version: expectedVersion, status: current.status }, { ...rowOf(columns, patch), version: expectedVersion + 1 });
     if (saved) return { event: saved };
     return (await getEvent(id)) ? fail('version_conflict', 409, { eventId: id }) : fail('event_not_found', 404);
   }
@@ -216,16 +238,26 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
 
   const getOrder = orderId => loadOrder(db, orderId);
 
-  async function replay(purchaserUserId, key, fingerprint) {
-    const existing = await db('EventOrder').where({ purchaserUserId, idempotencyKey: key }).first('id', 'idempotencyFingerprint');
+  /**
+   * Where an Idempotency-Key lives: per purchaser; without one (guest / corporate) per organisation;
+   * without either per event (the three partial unique indexes of the orders migration).
+   */
+  const keyScope = ({ purchaserUserId, organizationId, eventId }, key) => (
+    purchaserUserId ? { purchaserUserId, idempotencyKey: key }
+      : organizationId ? { purchaserUserId: null, organizationId, idempotencyKey: key }
+        : { purchaserUserId: null, organizationId: null, eventId, idempotencyKey: key });
+
+  async function replay(scope, fingerprint) {
+    const existing = await db('EventOrder').where(scope).first('id', 'idempotencyFingerprint');
     if (!existing) return null;
     if (existing.idempotencyFingerprint !== fingerprint) return fail('idempotency_key_reused', 409);
     return { ...(await loadOrder(db, existing.id)), replayed: true };
   }
 
   /** Validate the request shape before any SQL. Returns a refusal or { lines, participants, totalQuantity }. */
-  function parseOrderInput({ lines, participants }) {
+  function parseOrderInput({ lines, participants, discounts }) {
     if (!Array.isArray(lines) || !lines.length) return fail('invalid_lines', 400);
+    if (discounts != null && (typeof discounts !== 'object' || Array.isArray(discounts))) return fail('invalid_discounts', 400);
     const seen = new Set();
     const wanted = new Map();
     for (const line of lines) {
@@ -239,44 +271,58 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
     if (!Array.isArray(participants)) return fail('participants_required', 400);
     if (participants.length !== totalQuantity) return fail('participants_mismatch', 400, { expected: totalQuantity, received: participants.length });
     const perType = new Map();
+    let selfCount = 0;
     for (let i = 0; i < participants.length; i += 1) {
       const p = participants[i];
       if (!p || !wanted.has(p.ticketTypeId)) return fail('invalid_participant', 400, { index: i, reason: 'ticket_type' });
       if (!nonEmpty(p.firstName) || !nonEmpty(p.lastName)) return fail('invalid_participant', 400, { index: i, reason: 'name' });
       if (!CONSENT_BASES.includes(p.consentBasis)) return fail('invalid_participant', 400, { index: i, reason: 'consent_basis' });
+      if (p.consentBasis === 'self' && ++selfCount > 1) return fail('multiple_self_participants', 400, { index: i });
       perType.set(p.ticketTypeId, (perType.get(p.ticketTypeId) ?? 0) + 1);
     }
     for (const [ticketTypeId, quantity] of wanted) {
       if ((perType.get(ticketTypeId) ?? 0) !== quantity) return fail('participants_mismatch', 400, { ticketTypeId, expected: quantity, received: perType.get(ticketTypeId) ?? 0 });
     }
-    return { lines: [...wanted].map(([ticketTypeId, quantity]) => ({ ticketTypeId, quantity, discountTzs: lines.find(l => l.ticketTypeId === ticketTypeId).discountTzs ?? 0 })).sort((a, b) => (a.ticketTypeId < b.ticketTypeId ? -1 : 1)), participants, totalQuantity };
+    // Discounts come only from the server-side `discounts` map; whatever a client put on its lines is dropped.
+    for (const [ticketTypeId, discount] of Object.entries(discounts ?? {})) {
+      if (!wanted.has(ticketTypeId)) return fail('invalid_discounts', 400, { ticketTypeId });
+      if (!isInt(discount) || discount < 0) return fail('invalid_discount', 400, { ticketTypeId });
+    }
+    return { lines: [...wanted].map(([ticketTypeId, quantity]) => ({ ticketTypeId, quantity, discountTzs: discounts?.[ticketTypeId] ?? 0 })).sort((a, b) => (a.ticketTypeId < b.ticketTypeId ? -1 : 1)), participants, totalQuantity };
   }
 
   /**
    * Place an order and hold its places — all or nothing. See the file comment for the hold model.
    *   eventId, purchaserUserId (null for an approved guest/corporate flow), organizationId,
-   *   lines [{ ticketTypeId, quantity, discountTzs? }], participants [{ ticketTypeId, firstName, lastName,
-   *   phone?, email?, dateOfBirth?, gender?, emergencyContact?, consentBasis, participantUserId? }] — one
-   *   per place, idempotencyKey + fingerprint (honoured only with a purchaser: the unique index is per
-   *   purchaser), holdTtlMinutes, feeRule (defaults to the store's).
+   *   lines [{ ticketTypeId, quantity }] — a client's lines carry NO price or discount,
+   *   participants [{ ticketTypeId, firstName, lastName, phone?, email?, dateOfBirth?, gender?,
+   *   emergencyContact?, consentBasis }] — one per place; participantUserId is never taken from input: the
+   *   one `self` participant (at most one per order) is the purchaser, everyone else is claimed later,
+   *   idempotencyKey + fingerprint (scoped per purchaser, else per organisation, else per event),
+   *   SERVER-SIDE ONLY (a route must never forward these from the request body): discounts
+   *   { [ticketTypeId]: discountTzs } worked out by the route, holdTtlMinutes (default
+   *   EVENT_HOLD_TTL_MINUTES), feeRule (default the store's).
    * → { order, lines, registrations, replayed } or { error, status, ... }.
    */
   async function createOrderWithHolds({
     eventId, purchaserUserId = null, organizationId = null, lines = [], participants = [],
-    idempotencyKey = null, fingerprint = null, holdTtlMinutes = DEFAULT_HOLD_TTL_MINUTES, feeRule: orderFeeRule = feeRule,
+    idempotencyKey = null, fingerprint = null, discounts = null, holdTtlMinutes: ttl = holdTtlMinutes(), feeRule: orderFeeRule = feeRule,
   }) {
     if (!nonEmpty(eventId)) return fail('event_required', 400);
-    const parsed = parseOrderInput({ lines, participants });
+    const parsed = parseOrderInput({ lines, participants, discounts });
     if (parsed.error) return parsed;
-    if (!isInt(holdTtlMinutes) || holdTtlMinutes < 1) return fail('invalid_hold_ttl', 400);
-    const key = purchaserUserId && idempotencyKey ? String(idempotencyKey) : null;
+    if (!isInt(ttl) || ttl < 1) return fail('invalid_hold_ttl', 400);
+    const rule = normaliseFeeRule(orderFeeRule);
+    if (rule.error) return rule;
+    const key = idempotencyKey == null ? null : String(idempotencyKey);
     if (key && (key.length < 8 || key.length > 100 || !nonEmpty(fingerprint))) return fail('invalid_idempotency_key', 400);
-    if (key) {
-      const earlier = await replay(purchaserUserId, key, fingerprint);
+    const scope = key ? keyScope({ purchaserUserId, organizationId, eventId }, key) : null;
+    if (scope) {
+      const earlier = await replay(scope, fingerprint);
       if (earlier) return earlier;
     }
     const at = now();
-    const holdExpiresAt = new Date(+at + holdTtlMinutes * 60_000);
+    const holdExpiresAt = new Date(+at + ttl * 60_000);
     const ids = parsed.lines.map(l => l.ticketTypeId);
     try {
       return await db.transaction(async (trx) => {
@@ -301,7 +347,7 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
           if (line.quantity < tt.minPerOrder || line.quantity > tt.maxPerOrder) throw refusal('quantity_out_of_range', 400, { ticketTypeId: tt.id, min: tt.minPerOrder, max: tt.maxPerOrder });
         }
 
-        const quote = quoteLines(types, parsed.lines, { feeRule: orderFeeRule });
+        const quote = quoteLines(types, parsed.lines, { feeRule: rule });
         if (quote.error) throw refusal(quote.error, quote.status, quote);
 
         const orderId = newId('eor');
@@ -333,7 +379,7 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
           const tt = byId.get(p.ticketTypeId);
           await trx('EventRegistration').insert({
             id: newId('erg'), eventId, categoryId: tt.categoryId, ticketTypeId: tt.id, orderId, orderLineId: lineIds.get(tt.id),
-            participantUserId: p.participantUserId ?? null, purchaserUserId,
+            participantUserId: p.consentBasis === 'self' ? purchaserUserId : null, purchaserUserId,
             firstName: p.firstName.trim(), lastName: p.lastName.trim(), phone: p.phone ?? null, email: p.email ?? null,
             dateOfBirth: p.dateOfBirth ?? null, gender: p.gender ?? null, emergencyContact: json(p.emergencyContact ?? null),
             consentBasis: p.consentBasis, status: 'reserved', createdAt: at, updatedAt: at,
@@ -344,8 +390,8 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
     } catch (err) {
       if (err.refusal) return err.refusal;
       // The same key arrived twice at once: the other request won; this one rolled back whole.
-      if (err.code === UNIQUE_VIOLATION && key) {
-        const earlier = await replay(purchaserUserId, key, fingerprint);
+      if (err.code === UNIQUE_VIOLATION && scope) {
+        const earlier = await replay(scope, fingerprint);
         if (earlier) return earlier;
       }
       // The table CHECK is the last line of defence.
@@ -422,18 +468,19 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
   }
 
   /**
-   * Give an unpaid order's places back: `reason` 'expired' (the hold lapsed) or anything else
-   * (cancelled before payment). Only an order still holding inventory (draft / awaiting_payment) can be
-   * released; a confirmed order's places are sold and go back through the refund flow (invalid_transition).
-   * A second call changes nothing.
+   * Give an unpaid order's places back. `reason` is one of RELEASE_REASONS: 'expired' (the hold lapsed)
+   * makes the order expired, 'cancelled' / 'payment_failed' / 'admin' make it cancelled; anything else is
+   * invalid_reason. Only an order awaiting payment can be released; a confirmed order's places are sold and
+   * go back through the refund flow (invalid_transition). A second call changes nothing.
    */
   async function releaseOrder(orderId, reason = 'cancelled') {
+    if (!RELEASE_REASONS.includes(reason)) return fail('invalid_reason', 400, { reason, allowed: [...RELEASE_REASONS] });
     const to = reason === 'expired' ? 'expired' : 'cancelled';
     return db.transaction(async (trx) => {
       const order = plain(await trx('EventOrder').where({ id: orderId }).forUpdate().first());
       if (!order) return fail('order_not_found', 404);
       if (['expired', 'cancelled'].includes(order.status)) return { ...(await loadOrder(trx, orderId)), changed: false };
-      if (!['draft', 'awaiting_payment'].includes(order.status)) {
+      if (order.status !== 'awaiting_payment') {
         return { error: 'invalid_transition', status: 409, kind: 'order', from: order.status, to, allowed: [], reason: 'inventory_committed', orderId };
       }
       return releaseInTrx(trx, order, to, reason, now());
@@ -467,6 +514,6 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
   return {
     createOrganizer, getOrganizer, updateOrganizer, transitionOrganizer,
     createEvent, getEvent, updateEvent, transitionEvent, createCategory, createTicketType, getTicketType, updateTicketType,
-    appendOutbox, createOrderWithHolds, getOrder, commitOrder, releaseOrder, expireHolds, movementsOf,
+    appendOutbox, createOrderWithHolds, getOrder, commitOrder, releaseOrder, expireHolds, movementsOf, holdTtlMinutes,
   };
 }

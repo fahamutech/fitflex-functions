@@ -17,8 +17,9 @@
 //   Rule 6 callout: a new nullable column on a payments table.
 // - The Refund table is NOT touched in S1 (S4 decides between Refund.kind = 'event_order' and a table).
 //
-// Dormant: no route reads these (EVENTS_MODULE off). Down drops EventPayment and the column (rows that
-// point at an event order are deleted first, as 20261025090000-shop-order-payments.cjs does for orderId).
+// Dormant: no route reads these (EVENTS_MODULE off). Down drops EventPayment and the column, and FAILS
+// CLOSED: it refuses while any EventPayment exists or any PaymentRequest points at an event order
+// (money records are never deleted by a rollback; review #242).
 
 const PAYMENT_STATUSES = ['created', 'pending', 'succeeded', 'failed', 'cancelled', 'expired', 'reversed', 'reconciliation_required'];
 const list = values => values.map(v => `'${v}'`).join(', ');
@@ -65,7 +66,14 @@ exports.up = async function up(knex) {
 /** @param {import('knex').Knex} knex */
 exports.down = async function down(knex) {
   if (await knex.schema.hasColumn('PaymentRequest', 'eventOrderId')) {
-    await knex('PaymentRequest').whereNotNull('eventOrderId').del();
+    const requests = (await knex.raw(`SELECT count(*)::int AS n FROM "PaymentRequest" WHERE "eventOrderId" IS NOT NULL`)).rows[0].n;
+    if (requests) throw new Error(`events-payments down: ${requests} PaymentRequest row(s) point at an event order; the column cannot be dropped over them`);
+  }
+  if (await knex.schema.hasTable('EventPayment')) {
+    const payments = (await knex.raw(`SELECT count(*)::int AS n FROM "EventPayment"`)).rows[0].n;
+    if (payments) throw new Error(`events-payments down: ${payments} EventPayment row(s) exist; payment records cannot be dropped`);
+  }
+  if (await knex.schema.hasColumn('PaymentRequest', 'eventOrderId')) {
     await knex.schema.alterTable('PaymentRequest', (t) => { t.dropColumn('eventOrderId'); });
   }
   await knex.schema.dropTableIfExists('EventPayment');

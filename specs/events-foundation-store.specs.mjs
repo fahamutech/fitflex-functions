@@ -5,12 +5,12 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
-import { createPgEventStore, movementKeyOf, referenceOf } from '../src/infra/event-store-pg.mjs';
+import { createPgEventStore, movementKeyOf, referenceOf, holdTtlMinutes, RELEASE_REASONS } from '../src/infra/event-store-pg.mjs';
 import { eventStore, opsService } from '../src/bootstrap/services.mjs';
 import { eventHoldExpiry } from '../functions/jobs.mjs';
 
 const uid = p => `${p}_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
-const made = { users: [], organizers: [], events: [] };
+const made = { users: [], organizers: [], events: [], organizations: [] };
 const store = createPgEventStore({ db });
 
 after(async () => {
@@ -18,7 +18,12 @@ after(async () => {
   // Children first; every event-scoped row hangs off the events made here.
   await db('OutboxEvent').whereIn('eventId', made.events).del();
   const orderIds = (await db('EventOrder').whereIn('eventId', made.events).select('id')).map(r => r.id);
-  await db('EventInventoryMovement').whereIn('orderId', orderIds).del();
+  // The ledger is append-only (trigger); test data is removed with the trigger switched off for the statement.
+  await db.transaction(async (trx) => {
+    await trx.raw('ALTER TABLE "EventInventoryMovement" DISABLE TRIGGER ALL');
+    await trx('EventInventoryMovement').whereIn('orderId', orderIds).del();
+    await trx.raw('ALTER TABLE "EventInventoryMovement" ENABLE TRIGGER ALL');
+  });
   await db('EventRegistration').whereIn('orderId', orderIds).del();
   await db('EventOrderLine').whereIn('orderId', orderIds).del();
   await db('EventOrder').whereIn('id', orderIds).del();
@@ -26,6 +31,7 @@ after(async () => {
   await db('EventCategory').whereIn('eventId', made.events).del();
   await db('Event').whereIn('id', made.events).del();
   await db('EventOrganizer').whereIn('id', made.organizers).del();
+  await db('B2BOrganization').whereIn('id', made.organizations).del();
   await db('User').whereIn('id', made.users).del();
   await db('JobRun').where({ job: 'event-hold-expiry' }).del();
   await db.destroy();
@@ -38,10 +44,10 @@ async function user() {
   return id;
 }
 
-/** A published event with one category and one active ticket type. */
-async function fixture({ capacity = 10, priceTzs = 30000, ticketType = {}, event = {} } = {}) {
+/** A published (or, with publish: false, draft) event with one category and one active ticket type. */
+async function fixture({ capacity = 10, priceTzs = 30000, ticketType = {}, event = {}, publish = true } = {}) {
   const ownerUserId = await user();
-  const organizer = await store.createOrganizer({ ownerUserId, name: 'Dar Runners', status: 'active' });
+  const organizer = await store.createOrganizer({ ownerUserId, name: 'Dar Runners' });
   made.organizers.push(organizer.id);
   const created = await store.createEvent({
     organizerId: organizer.id, slug: `dar-half-${uid('').slice(1, 9)}`, title: 'Dar Half Marathon', eventType: 'road',
@@ -49,7 +55,7 @@ async function fixture({ capacity = 10, priceTzs = 30000, ticketType = {}, event
   });
   assert.equal(created.error, undefined, JSON.stringify(created));
   made.events.push(created.id);
-  if (!event.status) {
+  if (publish) {
     assert.equal((await store.transitionEvent(created.id, 'submitted')).to, 'submitted');
     assert.equal((await store.transitionEvent(created.id, 'published')).to, 'published');
   }
@@ -61,7 +67,8 @@ async function fixture({ capacity = 10, priceTzs = 30000, ticketType = {}, event
 }
 
 const participant = (ticketTypeId, i = 0, extra = {}) => ({ ticketTypeId, firstName: `Runner${i}`, lastName: 'Juma', phone: '+255700000001', consentBasis: 'self', ...extra });
-const participants = (ticketTypeId, n) => Array.from({ length: n }, (_, i) => participant(ticketTypeId, i));
+/** A roster: the first place is the purchaser's own (self), the rest are entered on others' behalf. */
+const participants = (ticketTypeId, n) => Array.from({ length: n }, (_, i) => participant(ticketTypeId, i, { consentBasis: i === 0 ? 'self' : 'purchaser_authorised' }));
 const counters = async id => { const r = await db('EventTicketType').where({ id }).first('sold', 'held', 'capacity'); return { sold: r.sold, held: r.held, capacity: r.capacity }; };
 const outboxFor = (eventId, type = null) => db('OutboxEvent').where({ eventId }).modify(q => { if (type) q.where({ type }); }).orderBy('createdAt');
 
@@ -115,7 +122,7 @@ test('createOrderWithHolds: refusals are results — roster mismatch, sale windo
   assert.ok(await store.updateTicketType(f.ticketType.id, { status: 'active' }, { expectedStatus: 'inactive' }));
   assert.equal(await store.updateTicketType(f.ticketType.id, { status: 'active' }, { expectedStatus: 'inactive' }), null, 'compare-and-set refuses once moved on');
   assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 0, capacity: 10 }, 'nothing was held by any refusal');
-  const draft = await fixture({ event: { status: 'draft' } });
+  const draft = await fixture({ publish: false });
   assert.deepEqual(await store.createOrderWithHolds({ eventId: draft.event.id, purchaserUserId: buyer, lines: [{ ticketTypeId: draft.ticketType.id, quantity: 1 }], participants: participants(draft.ticketType.id, 1) }), { error: 'event_not_open', status: 409, eventStatus: 'draft' });
 });
 
@@ -162,12 +169,32 @@ test('idempotency: same key + same fingerprint replays the order; a different fi
   assert.equal(pair[0].order.id, pair[1].order.id);
   assert.equal(pair.filter(r => r.replayed).length, 1);
   assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 2, capacity: 10 });
-  // Without a purchaser the key is not honoured (the unique index is per purchaser): two separate orders.
-  const guest = () => store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: null, lines: [{ ticketTypeId: f.ticketType.id, quantity: 1 }], participants: participants(f.ticketType.id, 1), idempotencyKey: key, fingerprint: 'fp-1' });
+  // Without a purchaser the key is scoped per event (guest) or per organisation (corporate) — review #242.
+  const guest = (over = {}) => store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: null, lines: [{ ticketTypeId: f.ticketType.id, quantity: 1 }], participants: [participant(f.ticketType.id, 0, { consentBasis: 'purchaser_authorised' })], idempotencyKey: key, fingerprint: 'fp-1', ...over });
   const g1 = await guest();
+  assert.equal(g1.error, undefined, JSON.stringify(g1));
+  assert.equal(g1.order.idempotencyKey, key);
   const g2 = await guest();
-  assert.notEqual(g1.order.id, g2.order.id);
-  assert.equal(g1.order.idempotencyKey, null);
+  assert.equal(g2.replayed, true);
+  assert.equal(g2.order.id, g1.order.id, 'guest replay on the same event');
+  assert.deepEqual(await guest({ fingerprint: 'fp-9' }), { error: 'idempotency_key_reused', status: 409 });
+  const elsewhere = await fixture();
+  const g3 = await guest({ eventId: elsewhere.event.id, lines: [{ ticketTypeId: elsewhere.ticketType.id, quantity: 1 }], participants: [participant(elsewhere.ticketType.id, 0, { consentBasis: 'purchaser_authorised' })] });
+  assert.equal(g3.error, undefined, JSON.stringify(g3));
+  assert.notEqual(g3.order.id, g1.order.id, 'another event is another scope');
+  const orgId = uid('b2bo');
+  await db('B2BOrganization').insert({ id: orgId, organizationType: 'employer', legalName: 'Guest Corp' });
+  made.organizations.push(orgId);
+  const c1 = await guest({ organizationId: orgId, participants: [participant(f.ticketType.id, 0, { consentBasis: 'organisation' })] });
+  assert.equal(c1.error, undefined, JSON.stringify(c1));
+  assert.notEqual(c1.order.id, g1.order.id, 'an organisation has its own scope');
+  const c2 = await guest({ organizationId: orgId, participants: [participant(f.ticketType.id, 0, { consentBasis: 'organisation' })] });
+  assert.equal(c2.order.id, c1.order.id);
+  assert.equal(c2.replayed, true);
+  const corp = await Promise.all([1, 2].map(() => guest({ organizationId: orgId, idempotencyKey: `${key}-c`, participants: [participant(f.ticketType.id, 0, { consentBasis: 'organisation' })] })));
+  assert.equal(corp[0].order.id, corp[1].order.id, 'two corporate submissions at once make one order');
+  assert.equal(corp.filter(r => r.replayed).length, 1);
+  assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 5, capacity: 10 });
 });
 
 test('commitOrder: held → sold once, registrations confirmed, one outbox row per registration; a second commit is a no-op', async () => {
@@ -208,16 +235,18 @@ test('releaseOrder: held given back once, order cancelled, registrations cancell
   const f = await fixture({ capacity: 5 });
   const buyer = await user();
   const placed = await store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: buyer, lines: [{ ticketTypeId: f.ticketType.id, quantity: 2 }], participants: participants(f.ticketType.id, 2) });
-  const released = await store.releaseOrder(placed.order.id, 'purchaser_cancelled');
+  assert.deepEqual(await store.releaseOrder(placed.order.id, 'purchaser_cancelled'), { error: 'invalid_reason', status: 400, reason: 'purchaser_cancelled', allowed: [...RELEASE_REASONS] });
+  assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 2, capacity: 5 }, 'a refused reason releases nothing');
+  const released = await store.releaseOrder(placed.order.id, 'cancelled');
   assert.equal(released.error, undefined, JSON.stringify(released));
   assert.equal(released.changed, true);
   assert.equal(released.order.status, 'cancelled');
-  assert.equal(released.order.closeReason, 'purchaser_cancelled');
-  assert.ok(released.registrations.every(r => r.status === 'cancelled' && r.cancelReason === 'purchaser_cancelled'));
+  assert.equal(released.order.closeReason, 'cancelled');
+  assert.ok(released.registrations.every(r => r.status === 'cancelled' && r.cancelReason === 'cancelled'));
   assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 0, capacity: 5 });
   const outbox = await outboxFor(f.event.id, 'registration.cancelled');
   assert.equal(outbox.length, 2);
-  const again = await store.releaseOrder(placed.order.id, 'purchaser_cancelled');
+  const again = await store.releaseOrder(placed.order.id, 'admin');
   assert.equal(again.changed, false);
   assert.deepEqual((await store.movementsOf(placed.order.id)).map(m => m.kind), ['hold', 'release']);
   assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 0, capacity: 5 });
@@ -227,6 +256,8 @@ test('releaseOrder: held given back once, order cancelled, registrations cancell
   // 'expired' as the reason makes the order expired.
   const other = await store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: buyer, lines: [{ ticketTypeId: f.ticketType.id, quantity: 1 }], participants: participants(f.ticketType.id, 1) });
   assert.equal((await store.releaseOrder(other.order.id, 'expired')).order.status, 'expired');
+  const failed = await store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: buyer, lines: [{ ticketTypeId: f.ticketType.id, quantity: 1 }], participants: participants(f.ticketType.id, 1) });
+  assert.deepEqual([(await store.releaseOrder(failed.order.id, 'payment_failed')).order.status, (await store.getOrder(failed.order.id)).order.closeReason], ['cancelled', 'payment_failed']);
 });
 
 test('expireHolds: releases only overdue awaiting_payment orders, is idempotent, and skips an order being committed', async () => {
@@ -279,9 +310,18 @@ test('outbox atomicity: a failure after the inventory moved leaves nothing behin
   await assert.rejects(db.transaction(trx => store.appendOutbox(trx, { type: 'x.y', aggregateType: 'registration' })), /aggregateId/);
 });
 
-test('organizer and event edits: compare-and-set versions and lifecycle refusals', async () => {
-  const f = await fixture({ event: { status: 'draft' } });
+test('organizer and event edits: compare-and-set versions, frozen fields, lifecycle refusals; status never comes from input', async () => {
+  const f = await fixture({ publish: false });
   assert.equal(f.event.version, 1);
+  assert.equal(f.event.status, 'draft');
+  assert.equal(f.organizer.status, 'draft');
+  // status / version / publishedAt / cancelledAt in the input are ignored (review #242).
+  const smuggled = await store.createEvent({ organizerId: f.organizer.id, slug: `smuggled-${uid('').slice(1, 9)}`, title: 'S', eventType: 'road', startsAt: new Date(), endsAt: new Date(), status: 'published', version: 9, publishedAt: new Date(), cancelledAt: new Date() });
+  made.events.push(smuggled.id);
+  assert.deepEqual([smuggled.status, smuggled.version, smuggled.publishedAt, smuggled.cancelledAt], ['draft', 1, null, null]);
+  const smuggledOrg = await store.createOrganizer({ ownerUserId: f.ownerUserId, name: 'Smuggler', status: 'active', statusReason: 'x' });
+  made.organizers.push(smuggledOrg.id);
+  assert.deepEqual([smuggledOrg.status, smuggledOrg.statusReason], ['draft', null]);
   const edited = await store.updateEvent(f.event.id, { title: 'Dar Half Marathon 2027', venueName: 'Coco Beach' }, { expectedVersion: 1 });
   assert.equal(edited.event.version, 2);
   assert.equal(edited.event.title, 'Dar Half Marathon 2027');
@@ -296,6 +336,13 @@ test('organizer and event edits: compare-and-set versions and lifecycle refusals
   assert.equal(published.event.status, 'published');
   assert.ok(published.event.publishedAt);
   assert.equal(published.event.version, 4);
+  // Once past submitted, slug / terms / refund policy are frozen; other fields still move with the version.
+  const frozen = await store.updateEvent(f.event.id, { slug: 'new-slug-after-publish' }, { expectedVersion: 4 });
+  assert.deepEqual(frozen, { error: 'event_frozen_field', status: 409, eventId: f.event.id, field: 'slug', eventStatus: 'published' });
+  assert.equal((await store.updateEvent(f.event.id, { termsSnapshot: { en: 'x', sw: 'y' } }, { expectedVersion: 4 })).error, 'event_frozen_field');
+  assert.equal((await store.updateEvent(f.event.id, { refundPolicySnapshot: { en: 'x', sw: 'y' } }, { expectedVersion: 4 })).error, 'event_frozen_field');
+  assert.equal((await store.updateEvent(f.event.id, { venueName: 'Coco Beach East' }, { expectedVersion: 4 })).event.version, 5);
+  assert.equal((await store.getEvent(f.event.id)).slug, f.event.slug);
   const cancelled = await store.transitionEvent(f.event.id, 'cancelled');
   assert.ok(cancelled.event.cancelledAt);
   assert.equal((await store.transitionEvent(f.event.id, 'published')).error, 'invalid_transition');
@@ -313,8 +360,56 @@ test('organizer and event edits: compare-and-set versions and lifecycle refusals
   assert.equal((await store.updateOrganizer(org.id, { commissionPct: 8 }, { fromStatus: 'rejected' })).commissionPct, 8);
   assert.deepEqual(await store.createOrganizer({ ownerUserId: f.ownerUserId }), { error: 'name_required', status: 400 });
   // A category of another event cannot carry this event's ticket type.
-  const other = await fixture({ event: { status: 'draft' } });
+  const other = await fixture({ publish: false });
   assert.equal((await store.createTicketType({ eventId: f.event.id, categoryId: other.category.id, name: 'x', priceTzs: 1, capacity: 1 })).error, 'category_not_in_event');
+});
+
+test('discounts never come from the client lines; only the server-side discounts map prices them (review #242)', async () => {
+  const f = await fixture({ capacity: 10, priceTzs: 30000 });
+  const buyer = await user();
+  const place = over => store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: buyer, lines: [{ ticketTypeId: f.ticketType.id, quantity: 2, discountTzs: 60000, unitPriceTzs: 1, priceTzs: 1 }], participants: participants(f.ticketType.id, 2), ...over });
+  const r = await place({});
+  assert.equal(r.error, undefined, JSON.stringify(r));
+  assert.deepEqual([r.order.subtotalTzs, r.order.discountTzs, r.order.totalTzs, r.lines[0].discountTzs, r.lines[0].unitPriceTzs], [60000, 0, 60000, 0, 30000]);
+  const d = await place({ discounts: { [f.ticketType.id]: 5000 } });
+  assert.deepEqual([d.order.subtotalTzs, d.order.discountTzs, d.order.totalTzs, d.lines[0].discountTzs, d.lines[0].lineTotalTzs], [60000, 5000, 55000, 5000, 55000]);
+  assert.deepEqual(await place({ discounts: { ett_other: 1 } }), { error: 'invalid_discounts', status: 400, ticketTypeId: 'ett_other' });
+  assert.deepEqual(await place({ discounts: { [f.ticketType.id]: 60001 } }), { error: 'invalid_discount', status: 400, ticketTypeId: f.ticketType.id });
+  assert.deepEqual(await place({ discounts: [5000] }), { error: 'invalid_discounts', status: 400 });
+  // A bad fee rule is refused, not quietly dropped to no fee.
+  assert.deepEqual(await place({ feeRule: { type: 'percent', pct: 250 } }), { error: 'invalid_fee_rule', status: 400, reason: 'pct' });
+  assert.equal((await place({ feeRule: { type: 'percent', pct: 2.5 } })).order.feesTzs, 1500);
+  assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 6, capacity: 10 });
+  // The hold TTL comes from EVENT_HOLD_TTL_MINUTES (default 30), never from the client.
+  assert.equal(holdTtlMinutes(), 30);
+  process.env.EVENT_HOLD_TTL_MINUTES = '15';
+  try { assert.equal(holdTtlMinutes(), 15); } finally { delete process.env.EVENT_HOLD_TTL_MINUTES; }
+  process.env.EVENT_HOLD_TTL_MINUTES = 'soon';
+  try { assert.equal(holdTtlMinutes(), 30); } finally { delete process.env.EVENT_HOLD_TTL_MINUTES; }
+  const t0 = Date.now();
+  const held = await place({});
+  const ttlMs = +new Date(held.order.holdExpiresAt) - t0;
+  assert.ok(ttlMs > 29 * 60_000 && ttlMs <= 31 * 60_000, `default TTL applied (${ttlMs} ms)`);
+});
+
+test('participantUserId is never taken from input: the one self participant is the purchaser, the rest are unclaimed (review #242)', async () => {
+  const f = await fixture({ capacity: 10 });
+  const buyer = await user();
+  const stranger = await user();
+  const r = await store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: buyer, lines: [{ ticketTypeId: f.ticketType.id, quantity: 3 }], participants: [
+    participant(f.ticketType.id, 0, { consentBasis: 'purchaser_authorised', participantUserId: stranger }),
+    participant(f.ticketType.id, 1, { consentBasis: 'self', participantUserId: stranger }),
+    participant(f.ticketType.id, 2, { consentBasis: 'organisation', participantUserId: buyer }),
+  ] });
+  assert.equal(r.error, undefined, JSON.stringify(r));
+  const byName = Object.fromEntries(r.registrations.map(x => [x.firstName, x.participantUserId]));
+  assert.deepEqual(byName, { Runner0: null, Runner1: buyer, Runner2: null });
+  assert.ok(r.registrations.every(x => x.claimedAt === null));
+  assert.deepEqual(await store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: buyer, lines: [{ ticketTypeId: f.ticketType.id, quantity: 2 }], participants: [participant(f.ticketType.id, 0), participant(f.ticketType.id, 1)] }), { error: 'multiple_self_participants', status: 400, index: 1 });
+  // A guest's self participant has no user yet (claimed later).
+  const g = await store.createOrderWithHolds({ eventId: f.event.id, purchaserUserId: null, lines: [{ ticketTypeId: f.ticketType.id, quantity: 1 }], participants: participants(f.ticketType.id, 1) });
+  assert.equal(g.registrations[0].participantUserId, null);
+  assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 4, capacity: 10 });
 });
 
 test('eventHoldExpiry job: does nothing while EVENTS_MODULE is off; releases overdue holds through ops-service when on', async () => {

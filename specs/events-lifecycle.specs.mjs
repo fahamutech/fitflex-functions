@@ -150,9 +150,9 @@ test('quoteLines: percent and flat fee rules round to the whole shilling; discou
   assert.deepEqual(flat.lines.map(l => l.feesTzs), [2000, 1000]);
   assert.equal(flat.feesTzs, 3500);
   assert.equal(flat.totalTzs, 65000 + 3500);
-  assert.deepEqual(normaliseFeeRule({ type: 'percent', pct: -1 }), NO_FEE);
-  assert.deepEqual(normaliseFeeRule({ type: 'surprise' }), NO_FEE);
   assert.deepEqual(normaliseFeeRule(null), NO_FEE);
+  assert.deepEqual(normaliseFeeRule({ type: 'none' }), NO_FEE);
+  assert.deepEqual(normaliseFeeRule({ type: 'percent', pct: 100 }), { type: 'percent', pct: 100, minTzs: 0, maxTzs: null });
 });
 
 test('quoteLines: refusals are results, never thrown', () => {
@@ -165,4 +165,16 @@ test('quoteLines: refusals are results, never thrown', () => {
   assert.deepEqual(quoteLines(snapshot, [{ ticketTypeId: 'ett_a', quantity: 1, discountTzs: 10.5 }]), { error: 'invalid_discount', status: 400, ticketTypeId: 'ett_a' });
   assert.equal(quoteLines([{ id: 'x', priceTzs: 10.5 }], [{ ticketTypeId: 'x', quantity: 1 }]).error, 'invalid_price_snapshot');
   assert.equal(quoteLines([{ id: 'x', priceTzs: 10, currency: 'TZS' }, { id: 'y', priceTzs: 10, currency: 'KES' }], [{ ticketTypeId: 'x', quantity: 1 }]).error, 'currency_mismatch');
+});
+
+test('fee rules outside 0..100 % or of an unknown shape are refused, never silently turned into no fee (review #242)', () => {
+  for (const [rule, reason] of [
+    [{ type: 'percent', pct: -1 }, 'pct'], [{ type: 'percent', pct: 100.5 }, 'pct'], [{ type: 'percent', pct: 'ten' }, 'pct'], [{ type: 'percent', pct: Infinity }, 'pct'],
+    [{ type: 'percent', pct: 5, minTzs: -1 }, 'minTzs'], [{ type: 'percent', pct: 5, minTzs: 100, maxTzs: 50 }, 'maxTzs'],
+    [{ type: 'flat', perTicketTzs: 1.5 }, 'perTicketTzs'], [{ type: 'flat', perOrderTzs: -1 }, 'perOrderTzs'],
+    [{ type: 'surprise' }, 'type'], ['percent', 'shape'], [5, 'shape'],
+  ]) {
+    assert.deepEqual(normaliseFeeRule(rule), { error: 'invalid_fee_rule', status: 400, reason }, JSON.stringify(rule));
+    assert.deepEqual(quoteLines(snapshot, [{ ticketTypeId: 'ett_a', quantity: 1 }], { feeRule: rule }), { error: 'invalid_fee_rule', status: 400, reason });
+  }
 });

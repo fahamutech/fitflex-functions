@@ -12,14 +12,17 @@
 //   value; caps; eligibility; expiry; fundingNote for who pays — D9).
 // - RewardLedgerEntry: APPEND-ONLY. earn | redeem | expire | reverse; a reversal is a new row pointing at
 //   the entry it undoes (reversesEntryId); the balance is Σ points. idempotencyKey is unique so a retry
-//   cannot add a second entry. A trigger refuses UPDATE and DELETE (the same pattern as PartnerKycEvent),
+//   cannot add a second entry. A trigger refuses UPDATE, DELETE and TRUNCATE (the PartnerKycEvent pattern),
 //   which also means a user with ledger rows cannot be deleted through the FK (RESTRICT) — account
 //   deletion for such users is an S6 decision (called out in the PR).
 // - RewardRedemption: a claim of a reward: reserved → redeemed | cancelled | expired; codeHash unique
 //   (the code itself is never stored); idempotencyKey unique.
 //
-// Dormant: no route reads these tables (EVENTS_MODULE off). Down drops the trigger, its function and the
-// seven tables.
+// Medal templates and awards are fenced to one event by composite FKs; awards are ON DELETE RESTRICT on
+// the registration (review #242).
+//
+// Dormant: no route reads these tables (EVENTS_MODULE off). Down drops the triggers, their function and
+// the seven tables, and refuses while any RewardLedgerEntry exists (fail closed).
 
 const AWARD_STATUSES = ['awarded', 'revoked'];
 const DEFINITION_STATUSES = ['draft', 'active', 'paused', 'ended'];
@@ -38,21 +41,24 @@ exports.up = async function up(knex) {
   await knex.schema.createTable('EventMedalTemplate', (t) => {
     t.text('id').primary();
     t.text('eventId').notNullable().references('id').inTable('Event').onDelete('CASCADE').onUpdate('CASCADE');
-    t.text('categoryId').references('id').inTable('EventCategory').onDelete('CASCADE').onUpdate('CASCADE');
+    t.text('categoryId');
     t.jsonb('name').notNullable().defaultTo('{}');
     t.text('imageUrl');
     t.jsonb('rule').notNullable().defaultTo('{}');
     t.text('status').notNullable().defaultTo('active');
     stamps(t);
+    t.unique(['id', 'eventId']);
     t.index(['eventId']);
   });
   await knex.raw(`ALTER TABLE "EventMedalTemplate"
+    ADD CONSTRAINT eventmedaltemplate_category_fk FOREIGN KEY ("categoryId", "eventId") REFERENCES "EventCategory" (id, "eventId") ON DELETE RESTRICT ON UPDATE CASCADE,
     ADD CONSTRAINT eventmedaltemplate_status_check CHECK (status IN ('active', 'inactive'))`);
 
   await knex.schema.createTable('EventMedalAward', (t) => {
     t.text('id').primary();
-    t.text('registrationId').notNullable().references('id').inTable('EventRegistration').onDelete('CASCADE').onUpdate('CASCADE');
-    t.text('medalTemplateId').notNullable().references('id').inTable('EventMedalTemplate').onDelete('RESTRICT').onUpdate('CASCADE');
+    t.text('registrationId').notNullable();
+    t.text('eventId').notNullable();
+    t.text('medalTemplateId').notNullable();
     t.text('awardStatus').notNullable().defaultTo('awarded');
     t.text('sourceResultId').references('id').inTable('EventResult').onDelete('SET NULL').onUpdate('CASCADE');
     t.timestamp('awardedAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
@@ -62,6 +68,8 @@ exports.up = async function up(knex) {
     t.unique(['registrationId', 'medalTemplateId']);
   });
   await knex.raw(`ALTER TABLE "EventMedalAward"
+    ADD CONSTRAINT eventmedalaward_registration_fk FOREIGN KEY ("registrationId", "eventId") REFERENCES "EventRegistration" (id, "eventId") ON DELETE RESTRICT ON UPDATE CASCADE,
+    ADD CONSTRAINT eventmedalaward_template_fk FOREIGN KEY ("medalTemplateId", "eventId") REFERENCES "EventMedalTemplate" (id, "eventId") ON DELETE RESTRICT ON UPDATE CASCADE,
     ADD CONSTRAINT eventmedalaward_status_check CHECK ("awardStatus" IN (${list(AWARD_STATUSES)})),
     ADD CONSTRAINT eventmedalaward_revoked_check CHECK (("awardStatus" = 'revoked') = ("revokedAt" IS NOT NULL))`);
 
@@ -158,6 +166,9 @@ exports.up = async function up(knex) {
   await knex.raw(`CREATE TRIGGER reward_ledger_entry_no_update
     BEFORE UPDATE OR DELETE ON "RewardLedgerEntry"
     FOR EACH ROW EXECUTE FUNCTION reward_ledger_entry_immutable()`);
+  await knex.raw(`CREATE TRIGGER reward_ledger_entry_no_truncate
+    BEFORE TRUNCATE ON "RewardLedgerEntry"
+    FOR EACH STATEMENT EXECUTE FUNCTION reward_ledger_entry_immutable()`);
 
   await knex.schema.createTable('RewardRedemption', (t) => {
     t.text('id').primary();
@@ -182,7 +193,12 @@ exports.up = async function up(knex) {
 
 /** @param {import('knex').Knex} knex */
 exports.down = async function down(knex) {
+  if (await knex.schema.hasTable('RewardLedgerEntry')) {
+    const entries = (await knex.raw(`SELECT count(*)::int AS n FROM "RewardLedgerEntry"`)).rows[0].n;
+    if (entries) throw new Error(`events-rewards down: ${entries} RewardLedgerEntry row(s) exist; the ledger cannot be dropped`);
+  }
   await knex.schema.dropTableIfExists('RewardRedemption');
+  await knex.raw(`DROP TRIGGER IF EXISTS reward_ledger_entry_no_truncate ON "RewardLedgerEntry"`);
   await knex.raw(`DROP TRIGGER IF EXISTS reward_ledger_entry_no_update ON "RewardLedgerEntry"`);
   await knex.schema.dropTableIfExists('RewardLedgerEntry');
   await knex.raw(`DROP FUNCTION IF EXISTS reward_ledger_entry_immutable()`);

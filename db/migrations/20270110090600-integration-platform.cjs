@@ -15,7 +15,8 @@
 //   index finds unpublished rows.
 // - WebhookEndpoint: an organizer's HTTPS URL, the hash of its signing secret, the event types it
 //   subscribes to (jsonb array), active | disabled, lastSuccessAt.
-// - WebhookDelivery: one endpoint × one outbox event (unique), pending → delivered | failed → dead after
+// - WebhookDelivery: one endpoint × one outbox event (unique), ON DELETE RESTRICT on the endpoint
+//   (endpoints are disabled, never deleted — the delivery log is history; review #242), pending → delivered | failed → dead after
 //   retries; attemptCount, nextAttemptAt (backoff), responseCode, lastError. The dispatcher claims rows by
 //   (status, nextAttemptAt) with SKIP LOCKED (S5).
 //
@@ -92,7 +93,7 @@ exports.up = async function up(knex) {
 
   await knex.schema.createTable('WebhookDelivery', (t) => {
     t.text('id').primary();
-    t.text('endpointId').notNullable().references('id').inTable('WebhookEndpoint').onDelete('CASCADE').onUpdate('CASCADE');
+    t.text('endpointId').notNullable().references('id').inTable('WebhookEndpoint').onDelete('RESTRICT').onUpdate('CASCADE');
     t.text('outboxEventId').notNullable().references('id').inTable('OutboxEvent').onDelete('CASCADE').onUpdate('CASCADE');
     t.text('status').notNullable().defaultTo('pending');
     t.integer('attemptCount').notNullable().defaultTo(0);

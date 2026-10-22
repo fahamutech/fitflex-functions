@@ -190,7 +190,89 @@ test('order, line, registration and movement CHECKs: statuses, money arithmetic,
   await rejects(trx, t => t('EventInventoryMovement').insert(mv({ id: uid('eim'), movementKey: 'k2', kind: 'sell' })), '23514');
   await rejects(trx, t => t('EventInventoryMovement').insert(mv({ id: uid('eim'), movementKey: 'k3', quantity: 0 })), '23514');
   await rejects(trx, t => t('EventInventoryMovement').insert(mv({ id: uid('eim'), movementKey: 'k4', cycle: 0 })), '23514');
+  // The ledger is append-only (review #242).
+  await rejects(trx, t => t('EventInventoryMovement').where({ movementKey: `${f.orderId}:1:hold:${f.ticketTypeId}` }).update({ quantity: 2 }), 'P0001');
+  await rejects(trx, t => t('EventInventoryMovement').where({ movementKey: `${f.orderId}:1:hold:${f.ticketTypeId}` }).del(), 'P0001');
+  await rejects(trx, t => t.raw('TRUNCATE "EventInventoryMovement"'), 'P0001');
+  // Guest / corporate idempotency scopes (review #242).
+  await trx('EventOrder').insert(order({ idempotencyKey: 'guest-key-0001', idempotencyFingerprint: 'fp' }));
+  await rejects(trx, t => t('EventOrder').insert(order({ idempotencyKey: 'guest-key-0001', idempotencyFingerprint: 'fp' })), '23505');   // same event, no purchaser
+  await trx('EventOrder').insert(order({ purchaserUserId: f.userId, idempotencyKey: 'guest-key-0001', idempotencyFingerprint: 'fp' }));  // a purchaser's own scope
+  const orgId = uid('b2bo');
+  await trx('B2BOrganization').insert({ id: orgId, organizationType: 'employer', legalName: 'Guest Corp' });
+  await trx('EventOrder').insert(order({ organizationId: orgId, idempotencyKey: 'guest-key-0001', idempotencyFingerprint: 'fp' }));      // the organisation's scope
+  await rejects(trx, t => t('EventOrder').insert(order({ organizationId: orgId, idempotencyKey: 'guest-key-0001', idempotencyFingerprint: 'fp' })), '23505');
 }));
+
+test('registration history is never cascaded away: kit, bibs, results, medals, team membership RESTRICT; endpoints and audited events too (review #242)', () => inRollback(async (trx) => {
+  const f = await orderFixture(trx);
+  const [reg] = await trx('EventRegistration').insert(f.reg({ status: 'confirmed' })).returning('id');
+  const registrationId = reg.id;
+  await trx('EventKitCollection').insert({ id: uid('ekc'), registrationId, eventId: f.eventId, status: 'collected' });
+  await trx('EventBibAssignment').insert({ id: uid('ebb'), eventId: f.eventId, categoryId: f.categoryId, registrationId, bibNumber: '7' });
+  await trx('EventResult').insert({ id: uid('ers'), registrationId, sourceType: 'organizer_verified', finishStatus: 'dnf' });
+  const [tpl] = await trx('EventMedalTemplate').insert({ id: uid('emt'), eventId: f.eventId, name: JSON.stringify({ en: 'Finisher', sw: 'Mmalizaji' }) }).returning('id');
+  await trx('EventMedalAward').insert({ id: uid('ema'), registrationId, eventId: f.eventId, medalTemplateId: tpl.id });
+  const [team] = await trx('EventTeam').insert({ id: uid('etm'), eventId: f.eventId, name: 'Team A', teamType: 'club', captainRegistrationId: registrationId }).returning('id');
+  await trx('EventTeamMember').insert({ id: uid('etmm'), teamId: team.id, eventId: f.eventId, registrationId, role: 'captain' });
+  await rejects(trx, t => t('EventRegistration').where({ id: registrationId }).del(), '23503', '23001');
+  await rejects(trx, t => t('EventMedalTemplate').where({ id: tpl.id }).del(), '23503', '23001');
+  await trx('EventChangeLog').insert({ id: uid('ecl'), eventId: f.eventId, field: 'title', before: JSON.stringify('a'), after: JSON.stringify('b') });
+  await rejects(trx, t => t('Event').where({ id: f.eventId }).del(), '23503', '23001');
+  const [ep] = await trx('WebhookEndpoint').insert({ id: uid('whe'), organizerId: f.organizerId, url: 'https://hooks.example.org/x', secretHash: 'h' }).returning('id');
+  const [ob] = await trx('OutboxEvent').insert({ id: uid('obx'), type: 'registration.created', aggregateType: 'registration', aggregateId: registrationId }).returning('id');
+  await trx('WebhookDelivery').insert({ id: uid('whd'), endpointId: ep.id, outboxEventId: ob.id });
+  await rejects(trx, t => t('WebhookEndpoint').where({ id: ep.id }).del(), '23503', '23001');
+  // An activity link survives its activity (SET NULL), keeping the evidence row.
+  const activityId = uid('act');
+  await trx('Activity').insert({ id: activityId, userId: f.userId, type: 'running', source: 'fitflex', startedAt: new Date() });
+  const [link] = await trx('EventActivityLink').insert({ id: uid('eal'), registrationId, activityId, clientRef: 'client-ref-0002' }).returning('id');
+  await trx('Activity').where({ id: activityId }).del();
+  const kept = await trx('EventActivityLink').where({ id: link.id }).first();
+  assert.equal(kept.activityId, null);
+  assert.equal(kept.clientRef, 'client-ref-0002');
+}));
+
+test('tenancy fences: a kit collection, bib, medal, team member or collection point of another event is refused (review #242)', () => inRollback(async (trx) => {
+  const f = await orderFixture(trx);
+  const other = await orderFixture(trx);
+  const [reg] = await trx('EventRegistration').insert(f.reg({ status: 'confirmed' })).returning('id');
+  const [foreignReg] = await trx('EventRegistration').insert(other.reg({ status: 'confirmed' })).returning('id');
+  const [point] = await trx('EventCollectionPoint').insert({ id: uid('ecp'), eventId: other.eventId, name: 'Expo' }).returning('id');
+  await rejects(trx, t => t('EventKitCollection').insert({ id: uid('ekc'), registrationId: reg.id, eventId: other.eventId, status: 'collected' }), '23503');
+  await rejects(trx, t => t('EventKitCollection').insert({ id: uid('ekc'), registrationId: reg.id, eventId: f.eventId, collectionPointId: point.id, status: 'collected' }), '23503');
+  await rejects(trx, t => t('EventBibAssignment').insert({ id: uid('ebb'), eventId: f.eventId, categoryId: f.categoryId, registrationId: foreignReg.id, bibNumber: '9' }), '23503');
+  // A registration's bib must be in the registration's own category.
+  const [cat2] = await trx('EventCategory').insert({ id: uid('evc'), eventId: f.eventId, name: '5K', distanceMeters: 5000 }).returning('id');
+  await rejects(trx, t => t('EventBibAssignment').insert({ id: uid('ebb'), eventId: f.eventId, categoryId: cat2.id, registrationId: reg.id, bibNumber: '9' }), '23503');
+  await rejects(trx, t => t('EventMedalTemplate').insert({ id: uid('emt'), eventId: f.eventId, categoryId: other.categoryId }), '23503');
+  const [tpl] = await trx('EventMedalTemplate').insert({ id: uid('emt'), eventId: other.eventId }).returning('id');
+  await rejects(trx, t => t('EventMedalAward').insert({ id: uid('ema'), registrationId: reg.id, eventId: f.eventId, medalTemplateId: tpl.id }), '23503');
+  await rejects(trx, t => t('EventTeam').insert({ id: uid('etm'), eventId: f.eventId, name: 'T', teamType: 'club', captainRegistrationId: foreignReg.id }), '23503');
+  const [team] = await trx('EventTeam').insert({ id: uid('etm'), eventId: f.eventId, name: 'T', teamType: 'club' }).returning('id');
+  await rejects(trx, t => t('EventTeamMember').insert({ id: uid('etmm'), teamId: team.id, eventId: f.eventId, registrationId: foreignReg.id }), '23503');
+  await rejects(trx, t => t('EventTeamMember').insert({ id: uid('etmm'), teamId: team.id, eventId: other.eventId, registrationId: foreignReg.id }), '23503');
+  await trx('EventTeamMember').insert({ id: uid('etmm'), teamId: team.id, eventId: f.eventId, registrationId: reg.id });
+}));
+
+test('rolling back over data fails closed: orders, payments, ledger entries and event payment requests block their down (review #242)', async () => {
+  const [, , orders, payments, , rewards] = MIGRATIONS;
+  await inRollback(async (trx) => {
+    const f = await orderFixture(trx);
+    await assert.rejects(orders.down(trx), /1 EventOrder row/);
+    await trx('EventPayment').insert({ id: uid('epy'), orderId: f.orderId, provider: 'manual', merchantReference: uid('MR'), amountTzs: 1 });
+    await assert.rejects(payments.down(trx), /EventPayment row/);
+  });
+  await inRollback(async (trx) => {
+    const f = await orderFixture(trx);
+    await trx('PaymentRequest').insert({ id: uid('pay'), memberId: f.userId, tier: 'event', amountTzs: 1, status: 'pending', provider: 'manual', eventOrderId: f.orderId });
+    await assert.rejects(payments.down(trx), /PaymentRequest row/);
+    await trx('RewardLedgerEntry').insert({ id: uid('rle'), userId: f.userId, entryType: 'earn', points: 1, sourceType: 'test', idempotencyKey: uid('idem'), occurredAt: new Date() });
+    await assert.rejects(rewards.down(trx), /RewardLedgerEntry row/);
+  });
+  for (const t of TABLES) assert.equal(await db.schema.hasTable(t), true, `${t} still present`);
+  assert.equal(await db.schema.hasColumn('PaymentRequest', 'eventOrderId'), true);
+});
 
 test('payment CHECKs and PaymentRequest.eventOrderId', () => inRollback(async (trx) => {
   const f = await orderFixture(trx);
@@ -219,7 +301,7 @@ test('ticket, kit, bib, result and activity-link CHECKs and partial uniques', ()
   await trx('EventTicket').insert(tk());
   await rejects(trx, t => t('EventTicket').insert(tk()), '23505');                                           // one active ticket
   await trx('EventTicket').insert(tk({ status: 'revoked', revokedAt: new Date() }));
-  const kit = extra => ({ id: uid('ekc'), registrationId, status: 'collected', ...extra });
+  const kit = extra => ({ id: uid('ekc'), registrationId, eventId: f.eventId, status: 'collected', ...extra });
   await rejects(trx, t => t('EventKitCollection').insert(kit({ status: 'handed' })), '23514');
   await rejects(trx, t => t('EventKitCollection').insert(kit({ status: 'corrected' })), '23514');           // needs reason + supersedes
   const [first] = await trx('EventKitCollection').insert(kit()).returning('id');
@@ -273,10 +355,11 @@ test('reward tables: CHECKs, unique award keys, and the append-only ledger trigg
   // Append-only: the trigger refuses UPDATE and DELETE.
   await rejects(trx, t => t('RewardLedgerEntry').where({ id: earned.id }).update({ points: 1 }), 'P0001');
   await rejects(trx, t => t('RewardLedgerEntry').where({ id: earned.id }).del(), 'P0001');
+  await rejects(trx, t => t.raw('TRUNCATE "RewardLedgerEntry" CASCADE'), 'P0001');
   await rejects(trx, t => t('RewardRedemption').insert({ id: uid('rrd'), userId: f.userId, rewardDefinitionId: reward.id, codeHash: 'c1', status: 'used' }), '23514');
   await trx('RewardRedemption').insert({ id: uid('rrd'), userId: f.userId, rewardDefinitionId: reward.id, codeHash: 'c1' });
   await rejects(trx, t => t('RewardRedemption').insert({ id: uid('rrd'), userId: f.userId, rewardDefinitionId: reward.id, codeHash: 'c1' }), '23505');
-  await rejects(trx, t => t('EventMedalAward').insert({ id: uid('ema'), registrationId: 'erg_none', medalTemplateId: 'emt_none' }), '23503');
+  await rejects(trx, t => t('EventMedalAward').insert({ id: uid('ema'), registrationId: 'erg_none', eventId: f.eventId, medalTemplateId: 'emt_none' }), '23503');
 }));
 
 test('integration platform: API client, outbox, webhook endpoint and delivery CHECKs', () => inRollback(async (trx) => {
