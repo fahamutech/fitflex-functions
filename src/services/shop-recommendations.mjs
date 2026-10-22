@@ -427,7 +427,7 @@ const COPY = {
   // describeSections from what actually put the products there. [SW review]
   popular_near_you: {
     title: { all: { en: 'Popular near you', sw: 'Maarufu karibu nawe' } },
-    reason: () => NEAR_COPY.delivers_to_area(''),
+    reason: () => NEAR_COPY.delivers_to_area(),
     codes: () => ['delivers_to_area'],
   },
   recently_viewed: {
@@ -458,10 +458,11 @@ const PERSONAL_COPY = {
 };
 // Slice 3 reasons, in the order they are listed. [SW review] delivers_to_area is the spec §10.6 fixed text.
 export const NEAR_REASON_CODES = Object.freeze(['popular_in_area', 'delivers_to_area', 'seller_in_area']);
+// `area` is { en, sw } (the place name in each language; Swahili names from GeoArea.nameSw, native review).
 const NEAR_COPY = {
-  popular_in_area: area => ({ en: `Popular with shoppers in ${area}.`, sw: `Maarufu kwa wanunuzi wa ${area}.` }),
-  delivers_to_area: () => ({ en: 'It delivers to your current area.', sw: 'Ina delivery kwenye eneo ulipo sasa.' }),
-  seller_in_area: area => ({ en: `From sellers based in ${area}.`, sw: `Kutoka kwa wauzaji walioko ${area}.` }),
+  popular_in_area: area => ({ en: `Popular with shoppers in ${area.en}.`, sw: `Maarufu kwa wanunuzi wa ${area.sw}.` }),
+  delivers_to_area: () => ({ en: 'These sellers deliver to your current area.', sw: 'Wauzaji hawa wana delivery hadi eneo ulipo sasa.' }),
+  seller_in_area: area => ({ en: `From sellers based in ${area.en}.`, sw: `Kutoka kwa wauzaji walioko ${area.sw}.` }),
 };
 
 /** Which near-you reasons hold for the products shown (closed list, NEAR_REASON_CODES order). */
@@ -489,7 +490,8 @@ export function describeSections(sections, needs, personal = {}) {
     let reasonParams = null;
     const mine = personal[s.key] || {};
     if (s.key === 'popular_near_you' && needs.location) {
-      const areaName = needs.location.area.name;
+      const a = needs.location.area;
+      const areaName = a.names ? { en: a.names.en, sw: a.names.sw } : { en: a.name, sw: a.name };
       reasonCodes = nearReasonCodes(s.productIds, needs.location, id => s.vendorOf?.(id));
       if (!reasonCodes.length) reasonCodes = ['seller_in_area'];
       reason = NEAR_COPY[reasonCodes[0]](areaName);

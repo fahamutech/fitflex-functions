@@ -16,7 +16,7 @@ import { shopHome, shopAreas, resetShopHomeLimits } from '../functions/shop-home
 import { getShopPreferences } from '../functions/shop-preferences.mjs';
 import { vendorProfile, vendorSaveProfile, adminListVendors, adminUpdateVendor, vendorToolsOptionsRoute } from '../functions/shop.mjs';
 import { shopHomeService } from '../src/bootstrap/services.mjs';
-import { listGeoAreas, createGeoArea } from '../functions/promotions.mjs';
+import { listGeoAreas, createGeoArea, updateGeoArea } from '../functions/promotions.mjs';
 
 const require = createRequire(import.meta.url);
 const migration = require('../db/migrations/20270111120000-vendor-shop-areas.cjs');
@@ -26,7 +26,7 @@ await ensureInit();
 const tag = randomUUID().slice(0, 6);
 const A = {
   region: `nyt${tag}-reg`, city: `nyt${tag}-city`, district: `nyt${tag}-dist`, other: `nyt${tag}-dist2`,
-  farRegion: `nyt${tag}-far`, farCity: `nyt${tag}-farcity`, off: `nyt${tag}-off`,
+  farRegion: `nyt${tag}-far`, farCity: `nyt${tag}-farcity`, off: `nyt${tag}-off`, tiny: `nyt${tag}-tiny`, smallCity: `nyt${tag}-smallcity`,
 };
 // Unique names, so the backfill can only match these.
 const N = { region: `Nyreg${tag}`, city: `Nycity${tag}`, district: `Nydist${tag}`, farCity: `Nyfar${tag}` };
@@ -41,8 +41,9 @@ function res() {
     set(k, v) { this.headers[k] = v; return this; },
   };
 }
-async function call(route, claims, { query = {}, body = {}, params = {} } = {}) {
-  const req = { headers: claims ? { authorization: `Bearer ${sign(claims)}` } : {}, params, query, body, get: () => null };
+async function call(route, claims, { query = {}, body = {}, params = {}, headers = {} } = {}) {
+  const all = { ...(claims ? { authorization: `Bearer ${sign(claims)}` } : {}), ...headers };
+  const req = { headers: all, params, query, body, get: name => all[String(name).toLowerCase()] ?? null };
   const out = res();
   for (const guard of [route.onGuard].flat().filter(Boolean)) {
     let passed = false;
@@ -78,6 +79,9 @@ await db('GeoArea').insert([
   { id: A.farRegion, level: 'region', name: `Nyfarreg${tag}`, parentId: 'tz', lat: -9, lng: 33, radiusKm: 50 },
   { id: A.farCity, level: 'city', name: N.farCity, parentId: A.farRegion, lat: -9, lng: 33, radiusKm: 20 },
   { id: A.off, level: 'city', name: `Nyoff${tag}`, parentId: A.region, lat: -1, lng: 30, radiusKm: 5, active: false },
+  // M1: too small to stand for a position (district < 2 km, city < 5 km).
+  { id: A.tiny, level: 'district', name: `Nytiny${tag}`, nameSw: `Nytiny-sw${tag}`, parentId: A.city, lat: -1.02, lng: 30.02, radiusKm: 1, active: true },
+  { id: A.smallCity, level: 'city', name: `Nysmall${tag}`, parentId: A.region, lat: -1.3, lng: 30.3, radiusKm: 3, active: true },
 ]);
 
 beforeEach(() => {
@@ -96,8 +100,10 @@ after(async () => {
   await db('ShopPreference').whereIn('personId', db('User').whereIn('id', made.users).select('personId')).del();
   await db('Product').whereIn('id', made.products).del();
   await db('User').whereIn('id', made.users).del();
-  await db('GeoArea').whereIn('id', [A.district, A.other, A.off]).del();
-  await db('GeoArea').whereIn('id', [A.city, A.farCity]).del();
+  await db('AuditLog').whereIn('target', Object.values(A)).del();
+  await db('GeoArea').whereIn('id', [A.district, A.other, A.off, A.tiny]).del();
+  await db('GeoArea').whereIn('parentId', [A.city]).del();
+  await db('GeoArea').whereIn('id', [A.city, A.farCity, A.smallCity]).del();
   await db('GeoArea').whereIn('id', [A.region, A.farRegion]).del();
   await db.destroy();
 });
@@ -115,7 +121,13 @@ test('GET /shop/areas: flag off 404; signed out 401; on → usable areas only, c
   const ids = out.body.areas.map(a => a.id);
   for (const id of [A.region, A.city, A.district, 'tz', 'tz-dar-city']) assert.ok(ids.includes(id), id);
   assert.ok(!ids.includes(A.off), 'inactive left out');
-  assert.deepEqual(out.body.areas.find(a => a.id === A.district), { id: A.district, level: 'district', name: N.district, names: { en: N.district, sw: N.district }, parentId: A.city, lat: -1.01, lng: 30.01, radiusKm: 4 });
+  assert.deepEqual(out.body.areas.find(a => a.id === A.district), { id: A.district, level: 'district', name: N.district, names: { en: N.district, sw: N.district }, parentId: A.city, locatable: true, lat: -1.01, lng: 30.01, radiusKm: 4 });
+  // M1: listed for vendor pickers, but no circle the device could map to; Swahili name from nameSw.
+  assert.deepEqual(out.body.areas.find(a => a.id === A.tiny), { id: A.tiny, level: 'district', name: `Nytiny${tag}`, names: { en: `Nytiny${tag}`, sw: `Nytiny-sw${tag}` }, parentId: A.city, locatable: false, lat: null, lng: null, radiusKm: null });
+  assert.equal(out.body.areas.find(a => a.id === A.smallCity).locatable, false);
+  // The seeded Swahili names (native review).
+  assert.deepEqual(out.body.areas.find(a => a.id === 'tz-znz-city').names, { en: 'Zanzibar City', sw: 'Mji wa Zanzibar' });
+  assert.deepEqual(out.body.areas.find(a => a.id === 'tz-znz-stone-town').names, { en: 'Stone Town', sw: 'Mji Mkongwe' });
   assert.deepEqual(Object.keys(out.body), ['areas']);
 });
 
@@ -234,19 +246,34 @@ test('home: flag on + personalisation on → popular_near_you from the database;
   process.env.SHOP_NEAR_YOU = '1';
   const { p } = await nearCatalogue();
   const m = await member();
-  const { out, seen } = await withQueries(() => call(shopHome, asMember(m), { query: { areaId: A.district } }));
+  const { out, seen } = await withQueries(() => call(shopHome, asMember(m), { headers: { 'x-ff-area': A.district } }));
   assert.equal(out.statusCode, 200, JSON.stringify(out.body));
   assert.deepEqual(out.body.nearYou, { available: true, areaId: A.district, areaName: { en: N.district, sw: N.district } });
   const near = out.body.sections.find(s => s.key === 'popular_near_you');
   assert.ok(near, JSON.stringify(out.body.sections));
   assert.deepEqual([...near.productIds].sort(), [...p.based, ...p.delivers].sort(), 'the far vendor (and its 0.5 km distance) is not near');
-  assert.deepEqual(near.reasonParams, { areaName: N.district });
+  assert.deepEqual(near.reasonParams, { areaName: { en: N.district, sw: N.district } });
   for (const id of p.delivers) assert.equal(out.body.products[id].deliversToViewerArea, true);
   for (const id of p.based) assert.equal(out.body.products[id].deliversToViewerArea, undefined);
   assert.ok(seen.length > 0, 'queries were captured');
   const writes = seen.filter(q => /^\s*(insert|update|delete|upsert|merge|create|alter|drop|truncate)\b/i.test(q.sql));
   assert.deepEqual(writes, [], 'GET /shop/home writes nothing');
   assert.deepEqual(seen.filter(q => q.sql.includes(A.district) || q.bindings.includes(A.district)), [], 'the areaId is in no query');
+});
+
+test('home: X-FF-Area header is preferred over ?areaId=; ?areaId= still works; too-small areas are ignored (M1, M3)', async () => {
+  process.env.SHOP_PERSONALISATION = '1';
+  process.env.SHOP_NEAR_YOU = '1';
+  await nearCatalogue();
+  const m = await member();
+  const areaOf = async opts => (await call(shopHome, asMember(m), opts)).body.nearYou;
+  assert.equal((await areaOf({ headers: { 'x-ff-area': A.city }, query: { areaId: A.district } })).areaId, A.city, 'header wins');
+  assert.equal((await areaOf({ query: { areaId: A.district } })).areaId, A.district, 'query still accepted (one release)');
+  assert.equal((await areaOf({ headers: { 'x-ff-area': '  ' }, query: { areaId: A.district } })).areaId, A.district, 'blank header falls back');
+  for (const small of [A.tiny, A.smallCity]) {
+    const near = await areaOf({ headers: { 'x-ff-area': small } });
+    assert.deepEqual(near, { available: true }, small);
+  }
 });
 
 test('home: flag off → byte-identical body with or without areaId; switch off / under 18 → no section, no badge', async () => {
@@ -299,6 +326,15 @@ test('request log: the real request logger (morgan, as bfast-function mounts it)
     const okRes = await fetch(`${base}/shop/home?mode=member&areaId=${A.district}`, { headers: { authorization: `Bearer ${token}` } });
     assert.equal(okRes.status, 200);
     assert.equal((await okRes.json()).nearYou.areaId, A.district, 'the handler still read the areaId');
+    // M3: the header (never in the log line), and keys hidden by percent-encoding, case or brackets.
+    const viaHeader = await fetch(`${base}/shop/home?mode=member`, { headers: { authorization: `Bearer ${token}`, 'x-ff-area': A.district } });
+    assert.equal((await viaHeader.json()).nearYou.areaId, A.district);
+    for (const q of [`%61reaId=${A.district}`, `area%49d=${A.district}`, `AREAID=${A.district}`, `areaId[]=${A.district}`, `areaId%5B%5D=${A.district}`, `%2561reaId=${A.district}`, `mode=member&areaid=${encodeURIComponent(A.district)}`]) {
+      const r = await fetch(`${base}/shop/home?${q}`, { headers: { authorization: `Bearer ${token}` } });
+      assert.ok([200, 403].includes(r.status), `${q}: ${r.status}`);
+    }
+    const encoded = await fetch(`${base}/shop/home?%61reaId=${A.district}`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal((await encoded.json()).nearYou.areaId, A.district, 'Express decodes %61reaId to areaId — exactly why it must be redacted');
     assert.equal((await fetch(`${base}/shop/home?areaId=${A.district}`)).status, 401);
     delete process.env.SHOP_HOME_V2;
     assert.equal((await fetch(`${base}/shop/home?areaId=${A.district}&mode=member`, { headers: { authorization: `Bearer ${token}` } })).status, 404);
@@ -307,7 +343,7 @@ test('request log: the real request logger (morgan, as bfast-function mounts it)
     for (const k of Object.keys(orig)) console[k] = orig[k];
     await new Promise(r => server.close(r));
   }
-  assert.equal(lines.length, 3, lines.join(''));
+  assert.equal(lines.length, 12, lines.join(''));
   assert.ok(lines.every(l => l.includes('/shop/home')), lines.join(''));
   assert.ok(lines.some(l => l.includes('/shop/home?mode=member')), 'other parameters still logged');
   assert.deepEqual([...lines, ...consoleLines].filter(l => l.includes(A.district) || l.includes(N.district) || /areaId/i.test(l)), []);
@@ -331,4 +367,27 @@ test('admin areas: GET /admin/geo-areas opens to the shop scope (read only); POS
     assert.deepEqual([out.body.error, out.body.ids, out.body.reason], ['invalid_area', ids, reason]);
   }
   assert.equal((await profileOf(v)).cityId, undefined);
+});
+
+test('area Swahili names: POST /admin/geo-areas takes nameSw; PATCH sets / clears it (campaigns only), audited', async () => {
+  const id = await user('admin');
+  const portal = scopes => ({ sub: id, userType: 'admin', portalUser: true, aclPermissions: scopes });
+  const made1 = await call(createGeoArea, portal(['campaigns']), { body: { level: 'district', name: `Nynew${tag}`, nameSw: ` Mpya${tag} `, parentId: A.city, lat: -1, lng: 30, radiusKm: 3 } });
+  assert.equal(made1.statusCode, 201, JSON.stringify(made1.body));
+  const newId = made1.body.area.id;
+  assert.equal((await db('GeoArea').where({ id: newId }).first()).nameSw, `Mpya${tag}`);
+  assert.equal((await call(updateGeoArea, portal(['shop']), { params: { id: newId }, body: { nameSw: 'x' } })).statusCode, 403, 'shop is read only');
+  const set = await call(updateGeoArea, portal(['campaigns']), { params: { id: A.district }, body: { nameSw: `Wilaya${tag}` } });
+  assert.equal(set.statusCode, 200, JSON.stringify(set.body));
+  assert.equal((await db('GeoArea').where({ id: A.district }).first()).nameSw, `Wilaya${tag}`);
+  process.env.SHOP_NEAR_YOU = '1';
+  const m = await member();
+  assert.deepEqual((await call(shopAreas, asMember(m))).body.areas.find(a => a.id === A.district).names, { en: N.district, sw: `Wilaya${tag}` });
+  const audit = await db('AuditLog').where({ target: A.district, action: 'promotion.geo_area_updated' }).first();
+  assert.deepEqual([audit.before, audit.after], [{ nameSw: null }, { nameSw: `Wilaya${tag}` }]);
+  assert.equal((await call(updateGeoArea, portal(['campaigns']), { params: { id: A.district }, body: { nameSw: null } })).statusCode, 200);
+  assert.equal((await db('GeoArea').where({ id: A.district }).first()).nameSw, null);
+  assert.equal((await call(updateGeoArea, portal(['campaigns']), { params: { id: A.district }, body: { name: 'x' } })).statusCode, 422);
+  assert.equal((await call(updateGeoArea, portal(['campaigns']), { params: { id: A.district }, body: { nameSw: 5 } })).statusCode, 422);
+  assert.equal((await call(updateGeoArea, portal(['campaigns']), { params: { id: 'nope-q' }, body: { nameSw: 'x' } })).statusCode, 404);
 });

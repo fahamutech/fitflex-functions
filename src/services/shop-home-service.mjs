@@ -13,7 +13,14 @@
 import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recommendations.mjs';
 import { purchaseHistoryFrom, audienceFrom, historyDaysFromEnv } from './shop-personalisation.mjs';
 import { shopBannersOn, shopPersonalisationOn, shopNearYouOn } from '../shared/feature-flags.mjs';
-import { indexAreas, resolveViewerArea, vendorAreasOf, deliversTo, basedIn, publicAreas } from '../shared/shop-areas.mjs';
+import { indexAreas, resolveViewerArea, vendorAreasOf, deliversTo, basedIn, publicAreas, minRadiusFromEnv } from '../shared/shop-areas.mjs';
+
+/**
+ * Privacy (review M2, owner 2026-10-22: k = 5): a product counts as popular in a city only when at least
+ * this many DISTINCT buyers picked it up at gyms there in the last 30 days, and a city (or region) needs
+ * at least this many distinct buyers overall before any local ranking is used. Below that: 0.
+ */
+export const NEAR_MIN_BUYERS = 5;
 import { withoutTargets } from '../shared/product-targets.mjs';
 
 const usable = p => !p.portalOnly && p.accountStatus !== 'suspended' && p.approvalStatus !== 'rejected';
@@ -52,6 +59,8 @@ export function createShopHomeService({
   geoAreas = null,
   gymAreas = null,
   nearYouOn = shopNearYouOn,
+  // M1: the minimum area size the shop uses ({ district, city } km; floors 2 and 5).
+  minRadius = () => minRadiusFromEnv(),
   logger = console,
   config = () => shopHomeConfigFromEnv(),
   now = () => new Date(),
@@ -71,13 +80,39 @@ export function createShopHomeService({
 
   const nearWanted = () => Boolean(geoAreas) && nearYouOn();
 
-  /** Non-personal area data for near-you: the area index, each vendor's areas, each pickup gym's city/region. */
-  async function loadNear(vendors) {
+  /**
+   * Non-personal area data for near-you: the area index, each vendor's areas, and per city / region the
+   * local pickup counts — distinct buyers per product, kept only at or above NEAR_MIN_BUYERS, and only
+   * where the area has at least NEAR_MIN_BUYERS distinct buyers overall. Buyer ids are counted here and
+   * then dropped: the cache keeps numbers, never who bought.
+   */
+  async function loadNear(vendors, orders) {
     const [areaRows, gymRows] = await Promise.all([geoAreas.allAsync(), gymAreas ? gymAreas() : []]);
     const index = indexAreas(areaRows);
     const vendorAreas = new Map(vendors.map(v => [v.id, vendorAreasOf(v.vendorProfile, index)]));
     const gymArea = new Map((gymRows || []).map(g => [g.id, { cityId: g.cityId || null, regionId: g.regionId || null }]));
-    return { index, vendorAreas, gymArea };
+    const raw = new Map(); // 'city:<id>' | 'region:<id>' → { buyers: Set, products: Map(productId → Set(buyerId)) }
+    for (const order of orders || []) {
+      if (order.paymentStatus !== undefined && order.paymentStatus !== 'paid') continue;
+      const g = order.pickupGymId ? gymArea.get(order.pickupGymId) : null;
+      if (order.status === 'cancelled' || !g || !order.buyerId) continue;
+      for (const key of [g.cityId && `city:${g.cityId}`, g.regionId && `region:${g.regionId}`].filter(Boolean)) {
+        const a = raw.get(key) || { buyers: new Set(), products: new Map() };
+        a.buyers.add(order.buyerId);
+        for (const id of new Set((order.items || []).map(i => i?.productId).filter(Boolean))) {
+          if (!a.products.has(id)) a.products.set(id, new Set());
+          a.products.get(id).add(order.buyerId);
+        }
+        raw.set(key, a);
+      }
+    }
+    const localSales = new Map();
+    for (const [key, a] of raw) {
+      if (a.buyers.size < NEAR_MIN_BUYERS) continue;
+      const counts = new Map([...a.products].filter(([, b]) => b.size >= NEAR_MIN_BUYERS).map(([id, b]) => [id, b.size]));
+      if (counts.size) localSales.set(key, counts);
+    }
+    return { index, vendorAreas, localSales };
   }
 
   async function rebuild(at) {
@@ -94,22 +129,24 @@ export function createShopHomeService({
     // Vendors suspended on their account (not only in moderation) are left out of the home.
     const vendorIds = [...new Set(products.map(p => p.vendorId).filter(Boolean))];
     const vendors = vendorIds.length ? await users.filterByColumnInAsync('id', vendorIds) : [];
+    // M2: the local counts need who bought (distinct buyers); computed once, then buyer ids are not cached.
+    const near = nearWanted() ? await loadNear(vendors, orders) : null;
     const value = {
       products,
       suspendedVendorIds: vendors.filter(v => v.accountStatus === 'suspended').map(v => v.id),
-      orders,
+      orders: (orders || []).map(({ buyerId, pickupGymId, ...rest }) => rest),
       featured,
       paidPlacementIds: [...new Set([...live.map(p => p.entityId), ...featured.map(f => f.productId)])],
-      ...(nearWanted() ? { near: await loadNear(vendors) } : {}),
+      ...(near ? { near } : {}),
     };
     cache = { at, value };
     return value;
   }
 
   /**
-   * needs.location for this viewer: which vendors are based in or deliver to the area, and local
-   * sales = paid orders of the last 30 days picked up at a gym in the viewer's city (region-level
-   * viewer: region). Home-delivery addresses are free text and are not read.
+   * needs.location for this viewer: which vendors are based in or deliver to the area, and the local
+   * counts (distinct buyers, k-thresholded in loadNear) for the viewer's city, or region for a
+   * region-level viewer. Home-delivery addresses are free text and are not read.
    */
   function nearLocation(shared, viewer) {
     const vendors = new Map();
@@ -117,29 +154,20 @@ export function createShopHomeService({
       const m = { basedIn: basedIn(areasOfVendor, viewer), delivers: deliversTo(areasOfVendor, viewer) };
       if (m.basedIn || m.delivers) vendors.set(vendorId, m);
     }
-    const inArea = gymId => {
-      const g = gymId ? shared.near.gymArea.get(gymId) : null;
-      if (!g) return false;
-      return viewer.cityId ? g.cityId === viewer.cityId : Boolean(viewer.regionId) && g.regionId === viewer.regionId;
-    };
-    const areaSales = new Map();
-    for (const order of shared.orders || []) {
-      if (order.paymentStatus !== undefined && order.paymentStatus !== 'paid') continue;
-      if (order.status === 'cancelled' || !inArea(order.pickupGymId)) continue;
-      for (const id of new Set((order.items || []).map(i => i?.productId).filter(Boolean))) areaSales.set(id, (areaSales.get(id) || 0) + 1);
-    }
-    return { area: { areaId: viewer.areaId, name: viewer.name, cityId: viewer.cityId, regionId: viewer.regionId, chain: viewer.chain }, vendors, areaSales };
+    const key = viewer.cityId ? `city:${viewer.cityId}` : viewer.regionId ? `region:${viewer.regionId}` : null;
+    const areaSales = (key && shared.near.localSales.get(key)) || new Map();
+    return { area: { areaId: viewer.areaId, name: viewer.name, names: viewer.names, cityId: viewer.cityId, regionId: viewer.regionId, chain: viewer.chain }, vendors, areaSales };
   }
 
   const nearYouOf = (state, viewer, shared) => ({
     available: Boolean(state?.enabled && shared.near),
-    ...(viewer ? { areaId: viewer.areaId, areaName: { en: viewer.name, sw: viewer.name } } : {}),
+    ...(viewer ? { areaId: viewer.areaId, areaName: { ...viewer.names } } : {}),
   });
 
-  /** GET /shop/areas: the usable areas (non-personal). */
+  /** GET /shop/areas: the usable areas (non-personal; too-small areas carry no circle). */
   async function areas() {
     if (!geoAreas) return [];
-    return publicAreas(await geoAreas.allAsync());
+    return publicAreas(await geoAreas.allAsync(), minRadius());
   }
 
   /** The persona rows of this person (or just the signed-in row for an account without a Person). */
@@ -180,7 +208,7 @@ export function createShopHomeService({
         history = purchaseHistoryFrom(orders, { buyerIds: state.buyerIds, now: at, days: historyDays(), categoryOf: id => categories.get(id) || null });
       }
       // Slice 3: the viewer's area only when near-you is on and personalisation is on for this person.
-      if (nearYouOn() && state.enabled && shared.near) viewer = resolveViewerArea(shared.near.index, query.areaId);
+      if (nearYouOn() && state.enabled && shared.near) viewer = resolveViewerArea(shared.near.index, query.areaId, minRadius());
       personalisation = {
         location: viewer ? nearLocation(shared, viewer) : null,
         optedOut: state.personalised === false,

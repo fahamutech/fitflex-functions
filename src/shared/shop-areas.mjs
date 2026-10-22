@@ -11,6 +11,27 @@
 export const AREA_LEVELS = Object.freeze(['country', 'region', 'city', 'district']);
 const LEVEL_RANK = Object.freeze({ country: 0, region: 1, city: 2, district: 3 });
 export const MAX_DELIVERY_AREAS = 50;
+
+/**
+ * Privacy (review M1): an area smaller than this is too precise to stand for "where you are" in the shop.
+ * Districts need radiusKm >= SHOP_NEAR_YOU_MIN_RADIUS_KM_DISTRICT (2), cities and regions
+ * >= SHOP_NEAR_YOU_MIN_RADIUS_KM_CITY (5). Smaller (or no circle) -> the device is given no circle for it
+ * and an areaId for it is ignored. Values below the defaults are not accepted (a floor, not a knob).
+ */
+export const MIN_RADIUS_KM = Object.freeze({ district: 2, city: 5 });
+export function minRadiusFromEnv(env = process.env) {
+  const read = (v, floor) => { const n = Number(v); return v !== undefined && v !== '' && Number.isFinite(n) && n >= floor ? n : floor; };
+  return { district: read(env.SHOP_NEAR_YOU_MIN_RADIUS_KM_DISTRICT, MIN_RADIUS_KM.district), city: read(env.SHOP_NEAR_YOU_MIN_RADIUS_KM_CITY, MIN_RADIUS_KM.city) };
+}
+const finite = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+/** May this area stand for the viewer's position? A region, city or district with a big enough circle. */
+export function locatable(area, min = MIN_RADIUS_KM) {
+  if (!area || !['region', 'city', 'district'].includes(area.level)) return false;
+  if (!finite(area.radiusKm) || !finite(area.lat) || !finite(area.lng)) return false;
+  return Number(area.radiusKm) >= (area.level === 'district' ? min.district : min.city);
+}
+/** The area's name in both languages: nameSw when set (Swahili place name, native review), else the name. */
+export const namesOf = area => ({ en: area.name, sw: typeof area.nameSw === 'string' && area.nameSw.trim() ? area.nameSw.trim() : area.name });
 const AREA_ID_RE = /^[A-Za-z0-9_-]{1,120}$/;
 const MAX_DEPTH = 8;
 
@@ -45,29 +66,37 @@ export function chainOf(index, id) {
 
 const ancestorOfLevel = (index, id, level) => chainOf(index, id).find(x => index.byId.get(x)?.level === level) || null;
 
-/** GET /shop/areas rows: usable areas, by level then name. Place names are not translated. */
-export function publicAreas(rows) {
+/**
+ * GET /shop/areas rows: usable areas, by level then name. `locatable: false` areas (the country, or a
+ * circle missing or below the minimum size) carry lat/lng/radiusKm null, so the device never maps a
+ * position to them; they stay in the list for the vendor pickers.
+ */
+export function publicAreas(rows, min = MIN_RADIUS_KM) {
   const index = indexAreas(rows);
-  const num = v => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
   return [...index.usable].map(id => index.byId.get(id))
     .sort((a, b) => LEVEL_RANK[a.level] - LEVEL_RANK[b.level] || String(a.name).localeCompare(String(b.name)) || (a.id < b.id ? -1 : 1))
-    .map(a => ({ id: a.id, level: a.level, name: a.name, names: { en: a.name, sw: a.name }, parentId: a.parentId || null, lat: num(a.lat), lng: num(a.lng), radiusKm: num(a.radiusKm) }));
+    .map((a) => {
+      const ok = locatable(a, min);
+      return { id: a.id, level: a.level, name: a.name, names: namesOf(a), parentId: a.parentId || null, locatable: ok, lat: ok ? Number(a.lat) : null, lng: ok ? Number(a.lng) : null, radiusKm: ok ? Number(a.radiusKm) : null };
+    });
 }
 
 /**
- * The viewer's area from the `areaId` query. Unknown, inactive, malformed or country-level → null
+ * The viewer's area from the `areaId` query. Unknown, inactive, malformed, country-level or not locatable (circle missing or below the minimum size) → null
  * (ignored silently). A district rolls up to its city for "based in" / "popular in"; delivery checks
  * use the full chain so district-level delivery areas still count.
  * → null | { areaId, name, level, cityId, regionId, chain: [ids, most specific first] }
  */
-export function resolveViewerArea(index, areaId) {
+export function resolveViewerArea(index, areaId, min = MIN_RADIUS_KM) {
   if (typeof areaId !== 'string' || !AREA_ID_RE.test(areaId)) return null;
   if (!index.usable.has(areaId)) return null;
   const area = index.byId.get(areaId);
-  if (!area || area.level === 'country') return null;
+  // Country, or too small / no circle to stand for a position (M1): ignored.
+  if (!area || !locatable(area, min)) return null;
   return {
     areaId,
     name: area.name,
+    names: namesOf(area),
     level: area.level,
     cityId: area.level === 'region' ? null : ancestorOfLevel(index, areaId, 'city'),
     regionId: ancestorOfLevel(index, areaId, 'region'),

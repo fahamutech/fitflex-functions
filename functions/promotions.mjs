@@ -170,6 +170,11 @@ export const listGeoAreas = {
 };
 export const createGeoArea = {
   created, method: 'post', path: '/admin/geo-areas',
-  description: 'Admin (campaigns): add a region, city or district under the right parent. Body: level, name, parentId, optional lat, lng, radiusKm.',
+  description: 'Admin (campaigns): add a region, city or district under the right parent. Body: level, name, parentId, optional nameSw (Swahili name; absent = same as name), lat, lng, radiusKm. The shop uses an area as "near you" only with lat, lng and radiusKm >= 2 km (district) / 5 km (city, region).',
   onGuard: routeGuard('post', canCampaign), onRequest: async (req, res) => send(res, await promotionService.createArea({ body: req.body || {}, actorId: actor(req) }), 201),
+};
+export const updateGeoArea = {
+  created, method: 'patch', path: '/admin/geo-areas/:id',
+  description: 'Admin (campaigns): set or clear the Swahili name of an area (shop near-you). Body { nameSw: string ≤ 120 | null }. → { area }. 404 area_not_found; 422 nothing_to_update { allowed } | invalid_name_sw. Audited (promotion.geo_area_updated).',
+  onGuard: routeGuard('patch', canCampaign), onRequest: async (req, res) => send(res, await promotionService.updateArea({ id: req.params.id, body: req.body || {}, actorId: actor(req) })),
 };
