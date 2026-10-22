@@ -15,6 +15,8 @@ The privacy text that describes this is a **draft pending Tanzanian counsel**.
 
 Review round 1 (2026-10-22) changed the contract: **minimum area size** (M1), **k = 5 distinct buyers** for "popular here" (M2, owner), the area moves to the **`X-FF-Area` header** (M3), **Swahili area names** (`GeoArea.nameSw`, `names.sw`, `reasonParams.areaName {en, sw}`), and the `delivers_to_area` text is now plural. Members with **no date of birth may use near-you** (owner, as for purchase history).
 
+QA round 1 (2026-10-22, design-QA + UAT on RC be23f78) changed: **`reasonParams.areaName` names the level the claim is made at** (city / region, the district only for a district-exact delivery match); `popular_near_you.viewAll.query` is always `{}`; the badge (`deliversToViewerArea`) now also comes on **`GET /shop/products`** and **`GET /shop/products/:id`** via `X-FF-Area`.
+
 ## Live on merge, whatever the flag
 
 - The backfill migration `20270111120000-vendor-shop-areas` **writes `User.vendorProfile`** (fills absent `cityId` / `regionId` / `deliveryAreaIds`, `areasSource: "backfill"`).
@@ -141,8 +143,11 @@ Send the area id in the request header **`X-FF-Area: <GeoArea id>`** (M3: header
   - Ranking: the number of **distinct buyers** whose paid, not cancelled orders in the last 30 days were **picked up at a gym in the viewer's city** (region-level viewer: in the region), most first — counted only when **at least 5 distinct buyers** bought that product there (owner 2026-10-22, k = 5; below that the local count is 0, so no "popular here" signal ever rests on one to four people); then all paid orders in the last 30 days (the Best-sellers count); then the usual tie-break (admin priority, newest, id). Home-delivery addresses are free text and are **not** read for this. Buyer ids are used only to count and are not kept in the cache.
   - At least `SHOP_HOME_MIN_ITEMS` (4) products, else left out (no message); at most 12; a product is in one section only.
   - **Display order:** after `recommended`, before `essentials` (spec §7.1). **Allocation order** (who gets a product that fits several): `featured`, `best_sellers`, `recently_viewed`, **`popular_near_you`**, `recommended`, `essentials`, `deals`, `new_arrivals`. Near-you takes products before Recommended because its pool is small (only local vendors): after Recommended had taken its 12 it would rarely reach 4; Recommended draws from the whole catalogue and refills easily. Featured, Best sellers and Recently viewed keep priority (paid disclosure, the global ranking, and the shopper's own explicit history).
-  - `viewAll`: `{ path: "/shop/products", query: {} }` with `hasMore: false` (no list filter matches this rule yet; the app shows no "View all").
+  - `viewAll`: always `{ path: "/shop/products", query: {} }` with `hasMore: false` — never a category, even when every product shown shares one (QA1: no list filter matches this rule, and a category would hint at what local vendors sell). The app shows no "View all".
   - `reasonCodes` (closed list, in this order, only those that apply): `popular_in_area` (at least one product shown has a local count, i.e. ≥ 5 distinct local buyers), `delivers_to_area` (at least one product shown is from a vendor delivering to the area), `seller_in_area` (at least one product shown is from a vendor based in the area). **`reasonParams: { "areaName": { "en": "…", "sw": "…" } }`** (changed from a string).
+  - **Which area `areaName` names (QA1, truthful reasons)** — the area the claim behind the **first** reason code is computed at, which may differ from `nearYou.areaName` (always the viewer's own area):
+    - `popular_in_area`, `seller_in_area`: the viewer's **city** (local counts and "based in" are per city); for a region-level viewer, the **region**. Never the viewer's district. Kinondoni viewer → "Popular with shoppers in Dar es Salaam."; Stone Town viewer → "From sellers based in Zanzibar City." / "Kutoka kwa wauzaji walioko Mji wa Zanzibar."
+    - `delivers_to_area`: the viewer's **district** only when every delivering vendor shown lists that district itself in `deliveryAreaIds`; otherwise the city (region for a region-level viewer). The rail text does not print the name, but the Why sheet may.
   - `reason` is the first code's text:
 
 | Code | en | sw [SW review] |
@@ -153,9 +158,18 @@ Send the area id in the request header **`X-FF-Area: <GeoArea id>`** (M3: header
 
 The per-product Why reason in the product sheet (spec §10.6 `shop.why.deliversToArea`, singular "It delivers to your current area.") is app copy and is unchanged; the rail reason above is plural.
 
-- **`deliversToViewerArea: true`** on a product row (in `products`, any section) when the area is valid and allowed and the product's vendor **delivers to** the area (the rule above; "based in" alone does not set it). Absent otherwise (never `false`). For the "Delivers to your area" badge on the product sheet opened from the home (spec §7.3).
+- **`deliversToViewerArea: true`** on a product row (in `products`, any section) when the area is valid and allowed and the product's vendor **delivers to** the area (the rule above; "based in" alone does not set it). Absent otherwise (never `false`). For the "Delivers to your area" badge on the product sheet opened from the home (spec §7.3). Results and the product sheet use the routes below.
 - `signalsUsed` gains `location` and `personalised` is `true` when the `popular_near_you` section is on the page.
 - With the switch off (or not available): no section, no badge, `nearYou: { "available": false }`.
+
+## Badge outside the home: `GET /shop/products`, `GET /shop/products/:id` (QA1)
+
+Send the same **`X-FF-Area: <GeoArea id>`** header (header only; `?areaId=` is **not** read on these routes). Same validation (usable and locatable), same gating (`SHOP_NEAR_YOU` on, personalisation available and switched on), same privacy (never stored or logged; any `areaId` query key is removed from the request log line, as on `/shop/home`).
+
+- Allowed and valid: each row whose vendor **delivers to** the area carries `deliversToViewerArea: true` (list rows; on details the product itself **and** its `similarProducts` rows). "Based in" alone does not set it. Never `false`.
+- Flag off, not allowed (switch off, under 18, invalid date of birth, no member persona), header missing, or area unknown / inactive / country / too small: the field is **absent** and the body is byte-identical to a call without the header.
+- Vendor areas are read from the shop home cache, so a vendor's change shows within `SHOP_HOME_CACHE_SECONDS` (default 60 s).
+- Nothing else in these responses changes; filters, sorting and checkout are unchanged (no delivery block).
 
 ## `GET /shop/preferences`
 
@@ -167,6 +181,6 @@ The per-product Why reason in the product sheet (spec §10.6 `shop.why.deliversT
 
 ## Not in this slice (follow-ups)
 
-- `GET /shop/products?areaId=` / `GET /shop/products/:id?areaId=` (Results tiles and product sheet opened from Results, spec B-P2-10) are **not** built: those rows have no `deliversToViewerArea` yet, so the Results badge cannot show. The product sheet opened from the home can use the home `products` row.
+- `GET /shop/vendors/:id` (store page) and `/discover/products` carry no badge yet.
 - The server still honours `?maxDistanceKm=` on `/shop/products` (old app builds use it); the app stops sending it once areas exist.
 - Buyer home-delivery addresses are not mapped to areas.

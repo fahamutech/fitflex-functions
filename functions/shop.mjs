@@ -2,7 +2,8 @@
 import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService, vendorTaxService } from '../src/bootstrap/services.mjs';
+import { areaHeaderOf, areaRedactGuard, redactAreaId } from '../src/shared/area-request.mjs';
+import { shopService, shopHomeService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService, vendorTaxService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
 import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
@@ -63,22 +64,33 @@ async function requireActiveVendorStaff(req, res, next) {
 
 export const listShopProducts = {
   created, method: 'get', path: '/shop/products',
-  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither).',
-  onGuard: routeGuard('get', requireAuth()),
+  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither). SHOP_NEAR_YOU (docs/shop-near-you-api.md): header X-FF-Area: <GeoArea id worked out on the device; never stored or logged> → rows whose vendor delivers to that area carry deliversToViewerArea: true, only while personalisation is available and switched on and the area is usable; otherwise the body is unchanged.',
+  onGuard: routeGuard('get', [areaRedactGuard, requireAuth()]),
   onRequest: async (req, res) => {
+    redactAreaId(req);
     const { category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = req.query || {};
-    res.json(await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort }));
+    const rows = await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort });
+    res.json(await withBadge(req, rows));
   }
 };
 
+/** QA1: deliversToViewerArea on buyer rows (set only to true; absent when the badge does not apply). */
+async function withBadge(req, rows) {
+  const delivers = await shopHomeService.deliveryBadge({ claims: req.user, areaId: areaHeaderOf(req) });
+  if (!delivers) return rows;
+  const mark = row => (row && delivers(row.vendorId) ? { ...row, deliversToViewerArea: true } : row);
+  return Array.isArray(rows) ? rows.map(mark) : { ...mark(rows), ...(Array.isArray(rows?.similarProducts) ? { similarProducts: rows.similarProducts.map(mark) } : {}) };
+}
+
 export const getShopProduct = {
   created, method: 'get', path: '/shop/products/:id',
-  description: 'Buyer: product details (with vendorName), vendor, reviews and similar products (rows as in GET /shop/products).',
-  onGuard: routeGuard('get', requireAuth()),
+  description: 'Buyer: product details (with vendorName), vendor, reviews and similar products (rows as in GET /shop/products). SHOP_NEAR_YOU: header X-FF-Area as on GET /shop/products → deliversToViewerArea: true on the product and on similarProducts rows when it applies; otherwise the body is unchanged.',
+  onGuard: routeGuard('get', [areaRedactGuard, requireAuth()]),
   onRequest: async (req, res) => {
+    redactAreaId(req);
     const product = await shopService.getProduct(req.params.id);
     if (!product) return res.status(404).json({ error: 'product_not_found' });
-    res.json(product);
+    res.json(await withBadge(req, product));
   },
 };
 

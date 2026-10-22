@@ -13,7 +13,7 @@
 import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recommendations.mjs';
 import { purchaseHistoryFrom, audienceFrom, historyDaysFromEnv } from './shop-personalisation.mjs';
 import { shopBannersOn, shopPersonalisationOn, shopNearYouOn } from '../shared/feature-flags.mjs';
-import { indexAreas, resolveViewerArea, vendorAreasOf, deliversTo, basedIn, publicAreas, minRadiusFromEnv } from '../shared/shop-areas.mjs';
+import { indexAreas, resolveViewerArea, vendorAreasOf, deliversTo, deliversExactly, basedIn, publicAreas, minRadiusFromEnv } from '../shared/shop-areas.mjs';
 
 /**
  * Privacy (review M2, owner 2026-10-22: k = 5): a product counts as popular in a city only when at least
@@ -151,18 +151,36 @@ export function createShopHomeService({
   function nearLocation(shared, viewer) {
     const vendors = new Map();
     for (const [vendorId, areasOfVendor] of shared.near.vendorAreas) {
-      const m = { basedIn: basedIn(areasOfVendor, viewer), delivers: deliversTo(areasOfVendor, viewer) };
+      const m = { basedIn: basedIn(areasOfVendor, viewer), delivers: deliversTo(areasOfVendor, viewer), deliversExact: deliversExactly(areasOfVendor, viewer) };
       if (m.basedIn || m.delivers) vendors.set(vendorId, m);
     }
     const key = viewer.cityId ? `city:${viewer.cityId}` : viewer.regionId ? `region:${viewer.regionId}` : null;
     const areaSales = (key && shared.near.localSales.get(key)) || new Map();
-    return { area: { areaId: viewer.areaId, name: viewer.name, names: viewer.names, cityId: viewer.cityId, regionId: viewer.regionId, chain: viewer.chain }, vendors, areaSales };
+    return { area: { areaId: viewer.areaId, name: viewer.name, names: viewer.names, rankArea: viewer.rankArea, cityId: viewer.cityId, regionId: viewer.regionId, chain: viewer.chain }, vendors, areaSales };
   }
 
   const nearYouOf = (state, viewer, shared) => ({
     available: Boolean(state?.enabled && shared.near),
     ...(viewer ? { areaId: viewer.areaId, areaName: { ...viewer.names } } : {}),
   });
+
+  /**
+   * QA1: the "Delivers to your area" badge outside the home (GET /shop/products, /shop/products/:id).
+   * Same validation and gating as /shop/home: SHOP_NEAR_YOU on, personalisation available and switched
+   * on, a usable and locatable area. → null (no badge at all; the caller leaves the body unchanged) or
+   * vendorId → true when that vendor delivers to the area. Reads the shared cache (vendor areas may be up
+   * to SHOP_HOME_CACHE_SECONDS old); the area is used for this call only, never stored or logged.
+   */
+  async function deliveryBadge({ claims, areaId }) {
+    if (!areaId || !nearWanted() || !personalisationOn() || !preferences) return null;
+    const shared = await loadShared();
+    if (!shared.near) return null;
+    const state = await preferences.stateFor({ claims });
+    if (!state.enabled) return null;
+    const viewer = resolveViewerArea(shared.near.index, areaId, minRadius());
+    if (!viewer) return null;
+    return vendorId => deliversTo(shared.near.vendorAreas.get(vendorId), viewer);
+  }
 
   /** GET /shop/areas: the usable areas (non-personal; too-small areas carry no circle). */
   async function areas() {
@@ -278,5 +296,5 @@ export function createShopHomeService({
     return { body };
   }
 
-  return { home, clearCache: () => { cache = null; }, loadShared, areas };
+  return { home, clearCache: () => { cache = null; }, loadShared, areas, deliveryBadge };
 }
