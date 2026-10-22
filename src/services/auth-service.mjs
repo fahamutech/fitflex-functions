@@ -360,26 +360,17 @@ export function createAuthService({
         createdAt: new Date().toISOString()
       };
       // Other rows of this role holding the email, which this sign-in ignored.
+      // They are never changed (D-5 as revised 22 Oct 2026): the new row goes
+      // in without the email, so the (email, userType) index can't refuse it.
       const holders = fbEmail ? ignoredEmailRows.filter(u => u.userType === row.userType) : [];
-      let released = null;
+      user = await users.upsertAsync(u => u.id === row.id, holders.length ? { ...row, email: null } : row);
       if (holders.length && emailVerified && identityLink) {
-        // D-5: the verified owner gets the email; it is released from the rows
-        // that only had it typed in (audit + IdentityConflict), in one transaction.
+        // Recorded for review only; never blocks the sign-in.
         try {
-          released = await identityLink.insertReleasingEmail({ row, email: fbEmail, releaseUserIds: holders.map(u => u.id) });
+          await identityLink.recordEmailCollision({ newUserId: user.id, email: fbEmail, heldUserIds: holders.map(u => u.id) });
         } catch (err) {
-          // Never block the sign-in: fall through to a row without the email.
-          console.warn('[auth] email release skipped:', err?.message);
+          console.warn('[auth] email collision not recorded:', err?.message);
         }
-      }
-      if (released) {
-        // Through the collection, so the hooks that follow a profile run.
-        for (const id of released.releasedUserIds) await users.updateByIdAsync(id, { updatedAt: new Date().toISOString() });
-        user = (await users.updateByIdAsync(row.id, { updatedAt: new Date().toISOString() })) || released.row;
-      } else {
-        // Unverified: the email proves nothing, so nobody else's row is touched;
-        // the new row goes in without it.
-        user = await users.upsertAsync(u => u.id === row.id, holders.length ? { ...row, email: null } : row);
       }
     }
 

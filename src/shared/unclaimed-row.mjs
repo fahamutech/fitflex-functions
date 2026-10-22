@@ -28,7 +28,10 @@ export async function isUnclaimed(q, row) {
 }
 
 /**
- * Does this Person already hold the value as an active, verified identifier?
+ * Does this Person, while active, already hold the value as an active,
+ * verified identifier? Same rule as src/shared/verified-contacts.mjs
+ * (functions#234): a merged, closed or suspended Person proves nothing.
+ * TODO: fold this file into verified-contacts.mjs once #234 and #235 are both merged.
  * @param {import('knex').Knex | import('knex').Knex.Transaction} q
  * @param {string|null} personId
  * @param {'email'|'phone'|'firebase_uid'} type
@@ -37,6 +40,12 @@ export async function isUnclaimed(q, row) {
 export async function holdsVerified(q, personId, type, normalizedValue) {
   if (!personId || !normalizedValue) return false;
   const row = await q('LoginIdentifier')
-    .where({ personId, type, normalizedValue, status: 'active' }).whereNotNull('verifiedAt').first('id');
+    .join('Person', 'Person.id', 'LoginIdentifier.personId')
+    .where({
+      'LoginIdentifier.personId': personId, 'LoginIdentifier.type': type,
+      'LoginIdentifier.normalizedValue': normalizedValue, 'LoginIdentifier.status': 'active',
+      'Person.status': 'active',
+    })
+    .whereNotNull('LoginIdentifier.verifiedAt').first('LoginIdentifier.id');
   return Boolean(row);
 }

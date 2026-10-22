@@ -1,8 +1,9 @@
 // Security fix (20 Oct 2026): a Firebase sign-in with a verified email must
 // never land on, or link, a row that some other account only typed that email
-// into. Such a row is ignored and, when it blocks the verified owner's new
-// profile, the email is released from it (decision D-5) with an AuditLog entry
-// and an IdentityConflict. Organisation-made rows nobody has claimed are still
+// into. Such a row is ignored and never changed. When it holds the
+// (email, userType) slot the verified owner's new profile goes in without the
+// email, and the collision is recorded for review: an IdentityConflict and an
+// AuditLog entry (decision D-5 as revised 22 Oct 2026). Organisation-made rows nobody has claimed are still
 // claimed by a verified email (decision O7). Every case runs with linking off,
 // with Firebase evidence recording only, and with V2_LINKING on.
 import { test } from 'node:test';
@@ -66,7 +67,7 @@ async function assertNoEvidenceOn(personId, { email, uid }) {
 }
 
 for (const [mode, flags] of Object.entries(MODES)) {
-  test(`[${mode}] a row another Firebase account typed the email into is not chosen; the email is released`, async () => {
+  test(`[${mode}] a row another Firebase account typed the email into is not chosen and keeps its email`, async () => {
     await withFlags(flags, async () => {
       const email = victimEmail();
       const attacker = await makeUser({ firebaseUid: uniq('fb_att'), email });
@@ -75,23 +76,26 @@ for (const [mode, flags] of Object.entries(MODES)) {
       const out = await signIn({ uid, email, email_verified: true });
       assert.equal(out.statusCode, 200);
       assert.notEqual(out.body.user.id, attacker.id);
-      assert.equal(out.body.user.email, email);
+      assert.equal(out.body.user.email ?? null, null, 'the new row goes in without the email');
       assert.ok(out.body.token);
 
       const mine = await fresh(out.body.user.id);
       assert.equal(mine.firebaseUid, uid);
+      assert.equal(mine.email, null);
       assert.notEqual(mine.personId, attacker.personId);
       const planted = await fresh(attacker.id);
-      assert.equal(planted.email, null, 'email released from the planted row');
+      assert.equal(planted.email, email, 'the original row is not touched');
       assert.equal(planted.firebaseUid, attacker.firebaseUid);
       assert.equal(planted.personId, attacker.personId);
       await assertNoEvidenceOn(attacker.personId, { email, uid });
 
-      const audit = await db('AuditLog').where({ action: 'contact_released_to_verified_owner', target: attacker.id }).first();
+      const audit = await db('AuditLog').where({ action: 'unverified_contact_collision', target: attacker.id }).first();
       assert.ok(audit, 'audit entry written');
       assert.equal(audit.actor, mine.id);
+      assert.equal(audit.after.rowChanged, false);
+      assert.equal(await db('AuditLog').where({ action: 'contact_released_to_verified_owner', target: attacker.id }).first(), undefined);
       const conflict = await db('IdentityConflict')
-        .where({ kind: 'unverified_contact_released', normalizedValue: email, status: 'open' }).first();
+        .where({ kind: 'unverified_contact_collision', normalizedValue: email, status: 'open' }).first();
       assert.ok(conflict, 'IdentityConflict opened');
       assert.ok(conflict.userIds.includes(attacker.id) && conflict.userIds.includes(mine.id));
 
@@ -111,8 +115,8 @@ for (const [mode, flags] of Object.entries(MODES)) {
       const out = await signIn({ uid, email, email_verified: true });
       assert.equal(out.statusCode, 200);
       assert.notEqual(out.body.user.id, attacker.id);
-      assert.equal((await fresh(attacker.id)).email, null);
-      assert.equal((await fresh(out.body.user.id)).email, email);
+      assert.equal((await fresh(attacker.id)).email, email.toUpperCase(), 'untouched');
+      assert.equal((await fresh(out.body.user.id)).email, null);
       await assertNoEvidenceOn(attacker.personId, { email, uid });
     });
   });
@@ -128,7 +132,7 @@ for (const [mode, flags] of Object.entries(MODES)) {
       assert.equal(out.body.user.userType, 'member');
       assert.notEqual(out.body.user.id, attacker.id);
       const after = await fresh(attacker.id);
-      assert.equal(after.email, email, 'no collision, so nothing is released');
+      assert.equal(after.email, email);
       assert.equal(after.personId, attacker.personId);
       await assertNoEvidenceOn(attacker.personId, { email, uid });
     });
@@ -154,7 +158,49 @@ for (const [mode, flags] of Object.entries(MODES)) {
         assert.equal(after.personId, row.personId, 'never moved onto the signer');
         await assertNoEvidenceOn(row.personId, { email, uid });
       }
-      assert.equal((await fresh(sameRole.id)).email, null, 'the blocking row releases the email');
+      assert.equal((await fresh(sameRole.id)).email, email, 'the PIN row keeps its email');
+      assert.equal((await fresh(out.body.user.id)).email, null);
+    });
+  });
+
+  test(`[${mode}] a second collision on the same email keeps both people on the open conflict`, async () => {
+    await withFlags(flags, async () => {
+      const email = victimEmail();
+      const first = await makeUser({ firebaseUid: uniq('fb_a'), email });
+      const one = await signIn({ uid: uniq('fb_v1'), email, email_verified: true });
+      assert.equal(one.statusCode, 200);
+      const second = await makeUser({ firebaseUid: uniq('fb_b'), email, userType: 'trainer' });
+      const two = await signIn({ uid: uniq('fb_v2'), email, email_verified: true }, 'trainer');
+      assert.equal(two.statusCode, 200);
+
+      const conflicts = await db('IdentityConflict').where({ kind: 'unverified_contact_collision', normalizedValue: email, status: 'open' });
+      assert.equal(conflicts.length, 1);
+      for (const id of [first.id, one.body.user.id, second.id, two.body.user.id]) {
+        assert.ok(conflicts[0].userIds.includes(id), `${id} kept on the conflict`);
+      }
+      assert.equal((await fresh(first.id)).email, email);
+      assert.equal((await fresh(second.id)).email, email);
+    });
+  });
+
+  test(`[${mode}] a row made without the email gets it on a later verified sign-in once the slot is free`, async () => {
+    await withFlags(flags, async () => {
+      const email = victimEmail();
+      const holder = await makeUser({ firebaseUid: uniq('fb_h'), email });
+      const uid = uniq('fb_v');
+      const first = await signIn({ uid, email, email_verified: false });
+      assert.equal(first.statusCode, 200);
+      assert.equal((await fresh(first.body.user.id)).email, null);
+
+      const held = await signIn({ uid, email, email_verified: true });
+      assert.equal(held.body.user.id, first.body.user.id);
+      assert.equal((await fresh(first.body.user.id)).email, null, 'still held: stays empty');
+
+      await users.updateByIdAsync(holder.id, { email: `${uniq('changed')}@example.com` });
+      const later = await signIn({ uid, email, email_verified: true });
+      assert.equal(later.statusCode, 200);
+      assert.equal(later.body.user.id, first.body.user.id);
+      assert.equal((await fresh(first.body.user.id)).email, email);
     });
   });
 
@@ -187,11 +233,11 @@ for (const [mode, flags] of Object.entries(MODES)) {
       assert.equal(out.statusCode, 200);
       assert.equal(out.body.user.id, own.id);
       assert.equal((await fresh(own.id)).email, email);
-      assert.equal(await db('AuditLog').where({ action: 'contact_released_to_verified_owner', target: own.id }).first(), undefined);
+      assert.equal(await db('AuditLog').where({ action: 'unverified_contact_collision', target: own.id }).first(), undefined);
     });
   });
 
-  test(`[${mode}] an unverified email never releases anyone's email and still signs in`, async () => {
+  test(`[${mode}] an unverified email changes nobody's row, records nothing, and still signs in`, async () => {
     await withFlags(flags, async () => {
       const email = victimEmail();
       const real = await makeUser({ firebaseUid: uniq('fb_real'), email });
@@ -200,6 +246,7 @@ for (const [mode, flags] of Object.entries(MODES)) {
       assert.notEqual(out.body.user.id, real.id);
       assert.equal((await fresh(real.id)).email, email, 'untouched');
       assert.equal((await fresh(out.body.user.id)).email ?? null, null, 'the new row goes in without the email');
+      assert.equal(await db('AuditLog').where({ action: 'unverified_contact_collision', target: real.id }).first(), undefined);
     });
   });
 
@@ -253,4 +300,17 @@ test('registration linking (FitFlex code, no uid) moves only unclaimed rows foun
   assert.equal((await fresh(orgMade.id)).personId, anchor.personId);
   assert.equal((await fresh(pinRow.id)).personId, pinRow.personId);
   assert.equal((await fresh(provedPhone.id)).personId, provedPhone.personId);
+});
+
+test('holdsVerified needs an active Person', async () => {
+  const { holdsVerified } = await import('../src/shared/unclaimed-row.mjs');
+  const email = victimEmail();
+  const row = await makeUser({ firebaseUid: uniq('fb_hv'), email });
+  await db('LoginIdentifier').insert({
+    id: uniq('lid'), personId: row.personId, type: 'email', value: email, normalizedValue: email,
+    verifiedAt: db.fn.now(), provider: 'firebase', status: 'active',
+  });
+  assert.equal(await holdsVerified(db, row.personId, 'email', email), true);
+  await db('Person').where({ id: row.personId }).update({ status: 'suspended' });
+  assert.equal(await holdsVerified(db, row.personId, 'email', email), false);
 });
