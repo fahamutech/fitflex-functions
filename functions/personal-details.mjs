@@ -19,6 +19,10 @@ const writes = createVendorLimiter({ perMinute: PERSONAL_DETAILS_WRITES_PER_MINU
 /** Specs only. */
 export const resetPersonalDetailsLimits = () => writes.reset();
 
+// Security review L1: a member-profile date of birth is member data; only callers who may see
+// members (super-admins, or staff with the `members` scope) get it as the fallback.
+const seesMembers = claims => !claims?.portalUser || (Array.isArray(claims?.aclPermissions) && claims.aclPermissions.includes('members'));
+
 const off = res => res.status(404).json({ error: 'feature_disabled' });
 const fail = (res, r) => res.status(r.status ?? 400).json({ error: r.error, ...(r.field ? { field: r.field } : {}) });
 
@@ -52,14 +56,14 @@ export const putMyPersonalDetails = {
 
 export const adminTrainerPersonalDetails = {
   created, method: 'get', path: '/admin/trainers/:id/personal-details',
-  description: 'Admin, view only: the date of birth a trainer gave (never KYC). :id is the trainer profile id (as in DELETE /admin/trainers/:id). → { trainerId, userId, personalDetails: { dateOfBirth, age, gender, genderFrom, source } }. Each view is audit-logged (personal_details_viewed, no values). ACL scope `trainers`. Needs PARTNER_DOB_REQUIRED.',
+  description: 'Admin, view only: the date of birth a trainer gave (never KYC). :id is the trainer profile id (as in DELETE /admin/trainers/:id). → { trainerId, userId, personalDetails: { dateOfBirth, age, gender, genderFrom, source } }. source "member" (a member-profile date) only for callers who also hold the `members` scope (or super-admins). Each view is audit-logged (personal_details_viewed, no values). ACL scope `trainers`. Needs PARTNER_DOB_REQUIRED.',
   onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('trainers')]),
   onRequest: async (req, res) => {
     if (!partnerDobRequiredOn()) return off(res);
     const profile = await trainers.findAsync(t => t.id === req.params.id);
     if (!profile) return res.status(404).json({ error: 'not_found' });
     const personalDetails = await personalDetailsService.adminView({
-      userId: profile.userId || null, actorId: req.user?.sub, subject: { type: 'trainer', id: profile.id },
+      userId: profile.userId || null, actorId: req.user?.sub, subject: { type: 'trainer', id: profile.id }, withMemberFallback: seesMembers(req.user),
     });
     res.json({ trainerId: profile.id, userId: profile.userId || null, personalDetails });
   }
@@ -67,14 +71,14 @@ export const adminTrainerPersonalDetails = {
 
 export const adminGymOwnerPersonalDetails = {
   created, method: 'get', path: '/admin/gym-owners/:id/personal-details',
-  description: 'Admin, view only: the date of birth and gender a gym owner gave (never KYC). :id is the owner user id (as in DELETE /admin/gym-owners/:id). → { ownerId, personalDetails: { dateOfBirth, age, gender, genderFrom, source } }. Each view is audit-logged (personal_details_viewed, no values). ACL scope `owners`. Needs PARTNER_DOB_REQUIRED.',
+  description: 'Admin, view only: the date of birth and gender a gym owner gave (never KYC). :id is the owner user id (as in DELETE /admin/gym-owners/:id). → { ownerId, personalDetails: { dateOfBirth, age, gender, genderFrom, source } }. source "member" only for callers who also hold the `members` scope (or super-admins). Each view is audit-logged (personal_details_viewed, no values). ACL scope `owners`. Needs PARTNER_DOB_REQUIRED.',
   onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('owners')]),
   onRequest: async (req, res) => {
     if (!partnerDobRequiredOn()) return off(res);
     const owner = await users.findByIdAsync(req.params.id);
     if (!owner || owner.userType !== 'gym_operator') return res.status(404).json({ error: 'not_found' });
     const personalDetails = await personalDetailsService.adminView({
-      userId: owner.id, actorId: req.user?.sub, subject: { type: 'gym_owner', id: owner.id },
+      userId: owner.id, actorId: req.user?.sub, subject: { type: 'gym_owner', id: owner.id }, withMemberFallback: seesMembers(req.user),
     });
     res.json({ ownerId: owner.id, personalDetails });
   }

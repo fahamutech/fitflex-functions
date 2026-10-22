@@ -15,6 +15,8 @@ export async function personDetailsColumnsExist(q) {
   columnsKnown = Number(r.rows?.[0]?.n) === 3;
   return columnsKnown;
 }
+/** Specs only: forget the remembered answer. */
+export const resetPersonDetailsColumnsCache = () => { columnsKnown = false; };
 
 /** A Person's declared date of birth ("YYYY-MM-DD" text, never a JS Date) and gender, or null. */
 export async function readPersonDetails(q, personId) {

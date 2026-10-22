@@ -31,7 +31,7 @@ Migration `db/migrations/20270110090700-person-declared-details.cjs` is additive
 - KYC is never read, copied or backfilled. The KYC date of birth stays KYC-only. Existing accounts are test data and get no backfill.
 - The values never appear on the public trainer profile, `/trainers`, `/trainers/:id`, `/trainer/me`, `/me`, `/gyms/:id`, `/admin/trainers`, `/admin/gym-owners` or in any export.
 - **Identity merge:** the surviving Person takes the merged-in date of birth and gender, but only for a field it has no value for. A Person left empty (tombstone) keeps neither value.
-- **Account deletion** (`DELETE /me`): when the person's last persona is deleted, both values and `declaredProfileUpdatedAt` are cleared.
+- **Account deletion:** when the person's last persona is deleted, both values and `declaredProfileUpdatedAt` are cleared. This applies to `DELETE /me` and to the admin `DELETE /admin/gym-owners/:id`. `DELETE /admin/trainers/:id` also runs the step, but it removes only the trainer profile, so the trainer's account and its values normally stay.
 - **Audit:** each write is logged as `personal_details_updated` with the target set to the Person. The row records which fields were set and whether each was `set` or `none` before and after, plus `via` (`me` | `trainer_register` | `gym_owner_register`). It never records the values.
 
 ## Date and gender rules
@@ -47,7 +47,21 @@ These rules are shared with `POST /me/profile` (`src/shared/date-of-birth.mjs`).
   - `1900-12-31`
   - tomorrow
   - numbers, booleans, objects and arrays
-- **Under 18:** if the person holds a trainer or gym-owner role (on registration they always do), a date of birth that makes them younger than 18 today gets `400 {"error":"partner_under_18"}`. On their 18th birthday they are accepted. Members may give any valid date.
+- **Under 18 (flag on):** a person who holds or takes a trainer or gym-owner role must be 18 or older today. On their 18th birthday they are accepted. The **effective date of birth** is used:
+  1. the value being sent, if one is sent;
+  2. otherwise the valid `Person.dateOfBirth`;
+  3. otherwise a valid member-profile date of birth of the same Person.
+
+  Sending `""` (clearing) skips step 2. If the effective date is valid and under 18, the request gets `400 {"error":"partner_under_18"}` and nothing is saved. With no date of birth at all the request is accepted, and the app asks for one (`ask`). This is checked on:
+  - `PUT /me/personal-details`, when the person holds a trainer or owner role;
+  - `POST /trainer/register` and `POST /gym-owner/register`, **even when no date of birth is sent**, before any profile or gym is saved;
+  - `POST /me/personas`, when adding a `trainer` or `gym_operator`/`gym_owner` persona (Identity V2 `V2_ADD_PERSONA`; sign-in-flow code in `auth-service`);
+  - `POST /me/profile`: a member date of birth under 18 for a person who also holds a trainer or owner role.
+
+  Members on their own may give any valid date.
+- **Not checked, by design:**
+  - Trainers and owners that an admin creates or invites are treated as admin-vetted.
+  - An identity merge that brings in an under-18 date of birth is accepted. Slice 4 shop eligibility fails closed on any under-18 date of birth.
 - `gender` must be `"male"`, `"female"` or `"other"`. Anything else (including `"Female"`) gets `400 {"error":"invalid_field","field":"gender"}`.
 
 | Sent | `dateOfBirth` | `gender` |
@@ -100,6 +114,7 @@ Any signed-in user. Request body (both keys optional):
 | 400 | `{"error":"partner_under_18"}` |
 | 404 | `{"error":"feature_disabled"}` |
 | 404 | `{"error":"user_not_found"}` / `{"error":"person_not_found"}` |
+| 503 | `{"error":"personal_details_unavailable"}`: the migration has not run yet. Nothing is saved. **Run the migration before switching the flag on.** The register routes return the same 503, before saving anything, when they are sent a date of birth or gender. |
 | 429 | `{"error":"rate_limited","retryAfterSeconds":N}`, also a `Retry-After` header. The limit is 10 writes per minute per account, held in memory per server. |
 
 Nothing is saved when a 400 is returned.
@@ -112,7 +127,7 @@ New optional `dateOfBirth`. Everything else is unchanged. **Trainer gender is st
 { "displayName": "…", "photoUrl": "…", "gender": "female", "dateOfBirth": "1994-03-21", "…": "…" }
 ```
 
-When the flag is on, `dateOfBirth` is checked **before** anything is saved: `400 invalid_field` / `400 partner_under_18` as above, and no trainer profile is created. If the registration succeeds, the date is saved on the Person. The response (the trainer profile) does not change and never contains the date. If `dateOfBirth` is left out, the request is accepted.
+When the flag is on, `dateOfBirth` is checked **before** anything is saved: `400 invalid_field` / `400 partner_under_18` as above, and no trainer profile is created. If the registration succeeds, the date is saved on the Person. The response (the trainer profile) does not change and never contains the date. If `dateOfBirth` is left out, the request is accepted, unless the stored date of birth (Person, else member profile) is under 18, in which case it gets `400 partner_under_18`.
 
 ## `POST /gym-owner/register` (additive body fields)
 
@@ -153,6 +168,8 @@ ACL scope `owners`. `:id` is the **owner user id** (as in `DELETE /admin/gym-own
 }
 ```
 
+The member-profile fallback (`source: "member"`) is member data. It is returned only to super-admins and to staff who also hold the **`members`** scope. Anyone else sees only a date of birth the partner declared (`source: "person"`); when there is none, `dateOfBirth`, `age` and `source` are `null`.
+
 `personalDetails` contains:
 
 - `dateOfBirth`
@@ -176,4 +193,4 @@ Each successful read is audit-logged as `personal_details_viewed`, with the acto
 - Shop eligibility for partners (slice 4, `SHOP_PERSONALISATION_PARTNERS`).
 - App onboarding step, home card and settings tile (slice 3).
 - Privacy text (slice 5, draft pending counsel).
-- Under-18 is checked only when a date of birth is **sent**. A person whose only stored date is a member-profile one is not re-checked when they add a trainer or owner role, because `ask` is false for them.
+- Under-18 is not checked for admin-created or invited partners, or for identity merges (see above).

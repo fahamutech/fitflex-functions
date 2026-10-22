@@ -13,12 +13,13 @@ import {
   getMyPersonalDetails, putMyPersonalDetails, adminTrainerPersonalDetails, adminGymOwnerPersonalDetails,
   resetPersonalDetailsLimits, PERSONAL_DETAILS_WRITES_PER_MINUTE,
 } from '../functions/personal-details.mjs';
-import { trainerRegister, listTrainers, getTrainer, adminListTrainers, trainerMyProfile } from '../functions/trainers.mjs';
+import { trainerRegister, listTrainers, getTrainer, adminListTrainers, trainerMyProfile, adminDeleteTrainer } from '../functions/trainers.mjs';
 import { gymOwnerRegister } from '../functions/owner-gyms.mjs';
-import { adminListGymOwners } from '../functions/admin-owners.mjs';
-import { me } from '../functions/subscriptions.mjs';
+import { adminListGymOwners, adminDeleteGymOwner } from '../functions/admin-owners.mjs';
+import { me, updateMemberProfile } from '../functions/subscriptions.mjs';
 import { getGym } from '../functions/gyms.mjs';
-import { identityLinkService, accountService } from '../src/bootstrap/services.mjs';
+import { identityLinkService, accountService, authService } from '../src/bootstrap/services.mjs';
+import { resetPersonDetailsColumnsCache } from '../src/infra/person-details-store-pg.mjs';
 import { eatToday } from '../src/shared/date-of-birth.mjs';
 
 await ensureInit();
@@ -443,4 +444,142 @@ test('static: the declared date of birth code never imports or reads the KYC sto
       assert.ok(!src.includes(banned), `${file} mentions ${banned}`);
     }
   }
+});
+
+// ── security review fix round (M1, L1, L2, L3) ──────────────────────────────
+
+const memberDob = dob => JSON.stringify({ dateOfBirth: dob });
+
+test('M1: registering without a date of birth is refused when the stored one (member profile or Person) is under 18', async () => {
+  // Member profile under 18 on the same Person; the trainer sends nothing.
+  const per = await person();
+  await user('member', { personId: per, memberProfile: memberDob(yearsAgo(16)) });
+  const t = await user('trainer', { personId: per });
+  const r = await call(trainerRegister, as(t, 'trainer'), { body: trainerBody() });
+  assert.deepEqual([r.statusCode, r.body], [400, { error: 'partner_under_18' }]);
+  assert.equal(await db('TrainerProfile').where({ userId: t }).first(), undefined, 'no profile made');
+
+  // Owner clearing the date ("") falls back to the member profile, still under 18: no gym made.
+  const per2 = await person();
+  await user('member', { personId: per2, memberProfile: memberDob(yearsAgo(17)) });
+  const o = await user('gym_operator', { personId: per2 });
+  await db('Person').where({ id: per2 }).update({ dateOfBirth: '1980-01-01' });
+  const cleared = await registerOwner(o, { dateOfBirth: '' });
+  assert.deepEqual([cleared.statusCode, cleared.body], [400, { error: 'partner_under_18' }]);
+  assert.equal((await db('User').where({ id: o }).first()).gymId ?? null, null);
+  // Not clearing: the adult Person date counts and the owner registers.
+  const ok = await registerOwner(o, {});
+  assert.equal(ok.statusCode, 200, JSON.stringify(ok.body));
+
+  // A Person date under 18 (written by an older build) is refused too.
+  const t2 = await user('trainer');
+  await db('Person').where({ id: await personOf(t2) }).update({ dateOfBirth: yearsAgo(15) });
+  assert.equal((await call(trainerRegister, as(t2, 'trainer'), { body: trainerBody() })).body.error, 'partner_under_18');
+
+  // Flag off: nothing is checked, as before.
+  off();
+  assert.equal((await call(trainerRegister, as(t, 'trainer'), { body: trainerBody() })).statusCode, 200);
+});
+
+test('M1: PUT clearing the date ("") for a partner whose member-profile date is under 18 is refused', async () => {
+  const per = await person();
+  await user('member', { personId: per, memberProfile: memberDob(yearsAgo(17)) });
+  const o = await user('gym_operator', { personId: per });
+  await db('Person').where({ id: per }).update({ dateOfBirth: '1980-01-01' });
+  const r = await call(putMyPersonalDetails, as(o, 'gym_operator'), { body: { dateOfBirth: '' } });
+  assert.deepEqual([r.statusCode, r.body], [400, { error: 'partner_under_18' }]);
+  assert.equal((await stored(per)).dateOfBirth, '1980-01-01', 'nothing cleared');
+});
+
+test('M1: adding a trainer or gym-owner persona is refused for a person whose stored date is under 18', async () => {
+  const saved = { IDENTITY_V2: process.env.IDENTITY_V2, V2_ADD_PERSONA: process.env.V2_ADD_PERSONA };
+  process.env.IDENTITY_V2 = '1'; process.env.V2_ADD_PERSONA = '1';
+  try {
+    const young = await user('member', { memberProfile: memberDob(yearsAgo(16)) });
+    for (const userType of ['trainer', 'gym_owner']) {
+      const r = await authService.addPersona({ claims: { sub: young, userType: 'member' }, userType });
+      assert.deepEqual([r.error, r.status], ['partner_under_18', 400], userType);
+    }
+    const vendor = await authService.addPersona({ claims: { sub: young, userType: 'member' }, userType: 'vendor' });
+    assert.equal(vendor.created, true, 'other roles are not age-checked');
+    const adult = await user('member', { memberProfile: memberDob('1990-01-01') });
+    const ok = await authService.addPersona({ claims: { sub: adult, userType: 'member' }, userType: 'trainer' });
+    assert.equal(ok.created, true, JSON.stringify(ok));
+    const none = await user('member');
+    assert.equal((await authService.addPersona({ claims: { sub: none, userType: 'member' }, userType: 'gym_owner' })).created, true, 'no date of birth: the app asks later');
+    off();
+    const young2 = await user('member', { memberProfile: memberDob(yearsAgo(16)) });
+    assert.equal((await authService.addPersona({ claims: { sub: young2, userType: 'member' }, userType: 'trainer' })).created, true, 'flag off: unchanged');
+    for (const id of [young, adult, none, young2]) {
+      const extra = await db('User').where({ personId: await personOf(id) }).whereNot({ id }).pluck('id');
+      made.users.push(...extra);
+    }
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+});
+
+test('M1 variant 3: /me/profile refuses a member date under 18 for a person who also holds a partner role', async () => {
+  const per = await person();
+  const m = await user('member', { personId: per });
+  await user('trainer', { personId: per });
+  const r = await call(updateMemberProfile, as(m, 'member'), { body: { dateOfBirth: yearsAgo(17) } });
+  assert.deepEqual([r.statusCode, r.body], [400, { error: 'partner_under_18' }]);
+  assert.equal((await call(updateMemberProfile, as(m, 'member'), { body: { dateOfBirth: yearsAgo(30) } })).statusCode, 200);
+  // A member-only person may give any valid date; the flag off changes nothing.
+  const solo = await user('member');
+  assert.equal((await call(updateMemberProfile, as(solo, 'member'), { body: { dateOfBirth: yearsAgo(12) } })).statusCode, 200);
+  off();
+  assert.equal((await call(updateMemberProfile, as(m, 'member'), { body: { dateOfBirth: yearsAgo(17) } })).statusCode, 200);
+});
+
+test('L1: the admin view shows a member-profile date only to callers who may also see members', async () => {
+  const per = await person();
+  await user('member', { personId: per, memberProfile: memberDob('1975-05-05') });
+  const o = await user('gym_operator', { personId: per });
+  const superAdmin = as(await user('admin'), 'admin');
+  const ownersOnly = as(await user('admin', { portalUser: true, aclPermissions: ['owners'] }), 'admin', { portalUser: true, aclPermissions: ['owners'] });
+  const ownersAndMembers = as(await user('admin', { portalUser: true, aclPermissions: ['owners', 'members'] }), 'admin', { portalUser: true, aclPermissions: ['owners', 'members'] });
+  const view = async claims => (await call(adminGymOwnerPersonalDetails, claims, { params: { id: o } })).body.personalDetails;
+  assert.deepEqual([(await view(superAdmin)).source, (await view(superAdmin)).dateOfBirth], ['member', '1975-05-05']);
+  assert.deepEqual([(await view(ownersAndMembers)).source, (await view(ownersAndMembers)).dateOfBirth], ['member', '1975-05-05']);
+  assert.deepEqual(await view(ownersOnly), { dateOfBirth: null, age: null, gender: null, genderFrom: null, source: null });
+  // A declared (Person) date is shown with the page scope alone.
+  await db('Person').where({ id: per }).update({ dateOfBirth: '1976-06-06' });
+  assert.deepEqual([(await view(ownersOnly)).source, (await view(ownersOnly)).dateOfBirth], ['person', '1976-06-06']);
+});
+
+test('L2: before the migration has run, a write fails closed (503) before anything is saved', async () => {
+  await db.raw('ALTER TABLE "Person" RENAME COLUMN "gender" TO "gender_l2_tmp"');
+  resetPersonDetailsColumnsCache();
+  try {
+    const o = await user('gym_operator');
+    const put = await call(putMyPersonalDetails, as(o, 'gym_operator'), { body: { dateOfBirth: '1990-01-01' } });
+    assert.deepEqual([put.statusCode, put.body], [503, { error: 'personal_details_unavailable' }]);
+    const t = await user('trainer');
+    const reg = await call(trainerRegister, as(t, 'trainer'), { body: trainerBody({ dateOfBirth: '1990-01-01' }) });
+    assert.deepEqual([reg.statusCode, reg.body], [503, { error: 'personal_details_unavailable' }]);
+    assert.equal(await db('TrainerProfile').where({ userId: t }).first(), undefined, 'no profile made');
+    // Without the new fields registration still works.
+    assert.equal((await call(trainerRegister, as(t, 'trainer'), { body: trainerBody() })).statusCode, 200);
+  } finally {
+    await db.raw('ALTER TABLE "Person" RENAME COLUMN "gender_l2_tmp" TO "gender"');
+    resetPersonDetailsColumnsCache();
+  }
+});
+
+test('L3: an admin deleting the last persona (owner) clears the declared details; deleting only a trainer profile keeps them', async () => {
+  const admin = as(await user('admin'), 'admin');
+  const o = await user('gym_operator');
+  const po = await personOf(o);
+  await db('Person').where({ id: po }).update({ dateOfBirth: '1981-01-01', gender: 'female' });
+  const del = await call(adminDeleteGymOwner, admin, { params: { id: o } });
+  assert.equal(del.statusCode, 200, JSON.stringify(del.body));
+  assert.deepEqual([(await stored(po)).dateOfBirth, (await stored(po)).gender], [null, null]);
+
+  const t = await user('trainer');
+  const reg = await call(trainerRegister, as(t, 'trainer'), { body: trainerBody({ dateOfBirth: '1982-02-02' }) });
+  const delT = await call(adminDeleteTrainer, admin, { params: { id: reg.body.id } });
+  assert.equal(delT.statusCode, 200, JSON.stringify(delT.body));
+  assert.equal((await stored(await personOf(t))).dateOfBirth, '1982-02-02', 'the trainer account (persona) remains');
 });

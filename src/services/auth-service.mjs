@@ -67,6 +67,9 @@ export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink = null, auditLog = null, orgMemberships = null,
+  // Partner DOB security review M1: ({ user }) → null | { error: 'partner_under_18', status: 400 }.
+  // A person whose stored date of birth is under 18 may not add a trainer or gym-owner role.
+  partnerAgeGuard = async () => null,
 }) {
   /**
    * A trainer is "onboarded" once they have a trainer profile. Since 3 Oct 2026
@@ -597,6 +600,10 @@ export function createAuthService({
 
     const existing = (await identityLink.personasOf(caller.personId)).find(p => p.userType === type);
     if (existing) return { created: false, persona: existing, ...(await personaPayload(caller)) };
+    if (type === 'trainer' || type === 'gym_operator') {
+      const refused = await partnerAgeGuard({ user: caller });
+      if (refused) return refused;
+    }
 
     const result = await identityLink.createPersona({
       person, source: caller, userType: type, approvalStatus: approvalStatusForRole(type),

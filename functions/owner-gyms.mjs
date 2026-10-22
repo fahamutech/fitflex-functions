@@ -16,7 +16,7 @@ export const gymOwnerRegister = {
     try {
       const body = req.body || {};
       // Partner DOB slice 2: checked before anything is saved.
-      const declared = partnerDobRequiredOn() ? personalDetailsService.checkRegistration(body, ['dateOfBirth', 'gender']) : null;
+      const declared = partnerDobRequiredOn() ? await personalDetailsService.checkRegistration({ user: { id: req.user.sub }, body, fields: ['dateOfBirth', 'gender'] }) : null;
       if (declared?.error) return res.status(declared.status).json({ error: declared.error, ...(declared.field ? { field: declared.field } : {}) });
       let user = await resolveRequestUser(req);
       if (!user) {

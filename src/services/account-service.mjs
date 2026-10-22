@@ -9,6 +9,9 @@ export function createAccountService({
   initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
   // Called once the account is gone, e.g. to stop promotion analytics saying who a customer was: (userId) => void.
   onAccountDeleted = async () => {},
+  // Partner DOB security review M1 (variant 3): ({ user, dateOfBirth }) → null | { error, status }.
+  // Refuses a member date of birth under 18 for a person who holds a trainer or gym-owner role.
+  memberDobGuard = async () => null,
 }) {
   async function deleteMyAccount(user) {
     if (user.userType === 'gym_operator') {
@@ -83,6 +86,10 @@ export function createAccountService({
     // Strict YYYY-MM-DD, a real date, 1901-01-01 to today; '' clears it; null / not sent keeps it.
     const dob = parseDateOfBirthInput(body.dateOfBirth);
     if (dob.error) return dob;
+    if (!dob.skip && dob.value) {
+      const refused = await memberDobGuard({ user: current, dateOfBirth: dob.value });
+      if (refused) return refused;
+    }
     const memberProfile = {
       ...(current.memberProfile || {}),
       fitnessGoal: body.fitnessGoal ?? current.memberProfile?.fitnessGoal ?? null,

@@ -8,7 +8,8 @@
 // Values are never written to the audit log or to server logs.
 import { randomUUID } from 'node:crypto';
 import { parseDateOfBirthInput, readDateOfBirth, ageOnDay, eatToday } from '../shared/date-of-birth.mjs';
-import { PERSON_GENDERS, readPersonDetails } from '../infra/person-details-store-pg.mjs';
+import { PERSON_GENDERS, readPersonDetails, personDetailsColumnsExist } from '../infra/person-details-store-pg.mjs';
+import { partnerDobRequiredOn } from '../shared/feature-flags.mjs';
 
 export const PARTNER_TYPES = Object.freeze(['trainer', 'gym_operator']);
 export const PARTNER_MIN_AGE = 18;
@@ -114,9 +115,48 @@ export function createPersonalDetailsService({ db, auditLog, trainers, now = () 
     return { changes };
   }
 
+  const UNAVAILABLE = Object.freeze({ error: 'personal_details_unavailable', status: 503 });
+  const underAge = dob => ageOnDay(dob, eatToday(now())) < PARTNER_MIN_AGE;
+
+  /**
+   * Security review M1: the date of birth that counts for the 18+ rule. A value being sent wins; ""
+   * (clearing it) falls back past the Person to the member profile; otherwise the Person's, else a
+   * valid member-profile one. Flag on only. → null (fine, or no date of birth at all) |
+   * { error: 'partner_under_18', status: 400 }
+   */
+  async function assertPartnerAge({ user, changes = {} }) {
+    if (!partnerDobRequiredOn()) return null;
+    const personId = await personIdOf(user?.id);
+    let dob = null;
+    if (changes.dateOfBirth) dob = changes.dateOfBirth;
+    else {
+      if (!('dateOfBirth' in changes)) {
+        const person = await readPersonDetails(db, personId);
+        if (person?.dateOfBirth && readDateOfBirth(person.dateOfBirth, now()).status === 'valid') dob = person.dateOfBirth;
+      }
+      if (!dob) dob = await memberDateOfBirth(personId, user?.id);
+    }
+    return dob && readDateOfBirth(dob, now()).status === 'valid' && underAge(dob)
+      ? { error: 'partner_under_18', status: 400 } : null;
+  }
+
+  /**
+   * Security review M1 variant 3: POST /me/profile saving a member date of birth under 18 for a
+   * person who holds a trainer or gym-owner role. Flag on only. → null | { error, status }
+   */
+  async function assertMemberProfileAge({ user, dateOfBirth }) {
+    if (!partnerDobRequiredOn() || !dateOfBirth) return null;
+    if (readDateOfBirth(dateOfBirth, now()).status !== 'valid' || !underAge(dateOfBirth)) return null;
+    const partner = (await partnerPersonas(await personIdOf(user?.id))).length > 0;
+    return partner ? { error: 'partner_under_18', status: 400 } : null;
+  }
+
   async function write({ personId, actorId, changes, via }) {
     const fields = Object.keys(changes);
     if (!personId || !fields.length) return;
+    // Security review L2: before the migration has run there is nowhere to write; callers check
+    // ready() first so nothing else is saved either. This is the last stop.
+    if (!(await personDetailsColumnsExist(db))) return;
     const before = await readPersonDetails(db, personId);
     await db('Person').where({ id: personId })
       .update({ ...changes, declaredProfileUpdatedAt: db.fn.now(), updatedAt: db.fn.now() });
@@ -135,27 +175,44 @@ export function createPersonalDetailsService({ db, auditLog, trainers, now = () 
     const partner = (await partnerPersonas(personId)).length > 0;
     const checked = check(body || {}, { fields: ['dateOfBirth', 'gender'], partner });
     if (checked.error) return checked;
+    if (partner) {
+      const age = await assertPartnerAge({ user, changes: checked.changes });
+      if (age) return age;
+    }
+    if (Object.keys(checked.changes).length && !(await personDetailsColumnsExist(db))) return UNAVAILABLE;
     await write({ personId, actorId: user.id, changes: checked.changes, via: 'me' });
     return details({ userId: user.id, personId, flagOn: true });
   }
 
   /**
    * /trainer/register (fields ['dateOfBirth']) and /gym-owner/register (['dateOfBirth', 'gender']):
-   * check before registering, save after. Leaving the fields out is always accepted.
+   * check before registering, save after. Leaving the fields out is always accepted; the 18+ rule
+   * then still applies to a date of birth already stored (security review M1).
+   * → { error, status, field? } | { changes }
    */
-  function checkRegistration(body, fields) {
-    return check(body || {}, { fields, partner: true });
+  async function checkRegistration({ user, body, fields }) {
+    const checked = check(body || {}, { fields, partner: true });
+    if (checked.error) return checked;
+    const age = await assertPartnerAge({ user, changes: checked.changes });
+    if (age) return age;
+    if (Object.keys(checked.changes).length && !(await personDetailsColumnsExist(db))) return UNAVAILABLE;
+    return checked;
   }
   async function saveRegistration({ user, changes, via }) {
     if (!changes || !Object.keys(changes).length) return;
     await write({ personId: await personIdOf(user.id), actorId: user.id, changes, via });
   }
 
-  /** Admin, view only: { dateOfBirth, age, gender, genderFrom, source } of a persona's Person. */
-  async function adminView({ userId, actorId, subject }) {
+  /**
+   * Admin, view only: { dateOfBirth, age, gender, genderFrom, source } of a persona's Person.
+   * Security review L1: the member-profile fallback (source 'member') only for a caller who may also
+   * see members (`withMemberFallback`); otherwise only the date the partner declared.
+   */
+  async function adminView({ userId, actorId, subject, withMemberFallback = false }) {
     const personId = await personIdOf(userId);
     const d = personId ? await details({ userId, personId, flagOn: true })
       : { dateOfBirth: null, gender: null, source: null, genderFrom: null };
+    if (d.source === 'member' && !withMemberFallback) { d.dateOfBirth = null; d.source = null; }
     await auditLog.insertAsync({
       id: randomUUID(), at: now().toISOString(), actor: actorId, action: 'personal_details_viewed',
       target: userId || subject?.id || null, before: null, after: { subject },
@@ -167,7 +224,7 @@ export function createPersonalDetailsService({ db, auditLog, trainers, now = () 
     };
   }
 
-  return { mine, update, checkRegistration, saveRegistration, adminView };
+  return { mine, update, checkRegistration, saveRegistration, adminView, assertPartnerAge, assertMemberProfileAge };
 }
 
 function safeJson(text) {
