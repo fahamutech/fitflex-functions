@@ -85,6 +85,16 @@ This reuses the existing mechanisms: `requireAuth`, `requireAcl`, the per-reques
 
 Non-employer organisations have no KYB workflow yet (`kyc.supported = false`). The planned extension is a nullable `PartnerKycCase.organizationId` plus a new `partnerType`, which reuses the requirement evaluator, documents and review queue. No KYC logic is duplicated here.
 
+### 3a. Company HR in the organisation area (Phase B · B5a, flag `ORG_ONLY_SPONSORS`)
+
+Owner decisions (2026-10-20): convert the HR logins; company staff (`/corporate/staff`) stay the source of people for mapped organisations; `/hr` is deleted two weeks after the flag goes on (a later portal slice). With the flag **off** nothing above changes.
+
+- **Conversion** — `node scripts/hr-to-org.mjs` (dry run; `--apply` to write; `--corporate=<id>`; `--json`). Each `corporate_hr` login gets a `B2BOrganizationUser` row, role `hr`, on its company's organisation (the mirror is created as onboarding does when missing). Additive and re-runnable: the login keeps working, a live row is left alone, a removed row is never re-added, each row added writes `AuditLog` `b2b.org_user.convert_corporate_hr` (actor `system:hr-to-org`), and an applied run that changed anything writes `b2b.hr_to_org.run`. It is an ops script, not a migration: migrations run by themselves at deploy, and this changes who can sign in where, so it needs a dry run and a person deciding when. No schema change. With the flag on, `createHrUser` makes the row at once.
+- **Sign-in** — `POST /auth/login`, `/auth/firebase/session`, `/auth/pin/login` (and anything using `sessionForPerson`) and `/auth/switch-persona` add `user.organizationUser: true`, `user.organizationRoles`, `user.organizationIds` for a company HR login that reaches its organisation. The JWT is unchanged; access is still decided per request.
+- **People** — for a mapped organisation, `POST /b2b/organizations/:id/beneficiaries`, `.../:beneficiaryId/status`, `DELETE .../:beneficiaryId`, the new `POST .../:beneficiaryId/link` and `POST .../beneficiaries/import` write through `corporate-service` (seat limit, seat billing and `corporate.staff.*` audit unchanged). Status maps active→active, suspended→suspended, inactive→exited. Employee rows are no longer `readOnly` and carry `employeeStatus`, `linked`, and (for `beneficiaries.manage` only) `email`/`phone`.
+- **Tenancy** — a company HR login reaches only its own company's organisation, only while active; once it has a row, that row decides (suspended/removed in `/org` closes `/org`, `/corporate` still works until `/hr` goes); it cannot be added to another organisation (`409 hr_login_other_company`).
+- Challenges, rewards and groups already resolve a mapped organisation to its Corporate scope (§8), so `/org/...` and `/corporate/...` show the same ones.
+
 ## 4. Migration strategy
 
 1. `20261101090000-b2b-foundation`: the schema only. `down` drops the three new tables.

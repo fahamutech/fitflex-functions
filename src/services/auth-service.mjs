@@ -67,6 +67,10 @@ export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink = null, auditLog = null, orgMemberships = null,
+  // Phase B · B5a: async (user) => { organizationUser, organizationRoles,
+  // organizationIds } | null — what a sign-in tells the portal about a company
+  // HR login (b2bService.organizationSessionMarks; null unless ORG_ONLY_SPONSORS).
+  organizationMarks = null,
 }) {
   /**
    * A trainer is "onboarded" once they have a trainer profile. Since 3 Oct 2026
@@ -627,5 +631,28 @@ export function createAuthService({
     return { memberships: await orgMemberships.membershipsOfPerson(user.personId, { includeEnded }) };
   }
 
-  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships, sessionForPerson, sessionFor };
+  /**
+   * B5a: add the organisation marks to a session's `user` (never to the JWT:
+   * organisation access is still decided per request). A lookup failure only
+   * leaves the marks out; it never blocks a sign-in.
+   */
+  async function withOrganizationMarks(result) {
+    if (!organizationMarks || !result?.token || !result.user) return result;
+    let marks = null;
+    try {
+      marks = await organizationMarks(result.user);
+    } catch (err) {
+      console.warn('[auth] organisation marks skipped:', err?.message);
+    }
+    return marks ? { ...result, user: { ...result.user, ...marks } } : result;
+  }
+  const marking = fn => async (...args) => withOrganizationMarks(await fn(...args));
+
+  return {
+    requestOtp, verifyOtp, devLogin, myPersonas, addPersona, myMemberships, sessionFor,
+    login: marking(login),
+    firebaseSession: marking(firebaseSession),
+    switchPersona: marking(switchPersona),
+    sessionForPerson: marking(sessionForPerson),
+  };
 }

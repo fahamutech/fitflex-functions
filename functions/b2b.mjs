@@ -178,7 +178,7 @@ export const getB2BBeneficiary = {
 
 export const enrollB2BBeneficiary = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries',
-  description: 'Enrol a FitFlex member (beneficiaries.manage), named by the email or mobile number of their member account, or by userId (one of the three). The organisation must be active. A mapped company enrols staff through /corporate/staff.',
+  description: 'Enrol a FitFlex member (beneficiaries.manage), named by the email or mobile number of their member account, or by userId (one of the three). The organisation must be active. A mapped company enrols staff through /corporate/staff (409 managed_by_corporate) — unless ORG_ONLY_SPONSORS is on: then the person is added to the company staff list from here (seat limit as in /corporate/staff). Body for a company: { displayName?, email?, phone?, userId?, groupName? (department), status?: pending|active }; email and phone may both be given as contact details, the member account behind the first confirmed one is linked; with a name and no account behind the contact they are added unlinked. Returns { beneficiary, pin, writtenThrough: "corporate_staff" } (pin: the activation PIN, shown once).',
   requestSample: { phone: '0712 345 678', beneficiaryType: 'policyholder', externalReference: 'POL-00123', groupName: 'Gold scheme', status: 'active' },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.enrollBeneficiary({
@@ -188,7 +188,7 @@ export const enrollB2BBeneficiary = {
 
 export const setB2BBeneficiaryStatus = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/:beneficiaryId/status',
-  description: 'Move a beneficiary between pending, active, suspended and inactive (beneficiaries.manage).',
+  description: 'Move a beneficiary between pending, active, suspended and inactive (beneficiaries.manage). A mapped company\'s employee: 409 managed_by_corporate, unless ORG_ONLY_SPONSORS is on — then active/suspended/inactive set the employee active/suspended/exited (exited frees the seat) through the company staff path.',
   requestSample: { status: 'suspended' },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.setBeneficiaryStatus({
@@ -202,6 +202,16 @@ export const deactivateB2BBeneficiary = {
   onGuard: routeGuard('delete', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.deactivateBeneficiary({
     access, beneficiaryId: req.params.beneficiaryId, actorId: req.user.sub,
+  })),
+};
+
+export const linkB2BBeneficiaryAccount = {
+  created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/:beneficiaryId/link',
+  description: 'B5a (404 unless ORG_ONLY_SPONSORS is on): link a mapped company\'s employee to their FitFlex member account (beneficiaries.manage), as POST /corporate/staff/:id/link does — by email, mobile number or userId (one of them); no contact (or userId null) unlinks. 409 link_not_supported for anyone who is not company staff.',
+  requestSample: { email: 'asha@nmbtz.com' },
+  onGuard: routeGuard('post', requireOrgAccess),
+  onRequest: (req, res) => inOrganization(req, res, access => b2bService.linkBeneficiaryAccount({
+    access, beneficiaryId: req.params.beneficiaryId, body: req.body || {}, actorId: req.user.sub,
   })),
 };
 
@@ -933,7 +943,7 @@ const people = b2bBeneficiaryImportService;
 
 export const importB2BBeneficiaries = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/import',
-  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account who has verified that email or number is enrolled; anyone else is invited (by email, and by SMS when listed with a mobile number) and enrolled once a member verifies that email or number (an email or number only typed onto a profile matches nobody). Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason, plus `emailCodesAvailable` (false: people listed by email only cannot verify it in the app yet, so ask for a mobile number too).',
+  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account who has verified that email or number is enrolled; anyone else is invited (by email, and by SMS when listed with a mobile number) and enrolled once a member verifies that email or number (an email or number only typed onto a profile matches nobody). Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason, plus `emailCodesAvailable` (false: people listed by email only cannot verify it in the app yet, so ask for a mobile number too). A mapped company: 409 managed_by_corporate, unless ORG_ONLY_SPONSORS is on — then each new person joins the company staff list (linked and active with a confirmed member account, otherwise unlinked and pending; nobody is invited), all-or-nothing on free seats (409 seat_limit_reached), and the reply adds companyStaff: true, seatsAvailable and credentials [{ line, employeeId, displayName, pin }] for the unlinked (shown once, never stored).',
   requestSample: { rawText: 'name,email,phone,group\nAsha Mollel,asha@example.com,0712345678,Finance', dryRun: true },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => people.importPeople({ access, body: req.body || {}, actorId: actor(req) })),
