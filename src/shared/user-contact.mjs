@@ -6,15 +6,23 @@
 //   require: 'member'  only a member account will do
 //   prefer:  'member'  a member account if there is one; otherwise the only
 //                      account there is; otherwise the caller must say which
+//
+// An email or number counts only when someone has VERIFIED it (a
+// LoginIdentifier with verifiedAt, see verified-contacts.mjs). User.email and
+// User.phone are self-editable and prove nothing, so an account that holds
+// the contact only there is not found: the same `user_not_found` as nobody,
+// which reveals nothing. A user id is looked up as before.
 import { normalizeEmail, normalizePhone } from './identifiers.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 
 /**
- * @param users a collection with findByIdAsync and filterByColumnAsync
+ * @param users a collection with findByIdAsync
+ * @param options.contacts verified-contacts helper (createVerifiedContacts);
+ *   without it nobody is found by email or number (fail closed)
  * @returns {{ user } | { error, status }}
  */
-export async function findUserByContact(users, { userId, email, phone } = {}, { require = null, prefer = null } = {}) {
+export async function findUserByContact(users, { userId, email, phone } = {}, { require = null, prefer = null, contacts = null } = {}) {
   const given = [userId, email, phone].filter(v => v != null && String(v).trim() !== '');
   if (given.length === 0) return fail('user_contact_required', 400, { hint: 'Give an email address, a mobile number or a user id.' });
   if (given.length > 1) return fail('one_user_contact_only', 400);
@@ -26,17 +34,14 @@ export async function findUserByContact(users, { userId, email, phone } = {}, { 
   } else if (email) {
     const value = normalizeEmail(email);
     if (!value || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) return fail('invalid_email', 400);
-    const rows = await users.filterByColumnAsync('email', value);
-    // Addresses saved before emails were normalised may differ in case.
-    const exact = String(email).trim();
-    candidates = rows.length || exact === value ? rows : await users.filterByColumnAsync('email', exact);
+    candidates = await verifiedAccounts(users, contacts, { type: 'email', value });
   } else {
     const value = normalizePhone(phone);
     if (!value) return fail('invalid_phone', 400, { hint: 'For example 0712 345 678 or +255712345678.' });
-    candidates = await users.filterByColumnAsync('phone', value);
+    candidates = await verifiedAccounts(users, contacts, { type: 'phone', value });
   }
   candidates = candidates.filter(u => u.accountStatus !== 'deleted');
-  if (!candidates.length) return fail('user_not_found', 404, { hint: 'They need a FitFlex account first.' });
+  if (!candidates.length) return fail('user_not_found', 404, { hint: 'They need a FitFlex account with this email or number confirmed (in the app: Mobile number and email).' });
 
   const ofType = type => candidates.find(u => u.userType === type);
   if (require) {
@@ -45,4 +50,11 @@ export async function findUserByContact(users, { userId, email, phone } = {}, { 
   }
   const user = (prefer && ofType(prefer)) || (candidates.length === 1 ? candidates[0] : null);
   return user ? { user } : fail('ambiguous_user', 409, { found: candidates.map(u => ({ userId: u.id, userType: u.userType })) });
+}
+
+/** Every account of the person who has verified this contact (none when no helper is given). */
+async function verifiedAccounts(users, contacts, contact) {
+  if (!contacts?.userIdsFor) return [];
+  const ids = await contacts.userIdsFor(contact);
+  return (await Promise.all(ids.map(id => users.findByIdAsync(id)))).filter(Boolean);
 }

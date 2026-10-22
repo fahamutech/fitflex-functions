@@ -7,7 +7,8 @@
 // ID, TIN and account numbers go only to the partner themselves and to admins.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { partnerKycService as svc } from '../src/bootstrap/services.mjs';
+import { partnerKycService as svc, partnerProgressService } from '../src/bootstrap/services.mjs';
+import { partnerProgressOn } from '../src/shared/feature-flags.mjs';
 import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
 import { DOCUMENT_MAX_BYTES } from '../src/shared/partner-kyc.mjs';
 
@@ -67,9 +68,20 @@ const forPartner = fn => async (req, res) => {
 
 export const myKyc = {
   created, method: 'get', path: '/me/kyc',
-  description: 'Partner: my KYC case, details, payout accounts and the checklist of what is still needed.',
+  description: 'Partner: my KYC case, details, payout accounts and the checklist of what is still needed. With PARTNER_PROGRESS on, also `progress`: one tracker of steps registered → approved → verified → payoutReady, the current step and a nextAction code (gym owners: plus `progress.gyms`, one per gym).',
   onGuard: requireAuth(...PARTNER_ROLES),
-  onRequest: asPartner(partner => svc.overview(partner)),
+  onRequest: asPartner(async partner => {
+    const overview = await svc.overview(partner);
+    if (overview.error || !partnerProgressOn()) return overview;
+    // The tracker is extra: if it fails, /me/kyc still answers, without it.
+    try {
+      const progress = await partnerProgressService.forOverview(partner, overview);
+      return progress ? { ...overview, progress } : overview;
+    } catch (err) {
+      console.error('[partner-progress] omitted from /me/kyc:', partner.partnerType, partner.subjectId, err?.message || err);
+      return overview;
+    }
+  }),
 };
 
 export const myKycBusiness = {

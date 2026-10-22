@@ -47,6 +47,10 @@ function page(rows, query = {}) {
 export function createB2BService({
   users, corporateAccounts, corporateEmployees, partnerKycCases,
   organizations, organizationUsers, beneficiaries, auditLog,
+  // Verified-contacts helper (src/shared/verified-contacts.mjs): adding someone
+  // by email or number finds only a person who has verified it. Without it,
+  // nobody is found by email or number (fail closed); user ids still work.
+  verifiedContacts = null,
   now = () => new Date(),
 }) {
   const stamp = () => now().toISOString();
@@ -439,9 +443,9 @@ export function createB2BService({
     const refused = checkGrant(access, { role: body.role, permissions });
     if (refused) return refused;
 
-    // By user id, or by the email or mobile number of their FitFlex account. An
+    // By user id, or by the verified email or mobile number of their FitFlex account. An
     // organisation user signs in to the portal with their member account.
-    const found = await findUserByContact(users, body, { prefer: 'member' });
+    const found = await findUserByContact(users, body, { prefer: 'member', contacts: verifiedContacts });
     if (found.error) return found;
     const { user } = found;
     const live = (await organizationUsers.filterByColumnAsync('userId', user.id))
@@ -624,8 +628,8 @@ export function createB2BService({
     const status = body.status ?? 'pending';
     if (!['pending', 'active'].includes(status)) return fail('invalid_status', 400, { allowed: ['pending', 'active'] });
 
-    // By user id, or by the email or mobile number of their member account.
-    const found = await findUserByContact(users, body, { require: body.userId ? null : 'member' });
+    // By user id, or by the verified email or mobile number of their member account.
+    const found = await findUserByContact(users, body, { require: body.userId ? null : 'member', contacts: verifiedContacts });
     if (found.error) return found.error === 'member_account_required' ? fail('beneficiary_must_be_member', 400) : found;
     const { user } = found;
     if (user.userType !== 'member') return fail('beneficiary_must_be_member', 400);

@@ -16,6 +16,9 @@ export function createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
   onAccountCreated = null,
   billedByProgramme = null,
+  // Verified-contacts helper: linking by email or number finds only a person
+  // who has verified it (fail closed without it; user ids still work).
+  verifiedContacts = null,
 }) {
   const now = () => new Date().toISOString();
 
@@ -296,8 +299,8 @@ export function createCorporateService({
       await audit({ actor: actorId, action: 'corporate.staff.unlink', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId: null } });
       return { employee: (({ pinHash, ...rest }) => rest)(updated) };
     }
-    // By user id, or by the email or mobile number of their member account.
-    const found = await findUserByContact(users, { userId: givenUserId, email, phone }, { require: givenUserId ? null : 'member' });
+    // By user id, or by the verified email or mobile number of their member account.
+    const found = await findUserByContact(users, { userId: givenUserId, email, phone }, { require: givenUserId ? null : 'member', contacts: verifiedContacts });
     if (found.error) return found.error === 'member_account_required' ? { error: 'user_must_be_member', status: 400 } : found;
     const { user } = found;
     if (user.userType !== 'member') return { error: 'user_must_be_member', status: 400 };

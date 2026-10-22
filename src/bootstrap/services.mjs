@@ -88,7 +88,7 @@ import { createExerciseAdminService } from '../services/training/exercise-admin-
 import { createSocialService } from '../services/social-service.mjs';
 import { createUsernameService } from '../services/username-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
-import { createVerifiedContacts } from '../services/friend-invitation-contacts.mjs';
+import { createVerifiedContacts } from '../shared/verified-contacts.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
 import { createChallengeService } from '../services/challenge-service.mjs';
@@ -121,6 +121,7 @@ import { createCommunicationAccess } from '../services/communication-access.mjs'
 import { whatsappParameter } from '../shared/message-render.mjs';
 import { createWhatsAppProvider } from '../integrations/whatsapp/provider.mjs';
 import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
+import { createPartnerProgressService } from '../services/partner-progress-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
@@ -353,8 +354,13 @@ export const vendorDocumentService = createVendorDocumentService({
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const productStatsRecomputeService = createProductStatsRecomputeService({ db });
+// Who an email / number belongs to, by verified LoginIdentifier rows only
+// (never the self-editable User.email / User.phone). Used by friend
+// invitations, B2B invite matching and import, and add-by-contact.
+export const verifiedContacts = createVerifiedContacts(db);
 export const corporateService = createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
+  verifiedContacts,
   // Every new company gets its employer B2B organisation. b2bService is defined
   // below; the hook only runs later, at onboarding.
   onAccountCreated: (account, actorId) => b2bService.ensureOrganizationForCorporate({ corporateId: account.id, actorId }),
@@ -365,7 +371,7 @@ export const corporateService = createCorporateService({
 export const b2bService = createB2BService({
   users, corporateAccounts, corporateEmployees, partnerKycCases,
   organizations: b2bOrganizations, organizationUsers: b2bOrganizationUsers, beneficiaries: b2bBeneficiaries,
-  auditLog,
+  auditLog, verifiedContacts,
 });
 // B2B Phase 2: wellness programmes and benefit rules (no usage counting or payouts).
 export const b2bProgramService = createB2BProgramService({
@@ -422,7 +428,10 @@ export const b2bAnalyticsService = createB2BAnalyticsService({
 export const opsService = createOpsService({ db });
 // Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
 export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
-  db, b2bService, emailSender: () => emailSender(),
+  db, b2bService, emailSender: () => emailSender(), verifiedContacts,
+  // Whether FitFlex can send email codes, i.e. whether someone listed by email
+  // only can verify that address in the app (same source as emailCodes in GET /auth/options).
+  emailCodes: () => emailSender().configured === true,
   // Invitation SMS goes through the shared SMS service (SMS_PROVIDER), so it is logged in SmsLog like every other SMS.
   // smsProvider and smsService are defined further down; this only runs later.
   smsSender: () => ({
@@ -683,8 +692,8 @@ export const friendInvitationService = createFriendInvitationService({
   users, follows, blocks, invites: friendInvitations, notifications,
   notify: (userId, message) => notificationService.notify(userId, message),
   // Verified evidence only (LoginIdentifier.verifiedAt): never User.email /
-  // User.phone, which are unverified and self-editable. See friend-invitation-contacts.mjs.
-  ...createVerifiedContacts(db),
+  // User.phone, which are unverified and self-editable. See src/shared/verified-contacts.mjs.
+  findMember: verifiedContacts.findMember, contactsFor: verifiedContacts.contactsFor,
   // FitFlex sends the invitation itself only when these are switched on
   // (FRIEND_INVITE_SMS / FRIEND_INVITE_WHATSAPP = on). SMS goes through the
   // shared SMS service and its registered sender name; WhatsApp needs an
@@ -968,6 +977,8 @@ export const partnerKycService = createPartnerKycService({
   // KYC documents stay private on Zebra; the API streams them after its own checks.
   documentStore: createZebraDocumentStore(),
 });
+// Phase B · B4a: one partner progress tracker on GET /me/kyc (flag PARTNER_PROGRESS; read-only).
+export const partnerProgressService = createPartnerProgressService({ gyms, trainers, partnerGate, payoutEligibility });
 export const termsService = createTermsService({ users, partnerKycService, auditLog });
 
 // Moderation & Promotion. Moderation decides what may be shown; promotions decide

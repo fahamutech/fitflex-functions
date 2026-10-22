@@ -277,6 +277,17 @@ export function vendorDocumentsTinWithoutVatOn() {
   return vendorDocumentsOn() && on('VENDOR_DOCUMENTS_TIN_WITHOUT_VAT');
 }
 
+/**
+ * Phase B · B4a: one partner progress tracker (registered → approved →
+ * verified → payoutReady) on GET /me/kyc as `progress`. Off unless
+ * PARTNER_PROGRESS is set: the field is absent and nothing else changes.
+ * Read-only: built from approvalStatus, the KYC case/checklist and payout
+ * eligibility (src/shared/partner-progress.mjs).
+ */
+export function partnerProgressOn() {
+  return on('PARTNER_PROGRESS');
+}
+
 // ── Default-ON switches ──────────────────────────────────────────────────────
 // The exception to "off unless set": these switches keep work that already
 // runs today running, so a deploy changes nothing. Only an explicit off value
