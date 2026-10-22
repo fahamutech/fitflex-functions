@@ -208,6 +208,11 @@ export function createPgVendorDocumentStore({ db, customerStore, vatOn = () => f
     return rows.map((r, i) => ({ ...r, n: i + 1, createdByName: names.get(r.createdBy) ?? null }));
   }
 
+  /** What a sale of this vendor is shared as: receipt (cash) | invoice (credit) | null (not this vendor's). */
+  async function saleDocType(vendorId, saleId) {
+    const row = typeof saleId === 'string' && saleId ? await db('VendorSale').where({ id: saleId, vendorId }).first('kind') : null;
+    return row ? (row.kind === 'credit' ? 'invoice' : 'receipt') : null;
+  }
   const getLink = async (vendorId, linkId) => (typeof linkId === 'string' && linkId
     ? linkRow(await db('VendorDocumentLink').where({ id: linkId, vendorId }).first()) : null);
 
@@ -236,6 +241,6 @@ export function createPgVendorDocumentStore({ db, customerStore, vatOn = () => f
 
   return {
     saleSource, paymentSource, statementSource, issueOrderInvoice, orderInvoiceSource, orderVendorsForBuyer, vendorsOf,
-    createLink, listLinks, getLink, revoke, liveLinkByHash, touch, vendorExists, customerForgotten,
+    createLink, listLinks, getLink, saleDocType, revoke, liveLinkByHash, touch, vendorExists, customerForgotten,
   };
 }

@@ -51,6 +51,12 @@ export function taxProfileView(row, kyc = null, certificate = null, verifiedCert
   };
 }
 
+/**
+ * UAT D3: who proposed / decided / acted, as { id, name } — the admin's display name; "System" for the
+ * migration seed (system:*); name null when the account is not found.
+ */
+export const personOf = (id, names) => (id == null ? null : { id, name: String(id).startsWith('system:') ? 'System' : names.get(id) ?? null });
+
 export function createVendorTaxService({ store, notifyVendor = async () => {}, vatOn = vendorVatOn, now = () => new Date() }) {
   const today = () => eatDate(now());
 
@@ -124,13 +130,14 @@ export function createVendorTaxService({ store, notifyVendor = async () => {}, v
     const [codes, rates] = await Promise.all([store.codes(), store.rates()]);
     const statuses = rateStatuses(rates, day);
     const history = await store.historyOf(rates.map(r => r.id));
+    const names = await store.namesOf([...rates.flatMap(r => [r.proposedBy, r.decidedBy]), ...[...history.values()].flat().map(h => h.actor)]);
     const byCode = new Map(codes.map(c => [c.code, c]));
     const rows = rates.map(r => ({
       id: r.id, code: r.code, nameEn: byCode.get(r.code)?.nameEn ?? null, nameSw: byCode.get(r.code)?.nameSw ?? null,
       ratePct: r.ratePct, exempt: r.ratePct == null, effectiveFrom: r.effectiveFrom, effectiveTo: statuses.get(r.id).effectiveTo,
-      status: statuses.get(r.id).status, reason: r.reason, proposedBy: r.proposedBy, proposedAt: iso(r.proposedAt),
-      decidedBy: r.decidedBy ?? null, decidedAt: iso(r.decidedAt), decisionNote: r.decisionNote ?? null,
-      history: (history.get(r.id) || []).map(h => ({ action: h.action, actor: h.actor, at: iso(h.at), before: h.before ?? null, after: h.after ?? null })),
+      status: statuses.get(r.id).status, reason: r.reason, proposedBy: personOf(r.proposedBy, names), proposedAt: iso(r.proposedAt),
+      decidedBy: personOf(r.decidedBy, names), decidedAt: iso(r.decidedAt), decisionNote: r.decisionNote ?? null,
+      history: (history.get(r.id) || []).map(h => ({ action: h.action, actor: personOf(h.actor, names), at: iso(h.at), before: h.before ?? null, after: h.after ?? null })),
     }));
     return {
       asOf: day,
@@ -147,7 +154,7 @@ export function createVendorTaxService({ store, notifyVendor = async () => {}, v
     const codes = new Map((await store.codes()).map(c => [c.code, { exempt: Boolean(c.exempt), inUse: Boolean(c.inUse) }]));
     const proposal = parseTaxRateProposal(body, { codes, tomorrow: addDays(today(), 1) });
     if (proposal.error) return proposal;
-    return { rate: await store.propose({ actorId, proposal }), status: 201 };
+    return { rate: await withPeople(await store.propose({ actorId, proposal })), status: 201 };
   }
 
   /** Maker ≠ checker (§7.3): the proposer can never approve or reject their own proposal; only they withdraw it. */
@@ -156,7 +163,7 @@ export function createVendorTaxService({ store, notifyVendor = async () => {}, v
     if (action === 'reject' && !note) return { error: 'reason_required', status: 400 };
     if (note && note.length > 300) return { error: 'reason_too_long', status: 400, max: 300 };
     const tomorrow = addDays(today(), 1);
-    return store.decideRate({
+    const out = await store.decideRate({
       id, actorId, action, note,
       check: (rate) => {
         if (action === 'withdraw') return rate.proposedBy === actorId ? null : { error: 'not_proposer', status: 403 };
@@ -165,6 +172,13 @@ export function createVendorTaxService({ store, notifyVendor = async () => {}, v
         return null;
       },
     });
+    return out.error ? out : { rate: await withPeople(out.rate) };
+  }
+
+  /** One rate as the admin endpoints answer it: proposedBy / decidedBy as { id, name } (UAT D3). */
+  async function withPeople(rate) {
+    const names = await store.namesOf([rate.proposedBy, rate.decidedBy]);
+    return { ...rate, proposedBy: personOf(rate.proposedBy, names), decidedBy: personOf(rate.decidedBy, names) };
   }
 
   /**
