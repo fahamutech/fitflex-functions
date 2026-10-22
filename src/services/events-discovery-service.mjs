@@ -14,6 +14,20 @@ const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const CANDIDATE_CAP = 500;
 const toList = v => (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(s => String(s).trim()).filter(Boolean);
 const toDate = v => { if (!v) return null; const d = new Date(v); return Number.isNaN(+d) ? null : d; };
+/** Day boundaries are read in East Africa Time (UTC+3, no DST): a date-only `from`/`to` means the whole Dar day. */
+export const DAY_TZ_OFFSET_MS = 3 * 3_600_000;
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * `from` / `to` as the apps send them: a full ISO instant is used as is; a date-only value (YYYY-MM-DD,
+ * what mobile sends) is the start (from) or the end, 23:59:59.999 (to), of that day in Africa/Dar_es_Salaam.
+ */
+export function parseDayBound(value, edge) {
+  if (typeof value !== 'string' || !DATE_ONLY.test(value.trim())) return toDate(value);
+  const midnightUtc = Date.parse(`${value.trim()}T00:00:00.000Z`);
+  if (Number.isNaN(midnightUtc)) return null;
+  const startOfDay = midnightUtc - DAY_TZ_OFFSET_MS;
+  return new Date(edge === 'end' ? startOfDay + 86_400_000 - 1 : startOfDay);
+}
 const encodeCursor = offset => Buffer.from(String(offset), 'utf8').toString('base64url');
 const decodeCursor = cursor => { if (!cursor) return 0; const n = parseInt(Buffer.from(String(cursor), 'base64url').toString('utf8'), 10); return Number.isInteger(n) && n >= 0 ? n : 0; };
 
@@ -55,8 +69,8 @@ export function createEventsDiscoveryService({
     const text = typeof query.q === 'string' && query.q.trim() ? query.q.trim().slice(0, 80) : null;
     const limit = Math.min(Math.max(parseInt(query.limit, 10) || 20, 1), 50);
     const offset = decodeCursor(query.cursor);
-    const from = toDate(query.from) ?? now();
-    const to = toDate(query.to);
+    const from = parseDayBound(query.from, 'start') ?? now();
+    const to = parseDayBound(query.to, 'end');
 
     let ids = null;
     if (savedOnly) {

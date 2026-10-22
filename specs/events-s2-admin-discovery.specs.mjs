@@ -13,6 +13,7 @@ import { UNLIMITED_CAPACITY } from '../src/shared/events-document.mjs';
 import { PORTAL_ACL_SCOPES } from '../src/services/portal-user-service.mjs';
 import { adminListEvents, adminEventsSummary, adminEventsAudit, adminGetEvent, adminDecideEvent, adminCancelEvent, adminArchiveEvent, adminCompleteEvent, adminEventAudit } from '../functions/events-admin.mjs';
 import { eventsOptions, eventsList, eventDetail, saveEventFavourite, removeEventFavourite } from '../functions/events-public.mjs';
+import { parseDayBound } from '../src/services/events-discovery-service.mjs';
 import { organizerGetEvent, organizerSubmitEvent, organizerEventChanges } from '../functions/events-organizer.mjs';
 import { invitationService } from '../src/bootstrap/services.mjs';
 import { eventLifecycle } from '../functions/jobs.mjs';
@@ -305,8 +306,9 @@ test('admin cancel (even with confirmed registrations, D12), complete and archiv
 test('GET /events: default statuses only, filters, sort, opaque cursor pagination, computed fields; drafts never revealed', async () => {
   on();
   const org = await organizer({ name: 'Discovery Club' });
-  const soon = new Date(+new Date() + 5 * D);
-  const later = new Date(+new Date() + 20 * D);
+  const now_ = new Date();
+  const soon = new Date(+now_ + 5 * D);
+  const later = new Date(+now_ + 20 * D);
   const a = await seed(org, { title: 'Alpha Half Dar', startsAt: soon, venueRegion: 'dar-es-salaam', categories: [{ name: '21K', distanceMeters: 21097, tickets: [{ priceTzs: 30000, capacity: 100 }, { priceTzs: 25000, capacity: 50 }] }] });
   const b = await seed(org, { title: 'Bravo Trail Arusha', eventType: 'trail', startsAt: later, venueRegion: 'arusha', venueCity: 'Arusha', categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ priceTzs: 0, capacity: 100 }] }, { name: '5K', distanceMeters: 5000, tickets: [{ priceTzs: 15000, capacity: 100 }] }] });
   const c = await seed(org, { title: 'Charlie Closed', status: 'registration_closed', startsAt: new Date(+later + D) });
@@ -350,6 +352,16 @@ test('GET /events: default statuses only, filters, sort, opaque cursor paginatio
   assert.deepEqual(await q({ q: 'Bravo_Trail' }), []);
   assert.deepEqual(await q({ q: 'Bravo Trail' }), [b.id]);
   assert.deepEqual(await q({ from: new Date(+later - D).toISOString(), to: new Date(+later + D).toISOString() }), [b.id, c.id]);
+  // Date-only bounds are whole Dar days (contract check): an event at 18:00 EAT on the `to` day is included.
+  const dayEnd = new Date(+now_ + 60 * D); dayEnd.setUTCHours(15, 0, 0, 0); // 15:00 UTC = 18:00 EAT
+  const evening = await seed(org, { title: 'Evening on the to-day', startsAt: dayEnd, endsAt: new Date(+dayEnd + 2 * H), registrationClosesAt: new Date(+dayEnd - D) });
+  const day = new Date(+dayEnd + 3 * H).toISOString().slice(0, 10); // the Dar calendar day
+  assert.deepEqual((await call(eventsList, null, { query: { q: 'Evening on the to-day', from: day, to: day } })).body.items.map(i => i.id), [evening.id]);
+  assert.deepEqual((await call(eventsList, null, { query: { q: 'Evening on the to-day', to: `${day}T00:00:00.000Z` } })).body.items, [], 'a full ISO instant is taken as is');
+  assert.equal(parseDayBound('2027-03-06', 'start').toISOString(), '2027-03-05T21:00:00.000Z');
+  assert.equal(parseDayBound('2027-03-06', 'end').toISOString(), '2027-03-06T20:59:59.999Z');
+  assert.equal(parseDayBound('2027-03-06T10:00:00Z', 'end').toISOString(), '2027-03-06T10:00:00.000Z');
+  assert.equal(parseDayBound('nope', 'end'), null);
   assert.deepEqual(await q({ sort: 'price_low' }), [b.id, d.id, a.id, c.id, soldOut.id]);
   // Pagination: an opaque cursor walks the same ordering without gaps.
   const page1 = await call(eventsList, null, { query: { limit: 2, sort: 'soonest' } });
