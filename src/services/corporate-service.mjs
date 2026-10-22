@@ -305,8 +305,23 @@ export function createCorporateService({
       await audit({ actor: actorId, action: 'corporate.staff.unlink', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId: null } });
       return { employee: (({ pinHash, ...rest }) => rest)(updated) };
     }
+    // Named only by user id (a user id proves nothing): the member must accept
+    // before the record is linked and the company sees their activity.
+    // FitFlex platform admins (actorType 'admin') still link directly.
+    const byIdOnly = givenUserId != null && String(givenUserId).trim() !== '';
+    const askById = byIdOnly && actorType !== 'admin' && !memberRequestId;
+    if (askById) {
+      if (!memberRequests) return { error: 'member_consent_unavailable', status: 503 };
+      const limited = memberRequests.attempt(actorId);
+      if (limited) return limited;
+    }
     // By user id, or by the verified email or mobile number of their member account.
     const found = await findUserByContact(users, { userId: givenUserId, email, phone }, { require: givenUserId ? null : 'member', contacts: verifiedContacts });
+    // An id that names nobody, or no member, gets the same answer as a real request (nothing stored, nobody told).
+    if (askById && (found.error === 'user_not_found' || (found.user && found.user.userType !== 'member'))) {
+      return memberRequests.stub({ kind: 'employee_link', corporateId, employeeId, userId: givenUserId,
+        details: { displayName: employee.displayName ?? null, department: employee.department ?? null } });
+    }
     if (found.error) return found.error === 'member_account_required' ? { error: 'user_must_be_member', status: 400 } : found;
     const { user } = found;
     if (user.userType !== 'member') return { error: 'user_must_be_member', status: 400 };
@@ -314,13 +329,8 @@ export function createCorporateService({
     const taken = (await corporateEmployees.filterByColumnAsync('userId', userId))
       .find(e => e.corporateId === corporateId && e.id !== employeeId && e.status !== 'exited');
     if (taken) return { error: 'user_already_linked', status: 409, employeeId: taken.id };
-    // Named only by user id (a user id proves nothing): the member must accept
-    // before the record is linked and the company sees their activity.
-    // FitFlex platform admins (actorType 'admin') still link directly.
-    const byIdOnly = givenUserId != null && String(givenUserId).trim() !== '';
-    if (byIdOnly && actorType !== 'admin' && !memberRequestId) {
+    if (askById) {
       if (employee.userId === userId) return { employee: (({ pinHash, ...rest }) => rest)(employee), unchanged: true };
-      if (!memberRequests) return { error: 'member_consent_unavailable', status: 503 };
       return memberRequests.create({
         kind: 'employee_link', corporateId, employeeId, userId, requestedBy: actorId, requestedByType: actorType ?? 'corporate_hr',
         details: { displayName: employee.displayName ?? null, department: employee.department ?? null },
@@ -362,7 +372,9 @@ export function createCorporateService({
     const activeCount = roster.filter(e => e.status === 'active').length;
     const engagementRatePct = calculateEngagementRate({ activeCount, totalCount: enrolled.length });
 
-    const linkedUserIds = enrolled.map(e => e.userId).filter(Boolean);
+    // Only people enrolled now (active or suspended): not someone still pending
+    // activation, the same rule as B2B analytics (A-02; security review finding 7).
+    const linkedUserIds = roster.filter(e => e.status === 'active' || e.status === 'suspended').map(e => e.userId).filter(Boolean);
     const visits = linkedUserIds.length
       ? await checkins.filterByColumnInAsync('memberId', linkedUserIds)
       : [];

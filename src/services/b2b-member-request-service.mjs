@@ -21,6 +21,7 @@
 // the direct add (see b2b-service / corporate-service); adds by a VERIFIED
 // email or number are unchanged.
 import { randomUUID } from 'node:crypto';
+import { createVendorLimiter } from '../shared/vendor-rate-limit.mjs';
 
 const TABLE = 'B2BMemberRequest';
 const SYSTEM = 'system:b2b-member-requests';
@@ -34,6 +35,26 @@ export function memberRequestTtlDays(env = process.env) {
   const n = parseInt(env.B2B_MEMBER_REQUEST_TTL_DAYS, 10);
   return Number.isFinite(n) && n >= 1 && n <= 90 ? n : DEFAULT_MEMBER_REQUEST_TTL_DAYS;
 }
+
+/** Days after a decline (or the organisation withdrawing) before the same organisation may ask the same person again: B2B_MEMBER_REQUEST_COOLDOWN_DAYS (0–365), else 30. */
+export const DEFAULT_MEMBER_REQUEST_COOLDOWN_DAYS = 30;
+export function memberRequestCooldownDays(env = process.env) {
+  const n = parseInt(env.B2B_MEMBER_REQUEST_COOLDOWN_DAYS, 10);
+  return Number.isFinite(n) && n >= 0 && n <= 365 ? n : DEFAULT_MEMBER_REQUEST_COOLDOWN_DAYS;
+}
+/** Open requests one organisation / company may have at once: B2B_MEMBER_REQUEST_MAX_PENDING (1–10000), else 200. */
+export const DEFAULT_MEMBER_REQUEST_MAX_PENDING = 200;
+export function memberRequestMaxPending(env = process.env) {
+  const n = parseInt(env.B2B_MEMBER_REQUEST_MAX_PENDING, 10);
+  return Number.isFinite(n) && n >= 1 && n <= 10_000 ? n : DEFAULT_MEMBER_REQUEST_MAX_PENDING;
+}
+/** Adds by user id one requester may make per hour: B2B_MEMBER_REQUEST_RATE_PER_HOUR (1–1000), else 60. */
+export const DEFAULT_MEMBER_REQUEST_RATE_PER_HOUR = 60;
+export function memberRequestRatePerHour(env = process.env) {
+  const n = parseInt(env.B2B_MEMBER_REQUEST_RATE_PER_HOUR, 10);
+  return Number.isFinite(n) && n >= 1 && n <= 1000 ? n : DEFAULT_MEMBER_REQUEST_RATE_PER_HOUR;
+}
+const HOUR_MS = 3_600_000;
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const newId = () => `b2bmr_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
@@ -95,6 +116,9 @@ export function createB2BMemberRequestService({
   // (userId) → 'sw' | 'en' | null: the language the person chose for messages (CommunicationPreference.locale)
   localeOf = async () => null,
   ttlDays = () => memberRequestTtlDays(),
+  cooldownDays = () => memberRequestCooldownDays(),
+  maxPending = () => memberRequestMaxPending(),
+  ratePerHour = () => memberRequestRatePerHour(),
   now = () => new Date(),
 }) {
   const stamp = () => new Date(now());
@@ -118,14 +142,18 @@ export function createB2BMemberRequestService({
     return new Map(rows.map(u => [u.id, u.displayName ?? null]));
   };
 
-  /** The organisation's view: who was asked, what for, until when. Never the member's contacts. */
+  /**
+   * The organisation's view: who was asked, what for, until when. Never the
+   * member's contacts, and not even their name until they accept (security
+   * review finding 4: an id must not be turned into a name by asking).
+   */
   function orgView(row, names = new Map()) {
     const d = row.details || {};
     return {
       id: row.id, kind: row.kind,
       status: row.status === 'pending' ? 'pending_member_acceptance' : row.status,
       organizationId: row.organizationId ?? null, corporateId: row.corporateId ?? null, employeeId: row.employeeId ?? null,
-      userId: row.userId, displayName: names.get(row.userId) ?? null,
+      userId: row.userId, displayName: row.status === 'accepted' ? (names.get(row.userId) ?? null) : null,
       role: d.role ?? null, permissions: d.permissions ?? null,
       beneficiaryType: d.beneficiaryType ?? null, groupName: d.groupName ?? null, externalReference: d.externalReference ?? null,
       beneficiaryStatus: d.beneficiaryStatus ?? null,
@@ -186,6 +214,58 @@ export function createB2BMemberRequestService({
     return { expired: rows.length };
   }
 
+  // ── Limits (security review finding 3: each request pushes a notification) ─
+
+  // Every add by user id, including those that find nobody: in memory per
+  // server (the repo's limiter, vendor-rate-limit.mjs), one window per requester per hour.
+  const attemptLimiters = new Map();
+  /** null when this requester may try another add by user id now, else 429 rate_limited. */
+  function attempt(requestedBy) {
+    const limit = ratePerHour();
+    if (!attemptLimiters.has(limit)) attemptLimiters.set(limit, createVendorLimiter({ perMinute: limit, windowMs: HOUR_MS }));
+    const allowed = attemptLimiters.get(limit).allow(`member-request:${requestedBy ?? 'unknown'}`, +stamp());
+    return allowed.ok ? null : fail('rate_limited', 429, { retryAfterSeconds: allowed.retryAfterSeconds });
+  }
+
+  /** The checks before a request is stored: hourly rate (durable, all servers), cooldown, open cap. */
+  async function refuseNew({ scopeId, userId, requestedBy }) {
+    const at = stamp();
+    const [{ c: lastHour }] = await db(TABLE).where({ requestedBy }).where('createdAt', '>', new Date(+at - HOUR_MS)).count({ c: '*' });
+    if (Number(lastHour) >= ratePerHour()) {
+      const [{ first }] = await db(TABLE).where({ requestedBy }).where('createdAt', '>', new Date(+at - HOUR_MS)).min({ first: 'createdAt' });
+      return fail('rate_limited', 429, { retryAfterSeconds: Math.max(1, Math.ceil((+new Date(first) + HOUR_MS - +at) / 1000)) });
+    }
+    const days = cooldownDays();
+    if (days > 0) {
+      const recent = await db(TABLE).where({ scopeId, userId }).where('decidedAt', '>', new Date(+at - days * DAY_MS))
+        .where(b => b.where({ status: 'declined' }).orWhere({ status: 'cancelled', reason: 'cancelled_by_organization' }))
+        .max({ last: 'decidedAt' }).first();
+      if (recent?.last) {
+        const until = new Date(+new Date(recent.last) + days * DAY_MS);
+        return fail('member_request_cooldown', 429, { retryAfter: until.toISOString(), retryAfterSeconds: Math.max(1, Math.ceil((+until - +at) / 1000)) });
+      }
+    }
+    const [{ c: open }] = await db(TABLE).where({ scopeId, status: 'pending' }).where('expiresAt', '>', at).count({ c: '*' });
+    if (Number(open) >= maxPending()) return fail('member_request_limit', 429, { maxPending: maxPending() });
+    return null;
+  }
+
+  /**
+   * The same 202 answer as a real request, when the id names nobody who can
+   * be asked (no such account, or not a member where one is needed). Nothing
+   * is stored and nobody is told; `id` is null.
+   */
+  function stub({ kind, organizationId = null, corporateId = null, employeeId = null, userId, details = {} }) {
+    const at = stamp();
+    return {
+      outcome: 'pending_member_acceptance',
+      memberRequest: orgView({
+        id: null, kind, status: 'pending', organizationId, corporateId, employeeId, userId: String(userId ?? '').trim(),
+        details, expiresAt: new Date(+at + ttlDays() * DAY_MS), createdAt: at,
+      }),
+    };
+  }
+
   // ── Made by the organisation side ─────────────────────────────────────────
 
   /**
@@ -199,6 +279,11 @@ export function createB2BMemberRequestService({
     if (!scopeId || !userId) throw new Error('member request needs a scope and a user');
     // An expired request must not block a new one.
     await expireDue({ userId });
+    const open = await db(TABLE).where({ status: 'pending' })
+      .where(b => { b.where({ kind, scopeId, userId }); if (employeeId) b.orWhere({ kind: 'employee_link', employeeId }); }).first();
+    if (open) return fail('member_request_pending', 409, { memberRequestId: open.id, expiresAt: open.expiresAt });
+    const refused = await refuseNew({ scopeId, userId, requestedBy });
+    if (refused) return refused;
     const at = stamp();
     const row = {
       id: newId(), kind, scopeId, organizationId, corporateId, employeeId, userId, requestedBy, requestedByType: requestedByType || 'member',
@@ -369,6 +454,7 @@ export function createB2BMemberRequestService({
   }
 
   return {
+    attempt, stub,
     create, pendingForOrganization, pendingForCorporate, cancel, cancelForEmployee,
     listForMember, accept, decline, expireDue,
   };

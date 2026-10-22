@@ -466,7 +466,17 @@ export function createB2BService({
 
     // By user id, or by the verified email or mobile number of their FitFlex account. An
     // organisation user signs in to the portal with their member account.
+    const askById = needsMemberConsent(access, body, opts);
+    if (askById) {
+      if (!memberRequests) return consentUnavailable();
+      const limited = memberRequests.attempt(actorId);
+      if (limited) return limited;
+    }
     const found = await findUserByContact(users, body, { prefer: 'member', contacts: verifiedContacts });
+    // An id that names nobody gets the same answer as a real request (nothing stored, nobody told).
+    if (askById && found.error === 'user_not_found') {
+      return memberRequests.stub({ kind: 'org_user', organizationId: access.org.id, userId: body.userId, details: { role: body.role, permissions } });
+    }
     if (found.error) return found;
     const { user } = found;
     const live = (await organizationUsers.filterByColumnAsync('userId', user.id))
@@ -474,8 +484,7 @@ export function createB2BService({
     if (live) return fail('already_organization_user', 409, { organizationUserId: live.id });
 
     // Named only by user id: no role until the person accepts.
-    if (needsMemberConsent(access, body, opts)) {
-      if (!memberRequests) return consentUnavailable();
+    if (askById) {
       return memberRequests.create({
         kind: 'org_user', organizationId: access.org.id, userId: user.id, requestedBy: actorId, requestedByType: access.userType,
         details: { role: body.role, permissions },
@@ -660,7 +669,19 @@ export function createB2BService({
     if (!['pending', 'active'].includes(status)) return fail('invalid_status', 400, { allowed: ['pending', 'active'] });
 
     // By user id, or by the verified email or mobile number of their member account.
+    const askById = needsMemberConsent(access, body, opts);
+    if (askById) {
+      if (!memberRequests) return consentUnavailable();
+      const limited = memberRequests.attempt(actorId);
+      if (limited) return limited;
+    }
     const found = await findUserByContact(users, body, { require: body.userId ? null : 'member', contacts: verifiedContacts });
+    // An id that names nobody, or no member, gets the same answer as a real
+    // request (nothing stored, nobody told), so ids can't be probed this way.
+    if (askById && (found.error === 'user_not_found' || (found.user && found.user.userType !== 'member'))) {
+      return memberRequests.stub({ kind: 'beneficiary', organizationId: access.org.id, userId: body.userId,
+        details: { beneficiaryType, groupName: text(body.groupName, 100), externalReference: text(body.externalReference, 100), beneficiaryStatus: status } });
+    }
     if (found.error) return found.error === 'member_account_required' ? fail('beneficiary_must_be_member', 400) : found;
     const { user } = found;
     if (user.userType !== 'member') return fail('beneficiary_must_be_member', 400);
@@ -675,8 +696,7 @@ export function createB2BService({
     }
 
     // Named only by user id: nothing is enrolled, shown or charged until the member accepts.
-    if (needsMemberConsent(access, body, opts)) {
-      if (!memberRequests) return consentUnavailable();
+    if (askById) {
       return memberRequests.create({
         kind: 'beneficiary', organizationId: access.org.id, userId: user.id, requestedBy: actorId, requestedByType: access.userType,
         details: { beneficiaryType, groupName: text(body.groupName, 100), externalReference, beneficiaryStatus: status },

@@ -13,14 +13,16 @@ import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { b2bService, corporateService, b2bMemberRequestService as requests, b2bAnalyticsService as analytics } from '../src/bootstrap/services.mjs';
-import { memberRequestTtlDays } from '../src/services/b2b-member-request-service.mjs';
+import { memberRequestTtlDays, memberRequestCooldownDays, memberRequestMaxPending, memberRequestRatePerHour } from '../src/services/b2b-member-request-service.mjs';
+import { enrollB2BBeneficiary } from '../functions/b2b.mjs';
+import { sign } from '../src/auth/jwt.mjs';
 import { localDay, addDays } from '../src/shared/member-progress.mjs';
 import { verifyContacts, purgeIdentity } from './fixtures/verified-contacts.mjs';
 
 await ensureInit();
 
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
-const made = { users: [], orgs: [], corporates: [], activities: [] };
+const made = { users: [], orgs: [], corporates: [], activities: [], gyms: [], checkins: [] };
 const SYSTEM = 'system:b2b-member-requests';
 const TODAY = localDay(new Date());
 const RANGE = { from: addDays(TODAY, -6), to: TODAY };
@@ -57,8 +59,30 @@ async function activity(userId) {
 const audits = target => db('AuditLog').where({ target }).orderBy('at').pluck('action');
 const row = id => db('B2BMemberRequest').where({ id }).first();
 
+/** Run with these env values set, restoring them after. */
+async function withEnv(vars, fn) {
+  const before = Object.fromEntries(Object.keys(vars).map(k => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try { return await fn(); } finally {
+    for (const [k, v] of Object.entries(before)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+}
+async function call(route, { claims, params = {}, body = {} }) {
+  const req = { headers: { authorization: `Bearer ${sign(claims)}` }, params, body, query: {} };
+  const out = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; }, set() {} };
+  for (const guard of [route.onGuard].flat().filter(Boolean)) {
+    let passed = false;
+    await guard(req, out, () => { passed = true; });
+    if (!passed) return out;
+  }
+  await route.onRequest(req, out);
+  return out;
+}
+
 after(async () => {
   await db('Activity').whereIn('id', made.activities).del();
+  if (made.checkins.length) await db('Checkin').whereIn('id', made.checkins).del();
+  if (made.gyms.length) await db('Gym').whereIn('id', made.gyms).del();
   await db('B2BMemberRequest').whereIn('userId', made.users).del();
   await db('Notification').whereIn('userId', made.users).del();
   await db('CommunicationPreference').whereIn('id', made.users).del();
@@ -95,13 +119,14 @@ test('an organisation user enrolling a member by user id makes a request: nothin
   assert.equal(asked.outcome, 'pending_member_acceptance');
   assert.equal(asked.beneficiary, undefined);
   const req = asked.memberRequest;
-  assert.deepEqual([req.kind, req.status, req.userId, req.displayName, req.groupName, req.beneficiaryStatus], ['beneficiary', 'pending_member_acceptance', member, 'Consent Asha', 'Gold', 'active']);
+  // The name stays hidden until the member accepts (security review finding 4).
+  assert.deepEqual([req.kind, req.status, req.userId, req.displayName, req.groupName, req.beneficiaryStatus], ['beneficiary', 'pending_member_acceptance', member, null, 'Gold', 'active']);
   assert.ok(new Date(req.expiresAt) > new Date(Date.now() + 13 * 86_400_000));
 
   // The organisation sees the request, and nothing else of the member.
   assert.equal(await db('B2BBeneficiary').where({ organizationId: org.id, userId: member }).first(), undefined);
   const list = await b2bService.listBeneficiaries({ access });
-  assert.deepEqual([list.total, list.pendingMemberAcceptance.map(r => r.userId)], [0, [member]]);
+  assert.deepEqual([list.total, list.pendingMemberAcceptance.map(r => [r.userId, r.displayName])], [0, [[member, null]]]);
   assert.equal((await b2bService.allBeneficiaries(org)).length, 0);
   const people = await analytics.people({ access: await adminAccess(org.id), query: RANGE });
   assert.equal(people.total, 0);
@@ -192,7 +217,7 @@ test('another member can neither see, accept nor decline the request', async () 
   assert.equal(await db('B2BBeneficiary').where({ organizationId: org.id }).first(), undefined);
 });
 
-test('declining adds nothing; the organisation may ask again later', async () => {
+test('declining adds nothing; the organisation may ask again only after the cooldown', async () => {
   const org = await organisation();
   const manager = await orgUser(org.id, 'manager');
   const access = await as(org.id, manager);
@@ -205,7 +230,158 @@ test('declining adds nothing; the organisation may ask again later', async () =>
   assert.deepEqual((await requests.listForMember({ userId: member })).items, []);
   assert.equal((await requests.accept({ userId: member, requestId: memberRequest.id })).status, 409);
   assert.deepEqual(await audits(memberRequest.id), ['b2b.member_request.create', 'b2b.member_request.decline']);
+  // Within B2B_MEMBER_REQUEST_COOLDOWN_DAYS (default 30) the same organisation can't ask again, by any kind.
+  const blocked = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: member } });
+  assert.deepEqual([blocked.error, blocked.status], ['member_request_cooldown', 429]);
+  assert.ok(blocked.retryAfterSeconds > 29 * 86_400 && new Date(blocked.retryAfter) > new Date());
+  const owner = await orgUser(org.id, 'owner');
+  assert.equal((await b2bService.addOrganizationUser({ access: await as(org.id, owner), actorId: owner, body: { userId: member, role: 'viewer' } })).error, 'member_request_cooldown');
+  assert.equal(await db('Notification').where({ userId: member, type: 'b2b_member_request' }).count({ c: '*' }).then(([r]) => Number(r.c)), 1);
+  // Another organisation is not held back.
+  const other = await organisation('Other insurer');
+  const otherManager = await orgUser(other.id, 'manager');
+  assert.equal((await b2bService.enrollBeneficiary({ access: await as(other.id, otherManager), actorId: otherManager, body: { userId: member } })).outcome, 'pending_member_acceptance');
+  // After the cooldown it may ask again.
+  await db('B2BMemberRequest').where({ id: memberRequest.id }).update({ decidedAt: new Date(Date.now() - 31 * 86_400_000) });
   assert.equal((await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: member } })).outcome, 'pending_member_acceptance');
+});
+
+test('withdrawing starts the cooldown too, so withdraw-and-ask-again cannot repeat the notification', async () => {
+  assert.equal(memberRequestCooldownDays({}), 30);
+  assert.equal(memberRequestCooldownDays({ B2B_MEMBER_REQUEST_COOLDOWN_DAYS: '7' }), 7);
+  const org = await organisation();
+  const manager = await orgUser(org.id, 'manager');
+  const access = await as(org.id, manager);
+  const member = await user('member');
+  const { memberRequest } = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: member } });
+  await requests.cancel({ access, requestId: memberRequest.id, actorId: manager });
+  assert.equal((await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: member } })).error, 'member_request_cooldown');
+  // With the cooldown set to 0 days it does not apply.
+  await withEnv({ B2B_MEMBER_REQUEST_COOLDOWN_DAYS: '0' }, async () => {
+    assert.equal((await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: member } })).outcome, 'pending_member_acceptance');
+  });
+});
+
+test('an organisation can have only so many open requests (B2B_MEMBER_REQUEST_MAX_PENDING)', async () => {
+  assert.equal(memberRequestMaxPending({}), 200);
+  const org = await organisation();
+  const manager = await orgUser(org.id, 'manager');
+  const access = await as(org.id, manager);
+  const people = [await user('member'), await user('member'), await user('member')];
+  await withEnv({ B2B_MEMBER_REQUEST_MAX_PENDING: '2' }, async () => {
+    for (const p of people.slice(0, 2)) assert.equal((await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: p } })).outcome, 'pending_member_acceptance');
+    const third = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: people[2] } });
+    assert.deepEqual([third.error, third.status, third.maxPending], ['member_request_limit', 429, 2]);
+    assert.equal(await db('Notification').where({ userId: people[2], type: 'b2b_member_request' }).first(), undefined);
+    // Once one is answered there is room again.
+    const first = (await b2bService.listBeneficiaries({ access })).pendingMemberAcceptance.find(r => r.userId === people[0]);
+    await requests.accept({ userId: people[0], requestId: first.id });
+    assert.equal((await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: people[2] } })).outcome, 'pending_member_acceptance');
+  });
+});
+
+test('one requester may make only so many adds by user id per hour (B2B_MEMBER_REQUEST_RATE_PER_HOUR)', async () => {
+  assert.equal(memberRequestRatePerHour({}), 60);
+  const org = await organisation();
+  const manager = await orgUser(org.id, 'manager');
+  const access = await as(org.id, manager);
+  const people = [await user('member'), await user('member'), await user('member'), await user('member')];
+  await withEnv({ B2B_MEMBER_REQUEST_RATE_PER_HOUR: '3' }, async () => {
+    // Attempts that find nobody count too, so ids can't be probed without limit.
+    assert.equal((await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: uid('ghost') } })).outcome, 'pending_member_acceptance');
+    for (const p of people.slice(0, 2)) assert.equal((await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: p } })).outcome, 'pending_member_acceptance');
+    const limited = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: people[2] } });
+    assert.deepEqual([limited.error, limited.status], ['rate_limited', 429]);
+    assert.ok(limited.retryAfterSeconds > 0 && limited.retryAfterSeconds <= 3600);
+    // The same limit on the organisation-user path, for the same requester.
+    assert.equal((await b2bService.addOrganizationUser({ access: await adminAccess(org.id), actorId: ADMIN.userId, body: { userId: people[3], role: 'viewer' } })).organizationUser.userId, people[3]);   // admins are not limited
+    // Durable across servers: requests stored in the last hour are counted too.
+    const stored = await requests.create({ kind: 'beneficiary', organizationId: org.id, userId: people[2], requestedBy: manager, requestedByType: 'member', details: {} });
+    assert.equal(stored.outcome, 'pending_member_acceptance');
+    const overDb = await requests.create({ kind: 'beneficiary', organizationId: org.id, userId: people[3], requestedBy: manager, requestedByType: 'member', details: {} });
+    assert.deepEqual([overDb.error, overDb.status], ['rate_limited', 429]);
+  });
+  // HR on the company link path is limited the same way.
+  const { account } = await corporateService.onboard({ body: { companyName: `Consent Rate Corp ${uid('c')}`, industrySector: 'banking', workforceBracket: '50-100', subsidyModel: 'fully_funded', passTier: 'pro', seatLimit: 5 }, actorId: ADMIN.userId });
+  made.corporates.push(account.id);
+  await corporateService.setStatus({ corporateId: account.id, status: 'active', actorId: ADMIN.userId });
+  const hr = await user('corporate_hr');
+  const staff = [];
+  for (let i = 0; i < 2; i += 1) staff.push((await corporateService.provisionStaff({ corporateId: account.id, body: { displayName: `Rate ${i}` }, actorId: ADMIN.userId })).employee.id);
+  await withEnv({ B2B_MEMBER_REQUEST_RATE_PER_HOUR: '1' }, async () => {
+    assert.equal((await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: staff[0], userId: await user('member'), actorId: hr, actorType: 'corporate_hr' })).outcome, 'pending_member_acceptance');
+    assert.equal((await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: staff[1], userId: await user('member'), actorId: hr, actorType: 'corporate_hr' })).error, 'rate_limited');
+  });
+});
+
+test('an id that names nobody, or no member, gets the same 202 as a real request; nothing is stored and nobody is told', async () => {
+  const org = await organisation();
+  const manager = await orgUser(org.id, 'manager');
+  const access = await as(org.id, manager);
+  const member = await user('member');
+  const trainer = await user('trainer');
+  const ghost = uid('usr');
+  const real = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId: member, groupName: 'Gold' } });
+  const shape = r => Object.keys(r.memberRequest).sort();
+  for (const userId of [ghost, trainer]) {
+    const out = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { userId, groupName: 'Gold' } });
+    assert.equal(out.outcome, 'pending_member_acceptance', JSON.stringify(out));
+    assert.deepEqual(shape(out), shape(real));
+    assert.deepEqual([out.memberRequest.id, out.memberRequest.status, out.memberRequest.userId, out.memberRequest.displayName, out.memberRequest.groupName], [null, 'pending_member_acceptance', userId, null, 'Gold']);
+    assert.equal(await db('B2BMemberRequest').where({ userId }).first(), undefined);
+    assert.equal(await db('Notification').where({ userId }).first(), undefined);
+  }
+  assert.deepEqual((await b2bService.listBeneficiaries({ access })).pendingMemberAcceptance.map(r => r.userId), [member]);
+  // Through the route: 202 for all three.
+  for (const userId of [uid('usr'), trainer]) {
+    const res = await call(enrollB2BBeneficiary, { claims: { sub: manager, userType: 'member' }, params: { id: org.id }, body: { userId } });
+    assert.deepEqual([res.statusCode, res.body.outcome, res.body.memberRequest.id], [202, 'pending_member_acceptance', null]);
+  }
+  // Organisation user by an unknown id, and a company link by an unknown or non-member id: the same.
+  const owner = await orgUser(org.id, 'owner');
+  const asUser = await b2bService.addOrganizationUser({ access: await as(org.id, owner), actorId: owner, body: { userId: ghost, role: 'viewer' } });
+  assert.deepEqual([asUser.outcome, asUser.memberRequest.id, asUser.memberRequest.role], ['pending_member_acceptance', null, 'viewer']);
+  const { account } = await corporateService.onboard({ body: { companyName: `Consent Stub Corp ${uid('c')}`, industrySector: 'banking', workforceBracket: '50-100', subsidyModel: 'fully_funded', passTier: 'pro', seatLimit: 5 }, actorId: ADMIN.userId });
+  made.corporates.push(account.id);
+  await corporateService.setStatus({ corporateId: account.id, status: 'active', actorId: ADMIN.userId });
+  const { employee } = await corporateService.provisionStaff({ corporateId: account.id, body: { displayName: 'Stub' }, actorId: ADMIN.userId });
+  const hr = await user('corporate_hr');
+  for (const userId of [ghost, trainer]) {
+    const out = await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId, actorId: hr, actorType: 'corporate_hr' });
+    assert.deepEqual([out.outcome, out.memberRequest.id, out.memberRequest.employeeId], ['pending_member_acceptance', null, employee.id]);
+  }
+  assert.equal((await db('CorporateEmployee').where({ id: employee.id }).first()).userId, null);
+  // FitFlex admins still get the plain answers.
+  assert.equal((await b2bService.enrollBeneficiary({ access: await adminAccess(org.id), actorId: ADMIN.userId, body: { userId: ghost } })).error, 'user_not_found');
+  assert.equal((await b2bService.enrollBeneficiary({ access: await adminAccess(org.id), actorId: ADMIN.userId, body: { userId: trainer } })).error, 'beneficiary_must_be_member');
+});
+
+test('the company dashboard counts visits only for staff enrolled now, not those pending activation', async () => {
+  const { account } = await corporateService.onboard({ body: { companyName: `Consent Dash Corp ${uid('c')}`, industrySector: 'banking', workforceBracket: '50-100', subsidyModel: 'fully_funded', passTier: 'pro', seatLimit: 5 }, actorId: ADMIN.userId });
+  made.corporates.push(account.id);
+  await corporateService.setStatus({ corporateId: account.id, status: 'active', actorId: ADMIN.userId });
+  const gymId = uid('gym');
+  await db('Gym').insert({ id: gymId, name: 'Consent Dash Gym', tier: 'standard', location: 'Dar es Salaam', updatedAt: new Date() });
+  made.gyms.push(gymId);
+  const visit = async (memberId) => {
+    const id = uid('chk');
+    await db('Checkin').insert({ id, memberId, gymId, timestamp: new Date(Date.now() - 86_400_000 - Math.floor(Math.random() * 1e6)), method: 'gym_scanned', subscriptionType: 'platform_pass', passTier: 'pro', visitNumberInCycle: 1, gymTier: 'standard', creditsDeductedTzs: 0, visitConsumed: true });
+    made.checkins.push(id);
+  };
+  const { employee } = await corporateService.provisionStaff({ corporateId: account.id, body: { displayName: 'Dash' }, actorId: ADMIN.userId });
+  const member = await user('member');
+  await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId: member, actorId: ADMIN.userId, actorType: 'admin' });
+  await visit(member);
+  await visit(member);
+  const visits = async () => (await corporateService.dashboard({ corporateId: account.id })).dashboard.visits.total;
+  assert.equal((await db('CorporateEmployee').where({ id: employee.id }).first()).status, 'pending');
+  assert.equal(await visits(), 0);
+  await corporateService.setEmployeeStatus({ corporateId: account.id, employeeId: employee.id, status: 'active', actorId: ADMIN.userId });
+  assert.equal(await visits(), 2);
+  await corporateService.setEmployeeStatus({ corporateId: account.id, employeeId: employee.id, status: 'suspended', actorId: ADMIN.userId });
+  assert.equal(await visits(), 2);
+  await corporateService.setEmployeeStatus({ corporateId: account.id, employeeId: employee.id, status: 'exited', actorId: ADMIN.userId });
+  assert.equal(await visits(), 0);
 });
 
 test('a request expires: it can no longer be accepted, the expiry is audited, and a new one may be made', async () => {

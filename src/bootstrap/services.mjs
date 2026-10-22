@@ -362,6 +362,8 @@ export const verifiedContacts = createVerifiedContacts(db);
 // Requests a member must accept before an organisation adds them by user id
 // (b2bMemberRequestService is defined below; these only run later, per request).
 const memberRequestsLater = {
+  attempt: requestedBy => b2bMemberRequestService.attempt(requestedBy),
+  stub: args => b2bMemberRequestService.stub(args),
   create: args => b2bMemberRequestService.create(args),
   pendingForOrganization: args => b2bMemberRequestService.pendingForOrganization(args),
   pendingForCorporate: args => b2bMemberRequestService.pendingForCorporate(args),

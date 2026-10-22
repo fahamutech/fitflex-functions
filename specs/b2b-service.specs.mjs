@@ -56,6 +56,8 @@ function setup() {
   // Adds by user id from organisation users become member requests (22 Oct 2026); recorded here.
   s.requested = [];
   s.memberRequests = {
+    attempt: () => null,
+    stub: r => ({ outcome: 'pending_member_acceptance', memberRequest: { id: null, status: 'pending_member_acceptance', displayName: null, ...r } }),
     create: async (r) => { s.requested.push(r); return { outcome: 'pending_member_acceptance', memberRequest: { id: `req_${s.requested.length}`, status: 'pending_member_acceptance', ...r } }; },
     pendingForOrganization: async ({ organizationId, kind }) => s.requested.filter(r => r.organizationId === organizationId && r.kind === kind),
   };
