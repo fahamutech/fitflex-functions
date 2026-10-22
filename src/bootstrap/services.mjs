@@ -32,7 +32,7 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
 import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
@@ -638,6 +638,10 @@ export const mobileMoneyService = createMobileMoneyService({
   scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
   // Only tiers configured in Settings are sold (owner decision 2026-10-19).
   tierSellable: settingsService.isTierSellable,
+  // B6a: trainer sessions and trainer gym passes (TUNZAA_TRAINER_PRODUCTS, needs TUNZAA_PAYMENTS).
+  trainerProducts: tunzaaTrainerProductsOn,
+  // A rejected session whose slot was booked by someone else since is not asked for (409 group_slot_rebooked).
+  beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
 });
 export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService, gymPayoutOwner });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
