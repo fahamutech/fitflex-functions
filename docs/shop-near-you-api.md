@@ -77,6 +77,7 @@ Returns the stored profile as before, now including `cityId`, `regionId`, `deliv
 ### Admin (mapping)
 
 - `GET /admin/vendors`: each vendor's `vendorProfile` carries the same four fields when set (no new top-level keys).
+- `GET /admin/geo-areas` (existing): now also readable with the **`shop`** scope (before: `promotions`, `promotions_approve` or `campaigns`), so a shop-only admin can load the area tree for mapping while `SHOP_NEAR_YOU` is off (`/shop/areas` is 404 then). **Read only**: `POST /admin/geo-areas` still needs `campaigns`. No new scope. The response is unchanged (all areas incl. inactive, sorted by name; filter `active` in the portal).
 - `PUT /admin/vendors/:id` (scope `shop`; additive): also accepts `cityId`, `regionId`, `deliveryAreaIds` with the same rules and errors. Sets `areasSource: "admin"`. Audited in `vendor_management_updated` (before/after area fields).
 
 ### Backfill (migration `20270111120000-vendor-shop-areas`)
