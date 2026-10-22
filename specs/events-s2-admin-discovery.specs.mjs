@@ -383,7 +383,8 @@ test('GET /events/:idOrSlug: public document by id or slug, cancelled readable, 
   assert.deepEqual(byId.body.description, { en: 'E'.repeat(50), sw: 'S'.repeat(50) });
   assert.equal(byId.body.categories.length, 1);
   assert.equal(byId.body.categories[0].availability, 'open');
-  assert.deepEqual(byId.body.categories[0].ticketTypes.map(t => [t.name, t.availability, t.capacity]), [['Early', 'open', 12], ['Late', 'not_yet_open', 100]]);
+  // Seeded through the S1 store in the same millisecond, so compare by name rather than by position.
+  assert.deepEqual(byId.body.categories[0].ticketTypes.map(t => [t.name, t.availability, t.capacity]).sort(), [['Early', 'open', 12], ['Late', 'not_yet_open', 100]]);
   assert.equal(byId.body.categories[0].remaining, null, 'category has no cap');
   assert.equal(byId.body.shareUrl, `https://fitflex-af-app.web.app/events/${e.slug}`);
   assert.equal(byId.body.terms.en, 'T'.repeat(120));
