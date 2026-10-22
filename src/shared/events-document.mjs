@@ -60,6 +60,32 @@ const ms = v => (v ? +new Date(v) : null);
 const num = v => (v === null || v === undefined || v === '' ? null : Number(v));
 const HTTPS = /^https:\/\/[^\s]+$/i;
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+export const URL_MAX = 2048;
+export const NOTE_MAX = 500;
+
+const hostOf = value => { try { return new URL(String(value)).host.toLowerCase() || null; } catch { return null; } };
+/**
+ * Hosts an event image may be served from (security review #249): EVENTS_IMAGE_HOSTS (comma-separated)
+ * or, by default, the hosts of PUBLIC_API_URL and ZEBRA_BASE_URL — where /storage/upload files live.
+ * A relative `/storage/<cid>/<file>` path (what /storage/upload returns) is always accepted.
+ */
+export function imageHostsAllowed(env = process.env) {
+  const configured = String(env.EVENTS_IMAGE_HOSTS || '').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+  if (configured.length) return configured;
+  return [env.PUBLIC_API_URL, env.ZEBRA_BASE_URL].map(hostOf).filter(Boolean);
+}
+const STORAGE_PATH = /^\/storage\/[A-Za-z0-9._-]+\/[^\s/?#]+$/;
+/** null when fine, else the §10 code: invalid_url (not https / not an allowed image host) or too_long. */
+export function urlProblem(value, { image = false, hosts = imageHostsAllowed() } = {}) {
+  const v = String(value);
+  if (v.length > URL_MAX) return 'too_long';
+  if (image && STORAGE_PATH.test(v)) return null;
+  if (!HTTPS.test(v)) return 'invalid_url';
+  const host = hostOf(v);
+  if (!host) return 'invalid_url';
+  if (image && !hosts.includes(host)) return 'invalid_url';
+  return null;
+}
 
 /** A valid IANA zone name (Intl is the only timezone database the server has). */
 export function validTimezone(tz) {
@@ -86,7 +112,14 @@ export function slugify(title) {
   return base.length >= 3 ? base : `event-${base}`.replace(/-+$/g, '');
 }
 
-const bilingual = v => (v && typeof v === 'object' && !Array.isArray(v) ? { en: isStr(v.en) ? v.en : null, sw: isStr(v.sw) ? v.sw : null } : null);
+const bilingual = v => (v && typeof v === 'object' && !Array.isArray(v) ? { en: isStr(v.en) ? v.en : v.en == null ? null : String(v.en), sw: isStr(v.sw) ? v.sw : v.sw == null ? null : String(v.sw) } : null);
+/** { en, sw } of strings ≤ NOTE_MAX (anything else coerced to string), or null when empty. Over-long → { error } (L1). */
+export function parseNote(value) {
+  const v = bilingual(value);
+  if (!v || emptyBilingual(v)) return { note: null };
+  const fields = ['en', 'sw'].filter(l => filled(v[l]) && v[l].length > NOTE_MAX).map(l => ({ path: `note.${l}`, code: 'too_long', max: NOTE_MAX }));
+  return fields.length ? { error: 'event_invalid', status: 422, fields } : { note: { en: filled(v.en) ? v.en.trim() : null, sw: filled(v.sw) ? v.sw.trim() : null } };
+}
 const emptyBilingual = v => !v || (!filled(v.en) && !filled(v.sw));
 
 /** Distance bucket for a filter chip: 5k | 10k | 21k | 42k | other (spec §14.1). */
@@ -208,10 +241,12 @@ export function parseEventPatch(body = {}) {
  * mode 'submit' — the full checklist: required fields, at least one category, one ticket type per category,
  *                 the 24-hour rule, kit points when a kit is handed out.
  */
-export function validateEvent(doc, { mode = 'patch', now = new Date() } = {}) {
+export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHosts = imageHostsAllowed() } = {}) {
   const full = mode === 'submit';
   const fields = [];
   const add = (path, code, extra) => { fields.push(extra ? { path, code, ...extra } : { path, code }); };
+  const url = (path, value, image) => { if (filled(value)) { const p = urlProblem(value.trim(), { image, hosts: imageHosts }); if (p) add(path, p, p === 'too_long' ? { max: URL_MAX } : undefined); } };
+  const cap = (path, value, max) => { if (isStr(value) && value.length > max) add(path, 'too_long', { max }); };
   const required = (path, value, test = filled) => { if (full && !test(value)) { add(path, 'required'); return false; } return true; };
   const length = (path, value, min, max) => { if (filled(value) && (value.trim().length < min || value.trim().length > max)) add(path, 'length', { min, max }); };
   const range = (path, value, min, max) => { if (value !== null && value !== undefined && (!Number.isFinite(value) || value < min || value > max)) add(path, 'range', { min, max }); };
@@ -241,6 +276,7 @@ export function validateEvent(doc, { mode = 'patch', now = new Date() } = {}) {
   if (regOpens && regCloses && regCloses <= regOpens) add('registrationClosesAt', 'endAfterStart');
   if (regCloses && starts && regCloses > starts) add('registrationClosesAt', 'closeBeforeStart');
   if (filled(doc.heroImageUrl)) { if (!filled(doc.heroImageAlt)) add('heroImageAlt', 'altRequired'); else length('heroImageAlt', doc.heroImageAlt, 1, 120); }
+  url('heroImageUrl', doc.heroImageUrl, true); url('heroThumbUrl', doc.heroThumbUrl, true);
 
   // 2 Venue & route
   if (!virtual) {
@@ -251,9 +287,11 @@ export function validateEvent(doc, { mode = 'patch', now = new Date() } = {}) {
   } else if (filled(doc.venueRegion) && !REGION_CODES.includes(doc.venueRegion)) add('venue.region', 'required');
   length('venue.name', doc.venueName, 1, 120);
   length('venue.address', doc.venueAddress, 1, 200);
+  cap('venue.city', doc.venueCity, 80);
   range('venue.lat', num(doc.lat), -90, 90); range('venue.lng', num(doc.lng), -180, 180);
-  if (filled(doc.routeUrl) && !HTTPS.test(doc.routeUrl.trim())) add('routeUrl', 'httpsOnly');
+  if (filled(doc.routeUrl) && !HTTPS.test(doc.routeUrl.trim())) add('routeUrl', 'httpsOnly'); else url('routeUrl', doc.routeUrl, false);
   if (filled(doc.routeImageUrl)) { if (!filled(doc.routeImageAlt)) add('routeImageAlt', 'altRequired'); else length('routeImageAlt', doc.routeImageAlt, 1, 120); }
+  url('routeImageUrl', doc.routeImageUrl, true);
   both('accessibility', doc.accessibility, 1000);
 
   // 3 Categories, 4 Ticket types
@@ -317,8 +355,13 @@ export function validateEvent(doc, { mode = 'patch', now = new Date() } = {}) {
   for (const lang of ['en', 'sw']) if (required(`terms.${lang}`, doc.terms?.[lang])) length(`terms.${lang}`, doc.terms?.[lang], 100, 20000);
   const preset = doc.refundPolicy?.preset;
   if (required('refundPolicy.preset', preset) && filled(preset) && !REFUND_PRESETS.includes(preset)) add('refundPolicy.preset', 'required');
-  if (preset === 'custom') for (const lang of ['en', 'sw']) if (required(`refundPolicy.text.${lang}`, doc.refundPolicy?.text?.[lang])) length(`refundPolicy.text.${lang}`, doc.refundPolicy?.text?.[lang], 50, 5000);
+  if (preset === 'custom') {
+    for (const lang of ['en', 'sw']) if (required(`refundPolicy.text.${lang}`, doc.refundPolicy?.text?.[lang])) length(`refundPolicy.text.${lang}`, doc.refundPolicy?.text?.[lang], 50, 5000);
+  } else {
+    for (const lang of ['en', 'sw']) cap(`refundPolicy.text.${lang}`, doc.refundPolicy?.text?.[lang], 5000);
+  }
   const contact = doc.contact || {};
+  cap('contact.email', contact.email, 254);
   if (required('contact.email', contact.email) && filled(contact.email) && !EMAIL.test(contact.email.trim())) add('contact.email', 'email');
   if (filled(contact.phone) && !normalizePhone(contact.phone)) add('contact.phone', 'phone');
   if (filled(contact.whatsapp) && !normalizePhone(contact.whatsapp)) add('contact.whatsapp', 'phone');
@@ -326,7 +369,8 @@ export function validateEvent(doc, { mode = 'patch', now = new Date() } = {}) {
   if (sponsors.length > 10) add('sponsors', 'range', { min: 0, max: 10 });
   sponsors.forEach((s, i) => {
     if (!filled(s.name)) add(`sponsors[${i}].name`, 'required'); else length(`sponsors[${i}].name`, s.name, 1, 60);
-    if (filled(s.url) && !HTTPS.test(s.url.trim())) add(`sponsors[${i}].url`, 'httpsOnly');
+    if (filled(s.url) && !HTTPS.test(s.url.trim())) add(`sponsors[${i}].url`, 'httpsOnly'); else url(`sponsors[${i}].url`, s.url, false);
+    url(`sponsors[${i}].logoUrl`, s.logoUrl, true);
   });
   const schedule = Array.isArray(doc.schedule) ? doc.schedule : [];
   if (schedule.length > 20) add('schedule', 'range', { min: 0, max: 20 });
@@ -464,9 +508,10 @@ export function categoryAvailability(eventAvailability, ticketTypes, opts) {
  */
 export function allowedActionsFor({ status, actor, role = null, organizerStatus = 'active' }) {
   if (actor === 'admin') {
+    // No admin edit route exists (security review #249): the vocabulary says only what is possible.
     switch (status) {
       case 'submitted': return ['approve', 'reject'];
-      case 'published': case 'registration_closed': return ['edit', 'cancel'];
+      case 'published': case 'registration_closed': return ['cancel'];
       case 'in_progress': return ['complete', 'cancel'];
       case 'completed': case 'cancelled': return ['archive'];
       default: return [];

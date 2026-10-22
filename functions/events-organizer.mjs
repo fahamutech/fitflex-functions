@@ -4,7 +4,7 @@
 // from the token's copy.
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
-import { requireOrganizer, requireActiveOrganizer, loadOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
+import { requireOrganizer, requireActiveOrganizer, requireOpenOrganizer, loadOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsModule } from '../src/shared/feature-flags.mjs';
 import { eventsOrganizerService as svc } from '../src/bootstrap/services.mjs';
@@ -22,9 +22,11 @@ function send(res, result, okStatus = 200) {
   res.status(okStatus).json(result);
 }
 
-const anyOrganizer = method => routeGuard(method, [requireEventsModule, requireAuth(...ORGANIZER_TYPES), requireOrganizer()]);
+// Reads of events and staff need an active or suspended organizer (L2); the overview is open to every status.
+const anyOrganizer = method => routeGuard(method, [requireEventsModule, requireAuth(...ORGANIZER_TYPES), requireOpenOrganizer()]);
+const overview = method => routeGuard(method, [requireEventsModule, requireAuth(...ORGANIZER_TYPES), requireOrganizer()]);
 const editors = method => routeGuard(method, [requireEventsModule, requireAuth(...ORGANIZER_TYPES), requireActiveOrganizer('owner', 'admin')]);
-const staffManagers = method => routeGuard(method, [requireEventsModule, requireAuth(...ORGANIZER_TYPES), requireOrganizer('owner', 'admin')]);
+const staffManagers = method => routeGuard(method, [requireEventsModule, requireAuth(...ORGANIZER_TYPES), requireOpenOrganizer('owner', 'admin')]);
 
 // ── Capability ────────────────────────────────────────────────────────────
 
@@ -49,7 +51,7 @@ export const organizerMe = {
 export const organizerSummary = {
   created, method: 'get', path: '/organizer/summary',
   description: 'Organizer owner / staff: overview numbers → { eventsTotal, publishedTotal, registrationsTotal, awaitingPaymentTotal, confirmedTotal, nextEvents[≤3] }. The three registration totals are 0 until S3.',
-  onGuard: anyOrganizer('get'),
+  onGuard: overview('get'),
   onRequest: async (req, res) => send(res, await svc.summary({ ctx: organizerOf(req) })),
 };
 
@@ -121,7 +123,7 @@ export const organizerListStaff = {
 
 export const organizerInviteStaff = {
   created, method: 'post', path: '/organizer/staff',
-  description: 'Organizer owner / admin (organizer active): invite a staff member through the start-PIN invitation flow (org type organizer). Body { email | phone | userId, role: admin | ops | finance | timing, locale? }. → 201 { invitation: { id, role, status: "invited", maskedContact, expiresAt, delivery } }. 409 already_staff, 400 invalid_contact | invalid_role, 422 cannot_invite_self, 403 forbidden_role | organizer_not_active | organizer_suspended. Accepting needs the invited person\'s own session (V2_INVITES on).',
+  description: 'Organizer owner / admin (organizer active): invite a staff member through the start-PIN invitation flow (org type organizer). Body { email | phone, role: admin | ops | finance | timing, locale? } (a userId is not accepted: 400 invalid_contact). → 201 { invitation: { id, role, status: "invited", maskedContact, expiresAt, delivery } }. 409 already_staff, 400 invalid_contact | invalid_role, 422 cannot_invite_self, 403 forbidden_role | organizer_not_active | organizer_suspended. Accepting needs the invited person\'s own session (V2_INVITES on).',
   onGuard: routeGuard('post', [requireEventsModule, requireAuth(...ORGANIZER_TYPES), requireActiveOrganizer('owner', 'admin')]),
   onRequest: async (req, res) => send(res, await svc.inviteStaff({ ctx: organizerOf(req), body: req.body || {}, actorId: req.user.sub }), 201),
 };

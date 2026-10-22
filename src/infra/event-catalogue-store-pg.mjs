@@ -145,7 +145,11 @@ export function createPgEventCatalogueStore({ db, now = () => new Date() }) {
     if (from) q = q.where('endsAt', '>=', from);
     if (to) q = q.where('startsAt', '<=', to);
     if (ids) q = q.whereIn('id', ids);
-    if (text) q = q.where(b => b.whereILike('title', `%${text}%`).orWhereILike('venueName', `%${text}%`).orWhereILike('venueCity', `%${text}%`));
+    if (text) {
+      // `%` and `_` in the search text are literal characters, not wildcards (Postgres' default ESCAPE is backslash).
+      const pattern = `%${String(text).replace(/[\\%_]/g, m => `\\${m}`)}%`;
+      q = q.where(b => b.whereILike('title', pattern).orWhereILike('venueName', pattern).orWhereILike('venueCity', pattern));
+    }
     return join(db, await q.orderBy([{ column: 'startsAt' }, { column: 'id' }]).limit(limit));
   }
 

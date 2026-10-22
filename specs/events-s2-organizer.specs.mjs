@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { ensureInit } from '../functions/index.mjs';
-import { users, partnerKycService, invitationService, eventStore, eventCatalogueStore, eventsOrganizerService } from '../src/bootstrap/services.mjs';
+import { users, partnerKycService, invitationService, eventStore, eventCatalogueStore, eventsOrganizerService, identityLinkService } from '../src/bootstrap/services.mjs';
 import {
   createOrganizer, organizerMe, organizerSummary, organizerListEvents, organizerCreateEvent, organizerGetEvent, organizerPatchEvent, organizerDeleteEvent,
   organizerSubmitEvent, organizerWithdrawEvent, organizerCancelEvent, organizerCompleteEvent, organizerArchiveEvent, organizerEventChanges,
@@ -240,6 +240,20 @@ test('a draft organizer cannot create events (organizer_not_active); KYC decisio
   on();
   const f = await organizerFixture('Pending Club');
   assert.deepEqual((await call(organizerCreateEvent, f.claims, { body: { title: 'Too early' } })).body, { error: 'organizer_not_active', organizerStatus: 'draft' });
+  // Reads of events and staff are closed too until verified (L2); the overview stays open.
+  assert.deepEqual((await call(organizerListEvents, f.claims)).body, { error: 'organizer_not_active', organizerStatus: 'draft' });
+  assert.deepEqual((await call(organizerListStaff, f.claims)).body, { error: 'organizer_not_active', organizerStatus: 'draft' });
+  assert.equal((await call(organizerSummary, f.claims)).status, 200);
+  // L5: a persona left behind by an interrupted attempt is reused, not refused.
+  const stranded = await makeUser('member', { email: `${uid('m')}@example.com`, firebaseUid: uid('fb') });
+  const person = await identityLinkService.personOf(stranded.personId);
+  const left = await identityLinkService.createPersona({ person, source: stranded, userType: 'event_organizer', approvalStatus: 'approved' });
+  assert.equal(left.error, undefined);
+  const retried = await call(createOrganizer, claimsOf(stranded), { body: { name: 'Second Try Club', contactPhone: '0712345678' } });
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  assert.equal(retried.body.personaId, left.row.id, 'the dangling persona is the organizer\'s owner');
+  made.organizers.push(retried.body.organizer.id);
+  assert.equal((await call(createOrganizer, claimsOf(stranded), { body: { name: 'Third', contactPhone: '0712345678' } })).body.error, 'organizer_exists');
   // submitted → pending_review (the hook runs on every case move).
   await db('PartnerKycCase').where({ id: f.kycCaseId }).update({ status: 'submitted' });
   const reviewer = { id: (await admin()).sub, role: 'admin', superAdmin: true };
@@ -288,7 +302,9 @@ test('staff: invitations through the organizer org type, acceptance creates the 
   assert.equal((await call(organizerInviteStaff, f.claims, { body: { email: 'not-an-email', role: 'ops' } })).body.error, 'invalid_contact');
   assert.equal((await call(organizerInviteStaff, f.claims, { body: { role: 'ops' } })).body.error, 'invalid_contact');
   assert.equal((await call(organizerInviteStaff, f.claims, { body: { phone: f.persona.phone, role: 'ops' } })).body.error, 'cannot_invite_self');
-  assert.equal((await call(organizerInviteStaff, f.claims, { body: { userId: f.persona.id, role: 'ops' } })).body.error, 'cannot_invite_self');
+  // A userId is never accepted (security review: no account probing, the mask is of what the caller typed).
+  const someone = await makeUser('member');
+  assert.deepEqual((await call(organizerInviteStaff, f.claims, { body: { userId: someone.id, role: 'ops' } })).body, { error: 'invalid_contact' });
 
   // Invite an existing verified person (email on their LoginIdentifier) as admin, then another as ops.
   const invitee = await makeUser('member', { email: `${uid('p')}@example.com`, firebaseUid: uid('fb') });
@@ -506,6 +522,8 @@ test('published events: non-material edits log; material edits need a change not
   const refused = await call(organizerPatchEvent, f.claims, { params: { id: e.id }, body: { version: minor.body.version, startsAt: newStart, endsAt: new Date(+starts + D + 6 * H).toISOString() } });
   assert.equal(refused.status, 409);
   assert.equal(refused.body.error, 'change_note_required');
+  const longNote = await call(organizerPatchEvent, f.claims, { params: { id: e.id }, body: { version: minor.body.version, startsAt: newStart, endsAt: new Date(+starts + D + 6 * H).toISOString(), changeNote: { en: 'n'.repeat(501), sw: 'ok' } } });
+  assert.deepEqual(longNote.body, { error: 'event_invalid', fields: [{ path: 'changeNote.en', code: 'too_long', max: 500 }] });
   assert.deepEqual(refused.body.fields, ['endsAt', 'startsAt']);
   assert.equal((await eventStore.getEvent(e.id)).version, minor.body.version);
   // With a note: saved, material, logged with before/after and the note; frozen snapshots untouched.
@@ -541,6 +559,7 @@ test('published events: non-material edits log; material edits need a change not
   assert.equal(committed.error, undefined, JSON.stringify(committed));
   assert.equal(committed.registrations[0].status, 'confirmed');
   assert.equal((await call(organizerCancelEvent, f.claims, { params: { id: e.id }, body: {} })).body.error, 'reason_code_required');
+  assert.deepEqual((await call(organizerCancelEvent, f.claims, { params: { id: e.id }, body: { reason: 'weather', note: { en: 'n'.repeat(501), sw: 'x' } } })).body, { error: 'event_invalid', fields: [{ path: 'note.en', code: 'too_long', max: 500 }] });
   assert.deepEqual((await call(organizerCancelEvent, f.claims, { params: { id: e.id }, body: { reason: 'weather' } })).body, { error: 'has_registrations' });
   assert.equal((await eventStore.getEvent(e.id)).status, 'published');
 

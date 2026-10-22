@@ -26,7 +26,10 @@ async function resolve(req) {
   return req.organizer;
 }
 
-function guard(roles, { active }) {
+// Statuses that open the events and staff screens at all (spec §2): suspended is read-only, the rest see nothing.
+const OPEN_STATUSES = ['active', 'suspended'];
+
+function guard(roles, { active, open = false }) {
   return async (req, res, next) => {
     const ctx = await resolve(req);
     if (!ctx) return res.status(403).json({ error: 'not_your_organizer' });
@@ -34,8 +37,14 @@ function guard(roles, { active }) {
     if (active && ctx.organizer.status !== 'active') {
       return res.status(403).json({ error: ctx.organizer.status === 'suspended' ? 'organizer_suspended' : 'organizer_not_active', organizerStatus: ctx.organizer.status });
     }
+    if (open && !OPEN_STATUSES.includes(ctx.organizer.status)) return res.status(403).json({ error: 'organizer_not_active', organizerStatus: ctx.organizer.status });
     next();
   };
+}
+
+/** Reads of events and staff: an organizer that is active or suspended (read-only); draft, pending_review, rejected → 403 organizer_not_active. */
+export function requireOpenOrganizer(...roles) {
+  return guard(roles, { active: false, open: true });
 }
 
 /** Resolve the caller's organizer without refusing (GET /organizer/me answers 404 no_organizer itself). */

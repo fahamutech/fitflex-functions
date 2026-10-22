@@ -680,6 +680,9 @@ export function createInvitationService({
   async function acceptOrganizerStaff(user, inv) {
     const role = inv.payload?.organizerRole;
     if (!ORGANIZER_STAFF_ROLES.includes(role)) return { error: 'invalid_staff_role', status: 400 };
+    // Only a verified (active) organizer takes on staff (security review #249); the invitation stays open.
+    const organizer = await db('EventOrganizer').where({ id: inv.organizerId }).first('id', 'status');
+    if (organizer?.status !== 'active') return { error: 'organizer_not_active', status: 409, organizerStatus: organizer?.status ?? null };
     const existing = await db('User').where({ personId: user.personId, userType: 'organizer_staff' }).first();
     let staffId = existing?.id ?? null;
     if (existing) {

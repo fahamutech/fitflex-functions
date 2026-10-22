@@ -2,7 +2,7 @@
 // Every action writes an AuditLog row with the status before and after (`events.*` actions, read back by
 // the audit routes). Approval (→ published) needs an active organizer whose KYC case is approved
 // (follow-ups.md S2). Rejection sends the event back to draft with { reason, note, at } on the event.
-import { organizerView, rowView, allowedActionsFor, CANCEL_REASONS, REJECT_REASONS, DEFAULT_CLOSING_SOON_HOURS } from '../shared/events-document.mjs';
+import { organizerView, rowView, allowedActionsFor, parseNote, CANCEL_REASONS, REJECT_REASONS, DEFAULT_CLOSING_SOON_HOURS } from '../shared/events-document.mjs';
 import { paginate } from '../shared/pagination.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -74,8 +74,10 @@ export function createEventsAdminService({ db, catalogue, organizerService, now 
     const joined = await catalogue.loadJoined(eventId);
     if (!joined) return fail('event_not_found', 404);
     if (!CANCEL_REASONS.includes(body.reason)) return fail('reason_code_required', 400, { allowed: [...CANCEL_REASONS] });
+    const note = parseNote(body.note);
+    if (note.error) return note;
     const moved = await organizerService.moveEvent(joined.event.id, 'cancelled', {
-      actor: { id: actorId, kind: 'admin', role: 'admin' }, cancellation: { reason: body.reason, note: { en: body.note?.en ?? null, sw: body.note?.sw ?? null } },
+      actor: { id: actorId, kind: 'admin', role: 'admin' }, cancellation: { reason: body.reason, note: note.note ?? { en: null, sw: null } },
     });
     if (moved.error) return moved;
     return { status: moved.status };

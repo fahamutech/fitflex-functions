@@ -5,8 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { organizerStatusOf, permissionsFor, removalRefusal, roleChangeRefusal, INVITABLE_ORGANIZER_ROLES } from '../src/shared/events-organizer.mjs';
 import {
-  parseEventPatch, validateEvent, changedPaths, materialChanges, availabilityOf, ticketAvailability, categoryAvailability, tzInfo, slugify, distanceBucket,
-  allowedActionsFor, summaryView, detailView, REGIONS, REGION_CODES, UNLIMITED_CAPACITY,
+  parseEventPatch, parseNote, validateEvent, changedPaths, materialChanges, availabilityOf, ticketAvailability, categoryAvailability, tzInfo, slugify, distanceBucket,
+  allowedActionsFor, summaryView, detailView, urlProblem, imageHostsAllowed, REGIONS, REGION_CODES, UNLIMITED_CAPACITY, URL_MAX, NOTE_MAX,
 } from '../src/shared/events-document.mjs';
 import { eventsClosingSoonHours, eventAutoCompleteGraceHours } from '../src/shared/feature-flags.mjs';
 
@@ -193,6 +193,45 @@ test('availability: status first, then registration window, sold-out, closing-so
   }
 });
 
+test('URLs (security review): https only, ≤ 2048, image fields only from the storage host allowlist or a relative /storage path; length caps; notes', () => {
+  const hosts = ['cdn.example.com'];
+  assert.equal(urlProblem('https://cdn.example.com/a.webp', { image: true, hosts }), null);
+  assert.equal(urlProblem('/storage/QmAbc123/photo.webp', { image: true, hosts }), null);
+  assert.equal(urlProblem('https://evil.example.net/a.webp', { image: true, hosts }), 'invalid_url');
+  assert.equal(urlProblem('http://cdn.example.com/a.webp', { image: true, hosts }), 'invalid_url');
+  assert.equal(urlProblem('javascript:alert(1)', { image: true, hosts }), 'invalid_url');
+  assert.equal(urlProblem('/storage/../etc/passwd', { image: true, hosts }), 'invalid_url');
+  assert.equal(urlProblem('https://anywhere.example.org/route', { image: false, hosts }), null, 'links may point anywhere over https');
+  assert.equal(urlProblem('http://anywhere.example.org/route', { image: false, hosts }), 'invalid_url');
+  assert.equal(urlProblem(`https://cdn.example.com/${'a'.repeat(URL_MAX)}`, { image: true, hosts }), 'too_long');
+  // The allowlist: EVENTS_IMAGE_HOSTS, else the PUBLIC_API_URL / ZEBRA_BASE_URL hosts.
+  assert.deepEqual(imageHostsAllowed({ EVENTS_IMAGE_HOSTS: 'Img.FitFlex.tz, cdn.example.com' }), ['img.fitflex.tz', 'cdn.example.com']);
+  assert.deepEqual(imageHostsAllowed({ PUBLIC_API_URL: 'https://api.fitflex.tz/', ZEBRA_BASE_URL: 'https://zebra.fitflex.tz:8443' }), ['api.fitflex.tz', 'zebra.fitflex.tz:8443']);
+  assert.deepEqual(imageHostsAllowed({}), []);
+  // Through validateEvent with the given hosts.
+  const bad = codesOf(validateEvent({
+    heroImageUrl: 'https://evil.example.net/x.webp', heroImageAlt: 'x', heroThumbUrl: 'http://cdn.example.com/t.webp', routeImageUrl: `https://cdn.example.com/${'r'.repeat(URL_MAX)}`, routeImageAlt: 'r',
+    routeUrl: 'https://maps.example.org/route', sponsors: [{ name: 'A', logoUrl: 'https://evil.example.net/logo.png', url: 'https://a.example.org' }],
+    venueCity: 'c'.repeat(81), contact: { email: `${'e'.repeat(250)}@x.co` }, refundPolicy: { preset: 'no_refund', text: { en: 't'.repeat(5001), sw: null } },
+  }, { mode: 'patch', now: NOW, imageHosts: hosts }));
+  assert.equal(bad.heroImageUrl, 'invalid_url');
+  assert.equal(bad.heroThumbUrl, 'invalid_url');
+  assert.equal(bad.routeImageUrl, 'too_long');
+  assert.equal(bad.routeUrl, undefined);
+  assert.equal(bad['sponsors[0].logoUrl'], 'invalid_url');
+  assert.equal(bad['sponsors[0].url'], undefined);
+  assert.equal(bad['venue.city'], 'too_long');
+  assert.equal(bad['contact.email'], 'too_long');
+  assert.equal(bad['refundPolicy.text.en'], 'too_long');
+  const good = validateEvent({ heroImageUrl: '/storage/QmAbc/hero.webp', heroImageAlt: 'x', heroThumbUrl: 'https://cdn.example.com/t.webp' }, { mode: 'patch', now: NOW, imageHosts: hosts });
+  assert.deepEqual(good, []);
+  // Notes: coerced to strings, ≤ 500 each, empty → null.
+  assert.deepEqual(parseNote({ en: 123, sw: 'ok' }), { note: { en: '123', sw: 'ok' } });
+  assert.deepEqual(parseNote(null), { note: null });
+  assert.deepEqual(parseNote({ en: '', sw: '' }), { note: null });
+  assert.deepEqual(parseNote({ en: 'x'.repeat(NOTE_MAX + 1), sw: 'y' }), { error: 'event_invalid', status: 422, fields: [{ path: 'note.en', code: 'too_long', max: NOTE_MAX }] });
+});
+
 test('tzInfo from Intl only: Dar is UTC+3 EAT, London shifts with DST, an unknown zone falls back to UTC', () => {
   assert.deepEqual(tzInfo('Africa/Dar_es_Salaam', new Date('2027-03-06T04:00:00Z')), { utcOffsetMinutes: 180, timezoneAbbr: 'EAT' });
   assert.deepEqual(tzInfo('Africa/Johannesburg', new Date('2027-03-06T04:00:00Z')), { utcOffsetMinutes: 120, timezoneAbbr: 'SAST' });
@@ -233,7 +272,8 @@ test('allowed actions per status and actor (§7.2); nothing for suspended organi
   const admin = status => allowedActionsFor({ status, actor: 'admin' });
   assert.deepEqual(admin('submitted'), ['approve', 'reject']);
   assert.deepEqual(admin('draft'), []);
-  assert.deepEqual(admin('published'), ['edit', 'cancel']);
+  assert.deepEqual(admin('published'), ['cancel'], 'no admin edit route exists');
+  assert.deepEqual(admin('registration_closed'), ['cancel']);
   assert.deepEqual(admin('in_progress'), ['complete', 'cancel']);
   assert.deepEqual(admin('cancelled'), ['archive']);
 });

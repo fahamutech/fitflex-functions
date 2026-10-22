@@ -13,7 +13,8 @@ import { UNLIMITED_CAPACITY } from '../src/shared/events-document.mjs';
 import { PORTAL_ACL_SCOPES } from '../src/services/portal-user-service.mjs';
 import { adminListEvents, adminEventsSummary, adminEventsAudit, adminGetEvent, adminDecideEvent, adminCancelEvent, adminArchiveEvent, adminCompleteEvent, adminEventAudit } from '../functions/events-admin.mjs';
 import { eventsOptions, eventsList, eventDetail, saveEventFavourite, removeEventFavourite } from '../functions/events-public.mjs';
-import { organizerGetEvent, organizerSubmitEvent } from '../functions/events-organizer.mjs';
+import { organizerGetEvent, organizerSubmitEvent, organizerEventChanges } from '../functions/events-organizer.mjs';
+import { invitationService } from '../src/bootstrap/services.mjs';
 import { eventLifecycle } from '../functions/jobs.mjs';
 import { postPromotionEvents } from '../functions/promotion-events.mjs';
 
@@ -53,6 +54,7 @@ after(async () => {
   if (made.organizers.length) {
     await db('EventOrganizerStaff').whereIn('organizerId', made.organizers).del();
     await db('OrgMembership').whereIn('organizerId', made.organizers).del();
+    await db('Invitation').whereIn('organizerId', made.organizers).del();
     await db('AuditLog').whereIn('target', made.organizers).del();
     await db('EventOrganizer').whereIn('id', made.organizers).del();
   }
@@ -254,6 +256,16 @@ test('queue, summary, detail, decisions (approve → published, reject → draft
   const early = await seed(pending, { status: 'submitted' });
   assert.deepEqual((await call(adminDecideEvent, admin, { params: { id: early.id }, body: { decision: 'approve' } })).body, { error: 'organizer_not_active', organizerStatus: 'pending_review' });
   assert.equal((await eventStore.getEvent(early.id)).status, 'submitted');
+  // L4: a staff invitation at an organizer that is not active cannot be accepted; the invitation stays open.
+  const inviteeId = await user('member', { email: `${uid('inv')}@example.com`, firebaseUid: uid('fb') });
+  const invitee = await db('User').where({ id: inviteeId }).first();
+  await db('LoginIdentifier').insert({ id: uid('lid'), personId: invitee.personId, type: 'email', value: invitee.email, normalizedValue: invitee.email, verifiedAt: new Date(), status: 'active' });
+  const sent = await invitationService.create({ actor: { id: pending.ownerUserId, userType: 'event_organizer' }, orgType: 'organizer', orgId: pending.id, body: { email: invitee.email, role: 'staff', organizerRole: 'ops' } });
+  assert.equal(sent.error, undefined, JSON.stringify(sent));
+  const refused = await invitationService.accept({ user: invitee, invitationId: sent.invitation.id });
+  assert.deepEqual([refused.error, refused.status, refused.organizerStatus], ['organizer_not_active', 409, 'pending_review']);
+  assert.equal((await db('Invitation').where({ id: sent.invitation.id }).first()).status, 'pending');
+  assert.equal(await db('User').where({ personId: invitee.personId, userType: 'organizer_staff' }).first(), undefined);
 });
 
 test('admin cancel (even with confirmed registrations, D12), complete and archive; every action audited', async () => {
@@ -273,7 +285,13 @@ test('admin cancel (even with confirmed registrations, D12), complete and archiv
   assert.deepEqual(row.cancellation, { reason: 'safety', note: { en: 'Flooding', sw: 'Mafuriko' } });
   const log = await eventCatalogueStore.listChangeLog(published.id);
   assert.equal(log.length, 1); assert.equal(log[0].material, true); assert.deepEqual(log[0].fields, ['status']); assert.equal(log[0].actorRole, 'admin');
+  // The organizer sees the role, never the admin's name (L3).
+  const seen = await call(organizerEventChanges, org.claims, { params: { id: published.id } });
+  assert.deepEqual(seen.body.items[0].actor, { name: null, role: 'admin' });
+  assert.deepEqual((await call(adminCancelEvent, admin, { params: { id: published.id }, body: { reason: 'safety', note: { en: 'n'.repeat(501) } } })).body, { error: 'event_invalid', fields: [{ path: 'note.en', code: 'too_long', max: 500 }] });
   assert.deepEqual((await call(adminGetEvent, admin, { params: { id: published.id } })).body.allowedActions, ['archive']);
+  const live = await seed(org, { title: 'Live for actions' });
+  assert.deepEqual((await call(adminGetEvent, admin, { params: { id: live.id } })).body.allowedActions, ['cancel'], 'no admin edit action (L8)');
   assert.deepEqual((await call(adminArchiveEvent, admin, { params: { id: published.id } })).body, { status: 'archived' });
   assert.ok((await eventStore.getEvent(published.id)).cancelledAt, 'archiving keeps the cancellation time');
   const running = await seed(org, { status: 'in_progress' });
@@ -328,6 +346,9 @@ test('GET /events: default statuses only, filters, sort, opaque cursor paginatio
   assert.deepEqual(await q({ availability: 'open' }), [a.id, b.id]);
   assert.deepEqual(await q({ q: 'bravo' }), [b.id]);
   assert.deepEqual(await q({ q: 'Arusha' }), [b.id]);
+  assert.deepEqual(await q({ q: '%' }), [], 'LIKE wildcards are literal (L7)');
+  assert.deepEqual(await q({ q: 'Bravo_Trail' }), []);
+  assert.deepEqual(await q({ q: 'Bravo Trail' }), [b.id]);
   assert.deepEqual(await q({ from: new Date(+later - D).toISOString(), to: new Date(+later + D).toISOString() }), [b.id, c.id]);
   assert.deepEqual(await q({ sort: 'price_low' }), [b.id, d.id, a.id, c.id, soldOut.id]);
   // Pagination: an opaque cursor walks the same ordering without gaps.

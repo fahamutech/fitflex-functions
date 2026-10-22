@@ -15,8 +15,8 @@ import {
   INVITABLE_ORGANIZER_ROLES, EVENT_EDITOR_ROLES, organizerStatusOf, permissionsFor, canManageStaff, removalRefusal, roleChangeRefusal,
 } from '../shared/events-organizer.mjs';
 import {
-  parseEventPatch, validateEvent, changedPaths, isMaterialPath, diffOf, allowedActionsFor, organizerView, rowView, slugify, validTimezone,
-  CANCEL_REASONS, DEFAULT_CLOSING_SOON_HOURS,
+  parseEventPatch, parseNote, validateEvent, changedPaths, isMaterialPath, diffOf, allowedActionsFor, organizerView, rowView, slugify, validTimezone,
+  CANCEL_REASONS, DEFAULT_CLOSING_SOON_HOURS, NOTE_MAX,
 } from '../shared/events-document.mjs';
 import { paginate } from '../shared/pagination.mjs';
 
@@ -86,11 +86,15 @@ export function createEventsOrganizerService({
     const person = await identityLink.personOf(caller.personId);
     if (person?.status !== 'active') return fail('persona_not_allowed', 403, { reason: 'person_not_active' });
     const personas = await identityLink.personasOf(caller.personId);
-    if (personas.some(p => p.userType === 'event_organizer')) return fail('organizer_exists', 409);
-
-    const made = await identityLink.createPersona({ person, source: caller, userType: 'event_organizer', approvalStatus: 'approved' });
-    if (made.error) return fail('persona_identifier_in_use', 409);
-    const persona = made.row;
+    const dangling = personas.find(p => p.userType === 'event_organizer');
+    // A persona left behind by an interrupted earlier attempt (no organizer behind it) is reused, not refused (L5).
+    if (dangling && ((await catalogue.organizerForUser(dangling.id)) || (await catalogue.organizerOfOwner(dangling.id)))) return fail('organizer_exists', 409);
+    let persona = dangling ? await users.findByIdAsync(dangling.id) : null;
+    if (!persona) {
+      const made = await identityLink.createPersona({ person, source: caller, userType: 'event_organizer', approvalStatus: 'approved' });
+      if (made.error) return fail('persona_identifier_in_use', 409);
+      persona = made.row;
+    }
     const organizer = await eventStore.createOrganizer({ ownerUserId: persona.id, name, contactPhone: phone, contactEmail: email, timezone });
     if (organizer.error) return organizer;
     const actor = { id: persona.id, role: 'partner' };
@@ -202,7 +206,10 @@ export function createEventsOrganizerService({
     if (expectedVersion !== current.version) return fail('version_conflict', 409, { eventId, version: current.version });
     if (!EDITABLE_STATUSES.has(current.status)) return fail('invalid_transition', 409, { from: current.status, to: 'edit', allowed: [] });
 
-    const { patch, nested, changeNote } = parseEventPatch(body);
+    const { patch, nested, changeNote: rawNote } = parseEventPatch(body);
+    const parsedNote = parseNote(rawNote);
+    if (parsedNote.error) return fail('event_invalid', 422, { fields: parsedNote.fields.map(x => ({ ...x, path: `changeNote.${x.path.slice(5)}` })) });
+    const changeNote = parsedNote.note;
     // Validate the document as it would be after the save (patch mode: only what is present).
     const draft = { ...current, ...patch };
     if (nested?.categories) draft.categories = nested.categories.map(c => ({ ...c, distanceMeters: c.distanceM, startTime: c.startsAt, ticketTypes: c.ticketTypes }));
@@ -283,9 +290,11 @@ export function createEventsOrganizerService({
     }
     if (action === 'cancel') {
       if (!CANCEL_REASONS.includes(body.reason)) return fail('reason_code_required', 400, { allowed: [...CANCEL_REASONS] });
+      const note = parseNote(body.note);
+      if (note.error) return note;
       // D12: once anyone holds a confirmed place, only FitFlex cancels.
       if (await catalogue.hasConfirmedRegistrations(joined.event.id)) return fail('has_registrations', 409);
-      extra.cancellation = { reason: body.reason, note: { en: body.note?.en ?? null, sw: body.note?.sw ?? null } };
+      extra.cancellation = { reason: body.reason, note: note.note ?? { en: null, sw: null } };
     }
     const moved = await moveEvent(joined.event.id, to, { actor: { id: actorId, kind: 'organizer', role: ctx.role }, ...extra });
     if (moved.error) return moved;
@@ -304,8 +313,9 @@ export function createEventsOrganizerService({
     return { deleted: true };
   }
 
+  // An admin's name is never shown to the organizer (L3); the role still says who acted.
   const changeView = l => ({
-    id: l.id, at: new Date(l.createdAt).toISOString(), actor: { name: l.actorName ?? null, role: l.actorRole ?? null },
+    id: l.id, at: new Date(l.createdAt).toISOString(), actor: { name: l.actorRole === 'admin' ? null : l.actorName ?? null, role: l.actorRole ?? null },
     fields: Array.isArray(l.fields) ? l.fields : String(l.field || '').split(',').filter(Boolean), material: l.material === true,
     note: l.note ? { en: l.note.en ?? null, sw: l.note.sw ?? null } : null, before: l.before ?? null, after: l.after ?? null,
   });
@@ -345,14 +355,10 @@ export function createEventsOrganizerService({
     const role = String(body.role || '');
     if (!INVITABLE_ORGANIZER_ROLES.includes(role)) return fail('invalid_role', 400, { allowed: [...INVITABLE_ORGANIZER_ROLES] });
     if (!invitations) return fail('invitations_unavailable', 503);
+    // Phone or email only (security review #249): a userId would let an organizer probe accounts and
+    // learn a stranger's contact; the mask below is of what the caller typed.
     let identifier = null;
-    if (body.userId) {
-      const target = await users.findByIdAsync(String(body.userId));
-      if (!target) return fail('invalid_contact', 400);
-      if (target.id === actorId || (target.personId && target.personId === (await users.findByIdAsync(actorId))?.personId)) return fail('cannot_invite_self', 422);
-      identifier = target.phone ? { phone: target.phone } : target.email ? { email: target.email } : null;
-      if (!identifier) return fail('invalid_contact', 400);
-    } else if (body.phone) {
+    if (body.phone) {
       const phone = normalizePhone(body.phone);
       if (!phone) return fail('invalid_contact', 400);
       identifier = { phone };

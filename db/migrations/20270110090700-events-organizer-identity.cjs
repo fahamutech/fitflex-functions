@@ -99,8 +99,9 @@ exports.down = async function down(knex) {
     const n = (await knex.raw(`SELECT count(*)::int AS n FROM "${table}" WHERE "orgType" = 'organizer'`)).rows[0].n;
     if (n) throw new Error(`events-organizer-identity down: ${n} ${what} row(s) have orgType organizer; the old CHECKs cannot be restored over them`);
   }
-  const users = (await knex.raw(`SELECT count(*)::int AS n FROM "User" WHERE "userType" IN ('event_organizer', 'organizer_staff')`)).rows[0].n;
-  if (users) throw new Error(`events-organizer-identity down: ${users} User row(s) are event_organizer / organizer_staff personas; remove them first`);
+  // Personas still attached to an organizer would lose that link; detached ones (no organizerId) are not data this migration holds.
+  const users = (await knex.raw(`SELECT count(*)::int AS n FROM "User" WHERE "userType" IN ('event_organizer', 'organizer_staff') AND "organizerId" IS NOT NULL`)).rows[0].n;
+  if (users) throw new Error(`events-organizer-identity down: ${users} User row(s) are event_organizer / organizer_staff personas of an organizer; remove them first`);
 
   await knex.raw('DROP INDEX IF EXISTS invitation_open_person_unique');
   await knex.raw('DROP INDEX IF EXISTS invitation_open_identifier_unique');
