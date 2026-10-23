@@ -182,6 +182,15 @@ export function createShopHomeService({
     return vendorId => deliversTo(shared.near.vendorAreas.get(vendorId), viewer);
   }
 
+  /**
+   * QA2 (spec §7.3): once areas exist (SHOP_NEAR_YOU on and at least one usable area), the vendor-typed
+   * distance is not used anywhere in the shop, so ?maxDistanceKm= is ignored. Flag off: false (as before).
+   */
+  async function vendorDistanceIgnored() {
+    if (!nearWanted()) return false;
+    return (await areas()).length > 0;
+  }
+
   /** GET /shop/areas: the usable areas (non-personal; too-small areas carry no circle). */
   async function areas() {
     if (!geoAreas) return [];
@@ -296,5 +305,5 @@ export function createShopHomeService({
     return { body };
   }
 
-  return { home, clearCache: () => { cache = null; }, loadShared, areas, deliveryBadge };
+  return { home, clearCache: () => { cache = null; }, loadShared, areas, deliveryBadge, vendorDistanceIgnored };
 }

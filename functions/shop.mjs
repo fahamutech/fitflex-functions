@@ -64,11 +64,13 @@ async function requireActiveVendorStaff(req, res, next) {
 
 export const listShopProducts = {
   created, method: 'get', path: '/shop/products',
-  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither). SHOP_NEAR_YOU (docs/shop-near-you-api.md): header X-FF-Area: <GeoArea id worked out on the device; never stored or logged> → rows whose vendor delivers to that area carry deliversToViewerArea: true, only while personalisation is available and switched on and the area is usable; otherwise the body is unchanged.',
+  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither). SHOP_NEAR_YOU (docs/shop-near-you-api.md): header X-FF-Area: <GeoArea id worked out on the device; never stored or logged> → rows whose vendor delivers to that area carry deliversToViewerArea: true, only while personalisation is available and switched on and the area is usable; otherwise the body is unchanged. With SHOP_NEAR_YOU on and at least one usable area, ?maxDistanceKm= (the vendor-typed distance) is ignored; flag off: applied as before.',
   onGuard: routeGuard('get', [areaRedactGuard, requireAuth()]),
   onRequest: async (req, res) => {
     redactAreaId(req);
-    const { category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = req.query || {};
+    const { category, search, brand, vendorId, minPrice, maxPrice, minRating, delivery, promotions, sort } = req.query || {};
+    // QA2: with areas on, the vendor-typed distance filter is ignored (spec §7.3); flag off: as before.
+    const maxDistanceKm = (await shopHomeService.vendorDistanceIgnored()) ? undefined : req.query?.maxDistanceKm;
     const rows = await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort });
     res.json(await withBadge(req, rows));
   }
