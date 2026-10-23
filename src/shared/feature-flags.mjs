@@ -351,6 +351,24 @@ export function eventsModuleOn() {
   return on('EVENTS_MODULE');
 }
 
+/**
+ * Phase B · B5a: company sponsors move from the legacy HR area (/hr) to the
+ * organisation area (/org). Off unless ORG_ONLY_SPONSORS is set; off, nothing
+ * changes. On:
+ *  - a company HR login's session (POST /auth/login, Firebase, PIN, switch)
+ *    carries organizationUser / organizationRoles / organizationIds, so the
+ *    portal opens /org for it;
+ *  - people of a company's organisation are added, changed, linked and
+ *    imported through /b2b/organizations/:id/beneficiaries..., which write
+ *    through the company staff list (no managed_by_corporate dead end);
+ *  - a company HR login only ever reaches its own company's organisation;
+ *  - new HR logins are also made organisation users (role hr).
+ * The conversion of existing HR logins is scripts/hr-to-org.mjs.
+ */
+export function orgOnlySponsorsOn() {
+  return on('ORG_ONLY_SPONSORS');
+}
+
 /** S2: saving events and the Saved filter (GET /events/options.favourites). Needs EVENTS_MODULE too. */
 export function eventsFavouritesOn() {
   return eventsModuleOn() && on('EVENTS_FAVOURITES');

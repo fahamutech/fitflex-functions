@@ -11,10 +11,15 @@ import {
 import { sameEmail } from '../shared/identifiers.mjs';
 
 const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
+// The activation PIN's hash never leaves the service (a 4-digit PIN's hash is trivially reversed).
+const withoutPinHash = row => (row ? (({ pinHash, ...rest }) => rest)(row) : row);
 
 export function createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
   onAccountCreated = null,
+  // B5a: called after a new HR login is created (the bootstrap makes it an
+  // organisation user while ORG_ONLY_SPONSORS is on). Never blocks creation.
+  onHrUserCreated = null,
   billedByProgramme = null,
   // Verified-contacts helper: linking by email or number finds only a person
   // who has verified it (fail closed without it; user ids still work).
@@ -211,10 +216,10 @@ export function createCorporateService({
     await corporateAccounts.updateByIdAsync(corporateId, {
       seatsUsed: account.seatsUsed + 1, updatedAt: now(),
     });
-    await audit({ actor: actorId, action: 'corporate.staff.provision', target: employee.id, after: employee });
+    await audit({ actor: actorId, action: 'corporate.staff.provision', target: employee.id, after: withoutPinHash(employee) });
 
     // PIN is returned exactly once so HR can distribute it; it is never re-readable.
-    return { employee, pin };
+    return { employee: withoutPinHash(employee), pin };
   }
 
   /**
@@ -267,7 +272,7 @@ export function createCorporateService({
     if (!EMPLOYEE_STATUS.includes(status)) return { error: 'invalid_status', status: 400 };
     const employee = await corporateEmployees.findByIdAsync(employeeId);
     if (!employee || employee.corporateId !== corporateId) return { error: 'employee_not_found', status: 404 };
-    if (employee.status === status) return { employee, unchanged: true };
+    if (employee.status === status) return { employee: withoutPinHash(employee), unchanged: true };
 
     const patch = { status, updatedAt: now() };
     if (status === 'active' && !employee.activatedAt) patch.activatedAt = now();
@@ -282,8 +287,8 @@ export function createCorporateService({
         });
       }
     }
-    await audit({ actor: actorId, action: `corporate.staff.${status}`, target: employeeId, before: employee, after: updated });
-    return { employee: updated };
+    await audit({ actor: actorId, action: `corporate.staff.${status}`, target: employeeId, before: withoutPinHash(employee), after: withoutPinHash(updated) });
+    return { employee: withoutPinHash(updated) };
   }
 
   /**
@@ -508,6 +513,9 @@ export function createCorporateService({
     };
     await users.insertAsync(row);
     await audit({ actor: actorId, action: 'corporate.hr.create', target: row.id, after: hrView(row) });
+    if (onHrUserCreated) {
+      try { await onHrUserCreated(row, actorId); } catch (err) { console.warn('[corporate] HR organisation user not made:', err?.message); }
+    }
     return { hrUser: hrView(row) };
   }
 
