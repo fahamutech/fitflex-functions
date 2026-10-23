@@ -34,6 +34,8 @@ const decodeCursor = cursor => { if (!cursor) return 0; const n = parseInt(Buffe
 export function createEventsDiscoveryService({
   catalogue, now = () => new Date(), flags = {}, closingSoonHours = () => DEFAULT_CLOSING_SOON_HOURS,
   shareBase = () => process.env.FRIEND_INVITE_BASE_URL || process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
+  // S3 (spec §3.1): the registration keys added to the probe while EVENTS_REGISTRATION is on (holdTtlMinutes, maxParticipantsPerOrder, payment, teams, corporate, claim, consentTextVersion).
+  registrationOptions = () => ({}),
 }) {
   const on = name => Boolean(flags[name]?.());
   const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
@@ -41,10 +43,12 @@ export function createEventsDiscoveryService({
   /** Spec §13: the flag probe. Never 404s; `discovery` false while EVENTS_MODULE is off. */
   function options() {
     const discovery = on('module');
+    const registration = discovery && on('registration');
     return {
       discovery,
       favourites: discovery && on('favourites'),
-      registration: discovery && on('registration'),
+      registration,
+      ...(registration ? registrationOptions() : {}),
       currency: 'TZS',
       closingSoonHours: closingSoonHours(),
       regions: REGIONS.map(r => ({ code: r.code, name: { ...r.name } })),

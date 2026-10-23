@@ -44,6 +44,8 @@ export function createEventsOrganizerService({
   db, eventStore, catalogue, users, identityLink = null, partnerKyc, invitations = null, orgMemberships = null, auditLog = null,
   notify = async () => {}, track = async () => {}, now = () => new Date(),
   closingSoonHours = () => DEFAULT_CLOSING_SOON_HOURS, autoCompleteGraceHours = () => 6,
+  // S3: (organizerId) → { registrationsTotal, awaitingPaymentTotal, confirmedTotal } for the overview (null until wired).
+  registrationTotals = null,
 }) {
   const nowIso = () => now().toISOString();
   const audit = async (actor, action, target, before, after) => {
@@ -131,8 +133,8 @@ export function createEventsOrganizerService({
     return {
       eventsTotal: all.length,
       publishedTotal: all.filter(j => ['published', 'registration_closed', 'in_progress'].includes(j.event.status)).length,
-      // S3 fills these (spec §5.1).
-      registrationsTotal: 0, awaitingPaymentTotal: 0, confirmedTotal: 0,
+      // S3 (registration service) fills these; zeros until it is wired.
+      ...(registrationTotals ? await registrationTotals(ctx.organizer.id) : { registrationsTotal: 0, awaitingPaymentTotal: 0, confirmedTotal: 0 }),
       nextEvents: next.map(j => rowView(j, { ...viewOpts(), allowedActions: actionsFor(ctx, j.event.status) })),
     };
   }

@@ -10,6 +10,7 @@
 //   allowedActionsFor({ status, actor, role, organizerStatus }) → §7.2 action names
 //   summaryView / detailView / organizerView      → the §14 shapes
 import { normalizePhone } from './identifiers.mjs';
+import { parseParticipantFields, effectiveFields, DUPLICATE_POLICIES, FIELD_POLICIES, PARTICIPANT_FIELD_KEYS } from './events-participants.mjs';
 
 export const EVENT_TYPES = Object.freeze(['road', 'trail', 'fun', 'charity', 'virtual']);
 export const REFUND_PRESETS = Object.freeze(['no_refund', 'refund_until_close', 'custom']);
@@ -147,6 +148,9 @@ const PATCHABLE = {
   routeImageUrl: v => (v === null || isStr(v) ? v : undefined),
   routeImageAlt: v => (v === null || isStr(v) ? v : undefined),
   kitProvided: v => (typeof v === 'boolean' ? v : undefined),
+  // S3 (§3.3, D20): which participant fields are collected and the duplicate rule — material (ORG-007).
+  participantFields: parseParticipantFields,
+  duplicatePolicy: v => (isStr(v) ? v : undefined),
 };
 const BILINGUAL_FIELDS = ['description', 'accessibility', 'inclusions', 'terms'];
 
@@ -259,6 +263,12 @@ export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHost
 
   // 1 Basics
   if (required('title', doc.title)) length('title', doc.title, 3, 80);
+  // S3: registration settings (optional; defaults apply when absent)
+  if (doc.duplicatePolicy !== undefined && doc.duplicatePolicy !== null && !DUPLICATE_POLICIES.includes(doc.duplicatePolicy)) add('duplicatePolicy', 'required');
+  if (doc.participantFields !== undefined && doc.participantFields !== null) {
+    if (typeof doc.participantFields !== 'object' || Array.isArray(doc.participantFields)) add('participantFields', 'required');
+    else for (const [k, v] of Object.entries(doc.participantFields)) if (!PARTICIPANT_FIELD_KEYS.includes(k) || !FIELD_POLICIES.includes(v)) add(`participantFields.${k}`, 'required');
+  }
   if (required('type', doc.eventType) && filled(doc.eventType) && !EVENT_TYPES.includes(doc.eventType)) add('type', 'required');
   for (const lang of ['en', 'sw']) {
     const v = lang === 'en' ? doc.description : doc.descriptionSw;
@@ -386,7 +396,7 @@ export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHost
 
 // ── Change detection (§7.4) ─────────────────────────────────────────────────
 
-const MATERIAL_EVENT_FIELDS = ['startsAt', 'endsAt', 'timezone', 'venue.name', 'venue.address', 'venue.lat', 'venue.lng', 'routeUrl', 'routeImageUrl', 'registrationClosesAt', 'refundPolicy'];
+const MATERIAL_EVENT_FIELDS = ['startsAt', 'endsAt', 'timezone', 'venue.name', 'venue.address', 'venue.lat', 'venue.lng', 'routeUrl', 'routeImageUrl', 'registrationClosesAt', 'refundPolicy', 'participantFields', 'duplicatePolicy'];
 const MATERIAL_CATEGORY_FIELDS = ['distanceM', 'startsAt'];
 const MATERIAL_TICKET_FIELDS = ['priceTzs'];
 
@@ -402,6 +412,8 @@ export function flattenDocument(doc = {}) {
   for (const k of ['name', 'address', 'city', 'region', 'lat', 'lng']) out[`venue.${k}`] = scalar(doc.venue?.[k] ?? null);
   for (const k of ['email', 'phone', 'whatsapp']) out[`contact.${k}`] = doc.contact?.[k] ?? null;
   out.refundPolicy = JSON.stringify(doc.refundPolicy ?? null);
+  out.participantFields = JSON.stringify(doc.participantFields ?? null);
+  out.duplicatePolicy = doc.duplicatePolicy ?? null;
   out.schedule = JSON.stringify(doc.schedule ?? []);
   out.sponsors = JSON.stringify(doc.sponsors ?? []);
   for (const c of doc.categories || []) {
@@ -607,6 +619,9 @@ export function detailView(joined, { now = new Date(), closingSoonHours = DEFAUL
     accessibility: { en: e.accessibility?.en ?? null, sw: e.accessibility?.sw ?? null },
     inclusions: { en: e.inclusions?.en ?? null, sw: e.inclusions?.sw ?? null },
     kitProvided: e.kitProvided === true,
+    // S3 (§8.2): the effective participant field policy, so the registration form and the quote agree.
+    participantFields: effectiveFields(e, categories),
+    duplicatePolicy: DUPLICATE_POLICIES.includes(e.duplicatePolicy) ? e.duplicatePolicy : 'one_per_category',
     categories: categories.filter(c => c.status !== 'inactive').map(c => categoryView(c, summary.availability, opts)),
     collectionPoints: collectionPoints.filter(p => p.status !== 'inactive').map(pointView),
     schedule: (e.schedule || []).map(s => ({ at: iso(s.at), label: { en: s.label?.en ?? null, sw: s.label?.sw ?? null } })),
@@ -635,6 +650,8 @@ export function organizerView(joined, { now, closingSoonHours, allowedActions = 
     terms: { en: e.terms?.en ?? null, sw: e.terms?.sw ?? null },
     refundPolicy: { preset: e.refundPolicy?.preset ?? null, text: { en: e.refundPolicy?.text?.en ?? null, sw: e.refundPolicy?.text?.sw ?? null } },
     heroImageAlt: e.heroImageAlt ?? null,
+    participantFields: e.participantFields && typeof e.participantFields === 'object' ? { ...e.participantFields } : {},
+    effectiveParticipantFields: view.participantFields,
     status: e.status, version: e.version, allowedActions,
     submittedAt: iso(e.submittedAt),
     rejection: e.rejection ? { reason: e.rejection.reason ?? null, note: e.rejection.note ?? null, at: iso(e.rejection.at) } : null,
