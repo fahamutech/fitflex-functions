@@ -549,3 +549,15 @@ test('QA1 deliveryBadge: same gating as the home — flag, personalisation, swit
   }
   assert.deepEqual(s.writes, []);
 });
+
+test('QA2 vendorDistanceIgnored: only with SHOP_NEAR_YOU on and at least one usable area', async () => {
+  const make = (rows, near) => createShopHomeService({
+    shopService: { listProducts: async () => [] }, discoveryService: { discover: async () => ({ featured: [] }) },
+    promotionService: { listLive: async () => [] }, users: memStore(), recentPaidOrders: async () => [], now: () => NOW,
+    geoAreas: { allAsync: async () => rows }, nearYouOn: () => near,
+  });
+  assert.equal(await make(AREAS, true).vendorDistanceIgnored(), true);
+  assert.equal(await make(AREAS, false).vendorDistanceIgnored(), false, 'flag off: as before');
+  assert.equal(await make([], true).vendorDistanceIgnored(), false, 'no areas configured');
+  assert.equal(await make([{ id: 'x', level: 'region', name: 'X', parentId: null, active: false }], true).vendorDistanceIgnored(), false, 'only inactive areas');
+});

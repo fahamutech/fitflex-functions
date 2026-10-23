@@ -15,6 +15,7 @@ import { ensureInit } from '../functions/index.mjs';
 import { shopHome, shopAreas, resetShopHomeLimits } from '../functions/shop-home.mjs';
 import { getShopPreferences } from '../functions/shop-preferences.mjs';
 import { vendorProfile, vendorSaveProfile, adminListVendors, adminUpdateVendor, vendorToolsOptionsRoute, listShopProducts, getShopProduct } from '../functions/shop.mjs';
+import { discoverProducts } from '../functions/discover.mjs';
 import { shopHomeService } from '../src/bootstrap/services.mjs';
 import { listGeoAreas, createGeoArea, updateGeoArea } from '../functions/promotions.mjs';
 
@@ -478,4 +479,31 @@ test('QA1 products: the real request logger never prints the area for /shop/prod
   }
   assert.equal(lines.length, 8, lines.join(''));
   assert.deepEqual(lines.filter(l => l.includes(A.district) || /areaid/i.test(l) || l.includes('%61reaId')), [], lines.join(''));
+});
+
+// ── QA2: ?maxDistanceKm= (vendor-typed distance) is ignored once areas exist ───
+
+test('QA2 maxDistanceKm: flag off filters by the vendor-typed distance exactly as before; flag on with areas ignores it', async () => {
+  const v = await vendor({ cityId: A.city });
+  const near = await product(v, { distanceKm: 3, name: `QA2 dist ${tag}` });
+  const far = await product(v, { distanceKm: 30, name: `QA2 dist ${tag}` });
+  const none = await product(v, { name: `QA2 dist ${tag}` }); // no distance typed
+  const m = await member();
+  const ids = body => (Array.isArray(body) ? body : [...(body.featured || []), ...(body.items || body.results || [])]).map(r => r.id).filter(id => [near, far, none].includes(id)).sort();
+  const list = q => call(listShopProducts, asMember(m), { query: { search: `QA2 dist ${tag}`, ...q } });
+  const disc = q => call(discoverProducts, asMember(m), { query: { q: `QA2 dist ${tag}`, ...q } });
+  // Flag off: today's behaviour.
+  assert.deepEqual(ids((await list({ maxDistanceKm: '10' })).body), [near]);
+  assert.deepEqual(ids((await list({})).body), [near, far, none].sort());
+  const dOff = await disc({ maxDistanceKm: '10' });
+  assert.equal(dOff.statusCode, 200, JSON.stringify(dOff.body));
+  assert.deepEqual(ids(dOff.body), [near]);
+  // Flag on, areas configured (the seeded GeoArea rows): the filter is ignored on both routes.
+  process.env.SHOP_NEAR_YOU = '1';
+  assert.ok((await shopHomeService.areas()).length > 0);
+  assert.deepEqual(ids((await list({ maxDistanceKm: '10' })).body), [near, far, none].sort());
+  assert.deepEqual(JSON.stringify((await list({ maxDistanceKm: '10' })).body), JSON.stringify((await list({})).body), 'same as no filter');
+  assert.deepEqual(ids((await disc({ maxDistanceKm: '10' })).body), [near, far, none].sort());
+  // Other filters still apply.
+  assert.deepEqual(ids((await list({ maxDistanceKm: '10', maxPrice: '1' })).body), []);
 });

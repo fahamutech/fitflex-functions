@@ -171,6 +171,13 @@ Send the same **`X-FF-Area: <GeoArea id>`** header (header only; `?areaId=` is *
 - Vendor areas are read from the shop home cache, so a vendor's change shows within `SHOP_HOME_CACHE_SECONDS` (default 60 s).
 - Nothing else in these responses changes; filters, sorting and checkout are unchanged (no delivery block).
 
+## Vendor-typed distance (`?maxDistanceKm=`) — QA round 2
+
+Spec §7.3: once areas exist, the vendor-typed `distanceKm` is not used anywhere in the shop.
+- **`SHOP_NEAR_YOU` on and at least one usable area** (what `GET /shop/areas` would list): `?maxDistanceKm=` is **ignored** on `GET /shop/products` and on `GET /discover/products` (the result is the same as without it; every other filter still applies). This is a behaviour change under the flag: old app builds that still send it get unfiltered results.
+- **Flag off, or no usable area:** applied exactly as before.
+- The app hides the "Maximum distance" field and any "{n} km" text in the same case (spec §7.3).
+
 ## `GET /shop/preferences`
 
 `uses` gains `location` (between `profile_age` and `goal`) **in every mode** (`?mode=`, functions#246) when `SHOP_NEAR_YOU` is on and personalisation is enabled for the person. It means "your current area is used **if you allow location** on this device"; the server cannot know the device choice. Flag off: unchanged.
@@ -182,5 +189,4 @@ Send the same **`X-FF-Area: <GeoArea id>`** header (header only; `?areaId=` is *
 ## Not in this slice (follow-ups)
 
 - `GET /shop/vendors/:id` (store page) and `/discover/products` carry no badge yet.
-- The server still honours `?maxDistanceKm=` on `/shop/products` (old app builds use it); the app stops sending it once areas exist.
 - Buyer home-delivery addresses are not mapped to areas.
