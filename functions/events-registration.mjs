@@ -14,6 +14,7 @@ const created = new Date().toISOString();
 const HOUR = 3_600_000;
 const limiters = {
   quote: createVendorLimiter({ perMinute: 60 }),
+  order: createVendorLimiter({ perMinute: 20 }),
   claim: createVendorLimiter({ perMinute: 20, windowMs: HOUR }),
   lookup: createVendorLimiter({ perMinute: 30, windowMs: HOUR }),
   teamCreate: createVendorLimiter({ perMinute: 10, windowMs: 24 * HOUR }),
@@ -21,7 +22,8 @@ const limiters = {
 };
 /** For specs: clear every window. */
 export const resetEventsRegistrationLimits = () => Object.values(limiters).forEach(l => l.reset());
-const addressOf = req => String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || req.socket?.remoteAddress || 'anon';
+// The client-supplied left end of X-Forwarded-For can be forged; the rightmost entry is the one the nearest proxy appended (review L4).
+const addressOf = req => String(req.headers?.['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean).pop() || req.ip || req.socket?.remoteAddress || 'anon';
 const headerOf = (req, name) => req.headers?.[name] ?? req.headers?.[name.toLowerCase()] ?? (typeof req.get === 'function' ? req.get(name) : undefined) ?? null;
 
 function send(res, result, okStatus = 200) {
@@ -50,9 +52,12 @@ export const quoteEventOrder = {
 
 export const createEventOrder = {
   created, method: 'post', path: '/me/event-orders',
-  description: 'Member: place an order and hold its places (30 min, EVENT_HOLD_TTL_MINUTES). Header Idempotency-Key (required, 8–100 chars [A-Za-z0-9._:-]); same key + same body → 200 { …, replayed: true }, same key + different body → 409 idempotency_key_reused. Body = quote body + { acceptedTerms: true, consentTextVersion, expectedTotalTzs }. → 201 { order { id, reference, status: awaiting_payment, currency, subtotalTzs, discountTzs, feesTzs, totalTzs, holdExpiresAt, holdCycle, createdAt, teamId }, lines[], registrations [{ id, ticketTypeId, categoryId, firstName, lastName, status: reserved, consentBasis, isSelf, claimState }], holdExpiresAt, next { payment: "none", instructions: null }, event, team, replayed: false }. 422 participant_invalid { participants [{ index, problems }] } (every row), 400 idempotency_key_required | terms_not_accepted | too_many_participants { max } | quantity_out_of_range | invalid_lines | participants_mismatch | multiple_self_participants, 409 consent_version_stale | price_changed { quotedTotalTzs, totalTzs } | capacity_unavailable { ticketTypeId } | event_not_open | registration_closed | sale_not_open | sale_closed | ticket_type_inactive | category_inactive | team_full | team_disbanded | team_name_taken, 404 event_not_found | ticket_type_not_found | team_not_found. The route never forwards holdTtlMinutes, feeRule, discounts or participantUserId.',
+  description: 'Member: place an order and hold its places (30 min, EVENT_HOLD_TTL_MINUTES). Header Idempotency-Key (required, 8–100 chars [A-Za-z0-9._:-]); same key + same body → 200 { …, replayed: true }, same key + different body → 409 idempotency_key_reused. Body = quote body + { acceptedTerms: true, consentTextVersion, expectedTotalTzs (REQUIRED: 400 expected_total_required) }. Rate 20/min; one live unpaid order per event (409 hold_limit_reached). → 201 { order { id, reference, status: awaiting_payment, currency, subtotalTzs, discountTzs, feesTzs, totalTzs, holdExpiresAt, holdCycle, createdAt, teamId }, lines[], registrations [{ id, ticketTypeId, categoryId, firstName, lastName, status: reserved, consentBasis, isSelf, claimState }], holdExpiresAt, next { payment: "none", instructions: null }, event, team, replayed: false }. 422 participant_invalid { participants [{ index, problems }] } (every row), 400 idempotency_key_required | terms_not_accepted | too_many_participants { max } | quantity_out_of_range | invalid_lines | participants_mismatch | multiple_self_participants, 409 consent_version_stale | price_changed { quotedTotalTzs, totalTzs } | capacity_unavailable { ticketTypeId } | event_not_open | registration_closed | sale_not_open | sale_closed | ticket_type_inactive | category_inactive | team_full | team_disbanded | team_name_taken, 404 event_not_found | ticket_type_not_found | team_not_found. The route never forwards holdTtlMinutes, feeRule, discounts or participantUserId.',
   onGuard: member('post'),
-  onRequest: async (req, res) => send(res, await svc.createOrder({ userId: req.user.sub, body: req.body || {}, idempotencyKey: headerOf(req, 'Idempotency-Key') }), 201),
+  onRequest: async (req, res) => {
+    if (limitOrNull(limiters.order, `order:${req.user.sub}`, res)) return undefined;
+    return send(res, await svc.createOrder({ userId: req.user.sub, body: req.body || {}, idempotencyKey: headerOf(req, 'Idempotency-Key') }), 201);
+  },
 };
 
 export const listMyEventOrders = {
@@ -111,7 +116,7 @@ export const getMyEventRegistration = {
 
 export const claimEventRegistration = {
   created, method: 'post', path: '/me/event-registrations/:id/claim',
-  description: 'Member: claim a place registered for me by someone else. Body { token? }. The registration\'s phone or email MUST equal one of my verified contacts (token or not); with a token its hash must match and not be expired. → { registration (participantUserId = me, claimedAt), changed }. 403 claim_not_verified { contact { type, masked }, verifiable }, 409 already_claimed | claim_own_contact | registration_closed_state, 400 claim_token_invalid, 410 claim_token_expired, 404 registration_not_found. Rate 20/h.',
+  description: 'Member: claim a place registered for me by someone else. Body { token? }. The registration\'s phone or email MUST equal one of my verified contacts (token or not); with a token its hash must match and not be expired. → { registration (participantUserId = me, claimedAt), changed }. 403 claim_not_verified (no hints about the place or its contact), 409 already_claimed | claim_own_contact | registration_closed_state, 400 claim_token_invalid, 410 claim_token_expired, 404 registration_not_found. Rate 20/h.',
   onGuard: member('post'),
   onRequest: async (req, res) => {
     if (limitOrNull(limiters.claim, `claim:${req.user.sub}`, res)) return undefined;

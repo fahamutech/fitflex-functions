@@ -22,8 +22,9 @@ import { summaryView, detailView, ticketAvailability, availabilityOf, DEFAULT_CL
 import {
   effectiveFields, checkParticipant, findDuplicatesInRequest, consentTextFor, maskName, maskFirstName, lastInitial, maskContactShort,
   canonicalFingerprint, IDEMPOTENCY_KEY_RE, newJoinCode, normaliseJoinCode, formatJoinCode, newClaimToken, hashToken, isClaimTokenShape,
-  localTimeIn, MEMBER_CANCEL_REASONS, TEAM_TYPES_MEMBER, DUPLICATE_POLICIES,
+  localTimeIn, localHourMinuteIn, oversizedField, startsLikeFormula, MEMBER_CANCEL_REASONS, TEAM_TYPES_MEMBER, DUPLICATE_POLICIES,
 } from '../shared/events-participants.mjs';
+import { swahiliTime } from '../shared/vendor-documents.mjs';
 import { storeRefusal } from '../infra/event-store-pg.mjs';
 import { paginate } from '../shared/pagination.mjs';
 import {
@@ -174,7 +175,7 @@ export function createEventsRegistrationService({
     const names = namesOf(joined);
 
     // lines
-    if (!Array.isArray(body.lines) || !body.lines.length) return fail('invalid_lines', 400);
+    if (!Array.isArray(body.lines) || !body.lines.length || body.lines.length > 200) return fail('invalid_lines', 400);
     const wanted = new Map();
     for (const line of body.lines) {
       if (!line || !isStr(line.ticketTypeId) || wanted.has(line.ticketTypeId) || !isInt(line.quantity) || line.quantity < 1) return fail('invalid_lines', 400, { ticketTypeId: line?.ticketTypeId ?? null });
@@ -191,6 +192,11 @@ export function createEventsRegistrationService({
     for (const p of raw) perType.set(p?.ticketTypeId, (perType.get(p?.ticketTypeId) ?? 0) + 1);
     for (const [ticketTypeId, quantity] of wanted) if ((perType.get(ticketTypeId) ?? 0) !== quantity) return fail('participants_mismatch', 400, { ticketTypeId, expected: quantity, received: perType.get(ticketTypeId) ?? 0 });
 
+    // Input caps run before any regex or normaliser (review M4): an oversized field is a 400, nothing else is evaluated.
+    for (let i = 0; i < raw.length; i += 1) {
+      const big = oversizedField(raw[i]);
+      if (big) return fail('field_too_long', 400, { index: i, field: big.field, max: big.max });
+    }
     const fields = effectiveFields(event, joined.categories);
     const purchaserContacts = mode === 'member' && purchaserUserId ? await verifiedContacts.contactsFor(purchaserUserId) : [];
     const participants = [];
@@ -217,15 +223,18 @@ export function createEventsRegistrationService({
       const phones = participants.map(p => p.phoneNormalized).filter(Boolean);
       const emails = participants.map(p => p.emailNormalized).filter(Boolean);
       if (phones.length || emails.length) {
-        const existing = await db('EventRegistration').where({ eventId: event.id }).whereIn('status', LIVE_REGISTRATION)
-          .where(b => { if (phones.length) b.orWhereIn('phoneNormalized', phones); if (emails.length) b.orWhereIn('emailNormalized', emails); })
-          .select('id', 'categoryId', 'phoneNormalized', 'emailNormalized', 'status');
+        const existing = await db('EventRegistration as r').join('EventOrder as o', 'o.id', 'r.orderId').where({ 'r.eventId': event.id }).whereIn('r.status', LIVE_REGISTRATION)
+          .where(b => { if (phones.length) b.orWhereIn('r.phoneNormalized', phones); if (emails.length) b.orWhereIn('r.emailNormalized', emails); })
+          .select('r.id', 'r.categoryId', 'r.phoneNormalized', 'r.emailNormalized', 'r.status', 'r.purchaserUserId', 'o.organizationId');
         participants.forEach((p, index) => {
           const hit = existing.find(r => r.categoryId === p.categoryId && ((p.phoneNormalized && r.phoneNormalized === p.phoneNormalized) || (p.emailNormalized && r.emailNormalized === p.emailNormalized)));
           if (hit && !report[index].problems.some(x => x.code === 'duplicate_participant')) {
-            report[index].problems.push({ field: p.phoneNormalized && hit.phoneNormalized === p.phoneNormalized ? 'phone' : 'email', code: 'duplicate_participant', registrationId: hit.id });
+            // Someone else's registration is never identified (review M1): ids and statuses only for the caller's own live orders.
+            const own = mode === 'corporate' ? Boolean(organizationId) && hit.organizationId === organizationId : Boolean(purchaserUserId) && hit.purchaserUserId === purchaserUserId;
+            const field = p.phoneNormalized && hit.phoneNormalized === p.phoneNormalized ? 'phone' : 'email';
+            report[index].problems.push(own ? { field, code: 'duplicate_participant', registrationId: hit.id } : { field, code: 'duplicate_participant' });
             report[index].ok = false;
-            duplicates.push({ index, kind: 'already_registered', registrationStatus: hit.status });
+            duplicates.push(own ? { index, kind: 'already_registered', registrationStatus: hit.status } : { index, kind: 'already_registered' });
           }
         });
       }
@@ -253,7 +262,7 @@ export function createEventsRegistrationService({
     let discounts = null;
     if (mode === 'corporate' && organizationId) {
       const rules = cfg.orgDiscounts();
-      if (rules.error) return rules;
+      if (rules.error) return fail('invalid_config', 500);
       const pct = rules[organizationId]?.pct ?? 0;
       if (pct > 0) {
         discounts = {};
@@ -264,7 +273,7 @@ export function createEventsRegistrationService({
       }
     }
     const feeRule = cfg.feeRule();
-    if (feeRule.error) return fail('invalid_config', 500, { name: 'EVENTS_FEE_RULE', reason: feeRule.reason ?? feeRule.name ?? null });
+    if (feeRule.error) return fail('invalid_config', 500);
     const priced = quoteLines(liveTicketRows, lines.map(l => ({ ...l, discountTzs: discounts?.[l.ticketTypeId] ?? 0 })), { feeRule });
     if (priced.error) return priced;
     const quote = {
@@ -291,7 +300,7 @@ export function createEventsRegistrationService({
       const name = isStr(t.create.name) ? t.create.name.trim() : '';
       const teamType = mode === 'corporate' ? 'corporate' : (isStr(t.create.teamType) ? t.create.teamType : 'community');
       const problems = [];
-      if (name.length < 1 || name.length > 120) problems.push({ code: 'team_name_invalid' });
+      if (name.length < 1 || name.length > 120 || startsLikeFormula(name)) problems.push({ code: 'team_name_invalid' });
       if (mode !== 'corporate' && !TEAM_TYPES_MEMBER.includes(teamType)) problems.push({ code: 'team_type_invalid' });
       if (name && await db('EventTeam').where({ eventId: event.id }).whereRaw('lower(name) = lower(?)', [name]).first('id')) problems.push({ code: 'team_name_taken' });
       if (places > maxMembers) problems.push({ code: 'team_full', maxMembers });
@@ -310,7 +319,7 @@ export function createEventsRegistrationService({
 
   /** { team, memberCount, maxMembers } by join code within one event, or { error: team_not_found | team_disbanded }. */
   async function findTeamByCode(eventId, joinCode) {
-    const code = normaliseJoinCode(joinCode);
+    const code = typeof joinCode === 'string' && joinCode.length <= 32 ? normaliseJoinCode(joinCode) : null;
     if (!code) return fail('team_not_found', 404);
     const team = await db('EventTeam').where({ eventId, joinCode: code }).first();
     if (!team) return fail('team_not_found', 404);
@@ -387,7 +396,12 @@ export function createEventsRegistrationService({
     if (earlier) return earlier;
 
     if (mode === 'member' && body.organizationId != null) return fail('organization_not_allowed', 400);
-    if (body.expectedTotalTzs !== undefined && body.expectedTotalTzs !== null && (!isInt(body.expectedTotalTzs) || body.expectedTotalTzs < 0)) return fail('invalid_expected_total', 400);
+    // The total the client was quoted is mandatory (review M2): an order is never placed blind. The quote stays free of it.
+    if (body.expectedTotalTzs === undefined || body.expectedTotalTzs === null) return fail('expected_total_required', 400);
+    if (!isInt(body.expectedTotalTzs) || body.expectedTotalTzs < 0) return fail('invalid_expected_total', 400);
+    for (const field of ['costCentre', 'purchaserReference']) {
+      if (body[field] !== undefined && body[field] !== null && (!isStr(body[field]) || body[field].length > 80 || startsLikeFormula(body[field]))) return fail('invalid_text', 400, { field });
+    }
     const prep = await prepare({ mode, purchaserUserId, organizationId, body });
     if (prep.error) return prep;
     const bad = prep.report.filter(r => !r.ok);
@@ -417,17 +431,41 @@ export function createEventsRegistrationService({
       costCentre: mode === 'corporate' && isStr(body.costCentre) && body.costCentre.trim() ? body.costCentre.trim().slice(0, 80) : null,
       purchaserReference: mode === 'corporate' && isStr(body.purchaserReference) && body.purchaserReference.trim() ? body.purchaserReference.trim().slice(0, 80) : null,
     };
+    // Hold abuse (review M3): a member keeps one live unpaid order per event and at most the per-order place limit held.
+    if (mode === 'member') {
+      const limited = await holdLimit(db, purchaserUserId, prep.event.id, prep.totalQuantity);
+      if (limited) return limited;
+    }
     const result = await eventStore.createOrderWithHolds({
       eventId: prep.event.id, purchaserUserId, organizationId, lines: prep.lines, participants,
-      idempotencyKey: k.key, fingerprint, discounts: prep.discounts, expectedTotalTzs: body.expectedTotalTzs ?? null,
+      idempotencyKey: k.key, fingerprint, discounts: prep.discounts, expectedTotalTzs: body.expectedTotalTzs,
       bulk: mode === 'corporate', orderExtra, feeRule: prep.feeRule,
-      afterCreate: prep.team ? (trx, created) => attachTeam(trx, created, { team: prep.team, organizationId, purchaserUserId: purchaserUserId ?? createdByUserId, at }) : null,
+      afterCreate: (mode === 'member' || prep.team) ? async (trx, created) => {
+        if (mode === 'member') {
+          // Serialise this user's orders for this event; the earlier committed order is then visible (a race loses here).
+          await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`evh:${purchaserUserId}:${prep.event.id}`]);
+          const limited = await holdLimit(trx, purchaserUserId, prep.event.id, 0, created.order.id);
+          if (limited) throw storeRefusal(limited.error, limited.status, { reason: limited.reason });
+        }
+        if (prep.team) await attachTeam(trx, created, { team: prep.team, organizationId, purchaserUserId: purchaserUserId ?? createdByUserId, at });
+      } : null,
     });
     if (result.error) return result;
     if (result.replayed) return { status: 200, ...(await orderResponse(result, { viewerUserId: purchaserUserId })), replayed: true };
 
     await afterOrderCreated(result, { mode, purchaserUserId, createdByUserId: orderExtra.createdByUserId, joined: prep.joined });
     return { status: 201, ...(await orderResponse(result, { viewerUserId: purchaserUserId, joined: prep.joined })), replayed: false };
+  }
+
+  /** hold_limit_reached when the member already holds a live unpaid order for the event, or would hold more places than the per-order limit. */
+  async function holdLimit(q, userId, eventId, newPlaces, exceptOrderId = null) {
+    const live = q('EventOrder').where({ purchaserUserId: userId, eventId, status: 'awaiting_payment' }).where('holdExpiresAt', '>', now());
+    if (exceptOrderId) live.whereNot({ id: exceptOrderId });
+    const orders = await live.select('id');
+    if (orders.length >= 1) return fail('hold_limit_reached', 409, { reason: 'unpaid_order_exists' });
+    const held = orders.length ? Number((await q('EventRegistration').whereIn('orderId', orders.map(o => o.id)).where({ status: 'reserved' }).count({ n: '*' }).first())?.n || 0) : 0;
+    if (held + newPlaces > cfg.maxParticipantsPerOrder()) return fail('hold_limit_reached', 409, { reason: 'places', max: cfg.maxParticipantsPerOrder() });
+    return null;
   }
 
   /** In the order's transaction: create / join the team and enrol every registration (spec §3.5 step 6, §3.9). */
@@ -501,10 +539,19 @@ export function createEventsRegistrationService({
 
   async function sendOrderCreated(userId, order, n, event) {
     const time = localTimeIn(event.timezone, order.holdExpiresAt);
+    // Swahili uses the apps' 12-hour clock with the part of the day ("2:05 mchana"); English keeps 24-hour.
+    const hm = localHourMinuteIn(event.timezone, order.holdExpiresAt);
+    const timeSw = hm ? swahiliTime(hm.h, hm.min) : time;
+    const enBody = n === 1
+      ? `Your place for ${event.title} is held until ${time}. Payment instructions follow in the next app update.`
+      : `Your ${n} places for ${event.title} are held until ${time}. Payment instructions follow in the next app update.`;
+    const swBody = n === 1
+      ? `Tiketi yako ya ${event.title} imeshikiliwa hadi ${timeSw}. Maelekezo ya malipo yatafuata kwenye toleo lijalo la app.`
+      : `Tiketi zako ${n} za ${event.title} zimeshikiliwa hadi ${timeSw}. Maelekezo ya malipo yatafuata kwenye toleo lijalo la app.`;
     return bilingualNotify(userId, {
       id: `ntf_evo_${order.id}`.slice(0, 60), type: 'event_order_created',
-      en: { title: 'Registration received · payment pending', body: `Your ${n} place${n === 1 ? '' : 's'} for ${event.title} ${n === 1 ? 'is' : 'are'} held until ${time}. Payment instructions follow in the next app update.` },
-      sw: { title: 'Usajili umepokelewa · malipo yanasubiriwa', body: `Tiketi zako ${n} za ${event.title} zimeshikiliwa hadi ${time}. Maelekezo ya malipo yatafuata kwenye toleo lijalo la app.` },
+      en: { title: 'Registration received · payment pending', body: enBody },
+      sw: { title: 'Usajili umepokelewa · Inasubiri malipo', body: swBody },
       data: { orderId: order.id, eventId: order.eventId, route: `/member/events/orders/${order.id}` },
     });
   }
@@ -515,14 +562,18 @@ export function createEventsRegistrationService({
     if (!rows.length) return;
     const { byPhone, byEmail } = await verifiedContacts.findMembers({ phones: rows.map(r => r.phoneNormalized).filter(Boolean), emails: rows.map(r => r.emailNormalized).filter(Boolean) });
     const purchaserName = order.purchaserUserId ? (await users.findByIdAsync(order.purchaserUserId))?.displayName : null;
-    const purchaserMasked = purchaserName ? maskName(purchaserName) : (order.organizationId ? ((await db('B2BOrganization').where({ id: order.organizationId }).first('tradingName', 'legalName')) || {}).tradingName ?? 'An organisation' : 'Someone');
+    // Separate fallbacks per language: an English word never lands in a Swahili sentence.
+    const orgName = !purchaserName && order.organizationId ? ((await db('B2BOrganization').where({ id: order.organizationId }).first('tradingName', 'legalName')) || {}) : null;
+    const nameOrNull = purchaserName ? maskName(purchaserName) : (orgName?.tradingName || orgName?.legalName || null);
+    const purchaserEn = nameOrNull ?? (order.organizationId ? 'An organisation' : 'Someone');
+    const purchaserSw = nameOrNull ?? (order.organizationId ? 'Shirika' : 'Mtu mmoja');
     for (const r of rows) {
       const userId = (r.phoneNormalized && byPhone.get(r.phoneNormalized)) || (r.emailNormalized && byEmail.get(r.emailNormalized)) || null;
       if (!userId || userId === order.purchaserUserId) continue;
       await bilingualNotify(userId, {
         id: `ntf_evc_${r.id}`.slice(0, 60), type: 'event_claim_available',
-        en: { title: `Is this you? A place for ${event.title}`, body: `${purchaserMasked} registered someone with your number for ${event.title}. Claim it if it's you.` },
-        sw: { title: `Ni wewe? Tiketi ya ${event.title}`, body: `${purchaserMasked} amesajili mtu mwenye namba yako kwa ${event.title}. Chukua tiketi kama ni wewe.` },
+        en: { title: `Is this you? A place for ${event.title}`, body: `${purchaserEn} registered someone with your number for ${event.title}. Claim it if it's you.` },
+        sw: { title: `Ni wewe? Tiketi ya ${event.title}`, body: `${purchaserSw} amesajili mtu mwenye namba yako kwa ${event.title}. Chukua tiketi kama ni wewe.` },
         data: { registrationId: r.id, eventId: order.eventId, route: `/member/events/claim/${r.id}` },
       });
     }
@@ -559,6 +610,8 @@ export function createEventsRegistrationService({
   async function inviteClaims({ orderId, channels = { sms: true, email: true } }) {
     const loaded = await eventStore.getOrder(orderId);
     if (!loaded) return fail('order_not_found', 404);
+    // Invitations go out only for a paid order (D15; review L9).
+    if (loaded.order.status !== 'confirmed') return fail('order_not_confirmed', 409, { orderStatus: loaded.order.status });
     const joined = await joinedOf(loaded.order.eventId);
     const names = namesOf(joined);
     const purchaserName = loaded.order.purchaserUserId ? (await users.findByIdAsync(loaded.order.purchaserUserId))?.displayName : null;
@@ -571,9 +624,19 @@ export function createEventsRegistrationService({
       const link = `${base}/event-claim/#${token}`;
       const category = names.categories.get(r.categoryId)?.name ?? '';
       const text = claimInvitationText({ purchaser, event: joined.event.title, category, link });
+      // SMS follows the recipient's language when FitFlex knows them (a verified member), else carries both; email always both.
+      let locale = null;
+      if (r.phoneNormalized || r.emailNormalized) {
+        try {
+          const found = await verifiedContacts.findMembers({ phones: [r.phoneNormalized].filter(Boolean), emails: [r.emailNormalized].filter(Boolean) });
+          const uid = (r.phoneNormalized && found.byPhone.get(r.phoneNormalized)) || (r.emailNormalized && found.byEmail.get(r.emailNormalized)) || null;
+          locale = uid ? await localeOf(uid) : null;
+        } catch { locale = null; }
+      }
+      const smsText = locale === 'sw' ? text.sms.sw : locale === 'en' ? text.sms.en : `${text.sms.sw}\n${text.sms.en}`;
       let sent = { ok: false, error: 'no_channel' };
-      if (r.phone && channels.sms && senders.sms().configured) sent = await senders.sms().send(r.phone, { text: text.sms.en });
-      else if (r.email && channels.email && senders.email().configured) sent = await senders.email().send(r.email, { subject: text.email.subject.en, text: text.email.body.en });
+      if (r.phone && channels.sms && senders.sms().configured) sent = await senders.sms().send(r.phone, { text: smsText });
+      else if (r.email && channels.email && senders.email().configured) sent = await senders.email().send(r.email, { subject: `${text.email.subject.sw} / ${text.email.subject.en}`, text: `${text.email.body.sw}\n\n---\n\n${text.email.body.en}` });
       if (!sent.ok) { skipped += 1; continue; }
       await db('EventRegistration').where({ id: r.id }).update({
         claimTokenHash: hashToken(token), claimTokenExpiresAt: new Date(+now() + cfg.claimTokenDays() * 86_400_000), claimInvitedAt: now(), claimInviteCount: db.raw('"claimInviteCount" + 1'), updatedAt: now(),
@@ -639,12 +702,35 @@ export function createEventsRegistrationService({
     return {
       order: orderView(loaded.order),
       lines: loaded.lines.map(l => lineView(l, names)),
-      registrations: loaded.registrations.map(r => registrationView(r, { full: true })),
+      // Once a place is claimed the person it belongs to controls their details: the purchaser sees the masked view (review M5).
+      registrations: loaded.registrations.map(r => (isClaimedByOther(r) ? maskedClaimedView(r) : registrationView(r, { full: true }))),
       event: await eventBlock(j, { full: true }),
       team: await teamView(loaded.order.teamId, { viewerUserId }),
       next: paymentNext(),
       allowedActions: actions,
     };
+  }
+
+  const isClaimedByOther = r => Boolean(r.claimedAt && r.participantUserId && r.participantUserId !== r.purchaserUserId);
+  /** name, category, status, kit size — phone, email, date of birth, gender and emergency contact are null (nullable for the apps). */
+  const maskedClaimedView = r => ({
+    ...registrationView(r, { full: false }), masked: true, kitSize: r.kitSize ?? null,
+    phone: null, email: null, dateOfBirth: null, gender: null, emergencyContact: null, consentAt: iso(r.consentAt), consentTextVersion: r.consentTextVersion ?? null, claimedAt: iso(r.claimedAt),
+  });
+
+  /** Tell the people who had claimed these places that the unpaid place was cancelled by the purchaser (bilingual, in-app). */
+  async function notifyClaimedCancelled(registrations, event) {
+    for (const r of registrations) {
+      if (!isClaimedByOther(r) || r.status !== 'reserved') continue;
+      try {
+        await bilingualNotify(r.participantUserId, {
+          id: `ntf_evcc_${r.id}`.slice(0, 60), type: 'event_place_cancelled',
+          en: { title: 'Your place was cancelled', body: `The unpaid place for ${event?.title ?? 'the event'} that you claimed was cancelled by the person who registered you.` },
+          sw: { title: 'Tiketi yako imeghairiwa', body: `Tiketi ya ${event?.title ?? 'tukio'} uliyochukua, ambayo haijalipiwa, imeghairiwa na aliyekusajili.` },
+          data: { registrationId: r.id, orderId: r.orderId, eventId: r.eventId, route: `/member/events/registrations/${r.id}` },
+        });
+      } catch (err) { console.warn('[events] claimed-cancel notification skipped:', r.id, err?.message); }
+    }
   }
 
   async function getOrder({ userId, orderId }) {
@@ -657,7 +743,10 @@ export function createEventsRegistrationService({
   async function releaseWholeOrder(loaded, { reason, actor, storeReason = 'cancelled' }) {
     const r = await eventStore.releaseOrder(loaded.order.id, storeReason, { cancelReason: reason ?? null });
     if (r.error) return r;
-    if (r.changed) await analytics('order_cancelled', { eventId: r.order.eventId, orderId: r.order.id, reason: reason ?? storeReason, actor });
+    if (r.changed) {
+      await analytics('order_cancelled', { eventId: r.order.eventId, orderId: r.order.id, reason: reason ?? storeReason, actor });
+      await notifyClaimedCancelled(loaded.registrations, (await joinedOf(r.order.eventId))?.event);
+    }
     return r;
   }
 
@@ -722,6 +811,10 @@ export function createEventsRegistrationService({
     const full = registrationView(r, { full: true });
     const o = ctx.orders.get(r.orderId);
     const isPurchaser = r.purchaserUserId === userId;
+    // The purchaser of a claimed place sees the masked view only (review M5).
+    if (isPurchaser && isClaimedByOther(r)) {
+      return { ...row, ...maskedClaimedView(r), id: r.id, purchaser: null, allowedActions: r.status === 'reserved' && o?.status === 'awaiting_payment' ? ['cancel'] : [], ticket: null };
+    }
     const purchaser = isPurchaser ? null : { nameMasked: r.purchaserUserId ? maskName((await users.findByIdAsync(r.purchaserUserId))?.displayName) : (o?.organizationId ? 'Organisation' : null) };
     return {
       ...row, kitSize: full.kitSize, dateOfBirth: full.dateOfBirth, gender: full.gender, phone: full.phone, email: full.email, emergencyContact: full.emergencyContact,
@@ -743,7 +836,10 @@ export function createEventsRegistrationService({
     if (live.length <= 1) result = await releaseWholeOrder(loaded, { reason: body.reason, actor: 'purchaser' });
     else {
       result = await eventStore.releaseRegistration(loaded.order.id, registrationId, 'cancelled', { cancelReason: body.reason });
-      if (!result.error && result.changed) await analytics('registration_cancelled', { eventId: loaded.order.eventId, orderId: loaded.order.id, registrationId, reason: body.reason });
+      if (!result.error && result.changed) {
+        await analytics('registration_cancelled', { eventId: loaded.order.eventId, orderId: loaded.order.id, registrationId, reason: body.reason });
+        await notifyClaimedCancelled([r], (await joinedOf(loaded.order.eventId))?.event);
+      }
     }
     if (result.error) return result;
     return { order: orderView(result.order), registrations: result.registrations.map(x => registrationView(x)), registration: registrationView(result.registrations.find(x => x.id === registrationId) ?? r), changed: result.changed };
@@ -820,20 +916,16 @@ export function createEventsRegistrationService({
       if (!isClaimTokenShape(token) || !r.claimTokenHash || hashToken(token) !== r.claimTokenHash) return fail('claim_token_invalid', 400);
       if (r.claimTokenExpiresAt && now() > new Date(r.claimTokenExpiresAt)) return fail('claim_token_expired', 410);
     }
-    if (!LIVE_REGISTRATION.includes(r.status)) return fail('registration_closed_state', 409, { status: r.status });
-    if (r.participantUserId) {
-      if (r.participantUserId === userId) return { registration: registrationView(r, { full: true }), changed: false };
-      return fail('already_claimed', 409);
-    }
+    if (r.participantUserId === userId) return { registration: registrationView(r, { full: true }), changed: false };
     // (b) a verified contact of the caller must equal the registration's contact — mandatory, token or not.
+    // Checked BEFORE anything about the registration is revealed (review M1): a caller who does not match learns only
+    // "not verified" — no masked contact, no claimed / closed state.
     const contacts = await verifiedContacts.contactsFor(userId);
     const matchedPhone = r.phoneNormalized && contacts.some(c => c.type === 'phone' && c.value === r.phoneNormalized);
     const matchedEmail = r.emailNormalized && contacts.some(c => c.type === 'email' && c.value === r.emailNormalized);
-    if (!matchedPhone && !matchedEmail) {
-      const contact = contactOf(r);
-      const codes = claimCodes();
-      return fail('claim_not_verified', 403, { contact, verifiable: contact ? Boolean(contact.type === 'phone' ? codes.smsCodes : codes.emailCodes) : false });
-    }
+    if (!matchedPhone && !matchedEmail) return fail('claim_not_verified', 403);
+    if (!LIVE_REGISTRATION.includes(r.status)) return fail('registration_closed_state', 409, { status: r.status });
+    if (r.participantUserId) return fail('already_claimed', 409);
     // (d) the purchaser entered someone else with their own number.
     if (r.purchaserUserId === userId && r.consentBasis === 'purchaser_authorised') return fail('claim_own_contact', 409);
     const at = now();
@@ -861,7 +953,7 @@ export function createEventsRegistrationService({
     if (!joined || !['published', 'registration_closed', 'in_progress'].includes(joined.event.status)) return fail('event_not_found', 404);
     if (joined.event.status !== 'published') return fail('event_not_open', 409, { eventStatus: joined.event.status });
     const name = isStr(body.name) ? body.name.trim() : '';
-    if (name.length < 1 || name.length > 120) return fail('team_name_invalid', 400);
+    if (name.length < 1 || name.length > 120 || startsLikeFormula(name)) return fail('team_name_invalid', 400);
     if (!TEAM_TYPES_MEMBER.includes(body.teamType)) return fail('team_type_invalid', 400, { allowed: [...TEAM_TYPES_MEMBER] });
     if (await db('EventTeam').where({ eventId: joined.event.id }).whereRaw('lower(name) = lower(?)', [name]).first('id')) return fail('team_name_taken', 409);
     const at = now();
@@ -999,8 +1091,8 @@ export function createEventsRegistrationService({
     const loaded = await eventStore.getOrder(orderId);
     if (!loaded || loaded.order.eventId !== eventId) return fail('order_not_found', 404);
     const detail = await orderDetail(loaded, { actions: loaded.order.status === 'awaiting_payment' ? ['cancel'] : [] });
-    // Admins do not need the emergency contact (§3.13, §7.3).
-    detail.registrations = detail.registrations.map(({ emergencyContact, ...r }) => r);
+    // Admins see names and statuses, not contact or personal details (§3.13, §7.3; review L7).
+    detail.registrations = detail.registrations.map(({ emergencyContact, phone, email, dateOfBirth, gender, ...r }) => r);
     const purchaser = loaded.order.purchaserUserId ? await users.findByIdAsync(loaded.order.purchaserUserId) : null;
     const org = loaded.order.organizationId ? await db('B2BOrganization').where({ id: loaded.order.organizationId }).first('id', 'tradingName', 'legalName') : null;
     const createdBy = loaded.order.createdByUserId ? await users.findByIdAsync(loaded.order.createdByUserId) : null;
@@ -1026,6 +1118,7 @@ export function createEventsRegistrationService({
     if (r.error) return r;
     if (r.changed) {
       await audit(actorId, 'events.order_cancelled', orderId, { status: loaded.order.status }, { status: r.order.status, reason: 'admin', note: note || null, eventId });
+      await notifyClaimedCancelled(loaded.registrations, (await joinedOf(eventId))?.event);
       await analytics('order_cancelled', { eventId, orderId, reason: 'admin', actor: 'admin' });
       const recipient = r.order.purchaserUserId ?? r.order.createdByUserId;
       if (recipient) {
@@ -1034,7 +1127,7 @@ export function createEventsRegistrationService({
           await bilingualNotify(recipient, {
             id: `ntf_evac_${orderId}`.slice(0, 60), type: 'event_order_cancelled',
             en: { title: 'Your order was cancelled by FitFlex', body: `Order ${r.order.reference} for ${title} was cancelled and its places released.` },
-            sw: { title: 'Agizo lako limeghairiwa na FitFlex', body: `Agizo ${r.order.reference} la ${title} limeghairiwa na tiketi zake zimeachiliwa.` },
+            sw: { title: 'Oda yako imeghairiwa na FitFlex', body: `Oda ${r.order.reference} ya ${title} imeghairiwa na tiketi zake zimeachiliwa.` },
             data: { orderId, eventId, route: `/member/events/orders/${orderId}` },
           });
         } catch (err) { console.warn('[events] admin cancel notification skipped:', orderId, err?.message); }

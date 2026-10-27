@@ -78,6 +78,34 @@ export function localTimeIn(timezone, at) {
   }
 }
 
+/** { h, min } of instant `at` in `timezone` (24-hour), for the Swahili 12-hour clock. */
+export function localHourMinuteIn(timezone, at) {
+  const t = localTimeIn(timezone, at);
+  const m = /^(\d{2}):(\d{2})$/.exec(t || '');
+  return m ? { h: Number(m[1]), min: Number(m[2]) } : null;
+}
+
+/** Input caps, applied BEFORE any regex or normaliser runs (security review M4). */
+export const FIELD_CAPS = Object.freeze({
+  firstName: 80, lastName: 80, phone: 20, email: 254, dateOfBirth: 10, gender: 20, kitSize: 10, groupLabel: 100,
+  ticketTypeId: 64, category: 120, ticketType: 120, costCentre: 80, purchaserReference: 80, consentBasis: 30,
+});
+export const EMERGENCY_CAPS = Object.freeze({ name: 80, phone: 20 });
+export const ROSTER_TEXT_MAX_CHARS = 1_000_000;
+export const CELL_MAX_CHARS = 200;
+
+/** The first participant field whose string is over its cap → { field } | null. Non-strings are left to the checks. */
+export function oversizedField(p) {
+  if (!p || typeof p !== 'object') return null;
+  for (const [key, max] of Object.entries(FIELD_CAPS)) if (typeof p[key] === 'string' && p[key].length > max) return { field: key, max };
+  const ec = p.emergencyContact;
+  if (ec && typeof ec === 'object') for (const [key, max] of Object.entries(EMERGENCY_CAPS)) if (typeof ec[key] === 'string' && ec[key].length > max) return { field: `emergencyContact.${key}`, max };
+  return null;
+}
+
+/** Spreadsheet formula starters: =, +, -, @ at the start of a free-text value (security review L2). */
+export const startsLikeFormula = v => typeof v === 'string' && /^[=+\-@]/.test(v.trim());
+
 /** Whole years from `dateOfBirth` to the event start day in the event's timezone; a birthday on event day counts. null when unreadable. */
 export function ageOnEventDay(dateOfBirth, startsAt, timezone) {
   const day = localDateIn(timezone, startsAt);
@@ -113,7 +141,8 @@ export function checkParticipant(p, { fields, category, event, mode = 'member', 
   for (const key of ['firstName', 'lastName']) {
     const v = trimmed(src[key]);
     if (!v) problems.push(problem(key, 'required'));
-    else if (v.length > 80 || NAME_BAD.test(v)) problems.push(problem(key, 'name_invalid'));
+    else if (v.length > FIELD_CAPS[key] || NAME_BAD.test(v)) problems.push(problem(key, 'name_invalid'));
+    else if (startsLikeFormula(v)) problems.push(problem(key, 'invalid_text'));
     out[key] = v || null;
   }
 
@@ -125,7 +154,7 @@ export function checkParticipant(p, { fields, category, event, mode = 'member', 
   let phone = null;
   if (policy.phone === 'off') dropped('phone');
   else if (sent('phone')) {
-    phone = normalizePhone(src.phone);
+    phone = isStr(src.phone) && src.phone.length > FIELD_CAPS.phone ? null : normalizePhone(src.phone);
     if (!phone) problems.push(problem('phone', 'phone_invalid'));
   } else if (policy.phone === 'required') problems.push(problem('phone', 'required'));
   out.phone = phone;
@@ -134,8 +163,8 @@ export function checkParticipant(p, { fields, category, event, mode = 'member', 
   let email = null;
   if (policy.email === 'off') dropped('email');
   else if (sent('email')) {
-    email = normalizeEmail(src.email);
-    if (!email || !EMAIL_RE.test(email)) { problems.push(problem('email', 'email_invalid')); email = null; }
+    email = isStr(src.email) && src.email.length > FIELD_CAPS.email ? null : normalizeEmail(src.email);
+    if (!email || email.length > FIELD_CAPS.email || !EMAIL_RE.test(email)) { problems.push(problem('email', 'email_invalid')); email = null; }
   } else if (policy.email === 'required') problems.push(problem('email', 'required'));
   out.email = email;
   out.emailNormalized = email;
@@ -154,7 +183,7 @@ export function checkParticipant(p, { fields, category, event, mode = 'member', 
   if (policy.dateOfBirth === 'off') dropped('dateOfBirth');
   else if (sent('dateOfBirth')) {
     dob = trimmed(src.dateOfBirth);
-    if (!isValidDateOfBirth(dob, now)) { problems.push(problem('dateOfBirth', 'dob_invalid')); dob = null; }
+    if (dob.length > FIELD_CAPS.dateOfBirth || !isValidDateOfBirth(dob, now)) { problems.push(problem('dateOfBirth', 'dob_invalid')); dob = null; }
   } else if (policy.dateOfBirth === 'required') problems.push(problem('dateOfBirth', 'required'));
   out.dateOfBirth = dob;
   const minAge = Number.isInteger(category?.minAge) && category.minAge > 0 ? category.minAge : null;
@@ -187,15 +216,22 @@ export function checkParticipant(p, { fields, category, event, mode = 'member', 
   if (policy.emergencyContact === 'off') { if (ecSent) warnings.push(problem('emergencyContact', 'not_collected')); }
   else if (ecSent) {
     const name = trimmed(src.emergencyContact.name);
-    const ecPhone = normalizePhone(src.emergencyContact.phone);
-    if (!name || name.length > 80 || !ecPhone) problems.push(problem('emergencyContact', 'emergency_contact_invalid'));
+    const rawEc = src.emergencyContact.phone;
+    const ecPhone = isStr(rawEc) && rawEc.length > EMERGENCY_CAPS.phone ? null : normalizePhone(rawEc);
+    if (!name || name.length > EMERGENCY_CAPS.name || !ecPhone) problems.push(problem('emergencyContact', 'emergency_contact_invalid'));
     else emergencyContact = { name, phone: ecPhone };
-  } else if (policy.emergencyContact === 'required') problems.push(problem('emergencyContact', 'required'));
+  } else if (policy.emergencyContact === 'required') {
+    // A roster has no emergency-contact column, so a corporate row cannot supply it: a warning, not a blocker (review L1).
+    if (mode === 'corporate') warnings.push(problem('emergencyContact', 'not_collected'));
+    else problems.push(problem('emergencyContact', 'required'));
+  }
   out.emergencyContact = emergencyContact;
 
   if (mode === 'corporate') {
     const g = trimmed(src.groupLabel);
-    out.groupLabel = g ? g.slice(0, 100) : null;
+    if (g.length > FIELD_CAPS.groupLabel) problems.push(problem('groupLabel', 'invalid_text'));
+    else if (startsLikeFormula(g)) problems.push(problem('groupLabel', 'invalid_text'));
+    out.groupLabel = g && !problems.some(x => x.field === 'groupLabel') ? g : null;
   }
 
   return { ok: problems.length === 0, problems, warnings, participant: out };
@@ -225,21 +261,22 @@ export function findDuplicatesInRequest(participants, categoryOf = p => p.catego
 const CONSENT = Object.freeze({
   self: {
     en: 'I agree to the event terms and refund policy and to FitFlex sharing my registration details (name, contact, date of birth, kit size) with the organizer for this event.',
-    sw: 'Nakubali masharti ya tukio na sera ya marejesho, na FitFlex kushiriki taarifa zangu za usajili (jina, mawasiliano, tarehe ya kuzaliwa, saizi ya vifaa vya mbio) na mwandaaji wa tukio hili.',
+    sw: 'Nakubali masharti ya tukio na sera ya marejesho, na FitFlex kushirikisha taarifa zangu za usajili (jina, mawasiliano, tarehe ya kuzaliwa, saizi ya vifaa vya mbio) na mwandaaji wa tukio hili.',
   },
   purchaser_authorised: {
     en: 'I confirm I have each listed person\'s permission to register them and to share their details with FitFlex and the organizer. They will be invited to claim their place.',
-    sw: 'Nathibitisha nina ruhusa ya kila mtu aliyeorodheshwa kumsajili na kushiriki taarifa zake na FitFlex na mwandaaji. Wataalikwa kuchukua tiketi yao.',
+    sw: 'Nathibitisha nina ruhusa ya kila mtu aliyeorodheshwa kumsajili na kushirikisha taarifa zake na FitFlex na mwandaaji. Wataalikwa kuchukua tiketi yao.',
   },
   organisation: {
     en: 'We confirm our organisation has each listed person\'s permission to register them for this event and to share their details with FitFlex and the organizer.',
-    sw: 'Tunathibitisha shirika letu lina ruhusa ya kila mtu aliyeorodheshwa kumsajili kwenye tukio hili na kushiriki taarifa zake na FitFlex na mwandaaji.',
+    sw: 'Tunathibitisha shirika letu lina ruhusa ya kila mtu aliyeorodheshwa kumsajili kwenye tukio hili na kushirikisha taarifa zake na FitFlex na mwandaaji.',
   },
 });
 
 /** { version, self: { en, sw }, purchaser_authorised: { en, sw }, organisation: { en, sw } } */
 export function consentTextFor(version) {
-  return { version, self: { ...CONSENT.self }, purchaser_authorised: { ...CONSENT.purchaser_authorised }, organisation: { ...CONSENT.organisation } };
+  // versionLabel: what a screen may show (the "-draft" suffix is internal; the identifier `version` stays as is).
+  return { version, versionLabel: String(version).replace(/-draft$/i, ''), self: { ...CONSENT.self }, purchaser_authorised: { ...CONSENT.purchaser_authorised }, organisation: { ...CONSENT.organisation } };
 }
 
 // ── Masking ──────────────────────────────────────────────────────────────────

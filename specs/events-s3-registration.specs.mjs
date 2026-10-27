@@ -17,11 +17,22 @@ import { organizerListRegistrations, organizerRegistrationsSummary, organizerLis
 import { adminListEventOrders, adminGetEventOrder, adminCancelEventOrder, adminListEventRegistrations } from '../functions/events-admin.mjs';
 import { eventsOptions } from '../functions/events-public.mjs';
 import { hashToken, newClaimToken } from '../src/shared/events-participants.mjs';
+import { createEventsRegistrationService } from '../src/services/events-registration-service.mjs';
+import { users, eventCatalogueStore, verifiedContacts, auditLog } from '../src/bootstrap/services.mjs';
 import { harness, participant, phone, mail, flagsOn, flagsOff, uid, D } from './fixtures/events-s3.mjs';
 
 await ensureInit();
 const h = harness();
-const { call, db } = h;
+const { db } = h;
+const rawCall = h.call;
+/** createEventOrder now needs expectedTotalTzs (review M2): unless a spec sets it, price the same body with the quote first. */
+const call = async (route, claims, opts = {}) => {
+  if (route === createEventOrder && opts.body && opts.body.expectedTotalTzs === undefined) {
+    const q = await rawCall(quoteEventOrder, claims, { body: opts.body });
+    opts = { ...opts, body: { ...opts.body, expectedTotalTzs: q.body?.quote?.totalTzs ?? 0 } };
+  }
+  return rawCall(route, claims, opts);
+};
 afterEach(() => { flagsOff(); resetEventsRegistrationLimits(); });
 after(async () => { await h.cleanup(); await db.destroy(); });
 
@@ -128,7 +139,7 @@ test('scenario 1: quote → order (Idempotency-Key) → awaiting_payment with on
   // notification 1 to the purchaser, bilingual
   const n = await h.notifications(b.sub, 'event_order_created');
   assert.equal(n.length, 1);
-  assert.equal(n[0].data.titleSw, 'Usajili umepokelewa · malipo yanasubiriwa');
+  assert.equal(n[0].data.titleSw, 'Usajili umepokelewa · Inasubiri malipo');
   assert.equal(n[0].data.orderId, r.body.order.id);
   // analytics row
   assert.equal((await db('AuditLog').where({ action: 'analytics.order_created', target: f.event.id })).length, 1);
@@ -257,18 +268,18 @@ test('scenario 2: a purchaser_authorised place has no participant, a claim token
   const nv = await call(claimEventRegistration, typed, { params: { id: regId }, body: { token } });
   assert.equal(nv.status, 403, JSON.stringify(nv.body));
   assert.equal(nv.body.error, 'claim_not_verified');
-  assert.deepEqual(nv.body.contact, { type: 'phone', masked: `••• ${other.slice(-3)}` });
-  assert.equal(typeof nv.body.verifiable, 'boolean');
+  assert.deepEqual(nv.body, { error: 'claim_not_verified' }); // no masked contact, no hints (review M1)
   await db('User').where({ id: typed.sub }).update({ phone: null }); // (phone, userType) is unique on User; the real owner signs up below
   // name alone never matches: a verified "Asha Mollel" with another number sees nothing claimable
   const sameName = h.claimsOf(await h.user({ phone: phone(), name: 'Asha Mollel' }));
   assert.deepEqual((await call(claimableEventRegistrations, sameName)).body, { items: [] });
   assert.equal((await call(claimEventRegistration, sameName, { params: { id: regId } })).body.error, 'claim_not_verified');
   // the purchaser registering someone else with their own number → claim_own_contact
-  const own = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 1 }], [participant(f.ticket.id, { phone: b.phone })]) });
+  const b2 = await buyer();
+  const own = await call(createEventOrder, b2.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 1 }], [participant(f.ticket.id, { phone: b2.phone })]) });
   assert.equal(own.status, 201, JSON.stringify(own.body));
-  assert.deepEqual((await call(claimEventRegistration, b.claims, { params: { id: own.body.registrations[0].id } })).body, { error: 'claim_own_contact' });
-  assert.deepEqual((await call(claimableEventRegistrations, b.claims)).body, { items: [] });
+  assert.deepEqual((await call(claimEventRegistration, b2.claims, { params: { id: own.body.registrations[0].id } })).body, { error: 'claim_own_contact' });
+  assert.deepEqual((await call(claimableEventRegistrations, b2.claims)).body, { items: [] });
 
   // the real Asha: verified number → the place is claimable, the claim succeeds, the purchaser is told
   const asha = h.claimsOf(await h.user({ phone: other, name: 'Asha Mollel' }));
@@ -296,7 +307,8 @@ test('scenario 2: a purchaser_authorised place has no participant, a claim token
   assert.ok(['already_claimed', 'claim_not_verified'].includes(second.body.error), JSON.stringify(second.body));
 
   // expired token
-  const exp = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 1 }], [participant(f.ticket.id, { phone: phone() })]) });
+  const b3 = await buyer();
+  const exp = await call(createEventOrder, b3.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 1 }], [participant(f.ticket.id, { phone: phone() })]) });
   const t2 = newClaimToken();
   await db('EventRegistration').where({ id: exp.body.registrations[0].id }).update({ claimTokenHash: hashToken(t2), claimTokenExpiresAt: new Date(Date.now() - 1000) });
   assert.deepEqual([(await call(previewEventClaim, null, { params: { token: t2 } })).status, (await call(claimEventRegistrationByToken, asha, { body: { token: t2 } })).status], [410, 410]);
@@ -408,11 +420,16 @@ test('duplicate policy (D20): the same phone twice in one category is refused in
   const again = await call(createEventOrder, other.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: t5.id, quantity: 1 }], [participant(t5.id, { phone: p })]) });
   assert.equal(again.status, 422);
   assert.equal(again.body.participants[0].problems[0].code, 'duplicate_participant');
-  assert.equal(again.body.participants[0].problems[0].registrationId, first.body.registrations[0].id);
+  // someone else's registration is never identified (review M1) ...
+  assert.deepEqual(again.body.participants[0].problems[0], { field: 'phone', code: 'duplicate_participant' });
+  // ... but the caller's own live order is
+  const mine = await call(quoteEventOrder, b.claims, { body: { eventId: f.event.id, lines: [{ ticketTypeId: t5.id, quantity: 1 }], participants: [participant(t5.id, { phone: p })] } });
+  assert.equal(mine.body.participants[0].problems[0].registrationId, first.body.registrations[0].id);
   const otherCategory = await call(createEventOrder, other.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: t10.id, quantity: 1 }], [participant(t10.id, { phone: p })]) });
   assert.equal(otherCategory.status, 201, JSON.stringify(otherCategory.body));
   await db('Event').where({ id: f.event.id }).update({ duplicatePolicy: 'allow' });
-  const allowed = await call(createEventOrder, other.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: t5.id, quantity: 1 }], [participant(t5.id, { phone: p })]) });
+  const third = await buyer();
+  const allowed = await call(createEventOrder, third.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: t5.id, quantity: 1 }], [participant(t5.id, { phone: p })]) });
   assert.equal(allowed.status, 201, JSON.stringify(allowed.body));
 });
 
@@ -599,6 +616,7 @@ test('admin reads: full names, order detail without emergency contact, cancel of
   assert.equal(detail.status, 200, JSON.stringify(detail.body));
   assert.equal(detail.body.registrations[0].firstName, 'Asha');
   assert.ok(!('emergencyContact' in detail.body.registrations[0]));
+  for (const k of ['phone', 'email', 'dateOfBirth', 'gender']) assert.ok(!(k in detail.body.registrations[0]), k); // review L7
   assert.deepEqual(detail.body.allowedActions, ['cancel']);
   assert.deepEqual((await call(adminGetEventOrder, admin, { params: { id: 'evt_other', orderId: r.body.order.id } })).body, { error: 'order_not_found' });
   const cancelled = await call(adminCancelEventOrder, admin, { params: { id: f.event.id, orderId: r.body.order.id }, body: { note: 'duplicate of EV-1' } });
@@ -634,4 +652,161 @@ test('S4 seam: inviteClaims is built (templates, token rotation, bookkeeping) bu
   // nothing in S3 has sent anything
   const stillUnsent = await db('EventRegistration').where({ id: other.id }).first();
   assert.equal(stillUnsent.claimInviteCount, 0);
+});
+
+
+// ── Security review fixes ────────────────────────────────────────────────
+
+test('M2: expectedTotalTzs is required to place an order (the quote stays free of it)', async () => {
+  flagsOn();
+  const f = await h.publishedEvent();
+  const b = await buyer();
+  const lines = [{ ticketTypeId: f.ticket.id, quantity: 1 }];
+  const body = orderBody(f.event.id, lines, [self(f.ticket.id, b)]);
+  const missing = await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body });
+  assert.deepEqual([missing.status, missing.body.error], [400, 'expected_total_required']);
+  assert.equal((await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: -5 } })).body.error, 'invalid_expected_total');
+  assert.equal((await rawCall(quoteEventOrder, b.claims, { body: { eventId: f.event.id, lines, participants: [self(f.ticket.id, b)] } })).status, 200);
+  assert.equal((await db('EventOrder').where({ eventId: f.event.id })).length, 0);
+});
+
+test('M3: one live unpaid order per user per event (409 hold_limit_reached), also under a race; a cancelled order frees the slot; the order route is rate limited', async () => {
+  flagsOn();
+  const f = await h.publishedEvent({ categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ name: 'S', priceTzs: 1000, capacity: 50 }] }] });
+  const b = await buyer();
+  const mk = () => orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 1 }], [participant(f.ticket.id)], { expectedTotalTzs: 1000 });
+  const first = await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: mk() });
+  assert.equal(first.status, 201, JSON.stringify(first.body));
+  const second = await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: mk() });
+  assert.deepEqual([second.status, second.body.error], [409, 'hold_limit_reached']);
+  assert.deepEqual(await h.counters(f.ticket.id), { sold: 0, held: 1, capacity: 50 });
+  await rawCall(cancelMyEventOrder, b.claims, { params: { id: first.body.order.id }, body: { reason: 'other' } });
+  assert.equal((await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: mk() })).status, 201);
+  // a race: two simultaneous orders by one user for a fresh event → exactly one wins
+  const g = await h.publishedEvent({ categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ name: 'S', priceTzs: 1000, capacity: 50 }] }] });
+  const c = await buyer();
+  const mk2 = () => orderBody(g.event.id, [{ ticketTypeId: g.ticket.id, quantity: 1 }], [participant(g.ticket.id)], { expectedTotalTzs: 1000 });
+  const raced = await Promise.all([1, 2, 3].map(() => rawCall(createEventOrder, c.claims, { headers: { 'Idempotency-Key': key() }, body: mk2() })));
+  assert.deepEqual(raced.map(r => r.status).sort(), [201, 409, 409], JSON.stringify(raced.map(r => r.body.error)));
+  assert.deepEqual(await h.counters(g.ticket.id), { sold: 0, held: 1, capacity: 50 });
+  // rate limit: 20 / minute per user
+  resetEventsRegistrationLimits();
+  const d = await buyer();
+  let limited = null;
+  for (let i = 0; i < 22 && !limited; i += 1) {
+    const r = await rawCall(createEventOrder, d.claims, { headers: { 'Idempotency-Key': key() }, body: { eventId: f.event.id } });
+    if (r.status === 429) limited = r;
+  }
+  assert.equal(limited?.body.error, 'rate_limited');
+});
+
+test('M4: oversized input is refused with 400 before any regex runs, fast', async () => {
+  flagsOn();
+  const f = await h.publishedEvent();
+  const b = await buyer();
+  const lines = [{ ticketTypeId: f.ticket.id, quantity: 1 }];
+  const huge = 'a'.repeat(50_000);
+  for (const [field, value] of [['email', `${huge}@x.co`], ['phone', '1'.repeat(5000)], ['firstName', huge], ['lastName', huge], ['gender', huge], ['dateOfBirth', huge], ['emergencyContact', { name: huge, phone: '0712345678' }]]) {
+    const started = Date.now();
+    const q = await rawCall(quoteEventOrder, b.claims, { body: { eventId: f.event.id, lines, participants: [participant(f.ticket.id, { [field]: value })] } });
+    const o = await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, lines, [participant(f.ticket.id, { [field]: value })], { expectedTotalTzs: 20000 }) });
+    assert.deepEqual([q.status, q.body.error, o.status, o.body.error], [400, 'field_too_long', 400, 'field_too_long'], field);
+    assert.ok(Date.now() - started < 1500, `${field} took ${Date.now() - started} ms`);
+  }
+  assert.equal((await db('EventOrder').where({ eventId: f.event.id })).length, 0);
+});
+
+test('L2: a name starting with = + - @ is refused (invalid_text); costCentre and purchaserReference too', async () => {
+  flagsOn();
+  const f = await h.publishedEvent();
+  const b = await buyer();
+  const lines = [{ ticketTypeId: f.ticket.id, quantity: 1 }];
+  const q = await rawCall(quoteEventOrder, b.claims, { body: { eventId: f.event.id, lines, participants: [participant(f.ticket.id, { firstName: '=HYPERLINK' })] } });
+  assert.deepEqual(q.body.participants[0].problems, [{ field: 'firstName', code: 'invalid_text' }]);
+});
+
+test('M5: once a place is claimed the purchaser sees the masked view; the participant is told when the purchaser cancels the unpaid place', async () => {
+  flagsOn();
+  const f = await h.publishedEvent({ event: { kitProvided: true } });
+  const b = await buyer();
+  const ashaPhone = phone();
+  const r = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 2 }], [self(f.ticket.id, b), participant(f.ticket.id, { firstName: 'Asha', lastName: 'Mollel', phone: ashaPhone, kitSize: 'm', emergencyContact: { name: 'Mama', phone: '0712000000' } })]) });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const regId = r.body.registrations.find(x => !x.isSelf).id;
+  // before the claim the purchaser sees what they typed
+  assert.equal((await call(getMyEventRegistration, b.claims, { params: { id: regId } })).body.phone, ashaPhone);
+  const asha = h.claimsOf(await h.user({ phone: ashaPhone, name: 'Asha Mollel', }));
+  assert.equal((await call(claimEventRegistration, asha, { params: { id: regId } })).status, 200);
+  const view = await call(getMyEventRegistration, b.claims, { params: { id: regId } });
+  assert.equal(view.status, 200, JSON.stringify(view.body));
+  assert.deepEqual([view.body.firstName, view.body.status, view.body.kitSize, view.body.masked], ['Asha', 'reserved', 'm', true]);
+  for (const k of ['phone', 'email', 'dateOfBirth', 'gender', 'emergencyContact']) assert.equal(view.body[k], null, k);
+  const detail = await call(getMyEventOrder, b.claims, { params: { id: r.body.order.id } });
+  const row = detail.body.registrations.find(x => x.id === regId);
+  assert.deepEqual([row.masked, row.phone, row.emergencyContact, row.kitSize], [true, null, null, 'm']);
+  const mineRow = detail.body.registrations.find(x => x.isSelf);
+  assert.equal(mineRow.phone, b.phone); // my own place is not masked
+  // the claimed participant keeps full access
+  assert.equal((await call(getMyEventRegistration, asha, { params: { id: regId } })).body.phone, ashaPhone);
+  // the purchaser cancels the unpaid claimed place → Asha is told, in both languages
+  const gone = await call(cancelMyEventRegistration, b.claims, { params: { id: regId }, body: { reason: 'wrong_details' } });
+  assert.equal(gone.status, 200, JSON.stringify(gone.body));
+  const n = await h.notifications(asha.sub, 'event_place_cancelled');
+  assert.equal(n.length, 1);
+  assert.equal(n[0].data.titleSw, 'Tiketi yako imeghairiwa');
+  assert.equal(n[0].data.titleEn, 'Your place was cancelled');
+});
+
+test('Swahili: order notice uses the 12-hour clock and one/other plurals; fallbacks and wording per the audit', async () => {
+  flagsOn();
+  const f = await h.publishedEvent({ categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ name: 'S', priceTzs: 1000, capacity: 50 }] }] });
+  const b = await buyer();
+  const one = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 1 }], [self(f.ticket.id, b)]) });
+  assert.equal(one.status, 201, JSON.stringify(one.body));
+  const n = (await h.notifications(b.sub, 'event_order_created'))[0];
+  assert.equal(n.data.titleSw, 'Usajili umepokelewa · Inasubiri malipo');
+  assert.match(n.data.bodySw, /^Tiketi yako ya Dar Half Marathon imeshikiliwa hadi \d{1,2}:\d{2} (asubuhi|mchana|jioni|usiku)\./);
+  assert.match(n.data.bodyEn, /^Your place for Dar Half Marathon is held until \d{2}:\d{2}\./);
+  // a corporate purchaser with no name gets Swahili fallbacks, never English words, in the Swahili text
+  const friend = phone();
+  const friendUser = await h.user({ phone: friend });
+  const c = await buyer();
+  const many = await call(createEventOrder, c.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 2 }], [participant(f.ticket.id, { phone: friend }), participant(f.ticket.id)]) });
+  assert.equal(many.status, 201, JSON.stringify(many.body));
+  const nn = (await h.notifications(c.sub, 'event_order_created'))[0];
+  assert.match(nn.data.bodySw, /^Tiketi zako 2 za /);
+  assert.match(nn.data.bodyEn, /^Your 2 places for /);
+  const claimNotice = (await h.notifications(friendUser, 'event_claim_available'))[0];
+  assert.ok(!/Someone|An organisation/.test(claimNotice.data.bodySw));
+  // consent wording and the label without the draft suffix
+  const q = await call(quoteEventOrder, c.claims, { body: { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], participants: [self(f.ticket.id, c)] } });
+  assert.match(q.body.consentText.self.sw, /kushirikisha taarifa/);
+  assert.equal(q.body.consentText.version, '2026-10-draft');
+  assert.equal(q.body.consentText.versionLabel, '2026-10');
+});
+
+test('L9 / Swahili: inviteClaims refuses an unpaid order; for a paid one it sends both languages (or the recipient\'s) and rotates the token', async () => {
+  flagsOn();
+  const f = await h.publishedEvent();
+  const b = await buyer({ name: 'Neema Abdallah' });
+  const target = phone();
+  const r = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 1 }], [participant(f.ticket.id, { phone: target })]) });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const sent = [];
+  const svc = createEventsRegistrationService({
+    db, eventStore, catalogue: eventCatalogueStore, users, verifiedContacts, auditLog,
+    senders: { sms: () => ({ configured: true, send: async (to, m) => { sent.push({ to, ...m }); return { ok: true }; } }), email: () => ({ configured: false }) },
+  });
+  const refused = await svc.inviteClaims({ orderId: r.body.order.id });
+  assert.deepEqual([refused.status, refused.error], [409, 'order_not_confirmed']);
+  assert.equal(sent.length, 0);
+  await eventStore.commitOrder(r.body.order.id);
+  const before = await db('EventRegistration').where({ orderId: r.body.order.id }).first();
+  assert.deepEqual(await svc.inviteClaims({ orderId: r.body.order.id }), { invited: 1, skipped: 0 });
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /amekusajili/);   // unknown recipient: Swahili and English together
+  assert.match(sent[0].text, /registered you/);
+  const after = await db('EventRegistration').where({ orderId: r.body.order.id }).first();
+  assert.notEqual(after.claimTokenHash, before.claimTokenHash);
+  assert.equal(after.claimInviteCount, 1);
 });

@@ -7,7 +7,7 @@
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
-import { validateB2BEventRoster, createB2BEventOrder, listB2BEventOrders, getB2BEventOrder, cancelB2BEventOrder } from '../functions/events-corporate.mjs';
+import { validateB2BEventRoster, createB2BEventOrder, listB2BEventOrders, getB2BEventOrder, cancelB2BEventOrder, resetEventsCorporateLimits } from '../functions/events-corporate.mjs';
 import { createEventOrder, claimableEventRegistrations } from '../functions/events-registration.mjs';
 import { harness, participant, phone, flagsOn, flagsOff, uid } from './fixtures/events-s3.mjs';
 
@@ -42,7 +42,7 @@ test('scenario 4: CSV with aliases, DD/MM/YYYY and "10K"; per-row problems; list
   const taken = phone();
   // someone already holds a 10K place with that number (a member order)
   const member = h.claimsOf(await h.user({ phone: phone() }));
-  const existing = await call(createEventOrder, member, { headers: { 'Idempotency-Key': key() }, body: { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], participants: [participant(f.ticket.id, { phone: taken, dateOfBirth: '1990-01-01' })], acceptedTerms: true, consentTextVersion: CONSENT } });
+  const existing = await call(createEventOrder, member, { headers: { 'Idempotency-Key': key() }, body: { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], participants: [participant(f.ticket.id, { phone: taken, dateOfBirth: '1990-01-01' })], acceptedTerms: true, consentTextVersion: CONSENT, expectedTotalTzs: 20000 } });
   assert.equal(existing.status, 201, JSON.stringify(existing.body));
   const dup = phone();
   const rawText = [
@@ -72,7 +72,7 @@ test('scenario 4: CSV with aliases, DD/MM/YYYY and "10K"; per-row problems; list
   assert.deepEqual(byIndex(7).problems.map(p => p.code), ['phone_invalid']);
   assert.deepEqual([byIndex(8).ok, byIndex(8).participant.kitSize], [true, 'xxl']);
   assert.equal(byIndex(9).ok, true);
-  assert.deepEqual(v.body.duplicates.map(d => [d.index, d.kind, d.otherIndex ?? null, d.registrationStatus ?? null]), [[2, 'in_list', 1, null], [3, 'already_registered', null, 'reserved']]);
+  assert.deepEqual(v.body.duplicates.map(d => [d.index, d.kind, d.otherIndex ?? null, d.registrationStatus ?? null]), [[2, 'in_list', 1, null], [3, 'already_registered', null, null]]);
   assert.deepEqual(v.body.summary, { total: 10, ok: 4, problems: 6, duplicates: 2 });
   // quote for the ok rows only: 3 × 10K Corporate (20000) + 1 × Half (30000)
   assert.deepEqual(v.body.lines.sort((a, b) => a.ticketTypeId.localeCompare(b.ticketTypeId)), [{ ticketTypeId: f.ticket.id, quantity: 3 }, { ticketTypeId: f.categories[1].tickets[0].id, quantity: 1 }].sort((a, b) => a.ticketTypeId.localeCompare(b.ticketTypeId)));
@@ -131,7 +131,7 @@ test('a clean roster of 50 rows passes with bulk although maxPerOrder is 10; EVE
   assert.deepEqual(await h.counters(f.ticket.id), { sold: 0, held: 50, capacity: 100 });
   // a member order for that ticket type still obeys maxPerOrder
   const member = h.claimsOf(await h.user({ phone: phone() }));
-  const tooMany = await call(createEventOrder, member, { headers: { 'Idempotency-Key': key() }, body: { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 11 }], participants: Array.from({ length: 11 }, () => participant(f.ticket.id)), acceptedTerms: true, consentTextVersion: CONSENT } });
+  const tooMany = await call(createEventOrder, member, { headers: { 'Idempotency-Key': key() }, body: { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 11 }], participants: Array.from({ length: 11 }, () => participant(f.ticket.id)), acceptedTerms: true, consentTextVersion: CONSENT, expectedTotalTzs: 1 } });
   assert.ok(['too_many_participants', 'quantity_out_of_range'].includes(tooMany.body.error), JSON.stringify(tooMany.body));
   // 413 above the row cap
   process.env.EVENTS_CORPORATE_MAX_ROWS = '20';
@@ -211,4 +211,52 @@ test('a corporate place is claimable by the employee exactly like a member order
   assert.equal(claimable.body.items[0].purchaser.nameMasked, 'Gamma');
   // the "Is this you?" notice went to the verified employee only if the account existed at creation; it did not → none; S4 sends the invitation
   assert.equal((await h.notifications(employee.sub, 'event_claim_available')).length, 0);
+});
+
+
+test('review fixes: duplicates identify only the organisation\'s own orders; expected total required; 413 on huge input; per-organisation validate limit; formula text refused; emergency contact is not a blocker', async () => {
+  flagsOn();
+  const f = await h.publishedEvent({ event: { participantFields: { emergencyContact: 'required' } }, categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ name: 'S', priceTzs: 1000, capacity: 50 }] }] });
+  const org = await h.organization({ name: 'Delta' });
+  const admin = await org.member('admin');
+  const p1 = phone();
+  // L1: a required emergency contact cannot come from a roster, so it is a warning and the order can be placed
+  const first = await place(org.id, admin, { eventId: f.event.id, rows: [csvRow(1, { phone: p1 })], expectedTotalTzs: 1000 });
+  assert.equal(first.status, 201, JSON.stringify(first.body));
+  // the organisation's own earlier order is identified; someone else's is not
+  const again = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(2, { phone: p1 })] } });
+  assert.equal(again.body.rows[0].problems[0].registrationId !== undefined, true);
+  assert.equal(again.body.duplicates[0].registrationStatus, 'reserved');
+  const other = await h.organization({ name: 'Epsilon' });
+  const otherAdmin = await other.member('admin');
+  const theirs = await call(validateB2BEventRoster, otherAdmin, { params: { id: other.id }, body: { eventId: f.event.id, rows: [csvRow(3, { phone: p1 })] } });
+  assert.deepEqual(theirs.body.rows[0].problems, [{ field: 'phone', code: 'duplicate_participant' }]);
+  assert.deepEqual(theirs.body.duplicates, [{ index: 0, kind: 'already_registered' }]);
+  // M2
+  const noTotal = await place(org.id, admin, { eventId: f.event.id, rows: [csvRow(4)] });
+  assert.deepEqual([noTotal.status, noTotal.body.error], [400, 'expected_total_required']);
+  // L2
+  const formula = await place(org.id, admin, { eventId: f.event.id, rows: [csvRow(5)], expectedTotalTzs: 1000, costCentre: '=cmd' });
+  assert.deepEqual([formula.status, formula.body.error], [400, 'invalid_text']);
+  const group = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(6, { group: '@SUM(1)' })] } });
+  assert.deepEqual(group.body.rows[0].problems, [{ field: 'groupLabel', code: 'invalid_text' }]);
+  // M4: a 50,000-character email and a huge rawText never reach the parser
+  const started = Date.now();
+  const huge = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(7, { email: `${'a'.repeat(50_000)}@x.co` })] } });
+  assert.deepEqual([huge.status, huge.body.error, huge.body.field], [400, 'field_too_long', 'email']);
+  assert.ok(Date.now() - started < 1500);
+  const big = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rawText: 'a'.repeat(1_000_001) } });
+  assert.deepEqual([big.status, big.body.error], [413, 'raw_text_too_long']);
+  const cell = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(8, { category: '1'.repeat(50_000) })] } });
+  assert.deepEqual(cell.body.rows[0].problems.map(x => x.code), ['category_unknown']);
+  // M1: validate is limited per organisation
+  resetEventsCorporateLimits();
+  let limited = null;
+  for (let i = 0; i < 22 && !limited; i += 1) {
+    const r = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(9)] } });
+    if (r.status === 429) limited = r;
+  }
+  assert.equal(limited?.body.error, 'rate_limited');
+  // another organisation is not affected
+  assert.equal((await call(validateB2BEventRoster, otherAdmin, { params: { id: other.id }, body: { eventId: f.event.id, rows: [csvRow(10)] } })).status, 200);
 });

@@ -32,10 +32,11 @@ export const eventsConsentTextVersion = () => {
   return v || DEFAULT_CONSENT_TEXT_VERSION;
 };
 
+// A bad value reports only { error: 'invalid_config' } — never the variable name or the organisation id (review L8).
 function parseJsonEnv(name) {
   const raw = process.env[name];
   if (raw == null || String(raw).trim() === '') return { value: null };
-  try { return { value: JSON.parse(raw) }; } catch { return { error: 'invalid_config', status: 500, name }; }
+  try { return { value: JSON.parse(raw) }; } catch { return { error: 'invalid_config', status: 500 }; }
 }
 
 /**
@@ -53,11 +54,11 @@ export function eventsOrgDiscounts() {
   const parsed = parseJsonEnv('EVENTS_ORG_DISCOUNTS');
   if (parsed.error) return parsed;
   if (parsed.value == null) return {};
-  if (typeof parsed.value !== 'object' || Array.isArray(parsed.value)) return { error: 'invalid_config', status: 500, name: 'EVENTS_ORG_DISCOUNTS' };
+  if (typeof parsed.value !== 'object' || Array.isArray(parsed.value)) return { error: 'invalid_config', status: 500 };
   const out = {};
   for (const [orgId, rule] of Object.entries(parsed.value)) {
     const pct = Number(rule?.pct);
-    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return { error: 'invalid_config', status: 500, name: 'EVENTS_ORG_DISCOUNTS', organizationId: orgId };
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return { error: 'invalid_config', status: 500 };
     out[orgId] = { pct };
   }
   return out;

@@ -13,7 +13,7 @@
 // Parsing copies b2b-beneficiary-import-service (splitCsv, header aliases) with event columns.
 import { splitCsv } from './b2b-beneficiary-import-service.mjs';
 import { distanceBucket, ticketAvailability } from '../shared/events-document.mjs';
-import { MEMBER_CANCEL_REASONS } from '../shared/events-participants.mjs';
+import { MEMBER_CANCEL_REASONS, ROSTER_TEXT_MAX_CHARS, CELL_MAX_CHARS, startsLikeFormula } from '../shared/events-participants.mjs';
 import { paginate } from '../shared/pagination.mjs';
 import { eventsCorporateMaxRows } from '../shared/events-config.mjs';
 
@@ -96,6 +96,13 @@ export function createEventsRosterService({ db, registration, users, now = () =>
     return [];
   }
 
+  /** Size limits checked before any parsing or regex (review M4): → a refusal or null. */
+  function sizeProblem(body) {
+    if (Array.isArray(body.rows) && body.rows.length > maxRows()) return fail('too_many_rows', 413, { max: maxRows(), received: body.rows.length });
+    if (isStr(body.rawText) && body.rawText.length > ROSTER_TEXT_MAX_CHARS) return fail('raw_text_too_long', 413, { max: ROSTER_TEXT_MAX_CHARS });
+    return null;
+  }
+
   /** One raw row → { index, participant (wire, consentBasis organisation), categoryId, ticketTypeId, problems } — category / ticket resolution only; the participant rules run in prepare(). */
   function readRow(raw, index, joined) {
     const problems = [];
@@ -106,7 +113,9 @@ export function createEventsRosterService({ db, registration, users, now = () =>
       if (parts.length < 2) problems.push({ field: 'name', code: 'name_incomplete' });
       else { lastName = parts.pop(); firstName = parts.join(' '); }
     }
-    const category = matchCategory(raw.category, joined.categories || []);
+    // Cells are capped before matching: an over-long cell never reaches a regex.
+    const catCell = isStr(raw.category) && raw.category.length > CELL_MAX_CHARS ? '' : raw.category;
+    const category = matchCategory(catCell, joined.categories || []);
     let ticketType = null;
     if (!category) problems.push({ field: 'category', code: 'category_unknown' });
     else {
@@ -115,7 +124,7 @@ export function createEventsRosterService({ db, registration, users, now = () =>
       const onSale = (category.ticketTypes || []).filter(t => t.status === 'active' && ['open', 'closing_soon'].includes(ticketAvailability(t, opts)));
       const closed = category.status === 'inactive' || (category.registrationClosesAt && at > new Date(category.registrationClosesAt));
       if (isStr(raw.ticketType) && raw.ticketType.trim()) {
-        ticketType = (category.ticketTypes || []).find(t => String(t.name).trim().toLowerCase() === raw.ticketType.trim().toLowerCase()) ?? null;
+        ticketType = raw.ticketType.length > CELL_MAX_CHARS ? null : (category.ticketTypes || []).find(t => String(t.name).trim().toLowerCase() === raw.ticketType.trim().toLowerCase()) ?? null;
         if (!ticketType) problems.push({ field: 'ticketType', code: 'ticket_type_unknown' });
         else if (closed || ticketType.status !== 'active') { problems.push({ field: 'category', code: 'category_closed' }); ticketType = null; }
       } else if (closed || !onSale.length) problems.push({ field: 'category', code: 'category_closed' });
@@ -151,6 +160,8 @@ export function createEventsRosterService({ db, registration, users, now = () =>
     const joined = await R.joinedOf(isStr(body.eventId) ? body.eventId : null);
     if (!joined || !['published', 'registration_closed', 'in_progress', 'completed', 'cancelled'].includes(joined.event.status)) return fail('event_not_found', 404);
     if (joined.event.status !== 'published') return fail('event_not_open', 409, { eventStatus: joined.event.status });
+    const tooBig = sizeProblem(body);
+    if (tooBig) return tooBig;
     const raws = rowsOf(body);
     if (!raws.length) return fail('invalid_rows', 400);
     if (raws.length > maxRows()) return fail('too_many_rows', 413, { max: maxRows(), received: raws.length });
@@ -217,6 +228,11 @@ export function createEventsRosterService({ db, registration, users, now = () =>
     const scope = { purchaserUserId: null, organizationId: access.org.id };
     const earlier = await R.replay({ replayScope: scope, idempotencyKey, rawBody: body });
     if (earlier) return earlier.error ? earlier : { ...earlier, organizationId: access.org.id };
+    // The quoted total is mandatory here too (review M2), before the roster is read.
+    if (body.expectedTotalTzs === undefined || body.expectedTotalTzs === null) return fail('expected_total_required', 400);
+    for (const field of ['costCentre', 'purchaserReference']) {
+      if (body[field] !== undefined && body[field] !== null && (!isStr(body[field]) || body[field].length > 80 || startsLikeFormula(body[field]))) return fail('invalid_text', 400, { field });
+    }
     const checked = await checkRoster({ access, body });
     if (checked.error) return checked;
     const bad = checked.rows.filter(r => !r.ok);

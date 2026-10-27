@@ -9,7 +9,12 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsRegistration } from '../src/shared/feature-flags.mjs';
+import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 import { b2bService, eventsRosterService as svc } from '../src/bootstrap/services.mjs';
+
+// roster/validate is the heaviest read here (review M1): limited per organisation, in memory per server.
+const validateLimiter = createVendorLimiter({ perMinute: 20 });
+export const resetEventsCorporateLimits = () => validateLimiter.reset();
 
 const created = new Date().toISOString();
 const guard = method => routeGuard(method, [requireEventsRegistration, requireAuth(), requireAcl('b2b')]);
@@ -33,9 +38,13 @@ async function inOrganization(req, res, handler, okStatus = 200) {
 
 export const validateB2BEventRoster = {
   created, method: 'post', path: '/b2b/organizations/:id/event-orders/roster/validate',
-  description: 'Organisation user (beneficiaries.manage): check a roster without writing anything. Body { eventId, rows?: [{ firstName | name, lastName?, phone?, email?, category, ticketType?, dateOfBirth? (YYYY-MM-DD or DD/MM/YYYY), gender?, kitSize?, group? }], rawText?: CSV (header aliases in any order; without a header: first name, last name, phone, email, category, date of birth, gender, kit size, group), team?: { create: { name } } } → { rows [{ index, ok, participant, categoryId, ticketTypeId, problems [{ field, code }] }], duplicates [{ index, kind: in_list | already_registered, otherIndex?, registrationStatus? }], summary { total, ok, problems, duplicates }, lines, quote (ok rows only; null when none), availability, fields, consentText, refundPolicy, capacityShort [{ ticketTypeId, requested, remaining }] }. Problem codes: the participant codes + category_unknown | category_closed | ticket_type_unknown | name_incomplete | duplicate_participant. 413 too_many_rows (EVENTS_CORPORATE_MAX_ROWS, 500), 409 organization_not_active | event_not_open, 404 event_not_found | organization_not_found, 403 forbidden.',
+  description: 'Organisation user (beneficiaries.manage; 20/min per organisation, else 429 rate_limited): check a roster without writing anything. Body { eventId, rows?: [{ firstName | name, lastName?, phone?, email?, category, ticketType?, dateOfBirth? (YYYY-MM-DD or DD/MM/YYYY), gender?, kitSize?, group? }], rawText?: CSV (header aliases in any order; without a header: first name, last name, phone, email, category, date of birth, gender, kit size, group), team?: { create: { name } } } → { rows [{ index, ok, participant, categoryId, ticketTypeId, problems [{ field, code }] }], duplicates [{ index, kind: in_list | already_registered, otherIndex?, registrationStatus? }], summary { total, ok, problems, duplicates }, lines, quote (ok rows only; null when none), availability, fields, consentText, refundPolicy, capacityShort [{ ticketTypeId, requested, remaining }] }. Problem codes: the participant codes + category_unknown | category_closed | ticket_type_unknown | name_incomplete | duplicate_participant. 413 too_many_rows (EVENTS_CORPORATE_MAX_ROWS, 500), 409 organization_not_active | event_not_open, 404 event_not_found | organization_not_found, 403 forbidden.',
   onGuard: guard('post'),
-  onRequest: (req, res) => inOrganization(req, res, access => svc.validate({ access, body: req.body || {} })),
+  onRequest: (req, res) => inOrganization(req, res, async (access) => {
+    const allowed = validateLimiter.allow(`validate:${access.org.id}`);
+    if (!allowed.ok) { res.set?.('Retry-After', String(allowed.retryAfterSeconds)); return { error: 'rate_limited', status: 429, retryAfterSeconds: allowed.retryAfterSeconds }; }
+    return svc.validate({ access, body: req.body || {} });
+  }),
 };
 
 export const createB2BEventOrder = {
