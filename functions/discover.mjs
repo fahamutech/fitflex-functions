@@ -6,7 +6,7 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth, optionalSessionClaims } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
 import { isTokenSession } from '../src/auth/promotion-token.mjs';
-import { discoveryService, trainerService } from '../src/bootstrap/services.mjs';
+import { discoveryService, trainerService, shopHomeService } from '../src/bootstrap/services.mjs';
 import { publicGym } from '../src/services/gym-service.mjs';
 
 const created = new Date().toISOString();
@@ -17,9 +17,11 @@ const number = v => (v === undefined || v === '' ? undefined : (Number.isFinite(
 
 async function run(entityType, req, res, shape) {
   const claims = claimsOf(req);
+  // QA2 (shop near-you, spec §7.3): products only — with areas on, the vendor-typed distance is ignored.
+  const skip = entityType === 'product' && (await shopHomeService.vendorDistanceIgnored()) ? new Set(['maxDistanceKm']) : new Set();
   const out = await discoveryService.discover({
     entityType, q: req.query?.q ?? req.query?.search,
-    filters: Object.fromEntries(FILTERS.filter(k => req.query?.[k] !== undefined).map(k => [k, req.query[k]])),
+    filters: Object.fromEntries(FILTERS.filter(k => req.query?.[k] !== undefined && !skip.has(k)).map(k => [k, req.query[k]])),
     lat: number(req.query?.lat), lng: number(req.query?.lng), areaId: req.query?.areaId,
     sort: req.query?.sort || 'relevance', placement: req.query?.placement, limit: req.query?.limit, cursor: req.query?.cursor,
     rotation: Number.isInteger(number(req.query?.rotation)) ? number(req.query.rotation) : undefined,
@@ -51,7 +53,7 @@ export const discoverTrainers = {
 
 export const discoverProducts = {
   created, method: 'get', path: '/discover/products',
-  description: `Any signed-in user: shop products ranked for the viewer, with a Featured section and labelled promotions. Filters: ?category= &brand= &minPrice= &maxPrice= &minRating= &delivery=true &maxDistanceKm=. Also sorts price_asc and price_desc. ${QUERY_DOC}`,
+  description: `Any signed-in user: shop products ranked for the viewer, with a Featured section and labelled promotions. Filters: ?category= &brand= &minPrice= &maxPrice= &minRating= &delivery=true &maxDistanceKm= (ignored when SHOP_NEAR_YOU is on and areas exist). Also sorts price_asc and price_desc. ${QUERY_DOC}`,
   onGuard: requireAuth(),
   onRequest: async (req, res) => run('product', req, res, p => p),
 };
