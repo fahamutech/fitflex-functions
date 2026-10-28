@@ -19,6 +19,8 @@ const limiters = {
   lookup: createVendorLimiter({ perMinute: 30, windowMs: HOUR }),
   teamCreate: createVendorLimiter({ perMinute: 10, windowMs: 24 * HOUR }),
   preview: createVendorLimiter({ perMinute: 40, windowMs: HOUR }),
+  // S4: cancel / refund requests of PAID targets, 10 per day per user (the unpaid S3 cancel is not limited).
+  paidCancel: createVendorLimiter({ perMinute: 10, windowMs: 24 * HOUR }),
 };
 /** For specs: clear every window. */
 export const resetEventsRegistrationLimits = () => Object.values(limiters).forEach(l => l.reset());
@@ -76,9 +78,12 @@ export const getMyEventOrder = {
 
 export const cancelMyEventOrder = {
   created, method: 'post', path: '/me/event-orders/:id/cancel',
-  description: 'Member (purchaser): cancel an unpaid order and release its places. Body { reason: changed_mind | wrong_details | duplicate | other } → { order (cancelled), registrations (cancelled), changed }. Already closed → 200 with the current order (idempotent). 400 invalid_reason, 404 order_not_found, 409 invalid_transition (confirmed orders: refunds arrive with S4).',
+  description: 'Member (purchaser): cancel an unpaid order and release its places, or (S4) a PAID order with its refund. Body { reason: changed_mind | wrong_details | duplicate | other, expectedRefundTzs (REQUIRED for a paid order: an equality check against a fresh evaluation, never the amount) } → { order, registrations, refund: RefundView | null, changed, requested? }. Paid + policy preset: the places are cancelled, tickets revoked and the refund row is created in the SAME transaction (floor(paid × percent / 100) per place); custom policy → { requested: true } and nothing is cancelled until staff decide. Already closed → 200 with the current result (idempotent). 400 invalid_reason | expected_refund_required, 404 order_not_found, 409 payment_submitted (a manual payment is being checked) | refund_changed { refundTzs } | refund_in_progress | cancellation_window_closed | event_cancelled | kit_collected | invalid_transition. 429 rate_limited (10 paid cancels/day).',
   onGuard: member('post'),
-  onRequest: async (req, res) => send(res, await svc.cancelOrder({ userId: req.user.sub, orderId: req.params.id, body: req.body || {} })),
+  onRequest: async (req, res) => {
+    if (req.body?.expectedRefundTzs !== undefined && limitOrNull(limiters.paidCancel, `cancel:${req.user.sub}`, res)) return undefined;
+    return send(res, await svc.cancelOrder({ userId: req.user.sub, orderId: req.params.id, body: req.body || {} }));
+  },
 };
 
 // ── Registrations and claims (§3.6, §3.7, §3.8) ───────────────────────────
@@ -127,9 +132,12 @@ export const claimEventRegistration = {
 
 export const cancelMyEventRegistration = {
   created, method: 'post', path: '/me/event-registrations/:id/cancel',
-  description: 'Member (purchaser only): remove one place from an unpaid order. Body { reason: changed_mind | wrong_details | duplicate | other }. The only live place → the whole order is cancelled. → { order, registrations, registration, changed }. 409 remove_whole_line (the last place of a ticket line while other lines remain: cancel the whole order), 409 invalid_transition, 400 invalid_reason, 404 registration_not_found.',
+  description: 'Member (purchaser only): remove one place from an unpaid order, or (S4) cancel one PAID place with its refund (body adds expectedRefundTzs, REQUIRED for a paid place; a claimed participant gets 403 purchaser_only). The only live place of an unpaid order → the whole order is cancelled. → { order, registrations, registration, refund?, changed, requested? }. 409 remove_whole_line (the last place of a ticket line while other lines remain: cancel the whole order), payment_submitted, refund_changed, refund_in_progress, cancellation_window_closed, event_cancelled, invalid_transition; 400 invalid_reason | expected_refund_required; 404 registration_not_found.',
   onGuard: member('post'),
-  onRequest: async (req, res) => send(res, await svc.cancelRegistration({ userId: req.user.sub, registrationId: req.params.id, body: req.body || {} })),
+  onRequest: async (req, res) => {
+    if (req.body?.expectedRefundTzs !== undefined && limitOrNull(limiters.paidCancel, `cancel:${req.user.sub}`, res)) return undefined;
+    return send(res, await svc.cancelRegistration({ userId: req.user.sub, registrationId: req.params.id, body: req.body || {} }));
+  },
 };
 
 export const previewEventClaim = {
