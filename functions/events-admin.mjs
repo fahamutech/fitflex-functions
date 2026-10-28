@@ -6,12 +6,20 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsModule, requireEventsRegistration } from '../src/shared/feature-flags.mjs';
-import { eventsAdminService as svc, eventsRegistrationService as registration } from '../src/bootstrap/services.mjs';
+import { eventsAdminService as svc, eventsRegistrationService as registration, eventsPaymentsService as payments, eventsRefundsService as refunds } from '../src/bootstrap/services.mjs';
+import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 
 const created = new Date().toISOString();
 const guard = method => routeGuard(method, [requireEventsModule, requireAuth('admin'), requireAcl('events')]);
 // S3: order and registration views need EVENTS_REGISTRATION too (404 feature_disabled otherwise).
 const registrationGuard = method => routeGuard(method, [requireEventsRegistration, requireAuth('admin'), requireAcl('events')]);
+// S4: money steps (repair, refund batch) are `payments`-scope work, not `events`.
+const paymentsGuard = method => routeGuard(method, [requireEventsModule, requireAuth('admin'), requireAcl('payments')]);
+const financeLimiter = createVendorLimiter({ perMinute: 60, windowMs: 3_600_000 });
+/** For specs: clear the finance window. */
+export const resetEventsAdminLimits = () => financeLimiter.reset();
+/** The payments scope (or a super-admin) sees the payer's phone in full; `events` alone sees it masked. */
+const hasPaymentsScope = req => !req.user?.portalUser || (Array.isArray(req.user?.aclPermissions) && req.user.aclPermissions.includes('payments'));
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
@@ -58,7 +66,7 @@ export const adminDecideEvent = {
 
 export const adminCancelEvent = {
   created, method: 'post', path: '/admin/events/:id/cancel',
-  description: 'Admin (scope events): cancel a published / registration-closed / in-progress event, registrations or not. Body { reason: weather | permit | safety | low_turnout | organizer_decision | other, note { en, sw }? } → { status: "cancelled" }. 400 reason_code_required, 409 invalid_transition.',
+  description: 'Admin (scope events): cancel a published / registration-closed / in-progress event, registrations or not. Body { reason: weather | permit | safety | low_turnout | organizer_decision | other, note { en, sw }?, refundPaidOrders? (default true), expectedRefundableTzs? } → { status: "cancelled", batch? { batchId, created, existing, remaining, amountTzs, released } }. S4: unpaid orders are released; every paid order\'s places are cancelled, tickets revoked and ONE refund request (the full amount paid, fees included) is created per order, in chunks of 200 (re-run POST …/refund-batch while remaining > 0). expectedRefundableTzs is checked BEFORE anything changes (409 refundable_changed { refundableTzs }). 400 reason_code_required, 409 invalid_transition.',
   onGuard: guard('post'),
   onRequest: async (req, res) => send(res, await svc.cancel({ eventId: req.params.id, body: req.body || {}, actorId: req.user.sub })),
 };
@@ -95,16 +103,23 @@ export const adminListEventOrders = {
 
 export const adminGetEventOrder = {
   created, method: 'get', path: '/admin/events/:id/orders/:orderId',
-  description: 'Admin (scope events): one order with lines and registrations (full names; no emergency contact) + purchaser { type, id, label }, createdBy, team, allowedActions: ["cancel"] while awaiting payment. 404 order_not_found (also when the order belongs to another event).',
+  description: 'Admin (scope events): one order with lines and registrations (full names; no emergency contact) + purchaser { type, id, label }, createdBy, team, allowedActions: ["cancel"] while awaiting payment or paid with live places. S4 adds payment (PaymentView), next, refunds[], per-place ticket { state, displayCode } (never a token) and paymentPanel { payments [{ id, status, method, amountTzs, reference, payerPhone (full with the payments scope, masked without), rejectCode, failureReason, late, refundId, organizationId, payerMethod, paidOn }], tickets { issued, cancelled, rows }, refunds[] }. 404 order_not_found (also when the order belongs to another event).',
   onGuard: registrationGuard('get'),
-  onRequest: async (req, res) => send(res, await registration.adminGetOrder({ eventId: req.params.id, orderId: req.params.orderId })),
+  onRequest: async (req, res) => send(res, await registration.adminGetOrder({ eventId: req.params.id, orderId: req.params.orderId, withPayments: hasPaymentsScope(req) })),
 };
 
 export const adminCancelEventOrder = {
   created, method: 'post', path: '/admin/events/:id/orders/:orderId/cancel',
-  description: 'Admin (scope events): cancel an unpaid order (releaseOrder with reason admin). Body { note? (≤500) } → { order, registrations, changed }. Writes AuditLog events.order_cancelled with the note and tells the purchaser. 409 invalid_transition for confirmed orders (refunds are S4), 404 order_not_found.',
+  description: 'Admin (scope events): cancel an unpaid order (releaseOrder with reason admin; a pending payment on it is cancelled with it) or, S4, a PAID order. Paid: body { note (≥5 chars), refundMode: full | policy | none } (full = 100% of what was paid for the live places, policy = as the member would get, 409 policy_not_evaluable on a custom policy, none = no refund and needs the payments scope: 403 payments_scope_required) → { order, registrations, refund: RefundView | null, changed }; the refund is created as REQUESTED for a second admin (payments scope). Writes AuditLog events.order_cancelled with the note and tells the purchaser. 400 note_required | refund_mode_required, 409 refund_in_progress | event_cancelled, 404 order_not_found.',
   onGuard: registrationGuard('post'),
-  onRequest: async (req, res) => send(res, await registration.adminCancelOrder({ eventId: req.params.id, orderId: req.params.orderId, body: req.body || {}, actorId: req.user.sub })),
+  onRequest: async (req, res) => send(res, await registration.adminCancelOrder({ eventId: req.params.id, orderId: req.params.orderId, body: req.body || {}, actorId: req.user.sub, withPayments: hasPaymentsScope(req) })),
+};
+
+export const adminEventOrderCancelPreview = {
+  created, method: 'get', path: '/admin/events/:id/orders/:orderId/cancel-preview',
+  description: 'Admin (scope events; EVENTS_REGISTRATION on): what cancelling a PAID order would refund under each refundMode, before the dialog confirms → { eligible, blocked: null | event_cancelled | refund_in_progress, paidTzs, currency, releaseInventory, modes { full { refundTzs }, policy { evaluable, mode, percent, refundTzs | null, error? policy_not_evaluable }, none { refundTzs: 0, requiresScope: "payments" } }, policy { preset, text, days?, tiers?, generated { en, sw } }, places [{ registrationId, name, paidTzs, refundTzs }] }. 409 nothing_to_cancel, 404 order_not_found.',
+  onGuard: registrationGuard('get'),
+  onRequest: async (req, res) => send(res, await refunds.adminOrderCancelPreview({ eventId: req.params.id, orderId: req.params.orderId })),
 };
 
 export const adminListEventRegistrations = {
@@ -112,4 +127,37 @@ export const adminListEventRegistrations = {
   description: 'Admin (scope events): the roster with full names and kit sizes (never phone, email, DOB, gender or emergency contact in the list). ?status&categoryId&q&cursor&limit → { items [{ id, participant { name }, categoryName, ticketTypeName, status, orderReference, orderStatus, teamName, kitSize, createdAt, claimed, consentBasis, groupLabel }], nextCursor, total }. 404 event_not_found.',
   onGuard: registrationGuard('get'),
   onRequest: async (req, res) => send(res, await registration.adminListRegistrations({ eventId: req.params.id, query: req.query || {} })),
+};
+
+// ── S4: money steps of events ─────────────────────────────────────────────
+
+export const adminEventCancelPreview = {
+  created, method: 'get', path: '/admin/events/:id/cancel-preview',
+  description: 'Admin (scope events): what cancelling the event would do to money, before the dialog confirms → { awaitingOrders, awaitingWithSubmittedPayment, paidOrders, paidPlaces, totalPaidTzs, alreadyRefundedTzs, refundableTzs, openRefunds }. Send refundableTzs back as expectedRefundableTzs on the cancel. 404 event_not_found.',
+  onGuard: guard('get'),
+  onRequest: async (req, res) => send(res, await svc.cancelPreview({ eventId: req.params.id })),
+};
+
+export const adminRepairEventPayment = {
+  created, method: 'post', path: '/admin/events/:id/orders/:orderId/repair-payment',
+  description: 'Admin (scope payments): re-apply an APPROVED event payment whose order is not confirmed (tickets, confirmation). Idempotent; it can never confirm a payment nobody approved. → { repaired, outcome: confirmed | reheld | refund_raised, … }. 409 nothing_to_repair | payment_row_mismatch, 404 order_not_found. Audits events.order_repaired.',
+  onGuard: paymentsGuard('post'),
+  onRequest: async (req, res) => send(res, await payments.repairOrder({ orderId: req.params.orderId, eventId: req.params.id, actorId: req.user.sub })),
+};
+
+export const adminRunEventRefundBatch = {
+  created, method: 'post', path: '/admin/events/:id/refund-batch',
+  description: 'Admin (scope payments): run or RESUME the refund batch of a cancelled event: unpaid orders released, paid places cancelled with tickets revoked, one `event_cancelled` refund request per paid order (full amount paid), orders refund_pending. Idempotent (a live-unique index per order). Body { note?, expectedRefundableTzs? } → { batchId, created, existing, remaining, amountTzs, released }. 409 event_not_cancelled | refundable_changed { refundableTzs }; 404 event_not_found.',
+  onGuard: paymentsGuard('post'),
+  onRequest: async (req, res) => send(res, await refunds.runEventBatch({ eventId: req.params.id, actorId: req.user.sub, note: typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) || null : null, expectedRefundableTzs: req.body?.expectedRefundableTzs ?? null })),
+};
+
+export const adminEventFinance = {
+  created, method: 'get', path: '/admin/events/:id/finance',
+  description: 'Admin (scope events): the organizer finance totals of one event plus unfulfilledTzs and openReconciliations → { eventId, currency, asOf, paidTzs, refundedTzs, refundPendingTzs, awaitingPaymentTzs, commissionPct, commissionTzs, expectedNetTzs, orders { paid, refunded, partlyRefunded }, byTicketType [{ ticketTypeId, name, sold, grossTzs }], settlement { state: "not_started" }, unfulfilledTzs, openReconciliations }. 60 per hour. 404 event_not_found.',
+  onGuard: registrationGuard('get'),
+  onRequest: async (req, res) => {
+    if (limitOrNull(financeLimiter, `f:${req.user.sub}`, res)) return undefined;
+    return send(res, await payments.adminFinance({ eventId: req.params.id }));
+  },
 };

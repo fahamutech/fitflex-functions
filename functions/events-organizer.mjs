@@ -7,7 +7,8 @@ import { requireAuth } from '../src/auth/jwt.mjs';
 import { requireOrganizer, requireActiveOrganizer, requireOpenOrganizer, loadOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsModule, requireEventsRegistration } from '../src/shared/feature-flags.mjs';
-import { eventsOrganizerService as svc, eventsRegistrationService as registration } from '../src/bootstrap/services.mjs';
+import { eventsOrganizerService as svc, eventsRegistrationService as registration, eventsPaymentsService as payments } from '../src/bootstrap/services.mjs';
+import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 
 const created = new Date().toISOString();
 const ORGANIZER_TYPES = ['event_organizer', 'organizer_staff'];
@@ -166,4 +167,20 @@ export const organizerRemoveStaff = {
   description: 'Organizer owner / admin: remove a staff member (or withdraw an open invitation by its id). → { removed: true }. 409 cannot_remove_owner | cannot_remove_self; 403 forbidden_role (an admin removing another admin); 404 staff_not_found.',
   onGuard: routeGuard('delete', [requireEventsModule, requireAuth(...ORGANIZER_TYPES), requireActiveOrganizer('owner', 'admin')]),
   onRequest: async (req, res) => send(res, await svc.removeStaff({ ctx: organizerOf(req), staffId: req.params.id, actorId: req.user.sub })),
+};
+
+// ── S4: finance (totals only; never payer details) ────────────────────────
+
+const financeLimiter = createVendorLimiter({ perMinute: 60, windowMs: 3_600_000 });
+/** For specs: clear the finance window. */
+export const resetEventsOrganizerLimits = () => financeLimiter.reset();
+
+export const organizerEventFinance = {
+  created, method: 'get', path: '/organizer/events/:id/finance',
+  description: 'Organizer finance / owner / admin (EVENTS_REGISTRATION on; suspended organizers may read; other roles 403 forbidden_role): the money of one of MY events, totals only → { eventId, currency: "TZS", asOf, paidTzs (collected), refundedTzs, refundPendingTzs, awaitingPaymentTzs (held, not income), commissionPct, commissionTzs (on money kept, from the rate stamped at confirmation), expectedNetTzs, orders { paid, refunded, partlyRefunded }, byTicketType [{ ticketTypeId, name, sold, grossTzs }], settlement { state: "not_started" } }. Never a payer name, phone, transaction ID, payment method or refund destination, and no per-order rows. 404 event_not_found for another organizer\'s event; 429 rate_limited (60/h).',
+  onGuard: routeGuard('get', [requireEventsRegistration, requireAuth(...ORGANIZER_TYPES), requireOpenOrganizer('finance', 'owner', 'admin')]),
+  onRequest: async (req, res) => {
+    if (limitOrNull(financeLimiter, `f:${req.user.sub}`, res)) return undefined;
+    return send(res, await payments.organizerFinance({ ctx: organizerOf(req), eventId: req.params.id }));
+  },
 };

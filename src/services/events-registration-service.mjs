@@ -9,7 +9,10 @@
 //   organizer*                 GET /organizer/events/:id/registrations[/summary], /orders (masked per status, §3.13)
 //   admin*                     GET /admin/events/:id/orders[/:orderId], /registrations; POST …/orders/:id/cancel
 //   onOrderExpired             the expireHolds hook (notification 2, analytics order_expired)
-//   inviteClaims               BUILT, NOT CALLED in S3: the S4 payment-confirmation seam sends SMS / email claim links
+//   inviteClaims               S4: called by the payment service after a payment is confirmed (D15) and by the resend route
+//   S4 (payments): order detail gains payment / next / refunds / per-place ticket; cancel of a PAID place or order goes to the
+//                  refund service (policy preview, refund row in the same transaction); `getPayments` / `getRefunds` are lazy deps that
+//                  stay null in unit contexts, where the service is exactly the S3 one.
 //   placeOrder (internal)      shared by the corporate roster service (events-roster-service.mjs)
 //
 // Rules the routes rely on: the store is the only writer of money and holds; the service never forwards
@@ -26,6 +29,7 @@ import {
 } from '../shared/events-participants.mjs';
 import { swahiliTime } from '../shared/vendor-documents.mjs';
 import { storeRefusal } from '../infra/event-store-pg.mjs';
+import { refundView } from '../shared/events-money-views.mjs';
 import { paginate } from '../shared/pagination.mjs';
 import {
   eventsMaxParticipantsPerOrder, eventsCorporateMaxRows, eventsTeamMaxMembers, eventsClaimTokenDays, eventsConsentTextVersion, eventsFeeRule, eventsOrgDiscounts, feeLabelFor, ORG_DISCOUNT_LABEL,
@@ -36,7 +40,8 @@ const LIVE_REGISTRATION = ['reserved', 'confirmed'];
 const iso = v => (v ? new Date(v).toISOString() : null);
 const isInt = n => Number.isInteger(n);
 const isStr = v => typeof v === 'string';
-const ORDER_STATUS_FILTER = ['awaiting_payment', 'confirmed', 'cancelled', 'expired'];
+// S4 adds the statuses a paid order can reach (the portal Orders tab filters by them).
+const ORDER_STATUS_FILTER = ['awaiting_payment', 'confirmed', 'cancelled', 'expired', 'partially_cancelled', 'refund_pending', 'refunded'];
 const pageOpts = query => ({ limit: Math.min(parseInt(query.limit, 10) || 20, 50), cursor: query.cursor });
 
 /** Which of the two contacts a claim notice / preview talks about (phone first, as on the roster). */
@@ -50,6 +55,8 @@ export function createEventsRegistrationService({
   senders = { sms: () => ({ configured: false }), email: () => ({ configured: false }) },
   shareBase = () => process.env.FRIEND_INVITE_BASE_URL || process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
   config = {},
+  // S4: the payment and refund services (declared after this one in bootstrap; read at request time).
+  getPayments = () => null, getRefunds = () => null,
 }) {
   const cfg = {
     maxParticipantsPerOrder: eventsMaxParticipantsPerOrder, corporateMaxRows: eventsCorporateMaxRows, teamMaxMembers: eventsTeamMaxMembers,
@@ -123,7 +130,7 @@ export function createEventsRegistrationService({
     return registrations.map(r => named(r, names, opts));
   }
 
-  const paymentNext = () => ({ payment: 'none', instructions: null });
+  const paymentNext = async (order, opts = {}) => (getPayments() ? getPayments().nextFor(order, opts) : { payment: 'none', instructions: null });
 
   async function teamView(teamId, { viewerUserId = null } = {}) {
     if (!teamId) return null;
@@ -520,7 +527,8 @@ export function createEventsRegistrationService({
       lines: result.lines.map(l => lineView(l, names)),
       registrations: result.registrations.map(r => named(r, names)),
       holdExpiresAt: iso(result.order.holdExpiresAt),
-      next: paymentNext(),
+      // A corporate order's way to pay is the organisation's bank / Lipa Namba, not the member's instructions (S4 §3.4.3).
+      next: await paymentNext(result.order, { access: result.order.organizationId && !result.order.purchaserUserId ? {} : null }),
       event: summaryOf(j),
       team: await teamView(result.order.teamId, { viewerUserId }),
     };
@@ -599,10 +607,16 @@ export function createEventsRegistrationService({
       const event = (await joinedOf(order.eventId))?.event;
       if (recipient && event) {
         const minutes = eventStore.holdTtlMinutes();
+        // S4: a payment that was submitted but not decided in time is not "before payment": say what happens next (§3.9, §5.11 rule 5).
+        const waiting = await paymentSubmitted(order.id);
         await bilingualNotify(recipient, {
           id: `ntf_evx_${order.id}`.slice(0, 60), type: 'event_order_expired',
-          en: { title: 'Your places were released', body: `The ${minutes}-minute hold for ${event.title} ended before payment. You can register again if places remain.` },
-          sw: { title: 'Tiketi zako zimeachiliwa', body: `Muda wa dakika ${minutes} wa kushikilia tiketi za ${event.title} umeisha kabla ya malipo. Unaweza kujisajili tena kama bado kuna tiketi.` },
+          en: waiting
+            ? { title: 'Your hold ended while we were checking', body: `Your places for ${event.title} were released. If you paid, we will try to re-reserve them; if they are gone we will refund you in full.` }
+            : { title: 'Your places were released', body: `The ${minutes === 1 ? 'one-minute' : `${minutes}-minute`} hold for ${event.title} ended before payment. You can register again if places remain.` },
+          sw: waiting
+            ? { title: 'Muda wa kushikilia umeisha wakati tunakagua', body: `Tiketi zako za ${event.title} zimeachiliwa. Kama ulilipa, tutajaribu kukuwekea tena; zikiwa zimeisha tutakurejeshea pesa zote.` }
+            : { title: 'Tiketi zako zimeachiliwa', body: `Muda wa dakika ${minutes} wa kushikilia tiketi za ${event.title} umeisha kabla ya malipo. Unaweza kujisajili tena kama bado kuna tiketi.` },
           data: { orderId: order.id, eventId: order.eventId, route: `/member/events/orders/${order.id}` },
         });
       }
@@ -618,19 +632,21 @@ export function createEventsRegistrationService({
    * (${shareBase}/event-claim/#<token>; the token is minted here, its hash replaces the stored one). Returns
    * { invited, skipped } and updates claimInvitedAt / claimInviteCount. Never called before payment (D15).
    */
-  async function inviteClaims({ orderId, channels = { sms: true, email: true } }) {
+  async function inviteClaims({ orderId, channels = { sms: true, email: true }, registrationIds = null }) {
     const loaded = await eventStore.getOrder(orderId);
     if (!loaded) return fail('order_not_found', 404);
-    // Invitations go out only for a paid order (D15; review L9).
-    if (loaded.order.status !== 'confirmed') return fail('order_not_confirmed', 409, { orderStatus: loaded.order.status });
+    // Paid orders only (D15; review L9): confirmed, or part-cancelled (a resend for the places still held).
+    if (!['confirmed', 'partially_cancelled'].includes(loaded.order.status)) return fail('order_not_confirmed', 409, { orderStatus: loaded.order.status });
     const joined = await joinedOf(loaded.order.eventId);
     const names = namesOf(joined);
     const purchaserName = loaded.order.purchaserUserId ? (await users.findByIdAsync(loaded.order.purchaserUserId))?.displayName : null;
     const purchaser = purchaserName || (loaded.order.organizationId ? ((await db('B2BOrganization').where({ id: loaded.order.organizationId }).first('tradingName', 'legalName')) || {}).tradingName : null) || 'FitFlex';
     const base = String(shareBase()).replace(/\/+$/, '');
     let invited = 0; let skipped = 0;
+    const results = [];
     for (const r of loaded.registrations) {
-      if (r.participantUserId || r.consentBasis === 'self' || !LIVE_REGISTRATION.includes(r.status) || (!r.phone && !r.email)) { skipped += 1; continue; }
+      if (registrationIds && !registrationIds.includes(r.id)) continue;
+      if (r.participantUserId || r.consentBasis === 'self' || !LIVE_REGISTRATION.includes(r.status) || (!r.phone && !r.email)) { skipped += 1; results.push({ registrationId: r.id, sent: false, channel: null }); continue; }
       const token = newClaimToken();
       const link = `${base}/event-claim/#${token}`;
       const category = names.categories.get(r.categoryId)?.name ?? '';
@@ -646,15 +662,17 @@ export function createEventsRegistrationService({
       }
       const smsText = locale === 'sw' ? text.sms.sw : locale === 'en' ? text.sms.en : `${text.sms.sw}\n${text.sms.en}`;
       let sent = { ok: false, error: 'no_channel' };
-      if (r.phone && channels.sms && senders.sms().configured) sent = await senders.sms().send(r.phone, { text: smsText });
-      else if (r.email && channels.email && senders.email().configured) sent = await senders.email().send(r.email, { subject: `${text.email.subject.sw} / ${text.email.subject.en}`, text: `${text.email.body.sw}\n\n---\n\n${text.email.body.en}` });
-      if (!sent.ok) { skipped += 1; continue; }
+      let channel = null;
+      if (r.phone && channels.sms && senders.sms().configured) { channel = 'sms'; sent = await senders.sms().send(r.phone, { text: smsText }); }
+      else if (r.email && channels.email && senders.email().configured) { channel = 'email'; sent = await senders.email().send(r.email, { subject: `${text.email.subject.sw} / ${text.email.subject.en}`, text: `${text.email.body.sw}\n\n---\n\n${text.email.body.en}` }); }
+      if (!sent.ok) { skipped += 1; results.push({ registrationId: r.id, sent: false, channel: null }); continue; }
       await db('EventRegistration').where({ id: r.id }).update({
         claimTokenHash: hashToken(token), claimTokenExpiresAt: new Date(+now() + cfg.claimTokenDays() * 86_400_000), claimInvitedAt: now(), claimInviteCount: db.raw('"claimInviteCount" + 1'), updatedAt: now(),
       });
       invited += 1;
+      results.push({ registrationId: r.id, sent: true, channel });
     }
-    return { invited, skipped };
+    return { invited, skipped, results };
   }
 
   /** The claim invitation templates (§3.14), EN and SW; SMS ≤ 160 characters with a short host. */
@@ -690,7 +708,7 @@ export function createEventsRegistrationService({
     let q = db('EventOrder').where({ purchaserUserId: userId });
     if (ORDER_STATUS_FILTER.includes(query.status)) q = q.where({ status: query.status });
     const rows = await q.orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(500);
-    const counts = rows.length ? await db('EventRegistration').whereIn('orderId', rows.map(r => r.id)).whereNot({ status: 'cancelled' }).groupBy('orderId').select('orderId').count({ n: '*' }) : [];
+    const counts = rows.length ? await db('EventRegistration').whereIn('orderId', rows.map(r => r.id)).whereNotIn('status', ['cancelled', 'refunded']).groupBy('orderId').select('orderId').count({ n: '*' }) : [];
     const placesOf = new Map(counts.map(c => [c.orderId, Number(c.n)]));
     const events = eventCache();
     const items = [];
@@ -707,19 +725,21 @@ export function createEventsRegistrationService({
     return { items: page.items, nextCursor: page.nextCursor === null ? null : String(page.nextCursor) };
   }
 
-  async function orderDetail(loaded, { viewerUserId = null, actions = [] } = {}) {
+  async function orderDetail(loaded, { viewerUserId = null, actions = [], access = null } = {}) {
     const j = await joinedOf(loaded.order.eventId);
     const names = namesOf(j);
-    return {
+    const detail = {
       order: orderView(loaded.order),
       lines: loaded.lines.map(l => lineView(l, names)),
       // Once a place is claimed the person it belongs to controls their details: the purchaser sees the masked view (review M5).
       registrations: loaded.registrations.map(r => (isClaimedByOther(r) ? maskedClaimedView(r, names) : named(r, names, { full: true }))),
       event: await eventBlock(j, { full: true }),
       team: await teamView(loaded.order.teamId, { viewerUserId }),
-      next: paymentNext(),
+      next: { payment: 'none', instructions: null },
       allowedActions: actions,
     };
+    // S4: payment, the way to pay, refunds, per-place tickets and the actions that now exist (pay, cancel and refund).
+    return getPayments() ? getPayments().decorateOrderDetail(detail, loaded, { viewerUserId, access, refundsService: getRefunds() }) : detail;
   }
 
   const isClaimedByOther = r => Boolean(r.claimedAt && r.participantUserId && r.participantUserId !== r.purchaserUserId);
@@ -765,9 +785,18 @@ export function createEventsRegistrationService({
     if (!MEMBER_CANCEL_REASONS.includes(body.reason)) return fail('invalid_reason', 400, { allowed: [...MEMBER_CANCEL_REASONS] });
     const loaded = await eventStore.getOrder(orderId);
     if (!loaded || loaded.order.purchaserUserId !== userId) return fail('order_not_found', 404);
+    // S4: a paid order is cancelled with its refund (policy evaluated, one transaction); a submitted payment blocks cancelling an unpaid one.
+    if (['confirmed', 'partially_cancelled', 'refund_pending'].includes(loaded.order.status) && getRefunds()) return getRefunds().cancelOrder({ userId, orderId, body });
+    if (loaded.order.status === 'awaiting_payment' && await paymentSubmitted(orderId)) return fail('payment_submitted', 409);
     const r = await releaseWholeOrder(loaded, { reason: body.reason, actor: 'purchaser' });
     if (r.error) return r;
     return { order: orderView(r.order), registrations: await viewsOf(r.registrations, r.order.eventId), changed: r.changed };
+  }
+
+  /** A manual payment is waiting for a decision: the member cannot cancel the unpaid order (S4 §3.6). */
+  async function paymentSubmitted(orderId) {
+    const row = await db('EventPayment').where({ orderId }).whereIn('status', ['pending', 'reconciliation_required']).first('id');
+    return Boolean(row);
   }
 
   // ── Member registrations (§3.6, §3.8) ─────────────────────────────────────
@@ -831,17 +860,40 @@ export function createEventsRegistrationService({
     return {
       ...row, kitSize: full.kitSize, dateOfBirth: full.dateOfBirth, gender: full.gender, phone: full.phone, email: full.email, emergencyContact: full.emergencyContact,
       consentBasis: r.consentBasis, consentAt: full.consentAt, consentTextVersion: full.consentTextVersion, claimedAt: full.claimedAt, cancelReason: r.cancelReason ?? null,
-      purchaser, allowedActions: isPurchaser && r.status === 'reserved' && o?.status === 'awaiting_payment' ? ['cancel'] : [], ticket: null,
+      refunds: isPurchaser ? await placeRefunds(r) : [],
+      purchaser, allowedActions: await registrationActions(r, o, isPurchaser), ticket: getPayments() && ['confirmed', 'cancelled', 'refunded'].includes(r.status) && getPayments().mayViewTicket(r, userId) ? await getPayments().ticketSummary(r.id) : null,
     };
+  }
+
+  /** The refunds that cover this place (its own, or the order-level one that holds it), member view. */
+  async function placeRefunds(r) {
+    const rows = await db('Refund').where({ kind: 'event_order' }).where(b => { b.where({ eventRegistrationId: r.id }); if (r.refundId) b.orWhere({ id: r.refundId }); }).orderBy('createdAt', 'desc');
+    return rows.map(x => refundView(x));
+  }
+
+  /** The actions on one place: cancel while unpaid (not while a payment is being checked), cancel and refund once paid. */
+  async function registrationActions(r, o, isPurchaser) {
+    if (!isPurchaser) return [];
+    if (r.status === 'reserved' && o?.status === 'awaiting_payment') return (await paymentSubmitted(o.id)) ? [] : ['cancel'];
+    if (r.status === 'confirmed' && ['confirmed', 'partially_cancelled'].includes(o?.status) && !r.refundId && getRefunds()) {
+      const loaded = await eventStore.getOrder(o.id);
+      return (await getRefunds().cancellable({ order: loaded.order, registrations: [loaded.registrations.find(x => x.id === r.id)] })) ? ['cancel_refund'] : [];
+    }
+    return [];
   }
 
   /** One place out of an unpaid order (§3.8): the purchaser only; the last live place → whole-order cancel. */
   async function cancelRegistration({ userId, registrationId, body = {} }) {
     if (!MEMBER_CANCEL_REASONS.includes(body.reason)) return fail('invalid_reason', 400, { allowed: [...MEMBER_CANCEL_REASONS] });
     const r = await db('EventRegistration').where({ id: registrationId }).first();
+    // S4: the person who holds a claimed paid place is told to ask the purchaser (403 purchaser_only), not shown a missing page.
+    if (r && r.participantUserId === userId && r.purchaserUserId !== userId && r.status === 'confirmed') return fail('purchaser_only', 403);
     if (!r || r.purchaserUserId !== userId) return fail('registration_not_found', 404);
     const loaded = await eventStore.getOrder(r.orderId);
     if (!loaded) return fail('registration_not_found', 404);
+    // S4: a paid place is cancelled with its refund; an unpaid one cannot be removed while a payment is being checked.
+    if (['confirmed', 'partially_cancelled', 'refund_pending'].includes(loaded.order.status) && getRefunds()) return getRefunds().cancelRegistration({ userId, registrationId, body });
+    if (loaded.order.status === 'awaiting_payment' && await paymentSubmitted(r.orderId)) return fail('payment_submitted', 409);
     if (loaded.order.status !== 'awaiting_payment') return fail('invalid_transition', 409, { kind: 'order', from: loaded.order.status, to: 'cancelled', allowed: [] });
     const live = loaded.registrations.filter(x => x.status === 'reserved');
     let result;
@@ -946,6 +998,8 @@ export function createEventsRegistrationService({
       .update({ participantUserId: userId, claimedAt: at, claimTokenHash: null, updatedAt: at }).returning('*');
     if (!updated) return fail('already_claimed', 409);
     await analytics('registration_claimed', { eventId: r.eventId, registrationId: r.id, via });
+    // S4 (§3.8.5): when someone other than the purchaser claims a paid place, its ticket code changes at that moment.
+    if (getPayments() && r.purchaserUserId !== userId) await getPayments().onClaimed(updated);
     if (r.purchaserUserId && r.purchaserUserId !== userId) {
       try {
         await bilingualNotify(r.purchaserUserId, {
@@ -1062,7 +1116,7 @@ export function createEventsRegistrationService({
     let q = db('EventOrder').where({ eventId: joined.event.id });
     if (ORDER_STATUS_FILTER.includes(status)) q = q.where({ status });
     const rows = await q.orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(2000);
-    const counts = rows.length ? await db('EventRegistration').whereIn('orderId', rows.map(r => r.id)).whereNot({ status: 'cancelled' }).groupBy('orderId').select('orderId').count({ n: '*' }) : [];
+    const counts = rows.length ? await db('EventRegistration').whereIn('orderId', rows.map(r => r.id)).whereNotIn('status', ['cancelled', 'refunded']).groupBy('orderId').select('orderId').count({ n: '*' }) : [];
     const placesOf = new Map(counts.map(c => [c.orderId, Number(c.n)]));
     const userIds = [...new Set(rows.map(r => r.purchaserUserId).filter(Boolean))];
     const orgIds = [...new Set(rows.map(r => r.organizationId).filter(Boolean))];
@@ -1100,10 +1154,16 @@ export function createEventsRegistrationService({
     return { items: page.items, nextCursor: page.nextCursor === null ? null : String(page.nextCursor), total: page.total };
   }
 
-  async function adminGetOrder({ eventId, orderId }) {
+  async function adminGetOrder({ eventId, orderId, withPayments = false }) {
     const loaded = await eventStore.getOrder(orderId);
     if (!loaded || loaded.order.eventId !== eventId) return fail('order_not_found', 404);
     const detail = await orderDetail(loaded, { actions: loaded.order.status === 'awaiting_payment' ? ['cancel'] : [] });
+    // S4: an admin may cancel a paid order too (with a refund mode); the payment panel carries the payer phone masked unless the admin holds the payments scope.
+    if (getPayments()) {
+      const paid = ['confirmed', 'partially_cancelled'].includes(loaded.order.status) && loaded.registrations.some(r => r.status === 'confirmed' && !r.refundId);
+      detail.allowedActions = loaded.order.status === 'awaiting_payment' || paid ? ['cancel'] : [];
+      detail.paymentPanel = await getPayments().adminOrderPanel(orderId, { withPayments });
+    }
     // Admins see names and statuses, not contact or personal details (§3.13, §7.3; review L7).
     detail.registrations = detail.registrations.map(({ emergencyContact, phone, email, dateOfBirth, gender, ...r }) => r);
     const purchaser = loaded.order.purchaserUserId ? await users.findByIdAsync(loaded.order.purchaserUserId) : null;
@@ -1123,12 +1183,16 @@ export function createEventsRegistrationService({
     return { items: page.items, nextCursor: page.nextCursor === null ? null : String(page.nextCursor), total: page.total };
   }
 
-  async function adminCancelOrder({ eventId, orderId, body = {}, actorId }) {
+  async function adminCancelOrder({ eventId, orderId, body = {}, actorId, withPayments = false }) {
     const loaded = await eventStore.getOrder(orderId);
     if (!loaded || loaded.order.eventId !== eventId) return fail('order_not_found', 404);
+    // S4: a paid order is cancelled with a refund mode (full | policy | none); the refund is a `payments` step for a second admin.
+    if (['confirmed', 'partially_cancelled', 'refund_pending'].includes(loaded.order.status) && getRefunds()) return getRefunds().adminCancelPaidOrder({ eventId, orderId, body, actorId, withPayments });
     const note = isStr(body.note) ? body.note.trim().slice(0, 500) : '';
     const r = await eventStore.releaseOrder(orderId, 'admin', { cancelReason: 'admin' });
     if (r.error) return r;
+    // S4 (§3.7.7): the admin has decided the money is not for these places — a pending payment is cancelled with the order, never left behind.
+    if (r.changed && getRefunds()) await getRefunds().cancelPendingPaymentOf(orderId, actorId);
     if (r.changed) {
       await audit(actorId, 'events.order_cancelled', orderId, { status: loaded.order.status }, { status: r.order.status, reason: 'admin', note: note || null, eventId });
       await notifyClaimedCancelled(loaded.registrations, (await joinedOf(eventId))?.event);
@@ -1157,6 +1221,6 @@ export function createEventsRegistrationService({
     adminListOrders, adminGetOrder, adminListRegistrations, adminCancelOrder,
     onOrderExpired, inviteClaims, claimInvitationText,
     // shared with events-roster-service.mjs (corporate)
-    internals: { prepare, placeOrder, replay, quoteResponse, orderDetail, orderView, registrationView, viewsOf, lineView, namesOf, joinedOf, summaryOf, releaseWholeOrder, participantsReport, publicAvailability, eventBlock, teamView, loadOrder: id => eventStore.getOrder(id) },
+    internals: { paymentSubmitted, prepare, placeOrder, replay, quoteResponse, orderDetail, orderView, registrationView, viewsOf, lineView, namesOf, joinedOf, summaryOf, releaseWholeOrder, participantsReport, publicAvailability, eventBlock, teamView, loadOrder: id => eventStore.getOrder(id) },
   };
 }
