@@ -24,6 +24,9 @@ const MIGRATIONS = [
   '20270110090800-events-document-fields.cjs',
   // S3: registration fields (additive; its EventOrder.teamId → EventTeam FK must come down before events-orders).
   '20270110090900-events-registration-fields.cjs',
+  // S4: payments, tickets and event refunds (additive columns / indexes on EventPayment, EventOrder, EventRegistration, EventTicket,
+  // EventInventoryMovement and Refund; it must come down BEFORE the tables it widens).
+  '20270110091100-events-payments-tickets.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');
@@ -282,7 +285,8 @@ test('rolling back over data fails closed: orders, payments, ledger entries and 
 
 test('payment CHECKs and PaymentRequest.eventOrderId', () => inRollback(async (trx) => {
   const f = await orderFixture(trx);
-  const pay = extra => ({ id: uid('epy'), orderId: f.orderId, provider: 'manual', merchantReference: uid('MR'), amountTzs: 30000, ...extra });
+  // S4: one live attempt per order (eventpayment_one_live_per_order), so these rows are earlier, failed attempts.
+  const pay = extra => ({ id: uid('epy'), orderId: f.orderId, provider: 'manual', merchantReference: uid('MR'), amountTzs: 30000, status: 'failed', ...extra });
   await rejects(trx, t => t('EventPayment').insert(pay({ status: 'paid' })), '23514');
   await rejects(trx, t => t('EventPayment').insert(pay({ status: 'succeeded' })), '23514');                 // succeeded needs verifiedAt
   await rejects(trx, t => t('EventPayment').insert(pay({ amountTzs: -1 })), '23514');
@@ -292,6 +296,12 @@ test('payment CHECKs and PaymentRequest.eventOrderId', () => inRollback(async (t
   const mr = uid('MR');
   await trx('EventPayment').insert(pay({ merchantReference: mr }));
   await rejects(trx, t => t('EventPayment').insert(pay({ merchantReference: mr })), '23505');
+  // S4: a second live attempt and a second success for one order are refused by the database.
+  await trx('EventPayment').insert(pay({ status: 'pending' }));
+  await rejects(trx, t => t('EventPayment').insert(pay({ status: 'created' })), '23505');
+  await rejects(trx, t => t('EventPayment').insert(pay({ status: 'reconciliation_required' })), '23505');
+  await trx('EventPayment').where({ orderId: f.orderId, status: 'pending' }).update({ status: 'succeeded', verifiedAt: new Date() });
+  await rejects(trx, t => t('EventPayment').insert(pay({ status: 'succeeded', verifiedAt: new Date() })), '23505');
   await trx('PaymentRequest').insert({ id: uid('pay'), memberId: f.userId, tier: 'event', amountTzs: 30000, status: 'pending', provider: 'manual', eventOrderId: f.orderId });
   await rejects(trx, t => t('PaymentRequest').insert({ id: uid('pay'), memberId: f.userId, tier: 'event', amountTzs: 1, status: 'pending', provider: 'manual', eventOrderId: 'eor_missing' }), '23503');
 }));
