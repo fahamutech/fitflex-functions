@@ -110,9 +110,16 @@ export const adminGetEventOrder = {
 
 export const adminCancelEventOrder = {
   created, method: 'post', path: '/admin/events/:id/orders/:orderId/cancel',
-  description: 'Admin (scope events): cancel an unpaid order (releaseOrder with reason admin; a pending payment on it is cancelled with it) or, S4, a PAID order. Paid: body { note (≥5 chars), refundMode: full | policy | none } (full = 100% of what was paid for the live places, policy = as the member would get, none = no refund) → { order, registrations, refund: RefundView | null, changed }; the refund is created as REQUESTED for a second admin (payments scope). Writes AuditLog events.order_cancelled with the note and tells the purchaser. 400 note_required | refund_mode_required, 409 refund_in_progress | event_cancelled, 404 order_not_found.',
+  description: 'Admin (scope events): cancel an unpaid order (releaseOrder with reason admin; a pending payment on it is cancelled with it) or, S4, a PAID order. Paid: body { note (≥5 chars), refundMode: full | policy | none } (full = 100% of what was paid for the live places, policy = as the member would get, 409 policy_not_evaluable on a custom policy, none = no refund and needs the payments scope: 403 payments_scope_required) → { order, registrations, refund: RefundView | null, changed }; the refund is created as REQUESTED for a second admin (payments scope). Writes AuditLog events.order_cancelled with the note and tells the purchaser. 400 note_required | refund_mode_required, 409 refund_in_progress | event_cancelled, 404 order_not_found.',
   onGuard: registrationGuard('post'),
-  onRequest: async (req, res) => send(res, await registration.adminCancelOrder({ eventId: req.params.id, orderId: req.params.orderId, body: req.body || {}, actorId: req.user.sub })),
+  onRequest: async (req, res) => send(res, await registration.adminCancelOrder({ eventId: req.params.id, orderId: req.params.orderId, body: req.body || {}, actorId: req.user.sub, withPayments: hasPaymentsScope(req) })),
+};
+
+export const adminEventOrderCancelPreview = {
+  created, method: 'get', path: '/admin/events/:id/orders/:orderId/cancel-preview',
+  description: 'Admin (scope events; EVENTS_REGISTRATION on): what cancelling a PAID order would refund under each refundMode, before the dialog confirms → { eligible, blocked: null | event_cancelled | refund_in_progress, paidTzs, currency, releaseInventory, modes { full { refundTzs }, policy { evaluable, mode, percent, refundTzs | null, error? policy_not_evaluable }, none { refundTzs: 0, requiresScope: "payments" } }, policy { preset, text, days?, tiers?, generated { en, sw } }, places [{ registrationId, name, paidTzs, refundTzs }] }. 409 nothing_to_cancel, 404 order_not_found.',
+  onGuard: registrationGuard('get'),
+  onRequest: async (req, res) => send(res, await refunds.adminOrderCancelPreview({ eventId: req.params.id, orderId: req.params.orderId })),
 };
 
 export const adminListEventRegistrations = {

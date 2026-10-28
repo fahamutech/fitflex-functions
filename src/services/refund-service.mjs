@@ -16,6 +16,7 @@ import { formatTsh } from '../shared/money-display.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
 import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
+import { refundView } from '../shared/events-money-views.mjs';
 import { staffNameLookup } from '../shared/staff-names.mjs';
 
 export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order', 'event_order'];
@@ -36,6 +37,7 @@ export function createRefundService({
   onPaid = async () => {},          // (refund) → e.g. mark the order refunded
   // S4 (kind 'event_order'; all default to no-ops so the other kinds are untouched):
   onApproved = async () => {},      // (refund) → a manual-review request cancels the places when it is approved
+  beforePaid = async () => null,    // (refund) → null | { error, status }: a manual-review refund is not paid before its places are cancelled
   onRejected = async () => {},      // (refund) → the places the refund covered are free again
   tellEvent = null,                 // (refund, 'requested' | 'requested_by_fitflex' | 'approved' | 'rejected' | 'paid', { note, reference }) → bilingual notice
   enrichRows = async () => new Map(), // (rows) → Map<refundId, { event, orderReference, scope, batchId, policySnapshot, payerPhone, organizationName }>
@@ -50,7 +52,7 @@ export function createRefundService({
   async function tell(refund, type, title, body) {
     // Event refunds are told bilingually by the events refund service; the other kinds keep their English push.
     if (refund.kind === 'event_order' && tellEvent) {
-      try { await tellEvent(refund, EVENT_TELL[type] ?? 'requested', { note: type === 'refund_rejected' ? body : null, reference: refund.paymentReference ?? null }); } catch { /* a notification never blocks a refund */ }
+      try { await tellEvent(refund, EVENT_TELL[type] ?? 'requested', { note: type === 'refund_rejected' ? body : null, noteSw: type === 'refund_rejected' ? (refund.decisionNoteSw ?? null) : null, reference: refund.paymentReference ?? null }); } catch { /* a notification never blocks a refund */ }
       return;
     }
     try {
@@ -171,6 +173,7 @@ export function createRefundService({
       return fail('cannot_approve_own_request', 403);
     }
     const note = text(body.note);
+    const noteSw = text(body.noteSw, 500);
     if (body.decision === 'reject' && !note) return fail('note_required');
     let amountTzs = prior.amountTzs;
     if (body.decision === 'approve' && body.amountTzs != null) {
@@ -181,7 +184,7 @@ export function createRefundService({
     // Only while it is still waiting: two staff members deciding at once cannot both succeed.
     const refund = await updateIf(refunds, id, { status: 'requested' }, {
       status: body.decision === 'approve' ? 'approved' : 'rejected', amountTzs,
-      decidedBy: actorId, decidedAt: at, decisionNote: note, updatedAt: at,
+      decidedBy: actorId, decidedAt: at, decisionNote: note, ...(noteSw ? { decisionNoteSw: noteSw } : {}), updatedAt: at,
     });
     if (!refund) return fail('already_decided', 409);
     // A pass or plan refunded in full stops giving access, when the reviewer says so.
@@ -239,6 +242,8 @@ export function createRefundService({
     }
     const reference = text(body.paymentReference, 120);
     if (!reference) return fail('payment_reference_required');
+    const blocked = await beforePaid(prior);
+    if (blocked?.error) return fail(blocked.error, blocked.status || 409);
     const at = nowIso();
     // Only an approved refund that nobody has paid yet: a double click or two staff members record one payment.
     const refund = await updateIf(refunds, id, { status: 'approved' }, {
@@ -267,8 +272,10 @@ export function createRefundService({
     const rows = (await refunds.filterByColumnAsync('memberId', memberId)).sort(byNewest);
     const extra = await enrichRows(rows);
     // Event refunds also say which event and order they are for (the payer's phone and the policy internals stay with staff).
-    const strip = ({ policySnapshot, batchId, organizerId, eventPaymentId, organizationId, ...rest }) => rest; // staff-side fields
-    return { refunds: rows.map(r => (extra.has(r.id) ? { ...strip(r), event: extra.get(r.id).event, orderReference: extra.get(r.id).orderReference } : r)) };
+    // Event refunds go back as the member-facing RefundView only (L1): no staff ids, notes, payout destination or reference until paid.
+    // An organisation's refund is shown only to a coordinator who still holds a billing role (ruling b).
+    const view = r => ({ ...refundView(r), kind: r.kind, eventOrderId: r.eventOrderId ?? null, event: extra.get(r.id).event, orderReference: extra.get(r.id).orderReference });
+    return { refunds: rows.filter(r => !extra.get(r.id)?.hiddenFromMember).map(r => (extra.has(r.id) ? view(r) : r)) };
   }
 
   /**
@@ -302,7 +309,7 @@ export function createRefundService({
         const u = byId.get(r.memberId);
         return {
           ...r,
-          ...(extra.has(r.id) ? extra.get(r.id) : {}),
+          ...(extra.has(r.id) ? (({ hiddenFromMember, ...rest }) => rest)(extra.get(r.id)) : {}),
           member: u ? { id: u.id, displayName: u.displayName || null, phone: u.phone || null, email: u.email || null } : null,
           requestedByName: nameOf(r.requestedBy),
           decidedByName: nameOf(r.decidedBy),

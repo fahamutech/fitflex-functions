@@ -17,6 +17,7 @@
 // token or provider payload (PAY-013). Every refusal is { error, status, ...extra } (D5), never thrown.
 import { randomUUID } from 'node:crypto';
 import { storeRefusal } from '../infra/event-store-pg.mjs';
+import { billingRecipients } from '../infra/event-money-store-pg.mjs';
 import {
   canonicalFingerprint, IDEMPOTENCY_KEY_RE, localTimeIn, localHourMinuteIn,
 } from '../shared/events-participants.mjs';
@@ -31,6 +32,7 @@ import {
   eventManualHoldExtendHours, eventManualHoldMaxHours, eventsOrgHoldMaxHours, eventsProviderHoldExtendMinutes, eventsRejectedRetryMinutes,
   eventsLatePaymentGraceHours, eventsManualConfirmSlaHours, eventTicketKeyRing,
 } from '../shared/events-config.mjs';
+import { eventsApproverGateOpen } from '../shared/feature-flags.mjs';
 import { ORG_BILLING_ROLES } from './events-roster-service.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -64,6 +66,8 @@ export function createEventsPaymentService({
 }) {
   const nowIso = () => now().toISOString();
   const R = () => registration.internals;
+  // M4: fail closed unless two admins are on money (or the owner accepted a single approver).
+  const approverGate = () => eventsApproverGateOpen();
   const intakeOn = () => Boolean(flags.manual() || flags.tunzaa());
 
   const audit = async (actor, action, target, before, after) => {
@@ -84,6 +88,7 @@ export function createEventsPaymentService({
    */
   function mode() {
     if (!keyRing()) return 'none';
+    if (!approverGate()) return 'none';
     if (flags.tunzaa() && providerEffective()) return 'provider';
     if (flags.manual() && manualPayment.required()) return 'manual';
     return 'none';
@@ -122,6 +127,8 @@ export function createEventsPaymentService({
       confirmTargetAt: state === 'submitted' && submittedAt ? new Date(+new Date(submittedAt) + eventsManualConfirmSlaHours() * HOUR).toISOString() : null,
       rejectCode: state === 'rejected' ? (payment.rejectCode ?? null) : null,
       memberNote: state === 'rejected' ? (payment.settledNote ?? null) : null,
+      memberNoteSw: state === 'rejected' ? (payment.settledNoteSw ?? null) : null,
+      payerMethod: payment.payerMethod ?? null, paidOn: payment.paidOn ? new Date(payment.paidOn).toISOString().slice(0, 10) : null,
       late: payment.lateOrder === true, canRetry, refundId: payment.refundId ?? null,
     };
   }
@@ -188,6 +195,8 @@ export function createEventsPaymentService({
         ...r,
         ticket: hidden ? null : t ? { state: t.status === 'active' ? 'active' : 'revoked', displayCode: t.displayCode ?? null } : { state: 'none', displayCode: null },
         invitation: invitationOf(src),
+        // Flat copies for the clients (the invitation{} object stays).
+        claimInvitedAt: src ? iso(src.claimInvitedAt) : null, claimInviteCount: Number(src?.claimInviteCount ?? 0),
       };
     });
     const actions = [];
@@ -218,10 +227,22 @@ export function createEventsPaymentService({
     } catch (err) { console.warn('[events] payment notification skipped:', type, err?.message); }
   }
 
+  const MONTHS_EN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const MONTHS_SW = ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'];
+  const localDate = (tz, d) => new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'Africa/Dar_es_Salaam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  /** "14:05" / "tomorrow 14:05" / "29 Oct 14:05" in English and "2:05 mchana" / "kesho 2:05 mchana" / "29 Okt 2:05 mchana" in Swahili: the date appears when the hold runs past today. */
   const timeTexts = (event, at) => {
+    const when = new Date(at);
     const en = localTimeIn(event.timezone, at);
     const hm = localHourMinuteIn(event.timezone, at);
-    return { en, sw: hm ? swahiliTime(hm.h, hm.min) : en };
+    const sw = hm ? swahiliTime(hm.h, hm.min) : en;
+    const today = localDate(event.timezone, now());
+    const day = localDate(event.timezone, when);
+    if (day === today) return { en, sw };
+    const tomorrow = localDate(event.timezone, new Date(+now() + DAY));
+    if (day === tomorrow) return { en: `tomorrow ${en}`, sw: `kesho ${sw}` };
+    const [, m, d] = day.split('-').map(Number);
+    return { en: `${d} ${MONTHS_EN[m - 1]} ${en}`, sw: `${d} ${MONTHS_SW[m - 1]} ${sw}` };
   };
   const route = {
     order: id => `/member/events/orders/${id}`,
@@ -230,6 +251,7 @@ export function createEventsPaymentService({
     ticket: id => `/member/events/registrations/${id}/ticket`,
   };
   const REASON_TEXT = {
+    other: { en: "We couldn't confirm your payment.", sw: 'Hatukuweza kuthibitisha malipo yako.' },
     reference_not_found: { en: "We couldn't find that transaction ID in our payment records.", sw: 'Hatukuipata namba hiyo ya muamala kwenye rekodi zetu za malipo.' },
     amount_mismatch: { en: 'The amount we received was different from the order total.', sw: 'Kiasi tulichopokea ni tofauti na jumla ya oda.' },
     wrong_account: { en: 'The payment went to a different account.', sw: 'Malipo yalitumwa kwenye akaunti nyingine.' },
@@ -238,20 +260,26 @@ export function createEventsPaymentService({
 
   async function eventOf(eventId) { return plain(await db('Event').where({ id: eventId }).first()); }
   const recipientOf = order => order.purchaserUserId ?? order.createdByUserId ?? null;
+  /** Tell whoever answers for this order's money: the purchaser, or for an organisation the coordinator while they hold a billing role, else its billing contacts (ruling b). */
+  async function noticeOrder(order, payload) {
+    let targets = [recipientOf(order)];
+    try { const b = await billingRecipients(db, order); if (b.length) targets = b; } catch { /* fall back to the recorded person */ }
+    for (const [i, to] of targets.entries()) await notice(to, i ? { ...payload, id: `${payload.id}_${i}` } : payload);
+  }
 
   async function notifySubmitted(order, event, payment) {
     const t = timeTexts(event, order.holdExpiresAt);
     const hours = eventsManualConfirmSlaHours();
-    await notice(recipientOf(order), {
+    await noticeOrder(order, {
       id: `ntf_evps_${payment.id}`, type: 'event_payment_submitted',
-      en: { title: 'Payment received · being checked', body: `We have your transaction ID. FitFlex confirms payments within ${hours} hours. Your places for ${event.title} are held until ${t.en}.` },
+      en: { title: 'Payment received · being checked', body: `We have your transaction ID. FitFlex confirms payments within ${hours === 1 ? '1 hour' : `${hours} hours`}. Your places for ${event.title} are held until ${t.en}.` },
       sw: { title: 'Malipo yamepokelewa · yanakaguliwa', body: `Tumepokea namba yako ya muamala. FitFlex huthibitisha malipo ndani ya saa ${hours}. Tiketi zako za ${event.title} zimeshikiliwa hadi ${t.sw}.` },
       data: { orderId: order.id, eventId: order.eventId, paymentId: payment.id, route: route.order(order.id) },
     });
   }
 
   async function notifyLateReceived(order, event, payment) {
-    await notice(recipientOf(order), {
+    await noticeOrder(order, {
       id: `ntf_evpl_${payment.id}`, type: 'event_payment_late_received',
       en: { title: 'Payment received after your hold ended', body: `We'll try to re-reserve your places for ${event.title}; if they are gone we'll refund you in full.` },
       sw: { title: 'Malipo yamepokelewa baada ya muda kuisha', body: `Tutajaribu kukuwekea tiketi za ${event.title} tena; zikiwa zimeisha tutakurejeshea pesa zote.` },
@@ -260,29 +288,36 @@ export function createEventsPaymentService({
   }
 
   async function notifyRejected(order, event, payment) {
-    const reason = REASON_TEXT[payment.rejectCode] ?? null;
+    const reason = REASON_TEXT[payment.rejectCode] ?? REASON_TEXT.other;
     const canRetry = order.status === 'awaiting_payment' && order.holdExpiresAt && +new Date(order.holdExpiresAt) > +now();
     const t = order.holdExpiresAt ? timeTexts(event, order.holdExpiresAt) : { en: '', sw: '' };
-    const note = payment.settledNote ? ` ${payment.settledNote}` : '';
-    await notice(recipientOf(order), {
+    // Staff type the note in one language: Swahili is theirs when they wrote it, else the English one is labelled as such.
+    const noteEn = payment.settledNote ? ` ${payment.settledNote}` : '';
+    const noteSw = payment.settledNoteSw ? ` ${payment.settledNoteSw}` : payment.settledNote ? ` Maelezo kutoka FitFlex (kwa Kiingereza): ${payment.settledNote}` : '';
+    await noticeOrder(order, {
       id: `ntf_evpr_${payment.id}`, type: 'event_payment_rejected',
-      en: { title: "We couldn't confirm your payment", body: `${(reason ?? { en: '' }).en}${note}${canRetry ? ` You can try again until ${t.en}.` : ''}`.trim() },
-      sw: { title: 'Hatukuweza kuthibitisha malipo yako', body: `${(reason ?? { sw: '' }).sw}${note}${canRetry ? ` Unaweza kujaribu tena hadi ${t.sw}.` : ''}`.trim() },
+      en: { title: "We couldn't confirm your payment", body: `${reason.en}${noteEn}${canRetry ? ` You can try again until ${t.en}.` : ''}`.trim() },
+      sw: { title: 'Hatukuweza kuthibitisha malipo yako', body: `${reason.sw}${noteSw}${canRetry ? ` Unaweza kujaribu tena hadi ${t.sw}.` : ''}`.trim() },
       data: { orderId: order.id, eventId: order.eventId, paymentId: payment.id, route: canRetry ? route.pay(order.id) : route.order(order.id) },
     });
   }
 
   /** After the confirmation transaction committed: notices, claim invitations, analytics. Failures are logged by id and never undo. */
-  async function afterDecision(result, { source = 'admin' } = {}) {
+  async function afterDecision(result, opts = {}) {
+    // L2: nothing after the commit may turn a successful confirmation into a 500.
+    try { await afterDecisionInner(result, opts); } catch (err) { console.warn('[events] post-commit steps failed:', result?.order?.id, err?.message); }
+  }
+
+  async function afterDecisionInner(result, { source = 'admin' } = {}) {
     if (!result) return;
     const order = result.order;
     const event = await eventOf(order.eventId);
     if (result.outcome === 'refund_raised') {
       const refund = plain(await db('Refund').where({ id: result.refundId }).first());
-      await notice(recipientOf(order), {
+      await noticeOrder(order, {
         id: `ntf_evpf_${result.payment.id}`, type: 'event_payment_refund_due',
         en: { title: "Your places weren't available", body: `We received your payment of ${formatTsh(result.payment.amountTzs)} but could not keep your places for ${event?.title ?? 'the event'}. A full refund is being prepared.` },
-        sw: { title: 'Tiketi hazikuwepo', body: `Tumepokea malipo yako ya ${formatTsh(result.payment.amountTzs)} lakini hatukuweza kuhifadhi tiketi zako za ${event?.title ?? 'tukio'}. Marejesho kamili yanaandaliwa.` },
+        sw: { title: 'Tiketi hazikuwepo', body: `Tumepokea malipo yako ya ${formatTsh(result.payment.amountTzs)} lakini hatukuweza kuhifadhi tiketi zako za ${event?.title ?? 'tukio'}. Malipo yatarejeshwa kikamilifu.` },
         data: { orderId: order.id, eventId: order.eventId, refundId: result.refundId, route: route.order(order.id) },
       });
       if (ops) {
@@ -294,9 +329,8 @@ export function createEventsPaymentService({
       return;
     }
     if (!result.changed) return;
-    const purchaser = recipientOf(order);
     const n = result.tickets.length;
-    await notice(purchaser, {
+    await noticeOrder(order, {
       id: `ntf_evpc_${result.payment.id}`, type: 'event_payment_confirmed',
       en: { title: 'Payment confirmed · tickets ready', body: `${n} ticket${n === 1 ? '' : 's'} for ${event?.title ?? 'the event'} ${n === 1 ? 'is' : 'are'} ready.` },
       sw: { title: 'Malipo yamethibitishwa · tiketi ziko tayari', body: `Tiketi ${n} za ${event?.title ?? 'tukio'} ziko tayari.` },
@@ -371,6 +405,7 @@ export function createEventsPaymentService({
   async function initiateFor({ loaded, actorId, body, key, access }) {
     if (!intakeOn()) return fail('feature_disabled', 404);
     if (!keyRing()) return fail('tickets_unavailable', 503);
+    if (!approverGate()) return fail('payment_mode_mismatch', 409, { mode: 'none' });
     const order0 = loaded.order;
     const free = Number(order0.totalTzs) === 0;
     const m = access ? 'manual' : mode();
@@ -476,13 +511,15 @@ export function createEventsPaymentService({
     }
 
     const payment = plain(await db('EventPayment').where({ id: paymentId }).first());
-    const event = await eventOf(created.order.eventId);
-    if (created.free) {
-      await afterDecision(confirmed, { source: 'free' });
-    } else if (payment.method === 'manual') {
-      if (created.late) await notifyLateReceived(created.order, event, payment);
-      else await notifySubmitted(created.order, event, payment);
-    }
+    try {
+      const event = await eventOf(created.order.eventId);
+      if (created.free) {
+        await afterDecision(confirmed, { source: 'free' });
+      } else if (payment.method === 'manual') {
+        if (created.late) await notifyLateReceived(created.order, event, payment);
+        else await notifySubmitted(created.order, event, payment);
+      }
+    } catch (err) { console.warn('[events] post-commit steps failed:', created.order.id, err?.message); }
     await analytics('payment_initiated', { orderId: created.order.id, eventId: created.order.eventId, method: payment.method, late: created.late });
     const fresh = plain(await db('EventOrder').where({ id: created.order.id }).first());
     return {
@@ -526,6 +563,9 @@ export function createEventsPaymentService({
       return { error: 'payment_row_mismatch', status: 409 };
     }
     if (payment.status === 'failed' && payment.method !== 'manual') return { error: 'payment_row_mismatch', status: 409 };
+    if (payment.refundId || payment.failureReason === 'refunded_after_late_payment') return { error: 'payment_refunded_or_closed', status: 409 };
+    // A held amount / transaction mismatch is settled by a refund or a person at the provider, not by an approval (L5).
+    if (['amount_mismatch', 'transaction_mismatch'].includes(payment.failureReason)) return { error: 'payment_held_mismatch', status: 409, failureReason: payment.failureReason };
     if (payment.status === 'failed') {
       const other = await db('EventPayment').where({ orderId: order.id }).whereIn('status', LIVE_PAYMENT).whereNot({ id: payment.id }).first('id');
       if (other) return { error: 'payment_in_progress', status: 409 };
@@ -537,11 +577,11 @@ export function createEventsPaymentService({
   }
 
   /** Reject input for event requests: a closed reason code and an optional member note (§3.7.5). null or a refusal. */
-  function checkRejectInput({ reasonCode, memberNote }) {
+  function checkRejectInput({ reasonCode, memberNote, memberNoteSw = null }) {
     if (!REJECT_CODES.includes(reasonCode)) return fail('reason_code_required', 400, { allowed: [...REJECT_CODES] });
     const note = isStr(memberNote) ? memberNote.trim() : '';
     if (reasonCode === 'other' && !note) return fail('note_required', 400);
-    if (note.length > MEMBER_NOTE_MAX) return fail('note_too_long', 400, { max: MEMBER_NOTE_MAX });
+    if (note.length > MEMBER_NOTE_MAX || (isStr(memberNoteSw) && memberNoteSw.trim().length > MEMBER_NOTE_MAX)) return fail('note_too_long', 400, { max: MEMBER_NOTE_MAX });
     return null;
   }
 
@@ -568,13 +608,14 @@ export function createEventsPaymentService({
         const upd = plain(row);
         // A note-only edit (status unchanged) touches the request and nothing else.
         if (status === request.status) return upd;
-        // Lock order first, payment second: the order every other path takes (a repair running at the same time cannot deadlock with a decision).
+        // Lock order first, payment second (confirmPaidOrder does the same), so a repair running at the same time cannot deadlock with a decision.
         const ref = await trx('EventPayment').where({ paymentRequestId: request.id }).first('id', 'orderId');
         if (!ref) throw refuse('payment_row_mismatch', 409);
         await trx('EventOrder').where({ id: ref.orderId }).forUpdate().first('id');
         const payment = plain(await trx('EventPayment').where({ id: ref.id }).forUpdate().first());
         const at = now();
         if (status === 'approved') {
+          if (payment.refundId || payment.failureReason === 'refunded_after_late_payment') throw refuse('payment_refunded_or_closed', 409);
           const revived = payment.status === 'failed';
           result = await money.confirmPaidOrder(trx, {
             orderId: payment.orderId, eventPaymentId: payment.id, source: meta.automated ? 'provider' : 'admin', actorId: meta.actorId ?? null, allowFailed: revived,
@@ -584,7 +625,8 @@ export function createEventsPaymentService({
           if (!['pending', 'created'].includes(payment.status)) throw refuse('event_payment_change_not_allowed', 409, { paymentStatus: payment.status });
           const code = meta.reasonCode;
           const [saved] = await trx('EventPayment').where({ id: payment.id }).update({
-            status: 'failed', rejectCode: code, failureReason: `rejected:${code}`, settledNote: isStr(meta.memberNote) && meta.memberNote.trim() ? meta.memberNote.trim().slice(0, MEMBER_NOTE_MAX) : null, updatedAt: at,
+            status: 'failed', rejectCode: code, failureReason: `rejected:${code}`, settledNote: isStr(meta.memberNote) && meta.memberNote.trim() ? meta.memberNote.trim().slice(0, MEMBER_NOTE_MAX) : null,
+            settledNoteSw: isStr(meta.memberNoteSw) && meta.memberNoteSw.trim() ? meta.memberNoteSw.trim().slice(0, MEMBER_NOTE_MAX) : null, updatedAt: at,
           }).returning('*');
           const order = plain(await trx('EventOrder').where({ id: payment.orderId }).forUpdate().first());
           const reset = await money.resetHoldAfterRejection(trx, order, { retryMs: eventsRejectedRetryMinutes() * MINUTE, maxHoursMs: (order.organizationId ? eventsOrgHoldMaxHours() : eventManualHoldMaxHours()) * HOUR });
@@ -609,8 +651,10 @@ export function createEventsPaymentService({
       await afterDecision(result, { source: meta.automated ? 'provider' : 'admin' });
     }
     if (rejection) {
-      const event = await eventOf(rejection.order.eventId);
-      await notifyRejected(rejection.order, event, rejection.payment);
+      try {
+        const event = await eventOf(rejection.order.eventId);
+        await notifyRejected(rejection.order, event, rejection.payment);
+      } catch (err) { console.warn('[events] post-commit steps failed:', rejection.order.id, err?.message); }
       await analytics('payment_failed', { orderId: rejection.order.id, eventId: rejection.order.eventId, method: rejection.payment.method ?? 'manual', code: rejection.payment.rejectCode });
     }
     return updated;
@@ -699,10 +743,12 @@ export function createEventsPaymentService({
     if (!payment) return fail('payment_row_mismatch', 409);
     if (payment.status === 'succeeded' && order.status !== 'awaiting_payment') return { repaired: false, outcome: payment.status === 'succeeded' ? 'confirmed' : null };
     if (payment.status === 'reconciliation_required' && payment.refundId) return { repaired: false, outcome: 'refund_raised', refundId: payment.refundId };
+    // A payment that was refunded (or is being) is never confirmed again, whatever its request says (security review H1).
+    if (payment.refundId || payment.failureReason === 'refunded_after_late_payment' || ['failed', 'cancelled', 'expired'].includes(payment.status)) return fail('payment_refunded_or_closed', 409, { paymentStatus: payment.status });
     let result;
     try {
       result = await db.transaction(async trx => money.confirmPaidOrder(trx, {
-        orderId, eventPaymentId: payment.id, source: 'repair', actorId, allowFailed: payment.method === 'manual', expectedAmountTzs: request.amountTzs,
+        orderId, eventPaymentId: payment.id, source: 'repair', actorId, allowFailed: false, expectedAmountTzs: request.amountTzs,
       }));
     } catch (err) {
       if (err.refusal) return err.refusal;
@@ -717,7 +763,7 @@ export function createEventsPaymentService({
   async function onEventOrderPayment(request, status) {
     if (status !== 'approved') return;
     const payment = plain(await db('EventPayment').where({ paymentRequestId: request.id }).first('status', 'orderId', 'refundId'));
-    if (!payment || payment.status === 'succeeded' || (payment.status === 'reconciliation_required' && payment.refundId)) return;
+    if (!payment || payment.refundId || ['succeeded', 'failed', 'cancelled', 'expired'].includes(payment.status)) return;
     await repairOrder({ orderId: payment.orderId, actorId: null });
   }
 
@@ -777,13 +823,14 @@ export function createEventsPaymentService({
    * Bounded per run; safe to run twice and on two servers (confirmPaidOrder and every step are idempotent).
    */
   async function sweep({ limit = 100, refunds = null } = {}) {
-    const stats = { repaired: 0, settled: 0, expired: 0, invited: 0, refundsApplied: 0, failed: 0 };
+    const stats = { repaired: 0, settled: 0, expired: 0, invited: 0, refundsApplied: 0, batchesResumed: 0, failed: 0 };
     const at = now();
     // (a) approved requests whose payment is not succeeded
     const stuck = await db('PaymentRequest as r').join('EventPayment as p', 'p.paymentRequestId', 'r.id').where('r.status', 'approved')
-      .whereNot('p.status', 'succeeded').whereNot(b => b.where('p.status', 'reconciliation_required').whereNotNull('p.refundId')).limit(limit).select('p.orderId', 'r.id as requestId');
+      .whereIn('p.status', ['created', 'pending', 'reconciliation_required']).whereNull('p.refundId').limit(limit).select('p.orderId', 'r.id as requestId');
     for (const row of stuck) {
       const out = await repairOrder({ orderId: row.orderId });
+      if (out.error === 'payment_refunded_or_closed') continue;   // nothing to repair, nothing to alert
       if (out.error) {
         stats.failed += 1;
         if (ops) { try { await ops.raise({ type: 'events_order_unconfirmed', severity: 'high', title: 'An approved event payment has not confirmed its order', dedupeKey: `evord:${row.orderId}`, entityType: 'EventOrder', entityId: row.orderId, detail: { error: out.error } }); } catch { /* best effort */ } }
@@ -817,7 +864,10 @@ export function createEventsPaymentService({
       try { const sent = await registration.inviteClaims({ orderId: o.id }); if (!sent.error) stats.invited += sent.invited; } catch { stats.failed += 1; }
     }
     // (d) paid refunds whose places were not updated (a crash between the two writes)
-    if (refunds) stats.refundsApplied = await refunds.repairPaid({ limit });
+    if (refunds) {
+      stats.refundsApplied = await refunds.repairPaid({ limit });
+      stats.batchesResumed = await refunds.resumeBatches({ limit: 20 });   // cancelled events whose refund batch stopped part-way
+    }
     return stats;
   }
 
@@ -873,7 +923,9 @@ export function createEventsPaymentService({
     if (!ring) return fail('tickets_unavailable', 503);
     const token = deriveToken(ring, { ticketId: ticket.id, tokenVersion: ticket.tokenVersion, registrationId: reg.id, eventId: reg.eventId, keyId: ticket.tokenKeyId ?? ring.keyId });
     // Integrity: the derived token must hash to what is stored; never return a token that does not.
-    if (!token || sha256hex(token) !== ticket.tokenHash) {
+    // The key this ticket was made under is gone from EVENT_TICKET_SECRET_PREVIOUS: ask for a new code instead of failing (L8).
+    if (!token) return fail('rotate_required', 409);
+    if (sha256hex(token) !== ticket.tokenHash) {
       await audit('system', 'events.ticket_integrity_failed', ticket.id, null, { registrationId: reg.id });
       return fail('ticket_integrity_failed', 500);
     }
@@ -882,7 +934,7 @@ export function createEventsPaymentService({
     const c = names.categories.get(reg.categoryId);
     return {
       ticket: { id: ticket.id, displayCode: ticket.displayCode ?? displayCodeOf(ticket.id, reg.id), state: 'active', issuedAt: iso(ticket.issuedAt), rotatedAt: iso(ticket.rotatedAt) },
-      token, qrPayload: qrPayloadOf(token), event: R().summaryOf(j),
+      token, qrPayload: qrPayloadOf(token), event: R().summaryOf(j), ticketType: names.tickets.get(reg.ticketTypeId) ? { id: reg.ticketTypeId, name: names.tickets.get(reg.ticketTypeId).name } : null,
       category: c ? { id: c.id, name: c.name, distanceM: Number(c.distanceMeters), startsAt: iso(c.startTime) } : null,
       participant: { firstName: reg.firstName, lastName: reg.lastName }, relation: relationOf(reg, userId), scanning: false,
       kit: { state: reg.kitStatus === 'exception' ? 'not_ready' : reg.kitStatus },
@@ -934,12 +986,16 @@ export function createEventsPaymentService({
   async function onClaimed(registration_) {
     try {
       const ring = keyRing();
-      if (!ring) return;
+      if (!ring) throw new Error('no ticket secret');
       const reg = plain(await db('EventRegistration').where({ id: registration_.id }).first());
       if (!reg) return;
       const active = (await ticketRows(reg.id)).find(t => t.status === 'active');
       if (active) await rotateRow(reg, active, ring, 'claim', reg.participantUserId);
-    } catch (err) { console.warn('[events] ticket rotation on claim failed:', registration_?.id, err?.message); }
+    } catch (err) {
+      // The purchaser may still hold the old code: say so where staff will see it (L7).
+      console.warn('[events] ticket rotation on claim failed:', registration_?.id, err?.message);
+      if (ops) { try { await ops.raise({ type: 'events_ticket_rotation_failed', severity: 'high', title: 'A ticket code was not rotated after a claim', dedupeKey: `evrot:${registration_?.id}`, entityType: 'EventRegistration', entityId: registration_?.id, detail: { error: String(err?.message ?? err).slice(0, 200) } }); } catch { /* best effort */ } }
+    }
   }
 
   /** The per-registration ticket summary for the registration detail page. */

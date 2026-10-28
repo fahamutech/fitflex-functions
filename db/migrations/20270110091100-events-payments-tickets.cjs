@@ -52,6 +52,7 @@ exports.up = async function up(knex) {
     // The Idempotency-Key convention is `${orderId}:${key}` (the column is globally unique, the key is per order);
     // the fingerprint of the request body lives beside it so a replay can tell "same request" from "same key, other body".
     t.text('idempotencyFingerprint');
+    t.text('settledNoteSw');   // the member-visible rejection note in Swahili, when staff wrote one (settledNote is what they typed)
     t.index(['eventId']);
   });
   await knex.raw(`ALTER TABLE "EventPayment"
@@ -123,6 +124,7 @@ exports.up = async function up(knex) {
     t.jsonb('policySnapshot');
     t.text('batchId');
     t.text('eventPaymentId');
+    t.text('decisionNoteSw');   // the member-visible rejection note in Swahili, when staff wrote one
     t.index(['eventId']);
     t.index(['batchId']);
   });
@@ -158,7 +160,7 @@ exports.down = async function down(knex) {
   await knex.schema.alterTable('Refund', (t) => {
     t.dropIndex(['eventId']);
     t.dropIndex(['batchId']);
-    for (const c of ['eventId', 'eventOrderId', 'eventRegistrationId', 'organizerId', 'organizationId', 'scope', 'policySnapshot', 'batchId', 'eventPaymentId']) t.dropColumn(c);
+    for (const c of ['eventId', 'eventOrderId', 'eventRegistrationId', 'organizerId', 'organizationId', 'scope', 'policySnapshot', 'batchId', 'eventPaymentId', 'decisionNoteSw']) t.dropColumn(c);
   });
   await knex.raw(`ALTER TABLE "Refund" DROP CONSTRAINT refund_ck`);
   await knex.raw(`ALTER TABLE "Refund" ADD CONSTRAINT refund_ck ${REFUND_CK(['subscription', 'trainer_booking', 'shop_order'])}`);
@@ -189,6 +191,6 @@ exports.down = async function down(knex) {
   await knex.raw(`ALTER TABLE "EventPayment" DROP CONSTRAINT IF EXISTS eventpayment_method_check, DROP CONSTRAINT IF EXISTS eventpayment_payer_method_check, DROP CONSTRAINT IF EXISTS eventpayment_reject_code_check`);
   await knex.schema.alterTable('EventPayment', (t) => {
     t.dropIndex(['eventId']);
-    for (const c of ['eventId', 'organizerId', 'submittedAt', 'method', 'rejectCode', 'lateOrder', 'refundId', 'settledNote', 'organizationId', 'payerMethod', 'paidOn', 'idempotencyFingerprint']) t.dropColumn(c);
+    for (const c of ['eventId', 'organizerId', 'submittedAt', 'method', 'rejectCode', 'lateOrder', 'refundId', 'settledNote', 'organizationId', 'payerMethod', 'paidOn', 'idempotencyFingerprint', 'settledNoteSw']) t.dropColumn(c);
   });
 };

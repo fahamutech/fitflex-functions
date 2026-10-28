@@ -279,14 +279,14 @@ export function createAdminPaymentService({
 
   const referenceChanged = (request, reference) => reference != null && reference !== '' && reference !== request.reference;
 
-  async function decide({ id, decision, reference, note, actorId, amountTzs = null, automated = false, reasonCode = null, memberNote = null, providerPayload = null }) {
+  async function decide({ id, decision, reference, note, actorId, amountTzs = null, automated = false, reasonCode = null, memberNote = null, memberNoteSw = null, providerPayload = null }) {
     if (!['approve', 'reject'].includes(decision)) return { error: 'invalid_decision', status: 400 };
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
     // S4: rejecting an event payment needs a reason code (a closed set) so the member can correct it.
     if (decision === 'reject' && request.eventOrderId) {
-      const bad = checkEventRejection({ reasonCode, memberNote });
+      const bad = checkEventRejection({ reasonCode, memberNote, memberNoteSw });
       if (bad) return bad;
     }
     // Approving with no reference typed, and none recorded yet (e.g. by a verifying admin),
@@ -318,7 +318,7 @@ export function createAdminPaymentService({
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
       decidedBy: actorId
-    }, guard, { actorId, automated, reasonCode, memberNote, amountTzs, providerPayload });
+    }, guard, { actorId, automated, reasonCode, memberNote, memberNoteSw, amountTzs, providerPayload });
     // Another decision got there first (two staff members, or a double click).
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (updated?.error) return updated;
@@ -334,7 +334,7 @@ export function createAdminPaymentService({
     return event ? { paymentRequest: updated, event } : { paymentRequest: updated };
   }
 
-  async function update({ id, status, reference, note, actorId, amountTzs = null, reasonCode = null, memberNote = null }) {
+  async function update({ id, status, reference, note, actorId, amountTzs = null, reasonCode = null, memberNote = null, memberNoteSw = null }) {
     const allowed = ['pending', 'approved', 'rejected', 'cancelled'];
     if (status && !allowed.includes(status)) return { error: 'invalid_status', status: 400 };
     const request = await paymentRequests.findAsync(p => p.id === id);
@@ -342,7 +342,7 @@ export function createAdminPaymentService({
     const nextStatus = status || request.status;
     // S4: rejecting an event payment needs a reason code, however it is done.
     if (request.eventOrderId && nextStatus === 'rejected' && request.status !== 'rejected') {
-      const bad = checkEventRejection({ reasonCode, memberNote });
+      const bad = checkEventRejection({ reasonCode, memberNote, memberNoteSw });
       if (bad) return bad;
     }
     if (secondApprover()) {
@@ -362,6 +362,10 @@ export function createAdminPaymentService({
     }
     // A confirmed shop-order (or event-order) payment is not edited back: the order is paid, maybe fulfilled.
     // Getting the money back is the refund workflow.
+    // L4: nor is the reference of a confirmed event payment rewritten.
+    if (request.eventOrderId && request.status === 'approved' && referenceChanged(request, reference)) {
+      return { error: 'payment_already_confirmed', status: 409 };
+    }
     if ((request.orderId || request.eventOrderId) && request.status === 'approved' && nextStatus !== 'approved') {
       return { error: 'payment_already_confirmed', status: 409 };
     }
@@ -390,7 +394,7 @@ export function createAdminPaymentService({
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
       decidedBy: nextStatus === 'pending' ? null : (keepDecider ? request.decidedBy : actorId)
     // Flag on: only while the verification read still stands (a stale read cannot overwrite a verified payment).
-    }, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {}, { actorId, amountTzs, reasonCode, memberNote });
+    }, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {}, { actorId, amountTzs, reasonCode, memberNote, memberNoteSw });
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
     if (updated?.error) return updated;
     if (!updated) return { error: 'payment_changed', status: 409 };

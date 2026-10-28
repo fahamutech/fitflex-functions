@@ -25,11 +25,11 @@ export const adminPaymentRequests = {
 
 export const adminDecidePaymentRequest = {
   created, method: 'post', path: '/admin/payment-requests/:id/decision',
-  description: 'Admin: approve or reject a pilot payment request. Approval activates the subscription (or pays the shop order). Optional amountTzs is the amount actually received: a mismatch is refused (409 amount_mismatch); for an EVENT_ORDER request it is REQUIRED (400 amount_required) and a reject needs reasonCode (reference_not_found | amount_mismatch | wrong_account | duplicate_reference | other; 400 reason_code_required) plus memberNote (≤140, required for other: 400 note_required); the response then also carries event { outcome: confirmed | reheld | refund_raised, … }. A reference confirms one shop order only (409 reference_already_used). A request already decided is 409 already_decided. With MONEY_SECOND_APPROVER on, approving needs a verification first (409 verification_required) by a different admin (403 cannot_approve_own_verification), with the verified reference (409 reference_differs_from_verification), and a reference already on another approved payment is refused (409 reference_already_used); rejecting stays single-admin.',
+  description: 'Admin: approve or reject a pilot payment request. Approval activates the subscription (or pays the shop order). Optional amountTzs is the amount actually received: a mismatch is refused (409 amount_mismatch); for an EVENT_ORDER request it is REQUIRED (400 amount_required) and a reject needs reasonCode (reference_not_found | amount_mismatch | wrong_account | duplicate_reference | other; 400 reason_code_required) plus memberNote (≤140, required for other: 400 note_required) and an optional memberNoteSw (≤140, the Swahili version of the note; without it the English note is labelled as such in the Swahili message); the response then also carries event { outcome: confirmed | reheld | refund_raised, … }. A reference confirms one shop order only (409 reference_already_used). A request already decided is 409 already_decided. With MONEY_SECOND_APPROVER on, approving needs a verification first (409 verification_required) by a different admin (403 cannot_approve_own_verification), with the verified reference (409 reference_differs_from_verification), and a reference already on another approved payment is refused (409 reference_already_used); rejecting stays single-admin.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => {
-    const { decision, reference, note, amountTzs, reasonCode, memberNote } = req.body || {};
-    const result = await adminPaymentService.decide({ id: req.params.id, decision, reference, note, amountTzs, reasonCode, memberNote, actorId: req.user.sub });
+    const { decision, reference, note, amountTzs, reasonCode, memberNote, memberNoteSw } = req.body || {};
+    const result = await adminPaymentService.decide({ id: req.params.id, decision, reference, note, amountTzs, reasonCode, memberNote, memberNoteSw, actorId: req.user.sub });
     if (result.error) {
       const { error, status, ...extra } = result;
       return res.status(status).json({ error, ...extra });
@@ -43,8 +43,8 @@ export const adminUpdatePaymentRequest = {
   description: 'Admin: update pilot payment request status, reference, and note. With MONEY_SECOND_APPROVER on: a decided payment only takes note edits (status or reference change is 409 change_requires_confirmation: use /change-request); pending → approved follows the verify rule (409 verification_required, 403 cannot_approve_own_verification); a verified payment keeps its reference (409 reference_differs_from_verification); a mobile-money payment keeps its provider reference (409 reference_locked_provider); approving with a reference already on another approved payment is 409 reference_already_used.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => {
-    const { status, reference, note, amountTzs, reasonCode, memberNote } = req.body || {};
-    const result = await adminPaymentService.update({ id: req.params.id, status, reference, note, amountTzs, reasonCode, memberNote, actorId: req.user.sub });
+    const { status, reference, note, amountTzs, reasonCode, memberNote, memberNoteSw } = req.body || {};
+    const result = await adminPaymentService.update({ id: req.params.id, status, reference, note, amountTzs, reasonCode, memberNote, memberNoteSw, actorId: req.user.sub });
     if (result.error) {
       const { error, status: code, ...extra } = result;
       return res.status(code).json({ error, ...extra });

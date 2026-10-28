@@ -417,6 +417,9 @@ test('unfulfilled-payment refunds: admin raises one for an approved payment whos
   await db('PaymentRequest').where({ id: req2.id }).update({ status: 'approved', decidedAt: new Date(), reference: 'MM-88' });
   await eventStore.releaseOrder(o2.order.id, 'admin');
   const p2 = await db('EventPayment').where({ orderId: o2.order.id }).first();
+  // a still-pending payment is not "money held": the sweep / approval decides it (M1)
+  assert.deepEqual([(await call(adminRaiseRefund, a, { body: { eventPaymentId: p2.id, reasonCode: 'payment_error' } })).body.error], ['payment_not_unfulfilled']);
+  await db('EventPayment').where({ id: p2.id }).update({ status: 'reconciliation_required', failureReason: 'order_cancelled' });
   assert.equal((await call(adminRaiseRefund, a, { body: { eventPaymentId: p2.id, amountTzs: 99999, reasonCode: 'payment_error' } })).body.error, 'amount_exceeds_payment');
   const raised = await call(adminRaiseRefund, a, { body: { eventPaymentId: p2.id, amountTzs: 15000, reasonCode: 'payment_error', note: 'order was cancelled' } });
   assert.equal(raised.status, 201, JSON.stringify(raised.body));

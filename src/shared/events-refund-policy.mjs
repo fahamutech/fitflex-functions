@@ -74,7 +74,7 @@ export function describePolicy(policy) {
       const tiers = (p.tiers || []).filter(t => isInt(t.daysBefore) && isInt(t.percent));
       if (!tiers.length) return null;
       const en = tiers.map(t => `${t.percent}% until ${t.daysBefore} ${t.daysBefore === 1 ? 'day' : 'days'} before`).join(', then ');
-      const sw = tiers.map(t => `asilimia ${t.percent} hadi siku ${t.daysBefore} kabla`).join(', kisha ');
+      const sw = tiers.map((t, i) => `${i === 0 ? 'marejesho ya asilimia' : 'asilimia'} ${t.percent} hadi siku ${t.daysBefore} kabla ya tukio`).join(', kisha ');
       return { en: `${en[0].toUpperCase()}${en.slice(1)}, then no refund.`, sw: `${sw[0].toUpperCase()}${sw.slice(1)}, kisha hakuna marejesho.` };
     }
     default: return null;

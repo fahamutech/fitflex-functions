@@ -16,7 +16,7 @@ const DAY = 24 * HOUR;
 const limiters = {
   initiateUser: createVendorLimiter({ perMinute: 10, windowMs: HOUR }),
   initiateOrder: createVendorLimiter({ perMinute: 20, windowMs: HOUR }),
-  status: createVendorLimiter({ perMinute: 120, windowMs: HOUR }),
+  status: createVendorLimiter({ perMinute: 240, windowMs: HOUR }),   // per ORDER: a 30-second poll is 120 an hour, two screens 240
   ticketRead: createVendorLimiter({ perMinute: 60, windowMs: HOUR }),
   ticketRotate: createVendorLimiter({ perMinute: 5, windowMs: DAY }),
   preview: createVendorLimiter({ perMinute: 60, windowMs: HOUR }),
@@ -56,10 +56,10 @@ export const payForEventOrder = {
 
 export const eventOrderPaymentStatus = {
   created, method: 'get', path: '/me/event-orders/:id/payment-status',
-  description: 'Member (purchaser only): where the payment of one order stands, cheap enough to poll every 30 s (120/h) → { order { id, status, holdExpiresAt, totalTzs, currency }, payment: PaymentView | null, refund: RefundView | null }. PaymentView { id, state: submitted | processing | confirmed | rejected | failed | expired | needs_attention | none, method, amountTzs, currency, reference (the member\'s own transaction ID), payerPhoneMasked, submittedAt, decidedAt, confirmTargetAt, rejectCode, memberNote, late, canRetry, refundId }. Never staff names, internal notes, approval stages or provider payloads. Reads need only EVENTS_REGISTRATION.',
+  description: 'Member (purchaser only): where the payment of one order stands, cheap enough to poll every 30 s (240/h per order) → { order { id, status, holdExpiresAt, totalTzs, currency }, payment: PaymentView | null, refund: RefundView | null }. PaymentView { id, state: submitted | processing | confirmed | rejected | failed | expired | needs_attention | none, method, amountTzs, currency, reference (the member\'s own transaction ID), payerPhoneMasked, submittedAt, decidedAt, confirmTargetAt, rejectCode, memberNote, late, canRetry, refundId }. Never staff names, internal notes, approval stages or provider payloads. Reads need only EVENTS_REGISTRATION.',
   onGuard: member('get'),
   onRequest: async (req, res) => {
-    if (limitOrNull(limiters.status, `s:${req.user.sub}`, res)) return undefined;
+    if (limitOrNull(limiters.status, `s:${req.params.id}`, res)) return undefined;
     return send(res, await payments.paymentStatus({ userId: req.user.sub, orderId: req.params.id }));
   },
 };
@@ -89,7 +89,7 @@ export const rotateEventTicket = {
   description: 'Member (same access as reading the ticket): a new code — the old one stops matching at once → the ticket body of GET …/ticket. 5 per day per ticket (429 rate_limited); 409 ticket_revoked; 404 registration_not_found. Cache-Control: no-store.',
   onGuard: member('post'),
   onRequest: async (req, res) => {
-    if (limitOrNull(limiters.ticketRotate, `r:${req.params.id}`, res)) return undefined;
+    if (limitOrNull(limiters.ticketRotate, `r:${req.user.sub}:${req.params.id}`, res)) return undefined;
     noStore(res);
     return send(res, await payments.rotateTicket({ userId: req.user.sub, registrationId: req.params.id }));
   },
@@ -124,7 +124,7 @@ export const resendEventClaimInvitation = {
   description: 'Member (purchaser): send the claim invitation for one unclaimed, non-self place of a PAID order again. Body { registrationId } → { sent, channel: sms | email | null, nextAllowedAt, invalidatesPreviousLink }. It mints a NEW link: the previous one stops working. 3 per day per place and at most 5 sends (409 resend_limit_reached); 409 order_not_confirmed | not_resendable; 404 order_not_found | registration_not_found.',
   onGuard: member('post'),
   onRequest: async (req, res) => {
-    if (limitOrNull(limiters.resend, `c:${req.body?.registrationId}`, res)) return undefined;
+    if (limitOrNull(limiters.resend, `c:${req.user.sub}:${req.body?.registrationId}`, res)) return undefined;
     return send(res, await payments.resendClaim({ userId: req.user.sub, orderId: req.params.id, registrationId: req.body?.registrationId }));
   },
 };

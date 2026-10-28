@@ -17,7 +17,7 @@ const validateLimiter = createVendorLimiter({ perMinute: 20 });
 // S4: payment notices, 10 per hour per organisation; status polls and previews, 120 / 60 per hour per user; resend 3 per day per place.
 const HOUR = 3_600_000;
 const paymentLimiter = createVendorLimiter({ perMinute: 10, windowMs: HOUR });
-const statusLimiter = createVendorLimiter({ perMinute: 120, windowMs: HOUR });
+const statusLimiter = createVendorLimiter({ perMinute: 240, windowMs: HOUR });   // per order
 const previewLimiter = createVendorLimiter({ perMinute: 60, windowMs: HOUR });
 const resendLimiter = createVendorLimiter({ perMinute: 3, windowMs: 24 * HOUR });
 export const resetEventsCorporateLimits = () => [validateLimiter, paymentLimiter, statusLimiter, previewLimiter, resendLimiter].forEach(l => l.reset());
@@ -98,10 +98,10 @@ export const payB2BEventOrder = {
 
 export const b2bEventOrderPaymentStatus = {
   created, method: 'get', path: '/b2b/organizations/:id/event-orders/:orderId/payment-status',
-  description: 'Organisation user with a billing role: where the payment of one corporate order stands (as GET /me/event-orders/:id/payment-status; 120 per hour per user) → { order, payment: PaymentView | null, refund: RefundView | null }. Reads need only EVENTS_REGISTRATION.',
+  description: 'Organisation user with a billing role: where the payment of one corporate order stands (as GET /me/event-orders/:id/payment-status; 240 per hour per order) → { order, payment: PaymentView | null, refund: RefundView | null }. Reads need only EVENTS_REGISTRATION.',
   onGuard: guard('get'),
   onRequest: (req, res) => inOrganization(req, res, async (access) => {
-    const allowed = statusLimiter.allow(`status:${req.user.sub}`);
+    const allowed = statusLimiter.allow(`status:${req.params.orderId}`);
     if (!allowed.ok) { res.set?.('Retry-After', String(allowed.retryAfterSeconds)); return { error: 'rate_limited', status: 429, retryAfterSeconds: allowed.retryAfterSeconds }; }
     return payments.paymentStatus({ access, orderId: req.params.orderId });
   }),
@@ -123,7 +123,7 @@ export const resendB2BEventClaimInvitation = {
   description: 'Organisation user with a billing role: send the claim invitation for one unclaimed place of a PAID corporate order again. Body { registrationId } → { sent, channel, nextAllowedAt, invalidatesPreviousLink } (the previous link stops working). 3 per day per place and at most 5 sends: 409 resend_limit_reached.',
   onGuard: guard('post'),
   onRequest: (req, res) => inOrganization(req, res, async (access) => {
-    const allowed = resendLimiter.allow(`resend:${req.body?.registrationId}`);
+    const allowed = resendLimiter.allow(`resend:${req.user.sub}:${req.body?.registrationId}`);
     if (!allowed.ok) { res.set?.('Retry-After', String(allowed.retryAfterSeconds)); return { error: 'rate_limited', status: 429, retryAfterSeconds: allowed.retryAfterSeconds }; }
     return payments.resendClaim({ access, orderId: req.params.orderId, registrationId: req.body?.registrationId });
   }),

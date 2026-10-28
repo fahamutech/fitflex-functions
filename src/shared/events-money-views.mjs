@@ -31,6 +31,8 @@ export function refundView(r) {
     paidTo: r.status === 'paid' ? maskPaidTo(r.paidTo) : null,
     paymentReference: r.status === 'paid' ? (r.paymentReference ?? null) : null,
     rejectionNote: r.status === 'rejected' ? (r.decisionNote ?? null) : null,
+    // Staff type the note in one language; the Swahili one is there only when they wrote it (clients label the English one).
+    rejectionNoteSw: r.status === 'rejected' ? (r.decisionNoteSw ?? null) : null,
   };
 }
 

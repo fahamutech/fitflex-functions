@@ -29,6 +29,7 @@ import {
 } from '../shared/events-participants.mjs';
 import { swahiliTime } from '../shared/vendor-documents.mjs';
 import { storeRefusal } from '../infra/event-store-pg.mjs';
+import { refundView } from '../shared/events-money-views.mjs';
 import { paginate } from '../shared/pagination.mjs';
 import {
   eventsMaxParticipantsPerOrder, eventsCorporateMaxRows, eventsTeamMaxMembers, eventsClaimTokenDays, eventsConsentTextVersion, eventsFeeRule, eventsOrgDiscounts, feeLabelFor, ORG_DISCOUNT_LABEL,
@@ -612,7 +613,7 @@ export function createEventsRegistrationService({
           id: `ntf_evx_${order.id}`.slice(0, 60), type: 'event_order_expired',
           en: waiting
             ? { title: 'Your hold ended while we were checking', body: `Your places for ${event.title} were released. If you paid, we will try to re-reserve them; if they are gone we will refund you in full.` }
-            : { title: 'Your places were released', body: `The ${minutes}-minute hold for ${event.title} ended before payment. You can register again if places remain.` },
+            : { title: 'Your places were released', body: `The ${minutes === 1 ? 'one-minute' : `${minutes}-minute`} hold for ${event.title} ended before payment. You can register again if places remain.` },
           sw: waiting
             ? { title: 'Muda wa kushikilia umeisha wakati tunakagua', body: `Tiketi zako za ${event.title} zimeachiliwa. Kama ulilipa, tutajaribu kukuwekea tena; zikiwa zimeisha tutakurejeshea pesa zote.` }
             : { title: 'Tiketi zako zimeachiliwa', body: `Muda wa dakika ${minutes} wa kushikilia tiketi za ${event.title} umeisha kabla ya malipo. Unaweza kujisajili tena kama bado kuna tiketi.` },
@@ -859,8 +860,15 @@ export function createEventsRegistrationService({
     return {
       ...row, kitSize: full.kitSize, dateOfBirth: full.dateOfBirth, gender: full.gender, phone: full.phone, email: full.email, emergencyContact: full.emergencyContact,
       consentBasis: r.consentBasis, consentAt: full.consentAt, consentTextVersion: full.consentTextVersion, claimedAt: full.claimedAt, cancelReason: r.cancelReason ?? null,
+      refunds: isPurchaser ? await placeRefunds(r) : [],
       purchaser, allowedActions: await registrationActions(r, o, isPurchaser), ticket: getPayments() && ['confirmed', 'cancelled', 'refunded'].includes(r.status) && getPayments().mayViewTicket(r, userId) ? await getPayments().ticketSummary(r.id) : null,
     };
+  }
+
+  /** The refunds that cover this place (its own, or the order-level one that holds it), member view. */
+  async function placeRefunds(r) {
+    const rows = await db('Refund').where({ kind: 'event_order' }).where(b => { b.where({ eventRegistrationId: r.id }); if (r.refundId) b.orWhere({ id: r.refundId }); }).orderBy('createdAt', 'desc');
+    return rows.map(x => refundView(x));
   }
 
   /** The actions on one place: cancel while unpaid (not while a payment is being checked), cancel and refund once paid. */
@@ -1175,11 +1183,11 @@ export function createEventsRegistrationService({
     return { items: page.items, nextCursor: page.nextCursor === null ? null : String(page.nextCursor), total: page.total };
   }
 
-  async function adminCancelOrder({ eventId, orderId, body = {}, actorId }) {
+  async function adminCancelOrder({ eventId, orderId, body = {}, actorId, withPayments = false }) {
     const loaded = await eventStore.getOrder(orderId);
     if (!loaded || loaded.order.eventId !== eventId) return fail('order_not_found', 404);
     // S4: a paid order is cancelled with a refund mode (full | policy | none); the refund is a `payments` step for a second admin.
-    if (['confirmed', 'partially_cancelled', 'refund_pending'].includes(loaded.order.status) && getRefunds()) return getRefunds().adminCancelPaidOrder({ eventId, orderId, body, actorId });
+    if (['confirmed', 'partially_cancelled', 'refund_pending'].includes(loaded.order.status) && getRefunds()) return getRefunds().adminCancelPaidOrder({ eventId, orderId, body, actorId, withPayments });
     const note = isStr(body.note) ? body.note.trim().slice(0, 500) : '';
     const r = await eventStore.releaseOrder(orderId, 'admin', { cancelReason: 'admin' });
     if (r.error) return r;

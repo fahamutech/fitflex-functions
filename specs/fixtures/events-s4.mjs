@@ -12,7 +12,7 @@ export const DETAILS = { lipaNamba: '5123456', accountName: 'FitFlex Africa Ltd'
 export const S4_ENV = [
   'EVENT_TICKET_SECRET', 'EVENT_TICKET_KEY_ID', 'EVENT_TICKET_SECRET_PREVIOUS', 'EVENTS_PAYMENTS_MANUAL', 'EVENTS_PAYMENTS_TUNZAA', 'MANUAL_PAY_INSTRUCTIONS', 'MONEY_SECOND_APPROVER',
   'EVENT_MANUAL_HOLD_EXTEND_HOURS', 'EVENT_MANUAL_HOLD_MAX_HOURS', 'EVENTS_ORG_HOLD_MAX_HOURS', 'EVENTS_REJECTED_RETRY_MINUTES', 'EVENTS_LATE_PAYMENT_GRACE_HOURS',
-  'EVENTS_MANUAL_CONFIRM_SLA_HOURS', 'EVENTS_REFUND_TARGET_DAYS', 'TUNZAA_PAYMENTS', 'TUNZAA_SANDBOX_SETTLES',
+  'EVENTS_MANUAL_CONFIRM_SLA_HOURS', 'EVENTS_REFUND_TARGET_DAYS', 'TUNZAA_PAYMENTS', 'TUNZAA_SANDBOX_SETTLES', 'EVENTS_ALLOW_SINGLE_APPROVER',
 ];
 
 /** EVENTS_MODULE + EVENTS_REGISTRATION + the manual payment path + the ticket secret (+ MONEY_SECOND_APPROVER on request). */
@@ -22,6 +22,7 @@ export function s4On({ secondApprover = false, tunzaa = false } = {}) {
   process.env.EVENTS_PAYMENTS_MANUAL = '1';
   process.env.MANUAL_PAY_INSTRUCTIONS = '1';
   if (secondApprover) process.env.MONEY_SECOND_APPROVER = '1';
+  else process.env.EVENTS_ALLOW_SINGLE_APPROVER = '1';   // the launch gate (M4); specs of the gate itself clear it
   if (tunzaa) process.env.EVENTS_PAYMENTS_TUNZAA = '1';
 }
 export function s4Off() {

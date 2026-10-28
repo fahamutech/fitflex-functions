@@ -911,6 +911,7 @@ export const refundService = createRefundService({
   onPaid: refund => (refund.kind === 'shop_order' ? shopService.markOrderRefunded(refund.orderId) : refund.kind === 'event_order' ? eventsRefundsService.onPaid(refund) : null),
   // Marathon & Events S4 (kind event_order; eventsRefundsService is defined further down, these only run at request time).
   onApproved: refund => eventsRefundsService.onApproved(refund),
+  beforePaid: refund => (refund.kind === 'event_order' ? eventsRefundsService.beforePaid(refund) : null),
   onRejected: refund => eventsRefundsService.onRejected(refund),
   tellEvent: async (refund, type, extra) => eventsRefundsService.tellRefund(refund, await db('Event').where({ id: refund.eventId }).first('title'), type, extra),
   enrichRows: rows => eventsRefundsService.enrich(rows),
@@ -1252,7 +1253,7 @@ opsService.register({
   run: async () => {
     if (!eventsRegistrationOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
     const r = await eventsPaymentsService.sweep({ refunds: eventsRefundsService });
-    const processed = r.repaired + r.settled + r.expired + r.invited + r.refundsApplied + r.failed;
+    const processed = r.repaired + r.settled + r.expired + r.invited + r.refundsApplied + r.batchesResumed + r.failed;
     return { processed, succeeded: processed - r.failed, failed: r.failed, ...r };
   },
 });

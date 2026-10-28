@@ -378,6 +378,14 @@ export function eventsPaymentsTunzaaOn() {
   return eventsRegistrationOn() && on('EVENTS_PAYMENTS_TUNZAA');
 }
 
+/**
+ * S4 launch gate (security review M4): event payments are taken only with two admins on money (MONEY_SECOND_APPROVER) unless the
+ * owner explicitly accepts a single approver with EVENTS_ALLOW_SINGLE_APPROVER=1 (default off).
+ */
+export function eventsApproverGateOpen() {
+  return moneySecondApproverOn() || on('EVENTS_ALLOW_SINGLE_APPROVER');
+}
+
 /** S4: payment intake (initiate, provider prompt, corporate notice) is on in either mode. */
 export function eventsPaymentIntakeOn() {
   return eventsPaymentsManualOn() || eventsPaymentsTunzaaOn();

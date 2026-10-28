@@ -15,7 +15,7 @@
 // Percent never rounds up: floor(paid × percent / 100) per place. Money is whole TZS (D4). Payout stays manual.
 import { randomUUID } from 'node:crypto';
 import { storeRefusal } from '../infra/event-store-pg.mjs';
-import { newRefundId } from '../infra/event-money-store-pg.mjs';
+import { newRefundId, billingRecipients, refundRecipient } from '../infra/event-money-store-pg.mjs';
 import { evaluateRefund, normalisePolicy, describePolicy, refundFor } from '../shared/events-refund-policy.mjs';
 import { policyView } from '../shared/events-document.mjs';
 import { MEMBER_CANCEL_REASONS } from '../shared/events-participants.mjs';
@@ -149,6 +149,28 @@ export function createEventsRefundService({
     return previewOf({ order: o, regs: loaded.registrations });
   }
 
+  /** GET /admin/events/:id/orders/:orderId/cancel-preview — what each refundMode would refund (full | policy | none), before the dialog confirms. */
+  async function adminOrderCancelPreview({ eventId, orderId }) {
+    const loaded = await eventStore.getOrder(orderId);
+    if (!loaded || loaded.order.eventId !== eventId) return fail('order_not_found', 404);
+    const live = loaded.registrations.filter(r => r.status === 'confirmed');
+    if (!live.length) return fail('nothing_to_cancel', 409, { orderStatus: loaded.order.status });
+    const ctx = await contextOf(db, loaded.order);
+    const at = now();
+    const ev = evaluatePlaces(ctx, live, at);
+    const evaluable = ev.mode === 'auto' || ev.mode === 'none' || ev.mode === 'closed';
+    const blocked = ctx.event?.status === 'cancelled' ? 'event_cancelled' : live.some(r => r.refundId) ? 'refund_in_progress' : null;
+    return {
+      eligible: !blocked, blocked, paidTzs: ev.paidTzs, currency: loaded.order.currency, releaseInventory: live.some(r => canResell(ctx, r, at)),
+      modes: {
+        full: { refundTzs: ev.paidTzs },
+        policy: { evaluable, mode: ev.mode, percent: ev.percent, refundTzs: evaluable ? (ev.mode === 'closed' ? 0 : ev.refundTzs) : null, ...(evaluable ? {} : { error: 'policy_not_evaluable' }) },
+        none: { refundTzs: 0, requiresScope: 'payments' },
+      },
+      policy: policySummary(ctx.event.refundPolicySnapshot ?? ctx.event.refundPolicy), places: ev.places,
+    };
+  }
+
   // ── The cancellation transaction ───────────────────────────────────────────
 
   async function insertRefund(trx, row) {
@@ -186,6 +208,8 @@ export function createEventsRefundService({
         // Members are blocked by every reason; an admin can still cancel after the window or the kit, but not an event FitFlex
         // already cancelled (its batch handles the refunds) and not a place another refund covers.
         if (blocked && (!isAdmin || ['event_cancelled', 'refund_in_progress'].includes(blocked))) throw refuse(blocked, 409);
+        // An admin's `policy` on a custom (human-judged) policy has no amount to compute: they pick full or none (ruling a).
+        if (isAdmin && refundMode === 'policy' && ev.mode === 'manual_review') throw refuse('policy_not_evaluable', 409);
         const mode = isAdmin
           ? (refundMode === 'none' ? 'none' : refundMode === 'full' ? 'full' : (ev.mode === 'closed' ? 'none' : ev.mode === 'manual_review' ? 'full' : ev.mode))
           : ev.mode;
@@ -196,7 +220,8 @@ export function createEventsRefundService({
           if (expectedRefundTzs !== (ev.mode === 'closed' ? 0 : ev.refundTzs)) throw refuse('refund_changed', 409, { refundTzs: ev.refundTzs });
         }
         const releaseInventory = live.some(r => canResell(ctx, r, at));
-        const memberId = corporate ? order.createdByUserId : (order.purchaserUserId ?? order.createdByUserId);
+        const memberId = await refundRecipient(trx, order);
+        if (!memberId) throw refuse('refund_recipient_missing', 409);
         const base = {
           memberId, kind: 'event_order', scope, eventId: order.eventId, eventOrderId: order.id, eventRegistrationId: scope === 'registration' ? live[0].id : null,
           organizerId: ctx.event.organizerId, organizationId: order.organizationId ?? null, eventPaymentId: (await trx('EventPayment').where({ orderId, status: 'succeeded' }).first('id'))?.id ?? null,
@@ -298,12 +323,14 @@ export function createEventsRefundService({
   }
 
   /** Admin: cancel a paid order with a refund mode (the refund is then a `payments` step, approved by a second admin). */
-  async function adminCancelPaidOrder({ eventId, orderId, body = {}, actorId }) {
+  async function adminCancelPaidOrder({ eventId, orderId, body = {}, actorId, withPayments = false }) {
     const loaded = await eventStore.getOrder(orderId);
     if (!loaded || loaded.order.eventId !== eventId) return fail('order_not_found', 404);
     const note = isStr(body.note) ? body.note.trim().slice(0, 500) : '';
     if (note.length < 5) return fail('note_required', 400, { min: 5 });
     if (!['full', 'policy', 'none'].includes(body.refundMode)) return fail('refund_mode_required', 400, { allowed: ['full', 'policy', 'none'] });
+    // Giving no refund at all is a money decision: it needs the payments scope (M5). full / policy only create requests.
+    if (body.refundMode === 'none' && !withPayments) return fail('payments_scope_required', 403, { requiredScope: 'payments' });
     return runCancel({ orderId, scope: 'order', reason: 'admin', actor: { id: actorId, role: 'admin' }, refundMode: body.refundMode, note, corporate: Boolean(loaded.order.organizationId && !loaded.order.purchaserUserId) });
   }
 
@@ -323,48 +350,73 @@ export function createEventsRefundService({
   // ── Refund notifications (bilingual; kind event_order) ─────────────────────
 
   async function tellRefund(refund, event, type, extra = {}) {
-    const to = refund.memberId;
+    // Organisation refunds go to a coordinator who still holds a billing role, else to the organisation's billing contacts (ruling b).
+    let targets = [refund.memberId];
+    if (refund.organizationId && refund.eventOrderId) {
+      const order = plain(await db('EventOrder').where({ id: refund.eventOrderId }).first());
+      if (order) targets = (await billingRecipients(db, order)).length ? await billingRecipients(db, order) : [refund.memberId];
+    }
     const money_ = formatTsh(refund.amountTzs);
-    const title = event?.title ?? 'the event';
+    // Each language has its own fallback for a missing title (no English word in a Swahili sentence).
+    const titleEn = event?.title ?? 'the event';
+    const titleSw = event?.title ?? 'tukio';
+    const noteEn = extra.note ?? refund.decisionNote ?? null;
+    // Staff type the note in one language. Swahili is the staff's own when they wrote it; otherwise the English note is labelled.
+    const noteSw = extra.noteSw ?? refund.decisionNoteSw ?? (noteEn ? `Maelezo kutoka FitFlex (kwa Kiingereza): ${noteEn}` : null);
     const texts = {
-      requested: { t: ['Refund request received', 'Ombi la marejesho limepokelewa'], b: [`We have your request for ${money_} for ${title}. FitFlex will reply soon.`, `Tumepokea ombi lako la ${money_} la ${title}. FitFlex itajibu hivi karibuni.`], type: 'event_refund_requested' },
-      requested_by_fitflex: { t: ['Refund being prepared', 'Marejesho yanaandaliwa'], b: [`FitFlex is preparing a refund of ${money_} for ${title}. We will tell you when it is sent.`, `FitFlex inaandaa marejesho ya ${money_} ya ${title}. Tutakuarifu yatakapotumwa.`], type: 'event_refund_requested' },
+      requested: { t: ['Refund request received', 'Ombi la marejesho limepokelewa'], b: [`We have your request for ${money_} for ${titleEn}. FitFlex will reply soon.`, `Tumepokea ombi lako la ${money_} la ${titleSw}. FitFlex itajibu hivi karibuni.`], type: 'event_refund_requested' },
+      requested_by_fitflex: { t: ['Refund being prepared', 'Marejesho yanaandaliwa'], b: [`FitFlex is preparing a refund of ${money_} for ${titleEn}. We will tell you when it is sent.`, `FitFlex inaandaa marejesho ya ${money_} ya ${titleSw}. Tutakuarifu yatakapotumwa.`], type: 'event_refund_requested' },
       approved: { t: ['Refund approved', 'Marejesho yameidhinishwa'], b: [`Your refund of ${money_} is approved. FitFlex will send it to the account you paid from.`, `Marejesho yako ya ${money_} yameidhinishwa. FitFlex itayatuma kwenye akaunti uliyolipia.`], type: 'event_refund_approved' },
-      paid: { t: ['Refund sent', 'Marejesho yametumwa'], b: [`We sent ${money_} back to you. Reference: ${extra.reference ?? refund.paymentReference ?? ''}.`, `Tumekutumia ${money_}. Namba ya kumbukumbu: ${extra.reference ?? refund.paymentReference ?? ''}.`], type: 'event_refund_paid' },
-      rejected: { t: ['Refund not approved', 'Marejesho hayajaidhinishwa'], b: [extra.note ?? refund.decisionNote ?? 'Contact support.', extra.note ?? refund.decisionNote ?? 'Wasiliana na msaada.'], type: 'event_refund_rejected' },
+      paid: { t: ['Refund sent', 'Marejesho yametumwa'], b: [`We sent ${money_} back to you. Reference: ${extra.reference ?? refund.paymentReference ?? ''}.`, `Tumekutumia ${money_}. Namba ya muamala: ${extra.reference ?? refund.paymentReference ?? ''}.`], type: 'event_refund_paid' },
+      rejected: { t: ['Refund not approved', 'Marejesho yamekataliwa'], b: [noteEn ?? 'Contact support.', noteSw ?? 'Wasiliana na msaada.'], type: 'event_refund_rejected' },
     };
     const c = texts[type];
     if (!c) return;
-    await notice(to, {
-      id: `ntf_${c.type}_${refund.id}`, type: c.type, en: { title: c.t[0], body: c.b[0] }, sw: { title: c.t[1], body: c.b[1] },
-      data: { refundId: refund.id, kind: refund.kind, orderId: refund.eventOrderId, eventId: refund.eventId, route: `/member/events/orders/${refund.eventOrderId}` },
-    });
+    for (const [i, to] of targets.entries()) {
+      await notice(to, {
+        id: `ntf_${c.type}_${refund.id}${i ? `_${i}` : ''}`, type: c.type, en: { title: c.t[0], body: c.b[0] }, sw: { title: c.t[1], body: c.b[1] },
+        data: { refundId: refund.id, kind: refund.kind, orderId: refund.eventOrderId, eventId: refund.eventId, route: `/member/events/orders/${refund.eventOrderId}` },
+      });
+    }
   }
 
   // ── Hooks for refund-service ───────────────────────────────────────────────
 
-  /** Approved: a manual-review request cancels the places now (the approved amount is already on the row). */
-  async function onApproved(refund) {
-    if (refund.kind !== 'event_order' || refund.scope === 'unfulfilled_payment') return;
-    const snapshot = typeof refund.policySnapshot === 'string' ? JSON.parse(refund.policySnapshot) : refund.policySnapshot;
-    if (snapshot?.mode !== 'manual_review') return;
-    await db.transaction(async (trx) => {
+  const snapshotOf = refund => (typeof refund.policySnapshot === 'string' ? JSON.parse(refund.policySnapshot) : refund.policySnapshot);
+
+  /** A manual-review request cancels the places it holds. Idempotent: places already cancelled are left alone. → how many places are still confirmed afterwards. */
+  async function cancelCoveredPlaces(refund) {
+    if (refund.kind !== 'event_order' || refund.scope === 'unfulfilled_payment' || snapshotOf(refund)?.mode !== 'manual_review') return 0;
+    return db.transaction(async (trx) => {
       const order = plain(await trx('EventOrder').where({ id: refund.eventOrderId }).forUpdate().first());
       const regs = (await trx('EventRegistration').where({ orderId: order.id, refundId: refund.id }).orderBy('id').forUpdate()).map(plain);
       const live = regs.filter(r => r.status === 'confirmed');
-      if (!live.length) return;
+      if (!live.length) return 0;
       const ctx = await contextOf(trx, order);
       const at = now();
       await money.cancelPaidPlaces(trx, {
         order, registrations: live, cancelReason: 'member_review_approved', revokeReason: 'refunded', releaseInventory: live.some(r => canResell(ctx, r, at)), refundId: refund.id, existingRefund: true,
       });
       await money.deriveAndSetOrderStatus(trx, order.id);
+      return 0;
     });
+  }
+
+  /** Approved: a manual-review request cancels the places now (the approved amount is already on the row). */
+  async function onApproved(refund) { await cancelCoveredPlaces(refund); }
+
+  /** markPaid refuses for a manual-review refund until its places are cancelled (M2). */
+  async function beforePaid(refund) {
+    if (refund.kind !== 'event_order' || snapshotOf(refund)?.mode !== 'manual_review') return null;
+    await cancelCoveredPlaces(refund);
+    const still = await db('EventRegistration').where({ refundId: refund.id, status: 'confirmed' }).first('id');
+    return still ? { error: 'places_not_cancelled', status: 409 } : null;
   }
 
   /** Paid: places cancelled → refunded (their share in refundedTzs), order refundedTzs and status, unfulfilled payment → failed. */
   async function onPaid(refund) {
     if (refund.kind !== 'event_order') return;
+    await cancelCoveredPlaces(refund);   // M2: a still-confirmed place covered by a paid manual-review refund is cancelled first
     await db.transaction(async trx => money.applyRefundPaid(trx, refund));
     const event = plain(await db('Event').where({ id: refund.eventId }).first());
     void event;
@@ -379,6 +431,10 @@ export function createEventsRefundService({
 
   /** The sweep: paid refunds whose places were not updated (a crash between the refund write and the hook). */
   async function repairPaid({ limit = 100 } = {}) {
+    // Approved / paid manual-review refunds whose places are still confirmed (the cancel step failed).
+    const review = (await db('Refund as f').where('f.kind', 'event_order').whereIn('f.status', ['approved', 'paid']).whereRaw(`f."policySnapshot"->>'mode' = 'manual_review'`)
+      .whereExists(db('EventRegistration as r').whereRaw('r."refundId" = f.id').where('r.status', 'confirmed')).limit(limit).select('f.*')).map(plain);
+    for (const r of review) { try { await cancelCoveredPlaces(r); } catch (err) { console.warn('[events] review refund places not cancelled:', r.id, err?.message); } }
     const rows = (await db('Refund as f').where('f.kind', 'event_order').where('f.status', 'paid').whereNot('f.scope', 'unfulfilled_payment')
       .whereExists(db('EventRegistration as r').whereRaw('r."refundId" = f.id').where('r.status', 'cancelled')).limit(limit).select('f.*')).map(plain);
     const unfulfilled = (await db('Refund as f').where('f.kind', 'event_order').where('f.status', 'paid').where('f.scope', 'unfulfilled_payment')
@@ -404,9 +460,12 @@ export function createEventsRefundService({
       for (const p of await db('EventPayment as p').leftJoin('PaymentRequest as q', 'q.id', 'p.paymentRequestId').whereIn('p.id', payIds).select('p.id', 'q.payerPhone')) payers.set(p.id, p.payerPhone);
     }
     const out = new Map();
+    const billing = new Set((orgIds.length ? await db('B2BOrganizationUser').whereIn('organizationId', orgIds).where({ status: 'active' }).whereIn('role', ['owner', 'admin', 'finance']).select('organizationId', 'userId') : []).map(x => `${x.organizationId}:${x.userId}`));
     for (const r of events) {
       const o = orders.get(r.eventOrderId);
       out.set(r.id, {
+        // An organisation's refund is the coordinator's to see only while they still hold a billing role (ruling b).
+        hiddenFromMember: Boolean(o?.organizationId) && !billing.has(`${o.organizationId}:${r.memberId}`),
         event: eventRows.has(r.eventId) ? { id: r.eventId, title: eventRows.get(r.eventId).title } : null, orderReference: o?.reference ?? null,
         scope: r.scope ?? null, batchId: r.batchId ?? null, policySnapshot: typeof r.policySnapshot === 'string' ? JSON.parse(r.policySnapshot) : r.policySnapshot ?? null,
         payerPhone: payers.get(r.eventPaymentId) ?? null, organizationName: o?.organizationId ? orgs.get(o.organizationId) ?? null : null,
@@ -424,12 +483,17 @@ export function createEventsRefundService({
     const request = payment.paymentRequestId ? plain(await db('PaymentRequest').where({ id: payment.paymentRequestId }).first()) : null;
     if (!request || request.status !== 'approved') return fail('payment_not_confirmed', 409);
     const order = plain(await db('EventOrder').where({ id: payment.orderId }).first());
-    if (order.status === 'confirmed') return fail('payment_not_unfulfilled', 409);
+    if (order.status === 'confirmed' || payment.status === 'succeeded') return fail('payment_not_unfulfilled', 409);
+    // Only money that is held (reconciliation_required) or a rejected attempt nobody refunded; never a payment that already has a refund (M1).
+    if (!(payment.status === 'reconciliation_required' || (payment.status === 'failed' && !payment.refundId)) || payment.refundId) return fail('payment_not_unfulfilled', 409, { paymentStatus: payment.status });
+    const liveRefunds = (await db('Refund').where({ kind: 'event_order', eventOrderId: order.id }).whereNot({ status: 'rejected' }).select('amountTzs')).map(plain);
+    if (liveRefunds.length) return fail('refund_already_exists', 409);
     if (body.reasonCode && body.reasonCode !== 'payment_error') return fail('invalid_reason', 400, { allowed: ['payment_error'] });
     const amount = body.amountTzs == null ? Number(payment.amountTzs) : Math.round(Number(body.amountTzs));
     if (!Number.isFinite(amount) || amount <= 0) return fail('nothing_to_refund', 409);
-    if (amount > Number(payment.amountTzs)) return fail('amount_exceeds_payment', 400);
-    const memberId = order.purchaserUserId ?? order.createdByUserId;
+    if (amount > Number(payment.amountTzs) || liveRefunds.reduce((a, r) => a + Number(r.amountTzs), 0) + amount > Number(payment.amountTzs)) return fail('amount_exceeds_payment', 400);
+    const memberId = await refundRecipient(db, order);
+    if (!memberId) return fail('refund_recipient_missing', 409);
     const event = plain(await db('Event').where({ id: order.eventId }).first());
     const id = newRefundId();
     const at = now();
@@ -442,7 +506,7 @@ export function createEventsRefundService({
           status: secondApprover ? 'requested' : 'approved', requestedBy: actorId, requestedRole: 'admin', decidedBy: secondApprover ? null : 'policy', decidedAt: secondApprover ? null : at,
           policySnapshot: { reason: 'admin_raised' }, createdAt: at, updatedAt: at,
         });
-        await trx('EventPayment').where({ id: payment.id }).whereIn('status', ['pending', 'reconciliation_required', 'succeeded', 'failed']).update({ refundId: id, updatedAt: at });
+        await trx('EventPayment').where({ id: payment.id }).whereIn('status', ['reconciliation_required', 'failed']).whereNull('refundId').update({ refundId: id, updatedAt: at });
         return row;
       });
     } catch (err) {
@@ -461,7 +525,7 @@ export function createEventsRefundService({
     if (!event) return fail('event_not_found', 404);
     const awaiting = (await db('EventOrder').where({ eventId, status: 'awaiting_payment' }).select('id')).map(o => o.id);
     const withSubmitted = awaiting.length ? await db('EventPayment').whereIn('orderId', awaiting).where({ status: 'pending' }).countDistinct({ n: 'orderId' }) : [{ n: 0 }];
-    const live = await db('EventRegistration as r').join('EventOrder as o', 'o.id', 'r.orderId').where('r.eventId', eventId).where('r.status', 'confirmed')
+    const live = await db('EventRegistration as r').join('EventOrder as o', 'o.id', 'r.orderId').where('r.eventId', eventId).where('r.status', 'confirmed').whereNull('r.refundId')
       .select(db.raw('count(distinct r."orderId")::int as orders'), db.raw('count(*)::int as places'), db.raw('coalesce(sum(r."paidAmountTzs"), 0)::int as total'));
     const refunds = (await db('Refund').where({ kind: 'event_order', eventId }).whereNot({ scope: 'unfulfilled_payment' }).whereIn('status', ['requested', 'approved', 'paid']).select('status', 'amountTzs')).map(plain);
     const total = Number(live[0].total);
@@ -490,15 +554,15 @@ export function createEventsRefundService({
       if (Number(expectedRefundableTzs) !== p.refundableTzs) return fail('refundable_changed', 409, { refundableTzs: p.refundableTzs });
     }
     const batchId = await batchIdFor(eventId);
-    let created = 0; let existing = 0; let amountTzs = 0; let released = 0;
+    let created = 0; let existing = 0; let amountTzs = 0; let released = 0; let failed = 0;
     // 1. unpaid orders go back on the shelf (a pending manual payment stays for staff).
-    const awaiting = await db('EventOrder').where({ eventId, status: 'awaiting_payment' }).orderBy('id').limit(CHUNK).select('id', 'purchaserUserId', 'createdByUserId');
+    const awaiting = await db('EventOrder').where({ eventId, status: 'awaiting_payment' }).orderBy('id').limit(CHUNK).select('id', 'purchaserUserId', 'createdByUserId', 'organizationId');
     for (const o of awaiting) {
       const r = await eventStore.releaseOrder(o.id, 'admin', { cancelReason: 'event_cancelled' });
       if (!r.error && r.changed) {
         released += 1;
-        await notice(o.purchaserUserId ?? o.createdByUserId, {
-          id: `ntf_evcr_${o.id}`, type: 'event_cancelled_refund',
+        for (const [i, to] of (await billingRecipients(db, o)).entries()) await notice(to, {
+          id: `ntf_evcr_${o.id}${i ? `_${i}` : ''}`, type: 'event_cancelled_refund',
           en: { title: `${event.title} has been cancelled`, body: 'Your reserved places were released. You have not been charged.' },
           sw: { title: `${event.title} imeghairiwa`, body: 'Tiketi ulizoshikilia zimeachiliwa. Hujakatwa pesa.' },
           data: { orderId: o.id, eventId, route: `/member/events/orders/${o.id}` },
@@ -506,19 +570,29 @@ export function createEventsRefundService({
       }
     }
     // 2. paid orders: one transaction each.
-    const paidOrders = await db('EventRegistration').where({ eventId, status: 'confirmed' }).distinct('orderId').orderBy('orderId').limit(CHUNK).pluck('orderId');
+    const paidOrders = await db('EventRegistration').where({ eventId, status: 'confirmed' }).whereNull('refundId').distinct('orderId').orderBy('orderId').limit(CHUNK).pluck('orderId');
     for (const orderId of paidOrders) {
       const out = await cancelEventOrder({ orderId, event, batchId, actorId, note });
-      if (out.error) { console.warn('[events] event-cancel refund failed for order:', orderId, out.error); continue; }
+      if (out.error) { failed += 1; console.warn('[events] event-cancel refund failed for order:', orderId, out.error); continue; }
       // Places with nothing paid (free tickets) are cancelled without a refund row; an order with nothing live is not counted.
       if (out.skipped || out.noRefund) continue;
       if (out.created) created += 1; else existing += 1;
       amountTzs += out.amountTzs;
     }
-    const remaining = Number((await db('EventRegistration').where({ eventId, status: 'confirmed' }).countDistinct({ n: 'orderId' }))[0].n)
+    const remaining = Number((await db('EventRegistration').where({ eventId, status: 'confirmed' }).whereNull('refundId').countDistinct({ n: 'orderId' }))[0].n)
       + Number((await db('EventOrder').where({ eventId, status: 'awaiting_payment' }).count({ n: '*' }))[0].n);
     if (created || existing || released) await audit(actorId, 'events.refund_batch_created', eventId, null, { batchId, created, existing, released, amountTzs });
-    return { batchId, created, existing, remaining, amountTzs, released, touched: Boolean(created || existing || released) };
+    return { batchId, created, existing, remaining, amountTzs, released, failed, touched: Boolean(created || existing || released || failed) };
+  }
+
+  /** The sweep (M6): cancelled events that still hold confirmed, uncovered places get their refund batch resumed. → how many events were worked. */
+  async function resumeBatches({ limit = 20 } = {}) {
+    const ids = await db('EventRegistration as r').join('Event as e', 'e.id', 'r.eventId').where('e.status', 'cancelled').where('r.status', 'confirmed').whereNull('r.refundId').distinct('r.eventId').limit(limit).pluck('r.eventId');
+    let n = 0;
+    for (const eventId of ids) {
+      try { const out = await runEventBatch({ eventId, actorId: 'system' }); if (!out.error) n += 1; } catch (err) { console.warn('[events] refund batch resume failed:', eventId, err?.message); }
+    }
+    return n;
   }
 
   async function cancelEventOrder({ orderId, event, batchId, actorId, note }) {
@@ -529,13 +603,15 @@ export function createEventsRefundService({
         const regs = (await trx('EventRegistration').where({ orderId }).orderBy('id').forUpdate()).map(plain);
         const live = regs.filter(r => r.status === 'confirmed');
         if (!live.length) return { created: false, amountTzs: 0, order, regs, skipped: true };
-        const covered = live.filter(r => r.refundId);
-        if (covered.length) return { created: false, amountTzs: 0, order, regs };
-        const total = live.reduce((a, r) => a + Number(r.paidAmountTzs ?? 0), 0);
+        // Only the places no refund covers yet (a manual-review request holds its own); the rest of the order still goes (M6).
+        const open = live.filter(r => !r.refundId);
+        if (!open.length) return { created: false, amountTzs: 0, order, regs };
+        const total = open.reduce((a, r) => a + Number(r.paidAmountTzs ?? 0), 0);
         const at = now();
-        const memberId = order.purchaserUserId ?? order.createdByUserId;
+        const memberId = await refundRecipient(trx, order);
+        if (!memberId && total > 0) throw refuse('refund_recipient_missing', 409);
         const refundId = total > 0 ? newRefundId() : null;
-        const done = await money.cancelPaidPlaces(trx, { order, registrations: live, cancelReason: 'event_cancelled', revokeReason: 'event_cancelled', releaseInventory: false, refundId, actorId });
+        const done = await money.cancelPaidPlaces(trx, { order, registrations: open, cancelReason: 'event_cancelled', revokeReason: 'event_cancelled', releaseInventory: false, refundId, actorId });
         let refund = null;
         if (refundId) {
           refund = await insertRefund(trx, {
@@ -556,8 +632,8 @@ export function createEventsRefundService({
     }
     if (result.refund) {
       // One notice for the purchaser (#8): the cancellation and the refund promise together, not two pushes.
-      await notice(result.refund.memberId, {
-        id: `ntf_evcl_${orderId}`, type: 'event_cancelled_refund',
+      for (const [i, to] of ((await billingRecipients(db, result.order)).length ? await billingRecipients(db, result.order) : [result.refund.memberId]).entries()) await notice(to, {
+        id: `ntf_evcl_${orderId}${i ? `_${i}` : ''}`, type: 'event_cancelled_refund',
         en: { title: `${event.title} has been cancelled`, body: `FitFlex will refund what you paid for this event (${formatTsh(result.refund.amountTzs)}). We'll tell you when it is sent.` },
         sw: { title: `${event.title} imeghairiwa`, body: `FitFlex itarejesha ulicholipa kwa tukio hili (${formatTsh(result.refund.amountTzs)}). Tutakuarifu itakapotumwa.` },
         data: { orderId, eventId: event.id, refundId: result.refund.id, route: `/member/events/orders/${orderId}` },
@@ -586,7 +662,7 @@ export function createEventsRefundService({
     let sent = null;
     try {
       if (reg.phone && senders.sms().configured) sent = (await senders.sms().send(reg.phone, { text: `${text.sw}\n${text.en}` }))?.ok ? 'sms' : null;
-      else if (reg.email && senders.email().configured) sent = (await senders.email().send(reg.email, { subject: `${event.title}`, text: `${text.sw}\n\n---\n\n${text.en}` }))?.ok ? 'email' : null;
+      else if (reg.email && senders.email().configured) sent = (await senders.email().send(reg.email, { subject: `${event.title} imeghairiwa / ${event.title} cancelled`, text: `${text.sw}\n\n---\n\n${text.en}` }))?.ok ? 'email' : null;
     } catch { sent = null; }
     if (sent) await audit('system', 'events.cancellation_notified', reg.id, null, { channel: sent });
   }
@@ -624,9 +700,9 @@ export function createEventsRefundService({
   }
 
   return {
-    previewRegistration, previewOrder, cancellable, cancelRegistration, cancelOrder, cancelOrderCorporate, adminCancelPaidOrder, cancelPendingPaymentOf,
+    previewRegistration, previewOrder, adminOrderCancelPreview, cancellable, cancelRegistration, cancelOrder, cancelOrderCorporate, adminCancelPaidOrder, cancelPendingPaymentOf,
     eventCancelPreview, runEventBatch, batchDecision, batchPaid, adminRaiseForPayment,
-    onApproved, onPaid, onRejected, repairPaid, enrich, tellRefund,
+    onApproved, beforePaid, onPaid, onRejected, repairPaid, resumeBatches, enrich, tellRefund,
     internals: { evaluatePlaces, canResell, maskPayerPhone, iso },
   };
 }

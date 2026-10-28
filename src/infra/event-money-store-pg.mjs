@@ -32,6 +32,30 @@ const UNIQUE_VIOLATION = '23505';
 const CONFIRMABLE = ['created', 'pending', 'reconciliation_required'];
 const LIVE_REGISTRATION = ['reserved', 'confirmed'];
 
+const BILLING_ROLES = ['owner', 'admin', 'finance'];
+
+/**
+ * Who hears about / is owed the money of an order (ruling b). A member order: the purchaser. A corporate order: the coordinator
+ * while they still hold a current billing role in the organisation; otherwise the organisation's billing contacts (owners first,
+ * then finance, then admins; at most 3). Never a person who has left. May be empty.
+ */
+export async function billingRecipients(q, order) {
+  if (!order.organizationId || order.purchaserUserId) return [order.purchaserUserId].filter(Boolean);
+  const rows = (await q('B2BOrganizationUser').where({ organizationId: order.organizationId, status: 'active' }).whereIn('role', BILLING_ROLES).select('userId', 'role')).map(r => ({ userId: r.userId, role: r.role }));
+  if (order.createdByUserId && rows.some(r => r.userId === order.createdByUserId)) return [order.createdByUserId];
+  const rank = r => BILLING_ROLES.indexOf(r.role);
+  return rows.sort((a, b) => rank(a) - rank(b)).slice(0, 3).map(r => r.userId);
+}
+
+/** The single User a refund row (memberId NOT NULL) is addressed to: the first billing recipient, else the coordinator row if it still exists, else null. */
+export async function refundRecipient(q, order) {
+  const first = (await billingRecipients(q, order))[0];
+  if (first) return first;
+  if (order.purchaserUserId) return order.purchaserUserId;
+  if (order.createdByUserId && await q('User').where({ id: order.createdByUserId }).first('id')) return order.createdByUserId;
+  return null;
+}
+
 export function createPgEventMoneyStore({ db, eventStore, now = () => new Date(), keyRing = eventTicketKeyRing }) {
   const audit = (trx, actor, action, target, before, after, at) => trx('AuditLog').insert({
     id: randomUUID(), at, actor: actor || 'system', action, target, before: json(before ?? null), after: json(after ?? null),
@@ -149,7 +173,7 @@ export function createPgEventMoneyStore({ db, eventStore, now = () => new Date()
     }).returning('*');
 
     const [savedPayment] = await trx('EventPayment').where({ id: payment.id }).update({
-      status: 'succeeded', verifiedAt: payment.verifiedAt ?? at, failureReason: null, rejectCode: null, settledNote: null,
+      status: 'succeeded', verifiedAt: payment.verifiedAt ?? at, failureReason: null, rejectCode: null, settledNote: null, settledNoteSw: null,
       eventId: order.eventId, organizerId: event.organizerId, method,
       ...(rawRedacted !== undefined ? { rawRedacted: json(rawRedacted) } : {}), updatedAt: at,
     }).returning('*');
@@ -225,7 +249,7 @@ export function createPgEventMoneyStore({ db, eventStore, now = () => new Date()
 
   /** Money in, the places cannot be honoured: payment reconciliation_required + a full approved refund, same transaction. */
   async function unfulfilled(trx, { order, payment, event, reason, at, actorId, source }) {
-    const memberId = order.purchaserUserId ?? order.createdByUserId;
+    const memberId = await refundRecipient(trx, order);
     if (!memberId) throw storeRefusal('refund_recipient_missing', 409);
     const refundId = newRefundId();
     try {
