@@ -472,3 +472,37 @@ test('Swahili: an unfulfilled payment says "Malipo yatarejeshwa"; the cancelled-
   assert.equal(sent.length, 1);
   assert.equal(sent[0].subject, 'Dar Half Marathon imeghairiwa / Dar Half Marathon cancelled');
 });
+
+// ── Final contract re-check ──────────────────────────────────────────────
+
+test('(4) a corporate order shows next.payment "none" while the launch gate is closed, "manual" once it opens', async () => {
+  s4On(); await saveManualDetails();
+  const f = await eventWith(POLICY.until_close);
+  const org = await h.organization();
+  const finance = await org.member('finance');
+  const body = { eventId: f.event.id, rows: [{ firstName: 'Asha', lastName: 'Mollel', phone: phone(), category: '10K' }], acceptedTerms: true, consentTextVersion: '2026-10-draft', expectedTotalTzs: 20000 };
+  const placed = await call(createB2BEventOrder, finance, { params: { id: org.id }, headers: { 'Idempotency-Key': key() }, body });
+  assert.equal(placed.body.next.payment, 'manual');
+  delete process.env.EVENTS_ALLOW_SINGLE_APPROVER;
+  const closed = (await call(getB2BEventOrder, finance, { params: { id: org.id, orderId: placed.body.order.id } })).body;
+  assert.deepEqual([closed.next.payment, closed.next.instructions, closed.allowedActions.includes('pay')], ['none', null, false]);
+  process.env.MONEY_SECOND_APPROVER = '1';
+  assert.equal((await call(getB2BEventOrder, finance, { params: { id: org.id, orderId: placed.body.order.id } })).body.next.payment, 'manual');
+});
+
+test('(9) repairable is false for an approved request whose payment carries a refund, in the Payments row and in paymentPanel; true for an open one', async () => {
+  const { f, b } = await setup();
+  const o = await place(f, b);
+  const request = await submit(b, o.order.id);
+  const a = await admin();
+  const rowOf = async () => (await call((await import('../functions/admin-payments.mjs')).adminPaymentRequests, a, { query: { productType: 'EVENT_ORDER' } })).body.find(r => r.id === request.id);
+  const panel = async () => (await call((await import('../functions/events-admin.mjs')).adminGetEventOrder, a, { params: { id: f.event.id, orderId: o.order.id } })).body.paymentPanel.payments[0];
+  await db('PaymentRequest').where({ id: request.id }).update({ status: 'approved', decidedAt: new Date(), reference: 'RP1' });
+  assert.deepEqual([(await rowOf()).eventOrder.repairable, (await panel()).repairable], [true, true]);
+  await db('EventPayment').where({ orderId: o.order.id }).update({ status: 'failed', refundId: 'rfd_late', failureReason: 'refunded_after_late_payment' });
+  assert.deepEqual([(await rowOf()).eventOrder.repairable, (await panel()).repairable], [false, false]);
+  await db('EventPayment').where({ orderId: o.order.id }).update({ status: 'failed', refundId: 'rfd_late', failureReason: null });
+  assert.equal((await rowOf()).eventOrder.repairable, false, 'any refundId');
+  await db('EventPayment').where({ orderId: o.order.id }).update({ status: 'reconciliation_required', refundId: 'rfd_late' });
+  assert.equal((await panel()).repairable, false);
+});

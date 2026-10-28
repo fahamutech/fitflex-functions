@@ -154,7 +154,7 @@ export function createEventsPaymentService({
     // Nothing to pay (or paying is off): exactly the S3 shape.
     if (!awaiting) return { payment: 'none', instructions: null };
     if (access) {
-      if (!(intakeOn() && keyRing())) return { payment: 'none', instructions: null };
+      if (!(intakeOn() && keyRing() && approverGate())) return { payment: 'none', instructions: null };
       return { payment: 'manual', paymentRequestId, instructions: await orgInstructions(order) };
     }
     const m = mode();
@@ -687,11 +687,15 @@ export function createEventsPaymentService({
         holdExpiresAt: iso(o.holdExpiresAt), totalTzs: Number(o.totalTzs), expectedTzs: Number(o.totalTzs), organizationName: o.organizationId ? orgs.get(o.organizationId) ?? null : null,
         paymentStatus: p?.status ?? null, failureReason: p?.failureReason ?? null, refundId: p?.refundId ?? null,
         lateOutcome: await lateOutcomeOf(o, e, r, p),
-        repairable: r.status === 'approved' && Boolean(p) && !(p.status === 'succeeded' && o.status !== 'awaiting_payment') && !(p.status === 'reconciliation_required' && p.refundId),
+        repairable: repairableOf(r, p),
       });
     }
     return out;
   }
+
+  /** The Repair button: an approved request whose payment is still open and has no refund (what repairOrder will actually do). */
+  const repairableOf = (request, payment) => Boolean(request && payment) && request.status === 'approved'
+    && ['created', 'pending', 'reconciliation_required'].includes(payment.status) && !payment.refundId && payment.failureReason !== 'refunded_after_late_payment';
 
   /** A non-locking preview for the approve dialog only; the decision re-checks under lock. */
   async function lateOutcomeOf(order, event, request, payment) {
@@ -1097,6 +1101,7 @@ export function createEventsPaymentService({
         id: p.id, status: p.status, method: p.method, provider: p.provider, amountTzs: Number(p.amountTzs), currency: p.currency, late: p.lateOrder === true, failureReason: p.failureReason ?? null,
         rejectCode: p.rejectCode ?? null, submittedAt: iso(p.submittedAt), verifiedAt: iso(p.verifiedAt), refundId: p.refundId ?? null, paymentRequestId: p.paymentRequestId ?? null,
         reference: req?.memberReference ?? null, payerPhone: withPayments ? (req?.payerPhone ?? null) : maskPayerPhone(req?.payerPhone), requestStatus: req?.status ?? null,
+        repairable: repairableOf(req, p),
         organizationId: p.organizationId ?? null, payerMethod: p.payerMethod ?? null, paidOn: p.paidOn ? String(p.paidOn).slice(0, 10) : null,
       });
     }
