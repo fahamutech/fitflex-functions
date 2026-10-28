@@ -394,7 +394,11 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
             .where({ id: line.ticketTypeId })
             .whereRaw('sold + held + ? <= capacity', [line.quantity])
             .update({ held: trx.raw('held + ?', [line.quantity]), updatedAt: at });
-          if (!updated) throw refusal('capacity_unavailable', 409, { ticketTypeId: line.ticketTypeId });
+          if (!updated) {
+            const t = byId.get(line.ticketTypeId);
+            const now_ = plain(await trx('EventTicketType').where({ id: t.id }).first('sold', 'held', 'capacity'));
+            throw refusal('capacity_unavailable', 409, { ticketTypeId: line.ticketTypeId, requested: line.quantity, remaining: Math.max(Number(now_.capacity) - Number(now_.sold) - Number(now_.held), 0) });
+          }
         }
         await trx('EventOrder').insert({
           ...rowOf(ORDER_EXTRA_COLUMNS, orderExtra || {}),

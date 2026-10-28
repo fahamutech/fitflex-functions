@@ -464,7 +464,7 @@ test('scenario 5: two concurrent orders for the last place → exactly one 201 a
   assert.deepEqual(statuses, [201, 409], JSON.stringify([ra.body, rb.body]));
   const loser = ra.status === 409 ? ra : rb;
   const winner = ra.status === 201 ? ra : rb;
-  assert.deepEqual(loser.body, { error: 'capacity_unavailable', ticketTypeId: f.ticket.id });
+  assert.deepEqual(loser.body, { error: 'capacity_unavailable', ticketTypeId: f.ticket.id, requested: 1, remaining: 0 });
   assert.deepEqual(await h.counters(f.ticket.id), { sold: 0, held: 1, capacity: 1 });
   // the place is gone for a third buyer as well, and the quote says so
   const c = await buyer();
@@ -678,7 +678,7 @@ test('M3: one live unpaid order per user per event (409 hold_limit_reached), als
   const first = await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: mk() });
   assert.equal(first.status, 201, JSON.stringify(first.body));
   const second = await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: mk() });
-  assert.deepEqual([second.status, second.body.error], [409, 'hold_limit_reached']);
+  assert.deepEqual([second.status, second.body.error, second.body.limit, 'reason' in second.body], [409, 'hold_limit_reached', 'unpaid_order_exists', false]);
   assert.deepEqual(await h.counters(f.ticket.id), { sold: 0, held: 1, capacity: 50 });
   await rawCall(cancelMyEventOrder, b.claims, { params: { id: first.body.order.id }, body: { reason: 'other' } });
   assert.equal((await rawCall(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: mk() })).status, 201);
@@ -809,4 +809,30 @@ test('L9 / Swahili: inviteClaims refuses an unpaid order; for a paid one it send
   const after = await db('EventRegistration').where({ orderId: r.body.order.id }).first();
   assert.notEqual(after.claimTokenHash, before.claimTokenHash);
   assert.equal(after.claimInviteCount, 1);
+});
+
+
+test('contract check: flat categoryName / ticketTypeName on every registration view; notification data for the extra types', async () => {
+  flagsOn();
+  const f = await h.publishedEvent({ categories: [{ name: '10K Fun Run', distanceMeters: 10000, tickets: [{ name: 'Early bird', priceTzs: 1000, capacity: 20 }] }] });
+  const b = await buyer();
+  const r = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 2 }], [self(f.ticket.id, b), participant(f.ticket.id)]) });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  for (const x of r.body.registrations) assert.deepEqual([x.categoryName, x.ticketTypeName], ['10K Fun Run', 'Early bird']);
+  const detail = await call(getMyEventOrder, b.claims, { params: { id: r.body.order.id } });
+  for (const x of detail.body.registrations) assert.deepEqual([x.categoryName, x.ticketTypeName], ['10K Fun Run', 'Early bird']);
+  const list = await call(listMyEventRegistrations, b.claims);
+  assert.ok(list.body.items.every(x => x.categoryName === '10K Fun Run' && x.ticketTypeName === 'Early bird'));
+  const one = await call(getMyEventRegistration, b.claims, { params: { id: r.body.registrations[0].id } });
+  assert.deepEqual([one.body.categoryName, one.body.ticketTypeName], ['10K Fun Run', 'Early bird']);
+  const other = r.body.registrations.find(x => !x.isSelf);
+  const gone = await call(cancelMyEventRegistration, b.claims, { params: { id: other.id }, body: { reason: 'other' } });
+  assert.equal(gone.body.registration.categoryName, '10K Fun Run');
+  assert.ok(gone.body.registrations.every(x => x.ticketTypeName === 'Early bird'));
+  // admin cancel notice and claimed-place cancel notice carry ids and a route
+  const admin = await h.superAdmin();
+  const c = await call(adminCancelEventOrder, admin, { params: { id: f.event.id, orderId: r.body.order.id }, body: {} });
+  assert.equal(c.status, 200, JSON.stringify(c.body));
+  const n = (await h.notifications(b.sub, 'event_order_cancelled'))[0];
+  assert.deepEqual([n.data.orderId, n.data.eventId, n.data.route], [r.body.order.id, f.event.id, `/member/events/orders/${r.body.order.id}`]);
 });

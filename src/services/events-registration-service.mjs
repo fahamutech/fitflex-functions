@@ -112,6 +112,17 @@ export function createEventsRegistrationService({
     } : {}),
   });
 
+  /** registrationView + flat categoryName / ticketTypeName (the apps read them per registration). */
+  const named = (r, names, opts = {}) => ({
+    ...registrationView(r, opts),
+    categoryName: names.categories.get(r.categoryId)?.name ?? null,
+    ticketTypeName: names.tickets.get(r.ticketTypeId)?.name ?? null,
+  });
+  async function viewsOf(registrations, eventId, opts = {}) {
+    const names = namesOf(await joinedOf(eventId));
+    return registrations.map(r => named(r, names, opts));
+  }
+
   const paymentNext = () => ({ payment: 'none', instructions: null });
 
   async function teamView(teamId, { viewerUserId = null } = {}) {
@@ -445,7 +456,7 @@ export function createEventsRegistrationService({
           // Serialise this user's orders for this event; the earlier committed order is then visible (a race loses here).
           await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`evh:${purchaserUserId}:${prep.event.id}`]);
           const limited = await holdLimit(trx, purchaserUserId, prep.event.id, 0, created.order.id);
-          if (limited) throw storeRefusal(limited.error, limited.status, { reason: limited.reason });
+          if (limited) throw storeRefusal(limited.error, limited.status, { limit: limited.limit, ...(limited.max ? { max: limited.max } : {}) });
         }
         if (prep.team) await attachTeam(trx, created, { team: prep.team, organizationId, purchaserUserId: purchaserUserId ?? createdByUserId, at });
       } : null,
@@ -462,9 +473,9 @@ export function createEventsRegistrationService({
     const live = q('EventOrder').where({ purchaserUserId: userId, eventId, status: 'awaiting_payment' }).where('holdExpiresAt', '>', now());
     if (exceptOrderId) live.whereNot({ id: exceptOrderId });
     const orders = await live.select('id');
-    if (orders.length >= 1) return fail('hold_limit_reached', 409, { reason: 'unpaid_order_exists' });
+    if (orders.length >= 1) return fail('hold_limit_reached', 409, { limit: 'unpaid_order_exists' });
     const held = orders.length ? Number((await q('EventRegistration').whereIn('orderId', orders.map(o => o.id)).where({ status: 'reserved' }).count({ n: '*' }).first())?.n || 0) : 0;
-    if (held + newPlaces > cfg.maxParticipantsPerOrder()) return fail('hold_limit_reached', 409, { reason: 'places', max: cfg.maxParticipantsPerOrder() });
+    if (held + newPlaces > cfg.maxParticipantsPerOrder()) return fail('hold_limit_reached', 409, { limit: 'places', max: cfg.maxParticipantsPerOrder() });
     return null;
   }
 
@@ -507,7 +518,7 @@ export function createEventsRegistrationService({
     return {
       order: orderView(result.order),
       lines: result.lines.map(l => lineView(l, names)),
-      registrations: result.registrations.map(r => registrationView(r)),
+      registrations: result.registrations.map(r => named(r, names)),
       holdExpiresAt: iso(result.order.holdExpiresAt),
       next: paymentNext(),
       event: summaryOf(j),
@@ -703,7 +714,7 @@ export function createEventsRegistrationService({
       order: orderView(loaded.order),
       lines: loaded.lines.map(l => lineView(l, names)),
       // Once a place is claimed the person it belongs to controls their details: the purchaser sees the masked view (review M5).
-      registrations: loaded.registrations.map(r => (isClaimedByOther(r) ? maskedClaimedView(r) : registrationView(r, { full: true }))),
+      registrations: loaded.registrations.map(r => (isClaimedByOther(r) ? maskedClaimedView(r, names) : named(r, names, { full: true }))),
       event: await eventBlock(j, { full: true }),
       team: await teamView(loaded.order.teamId, { viewerUserId }),
       next: paymentNext(),
@@ -713,8 +724,8 @@ export function createEventsRegistrationService({
 
   const isClaimedByOther = r => Boolean(r.claimedAt && r.participantUserId && r.participantUserId !== r.purchaserUserId);
   /** name, category, status, kit size — phone, email, date of birth, gender and emergency contact are null (nullable for the apps). */
-  const maskedClaimedView = r => ({
-    ...registrationView(r, { full: false }), masked: true, kitSize: r.kitSize ?? null,
+  const maskedClaimedView = (r, names = null) => ({
+    ...(names ? named(r, names, { full: false }) : registrationView(r, { full: false })), masked: true, kitSize: r.kitSize ?? null,
     phone: null, email: null, dateOfBirth: null, gender: null, emergencyContact: null, consentAt: iso(r.consentAt), consentTextVersion: r.consentTextVersion ?? null, claimedAt: iso(r.claimedAt),
   });
 
@@ -756,7 +767,7 @@ export function createEventsRegistrationService({
     if (!loaded || loaded.order.purchaserUserId !== userId) return fail('order_not_found', 404);
     const r = await releaseWholeOrder(loaded, { reason: body.reason, actor: 'purchaser' });
     if (r.error) return r;
-    return { order: orderView(r.order), registrations: r.registrations.map(x => registrationView(x)), changed: r.changed };
+    return { order: orderView(r.order), registrations: await viewsOf(r.registrations, r.order.eventId), changed: r.changed };
   }
 
   // ── Member registrations (§3.6, §3.8) ─────────────────────────────────────
@@ -771,6 +782,7 @@ export function createEventsRegistrationService({
     const t = names.tickets.get(r.ticketTypeId);
     return {
       id: r.id, relation: relationOf(r, me), participant: { firstName: r.firstName, lastName: r.lastName },
+      categoryName: c?.name ?? null, ticketTypeName: t?.name ?? null,
       event: summaryOf(j), category: c ? { id: c.id, name: c.name, distanceM: Number(c.distanceMeters), startsAt: iso(c.startTime) } : null,
       ticketType: t ? { name: t.name } : null, status: r.status, orderId: r.orderId, orderReference: o?.reference ?? null, orderStatus: o?.status ?? null,
       holdExpiresAt: iso(o?.holdExpiresAt), claimState: claimStateOf(r), team: teams.get(r.id) ? { id: teams.get(r.id).id, name: teams.get(r.id).name } : null,
@@ -813,7 +825,7 @@ export function createEventsRegistrationService({
     const isPurchaser = r.purchaserUserId === userId;
     // The purchaser of a claimed place sees the masked view only (review M5).
     if (isPurchaser && isClaimedByOther(r)) {
-      return { ...row, ...maskedClaimedView(r), id: r.id, purchaser: null, allowedActions: r.status === 'reserved' && o?.status === 'awaiting_payment' ? ['cancel'] : [], ticket: null };
+      return { ...maskedClaimedView(r), ...row, masked: true, purchaser: null, allowedActions: r.status === 'reserved' && o?.status === 'awaiting_payment' ? ['cancel'] : [], ticket: null };
     }
     const purchaser = isPurchaser ? null : { nameMasked: r.purchaserUserId ? maskName((await users.findByIdAsync(r.purchaserUserId))?.displayName) : (o?.organizationId ? 'Organisation' : null) };
     return {
@@ -842,7 +854,8 @@ export function createEventsRegistrationService({
       }
     }
     if (result.error) return result;
-    return { order: orderView(result.order), registrations: result.registrations.map(x => registrationView(x)), registration: registrationView(result.registrations.find(x => x.id === registrationId) ?? r), changed: result.changed };
+    const views = await viewsOf(result.registrations, result.order.eventId);
+    return { order: orderView(result.order), registrations: views, registration: views.find(x => x.id === registrationId) ?? registrationView(r), changed: result.changed };
   }
 
   // ── Claims (§3.7; D14) ──────────────────────────────────────────────────────
@@ -916,7 +929,7 @@ export function createEventsRegistrationService({
       if (!isClaimTokenShape(token) || !r.claimTokenHash || hashToken(token) !== r.claimTokenHash) return fail('claim_token_invalid', 400);
       if (r.claimTokenExpiresAt && now() > new Date(r.claimTokenExpiresAt)) return fail('claim_token_expired', 410);
     }
-    if (r.participantUserId === userId) return { registration: registrationView(r, { full: true }), changed: false };
+    if (r.participantUserId === userId) return { registration: (await viewsOf([r], r.eventId, { full: true }))[0], changed: false };
     // (b) a verified contact of the caller must equal the registration's contact — mandatory, token or not.
     // Checked BEFORE anything about the registration is revealed (review M1): a caller who does not match learns only
     // "not verified" — no masked contact, no claimed / closed state.
@@ -943,7 +956,7 @@ export function createEventsRegistrationService({
         });
       } catch (err) { console.warn('[events] claim notification skipped:', r.id, err?.message); }
     }
-    return { registration: registrationView(updated, { full: true }), changed: true };
+    return { registration: (await viewsOf([updated], updated.eventId, { full: true }))[0], changed: true };
   }
 
   // ── Teams (§3.9) ───────────────────────────────────────────────────────────
@@ -1133,7 +1146,7 @@ export function createEventsRegistrationService({
         } catch (err) { console.warn('[events] admin cancel notification skipped:', orderId, err?.message); }
       }
     }
-    return { order: orderView(r.order), registrations: r.registrations.map(x => registrationView(x)), changed: r.changed };
+    return { order: orderView(r.order), registrations: await viewsOf(r.registrations, r.order.eventId), changed: r.changed };
   }
 
   return {
@@ -1144,6 +1157,6 @@ export function createEventsRegistrationService({
     adminListOrders, adminGetOrder, adminListRegistrations, adminCancelOrder,
     onOrderExpired, inviteClaims, claimInvitationText,
     // shared with events-roster-service.mjs (corporate)
-    internals: { prepare, placeOrder, replay, quoteResponse, orderDetail, orderView, registrationView, lineView, namesOf, joinedOf, summaryOf, releaseWholeOrder, participantsReport, publicAvailability, eventBlock, teamView, loadOrder: id => eventStore.getOrder(id) },
+    internals: { prepare, placeOrder, replay, quoteResponse, orderDetail, orderView, registrationView, viewsOf, lineView, namesOf, joinedOf, summaryOf, releaseWholeOrder, participantsReport, publicAvailability, eventBlock, teamView, loadOrder: id => eventStore.getOrder(id) },
   };
 }

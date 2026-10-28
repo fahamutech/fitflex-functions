@@ -244,6 +244,9 @@ test('review fixes: duplicates identify only the organisation\'s own orders; exp
   const started = Date.now();
   const huge = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(7, { email: `${'a'.repeat(50_000)}@x.co` })] } });
   assert.deepEqual([huge.status, huge.body.error, huge.body.field], [400, 'field_too_long', 'email']);
+  // the index is the original roster row, even when earlier rows are unusable (unknown category)
+  const idx = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(11, { category: '42K' }), csvRow(12), csvRow(13, { email: `${'a'.repeat(300)}@x.co` })] } });
+  assert.deepEqual([idx.status, idx.body.error, idx.body.index], [400, 'field_too_long', 2]);
   assert.ok(Date.now() - started < 1500);
   const big = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rawText: 'a'.repeat(1_000_001) } });
   assert.deepEqual([big.status, big.body.error], [413, 'raw_text_too_long']);
@@ -259,4 +262,41 @@ test('review fixes: duplicates identify only the organisation\'s own orders; exp
   assert.equal(limited?.body.error, 'rate_limited');
   // another organisation is not affected
   assert.equal((await call(validateB2BEventRoster, otherAdmin, { params: { id: other.id }, body: { eventId: f.event.id, rows: [csvRow(10)] } })).status, 200);
+});
+
+
+test('contract check: validate output goes back to place verbatim (ids, or names, ids win); categories and tickets must belong to the event', async () => {
+  flagsOn();
+  const f = await h.publishedEvent({ categories: [
+    { name: '10K Fun Run', distanceMeters: 10000, tickets: [{ name: 'Corporate', priceTzs: 20000, capacity: 30 }, { name: 'VIP', priceTzs: 50000, capacity: 30 }] },
+    { name: 'Half Marathon', distanceMeters: 21097, tickets: [{ name: 'Standard', priceTzs: 30000, capacity: 30 }] },
+  ] });
+  const g = await h.publishedEvent();
+  const org = await h.organization({ name: 'Zeta' });
+  const admin = await org.member('admin');
+  const rows = [csvRow(1), csvRow(2, { category: 'Half Marathon' }), csvRow(3, { ticketType: 'VIP' })];
+  const v = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows } });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
+  assert.equal(v.body.summary.ok, 3);
+  for (const r of v.body.rows) { assert.ok(r.participant.categoryId && r.participant.ticketTypeId); assert.equal(r.participant.categoryId, r.categoryId); assert.equal(r.participant.ticketTypeId, r.ticketTypeId); }
+  // 1) the validate rows verbatim
+  const placed = await place(org.id, admin, { eventId: f.event.id, rows: v.body.rows, expectedTotalTzs: v.body.quote.totalTzs });
+  assert.equal(placed.status, 201, JSON.stringify(placed.body));
+  assert.equal(placed.body.registrations.length, 3);
+  assert.deepEqual(placed.body.registrations.map(x => x.ticketTypeName).sort(), ['Corporate', 'Standard', 'VIP']);
+  assert.ok(placed.body.registrations.every(x => x.categoryName));
+  // 2) the portal shape: participant fields flat plus the ids
+  const flat = v.body.rows.map(r => ({ ...r.participant, categoryId: r.categoryId, ticketTypeId: r.ticketTypeId }));
+  const again = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: flat.map(r => ({ ...r, phone: phone() })) } });
+  assert.equal(again.body.summary.ok, 3, JSON.stringify(again.body.rows.map(r => r.problems)));
+  // ids win over names
+  const win = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(4, { category: 'Half Marathon', categoryId: v.body.rows[0].categoryId, ticketTypeId: v.body.rows[0].ticketTypeId })] } });
+  assert.deepEqual([win.body.rows[0].ok, win.body.rows[0].categoryId, win.body.rows[0].ticketTypeId], [true, v.body.rows[0].categoryId, v.body.rows[0].ticketTypeId]);
+  // ids from another event, or a ticket that is not in the named category
+  const foreign = await call(validateB2BEventRoster, admin, { params: { id: org.id }, body: { eventId: f.event.id, rows: [csvRow(5, { categoryId: g.categories[0].id }), csvRow(6, { ticketTypeId: g.ticket.id }), csvRow(7, { categoryId: v.body.rows[1].categoryId, ticketTypeId: v.body.rows[0].ticketTypeId })] } });
+  assert.deepEqual(foreign.body.rows.map(r => r.problems.map(p => p.code)), [['category_unknown'], ['ticket_type_unknown'], ['ticket_type_unknown']]);
+  // a capacity refusal at place time says how many
+  const small = await h.publishedEvent({ categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ name: 'S', priceTzs: 1000, capacity: 2 }] }] });
+  const short = await place(org.id, admin, { eventId: small.event.id, rows: [csvRow(8), csvRow(9), csvRow(10)], expectedTotalTzs: 3000 });
+  assert.deepEqual([short.status, short.body.error, short.body.requested, short.body.remaining], [409, 'capacity_unavailable', 3, 2]);
 });

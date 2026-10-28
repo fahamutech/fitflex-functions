@@ -90,8 +90,17 @@ export function createEventsRosterService({ db, registration, users, now = () =>
   const activeOrg = access => (access.org?.status === 'active' ? null : fail('organization_not_active', 409, { organizationStatus: access.org?.status ?? null }));
 
   /** Rows from the body: `rows` (objects) or `rawText` (CSV). */
+  /** A row may be flat or a validate row verbatim ({ participant, categoryId, ticketTypeId }): flatten the latter. */
+  const flatRow = (r, i) => {
+    const base = { line: r.line ?? i + 1, ...r };
+    if (r.participant && typeof r.participant === 'object') {
+      const { participant, ok, problems, warnings, index, ...rest } = base;
+      return { ...participant, ...rest, categoryId: r.categoryId ?? participant.categoryId, ticketTypeId: r.ticketTypeId ?? participant.ticketTypeId };
+    }
+    return base;
+  };
   function rowsOf(body) {
-    if (Array.isArray(body.rows)) return body.rows.filter(r => r && typeof r === 'object').map((r, i) => ({ line: i + 1, ...r }));
+    if (Array.isArray(body.rows)) return body.rows.filter(r => r && typeof r === 'object').map(flatRow);
     if (isStr(body.rawText)) return parseRosterText(body.rawText);
     return [];
   }
@@ -113,17 +122,38 @@ export function createEventsRosterService({ db, registration, users, now = () =>
       if (parts.length < 2) problems.push({ field: 'name', code: 'name_incomplete' });
       else { lastName = parts.pop(); firstName = parts.join(' '); }
     }
-    // Cells are capped before matching: an over-long cell never reaches a regex.
-    const catCell = isStr(raw.category) && raw.category.length > CELL_MAX_CHARS ? '' : raw.category;
-    const category = matchCategory(catCell, joined.categories || []);
+    const cats = joined.categories || [];
+    const idOk = v => isStr(v) && v.length > 0 && v.length <= 64;
+    // Ids (echoed from validate) win over names; both must belong to this event.
+    let category = null;
+    let idTicket = null;
+    let idsGiven = false;
+    if (idOk(raw.categoryId) || idOk(raw.ticketTypeId)) {
+      idsGiven = true;
+      if (idOk(raw.ticketTypeId)) {
+        for (const c of cats) { const t = (c.ticketTypes || []).find(x => x.id === raw.ticketTypeId); if (t) { idTicket = t; category = c; } }
+        if (idTicket && idOk(raw.categoryId) && category.id !== raw.categoryId) { idTicket = null; category = null; problems.push({ field: 'ticketType', code: 'ticket_type_unknown' }); }
+        else if (!idTicket) problems.push({ field: 'ticketType', code: 'ticket_type_unknown' });
+      } else category = cats.find(c => c.id === raw.categoryId) ?? null;
+      if (idOk(raw.categoryId) && !cats.some(c => c.id === raw.categoryId)) { category = null; idTicket = null; problems.splice(0, problems.length, ...problems.filter(p => p.field !== 'ticketType'), { field: 'category', code: 'category_unknown' }); }
+      else if (!category && !problems.length) problems.push({ field: 'category', code: 'category_unknown' });
+    } else {
+      // Cells are capped before matching: an over-long cell never reaches a regex.
+      const catCell = isStr(raw.category) && raw.category.length > CELL_MAX_CHARS ? '' : raw.category;
+      category = matchCategory(catCell, cats);
+      if (!category) problems.push({ field: 'category', code: 'category_unknown' });
+    }
     let ticketType = null;
-    if (!category) problems.push({ field: 'category', code: 'category_unknown' });
+    if (!category) { /* problem already recorded */ }
     else {
       const at = now();
       const opts = { now: at, closingSoonHours: closingSoonHours(), registrationClosesAt: joined.event.registrationClosesAt };
       const onSale = (category.ticketTypes || []).filter(t => t.status === 'active' && ['open', 'closing_soon'].includes(ticketAvailability(t, opts)));
       const closed = category.status === 'inactive' || (category.registrationClosesAt && at > new Date(category.registrationClosesAt));
-      if (isStr(raw.ticketType) && raw.ticketType.trim()) {
+      if (idTicket) {
+        if (closed || idTicket.status !== 'active') problems.push({ field: 'category', code: 'category_closed' });
+        else ticketType = idTicket;
+      } else if (!idsGiven && isStr(raw.ticketType) && raw.ticketType.trim()) {
         ticketType = raw.ticketType.length > CELL_MAX_CHARS ? null : (category.ticketTypes || []).find(t => String(t.name).trim().toLowerCase() === raw.ticketType.trim().toLowerCase()) ?? null;
         if (!ticketType) problems.push({ field: 'ticketType', code: 'ticket_type_unknown' });
         else if (closed || ticketType.status !== 'active') { problems.push({ field: 'category', code: 'category_closed' }); ticketType = null; }
@@ -150,6 +180,8 @@ export function createEventsRosterService({ db, registration, users, now = () =>
     const lines = [...usable.reduce((m, r) => m.set(r.ticketTypeId, (m.get(r.ticketTypeId) ?? 0) + 1), new Map())].map(([ticketTypeId, quantity]) => ({ ticketTypeId, quantity }));
     const body = { eventId, lines, participants: usable.map(r => r.participant), ...(team ? { team } : {}) };
     const prep = await R.prepare({ mode: 'corporate', organizationId, body });
+    // The original roster row, not the position among usable rows, goes back to the client.
+    if (prep.error === 'field_too_long' && Number.isInteger(prep.index) && usable[prep.index]) return { prep: { ...prep, index: usable[prep.index].index }, usable, lines };
     return { prep, usable, lines };
   }
 
@@ -187,6 +219,7 @@ export function createEventsRosterService({ db, registration, users, now = () =>
     participant: {
       firstName: r.participant.firstName || null, lastName: r.participant.lastName || null, phone: r.participant.phoneNormalized ?? r.participant.phone ?? null, email: r.participant.emailNormalized ?? r.participant.email ?? null,
       dateOfBirth: r.participant.dateOfBirth ?? null, gender: r.participant.gender ?? null, kitSize: r.participant.kitSize ?? null, groupLabel: r.participant.groupLabel ?? null, consentBasis: 'organisation',
+      categoryId: r.categoryId, ticketTypeId: r.ticketTypeId,
     },
     categoryId: r.categoryId, ticketTypeId: r.ticketTypeId, problems: r.problems, ...(r.warnings ? { warnings: r.warnings } : {}),
   });
@@ -298,7 +331,7 @@ export function createEventsRosterService({ db, registration, users, now = () =>
     if (loaded.error) return loaded;
     const r = await R.releaseWholeOrder(loaded, { reason: body.reason, actor: `organization:${actorId}` });
     if (r.error) return r;
-    return { order: R.orderView(r.order), registrations: r.registrations.map(x => R.registrationView(x)), changed: r.changed };
+    return { order: R.orderView(r.order), registrations: await R.viewsOf(r.registrations, r.order.eventId), changed: r.changed };
   }
 
   return { validate, placeOrder, listOrders, getOrder, cancelOrder, parseRosterText, matchCategory };
