@@ -5,11 +5,13 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsModule } from '../src/shared/feature-flags.mjs';
-import { eventsAdminService as svc } from '../src/bootstrap/services.mjs';
+import { requireEventsModule, requireEventsRegistration } from '../src/shared/feature-flags.mjs';
+import { eventsAdminService as svc, eventsRegistrationService as registration } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 const guard = method => routeGuard(method, [requireEventsModule, requireAuth('admin'), requireAcl('events')]);
+// S3: order and registration views need EVENTS_REGISTRATION too (404 feature_disabled otherwise).
+const registrationGuard = method => routeGuard(method, [requireEventsRegistration, requireAuth('admin'), requireAcl('events')]);
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
@@ -80,4 +82,34 @@ export const adminEventAudit = {
   description: 'Admin (scope events): the audit rows of one event (events.* actions targeting it), newest first. ?cursor&limit → { items: [{ id, at, actor { id, name }, action, target, reason, note, before, after }], nextCursor, total }. 404 event_not_found.',
   onGuard: guard('get'),
   onRequest: async (req, res) => send(res, await svc.eventAudit({ eventId: req.params.id, query: req.query || {} })),
+};
+
+// ── S3: orders and registrations of any event (spec §3.8, §3.13) ──────────
+
+export const adminListEventOrders = {
+  created, method: 'get', path: '/admin/events/:id/orders',
+  description: 'Admin (scope events; EVENTS_REGISTRATION on): orders of an event, newest first, full purchaser names. ?status&cursor&limit → { items [{ id, reference, status, purchaser { type, label }, placesCount, totalTzs, feesTzs, discountTzs, currency, createdAt, holdExpiresAt, closedAt, closeReason, allowedActions, costCentre, purchaserReference }], nextCursor, total }. 404 event_not_found.',
+  onGuard: registrationGuard('get'),
+  onRequest: async (req, res) => send(res, await registration.adminListOrders({ eventId: req.params.id, query: req.query || {} })),
+};
+
+export const adminGetEventOrder = {
+  created, method: 'get', path: '/admin/events/:id/orders/:orderId',
+  description: 'Admin (scope events): one order with lines and registrations (full names; no emergency contact) + purchaser { type, id, label }, createdBy, team, allowedActions: ["cancel"] while awaiting payment. 404 order_not_found (also when the order belongs to another event).',
+  onGuard: registrationGuard('get'),
+  onRequest: async (req, res) => send(res, await registration.adminGetOrder({ eventId: req.params.id, orderId: req.params.orderId })),
+};
+
+export const adminCancelEventOrder = {
+  created, method: 'post', path: '/admin/events/:id/orders/:orderId/cancel',
+  description: 'Admin (scope events): cancel an unpaid order (releaseOrder with reason admin). Body { note? (≤500) } → { order, registrations, changed }. Writes AuditLog events.order_cancelled with the note and tells the purchaser. 409 invalid_transition for confirmed orders (refunds are S4), 404 order_not_found.',
+  onGuard: registrationGuard('post'),
+  onRequest: async (req, res) => send(res, await registration.adminCancelOrder({ eventId: req.params.id, orderId: req.params.orderId, body: req.body || {}, actorId: req.user.sub })),
+};
+
+export const adminListEventRegistrations = {
+  created, method: 'get', path: '/admin/events/:id/registrations',
+  description: 'Admin (scope events): the roster with full names and kit sizes (never phone, email, DOB, gender or emergency contact in the list). ?status&categoryId&q&cursor&limit → { items [{ id, participant { name }, categoryName, ticketTypeName, status, orderReference, orderStatus, teamName, kitSize, createdAt, claimed, consentBasis, groupLabel }], nextCursor, total }. 404 event_not_found.',
+  onGuard: registrationGuard('get'),
+  onRequest: async (req, res) => send(res, await registration.adminListRegistrations({ eventId: req.params.id, query: req.query || {} })),
 };
