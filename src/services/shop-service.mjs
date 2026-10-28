@@ -16,7 +16,7 @@ import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, 
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { indexAreas, validateVendorAreas, touchesAreas } from '../shared/shop-areas.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
-import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
+import { checkMediaFields, storedMedia, mediaSrcMaxBytes } from '../shared/media-src.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set([...STATUSES, ...LEGACY_INPUTS]);
@@ -274,7 +274,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (input[field] != null && !isMoneyInt(input[field], { allowZero: field === 'discountPriceTzs' })) return { error: field === 'priceTzs' ? 'priceTzs_required' : 'invalid_field', status: 400, field };
     }
     if (input.stock != null && (!Number.isInteger(Number(input.stock)) || Number(input.stock) < 0 || Number(input.stock) > 1_000_000)) return { error: 'invalid_stock', status: 400 };
-    if (input.images != null && (!Array.isArray(input.images) || input.images.length > 10 || input.images.some(i => typeof i !== 'string' || i.length > 500))) return { error: 'invalid_field', status: 400, field: 'images' };
+    // The app sends each photo inline as a data URI, far over 500 characters: those are capped at the
+    // media-src size (checkMediaFields then decodes them); any other string (a /storage path) stays ≤ 500.
+    const dataUriMax = 64 + 4 * Math.ceil(mediaSrcMaxBytes() / 3);
+    if (input.images != null && (!Array.isArray(input.images) || input.images.length > 10 || input.images.some(i => typeof i !== 'string' || i.length > (i.startsWith('data:') ? dataUriMax : 500)))) return { error: 'invalid_field', status: 400, field: 'images' };
     if (input.variants != null) {
       const v = input.variants;
       const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && x.name.length <= 60
