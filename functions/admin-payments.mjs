@@ -5,25 +5,36 @@ import { adminPaymentService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
+/**
+ * The response of a decision: the payment request, exactly as before, for every product. An EVENT_ORDER decision adds
+ * `event: { outcome: confirmed | reheld | refund_raised, reason?, refundId?, orderId, ticketsIssued, changed }` (Marathon & Events S4 §3.9)
+ * and also nests the request under `paymentRequest`, so callers can read either shape.
+ */
+const withEvent = result => (result.event ? { ...result.paymentRequest, paymentRequest: result.paymentRequest, event: result.event } : result.paymentRequest);
+
 export const adminPaymentRequests = {
   created, method: 'get', path: '/admin/payment-requests',
-  description: 'Admin: list pilot payment requests. Rows carry verifiedBy, verifiedAt, changeRequestedStatus, changeRequestedBy, changeRequestedAt, changeRequestReason, and staff names verifiedByName, changeRequestedByName, decidedByName (portal/admin user display name, else email; null when unknown or not staff); with MONEY_SECOND_APPROVER on also secondApproverRequired, approvalStage, approveNotBy, confirmChangeNotBy.',
+  description: 'Admin: list pilot payment requests. Optional ?productType= (FITFLEX_PASS | GYM_SUBSCRIPTION | TRAINER_SERVICE | TRAINER_GYM_PASS | SHOP_ORDER | EVENT_ORDER), ?status= and ?limit= (EVENT_ORDER is read without loading the whole table); event rows add eventOrder { orderId, reference, status, eventId, eventTitle, placesCount, holdExpiresAt, totalTzs, expectedTzs, organizationName, lateOutcome: none | would_rehold | would_refund, repairable, … }. Rows carry verifiedBy, verifiedAt, changeRequestedStatus, changeRequestedBy, changeRequestedAt, changeRequestReason, and staff names verifiedByName, changeRequestedByName, decidedByName (portal/admin user display name, else email; null when unknown or not staff); with MONEY_SECOND_APPROVER on also secondApproverRequired, approvalStage, approveNotBy, confirmChangeNotBy.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
-  onRequest: async (_, res) => res.json(await adminPaymentService.list())
+  onRequest: async (req, res) => {
+    const q = req?.query || {};
+    // Optional filters (additive): ?productType=EVENT_ORDER&status=pending&limit=200. None: the whole list, as before.
+    res.json(await adminPaymentService.list({ productType: q.productType || null, status: q.status || null, limit: q.limit || null }));
+  }
 };
 
 export const adminDecidePaymentRequest = {
   created, method: 'post', path: '/admin/payment-requests/:id/decision',
-  description: 'Admin: approve or reject a pilot payment request. Approval activates the subscription (or pays the shop order). Optional amountTzs is the amount actually received: a mismatch is refused (409 amount_mismatch). A reference confirms one shop order only (409 reference_already_used). A request already decided is 409 already_decided. With MONEY_SECOND_APPROVER on, approving needs a verification first (409 verification_required) by a different admin (403 cannot_approve_own_verification), with the verified reference (409 reference_differs_from_verification), and a reference already on another approved payment is refused (409 reference_already_used); rejecting stays single-admin.',
+  description: 'Admin: approve or reject a pilot payment request. Approval activates the subscription (or pays the shop order). Optional amountTzs is the amount actually received: a mismatch is refused (409 amount_mismatch); for an EVENT_ORDER request it is REQUIRED (400 amount_required) and a reject needs reasonCode (reference_not_found | amount_mismatch | wrong_account | duplicate_reference | other; 400 reason_code_required) plus memberNote (≤140, required for other: 400 note_required); the response then also carries event { outcome: confirmed | reheld | refund_raised, … }. A reference confirms one shop order only (409 reference_already_used). A request already decided is 409 already_decided. With MONEY_SECOND_APPROVER on, approving needs a verification first (409 verification_required) by a different admin (403 cannot_approve_own_verification), with the verified reference (409 reference_differs_from_verification), and a reference already on another approved payment is refused (409 reference_already_used); rejecting stays single-admin.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => {
-    const { decision, reference, note, amountTzs } = req.body || {};
-    const result = await adminPaymentService.decide({ id: req.params.id, decision, reference, note, amountTzs, actorId: req.user.sub });
+    const { decision, reference, note, amountTzs, reasonCode, memberNote } = req.body || {};
+    const result = await adminPaymentService.decide({ id: req.params.id, decision, reference, note, amountTzs, reasonCode, memberNote, actorId: req.user.sub });
     if (result.error) {
       const { error, status, ...extra } = result;
       return res.status(status).json({ error, ...extra });
     }
-    res.json(result.paymentRequest);
+    res.json(withEvent(result));
   }
 };
 
@@ -32,13 +43,13 @@ export const adminUpdatePaymentRequest = {
   description: 'Admin: update pilot payment request status, reference, and note. With MONEY_SECOND_APPROVER on: a decided payment only takes note edits (status or reference change is 409 change_requires_confirmation: use /change-request); pending → approved follows the verify rule (409 verification_required, 403 cannot_approve_own_verification); a verified payment keeps its reference (409 reference_differs_from_verification); a mobile-money payment keeps its provider reference (409 reference_locked_provider); approving with a reference already on another approved payment is 409 reference_already_used.',
   onGuard: [requireAuth('admin'), requireAcl('payments')],
   onRequest: async (req, res) => {
-    const { status, reference, note, amountTzs } = req.body || {};
-    const result = await adminPaymentService.update({ id: req.params.id, status, reference, note, amountTzs, actorId: req.user.sub });
+    const { status, reference, note, amountTzs, reasonCode, memberNote } = req.body || {};
+    const result = await adminPaymentService.update({ id: req.params.id, status, reference, note, amountTzs, reasonCode, memberNote, actorId: req.user.sub });
     if (result.error) {
       const { error, status: code, ...extra } = result;
       return res.status(code).json({ error, ...extra });
     }
-    res.json(result.paymentRequest);
+    res.json(withEvent(result));
   }
 };
 
@@ -49,7 +60,7 @@ const reply = (res, result) => {
     const { error, status: code, ...extra } = result;
     return res.status(code).json({ error, ...extra });
   }
-  res.json(result.paymentRequest);
+  res.json(withEvent(result));
 };
 
 export const adminVerifyPaymentRequest = {

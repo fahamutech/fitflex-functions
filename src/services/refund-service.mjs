@@ -18,14 +18,14 @@ import { randomUUID } from 'node:crypto';
 import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
 import { staffNameLookup } from '../shared/staff-names.mjs';
 
-export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order'];
+export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order', 'event_order'];
 export const REFUND_STATUSES = ['requested', 'approved', 'paid', 'rejected'];
 /** Reasons a member may give when asking for a pass or plan refund. */
 export const MEMBER_REASONS = ['charged_twice', 'not_activated', 'other'];
 const REASONS = new Set([
   ...MEMBER_REASONS, 'member_cancelled', 'trainer_cancelled', 'vendor_cancelled', 'cancelled_by_fitflex', 'payment_error', 'sponsor_paid',
 ]);
-const SOURCE_FIELD = { subscription: 'paymentRequestId', trainer_booking: 'bookingId', shop_order: 'orderId' };
+const SOURCE_FIELD = { subscription: 'paymentRequestId', trainer_booking: 'bookingId', shop_order: 'orderId', event_order: 'eventOrderId' };
 const fail = (error, status = 400, extra = {}) => ({ error, status, ...extra });
 const nowIso = () => new Date().toISOString();
 const text = (v, max = 500) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
@@ -34,12 +34,25 @@ export function createRefundService({
   refunds, paymentRequests, subscriptions, users, auditLog,
   notify = async () => {},          // (userId, { type, title, body, data })
   onPaid = async () => {},          // (refund) → e.g. mark the order refunded
+  // S4 (kind 'event_order'; all default to no-ops so the other kinds are untouched):
+  onApproved = async () => {},      // (refund) → a manual-review request cancels the places when it is approved
+  onRejected = async () => {},      // (refund) → the places the refund covered are free again
+  tellEvent = null,                 // (refund, 'requested' | 'requested_by_fitflex' | 'approved' | 'rejected' | 'paid', { note, reference }) → bilingual notice
+  enrichRows = async () => new Map(), // (rows) → Map<refundId, { event, orderReference, scope, batchId, policySnapshot, payerPhone, organizationName }>
+  raiseForEventPayment = null,      // ({ body, actorId, secondApprover }) → the unfulfilled-payment refund of an event payment
   // A1: two admins on refunds (MONEY_SECOND_APPROVER). Off: unchanged.
   secondApprover = moneySecondApproverOn,
 }) {
   const money = formatTsh;
 
+  const EVENT_TELL = { refund_requested: 'requested', refund_preparing: 'requested_by_fitflex', refund_approved: 'approved', refund_rejected: 'rejected', refund_paid: 'paid' };
+
   async function tell(refund, type, title, body) {
+    // Event refunds are told bilingually by the events refund service; the other kinds keep their English push.
+    if (refund.kind === 'event_order' && tellEvent) {
+      try { await tellEvent(refund, EVENT_TELL[type] ?? 'requested', { note: type === 'refund_rejected' ? body : null, reference: refund.paymentReference ?? null }); } catch { /* a notification never blocks a refund */ }
+      return;
+    }
     try {
       await notify(refund.memberId, { id: `ntf_${type}_${refund.id}`, type, title, body, data: { refundId: refund.id, kind: refund.kind } });
     } catch { /* a notification never blocks a refund */ }
@@ -130,6 +143,8 @@ export function createRefundService({
    * once, unless MONEY_SECOND_APPROVER is on: then it waits for another admin.
    */
   async function adminRaise({ body = {}, actorId }) {
+    // S4: money that arrived for an event order whose places are not possible (kind event_order, unfulfilled payment only).
+    if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: secondApprover() });
     const request = body.paymentRequestId ? await paymentRequests.findByIdAsync(body.paymentRequestId) : null;
     if (!request) return fail('payment_not_found', 404);
     if (!request.subscriptionId) return fail('cancel_instead', 409);
@@ -174,6 +189,14 @@ export function createRefundService({
       await subscriptions.updateByIdAsync(refund.subscriptionId, { expiresAt: at, renewsAt: at });
     }
     await audit(`refund_${refund.status}`, actorId, prior, refund);
+    try {
+      if (refund.status === 'approved') await onApproved(refund);
+      else await onRejected(refund);
+    } catch (err) {
+      // The decision is recorded; the places were not updated. Say so where staff will find it (the sweep re-applies paid refunds).
+      console.error('[refunds] decided refund not applied to its source:', refund.id, err?.message);
+      try { await audit('refund_decided_source_not_updated', actorId, null, { id: refund.id, kind: refund.kind, error: String(err?.message || err).slice(0, 300) }); } catch { /* logged above */ }
+    }
     if (refund.status === 'approved') {
       await tell(refund, 'refund_approved', 'Refund approved', `Your refund of ${money(refund.amountTzs)} is approved. FitFlex will send it to the account you paid from.`);
     } else {
@@ -241,7 +264,11 @@ export function createRefundService({
 
   /** Member: my refunds, newest first. */
   async function listMine(memberId) {
-    return { refunds: (await refunds.filterByColumnAsync('memberId', memberId)).sort(byNewest) };
+    const rows = (await refunds.filterByColumnAsync('memberId', memberId)).sort(byNewest);
+    const extra = await enrichRows(rows);
+    // Event refunds also say which event and order they are for (the payer's phone and the policy internals stay with staff).
+    const strip = ({ policySnapshot, batchId, organizerId, eventPaymentId, organizationId, ...rest }) => rest; // staff-side fields
+    return { refunds: rows.map(r => (extra.has(r.id) ? { ...strip(r), event: extra.get(r.id).event, orderReference: extra.get(r.id).orderReference } : r)) };
   }
 
   /**
@@ -269,11 +296,13 @@ export function createRefundService({
     // Staff who acted on each row, by name (null for members, 'policy' and anyone not portal/admin staff).
     const nameOf = await staffNameLookup(users, rows, ['requestedBy', 'decidedBy', 'paidBy']);
     const twoAdmins = secondApprover();
+    const extra = await enrichRows(rows);
     return {
       refunds: rows.map((r) => {
         const u = byId.get(r.memberId);
         return {
           ...r,
+          ...(extra.has(r.id) ? extra.get(r.id) : {}),
           member: u ? { id: u.id, displayName: u.displayName || null, phone: u.phone || null, email: u.email || null } : null,
           requestedByName: nameOf(r.requestedBy),
           decidedByName: nameOf(r.decidedBy),

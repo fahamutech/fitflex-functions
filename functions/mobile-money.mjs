@@ -2,7 +2,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { mobileMoneyService, manualPayment } from '../src/bootstrap/services.mjs';
-import { tunzaaTrainerProductsOn } from '../src/shared/feature-flags.mjs';
+import { tunzaaTrainerProductsOn, eventsPaymentsTunzaaOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 
 const created = new Date().toISOString();
@@ -32,20 +32,22 @@ const payerRole = req => (req.user?.userType === 'trainer' ? 'trainer' : 'member
 
 export const paymentOptions = {
   created, method: 'get', path: '/payments/options',
-  description: 'Whether paying by mobile money is available, and in which environment (sandbox shows a test-mode notice in the app). While MANUAL_PAY_INSTRUCTIONS is on, also `manual` { enabled, lipaNamba, accountName, network, instructions, referenceRequired, payerPhoneRequired }: enabled only when the Lipa Namba and account name are configured. While TUNZAA_TRAINER_PRODUCTS is on (with TUNZAA_PAYMENTS), also `mobileMoney` { products }: the product kinds the caller may pay by mobile money (member: FITFLEX_PASS, GYM_SUBSCRIPTION, TRAINER_SERVICE; trainer: TRAINER_GYM_PASS; empty while paying is not offered).',
+  description: 'Whether paying by mobile money is available, and in which environment (sandbox shows a test-mode notice in the app). Marathon & Events S4: while EVENTS_PAYMENTS_TUNZAA is effective a member\'s `mobileMoney.products` also lists EVENT_ORDER (the block then appears even without TUNZAA_TRAINER_PRODUCTS). While MANUAL_PAY_INSTRUCTIONS is on, also `manual` { enabled, lipaNamba, accountName, network, instructions, referenceRequired, payerPhoneRequired }: enabled only when the Lipa Namba and account name are configured. While TUNZAA_TRAINER_PRODUCTS is on (with TUNZAA_PAYMENTS), also `mobileMoney` { products }: the product kinds the caller may pay by mobile money (member: FITFLEX_PASS, GYM_SUBSCRIPTION, TRAINER_SERVICE; trainer: TRAINER_GYM_PASS; empty while paying is not offered).',
   onGuard: requireAuth(),
   onRequest: async (req, res) => res.json({
     ...mobileMoneyService.options(),
     // Flag off: the response is exactly as before (no `manual` key).
     ...(manualPayment.flagOn() ? { manual: manualPayment.options() } : {}),
     // B6a flag off: no `mobileMoney` key (members: FITFLEX_PASS + GYM_SUBSCRIPTION, as before).
-    ...(tunzaaTrainerProductsOn() ? { mobileMoney: { products: mobileMoneyService.payableProducts(req?.user?.userType) } } : {}),
+    // S4: also while event orders are payable this way (EVENTS_PAYMENTS_TUNZAA effective), so the app can offer EVENT_ORDER.
+    ...(tunzaaTrainerProductsOn() || (eventsPaymentsTunzaaOn() && mobileMoneyService.payableProducts(req?.user?.userType).includes('EVENT_ORDER'))
+      ? { mobileMoney: { products: mobileMoneyService.payableProducts(req?.user?.userType) } } : {}),
   })
 };
 
 export const payByMobileMoney = {
   created, method: 'post', path: '/me/payments/:id/mobile-money',
-  description: 'Ask the payer\'s phone to approve one of their own pending payment requests (member: pass, upgrade, gym plan and, with TUNZAA_TRAINER_PRODUCTS, trainer sessions; trainer, with TUNZAA_TRAINER_PRODUCTS: their own trainer gym pass). Body {phone}. The amount is always the request\'s own. 404 feature_disabled while off; 404 not_found for someone else\'s request; 403 not_payable_by_role; 409 payment_not_pending / manual_payment_submitted / not_payable_this_way / tier_not_available / invalid_amount / unsupported_currency / group_slot_rebooked {bookingIds}; 400 invalid_phone; 429 too_many_attempts.',
+  description: 'Ask the payer\'s phone to approve one of their own pending payment requests (member: pass, upgrade, gym plan and, with TUNZAA_TRAINER_PRODUCTS, trainer sessions; trainer, with TUNZAA_TRAINER_PRODUCTS: their own trainer gym pass). Body {phone}. The amount is always the request\'s own. 404 feature_disabled while off; 404 not_found for someone else\'s request; 403 not_payable_by_role (an EVENT_ORDER is a member\'s purchase only); 409 hold_expired | event_not_open | order_amount_mismatch | payment_row_mismatch (EVENT_ORDER pre-checks); 409 payment_not_pending / manual_payment_submitted / not_payable_this_way / tier_not_available / invalid_amount / unsupported_currency / group_slot_rebooked {bookingIds}; 400 invalid_phone; 429 too_many_attempts.',
   requestSample: { phone: '0712345678' },
   onGuard: routeGuard('post', payerGuard),
   onRequest: async (req, res) => send(res, await mobileMoneyService.pay({

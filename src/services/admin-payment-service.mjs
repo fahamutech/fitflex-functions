@@ -3,7 +3,7 @@
 // with memberProfile/aclPermissions) to keep the list endpoint's payload small.
 import { randomUUID } from 'node:crypto';
 import { activationDates } from '../shared/subscription-status.mjs';
-import { productTypeOfPayment } from '../shared/payment-product.mjs';
+import { productTypeOfPayment, PRODUCT_TYPES } from '../shared/payment-product.mjs';
 import { upgradeOf, upgradeApprovable, applyUpgradeStatus } from '../shared/pass-upgrade.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { referenceKey, memoryReferenceStore } from '../shared/manual-payment.mjs';
@@ -41,6 +41,22 @@ export function createAdminPaymentService({
   manualReferenceChecks = () => false,
   // A1: two admins on every manual payment decision (MONEY_SECOND_APPROVER). Off: unchanged.
   secondApprover = moneySecondApproverOn,
+  // Marathon & Events S4 (EVENT_ORDER). Every dep defaults to a no-op / absent, and every branch below is reached only
+  // by a request that carries `eventOrderId`, so the other products behave exactly as before.
+  // Before an event order's payment is confirmed: (request, { amountTzs }) → null | { error, status }. The amount received is mandatory.
+  beforeEventOrderPayment = async () => null,
+  // An approved event request whose order is not confirmed is re-applied (idempotent repair): (request, status) → void.
+  onEventOrderPayment = async () => {},
+  // The decision transaction: (request, patch, guard, meta) → updated row | null | 'reference_already_used' | { error, status }.
+  // Writes the PaymentRequest, the EventPayment and the order confirmation (tickets, outbox, audit) together.
+  writeEventDecision = null,
+  // Reject input for event requests: ({ reasonCode, memberNote }) → null | { error, status }.
+  checkEventRejection = () => null,
+  // The event rows of the admin list, one batch: (requests) → Map<requestId, projection>; and the event-only list for ?productType=EVENT_ORDER.
+  projectEventRequests = async () => new Map(),
+  listEventRequests = null,
+  // The outcome the decision transaction recorded for an updated row (confirmed | reheld | refund_raised): (row) → { outcome, … } | null.
+  eventOutcomeOf = () => null,
 }) {
   const references = referenceStore || memoryReferenceStore({ paymentRequests });
   function slimMember(u) {
@@ -62,6 +78,11 @@ export function createAdminPaymentService({
 
   // A request pays for a subscription, a trainer booking group or a shop order.
   async function applyPaymentStatusToSubscription(request, status, reference) {
+    // S4: an event order's payment was applied inside the decision transaction; this is the idempotent repair.
+    if (request.eventOrderId) {
+      await onEventOrderPayment(request, status);
+      return;
+    }
     if (request.bookingGroupId) {
       await onBookingPayment(request.bookingGroupId, status);
       return;
@@ -107,8 +128,10 @@ export function createAdminPaymentService({
     }
   }
 
-  async function list() {
-    const allPayReqs = await paymentRequests.allAsync();
+  async function list({ productType = null, status = null, limit = null } = {}) {
+    // The Payments page filter for event tickets must not load the whole table during a sale.
+    const eventOnly = productType === PRODUCT_TYPES.EVENT_ORDER && typeof listEventRequests === 'function';
+    const allPayReqs = eventOnly ? await listEventRequests({ limit, status }) : await paymentRequests.allAsync();
     allPayReqs.sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt));
 
     // Batch-fetch every referenced member/subscription in two queries
@@ -128,7 +151,8 @@ export function createAdminPaymentService({
     const nameOf = await staffNameLookup(users, allPayReqs, ['verifiedBy', 'changeRequestedBy', 'decidedBy']);
 
     const twoAdmins = secondApprover();
-    return allPayReqs.map(p => ({
+    const eventRows = await projectEventRequests(allPayReqs);
+    const rows = allPayReqs.map(p => ({
       ...p,
       verifiedByName: nameOf(p.verifiedBy),
       changeRequestedByName: nameOf(p.changeRequestedBy),
@@ -137,8 +161,14 @@ export function createAdminPaymentService({
       subscription: slimSub(subById.get(p.subscriptionId) || null),
       productType: productTypeOfPayment(p, subById.get(p.subscriptionId) || null),
       gym: slimGym(p.gymId),
+      ...(eventRows.has(p.id) ? { eventOrder: eventRows.get(p.id) } : {}),
       ...(twoAdmins ? secondApproval(p) : {}),
     }));
+    // ?productType= / ?status= / ?limit= are additive: with none of them the list is exactly what it was.
+    let out = productType ? rows.filter(r => r.productType === productType) : rows;
+    if (status && STATUSES.includes(status)) out = out.filter(r => r.status === status);
+    const n = Math.min(Math.max(parseInt(limit, 10) || 0, 0), 5000);
+    return n ? out.slice(0, n) : out;
   }
 
   /**
@@ -164,9 +194,10 @@ export function createAdminPaymentService({
    * order only: using it again is refused (the database also enforces it for confirmed order payments).
    */
   async function referenceInUse(request, reference) {
-    if (!request.orderId || !reference || String(reference).startsWith('ADMIN_')) return false;
+    // S4: an event order's reference pays for that order only, as a shop order's does.
+    if (!(request.orderId || request.eventOrderId) || !reference || String(reference).startsWith('ADMIN_')) return false;
     const same = await paymentRequests.filterByColumnAsync('reference', reference);
-    return same.some(p => p.id !== request.id && p.orderId && p.status === 'approved');
+    return same.some(p => p.id !== request.id && (p.orderId || p.eventOrderId) && p.status === 'approved');
   }
 
   /**
@@ -188,6 +219,12 @@ export function createAdminPaymentService({
     if (request.bookingGroupId) {
       const problem = await beforeBookingPayment(request);
       if (problem?.error) return problem;
+    }
+    if (request.eventOrderId) {
+      const problem = await beforeEventOrderPayment(request, { amountTzs });
+      if (problem?.error) return problem;
+      if (await referenceInUse(request, reference)) return { error: 'reference_already_used', status: 409 };
+      return null;
     }
     if (!request.orderId) return null;
     const problem = await beforeOrderPayment(request, { amountTzs });
@@ -215,7 +252,9 @@ export function createAdminPaymentService({
   const memberRefFor = (request, typedOrRecorded) => (!typedOrRecorded ? (request.memberReference || null) : null);
 
   /** Write the decision only if the request is still in the state it was read in. */
-  async function writeDecision(request, patch, guard = {}) {
+  async function writeDecision(request, patch, guard = {}, meta = {}) {
+    // S4: one transaction for the request and everything an event payment confirms (tickets, outbox, audit).
+    if (request.eventOrderId && writeEventDecision) return writeEventDecision(request, patch, guard, meta);
     try {
       return await updateIf(paymentRequests, request.id, { status: request.status, ...guard }, patch);
     } catch (err) {
@@ -240,11 +279,16 @@ export function createAdminPaymentService({
 
   const referenceChanged = (request, reference) => reference != null && reference !== '' && reference !== request.reference;
 
-  async function decide({ id, decision, reference, note, actorId, amountTzs = null, automated = false }) {
+  async function decide({ id, decision, reference, note, actorId, amountTzs = null, automated = false, reasonCode = null, memberNote = null, providerPayload = null }) {
     if (!['approve', 'reject'].includes(decision)) return { error: 'invalid_decision', status: 400 };
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     if (request.status !== 'pending') return { error: 'already_decided', status: 409 };
+    // S4: rejecting an event payment needs a reason code (a closed set) so the member can correct it.
+    if (decision === 'reject' && request.eventOrderId) {
+      const bad = checkEventRejection({ reasonCode, memberNote });
+      if (bad) return bad;
+    }
     // Approving with no reference typed, and none recorded yet (e.g. by a verifying admin),
     // confirms the transaction ID the member gave (slice A3). A recorded or typed one wins.
     const memberRef = decision === 'approve' ? memberRefFor(request, reference || request.reference) : null;
@@ -274,9 +318,10 @@ export function createAdminPaymentService({
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
       decidedBy: actorId
-    }, guard);
+    }, guard, { actorId, automated, reasonCode, memberNote, amountTzs, providerPayload });
     // Another decision got there first (two staff members, or a double click).
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
+    if (updated?.error) return updated;
     if (!updated) return { error: 'already_decided', status: 409 };
     // The plan records the reference the payment request now carries (typed, else verified/recorded,
     // else the member's transaction ID); ADMIN_<id> only when there is none at all.
@@ -285,15 +330,21 @@ export function createAdminPaymentService({
       id: randomUUID(), at: now, actor: actorId,
       action: `payment_${status}`, target: request.id, before: request, after: updated
     });
-    return { paymentRequest: updated };
+    const event = request.eventOrderId ? eventOutcomeOf(updated) : null;
+    return event ? { paymentRequest: updated, event } : { paymentRequest: updated };
   }
 
-  async function update({ id, status, reference, note, actorId, amountTzs = null }) {
+  async function update({ id, status, reference, note, actorId, amountTzs = null, reasonCode = null, memberNote = null }) {
     const allowed = ['pending', 'approved', 'rejected', 'cancelled'];
     if (status && !allowed.includes(status)) return { error: 'invalid_status', status: 400 };
     const request = await paymentRequests.findAsync(p => p.id === id);
     if (!request) return { error: 'not_found', status: 404 };
     const nextStatus = status || request.status;
+    // S4: rejecting an event payment needs a reason code, however it is done.
+    if (request.eventOrderId && nextStatus === 'rejected' && request.status !== 'rejected') {
+      const bad = checkEventRejection({ reasonCode, memberNote });
+      if (bad) return bad;
+    }
     if (secondApprover()) {
       // A decided payment changes only by request + confirmation (requestChange / confirmChange).
       if (DECIDED.includes(request.status) && (nextStatus !== request.status || referenceChanged(request, reference))) {
@@ -309,9 +360,9 @@ export function createAdminPaymentService({
       }
       if (referenceLocked(request, reference)) return { error: 'reference_locked_provider', status: 409 };
     }
-    // A confirmed shop-order payment is not edited back: the order is paid, maybe fulfilled.
+    // A confirmed shop-order (or event-order) payment is not edited back: the order is paid, maybe fulfilled.
     // Getting the money back is the refund workflow.
-    if (request.orderId && request.status === 'approved' && nextStatus !== 'approved') {
+    if ((request.orderId || request.eventOrderId) && request.status === 'approved' && nextStatus !== 'approved') {
       return { error: 'payment_already_confirmed', status: 409 };
     }
     const approving = nextStatus === 'approved' && request.status !== 'approved';
@@ -339,15 +390,17 @@ export function createAdminPaymentService({
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
       decidedBy: nextStatus === 'pending' ? null : (keepDecider ? request.decidedBy : actorId)
     // Flag on: only while the verification read still stands (a stale read cannot overwrite a verified payment).
-    }, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {});
+    }, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {}, { actorId, amountTzs, reasonCode, memberNote });
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
+    if (updated?.error) return updated;
     if (!updated) return { error: 'payment_changed', status: 409 };
     await applyPaymentStatusToSubscription(request, nextStatus, updated.reference || finalRef);
     await auditLog.insertAsync({
       id: randomUUID(), at: now, actor: actorId,
       action: 'payment_updated', target: request.id, before: request, after: updated
     });
-    return { paymentRequest: updated };
+    const event = request.eventOrderId ? eventOutcomeOf(updated) : null;
+    return event ? { paymentRequest: updated, event } : { paymentRequest: updated };
   }
 
   const off = { error: 'feature_disabled', status: 404 };
@@ -392,8 +445,10 @@ export function createAdminPaymentService({
     if (!DECIDED.includes(request.status)) return { error: 'not_decided', status: 409, currentStatus: request.status };
     if (status === request.status) return { error: 'no_change', status: 400 };
     if (request.changeRequestedBy) return { error: 'change_already_requested', status: 409, changeRequestedBy: request.changeRequestedBy };
-    // A confirmed shop-order payment is not edited back: getting the money back is the refund workflow.
-    if (request.orderId && request.status === 'approved') return { error: 'payment_already_confirmed', status: 409 };
+    // A confirmed shop-order (or event-order) payment is not edited back: getting the money back is the refund workflow.
+    if ((request.orderId || request.eventOrderId) && request.status === 'approved') return { error: 'payment_already_confirmed', status: 409 };
+    // S4: the only change an event payment accepts is a mistaken rejection becoming an approval (the payment machine has no other move).
+    if (request.eventOrderId && !(request.status === 'rejected' && status === 'approved')) return { error: 'event_payment_change_not_allowed', status: 409 };
     const at = new Date().toISOString();
     const updated = await updateIf(paymentRequests, request.id, { status: request.status, changeRequestedBy: null }, {
       changeRequestedStatus: status, changeRequestedBy: actorId, changeRequestedAt: at, changeRequestReason: why,
@@ -426,12 +481,12 @@ export function createAdminPaymentService({
     if (request.changeRequestedBy === actorId) return { error: 'cannot_confirm_own_request', status: 403 };
     const nextStatus = request.changeRequestedStatus;
     if (!STATUSES.includes(nextStatus) || nextStatus === request.status) return { error: 'invalid_status', status: 409 };
-    if (request.orderId && request.status === 'approved') return { error: 'payment_already_confirmed', status: 409 };
+    if ((request.orderId || request.eventOrderId) && request.status === 'approved') return { error: 'payment_already_confirmed', status: 409 };
     if (nextStatus === 'approved') {
       const can = await upgradeApprovable(subscriptions, request);
       if (!can.ok) return { error: can.error, status: 409 };
-      // A shop order approved this way is checked against the amount received, as at a decision.
-      if (request.orderId && amountTzs == null) return { error: 'amount_required', status: 400 };
+      // A shop (or event) order approved this way is checked against the amount received, as at a decision.
+      if ((request.orderId || request.eventOrderId) && amountTzs == null) return { error: 'amount_required', status: 400 };
       const problem = await checkConfirmation(request, { reference: request.reference, amountTzs });
       if (problem) return problem;
       // As at a decision: the final reference (recorded, else the member's ID) must not be used elsewhere.
@@ -451,14 +506,16 @@ export function createAdminPaymentService({
     if (nextStatus === 'pending') Object.assign(patch, { verifiedBy: null, verifiedAt: null });
     // Approved with no reference recorded: record the member's transaction ID, as a decision does.
     if (nextStatus === 'approved' && !request.reference && request.memberReference) patch.reference = request.memberReference;
-    const updated = await writeDecision(request, patch, { changeRequestedBy: request.changeRequestedBy });
+    const updated = await writeDecision(request, patch, { changeRequestedBy: request.changeRequestedBy }, { actorId, amountTzs, automated: false });
     if (updated === 'reference_already_used') return { error: 'reference_already_used', status: 409 };
+    if (updated?.error) return updated;
     if (!updated) return { error: 'payment_changed', status: 409 };
     await applyPaymentStatusToSubscription(request, nextStatus, updated.reference || request.reference);
     await audit('payment_change_confirmed', actorId, request, {
       ...updated, requestedBy: request.changeRequestedBy, requestedAt: request.changeRequestedAt, reason: request.changeRequestReason,
     }, at);
-    return { paymentRequest: updated };
+    const event = request.eventOrderId ? eventOutcomeOf(updated) : null;
+    return event ? { paymentRequest: updated, event } : { paymentRequest: updated };
   }
 
   return { list, decide, update, verify, requestChange, cancelChange, confirmChange, applyPaymentStatusToSubscription };

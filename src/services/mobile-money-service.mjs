@@ -73,6 +73,11 @@ export function createMobileMoneyService({
   // prompt goes out for a trainer booking group (trainerBookingService.checkGroupPayment).
   // Not wired: trainer sessions are not payable this way (fail closed).
   beforeBookingPayment = null,
+  // Marathon & Events S4 (EVENTS_PAYMENTS_TUNZAA; built dormant). Absent / disabled: EVENT_ORDER is not payable this way and
+  // every other branch is untouched. { enabled(), beforePrompt(request), afterPrompt(request, txn), onHeld(request, reason, detail), onFailed(request, remark) }
+  eventOrders = null,
+  // Callbacks already fully processed: { has(id) → bool, mark(id) } (WebhookSeen). Used for event requests only.
+  webhookSeen = null,
 }) {
   const fail = (error, status, extra = {}) => ({ error, status, ...extra });
   const audit = (action, target, before, after) => auditLog?.insertAsync?.({
@@ -94,9 +99,12 @@ export function createMobileMoneyService({
   const isOn = () => Boolean(enabled() && client && canSettle());
   const roleOf = (role) => (role === 'trainer' ? 'trainer' : 'member');
 
+  const eventsOn = () => Boolean(eventOrders?.enabled?.());
+
   /** The products payable this way right now, whoever pays. */
   function payable() {
     const set = new Set(BASE_PAYABLE);
+    if (eventsOn()) set.add(PRODUCT_TYPES.EVENT_ORDER);
     if (trainerProducts()) {
       for (const p of TRAINER_PAYABLE) if (p !== PRODUCT_TYPES.TRAINER_SERVICE || beforeBookingPayment) set.add(p);
     }
@@ -104,7 +112,11 @@ export function createMobileMoneyService({
   }
 
   /** May this caller role pay this product this way? Without B6a only members reach here. */
-  const roleMayPay = (role, product) => !trainerProducts() || ROLE_PRODUCTS[roleOf(role)].includes(product);
+  const roleMayPay = (role, product) => {
+    // An event order is a member's purchase, never a trainer's or an organisation's.
+    if (product === PRODUCT_TYPES.EVENT_ORDER) return roleOf(role) === 'member';
+    return !trainerProducts() || ROLE_PRODUCTS[roleOf(role)].includes(product);
+  };
 
   /** What the app needs to know before showing "Pay now". */
   function options() {
@@ -120,7 +132,9 @@ export function createMobileMoneyService({
     if (!isOn() || !['member', 'trainer'].includes(role)) return [];
     if (role === 'trainer' && !trainerProducts()) return [];
     const set = payable();
-    return (trainerProducts() ? ROLE_PRODUCTS[role] : BASE_PAYABLE).filter((p) => set.has(p));
+    const list = (trainerProducts() ? ROLE_PRODUCTS[role] : BASE_PAYABLE).filter((p) => set.has(p));
+    // S4: members may also pay an event order while the Tunzaa event flag is effective.
+    return role === 'member' && eventsOn() ? [...list, PRODUCT_TYPES.EVENT_ORDER] : list;
   }
 
   async function productOf(request) {
@@ -174,6 +188,11 @@ export function createMobileMoneyService({
     // B6a: a trainer pays only their own trainer pass; a member never pays a trainer pass.
     if (!roleMayPay(role, product)) return fail('not_payable_by_role', 403, { product });
     if (request.currency && String(request.currency).toUpperCase() !== CURRENCY) return fail('unsupported_currency', 409);
+    // S4: an event order is prompted only while its hold stands, the event is open and every amount agrees (the order's own).
+    if (product === PRODUCT_TYPES.EVENT_ORDER) {
+      const problem = await eventOrders.beforePrompt(request);
+      if (problem?.error) return fail(problem.error, problem.status || 409, problem.expectedTzs != null ? { expectedTzs: problem.expectedTzs } : {});
+    }
     // Owner decision 2026-10-19: a tier not configured in Settings is not sold,
     // even on a request raised before it was taken off (fail closed).
     if (product === PRODUCT_TYPES.FITFLEX_PASS && tierSellable && !tierSellable(request.tier)) {
@@ -229,6 +248,10 @@ export function createMobileMoneyService({
     try {
       const updated = await paymentRequests.updateByIdAsync(request.id, { provider: PROVIDER, reference: transactionId });
       await audit('payment_mobile_money_requested', request.id, null, { transactionId, amountTzs: request.amountTzs });
+      // S4: the event payment becomes pending with the provider's transaction, and the hold is extended a little.
+      if (request.eventOrderId) {
+        try { await eventOrders.afterPrompt(request, transactionId); } catch (err) { await audit('payment_mobile_money_unrecorded', request.id, null, { transactionId, error: String(err?.message || err) }); }
+      }
       return { status: 202, state: 'in_progress', paymentRequest: view(updated) };
     } catch (err) {
       // The prompt is out but we could not record it: keep the claim; the callback settles it.
@@ -259,6 +282,7 @@ export function createMobileMoneyService({
           const remote = await client.checkStatus(late);
           if (remote.status === 'COMPLETED') {
             await audit('payment_mobile_money_orphaned', request.id, { status: request.status }, { transactionId: late, amountTzs: remote.amountTzs });
+            if (request.eventOrderId) await eventOrders.onHeld(request, 'request_closed', { transactionId: late });
           }
         } catch { /* the next callback retry looks again */ }
       }
@@ -281,12 +305,14 @@ export function createMobileMoneyService({
       // Money received must be what was asked: an amount we cannot read is not good enough.
       if (remote.amountTzs == null || remote.amountTzs !== Number(request.amountTzs)) {
         await audit('payment_mobile_money_amount_mismatch', request.id, { amountTzs: request.amountTzs }, { received: remote.amountTzs, transactionId: txn });
+        if (request.eventOrderId) await eventOrders.onHeld(request, 'amount_mismatch', { transactionId: txn });
         return { state: 'held', reason: 'amount_mismatch', paymentRequest: view(request) };
       }
       // The request records the prompt it is waiting on: money confirmed for a different
       // transaction is not this request's (B6a review). Staff look; nothing is approved.
       if (request.provider === PROVIDER && request.reference && !isPlaceholder(request.reference) && request.reference !== txn) {
         await audit('payment_mobile_money_held', request.id, { reference: request.reference }, { error: 'transaction_mismatch', transactionId: txn, amountTzs: remote.amountTzs });
+        if (request.eventOrderId) await eventOrders.onHeld(request, 'transaction_mismatch', { transactionId: txn });
         return { state: 'held', reason: 'transaction_mismatch', paymentRequest: view(request) };
       }
       // One transaction confirms one payment, flags or not.
@@ -302,12 +328,15 @@ export function createMobileMoneyService({
         id: request.id, decision: 'approve', reference: txn, actorId: ACTOR, amountTzs: request.amountTzs,
         // The provider confirmed the money: that is the verification (MONEY_SECOND_APPROVER does not apply).
         automated: true,
+        // Event payments keep an allowlist-redacted copy of what the provider said (never the signature or a phone number).
+        ...(request.eventOrderId ? { providerPayload: remote.raw } : {}),
       });
       if (out.error === 'already_decided') {
         const latest = await paymentRequests.findByIdAsync(request.id);
         if (latest?.status !== 'approved') {
           // Money arrived for a request that was cancelled or rejected meanwhile: staff must look.
           await audit('payment_mobile_money_orphaned', request.id, { status: latest?.status }, { transactionId: txn, amountTzs: remote.amountTzs });
+          if (request.eventOrderId) await eventOrders.onHeld(request, 'request_closed', { transactionId: txn });
           return { state: 'held', reason: 'request_closed', paymentRequest: view(latest ?? request) };
         }
         return { state: 'completed', paymentRequest: view(latest) };
@@ -315,13 +344,18 @@ export function createMobileMoneyService({
       if (out.error) {
         // e.g. the plan being upgraded ended meanwhile: money is in, staff must look.
         await audit('payment_mobile_money_held', request.id, null, { error: out.error, transactionId: txn });
+        if (request.eventOrderId) await eventOrders.onHeld(request, out.error, { transactionId: txn });
         return { state: 'held', reason: out.error, paymentRequest: view(request) };
       }
       return { state: 'completed', paymentRequest: view(out.paymentRequest) };
     }
     if (remote.status === 'FAILED') {
       // Only an attempt we still hold is released; a late FAILED for an old one changes nothing.
-      if (request.reference === txn) await release(request, remote.remark || 'failed');
+      if (request.reference === txn) {
+        await release(request, remote.remark || 'failed');
+        // S4: the event attempt is over (EventPayment failed, request cancelled); the hold keeps running and the member can retry.
+        if (request.eventOrderId) await eventOrders.onFailed(request, remote.remark || null);
+      }
       return { state: 'failed', paymentRequest: view({ ...request, provider: MANUAL, reference: null }), remark: remote.remark };
     }
     return { state: 'in_progress', paymentRequest: view(request) };
@@ -364,9 +398,23 @@ export function createMobileMoneyService({
     if (!requestId || !transactionId) return fail('invalid_payload', 400);
     const request = await paymentRequests.findByIdAsync(requestId);
     if (!request) return { status: 200, ok: true, ignored: 'unknown_reference' };
+    // S4 (event requests only): a callback that was fully processed once is a no-op the second time, without calling Tunzaa.
+    // It is recorded AFTER processing, so a crash midway does not swallow Tunzaa's retry. The state machine, the database's
+    // one-success-per-order index and the idempotent confirmation are the guarantees; this is the belt.
+    const seenKey = request.eventOrderId && webhookSeen ? `tunzaa:${transactionId}:${String(payload?.status ?? '').toUpperCase()}` : null;
+    if (seenKey && await webhookSeen.has(seenKey)) return { status: 200, ok: true, duplicate: true };
     const out = await settle(request, { transactionId });
+    if (seenKey && ['completed', 'failed'].includes(out.state)) await webhookSeen.mark(seenKey);
     return { status: 200, ok: true, state: out.state };
   }
 
-  return { options, payableProducts, pay, refresh, handleCallback };
+  /** The sweep (eventPaymentReconciliation): settle one request by id as the refresh route does. */
+  async function settleById(paymentRequestId) {
+    if (!client) return { state: 'none' };
+    const request = await paymentRequests.findByIdAsync(paymentRequestId);
+    if (!request) return { state: 'none' };
+    return settle(request);
+  }
+
+  return { options, payableProducts, pay, refresh, handleCallback, settleById };
 }
