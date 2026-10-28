@@ -54,10 +54,10 @@ test('disallowed moves come back as invalid_transition with what would have been
     ['event', 'archived', 'draft', []],
     ['order', 'confirmed', 'expired', ['partially_cancelled', 'cancelled', 'refund_pending']],
     ['order', 'confirmed', 'awaiting_payment', ['partially_cancelled', 'cancelled', 'refund_pending']],
-    ['order', 'expired', 'confirmed', []],
+    ['order', 'expired', 'cancelled', ['confirmed']],      // S4: expired → confirmed only through rehold
     ['order', 'refunded', 'confirmed', []],
     ['paymentAttempt', 'succeeded', 'pending', ['reversed']],
-    ['paymentAttempt', 'failed', 'succeeded', []],
+    ['paymentAttempt', 'failed', 'pending', ['succeeded', 'reconciliation_required']],  // S4: failed → succeeded (manual, two-person change)
     ['paymentAttempt', 'reversed', 'succeeded', []],
     ['registration', 'reserved', 'transferred', ['confirmed', 'cancelled']],
     ['registration', 'disqualified', 'confirmed', []],
@@ -75,8 +75,8 @@ test('disallowed moves come back as invalid_transition with what would have been
 
 test('final statuses', () => {
   for (const [kind, finals] of [
-    ['order', ['cancelled', 'expired', 'refunded']],
-    ['paymentAttempt', ['failed', 'cancelled', 'expired', 'reversed']],
+    ['order', ['cancelled', 'refunded']],
+    ['paymentAttempt', ['cancelled', 'expired', 'reversed']],
     ['registration', ['transferred', 'refunded', 'disqualified']],
     ['event', ['archived']],
     ['ticket', ['revoked']],
