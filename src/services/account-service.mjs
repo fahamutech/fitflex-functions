@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
+import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
 
 export function createAccountService({
   users, trainers, trainerBookings, checkins, auditLog,
@@ -69,6 +70,10 @@ export function createAccountService({
       approvalStatus: approvalStatusForRole(role),
       createdAt: new Date().toISOString()
     };
+    // The photo is shown to other people (feeds, followers, trainers, gyms): data URI or our own
+    // storage path only (media-src.mjs); the stored one (e.g. the sign-in provider's) is kept as is.
+    const badMedia = await checkMediaFields({ photoUrl: body.photoUrl }, { kept: storedMedia(current.photoUrl) });
+    if (badMedia) return badMedia;
     const baseProfile = {
       ...current,
       displayName: body.displayName ?? current.displayName,

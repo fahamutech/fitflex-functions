@@ -56,7 +56,7 @@ export const adminDeleteTrainer = {
 
 export const trainerRegister = {
   created, method: 'post', path: '/trainer/register',
-  description: 'Trainer: self-register full profile (displayName, optional nickname clients see instead, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing. Optional dateOfBirth ("YYYY-MM-DD"): with PARTNER_DOB_REQUIRED on it is checked like PUT /me/personal-details (400 { error: "invalid_field", field: "dateOfBirth" }, 400 { error: "partner_under_18" }) and saved on the person, never on the public trainer profile; off, it is ignored. Leaving it out is always accepted.',
+  description: 'Trainer: self-register full profile (displayName, optional nickname clients see instead, photoUrl, gender, specialties, bio, hourlyRate, availability). Creates trainer profile if missing. Optional dateOfBirth ("YYYY-MM-DD"): with PARTNER_DOB_REQUIRED on it is checked like PUT /me/personal-details (400 { error: "invalid_field", field: "dateOfBirth" }, 400 { error: "partner_under_18" }) and saved on the person, never on the public trainer profile; off, it is ignored. Leaving it out is always accepted. Photos (photoUrl, images, imageThumbnails; security fix 2026-10-29): each must be data:image/(png|jpeg|webp);base64,… (≤ 2 MB decoded, a real image of that kind, ≤ 4096 px a side) or our own /storage/<cid>/<file> path; values already on the profile are accepted unchanged; anything else → 400 invalid_media_src { field, index?, reason } (nothing saved).',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
@@ -72,6 +72,7 @@ export const trainerRegister = {
         error: result.error,
         ...(result.validValues ? { validValues: result.validValues } : {}),
         ...(result.platforms ? { platforms: result.platforms } : {}),
+        ...(result.error === 'invalid_media_src' ? { field: result.field, index: result.index, reason: result.reason } : {}),
       });
     }
     await users.updateByIdAsync(req.user.sub, {
@@ -120,7 +121,7 @@ export const trainerCancelGymApplication = {
 
 export const trainerUpdateProfile = {
   created, method: 'put', path: '/trainer/me',
-  description: 'Trainer: update own professional details — displayName (the own name of the trainer), nickname (optional name clients see instead; 2–30 characters, null or an empty string removes it; the displayName of the profile then reads as the nickname and fullName keeps the own name), phone, bio, specialties, hourlyRateTzs, sessionRateCurrency (TZS|USD), experienceYears, availability, images (gallery, max 8; first is the profile picture) with imageThumbnails, photoUrl, and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL). Only the fields sent are changed.',
+  description: 'Trainer: update own professional details — displayName (the own name of the trainer), nickname (optional name clients see instead; 2–30 characters, null or an empty string removes it; the displayName of the profile then reads as the nickname and fullName keeps the own name), phone, bio, specialties, hourlyRateTzs, sessionRateCurrency (TZS|USD), experienceYears, availability, images (gallery, max 8; first is the profile picture) with imageThumbnails, photoUrl, and socialLinks { instagram, facebook, twitter } (handle, @handle or profile URL). Only the fields sent are changed. Photos (photoUrl, images, imageThumbnails; security fix 2026-10-29): each must be data:image/(png|jpeg|webp);base64,… (≤ 2 MB decoded, a real image of that kind, ≤ 4096 px a side) or our own /storage/<cid>/<file> path; values already on the profile are accepted unchanged; anything else → 400 invalid_media_src { field, index?, reason } (nothing saved).',
   onGuard: requireAuth('trainer'),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);

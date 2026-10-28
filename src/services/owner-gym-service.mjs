@@ -3,6 +3,15 @@
 import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
+import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
+import { trainerMedia } from './trainer-service.mjs';
+
+// Gym photos are shown to every member: data URI or our own storage path only (media-src.mjs).
+// Photos already on the gym are accepted unchanged (the app sends the whole gallery back).
+const gymMediaProblem = (row, prior) => checkMediaFields(
+  { images: row.images, thumbnails: row.thumbnails },
+  { kept: storedMedia(prior?.images, prior?.thumbnails) },
+);
 
 // What a gym owner may set when they add a trainer (the trainer edits it after).
 const OWNER_TRAINER_FIELDS = Object.freeze([
@@ -51,7 +60,8 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const status = await newGymStatus(user);
     const createdGyms = [];
     const gymIds = [];
-    for (const g of gymList) {
+    const rows = [];
+    for (const [index, g] of gymList.entries()) {
       const gymData = ownerInput(g);
       if (!gymData.images && Array.isArray(gymData.imagePaths)) {
         gymData.images = gymData.imagePaths;
@@ -60,6 +70,12 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       // Always a new gym: an id sent by the caller could name someone else's.
       gymData.id = `gym_${randomUUID().slice(0, 8)}`;
       const row = gymService.normalizeGymPayload(gymData, {});
+      // Every gym is checked before any is saved, so a bad photo leaves nothing half-registered.
+      const badMedia = await gymMediaProblem(row, null);
+      if (badMedia) return { ...badMedia, gymIndex: index };
+      rows.push([g, row]);
+    }
+    for (const [g, row] of rows) {
       row.status = status;
       await gyms.upsertAsync(x => x.id === row.id, row);
       createdGyms.push(row);
@@ -132,6 +148,8 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const { tier: _tier, ...input } = ownerInput(body);
     const tier = prior.tier === 'online' ? 'standard' : prior.tier;
     const row = gymService.normalizeGymPayload({ ...input, tier, id: prior.id }, prior);
+    const badMedia = await gymMediaProblem(row, prior);
+    if (badMedia) return badMedia;
     await gyms.upsertAsync(g => g.id === row.id, row);
     if (Array.isArray(body.trainerIds)) await syncTrainersForGym(row.id, body.trainerIds);
     return { gym: row };
@@ -141,6 +159,8 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     if (!body.name) return { error: 'name_required', status: 400 };
     const id = `gym_${randomUUID().slice(0, 8)}`;
     const row = gymService.normalizeGymPayload({ ...ownerInput(body), id }, {});
+    const badMedia = await gymMediaProblem(row, null);
+    if (badMedia) return badMedia;
     row.status = await newGymStatus(owner);
     await gyms.upsertAsync(g => g.id === row.id, row);
     if (Array.isArray(body.trainerIds) && body.trainerIds.length) await syncTrainersForGym(row.id, body.trainerIds);
@@ -214,6 +234,8 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       ...starting, id: trainerId, userId, email, displayName, gymIds: [gymId],
       status: 'active', approvalStatus: 'approved',
     }, {});
+    const badMedia = await checkMediaFields(trainerMedia(trainer));
+    if (badMedia) return badMedia;
     await users.upsertAsync(u => u.id === userId, user);
     await trainers.upsertAsync(t => t.id === trainerId, trainer);
     await auditLog.insertAsync({

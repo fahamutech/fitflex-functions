@@ -136,7 +136,7 @@ test('routes: a conversation round-trips through the database and notifies both 
   await call(updateMemberProfile, { user: trainerUser, body: { displayName: 'Coach Enquiry', phone: phone() } });
   await call(updateMemberProfile, { user: member, body: { displayName: 'Member Enquiry', phone: phone() } });
   const reg = await call(trainerRegister, {
-    user: trainerUser, body: { displayName: 'Coach Enquiry', photoUrl: 'https://example.com/c.jpg', gender: 'male', hourlyRateTzs: 15000 },
+    user: trainerUser, body: { displayName: 'Coach Enquiry', photoUrl: '/storage/bafytest/c.jpg', gender: 'male', hourlyRateTzs: 15000 },
   });
   assert.equal(reg.statusCode, 200, JSON.stringify(reg.body));
 

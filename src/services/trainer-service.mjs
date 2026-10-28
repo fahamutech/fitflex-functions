@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
+import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
 import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
 
 /**
@@ -59,6 +60,9 @@ const PUBLIC_TRAINER_FIELDS = Object.freeze([
 const PRIVATE_GYM_FIELDS = Object.freeze([
   'commissionRate', 'paymentBank', 'paymentNumber', 'paymentNotes', 'tinNumber', 'homepageVisible', 'homepagePriority',
 ]);
+
+/** The image fields of a trainer row or patch, for checkMediaFields. */
+export const trainerMedia = row => ({ photoUrl: row?.photoUrl, images: row?.images, imageThumbnails: row?.imageThumbnails });
 
 export function publicTrainer(trainer) {
   if (!trainer) return trainer;
@@ -303,6 +307,12 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       // The profile is active at once; verification is the trainer's KYC (3 Oct 2026).
       approvalStatus: 'approved',
     }, profile || {});
+    // Photos are shown to every member: data URI or our own storage path only (media-src.mjs). What the
+    // profile or the account already had (e.g. the sign-in photo) is kept as is.
+    const badMedia = await checkMediaFields(trainerMedia(row), {
+      kept: storedMedia(profile?.photoUrl, profile?.images, profile?.imageThumbnails, user?.photoUrl),
+    });
+    if (badMedia) return badMedia;
     await trainers.upsertAsync(t => t.id === row.id, row);
     // Only the gyms newly asked for, not ones already waiting.
     await askedToJoin(requested.filter(id => !(profile?.pendingGymIds || []).includes(id)), row);
@@ -401,6 +411,10 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       updates.images = [updates.photoUrl];
     }
     if (body.socialLinks !== undefined) updates.socialLinks = normalizeSocialLinks(body.socialLinks).links;
+    const badMedia = await checkMediaFields(trainerMedia(updates), {
+      kept: storedMedia(profile.photoUrl, profile.images, profile.imageThumbnails),
+    });
+    if (badMedia) return badMedia;
     updates.updatedAt = new Date().toISOString();
     const updated = await trainers.updateAsync(t => t.id === profile.id, updates);
     return { trainer: hydrateTrainer(updated) };

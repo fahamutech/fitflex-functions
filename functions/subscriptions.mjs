@@ -79,12 +79,12 @@ export const deleteMyAccount = {
 
 export const updateMemberProfile = {
   created, method: 'post', path: '/me/profile',
-  description: 'Authenticated user: save profile details; members can also save onboarding goals and preferences. Members: dateOfBirth must be "YYYY-MM-DD", a real calendar date from 1901-01-01 to today (East Africa day), else 400 invalid_field { field: "dateOfBirth" }; "" (or only spaces) clears it; null or leaving it out keeps the stored one. With PARTNER_DOB_REQUIRED on, a date of birth under 18 for a person who also holds a trainer or gym-owner role is refused: 400 { error: "partner_under_18" }.',
+  description: 'Authenticated user: save profile details; members can also save onboarding goals and preferences. Members: dateOfBirth must be "YYYY-MM-DD", a real calendar date from 1901-01-01 to today (East Africa day), else 400 invalid_field { field: "dateOfBirth" }; "" (or only spaces) clears it; null or leaving it out keeps the stored one. With PARTNER_DOB_REQUIRED on, a date of birth under 18 for a person who also holds a trainer or gym-owner role is refused: 400 { error: "partner_under_18" }. photoUrl (security fix 2026-10-29): data:image/(png|jpeg|webp);base64,… (≤ 2 MB decoded, a real image of that kind) or our own /storage/<cid>/<file> path; the stored photo is accepted unchanged; null / "" as before; else 400 invalid_media_src { field: "photoUrl", reason }.',
   onGuard: routeGuard('post', requireAuth()),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
     const result = await accountService.updateMemberProfile({ claims: req.user, user, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.field ? { field: result.field } : {}) });
+    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.field ? { field: result.field } : {}), ...(result.reason ? { reason: result.reason } : {}) });
     res.json(result);
   }
 };

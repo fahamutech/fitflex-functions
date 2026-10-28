@@ -246,11 +246,11 @@ export const vendorProfile = {
   onRequest: async (req, res) => res.json(await shopService.vendorProfileFor(req.user) || {}),
 };
 export const vendorSaveProfile = {
-  created, method: 'put', path: '/vendor/profile', description: 'Vendor (account holder) or admin only: create, edit or publish business profile. vendor_staff → 403. Shop home slice 3 (additive, not flagged): optional cityId (a usable city or district: "Based in"), regionId (a usable region; filled from cityId when left out), deliveryAreaIds (usable areas of any level, ≤ 50; the country id = nationwide; [] = no delivery). Left out = unchanged; null clears cityId/regionId. The server sets areasSource: vendor. 400 invalid_area { field, ids, reason: unknown | inactive | wrong_level | not_in_region | too_many | not_a_list } (nothing saved). docs/shop-near-you-api.md.',
+  created, method: 'put', path: '/vendor/profile', description: 'Vendor (account holder) or admin only: create, edit or publish business profile. vendor_staff → 403. Shop home slice 3 (additive, not flagged): optional cityId (a usable city or district: "Based in"), regionId (a usable region; filled from cityId when left out), deliveryAreaIds (usable areas of any level, ≤ 50; the country id = nationwide; [] = no delivery). Left out = unchanged; null clears cityId/regionId. The server sets areasSource: vendor. 400 invalid_area { field, ids, reason: unknown | inactive | wrong_level | not_in_region | too_many | not_a_list } (nothing saved). docs/shop-near-you-api.md. logo / banner (security fix 2026-10-29): only data:image/(png|jpeg|webp);base64,… (≤ 2 MB decoded, must decode as that raster, ≤ 4096 px a side) or our own /storage/<cid>/<file> path; a value already stored is accepted unchanged; anything else (another host, http(s), javascript:, SVG, oversize) → 400 invalid_media_src { field, reason } (nothing saved).',
   onGuard: routeGuard('put', requireAuth('vendor', 'admin')),
   onRequest: async (req, res) => {
     const result = await shopService.saveVendorProfile({ vendorId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing, allowed: result.allowed, field: result.field, ids: result.ids, reason: result.reason });
+    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing, allowed: result.allowed, field: result.field, ids: result.ids, reason: result.reason, index: result.index });
     res.json(result.profile);
   },
 };

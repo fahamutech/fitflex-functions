@@ -125,7 +125,10 @@ Staff:
   still the unused subscription stub. A gateway would create the same
   `B2BPayment` a confirmed notice does.
 - **Proof of payment is an image** uploaded through `/storage/upload`; PDFs are
-  not accepted there.
+  not accepted there. Since 29 Oct 2026 that upload needs an active seat in a
+  B2B organisation (or a staff/partner/HR account): a plain member is refused
+  (403 `upload_forbidden`). Uploads are rate limited (20 a minute, 200 a day
+  per user) and written to the audit log.
 - **Reminder emails are plain text** and go to one address, the billing
   contact. Reminder wording is English only.
 - **Company seat bills** (the old Corporate billing) are not chased here; only

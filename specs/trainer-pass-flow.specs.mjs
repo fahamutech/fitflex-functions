@@ -71,7 +71,7 @@ async function setup() {
   const trainer = { sub: trainerUserId, userType: 'trainer' };
   const reg = await call(trainerRegister, {
     user: trainer,
-    body: { displayName: 'Pass Trainer', photoUrl: 'https://example.com/t.jpg', gender: 'female', hourlyRateTzs: 20000 },
+    body: { displayName: 'Pass Trainer', photoUrl: '/storage/bafytest/t.jpg', gender: 'female', hourlyRateTzs: 20000 },
   });
   assert.equal(reg.statusCode, 200, JSON.stringify(reg.body));
   return { owner, trainer, trainerProfileId: reg.body.id, passGym, planGym, homeGym };
