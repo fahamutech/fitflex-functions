@@ -628,11 +628,11 @@ test('admin reads: full names, order detail without emergency contact, cancel of
   assert.equal(aud.after.note, 'duplicate of EV-1');
   assert.equal((await h.notifications(b.sub, 'event_order_cancelled')).length, 1);
   assert.equal((await call(adminCancelEventOrder, admin, { params: { id: f.event.id, orderId: r.body.order.id }, body: {} })).body.changed, false);
-  // a confirmed order cannot be cancelled here (refunds are S4)
+  // a confirmed order is no longer refused with invalid_transition (S4): an admin needs a note and a refund mode, a member the expected refund
   const r2 = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: orderBody(f.event.id, [{ ticketTypeId: f.ticket.id, quantity: 1 }], [self(f.ticket.id, b)]) });
   await eventStore.commitOrder(r2.body.order.id);
-  assert.equal((await call(adminCancelEventOrder, admin, { params: { id: f.event.id, orderId: r2.body.order.id }, body: {} })).body.error, 'invalid_transition');
-  assert.equal((await call(cancelMyEventOrder, b.claims, { params: { id: r2.body.order.id }, body: { reason: 'other' } })).body.error, 'invalid_transition');
+  assert.equal((await call(adminCancelEventOrder, admin, { params: { id: f.event.id, orderId: r2.body.order.id }, body: {} })).body.error, 'note_required');
+  assert.equal((await call(cancelMyEventOrder, b.claims, { params: { id: r2.body.order.id }, body: { reason: 'other' } })).body.error, 'expected_refund_required');
   delete process.env.EVENTS_REGISTRATION;
   assert.deepEqual((await call(adminListEventOrders, admin, { params: { id: f.event.id } })).body, { error: 'feature_disabled' });
 });
@@ -802,7 +802,8 @@ test('L9 / Swahili: inviteClaims refuses an unpaid order; for a paid one it send
   assert.equal(sent.length, 0);
   await eventStore.commitOrder(r.body.order.id);
   const before = await db('EventRegistration').where({ orderId: r.body.order.id }).first();
-  assert.deepEqual(await svc.inviteClaims({ orderId: r.body.order.id }), { invited: 1, skipped: 0 });
+  const invitedNow = await svc.inviteClaims({ orderId: r.body.order.id });
+  assert.deepEqual([invitedNow.invited, invitedNow.skipped], [1, 0]);   // S4 adds per-place `results`
   assert.equal(sent.length, 1);
   assert.match(sent[0].text, /amekusajili/);   // unknown recipient: Swahili and English together
   assert.match(sent[0].text, /registered you/);
