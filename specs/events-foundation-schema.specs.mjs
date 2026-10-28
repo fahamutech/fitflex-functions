@@ -22,6 +22,8 @@ const MIGRATIONS = [
   // its two migrations are part of the same up/down set.
   '20270110090700-events-organizer-identity.cjs',
   '20270110090800-events-document-fields.cjs',
+  // S3: registration fields (additive; its EventOrder.teamId → EventTeam FK must come down before events-orders).
+  '20270110090900-events-registration-fields.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');

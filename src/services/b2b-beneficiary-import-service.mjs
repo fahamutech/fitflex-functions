@@ -58,8 +58,8 @@ const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const newId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const text = (v, max) => (v == null ? null : String(v).trim().slice(0, max) || null);
 
-/** Split one CSV line, honouring double quotes. */
-function splitCsv(line) {
+/** Split one CSV line, honouring double quotes (also used by the events roster parser, S3). */
+export function splitCsv(line) {
   const out = [];
   let cell = '';
   let quoted = false;
