@@ -143,7 +143,7 @@ export const myMemberships = {
 
 export const addMyPersona = {
   created, method: 'post', path: '/me/personas',
-  description: 'Identity V2: add a persona (member, trainer, gym_operator, vendor) to the caller\'s own Person. 404 unless V2_ADD_PERSONA is on.',
+  description: 'Identity V2: add a persona (member, trainer, gym_operator, vendor) to the caller\'s own Person. 404 unless V2_ADD_PERSONA is on. With PARTNER_DOB_REQUIRED on, a trainer or gym_operator persona is refused with 400 partner_under_18 when the person\'s stored date of birth (declared, else member profile) is under 18.',
   requestSample: { userType: 'trainer' },
   onGuard: requireAuth(),
   onRequest: async (req, res) => {

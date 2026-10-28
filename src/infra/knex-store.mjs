@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import knexFactory from 'knex';
+import { redactAuditValue } from '../shared/audit-redact.mjs';
 import pg from 'pg';
 
 // pg returns NUMERIC/DECIMAL as strings to avoid precision loss. Ours are all
@@ -631,7 +632,7 @@ export function collection(name) {
 // Known scalar columns per model — only these are written to PG.
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
-  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','termsVersion','termsAcceptedAt','passwordChangeRequired','startPasswordHash','sessionsValidAfter','passwordChangeClaimedAt','createdAt','updatedAt']),
+  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','organizerId','organizerRole','termsVersion','termsAcceptedAt','passwordChangeRequired','startPasswordHash','sessionsValidAfter','passwordChangeClaimedAt','createdAt','updatedAt']),
   gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','regionId','cityId','paymentBank','paymentNumber','paymentNotes','tinNumber','rating','reviewCount','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed',
@@ -648,7 +649,7 @@ const ALLOWED_FIELDS = {
   gym_owners:       new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','gymId','gymIds','createdAt','updatedAt']),
   trainer_engagements: new Set(['id','memberId','trainerId','type','message','gymId','status','messages','lastMessageAt','lastMessageFrom','trainerReadAt','memberReadAt','createdAt','updatedAt']),
   trainer_sessions: new Set(['id','trainerId','memberId','customerName','customerEmail','customerPhone','gymId','locationType','locationLabel','date','slot','source','status','amountTzs','createdAt']),
-  products:         new Set(['id','vendorId','name','description','category','brand','priceTzs','discountPriceTzs','stock','sku','weightKg','distanceKm','variants','images','visibility','deliveryAvailable','status','approvalStatus','rating','reviewCount','soldCount','homepageVisible','homepagePriority','deletedAt','createdAt','updatedAt']),
+  products:         new Set(['id','vendorId','name','description','category','brand','priceTzs','discountPriceTzs','stock','sku','weightKg','distanceKm','variants','images','visibility','deliveryAvailable','status','approvalStatus','rating','reviewCount','soldCount','homepageVisible','homepagePriority','targetGender','targetAgeBands','deletedAt','createdAt','updatedAt']),
   shop_orders:      new Set(['id','buyerId','buyerRole','items','totalTzs','status','deliveryMethod','pickupGymId','deliveryAddress','paymentMethod','paymentStatus','paymentReference','timeline','settlementStatus','note','idempotencyKey','idempotencyFingerprint','stockState','reservationExpiresAt','reservationCycle','fulfilments','createdAt','updatedAt']),
   marketplace_enquiries: new Set(['id','buyerId','vendorId','productId','subject','status','messages','createdAt','updatedAt']),
   marketplace_notifications: new Set(['id','userId','type','data','read','createdAt']),
@@ -691,7 +692,7 @@ const ALLOWED_FIELDS = {
   b2b_programs:           new Set(['id','organizationId','name','description','programType','status','statusReason','statusChangedAt','startDate','endDate','eligibility','budgetTzs','discountBps','activatedAt','activatedBy','createdBy','createdAt','updatedAt']),
   moderation_states:    new Set(['id','entityType','entityId','status','reason','decidedBy','decidedAt','createdAt','updatedAt']),
   moderation_events:    new Set(['id','entityType','entityId','action','fromStatus','toStatus','reason','actor','at']),
-  geo_areas:            new Set(['id','level','name','parentId','lat','lng','radiusKm','active','createdAt','updatedAt']),
+  geo_areas:            new Set(['id','level','name','nameSw','parentId','lat','lng','radiusKm','active','createdAt','updatedAt']),
   promotion_campaigns:  new Set(['id','name','description','status','statusReason','startsAt','endsAt','geoScope','createdBy','createdAt','updatedAt']),
   promotions:           new Set(['id','entityType','entityId','type','status','statusReason','statusChangedAt','campaignId','partnerRef','startsAt','endsAt','priority','boostWeight','geoScope','audience','categories','isCommercial','relationshipType','commercialRef','disclosureLabel','notes','createdBy','submittedBy','submittedAt','approvedBy','approvedAt','activatedAt','pausedAt','createdAt','updatedAt']),
   promotion_placements: new Set(['id','promotionId','placement']),
@@ -825,6 +826,13 @@ function prepareForKnex(name, data, isUpdate = false) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];
       cleaned[f] = typeof val === 'number' ? new Date(val) : new Date(val);
+    }
+  }
+
+  // Credential keys never reach AuditLog, whatever a caller passes.
+  if (name === 'audit_log') {
+    for (const f of ['before', 'after']) {
+      if (cleaned[f] && typeof cleaned[f] === 'object') cleaned[f] = redactAuditValue(cleaned[f]);
     }
   }
 

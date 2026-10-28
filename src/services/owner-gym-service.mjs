@@ -57,7 +57,8 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
         gymData.images = gymData.imagePaths;
         delete gymData.imagePaths;
       }
-      if (!gymData.id) gymData.id = `gym_${randomUUID().slice(0, 8)}`;
+      // Always a new gym: an id sent by the caller could name someone else's.
+      gymData.id = `gym_${randomUUID().slice(0, 8)}`;
       const row = gymService.normalizeGymPayload(gymData, {});
       row.status = status;
       await gyms.upsertAsync(x => x.id === row.id, row);

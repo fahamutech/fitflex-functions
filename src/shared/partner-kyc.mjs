@@ -9,7 +9,7 @@
 // people, documents, checks, settlement accounts, agreements and events.
 // What each partner type must provide lives in partner-kyc-requirements.mjs.
 
-export const PARTNER_TYPES = ['gym_owner', 'trainer', 'vendor', 'corporate'];
+export const PARTNER_TYPES = ['gym_owner', 'trainer', 'vendor', 'corporate', 'event_organizer'];
 
 // Which existing record a partner type points at.
 export const PARTNER_SUBJECT = Object.freeze({
@@ -17,6 +17,8 @@ export const PARTNER_SUBJECT = Object.freeze({
   trainer: { table: 'User', userType: 'trainer' },
   vendor: { table: 'User', userType: 'vendor' },
   corporate: { table: 'CorporateAccount' },
+  // Events · S2 (D3, D10): the organizer persona (User.userType event_organizer); its EventOrganizer row is derived from the case.
+  event_organizer: { table: 'User', userType: 'event_organizer' },
 });
 
 export function partnerTypeForUserType(userType) {
@@ -78,6 +80,46 @@ export const REASON_CODES = [
   'suspected_fraud', 'duplicate_partner', 'incomplete_submission', 'other',
 ];
 
+// ── What partners are told about a reason (owner decision, 22 Oct 2026) ─────
+// Some reasons reveal what FitFlex suspects. A partner never sees them: the
+// server sends the neutral code below instead, and drops the reviewer's note
+// (it may say what was suspected). Admins keep the real code and note.
+//
+//   suspected_fraud    the reviewer suspects fraud
+//   duplicate_partner  the same person or business is already a partner
+//                      (telling them shows which identity was matched)
+//
+// Fail closed: any code that is not a known, partner-safe one (including a
+// code added to REASON_CODES later without being reviewed here) is treated
+// as sensitive too.
+export const SENSITIVE_REASON_CODES = Object.freeze(['suspected_fraud', 'duplicate_partner']);
+export const PARTNER_NEUTRAL_REASON = 'under_review';
+
+const PARTNER_SAFE_REASON_CODES = new Set(REASON_CODES.filter(c => !SENSITIVE_REASON_CODES.includes(c)));
+
+/** True when a partner must not see this reason code (or the note that came with it). */
+export function isSensitiveReason(code) {
+  return code !== null && code !== undefined && code !== '' && !PARTNER_SAFE_REASON_CODES.has(code);
+}
+
+/** The reason code a partner is shown: the code itself, or 'under_review'. */
+export function partnerReasonCode(code) {
+  if (code === null || code === undefined || code === '') return null;
+  return isSensitiveReason(code) ? PARTNER_NEUTRAL_REASON : code;
+}
+
+/** The reviewer's note as a partner may see it: none when the reason is sensitive. */
+export function partnerReasonNote(code, note) {
+  return isSensitiveReason(code) ? null : (note ?? null);
+}
+
+/** A KYC case as its partner sees it. Admin views use the case as stored. */
+export function partnerSafeCase(kycCase) {
+  if (!kycCase) return kycCase;
+  if (!isSensitiveReason(kycCase.reasonCode)) return kycCase;
+  return { ...kycCase, reasonCode: PARTNER_NEUTRAL_REASON, reasonNote: null };
+}
+
 // The existing coarse gate every app already reads (User.approvalStatus),
 // derived from the case so the two never disagree. Suspension is expressed
 // through accountStatus/payout holds, not by un-approving the role.
@@ -86,7 +128,8 @@ export const REASON_CODES = [
 export function approvalStatusForCase(caseStatus, partnerType = null) {
   if (caseStatus === 'approved' || caseStatus === 'suspended') return 'approved';
   if (caseStatus === 'rejected') return 'rejected';
-  return partnerType === 'trainer' || partnerType === 'gym_owner' ? 'approved' : 'pending_approval';
+  // Organizers too (spec §2): the persona is usable at once; what they may do follows EventOrganizer.status.
+  return partnerType === 'trainer' || partnerType === 'gym_owner' || partnerType === 'event_organizer' ? 'approved' : 'pending_approval';
 }
 
 // ── People (identity, beneficial owners, representatives) ──────────────────
@@ -116,6 +159,7 @@ export const DOCUMENT_TYPES = [
   'board_resolution', 'certification', 'liability_insurance',
   'letter_of_authority', 'bank_proof', 'mobile_money_proof', 'site_photo', 'signed_agreement', 'other',
   'vat_certificate', // vendor tools · S5 (optional, vendors)
+  'event_permit', // events · S2 (optional, organizers; D13)
 ];
 
 // Only these file types may be stored as KYC documents.

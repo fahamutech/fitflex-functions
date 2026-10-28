@@ -15,11 +15,11 @@ export const adminMembers = {
 
 export const adminUpsertMember = {
   created, method: 'post', path: '/admin/members',
-  description: 'Admin: create or update a member profile.',
+  description: 'Admin: create or update a member profile. memberProfile.dateOfBirth must be "YYYY-MM-DD", a real calendar date from 1901-01-01 to today, else 400 invalid_field { field: "dateOfBirth" }; "" clears it; null or leaving it out keeps the stored one.',
   onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('members')]),
   onRequest: async (req, res) => {
     const result = await adminMemberService.upsert({ body: req.body || {}, actorId: req.user?.sub });
-    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.existingRole ? { existingRole: result.existingRole } : {}) });
+    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.existingRole ? { existingRole: result.existingRole } : {}), ...(result.field ? { field: result.field } : {}) });
     res.status(result.created ? 201 : 200).json(result.member);
   }
 };

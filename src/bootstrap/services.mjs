@@ -31,7 +31,8 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn } from '../shared/feature-flags.mjs';
+import { identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
+import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
@@ -140,14 +141,24 @@ import { createShopBannerService } from '../services/shop-banner-service.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
 import { createShopHomeService } from '../services/shop-home-service.mjs';
+import { createShopPreferenceService } from '../services/shop-preference-service.mjs';
+import { createPgShopPreferenceStore, forgetShopPreference } from '../infra/shop-preference-store-pg.mjs';
 import { signServedToken } from '../auth/promotion-token.mjs';
 import { createPromotionEventsService } from '../services/promotion-events-service.mjs';
 import { createPromotionAnalyticsService } from '../services/promotion-analytics-service.mjs';
 import { createZebraDocumentStore, createZebraPublicStore } from '../infra/storage-client.mjs';
+import { createPgEventCatalogueStore } from '../infra/event-catalogue-store-pg.mjs';
+import { createEventsOrganizerService } from '../services/events-organizer-service.mjs';
+import { createEventsAdminService } from '../services/events-admin-service.mjs';
+import { createEventsDiscoveryService } from '../services/events-discovery-service.mjs';
+import { registerOrganizerLookup } from '../auth/events-authz.mjs';
+import { eventsFavouritesOn, eventsRegistrationOn, eventsClosingSoonHours, eventAutoCompleteGraceHours } from '../shared/feature-flags.mjs';
 import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
 import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
+import { createPersonalDetailsService } from '../services/personal-details-service.mjs';
+import { forgetPersonDetails } from '../infra/person-details-store-pg.mjs';
 import {
   moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
@@ -232,9 +243,17 @@ export const partnerNotifier = createPartnerNotifier({
   usernames: { handleOf: userId => usernameService.handleOf(userId) }, users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Partner DOB slice 2 (docs/partner-dob-api.md): a person's own date of birth and gender on their Person.
+export const personalDetailsService = createPersonalDetailsService({ db, auditLog, trainers });
 export const trainerService = createTrainerService({
   trainers, gyms, trainerBookings, auditLog, gymService, partnerGate,
   onGymRequest: request => partnerNotifier.gymTrainerRequest(request),
+  // Partner DOB review L3: the declared date of birth goes once the Person has no personas left
+  // (deleting only the profile leaves the trainer's account, so this usually keeps it).
+  onTrainerRemoved: async prior => {
+    const row = prior?.userId ? await db('User').where({ id: prior.userId }).first('personId') : null;
+    await forgetPersonDetails(db, { personId: row?.personId || null });
+  },
 });
 export const trainerBookingService = createTrainerBookingService({
   trainerBookings, trainerSessions, trainers, gyms, users, auditLog, trainerService,
@@ -285,6 +304,8 @@ export const trainerEngagementService = createTrainerEngagementService({
 });
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
+  // Shop home slice 3: vendor "Based in" / "Delivers to" are checked against usable GeoAreas.
+  geoAreas,
   // Stock reservation and cancellation are single database transactions.
   orderStore: createPgShopOrderStore({ db }),
   // Vendor tools · S1: stock ledger, cost price, reorder level (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
@@ -483,6 +504,20 @@ export const b2bOps = registerB2BJobs({
   b2bSponsorRefundService: { repair: () => b2bSponsorRefundService.repair() },
 });
 
+// Marathon & running events · S1 (foundation): persistence, the hold primitive and the hold-expiry job.
+// Dormant behind EVENTS_MODULE — nothing here is reachable from a route; the job returns at once while
+// the flag is off. Construction is unconditional (like every other store) so the wiring is exercised.
+export const eventStore = createPgEventStore({ db });
+opsService.register({
+  name: 'event-hold-expiry', title: 'Event hold expiry', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  description: 'Gives back the places of unpaid event orders whose hold has lapsed (order expired, registrations cancelled). Does nothing unless EVENTS_MODULE is on.',
+  run: async () => {
+    if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventStore.expireHolds();
+    return { processed: r.due, succeeded: r.released, failed: 0, ...r };
+  },
+});
+
 export const identityLinkService = createIdentityLinkService({ db });
 
 // Identity V2 · I4: OrgMembership follows every write to its sources.
@@ -497,6 +532,7 @@ export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink: identityLinkService, auditLog, orgMemberships: orgMembershipService,
+  partnerAgeGuard: ({ user }) => personalDetailsService.assertPartnerAge({ user }),
 });
 
 /**
@@ -515,16 +551,21 @@ export const subscriptionService = createSubscriptionService({
 });
 export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
+  memberDobGuard: args => personalDetailsService.assertMemberProfileAge(args),
   // promotionEventsService is defined at the end of this file; this only runs later.
   // A deleted account lets its username go (held 90 days). usernameService is defined further down.
   // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
   // their link to the account unless money is owed. Each step runs even if another fails.
-  onAccountDeleted: async (userId) => {
+  onAccountDeleted: async (userId, deleted = null) => {
     const errors = [];
     for (const step of [
       () => promotionEventsService.forgetUser(userId),
       () => usernameService.forgetUser(userId),
       () => vendorCustomerService.forgetBuyer(userId),
+      // The "Personalised shop" switch goes once the Person has no personas left.
+      () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
+      // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
+      () => forgetPersonDetails(db, { personId: deleted?.personId || null }),
     ]) {
       try { await step(); } catch (err) { errors.push(err); }
     }
@@ -636,8 +677,15 @@ export const mobileMoneyService = createMobileMoneyService({
   scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
   // Only tiers configured in Settings are sold (owner decision 2026-10-19).
   tierSellable: settingsService.isTierSellable,
+  // B6a: trainer sessions and trainer gym passes (TUNZAA_TRAINER_PRODUCTS, needs TUNZAA_PAYMENTS).
+  trainerProducts: tunzaaTrainerProductsOn,
+  // A rejected session whose slot was booked by someone else since is not asked for (409 group_slot_rebooked).
+  beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
 });
-export const adminOwnerService = createAdminOwnerService({ users, gyms, checkins, auditLog, gymService });
+export const adminOwnerService = createAdminOwnerService({
+  users, gyms, checkins, auditLog, gymService,
+  onOwnerRemoved: prior => forgetPersonDetails(db, { personId: prior?.personId || null }),
+});
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
 // Gym settlement workflow (settlement Phase 4): submit, approve, hold, pay.
@@ -845,6 +893,7 @@ export const invitationService = createInvitationService({
     hash: (invitationId, pin) => pinAuthService.startPinHash(invitationId, pin),
   },
   isRegistered: identifier => registrationService.alreadyRegistered(identifier),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
   // Placeholder until the app is in the stores: the web app.
   appLink: () => process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
   newTrainerProfile: async ({ userId, displayName, email, phone }) => {
@@ -992,6 +1041,10 @@ export const partnerKycService = createPartnerKycService({
   notify: (userId, message) => notificationService.notify(userId, message),
   // KYC documents stay private on Zebra; the API streams them after its own checks.
   documentStore: createZebraDocumentStore(),
+  // Events · S2: the organizer record its checklist reads, and the hook that keeps EventOrganizer.status
+  // derived from the case (eventsOrganizerService is declared below; only called later).
+  eventOrganizerOf: userId => eventCatalogueStore.organizerOfOwner(userId),
+  onCaseStatusChanged: (kycCase, change) => eventsOrganizerService.syncOrganizerStatus(kycCase, { reasonNote: change?.reasonNote ?? null }),
 });
 // Phase B · B4a: one partner progress tracker on GET /me/kyc (flag PARTNER_PROGRESS; read-only).
 export const partnerProgressService = createPartnerProgressService({ gyms, trainers, partnerGate, payoutEligibility });
@@ -1047,14 +1100,31 @@ export const shopBannerService = createShopBannerService({
   partnerGate, moderationGate,
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
+// "Personalised shop" switch (SHOP_PERSONALISATION, Phase 2 slice 2): one row per Person, no row = on.
+export const shopPreferenceService = createShopPreferenceService({
+  store: createPgShopPreferenceStore({ db }), users, identityLink: identityLinkService,
+  trainerProfileOf: userId => trainerService.findProfileByUser(userId),
+});
+// Purchase history is the person's own orders only, read per request; capped so memory stays bounded.
+const SHOP_HISTORY_MAX_ORDERS = 500;
 export const shopHomeService = createShopHomeService({
   bannerFeed: args => shopBannerService.feed(args),
+  preferences: shopPreferenceService,
+  buyerPaidOrders: ({ buyerIds, since }) => (buyerIds.length ? db('ShopOrder')
+    .whereIn('buyerId', buyerIds).where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
+    .orderBy('createdAt', 'desc').limit(SHOP_HISTORY_MAX_ORDERS)
+    .select('id', 'buyerId', 'items', 'status', 'paymentStatus', 'createdAt') : []),
   shopService, discoveryService, promotionService, users, trainerService, identityLink: identityLinkService,
   recentPaidOrders: ({ since }) => db('ShopOrder')
     .where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
     .orderBy('createdAt', 'desc').limit(SHOP_HOME_MAX_ORDERS)
-    .select('id', 'buyerRole', 'items', 'status', 'paymentStatus', 'createdAt'),
+    // pickupGymId + buyerId: slice 3 counts DISTINCT buyers picking up at gyms in a city ("Popular near you",
+    // k = 5). Both are dropped from the cached rows once counted (shop-home-service loadNear).
+    .select('id', 'buyerRole', 'items', 'status', 'paymentStatus', 'createdAt', 'pickupGymId', 'buyerId'),
   signToken: signServedToken,
+  // Slice 3 (SHOP_NEAR_YOU): areas and the pickup gyms' cities. Read only while the flag is on.
+  geoAreas,
+  gymAreas: () => db('Gym').whereNotNull('cityId').orWhereNotNull('regionId').select('id', 'cityId', 'regionId'),
 });
 
 // Admin-managed app photos (HERO_IMAGES_CMS, plan slice 4). Uploads stay private on Zebra (the
@@ -1063,4 +1133,29 @@ export const heroImageService = createHeroImageService({
   store: createPgHeroImageStore({ db }),
   documentStore: createZebraDocumentStore(),
   publicStore: createZebraPublicStore(),
+});
+
+// Marathon & running events · S2: organizer capability, event management, admin moderation, discovery.
+// Dormant behind EVENTS_MODULE (every route but GET /events/options answers 404 feature_disabled).
+export const eventCatalogueStore = createPgEventCatalogueStore({ db });
+registerOrganizerLookup(userId => eventCatalogueStore.organizerForUser(userId));
+export const eventsOrganizerService = createEventsOrganizerService({
+  db, eventStore, catalogue: eventCatalogueStore, users, identityLink: identityLinkService, partnerKyc: partnerKycService,
+  invitations: invitationService, orgMemberships: orgMembershipService, auditLog,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  closingSoonHours: eventsClosingSoonHours, autoCompleteGraceHours: eventAutoCompleteGraceHours,
+});
+export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours });
+export const eventsDiscoveryService = createEventsDiscoveryService({
+  catalogue: eventCatalogueStore, closingSoonHours: eventsClosingSoonHours,
+  flags: { module: eventsModuleOn, favourites: eventsFavouritesOn, registration: eventsRegistrationOn },
+});
+opsService.register({
+  name: 'event-lifecycle', title: 'Event lifecycle', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  description: 'Moves events along automatically: published → registration_closed at registrationClosesAt, → in_progress at startsAt, in_progress → completed at endsAt + EVENT_AUTO_COMPLETE_GRACE_HOURS (default 6). Does nothing unless EVENTS_MODULE is on.',
+  run: async () => {
+    if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsOrganizerService.runLifecycle();
+    return { processed: r.due, succeeded: r.moved, failed: r.failed, ...r };
+  },
 });

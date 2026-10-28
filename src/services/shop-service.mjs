@@ -1,6 +1,7 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
 import { formatTsh } from '../shared/money-display.mjs';
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
+import { parseProductTargets, withoutTargets, targetsOf, TARGET_FIELDS, TARGET_AGE_BANDS } from '../shared/product-targets.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { storeNameOf } from '../shared/vendor-name.mjs';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
@@ -13,6 +14,7 @@ import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn } from '../shared/feature-flags.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
+import { indexAreas, validateVendorAreas, touchesAreas } from '../shared/shop-areas.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
@@ -104,6 +106,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   buyerContactOn = vendorBuyerContactOn,
   // S4: buyer.customerLinked on vendor orders only while VENDOR_TOOLS + VENDOR_CUSTOMERS are on.
   customersOn = vendorCustomersOn,
+  // Shop home slice 3: GeoArea rows ({ allAsync }) for the vendor area fields. null → area fields are refused.
+  geoAreas = null,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
   buyerRefs ||= createMemoryVendorBuyerRefStore();
@@ -138,10 +142,28 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return rest;
   }
 
+  /**
+   * Shop home slice 3: "Based in" (cityId: a city or district; regionId: a region) and "Delivers to"
+   * (deliveryAreaIds: any usable areas; the country = nationwide). Validated against usable GeoAreas;
+   * fields left out keep their stored value. Not flagged (stored either way, like product targets).
+   * → { patch } (empty when the body has no area field) | { error: 'invalid_area', status, field, ids, reason }
+   */
+  async function vendorAreaPatch(body, prior, source) {
+    if (!touchesAreas(body)) return { patch: {} };
+    if (!geoAreas) return { error: 'invalid_area', status: 400, field: 'cityId', ids: [], reason: 'unknown' };
+    const out = validateVendorAreas(body, prior, indexAreas(await geoAreas.allAsync()));
+    if (out.error) return out;
+    return { patch: { ...out.patch, areasSource: source } };
+  }
+  const AREA_KEYS = ['cityId', 'regionId', 'deliveryAreaIds', 'areasSource'];
+  const areasOf = profile => Object.fromEntries(AREA_KEYS.map(k => [k, profile?.[k] ?? null]));
+
   async function saveVendorProfile({ vendorId, body }) {
     const current = await users.findByIdAsync(vendorId);
     const prior = current?.vendorProfile || {};
     const publish = body?.publish === true;
+    const areas = await vendorAreaPatch(body, prior, 'vendor');
+    if (areas.error) return areas;
     if (body?.productCategories !== undefined) {
       const picked = Array.isArray(body.productCategories) ? body.productCategories : [];
       const unknown = picked.filter(key => !PRODUCT_CATEGORY_KEYS.has(key));
@@ -149,7 +171,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         return { error: 'invalid_product_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
       }
     }
-    const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
+    const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), ...areas.patch, vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
     const missing = PROFILE_REQUIRED.filter(key => {
       const value = profile[key];
       if (Array.isArray(value)) return !value.length;
@@ -189,7 +211,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { ...profile, rating, reviewCount: reviews.length, products: storeProducts, reviews };
   }
 
-  async function listProducts({ category, search, vendorId, includeArchived = false, brand, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = {}) {
+  // includeTargets: internal (the shop home's personalisation); buyer rows never carry targetGender / targetAgeBands.
+  async function listProducts({ category, search, vendorId, includeArchived = false, includeTargets = false, brand, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = {}) {
     let rows = await products.filterAsync(product => {
       if (product.deletedAt) return false;
       if (includeArchived) return true;
@@ -207,7 +230,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const names = new Map(accounts.map(user => [user.id, storeNameOf(user)]));
       rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId))
         // Buyer-facing rows carry the seller's store name (QA round 2: the Visit-store heading survives a reload).
-        .map(product => ({ ...product, vendorName: names.get(product.vendorId) ?? null }));
+        .map(product => ({ ...(includeTargets === true ? product : withoutTargets(product)), vendorName: names.get(product.vendorId) ?? null }));
     }
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
@@ -233,7 +256,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!includeUnlisted && !(await listProducts({})).some(row => row.id === productId)) return null;
     const reviews = (await productReviews.filterAsync(review => review.productId === productId)).map(publicReview);
     const vendorUser = await users.findByIdAsync(product.vendorId);
-    return { ...product, vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
+    return { ...withoutTargets(product), vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
   }
 
   /** Shape and size limits on what a vendor may store; null when fine. */
@@ -317,6 +340,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
+    // Who it's for (optional vendor tags): not reviewed, so changing them never re-queues approval.
+    const targets = parseProductTargets(input);
+    if (targets.error) return targets;
     if (ledgerOn() && !costAllowed && sendsCost(input)) return { error: 'cost_forbidden', status: 403 };
     if (productId) {
       const prior = await products.findByIdAsync(productId);
@@ -329,7 +355,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (input.category && input.category !== prior.category && !PRODUCT_CATEGORY_KEYS.has(input.category)) {
         return { error: 'invalid_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
       }
-      const patch = { updatedAt: nowIso() };
+      const patch = { updatedAt: nowIso(), ...targets.patch };
       if (input.name !== undefined) patch.name = String(input.name).trim();
       for (const field of ['description', 'category', 'brand', 'sku', 'visibility', 'deliveryAvailable']) if (input[field] !== undefined) patch[field] = input[field];
       for (const field of ['priceTzs', 'discountPriceTzs', 'weightKg', 'distanceKm']) if (input[field] !== undefined) patch[field] = input[field] === null ? null : Number(input[field]);
@@ -383,6 +409,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // reviews and the order store keeps soldCount. Whatever a vendor (or admin) sends for them is ignored.
       deliveryAvailable: input.deliveryAvailable !== false, status: 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
       homepageVisible: true, homepagePriority: 0, createdAt: at, updatedAt: at,
+      targetGender: targets.patch.targetGender ?? null, targetAgeBands: targets.patch.targetAgeBands ?? [],
     };
     if (ledger) {
       // The product and the first rows of its stock history are written together, in one transaction.
@@ -497,8 +524,19 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { deleted: true };
   }
   /** GET /admin/products. With the ledger on, admins see the private fields too (cost included). */
-  async function adminListProducts() {
-    const rows = (await products.filterAsync(product => !product.deletedAt)).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
+  /**
+   * GET /admin/products. Optional filters on the vendor's tags (read-only for admins):
+   * targetGender = women | men | everyone (no tag); targetAgeBand = a band | all (no bands).
+   */
+  async function adminListProducts({ targetGender, targetAgeBand } = {}) {
+    const GENDERS = ['women', 'men', 'everyone'];
+    const BANDS = [...TARGET_AGE_BANDS, 'all'];
+    if (targetGender !== undefined && !GENDERS.includes(targetGender)) return { error: 'invalid_filter', status: 400, field: 'targetGender', allowed: GENDERS };
+    if (targetAgeBand !== undefined && !BANDS.includes(targetAgeBand)) return { error: 'invalid_filter', status: 400, field: 'targetAgeBand', allowed: BANDS };
+    const genderOk = p => targetGender === undefined || (targetGender === 'everyone' ? !p.targetGender : p.targetGender === targetGender);
+    const bandsOf = p => targetsOf(p).targetAgeBands; // every band counts as all ages
+    const bandOk = p => targetAgeBand === undefined || (targetAgeBand === 'all' ? bandsOf(p).length === 0 : bandsOf(p).includes(targetAgeBand));
+    const rows = (await products.filterAsync(product => !product.deletedAt && genderOk(product) && bandOk(product))).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
     return vendorProductsView(null, rows, { costAllowed: true });
   }
 
@@ -536,7 +574,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!vendor || vendor.userType !== 'vendor') return { error: 'vendor_not_found', status: 404 };
     if (vendor.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 409 };
     // The admin is the actor of the opening stock rows; cost and reorder level are stored as the vendor's would be.
-    const created = await upsertProduct({ vendorId, body, actorId, costAllowed: true });
+    // Who-it's-for tags are the vendor's to set in the app (spec Q-7): an admin-created product starts without them.
+    const vendorBody = Object.fromEntries(Object.entries(body || {}).filter(([key]) => !TARGET_FIELDS.includes(key)));
+    const created = await upsertProduct({ vendorId, body: vendorBody, actorId, costAllowed: true });
     if (created.error) return created;
     const requestedApproval = ['pending', 'approved', 'rejected'].includes(body?.approvalStatus)
       ? body.approvalStatus
@@ -625,12 +665,16 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       }
       patch.vendorProfile = { ...(vendor.vendorProfile || {}), vendorId, commissionPct: pct };
     }
+    // Shop home slice 3: staff map a vendor's areas (same rules as the vendor's own profile form).
+    const areas = await vendorAreaPatch(body, vendor.vendorProfile || {}, 'admin');
+    if (areas.error) return areas;
+    if (Object.keys(areas.patch).length) patch.vendorProfile = { ...(patch.vendorProfile || vendor.vendorProfile || {}), vendorId, ...areas.patch };
     const updated = await users.updateByIdAsync(vendorId, patch);
     await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'vendor_management_updated',
       target: vendorId,
-      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor) },
-      after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined, commissionPct: patch.vendorProfile.commissionPct } : {}) },
+      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor), ...(Object.keys(areas.patch).length ? { areas: areasOf(vendor.vendorProfile) } : {}) },
+      after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined } : {}), ...(body?.commissionPct != null ? { commissionPct: patch.vendorProfile.commissionPct } : {}), ...(Object.keys(areas.patch).length ? { areas: areasOf(patch.vendorProfile) } : {}) },
     });
     if (patch.approvalStatus) await notifyVendor(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
     return { vendor: updated };

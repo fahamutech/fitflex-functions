@@ -189,12 +189,26 @@ test('verified vendor whose payout account is waiting: payout account under revi
 test('rejected vendor: blocked with the KYC rejection', async () => {
   process.env.PARTNER_PROGRESS = 'on';
   const id = await makeUser('vendor', { approvalStatus: 'rejected', approvalNote: 'PRIVATE-REJECTION' });
-  await makeCase(id, 'vendor', 'rejected', { reasonCode: 'suspected_fraud', reasonNote: 'PRIVATE-REJECTION' });
+  await makeCase(id, 'vendor', 'rejected', { reasonCode: 'document_mismatch', reasonNote: 'PRIVATE-REJECTION' });
   const p = (await read(id, 'vendor')).progress;
   assert.equal(p.current, 'approved');
   assert.deepEqual(p.steps[1], { key: 'approved', state: 'blocked', reason: 'kyc_rejected' });
   assert.deepEqual(p.nextAction, { code: 'contact_support', reason: 'kyc_rejected' });
   assert.ok(!JSON.stringify(p).includes('PRIVATE-REJECTION'));
+});
+
+test('vendor rejected for suspected fraud: under review — contact support, never the reason', async () => {
+  process.env.PARTNER_PROGRESS = 'on';
+  const id = await makeUser('vendor', { approvalStatus: 'rejected' });
+  await makeCase(id, 'vendor', 'rejected', { reasonCode: 'suspected_fraud', reasonNote: 'PRIVATE-REJECTION' });
+  const body = await read(id, 'vendor');
+  const p = body.progress;
+  assert.equal(p.current, 'approved');
+  assert.deepEqual(p.steps[1], { key: 'approved', state: 'blocked', reason: 'under_review' });
+  assert.deepEqual(p.steps[2], { key: 'verified', state: 'blocked', reason: 'under_review' });
+  assert.deepEqual(p.nextAction, { code: 'contact_support', reason: 'under_review' });
+  assert.ok(!JSON.stringify(body).includes('suspected_fraud'));
+  assert.ok(!JSON.stringify(body).includes('PRIVATE-REJECTION'));
 });
 
 test('gym owner with two gyms: one tracker per gym plus an overall one', async () => {

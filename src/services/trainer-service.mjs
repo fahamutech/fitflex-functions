@@ -4,6 +4,16 @@ import { OPEN_GATE } from './partner-gate.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
 import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
 
+/**
+ * What a trainer may send when registering their own profile. Everything else
+ * on the row is FitFlex's: the verified badge, rating and review count, listing
+ * position and visibility, status, gym links, account id and email.
+ */
+export const TRAINER_REGISTER_FIELDS = Object.freeze([
+  'displayName', 'fullName', 'nickname', 'photoUrl', 'images', 'imageThumbnails', 'gender', 'specialties', 'bio',
+  'phone', 'hourlyRateTzs', 'sessionRateCurrency', 'experienceYears', 'availability', 'socialLinks',
+]);
+
 /** Limits on what a trainer can put on their own profile. */
 export const PROFILE_LIMITS = Object.freeze({ name: 80, bio: 2000, specialties: 20, images: 8, nickname: 30 });
 
@@ -62,7 +72,9 @@ export function publicTrainer(trainer) {
 
 export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate = OPEN_GATE,
   // A trainer asked to work at a gym: ({ gymId, trainer }) → void. Told to the gym's owner.
-  onGymRequest = async () => {} }) {
+  onGymRequest = async () => {},
+  // After an admin deletes a trainer profile (partner DOB review L3): (prior) → void. Never fails the delete.
+  onTrainerRemoved = async () => {} }) {
   const askedToJoin = async (gymIds, trainer) => {
     for (const gymId of gymIds) { try { await onGymRequest({ gymId, trainer }); } catch { /* best effort */ } }
   };
@@ -243,6 +255,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     if (!prior) return { error: 'not_found', status: 404 };
     if (await trainerBookings.findAsync(b => b.trainerId === prior.id)) return { error: 'trainer_has_bookings', status: 409 };
     const removed = await trainers.removeAsync(t => t.id === prior.id);
+    try { await onTrainerRemoved(prior); } catch (err) { console.warn('[admin-trainer-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'trainer_deleted',
@@ -275,8 +288,9 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const linked = profile?.gymIds || [];
     const requested = parseStringList(body.gymIds, []).filter(id => !linked.includes(id));
     const pendingGymIds = [...new Set([...(profile?.pendingGymIds || []), ...requested])];
+    const own = Object.fromEntries(TRAINER_REGISTER_FIELDS.filter(k => body[k] !== undefined).map(k => [k, body[k]]));
     const row = normalizeTrainerPayload({
-      ...body,
+      ...own,
       gymIds: linked,
       pendingGymIds,
       id: profile?.id || undefined,
@@ -284,7 +298,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       email: user.email,
       displayName: body.displayName || user.displayName,
       photoUrl: body.photoUrl || user.photoUrl,
-      status: 'active',
+      // Registering again never lifts a suspension or an admin's deactivation.
+      status: profile?.status || 'active',
       // The profile is active at once; verification is the trainer's KYC (3 Oct 2026).
       approvalStatus: 'approved',
     }, profile || {});

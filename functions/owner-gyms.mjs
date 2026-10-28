@@ -2,15 +2,15 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireGymAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { identityFlag, checkinVisitorNamesOn } from '../src/shared/feature-flags.mjs';
+import { identityFlag, checkinVisitorNamesOn, partnerDobRequiredOn } from '../src/shared/feature-flags.mjs';
 import { visitorName } from '../src/shared/visitor-name.mjs';
-import { ownerGymService, resolveRequestUser, publicUserId, checkins, users, trainers, usernameService } from '../src/bootstrap/services.mjs';
+import { ownerGymService, resolveRequestUser, publicUserId, checkins, users, trainers, usernameService, personalDetailsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
 export const gymOwnerRegister = {
   created, method: 'post', path: '/gym-owner/register',
-  description: 'Gym Owner: self-register with gym details. Creates one or more gyms and assigns to owner.',
+  description: 'Gym Owner: self-register with gym details. Creates one or more gyms and assigns to owner. Optional dateOfBirth ("YYYY-MM-DD") and gender (male | female | other; null or "" = prefer not to say): with PARTNER_DOB_REQUIRED on they are checked like PUT /me/personal-details (400 { error: "invalid_field", field: "dateOfBirth" | "gender" }, 400 { error: "partner_under_18" }) and saved on the person, never on the gym or the owner profile; off, they are ignored. Leaving them out is always accepted.',
   onGuard: routeGuard('post', requireAuth('gym_operator')),
   onRequest: async (req, res) => {
     try {
@@ -27,8 +27,13 @@ export const gymOwnerRegister = {
           createdAt: new Date().toISOString(),
         });
       }
+      // Partner DOB slice 2: checked on the resolved account (fails closed without one), before any gym
+      // is saved. Afterwards a failed save is logged without the value and the registration still succeeds.
+      const declared = partnerDobRequiredOn() ? await personalDetailsService.checkRegistration({ user, body, fields: ['dateOfBirth', 'gender'] }) : null;
+      if (declared?.error) return res.status(declared.status).json({ error: declared.error, ...(declared.field ? { field: declared.field } : {}) });
       const result = await ownerGymService.registerOwner({ user, body });
       if (result.error) return res.status(result.status).json({ error: result.error });
+      if (declared) await personalDetailsService.saveRegistration({ user, changes: declared.changes, via: 'gym_owner_register' });
       res.json(result);
     } catch (err) {
       console.error('[gymOwnerRegister] error:', err.message, err.meta || '');

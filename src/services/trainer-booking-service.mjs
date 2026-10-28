@@ -7,6 +7,8 @@ import {
   memberCancellation, slotStartMs,
 } from '../shared/trainer-access.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
+import { pendingMobileMoneyInFlight } from '../shared/mobile-money-claim.mjs';
+import { updateIf } from '../shared/conditional-update.mjs';
 import { publicGym } from './gym-service.mjs';
 import { publicTrainer } from './trainer-service.mjs';
 
@@ -450,6 +452,12 @@ export function createTrainerBookingService({
     const outcomes = outcomesOn();
     const allowed = outcomes ? ['confirmed', 'completed', 'cancelled', 'no_show'] : ['confirmed', 'completed', 'cancelled'];
     if (!allowed.includes(status)) return { error: 'invalid_status', status: 400 };
+    // B6a review: not while a mobile-money prompt is out for the group's payment (staff reset or
+    // decide the payment first). Admin cancel does not shrink the payment request.
+    if (status === 'cancelled') {
+      const current = await trainerBookings.findByIdAsync(id);
+      if (current && current.status !== 'cancelled' && await livePrompt(current)) return paymentInProgress();
+    }
     const at = new Date().toISOString();
     const out = await outcomeStore.transition({
       bookingId: id, actorId,
@@ -606,27 +614,46 @@ export function createTrainerBookingService({
     }
   }
 
-  /** A slot still waiting on payment was dropped: shrink or withdraw the group's payment request. */
+  /**
+   * B6a review: while a mobile-money prompt is out for the group's payment, its sessions are not
+   * cancelled — shrinking or withdrawing the request under the prompt would hold the money as an
+   * amount mismatch or leave a charge for a cancelled request. The member waits for the prompt to
+   * finish (or fail), or staff reset it. → 409 payment_in_progress.
+   */
+  const paymentInProgress = () => ({ error: 'payment_in_progress', status: 409 });
+  async function livePrompt(booking) {
+    if (!paymentRequests || !booking?.paymentRequestId) return false;
+    return pendingMobileMoneyInFlight(await paymentRequests.findByIdAsync(booking.paymentRequestId), +clock());
+  }
+
+  /**
+   * A slot still waiting on payment is being dropped: shrink or withdraw the group's payment
+   * request. Runs before the booking is cancelled; null when done (or nothing to do),
+   * payment_in_progress when a mobile-money prompt is out (or was claimed meanwhile).
+   */
   async function releaseUnpaidSlot(booking, at, actorId) {
-    if (!paymentRequests || !booking.paymentRequestId) return;
+    if (!paymentRequests || !booking.paymentRequestId) return null;
     const request = await paymentRequests.findByIdAsync(booking.paymentRequestId);
-    if (!request || request.status !== 'pending') return;
-    const left = (await trainerBookings.filterAsync(b => b.groupId === booking.groupId && b.status === 'payment_pending'));
-    if (!left.length) {
-      await paymentRequests.updateByIdAsync(request.id, { status: 'cancelled', decidedAt: at, decidedBy: actorId });
-    } else {
-      await paymentRequests.updateByIdAsync(request.id, {
-        amountTzs: left.reduce((sum, b) => sum + Number(b.amountTzs || 0), 0),
-        note: `${left.length} session(s) (one cancelled before payment)`,
-      });
-    }
+    if (!request || request.status !== 'pending') return null;
+    if (pendingMobileMoneyInFlight(request, +clock())) return paymentInProgress();
+    const left = (await trainerBookings.filterAsync(b => b.groupId === booking.groupId && b.status === 'payment_pending' && b.id !== booking.id));
+    const patch = left.length
+      ? { amountTzs: left.reduce((sum, b) => sum + Number(b.amountTzs || 0), 0), note: `${left.length} session(s) (one cancelled before payment)` }
+      : { status: 'cancelled', decidedAt: at, decidedBy: actorId };
+    // Conditional: a prompt claimed since the read keeps the request exactly as it was.
+    const done = await updateIf(paymentRequests, request.id,
+      { status: 'pending', provider: request.provider ?? null, reference: request.reference ?? null }, patch);
+    return done ? null : paymentInProgress();
   }
 
   async function cancel(booking, { by, actorId, reasonCode }) {
     const at = new Date().toISOString();
     const paid = wasPaid(booking);
+    if (booking.status === 'payment_pending') {
+      const blocked = await releaseUnpaidSlot(booking, at, actorId);
+      if (blocked) return blocked;
+    }
     const updated = await trainerBookings.updateByIdAsync(booking.id, { status: 'cancelled', cancelledAt: at, cancelledBy: by, updatedAt: at });
-    if (booking.status === 'payment_pending') await releaseUnpaidSlot(booking, at, actorId);
     await auditLog.insertAsync({
       id: randomUUID(), at, actor: actorId, action: `trainer_booking_cancelled_by_${by}`,
       target: booking.id, before: booking, after: updated,
