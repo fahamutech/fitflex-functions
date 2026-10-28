@@ -12,6 +12,7 @@ import {
   getB2BOrganization, updateB2BOrganization, listB2BOrganizationUsers, addB2BOrganizationUser,
   updateB2BOrganizationUser, removeB2BOrganizationUser, listB2BBeneficiaries, getB2BBeneficiary,
   enrollB2BBeneficiary, setB2BBeneficiaryStatus, deactivateB2BBeneficiary,
+  myB2BMemberRequests, acceptMyB2BMemberRequest,
 } from '../functions/b2b.mjs';
 import {
   adminOnboardCorporate, adminListCorporate, adminSetCorporateStatus, adminCreateHrUser,
@@ -58,6 +59,7 @@ after(async () => {
     await db('CorporateAccount').whereIn('id', corporates).del();
   }
   if (users.length) {
+    await db('B2BMemberRequest').whereIn('userId', users).del();
     await db('AuditLog').whereIn('actor', users).del();
     await db('User').whereIn('id', users).del();
   }
@@ -100,8 +102,14 @@ test('organisation users manage their own organisation within their role', async
   const viewer = { sub: viewerId, userType: 'member' };
 
   assert.equal((await call(addB2BOrganizationUser, { claims: admin, params: { id: orgId }, body: { userId: ownerId, role: 'owner' } })).statusCode, 201);
-  const addedViewer = await call(addB2BOrganizationUser, { claims: owner, params: { id: orgId }, body: { userId: viewerId, role: 'viewer' } });
-  assert.equal(addedViewer.statusCode, 201);
+  // An organisation user naming someone by user id only asks; the person accepts in the app (22 Oct 2026).
+  const askedViewer = await call(addB2BOrganizationUser, { claims: owner, params: { id: orgId }, body: { userId: viewerId, role: 'viewer' } });
+  assert.deepEqual([askedViewer.statusCode, askedViewer.body.outcome, askedViewer.body.memberRequest.status], [202, 'pending_member_acceptance', 'pending_member_acceptance']);
+  assert.equal((await call(getB2BOrganization, { claims: viewer, params: { id: orgId } })).statusCode, 404);   // no role yet
+  const viewerRequests = await call(myB2BMemberRequests, { claims: viewer });
+  assert.deepEqual(viewerRequests.body.items.map(r => [r.kind, r.role, r.organization.id]), [['org_user', 'viewer', orgId]]);
+  const addedViewer = await call(acceptMyB2BMemberRequest, { claims: viewer, params: { requestId: askedViewer.body.memberRequest.id } });
+  assert.equal(addedViewer.statusCode, 200, JSON.stringify(addedViewer.body));
 
   const mine = await call(getB2BOrganization, { claims: owner, params: { id: orgId } });
   assert.deepEqual([mine.statusCode, mine.body.access.role], [200, 'owner']);
@@ -114,8 +122,10 @@ test('organisation users manage their own organisation within their role', async
   assert.equal((await call(enrollB2BBeneficiary, { claims: viewer, params: { id: orgId }, body: { userId: memberId } })).statusCode, 403);
 
   assert.equal((await call(updateB2BOrganization, { claims: owner, params: { id: orgId }, body: { tradingName: 'Route' } })).body.organization.tradingName, 'Route');
-  const enrolled = await call(enrollB2BBeneficiary, { claims: owner, params: { id: orgId }, body: { userId: memberId, beneficiaryType: 'policyholder', externalReference: 'POL-9' } });
-  assert.equal(enrolled.statusCode, 201);
+  const asked = await call(enrollB2BBeneficiary, { claims: owner, params: { id: orgId }, body: { userId: memberId, beneficiaryType: 'policyholder', externalReference: 'POL-9' } });
+  assert.deepEqual([asked.statusCode, asked.body.outcome], [202, 'pending_member_acceptance']);
+  const enrolled = await call(acceptMyB2BMemberRequest, { claims: { sub: memberId, userType: 'member' }, params: { requestId: asked.body.memberRequest.id } });
+  assert.equal(enrolled.statusCode, 200, JSON.stringify(enrolled.body));
   const beneficiaryId = enrolled.body.beneficiary.id;
   assert.equal((await call(setB2BBeneficiaryStatus, { claims: owner, params: { id: orgId, beneficiaryId }, body: { status: 'active' } })).body.beneficiary.status, 'active');
   assert.equal((await call(getB2BBeneficiary, { claims: owner, params: { id: orgId, beneficiaryId } })).body.beneficiary.externalReference, 'POL-9');
