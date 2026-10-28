@@ -373,7 +373,7 @@ export function createB2BBeneficiaryImportService({
       confirmLine(invite),
       link ? `Get the app: ${link}` : null,
       '',
-      `What ${name} can see: once you join, ${name} can see your FitFlex activity (gym visits, trainer sessions, the workouts and steps you record, and your progress in its challenges). It cannot see your weight, height, or anything another sponsor gives you.`,
+      `What ${name} can see: once you join, ${name} can see your FitFlex activity, including activity from before you joined (gym visits, trainer sessions, the workouts and steps you record, and your progress in its challenges). It cannot see your weight, height, or anything another sponsor gives you.`,
       '',
       `If you do not want to take part, ignore this email or ask ${name} to remove you from its list.`,
     ].filter(l => l !== null);

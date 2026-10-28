@@ -61,7 +61,9 @@ const newId = () => `b2bmr_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 
 // What the organisation will see once the member accepts (A-02), as the
 // analytics person view shows it. Swahili texts are DRAFTS for native review.
-export const ACTIVITY_SHOWN = Object.freeze(['gym_visits', 'trainer_sessions', 'workouts', 'steps', 'active_minutes', 'challenge_progress', 'sponsored_benefit_use']);
+// Full history (owner decision 22 Oct 2026, stated openly): the organisation
+// also sees activity from before the person joined, hence `past_activity`.
+export const ACTIVITY_SHOWN = Object.freeze(['gym_visits', 'trainer_sessions', 'workouts', 'steps', 'active_minutes', 'challenge_progress', 'sponsored_benefit_use', 'past_activity']);
 export const ACTIVITY_NOT_SHOWN = Object.freeze(['weight', 'height', 'calories', 'notes', 'routes', 'other_sponsors']);
 
 function visibility(kind, name, role) {
@@ -76,8 +78,8 @@ function visibility(kind, name, role) {
   return {
     shown: [...ACTIVITY_SHOWN],
     notShown: [...ACTIVITY_NOT_SHOWN],
-    en: `${name} will see your FitFlex activity: gym visits, trainer sessions, the workouts and steps you record and your progress in its challenges, and how you use the benefits it pays for. It will not see your weight, height, calories, notes, routes, or anything another sponsor gives you.`,
-    sw: `${name} itaona shughuli zako za FitFlex: ziara za gym, vipindi na trainer, mazoezi na hatua unazorekodi, maendeleo yako kwenye changamoto zake, na jinsi unavyotumia manufaa inayolipia. Haitaona uzito wako, urefu wako, kalori, maelezo, njia zako, wala chochote anachokupa mfadhili mwingine.`,
+    en: `${name} will see your FitFlex activity, including activity from before you joined: gym visits, trainer sessions, the workouts and steps you record and your progress in its challenges, and how you use the benefits it pays for. It will not see your weight, height, calories, notes, routes, or anything another sponsor gives you.`,
+    sw: `${name} itaona shughuli zako za FitFlex, zikiwemo za kabla hujajiunga: ziara za gym, vipindi na trainer, mazoezi na hatua unazorekodi, maendeleo yako kwenye changamoto zake, na jinsi unavyotumia manufaa inayolipia. Haitaona uzito wako, urefu wako, kalori, maelezo, njia zako, wala chochote anachokupa mfadhili mwingine.`,
   };
 }
 
@@ -91,13 +93,35 @@ function message(kind, name, role) {
   }
   if (kind === 'employee_link') {
     return {
-      en: { title: `${name} wants to link your account`, body: `${name} wants to link your FitFlex account to your staff record. If you accept, it will see your FitFlex activity. Open to accept or decline.` },
-      sw: { title: `${name} inataka kuunganisha akaunti yako`, body: `${name} inataka kuunganisha akaunti yako ya FitFlex na taarifa zako za mfanyakazi. Ukikubali, itaona shughuli zako za FitFlex. Fungua ili ukubali au ukatae.` },
+      en: { title: `${name} wants to link your account`, body: `${name} wants to link your FitFlex account to your staff record. If you accept, it will see your FitFlex activity, including activity from before you joined. Open to accept or decline.` },
+      sw: { title: `${name} inataka kuunganisha akaunti yako`, body: `${name} inataka kuunganisha akaunti yako ya FitFlex na taarifa zako za mfanyakazi. Ukikubali, itaona shughuli zako za FitFlex, zikiwemo za kabla hujajiunga. Fungua ili ukubali au ukatae.` },
     };
   }
   return {
-    en: { title: `${name} wants to add you`, body: `${name} wants to add you to its wellness programme on FitFlex. If you accept, it will see your FitFlex activity. Open to accept or decline.` },
-    sw: { title: `${name} inataka kukuongeza`, body: `${name} inataka kukuongeza kwenye mpango wake wa afya kwenye FitFlex. Ukikubali, itaona shughuli zako za FitFlex. Fungua ili ukubali au ukatae.` },
+    en: { title: `${name} wants to add you`, body: `${name} wants to add you to its wellness programme on FitFlex. If you accept, it will see your FitFlex activity, including activity from before you joined. Open to accept or decline.` },
+    sw: { title: `${name} inataka kukuongeza`, body: `${name} inataka kukuongeza kwenye mpango wake wa afya kwenye FitFlex. Ukikubali, itaona shughuli zako za FitFlex, zikiwemo za kabla hujajiunga. Fungua ili ukubali au ukatae.` },
+  };
+}
+
+// A FitFlex platform admin added the person directly by user id (owner
+// decision 22 Oct 2026: admins keep the direct add, the person is told who
+// added them and what the organisation sees). Swahili is a DRAFT for native review.
+function adminAddedMessage(kind, name, role) {
+  if (kind === 'org_user') {
+    return {
+      en: { title: `${name} added you`, body: `FitFlex support gave you the ${role} role in ${name}'s FitFlex portal. ${name} will see your name and email in its list of portal users. Your activity is not shared.` },
+      sw: { title: `${name} imekuongeza`, body: `Timu ya FitFlex imekupa nafasi ya ${role} kwenye portal ya FitFlex ya ${name}. ${name} itaona jina lako na barua pepe yako kwenye orodha ya watumiaji wa portal yake. Shughuli zako hazishirikiwi.` },
+    };
+  }
+  if (kind === 'employee_link') {
+    return {
+      en: { title: `${name} linked your account`, body: `FitFlex support linked your FitFlex account to your staff record at ${name}. ${name} will see your FitFlex activity, including activity from before you joined. It will not see your weight, height, calories, notes or routes. Open Benefits to see what you get.` },
+      sw: { title: `${name} imeunganisha akaunti yako`, body: `Timu ya FitFlex imeunganisha akaunti yako ya FitFlex na taarifa zako za mfanyakazi katika ${name}. ${name} itaona shughuli zako za FitFlex, zikiwemo za kabla hujajiunga. Haitaona uzito wako, urefu wako, kalori, maelezo wala njia zako. Fungua Manufaa uone unachopata.` },
+    };
+  }
+  return {
+    en: { title: `${name} added you`, body: `FitFlex support added you to ${name}'s wellness programme. ${name} will see your FitFlex activity, including activity from before you joined. It will not see your weight, height, calories, notes or routes. Open Benefits to see what you get.` },
+    sw: { title: `${name} imekuongeza`, body: `Timu ya FitFlex imekuongeza kwenye mpango wa afya wa ${name}. ${name} itaona shughuli zako za FitFlex, zikiwemo za kabla hujajiunga. Haitaona uzito wako, urefu wako, kalori, maelezo wala njia zako. Fungua Manufaa uone unachopata.` },
   };
 }
 
@@ -196,6 +220,28 @@ export function createB2BMemberRequestService({
         titleEn: text.en.title, bodyEn: text.en.body, titleSw: text.sw.title, bodySw: text.sw.body,
       },
     });
+  }
+
+  /**
+   * Tell someone a FitFlex platform admin added them directly by user id:
+   * who (the organisation, by FitFlex support) and what it will see. Logged as
+   * b2b.member.admin_added next to the add's own audit entry.
+   */
+  async function adminAdded({ kind, organizationId = null, corporateId = null, employeeId = null, userId, actorId, role = null, resultId = null }) {
+    if (!MEMBER_REQUEST_KINDS.includes(kind) || !userId) return { notified: false };
+    const scope = await scopeOf({ kind, organizationId, corporateId });
+    const text = adminAddedMessage(kind, scope.name, role);
+    const locale = (await localeOf(userId).catch(() => null)) === 'sw' ? 'sw' : 'en';
+    const id = `b2b_admin_added_${kind}_${resultId ?? randomUUID()}_${userId}`.slice(0, 120);
+    await notify(userId, {
+      id, type: 'b2b_admin_added', title: text[locale].title, body: text[locale].body,
+      data: {
+        kind, organizationId: scope.id ?? '', open: 'b2b_benefits', locale,
+        titleEn: text.en.title, bodyEn: text.en.body, titleSw: text.sw.title, bodySw: text.sw.body,
+      },
+    }).catch(() => null);
+    await audit(actorId, 'b2b.member.admin_added', resultId ?? userId, { kind, userId, organizationId: scope.id ?? null, corporateId, employeeId, role, notificationId: id });
+    return { notified: true };
   }
 
   // ── Expiry ────────────────────────────────────────────────────────────────
@@ -454,7 +500,7 @@ export function createB2BMemberRequestService({
   }
 
   return {
-    attempt, stub,
+    attempt, stub, adminAdded,
     create, pendingForOrganization, pendingForCorporate, cancel, cancelForEmployee,
     listForMember, accept, decline, expireDue,
   };

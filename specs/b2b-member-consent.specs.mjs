@@ -149,7 +149,12 @@ test('an organisation user enrolling a member by user id makes a request: nothin
   const item = mine.items[0];
   assert.deepEqual([item.id, item.kind, item.organization.id, item.groupName], [req.id, 'beneficiary', org.id, 'Gold']);
   assert.ok(item.visibility.shown.includes('workouts') && item.visibility.notShown.includes('weight'));
-  assert.ok(item.visibility.en.length > 20 && item.visibility.sw.length > 20);
+  // Full history, said openly (owner decision 22 Oct 2026).
+  assert.ok(item.visibility.shown.includes('past_activity'));
+  assert.match(item.visibility.en, /will see your FitFlex activity, including activity from before you joined/);
+  assert.match(item.visibility.sw, /itaona shughuli zako za FitFlex, zikiwemo za kabla hujajiunga/);
+  assert.match(note.body, /including activity from before you joined/);
+  assert.match(data.bodySw, /zikiwemo za kabla hujajiunga/);
   assert.ok(Array.isArray(item.benefits));
   assert.deepEqual(await audits(req.id), ['b2b.member_request.create']);
 });
@@ -520,4 +525,71 @@ test('A-02: an organisation sees no personal activity of someone pending or no l
   await b2bService.deactivateBeneficiary({ access: admin, beneficiaryId: beneficiary.id, actorId: ADMIN.userId });
   assert.deepEqual(await look(), [['inactive', 0, 0]]);
   assert.deepEqual([await exported(), await dashboardActivities()], [0, 0]);
+});
+
+const notes = (userId, type = 'b2b_admin_added') => db('Notification').where({ userId, type }).orderBy('createdAt');
+const dataOf = n => (typeof n.data === 'string' ? JSON.parse(n.data) : n.data);
+
+test('a FitFlex admin adding someone directly by user id tells them who added them and what the organisation sees, past activity included', async () => {
+  const org = await organisation('Admin Notice Insurer');
+  const name = (await db('B2BOrganization').where({ id: org.id }).first()).legalName;
+  const member = await user('member');
+  const { beneficiary } = await b2bService.enrollBeneficiary({ access: await adminAccess(org.id), actorId: ADMIN.userId, body: { userId: member, status: 'active' } });
+  assert.ok(beneficiary);
+  const [n] = await notes(member);
+  assert.ok(n, 'member told');
+  const d = dataOf(n);
+  assert.deepEqual([d.kind, d.organizationId, d.open, d.locale], ['beneficiary', org.id, 'b2b_benefits', 'en']);
+  assert.equal(n.title, `${name} added you`);
+  assert.match(n.body, /^FitFlex support added you to .+'s wellness programme\. .+ will see your FitFlex activity, including activity from before you joined\./);
+  assert.match(d.bodySw, /^Timu ya FitFlex imekuongeza kwenye mpango wa afya wa .+zikiwemo za kabla hujajiunga/);
+  assert.equal(await db('B2BMemberRequest').where({ userId: member }).first(), undefined);   // still a direct add
+  const logged = await db('AuditLog').where({ action: 'b2b.member.admin_added', target: beneficiary.id }).first();
+  assert.equal(logged.actor, ADMIN.userId);
+  assert.ok(await db('AuditLog').where({ action: 'b2b.beneficiary.enroll', target: beneficiary.id, actor: ADMIN.userId }).first());
+
+  // An organisation role, in Swahili for someone who chose it.
+  const person = await user('member');
+  await db('CommunicationPreference').insert({ id: person, locale: 'sw' });
+  const { organizationUser } = await b2bService.addOrganizationUser({ access: await adminAccess(org.id), actorId: ADMIN.userId, body: { userId: person, role: 'analyst' } });
+  const [r] = await notes(person);
+  const rd = dataOf(r);
+  assert.deepEqual([rd.kind, rd.organizationId, rd.open, rd.locale, r.title], ['org_user', org.id, 'b2b_benefits', 'sw', `${name} imekuongeza`]);
+  assert.match(rd.bodyEn, /^FitFlex support gave you the analyst role in .+ Your activity is not shared\.$/);
+  assert.ok(await db('AuditLog').where({ action: 'b2b.member.admin_added', target: organizationUser.id }).first());
+});
+
+test('a FitFlex admin linking a staff record by user id tells the member; adds by email, by members themselves, and repeat links do not', async () => {
+  const { account } = await corporateService.onboard({ body: { companyName: `Consent Admin Corp ${uid('c')}`, industrySector: 'banking', workforceBracket: '50-100', subsidyModel: 'fully_funded', passTier: 'pro', seatLimit: 5 }, actorId: ADMIN.userId });
+  made.corporates.push(account.id);
+  await corporateService.setStatus({ corporateId: account.id, status: 'active', actorId: ADMIN.userId });
+  const { employee } = await corporateService.provisionStaff({ corporateId: account.id, body: { displayName: 'Admin linked' }, actorId: ADMIN.userId });
+  const member = await user('member');
+  const link = () => corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: employee.id, userId: member, actorId: ADMIN.userId, actorType: 'admin' });
+  assert.equal((await link()).employee.userId, member);
+  await link();   // the same link again: nobody is told twice
+  const list = await notes(member);
+  assert.equal(list.length, 1);
+  const d = dataOf(list[0]);
+  assert.deepEqual([d.kind, d.open, list[0].title], ['employee_link', 'b2b_benefits', `${account.companyName} linked your account`]);
+  assert.ok(d.organizationId);
+  assert.match(list[0].body, /^FitFlex support linked your FitFlex account to your staff record at .+including activity from before you joined/);
+  assert.ok(await db('AuditLog').where({ action: 'b2b.member.admin_added', target: employee.id, actor: ADMIN.userId }).first());
+
+  // By verified email, an admin add is not by user id: no admin notice (unchanged behaviour).
+  const org = await organisation();
+  const email = `admin.${randomUUID().slice(0, 6)}@consent.test`;
+  const byEmail = await user('member');
+  await db('User').where({ id: byEmail }).update({ email });
+  await verifyContacts(db, byEmail, { email });
+  assert.ok((await b2bService.enrollBeneficiary({ access: await adminAccess(org.id), actorId: ADMIN.userId, body: { email } })).beneficiary);
+  assert.equal((await notes(byEmail)).length, 0);
+  // A member who accepted a request gets no admin notice either.
+  const manager = await orgUser(org.id, 'manager');
+  const asked = await user('member');
+  const { memberRequest } = await b2bService.enrollBeneficiary({ access: await as(org.id, manager), actorId: manager, body: { userId: asked } });
+  await requests.accept({ userId: asked, requestId: memberRequest.id });
+  assert.equal((await notes(asked)).length, 0);
+  // The org user created by orgUser() above was added by an admin by id: told.
+  assert.equal((await notes(manager)).length, 1);
 });

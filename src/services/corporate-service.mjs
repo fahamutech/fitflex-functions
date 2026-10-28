@@ -340,6 +340,10 @@ export function createCorporateService({
     // Linked another way: an open request for this record is closed.
     if (memberRequests && !memberRequestId) await memberRequests.cancelForEmployee({ corporateId, employeeId, actorId });
     await audit({ actor: actorId, action: 'corporate.staff.link', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId, ...(memberRequestId ? { memberRequestId } : {}) } });
+    // A FitFlex platform admin linked them directly by user id: they are told (owner decision 22 Oct 2026).
+    if (byIdOnly && actorType === 'admin' && !memberRequestId && employee.userId !== userId && memberRequests?.adminAdded) {
+      await memberRequests.adminAdded({ kind: 'employee_link', corporateId, employeeId, userId, actorId, resultId: employeeId }).catch(() => null);
+    }
     return { employee: (({ pinHash, ...rest }) => rest)(updated) };
   }
 

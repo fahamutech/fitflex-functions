@@ -384,6 +384,10 @@ export function createB2BService({
     && !opts.memberRequestId && !opts.verifiedContact
     && body.userId != null && String(body.userId).trim() !== '';
   const consentUnavailable = () => fail('member_consent_unavailable', 503);
+  /** A FitFlex platform admin adding someone directly by user id: the person is told (owner decision 22 Oct 2026). */
+  const adminAddsById = (access, body, opts = {}) => access.platformAdmin
+    && !opts.memberRequestId && !opts.verifiedContact
+    && body.userId != null && String(body.userId).trim() !== '';
 
   /** Organisations the caller belongs to (native memberships and corporate HR). */
   async function listMyOrganizations({ userId, userType }) {
@@ -504,6 +508,9 @@ export function createB2BService({
       throw err;
     }
     await audit({ actor: actorId, action: 'b2b.org_user.add', target: row.id, after: opts.memberRequestId ? { ...row, memberRequestId: opts.memberRequestId } : row });
+    if (adminAddsById(access, body, opts) && memberRequests?.adminAdded) {
+      await memberRequests.adminAdded({ kind: 'org_user', organizationId: access.org.id, userId: user.id, actorId, role: row.role, resultId: row.id }).catch(() => null);
+    }
     return { organizationUser: { ...row, source: 'b2b', readOnly: false, user: userSummary(user) } };
   }
 
@@ -718,6 +725,9 @@ export function createB2BService({
       throw err;
     }
     await audit({ actor: actorId, action: 'b2b.beneficiary.enroll', target: row.id, after: opts.memberRequestId ? { ...row, memberRequestId: opts.memberRequestId } : row });
+    if (adminAddsById(access, body, opts) && memberRequests?.adminAdded) {
+      await memberRequests.adminAdded({ kind: 'beneficiary', organizationId: access.org.id, userId: user.id, actorId, resultId: row.id }).catch(() => null);
+    }
     return { beneficiary: (await nativeViews([row]))[0] };
   }
 

@@ -364,6 +364,7 @@ export const verifiedContacts = createVerifiedContacts(db);
 const memberRequestsLater = {
   attempt: requestedBy => b2bMemberRequestService.attempt(requestedBy),
   stub: args => b2bMemberRequestService.stub(args),
+  adminAdded: args => b2bMemberRequestService.adminAdded(args),
   create: args => b2bMemberRequestService.create(args),
   pendingForOrganization: args => b2bMemberRequestService.pendingForOrganization(args),
   pendingForCorporate: args => b2bMemberRequestService.pendingForCorporate(args),

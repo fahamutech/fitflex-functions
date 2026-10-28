@@ -869,7 +869,7 @@ export function createB2BAnalyticsService({
       try {
         await notify(r.userId, {
           id: idOf(r), type: 'b2b_sponsor_visibility', title: `What ${name} can see`,
-          body: `${name} gives you benefits through FitFlex and can see your FitFlex activity: gym visits, workouts, steps and challenge progress. It cannot see your weight, height or anything from another sponsor. See Benefits for details.`,
+          body: `${name} gives you benefits through FitFlex and can see your FitFlex activity, including activity from before you joined: gym visits, workouts, steps and challenge progress. It cannot see your weight, height or anything from another sponsor. See Benefits for details.`,
           data: { organizationId: r.organizationId },
         });
         stats.sent += 1;
