@@ -298,6 +298,7 @@ export function createFinanceService({ gyms, checkins, invoices, users, gymPayou
 
     for (const p of approvedPayments) {
       if (fromSponsors && p.provider === 'sponsor_invoice') continue;   // counted above, as the organisation's payment
+      if (p.eventOrderId) continue;   // event ticket money is the organizer's (settled in a later slice), not subscription income
       const member = memberById.get(p.memberId) || null;
       entries.push({
         id: p.id,

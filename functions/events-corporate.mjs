@@ -8,13 +8,19 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsRegistration } from '../src/shared/feature-flags.mjs';
+import { requireEventsRegistration, requireEventsPaymentIntake } from '../src/shared/feature-flags.mjs';
 import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
-import { b2bService, eventsRosterService as svc } from '../src/bootstrap/services.mjs';
+import { b2bService, eventsRosterService as svc, eventsPaymentsService as payments, eventsRefundsService as refunds } from '../src/bootstrap/services.mjs';
 
 // roster/validate is the heaviest read here (review M1): limited per organisation, in memory per server.
 const validateLimiter = createVendorLimiter({ perMinute: 20 });
-export const resetEventsCorporateLimits = () => validateLimiter.reset();
+// S4: payment notices, 10 per hour per organisation; status polls and previews, 120 / 60 per hour per user; resend 3 per day per place.
+const HOUR = 3_600_000;
+const paymentLimiter = createVendorLimiter({ perMinute: 10, windowMs: HOUR });
+const statusLimiter = createVendorLimiter({ perMinute: 240, windowMs: HOUR });   // per order
+const previewLimiter = createVendorLimiter({ perMinute: 60, windowMs: HOUR });
+const resendLimiter = createVendorLimiter({ perMinute: 3, windowMs: 24 * HOUR });
+export const resetEventsCorporateLimits = () => [validateLimiter, paymentLimiter, statusLimiter, previewLimiter, resendLimiter].forEach(l => l.reset());
 
 const created = new Date().toISOString();
 const guard = method => routeGuard(method, [requireEventsRegistration, requireAuth(), requireAcl('b2b')]);
@@ -70,7 +76,55 @@ export const getB2BEventOrder = {
 
 export const cancelB2BEventOrder = {
   created, method: 'post', path: '/b2b/organizations/:id/event-orders/:orderId/cancel',
-  description: 'Organisation user with an ORG_BILLING role: cancel an unpaid corporate order (order-level only: fix the list and place a new order). Body { reason: changed_mind | wrong_details | duplicate | other } → { order, registrations, changed }. 400 invalid_reason, 404 order_not_found, 409 invalid_transition.',
+  description: 'Organisation user with an ORG_BILLING role: cancel an unpaid corporate order (order-level only: fix the list and place a new order), or (S4) a PAID one with its refund — the whole order, to the organisation. Body { reason: changed_mind | wrong_details | duplicate | other, expectedRefundTzs (REQUIRED for a paid order) } → { order, registrations, refund: RefundView | null, changed, requested? }. 400 invalid_reason | expected_refund_required, 404 order_not_found, 409 payment_submitted | refund_changed { refundTzs } | refund_in_progress | cancellation_window_closed | event_cancelled | invalid_transition.',
   onGuard: guard('post'),
   onRequest: (req, res) => inOrganization(req, res, access => svc.cancelOrder({ access, orderId: req.params.orderId, body: req.body || {}, actorId: req.user.sub })),
+};
+
+// ── S4: paying a corporate order, its status, the paid-order cancel preview and the claim resend ─────────────────
+
+const paymentGuard = method => routeGuard(method, [requireEventsPaymentIntake, requireAuth(), requireAcl('b2b')]);
+
+export const payB2BEventOrder = {
+  created, method: 'post', path: '/b2b/organizations/:id/event-orders/:orderId/payment',
+  description: 'Organisation user with billing.pay (owner | admin | finance; EVENTS_PAYMENTS_MANUAL or EVENTS_PAYMENTS_TUNZAA on, organisation active): record that the organisation paid an awaiting order by bank transfer or mobile money; FitFlex finance then checks it against the statement. Header Idempotency-Key REQUIRED (scoped to the organisation, order and key). Body { method: bank_transfer | mobile_money, reference (bank reference or transaction ID), paidOn (YYYY-MM-DD, not in the future), note? (≤300) }; provider (mobile-prompt) mode is never offered to an organisation. Amount and currency come from the order. → 201 { payment (PaymentView), order, next { payment: "manual", paymentRequestId, instructions: null }, late, replayed }. Same errors as POST /me/event-orders/:id/payment plus 400 invalid_method | invalid_paid_on, 403 forbidden { requiredRole }, 409 organization_not_active. 10 per hour per organisation.',
+  onGuard: paymentGuard('post'),
+  onRequest: (req, res) => inOrganization(req, res, async (access) => {
+    const allowed = paymentLimiter.allow(`pay:${access.org.id}`);
+    if (!allowed.ok) { res.set?.('Retry-After', String(allowed.retryAfterSeconds)); return { error: 'rate_limited', status: 429, retryAfterSeconds: allowed.retryAfterSeconds }; }
+    return payments.initiateCorporate({ access, orderId: req.params.orderId, body: req.body || {}, idempotencyKey: headerOf(req, 'Idempotency-Key'), actorId: req.user.sub });
+  }, 201),
+};
+
+export const b2bEventOrderPaymentStatus = {
+  created, method: 'get', path: '/b2b/organizations/:id/event-orders/:orderId/payment-status',
+  description: 'Organisation user with a billing role: where the payment of one corporate order stands (as GET /me/event-orders/:id/payment-status; 240 per hour per order) → { order, payment: PaymentView | null, refund: RefundView | null }. Reads need only EVENTS_REGISTRATION.',
+  onGuard: guard('get'),
+  onRequest: (req, res) => inOrganization(req, res, async (access) => {
+    const allowed = statusLimiter.allow(`status:${req.params.orderId}`);
+    if (!allowed.ok) { res.set?.('Retry-After', String(allowed.retryAfterSeconds)); return { error: 'rate_limited', status: 429, retryAfterSeconds: allowed.retryAfterSeconds }; }
+    return payments.paymentStatus({ access, orderId: req.params.orderId });
+  }),
+};
+
+export const b2bEventOrderCancelPreview = {
+  created, method: 'get', path: '/b2b/organizations/:id/event-orders/:orderId/cancel-preview',
+  description: 'Organisation user with a billing role: what cancelling the whole PAID corporate order would refund (read-only; same shape as GET /me/event-orders/:id/cancel-preview; 60 per hour).',
+  onGuard: guard('get'),
+  onRequest: (req, res) => inOrganization(req, res, async (access) => {
+    const allowed = previewLimiter.allow(`preview:${req.user.sub}`);
+    if (!allowed.ok) { res.set?.('Retry-After', String(allowed.retryAfterSeconds)); return { error: 'rate_limited', status: 429, retryAfterSeconds: allowed.retryAfterSeconds }; }
+    return refunds.previewOrder({ access, orderId: req.params.orderId });
+  }),
+};
+
+export const resendB2BEventClaimInvitation = {
+  created, method: 'post', path: '/b2b/organizations/:id/event-orders/:orderId/claim-invitations',
+  description: 'Organisation user with a billing role: send the claim invitation for one unclaimed place of a PAID corporate order again. Body { registrationId } → { sent, channel, nextAllowedAt, invalidatesPreviousLink } (the previous link stops working). 3 per day per place and at most 5 sends: 409 resend_limit_reached.',
+  onGuard: guard('post'),
+  onRequest: (req, res) => inOrganization(req, res, async (access) => {
+    const allowed = resendLimiter.allow(`resend:${req.user.sub}:${req.body?.registrationId}`);
+    if (!allowed.ok) { res.set?.('Retry-After', String(allowed.retryAfterSeconds)); return { error: 'rate_limited', status: 429, retryAfterSeconds: allowed.retryAfterSeconds }; }
+    return payments.resendClaim({ access, orderId: req.params.orderId, registrationId: req.body?.registrationId });
+  }),
 };

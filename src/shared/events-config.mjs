@@ -10,7 +10,15 @@
 //   EVENTS_FEE_RULE                    (none) JSON fee rule for src/shared/events-pricing.mjs (D21: no member fee unless set)
 //   EVENTS_ORG_DISCOUNTS               {}     JSON { "<organizationId>": { "pct": 10 } } — server-side only (follow-ups S3)
 //   EVENT_HOLD_TTL_MINUTES             30     S1 (read through the store's holdTtlMinutes)
+// S4 (payments; spec §3.18):
+//   EVENT_TICKET_SECRET (>= 32 chars), EVENT_TICKET_KEY_ID (k1), EVENT_TICKET_SECRET_PREVIOUS (JSON)  ticket tokens (events-ticket-token.mjs)
+//   EVENT_MANUAL_HOLD_EXTEND_HOURS     24     hold extension while a manual payment waits
+//   EVENT_MANUAL_HOLD_MAX_HOURS        48     cap from the order's creation (organisation orders: EVENTS_ORG_HOLD_MAX_HOURS 120)
+//   EVENTS_PROVIDER_HOLD_EXTEND_MINUTES 10, EVENTS_REJECTED_RETRY_MINUTES 60, EVENTS_LATE_PAYMENT_GRACE_HOURS 24
+//   EVENTS_MANUAL_CONFIRM_SLA_HOURS    24     quoted to members in app copy only; no code enforces it
+//   EVENTS_REFUND_TARGET_DAYS          5      working days FitFlex quotes for sending a refund; copy only
 import { normaliseFeeRule, NO_FEE } from './events-pricing.mjs';
+import { ticketKeyRing } from './events-ticket-token.mjs';
 
 const intOr = (name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) => {
   const n = parseInt(process.env[name] ?? '', 10);
@@ -68,3 +76,17 @@ export function eventsOrgDiscounts() {
 export const feeLabelFor = rule => (rule && rule.type && rule.type !== 'none' ? { en: 'Service fee', sw: 'Ada ya huduma' } : null);
 /** The discount line label for an approved organisation discount (spec §3.10). */
 export const ORG_DISCOUNT_LABEL = Object.freeze({ en: 'Approved organisation discount', sw: 'Punguzo lililoidhinishwa la shirika' });
+
+// ── S4: payments and refunds ──────────────────────────────────────────────────
+
+export const eventsManualConfirmSlaHours = () => intOr('EVENTS_MANUAL_CONFIRM_SLA_HOURS', 24, { max: 720 });
+export const eventsRefundTargetDays = () => intOr('EVENTS_REFUND_TARGET_DAYS', 5, { max: 90 });
+export const eventManualHoldExtendHours = () => intOr('EVENT_MANUAL_HOLD_EXTEND_HOURS', 24, { max: 168 });
+export const eventManualHoldMaxHours = () => intOr('EVENT_MANUAL_HOLD_MAX_HOURS', 48, { max: 720 });
+export const eventsOrgHoldMaxHours = () => intOr('EVENTS_ORG_HOLD_MAX_HOURS', 120, { max: 720 });
+export const eventsProviderHoldExtendMinutes = () => intOr('EVENTS_PROVIDER_HOLD_EXTEND_MINUTES', 10, { max: 240 });
+export const eventsRejectedRetryMinutes = () => intOr('EVENTS_REJECTED_RETRY_MINUTES', 60, { max: 1440 });
+export const eventsLatePaymentGraceHours = () => intOr('EVENTS_LATE_PAYMENT_GRACE_HOURS', 24, { max: 168 });
+
+/** The ticket key ring, or null when EVENT_TICKET_SECRET is missing or shorter than 32 characters (fail closed: no payment is taken). */
+export const eventTicketKeyRing = () => ticketKeyRing(process.env);

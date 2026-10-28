@@ -361,6 +361,36 @@ export function eventsRegistrationOn() {
   return eventsModuleOn() && on('EVENTS_REGISTRATION');
 }
 
+/**
+ * S4: payment intake on the labelled manual confirmation path (D1). Needs EVENTS_MODULE and EVENTS_REGISTRATION.
+ * Off: GET /events/options.payment stays 'none' and S3 behaviour is unchanged.
+ */
+export function eventsPaymentsManualOn() {
+  return eventsRegistrationOn() && on('EVENTS_PAYMENTS_MANUAL');
+}
+
+/**
+ * S4: event orders payable by mobile money (Malipo by Tunzaa). Built dormant; stays off until the owner confirms
+ * Tunzaa as the launch provider (D1). Needs EVENTS_MODULE and EVENTS_REGISTRATION (the client, TUNZAA_PAYMENTS and
+ * canSettle() are checked where the provider is used).
+ */
+export function eventsPaymentsTunzaaOn() {
+  return eventsRegistrationOn() && on('EVENTS_PAYMENTS_TUNZAA');
+}
+
+/**
+ * S4 launch gate (security review M4): event payments are taken only with two admins on money (MONEY_SECOND_APPROVER) unless the
+ * owner explicitly accepts a single approver with EVENTS_ALLOW_SINGLE_APPROVER=1 (default off).
+ */
+export function eventsApproverGateOpen() {
+  return moneySecondApproverOn() || on('EVENTS_ALLOW_SINGLE_APPROVER');
+}
+
+/** S4: payment intake (initiate, provider prompt, corporate notice) is on in either mode. */
+export function eventsPaymentIntakeOn() {
+  return eventsPaymentsManualOn() || eventsPaymentsTunzaaOn();
+}
+
 const positiveNumber = (name, fallback) => {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -388,6 +418,12 @@ export function requireEventsModule(req, res, next) {
 /** S3: the guard of every registration route (quote, orders, registrations, claims, teams, corporate, organizer / admin order reads): 404 feature_disabled unless EVENTS_MODULE and EVENTS_REGISTRATION are both on. */
 export function requireEventsRegistration(req, res, next) {
   if (!eventsRegistrationOn()) return res.status(404).json({ error: 'feature_disabled' });
+  next();
+}
+
+/** S4: the guard of payment INTAKE routes: 404 feature_disabled unless an events payment flag is on (reads, tickets, cancel and refunds need only EVENTS_REGISTRATION). */
+export function requireEventsPaymentIntake(req, res, next) {
+  if (!eventsPaymentIntakeOn()) return res.status(404).json({ error: 'feature_disabled' });
   next();
 }
 

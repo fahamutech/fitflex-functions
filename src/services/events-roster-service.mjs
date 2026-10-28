@@ -81,7 +81,7 @@ export function matchCategory(cell, categories) {
   return null;
 }
 
-export function createEventsRosterService({ db, registration, users, now = () => new Date(), closingSoonHours = () => 72, maxRows = eventsCorporateMaxRows }) {
+export function createEventsRosterService({ db, registration, users, now = () => new Date(), closingSoonHours = () => 72, maxRows = eventsCorporateMaxRows, getRefunds = () => null }) {
   const R = registration.internals;
 
   const canValidate = access => access.platformAdmin || access.permissions.includes(ROSTER_PERMISSION);
@@ -287,9 +287,9 @@ export function createEventsRosterService({ db, registration, users, now = () =>
   async function listOrders({ access, query = {} }) {
     if (!canRead(access)) return fail('forbidden', 403, { requiredPermission: ROSTER_PERMISSION });
     let q = db('EventOrder').where({ organizationId: access.org.id }).whereNull('purchaserUserId');
-    if (['awaiting_payment', 'confirmed', 'cancelled', 'expired'].includes(query.status)) q = q.where({ status: query.status });
+    if (['awaiting_payment', 'confirmed', 'cancelled', 'expired', 'partially_cancelled', 'refund_pending', 'refunded'].includes(query.status)) q = q.where({ status: query.status });
     const rows = await q.orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(500);
-    const counts = rows.length ? await db('EventRegistration').whereIn('orderId', rows.map(r => r.id)).whereNot({ status: 'cancelled' }).groupBy('orderId').select('orderId').count({ n: '*' }) : [];
+    const counts = rows.length ? await db('EventRegistration').whereIn('orderId', rows.map(r => r.id)).whereNotIn('status', ['cancelled', 'refunded']).groupBy('orderId').select('orderId').count({ n: '*' }) : [];
     const placesOf = new Map(counts.map(c => [c.orderId, Number(c.n)]));
     const creators = new Map();
     const items = [];
@@ -319,7 +319,7 @@ export function createEventsRosterService({ db, registration, users, now = () =>
     if (!canRead(access)) return fail('forbidden', 403, { requiredPermission: ROSTER_PERMISSION });
     const loaded = await ownOrder(access, orderId);
     if (loaded.error) return loaded;
-    const detail = await R.orderDetail(loaded, { actions: loaded.order.status === 'awaiting_payment' && canPlace(access) ? ['cancel'] : [] });
+    const detail = await R.orderDetail(loaded, { actions: loaded.order.status === 'awaiting_payment' && canPlace(access) ? ['cancel'] : [], access });
     const creator = loaded.order.createdByUserId ? await users.findByIdAsync(loaded.order.createdByUserId) : null;
     return { ...detail, organizationId: access.org.id, createdBy: creator ? { id: creator.id, name: creator.displayName ?? null } : null };
   }
@@ -329,6 +329,9 @@ export function createEventsRosterService({ db, registration, users, now = () =>
     if (!MEMBER_CANCEL_REASONS.includes(body.reason)) return fail('invalid_reason', 400, { allowed: [...MEMBER_CANCEL_REASONS] });
     const loaded = await ownOrder(access, orderId);
     if (loaded.error) return loaded;
+    // S4: a paid corporate order is cancelled with its refund (the whole order); a payment notice being checked blocks cancelling an unpaid one.
+    if (['confirmed', 'partially_cancelled', 'refund_pending'].includes(loaded.order.status) && getRefunds()) return getRefunds().cancelOrderCorporate({ access, orderId, body, actorId });
+    if (loaded.order.status === 'awaiting_payment' && await R.paymentSubmitted(orderId)) return fail('payment_submitted', 409);
     const r = await R.releaseWholeOrder(loaded, { reason: body.reason, actor: `organization:${actorId}` });
     if (r.error) return r;
     return { order: R.orderView(r.order), registrations: await R.viewsOf(r.registrations, r.order.eventId), changed: r.changed };
