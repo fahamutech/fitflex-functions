@@ -10,8 +10,18 @@
 //                     The row is kept after the files are gone, for audit and for the partner's
 //                     "taken down" notice. sha256 (of the uploaded bytes) is kept only on taken-down
 //                     rows, to refuse the same file again (O-P2); it is cleared otherwise.
-//   PartnerMediaFile  the cleaned bytes (bytea), one row per variant. Deleting the rows really
-//                     deletes the image (D-1, O-P4: no evidence copy). Ids are random and never reused.
+//   PartnerMediaFile  the cleaned bytes (bytea), one row per variant: master, the band files (x2/x1 or
+//                     logo256/logo128) and the review previews (p240/p480/p960, made once at upload).
+//                     Deleting the rows really deletes the image (D-1, O-P4: no evidence copy). Ids are
+//                     random and never reused.
+//   PartnerMediaUploadAttempt
+//                     one row per upload attempt (made before the file is read, whatever the outcome):
+//                     the per-person and per-partner daily caps count these (O-P5, security review M3).
+//                     Rows older than two days are deleted by the nightly sweep.
+//
+// pixelSha256 is a hash of the decoded cleaned pixels, so a re-saved copy with other metadata is
+// still recognised after a takedown (review L1). purgedAt marks rows of a partner that was deleted:
+// their bytes, hashes and notes are gone and no read shows them again, even if an id is reused (M2).
 //
 // At most one live item per (subjectType, subjectId, kind), enforced by a partial unique index.
 // Additive only; down drops both tables.
@@ -25,7 +35,7 @@ const REVIEW_STATES = ['to_review', 'reviewed'];
 const PLATES = ['light', 'dark'];
 const PLATE_CHOICES = ['auto', 'light', 'dark'];
 const REASONS = ['inappropriate', 'rights', 'other_brand', 'not_own_logo', 'person_request', 'quality', 'other'];
-const VARIANTS = ['master', 'x2', 'x1', 'logo256', 'logo128'];
+const VARIANTS = ['master', 'x2', 'x1', 'logo256', 'logo128', 'p240', 'p480', 'p960'];
 
 /** @param {import('knex').Knex} knex */
 exports.up = async function up(knex) {
@@ -62,6 +72,8 @@ exports.up = async function up(knex) {
       t.text('plateChoice');
       t.decimal('logoLuminance', 6, 3);
       t.text('sha256');
+      t.text('pixelSha256');
+      ts(t, 'purgedAt');
       t.text('confirmationVersion').notNullable();
       t.text('rightsConfirmedBy').notNullable();
       ts(t, 'rightsConfirmedAt').notNullable();
@@ -89,6 +101,8 @@ exports.up = async function up(knex) {
     await knex.raw(`CREATE UNIQUE INDEX partner_media_one_live_uq ON "PartnerMedia" ("subjectType", "subjectId", "kind") WHERE "status" = 'live'`);
     // The O-P2 check: has this exact file been taken down for this partner before?
     await knex.raw(`CREATE INDEX partner_media_taken_down_sha_idx ON "PartnerMedia" ("subjectType", "subjectId", "sha256") WHERE "status" = 'taken_down'`);
+    await knex.raw(`CREATE INDEX partner_media_taken_down_pixels_idx ON "PartnerMedia" ("subjectType", "subjectId", "pixelSha256") WHERE "status" = 'taken_down'`);
+    await chk('partner_media_purged_chk', `"purgedAt" IS NULL OR ("status" <> 'live' AND "sha256" IS NULL AND "pixelSha256" IS NULL AND "reasonNote" IS NULL)`);
   }
   if (!(await knex.schema.hasTable('PartnerMediaFile'))) {
     await knex.schema.createTable('PartnerMediaFile', (t) => {
@@ -107,10 +121,22 @@ exports.up = async function up(knex) {
     await knex.raw(`ALTER TABLE "PartnerMediaFile" ADD CONSTRAINT partner_media_file_type_chk CHECK ("contentType" = 'image/webp')`);
     await knex.raw(`ALTER TABLE "PartnerMediaFile" ADD CONSTRAINT partner_media_file_len_chk CHECK ("byteLength" = octet_length("data"))`);
   }
+  if (!(await knex.schema.hasTable('PartnerMediaUploadAttempt'))) {
+    await knex.schema.createTable('PartnerMediaUploadAttempt', (t) => {
+      t.text('id').primary();
+      t.text('userId').notNullable();
+      t.text('subjectType');
+      t.text('subjectId');
+      ts(t, 'createdAt').notNullable().defaultTo(knex.fn.now());
+      t.index(['userId', 'createdAt'], 'partner_media_attempt_user_idx');
+      t.index(['subjectType', 'subjectId', 'createdAt'], 'partner_media_attempt_subject_idx');
+    });
+  }
 };
 
 /** @param {import('knex').Knex} knex */
 exports.down = async function down(knex) {
+  await knex.schema.dropTableIfExists('PartnerMediaUploadAttempt');
   await knex.schema.dropTableIfExists('PartnerMediaFile');
   await knex.schema.dropTableIfExists('PartnerMedia');
 };

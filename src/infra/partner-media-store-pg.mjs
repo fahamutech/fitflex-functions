@@ -1,24 +1,27 @@
-// Postgres store for partner hero photos and logos (PartnerMedia + PartnerMediaFile, migration
-// 20270122090000-partner-media). The image bytes live in PartnerMediaFile.data (bytea): deleting
-// those rows really deletes the image (owner decision D-1).
+// Postgres store for partner hero photos and logos (PartnerMedia, PartnerMediaFile and
+// PartnerMediaUploadAttempt; migration 20270122090000-partner-media). The image bytes live in
+// PartnerMediaFile.data (bytea): deleting those rows really deletes the image (owner decision D-1).
 //
-// Every change of state runs in one transaction under an advisory lock per partner and kind
-// (`partner_media:<type>:<id>:<kind>`), so an upload, a remove and a takedown of the same slot can
-// never interleave; the partial unique index keeps one live item per slot whatever happens.
+// Every change of state runs in one transaction under advisory locks (`partner_media:<key>`): one
+// per partner and kind for media changes, one per partner or person for the daily upload counts.
+// Several keys are always taken in sorted order, so two transactions never wait on each other in
+// a circle. The partial unique index keeps one live item per slot whatever happens.
+// Rows of a purged partner (purgedAt set) are never read again (security review M2).
 // Every query is parameterised. No query here returns file bytes except getFile().
 import { MEDIA_STATUSES } from '../shared/partner-media-rules.mjs';
 
 const MEDIA_FIELDS = new Set([
   'id', 'subjectType', 'subjectId', 'kind', 'origin', 'status', 'revision', 'reviewState', 'reviewedBy', 'reviewedAt',
   'reason', 'reasonNote', 'decidedBy', 'decidedAt', 'statusChangedBy', 'statusChangedAt', 'width', 'height', 'focalX', 'focalY',
-  'textZoneMean', 'textZonePatch', 'plate', 'plateChoice', 'logoLuminance', 'sha256', 'confirmationVersion',
+  'textZoneMean', 'textZonePatch', 'plate', 'plateChoice', 'logoLuminance', 'sha256', 'pixelSha256', 'purgedAt', 'confirmationVersion',
   'rightsConfirmedBy', 'rightsConfirmedAt', 'ownLogoConfirmedBy', 'ownLogoConfirmedAt', 'uploadedBy', 'uploadedByRole',
   'createdAt', 'updatedAt',
 ]);
-const DATE_FIELDS = ['reviewedAt', 'decidedAt', 'statusChangedAt', 'rightsConfirmedAt', 'ownLogoConfirmedAt', 'createdAt', 'updatedAt'];
+const DATE_FIELDS = ['reviewedAt', 'decidedAt', 'statusChangedAt', 'rightsConfirmedAt', 'ownLogoConfirmedAt', 'purgedAt', 'createdAt', 'updatedAt'];
 const NUMBER_FIELDS = ['focalX', 'focalY', 'textZoneMean', 'textZonePatch', 'logoLuminance'];
 const AUDIT_FIELDS = new Set(['id', 'at', 'actor', 'action', 'target', 'before', 'after']);
 const FILE_META = ['id', 'mediaId', 'variant', 'contentType', 'byteLength', 'width', 'height', 'createdAt'];
+const CLOSED = ['suspended', 'closed'];
 
 const iso = v => (v instanceof Date ? v.toISOString() : v ?? null);
 const pick = (allowed, data) => Object.fromEntries(Object.entries(data).filter(([k, v]) => v !== undefined && allowed.has(k)));
@@ -33,17 +36,21 @@ const likeEscape = s => s.replace(/[\\%_]/g, m => `\\${m}`);
 
 // The partner's name, whatever kind of partner it is (gym name, trainer display name, vendor store name).
 const NAME_SQL = `coalesce(g."name", tp."displayName", nullif(btrim(vu."vendorProfile"->>'businessName'), ''), vu."displayName")`;
-function withNames(q) {
+/** PartnerMedia with its partner joined; a partner that no longer exists (or a closed vendor) joins as nulls. */
+function withSubjects(q) {
   return q('PartnerMedia as pm')
     .leftJoin('Gym as g', function joinGym() { this.on('g.id', 'pm.subjectId').andOn('pm.subjectType', q.raw('?', ['gym'])); })
     .leftJoin('TrainerProfile as tp', function joinTrainer() { this.on('tp.id', 'pm.subjectId').andOn('pm.subjectType', q.raw('?', ['trainer'])); })
     .leftJoin('User as vu', function joinVendor() {
-      this.on('vu.id', 'pm.subjectId').andOn('pm.subjectType', q.raw('?', ['vendor'])).andOn('vu.userType', q.raw('?', ['vendor']));
+      this.on('vu.id', 'pm.subjectId').andOn('pm.subjectType', q.raw('?', ['vendor'])).andOn('vu.userType', q.raw('?', ['vendor']))
+        .andOn('vu.accountStatus', '<>', q.raw('?', ['closed']));
     });
 }
+const SUBJECT_EXISTS = '(g.id IS NOT NULL OR tp.id IS NOT NULL OR vu.id IS NOT NULL)';
 
 function bind(q) {
-  const media = () => q('PartnerMedia');
+  const media = () => q('PartnerMedia').whereNull('purgedAt');
+  const attempts = () => q('PartnerMediaUploadAttempt');
   return {
     async getMedia(id) {
       if (typeof id !== 'string' || !id) return null;
@@ -59,11 +66,11 @@ function bind(q) {
       return mediaFromDb(await media().where({ subjectType, subjectId, kind, status: 'live' }).first());
     },
     async insertMedia(row) {
-      const [saved] = await media().insert(pick(MEDIA_FIELDS, row)).returning('*');
+      const [saved] = await q('PartnerMedia').insert(pick(MEDIA_FIELDS, row)).returning('*');
       return mediaFromDb(saved);
     },
     async updateMedia(id, patch) {
-      const [saved] = await media().where({ id }).update(pick(MEDIA_FIELDS, patch)).returning('*');
+      const [saved] = await q('PartnerMedia').where({ id }).update(pick(MEDIA_FIELDS, patch)).returning('*');
       return mediaFromDb(saved);
     },
     async insertFiles(mediaId, files) {
@@ -82,6 +89,10 @@ function bind(q) {
       const r = await q('PartnerMediaFile').where({ mediaId, variant }).first();
       return r ? { ...r, data: Buffer.from(r.data), byteLength: Number(r.byteLength), createdAt: iso(r.createdAt) } : null;
     },
+    /** One file's id (no bytes): answers a revalidation without reading the image. */
+    async fileId(mediaId, variant) {
+      return (await q('PartnerMediaFile').where({ mediaId, variant }).first('id'))?.id ?? null;
+    },
     /** File metadata (never bytes) of several items: Map(mediaId → { variant: { id, bytes, width, height } }). */
     async fileMeta(mediaIds) {
       const wanted = [...new Set(mediaIds.filter(Boolean))];
@@ -93,27 +104,60 @@ function bind(q) {
       }
       return out;
     },
-    /** How many file rows exist for an item (specs: the bytes are gone). */
-    async fileCount(mediaId) {
-      const [{ n }] = await q('PartnerMediaFile').where({ mediaId }).count({ n: '*' });
+    /**
+     * O-P2 / review L1: taken-down items of these partners matching the upload's bytes or its decoded
+     * pixels, newest first → [{ id, reason, subjectId, decidedAt }].
+     */
+    async takenDownMatches(subjectType, subjectIds, { sha256 = null, pixelSha256 = null }) {
+      const ids = [...new Set(subjectIds.filter(Boolean))];
+      if (!ids.length || (!sha256 && !pixelSha256)) return [];
+      const rows = await media().where({ subjectType, status: 'taken_down' }).whereIn('subjectId', ids)
+        .where((b) => {
+          if (sha256) b.orWhere({ sha256 });
+          if (pixelSha256) b.orWhere({ pixelSha256 });
+        })
+        .orderBy([{ column: 'decidedAt', order: 'desc' }, { column: 'id', order: 'desc' }])
+        .select('id', 'reason', 'subjectId', 'decidedAt');
+      return rows.map(r => ({ ...r, decidedAt: iso(r.decidedAt) }));
+    },
+    /** A gym and every other gym run by an owner of it (review L1: takedowns count across them). */
+    async relatedGymIds(gymId) {
+      const owners = await q('User').where({ userType: 'gym_operator' })
+        .where(b => b.whereRaw('? = ANY("gymIds")', [gymId]).orWhere({ gymId }))
+        .whereNot({ accountStatus: 'closed' }).select('gymId', 'gymIds');
+      const out = new Set([gymId]);
+      for (const o of owners) for (const id of [...(o.gymIds || []), o.gymId]) if (id) out.add(id);
+      return [...out];
+    },
+
+    // ── Upload attempts (daily caps, O-P5 / review M3, L8) ──────────────────
+
+    async insertAttempt(row) {
+      await attempts().insert(row);
+    },
+    async countUserAttempts(userId, sinceIso) {
+      const [{ n }] = await attempts().where({ userId }).where('createdAt', '>', sinceIso).count({ n: '*' });
       return Number(n);
     },
-    /** O-P2: was this exact upload (sha256 of the uploaded bytes) taken down for this partner before? */
-    async takenDownBefore(subjectType, subjectId, sha256) {
-      return Boolean(await media().where({ subjectType, subjectId, sha256, status: 'taken_down' }).first('id'));
-    },
-    /** Partner uploads of one partner since `sinceIso` (the daily cap, O-P5). */
-    async partnerUploadsSince(subjectType, subjectId, sinceIso) {
-      const [{ n }] = await media().where({ subjectType, subjectId, origin: 'partner' }).where('createdAt', '>', sinceIso).count({ n: '*' });
+    async countSubjectAttempts(subjectType, subjectId, sinceIso) {
+      const [{ n }] = await attempts().where({ subjectType, subjectId }).where('createdAt', '>', sinceIso).count({ n: '*' });
       return Number(n);
     },
+    async setAttemptSubject(id, subjectType, subjectId) {
+      return attempts().where({ id }).update({ subjectType, subjectId });
+    },
+    async deleteAttemptsBefore(iso0) {
+      return attempts().where('createdAt', '<', iso0).del();
+    },
+
     /**
      * The admin queue. tab: to_review (live partner uploads not yet reviewed, oldest first) | live
-     * (newest first) | taken_down (newest takedown first). → { rows (each with subjectName), total }.
+     * (newest first) | taken_down (newest takedown first). Items of a partner that no longer exists
+     * are never listed. → { rows (each with subjectName), total }.
      */
     async adminList({ tab, subjectType = null, kind = null, subjectId = null, search = null, limit = 25, offset = 0 }) {
       const base = () => {
-        const b = withNames(q);
+        const b = withSubjects(q).whereNull('pm.purgedAt').whereRaw(SUBJECT_EXISTS);
         if (tab === 'to_review') b.where({ 'pm.status': 'live', 'pm.origin': 'partner', 'pm.reviewState': 'to_review' });
         else if (MEDIA_STATUSES.includes(tab)) b.where('pm.status', tab);
         if (subjectType) b.where('pm.subjectType', subjectType);
@@ -128,6 +172,29 @@ function bind(q) {
           : [{ column: 'pm.createdAt', order: 'desc' }, { column: 'pm.id', order: 'desc' }];
       const rows = await base().select('pm.*', q.raw(`${NAME_SQL} as "subjectName"`)).orderBy(order).limit(limit).offset(offset);
       return { rows: rows.map(r => ({ ...mediaFromDb(r), subjectName: r.subjectName ?? null })), total: Number(n) };
+    },
+
+    // ── Purge (review M2) ───────────────────────────────────────────────────
+
+    /** Every not-yet-purged item of a partner, any status. */
+    async unpurgedOf(subjectType, subjectId) {
+      return (await media().where({ subjectType, subjectId })).map(mediaFromDb);
+    },
+    /** Partners with media whose partner no longer exists (gym or trainer profile gone, vendor gone or closed). */
+    async orphanSubjects(limit = 500) {
+      return withSubjects(q).whereNull('pm.purgedAt').whereRaw(`NOT ${SUBJECT_EXISTS}`)
+        .distinct('pm.subjectType', 'pm.subjectId').limit(limit);
+    },
+    /** Of these gyms, the ones no open owner account runs any more (or that no longer exist). */
+    async gymsWithoutOwner(gymIds) {
+      const out = [];
+      for (const gymId of [...new Set(gymIds.filter(Boolean))]) {
+        const owner = await q('User').where({ userType: 'gym_operator' })
+          .where(b => b.whereRaw('? = ANY("gymIds")', [gymId]).orWhere({ gymId }))
+          .whereNotIn('accountStatus', ['closed']).first('id');
+        if (!owner) out.push(gymId);
+      }
+      return out;
     },
 
     // ── Partners and people ─────────────────────────────────────────────────
@@ -158,11 +225,21 @@ function bind(q) {
       return q('OrgMembership').where({ personaId, gymId, orgType: 'gym', status: 'active' }).whereIn('role', ['owner', 'staff'])
         .select('role', 'aclPermissions');
     },
-    /** Who hears about a gym's media: its owners, and its active staff holding `gyms` (spec §44.3 audience). */
-    async gymAudience(gymId) {
+    /**
+     * Who hears about a gym's media (spec §44.3 audience): its owners and its staff holding `gyms`.
+     * `enforce` (V2_ORG_AUTHZ): from ACTIVE OrgMemberships at that gym, the same rule as access (review L6).
+     */
+    async gymAudience(gymId, { enforce = false } = {}) {
+      if (enforce) {
+        const rows = await q('OrgMembership as m').join('User as u', 'u.id', 'm.personaId')
+          .where({ 'm.gymId': gymId, 'm.orgType': 'gym', 'm.status': 'active' }).whereIn('m.role', ['owner', 'staff'])
+          .whereIn('u.userType', ['gym_operator', 'gym_staff']).whereNotIn('u.accountStatus', CLOSED)
+          .select('u.id', 'm.role', 'm.aclPermissions');
+        return rows.filter(r => r.role === 'owner' || (r.aclPermissions || []).includes('gyms')).map(r => r.id);
+      }
       const rows = await q('User').whereIn('userType', ['gym_operator', 'gym_staff'])
         .where(b => b.whereRaw('? = ANY("gymIds")', [gymId]).orWhere({ gymId }))
-        .whereNotIn('accountStatus', ['suspended', 'closed'])
+        .whereNotIn('accountStatus', CLOSED)
         .select('id', 'userType', 'aclPermissions');
       return rows.filter(r => r.userType === 'gym_operator' || (r.aclPermissions || []).includes('gyms')).map(r => r.id);
     },
@@ -171,12 +248,16 @@ function bind(q) {
       const staff = await q('User').where({ userType: 'vendor_staff', vendorId, vendorRole: 'admin', accountStatus: 'active' }).pluck('id');
       return [vendorId, ...staff];
     },
-    /** { userId: name } for showing who did what (display name, else email). */
-    async displayNames(ids) {
+    /**
+     * { userId: name } for showing who did what. `displayOnly` (the partner side, review L4): the
+     * display name only, never the email; null when there is none.
+     */
+    async displayNames(ids, { displayOnly = false } = {}) {
       const wanted = [...new Set(ids.filter(Boolean))];
       if (!wanted.length) return {};
       const rows = await q('User').whereIn('id', wanted).select('id', 'displayName', 'email');
-      return Object.fromEntries(rows.map(r => [r.id, r.displayName || r.email || null]));
+      const clean = v => (typeof v === 'string' && v.trim() ? v.trim() : null);
+      return Object.fromEntries(rows.map(r => [r.id, displayOnly ? clean(r.displayName) : clean(r.displayName) || clean(r.email)]));
     },
     async audit(row) {
       const out = pick(AUDIT_FIELDS, row);
@@ -189,9 +270,11 @@ function bind(q) {
 export function createPgPartnerMediaStore({ db }) {
   return {
     ...bind(db),
-    /** Run fn(store) in one transaction under the lock of one partner's photo or logo slot. */
-    transaction: (lockKey, fn) => db.transaction(async (trx) => {
-      await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`partner_media:${lockKey}`]);
+    /** Run fn(store) in one transaction holding the lock(s) of `lockKeys` (a key or a list), taken in sorted order. */
+    transaction: (lockKeys, fn) => db.transaction(async (trx) => {
+      for (const key of [...new Set([lockKeys].flat())].sort()) {
+        await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`partner_media:${key}`]);
+      }
       return fn(bind(trx));
     }),
   };

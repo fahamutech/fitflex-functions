@@ -248,7 +248,11 @@ const { resolveRequestUser, publicUserId } = identityService;
 
 // A tier members still hold cannot be removed, renamed or switched off in Settings (409 tier_in_use).
 export const settingsService = createSettingsService({ platformSettings, auditLog, tierHolders: createTierHolders({ db }) });
-export const gymService = createGymService({ gyms, users, checkins, auditLog });
+// partnerMediaService is defined further down; the follow-ups are only called later.
+export const gymService = createGymService({
+  gyms, users, checkins, auditLog,
+  onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
+});
 // Tells gym owners, staff and vendors what happens at their gym or shop (inbox + push).
 export const partnerNotifier = createPartnerNotifier({
   usernames: { handleOf: userId => usernameService.handleOf(userId) }, users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
@@ -262,8 +266,12 @@ export const trainerService = createTrainerService({
   // Partner DOB review L3: the declared date of birth goes once the Person has no personas left
   // (deleting only the profile leaves the trainer's account, so this usually keeps it).
   onTrainerRemoved: async prior => {
+    // Partner media (functions#277 review M2): the profile's photo and logo go with it, whatever else fails.
+    const purged = partnerMediaService.purgeSubject('trainer', prior?.id, { cause: 'trainer_profile_deleted' }).catch(err => err);
     const row = prior?.userId ? await db('User').where({ id: prior.userId }).first('personId') : null;
     await forgetPersonDetails(db, { personId: row?.personId || null });
+    const result = await purged;
+    if (result instanceof Error) throw result;
   },
 });
 export const trainerBookingService = createTrainerBookingService({
@@ -585,6 +593,8 @@ export const accountService = createAccountService({
       () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
       // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
       () => forgetPersonDetails(db, { personId: deleted?.personId || null }),
+      // Partner media (functions#277 review M2): a vendor's, a trainer's or an owner's last gyms' photos and logos.
+      () => partnerMediaService.purgeAccount(deleted || { id: userId }, { cause: 'account_deleted' }),
     ]) {
       try { await step(); } catch (err) { errors.push(err); }
     }
@@ -653,7 +663,10 @@ export const operatorService = createOperatorService({
   gymOpenToPass,
 });
 
-export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate });
+export const ownerGymService = createOwnerGymService({
+  gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate,
+  onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
+});
 export const ownerStaffService = createOwnerStaffService({ users, auditLog, initFirebaseAdmin, getAdminAuth });
 
 export const adminMemberService = createAdminMemberService({
@@ -723,7 +736,13 @@ export const mobileMoneyService = createMobileMoneyService({
 });
 export const adminOwnerService = createAdminOwnerService({
   users, gyms, checkins, auditLog, gymService,
-  onOwnerRemoved: prior => forgetPersonDetails(db, { personId: prior?.personId || null }),
+  onOwnerRemoved: async (prior) => {
+    // Partner media (functions#277 review M2): gyms no open owner runs any more lose their photo and logo.
+    const purged = partnerMediaService.purgeAccount(prior, { cause: 'owner_deleted' }).catch(err => err);
+    await forgetPersonDetails(db, { personId: prior?.personId || null });
+    const result = await purged;
+    if (result instanceof Error) throw result;
+  },
 });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
@@ -981,6 +1000,7 @@ export const registrationService = createRegistrationService({
   approvalStatusForRole, signPurpose, verifyPurpose,
   claimInvitations: personId => invitationService.claimFor(personId),
   linkingEnabled: () => identityFlag('V2_LINKING'),
+  onAccountClosed: row => partnerMediaService.purgeAccount(row, { cause: 'registration_withdrawn' }),
 });
 // A person with no profile yet: invited with a start PIN, or still to choose a role.
 export const onboardingService = createOnboardingService({

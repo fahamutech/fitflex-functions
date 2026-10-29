@@ -10,7 +10,8 @@ const OWNER_TRAINER_FIELDS = Object.freeze([
   'hourlyRateTzs', 'sessionRateCurrency', 'experienceYears', 'availability', 'socialLinks',
 ]);
 
-export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE }) {
+// onGymRemoved(gymId): follow-ups once an owner deleted a gym (partner media purge, functions#277 review M2).
+export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE, onGymRemoved = async () => {} }) {
   // Set by FitFlex, never by the owner: the verified badge, commission,
   // homepage placement, status and payout/tax details. Payout details for new
   // partners come from their verified KYC payout account.
@@ -154,6 +155,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const ids = ownerGymIdsOf(owner);
     if (!ids.includes(gymId)) return { error: 'not_your_gym', status: 403 };
     await gyms.removeAsync(g => g.id === gymId);
+    try { await onGymRemoved(gymId); } catch (err) { console.warn('[owner-gym-delete] follow-up failed:', err?.message); }
     const updatedGymIds = ids.filter(id => id !== gymId);
     await users.updateByIdAsync(owner.id, {
       gymIds: updatedGymIds,

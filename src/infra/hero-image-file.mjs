@@ -282,3 +282,30 @@ export async function buildLogoVariants(master) {
   }
   return out;
 }
+
+// ISO-BMFF brands of HEIF and AVIF stills and sequences (the 4 bytes after "ftyp").
+const HEIF_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1']);
+const AVIF_BRANDS = new Set(['avif', 'avis']);
+
+/**
+ * The image type the first bytes declare, before any decoder sees the file (security review L7):
+ * 'jpeg' | 'png' | 'webp' | 'heif' | 'avif', or null for anything else (GIF, TIFF, BMP, SVG, text…).
+ */
+export function sniffImageType(input) {
+  if (!Buffer.isBuffer(input) || input.length < 12) return null;
+  if (input[0] === 0xFF && input[1] === 0xD8 && input[2] === 0xFF) return 'jpeg';
+  if (input.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'png';
+  if (input.toString('latin1', 0, 4) === 'RIFF' && input.toString('latin1', 8, 12) === 'WEBP') return 'webp';
+  if (input.toString('latin1', 4, 8) === 'ftyp') {
+    const brand = input.toString('latin1', 8, 12);
+    if (AVIF_BRANDS.has(brand)) return 'avif';
+    if (HEIF_BRANDS.has(brand)) return 'heif';
+  }
+  return null;
+}
+
+/** sha256 of the decoded pixels (with their size) of a cleaned image: the same picture re-saved with other metadata hashes the same. */
+export async function pixelSha256(cleaned) {
+  const { data, info } = await sharp(cleaned).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  return createHash('sha256').update(`${info.width}x${info.height}x${info.channels}:`).update(data).digest('hex');
+}
