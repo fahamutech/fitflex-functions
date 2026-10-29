@@ -6,6 +6,7 @@ import { buildDevIdentity, devMarketplaceProduct, DEV_GYM_ID, DEV_OWNER_GYM_ID }
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { identityFlag, recordFirebaseEvidenceOn } from '../shared/feature-flags.mjs';
+import { mustChangeStartCredential } from '../shared/credential-change.mjs';
 import { signInPhotoOrNull } from '../shared/media-src.mjs';
 
 const configuredAdminEmails = new Set(
@@ -131,9 +132,10 @@ export function createAuthService({
       organizerRole: user.organizerRole,
       // Identity V2 · I2 (C3a): the Person rides along; nothing reads it as `sub`.
       ...(identityFlag('V2_PERSONAS') && user.personId ? { pid: user.personId, ver: 2 } : {}),
-      // A portal admin still on the start password another admin chose: every
-      // route but the change-password one refuses this session (2026-10-19).
-      ...(user.passwordChangeRequired === true ? { pwc: true } : {}),
+      // A portal admin still on the start password another admin chose (2026-10-19),
+      // or gym staff still on the PIN their owner chose (B3a, behind
+      // STAFF_PIN_CHANGE_REQUIRED): every route but the change one refuses this session.
+      ...(mustChangeStartCredential(user) ? { pwc: true } : {}),
     };
   }
 
@@ -225,7 +227,7 @@ export function createAuthService({
       await users.upsertAsync(u => u.id === user.id, user);
     }
     await otps.upsertAsync(o => o.phone === phone, { ...otp, code: null });
-    const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone, ...(user.passwordChangeRequired === true ? { pwc: true } : {}) });
+    const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone, ...(mustChangeStartCredential(user) ? { pwc: true } : {}) });
     return { token, user: toSessionUser(user) };
   }
 

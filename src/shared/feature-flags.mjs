@@ -329,6 +329,19 @@ export function partnerProgressOn() {
 }
 
 /**
+ * Phase B · B3a: gym staff whose PIN an owner chose must change it before
+ * anything else (owner decisions 2026-10-20). Off unless
+ * STAFF_PIN_CHANGE_REQUIRED is set: a gym_staff row's passwordChangeRequired
+ * is then ignored (no `pwc` on its sessions, no 403 password_change_required),
+ * POST /auth/pin/change and POST /owner/staff/:id/pin answer 404
+ * feature_disabled, and staff responses are unchanged. Portal admins (#219)
+ * are held regardless of this flag. See src/shared/credential-change.mjs.
+ */
+export function staffPinChangeRequiredOn() {
+  return on('STAFF_PIN_CHANGE_REQUIRED');
+}
+
+/**
  * A gym shared by several owners has ONE named payout owner (owner decision
  * 2026-10-22; Gym.payoutOwnerId). Off unless GYM_PAYOUT_OWNER is set: payout
  * eligibility, settlement payout gating and invoice payouts keep using the

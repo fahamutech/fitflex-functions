@@ -180,6 +180,7 @@ import {
   eventsWebhookBatch, eventsFeedLagSeconds, eventsExportMaxRows,
 } from '../shared/events-config.mjs';
 import { eventsFavouritesOn, eventsRegistrationOn, eventsClosingSoonHours, eventAutoCompleteGraceHours } from '../shared/feature-flags.mjs';
+import { mustChangeStartCredential } from '../shared/credential-change.mjs';
 import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
@@ -239,12 +240,13 @@ registerAccountStatusLookup(async id => {
     if (person?.status === 'suspended') return 'suspended';
     if (person?.sessionsValidAfter) validAfter = Math.max(validAfter ?? 0, +new Date(person.sessionsValidAfter));
   }
-  const passwordChangeRequired = user.passwordChangeRequired === true;
+  // Still on a start credential someone else chose (admin start password; gym staff
+  // owner-chosen PIN while STAFF_PIN_CHANGE_REQUIRED is on): held to the change route.
+  const passwordChangeRequired = mustChangeStartCredential(user);
   if (validAfter || passwordChangeRequired) {
     return {
       status: user.accountStatus ?? null,
       sessionsValidAfter: validAfter ? new Date(validAfter) : null,
-      // Still on the start password another admin chose: held to the change-password route.
       passwordChangeRequired,
     };
   }
@@ -711,7 +713,15 @@ export const ownerGymService = createOwnerGymService({
   gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate, gymPayoutOwner,
   onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
 });
-export const ownerStaffService = createOwnerStaffService({ users, auditLog, initFirebaseAdmin, getAdminAuth });
+export const ownerStaffService = createOwnerStaffService({
+  users, auditLog, db,
+  // Through the replaceable holder (defined below; read at call time), so specs can stand in for Firebase.
+  initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
+  // B3a: the start-PIN digest uses the same server key as PINs; the held PIN is the I7a service's.
+  pepper: () => pinPepper(), pinAuth: () => pinAuthService, forgetSession: invalidateAccountStatus,
+  // Read at call time through the replaceable holder (defined below), as the PIN service does.
+  verifyFirebasePassword: (...args) => firebasePasswordCheck.verify(...args),
+});
 
 export const adminMemberService = createAdminMemberService({
   users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr,
