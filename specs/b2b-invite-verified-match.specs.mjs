@@ -2,11 +2,12 @@
 // (security fix, 20 Oct 2026). Against the CI database.
 //
 // An email or number someone typed onto their own profile (User.email /
-// User.phone) never enrols them in another person's sponsored programme:
+// User.phone) never gets them asked into another person's sponsored programme:
 // not by the matching job, not when they open Benefits, not by an import.
 // The invite stays "invited" until a member who has verified that contact
-// (LoginIdentifier.verifiedAt) appears. Suspended / closed Persons and
-// deleted accounts are skipped.
+// (LoginIdentifier.verifiedAt) appears; since consent slice (a) that member is
+// asked in the app and enrolled only on accepting. Suspended / closed Persons
+// and deleted accounts are skipped.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -14,7 +15,7 @@ import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { purgeB2BBilling } from './fixtures/ledger-cleanup.mjs';
 import { verifyContacts, purgeIdentity } from './fixtures/verified-contacts.mjs';
-import { b2bService, b2bBeneficiaryImportService, signJwt as sign } from '../src/bootstrap/services.mjs';
+import { b2bService, b2bBeneficiaryImportService, b2bMemberRequestService, signJwt as sign } from '../src/bootstrap/services.mjs';
 import { createB2BBeneficiaryImportService, SMS_MAX_LENGTH } from '../src/services/b2b-beneficiary-import-service.mjs';
 import { myB2BBenefits } from '../functions/b2b.mjs';
 import { execFile } from 'node:child_process';
@@ -48,7 +49,7 @@ async function sponsor(name = 'Acme') {
 function service({ emailCodes = false } = {}) {
   const sent = { email: [], sms: [] };
   const svc = createB2BBeneficiaryImportService({
-    db, b2bService, emailCodes: () => emailCodes, appLink: () => 'https://example.test/app',
+    db, b2bService, memberRequests: b2bMemberRequestService, emailCodes: () => emailCodes, appLink: () => 'https://example.test/app',
     emailSender: () => ({ configured: true, send: async (to, m) => { sent.email.push({ to, ...m }); return { ok: true }; } }),
     smsSender: () => ({ configured: true, send: async (to, m) => { sent.sms.push({ to, ...m }); return { ok: true }; } }),
     smsEnabled: () => true,
@@ -56,6 +57,14 @@ function service({ emailCodes = false } = {}) {
   return { svc, sent };
 }
 const enrolled = async (orgId, userId) => Number((await db('B2BBeneficiary').where({ organizationId: orgId, userId }).count('* as n').first()).n);
+/** Requests this organisation's invites made to this person. */
+const asked = async (orgId, userId) => Number((await db('B2BMemberRequest').where({ organizationId: orgId, userId }).count('* as n').first()).n);
+async function accept(orgId, userId) {
+  const row = await db('B2BMemberRequest').where({ organizationId: orgId, userId, status: 'pending' }).first();
+  assert.ok(row, 'an open request');
+  const out = await b2bMemberRequestService.accept({ userId, requestId: row.id });
+  assert.ok(out.beneficiary, JSON.stringify(out));
+}
 const inviteOf = (orgId, where) => db('B2BBeneficiaryInvite').where({ organizationId: orgId, ...where }).first();
 const personOf = async userId => (await db('User').where({ id: userId }).first('personId')).personId;
 
@@ -72,6 +81,7 @@ async function openBenefits(userId) {
 }
 
 after(async () => {
+  await db('B2BMemberRequest').whereIn('organizationId', made.orgs).del();
   await db('B2BBeneficiaryInvite').whereIn('organizationId', made.orgs).del();
   await db('B2BBeneficiaryImport').whereIn('organizationId', made.orgs).del();
   await db('Notification').whereIn('userId', made.users).del().catch(() => {});
@@ -96,14 +106,14 @@ test('a planted email or number does not take an invite: not by the job, not by 
   const planter = await user({ email: victimEmail, phone: victimPhone });
 
   const job = await svc.matchInvites();
-  assert.equal(await enrolled(orgId, planter), 0, `job: ${JSON.stringify(job)}`);
+  assert.deepEqual([await enrolled(orgId, planter), await asked(orgId, planter)], [0, 0], `job: ${JSON.stringify(job)}`);
   // The bootstrap job (what the scheduler runs) does the same.
   await b2bBeneficiaryImportService.matchInvites();
-  assert.equal(await enrolled(orgId, planter), 0);
+  assert.deepEqual([await enrolled(orgId, planter), await asked(orgId, planter)], [0, 0]);
 
   const opened = await openBenefits(planter);
   assert.equal(opened.statusCode, 200, JSON.stringify(opened.body));
-  assert.equal(await enrolled(orgId, planter), 0, 'opening Benefits enrols nobody by a planted contact');
+  assert.deepEqual([await enrolled(orgId, planter), await asked(orgId, planter), opened.body.memberRequests.length], [0, 0, 0], 'opening Benefits asks nobody by a planted contact');
   assert.equal((await inviteOf(orgId, { email: victimEmail })).status, 'invited');
   assert.equal((await inviteOf(orgId, { phone: victimPhone })).status, 'invited');
 
@@ -115,16 +125,19 @@ test('a planted email or number does not take an invite: not by the job, not by 
   const dry = await svc.importPeople({ access: await access(await sponsor('Dry')), body: { rows: [{ email: victimEmail }], dryRun: true }, actorId: OPERATOR });
   assert.deepEqual([dry.enrolled, dry.invited], [0, 1]);
 
-  // The real owner verifies the email (with no User.email on their row): the job enrols them, not the planter.
+  // The real owner verifies the email (with no User.email on their row): the job asks them, not the planter; they accept.
   const owner = await user();
   await verifyContacts(db, owner, { email: victimEmail });
   await svc.matchInvites();
+  assert.deepEqual([await asked(orgId, owner), await asked(orgId, planter), await enrolled(orgId, owner)], [1, 0, 0]);
+  assert.equal((await inviteOf(orgId, { email: victimEmail })).status, 'invited');
+  await accept(orgId, owner);
   assert.deepEqual([await enrolled(orgId, owner), await enrolled(orgId, planter)], [1, 0]);
   assert.equal((await inviteOf(orgId, { email: victimEmail })).status, 'enrolled');
   assert.equal((await inviteOf(orgId, { phone: victimPhone })).status, 'invited', 'the number is still waiting for whoever verifies it');
 });
 
-test('a verified member is enrolled straight away by an import, and by the job or Benefits once they verify', async () => {
+test('a verified member is asked (never enrolled) by an import, and by the job or Benefits once they verify; enrolled when they accept', async () => {
   const orgId = await sponsor();
   const { svc } = service();
   const a = await access(orgId);
@@ -132,7 +145,9 @@ test('a verified member is enrolled straight away by an import, and by the job o
   const member = await user();
   await verifyContacts(db, member, { email: verifiedEmail });
   const out = await svc.importPeople({ access: a, body: { rows: [{ email: verifiedEmail.toUpperCase() }] }, actorId: OPERATOR });
-  assert.deepEqual([out.enrolled, out.invited], [1, 0]);
+  assert.deepEqual([out.enrolled, out.invited], [0, 1]);
+  assert.deepEqual([await enrolled(orgId, member), await asked(orgId, member)], [0, 1]);
+  await accept(orgId, member);
   assert.equal(await enrolled(orgId, member), 1);
 
   // Phone on the profile only, then verified later (Mobile number and email): Benefits matches them there and then.
@@ -141,10 +156,13 @@ test('a verified member is enrolled straight away by an import, and by the job o
   await svc.importPeople({ access: a, body: { rows: [{ phone: p }] }, actorId: OPERATOR });
   assert.equal((await inviteOf(orgId, { phone: p })).status, 'invited', 'an unverified number on the profile waits');
   await svc.matchInvites({ userId: late });
-  assert.equal(await enrolled(orgId, late), 0);
+  assert.deepEqual([await enrolled(orgId, late), await asked(orgId, late)], [0, 0]);
   await verifyContacts(db, late, { phone: p });
   const opened = await openBenefits(late);
   assert.equal(opened.statusCode, 200);
+  assert.deepEqual([await enrolled(orgId, late), opened.body.memberRequests.map(r => r.organization.id)], [0, [orgId]]);
+  assert.equal((await inviteOf(orgId, { phone: p })).status, 'invited');
+  await accept(orgId, late);
   assert.equal(await enrolled(orgId, late), 1);
   assert.equal((await inviteOf(orgId, { phone: p })).status, 'enrolled');
 });
@@ -168,7 +186,7 @@ test('suspended or closed Persons, deleted accounts and non-member accounts are 
 
   await svc.matchInvites();
   for (const id of [suspended, closed]) await svc.matchInvites({ userId: id });
-  for (const id of [suspended, closed, deleted, trainer]) assert.equal(await enrolled(orgId, id), 0, id);
+  for (const id of [suspended, closed, deleted, trainer]) assert.deepEqual([await enrolled(orgId, id), await asked(orgId, id)], [0, 0], id);
   for (const email of Object.values(contacts)) assert.equal((await inviteOf(orgId, { email })).status, 'invited', email);
   // An import doesn't enrol them either.
   const again = await svc.importPeople({ access: await access(await sponsor('Again')), body: { rows: Object.values(contacts).map(email => ({ email })) }, actorId: OPERATOR });
@@ -198,12 +216,12 @@ test('the import says whether email codes are available; the messages tell exist
   await off.svc.sendDue({ limit: 1000 });
   const emailOnly = off.sent.email.find(e => e.to === mail('off-email')).text;
   const withPhone = off.sent.email.find(e => e.to === mail('off-both')).text;
-  assert.match(emailOnly, /Already on FitFlex\? Your benefits appear once this email address is confirmed on your FitFlex account\./);
+  assert.match(emailOnly, /Already on FitFlex\? The app asks you once this email address is confirmed on your FitFlex account\./);
   assert.match(withPhone, /Already on FitFlex\? Confirm your mobile number under Mobile number and email in the FitFlex app/);
   for (const t of [emailOnly, withPhone]) assert.doesNotMatch(t, /Confirm this email address/);
   const sms = on.sent.sms.find(m => m.to === p);
   assert.ok(sms.text.length <= SMS_MAX_LENGTH, `${sms.text.length}: ${sms.text}`);
-  assert.equal(sms.text, 'Asha Ltd added you to its wellness programme on FitFlex. Join with this number (or confirm it under Mobile number and email): https://example.test/app');
+  assert.equal(sms.text, 'Asha Ltd invites you to its wellness programme on FitFlex. Join with this number (or confirm it under Mobile number and email): https://example.test/app');
 });
 
 test('the audit script refuses without a database, reports counts only and changes nothing', async () => {

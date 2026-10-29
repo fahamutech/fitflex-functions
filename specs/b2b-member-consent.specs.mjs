@@ -5,8 +5,8 @@
 // A user id proves nothing (ids show in feeds and groups). An organisation
 // user or a company's HR naming a member only by id makes a request; nothing
 // is enrolled, linked or granted, and no activity is shown, until the member
-// accepts. FitFlex platform admins still add directly; a verified email or
-// number still adds directly (unchanged, reported to the owner).
+// accepts. FitFlex platform admins still add directly. Adds by a verified
+// email or number wait too since consent slice (a): b2b-consent-contact-adds.specs.mjs.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -461,7 +461,7 @@ test('the organisation can withdraw an open request; only for its own requests a
   assert.deepEqual(await audits(memberRequest.id), ['b2b.member_request.create', 'b2b.member_request.cancel']);
 });
 
-test('FitFlex platform admins still add by user id directly; a verified email or number still adds directly (unchanged)', async () => {
+test('FitFlex platform admins still add by user id directly; a verified email or number now waits for the member too (consent slice (a))', async () => {
   const org = await organisation();
   const member = await user('member');
   const direct = await b2bService.enrollBeneficiary({ access: await adminAccess(org.id), actorId: ADMIN.userId, body: { userId: member, status: 'active' } });
@@ -474,7 +474,8 @@ test('FitFlex platform admins still add by user id directly; a verified email or
   await db('User').where({ id: byContact }).update({ email });
   await verifyContacts(db, byContact, { email });
   const added = await b2bService.enrollBeneficiary({ access: await as(org.id, manager), actorId: manager, body: { email } });
-  assert.equal(added.beneficiary?.userId, byContact, JSON.stringify(added));
+  assert.deepEqual([added.outcome, added.beneficiary, added.memberRequest.userId], ['pending_member_acceptance', undefined, null], JSON.stringify(added));
+  assert.equal(await db('B2BBeneficiary').where({ organizationId: org.id, userId: byContact }).first(), undefined);
 });
 
 test('HR linking a staff record by user id waits for the member; the company sees nothing until then', async () => {
@@ -559,7 +560,7 @@ test('a FitFlex admin adding someone directly by user id tells them who added th
   assert.ok(await db('AuditLog').where({ action: 'b2b.member.admin_added', target: organizationUser.id }).first());
 });
 
-test('a FitFlex admin linking a staff record by user id tells the member; adds by email, by members themselves, and repeat links do not', async () => {
+test('a FitFlex admin linking a staff record by user id tells the member; adds by members themselves and repeat links do not', async () => {
   const { account } = await corporateService.onboard({ body: { companyName: `Consent Admin Corp ${uid('c')}`, industrySector: 'banking', workforceBracket: '50-100', subsidyModel: 'fully_funded', passTier: 'pro', seatLimit: 5 }, actorId: ADMIN.userId });
   made.corporates.push(account.id);
   await corporateService.setStatus({ corporateId: account.id, status: 'active', actorId: ADMIN.userId });
@@ -576,14 +577,14 @@ test('a FitFlex admin linking a staff record by user id tells the member; adds b
   assert.match(list[0].body, /^FitFlex support linked your FitFlex account to your staff record at .+including activity from before you joined/);
   assert.ok(await db('AuditLog').where({ action: 'b2b.member.admin_added', target: employee.id, actor: ADMIN.userId }).first());
 
-  // By verified email, an admin add is not by user id: no admin notice (unchanged behaviour).
+  // By verified email an admin still adds directly and, since consent slice (a), the member is told too.
   const org = await organisation();
   const email = `admin.${randomUUID().slice(0, 6)}@consent.test`;
   const byEmail = await user('member');
   await db('User').where({ id: byEmail }).update({ email });
   await verifyContacts(db, byEmail, { email });
   assert.ok((await b2bService.enrollBeneficiary({ access: await adminAccess(org.id), actorId: ADMIN.userId, body: { email } })).beneficiary);
-  assert.equal((await notes(byEmail)).length, 0);
+  assert.deepEqual((await notes(byEmail)).map(n => dataOf(n).kind), ['beneficiary']);
   // A member who accepted a request gets no admin notice either.
   const manager = await orgUser(org.id, 'manager');
   const asked = await user('member');

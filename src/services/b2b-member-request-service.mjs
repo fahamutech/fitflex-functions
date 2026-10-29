@@ -1,31 +1,45 @@
-// A member agrees before an organisation adds them by account id
-// (security fix, owner decision 22 Oct 2026; privacy ruling A-02).
+// A member agrees before an organisation adds them (security fix, owner
+// decisions 22 Oct 2026; privacy ruling A-02).
 //
 // An organisation user (beneficiaries.manage / users.manage) or a company's
-// HR who names a member only by user id no longer adds them. A user id proves
-// nothing: ids show in activity feeds, leaderboards and groups. Instead a
-// pending B2BMemberRequest is made and the member is told in the app. Until
-// they accept nothing changes for them: no beneficiary row, no staff link, no
-// organisation role. So no organisation sees their activity (every A-02 read
-// goes through those rows) and no sponsor is charged. Accepting performs the
-// add, through the same service call and checks as before, with the
-// requester's access as it is at that moment.
+// HR who names a member, by user id OR by a verified email or mobile number,
+// no longer adds them; nor does a bulk import or an invite that matches a
+// member's verified contact (consent slice (a), owner decision 22 Oct 2026,
+// re-confirmed 29 Oct). Instead a pending B2BMemberRequest is made and the
+// member is told in the app. Until they accept nothing changes for them: no
+// beneficiary row, no staff link, no organisation role. So no organisation
+// sees their activity (every A-02 read goes through those rows) and no sponsor
+// is charged. Accepting performs the add, through the same service call and
+// checks as before, with the requester's access as it is at that moment.
 //
 //   kind     beneficiary    enrol in a B2B organisation   (b2bService.enrollBeneficiary)
 //            org_user       a role in its portal           (b2bService.addOrganizationUser)
 //            employee_link  link a company staff record    (corporateService.linkEmployeeUser)
+//   source   user_id        named by account id            (create)
+//            contact        named by email / number        (createByContact)
+//            invite         an invite matched a verified contact (createFromInvite)
 //   status   pending → accepted | declined | expired | cancelled
+//
+// By contact the organisation must not learn whether a member is behind the
+// email or number before that member accepts. So every add by contact stores
+// a request: with the member when there is one who may be asked, otherwise
+// with no member (nobody is told; it expires). The reply, the pending lists
+// and the limits are the same either way; a decline shows to the organisation
+// as still pending until the request would have expired. Invite matches are
+// never listed as requests (the organisation sees the invite, still invited).
 //
 // Accept is single use (compare-and-set on status). A request expires after
 // B2B_MEMBER_REQUEST_TTL_DAYS days (default 14). FitFlex platform admins keep
-// the direct add (see b2b-service / corporate-service); adds by a VERIFIED
-// email or number are unchanged.
+// the direct add, by id or by contact, and the person is told (b2b_admin_added).
 import { randomUUID } from 'node:crypto';
 import { createVendorLimiter } from '../shared/vendor-rate-limit.mjs';
 
 const TABLE = 'B2BMemberRequest';
 const SYSTEM = 'system:b2b-member-requests';
+/** Who asks when an invite matches: FitFlex on the organisation's behalf (checked again on accept). */
+export const INVITE_REQUESTER = 'system:b2b-beneficiary-invites';
 export const MEMBER_REQUEST_KINDS = Object.freeze(['beneficiary', 'org_user', 'employee_link']);
+export const MEMBER_REQUEST_SOURCES = Object.freeze(['user_id', 'contact', 'invite']);
 export const MEMBER_REQUEST_STATUSES = Object.freeze(['pending', 'accepted', 'declined', 'expired', 'cancelled']);
 export const DEFAULT_MEMBER_REQUEST_TTL_DAYS = 14;
 const DAY_MS = 86_400_000;
@@ -173,17 +187,36 @@ export function createB2BMemberRequestService({
    */
   function orgView(row, names = new Map()) {
     const d = row.details || {};
+    const source = row.source ?? 'user_id';
+    // By contact, who is behind it stays hidden until they accept (consent slice (a)),
+    // and a decline looks like a request still waiting until it would have expired.
+    const byContact = source !== 'user_id';
+    const masked = maskedDecline(row);
+    const accepted = row.status === 'accepted';
     return {
-      id: row.id, kind: row.kind,
-      status: row.status === 'pending' ? 'pending_member_acceptance' : row.status,
+      id: row.id, kind: row.kind, source,
+      status: row.status === 'pending' || masked ? 'pending_member_acceptance' : row.status,
       organizationId: row.organizationId ?? null, corporateId: row.corporateId ?? null, employeeId: row.employeeId ?? null,
-      userId: row.userId, displayName: row.status === 'accepted' ? (names.get(row.userId) ?? null) : null,
+      userId: byContact && !accepted ? null : (row.userId ?? null),
+      displayName: accepted ? (names.get(row.userId) ?? null) : null,
+      contactType: source === 'contact' ? (row.contactType ?? null) : null,
+      contact: source === 'contact' ? (row.contactValue ?? null) : null,
       role: d.role ?? null, permissions: d.permissions ?? null,
       beneficiaryType: d.beneficiaryType ?? null, groupName: d.groupName ?? null, externalReference: d.externalReference ?? null,
       beneficiaryStatus: d.beneficiaryStatus ?? null,
-      expiresAt: row.expiresAt, createdAt: row.createdAt, decidedAt: row.decidedAt ?? null, reason: row.reason ?? null,
+      expiresAt: row.expiresAt, createdAt: row.createdAt,
+      decidedAt: masked ? null : (row.decidedAt ?? null), reason: masked ? null : (row.reason ?? null),
     };
   }
+
+  /** A member's decline of a request by contact, shown to the organisation as still waiting until it would have expired. */
+  function maskedDecline(row) {
+    return row.source === 'contact' && row.status === 'declined' && !row.reason && new Date(row.expiresAt) > stamp();
+  }
+  /** What the organisation sees as waiting: open requests, and masked declines (see maskedDecline). */
+  const visibleOpen = (q, at = stamp()) => q
+    .where(b => b.where({ status: 'pending' }).orWhere(m => m.where({ status: 'declined', source: 'contact' }).whereNull('reason')))
+    .where('expiresAt', '>', at);
 
   /** The member's view: who is asking, what they will see, what the member would get. */
   async function memberView(row) {
@@ -199,7 +232,7 @@ export function createB2BMemberRequestService({
       sponsor = scope.account ? { passTier: scope.account.passTier ?? null, subsidyModel: scope.account.subsidyModel ?? null } : null;
     }
     return {
-      id: row.id, kind: row.kind, status: row.status,
+      id: row.id, kind: row.kind, status: row.status, source: row.source ?? 'user_id',
       organization: { id: scope.id, corporateId: scope.corporateId, name: scope.name, organizationType: scope.organizationType },
       role: d.role ?? null, beneficiaryType: d.beneficiaryType ?? null, groupName: d.groupName ?? null,
       visibility: visibility(row.kind, scope.name, d.role),
@@ -247,10 +280,11 @@ export function createB2BMemberRequestService({
   // ── Expiry ────────────────────────────────────────────────────────────────
 
   /** Close open requests past their expiry (all, one member's, or these ids). */
-  async function expireDue({ userId = null, ids = null, limit = 500 } = {}) {
+  async function expireDue({ userId = null, scopeId = null, ids = null, limit = 500 } = {}) {
     const at = stamp();
     let q = db(TABLE).where({ status: 'pending' }).where('expiresAt', '<=', at);
     if (userId) q = q.where({ userId });
+    if (scopeId) q = q.where({ scopeId });
     if (ids) q = q.whereIn('id', ids);
     const due = await q.orderBy('expiresAt').limit(limit).pluck('id');
     if (!due.length) return { expired: 0 };
@@ -273,27 +307,38 @@ export function createB2BMemberRequestService({
     return allowed.ok ? null : fail('rate_limited', 429, { retryAfterSeconds: allowed.retryAfterSeconds });
   }
 
-  /** The checks before a request is stored: hourly rate (durable, all servers), cooldown, open cap. */
+  /** Hourly rate per requester (durable, all servers). */
+  async function rateRefusal(requestedBy, at) {
+    const [{ c: lastHour }] = await db(TABLE).where({ requestedBy }).where('createdAt', '>', new Date(+at - HOUR_MS)).count({ c: '*' });
+    if (Number(lastHour) < ratePerHour()) return null;
+    const [{ first }] = await db(TABLE).where({ requestedBy }).where('createdAt', '>', new Date(+at - HOUR_MS)).min({ first: 'createdAt' });
+    return fail('rate_limited', 429, { retryAfterSeconds: Math.max(1, Math.ceil((+new Date(first) + HOUR_MS - +at) / 1000)) });
+  }
+
+  /** Until when this organisation / company may not ask this member again (a decline, or it withdrew), or null. */
+  async function cooldownUntil({ scopeId, userId }, at) {
+    const days = cooldownDays();
+    if (days <= 0 || !userId) return null;
+    const recent = await db(TABLE).where({ scopeId, userId }).where('decidedAt', '>', new Date(+at - days * DAY_MS))
+      .where(b => b.where({ status: 'declined' }).orWhere({ status: 'cancelled', reason: 'cancelled_by_organization' }))
+      .max({ last: 'decidedAt' }).first();
+    return recent?.last ? new Date(+new Date(recent.last) + days * DAY_MS) : null;
+  }
+
+  /** Open requests of one organisation / company at their cap? (Masked declines count, as the organisation sees them.) */
+  async function capRefusal(scopeId, at) {
+    const [{ c: open }] = await visibleOpen(db(TABLE).where({ scopeId }), at).count({ c: '*' });
+    return Number(open) >= maxPending() ? fail('member_request_limit', 429, { maxPending: maxPending() }) : null;
+  }
+
+  /** The checks before a request by user id is stored: hourly rate, cooldown, open cap. */
   async function refuseNew({ scopeId, userId, requestedBy }) {
     const at = stamp();
-    const [{ c: lastHour }] = await db(TABLE).where({ requestedBy }).where('createdAt', '>', new Date(+at - HOUR_MS)).count({ c: '*' });
-    if (Number(lastHour) >= ratePerHour()) {
-      const [{ first }] = await db(TABLE).where({ requestedBy }).where('createdAt', '>', new Date(+at - HOUR_MS)).min({ first: 'createdAt' });
-      return fail('rate_limited', 429, { retryAfterSeconds: Math.max(1, Math.ceil((+new Date(first) + HOUR_MS - +at) / 1000)) });
-    }
-    const days = cooldownDays();
-    if (days > 0) {
-      const recent = await db(TABLE).where({ scopeId, userId }).where('decidedAt', '>', new Date(+at - days * DAY_MS))
-        .where(b => b.where({ status: 'declined' }).orWhere({ status: 'cancelled', reason: 'cancelled_by_organization' }))
-        .max({ last: 'decidedAt' }).first();
-      if (recent?.last) {
-        const until = new Date(+new Date(recent.last) + days * DAY_MS);
-        return fail('member_request_cooldown', 429, { retryAfter: until.toISOString(), retryAfterSeconds: Math.max(1, Math.ceil((+until - +at) / 1000)) });
-      }
-    }
-    const [{ c: open }] = await db(TABLE).where({ scopeId, status: 'pending' }).where('expiresAt', '>', at).count({ c: '*' });
-    if (Number(open) >= maxPending()) return fail('member_request_limit', 429, { maxPending: maxPending() });
-    return null;
+    const rate = await rateRefusal(requestedBy, at);
+    if (rate) return rate;
+    const until = await cooldownUntil({ scopeId, userId }, at);
+    if (until) return fail('member_request_cooldown', 429, { retryAfter: until.toISOString(), retryAfterSeconds: Math.max(1, Math.ceil((+until - +at) / 1000)) });
+    return capRefusal(scopeId, at);
   }
 
   /**
@@ -325,9 +370,14 @@ export function createB2BMemberRequestService({
     if (!scopeId || !userId) throw new Error('member request needs a scope and a user');
     // An expired request must not block a new one.
     await expireDue({ userId });
-    const open = await db(TABLE).where({ status: 'pending' })
-      .where(b => { b.where({ kind, scopeId, userId }); if (employeeId) b.orWhere({ kind: 'employee_link', employeeId }); }).first();
-    if (open) return fail('member_request_pending', 409, { memberRequestId: open.id, expiresAt: open.expiresAt });
+    if (employeeId) await expireDue({ scopeId });
+    // Open by user id for this member (requests by contact or invite are separate, so an id can't be matched to a contact this way), or any open link for this staff record.
+    const openQuery = () => db(TABLE).where({ status: 'pending' })
+      .where(b => { b.where({ kind, scopeId, userId, source: 'user_id' }); if (employeeId) b.orWhere({ kind: 'employee_link', employeeId }); });
+    const open = await openQuery().first();
+    if (open) return fail('member_request_pending', 409, open.source === 'user_id' ? { memberRequestId: open.id, expiresAt: open.expiresAt } : {});
+    // A staff record whose request by contact was declined still shows as waiting (masked): the same 409.
+    if (employeeId && await visibleOpen(db(TABLE).where({ kind: 'employee_link', employeeId })).first('id')) return fail('member_request_pending', 409);
     const refused = await refuseNew({ scopeId, userId, requestedBy });
     if (refused) return refused;
     const at = stamp();
@@ -339,9 +389,8 @@ export function createB2BMemberRequestService({
       await db(TABLE).insert(row);
     } catch (err) {
       if (err.code !== '23505') throw err;
-      const open = await db(TABLE).where({ status: 'pending' })
-        .where(b => { b.where({ kind, scopeId, userId }); if (employeeId) b.orWhere({ kind: 'employee_link', employeeId }); }).first();
-      return fail('member_request_pending', 409, { memberRequestId: open?.id ?? null, expiresAt: open?.expiresAt ?? null });
+      const raced = await openQuery().first();
+      return fail('member_request_pending', 409, raced?.source === 'user_id' ? { memberRequestId: raced.id, expiresAt: raced.expiresAt } : {});
     }
     await audit(requestedBy, 'b2b.member_request.create', row.id, { kind, organizationId, corporateId, employeeId, userId, details });
     const saved = await db(TABLE).where({ id: row.id }).first();
@@ -349,20 +398,143 @@ export function createB2BMemberRequestService({
     return { outcome: 'pending_member_acceptance', memberRequest: orgView(saved, await displayNames([userId])) };
   }
 
-  /** Open requests an organisation made, of one kind (org lists show them as pending). */
-  async function pendingForOrganization({ organizationId, kind }) {
+  /**
+   * Called by b2bService / corporateService instead of adding someone named by
+   * an email address or mobile number (consent slice (a)). `contact` is
+   * readContact's { type, value }; `resolve()` returns the user id of the
+   * member who would be asked (verified contact, member account, not already
+   * added), or null. The reply is the same whether or not there is one:
+   * { outcome: 'pending_member_acceptance', memberRequest } with userId null
+   * and a real id (every add by contact is stored). Refusals here never depend
+   * on the person: 429 rate_limited / member_request_limit, and for a staff
+   * record that already has an open link request, 409 member_request_pending.
+   */
+  async function createByContact({ kind, organizationId = null, corporateId = null, employeeId = null, contact, requestedBy, requestedByType, details = {}, resolve = async () => null }) {
+    if (!MEMBER_REQUEST_KINDS.includes(kind)) throw new Error(`unknown member request kind ${kind}`);
+    if (!requestedBy) return fail('actor_required', 403);
+    const scopeId = kind === 'employee_link' ? corporateId : organizationId;
+    if (!scopeId || !contact?.type || !contact?.value) throw new Error('member request by contact needs a scope and a contact');
+    const limited = attempt(requestedBy);
+    if (limited) return limited;
+    await expireDue({ scopeId });
     const at = stamp();
-    const rows = await db(TABLE).where({ organizationId, kind, status: 'pending' }).where('expiresAt', '>', at).orderBy('createdAt', 'desc');
-    const names = await displayNames(rows.map(r => r.userId));
+
+    // The same contact asked already and still showing as waiting: the same answer again.
+    const sameContact = () => visibleOpen(db(TABLE).where({ kind, scopeId, source: 'contact', contactType: contact.type, contactValue: contact.value }), at)
+      .where(b => (employeeId ? b.where({ employeeId }) : b.whereNull('employeeId'))).orderBy('createdAt', 'desc').first();
+    const same = await sameContact();
+    if (same) return { outcome: 'pending_member_acceptance', memberRequest: orgView(same) };
+    // Any link request this staff record shows as waiting (a masked decline too, so a decline can't be told from nobody).
+    const openForEmployee = () => (employeeId ? visibleOpen(db(TABLE).where({ kind: 'employee_link', employeeId }), at).first() : null);
+    if (await openForEmployee()) return fail('member_request_pending', 409);
+    const rate = await rateRefusal(requestedBy, at);
+    if (rate) return rate;
+    const cap = await capRefusal(scopeId, at);
+    if (cap) return cap;
+
+    // Who would be asked. Nobody (or someone who may not be asked again yet, or
+    // has a request from this organisation open): stored without a member.
+    let userId = (await resolve()) || null;
+    let unmatched = userId ? null : 'no_member';
+    if (userId) {
+      await expireDue({ userId });
+      if (await cooldownUntil({ scopeId, userId }, at)) unmatched = 'cooldown';
+      else if (await db(TABLE).where({ kind, scopeId, userId, status: 'pending' }).first('id')) unmatched = 'already_asked';
+      if (unmatched) userId = null;
+    }
+    const row = {
+      id: newId(), kind, scopeId, organizationId, corporateId, employeeId, userId, requestedBy, requestedByType: requestedByType || 'member',
+      source: 'contact', contactType: contact.type, contactValue: contact.value,
+      details: JSON.stringify({ ...details, ...(unmatched ? { unmatched } : {}) }),
+      status: 'pending', expiresAt: new Date(+at + ttlDays() * DAY_MS), createdAt: at, updatedAt: at,
+    };
+    try {
+      await db(TABLE).insert(row);
+    } catch (err) {
+      if (err.code !== '23505') throw err;
+      const raced = await sameContact();
+      if (raced) return { outcome: 'pending_member_acceptance', memberRequest: orgView(raced) };
+      if (await openForEmployee()) return fail('member_request_pending', 409);
+      throw err;
+    }
+    await audit(requestedBy, 'b2b.member_request.create', row.id, {
+      kind, source: 'contact', organizationId, corporateId, employeeId, userId, contactType: contact.type, unmatched, details,
+    });
+    const saved = await db(TABLE).where({ id: row.id }).first();
+    if (userId) await tell(saved).catch(() => null);
+    return { outcome: 'pending_member_acceptance', memberRequest: orgView(saved) };
+  }
+
+  /**
+   * An invite (B2BBeneficiaryInvite) matched a member's verified email or
+   * number: ask them (consent slice (a)) instead of enrolling them. Asked by
+   * FitFlex on the organisation's behalf (requestedByType 'system'); the
+   * organisation is checked again on accept. Never shown to the organisation
+   * as a request: its invite simply stays invited until the member accepts.
+   * Returns { memberRequest } or { skipped: 'already_asked' | 'cooldown' | 'limit' }.
+   */
+  async function createFromInvite({ invite, userId }) {
+    const scopeId = invite.organizationId;
+    if (!scopeId || !userId) throw new Error('member request from invite needs an organisation and a user');
+    await expireDue({ userId });
+    const at = stamp();
+    const open = await db(TABLE).where({ kind: 'beneficiary', scopeId, userId, status: 'pending' }).first('id');
+    if (open) return { skipped: 'already_asked', memberRequestId: open.id };
+    if (await cooldownUntil({ scopeId, userId }, at)) {
+      const last = await db(TABLE).where({ kind: 'beneficiary', scopeId, userId }).whereIn('status', ['declined', 'cancelled']).orderBy('decidedAt', 'desc').first('id');
+      return { skipped: 'cooldown', memberRequestId: last?.id ?? null };
+    }
+    if (await capRefusal(scopeId, at)) return { skipped: 'limit' };
+    const details = {
+      beneficiaryType: invite.beneficiaryType ?? 'member', groupName: invite.groupName ?? null, externalReference: invite.externalReference ?? null,
+      beneficiaryStatus: 'active', invitedBy: invite.invitedBy ?? null,
+    };
+    const row = {
+      id: newId(), kind: 'beneficiary', scopeId, organizationId: scopeId, corporateId: null, employeeId: null, userId,
+      requestedBy: INVITE_REQUESTER, requestedByType: 'system',
+      source: 'invite', inviteId: invite.id, contactType: invite.email ? 'email' : 'phone', contactValue: invite.email ?? invite.phone,
+      details: JSON.stringify(details), status: 'pending', expiresAt: new Date(+at + ttlDays() * DAY_MS), createdAt: at, updatedAt: at,
+    };
+    try {
+      await db(TABLE).insert(row);
+    } catch (err) {
+      if (err.code === '23505') return { skipped: 'already_asked' };
+      throw err;
+    }
+    await audit(INVITE_REQUESTER, 'b2b.member_request.create', row.id, { kind: 'beneficiary', source: 'invite', inviteId: invite.id, organizationId: scopeId, userId, details });
+    const saved = await db(TABLE).where({ id: row.id }).first();
+    await tell(saved).catch(() => null);
+    return { memberRequest: saved };
+  }
+
+  /** Withdraw a request made from an invite (the organisation cancelled the invite). */
+  async function cancelForInvite({ inviteId, actorId }) {
+    const rows = await db(TABLE).where({ inviteId, source: 'invite', status: 'pending' });
+    for (const r of rows) await closeByOrg(r, actorId);
+    return { cancelled: rows.length };
+  }
+
+  /** Is the request this invite made still open? (So "send again" can ask once more once it is not.) */
+  async function inviteRequestOpen(memberRequestId) {
+    if (!memberRequestId) return false;
+    const row = await db(TABLE).where({ id: memberRequestId }).first('status', 'expiresAt');
+    return Boolean(row && row.status === 'pending' && new Date(row.expiresAt) > stamp());
+  }
+
+  /** Requests an organisation made that it sees as waiting, of one kind (org lists show them as pending). Never invite matches. */
+  async function pendingForOrganization({ organizationId, kind }) {
+    const rows = await visibleOpen(db(TABLE).where({ organizationId, kind }).whereNot({ source: 'invite' })).orderBy('createdAt', 'desc');
+    const names = await displayNames(rows.map(r => r.userId).filter(Boolean));
     return rows.map(r => orgView(r, names));
   }
 
-  /** Open staff-link requests of a company, by employee id. */
+  /** Staff-link requests of a company it sees as waiting, by employee id (the open one wins over a masked decline). */
   async function pendingForCorporate({ corporateId }) {
-    const at = stamp();
-    const rows = await db(TABLE).where({ corporateId, kind: 'employee_link', status: 'pending' }).where('expiresAt', '>', at);
-    const names = await displayNames(rows.map(r => r.userId));
-    return new Map(rows.map(r => [r.employeeId, orgView(r, names)]));
+    const rows = await visibleOpen(db(TABLE).where({ corporateId, kind: 'employee_link' })).orderBy('createdAt', 'asc');
+    const names = await displayNames(rows.map(r => r.userId).filter(Boolean));
+    const out = new Map();
+    for (const r of rows) if (r.status === 'pending' || !out.has(r.employeeId)) out.set(r.employeeId, orgView(r, names));
+    return out;
   }
 
   async function closeByOrg(row, actorId) {
@@ -375,21 +547,35 @@ export function createB2BMemberRequestService({
 
   /** An organisation withdraws a request it made (beneficiaries.manage / users.manage, by kind). */
   async function cancel({ access, requestId, actorId }) {
-    const row = await db(TABLE).where({ id: requestId }).first();
-    if (!row || row.kind === 'employee_link' || row.organizationId !== access.org.id) return fail('member_request_not_found', 404);
+    const row = await db(TABLE).where({ id: String(requestId ?? '') }).first();
+    // Invite matches are the invite's (cancel the invite instead).
+    if (!row || row.kind === 'employee_link' || row.source === 'invite' || row.organizationId !== access.org.id) return fail('member_request_not_found', 404);
     const permission = row.kind === 'org_user' ? 'users.manage' : 'beneficiaries.manage';
     if (!access.platformAdmin && !access.permissions.includes(permission)) return fail('forbidden', 403, { requiredPermission: permission });
+    // A decline the organisation still sees as waiting: withdrawn, as far as it can tell (the decline and its cooldown stay).
+    if (maskedDecline(row)) {
+      const at = stamp();
+      await hideDecline(row, actorId, at);
+      return { memberRequest: orgView({ ...row, status: 'cancelled', reason: 'cancelled_by_organization', decidedAt: at }) };
+    }
     if (row.status !== 'pending') return fail('member_request_not_pending', 409, { requestStatus: row.status });
     const closed = await closeByOrg(row, actorId);
     if (!closed) return fail('member_request_not_pending', 409);
-    return { memberRequest: orgView(closed, await displayNames([row.userId])) };
+    return { memberRequest: orgView(closed, await displayNames([row.userId].filter(Boolean))) };
+  }
+
+  async function hideDecline(row, actorId, at = stamp()) {
+    await db(TABLE).where({ id: row.id, status: 'declined' }).whereNull('reason').update({ reason: 'hidden_by_organization', updatedAt: at });
+    await audit(actorId, 'b2b.member_request.cancel', row.id, { kind: row.kind, organizationId: row.organizationId, corporateId: row.corporateId, afterDecline: true });
   }
 
   /** HR unlinked the staff record (or linked it otherwise): its open link request goes. */
   async function cancelForEmployee({ corporateId, employeeId, actorId }) {
     const rows = await db(TABLE).where({ corporateId, employeeId, kind: 'employee_link', status: 'pending' });
     for (const r of rows) await closeByOrg(r, actorId);
-    return { cancelled: rows.length };
+    const declined = await visibleOpen(db(TABLE).where({ corporateId, employeeId, kind: 'employee_link', status: 'declined' }));
+    for (const r of declined) await hideDecline(r, actorId);
+    return { cancelled: rows.length + declined.length };
   }
 
   // ── The member ────────────────────────────────────────────────────────────
@@ -415,6 +601,10 @@ export function createB2BMemberRequestService({
     if (row.status !== 'pending') return fail('member_request_not_pending', 409, { requestStatus: row.status });
     return null;
   }
+
+  /** Open invites this request answers: the one that matched, and others of the organisation linked to it by matching. */
+  const invitesOf = row => db('B2BBeneficiaryInvite').where({ organizationId: row.organizationId, status: 'invited' })
+    .where(b => { b.where({ memberRequestId: row.id }); if (row.inviteId) b.orWhere({ id: row.inviteId }); });
 
   /** Do what was asked, as the requester, with their access as it is now. */
   async function apply(row) {
@@ -442,17 +632,21 @@ export function createB2BMemberRequestService({
       if (out.error) return out;
       return { resultId: out.employee.id, result: { employee: out.employee } };
     }
-    const access = await b2bService.resolveAccess({ organizationId: row.organizationId, userId: row.requestedBy, userType: row.requestedByType });
+    // An invite match is asked by FitFlex for the organisation that invited (its status is checked by the add itself).
+    const system = row.requestedByType === 'system';
+    const access = await b2bService.resolveAccess({ organizationId: row.organizationId, userId: row.requestedBy, userType: system ? 'admin' : row.requestedByType });
     if (access.error) return fail('request_no_longer_valid', 409, { reason: access.error });
     if (row.kind === 'org_user') {
       const out = await b2bService.addOrganizationUser({ access, actorId: row.requestedBy, body: { userId: row.userId, role: d.role, permissions: d.permissions ?? [] } }, { memberRequestId: row.id });
       if (out.error) return LOST_ACCESS.has(out.error) ? fail('request_no_longer_valid', 409, { reason: out.error }) : out;
       return { resultId: out.organizationUser.id, result: { organizationUser: out.organizationUser } };
     }
-    const out = await b2bService.enrollBeneficiary({
-      access, actorId: row.requestedBy,
-      body: { userId: row.userId, status: d.beneficiaryStatus ?? 'pending', beneficiaryType: d.beneficiaryType, groupName: d.groupName, externalReference: d.externalReference },
-    }, { memberRequestId: row.id });
+    const body = { userId: row.userId, status: d.beneficiaryStatus ?? 'pending', beneficiaryType: d.beneficiaryType, groupName: d.groupName, externalReference: d.externalReference };
+    let out = await b2bService.enrollBeneficiary({ access, actorId: row.requestedBy, body }, { memberRequestId: row.id });
+    // From an invite: the reference went to someone else meanwhile; enrol without it rather than leave the person out (as invite matching did).
+    if (out.error === 'external_reference_in_use' && row.source === 'invite') {
+      out = await b2bService.enrollBeneficiary({ access, actorId: row.requestedBy, body: { ...body, externalReference: null } }, { memberRequestId: row.id });
+    }
     if (out.error) return LOST_ACCESS.has(out.error) ? fail('request_no_longer_valid', 409, { reason: out.error }) : out;
     return { resultId: out.beneficiary.id, result: { beneficiary: out.beneficiary } };
   }
@@ -490,6 +684,11 @@ export function createB2BMemberRequestService({
       return { ...out, memberRequestId: row.id };
     }
     const [done] = await db(TABLE).where({ id: row.id }).update({ resultId: out.resultId, updatedAt: stamp() }).returning('*');
+    if (row.kind === 'beneficiary') {
+      // The invites this request answers are done: the organisation now sees the person enrolled.
+      const at2 = stamp();
+      await invitesOf(row).update({ status: 'enrolled', enrolledAt: at2, beneficiaryId: out.resultId, nextEmailAt: null, nextSmsAt: null, updatedAt: at2 });
+    }
     await audit(userId, 'b2b.member_request.accept', row.id, { kind: row.kind, organizationId: row.organizationId, corporateId: row.corporateId, employeeId: row.employeeId, resultId: out.resultId });
     return { memberRequest: await memberView(done), ...out.result };
   }
@@ -503,13 +702,16 @@ export function createB2BMemberRequestService({
     const [closed] = await db(TABLE).where({ id: row.id, status: 'pending' })
       .update({ status: 'declined', decidedAt: at, decidedBy: userId, updatedAt: at }).returning('*');
     if (!closed) return fail('member_request_not_pending', 409);
+    // From an invite: no more invitation reminders to someone who said no (the invite itself stays as the organisation sees it).
+    if (row.kind === 'beneficiary') await invitesOf(row).update({ nextEmailAt: null, nextSmsAt: null, updatedAt: at });
     await audit(userId, 'b2b.member_request.decline', row.id, { kind: row.kind, organizationId: row.organizationId, corporateId: row.corporateId, employeeId: row.employeeId });
     return { memberRequest: await memberView(closed) };
   }
 
   return {
     attempt, stub, adminAdded,
-    create, pendingForOrganization, pendingForCorporate, cancel, cancelForEmployee,
+    create, createByContact, createFromInvite, cancelForInvite, inviteRequestOpen,
+    pendingForOrganization, pendingForCorporate, cancel, cancelForEmployee,
     listForMember, accept, decline, expireDue,
   };
 }

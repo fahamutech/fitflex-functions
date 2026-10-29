@@ -1,14 +1,20 @@
 // Adding many people to an organisation at once, including people who have
 // not joined FitFlex yet (Phase 7, slice 2).
 //
-//   import     a list of people by email or mobile number. Someone who already
-//              has a member account is enrolled straight away, through the
-//              same service a single "add person" uses, so the same rules
-//              apply. Someone who has not joined yet is kept as an invite.
+//   import     a list of people by email or mobile number. Everyone on it is
+//              kept as an invite, members and people who have not joined
+//              alike: nobody is enrolled by an import (consent slice (a),
+//              owner decision 22 Oct 2026, re-confirmed 29 Oct), and the
+//              reply does not say who already has an account.
 //   invite     waits for the person. When a member has VERIFIED that email or
-//              number (a LoginIdentifier with verifiedAt) they are enrolled
-//              and the invite is closed. Matching runs every few minutes, and
-//              at once when a member opens their benefits.
+//              number (a LoginIdentifier with verifiedAt) they are ASKED in the
+//              app (a B2BMemberRequest, source invite) and enrolled only if
+//              they accept; the invite then closes as enrolled. Until then the
+//              organisation sees the invite as invited. Matching runs every few
+//              minutes, at once after an import, and when a member opens their
+//              benefits. One request per invite: after a decline or expiry the
+//              member is not asked again unless the organisation presses "send
+//              again" (and the 30-day cooldown after a decline has passed).
 //   matching   uses verified contacts only (src/shared/verified-contacts.mjs).
 //              User.email / User.phone can be typed in by anyone, so a member
 //              who holds the contact only there is treated as not joined yet:
@@ -107,6 +113,9 @@ export function readImportRow(raw = {}) {
 
 export function createB2BBeneficiaryImportService({
   db, b2bService,
+  // Member requests (b2b-member-request-service): an invite that matches a
+  // member asks them. Without it nobody is matched (fail closed).
+  memberRequests = null,
   // Who has verified an email / number (src/shared/verified-contacts.mjs).
   verifiedContacts = createVerifiedContacts(db),
   // Whether FitFlex can send email codes right now (GET /auth/options
@@ -115,7 +124,8 @@ export function createB2BBeneficiaryImportService({
   emailCodes = () => false,
   // { configured, send(to, { subject, text }) }; read when needed so a later configuration is picked up.
   emailSender = () => ({ configured: false }),
-  // Tell one person in the app: (userId, { id, type, title, body, data })
+  // Tell one person in the app: (userId, { id, type, title, body, data }). No
+  // longer used here: a matched member is told by their member request.
   notify = async () => null,
   // { configured, send(to, { text }) }. Invitation SMS can be switched off with B2B_INVITE_SMS=off.
   smsSender = () => ({ configured: false }),
@@ -132,16 +142,8 @@ export function createB2BBeneficiaryImportService({
   });
   const orgName = org => org.tradingName || org.legalName;
   const sms = () => (smsEnabled() ? smsSender() : { configured: false });
-  const inviteView = ({ invitedBy, cancelledBy, ...i }) => ({ ...i, canResend: i.status === 'invited' && ((!!i.email && i.emailsSent < MAX_EMAILS_PER_INVITE) || (!!i.phone && i.smsSent < MAX_SMS_PER_INVITE)) });
-
-  /**
-   * Member accounts behind a set of emails and numbers, by verified contacts
-   * only (one query, whatever the size of the list). Someone who has the
-   * contact only on their profile is not found and is invited instead.
-   */
-  async function accountsFor(emails, phones) {
-    return verifiedContacts.findMembers({ emails, phones });
-  }
+  // memberRequestId is never shown: it would say a member is behind the contact.
+  const inviteView = ({ invitedBy, cancelledBy, memberRequestId, ...i }) => ({ ...i, canResend: i.status === 'invited' && ((!!i.email && i.emailsSent < MAX_EMAILS_PER_INVITE) || (!!i.phone && i.smsSent < MAX_SMS_PER_INVITE)) });
 
   // ── Import ────────────────────────────────────────────────────────────────
 
@@ -182,27 +184,19 @@ export function createB2BBeneficiaryImportService({
 
     if (companyStaff) return importCompanyStaff({ access, given, people, problems, dryRun, actorId });
 
-    const accounts = await accountsFor(people.map(p => p.email).filter(Boolean), people.map(p => p.phone).filter(Boolean));
+    // Nobody is looked up: who has an account is not the organisation's to learn
+    // from an import. Everyone new is invited; a member behind an invited
+    // contact is asked in the app (matching, below) and enrolled only if they accept.
     const live = await db(INVITE).where({ organizationId: org.id, status: 'invited' }).select('id', 'email', 'phone');
     const invitedEmail = new Map(live.filter(i => i.email).map(i => [i.email, i.id]));
     const invitedPhone = new Map(live.filter(i => i.phone).map(i => [i.phone, i.id]));
-    const enrolledUsers = new Set((await b2bService.allBeneficiaries(org)).map(b => b.userId).filter(Boolean));
 
+    // `enrolled` stays in the reply for compatibility and is always 0 here.
     const counts = { total: given.length, enrolled: 0, invited: 0, unchanged: 0, rejected: problems.length };
     const importId = newId('b2bim');
     const at = stamp();
+    const created = [];
     for (const p of people) {
-      const userId = (p.email && accounts.byEmail.get(p.email)) || (p.phone && accounts.byPhone.get(p.phone)) || null;
-      const where = { line: p.line, name: p.displayName, contact: p.email ?? p.phone };
-      if (userId) {
-        if (enrolledUsers.has(userId)) { counts.unchanged += 1; continue; }
-        if (dryRun) { counts.enrolled += 1; continue; }
-        // Found by a VERIFIED email / number, not a bare user id: enrolled as before (no member request).
-        const out = await b2bService.enrollBeneficiary({ access, actorId, body: { userId, status: 'active', groupName: p.groupName, externalReference: p.externalReference, beneficiaryType: p.beneficiaryType } }, { verifiedContact: true });
-        if (out.error === 'already_enrolled') counts.unchanged += 1;
-        else if (out.error) { counts.rejected += 1; problems.push({ ...where, problem: out.error }); } else { counts.enrolled += 1; enrolledUsers.add(userId); }
-        continue;
-      }
       const existing = (p.email && invitedEmail.get(p.email)) || (p.phone && invitedPhone.get(p.phone)) || null;
       if (existing) {
         counts.unchanged += 1;
@@ -212,10 +206,12 @@ export function createB2BBeneficiaryImportService({
       counts.invited += 1;
       if (dryRun) continue;
       try {
+        const id = newId('b2bbi');
         await db(INVITE).insert({
-          id: newId('b2bbi'), organizationId: org.id, email: p.email, phone: p.phone, displayName: p.displayName, externalReference: p.externalReference, groupName: p.groupName,
+          id, organizationId: org.id, email: p.email, phone: p.phone, displayName: p.displayName, externalReference: p.externalReference, groupName: p.groupName,
           beneficiaryType: p.beneficiaryType, status: 'invited', importId, invitedBy: actorId, invitedAt: at, nextEmailAt: p.email ? at : null, nextSmsAt: p.phone ? at : null, createdAt: at, updatedAt: at,
         });
+        created.push(id);
         if (p.email) invitedEmail.set(p.email, true);
         if (p.phone) invitedPhone.set(p.phone, true);
       } catch (err) {
@@ -229,6 +225,8 @@ export function createB2BBeneficiaryImportService({
     await db(IMPORT).insert({ id: importId, organizationId: org.id, createdBy: actorId, total: counts.total, enrolled: counts.enrolled, invited: counts.invited, unchanged: counts.unchanged, rejected: counts.rejected,
       problems: JSON.stringify(summary.problems.slice(0, 500)), createdAt: at, updatedAt: at });
     await audit({ actor: actorId, action: 'b2b.beneficiaries.import', target: org.id, after: { importId, ...counts } });
+    // Ask the members behind these contacts now rather than at the next run (not reflected in the reply).
+    if (created.length) await matchInvites({ inviteIds: created }).catch(err => console.warn(`[b2b-invites] matching after import ${importId} failed: ${err.message}`));
     return { importId, ...summary };
   }
 
@@ -238,11 +236,13 @@ export function createB2BBeneficiaryImportService({
    * (corporate-service underneath: seat limit, billing and audit as in
    * /corporate/staff/bulk). Every row needs a name and is added pending and
    * unlinked; a member whose verified email or number it lists is ASKED to
-   * accept the link (member-request consent) and is linked only if they do.
+   * accept the link (member request by contact, consent slice (a)) and is
+   * linked only if they do; the reply is the same whether or not there is one.
    * Every row added gets its activation PIN once in `credentials` (never
-   * stored with the import). Nobody is invited. Someone
-   * already on the staff list (same account, email or number) is left alone,
-   * so the same list can be uploaded again. All-or-nothing on seats: a list
+   * stored with the import). Nobody is invited. Someone already on the staff
+   * list by the same email or number is left alone, so the same list can be
+   * uploaded again. Accounts are not looked up (the reply must not say who
+   * has one). All-or-nothing on seats: a list
    * needing more seats than are free adds nobody.
    */
   async function importCompanyStaff({ access, given, people, problems, dryRun, actorId }) {
@@ -250,19 +250,16 @@ export function createB2BBeneficiaryImportService({
     const corporateId = org.legacyCorporateId;
     const account = await db('CorporateAccount').where({ id: corporateId }).first();
     if (!account || account.status !== 'active') return fail('organization_not_active', 409, { organizationStatus: org.status });
-    const staff = await db('CorporateEmployee').where({ corporateId }).whereNot({ status: 'exited' }).select('userId', 'email', 'phone');
-    const onListUser = new Set(staff.map(e => e.userId).filter(Boolean));
+    const staff = await db('CorporateEmployee').where({ corporateId }).whereNot({ status: 'exited' }).select('email', 'phone');
     const onListEmail = new Set(staff.map(e => (e.email ? normalizeEmail(e.email) : null)).filter(Boolean));
     const onListPhone = new Set(staff.map(e => (e.phone ? normalizePhone(e.phone) : null)).filter(Boolean));
-    const accounts = await accountsFor(people.map(p => p.email).filter(Boolean), people.map(p => p.phone).filter(Boolean));
 
     const counts = { total: given.length, enrolled: 0, invited: 0, unchanged: 0, rejected: problems.length };
     const toAdd = [];
     for (const p of people) {
-      const userId = (p.email && accounts.byEmail.get(p.email)) || (p.phone && accounts.byPhone.get(p.phone)) || null;
-      if ((userId && onListUser.has(userId)) || (p.email && onListEmail.has(p.email)) || (p.phone && onListPhone.has(p.phone))) { counts.unchanged += 1; continue; }
+      if ((p.email && onListEmail.has(p.email)) || (p.phone && onListPhone.has(p.phone))) { counts.unchanged += 1; continue; }
       if (!p.displayName) { counts.rejected += 1; problems.push({ line: p.line, name: null, contact: p.email ?? p.phone, problem: 'name_required' }); continue; }
-      toAdd.push({ ...p, userId });
+      toAdd.push(p);
     }
     const seatsAvailable = account.seatLimit > 0 ? Math.max(0, account.seatLimit - account.seatsUsed) : null;
     if (seatsAvailable !== null && toAdd.length > seatsAvailable) {
@@ -285,7 +282,7 @@ export function createB2BBeneficiaryImportService({
       const out = await b2bService.enrollBeneficiary({
         access, actorId,
         body: { email: p.email, phone: p.phone, displayName: p.displayName, groupName: p.groupName, status: 'pending' },
-      });
+      }, { fromImport: true });
       const where = { line: p.line, name: p.displayName, contact: p.email ?? p.phone };
       if (out.error === 'already_enrolled') { counts.unchanged += 1; continue; }
       if (out.error) { counts.rejected += 1; problems.push({ ...where, problem: out.error }); continue; }
@@ -332,6 +329,8 @@ export function createB2BBeneficiaryImportService({
     if (invite.status !== 'invited') return fail('invite_already_used', 409, { inviteStatus: invite.status });
     const at = stamp();
     const [row] = await db(INVITE).where({ id: invite.id, status: 'invited' }).update({ status: 'cancelled', cancelledAt: at, cancelledBy: actorId, nextEmailAt: null, nextSmsAt: null, updatedAt: at }).returning('*');
+    // A member asked because of this invite is no longer asked.
+    if (row && memberRequests) await memberRequests.cancelForInvite({ inviteId: invite.id, actorId });
     await audit({ actor: actorId, action: 'b2b.beneficiary_invite.cancel', target: invite.id, after: { organizationId: access.org.id } });
     return { invite: inviteView(row ?? await ownInvite(access, inviteId)) };
   }
@@ -347,6 +346,11 @@ export function createB2BBeneficiaryImportService({
     if (!invite) return fail('invite_not_found', 404);
     if (invite.status !== 'invited') return fail('invite_already_used', 409, { inviteStatus: invite.status });
     const at = stamp();
+    // "Send again" may also ask a matched member once more, once the last request is no longer open
+    // (declined: only after the cooldown; matching checks). Said nowhere in the reply.
+    if (invite.memberRequestId && memberRequests && !(await memberRequests.inviteRequestOpen(invite.memberRequestId))) {
+      await db(INVITE).where({ id: invite.id, memberRequestId: invite.memberRequestId }).update({ memberRequestId: null, updatedAt: at });
+    }
     const recent = last => last && +at - +new Date(last) < 3_600_000;
     const byEmail = !!invite.email && invite.emailsSent < MAX_EMAILS_PER_INVITE && !recent(invite.lastEmailAt);
     const bySms = !!invite.phone && invite.smsSent < MAX_SMS_PER_INVITE && !recent(invite.lastSmsAt) && sms().configured === true;
@@ -365,38 +369,49 @@ export function createB2BBeneficiaryImportService({
 
   // ── Matching: the person has joined ───────────────────────────────────────
 
-  async function enrolFromInvite(invite, userId) {
-    const access = await b2bService.resolveAccess({ organizationId: invite.organizationId, userType: 'admin', userId: SYSTEM });
-    if (access.error || access.org.status !== 'active') return { skipped: 'organization_not_active' };
-    const out = await b2bService.enrollBeneficiary({ access, actorId: SYSTEM,
-      body: { userId, status: 'active', groupName: invite.groupName, externalReference: invite.externalReference, beneficiaryType: invite.beneficiaryType } }, { verifiedContact: true });
-    let beneficiaryId = out.beneficiary?.id ?? null;
-    if (out.error === 'already_enrolled') beneficiaryId = out.beneficiaryId ?? null;
-    else if (out.error === 'external_reference_in_use') {
-      // The reference went to someone else in the meantime: enrol without it rather than leave the person out.
-      const again = await b2bService.enrollBeneficiary({ access, actorId: SYSTEM, body: { userId, status: 'active', groupName: invite.groupName, beneficiaryType: invite.beneficiaryType } }, { verifiedContact: true });
-      if (again.error && again.error !== 'already_enrolled') return { failed: again.error };
-      beneficiaryId = again.beneficiary?.id ?? again.beneficiaryId ?? null;
-    } else if (out.error) return { failed: out.error };
+  /**
+   * A member has verified an invited email or number: ask them (consent slice
+   * (a)) rather than enrol them. Someone already on the organisation's list
+   * (they accepted before) just closes the invite, as before.
+   */
+  async function askFromInvite(invite, userId) {
+    const org = await db('B2BOrganization').where({ id: invite.organizationId }).first('id', 'status', 'legacyCorporateId');
+    if (!org || org.status !== 'active' || org.legacyCorporateId) return { skipped: 'organization_not_active' };
     const at = stamp();
-    const closed = await db(INVITE).where({ id: invite.id, status: 'invited' }).update({ status: 'enrolled', enrolledAt: at, beneficiaryId, nextEmailAt: null, nextSmsAt: null, updatedAt: at });
-    if (closed && out.beneficiary) {
-      await notify(userId, {
-        id: `b2b_enrolled_${invite.id}`.slice(0, 120), type: 'b2b_beneficiary_enrolled', title: `${orgName(access.org)} added you`,
-        body: `${orgName(access.org)} has added you to its wellness programme on FitFlex. Open Benefits to see what you have.`, data: { organizationId: invite.organizationId },
-      }).catch(() => null);
+    const already = await db('B2BBeneficiary').where({ organizationId: org.id, userId }).first('id');
+    if (already) {
+      const closed = await db(INVITE).where({ id: invite.id, status: 'invited' })
+        .update({ status: 'enrolled', enrolledAt: at, beneficiaryId: already.id, nextEmailAt: null, nextSmsAt: null, updatedAt: at });
+      return closed ? { closed: true } : { skipped: 'invite_closed' };
     }
-    return { enrolled: !!closed };
+    const out = await memberRequests.createFromInvite({ invite, userId });
+    if (out.skipped) {
+      // Already asked by this organisation, or declined it lately: this invite counts as asked
+      // (so it is not tried every run); "send again" clears that.
+      if (out.memberRequestId) await db(INVITE).where({ id: invite.id, status: 'invited' }).whereNull('memberRequestId').update({ memberRequestId: out.memberRequestId, updatedAt: at });
+      return out;
+    }
+    // Remember the request on the invite (one per invite); if the invite was cancelled or matched meanwhile, withdraw it.
+    const linked = await db(INVITE).where({ id: invite.id, status: 'invited' }).whereNull('memberRequestId')
+      .update({ memberRequestId: out.memberRequest.id, updatedAt: at });
+    if (!linked) {
+      await memberRequests.cancelForInvite({ inviteId: invite.id, actorId: SYSTEM });
+      return { skipped: 'invite_closed' };
+    }
+    return { asked: true };
   }
 
   /**
-   * Enrol everyone who has joined, and verified the invited email or number,
-   * since they were invited. With `userId`, only that person (used when a
-   * member opens their benefits, so they do not wait for the next run).
-   * Verified contacts only: User.email / User.phone match nothing.
+   * Ask everyone who has joined, and verified the invited email or number,
+   * since they were invited (one request per invite). With `userId`, only that
+   * person (used when a member opens their benefits, so they do not wait for
+   * the next run); with `inviteIds`, only those invites (right after an
+   * import). Verified contacts only: User.email / User.phone match nothing.
+   * Returns { matched, asked, enrolled (already on the list: invite closed), failed, skipped }.
    */
-  async function matchInvites({ userId = null, limit = 500 } = {}) {
-    const stats = { matched: 0, enrolled: 0, failed: 0, skipped: 0 };
+  async function matchInvites({ userId = null, inviteIds = null, limit = 500 } = {}) {
+    const stats = { matched: 0, asked: 0, enrolled: 0, failed: 0, skipped: 0 };
+    if (!memberRequests) return stats;
     let pairs;
     if (userId) {
       const u = await whereLiveAccount(db('User').where({ id: userId, userType: 'member' })).first('id');
@@ -405,17 +420,18 @@ export function createB2BBeneficiaryImportService({
       const emails = proven.filter(c => c.type === 'email').map(c => c.value);
       const phones = proven.filter(c => c.type === 'phone').map(c => c.value);
       if (!emails.length && !phones.length) return stats;
-      const rows = await db(INVITE).where({ status: 'invited' })
+      const rows = await db(INVITE).where({ status: 'invited' }).whereNull('memberRequestId')
         .where(b => { if (emails.length) b.orWhereIn('email', emails); if (phones.length) b.orWhereIn('phone', phones); });
       pairs = rows.map(invite => ({ invite, userId: u.id }));
     } else {
       // Invites joined to verified contacts of live members (never User.email / User.phone).
-      const rows = await db(`${INVITE} as i`).join(verifiedContacts.verifiedMemberRows(), function on() {
+      let q = db(`${INVITE} as i`).join(verifiedContacts.verifiedMemberRows(), function on() {
         this.on(function email() { this.on('v.type', db.raw('?', ['email'])).andOn('v.normalizedValue', 'i.email'); })
           .orOn(function phone() { this.on('v.type', db.raw('?', ['phone'])).andOn('v.normalizedValue', 'i.phone'); });
       })
-        .where({ 'i.status': 'invited' })
-        .orderBy('i.invitedAt').orderBy('v.userCreatedAt').limit(limit).select('i.*', 'v.userId as matchedUserId');
+        .where({ 'i.status': 'invited' }).whereNull('i.memberRequestId');
+      if (inviteIds) q = q.whereIn('i.id', inviteIds);
+      const rows = await q.orderBy('i.invitedAt').orderBy('v.userCreatedAt').limit(limit).select('i.*', 'v.userId as matchedUserId');
       pairs = rows.map(({ matchedUserId, ...invite }) => ({ invite, userId: matchedUserId }));
     }
     const done = new Set();
@@ -424,11 +440,11 @@ export function createB2BBeneficiaryImportService({
       done.add(invite.id);
       stats.matched += 1;
       try {
-        const out = await enrolFromInvite(invite, id);
-        if (out.enrolled) stats.enrolled += 1; else if (out.failed) stats.failed += 1; else stats.skipped += 1;
+        const out = await askFromInvite(invite, id);
+        if (out.asked) stats.asked += 1; else if (out.closed) stats.enrolled += 1; else stats.skipped += 1;
       } catch (err) {
         stats.failed += 1;
-        console.warn(`[b2b-invites] could not enrol invite ${invite.id}: ${err.message}`);
+        console.warn(`[b2b-invites] could not ask about invite ${invite.id}: ${err.message}`);
       }
     }
     return stats;
@@ -443,18 +459,18 @@ export function createB2BBeneficiaryImportService({
     const lines = [
       hello, '',
       count === 0
-        ? `${name} has added you to its wellness programme on FitFlex.`
-        : `A reminder: ${name} has added you to its wellness programme on FitFlex, and your benefits are waiting.`,
+        ? `${name} wants to add you to its wellness programme on FitFlex.`
+        : `A reminder: ${name} wants to add you to its wellness programme on FitFlex.`,
       '',
-      `To use it, get the FitFlex app and sign up as a member with this email address (${invite.email}). Your benefits appear under Benefits as soon as you have joined.`,
+      `To take part, get the FitFlex app and sign up as a member with this email address (${invite.email}). The app will then ask you whether you accept; nothing is shared with ${name} unless you do.`,
       confirmLine(invite),
       link ? `Get the app: ${link}` : null,
       '',
-      `What ${name} can see: once you join, ${name} can see your FitFlex activity, including activity from before you joined (gym visits, trainer sessions, the workouts and steps you record, and your progress in its challenges). It cannot see your weight, height, or anything another sponsor gives you.`,
+      `What ${name} can see: if you accept, ${name} can see your FitFlex activity, including activity from before you joined (gym visits, trainer sessions, the workouts and steps you record, and your progress in its challenges). It cannot see your weight, height, or anything another sponsor gives you.`,
       '',
-      `If you do not want to take part, ignore this email or ask ${name} to remove you from its list.`,
+      `If you do not want to take part, ignore this email, decline in the app, or ask ${name} to remove you from its list.`,
     ].filter(l => l !== null);
-    return { subject: count === 0 ? `${name} has added you to FitFlex` : `Reminder: your FitFlex benefits from ${name}`, text: lines.join('\n') };
+    return { subject: count === 0 ? `${name} invites you to FitFlex` : `Reminder: ${name} invites you to FitFlex`, text: lines.join('\n') };
   }
 
   /**
@@ -464,16 +480,16 @@ export function createB2BBeneficiaryImportService({
    * on, so with them off the email doesn't promise that.
    */
   function confirmLine(invite) {
-    if (emailCodes() === true) return 'Already on FitFlex? Confirm this email address or your mobile number under Mobile number and email in the FitFlex app, and your benefits will appear.';
-    if (invite.phone) return 'Already on FitFlex? Confirm your mobile number under Mobile number and email in the FitFlex app, and your benefits will appear.';
-    return 'Already on FitFlex? Your benefits appear once this email address is confirmed on your FitFlex account.';
+    if (emailCodes() === true) return 'Already on FitFlex? Confirm this email address or your mobile number under Mobile number and email in the FitFlex app, and the app will ask you.';
+    if (invite.phone) return 'Already on FitFlex? Confirm your mobile number under Mobile number and email in the FitFlex app, and the app will ask you.';
+    return 'Already on FitFlex? The app asks you once this email address is confirmed on your FitFlex account.';
   }
 
   /** One SMS segment in plain characters: who added them, what to do, and the link when there is one. */
   function smsFor(invite, org, count) {
     const link = appLink();
     const name = orgName(org).replace(/[^\x20-\x7E]/g, '').trim().slice(0, 30) || 'Your organisation';
-    const lead = count === 0 ? `${name} added you to its wellness programme on FitFlex.` : `Reminder: ${name} added you to FitFlex.`;
+    const lead = count === 0 ? `${name} invites you to its wellness programme on FitFlex.` : `Reminder: ${name} invites you to FitFlex.`;
     // Existing users must confirm the number before the invite can match them.
     const plain = `${lead} Join as a member with this number, or confirm it under Mobile number and email.`;
     const withLink = link ? `${lead} Join with this number (or confirm it under Mobile number and email): ${link}` : null;

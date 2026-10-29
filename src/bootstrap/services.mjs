@@ -442,6 +442,10 @@ const memberRequestsLater = {
   stub: args => b2bMemberRequestService.stub(args),
   adminAdded: args => b2bMemberRequestService.adminAdded(args),
   create: args => b2bMemberRequestService.create(args),
+  createByContact: args => b2bMemberRequestService.createByContact(args),
+  createFromInvite: args => b2bMemberRequestService.createFromInvite(args),
+  cancelForInvite: args => b2bMemberRequestService.cancelForInvite(args),
+  inviteRequestOpen: id => b2bMemberRequestService.inviteRequestOpen(id),
   pendingForOrganization: args => b2bMemberRequestService.pendingForOrganization(args),
   pendingForCorporate: args => b2bMemberRequestService.pendingForCorporate(args),
   cancelForEmployee: args => b2bMemberRequestService.cancelForEmployee(args),
@@ -533,6 +537,8 @@ export const opsService = createOpsService({ db });
 // Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
 export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
   db, b2bService, emailSender: () => emailSender(), verifiedContacts,
+  // Consent slice (a): an invite that matches a member asks them (B2BMemberRequest) instead of enrolling them.
+  memberRequests: memberRequestsLater,
   // Whether FitFlex can send email codes, i.e. whether someone listed by email
   // only can verify that address in the app (same source as emailCodes in GET /auth/options).
   emailCodes: () => emailSender().configured === true,

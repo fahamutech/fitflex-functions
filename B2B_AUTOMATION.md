@@ -253,11 +253,16 @@ the portal should ask for a mobile number as well.
 An invite waits for a **member** whose person has **verified** its email or
 number (a `LoginIdentifier` row with `verifiedAt`; see
 `src/shared/verified-contacts.mjs`). Matching
-runs every 10 minutes, and at once when a member opens their benefits. The
-person is enrolled as active with the group, reference and type the
-organisation listed, the invite is closed, and they get one in-app message.
-Enrolment goes through `b2bService.enrollBeneficiary`, so "already on the
-list" closes the invite without a second row. A cancelled invite enrols nobody.
+runs every 10 minutes, straight after an import, and at once when a member
+opens their benefits. Since consent slice (a) (29 Oct 2026) the person is
+**asked** in the app (a `B2BMemberRequest`, source `invite`, one per invite)
+and enrolled only if they accept, as active with the group, reference and type
+the organisation listed; the invite then closes as enrolled. Until then the
+organisation sees the invite as invited, whatever the member does. Imports
+no longer look accounts up or enrol anyone. "Already on the list" closes the
+invite without a second row. A cancelled invite asks nobody (and withdraws
+its request); a decline stops its reminders; "send again" lets matching ask
+once more after the 30-day cooldown. See B2B_FOUNDATION.md §5.
 
 Matching never uses `User.email` / `User.phone`: anyone can type a
 colleague's email or number into their own profile. Since 20 Oct 2026
@@ -277,16 +282,16 @@ them (read only, counts only).
 | Email | within 10 minutes of the import | 3 and 10 days after | 6 |
 | SMS | within 10 minutes of the import | 3 days after | 3 |
 
-Then no more. None after the person joins or the invite is cancelled. Each
+Then no more. None after the person accepts, declines in the app, or the invite is cancelled. Each
 message is claimed before it is sent, so overlapping runs send one. Three
 failures in a row stop that channel for that invite. "Send again" starts it
 over, not within an hour of the last message of that kind.
 
-**Email** says who added the person, to sign up as a member with that
-address, a link to the app when `FITFLEX_APP_LINK` is set (none is invented),
+**Email** says who invites the person, to sign up as a member with that
+address (the app then asks them to accept), a link to the app when `FITFLEX_APP_LINK` is set (none is invented),
 and what the organisation will be able to see of their activity. English only.
 
-**SMS** is one segment (160 plain characters): who added them, to join as a
+**SMS** is one segment (160 plain characters): who invites them, to join as a
 member with that number or confirm it under Mobile number and email, with the
 app link when it fits (the confirm line is never dropped for the link). It has no room for
 the visibility statement; the person gets that in the app once they join.
@@ -295,7 +300,7 @@ SMS goes through the shared SMS service (`SMS.md`): it is sent only when
 **each SMS is paid for**. `B2B_INVITE_SMS=off` turns invitation SMS off
 without touching reminders, campaigns or sign-in codes.
 
-With no email sender configured, invites still work (people are enrolled when
+With no email sender configured, invites still work (people are asked when
 they join); the emails wait, the People page says so, and the job raises one
 low-severity exception until a sender is set up. With SMS switched off or not
 set up, no SMS is sent and nothing is raised: that is a choice, not a fault.
@@ -305,7 +310,7 @@ set up, no SMS is sent and nothing is raised: that is a choice, not a fault.
 Import, cancel and send again need `beneficiaries.manage` (owner, admin,
 manager, hr). Seeing invites and past imports needs `beneficiaries.read`.
 An invite belongs to one organisation; another organisation cannot see or
-change it. The same person invited by two organisations is enrolled in both.
+change it. The same person invited by two organisations is asked by each.
 
 ### Runbook
 
