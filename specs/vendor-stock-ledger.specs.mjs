@@ -117,7 +117,7 @@ test('GET /vendor/tools/options: everything off by default; a tool needs the umb
   const off = await call(vendorToolsOptionsRoute, as(v));
   assert.equal(off.status, 200);
   assert.deepEqual(off.body, {
-    canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false,
+    canSeeCost: true, canSeeOrderMoney: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false,
     vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false },
   });
   process.env.VENDOR_STOCK_LEDGER = '1';

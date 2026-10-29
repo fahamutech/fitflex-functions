@@ -132,6 +132,9 @@ import { createCompanyDirectory } from '../services/company-directory.mjs';
 import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createVendorSettlementService } from '../services/vendor-settlement-service.mjs';
+import { createVendorReportService } from '../services/vendor-report-service.mjs';
+import { createPgVendorReportStore } from '../infra/vendor-report-store-pg.mjs';
+import { vendorStockLedgerOn, vendorWalkInSalesOn, vendorCustomersOn } from '../shared/feature-flags.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createModerationGate } from '../services/moderation-gate.mjs';
 import { createEntityResolver } from '../services/promotion-entities.mjs';
@@ -339,6 +342,11 @@ export const shopService = createShopService({
   onVendorCustomerOrder: order => vendorCustomerService.marketplaceOrderPaid(order),
   // Vendor tools · S5: each vendor's invoice for the paid order is numbered (defined below; runs later).
   onVendorOrderInvoices: order => vendorDocumentService.orderPaid(order),
+  // Payout display (security review #275 M1): an order is settled FOR THIS VENDOR only when the vendor's own live
+  // statement line is on a paid statement; ShopOrder.settlementStatus is order-wide.
+  vendorPaidOrderIds: async (vendorId) => new Set((await db('VendorSettlementLine as l')
+    .join('VendorSettlement as s', 's.id', 'l.vendorSettlementId')
+    .where({ 'l.vendorId': vendorId, 'l.voided': false, 's.status': 'paid' }).select('l.orderId')).map(r => r.orderId)),
   // Vendor tools · S5: product VAT codes (VENDOR_TOOLS + VENDOR_VAT).
   productVat: {
     on: vendorVatOn,
@@ -381,6 +389,17 @@ export const vendorDocumentService = createVendorDocumentService({
   renderHtml: renderDocumentHtml,
   renderManyHtml: renderDocumentsHtml,
   renderPdf: renderDocumentPdf,
+});
+// Vendor tools · S6: reports and their CSV / PDF exports — read only (dormant behind VENDOR_TOOLS +
+// VENDOR_REPORTS; the routes check the flag). Never writes orders, sales, statements or money.
+export const vendorReportService = createVendorReportService({
+  store: createPgVendorReportStore({ db }), users, auditLog,
+  // "Owed to you" / "Overdue" / aging come from S4 so the two screens always agree.
+  owedTotals: async (vendorId) => {
+    const out = await vendorCustomerService.aging({ vendorId, query: { limit: 1 } });
+    return out.error ? null : out.totals;
+  },
+  flags: { stockLedger: vendorStockLedgerOn, walkInSales: vendorWalkInSalesOn, customers: vendorCustomersOn },
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const productStatsRecomputeService = createProductStatsRecomputeService({ db });
