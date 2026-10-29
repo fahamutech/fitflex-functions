@@ -24,6 +24,7 @@ import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 import { holdsVerified, isUnclaimed } from '../shared/unclaimed-row.mjs';
 import { carryShopPreference } from '../infra/shop-preference-store-pg.mjs';
 import { carryPersonDetails } from '../infra/person-details-store-pg.mjs';
+import { copyablePhotoOrNull } from '../shared/media-src.mjs';
 
 const shortId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const LIVE = u => u.accountStatus !== 'closed';
@@ -335,7 +336,8 @@ export function createIdentityLinkService({ db }) {
         email: source.email ?? null,
         phone: phoneTaken ? null : source.phone ?? null,
         displayName: source.displayName ?? null,
-        photoUrl: source.photoUrl ?? null,
+        // Copied only when it is an allowed sign-in photo or our media shape (security fix 2026-10-28).
+        photoUrl: copyablePhotoOrNull(source.photoUrl),
         accountStatus: 'active', approvalStatus, onboardingCompleted: false,
         createdAt: now, updatedAt: now,
       });

@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { vatForLines } from '../shared/vendor-vat.mjs';
 import { eatDate } from '../shared/vendor-order-view.mjs';
 import { vendorDocumentsTinWithoutVatOn } from '../shared/feature-flags.mjs';
+import { documentLogoUrl } from '../shared/vendor-documents.mjs';
 
 const plain = row => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v === 'bigint' ? Number(v) : v))) : null);
 const iso = v => (v == null ? null : new Date(v).toISOString());
@@ -86,7 +87,8 @@ export async function sellerSnapshotOf(q, vendorId, { vat = null } = {}) {
   const text = v => (typeof v === 'string' && v.trim() ? v.trim() : null);
   return {
     businessName: text(profile.businessName) || text(vendor?.displayName) || null,
-    logoUrl: typeof profile.logo === 'string' && /^https:\/\//i.test(profile.logo) ? profile.logo : null,
+    // Only a logo on our own storage (documentLogoUrl, security fix 2026-10-28); data-URI logos stay off documents.
+    logoUrl: documentLogoUrl(profile.logo),
     address: profile.address ?? null,
     contactNumber: text(profile.contactNumber),
     tin: tin || null,

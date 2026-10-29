@@ -188,8 +188,8 @@ test('the trainer\'s own edit is checked field by field, and keeps a photo galle
     assert.deepEqual([r.statusCode, r.body.error], [400, error], JSON.stringify(body));
   }
 
-  const photos = ['https://example.com/a.webp', 'https://example.com/b.webp', 'https://example.com/c.webp'];
-  const saved = await put({ images: photos, imageThumbnails: photos.map(p => `${p}?thumb`), specialties: [], bio: null });
+  const photos = ['/storage/bafytest/a.webp', '/storage/bafytest/b.webp', '/storage/bafytest/c.webp'];
+  const saved = await put({ images: photos, imageThumbnails: photos.map(p => p.replace('.webp', '-thumb.webp')), specialties: [], bio: null });
   assert.equal(saved.statusCode, 200, JSON.stringify(saved.body));
   assert.deepEqual(saved.body.images, photos);
   assert.equal(saved.body.imageThumbnails.length, 3);
@@ -199,8 +199,8 @@ test('the trainer\'s own edit is checked field by field, and keeps a photo galle
   const pub = await call(getTrainer, { params: { id: created.body.id } });
   assert.deepEqual(pub.body.images, photos, 'members get the gallery');
 
-  const onlyPhoto = await put({ photoUrl: 'https://example.com/new.webp' });
-  assert.equal(onlyPhoto.body.photoUrl, 'https://example.com/new.webp');
+  const onlyPhoto = await put({ photoUrl: '/storage/bafytest/new.webp' });
+  assert.equal(onlyPhoto.body.photoUrl, '/storage/bafytest/new.webp');
   assert.deepEqual(onlyPhoto.body.images, photos, 'changing the picture alone leaves the gallery');
 });
 
