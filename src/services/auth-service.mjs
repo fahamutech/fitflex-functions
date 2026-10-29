@@ -11,28 +11,36 @@ import { signInPhotoOrNull } from '../shared/media-src.mjs';
 // Built-in fallback super-admin, used only when FITFLEX_ADMIN_EMAILS is unset (audit S4).
 const FALLBACK_ADMIN_EMAILS = 'mama27j@gmail.com';
 let fallbackWarned = false;
+let strictOutsideProdWarned = false;
 
 /**
- * The configured super-admin emails. Unset/blank FITFLEX_ADMIN_EMAILS falls back to the
- * built-in address, with a one-time warning; with ADMIN_EMAILS_STRICT on in production it
- * trusts nobody instead. `env`/`warn` are injectable for specs.
+ * The configured super-admin emails.
+ *  - FITFLEX_ADMIN_EMAILS undefined: the built-in fallback address, with a one-time warning in
+ *    production; with ADMIN_EMAILS_STRICT on in production, nobody is trusted instead.
+ *  - FITFLEX_ADMIN_EMAILS set but blank: nobody is trusted (an operator who cleared it meant it).
+ * ADMIN_EMAILS_STRICT on outside production is ignored, with a one-time warning.
+ * `env`/`warn` are injectable for specs.
  */
 export function resolveAdminEmails(env = process.env, warn = console.warn) {
-  const configured = String(env.FITFLEX_ADMIN_EMAILS ?? '').trim();
-  let raw = configured;
-  if (!configured) {
-    if (adminEmailsStrictOn(env) && env.NODE_ENV === 'production') return new Set();
-    raw = FALLBACK_ADMIN_EMAILS;
-    if (!fallbackWarned && env.NODE_ENV === 'production') {
+  const isProd = env.NODE_ENV === 'production';
+  const strict = adminEmailsStrictOn(env);
+  if (strict && !isProd && !strictOutsideProdWarned) {
+    strictOutsideProdWarned = true;
+    warn('[auth] ADMIN_EMAILS_STRICT is on but NODE_ENV is not production: the flag has no effect here.');
+  }
+  if (env.FITFLEX_ADMIN_EMAILS === undefined) {
+    if (strict && isProd) return new Set();
+    if (!fallbackWarned && isProd) {
       fallbackWarned = true;
       warn('[auth] FITFLEX_ADMIN_EMAILS is not set: the built-in fallback super-admin address is in use. Set it (then ADMIN_EMAILS_STRICT=on) to remove the fallback.');
     }
+    return new Set(FALLBACK_ADMIN_EMAILS.split(','));
   }
-  return new Set(raw.split(',').map(email => email.trim().toLowerCase()).filter(Boolean));
+  return new Set(String(env.FITFLEX_ADMIN_EMAILS).split(',').map(email => email.trim().toLowerCase()).filter(Boolean));
 }
 
 /** Spec helper: allow the one-time warning to fire again. */
-export function _resetAdminEmailWarning() { fallbackWarned = false; }
+export function _resetAdminEmailWarning() { fallbackWarned = false; strictOutsideProdWarned = false; }
 
 export function isConfiguredAdminEmail(email) {
   return Boolean(email && resolveAdminEmails().has(String(email).toLowerCase()));

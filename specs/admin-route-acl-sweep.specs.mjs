@@ -22,6 +22,9 @@ const ALLOWLIST = {
   'GET /admin/settings/specialties': 'functions/admin-settings.mjs adminGetSpecialties',
 };
 
+const RECORDED_ADMIN_ROUTES = 365; // recorded 2026-10-29
+const TOLERANCE = 5;
+
 const staffId = `usr_sweep_${randomUUID().slice(0, 8)}`;
 after(async () => { await db('User').where({ id: staffId }).del(); });
 
@@ -65,7 +68,11 @@ test('every /admin route requires an ACL scope, except the allowlist', async () 
   });
   const token = sign({ sub: staffId, userType: 'admin', portalUser: true, aclPermissions: [] });
   const routes = await adminRoutes();
-  assert.ok(routes.length > 100, `expected many /admin routes, found ${routes.length}; the sweep is probably broken`);
+  // Floor: the recorded route count (RECORDED_ADMIN_ROUTES) less a small tolerance. A drop means
+  // routes were deleted or the sweep stopped finding them. To update: when you add/remove /admin
+  // routes on purpose, set RECORDED_ADMIN_ROUTES to the count printed in the failure message.
+  assert.ok(routes.length >= RECORDED_ADMIN_ROUTES - TOLERANCE,
+    `found ${routes.length} /admin routes, recorded ${RECORDED_ADMIN_ROUTES} (tolerance ${TOLERANCE}); update RECORDED_ADMIN_ROUTES if this is intentional`);
 
   const open = [];
   const wrongRefusal = [];

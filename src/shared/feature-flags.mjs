@@ -486,7 +486,10 @@ export function selcomStrictAmountOn() {
  * with FITFLEX_ADMIN_EMAILS unset or blank: no email is trusted as a configured
  * super-admin (the built-in fallback address is not used). Off: the fallback
  * stays in use and a one-time warning is logged. Set FITFLEX_ADMIN_EMAILS before
- * switching this on, or nobody signs in as an env super-admin.
+ * switching this on, or nobody signs in as an env super-admin. Note: with strict on and the
+ * variable unset, isConfiguredAdminEmail() is false for everyone, so the `env_admin_immutable`
+ * protection (env super-admins cannot be edited or deleted in the portal) also stops applying.
+ * A variable that is set but blank trusts nobody whether or not this flag is on.
  */
 export function adminEmailsStrictOn(env = process.env) {
   return TRUE_VALUES.has(String(env.ADMIN_EMAILS_STRICT ?? '').trim().toLowerCase());

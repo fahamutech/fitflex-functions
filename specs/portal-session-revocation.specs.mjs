@@ -5,9 +5,9 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { adminUpdatePortalUser, adminDeletePortalUser } from '../functions/admin-portal-users.mjs';
-import { users } from '../src/bootstrap/services.mjs';
+import { users, auditLog, portalUserService } from '../src/bootstrap/services.mjs';
 import { db } from '../src/infra/knex-store.mjs';
-import { sign, requireAuth } from '../src/auth/jwt.mjs';
+import { sign, requireAuth, registerAccountStatusLookup, invalidateAccountStatus } from '../src/auth/jwt.mjs';
 
 const made = [];
 after(async () => {
@@ -105,4 +105,48 @@ test('an id that never had a row keeps the old pass-through (only deleted portal
 
 test('missing non-admin accounts are unchanged (no behaviour change for other users)', async () => {
   assert.equal((await through(sign({ sub: 'usr_nobody_s1', userType: 'member' }))).status, 403); // role gate, as before
+});
+
+test('if the deletion marker cannot be written, nothing is deleted and the token stays tied to a live account', async () => {
+  const id = await staff();
+  const realInsert = auditLog.insertAsync;
+  auditLog.insertAsync = async () => { throw new Error('audit down'); };
+  try {
+    await assert.rejects(() => portalUserService.remove({ id, requesterId: 'x', actorId: 'x' }), /audit down/);
+  } finally { auditLog.insertAsync = realInsert; }
+  assert.ok(await users.findByIdAsync(id), 'user row must still exist');
+  assert.equal((await through(tokenFor(id))).passed, true);
+});
+
+test('the marker is written before the row goes: deleted user is cut off even if the lookup ran just before', async () => {
+  const id = await staff();
+  const t = tokenFor(id);
+  assert.equal((await through(t)).passed, true); // cached as a live account
+  const out = res();
+  await adminDeletePortalUser.onRequest({ params: { id }, user: SUPER }, out);
+  assert.equal(out.statusCode, 200);
+  assert.equal((await through(t)).status, 401, 'cache was dropped on delete');
+  assert.ok(await db('AuditLog').where({ action: 'portal_user_deleted', target: id }).first());
+});
+
+test('an in-flight lookup that started before forgetSession cannot re-populate the cache', async () => {
+  // A private lookup so the timing is exact; the real one is restored afterwards.
+  let release; const gate = new Promise(r => { release = r; });
+  let calls = 0;
+  const answers = ['active'];
+  registerAccountStatusLookup(async () => { calls += 1; const a = answers[0]; if (calls === 1) await gate; return a; });
+  try {
+    const req = { headers: { authorization: `Bearer ${sign({ sub: 'usr_inflight', userType: 'admin', portalUser: false })}` } };
+    const first = new Promise(resolve => requireAuth('admin')(req, res(), () => resolve('passed')));
+    await new Promise(r => setTimeout(r, 20)); // lookup #1 is now waiting on the gate
+    answers[0] = 'suspended';                 // the account changes, then the change invalidates
+    invalidateAccountStatus('usr_inflight');
+    release();
+    assert.equal(await first, 'passed', 'the stale request itself is served once');
+    const out = res(); let passed = false;
+    await requireAuth('admin')(req, out, () => { passed = true; });
+    assert.equal(passed, false, 'the next request re-reads and sees the change, not a stale cached answer');
+    assert.equal(out.statusCode, 403);
+    assert.equal(calls, 2);
+  } finally { /* LAST test in this file (own process): the private lookup is not restored. */ }
 });

@@ -42,8 +42,16 @@ export function registerAccountStatusLookup(fn) {
   statusCache.clear();
 }
 
+// Cache scope (admin-portal audit S1): this cache is per PROCESS. forgetSession/invalidateAccountStatus
+// only clears the instance that handled the change; other server instances keep serving the cached
+// status for up to STATUS_CACHE_MS (30 s) before they re-read it. Accepted, no shared infrastructure.
+// `epoch` closes the in-process race: a lookup that started before an invalidation must not write
+// its (possibly stale) answer into the cache afterwards.
+let epoch = 0;
+
 /** Drop a cached status so the next request re-reads it (call after a status change). */
 export function invalidateAccountStatus(userId) {
+  epoch += 1;
   statusCache.delete(userId);
 }
 
@@ -52,6 +60,7 @@ async function accountStatusOf(userId) {
   const hit = statusCache.get(userId);
   if (hit && Date.now() - hit.at < STATUS_CACHE_MS) return hit;
   let found = null;
+  const startedAt = epoch;
   try {
     found = await accountStatusLookup(userId);
   } catch (err) {
@@ -68,6 +77,8 @@ async function accountStatusOf(userId) {
       at: Date.now(),
     }
     : { status: found, validAfter: null, passwordChangeRequired: false, at: Date.now() };
+  // An invalidation happened while this lookup was in flight: serve it once, but do not cache it.
+  if (epoch !== startedAt) return entry;
   if (statusCache.size >= STATUS_CACHE_MAX) statusCache.clear();
   statusCache.set(userId, entry);
   return entry;

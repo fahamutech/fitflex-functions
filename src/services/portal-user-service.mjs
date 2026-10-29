@@ -354,15 +354,19 @@ export function createPortalUserService({
     if (target.email && isConfiguredAdminEmail(target.email)) {
       return { error: 'env_admin_immutable', status: 403, message: 'Super-admin accounts from environment config cannot be deleted.' };
     }
-    await deleteFirebaseUserIfUnshared({ users, row: target, initFirebaseAdmin, getAdminAuth, logTag: 'portal-users' });
-    await users.removeAsync(u => u.id === target.id);
-    // S1: the deleted account's token must stop working now (the status lookup reports it missing).
-    forgetSession(target.id);
+    // S1: write the deletion marker FIRST (the status lookup reads it to end this person's token
+    // once the row is gone). If the marker cannot be written, nothing is deleted and the call fails,
+    // so a delete can never leave a valid token behind without a marker.
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'portal_user_deleted',
       target: target.id, before: { email: target.email }, after: null
     });
+    forgetSession(target.id);
+    await deleteFirebaseUserIfUnshared({ users, row: target, initFirebaseAdmin, getAdminAuth, logTag: 'portal-users' });
+    await users.removeAsync(u => u.id === target.id);
+    // Again after the row is gone: drops anything a lookup cached in between.
+    forgetSession(target.id);
     return { ok: true };
   }
 

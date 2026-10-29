@@ -795,7 +795,7 @@ export const settlementViewService = createSettlementViewService({ gyms, users, 
 // raises each gym's difference as an adjustment (settlement Phase 6).
 export const settlementClawbackService = createSettlementClawbackService({ configService: settlementConfigService, workflow: settlementWorkflowService });
 export const invoiceService = createInvoiceService({
-  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts, gymPayoutOwner,
+  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts, gymPayoutOwner, db,
 });
 // Replaceable, so specs can stand in for the Firebase admin SDK.
 export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth };
