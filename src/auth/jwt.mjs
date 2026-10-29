@@ -43,8 +43,16 @@ export function registerAccountStatusLookup(fn) {
   statusCache.clear();
 }
 
+// Cache scope (admin-portal audit S1): this cache is per PROCESS. forgetSession/invalidateAccountStatus
+// only clears the instance that handled the change; other server instances keep serving the cached
+// status for up to STATUS_CACHE_MS (30 s) before they re-read it. Accepted, no shared infrastructure.
+// `epoch` closes the in-process race: a lookup that started before an invalidation must not write
+// its (possibly stale) answer into the cache afterwards.
+let epoch = 0;
+
 /** Drop a cached status so the next request re-reads it (call after a status change). */
 export function invalidateAccountStatus(userId) {
+  epoch += 1;
   statusCache.delete(userId);
 }
 
@@ -53,6 +61,7 @@ async function accountStatusOf(userId) {
   const hit = statusCache.get(userId);
   if (hit && Date.now() - hit.at < STATUS_CACHE_MS) return hit;
   let found = null;
+  const startedAt = epoch;
   try {
     found = await accountStatusLookup(userId);
   } catch (err) {
@@ -64,10 +73,13 @@ async function accountStatusOf(userId) {
     ? {
       status: found.status ?? null,
       validAfter: found.sessionsValidAfter ? +new Date(found.sessionsValidAfter) : null,
+      missing: found.missing === true,
       passwordChangeRequired: found.passwordChangeRequired === true,
       at: Date.now(),
     }
     : { status: found, validAfter: null, passwordChangeRequired: false, at: Date.now() };
+  // An invalidation happened while this lookup was in flight: serve it once, but do not cache it.
+  if (epoch !== startedAt) return entry;
   if (statusCache.size >= STATUS_CACHE_MAX) statusCache.clear();
   statusCache.set(userId, entry);
   return entry;
@@ -92,6 +104,11 @@ function authGuard(roles, { allowPasswordChange }) {
     const account = await accountStatusOf(claims.sub);
     if (account?.status === 'suspended') {
       return res.status(403).json({ error: 'account_suspended' });
+    }
+    // Fail closed (admin-portal audit S1): a portal staff token whose account no longer
+    // exists (deleted staff member) is over. Super-admin and other roles are unchanged.
+    if (account?.missing && claims.userType === 'admin' && claims.portalUser === true) {
+      return res.status(401).json({ error: 'session_ended' });
     }
     // Sessions issued before the person reset or changed their PIN (or an
     // admin changed their start password) are over.
