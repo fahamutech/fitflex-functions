@@ -72,7 +72,7 @@ export function createAccountService({
     };
     // The photo is shown to other people (feeds, followers, trainers, gyms): data URI or our own
     // storage path only (media-src.mjs); the stored one (e.g. the sign-in provider's) is kept as is.
-    const badMedia = await checkMediaFields({ photoUrl: body.photoUrl }, { kept: storedMedia(current.photoUrl) });
+    const badMedia = await checkMediaFields({ photoUrl: body.photoUrl }, { kept: { photoUrl: storedMedia(current.photoUrl) }, actor: current.personId || current.id });
     if (badMedia) return badMedia;
     const baseProfile = {
       ...current,

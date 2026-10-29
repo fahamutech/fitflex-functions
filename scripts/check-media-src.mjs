@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Report only: stored image sources that the media rule (src/shared/media-src.mjs, security fix
-// 2026-10-29) would refuse if they were sent as NEW values today — anything that is not a
+// 2026-10-28) would refuse if they were sent as NEW values today — anything that is not a
 // data:image/(png|jpeg|webp) URI that decodes, or our own /storage/<cid>/<file> path.
 //
 // Such values are still accepted unchanged on the record that holds them (so saves keep working);

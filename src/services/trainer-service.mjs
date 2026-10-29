@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
-import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
+import { checkMediaFields, storedMedia, signInPhotoOrNull } from '../shared/media-src.mjs';
 import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
 
 /**
@@ -63,6 +63,16 @@ const PRIVATE_GYM_FIELDS = Object.freeze([
 
 /** The image fields of a trainer row or patch, for checkMediaFields. */
 export const trainerMedia = row => ({ photoUrl: row?.photoUrl, images: row?.images, imageThumbnails: row?.imageThumbnails });
+/**
+ * Per-field `kept` for a trainer save. photoUrl and images are one picture set (the profile picture
+ * is images[0], and both the server and the app copy one into the other), so a stored value of
+ * either may stay in either; thumbnails keep only stored thumbnails. `signInPhoto`: the account's
+ * own sign-in photo, only when it passes the sign-in host allowlist (signInPhotoOrNull).
+ */
+export function trainerKeptMedia(prior, { signInPhoto = null } = {}) {
+  const pictures = storedMedia(prior?.photoUrl, prior?.images, signInPhotoOrNull(signInPhoto));
+  return { photoUrl: pictures, images: pictures, imageThumbnails: storedMedia(prior?.imageThumbnails) };
+}
 
 export function publicTrainer(trainer) {
   if (!trainer) return trainer;
@@ -308,9 +318,11 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       approvalStatus: 'approved',
     }, profile || {});
     // Photos are shown to every member: data URI or our own storage path only (media-src.mjs). What the
-    // profile or the account already had (e.g. the sign-in photo) is kept as is.
+    // profile already had is kept as is; the account's sign-in photo only from an allowed host.
     const badMedia = await checkMediaFields(trainerMedia(row), {
-      kept: storedMedia(profile?.photoUrl, profile?.images, profile?.imageThumbnails, user?.photoUrl),
+      kept: trainerKeptMedia(profile, { signInPhoto: user?.photoUrl }),
+      maxItems: { images: PROFILE_LIMITS.images, imageThumbnails: PROFILE_LIMITS.images },
+      actor: user?.personId || userId,
     });
     if (badMedia) return badMedia;
     await trainers.upsertAsync(t => t.id === row.id, row);
@@ -412,7 +424,9 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     }
     if (body.socialLinks !== undefined) updates.socialLinks = normalizeSocialLinks(body.socialLinks).links;
     const badMedia = await checkMediaFields(trainerMedia(updates), {
-      kept: storedMedia(profile.photoUrl, profile.images, profile.imageThumbnails),
+      kept: trainerKeptMedia(profile),
+      maxItems: { images: PROFILE_LIMITS.images, imageThumbnails: PROFILE_LIMITS.images },
+      actor: userId,
     });
     if (badMedia) return badMedia;
     updates.updatedAt = new Date().toISOString();

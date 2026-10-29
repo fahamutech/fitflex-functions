@@ -6,6 +6,7 @@ import { buildDevIdentity, devMarketplaceProduct, DEV_GYM_ID, DEV_OWNER_GYM_ID }
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { identityFlag, recordFirebaseEvidenceOn } from '../shared/feature-flags.mjs';
+import { signInPhotoOrNull } from '../shared/media-src.mjs';
 
 const configuredAdminEmails = new Set(
   (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
@@ -340,7 +341,8 @@ export function createAuthService({
         firebaseUid: user.firebaseUid || fb.uid,
         email: user.email || (emailHeldElsewhere ? null : fbEmail),
         displayName: fb.name || user.displayName,
-        photoUrl: fb.picture || user.photoUrl,
+        // Sign-in provider photo: only from an allowed host, else dropped (security fix 2026-10-28).
+        photoUrl: signInPhotoOrNull(fb.picture) || user.photoUrl,
         accountStatus: user.accountStatus || 'active',
         onboardingCompleted: user.onboardingCompleted || false,
         approvalStatus: user.approvalStatus || 'approved',
@@ -364,7 +366,7 @@ export function createAuthService({
         firebaseUid: fb.uid,
         email: fbEmail,
         displayName: fb.name,
-        photoUrl: fb.picture,
+        photoUrl: signInPhotoOrNull(fb.picture),
         userType: isAdminEmail ? 'admin' : newUserRole,
         approvalStatus: isAdminEmail ? 'approved' : approvalStatusForRole(newUserRole),
         accountStatus: 'active',

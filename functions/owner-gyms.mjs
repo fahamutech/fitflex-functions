@@ -7,16 +7,17 @@ import { visitorName } from '../src/shared/visitor-name.mjs';
 import { ownerGymService, resolveRequestUser, publicUserId, checkins, users, trainers, usernameService, personalDetailsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
-// An error body; a refused photo (invalid_media_src) also says which field and why.
-const MEDIA_ERROR_KEYS = ['field', 'index', 'reason', 'gymIndex'];
+// An error body; a refused photo also says which field and why (or the cap / when to retry).
+const MEDIA_ERRORS = new Set(['invalid_media_src', 'too_many_images', 'rate_limited']);
+const MEDIA_ERROR_KEYS = ['field', 'index', 'reason', 'gymIndex', 'max', 'retryAfterSeconds'];
 const errorBody = result => ({
   error: result.error,
-  ...(result.error === 'invalid_media_src' ? Object.fromEntries(MEDIA_ERROR_KEYS.filter(k => result[k] !== undefined).map(k => [k, result[k]])) : {}),
+  ...(MEDIA_ERRORS.has(result.error) ? Object.fromEntries(MEDIA_ERROR_KEYS.filter(k => result[k] !== undefined).map(k => [k, result[k]])) : {}),
 });
 
 export const gymOwnerRegister = {
   created, method: 'post', path: '/gym-owner/register',
-  description: 'Gym Owner: self-register with gym details. Creates one or more gyms and assigns to owner. Optional dateOfBirth ("YYYY-MM-DD") and gender (male | female | other; null or "" = prefer not to say): with PARTNER_DOB_REQUIRED on they are checked like PUT /me/personal-details (400 { error: "invalid_field", field: "dateOfBirth" | "gender" }, 400 { error: "partner_under_18" }) and saved on the person, never on the gym or the owner profile; off, they are ignored. Leaving them out is always accepted. Photos (images, thumbnails, per gyms[]; imagePaths is read as images; security fix 2026-10-29): each must be data:image/(png|jpeg|webp);base64,… (≤ 2 MB decoded, a real image of that kind) or our own /storage/<cid>/<file> path; photos already stored are accepted unchanged; else 400 invalid_media_src { field, index?, reason, gymIndex } (nothing saved).',
+  description: 'Gym Owner: self-register with gym details. Creates one or more gyms and assigns to owner. Optional dateOfBirth ("YYYY-MM-DD") and gender (male | female | other; null or "" = prefer not to say): with PARTNER_DOB_REQUIRED on they are checked like PUT /me/personal-details (400 { error: "invalid_field", field: "dateOfBirth" | "gender" }, 400 { error: "partner_under_18" }) and saved on the person, never on the gym or the owner profile; off, they are ignored. Leaving them out is always accepted. Photos (images, thumbnails, per gyms[]; imagePaths is read as images; security fix 2026-10-28): each must be data:image/(png|jpeg|webp);base64,… (≤ 1.4 MB decoded (MEDIA_SRC_MAX_BYTES), a real image of that kind) or our own /storage/<cid>/<file> path; photos already stored are accepted unchanged; else 400 invalid_media_src { field, index?, reason, gymIndex } (nothing saved). At most 10 images and 10 thumbnails per gym (400 too_many_images { field, max }, counted before decoding); saves that decode new photos: 30 per 10 minutes per person (429 rate_limited { retryAfterSeconds }).',
   onGuard: routeGuard('post', requireAuth('gym_operator')),
   onRequest: async (req, res) => {
     try {
@@ -118,7 +119,7 @@ export const ownerGymCheckins = {
 
 export const ownerUpdateGym = {
   created, method: 'put', path: '/owner/gyms/:gymId',
-  description: 'Owner: update details of an owned gym. Photos (images, thumbnails; security fix 2026-10-29): each must be data:image/(png|jpeg|webp);base64,… (≤ 2 MB decoded, a real image of that kind) or our own /storage/<cid>/<file> path; photos already stored are accepted unchanged; else 400 invalid_media_src { field, index?, reason } (nothing saved).',
+  description: 'Owner: update details of an owned gym. Photos (images, thumbnails; security fix 2026-10-28): each must be data:image/(png|jpeg|webp);base64,… (≤ 1.4 MB decoded (MEDIA_SRC_MAX_BYTES), a real image of that kind) or our own /storage/<cid>/<file> path; photos already stored are accepted unchanged (in their own field; a stored image may also be sent as a thumbnail); else 400 invalid_media_src { field, index?, reason } (nothing saved). At most 10 images and 10 thumbnails per gym (400 too_many_images { field, max }, counted before decoding); saves that decode new photos: 30 per 10 minutes per person (429 rate_limited { retryAfterSeconds }).',
   onGuard: routeGuard('put', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')]),
   onRequest: async (req, res) => {
     try {
@@ -135,7 +136,7 @@ export const ownerUpdateGym = {
 
 export const ownerCreateGym = {
   created, method: 'post', path: '/owner/gyms',
-  description: 'Owner: add a new gym to their account. Photos (images, thumbnails; security fix 2026-10-29): each must be data:image/(png|jpeg|webp);base64,… (≤ 2 MB decoded, a real image of that kind) or our own /storage/<cid>/<file> path; photos already stored are accepted unchanged; else 400 invalid_media_src { field, index?, reason } (nothing saved).',
+  description: 'Owner: add a new gym to their account. Photos (images, thumbnails; security fix 2026-10-28): each must be data:image/(png|jpeg|webp);base64,… (≤ 1.4 MB decoded (MEDIA_SRC_MAX_BYTES), a real image of that kind) or our own /storage/<cid>/<file> path; photos already stored are accepted unchanged (in their own field; a stored image may also be sent as a thumbnail); else 400 invalid_media_src { field, index?, reason } (nothing saved). At most 10 images and 10 thumbnails per gym (400 too_many_images { field, max }, counted before decoding); saves that decode new photos: 30 per 10 minutes per person (429 rate_limited { retryAfterSeconds }).',
   onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('gyms')]),
   onRequest: async (req, res) => {
     try {
@@ -178,7 +179,7 @@ export const ownerUpdateTrainer = {
 
 export const ownerCreateTrainer = {
   created, method: 'post', path: '/owner/trainers',
-  description: 'Owner: create a trainer account and assign it to one of their gyms. Photos (photoUrl, images, imageThumbnails; security fix 2026-10-29): data:image/(png|jpeg|webp);base64,… (≤ 2 MB decoded, a real image) or our own /storage/<cid>/<file> path, else 400 invalid_media_src { field, index?, reason }.',
+  description: 'Owner: create a trainer account and assign it to one of their gyms. Photos (photoUrl, images, imageThumbnails; security fix 2026-10-28): data:image/(png|jpeg|webp);base64,… (≤ 1.4 MB decoded (MEDIA_SRC_MAX_BYTES), a real image) or our own /storage/<cid>/<file> path, else 400 invalid_media_src { field, index?, reason }.',
   onGuard: routeGuard('post', [requireAuth('gym_operator', 'gym_staff'), requireGymAcl('trainers')]),
   onRequest: async (req, res) => {
     // With invitations on, an organisation no longer sets a person's credentials.

@@ -1,10 +1,12 @@
-// Security fix 2026-10-29: partner-supplied image sources and /storage/upload.
+// Security fix 2026-10-28: partner-supplied image sources and /storage/upload.
 // 1. Images the apps show to other people (vendor logo/banner, product images, trainer photos, gym
 //    photos, account photo) accept only a data:image/(png|jpeg|webp) URI that really decodes, or our
 //    own /storage/<cid>/<file> path. Any other host or scheme → 400 invalid_media_src. A value already
-//    stored on the record is accepted unchanged.
-// 2. /storage/upload: only staff, partners, organizers, company HR or an active B2B seat; byte-level
-//    format check (no SVG); per-user rate limit; one audit row per upload.
+//    stored in the same field of the record is accepted unchanged. Sign-in provider photos are kept
+//    only from an allowed host. Gallery caps and a per-person decode rate limit.
+// 2. /storage/upload: only staff, partners, organizers, company HR or an active billing seat;
+//    byte-level format check (no SVG); per-person rate limit first; one audit row per upload, and
+//    per refusal (never the file).
 // Service tests use the CI database; route tests mount every function file the way bfast does,
 // against a local Zebra stand-in.
 import { test, before, after, beforeEach } from 'node:test';
@@ -21,8 +23,9 @@ import { db } from '../src/infra/knex-store.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { ensureInit } from '../functions/index.mjs';
 import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
-import { shopService, trainerService, ownerGymService, accountService, trainers, users, gyms } from '../src/bootstrap/services.mjs';
-import { mediaSrcProblem, mediaSrcShapeProblem, checkMediaFields, isStoragePath, mediaSrcMaxBytes } from '../src/shared/media-src.mjs';
+import { shopService, trainerService, ownerGymService, accountService, authService, trainers, users, gyms, products } from '../src/bootstrap/services.mjs';
+import { mediaSrcProblem, mediaSrcShapeProblem, checkMediaFields, isStoragePath, mediaSrcMaxBytes, signInPhotoOrNull, copyablePhotoOrNull, resetMediaDecodeLimits, MEDIA_DECODE_RATE } from '../src/shared/media-src.mjs';
+import { documentLogoUrl } from '../src/shared/vendor-documents.mjs';
 import { resetStorageUploadLimits, UPLOAD_RATE_LIMITS, MAX_UPLOAD_BYTES } from '../functions/storage.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
@@ -48,7 +51,8 @@ const BAD = {
   file: 'file:///etc/passwd',
 };
 
-const made = { users: [], gyms: [], trainers: [], products: [], orgs: [] };
+const made = { users: [], gyms: [], trainers: [], products: [], orgs: [], persons: [] };
+let zebraFails = false;
 async function user(userType, extra = {}) {
   const id = uid(userType === 'admin' ? 'adm' : 'usr');
   await users.upsertAsync(u => u.id === id, { id, userType, displayName: `Media ${userType}`, accountStatus: 'active', approvalStatus: 'approved', createdAt: new Date().toISOString(), ...extra });
@@ -64,6 +68,7 @@ before(async () => {
   zebra = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/storage') {
       const { files } = await parseMultipartRequest(req);
+      if (zebraFails) { res.statusCode = 500; return res.end('internal zebra detail: db host 10.0.0.7'); }
       zebraCount += 1;
       res.setHeader('Content-Type', 'application/json');
       return res.end(JSON.stringify({ urls: [`/storage/bafymedia${zebraCount}/${files[0].filename}`] }));
@@ -99,10 +104,11 @@ after(async () => {
   await db('TrainerProfile').whereIn('id', made.trainers).del();
   await db('Gym').whereIn('id', made.gyms).del();
   await db('User').whereIn('id', made.users).del();
+  await db('Person').whereIn('id', made.persons).del();
   await db.destroy();
 });
 
-beforeEach(() => resetStorageUploadLimits());
+beforeEach(() => { resetStorageUploadLimits(); resetMediaDecodeLimits(); zebraFails = false; });
 
 async function hit(method, url, { claims, body } = {}) {
   const res = await fetch(`${base}${url}`, {
@@ -160,7 +166,7 @@ test('validator: other hosts, other schemes, SVG and non-image bytes are refused
   assert.equal(await mediaSrcProblem('data:image/png;base64,@@@@'), 'invalid_base64');
   assert.equal(await mediaSrcProblem('data:image/png,rawdata'), 'data_type_not_allowed');
   // Our path shape only: no dot segments, no encoded separators, no query, no other root.
-  for (const p of ['/storage/../admin', '/storage/a/..', '/storage/a/b%2fc', '/storage/a/b?x=1', '/storage/a', '/storage/a/b c.png']) {
+  for (const p of ['/storage/../admin', '/storage/a/..', '/storage/../x.png', '/storage/a/b%2fc', '/storage/a/b%41.png', '/storage/a/b(1).png', '/storage/a/b?x=1', '/storage/a', '/storage/a/b c.png', '/storage/a/b/c.png']) {
     assert.equal(await mediaSrcProblem(p), 'invalid_storage_path', p);
   }
   assert.equal(await mediaSrcProblem('/static/a/b.png'), 'scheme_not_allowed');
@@ -168,25 +174,76 @@ test('validator: other hosts, other schemes, SVG and non-image bytes are refused
   assert.equal(await mediaSrcProblem(''), 'empty');
 });
 
-test('validator: oversize is refused (default 2 MB decoded, before decoding) and huge dimensions are refused', async () => {
-  assert.equal(mediaSrcMaxBytes({}), 2 * 1024 * 1024);
-  assert.equal(mediaSrcMaxBytes({ MEDIA_SRC_MAX_BYTES: '1500000' }), 1_500_000);
-  const over = `data:image/png;base64,${Buffer.alloc(2 * 1024 * 1024 + 3).toString('base64')}`;
+test('validator: oversize is refused (default 1.4 MB decoded, before decoding; fits a 2 MB body) and big dimensions are refused', async () => {
+  assert.equal(mediaSrcMaxBytes({}), 1_400_000);
+  assert.ok(4 * Math.ceil(mediaSrcMaxBytes({}) / 3) + 100 < 2 * 1024 * 1024, 'one data URI fits BFAST_BODY_LIMIT 2mb');
+  assert.equal(mediaSrcMaxBytes({ MEDIA_SRC_MAX_BYTES: '1000000' }), 1_000_000);
+  const over = `data:image/png;base64,${Buffer.alloc(1_400_003).toString('base64')}`;
   assert.equal(mediaSrcShapeProblem(over), 'too_large');
   assert.equal(await mediaSrcProblem(over), 'too_large');
   // A real image just over a small cap.
   const noisy = await sharp({ create: { width: 200, height: 200, channels: 3, noise: { type: 'gaussian', mean: 128, sigma: 60 } } }).png().toBuffer();
   assert.equal(await mediaSrcProblem(dataUri('png', noisy), { maxBytes: noisy.length - 1 }), 'too_large');
   assert.equal(await mediaSrcProblem(dataUri('png', noisy), { maxBytes: noisy.length }), null);
-  const tall = await sharp({ create: { width: 1, height: 5000, channels: 3, background: '#000' } }).png().toBuffer();
+  const tall = await sharp({ create: { width: 1, height: 2049, channels: 3, background: '#000' } }).png().toBuffer();
   assert.equal(await mediaSrcProblem(dataUri('png', tall)), 'image_too_large');
+  const square = await sharp({ create: { width: 2049, height: 2049, channels: 3, background: '#000' } }).png().toBuffer();
+  assert.equal(await mediaSrcProblem(dataUri('png', square)), 'image_too_large');
+  const edge = await sharp({ create: { width: 2048, height: 16, channels: 3, background: '#000' } }).png().toBuffer();
+  assert.equal(await mediaSrcProblem(dataUri('png', edge)), null);
 });
 
-test('checkMediaFields: names the field and index; a value already stored is kept as is', async () => {
+test('checkMediaFields: names the field and index; a stored value is kept only in its own field', async () => {
   const bad = await checkMediaFields({ logo: dataUri('png', PNG), images: [STORAGE, BAD.otherHost] });
   assert.deepEqual(bad, { error: 'invalid_media_src', status: 400, field: 'images', index: 1, reason: 'scheme_not_allowed' });
-  assert.equal(await checkMediaFields({ images: [STORAGE, BAD.otherHost] }, { kept: [BAD.otherHost] }), null);
+  assert.equal(await checkMediaFields({ images: [STORAGE, BAD.otherHost] }, { kept: { images: [BAD.otherHost] } }), null);
+  // Not moved to another field: thumbnails → images, logo → banner.
+  const moved = await checkMediaFields({ images: [BAD.otherHost] }, { kept: { thumbnails: [BAD.otherHost] } });
+  assert.equal(moved?.field, 'images');
+  const swapped = await checkMediaFields({ banner: BAD.otherHost }, { kept: { logo: [BAD.otherHost] } });
+  assert.equal(swapped?.field, 'banner');
   assert.equal(await checkMediaFields({ logo: undefined, banner: null, photoUrl: '' }), null);
+});
+
+test('checkMediaFields: list caps are checked before any decode; decoding saves are rate limited per actor', async () => {
+  const many = Array.from({ length: 11 }, () => dataUri('png', PNG));
+  assert.deepEqual(await checkMediaFields({ images: many }, { maxItems: { images: 10 } }), { error: 'too_many_images', status: 400, field: 'images', max: 10 });
+  for (let i = 0; i < MEDIA_DECODE_RATE.perWindow; i += 1) assert.equal(await checkMediaFields({ logo: dataUri('png', PNG) }, { actor: 'person:a' }), null, `save ${i + 1}`);
+  const limited = await checkMediaFields({ logo: dataUri('png', PNG) }, { actor: 'person:a' });
+  assert.equal(limited.error, 'rate_limited');
+  assert.equal(limited.status, 429);
+  assert.ok(limited.retryAfterSeconds >= 1);
+  // Nothing to decode (a storage path, or a kept value) is never limited; other people are unaffected.
+  assert.equal(await checkMediaFields({ logo: STORAGE }, { actor: 'person:a' }), null);
+  assert.equal(await checkMediaFields({ logo: dataUri('png', PNG) }, { actor: 'person:b' }), null);
+});
+
+test('sign-in photos: only https on Google photo hosts (or our storage path) are kept; anything else is dropped', () => {
+  assert.equal(signInPhotoOrNull('https://lh3.googleusercontent.com/a/abc=s96-c'), 'https://lh3.googleusercontent.com/a/abc=s96-c');
+  assert.equal(signInPhotoOrNull(STORAGE), STORAGE);
+  for (const v of ['https://evil.example/x.png', 'http://lh3.googleusercontent.com/a/x', 'https://lh3.googleusercontent.com.evil.example/x', 'https://user@lh3.googleusercontent.com/a', 'https://lh3.googleusercontent.com:8443/a', 'javascript:alert(1)', dataUri('png', Buffer.from('x')), null, 42]) {
+    assert.equal(signInPhotoOrNull(v), null, String(v));
+  }
+  assert.equal(signInPhotoOrNull('https://cdn.idp.example/p.png', { hosts: ['cdn.idp.example'] }), 'https://cdn.idp.example/p.png');
+  assert.equal(copyablePhotoOrNull('https://evil.example/x.png'), null);
+  assert.equal(copyablePhotoOrNull(STORAGE), STORAGE);
+});
+
+test('Firebase sign-in: a picture on another host is never stored on the account (new or existing)', async () => {
+  const devToken = payload => `dev:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
+  const fbUid = uid('fb');
+  const first = await authService.firebaseSession({ idToken: devToken({ uid: fbUid, email: `${fbUid}@example.com`, name: 'Picture Test', picture: 'https://evil.example/x.png' }), requestedRole: 'trainer' });
+  assert.ok(first.user?.id, JSON.stringify(first));
+  made.users.push(first.user.id);
+  assert.equal((await db('User').where({ id: first.user.id }).first()).photoUrl, null);
+  // Existing account: a later sign-in with a planted picture keeps the stored, allowed photo.
+  await db('User').where({ id: first.user.id }).update({ photoUrl: 'https://lh3.googleusercontent.com/a/kept' });
+  await users.updateByIdAsync(first.user.id, { photoUrl: 'https://lh3.googleusercontent.com/a/kept' });
+  await authService.firebaseSession({ idToken: devToken({ uid: fbUid, email: `${fbUid}@example.com`, picture: 'https://evil.example/y.png' }) });
+  assert.equal((await db('User').where({ id: first.user.id }).first()).photoUrl, 'https://lh3.googleusercontent.com/a/kept');
+  // An allowed Google photo is taken.
+  await authService.firebaseSession({ idToken: devToken({ uid: fbUid, email: `${fbUid}@example.com`, picture: 'https://lh3.googleusercontent.com/a/new' }) });
+  assert.equal((await db('User').where({ id: first.user.id }).first()).photoUrl, 'https://lh3.googleusercontent.com/a/new');
 });
 
 // ── Vendor profile (PUT /vendor/profile) ────────────────────────────────────
@@ -270,6 +327,26 @@ test('trainer photos: updateProfile and register refuse other hosts; data URIs a
   const registered = await trainerService.register({ userId: regUser, user: account, body: { photoUrl: 'https://lh3.googleusercontent.com/a/another', gender: 'female' } });
   assert.equal(registered.error, undefined, JSON.stringify(registered));
   made.trainers.push(registered.trainer.id);
+
+  // An account photo planted before this fix (another host) is NOT "kept" for the trainer profile.
+  const planted = await user('trainer', { photoUrl: 'https://evil.example/x.png' });
+  const plantedAccount = await users.findByIdAsync(planted);
+  const plantedReg = await trainerService.register({ userId: planted, user: plantedAccount, body: { photoUrl: 'https://evil.example/x.png', gender: 'male' } });
+  assert.equal(plantedReg.error, 'invalid_media_src');
+  assert.equal(plantedReg.field, 'photoUrl');
+
+  // Thumbnails keep only stored thumbnails: a stored gallery image may not move into them... and the
+  // other way round a stored thumbnail may not become a gallery image.
+  const thumbUser = await user('trainer');
+  const thumbId = uid('trn');
+  await trainers.upsertAsync(t => t.id === thumbId, trainerService.normalizeTrainerPayload({ id: thumbId, userId: thumbUser, displayName: 'Thumb Trainer', images: [STORAGE], imageThumbnails: ['https://images.unsplash.com/legacy-thumb'] }, {}));
+  made.trainers.push(thumbId);
+  const movedUp = await trainerService.updateProfile({ userId: thumbUser, body: { images: ['https://images.unsplash.com/legacy-thumb'] } });
+  assert.equal(movedUp.error, 'invalid_media_src');
+  // The first image becomes the profile picture, which is checked first: either way it is refused.
+  assert.ok(['images', 'photoUrl'].includes(movedUp.field), movedUp.field);
+  const tooMany = await trainerService.updateProfile({ userId: thumbUser, body: { images: Array.from({ length: 9 }, () => STORAGE) } });
+  assert.equal(tooMany.error, 'too_many_images');
 });
 
 test('gym photos: owner create, update and register refuse other hosts; stored photos are kept', async () => {
@@ -302,6 +379,47 @@ test('gym photos: owner create, update and register refuse other hosts; stored p
   assert.equal(reg.error, 'invalid_media_src');
   assert.equal(reg.gymIndex, 1);
   assert.equal((await gyms.allAsync()).length, before);
+});
+
+test('gym photos: at most 10 each; a stored image may be sent as its thumbnail, a stored thumbnail never as an image', async () => {
+  const ownerId = await user('gym_operator', { gymIds: [] });
+  let owner = await users.findByIdAsync(ownerId);
+  const tooMany = await ownerGymService.createGym({ owner, body: { name: 'Big Gym', images: Array.from({ length: 11 }, () => STORAGE) } });
+  assert.deepEqual([tooMany.error, tooMany.field, tooMany.max], ['too_many_images', 'images', 10]);
+  const created = await ownerGymService.createGym({ owner, body: { name: 'Carry Gym', images: [STORAGE] } });
+  made.gyms.push(created.gym.id);
+  await gyms.updateAsync(g => g.id === created.gym.id, { images: ['https://images.unsplash.com/legacy-gym'], thumbnails: ['https://images.unsplash.com/legacy-gym-thumb'] });
+  owner = await users.findByIdAsync(ownerId);
+  // What the app sends for a photo without a recorded thumbnail: the image itself as the thumbnail.
+  const asThumb = await ownerGymService.updateGym({ owner, gymId: created.gym.id, body: { images: ['https://images.unsplash.com/legacy-gym'], thumbnails: ['https://images.unsplash.com/legacy-gym'] } });
+  assert.equal(asThumb.error, undefined, JSON.stringify(asThumb));
+  await gyms.updateAsync(g => g.id === created.gym.id, { thumbnails: ['https://images.unsplash.com/legacy-gym-thumb'] });
+  const thumbUp = await ownerGymService.updateGym({ owner, gymId: created.gym.id, body: { images: ['https://images.unsplash.com/legacy-gym-thumb'] } });
+  assert.deepEqual([thumbUp.error, thumbUp.field], ['invalid_media_src', 'images']);
+});
+
+test('product duplicate: a copy keeps the source product\'s old images; a new outside image is still refused', async () => {
+  const vendor = await user('vendor', { vendorProfile: { businessName: 'Dup Shop', status: 'published' } });
+  const created = await shopService.upsertProduct({ vendorId: vendor, body: { name: 'Mat', category: 'equipment', priceTzs: 1000, images: [STORAGE] } });
+  made.products.push(created.product.id);
+  await products.updateByIdAsync(created.product.id, { images: ['https://images.unsplash.com/old-product'] });
+  const copy = await shopService.duplicateProduct({ vendorId: vendor, productId: created.product.id });
+  assert.equal(copy.error, undefined, JSON.stringify(copy));
+  made.products.push(copy.product.id);
+  assert.deepEqual(copy.product.images, ['https://images.unsplash.com/old-product']);
+  const fresh = await shopService.upsertProduct({ vendorId: vendor, body: { name: 'Mat 2', category: 'equipment', priceTzs: 1000, images: ['https://images.unsplash.com/old-product'] } });
+  assert.equal(fresh.error, 'invalid_media_src');
+});
+
+test('vendor documents: the logo shows only from our storage, resolved to our host; other hosts and data URIs stay off', () => {
+  const base = 'https://api.fitflex.example';
+  assert.equal(documentLogoUrl(STORAGE, base), `${base}${STORAGE}`);
+  assert.equal(documentLogoUrl(`${base}${STORAGE}`, base), `${base}${STORAGE}`);
+  assert.equal(documentLogoUrl('https://cdn.example.com/logo.png', base), null);
+  assert.equal(documentLogoUrl(`${base}/other/logo.png`, base), null);
+  assert.equal(documentLogoUrl(`${base}${STORAGE}?x=1`, base), null);
+  assert.equal(documentLogoUrl(dataUri('png', Buffer.from('x')), base), null);
+  assert.equal(documentLogoUrl(STORAGE, null), null, 'no PUBLIC_API_URL → no logo');
 });
 
 test('owner-created trainer: a photo on another host is refused', async () => {
@@ -357,18 +475,68 @@ test('/storage/upload: partners, staff, organizers and HR may upload; each uploa
   }
 });
 
-test('/storage/upload: a member with an active B2B organisation seat may upload (proof of payment); a removed seat may not', async () => {
+async function org(status = 'active') {
+  const id = uid('b2b');
+  await db('B2BOrganization').insert({ id, organizationType: 'employer', legalName: `Media Org ${id}`, status });
+  made.orgs.push(id);
+  return id;
+}
+async function seat(userId, organizationId, role, extra = {}) {
+  const id = uid('b2bu');
+  await db('B2BOrganizationUser').insert({ id, organizationId, userId, role, status: 'active', ...extra });
+  return id;
+}
+const proof = claims => upload(claims, JPEG, { filename: 'proof.jpg', contentType: 'image/jpeg' });
+
+test('/storage/upload: a member with an active billing seat (owner/admin/finance/hr) in an active organisation may upload; a removed seat may not', async () => {
+  const activeOrg = await org();
+  for (const role of ['owner', 'admin', 'finance', 'hr']) {
+    const member = await user('member');
+    const seatId = await seat(member, activeOrg, role);
+    assert.equal((await proof({ sub: member, userType: 'member' })).status, 200, role);
+    if (role === 'finance') {
+      await db('B2BOrganizationUser').where({ id: seatId }).update({ status: 'removed', removedAt: new Date() });
+      assert.equal((await proof({ sub: member, userType: 'member' })).status, 403, 'removed seat');
+    }
+  }
+});
+
+test('/storage/upload: a non-billing seat, a suspended seat or a seat in an inactive organisation → 403', async () => {
+  const activeOrg = await org();
+  for (const role of ['viewer', 'analyst', 'manager']) {
+    const member = await user('member');
+    await seat(member, activeOrg, role);
+    assert.equal((await proof({ sub: member, userType: 'member' })).status, 403, role);
+  }
+  const granted = await user('member');
+  await seat(granted, activeOrg, 'viewer', { permissions: ['billing.pay'] });
+  assert.equal((await proof({ sub: granted, userType: 'member' })).status, 200, 'explicit billing.pay grant');
+  const suspendedSeat = await user('member');
+  await seat(suspendedSeat, activeOrg, 'finance', { status: 'suspended' });
+  assert.equal((await proof({ sub: suspendedSeat, userType: 'member' })).status, 403, 'suspended seat');
+  const pendingOrg = await org('pending');
+  const pending = await user('member');
+  await seat(pending, pendingOrg, 'finance');
+  assert.equal((await proof({ sub: pending, userType: 'member' })).status, 403, 'pending organisation');
+});
+
+test('/storage/upload: refusals are audited without the file; storage failures never echo upstream detail', async () => {
   const member = await user('member');
-  const orgId = uid('b2b');
-  await db('B2BOrganization').insert({ id: orgId, organizationType: 'employer', legalName: 'Media Org Ltd', status: 'active' });
-  made.orgs.push(orgId);
-  const seatId = uid('b2bu');
-  await db('B2BOrganizationUser').insert({ id: seatId, organizationId: orgId, userId: member, role: 'finance', status: 'active' });
-  const ok = await upload({ sub: member, userType: 'member' }, JPEG, { filename: 'proof.jpg', contentType: 'image/jpeg' });
-  assert.equal(ok.status, 200, JSON.stringify(ok.body));
-  await db('B2BOrganizationUser').where({ id: seatId }).update({ status: 'removed', removedAt: new Date() });
-  const refused = await upload({ sub: member, userType: 'member' }, JPEG, { filename: 'proof.jpg', contentType: 'image/jpeg' });
-  assert.equal(refused.status, 403);
+  assert.equal((await upload({ sub: member, userType: 'member' }, PNG)).status, 403);
+  const vendor = await user('vendor');
+  assert.equal((await upload({ sub: vendor, userType: 'vendor' }, SVG, { filename: 'secret-name.svg', contentType: 'image/svg+xml' })).status, 400);
+  const rows = await db('AuditLog').whereIn('actor', [member, vendor]).where({ action: 'storage_upload_refused' }).orderBy('at');
+  assert.equal(rows.length, 2);
+  const afters = rows.map(r => (typeof r.after === 'string' ? JSON.parse(r.after) : r.after));
+  assert.deepEqual(afters.map(a => [a.status, a.error]).sort(), [[400, 'unsupported_file_type'], [403, 'upload_forbidden']]);
+  const text = JSON.stringify(rows);
+  assert.equal(text.includes('secret-name'), false, 'no file name');
+  assert.equal(text.includes('<svg'), false, 'no file contents');
+
+  zebraFails = true;
+  const failed = await upload({ sub: vendor, userType: 'vendor' }, PNG);
+  assert.equal(failed.status, 502);
+  assert.deepEqual(failed.body, { error: 'storage_upload_failed' });
 });
 
 test('/storage/upload: SVG (even labelled PNG), PDF and non-image bytes → 400 unsupported_file_type; over 10 MB → 413', async () => {
@@ -392,6 +560,30 @@ test('/storage/upload: SVG (even labelled PNG), PDF and non-image bytes → 400 
   // WebP and GIF are fine.
   assert.equal((await upload(claims, WEBP, { filename: 'a.webp', contentType: 'image/webp' })).status, 200);
   assert.equal((await upload(claims, GIF, { filename: 'a.gif', contentType: 'image/gif' })).status, 200);
+});
+
+test('/storage/upload: rate limited per PERSON across their accounts, before the role check; refusals audited at most 10 a minute', async () => {
+  const personId = uid('per');
+  await db('Person').insert({ id: personId, updatedAt: new Date() });
+  made.persons.push(personId);
+  // Two accounts of one person, inserted with the person as identity linking does (the users store
+  // never writes personId, and a trigger refuses changing it later).
+  const persona = async (userType) => {
+    const id = uid('usr');
+    await db('User').insert({ id, userType, personId, displayName: `Persona ${userType}`, accountStatus: 'active', approvalStatus: 'approved', createdAt: new Date(), updatedAt: new Date() });
+    made.users.push(id);
+    return id;
+  };
+  const vendorPersona = await persona('vendor');
+  const memberPersona = await persona('member');
+  for (let i = 0; i < UPLOAD_RATE_LIMITS.perMinute; i += 1) {
+    assert.equal((await upload({ sub: vendorPersona, userType: 'vendor' }, PNG)).status, 200, `upload ${i + 1}`);
+  }
+  const otherPersona = await upload({ sub: memberPersona, userType: 'member' }, PNG);
+  assert.equal(otherPersona.status, 429, 'the same person on another account shares the limit (and it is checked before the 403)');
+  for (let i = 0; i < 15; i += 1) await upload({ sub: memberPersona, userType: 'member' }, PNG);
+  const refusals = await db('AuditLog').whereIn('actor', [vendorPersona, memberPersona]).where({ action: 'storage_upload_refused' });
+  assert.equal(refusals.length, 10, 'a flood of refusals writes at most 10 rows a minute');
 });
 
 test('/storage/upload: rate limited per user (20 a minute) with Retry-After; another user is unaffected', async () => {

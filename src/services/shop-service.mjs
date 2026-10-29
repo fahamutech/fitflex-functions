@@ -173,7 +173,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       }
     }
     // Logo and banner: an image the app shows to every buyer, so only a data URI or our own storage path (media-src.mjs).
-    const badMedia = await checkMediaFields({ logo: body?.logo, banner: body?.banner }, { kept: storedMedia(prior.logo, prior.banner) });
+    const badMedia = await checkMediaFields({ logo: body?.logo, banner: body?.banner }, {
+      kept: { logo: storedMedia(prior.logo), banner: storedMedia(prior.banner) }, actor: current?.personId || vendorId,
+    });
     if (badMedia) return badMedia;
     const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), ...areas.patch, vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
     const missing = PROFILE_REQUIRED.filter(key => {
@@ -340,7 +342,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { ...out, product: (await withVatCodes(args.vendorId, [out.product]))[0] };
   }
 
-  async function upsertProductCore({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true }) {
+  // keptImages: images a copy may carry over unchanged (duplicateProduct: the source product's own).
+  async function upsertProductCore({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [] }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
@@ -352,7 +355,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const prior = await products.findByIdAsync(productId);
       if (!prior || prior.deletedAt) return { error: 'product_not_found', status: 404 };
       if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
-      const badMedia = await checkMediaFields({ images: input.images }, { kept: storedMedia(prior.images) });
+      const badMedia = await checkMediaFields({ images: input.images }, { kept: { images: storedMedia(prior.images) }, actor: actorId });
       if (badMedia) return badMedia;
       if (input.name !== undefined && !String(input.name).trim()) return { error: 'name_required', status: 400 };
       if (input.priceTzs !== undefined && Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
@@ -401,7 +404,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     }
     if (input.priceTzs == null || Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
     if (Number(input.stock ?? 0) < 0) return { error: 'invalid_stock', status: 400 };
-    const badMedia = await checkMediaFields({ images: input.images });
+    const badMedia = await checkMediaFields({ images: input.images }, { kept: { images: storedMedia(keptImages) }, actor: actorId });
     if (badMedia) return badMedia;
     const ledger = ledgerOn();
     const plan = ledger ? planStock(null, input, { ledger: true }) : null;
@@ -522,7 +525,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
     if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
-    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true });
+    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true, keptImages: prior.images || [] });
   }
   async function deleteProduct({ vendorId, productId }) {
     const prior = await products.findByIdAsync(productId);
