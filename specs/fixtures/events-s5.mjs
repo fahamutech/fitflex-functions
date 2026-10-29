@@ -11,6 +11,15 @@ import { ticketKeyRing, deriveToken, newTicketId, sha256hex, displayCodeOf, qrPa
 import { exchangeClientCredentials, resetApiAuthLimits } from '../../src/auth/organizer-api-auth.mjs';
 
 export { uid, phone, D, H, db, s4Off };
+
+/** For writes the code sends after the response without awaiting (notices, usage counters, rate-limited audits): read until
+ *  `until(value)` holds or ~5 s pass, and return the last read. A read-once assertion races those writes on a busy CI database. */
+export async function eventually(read, { until = v => (Array.isArray(v) ? v.length > 0 : Boolean(v)), timeoutMs = 5000, stepMs = 50 } = {}) {
+  const end = Date.now() + timeoutMs;
+  let v = await read();
+  while (!until(v) && Date.now() < end) { await new Promise(r => setTimeout(r, stepMs)); v = await read(); }
+  return v;
+}
 export const WEBHOOK_KEY = randomBytes(32).toString('base64');
 export const S5_ENV = ['EVENTS_KIT_OPS', 'EVENTS_ORGANIZER_API', 'EVENTS_WEBHOOKS', 'EVENTS_WEBHOOK_SECRET_KEY', 'EVENTS_WEBHOOK_SECRET_KEY_ID', 'EVENTS_WEBHOOK_SECRET_KEY_PREVIOUS',
   'EVENTS_API_ORGANIZER_ALLOWLIST', 'EVENTS_API_MAX_CLIENTS', 'EVENTS_API_DEFAULT_RATE', 'EVENTS_WEBHOOK_MAX_ENDPOINTS', 'EVENTS_WEBHOOK_MAX_ATTEMPTS', 'EVENTS_FEED_LAG_SECONDS', 'EVENTS_EXPORT_MAX_ROWS'];
