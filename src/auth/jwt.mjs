@@ -63,6 +63,7 @@ async function accountStatusOf(userId) {
     ? {
       status: found.status ?? null,
       validAfter: found.sessionsValidAfter ? +new Date(found.sessionsValidAfter) : null,
+      missing: found.missing === true,
       passwordChangeRequired: found.passwordChangeRequired === true,
       at: Date.now(),
     }
@@ -91,6 +92,11 @@ function authGuard(roles, { allowPasswordChange }) {
     const account = await accountStatusOf(claims.sub);
     if (account?.status === 'suspended') {
       return res.status(403).json({ error: 'account_suspended' });
+    }
+    // Fail closed (admin-portal audit S1): a portal staff token whose account no longer
+    // exists (deleted staff member) is over. Super-admin and other roles are unchanged.
+    if (account?.missing && claims.userType === 'admin' && claims.portalUser === true) {
+      return res.status(401).json({ error: 'session_ended' });
     }
     // Sessions issued before the person reset or changed their PIN (or an
     // admin changed their start password) are over.

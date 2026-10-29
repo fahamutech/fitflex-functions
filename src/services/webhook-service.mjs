@@ -1,3 +1,4 @@
+import { selcomStrictAmountOn } from '../shared/feature-flags.mjs';
 import { activationDates } from '../shared/subscription-status.mjs';
 
 // Payment-provider webhook handling — Selcom (idempotent on payment_id).
@@ -40,6 +41,12 @@ export function createWebhookService({
       const request = await openRequestFor(sub.id);
       // A mobile-money prompt is out for this request: that answer settles it, not this one.
       if (request?.provider === 'tunzaa' && request.reference) return { ok: true, ignored: 'tunzaa_in_flight' };
+      // Audit M3 (SELCOM_STRICT_AMOUNT): an activation needs the amount and a matching open
+      // request. Refused before claim(), so the payment_id stays free for a corrected delivery.
+      if (selcomStrictAmountOn() && sub.status === 'payment_pending') {
+        if (!request) return { error: 'no_open_request', status: 409 };
+        if (amount == null || amount === '' || !Number.isFinite(Number(amount))) return { error: 'amount_required', status: 409 };
+      }
       // The money received must be what was asked for this exact product.
       if (request && amount != null && Number(amount) !== Number(request.amountTzs)) {
         return { error: 'amount_mismatch', status: 409 };

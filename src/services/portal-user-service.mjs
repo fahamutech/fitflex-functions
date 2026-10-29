@@ -325,7 +325,15 @@ export function createPortalUserService({
       }
     }
 
+    // Admin-portal audit S1: a change of scopes, status or super-admin standing ends the
+    // person's existing sessions at the next request (the token's claims are otherwise
+    // trusted until it expires). Cut off at the start of the NEXT whole second, because
+    // token issue times are whole seconds; a fresh sign-in a moment later is valid.
+    if (scopesChange || statusChange || portalUserChange) {
+      patch.sessionsValidAfter = new Date((Math.floor(Date.now() / 1000) + 1) * 1000);
+    }
     const updated = await users.upsertAsync(u => u.id === target.id, { ...target, ...patch, updatedAt: new Date().toISOString() });
+    forgetSession(target.id);
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'portal_user_updated',
@@ -348,6 +356,8 @@ export function createPortalUserService({
     }
     await deleteFirebaseUserIfUnshared({ users, row: target, initFirebaseAdmin, getAdminAuth, logTag: 'portal-users' });
     await users.removeAsync(u => u.id === target.id);
+    // S1: the deleted account's token must stop working now (the status lookup reports it missing).
+    forgetSession(target.id);
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'portal_user_deleted',

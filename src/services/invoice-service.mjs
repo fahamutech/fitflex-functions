@@ -100,7 +100,10 @@ export function createInvoiceService({
     if (status === 'paid') {
       updates.status = 'paid';
       updates.paidAt = new Date().toISOString();
-      await gymPayouts.insertAsync({
+      // Audit M4: a payout row only on the transition to paid; a repeated paid update
+      // must not create a second one (and keeps the first paidAt).
+      if (inv.status === 'paid') delete updates.paidAt;
+      else await gymPayouts.insertAsync({
         id: randomUUID(),
         gymId: inv.gymId,
         invoiceId: inv.id,

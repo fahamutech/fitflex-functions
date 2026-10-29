@@ -216,7 +216,13 @@ function pinPepper() {
 // persona never suspends the Person (invariant 30).
 registerAccountStatusLookup(async id => {
   const user = await users.findByIdAsync(id);
-  if (!user) return null;
+  if (!user) {
+    // S1: a portal user who was DELETED (remove() audits portal_user_deleted) is reported missing,
+    // and requireAuth fails closed on it for portal staff tokens. An id with no row and no such
+    // record keeps the old pass-through (existing behaviour; such a token cannot be minted in production).
+    const deleted = await db('AuditLog').where({ action: 'portal_user_deleted', target: id }).first('id');
+    return deleted ? { status: null, missing: true } : null;
+  }
   if (user.accountStatus === 'suspended') return 'suspended';
   // Sessions issued before this are over: the later of the profile's own cut-off
   // (a portal admin changed their start password) and the Person's (I7a: a PIN

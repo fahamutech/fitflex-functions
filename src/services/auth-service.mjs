@@ -5,18 +5,37 @@ import { verifyPassword } from '../auth/password-credentials.mjs';
 import { buildDevIdentity, devMarketplaceProduct, DEV_GYM_ID, DEV_OWNER_GYM_ID } from '../shared/dev-login.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
-import { identityFlag, recordFirebaseEvidenceOn } from '../shared/feature-flags.mjs';
+import { identityFlag, recordFirebaseEvidenceOn, adminEmailsStrictOn } from '../shared/feature-flags.mjs';
 import { signInPhotoOrNull } from '../shared/media-src.mjs';
 
-const configuredAdminEmails = new Set(
-  (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
-    .split(',')
-    .map(email => email.trim().toLowerCase())
-    .filter(Boolean)
-);
+// Built-in fallback super-admin, used only when FITFLEX_ADMIN_EMAILS is unset (audit S4).
+const FALLBACK_ADMIN_EMAILS = 'mama27j@gmail.com';
+let fallbackWarned = false;
+
+/**
+ * The configured super-admin emails. Unset/blank FITFLEX_ADMIN_EMAILS falls back to the
+ * built-in address, with a one-time warning; with ADMIN_EMAILS_STRICT on in production it
+ * trusts nobody instead. `env`/`warn` are injectable for specs.
+ */
+export function resolveAdminEmails(env = process.env, warn = console.warn) {
+  const configured = String(env.FITFLEX_ADMIN_EMAILS ?? '').trim();
+  let raw = configured;
+  if (!configured) {
+    if (adminEmailsStrictOn(env) && env.NODE_ENV === 'production') return new Set();
+    raw = FALLBACK_ADMIN_EMAILS;
+    if (!fallbackWarned && env.NODE_ENV === 'production') {
+      fallbackWarned = true;
+      warn('[auth] FITFLEX_ADMIN_EMAILS is not set: the built-in fallback super-admin address is in use. Set it (then ADMIN_EMAILS_STRICT=on) to remove the fallback.');
+    }
+  }
+  return new Set(raw.split(',').map(email => email.trim().toLowerCase()).filter(Boolean));
+}
+
+/** Spec helper: allow the one-time warning to fire again. */
+export function _resetAdminEmailWarning() { fallbackWarned = false; }
 
 export function isConfiguredAdminEmail(email) {
-  return Boolean(email && configuredAdminEmails.has(String(email).toLowerCase()));
+  return Boolean(email && resolveAdminEmails().has(String(email).toLowerCase()));
 }
 
 export function normalizeRequestedRole(role) {

@@ -468,3 +468,26 @@ export function requireEventsPaymentIntake(req, res, next) {
 export function partnerDobRequiredOn() {
   return on('PARTNER_DOB_REQUIRED');
 }
+
+/**
+ * Admin-portal audit M3. Off unless SELCOM_STRICT_AMOUNT is set. On: a Selcom
+ * "success" callback activates a waiting subscription only when it carries an
+ * `amount` AND an open payment request exists AND the amount equals the request's.
+ * Otherwise it is refused (409 amount_required / no_open_request / amount_mismatch)
+ * before the payment_id is claimed, so a corrected redelivery still works.
+ * Off: the old rule (amount compared only when both sides are present).
+ */
+export function selcomStrictAmountOn() {
+  return on('SELCOM_STRICT_AMOUNT');
+}
+
+/**
+ * Admin-portal audit S4. Off unless ADMIN_EMAILS_STRICT is set. On, in production
+ * with FITFLEX_ADMIN_EMAILS unset or blank: no email is trusted as a configured
+ * super-admin (the built-in fallback address is not used). Off: the fallback
+ * stays in use and a one-time warning is logged. Set FITFLEX_ADMIN_EMAILS before
+ * switching this on, or nobody signs in as an env super-admin.
+ */
+export function adminEmailsStrictOn(env = process.env) {
+  return TRUE_VALUES.has(String(env.ADMIN_EMAILS_STRICT ?? '').trim().toLowerCase());
+}
