@@ -17,6 +17,7 @@ import { createSettlementConfigService } from '../services/settlement-config-ser
 import { createSettlementService } from '../services/settlement-service.mjs';
 import { createSettlementWorkflowService } from '../services/settlement-workflow-service.mjs';
 import { createPayoutEligibility } from '../services/payout-eligibility.mjs';
+import { createGymPayoutOwner } from '../services/gym-payout-owner.mjs';
 import { createSettlementViewService } from '../services/settlement-view-service.mjs';
 import { createSettlementClawbackService } from '../services/settlement-clawback-service.mjs';
 import { createCheckinStatusService } from '../services/checkin-status-service.mjs';
@@ -249,6 +250,8 @@ const { resolveRequestUser, publicUserId } = identityService;
 // A tier members still hold cannot be removed, renamed or switched off in Settings (409 tier_in_use).
 export const settingsService = createSettingsService({ platformSettings, auditLog, tierHolders: createTierHolders({ db }) });
 export const gymService = createGymService({ gyms, users, checkins, auditLog });
+// Who is paid for a gym shared by several owners (GYM_PAYOUT_OWNER, dormant by default).
+export const gymPayoutOwner = createGymPayoutOwner({ users, gyms, auditLog });
 // Tells gym owners, staff and vendors what happens at their gym or shop (inbox + push).
 export const partnerNotifier = createPartnerNotifier({
   usernames: { handleOf: userId => usernameService.handleOf(userId) }, users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
@@ -669,7 +672,7 @@ export const operatorService = createOperatorService({
   gymOpenToPass,
 });
 
-export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate });
+export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate, gymPayoutOwner });
 export const ownerStaffService = createOwnerStaffService({ users, auditLog, initFirebaseAdmin, getAdminAuth });
 
 export const adminMemberService = createAdminMemberService({
@@ -738,13 +741,13 @@ export const mobileMoneyService = createMobileMoneyService({
   },
 });
 export const adminOwnerService = createAdminOwnerService({
-  users, gyms, checkins, auditLog, gymService,
+  users, gyms, checkins, auditLog, gymService, gymPayoutOwner,
   onOwnerRemoved: prior => forgetPersonDetails(db, { personId: prior?.personId || null }),
 });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
 // Gym settlement workflow (settlement Phase 4): submit, approve, hold, pay.
-export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts, trainers });
+export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts, trainers, payoutOwner: gymPayoutOwner });
 // Trainer payouts: a weekly statement per trainer on the same path as a gym statement.
 export const trainerSettlementService = createTrainerSettlementService({
   trainers, users, payoutEligibility,
@@ -759,12 +762,12 @@ export const vendorSettlementService = createVendorSettlementService({
 export const settlementWorkflowService = createSettlementWorkflowService({
   payoutEligibility, onStep: (statement, action) => partnerNotifier.gymStatement(statement, action),
 });
-export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId });
+export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId, gymPayoutOwner });
 // Recalculates a settled member cycle when one of its check-ins is voided and
 // raises each gym's difference as an adjustment (settlement Phase 6).
 export const settlementClawbackService = createSettlementClawbackService({ configService: settlementConfigService, workflow: settlementWorkflowService });
 export const invoiceService = createInvoiceService({
-  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
+  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts, gymPayoutOwner,
 });
 // Replaceable, so specs can stand in for the Firebase admin SDK.
 export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth };
