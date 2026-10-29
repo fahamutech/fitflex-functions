@@ -14,6 +14,8 @@ import { randomUUID } from 'node:crypto';
 import { ensureInit } from '../functions/index.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { b2bService, corporateService, b2bMemberRequestService as requests, b2bBeneficiaryImportService as invites } from '../src/bootstrap/services.mjs';
+import { createB2BBeneficiaryImportService } from '../src/services/b2b-beneficiary-import-service.mjs';
+import { createB2BMemberRequestService } from '../src/services/b2b-member-request-service.mjs';
 import { enrollB2BBeneficiary, addB2BOrganizationUser, cancelB2BMemberRequest, listB2BBeneficiaries } from '../functions/b2b.mjs';
 import { corporateLinkStaffUser, corporateListStaff } from '../functions/corporate.mjs';
 import { sign } from '../src/auth/jwt.mjs';
@@ -61,7 +63,8 @@ async function company(seatLimit = 10) {
 }
 const staffRow = async (corporateId, name) => (await corporateService.provisionStaff({ corporateId, body: { displayName: name }, actorId: ADMIN.userId })).employee;
 
-const told = (userId, type = 'b2b_member_request') => db('Notification').where({ userId, type }).orderBy('createdAt');
+// The member is told after the reply (security review of #283); wait for that first.
+const told = async (userId, type = 'b2b_member_request') => { await requests.idle(); return db('Notification').where({ userId, type }).orderBy('createdAt'); };
 const dataOf = n => (typeof n.data === 'string' ? JSON.parse(n.data) : n.data);
 const rowsOf = orgId => db('B2BMemberRequest').where({ organizationId: orgId }).orderBy('createdAt');
 
@@ -94,6 +97,7 @@ after(async () => {
   const orgIds = [...made.orgs, ...(made.corporates.length ? await db('B2BOrganization').whereIn('legacyCorporateId', made.corporates).pluck('id') : [])];
   await db('B2BMemberRequest').whereIn('organizationId', orgIds).del();
   if (made.corporates.length) await db('B2BMemberRequest').whereIn('corporateId', made.corporates).del();
+  await db('B2BBeneficiaryInviteMatch').whereIn('organizationId', orgIds).del();
   await db('B2BMemberRequest').whereIn('userId', made.users).del();
   await db('Notification').whereIn('userId', made.users).del();
   await db('B2BBeneficiaryInvite').whereIn('organizationId', orgIds).del();
@@ -371,58 +375,155 @@ test('FitFlex platform admins still add and link directly by email or number, an
   assert.equal(await db('B2BMemberRequest').where({ userId: linkMember }).first(), undefined);
 });
 
-test('invites: cancelling an invite withdraws its request; a decline stops the reminders but the invite still shows invited; "send again" asks once more after the cooldown', async () => {
+/** An import service on a clock the test moves, with what it delivered kept. */
+function inviteHarness() {
+  const clock = { now: new Date() };
+  const sent = { email: [], sms: [] };
+  const reqs = createB2BMemberRequestService({ db, b2bService, corporateService, now: () => clock.now });
+  const svc = createB2BBeneficiaryImportService({
+    db, b2bService, memberRequests: reqs, now: () => clock.now, appLink: () => null, smsEnabled: () => true,
+    emailSender: () => ({ configured: true, send: async (to, m) => { sent.email.push({ to, ...m }); return { ok: true }; } }),
+    smsSender: () => ({ configured: true, send: async (to, m) => { sent.sms.push({ to, ...m }); return { ok: true }; } }),
+  });
+  return { svc, reqs, sent, clock, days: n => { clock.now = new Date(+clock.now + n * 86_400_000); } };
+}
+/** An invite as the organisation sees it, without what is per row (id, the contact, the name). */
+const inviteShape = i => { const c = { ...i }; for (const k of ['id', 'email', 'phone', 'displayName']) delete c[k]; return c; };
+
+test('invites: the organisation\'s invite list is identical for a member, a non-member and someone already on the list, before and after matching, a decline and every reminder', async () => {
   const org = await organisation('Invite co');
   const access = await adminAccess(org.id);
-  const a = await user('member', { email: mail('inv-a') });
-  const b = await user('member', { email: mail('inv-b') });
-  await invites.importPeople({ access, actorId: ADMIN.userId, body: { rows: [{ email: mail('inv-a') }, { email: mail('inv-b') }] } });
-  const reqA = await db('B2BMemberRequest').where({ organizationId: org.id, userId: a }).first();
-  const reqB = await db('B2BMemberRequest').where({ organizationId: org.id, userId: b }).first();
-  assert.deepEqual([reqA.source, reqA.status, reqB.status], ['invite', 'pending', 'pending']);
-  // Never listed to the organisation as a request, and not withdrawable as one.
-  assert.deepEqual(await requests.pendingForOrganization({ organizationId: org.id, kind: 'beneficiary' }), []);
-  assert.equal((await requests.cancel({ access, requestId: reqA.id, actorId: ADMIN.userId })).error, 'member_request_not_found');
+  const h = inviteHarness();
+  const member = await user('member', { email: mail('inv-member') });
+  const onList = await user('member', { email: mail('inv-onlist') });
+  await b2bService.enrollBeneficiary({ access, actorId: ADMIN.userId, body: { userId: onList, status: 'active' } });
+  const imported = await h.svc.importPeople({ access, actorId: ADMIN.userId, body: { rows: [{ email: mail('inv-member') }, { email: mail('inv-nobody') }, { email: mail('inv-onlist') }] } });
+  assert.deepEqual([imported.enrolled, imported.invited, imported.unchanged], [0, 3, 0]);
+  // The import itself asks nobody (matching is the job's).
+  assert.equal((await rowsOf(org.id)).length, 0);
+  const snapshot = async () => {
+    const { items } = await h.svc.listInvites({ access });
+    const by = Object.fromEntries(items.map(i => [i.email, inviteShape(i)]));
+    return [by[mail('inv-member')], by[mail('inv-nobody')], by[mail('inv-onlist')]];
+  };
+  const same = async label => { const [m, n, o] = await snapshot(); assert.deepEqual(m, n, label); assert.deepEqual(o, n, label); };
+  await same('after import');
 
-  const inviteA = await db('B2BBeneficiaryInvite').where({ organizationId: org.id, email: mail('inv-a') }).first();
-  await invites.cancelInvite({ access, inviteId: inviteA.id, actorId: ADMIN.userId });
-  assert.equal((await db('B2BMemberRequest').where({ id: reqA.id }).first()).status, 'cancelled');
-  assert.deepEqual((await requests.listForMember({ userId: a })).items, []);
+  await h.svc.sendDue({ limit: 1000 });
+  const stats = await h.svc.matchInvites();
+  assert.ok(stats.asked >= 1 && stats.alreadyOnList >= 1, JSON.stringify(stats));
+  const asked = await rowsOf(org.id);
+  assert.deepEqual(asked.map(r => [r.userId, r.source]), [[member, 'invite']]);
+  await same('after matching');
+  // Nothing about the match is on the invite row.
+  const raw = await db('B2BBeneficiaryInvite').where({ organizationId: org.id });
+  assert.ok(raw.every(r => !('memberRequestId' in r)));
+  assert.equal((await db('B2BBeneficiaryInviteMatch').where({ organizationId: org.id })).length, 2);
 
-  await requests.decline({ userId: b, requestId: reqB.id });
-  const inviteB = await db('B2BBeneficiaryInvite').where({ organizationId: org.id, email: mail('inv-b') }).first();
-  assert.deepEqual([inviteB.status, inviteB.nextEmailAt, inviteB.memberRequestId], ['invited', null, reqB.id]);
-  // Matching does not ask again by itself.
-  await invites.matchInvites({ userId: b });
-  assert.equal((await db('B2BMemberRequest').where({ organizationId: org.id, userId: b })).length, 1);
-  // "Send again" frees the invite; with the cooldown still running nobody is asked; once it is over, one new request.
-  await invites.resendInvite({ access, inviteId: inviteB.id, actorId: ADMIN.userId });
-  await invites.matchInvites({ userId: b });
-  assert.equal((await db('B2BMemberRequest').where({ organizationId: org.id, userId: b })).length, 1);
-  await withEnv({ B2B_MEMBER_REQUEST_COOLDOWN_DAYS: '0' }, async () => {
-    await db('B2BBeneficiaryInvite').where({ id: inviteB.id }).update({ memberRequestId: null });
-    await invites.matchInvites({ userId: b });
-  });
-  const reasked = await db('B2BMemberRequest').where({ organizationId: org.id, userId: b, status: 'pending' }).first();
-  assert.equal(reasked.inviteId, inviteB.id);
-  await requests.accept({ userId: b, requestId: reasked.id });
-  assert.equal((await db('B2BBeneficiaryInvite').where({ id: inviteB.id }).first()).status, 'enrolled');
+  // The member declines: the invite row does not change.
+  await h.reqs.decline({ userId: member, requestId: asked[0].id });
+  await same('after the decline');
+  // Reminders: the schedule and counters move the same for all three; nothing reaches the member who said no, or the one already on the list.
+  for (const d of [3.1, 7.1, 30]) { h.days(d); await h.svc.sendDue({ limit: 1000 }); await same(`after reminders (+${d} days)`); }
+  const delivered = to => h.sent.email.filter(e => e.to === to).length;
+  assert.deepEqual([delivered(mail('inv-nobody')), delivered(mail('inv-member')), delivered(mail('inv-onlist'))], [3, 1, 1]);
+  const [m] = await snapshot();
+  assert.deepEqual([m.status, m.emailsSent, m.nextEmailAt, m.canResend], ['invited', 3, null, true]);
+  // "Send again" also answers the same and delivers nothing to the member who declined.
+  const r1 = await h.svc.resendInvite({ access, inviteId: raw.find(i => i.email === mail('inv-member')).id, actorId: ADMIN.userId });
+  const r2 = await h.svc.resendInvite({ access, inviteId: raw.find(i => i.email === mail('inv-nobody')).id, actorId: ADMIN.userId });
+  const r3 = await h.svc.resendInvite({ access, inviteId: raw.find(i => i.email === mail('inv-onlist')).id, actorId: ADMIN.userId });
+  assert.deepEqual([r1.sent, inviteShape(r1.invite)], [r2.sent, inviteShape(r2.invite)]);
+  assert.deepEqual([r3.sent, inviteShape(r3.invite)], [r2.sent, inviteShape(r2.invite)]);
+  assert.deepEqual([delivered(mail('inv-nobody')), delivered(mail('inv-member')), delivered(mail('inv-onlist'))], [4, 1, 1]);
+  await same('after send again');
+  // Matching never asks again for the same invite.
+  await h.svc.matchInvites();
+  assert.equal((await rowsOf(org.id)).length, 1);
 });
 
-test('two invites for one member (email and number) make one request; accepting it closes both', async () => {
-  const org = await organisation('Two invites');
+test('invites: cancelling an invite withdraws its request; accepting closes it as enrolled; two invites for one member make one request and both close', async () => {
+  const org = await organisation('Invite co 2');
   const access = await adminAccess(org.id);
+  const h = inviteHarness();
+  const a = await user('member', { email: mail('inv-a') });
   const p = phone();
-  const member = await user('member', { email: mail('two'), phone: p });
-  await invites.importPeople({ access, actorId: ADMIN.userId, body: { rows: [{ email: mail('two') }, { phone: p }] } });
-  const rows = await db('B2BMemberRequest').where({ organizationId: org.id, userId: member });
-  assert.equal(rows.length, 1);
-  assert.equal((await told(member)).length, 1);
-  const inv = await db('B2BBeneficiaryInvite').where({ organizationId: org.id }).orderBy('email');
-  assert.ok(inv.every(i => i.memberRequestId === rows[0].id), JSON.stringify(inv.map(i => i.memberRequestId)));
-  await requests.accept({ userId: member, requestId: rows[0].id });
-  assert.deepEqual((await db('B2BBeneficiaryInvite').where({ organizationId: org.id })).map(i => i.status), ['enrolled', 'enrolled']);
-  assert.equal((await db('B2BBeneficiary').where({ organizationId: org.id, userId: member })).length, 1);
+  const b = await user('member', { email: mail('inv-b'), phone: p });
+  await h.svc.importPeople({ access, actorId: ADMIN.userId, body: { rows: [{ email: mail('inv-a') }, { email: mail('inv-b') }, { phone: p }] } });
+  await h.svc.matchInvites();
+  const reqA = await db('B2BMemberRequest').where({ organizationId: org.id, userId: a }).first();
+  const reqsB = await db('B2BMemberRequest').where({ organizationId: org.id, userId: b });
+  assert.deepEqual([reqA.source, reqA.status, reqsB.length], ['invite', 'pending', 1]);
+  // Never listed to the organisation as a request, and not withdrawable as one.
+  assert.deepEqual(await h.reqs.pendingForOrganization({ organizationId: org.id, kind: 'beneficiary' }), []);
+  assert.equal((await h.reqs.cancel({ access, requestId: reqA.id, actorId: ADMIN.userId })).error, 'member_request_not_found');
+
+  const inviteA = await db('B2BBeneficiaryInvite').where({ organizationId: org.id, email: mail('inv-a') }).first();
+  await h.svc.cancelInvite({ access, inviteId: inviteA.id, actorId: ADMIN.userId });
+  assert.equal((await db('B2BMemberRequest').where({ id: reqA.id }).first()).status, 'cancelled');
+  assert.deepEqual((await h.reqs.listForMember({ userId: a })).items, []);
+
+  await h.reqs.accept({ userId: b, requestId: reqsB[0].id });
+  assert.deepEqual((await db('B2BBeneficiaryInvite').where({ organizationId: org.id }).whereNot({ id: inviteA.id })).map(i => i.status), ['enrolled', 'enrolled']);
+  assert.equal((await db('B2BBeneficiary').where({ organizationId: org.id, userId: b })).length, 1);
+});
+
+test('withdrawing a request by contact answers the same whatever the member did: the first time, again, and after expiry', async () => {
+  const org = await organisation();
+  const manager = await orgUser(org.id, 'manager');
+  const claims = { sub: manager, userType: 'member' };
+  const access = await as(org.id, manager);
+  const member = await user('member', { email: mail('del-member') });
+  const del = id => call(cancelB2BMemberRequest, { claims, params: { id: org.id, requestId: id } });
+  const view = r => ({ statusCode: r.statusCode, error: r.body.error ?? null, requestStatus: r.body.requestStatus ?? null, status: r.body.memberRequest?.status ?? null, reason: r.body.memberRequest?.reason ?? null, decided: Boolean(r.body.memberRequest?.decidedAt) });
+
+  // Declined vs nobody.
+  const m1 = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { email: mail('del-member') } });
+  const n1 = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { email: mail('del-nobody') } });
+  await requests.decline({ userId: member, requestId: m1.memberRequest.id });
+  assert.deepEqual(view(await del(m1.memberRequest.id)), view(await del(n1.memberRequest.id)));
+  const again = [await del(m1.memberRequest.id), await del(n1.memberRequest.id)];
+  assert.deepEqual(view(again[0]), view(again[1]));
+  assert.deepEqual([again[0].statusCode, again[0].body.requestStatus], [409, 'cancelled']);
+  // Also after the expiry date has passed.
+  await db('B2BMemberRequest').whereIn('id', [m1.memberRequest.id, n1.memberRequest.id]).update({ expiresAt: new Date(Date.now() - 1000) });
+  assert.deepEqual(view(await del(m1.memberRequest.id)), view(await del(n1.memberRequest.id)));
+
+  // Declined and left to expire vs nobody left to expire (before and after the expiry job).
+  const n2 = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { email: mail('del-nobody2') } });
+  const member3 = await user('member', { email: mail('del-member3') });
+  const m3 = await b2bService.enrollBeneficiary({ access, actorId: manager, body: { email: mail('del-member3') } });
+  await requests.decline({ userId: member3, requestId: m3.memberRequest.id });
+  await db('B2BMemberRequest').whereIn('id', [m3.memberRequest.id, n2.memberRequest.id]).update({ expiresAt: new Date(Date.now() - 1000) });
+  const before = [view(await del(m3.memberRequest.id)), view(await del(n2.memberRequest.id))];
+  assert.deepEqual(before[0], before[1]);
+  assert.deepEqual([before[0].statusCode, before[0].requestStatus], [409, 'expired']);
+  await requests.expireDue({ ids: [n2.memberRequest.id] });
+  assert.deepEqual(view(await del(m3.memberRequest.id)), view(await del(n2.memberRequest.id)));
+  const listed = await requests.pendingForOrganization({ organizationId: org.id, kind: 'beneficiary' });
+  assert.ok(!listed.some(r => [m3.memberRequest.id, n2.memberRequest.id].includes(r.id)));
+});
+
+test('limits and retention: an hourly cap per organisation (all its users), and the typed contact is cleared 30 days after a request closes', async () => {
+  const org = await organisation();
+  const [u1, u2] = [await orgUser(org.id, 'manager'), await orgUser(org.id, 'manager')];
+  await user('member', { email: mail('orgrate-member') });
+  await withEnv({ B2B_MEMBER_REQUEST_ORG_RATE_PER_HOUR: '2' }, async () => {
+    assert.equal((await b2bService.enrollBeneficiary({ access: await as(org.id, u1), actorId: u1, body: { email: mail('orgrate1') } })).outcome, 'pending_member_acceptance');
+    assert.equal((await b2bService.enrollBeneficiary({ access: await as(org.id, u2), actorId: u2, body: { email: mail('orgrate2') } })).outcome, 'pending_member_acceptance');
+    const member = await b2bService.enrollBeneficiary({ access: await as(org.id, u1), actorId: u1, body: { email: mail('orgrate-member') } });
+    const nobody = await b2bService.enrollBeneficiary({ access: await as(org.id, u2), actorId: u2, body: { email: mail('orgrate3') } });
+    assert.deepEqual([member.error, member.status, member.scope, nobody.error, nobody.status, nobody.scope], ['rate_limited', 429, 'organization', 'rate_limited', 429, 'organization']);
+  });
+
+  const rows = await rowsOf(org.id);
+  const old = new Date(Date.now() - 31 * 86_400_000);
+  await db('B2BMemberRequest').where({ id: rows[0].id }).update({ status: 'expired', expiresAt: old, decidedAt: old });
+  await db('B2BMemberRequest').where({ id: rows[1].id }).update({ status: 'cancelled', reason: 'cancelled_by_organization', expiresAt: new Date(Date.now() - 5 * 86_400_000), decidedAt: new Date(Date.now() - 5 * 86_400_000) });
+  const out = await requests.purgeContacts();
+  assert.ok(out.cleared >= 1);
+  const after2 = Object.fromEntries((await rowsOf(org.id)).map(r => [r.id, r.contactValue]));
+  assert.deepEqual([after2[rows[0].id], after2[rows[1].id]], [null, mail('orgrate2')]);
 });
 
 test('a staff record whose member declined looks like one nobody answered: another link attempt gets the same 409 until it would have expired; unlinking clears it', async () => {

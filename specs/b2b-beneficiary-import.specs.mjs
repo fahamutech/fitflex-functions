@@ -116,6 +116,7 @@ after(async () => {
     await db('CorporateAccount').whereIn('id', made.corporates).del();
   }
   if (orgIds.length) await db('B2BMemberRequest').whereIn('organizationId', orgIds).del();
+  if (orgIds.length) await db('B2BBeneficiaryInviteMatch').whereIn('organizationId', orgIds).del();
   await db('AuditLog').whereIn('actor', [...made.users, 'system:b2b-beneficiary-invites']).del();
   const persons = await purgeIdentity(db, made.users);
   await db('User').whereIn('id', made.users).del();
@@ -176,14 +177,17 @@ test('import: nobody is enrolled and nobody is looked up; everyone new is invite
   // The same counts whoever has an account (an import by a FitFlex admin too).
   assert.deepEqual([done.total, done.enrolled, done.invited, done.unchanged, done.rejected], [9, 0, 6, 0, 3]);
   assert.deepEqual(done.problems.map(p => [p.line, p.problem]), [[8, 'email_or_phone_required'], [9, 'invalid_email'], [10, 'listed_twice']]);
-  // Nobody was enrolled by the import.
+  // Nobody was enrolled, and nobody asked, by the import itself (matching is the job's).
   assert.deepEqual((await peopleOf(orgId)).map(b => b.userId), [already]);
+  assert.equal((await requestsOf(orgId)).length, 0);
+  await h.svc.matchInvites();
   const invites = await invitesOf(orgId);
+  // Every invite, member or not, already on the list or not, stays exactly as imported.
   assert.deepEqual(invites.map(i => [i.displayName, i.email, !!i.phone, i.groupName, i.externalReference, !!i.nextEmailAt, !!i.nextSmsAt]).sort((x, y) => x[0].localeCompare(y[0])),
     [['Asha Mollel', mail('asha'), false, 'Finance', 'EMP-1', true, false], ['Baraka Juma', null, true, 'Ops', 'EMP-2', false, true], ['Coach', mail('trainer'), false, 'Ops', null, true, false],
-      ['Juma Omari', null, true, 'Ops', null, false, true], ['Neema Said', mail('neema'), false, 'Finance', 'EMP-3', true, false]]);
-  // Someone already on the list (they accepted before) just closes; the members behind verified contacts were asked (matching ran straight after the import).
-  assert.deepEqual((await invitesOf(orgId, 'enrolled')).map(i => i.email), [mail('onlist')]);
+      ['Juma Omari', null, true, 'Ops', null, false, true], ['Neema Said', mail('neema'), false, 'Finance', 'EMP-3', true, false], ['On List', mail('onlist'), false, 'Ops', null, true, false]]);
+  assert.equal(new Set(invites.map(i => +new Date(i.updatedAt))).size, 1, 'no invite row was written by matching');
+  // The members behind verified contacts were asked; the one already on the list was not.
   const asked = await requestsOf(orgId);
   assert.deepEqual(asked.map(r => [r.source, r.status, r.kind, r.requestedByType]), [['invite', 'pending', 'beneficiary', 'system'], ['invite', 'pending', 'beneficiary', 'system']]);
   assert.deepEqual(h.sent.inbox.map(m => m.type), ['b2b_member_request', 'b2b_member_request']);
@@ -199,13 +203,14 @@ test('import: nobody is enrolled and nobody is looked up; everyone new is invite
   const asha = (await db('User').where({ email: mail('asha') }).first('id')).id;
   await h.accept(asha, orgId);
   assert.deepEqual((await peopleOf(orgId)).filter(b => b.userId === asha).map(b => [b.displayName, b.groupName, b.externalReference, b.beneficiaryType, b.status]), [['Asha Mollel', 'Finance', 'EMP-1', 'employee', 'active']]);
-  assert.deepEqual((await invitesOf(orgId, 'enrolled')).map(i => i.email).sort(), [mail('asha'), mail('onlist')].sort());
+  assert.deepEqual((await invitesOf(orgId, 'enrolled')).map(i => i.email), [mail('asha')]);
 
-  // The same file again: everyone still invited is left alone (changed details on an invite are taken); those
-  // already on the list get a fresh invite that closes at once (accounts are not looked up at import).
+  // The same file again: everyone still invited is left alone (changed details on an invite are taken);
+  // Asha (accepted, invite closed) gets a fresh invite (accounts are not looked up at import).
   const again = await h.svc.importPeople({ access: a, body: { rawText: rawText.replace('Neema Said', 'Neema S. Said').replace(`${mail('neema')},,Finance`, `${mail('neema')},,Sales`) }, actorId: OPERATOR });
-  assert.deepEqual([again.enrolled, again.invited, again.unchanged, again.rejected], [0, 2, 4, 3]);
-  assert.deepEqual([(await peopleOf(orgId)).length, (await invitesOf(orgId)).length, (await requestsOf(orgId)).length], [2, 4, 2]);
+  assert.deepEqual([again.enrolled, again.invited, again.unchanged, again.rejected], [0, 1, 5, 3]);
+  await h.svc.matchInvites();
+  assert.deepEqual([(await peopleOf(orgId)).length, (await invitesOf(orgId)).length, (await requestsOf(orgId)).length], [2, 6, 2]);
   assert.deepEqual((await invitesOf(orgId)).filter(i => i.email === mail('neema')).map(i => [i.displayName, i.groupName]), [['Neema S. Said', 'Sales']]);
   // Two uploads at the same moment do not double anyone either.
   const fresh = `x,${mail('race')}`;
@@ -270,13 +275,13 @@ test('an invited person is asked when they join, once per invite, and enrolled w
   await Promise.all([h.svc.matchInvites(), h.svc.matchInvites({ userId: neema })]);
   assert.deepEqual([(await peopleOf(orgA)).length, (await peopleOf(orgB)).length, h.sent.inbox.filter(m => m.userId === neema).length], [2, 1, 2]);
 
-  // Added by hand in the meantime: the invite closes without a second row.
+  // Added by hand in the meantime: no second row, nobody asked, and the invite is left as it is (no messages reach them).
   const late = await user({ email: mail('late') });
   await h.svc.importPeople({ access: await access(orgA), body: { rows: [{ email: mail('late2') }] }, actorId: OPERATOR });
   await db('B2BBeneficiaryInvite').where({ organizationId: orgA, email: mail('late2') }).update({ email: mail('late') });
   await b2bService.enrollBeneficiary({ access: await access(orgA), body: { userId: late, status: 'active' }, actorId: OPERATOR });
   await h.svc.matchInvites({ userId: late });
-  assert.deepEqual([(await peopleOf(orgA)).filter(b => b.userId === late).length, (await db('B2BBeneficiaryInvite').where({ organizationId: orgA, email: mail('late') }).first()).status], [1, 'enrolled']);
+  assert.deepEqual([(await peopleOf(orgA)).filter(b => b.userId === late).length, (await db('B2BBeneficiaryInvite').where({ organizationId: orgA, email: mail('late') }).first()).status, (await requestsOf(orgA)).filter(r => r.userId === late).length], [1, 'invited', 0]);
 
   // Cancelled: joining later does not enrol.
   const orgC = await sponsor('C');
@@ -292,6 +297,7 @@ test('an invited person is asked when they join, once per invite, and enrolled w
   // And can be invited afresh: the same reply as for anyone, and the member is asked.
   const fresh = await h.svc.importPeople({ access: ac, body: { rows: [{ email: mail('cancelled') }] }, actorId: OPERATOR });
   assert.deepEqual([fresh.enrolled, fresh.invited], [0, 1]);
+  await h.svc.matchInvites({ userId: gone });
   assert.deepEqual((await requestsOf(orgC)).map(r => [r.userId, r.status]), [[gone, 'pending']]);
 });
 

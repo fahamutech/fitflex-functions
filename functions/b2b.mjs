@@ -294,7 +294,7 @@ export const declineMyB2BMemberRequest = {
 
 export const cancelB2BMemberRequest = {
   created, method: 'delete', path: '/b2b/organizations/:id/member-requests/:requestId',
-  description: 'Withdraw a request to add someone (by user id or by email/phone) that shows as waiting (beneficiaries.manage for a beneficiary, users.manage for an organisation user). 200 { memberRequest } with status cancelled; 409 member_request_not_pending once it has been answered or has expired (a request by contact shows as waiting until it expires, whatever the member did). Requests made from invites are withdrawn by cancelling the invite.',
+  description: 'Withdraw a request to add someone (by user id or by email/phone) that shows as waiting (beneficiaries.manage for a beneficiary, users.manage for an organisation user). 200 { memberRequest } with status cancelled; 409 member_request_not_pending once it has been answered or has expired. A request by contact only ever shows the organisation waiting / expired / cancelled / accepted: whatever the member did otherwise, it answers as for a contact nobody was behind (a second DELETE: 409 { requestStatus: "cancelled" }; after expiry: "expired"). Requests made from invites are withdrawn by cancelling the invite.',
   onGuard: routeGuard('delete', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bMemberRequestService.cancel({
     access, requestId: req.params.requestId, actorId: req.user.sub,

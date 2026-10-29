@@ -602,6 +602,19 @@ Admin Imported,${email5}` } });
     const [req5] = await db('B2BMemberRequest').where({ employeeId: row5.id });
     assert.deepEqual([req5.userId, req5.status, req5.source, req5.requestedByType], [m5, 'pending', 'contact', 'admin']);
     assert.equal((await b2bMemberRequestService.accept({ userId: m5, requestId: req5.id })).employee?.userId, m5);
+
+    // Review finding 7: a request a FitFlex admin made is carried out only while they are still an active admin (with the b2b scope).
+    const formerAdmin = { sub: await account('admin'), userType: 'admin' };
+    const email6 = `${uid('imp')}@hr2org.example.com`;
+    const m6 = await account('member', { email: email6 });
+    await verifyContacts(db, m6, { email: email6 });
+    assert.equal((await call(importB2BBeneficiaries, { claims: formerAdmin, params: P, body: { rawText: `name,email\nFormer Admin Import,${email6}` } })).statusCode, 200);
+    const row6 = await db('CorporateEmployee').where({ corporateId, displayName: 'Former Admin Import' }).first();
+    const [req6] = await db('B2BMemberRequest').where({ employeeId: row6.id });
+    await db('User').where({ id: formerAdmin.sub }).update({ portalUser: true, aclPermissions: ['finance'] });
+    const refused = await b2bMemberRequestService.accept({ userId: m6, requestId: req6.id });
+    assert.deepEqual([refused.error, refused.reason], ['request_no_longer_valid', 'requester_not_admin']);
+    assert.equal((await db('CorporateEmployee').where({ id: row6.id }).first()).userId, null);
   });
 });
 

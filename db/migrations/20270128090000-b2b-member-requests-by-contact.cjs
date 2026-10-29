@@ -17,11 +17,15 @@
 //   adds by contact are one open request per contact, invite matches one per
 //   invite.
 //
-//   B2BBeneficiaryInvite.memberRequestId  the request a match made (never
-//                   shown to the organisation).
+//   B2BBeneficiaryInviteMatch  which request answers which invite, or that
+//                   the person is already on the list (one row per invite,
+//                   written when matching first finds a member behind it). Kept OUT of B2BBeneficiaryInvite so
+//                   the invite row an organisation sees never changes when a
+//                   member is found behind it (security review of #283).
 //
-// Additive. Down drops the new columns and indexes, deletes the rows that have
-// no member (they never reached anyone) and restores NOT NULL and the old index.
+// Additive. Down drops the new table, columns and indexes, deletes the rows
+// that have no member (they never reached anyone) and restores NOT NULL and the
+// old index.
 
 /** @param {import('knex').Knex} knex */
 exports.up = async function up(knex) {
@@ -42,16 +46,21 @@ exports.up = async function up(knex) {
     await knex.raw(`CREATE UNIQUE INDEX b2b_member_request_invite_uq ON "B2BMemberRequest" ("inviteId") WHERE "status" = 'pending' AND "source" = 'invite'`);
     await knex.raw('CREATE INDEX b2b_member_request_contact_idx ON "B2BMemberRequest" ("scopeId", "kind", "contactType", "contactValue")');
   }
-  if (!(await knex.schema.hasColumn('B2BBeneficiaryInvite', 'memberRequestId'))) {
-    await knex.schema.alterTable('B2BBeneficiaryInvite', (t) => { t.text('memberRequestId'); });
+  if (!(await knex.schema.hasTable('B2BBeneficiaryInviteMatch'))) {
+    await knex.schema.createTable('B2BBeneficiaryInviteMatch', (t) => {
+      t.text('inviteId').primary();
+      t.text('organizationId').notNullable();
+      t.text('memberRequestId');                 // the request that answers this invite
+      t.text('beneficiaryId');                   // or: the person was already on the list
+      t.timestamp('createdAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
+      t.index(['memberRequestId']);
+    });
   }
 };
 
 /** @param {import('knex').Knex} knex */
 exports.down = async function down(knex) {
-  if (await knex.schema.hasColumn('B2BBeneficiaryInvite', 'memberRequestId')) {
-    await knex.schema.alterTable('B2BBeneficiaryInvite', (t) => { t.dropColumn('memberRequestId'); });
-  }
+  await knex.schema.dropTableIfExists('B2BBeneficiaryInviteMatch');
   if (await knex.schema.hasColumn('B2BMemberRequest', 'source')) {
     await knex.raw('DROP INDEX IF EXISTS b2b_member_request_contact_idx');
     await knex.raw('DROP INDEX IF EXISTS b2b_member_request_invite_uq');

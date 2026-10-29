@@ -253,16 +253,19 @@ the portal should ask for a mobile number as well.
 An invite waits for a **member** whose person has **verified** its email or
 number (a `LoginIdentifier` row with `verifiedAt`; see
 `src/shared/verified-contacts.mjs`). Matching
-runs every 10 minutes, straight after an import, and at once when a member
-opens their benefits. Since consent slice (a) (29 Oct 2026) the person is
+runs every 10 minutes and at once when a member opens their benefits (not
+during the import). Since consent slice (a) (29 Oct 2026) the person is
 **asked** in the app (a `B2BMemberRequest`, source `invite`, one per invite)
 and enrolled only if they accept, as active with the group, reference and type
 the organisation listed; the invite then closes as enrolled. Until then the
-organisation sees the invite as invited, whatever the member does. Imports
-no longer look accounts up or enrol anyone. "Already on the list" closes the
-invite without a second row. A cancelled invite asks nobody (and withdraws
-its request); a decline stops its reminders; "send again" lets matching ask
-once more after the 30-day cooldown. See B2B_FOUNDATION.md §5.
+organisation sees the invite as invited, whatever the member does, and
+matching never writes to the invite row (`B2BBeneficiaryInviteMatch` holds
+the link). Imports no longer look accounts up or enrol anyone. Someone
+already on the list is not asked again and their invite stays as it is. A
+cancelled invite asks nobody (and withdraws its request). After a decline,
+or for someone already on the list, messages are recorded as sent on
+schedule but not delivered, so the invite looks like anyone else's. The same
+invite is never asked twice. See B2B_FOUNDATION.md §5.
 
 Matching never uses `User.email` / `User.phone`: anyone can type a
 colleague's email or number into their own profile. Since 20 Oct 2026
@@ -282,7 +285,7 @@ them (read only, counts only).
 | Email | within 10 minutes of the import | 3 and 10 days after | 6 |
 | SMS | within 10 minutes of the import | 3 days after | 3 |
 
-Then no more. None after the person accepts, declines in the app, or the invite is cancelled. Each
+Then no more. None after the person accepts or the invite is cancelled; after a decline they are recorded but not delivered. Each
 message is claimed before it is sent, so overlapping runs send one. Three
 failures in a row stop that channel for that invite. "Send again" starts it
 over, not within an hour of the last message of that kind.

@@ -38,6 +38,10 @@ import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 import { createVerifiedContacts, whereLiveAccount } from '../shared/verified-contacts.mjs';
 
 const INVITE = 'B2BBeneficiaryInvite';
+// Which member request answers an invite (or that the person was already on the
+// list). Never on the invite row itself: what the organisation sees of an
+// invite must not change when a member turns out to be behind it.
+const MATCH = 'B2BBeneficiaryInviteMatch';
 const IMPORT = 'B2BBeneficiaryImport';
 const MANAGE = 'beneficiaries.manage';
 const READ = 'beneficiaries.read';
@@ -142,8 +146,7 @@ export function createB2BBeneficiaryImportService({
   });
   const orgName = org => org.tradingName || org.legalName;
   const sms = () => (smsEnabled() ? smsSender() : { configured: false });
-  // memberRequestId is never shown: it would say a member is behind the contact.
-  const inviteView = ({ invitedBy, cancelledBy, memberRequestId, ...i }) => ({ ...i, canResend: i.status === 'invited' && ((!!i.email && i.emailsSent < MAX_EMAILS_PER_INVITE) || (!!i.phone && i.smsSent < MAX_SMS_PER_INVITE)) });
+  const inviteView = ({ invitedBy, cancelledBy, ...i }) => ({ ...i, canResend: i.status === 'invited' && ((!!i.email && i.emailsSent < MAX_EMAILS_PER_INVITE) || (!!i.phone && i.smsSent < MAX_SMS_PER_INVITE)) });
 
   // ── Import ────────────────────────────────────────────────────────────────
 
@@ -225,8 +228,8 @@ export function createB2BBeneficiaryImportService({
     await db(IMPORT).insert({ id: importId, organizationId: org.id, createdBy: actorId, total: counts.total, enrolled: counts.enrolled, invited: counts.invited, unchanged: counts.unchanged, rejected: counts.rejected,
       problems: JSON.stringify(summary.problems.slice(0, 500)), createdAt: at, updatedAt: at });
     await audit({ actor: actorId, action: 'b2b.beneficiaries.import', target: org.id, after: { importId, ...counts } });
-    // Ask the members behind these contacts now rather than at the next run (not reflected in the reply).
-    if (created.length) await matchInvites({ inviteIds: created }).catch(err => console.warn(`[b2b-invites] matching after import ${importId} failed: ${err.message}`));
+    // Members behind these contacts are asked by the matching job (every 10 minutes), not here,
+    // so the import's own timing does not depend on how many of them are members.
     return { importId, ...summary };
   }
 
@@ -346,11 +349,6 @@ export function createB2BBeneficiaryImportService({
     if (!invite) return fail('invite_not_found', 404);
     if (invite.status !== 'invited') return fail('invite_already_used', 409, { inviteStatus: invite.status });
     const at = stamp();
-    // "Send again" may also ask a matched member once more, once the last request is no longer open
-    // (declined: only after the cooldown; matching checks). Said nowhere in the reply.
-    if (invite.memberRequestId && memberRequests && !(await memberRequests.inviteRequestOpen(invite.memberRequestId))) {
-      await db(INVITE).where({ id: invite.id, memberRequestId: invite.memberRequestId }).update({ memberRequestId: null, updatedAt: at });
-    }
     const recent = last => last && +at - +new Date(last) < 3_600_000;
     const byEmail = !!invite.email && invite.emailsSent < MAX_EMAILS_PER_INVITE && !recent(invite.lastEmailAt);
     const bySms = !!invite.phone && invite.smsSent < MAX_SMS_PER_INVITE && !recent(invite.lastSmsAt) && sms().configured === true;
@@ -371,30 +369,32 @@ export function createB2BBeneficiaryImportService({
 
   /**
    * A member has verified an invited email or number: ask them (consent slice
-   * (a)) rather than enrol them. Someone already on the organisation's list
-   * (they accepted before) just closes the invite, as before.
+   * (a)) rather than enrol them; one request per invite. Nothing is written to
+   * the invite itself (security review of #283): the match is kept in
+   * B2BBeneficiaryInviteMatch, so the organisation's invite list looks the
+   * same whether or not a member is behind the contact. Someone already on the
+   * list (they accepted before) is not asked and gets no more messages; their
+   * invite stays as it is.
    */
   async function askFromInvite(invite, userId) {
     const org = await db('B2BOrganization').where({ id: invite.organizationId }).first('id', 'status', 'legacyCorporateId');
     if (!org || org.status !== 'active' || org.legacyCorporateId) return { skipped: 'organization_not_active' };
-    const at = stamp();
+    const remember = fields => db(MATCH).insert({ inviteId: invite.id, organizationId: org.id, ...fields, createdAt: stamp() }).onConflict('inviteId').ignore();
     const already = await db('B2BBeneficiary').where({ organizationId: org.id, userId }).first('id');
     if (already) {
-      const closed = await db(INVITE).where({ id: invite.id, status: 'invited' })
-        .update({ status: 'enrolled', enrolledAt: at, beneficiaryId: already.id, nextEmailAt: null, nextSmsAt: null, updatedAt: at });
-      return closed ? { closed: true } : { skipped: 'invite_closed' };
+      await remember({ beneficiaryId: already.id });
+      return { alreadyOnList: true };
     }
     const out = await memberRequests.createFromInvite({ invite, userId });
     if (out.skipped) {
-      // Already asked by this organisation, or declined it lately: this invite counts as asked
-      // (so it is not tried every run); "send again" clears that.
-      if (out.memberRequestId) await db(INVITE).where({ id: invite.id, status: 'invited' }).whereNull('memberRequestId').update({ memberRequestId: out.memberRequestId, updatedAt: at });
+      // Already asked by this organisation, or declined it lately: this invite counts as answered by that request.
+      if (out.memberRequestId) await remember({ memberRequestId: out.memberRequestId });
       return out;
     }
-    // Remember the request on the invite (one per invite); if the invite was cancelled or matched meanwhile, withdraw it.
-    const linked = await db(INVITE).where({ id: invite.id, status: 'invited' }).whereNull('memberRequestId')
-      .update({ memberRequestId: out.memberRequest.id, updatedAt: at });
-    if (!linked) {
+    await remember({ memberRequestId: out.memberRequest.id });
+    // Cancelled meanwhile: withdraw what was just asked.
+    const still = await db(INVITE).where({ id: invite.id }).first('status');
+    if (still?.status !== 'invited') {
       await memberRequests.cancelForInvite({ inviteId: invite.id, actorId: SYSTEM });
       return { skipped: 'invite_closed' };
     }
@@ -403,15 +403,16 @@ export function createB2BBeneficiaryImportService({
 
   /**
    * Ask everyone who has joined, and verified the invited email or number,
-   * since they were invited (one request per invite). With `userId`, only that
-   * person (used when a member opens their benefits, so they do not wait for
-   * the next run); with `inviteIds`, only those invites (right after an
-   * import). Verified contacts only: User.email / User.phone match nothing.
-   * Returns { matched, asked, enrolled (already on the list: invite closed), failed, skipped }.
+   * since they were invited (one request per invite; never again for the same
+   * invite). With `userId`, only that person (used when a member opens their
+   * benefits, so they do not wait for the next run); with `inviteIds`, only
+   * those invites. Verified contacts only: User.email / User.phone match nothing.
+   * Returns { matched, asked, alreadyOnList, failed, skipped }.
    */
   async function matchInvites({ userId = null, inviteIds = null, limit = 500 } = {}) {
-    const stats = { matched: 0, asked: 0, enrolled: 0, failed: 0, skipped: 0 };
+    const stats = { matched: 0, asked: 0, alreadyOnList: 0, failed: 0, skipped: 0 };
     if (!memberRequests) return stats;
+    const unmatched = col => function notMatched() { this.select(db.raw('1')).from(MATCH).whereRaw(`"${MATCH}"."inviteId" = ${col}`); };
     let pairs;
     if (userId) {
       const u = await whereLiveAccount(db('User').where({ id: userId, userType: 'member' })).first('id');
@@ -420,7 +421,7 @@ export function createB2BBeneficiaryImportService({
       const emails = proven.filter(c => c.type === 'email').map(c => c.value);
       const phones = proven.filter(c => c.type === 'phone').map(c => c.value);
       if (!emails.length && !phones.length) return stats;
-      const rows = await db(INVITE).where({ status: 'invited' }).whereNull('memberRequestId')
+      const rows = await db(INVITE).where({ status: 'invited' }).whereNotExists(unmatched(`"${INVITE}"."id"`))
         .where(b => { if (emails.length) b.orWhereIn('email', emails); if (phones.length) b.orWhereIn('phone', phones); });
       pairs = rows.map(invite => ({ invite, userId: u.id }));
     } else {
@@ -429,7 +430,7 @@ export function createB2BBeneficiaryImportService({
         this.on(function email() { this.on('v.type', db.raw('?', ['email'])).andOn('v.normalizedValue', 'i.email'); })
           .orOn(function phone() { this.on('v.type', db.raw('?', ['phone'])).andOn('v.normalizedValue', 'i.phone'); });
       })
-        .where({ 'i.status': 'invited' }).whereNull('i.memberRequestId');
+        .where({ 'i.status': 'invited' }).whereNotExists(unmatched('"i"."id"'));
       if (inviteIds) q = q.whereIn('i.id', inviteIds);
       const rows = await q.orderBy('i.invitedAt').orderBy('v.userCreatedAt').limit(limit).select('i.*', 'v.userId as matchedUserId');
       pairs = rows.map(({ matchedUserId, ...invite }) => ({ invite, userId: matchedUserId }));
@@ -441,13 +442,29 @@ export function createB2BBeneficiaryImportService({
       stats.matched += 1;
       try {
         const out = await askFromInvite(invite, id);
-        if (out.asked) stats.asked += 1; else if (out.closed) stats.enrolled += 1; else stats.skipped += 1;
+        if (out.asked) stats.asked += 1; else if (out.alreadyOnList) stats.alreadyOnList += 1; else stats.skipped += 1;
       } catch (err) {
         stats.failed += 1;
         console.warn(`[b2b-invites] could not ask about invite ${invite.id}: ${err.message}`);
       }
     }
     return stats;
+  }
+
+  /**
+   * Invites whose messages are recorded as sent but not delivered: the member
+   * behind them already said no (declined), or is already on the list. The
+   * invite's counters and schedule move exactly as for anyone else, so the
+   * organisation cannot tell (security review of #283); only nothing reaches
+   * the person.
+   */
+  async function quietInvites(ids) {
+    if (!ids.length) return new Set();
+    const rows = await db(`${MATCH} as m`).leftJoin('B2BMemberRequest as r', 'r.id', 'm.memberRequestId')
+      .whereIn('m.inviteId', ids)
+      .where(b => b.whereNotNull('m.beneficiaryId').orWhere('r.status', 'declined').orWhere(c => c.where('r.status', 'cancelled').whereNot('r.reason', 'cancelled_by_organization')))
+      .pluck('m.inviteId');
+    return new Set(rows);
   }
 
   // ── Email ─────────────────────────────────────────────────────────────────
@@ -515,6 +532,7 @@ export function createB2BBeneficiaryImportService({
     const sender = c.sender();
     if (!sender.configured) { stats.notConfigured = true; return stats; }
     const orgs = new Map((await db('B2BOrganization').whereIn('id', [...new Set(due.map(i => i.organizationId))])).map(o => [o.id, o]));
+    const quiet = await quietInvites(due.map(i => i.id));
     for (const invite of due) {
       const org = orgs.get(invite.organizationId);
       if (!org || org.status !== 'active') continue;
@@ -524,7 +542,7 @@ export function createB2BBeneficiaryImportService({
       let ok = false;
       let error = null;
       try {
-        const out = await sender.send(invite[c.contact], c.compose(invite, org, invite[c.sent]));
+        const out = quiet.has(invite.id) ? { ok: true } : await sender.send(invite[c.contact], c.compose(invite, org, invite[c.sent]));
         ok = out?.ok === true;
         error = ok ? null : out?.error ?? 'not_accepted';
       } catch (err) {

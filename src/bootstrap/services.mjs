@@ -445,7 +445,6 @@ const memberRequestsLater = {
   createByContact: args => b2bMemberRequestService.createByContact(args),
   createFromInvite: args => b2bMemberRequestService.createFromInvite(args),
   cancelForInvite: args => b2bMemberRequestService.cancelForInvite(args),
-  inviteRequestOpen: id => b2bMemberRequestService.inviteRequestOpen(id),
   pendingForOrganization: args => b2bMemberRequestService.pendingForOrganization(args),
   pendingForCorporate: args => b2bMemberRequestService.pendingForCorporate(args),
   cancelForEmployee: args => b2bMemberRequestService.cancelForEmployee(args),

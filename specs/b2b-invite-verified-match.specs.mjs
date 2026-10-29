@@ -89,6 +89,7 @@ after(async () => {
   await db('B2BBeneficiary').whereIn('organizationId', made.orgs).del();
   await db('B2BOrganizationUser').whereIn('organizationId', made.orgs).del().catch(() => {});
   await db('B2BOrganization').whereIn('id', made.orgs).del();
+  await db('B2BBeneficiaryInviteMatch').whereIn('organizationId', made.orgs).del();
   await db('AuditLog').whereIn('actor', [...made.users, 'system:b2b-beneficiary-invites']).del();
   const persons = await purgeIdentity(db, made.users);
   await db('User').whereIn('id', made.users).del();
@@ -146,6 +147,7 @@ test('a verified member is asked (never enrolled) by an import, and by the job o
   await verifyContacts(db, member, { email: verifiedEmail });
   const out = await svc.importPeople({ access: a, body: { rows: [{ email: verifiedEmail.toUpperCase() }] }, actorId: OPERATOR });
   assert.deepEqual([out.enrolled, out.invited], [0, 1]);
+  await svc.matchInvites();
   assert.deepEqual([await enrolled(orgId, member), await asked(orgId, member)], [0, 1]);
   await accept(orgId, member);
   assert.equal(await enrolled(orgId, member), 1);
