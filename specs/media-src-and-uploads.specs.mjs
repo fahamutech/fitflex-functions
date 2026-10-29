@@ -398,6 +398,66 @@ test('gym photos: at most 10 each; a stored image may be sent as its thumbnail, 
   assert.deepEqual([thumbUp.error, thumbUp.field], ['invalid_media_src', 'images']);
 });
 
+test('gym with 12 stored photos (before the cap) can still edit hours and shorten its gallery, but never grow it', async () => {
+  const ownerId = await user('gym_operator', { gymIds: [] });
+  let owner = await users.findByIdAsync(ownerId);
+  const created = await ownerGymService.createGym({ owner, body: { name: 'Legacy Big Gym', images: [STORAGE] } });
+  made.gyms.push(created.gym.id);
+  const twelve = Array.from({ length: 12 }, (_, i) => `/storage/bafyold${i}/photo.webp`);
+  await gyms.updateAsync(g => g.id === created.gym.id, { images: twelve, thumbnails: twelve });
+  owner = await users.findByIdAsync(ownerId);
+  const hours = { mon: { open: '06:00', close: '22:00' } };
+  // Photos left out (kept from the stored gym)…
+  const onlyHours = await ownerGymService.updateGym({ owner, gymId: created.gym.id, body: { operatingHours: hours } });
+  assert.equal(onlyHours.error, undefined, JSON.stringify(onlyHours));
+  assert.deepEqual(onlyHours.gym.operatingHours, hours);
+  assert.equal(onlyHours.gym.images.length, 12);
+  // …or sent back whole, as the app does.
+  const resent = await ownerGymService.updateGym({ owner, gymId: created.gym.id, body: { name: 'Legacy Big Gym 2', images: twelve, thumbnails: twelve } });
+  assert.equal(resent.error, undefined, JSON.stringify(resent));
+  const shorter = await ownerGymService.updateGym({ owner, gymId: created.gym.id, body: { images: twelve.slice(0, 11), thumbnails: twelve.slice(0, 11) } });
+  assert.equal(shorter.error, undefined, JSON.stringify(shorter));
+  const grown = await ownerGymService.updateGym({ owner, gymId: created.gym.id, body: { images: [...twelve.slice(0, 11), STORAGE, STORAGE] } });
+  assert.deepEqual([grown.error, grown.field, grown.max], ['too_many_images', 'images', 10]);
+});
+
+test('trainer with 10 stored photos can still edit the bio (gallery sent back) but cannot add an 11th', async () => {
+  const userId = await user('trainer');
+  const id = uid('trn');
+  const ten = Array.from({ length: 10 }, (_, i) => `/storage/bafytrn${i}/photo.webp`);
+  await trainers.upsertAsync(t => t.id === id, trainerService.normalizeTrainerPayload({ id, userId, displayName: 'Big Gallery Trainer', images: ten }, {}));
+  made.trainers.push(id);
+  const bio = await trainerService.updateProfile({ userId, body: { bio: 'New bio', images: ten } });
+  assert.equal(bio.error, undefined, JSON.stringify(bio));
+  assert.equal(bio.trainer.bio, 'New bio');
+  const onlyBio = await trainerService.updateProfile({ userId, body: { bio: 'Again' } });
+  assert.equal(onlyBio.error, undefined, JSON.stringify(onlyBio));
+  const eleven = await trainerService.updateProfile({ userId, body: { images: [...ten, STORAGE] } });
+  assert.equal(eleven.error, 'too_many_images');
+});
+
+test('trainer edit: the photo-decode limit counts per person (personId), not per account', async () => {
+  const personKey = uid('person');
+  const accounts = [];
+  for (let i = 0; i < 2; i += 1) {
+    const userId = await user('trainer');
+    const id = uid('trn');
+    await trainers.upsertAsync(t => t.id === id, trainerService.normalizeTrainerPayload({ id, userId, displayName: `Persona ${i}` }, {}));
+    made.trainers.push(id);
+    accounts.push(userId);
+  }
+  // A different picture every time, so no save is a "kept" value that needs no decoding.
+  const pics = await Promise.all(Array.from({ length: MEDIA_DECODE_RATE.perWindow + 2 }, (_, i) => picture('png', i + 2)));
+  for (let i = 0; i < MEDIA_DECODE_RATE.perWindow; i += 1) {
+    const r = await trainerService.updateProfile({ userId: accounts[i % 2], personId: personKey, body: { photoUrl: dataUri('png', pics[i]) } });
+    assert.equal(r.error, undefined, `save ${i + 1}: ${JSON.stringify(r)}`);
+  }
+  const limited = await trainerService.updateProfile({ userId: accounts[0], personId: personKey, body: { photoUrl: dataUri('png', pics[MEDIA_DECODE_RATE.perWindow]) } });
+  assert.equal(limited.error, 'rate_limited');
+  const other = await trainerService.updateProfile({ userId: accounts[1], personId: uid('person'), body: { photoUrl: dataUri('png', pics[MEDIA_DECODE_RATE.perWindow + 1]) } });
+  assert.equal(other.error, undefined, 'another person is unaffected');
+});
+
 test('product duplicate: a copy keeps the source product\'s old images; a new outside image is still refused', async () => {
   const vendor = await user('vendor', { vendorProfile: { businessName: 'Dup Shop', status: 'published' } });
   const created = await shopService.upsertProduct({ vendorId: vendor, body: { name: 'Mat', category: 'equipment', priceTzs: 1000, images: [STORAGE] } });

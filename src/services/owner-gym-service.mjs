@@ -7,7 +7,8 @@ import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
 import { trainerMedia, PROFILE_LIMITS } from './trainer-service.mjs';
 
 // Gym photos are shown to every member: data URI or our own storage path only (media-src.mjs).
-// At most GYM_MAX_IMAGES of each, counted before anything is decoded.
+// At most GYM_MAX_IMAGES of each, counted before anything is decoded. A gym stored with more before
+// the cap can still be edited (hours, name, fewer photos), but its galleries never grow.
 export const GYM_MAX_IMAGES = 10;
 // Photos already on the gym are accepted unchanged in their own field (the app sends the whole
 // gallery back). The one carry-over allowed: a stored image may be sent as its own thumbnail, which
@@ -17,6 +18,7 @@ const gymMediaProblem = (row, prior, actor) => checkMediaFields(
   {
     kept: { images: storedMedia(prior?.images), thumbnails: storedMedia(prior?.thumbnails, prior?.images) },
     maxItems: { images: GYM_MAX_IMAGES, thumbnails: GYM_MAX_IMAGES },
+    capFloor: { images: prior?.images?.length ?? 0, thumbnails: prior?.thumbnails?.length ?? 0 },
     actor,
   },
 );

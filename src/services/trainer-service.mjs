@@ -69,6 +69,8 @@ export const trainerMedia = row => ({ photoUrl: row?.photoUrl, images: row?.imag
  * either may stay in either; thumbnails keep only stored thumbnails. `signInPhoto`: the account's
  * own sign-in photo, only when it passes the sign-in host allowlist (signInPhotoOrNull).
  */
+/** What a stored trainer already holds, for checkMediaFields' capFloor (caps never block an existing gallery). */
+export const trainerCapFloor = prior => ({ images: prior?.images?.length ?? 0, imageThumbnails: prior?.imageThumbnails?.length ?? 0 });
 export function trainerKeptMedia(prior, { signInPhoto = null } = {}) {
   const pictures = storedMedia(prior?.photoUrl, prior?.images, signInPhotoOrNull(signInPhoto));
   return { photoUrl: pictures, images: pictures, imageThumbnails: storedMedia(prior?.imageThumbnails) };
@@ -322,6 +324,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const badMedia = await checkMediaFields(trainerMedia(row), {
       kept: trainerKeptMedia(profile, { signInPhoto: user?.photoUrl }),
       maxItems: { images: PROFILE_LIMITS.images, imageThumbnails: PROFILE_LIMITS.images },
+      capFloor: trainerCapFloor(profile),
       actor: user?.personId || userId,
     });
     if (badMedia) return badMedia;
@@ -371,7 +374,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
    * (null counts as "not sent"); each one sent is checked before anything is
    * saved, so a bad value is a clear 400 rather than a failed write.
    */
-  async function updateProfile({ userId, body = {} }) {
+  // personId: the person behind the account (route), so the photo-decode limit counts per person.
+  async function updateProfile({ userId, body = {}, personId = null }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     const socialError = socialLinksError(body);
@@ -413,7 +417,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     // Photos: `images` is the trainer's gallery (first = profile picture).
     if (sent('images')) {
       const images = parseStringList(body.images, []);
-      if (images.length > PROFILE_LIMITS.images) return { ...fail('too_many_images'), max: PROFILE_LIMITS.images };
+      // Over the cap only when it also grows: a gallery stored before the cap can still be edited.
+      if (images.length > PROFILE_LIMITS.images && images.length > (profile.images || []).length) return { ...fail('too_many_images'), max: PROFILE_LIMITS.images };
       updates.images = images;
       updates.imageThumbnails = sent('imageThumbnails') ? parseStringList(body.imageThumbnails, []).slice(0, images.length) : [];
     }
@@ -426,7 +431,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const badMedia = await checkMediaFields(trainerMedia(updates), {
       kept: trainerKeptMedia(profile),
       maxItems: { images: PROFILE_LIMITS.images, imageThumbnails: PROFILE_LIMITS.images },
-      actor: userId,
+      capFloor: trainerCapFloor(profile),
+      actor: personId || userId,
     });
     if (badMedia) return badMedia;
     updates.updatedAt = new Date().toISOString();

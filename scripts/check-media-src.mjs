@@ -12,7 +12,9 @@
 // images (Product).
 //
 // Prints counts per field and reason, and the HOSTS of refused http(s) values (never the full URL
-// and never data). --list also prints the record ids per refused value.
+// and never data). --list also prints the record ids per refused value. Also counts galleries over
+// the caps (gym images / thumbnails > 10, trainer images / imageThumbnails > 8, product images > 10):
+// those records can still be edited, but their galleries cannot grow.
 //
 // The database is never guessed and .env is not read:
 //   DATABASE_URL=postgres://… node scripts/check-media-src.mjs [--list]
@@ -55,6 +57,8 @@ const SOURCES = [
   ['Product', ['id', 'images'], row => ({ 'Product.images': asList(row.images) })],
 ];
 const BATCH = 100;
+// Gallery caps (owner-gym-service GYM_MAX_IMAGES, trainer PROFILE_LIMITS.images, product validation).
+const CAPS = { 'Gym.images': 10, 'Gym.thumbnails': 10, 'TrainerProfile.images': 8, 'TrainerProfile.imageThumbnails': 8, 'Product.images': 10 };
 
 try {
   await db.transaction(async (trx) => {
@@ -70,7 +74,8 @@ try {
         lastId = rows[rows.length - 1].id;
         for (const row of rows) {
           for (const [field, values] of Object.entries(pick(row))) {
-            const r = (report[field] ||= { values: 0, ok: 0, refused: {}, hosts: {}, ids: {} });
+            const r = (report[field] ||= { values: 0, ok: 0, refused: {}, hosts: {}, ids: {}, overCap: 0, overCapIds: new Set() });
+            if (CAPS[field] != null && values.length > CAPS[field]) { r.overCap += 1; if (list) r.overCapIds.add(row.id); }
             for (const value of values) {
               if (value == null || value === '') continue;
               r.values += 1;
@@ -92,6 +97,7 @@ try {
       console.log(`${field}: ${r.values} value(s), ${r.ok} ok, ${refused} would be refused as new`);
       for (const [reason, n] of Object.entries(r.refused)) console.log(`  ${reason}: ${n}${list ? ` — ids: ${[...r.ids[reason]].join(', ')}` : ''}`);
       for (const [host, n] of Object.entries(r.hosts)) console.log(`  host ${host}: ${n}`);
+      if (CAPS[field] != null) console.log(`  records over the cap of ${CAPS[field]}: ${r.overCap}${list && r.overCap ? ` — ids: ${[...r.overCapIds].join(', ')}` : ''}`);
     }
     console.log(refusedTotal ? `Total refused-as-new values: ${refusedTotal} (kept on their records; nothing changed).` : 'No stored value would be refused.');
   });

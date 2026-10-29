@@ -109,16 +109,20 @@ const listOf = raw => (raw === undefined || raw === null || raw === '' ? [] : Ar
  *   fields:   { [field]: string | string[] | null | undefined } (undefined/null/'' = not being set)
  *   kept:     { [field]: string[] } — values already stored in that field (accepted as is)
  *   maxItems: { [field]: n } — list length cap, checked before anything is decoded
+ *   capFloor: { [field]: n } — how many the record already holds: a list over the cap is refused only
+ *             when it is also longer than that, so a record stored before the cap can still be edited
+ *             (and its gallery shortened) but never grow
  *   actor:    person / account id for the decode rate limit (no limit without one)
  * → null | { error: 'too_many_images', status: 400, field, max }
  *        | { error: 'rate_limited', status: 429, retryAfterSeconds }
  *        | { error: 'invalid_media_src', status: 400, field, index?, reason }
  */
-export async function checkMediaFields(fields, { kept = {}, maxItems = {}, actor = null, maxBytes = mediaSrcMaxBytes() } = {}) {
+export async function checkMediaFields(fields, { kept = {}, maxItems = {}, capFloor = {}, actor = null, maxBytes = mediaSrcMaxBytes() } = {}) {
   const entries = Object.entries(fields || {});
   for (const [field, raw] of entries) {
     const max = maxItems[field];
-    if (max != null && listOf(raw).length > max) return { error: 'too_many_images', status: 400, field, max };
+    const count = listOf(raw).length;
+    if (max != null && count > max && count > (capFloor[field] ?? 0)) return { error: 'too_many_images', status: 400, field, max };
   }
   const keep = Object.fromEntries(Object.entries(kept || {}).map(([f, v]) => [f, new Set(storedMedia(v))]));
   const isKept = (field, value) => typeof value === 'string' && Boolean(keep[field]?.has(value));
