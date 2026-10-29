@@ -120,8 +120,8 @@ export function createEventsIntegrationsService({
     const organizerId = ctx.organizer.id;
     const g = await gate(organizerId);
     if (!g.open) return fail('api_access_not_enabled', 403);
-    const name = text(body.name, 60);
-    if (!name) return fail('validation_failed', 422, { fields: [{ path: 'name', code: 'required' }] });
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name || name.length > 60) return fail('validation_failed', 422, { fields: [{ path: 'name', code: name ? 'tooLong' : 'required' }] });
     if (!['live', 'sandbox'].includes(body.environment)) return fail('validation_failed', 422, { fields: [{ path: 'environment', code: 'invalid' }] });
     const parsedScopes = parseScopes(body.scopes, { role: ctx.role, environment: body.environment });
     if (parsedScopes.error) return parsedScopes;
@@ -169,7 +169,7 @@ export function createEventsIntegrationsService({
     if (!row) return fail('client_not_found', 404);
     if (row.status !== 'active') return fail('client_not_active', 409);
     const patch = {};
-    if (body.name !== undefined) { const n = text(body.name, 60); if (!n) return fail('validation_failed', 422, { fields: [{ path: 'name', code: 'required' }] }); patch.name = n; }
+    if (body.name !== undefined) { const n = typeof body.name === 'string' ? body.name.trim() : ''; if (!n || n.length > 60) return fail('validation_failed', 422, { fields: [{ path: 'name', code: n ? 'tooLong' : 'required' }] }); patch.name = n; }
     if (body.scopes !== undefined) {
       const parsed = parseScopes(body.scopes, { role: ctx.role, environment: row.environment, current: row.scopes });
       if (parsed.error) return parsed;
