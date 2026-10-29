@@ -18,7 +18,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   SALE_EFFECTIVE_STATUSES, SALE_REJECT_CODES, REASON_MAX, SALE_RULES, DAY_MS,
-  effectiveStatus, proposalExpiry, flashSaleConfigFromEnv, parseSaleInput, windowError, discountError,
+  effectiveStatus, effectiveReason, proposalExpiry, flashSaleConfigFromEnv, parseSaleInput, windowError, discountError,
   priceRaiseError, priceHistoryError, latestRaise, isRaise, eatDate, overlaps, maxSalePrice,
 } from '../shared/flash-sale-rules.mjs';
 import { standingPrice, validDiscount, discountPct } from '../shared/shop-pricing.mjs';
@@ -182,8 +182,10 @@ export function createFlashSaleService({
       savingTzs: regular ? Math.max(0, regular - s.salePriceTzs) : 0,
       startsAt: s.startsAt, endsAt: s.endsAt,
       status: s.status, effectiveStatus: effectiveStatus(s, now()),
-      statusReason: s.statusReason ?? null, statusReasonNote: s.statusReasonNote ?? null,
-      expiresAt: s.status === 'pending_approval' ? s.expiresAt : null,
+      // Derived at read time, so an expired or finished sale says why before the job has run.
+      statusReason: effectiveReason(s, now()), statusReasonNote: s.statusReasonNote ?? null,
+      // While waiting, and once expired (by time or by the job): when it lapses / lapsed.
+      expiresAt: ['pending_approval', 'expired'].includes(effectiveStatus(s, now())) ? (s.expiresAt ?? null) : null,
       revision: s.revision,
       submittedAt: s.submittedAt ?? null, approvedAt: s.approvedAt ?? null, decidedAt: s.decidedAt ?? null, endedAt: s.endedAt ?? null,
       createdAt: s.createdAt, updatedAt: s.updatedAt,
@@ -503,8 +505,7 @@ export function createFlashSaleService({
         const s = await q.getSale(s0.id);
         const eff = s ? effectiveStatus(s, at) : null;
         if (s?.status === 'pending_approval' && eff === 'expired') {
-          const code = ms(s.startsAt) <= ms(s.expiresAt) ? 'start_passed' : 'not_reviewed_in_time';
-          return { kind: 'expired', saved: await move(q, s, 'expired', SYSTEM_ACTOR, 'expired', { statusReason: code, statusReasonNote: null }) };
+          return { kind: 'expired', saved: await move(q, s, 'expired', SYSTEM_ACTOR, 'expired', { statusReason: effectiveReason(s, at), statusReasonNote: null }) };
         }
         if (s?.status === 'approved' && eff === 'ended') {
           return { kind: 'ended', saved: await move(q, s, 'ended', SYSTEM_ACTOR, 'ended', { endedAt: s.endsAt, statusReason: 'window_passed', statusReasonNote: null }) };

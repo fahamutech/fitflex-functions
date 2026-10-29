@@ -21,7 +21,7 @@ import { createFlashSaleService } from '../src/services/flash-sale-service.mjs';
 import { createPgFlashSaleStore } from '../src/infra/flash-sale-store-pg.mjs';
 import { createPartnerNotifier } from '../src/services/partner-notifier.mjs';
 import { effectivePrice, standingPrice, priceBreakdown, saleLiveFor, discountPct } from '../src/shared/shop-pricing.mjs';
-import { maxSalePrice, priceRaiseError, priceHistoryError, parseSaleInput, SALE_RULES } from '../src/shared/flash-sale-rules.mjs';
+import { maxSalePrice, priceRaiseError, priceHistoryError, parseSaleInput, SALE_RULES, effectiveReason } from '../src/shared/flash-sale-rules.mjs';
 import { priceOrderLine, vendorShareOfOrder } from '../src/shared/marketplace-pricing.mjs';
 import { walkInPrice } from '../src/shared/vendor-sale.mjs';
 
@@ -822,4 +822,49 @@ test('contract (5): the staff product picker lists sellable products of vendors 
   assert.deepEqual(out.items.map(i => i.id), [ok]);
   assert.deepEqual(Object.keys(out.items[0]).sort(), ['discountPriceTzs', 'effectivePriceTzs', 'id', 'image', 'maxSalePriceTzs', 'name', 'priceTzs', 'stock', 'vendorId', 'vendorName']);
   assert.deepEqual([out.items[0].effectivePriceTzs, out.items[0].maxSalePriceTzs], [45_000, 44_999]);
+});
+
+// ── QA round 1 (UAT D7, 2026-10-29) ─────────────────────────────────────────
+
+test('QA D7: an expired or finished sale says why at read time, before the lifecycle job runs; the job stores the same reason', async () => {
+  const h = harness();
+  const atStart = await pendingSale(h, { startIn: 3 * HOUR, length: DAY });        // lapses at its start
+  const in14 = await pendingSale(h, { startIn: 20 * DAY, length: DAY });           // lapses after 14 days
+  const done = await approvedSale(h, { startIn: 2 * HOUR, length: DAY });          // its window ends
+  const vendorView = async s => (await h.svc.vendorGet({ vendorId: s.vendor, id: s.id })).sale;
+  const adminView = async s => (await h.svc.adminGet({ id: s.id, viewer: { actorId: ADMIN_Y, canApprove: true } })).sale;
+  const pick = v => [v.effectiveStatus, v.statusReason, v.expiresAt];
+
+  // Before: pending and scheduled, no reason.
+  assert.deepEqual((await vendorView(atStart)).statusReason, null);
+
+  h.tick(3 * HOUR); // atStart's start (= its expiresAt) has passed; nothing written yet
+  const stored0 = await db('FlashSale').where({ id: atStart.id }).first();
+  assert.deepEqual([stored0.status, stored0.statusReason], ['pending_approval', null], 'the job has not run');
+  const v1 = await vendorView(atStart);
+  assert.deepEqual([v1.effectiveStatus, v1.statusReason], ['expired', 'start_passed']);
+  assert.equal(v1.expiresAt, new Date(stored0.expiresAt).toISOString());
+  assert.deepEqual(pick(await adminView(atStart)), pick(v1), 'admin and vendor views agree');
+  assert.deepEqual((await h.svc.adminList({ query: { tab: 'closed', productId: atStart.productId }, viewer: {} })).items.map(i => [i.id, i.statusReason]), [[atStart.id, 'start_passed']]);
+  // Approve and reject are still refused.
+  assert.equal((await h.svc.approve({ id: atStart.id, actorId: ADMIN_Y, revision: await revisionOf(atStart.id) })).error, 'proposal_expired');
+  assert.equal((await h.svc.reject({ id: atStart.id, actorId: ADMIN_Y, revision: await revisionOf(atStart.id), code: 'timing' })).error, 'proposal_expired');
+
+  h.tick(14 * DAY); // in14 is past its 14 days; done's window has ended
+  const v2 = await vendorView(in14);
+  assert.deepEqual([v2.effectiveStatus, v2.statusReason], ['expired', 'not_reviewed_in_time']);
+  const v3 = await vendorView(done);
+  assert.deepEqual([v3.effectiveStatus, v3.statusReason, v3.endedByFitflex], ['ended', 'window_passed', false]);
+
+  // The job writes down exactly what the views already said; the views don't change.
+  const before = await Promise.all([atStart, in14, done].map(async s => pick(await vendorView(s))));
+  await h.svc.runLifecycle();
+  const stored = await Promise.all([atStart, in14, done].map(s => db('FlashSale').where({ id: s.id }).first()));
+  assert.deepEqual(stored.map(r => [r.status, r.statusReason]), [['expired', 'start_passed'], ['expired', 'not_reviewed_in_time'], ['ended', 'window_passed']]);
+  const after = await Promise.all([atStart, in14, done].map(async s => pick(await vendorView(s))));
+  assert.deepEqual(after, before);
+
+  // Pure rule: stored reasons pass through untouched.
+  assert.equal(effectiveReason({ status: 'rejected', statusReason: 'timing' }), 'timing');
+  assert.equal(effectiveReason({ status: 'pending_approval', statusReason: null, startsAt: '2026-11-02T00:00:00Z', expiresAt: '2026-11-01T00:00:00Z' }, new Date('2026-10-31T00:00:00Z')), null);
 });

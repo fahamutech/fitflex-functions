@@ -54,7 +54,7 @@ Product price history (`ProductPriceChange`) is **written whether or not the fla
 
 ## States
 
-Same as banners. Stored `status`: `draft` · `pending_approval` · `approved` · `ended` · `rejected` · `withdrawn` · `expired`. Every view also has `effectiveStatus` from the clock on every read: `approved` → `live` inside `[startsAt, endsAt)` → `ended` after; `pending_approval` → `expired` from `expiresAt`.
+Same as banners. Stored `status`: `draft` · `pending_approval` · `approved` · `ended` · `rejected` · `withdrawn` · `expired`. Every view also has `effectiveStatus` from the clock on every read: `approved` → `live` inside `[startsAt, endsAt)` → `ended` after; `pending_approval` → `expired` from `expiresAt`. **`statusReason` is worked out at read time too** (QA D7): an expired proposal reads `start_passed` or `not_reviewed_in_time`, and a finished sale `window_passed`, as soon as time says so — never `null` while waiting for the lifecycle job, which later stores the same value. `expiresAt` is shown while `pending_approval` and once `expired`.
 
 | effectiveStatus | Label EN / SW (draft) | `statusReason` |
 |---|---|---|
