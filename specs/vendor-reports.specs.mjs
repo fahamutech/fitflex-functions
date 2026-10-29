@@ -23,12 +23,13 @@ import { createVendorSettlementService } from '../src/services/vendor-settlement
 import { createPayoutEligibility } from '../src/services/payout-eligibility.mjs';
 import { priceOrderLine } from '../src/shared/marketplace-pricing.mjs';
 import { csvCell, csvDocument, CSV_BOM } from '../src/shared/csv-export.mjs';
-import { parseReportQuery, bucketsOf, cover, createReportCache, periodInWords, REPORT_LIMITS, asOfText, eatTimeOfDay, reportLabel, methodName, salesCsv, payoutsCsv, methodsCsv } from '../src/shared/vendor-reports.mjs';
+import { parseReportQuery, bucketsOf, cover, createReportCache, periodInWords, REPORT_LIMITS, asOfText, eatTimeOfDay, reportLabel, reportCount, productsCsv, profitCsv, methodName, salesCsv, payoutsCsv, methodsCsv } from '../src/shared/vendor-reports.mjs';
 import { setPdfkitLoaderForTests } from '../src/shared/vendor-document-pdf.mjs';
+import { renderReportPdf, pctText } from '../src/shared/vendor-report-pdf.mjs';
 import { vendorToolsOptionsRoute } from '../functions/shop.mjs';
 import {
   vendorReportSummary, vendorReportSales, vendorReportProducts, vendorReportStockValue, vendorReportProfit, vendorReportMarketplaceNet,
-  vendorReportCustomers, vendorReportPaymentMethods, resetVendorReportCache, resetVendorReportLimits, VENDOR_REPORT_LIMITS,
+  vendorReportCustomers, vendorReportPaymentMethods, vendorReportRefunds, resetVendorReportCache, resetVendorReportLimits, VENDOR_REPORT_LIMITS,
 } from '../functions/vendor-reports.mjs';
 import { createShopService } from '../src/services/shop-service.mjs';
 
@@ -282,8 +283,8 @@ test('sales: totals equal the line sums; EAT days (23:30 vs 00:30 EAT); voids ap
   assert.deepEqual(t14, { grossTzs: 110_000, discountTzs: 6_000, refundTzs: 0, netTzs: 104_000, vatIncludedTzs: 0, saleCount: 1, orderCount: 1, itemsSold: 3, voided: { count: 0, totalTzs: 0 } },
     '14 Oct: the 23:30 EAT walk-in sale and O2 (paid on the 14th)');
   const t15 = await day('2026-10-15');
-  assert.deepEqual(t15, { grossTzs: 150_000, discountTzs: 0, refundTzs: 20_000, netTzs: 130_000, vatIncludedTzs: 13_728, saleCount: 2, orderCount: 1, itemsSold: 5, voided: { count: 1, totalTzs: 45_000 } },
-    '15 Oct: the 00:30 EAT (late-recorded) sale, the credit sale, O1, O2 refunded; the void counted apart');
+  assert.deepEqual(t15, { grossTzs: 150_000, discountTzs: 0, refundTzs: 20_000, netTzs: 130_000, vatIncludedTzs: 13_728, saleCount: 2, orderCount: 1, itemsSold: 4, voided: { count: 1, totalTzs: 45_000 } },
+    '15 Oct: the 00:30 EAT (late-recorded) sale, the credit sale, O1, O2 refunded (its unit comes off too, UAT D17); the void counted apart');
 
   const both = (await r.report('sales', { vendorId: V, access: OWNER, query: { from: '2026-10-14', to: '2026-10-15' } })).data;
   assert.equal(both.groupBy, 'day');
@@ -326,10 +327,10 @@ test('profit: ex-VAT, minus commission, costed lines only; lines without a cost 
   // Costed: S1 84,000 − 60,000; S4 (45,000 − 6,864 VAT) − 30,000; O1 (45,000 − 6,864) − 4,500 commission − 30,000.
   assert.deepEqual(p.totals, { netExVatTzs: 160_272, commissionTzs: 4_500, costTzs: 120_000, profitTzs: 35_772, marginPct: 22.3 });
   // Uncosted: S2 (3 × 20,000) and O2 (sold 14 Oct, refunded 15 Oct).
-  assert.deepEqual(p.uncosted, { lineCount: 2, qty: 4, revenueTzs: 60_000, netExVatTzs: 60_000 });
+  assert.deepEqual(p.uncosted, { lineCount: 2, qty: 3, revenueTzs: 60_000, netExVatTzs: 60_000 }, 'O2: 1 sold, 1 refunded = 0 (UAT D17)');
   assert.equal(p.hasVat, true);
   assert.equal(p.buckets.reduce((s, b) => s + b.profitTzs, 0), p.totals.profitTzs);
-  assert.deepEqual(p.uncostedProducts.map(x => [x.name, x.units, x.revenueTzs]), [['Gloves', 4, 60_000]]);
+  assert.deepEqual(p.uncostedProducts.map(x => [x.name, x.units, x.revenueTzs]), [['Gloves', 3, 60_000]]);
   assert.equal(p.byProduct.find(x => x.productId === seed.P1).profitTzs, 35_772);
   assert.ok(!p.byProduct.some(x => x.productId === seed.P2), 'a product with no cost price is not given a profit');
   assert.equal(p.byChannel.app.commissionTzs, 4_500);
@@ -345,7 +346,7 @@ test('products: units and revenue per product = sales totals; last sold, stock, 
   const best = (await r.report('products', { vendorId: V, access: OWNER, query: q })).data;
   const sales = (await r.report('sales', { vendorId: V, access: OWNER, query: q })).data;
   assert.deepEqual(best.totals, { unitsSold: sales.totals.itemsSold, netRevenueTzs: sales.totals.netTzs });
-  assert.deepEqual(best.rows.map(x => [x.productId, x.unitsSold, x.appUnits, x.walkInUnits, x.netRevenueTzs]), [[P1, 4, 1, 3, 174_000], [P2, 4, 1, 3, 60_000]]);
+  assert.deepEqual(best.rows.map(x => [x.productId, x.unitsSold, x.appUnits, x.walkInUnits, x.netRevenueTzs]), [[P1, 4, 1, 3, 174_000], [P2, 3, 0, 3, 60_000]], 'P2: the refunded app unit is not a unit sold (UAT D17)');
   const whey = best.rows[0];
   assert.equal(whey.lastSoldAt, '2026-10-15T10:00:00.000Z');
   assert.deepEqual([whey.stock, whey.coverState, whey.daysOfCover], [30, 'ok', 225], '30 in stock, 4 sold in 30 days (O2-style cancellations excluded)');
@@ -431,7 +432,7 @@ test('CSV exports: headers in English or Swahili with (TZS), raw integers, formu
   assert.match(swHeader, /^Bidhaa,Chaguo,Idadi iliyouzwa,.*Mapato baada ya makato \(TZS\)/);
   assert.ok(!/Faida|Profit/.test(swHeader), 'no profit column without canSeeCost');
   const sales = await r.toCsv('sales', await r.report('sales', { vendorId: V, access: OWNER, query: { from: '2026-10-14', to: '2026-10-15', format: 'csv' } }), OWNER, V);
-  assert.deepEqual(sales.csv.slice(1).trimEnd().split('\r\n').slice(1), ['2026-10-14,2026-10-14,20000,84000,110000,6000,0,104000,0,2,3', '2026-10-15,2026-10-15,25000,105000,150000,0,20000,130000,13728,3,5']);
+  assert.deepEqual(sales.csv.slice(1).trimEnd().split('\r\n').slice(1), ['2026-10-14,2026-10-14,20000,84000,110000,6000,0,104000,0,2,3', '2026-10-15,2026-10-15,25000,105000,150000,0,20000,130000,13728,3,4']);
   const stock = await r.toCsv('stock-value', await r.report('stock-value', { vendorId: V, access: PLAIN, query: { format: 'csv' } }), PLAIN, V);
   assert.ok(!/cost/i.test(stock.csv.split('\r\n')[0]));
   const huge = { period: { from: '2026-10-01', to: '2026-10-02', lang: 'en' }, data: { buckets: Array.from({ length: REPORT_LIMITS.maxCsvRows + 1 }, () => ({ start: 'x', end: 'x', app: { netTzs: 0, grossTzs: 0, discountTzs: 0, refundTzs: 0, vatIncludedTzs: 0, count: 0, itemsSold: 0 }, walkIn: { netTzs: 0, grossTzs: 0, discountTzs: 0, refundTzs: 0, vatIncludedTzs: 0, count: 0, itemsSold: 0 } })) } };
@@ -771,3 +772,127 @@ test('wording (2026-10-29): Swahili and English labels for CSV/PDF; "As of" show
   assert.equal(asOfText('sw', late, late), 'Kufikia 12:30 usiku leo. Kipindi ulichochagua hakitumiki hapa.');
   assert.equal(asOfText('en', '2026-10-28T20:30:00Z', late), 'As of 28 Oct 2026');
 });
+
+// ── UAT fixes 2026-10-29 ────────────────────────────────────────────────────
+
+test('UAT D1: no cost price → profitTzs and marginPct are null (never 0) per product, bucket, channel and total; CSV cell empty', async () => {
+  const { V, P1, P2, P3 } = await seedV();
+  const r = svc();
+  const q = { from: '2026-10-14', to: '2026-10-15' };
+  const rows = (await r.report('products', { vendorId: V, access: OWNER, query: { ...q, sort: 'slow' } })).data.rows;
+  const by = id => rows.find(x => x.productId === id);
+  assert.deepEqual([by(P2).profitTzs, by(P2).marginPct], [null, null], 'sold, but never with a cost price');
+  assert.deepEqual([by(P3).profitTzs, by(P3).marginPct], [null, null], 'not sold at all');
+  assert.deepEqual([by(P1).profitTzs, by(P1).marginPct], [35_772, 22.3]);
+  const csv = await r.toCsv('products', await r.report('products', { vendorId: V, access: OWNER, query: { ...q, sort: 'slow', format: 'csv' } }), OWNER, V);
+  const gloves = csv.csv.slice(1).split('\r\n').find(l => l.startsWith('Gloves,'));
+  assert.ok(gloves.endsWith(','), `empty profit cell: ${gloves}`);
+
+  // A vendor who has only sold things without a cost price: profit unknown everywhere.
+  const U = await vendor('Uncosted Shop');
+  const pu = await product(U, { name: 'Rope', priceTzs: 9_000, stock: 4 });
+  await walkIn(U, { soldAt: '2026-10-15T08:00:00Z', lines: [{ productId: pu, name: 'Rope', qty: 1, unitPriceTzs: 9_000 }], payments: [{ method: 'cash', amountTzs: 9_000 }] });
+  const p = (await r.report('profit', { vendorId: U, access: OWNER, query: q })).data;
+  assert.deepEqual([p.totals.profitTzs, p.totals.marginPct], [null, null]);
+  assert.ok(p.buckets.every(b => b.profitTzs === null && b.marginPct === null));
+  assert.deepEqual([p.byChannel.walkIn.profitTzs, p.byChannel.app.profitTzs], [null, null]);
+  assert.deepEqual(p.byProduct, []);
+  assert.deepEqual(p.uncosted, { lineCount: 1, qty: 1, revenueTzs: 9_000, netExVatTzs: 9_000 });
+  assert.deepEqual(profitCsv(p, 'en').rows.map(x => [x[5], x[6]]), [[null, null], [null, null]], 'profit and margin cells are null → empty in the file');
+  const file = await r.toCsv('profit', await r.report('profit', { vendorId: U, access: OWNER, query: { ...q, format: 'csv' } }), OWNER, U);
+  assert.deepEqual(file.csv.slice(1).trimEnd().split('\r\n').slice(1), ['2026-10-14,2026-10-14,0,0,0,,,0', '2026-10-15,2026-10-15,0,0,0,,,9000']);
+  const sum = r.publicSummary((await r.report('summary', { vendorId: U, access: OWNER, query: q })).data);
+  assert.deepEqual([sum.profit.profitTzs, sum.profit.marginPct], [null, null]);
+});
+
+test('UAT D2: hasEverSold on every answer, fresh even when the period is cached', async () => {
+  const { V } = await seedV();
+  const cachedSvc = svc({ cache: createReportCache() });
+  const q = { from: '2025-01-01', to: '2025-01-31' };
+  assert.equal((await cachedSvc.report('sales', { vendorId: V, access: OWNER, query: q })).data.hasEverSold, true);
+  const N = await vendor('New Shop');
+  const pn = await product(N, { name: 'Mat', priceTzs: 5_000, stock: 3 });
+  await appOrder({ buyerId: await user('member'), lines: [[N, pn, 5_000, 1]] }); // unpaid: not a sale
+  const first = await cachedSvc.report('sales', { vendorId: N, access: OWNER, query: q });
+  assert.equal(first.data.hasEverSold, false);
+  assert.equal(cachedSvc.cacheSize() > 0, true, 'the closed period was cached');
+  await walkIn(N, { soldAt: '2026-10-15T08:00:00Z', lines: [{ productId: pn, name: 'Mat', qty: 1, unitPriceTzs: 5_000 }], payments: [{ method: 'cash', amountTzs: 5_000 }] });
+  const again = await cachedSvc.report('sales', { vendorId: N, access: OWNER, query: q });
+  assert.equal(again.data.hasEverSold, true, 'not served from the cache');
+  for (const section of ['summary', 'products', 'stock-value', 'profit', 'payment-methods', 'refunds', 'marketplace-net', 'customers']) {
+    assert.equal(typeof (await cachedSvc.report(section, { vendorId: N, access: OWNER, query: {} })).data.hasEverSold, 'boolean', section);
+  }
+  const P = await vendor('Paid App Shop');
+  await appOrder({ buyerId: await user('member'), lines: [[P, uid('prd'), 5_000, 1]], paidAt: '2025-01-05T09:00:00Z' });
+  assert.equal((await cachedSvc.report('sales', { vendorId: P, access: OWNER, query: q })).data.hasEverSold, true, 'a paid app order counts');
+});
+
+test('UAT D16: GET /vendor/reports/refunds → { …envelope, rows: [] } until S7, with the same guards', async () => {
+  const { V } = await seedV();
+  assert.deepEqual((await call(vendorReportRefunds, null)).body, { error: 'feature_disabled' });
+  flagsOn();
+  assert.equal((await call(vendorReportRefunds, null)).status, 401);
+  const noReports = await staff(V, ['orders']);
+  assert.deepEqual((await call(vendorReportRefunds, staffOf(noReports, V))).body, { error: 'vendor_permission_forbidden', requiredPermission: 'reports' });
+  const ok = await call(vendorReportRefunds, as(V), { query: { from: '2026-10-14', to: '2026-10-15', channel: 'app' } });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body.rows, []);
+  assert.deepEqual([ok.body.from, ok.body.to, ok.body.channel, ok.body.timezone, ok.body.hasEverSold], ['2026-10-14', '2026-10-15', 'all', 'Africa/Dar_es_Salaam', true]);
+  const csv = await call(vendorReportRefunds, as(V), { query: { from: '2026-10-14', to: '2026-10-15', format: 'csv' } });
+  assert.equal(csv.body, `${CSV_BOM}Credit note,Date,Sale,Amount (TZS),Method,Units back in stock\r\n`);
+  assert.equal((await call(vendorReportRefunds, as(V), { query: { format: 'pdf' } })).body.error, 'invalid_format');
+});
+
+test('UAT D15, D10, D12: "Uliyokusanya wewe"; English singulars; margin and shares with one decimal', () => {
+  assert.equal(reportLabel('sw', 'byYou'), 'Uliyokusanya wewe');
+  assert.equal(reportCount('en', 'voided', 1, { amount: 'TSh 5,000' }), 'Voided (not counted): 1 sale · TSh 5,000');
+  assert.equal(reportCount('en', 'voided', 2, { amount: 'TSh 5,000' }), 'Voided (not counted): 2 sales · TSh 5,000');
+  assert.equal(reportCount('en', 'uncosted', 1, { amount: 'TSh 9,000' }), 'Sold without a cost price: 1 item · TSh 9,000. Not in profit.');
+  assert.equal(reportCount('en', 'costUnknown', 1), '1 product in stock has no cost price, so it is not in the cost value.');
+  assert.equal(reportCount('en', 'cover_ok', 1), '1 day');
+  assert.equal(reportCount('en', 'cover_ok', 12), '12 days');
+  assert.equal(reportCount('sw', 'cover_ok', 1), 'Siku 1');
+  assert.equal(productsCsv({ rows: [{ name: 'X', variant: null, unitsSold: 1, appUnits: 0, walkInUnits: 1, netRevenueTzs: 1, lastSoldAt: null, stock: 9, daysOfCover: 1, coverState: 'soon' }] }, 'en', { cost: false }).rows[0][9], 'Reorder soon · 1 day');
+  assert.deepEqual([pctText(25), pctText(22.3), pctText(0), pctText(null)], ['25.0%', '22.3%', '0.0%', '—']);
+});
+
+test('UAT D9/D10/D12 in the PDF: no section heading is the last thing on a page; singulars; margin "x.y%"', async () => {
+  const { V } = await seedV();
+  const r = svc();
+  const base = (await r.report('summary', { vendorId: V, access: OWNER, query: { from: '2026-10-14', to: '2026-10-15' } })).data;
+  const sales = (await r.report('sales', { vendorId: V, access: OWNER, query: { from: '2026-10-14', to: '2026-10-15' } })).data.buckets;
+  const headings = ['Net sales', 'Top products', 'Slow sellers', 'Stock value', 'Profit', 'App sales after commission', 'Customers and money owed', 'Payment methods', 'Collected by you', 'Paid through FitFlex'];
+  const stock = (await r.report('stock-value', { vendorId: V, access: OWNER, query: {} })).data;
+  // Sweep the length of the first table so every later heading lands at many heights on the page.
+  for (let n = 1; n <= 31; n += 1) {
+    const salesRows = Array.from({ length: n }, (_, i) => sales[i % sales.length]);
+    const pdf = await renderReportPdf({ summary: { ...base, profit: { ...base.profit, marginPct: 25 } }, salesRows, stock, payoutWeeks: [], businessName: 'Dar Fitness Gear', generatedBy: 'Asha', lang: 'en' });
+    for (const page of pdfPages(pdf)) {
+      const body = page.filter(t => !/not a tax document/.test(t));
+      assert.ok(!headings.includes(body[body.length - 1]), `${n} rows: page ends with heading "${body[body.length - 1]}"`);
+    }
+    if (n === 1) {
+      const text = pdfText(pdf);
+      assert.match(text, /Voided \(not counted\): 1 sale ·/);
+      assert.match(text, /25\.0%/);
+      assert.match(text, /1 product in stock has no cost price, so it is not in the cost value\./);
+    }
+  }
+});
+
+/** The text runs of each page of a pdfkit PDF, in drawing order (one content stream per page here). */
+function pdfPages(buffer) {
+  const s = buffer.toString('latin1');
+  const pages = [];
+  const re = /stream\r?\n/g;
+  let m;
+  while ((m = re.exec(s))) {
+    const start = m.index + m[0].length;
+    const end = s.indexOf('endstream', start);
+    let data;
+    try { data = zlib.inflateSync(Buffer.from(s.slice(start, end).replace(/\r?\n$/, ''), 'latin1')).toString('latin1'); } catch { continue; }
+    const runs = [...data.matchAll(/\[(.*?)\]\s*TJ/g)].map(t => [...t[1].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join(''));
+    if (runs.length) pages.push(runs);
+  }
+  return pages;
+}

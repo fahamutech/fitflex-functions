@@ -42,7 +42,8 @@ export function createPgVendorReportStore({ db }) {
   /**
    * The CTE list ending in `facts`: one row per walk-in sale line and per (app order, product, variant) of
    * this vendor, dated in EAT, for [from, to]. Columns: channel walk_in|app, kind sale|refund, doc_id, day,
-   * product_id, variant ('' = none), name, qty (units sold; 0 on refunds), refund_qty, gross, discount,
+   * product_id, variant ('' = none), name, qty (units: + on a sale, − on a refund — UAT D17: units are net of
+   * refunds on the same dates as the money), refund_qty, gross, discount,
    * refund, net (negative on refunds), vat, commission, cost (null = unknown), at, buyer.
    */
   function factsCte({ vendorId, from, to, channel = 'all' }) {
@@ -98,7 +99,7 @@ export function createPgVendorReportStore({ db }) {
           FROM app_priced p, bounds b WHERE p.paid_at >= b.t0 AND p.paid_at < b.t1
         UNION ALL
         SELECT 'app', 'refund', p.order_id, ${eatDay('p.cancelled_at')},
-               p.product_id, p.variant, p.name, 0::bigint, p.qty, 0::bigint, 0::bigint, p.gross,
+               p.product_id, p.variant, p.name, -p.qty, p.qty, 0::bigint, 0::bigint, p.gross,
                -p.gross, -p.vat, -p.commission, -p.cost, p.cancelled_at, p.buyer
           FROM app_priced p, bounds b WHERE p.cancelled_at >= b.t0 AND p.cancelled_at < b.t1
       ),
@@ -152,12 +153,13 @@ export function createPgVendorReportStore({ db }) {
              COALESCE(sum(f.qty) FILTER (WHERE f.cost IS NULL), 0)::bigint AS uncosted_units,
              COALESCE(sum(f.net) FILTER (WHERE f.cost IS NULL), 0)::bigint AS uncosted_net,
              COALESCE(sum(f.net - f.vat) FILTER (WHERE f.cost IS NULL), 0)::bigint AS uncosted_net_ex_vat,
-             count(*) FILTER (WHERE f.cost IS NULL AND f.kind = 'sale')::int AS uncosted_lines
+             count(*) FILTER (WHERE f.cost IS NULL AND f.kind = 'sale')::int AS uncosted_lines,
+             count(*) FILTER (WHERE f.cost IS NOT NULL)::int AS costed_rows
         FROM facts f GROUP BY 1, 2`, f.bindings);
     return rows.map(plain).map(r => ({
       productId: r.product_id, variant: r.variant || '', name: r.name, units: n(r.units), appUnits: n(r.app_units), walkInUnits: n(r.walk_units),
       net: n(r.net), refund: n(r.refund), costedUnits: n(r.costed_units), costedNetExVat: n(r.costed_net_ex_vat), costedCommission: n(r.costed_commission),
-      cost: n(r.cost), uncostedUnits: n(r.uncosted_units), uncostedNet: n(r.uncosted_net), uncostedNetExVat: n(r.uncosted_net_ex_vat), uncostedLines: n(r.uncosted_lines),
+      cost: n(r.cost), uncostedUnits: n(r.uncosted_units), uncostedNet: n(r.uncosted_net), uncostedNetExVat: n(r.uncosted_net_ex_vat), uncostedLines: n(r.uncosted_lines), costedRows: n(r.costed_rows),
     }));
   }
 
@@ -172,11 +174,12 @@ export function createPgVendorReportStore({ db }) {
              COALESCE(sum(f.net) FILTER (WHERE f.cost IS NULL), 0)::bigint AS uncosted_net,
              COALESCE(sum(f.qty) FILTER (WHERE f.cost IS NULL), 0)::bigint AS uncosted_units,
              count(*) FILTER (WHERE f.cost IS NULL AND f.kind = 'sale')::int AS uncosted_lines,
+             count(*) FILTER (WHERE f.cost IS NOT NULL)::int AS costed_rows,
              max(CASE WHEN f.vat <> 0 THEN 1 ELSE 0 END)::int AS has_vat
         FROM facts f GROUP BY 1, 2 ORDER BY 1, 2`, [...f.bindings, groupBy]);
     return rows.map(plain).map(r => ({
       bucket: r.bucket, channel: r.channel, netExVat: n(r.net_ex_vat), commission: n(r.commission), cost: n(r.cost),
-      uncostedNet: n(r.uncosted_net), uncostedUnits: n(r.uncosted_units), uncostedLines: n(r.uncosted_lines), hasVat: n(r.has_vat) > 0,
+      uncostedNet: n(r.uncosted_net), uncostedUnits: n(r.uncosted_units), uncostedLines: n(r.uncosted_lines), costedRows: n(r.costed_rows), hasVat: n(r.has_vat) > 0,
     }));
   }
 
@@ -336,5 +339,15 @@ export function createPgVendorReportStore({ db }) {
     }));
   }
 
-  return { factsCte, salesByBucket, voided, hasWalkIn, byProduct, profitByBucket, unitsInWindow, lastSold, productsOf, paymentMethods, customerActivity, marketplaceNet };
+  /**
+   * UAT D2: has this vendor EVER sold anything — a recorded walk-in sale (any status) or a paid app order with
+   * one of their lines? Two indexed EXISTS probes (VendorSale vendorId; ShopOrder items GIN + paidAt).
+   */
+  async function hasEverSold(vendorId) {
+    const { rows } = await db.raw(`SELECT EXISTS (SELECT 1 FROM "VendorSale" WHERE "vendorId" = ?)
+        OR EXISTS (SELECT 1 FROM "ShopOrder" WHERE items @> ?::jsonb AND "paidAt" IS NOT NULL) AS found`, [vendorId, containment(vendorId)]);
+    return Boolean(rows[0]?.found);
+  }
+
+  return { hasEverSold, factsCte, salesByBucket, voided, hasWalkIn, byProduct, profitByBucket, unitsInWindow, lastSold, productsOf, paymentMethods, customerActivity, marketplaceNet };
 }
