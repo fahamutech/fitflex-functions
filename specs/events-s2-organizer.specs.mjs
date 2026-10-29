@@ -273,6 +273,7 @@ test('a draft organizer cannot create events (organizer_not_active); KYC decisio
   me = await call(organizerMe, f.claims);
   assert.equal(me.body.organizer.status, 'suspended');
   assert.equal(me.body.organizer.statusReason, 'spec: permit lapsed');
+  assert.equal(me.body.organizer.statusReasonCode, 'document_expired');
   const list = await call(organizerListEvents, f.claims);
   assert.equal(list.status, 200);
   assert.deepEqual(list.body.items[0].allowedActions, []);
@@ -286,10 +287,51 @@ test('a draft organizer cannot create events (organizer_not_active); KYC decisio
   await decideKyc(g.kycCaseId, 'rejected');
   const gm = await call(organizerMe, g.claims);
   assert.equal(gm.body.organizer.status, 'rejected');
-  assert.equal(gm.body.organizer.statusReason, 'spec: not genuine');
+  // Rejected for suspected_fraud: the organizer is told under_review and never sees the reviewer's note (owner rule 22 Oct 2026).
+  assert.equal(gm.body.organizer.statusReasonCode, 'under_review');
+  assert.equal(gm.body.organizer.statusReason, null);
   assert.deepEqual(gm.body.permissions, ['overview', 'onboarding']);
   const status = await db('AuditLog').where({ action: 'events.organizer_status', target: g.organizer.id }).orderBy('at', 'desc').first();
   assert.equal(status.after.status, 'rejected');
+});
+
+test('GET /organizer/me never shows a sensitive KYC reason or its note to the owner or staff; safe reasons and notes still show', async () => {
+  on();
+  const reviewer = { id: (await admin()).sub, role: 'admin', superAdmin: true };
+  // A partner-safe request for information: code and note are shown, as on /me/kyc.
+  const a = await organizerFixture('Safe Reason Club');
+  await db('PartnerKycCase').where({ id: a.kycCaseId }).update({ status: 'submitted', submittedAt: new Date().toISOString() });
+  assert.equal((await partnerKycService.claim(a.kycCaseId, reviewer)).error, undefined);
+  const asked = await partnerKycService.decide(a.kycCaseId, { decision: 'request_info', reasonCode: 'document_unreadable', reasonNote: 'spec: permit photo is blurry' }, reviewer);
+  assert.equal(asked.error, undefined, JSON.stringify(asked));
+  const am = (await call(organizerMe, a.claims)).body.organizer;
+  assert.deepEqual([am.kycStatus, am.statusReasonCode, am.statusReason], ['info_requested', 'document_unreadable', 'spec: permit photo is blurry']);
+
+  // Suspended as a duplicate partner: owner and staff get under_review, no note, and nothing naming the real reason.
+  const f = await organizerFixture('Sensitive Reason Club');
+  await decideKyc(f.kycCaseId, 'approved');
+  const staff = await makeUser('organizer_staff', { organizerId: f.organizer.id, organizerRole: 'ops' });
+  await eventCatalogueStore.addStaff({ organizerId: f.organizer.id, userId: staff.id, role: 'ops', addedBy: f.persona.id });
+  const note = 'spec: same TIN as organizer evo_other';
+  const suspended = await partnerKycService.decide(f.kycCaseId, { decision: 'suspend', reasonCode: 'duplicate_partner', reasonNote: note }, reviewer);
+  assert.equal(suspended.error, undefined, JSON.stringify(suspended));
+  for (const claims of [f.claims, claimsOf(staff)]) {
+    const r = await call(organizerMe, claims);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.organizer.status, r.body.organizer.statusReasonCode, r.body.organizer.statusReason], ['suspended', 'under_review', null]);
+    const raw = JSON.stringify(r.body);
+    assert.ok(!raw.includes('duplicate_partner') && !raw.includes('same TIN'), raw);
+  }
+  // Admins keep the real code and note: on the case and on the organizer row.
+  assert.deepEqual(Object.values(await db('PartnerKycCase').where({ id: f.kycCaseId }).first('reasonCode', 'reasonNote')), ['duplicate_partner', note]);
+  assert.equal((await db('EventOrganizer').where({ id: f.organizer.id }).first()).statusReason, note);
+
+  // Fail closed: if the organizer row still holds the note but the case no longer has a code (the hook did not run),
+  // the note is not shown. (Codes outside the catalogue are refused by partner_kyc_case_reason_chk / the helper's own specs.)
+  await db('PartnerKycCase').where({ id: f.kycCaseId }).update({ status: 'submitted', reasonCode: null, reasonNote: null });
+  assert.equal((await db('EventOrganizer').where({ id: f.organizer.id }).first()).statusReason, note);
+  const m = (await call(organizerMe, f.claims)).body.organizer;
+  assert.deepEqual([m.statusReasonCode, m.statusReason], [null, null]);
 });
 
 // ── Staff ─────────────────────────────────────────────────────────────────
