@@ -35,15 +35,19 @@ export const PARTNER_MEDIA_LIMITS = Object.freeze({
 });
 
 /**
- * Upload caps. O-P5 (owner 2026-10-29): 10 a minute and 20 a day per partner (subject), both kinds
- * together. Security review M3: also per person, checked before the request body is read (10 a
- * minute, and 40 a day across every gym the person runs). Every attempt counts, refused ones too.
+ * Upload caps.
+ * - O-P5 (owner 2026-10-29), per partner (subject), both kinds together: 10 a minute, and 20
+ *   SUCCESSFUL uploads a day (re-review R5: refused or failed attempts never use these 20, so a
+ *   teammate's failures cannot lock the owner out).
+ * - Attempts per partner, whatever their outcome: 60 a day (their own cap, R5).
+ * - Per person, checked before the request body is read (security review M3): 10 attempts a minute
+ *   and 40 a day across every gym the person runs.
  */
-export const UPLOAD_RATE = Object.freeze({ perMinute: 10, perDay: 20, perUserMinute: 10, perUserDay: 40 });
+export const UPLOAD_RATE = Object.freeze({ perMinute: 10, perDay: 20, perDayAttempts: 60, perUserMinute: 10, perUserDay: 40 });
 /** Previews (review M3): made once at upload; the routes only read them. Per person per minute. */
 export const PREVIEW_VARIANT_OF_WIDTH = Object.freeze({ 240: 'p240', 480: 'p480', 960: 'p960' });
 export const PREVIEW_RATE = Object.freeze({ partnerPerMinute: 120, adminPerMinute: 300 });
-/** Review M3: at most this many images are decoded at once in one server process; more waiting → 503. */
+/** Review M3: at most this many partner images are decoded at once in one server process; more waiting → 503. */
 export const IMAGE_JOBS = Object.freeze({ concurrent: 2, maxWaiting: 20 });
 /** A FitFlex reason for putting back a file taken down at a person's request (review L2). */
 export const OVERRIDE_REASON_MAX = 500;

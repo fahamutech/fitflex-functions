@@ -13,9 +13,11 @@
 //     trainer  only the TrainerProfile whose userId is the caller.
 //     vendor   the vendor account; active vendor staff of that vendor (read), vendorRole admin (write).
 //   An item of another partner reads as 404 media_not_found, never 403.
-// - Abuse limits (O-P5, review M3/L8): per person (checked before the body is read, admitUpload) and
-//   per partner, a minute window in memory and a daily count of ATTEMPTS in the database, counted
-//   under a lock. At most IMAGE_JOBS.concurrent images are decoded at once in this process.
+// - Abuse limits (O-P5, review M3/L8, re-review R5): per person (checked before the body is read,
+//   admitUpload): attempts a minute and a day. Per partner: attempts a minute, attempts a day (60),
+//   and SUCCESSFUL uploads a day (20, O-P5), each counted under a lock. At most IMAGE_JOBS.concurrent
+//   partner images are decoded at once in this process (the gate; sharp's own settings are untouched,
+//   so hero photos, banners and KYC files are not affected).
 // - FitFlex: `moderation_decide` marks an item reviewed (never one's own upload) or takes it down
 //   (reason code; the bytes are deleted at once, the hashes kept for O-P2); `brand_media` sets a
 //   photo or logo for a partner directly (live and reviewed; no notice, O-P3). Putting back a file
@@ -82,13 +84,6 @@ export function createJobGate({ max = IMAGE_JOBS.concurrent, maxWaiting = IMAGE_
 
 // One gate for the whole process (every service instance shares the CPU).
 const processImageGate = createJobGate();
-let sharpTuned = false;
-/** Review M3: libvips uses one thread per image job. Process-wide; applied on the first partner image job only. */
-function tuneSharp() {
-  if (sharpTuned) return;
-  sharp.concurrency(1);
-  sharpTuned = true;
-}
 
 export function createPartnerMediaService({
   store,
@@ -109,18 +104,23 @@ export function createPartnerMediaService({
     return new Date(lastAuditMs).toISOString();
   };
   // Review L5: the upload's hashes are recorded only once it is taken down (O-P2 needs them there).
-  const snapshot = m => (m ? {
+  // Re-review R3: never in `purged` rows either (hashes: false).
+  const snapshot = (m, { hashes = true } = {}) => (m ? {
     id: m.id, subjectType: m.subjectType, subjectId: m.subjectId, kind: m.kind, origin: m.origin, status: m.status,
     revision: m.revision, reviewState: m.reviewState, reason: m.reason ?? null,
-    ...(m.status === 'taken_down' ? { sha256: m.sha256 ?? null, pixelSha256: m.pixelSha256 ?? null } : {}),
+    ...(hashes && m.status === 'taken_down' ? { sha256: m.sha256 ?? null, pixelSha256: m.pixelSha256 ?? null } : {}),
     focalX: m.focalX ?? null, focalY: m.focalY ?? null, plate: m.plate ?? null, plateChoice: m.plateChoice ?? null,
     confirmationVersion: m.confirmationVersion,
   } : null);
-  const audit = (q, action, actor, m, before, after, extra = {}) => q.audit({
+  const audit = (q, action, actor, m, before, after, extra = {}, opts = {}) => q.audit({
     id: randomUUID(), at: auditAt(), actor, action: `partner_media.${action}`, target: m.id,
-    before: snapshot(before), after: after ? { ...snapshot(after), ...extra } : extra,
+    before: snapshot(before, opts), after: after ? { ...snapshot(after, opts), ...extra } : extra,
   });
   const slotKey = (subjectType, subjectId, kind) => `slot:${subjectType}:${subjectId}:${kind}`;
+  const rateKey = (subjectType, subjectId) => `rate:${subjectType}:${subjectId}`;
+  const successCapped = async (q, subject) => (await q.countPartnerUploadsSince(subject.type, subject.id, dayAgo()) >= UPLOAD_RATE.perDay
+    ? fail('rate_limited', 429, { retryAfterSeconds: 3600, limit: 'day', scope: 'partner', max: UPLOAD_RATE.perDay })
+    : null);
   const enforce = () => orgAuthzMode() === 'enforce';
 
   // ── Who may see and change whose media ──────────────────────────────────────
@@ -358,11 +358,11 @@ export function createPartnerMediaService({
     });
   }
 
-  /** The partner's daily cap (O-P5): counted and claimed under the partner's lock (L8). */
+  /** The partner's daily ATTEMPT cap (60, re-review R5): counted and claimed under the partner's lock (L8). */
   async function claimSubjectAttempt({ claims, subject, attemptId }) {
-    return store.transaction(`rate:${subject.type}:${subject.id}`, async (q) => {
-      if (await q.countSubjectAttempts(subject.type, subject.id, dayAgo()) >= UPLOAD_RATE.perDay) {
-        return fail('rate_limited', 429, { retryAfterSeconds: 3600, limit: 'day', scope: 'partner', max: UPLOAD_RATE.perDay });
+    return store.transaction(rateKey(subject.type, subject.id), async (q) => {
+      if (await q.countSubjectAttempts(subject.type, subject.id, dayAgo()) >= UPLOAD_RATE.perDayAttempts) {
+        return fail('rate_limited', 429, { retryAfterSeconds: 3600, limit: 'day', scope: 'partner_attempts', max: UPLOAD_RATE.perDayAttempts });
       }
       if (attemptId) await q.setAttemptSubject(attemptId, subject.type, subject.id);
       else await q.insertAttempt({ id: `pma_${randomUUID().replace(/-/g, '').slice(0, 20)}`, userId: claims.sub, subjectType: subject.type, subjectId: subject.id, createdAt: stamp() });
@@ -375,10 +375,7 @@ export function createPartnerMediaService({
     if (looksLikeSvg(buffer)) return fail('svg_not_allowed', 400);
     const sniffed = sniffImageType(buffer);
     if (!sniffed || !(kind === 'hero' ? HERO_SNIFFED : LOGO_SNIFFED).has(sniffed)) return fail('unsupported_file_type', 400, { reason: 'not_an_accepted_image' });
-    const job = await imageGate.run(async () => {
-      tuneSharp();
-      return kind === 'hero' ? processHero(buffer) : processLogo(buffer);
-    });
+    const job = await imageGate.run(() => (kind === 'hero' ? processHero(buffer) : processLogo(buffer)));
     if (job.busy) return fail('image_service_busy', 503, { retryAfterSeconds: 5 });
     return job.value;
   }
@@ -432,13 +429,21 @@ export function createPartnerMediaService({
   }
 
   /**
-   * Make the new item live: the previous live one is replaced and its bytes deleted, in one transaction.
-   * `beforeSave(q)` may refuse (→ { error }) inside the lock, e.g. the O-P2 check.
+   * Make the new item live: the previous live one is replaced and its bytes deleted, in one transaction
+   * holding the slot lock and the partner's rate lock (the same locks a purge and the daily count use).
+   * Inside them: the partner must still exist (re-review R1: a purge may have run while the file was
+   * cleaned → 404 subject_not_found), a partner upload must be within the 20 a day (R5), then
+   * `beforeSave(q)` may refuse (→ { error }), e.g. the O-P2 check.
    */
   async function saveLive({ subject, kind, row, files, actorId, beforeSave = null, auditExtra = {} }) {
     const refuse = out => { throw Object.assign(new Error(out.error), { refusal: out }); };
     try {
-      return await store.transaction(slotKey(subject.type, subject.id, kind), async (q) => {
+      return await store.transaction([slotKey(subject.type, subject.id, kind), rateKey(subject.type, subject.id)], async (q) => {
+        if (!(await q.subjectExists(subject.type, subject.id))) refuse(fail('subject_not_found', 404));
+        if (row.origin === 'partner') {
+          const capped = await successCapped(q, subject);
+          if (capped) refuse(capped);
+        }
         if (beforeSave) {
           const refused = await beforeSave(q);
           if (refused) refuse(refused);
@@ -483,6 +488,9 @@ export function createPartnerMediaService({
     if (!minute.ok) return fail('rate_limited', 429, { retryAfterSeconds: minute.retryAfterSeconds, limit: 'minute', scope: 'partner', max: UPLOAD_RATE.perMinute });
     const capped = await claimSubjectAttempt({ claims, subject, attemptId });
     if (capped) return capped;
+    // The 20 successful uploads a day (O-P5): checked now to spare the work, and again in the lock.
+    const full = await successCapped(store, subject);
+    if (full) return full;
 
     if ('people' in fields || 'peopleConfirmed' in fields) return fail('unknown_field', 400, { field: 'people' in fields ? 'people' : 'peopleConfirmed' });
     if (fields.confirmationVersion !== PARTNER_CONFIRMATION.version) {
@@ -844,7 +852,7 @@ export function createPartnerMediaService({
    */
   async function purgeSubject(subjectType, subjectId, { actor = SYSTEM_ACTOR, cause = 'subject_removed' } = {}) {
     if (!SUBJECT_TYPES.includes(subjectType) || typeof subjectId !== 'string' || !subjectId) return { items: 0, files: 0 };
-    return store.transaction(MEDIA_KINDS.map(kind => slotKey(subjectType, subjectId, kind)), async (q) => {
+    return store.transaction([...MEDIA_KINDS.map(kind => slotKey(subjectType, subjectId, kind)), rateKey(subjectType, subjectId)], async (q) => {
       let files = 0;
       const rows = await q.unpurgedOf(subjectType, subjectId);
       for (const cur of rows) {
@@ -855,7 +863,7 @@ export function createPartnerMediaService({
           ...(cur.status === 'live' ? { status: 'removed', statusChangedBy: actor, statusChangedAt: at } : {}),
           sha256: null, pixelSha256: null, reasonNote: null, purgedAt: at, revision: cur.revision + 1, updatedAt: at,
         });
-        await audit(q, 'purged', actor, cur, cur, after, { cause, filesDeleted: deleted });
+        await audit(q, 'purged', actor, cur, cur, after, { cause, filesDeleted: deleted }, { hashes: false });
       }
       return { items: rows.length, files };
     });
@@ -873,7 +881,9 @@ export function createPartnerMediaService({
     if (user.userType === 'vendor') add(await purgeSubject('vendor', user.id, { actor, cause }));
     if (user.userType === 'trainer') add(await purgeOrphans({ subjectType: 'trainer', actor, cause }));
     if (user.userType === 'gym_operator') {
-      for (const gymId of await store.gymsWithoutOwner(ownGymIds(user))) add(await purgeSubject('gym', gymId, { actor, cause }));
+      // Legacy gym list and (Identity V2) owner memberships: a V2-only owner has no gymIds (re-review R2).
+      const candidates = [...ownGymIds(user), ...await store.ownedGymIdsOfPersona(user)];
+      for (const gymId of await store.gymsWithoutOwner(candidates)) add(await purgeSubject('gym', gymId, { actor, cause }));
     }
     return total;
   }
@@ -889,9 +899,17 @@ export function createPartnerMediaService({
     return out;
   }
 
-  /** The nightly sweep: orphaned media, and upload attempts older than two days. */
+  /**
+   * The nightly sweep: media of partners that no longer exist (incl. trainer profiles whose account is
+   * closed), of gyms no open owner runs any more (legacy or V2 owners; re-review R2), and upload
+   * attempts older than two days.
+   */
   async function sweep() {
     const orphans = await purgeOrphans();
+    for (const gymId of await store.gymsWithoutOwner(await store.gymSubjectsWithMedia())) {
+      const r = await purgeSubject('gym', gymId, { cause: 'gym_without_owner' });
+      orphans.subjects += 1; orphans.items += r.items; orphans.files += r.files;
+    }
     const attempts = await store.deleteAttemptsBefore(new Date(now().getTime() - ATTEMPT_KEEP_MS).toISOString());
     return { ...orphans, attemptsDeleted: Number(attempts) || 0 };
   }

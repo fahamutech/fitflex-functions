@@ -1,5 +1,5 @@
 // Postgres store for partner hero photos and logos (PartnerMedia, PartnerMediaFile and
-// PartnerMediaUploadAttempt; migration 20270122090000-partner-media). The image bytes live in
+// PartnerMediaUploadAttempt; migration 20270125090000-partner-media). The image bytes live in
 // PartnerMediaFile.data (bytea): deleting those rows really deletes the image (owner decision D-1).
 //
 // Every change of state runs in one transaction under advisory locks (`partner_media:<key>`): one
@@ -36,17 +36,23 @@ const likeEscape = s => s.replace(/[\\%_]/g, m => `\\${m}`);
 
 // The partner's name, whatever kind of partner it is (gym name, trainer display name, vendor store name).
 const NAME_SQL = `coalesce(g."name", tp."displayName", nullif(btrim(vu."vendorProfile"->>'businessName'), ''), vu."displayName")`;
-/** PartnerMedia with its partner joined; a partner that no longer exists (or a closed vendor) joins as nulls. */
+/**
+ * PartnerMedia with its partner joined; a partner that no longer exists joins as nulls: a deleted gym,
+ * a deleted trainer profile or one whose account is closed or gone (re-review R2), a deleted or closed vendor.
+ */
 function withSubjects(q) {
   return q('PartnerMedia as pm')
     .leftJoin('Gym as g', function joinGym() { this.on('g.id', 'pm.subjectId').andOn('pm.subjectType', q.raw('?', ['gym'])); })
     .leftJoin('TrainerProfile as tp', function joinTrainer() { this.on('tp.id', 'pm.subjectId').andOn('pm.subjectType', q.raw('?', ['trainer'])); })
+    .leftJoin('User as tu', function joinTrainerUser() { this.on('tu.id', 'tp.userId').andOn('tu.accountStatus', '<>', q.raw('?', ['closed'])); })
     .leftJoin('User as vu', function joinVendor() {
       this.on('vu.id', 'pm.subjectId').andOn('pm.subjectType', q.raw('?', ['vendor'])).andOn('vu.userType', q.raw('?', ['vendor']))
         .andOn('vu.accountStatus', '<>', q.raw('?', ['closed']));
     });
 }
-const SUBJECT_EXISTS = '(g.id IS NOT NULL OR tp.id IS NOT NULL OR vu.id IS NOT NULL)';
+// A trainer profile with no account (admin-made, or its user row gone: userId is SET NULL) still counts;
+// one whose account is closed does not.
+const SUBJECT_EXISTS = '(g.id IS NOT NULL OR (tp.id IS NOT NULL AND (tp."userId" IS NULL OR tu.id IS NOT NULL)) OR vu.id IS NOT NULL)';
 
 function bind(q) {
   const media = () => q('PartnerMedia').whereNull('purgedAt');
@@ -143,6 +149,11 @@ function bind(q) {
       const [{ n }] = await attempts().where({ subjectType, subjectId }).where('createdAt', '>', sinceIso).count({ n: '*' });
       return Number(n);
     },
+    /** Successful partner uploads of one partner since `sinceIso` (O-P5: the 20 a day; purged rows still count). */
+    async countPartnerUploadsSince(subjectType, subjectId, sinceIso) {
+      const [{ n }] = await q('PartnerMedia').where({ subjectType, subjectId, origin: 'partner' }).where('createdAt', '>', sinceIso).count({ n: '*' });
+      return Number(n);
+    },
     async setAttemptSubject(id, subjectType, subjectId) {
       return attempts().where({ id }).update({ subjectType, subjectId });
     },
@@ -185,16 +196,48 @@ function bind(q) {
       return withSubjects(q).whereNull('pm.purgedAt').whereRaw(`NOT ${SUBJECT_EXISTS}`)
         .distinct('pm.subjectType', 'pm.subjectId').limit(limit);
     },
-    /** Of these gyms, the ones no open owner account runs any more (or that no longer exist). */
+    /**
+     * Of these gyms, the ones no open owner runs any more (or that no longer exist). An owner is an
+     * open gym_operator account listing the gym, or (Identity V2) an ACTIVE owner OrgMembership whose
+     * persona is an open account (re-review R2).
+     */
     async gymsWithoutOwner(gymIds) {
       const out = [];
       for (const gymId of [...new Set(gymIds.filter(Boolean))]) {
-        const owner = await q('User').where({ userType: 'gym_operator' })
+        const legacy = await q('User').where({ userType: 'gym_operator' })
           .where(b => b.whereRaw('? = ANY("gymIds")', [gymId]).orWhere({ gymId }))
           .whereNotIn('accountStatus', ['closed']).first('id');
-        if (!owner) out.push(gymId);
+        if (legacy) continue;
+        const v2 = await q('OrgMembership as m').join('User as u', 'u.id', 'm.personaId')
+          .where({ 'm.gymId': gymId, 'm.orgType': 'gym', 'm.role': 'owner', 'm.status': 'active' })
+          .whereNot('u.accountStatus', 'closed').first('m.id');
+        if (!v2) out.push(gymId);
       }
       return out;
+    },
+    /**
+     * Gyms an account owned through owner OrgMemberships (any status). After the account row is deleted
+     * its memberships lose personaId (ON DELETE SET NULL), so those of its Person without a persona count too.
+     */
+    async ownedGymIdsOfPersona(user) {
+      if (!user?.id) return [];
+      return q('OrgMembership').where({ orgType: 'gym', role: 'owner' }).whereNotNull('gymId')
+        .where(b => b.where({ personaId: user.id }).modify((w) => { if (user.personId) w.orWhere(x => x.whereNull('personaId').andWhere({ personId: user.personId })); }))
+        .distinct().pluck('gymId');
+    },
+    /** Every gym with media not yet purged (the sweep checks each still has an open owner). */
+    async gymSubjectsWithMedia(limit = 2000) {
+      return q('PartnerMedia').whereNull('purgedAt').where({ subjectType: 'gym' }).distinct().limit(limit).pluck('subjectId');
+    },
+    /** Does the partner still exist (inside an upload's lock; re-review R1)? Trainers need an open account, vendors an open vendor account. */
+    async subjectExists(subjectType, subjectId) {
+      if (subjectType === 'gym') return Boolean(await q('Gym').where({ id: subjectId }).first('id'));
+      if (subjectType === 'trainer') {
+        const t = await q('TrainerProfile as tp').leftJoin('User as u', 'u.id', 'tp.userId').where('tp.id', subjectId).first('tp.userId', 'u.accountStatus');
+        return Boolean(t) && (!t.userId || (t.accountStatus != null && t.accountStatus !== 'closed'));
+      }
+      if (subjectType === 'vendor') return Boolean(await q('User').where({ id: subjectId, userType: 'vendor' }).whereNot({ accountStatus: 'closed' }).first('id'));
+      return false;
     },
 
     // ── Partners and people ─────────────────────────────────────────────────

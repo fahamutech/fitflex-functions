@@ -564,22 +564,36 @@ test('rate limits: 10 a minute per person (before the body is read) and per part
   assert.equal((await svc.upload({ claims: t2, kind: 'hero', fields: {} })).error, 'confirmation_version_mismatch');
 });
 
-test('rate limits: 20 attempts a day per partner and 40 a day per person, counted in the database (refused attempts included)', async () => {
+test('rate limits (R5): 20 SUCCESSFUL uploads a day per partner; failed attempts have their own 60 a day; 40 a day per person', async () => {
   const at = new Date(Date.now() - 3_600_000);
-  const attempt = (extra) => ({ id: uid('pma'), userId: P.trainer1, createdAt: at, ...extra });
-  // 19 earlier attempts on trainer 1's profile, whatever became of them.
-  await db('PartnerMediaUploadAttempt').insert(Array.from({ length: 19 }, () => attempt({ subjectType: 'trainer', subjectId: P.tp1 })));
+  // 19 earlier successful uploads on trainer 1's profile (since replaced).
+  await db('PartnerMedia').insert(Array.from({ length: 19 }, (_, i) => ({
+    id: uid('pmd'), subjectType: 'trainer', subjectId: P.tp1, kind: i % 2 ? 'logo' : 'hero', origin: 'partner', status: 'replaced',
+    width: 1600, height: 1000, ...(i % 2 ? { plate: 'light', plateChoice: 'auto' } : { focalX: 0, focalY: 0 }),
+    confirmationVersion: PARTNER_CONFIRMATION.version, rightsConfirmedBy: P.trainer1, rightsConfirmedAt: at, uploadedBy: P.trainer1, uploadedByRole: 'trainer',
+    createdAt: at, updatedAt: at,
+  })));
   const t1 = claimsOf(P.trainer1, 'trainer');
-  assert.equal((await heroFor(t1, { rightsConfirmed: 'false' })).status, 400, 'the 20th of the day: refused for its own reason, still counted');
+  assert.equal((await heroFor(t1, { rightsConfirmed: 'false' })).status, 400, 'a refused attempt does not use one of the 20');
+  assert.equal((await heroFor(t1)).status, 201, 'the 20th successful upload of the day');
   const r = await heroFor(t1);
   assert.deepEqual([r.status, r.body.error, r.body.limit, r.body.scope, r.body.max], [429, 'rate_limited', 'day', 'partner', 20]);
   // Older than a day: no longer counted.
-  const older = (await db('PartnerMediaUploadAttempt').where({ userId: P.trainer1 }).orderBy('id').limit(5).pluck('id'));
-  await db('PartnerMediaUploadAttempt').whereIn('id', older).update({ createdAt: new Date(Date.now() - DAY_MS - 3_600_000) });
-  assert.equal((await heroFor(t1)).status, 201);
-  // Per person across every gym they run: 40 a day, wherever they were spent.
+  await db('PartnerMedia').where({ subjectId: P.tp1 }).where('createdAt', '<', new Date(Date.now() - 60_000)).update({ createdAt: new Date(Date.now() - DAY_MS - 3_600_000) });
+  assert.equal((await heroFor(t1, {}, await photo())).status, 201);
+
+  // A teammate's 25 failed attempts today do not lock the owner out of gym A.
+  const failed = n => Array.from({ length: n }, () => ({ id: uid('pma'), userId: P.staffEdit, subjectType: 'gym', createdAt: at }));
+  await db('PartnerMediaUploadAttempt').insert(failed(25).map(x => ({ ...x, subjectId: P.gymA })));
+  assert.equal((await heroFor(owner(), { gymId: P.gymA })).status, 201);
+  // But attempts have their own cap: 60 a day per partner, whatever their outcome.
+  await db('PartnerMediaUploadAttempt').insert(failed(60).map(x => ({ ...x, subjectId: P.gymC })));
+  const a = await heroFor(owner(), { gymId: P.gymC });
+  assert.deepEqual([a.status, a.body.limit, a.body.scope, a.body.max], [429, 'day', 'partner_attempts', 60]);
+
+  // Per person across every gym they run: 40 attempts a day, wherever they were spent.
   await db('PartnerMediaUploadAttempt').insert(Array.from({ length: 40 }, (_, i) => ({ id: uid('pma'), userId: P.ownerA, subjectType: 'gym', subjectId: i % 2 ? P.gymA : P.gymC, createdAt: at })));
-  const p = await heroFor(owner(), { gymId: P.gymC });
+  const p = await heroFor(owner(), { gymId: P.gymA });
   assert.deepEqual([p.status, p.body.limit, p.body.scope, p.body.max], [429, 'day', 'person', 40]);
   // The sweep deletes attempts older than two days.
   await db('PartnerMediaUploadAttempt').where({ userId: P.ownerA }).update({ createdAt: new Date(Date.now() - 3 * DAY_MS) });
@@ -836,6 +850,8 @@ test('M2 purge: admin gym delete and owner gym delete purge that gym; a re-creat
   assert.equal((await hit('GET', `/admin/partner-media/${hero.body.item.id}/preview`, { claims: adminClaims(P.super) })).status, 404);
   const purgeAudit = await db('AuditLog').where({ action: 'partner_media.purged' }).whereIn('target', [hero.body.item.id, logoItem.body.item.id]);
   assert.equal(purgeAudit.length, 2);
+  // R3: not even the taken-down logo's hashes are written into the purge rows.
+  for (const r of purgeAudit) assert.doesNotMatch(JSON.stringify([r.before, r.after]), /[0-9a-f]{64}|sha256/i, 'no hashes in purged audit rows');
   // The same id comes back: no live item, no old takedown, nothing in the admin queue.
   await gymService.upsert({ body: { id: gymId, name: 'Purge Gym again', tier: 'standard', location: 'Dar' }, actorId: P.super });
   const reborn = await user('gym_operator', { gymIds: [gymId] });
@@ -1033,4 +1049,70 @@ test('L7: only JPEG, PNG, WebP and HEIF/AVIF magic bytes reach the decoder (logo
   const avifLogo = await logoFor(owner(), { gymId: P.gymA }, await sharp(LOGO_DARK).avif().toBuffer());
   assert.deepEqual([avifLogo.status, avifLogo.body.error], [400, 'unsupported_file_type']);
   assert.match(await pixelSha256(await sharp(PHOTO).webp().toBuffer()), /^[0-9a-f]{64}$/);
+});
+
+// ── Re-review of functions#277 ──────────────────────────────────────────────
+
+test('R1: a partner deleted while its file is being cleaned is refused inside the lock (404 subject_not_found); nothing is saved', async () => {
+  const gR = await gym('Deleted mid-upload');
+  const oR = await user('gym_operator', { gymIds: [gR] });
+  const svc = createPartnerMediaService({
+    store: createPgPartnerMediaStore({ db }), logger: { error() {}, warn() {} },
+    // The gym goes while the image is being processed (after every check made before the work).
+    imageGate: { run: async (fn) => { const value = await fn(); await db('Gym').where({ id: gR }).del(); return { value }; } },
+  });
+  const r = await svc.upload({ claims: claimsOf(oR, 'gym_operator'), kind: 'hero', gymId: gR, file: { buffer: PHOTO }, fields: HERO_FIELDS() });
+  assert.deepEqual([r.status, r.error], [404, 'subject_not_found']);
+  assert.equal((await mediaRows(gR)).length, 0);
+});
+
+test('R2: the sweep purges gyms with no open owner and trainers whose account is closed; keeps V2-only owners and account-less trainer profiles; purgeAccount finds V2-only gyms', async () => {
+  const sa = adminClaims(P.super);
+  // A gym nobody owns (FitFlex set its photo).
+  const gNone = await gym('Ownerless gym');
+  assert.equal((await brandSet('gym', gNone)).status, 201);
+  // A gym whose only owner is a closed account.
+  const gClosed = await gym('Closed owner gym');
+  const closedOwner = await user('gym_operator', { gymIds: [gClosed] });
+  assert.equal((await heroFor(claimsOf(closedOwner, 'gym_operator'), { gymId: gClosed })).status, 201);
+  await db('User').where({ id: closedOwner }).update({ accountStatus: 'closed' });
+  // A gym owned only through an ACTIVE Identity V2 owner membership: kept.
+  const gV2 = await gym('V2 owned gym');
+  const person = uid('per'); await db('Person').insert({ id: person }); made.persons.push(person);
+  const v2Owner = await user('gym_operator', { gymIds: [], personId: person });
+  const om = uid('om');
+  await db('OrgMembership').insert({ id: om, personId: person, personaId: v2Owner, orgType: 'gym', gymId: gV2, role: 'owner', status: 'active', aclPermissions: [], source: 'sync' });
+  made.memberships.push(om);
+  assert.equal((await brandSet('gym', gV2)).status, 201);
+  // A trainer whose account is closed, and an account-less (admin-made) profile.
+  const tcUser = await user('trainer');
+  const tcProfile = await trainerProfile(tcUser, 'Closed Coach');
+  assert.equal((await heroFor(claimsOf(tcUser, 'trainer'))).status, 201);
+  await db('User').where({ id: tcUser }).update({ accountStatus: 'closed' });
+  const tNoUser = await trainerProfile(null, 'Studio Coach');
+  assert.equal((await brandSet('trainer', tNoUser)).status, 201);
+  // Until the sweep, the admin list already hides the closed trainer.
+  const before = await hit('GET', '/admin/partner-media?tab=live&subjectType=trainer', { claims: sa });
+  assert.equal(before.body.items.some(i => i.subject.id === tcProfile), false);
+  assert.equal(before.body.items.some(i => i.subject.id === tNoUser), true);
+
+  await partnerMediaSweep.onJob();
+  await assertPurged(gNone, 'sweep: gym with no owner');
+  await assertPurged(gClosed, 'sweep: gym whose owner is closed');
+  await assertPurged(tcProfile, 'sweep: trainer whose account is closed');
+  for (const kept of [gV2, tNoUser]) {
+    const rows = await mediaRows(kept);
+    assert.equal(rows.filter(r => r.status === 'live' && !r.purgedAt).length, 1, `kept: ${kept}`);
+  }
+
+  // purgeAccount for a V2-only owner (no gymIds): their gym goes when an admin removes them.
+  assert.equal((await adminOwnerService.remove({ id: v2Owner, actorId: P.super })).error, undefined);
+  await assertPurged(gV2, 'adminOwnerService.remove of a V2-only owner');
+});
+
+test('sharp settings are not changed by partner uploads (the gate alone limits them)', async () => {
+  const beforeThreads = sharp.concurrency();
+  assert.equal((await heroFor(owner(), { gymId: P.gymA })).status, 201);
+  assert.equal((await logoFor(owner(), { gymId: P.gymA })).status, 201);
+  assert.equal(sharp.concurrency(), beforeThreads);
 });

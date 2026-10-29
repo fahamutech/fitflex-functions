@@ -4,7 +4,7 @@ Plan: `docs/plans/partner-hero-media-plan.md` (parent repo). Design: `docs/desig
 
 **Flag:** `PARTNER_MEDIA` (server env, default off). When it is off, every route below answers `404 { error: "feature_disabled" }` before sign-in is checked. Apps treat that as "feature off".
 
-**Storage:** the cleaned bytes are stored in Postgres (`PartnerMediaFile.data`, bytea). Replace, remove and takedown delete those rows, so the files really are gone. The `PartnerMedia` metadata row stays. Migration: `db/migrations/20270122090000-partner-media.cjs`.
+**Storage:** the cleaned bytes are stored in Postgres (`PartnerMediaFile.data`, bytea). Replace, remove and takedown delete those rows, so the files really are gone. The `PartnerMedia` metadata row stays. Migration: `db/migrations/20270125090000-partner-media.cjs`.
 
 **Serving (O-P1):** files are served only to signed-in readers of that partner. There is no public route in v1.
 
@@ -66,10 +66,14 @@ Returns `200`:
 - Errors: `400 gym_id_required`, `403 not_your_gym | acl_forbidden`, `404 subject_not_found`.
 
 ### Upload limits (O-P5, review M3/L8)
-- **Before the request body is read** (route guard): per person, 10 a minute (in memory, per server) and 40 a day across every gym they run (counted in `PartnerMediaUploadAttempt`, under a lock per person). The attempt is recorded at this point, so refused and failed uploads count too.
-- **Then, per partner:** 10 a minute (in memory) and 20 attempts a day (counted under a lock per partner).
-- **Over a limit:** `429 rate_limited { retryAfterSeconds, limit: 'minute'|'day', scope: 'person'|'partner', max }`, with `Retry-After`.
-- **Image jobs:** at most 2 images are decoded at once per server process, with up to 20 waiting. Beyond that: `503 image_service_busy { retryAfterSeconds }`. libvips runs one thread per job (`sharp.concurrency(1)`, process-wide, set on the first partner image job).
+- **Before the request body is read** (route guard): per person, 10 attempts a minute (in memory, per server) and 40 a day across every gym they run (counted in `PartnerMediaUploadAttempt`, under a lock per person). The attempt is recorded at this point, so refused and failed uploads count toward these.
+- **Then, per partner:**
+  - 10 attempts a minute (in memory);
+  - 60 attempts a day, whatever their outcome (`scope: 'partner_attempts'`);
+  - **20 successful uploads a day** (O-P5, `scope: 'partner'`). Refused or failed attempts never use these 20, so a teammate's failures can't lock the owner out (re-review R5).
+  - Counted under the partner's lock; the successful count is checked again inside the save transaction.
+- **Over a limit:** `429 rate_limited { retryAfterSeconds, limit: 'minute'|'day', scope: 'person'|'partner'|'partner_attempts', max }`, with `Retry-After`.
+- **Image jobs:** at most 2 partner images are decoded at once per server process, with up to 20 waiting. Beyond that: `503 image_service_busy { retryAfterSeconds }`. sharp's own settings are not changed, so hero photos, shop banners and KYC files are unaffected.
 - **Magic bytes (L7):** a file whose first bytes are not JPEG, PNG, WebP or HEIF/AVIF (logos: JPEG, PNG, WebP only) is refused with `400 unsupported_file_type { reason: 'not_an_accepted_image' }` before any decoder sees it. SVG still gets `svg_not_allowed`.
 
 ### `POST /partner/media/hero` (multipart)
@@ -94,7 +98,7 @@ With `auto`, the plate is dark when the alpha-weighted luminance of the logo is 
 **Upload errors:**
 - `400`: `gym_id_required`, `confirmation_version_mismatch {current}`, `rights_confirmation_required`, `own_logo_confirmation_required`, `invalid_focal`, `invalid_plate`, `no_file_provided`, `unsupported_file_type`, `svg_not_allowed`, `image_too_small {minWidth|minSide, width, height}`, `unknown_field` (any `people` / `peopleConfirmed` field), `invalid_multipart`
 - `403`: `not_your_gym`, `acl_forbidden {requiredScope: gyms|own_profile|vendor_admin}`
-- `404`: `subject_not_found`
+- `404`: `subject_not_found` (also when the partner was deleted while the file was being cleaned)
 - `409`: `image_taken_down_before`. The same file was taken down before (O-P2, review L1). "Same" means the same uploaded bytes (sha256) or the same decoded cleaned pixels (`pixelSha256`, which catches metadata-only edits). For gyms, takedowns at any gym of the same owner count.
 - `413`: `file_too_large {maxBytes|maxSide}`
 - `422`: `variant_over_budget`
@@ -158,11 +162,18 @@ Reason codes:
   - clears `sha256`, `pixelSha256` and the takedown note on every row;
   - sets `purgedAt`.
 - **After a purge:** purged rows are never read again, so a re-created id shows no old photo, logo or takedown. Audit row: `partner_media.purged { cause }`.
-- **Nightly sweep:** job `partnerMediaSweep` (`40 0 * * *` UTC) purges the media of partners that vanished another way (gym or trainer profile row gone, vendor gone or closed) and deletes upload attempts older than two days. It runs whatever the flag says, because it only ever deletes partner-media data.
+- **Nightly sweep:** job `partnerMediaSweep` (`40 0 * * *` UTC) purges the media of:
+  - partners that vanished another way (gym or trainer profile row gone, vendor gone or closed);
+  - trainer profiles whose account is closed (a profile with no account at all is kept);
+  - gyms that no open owner runs: no open `gym_operator` listing the gym, and no ACTIVE V2 owner `OrgMembership` whose persona is open (re-review R2). This includes FitFlex-set media on a gym an admin created but no owner has claimed yet.
+
+  It also deletes upload attempts older than two days. It runs whatever the flag says, because it only ever deletes partner-media data.
+- **V2-only owners:** `purgeAccount` also finds gyms owned through owner memberships, including memberships whose persona row was just deleted (matched by Person).
+- **Race with an upload (re-review R1):** the save transaction holds the same locks as a purge and re-checks that the partner still exists, so an upload that finishes after its partner was deleted gets `404 subject_not_found` and nothing is saved.
 - **Meanwhile:** the admin list hides these items and the admin preview answers 404.
 
 ## Audit
-Every write adds an `AuditLog` row. Actions: `partner_media.uploaded | set_by_fitflex | replaced | removed | reviewed | taken_down | updated`. The `before` and `after` snapshots hold ids, status, revision, review state, reason, focal and plate only. They never hold bytes or the note text. The upload hashes (`sha256`, `pixelSha256`) appear only in snapshots of `taken_down` items (review L5), and the action `partner_media.purged` also exists.
+Every write adds an `AuditLog` row. Actions: `partner_media.uploaded | set_by_fitflex | replaced | removed | reviewed | taken_down | updated`. The `before` and `after` snapshots hold ids, status, revision, review state, reason, focal and plate only. They never hold bytes or the note text. The upload hashes (`sha256`, `pixelSha256`) appear only in snapshots of `taken_down` items (review L5), and never in `partner_media.purged` rows (re-review R3).
 
 ## Names on the partner side (review L4)
 `uploadedByName`, `rightsConfirmedByName` and `ownLogoConfirmedByName` are the person's display name only, never an email. They are `null` when there is no display name; show `uploadedByRole` instead. The admin view still falls back to the email.
