@@ -218,7 +218,7 @@ export function createEventsOrganizerService({
     // S5 (D33): the payout schedule is free in a draft and locked from submission on; after publication only FitFlex changes it (admin route, with a reason).
     if (patch.payoutSchedule !== undefined && current.status !== 'draft') {
       if (patch.payoutSchedule === (current.payoutSchedule ?? null)) delete patch.payoutSchedule;
-      else return fail('payout_schedule_locked', 409, { eventId, status: current.status });
+      else return fail('payout_schedule_locked', 409, { eventId, eventStatus: current.status });
     }
     const parsedNote = parseNote(rawNote);
     if (parsedNote.error) return fail('event_invalid', 422, { fields: parsedNote.fields.map(x => ({ ...x, path: `changeNote.${x.path.slice(5)}` })) });
