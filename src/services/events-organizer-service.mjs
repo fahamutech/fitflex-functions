@@ -19,6 +19,7 @@ import {
   CANCEL_REASONS, DEFAULT_CLOSING_SOON_HOURS, NOTE_MAX,
 } from '../shared/events-document.mjs';
 import { paginate } from '../shared/pagination.mjs';
+import { isSensitiveReason, partnerReasonCode } from '../shared/partner-kyc.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -58,9 +59,21 @@ export function createEventsOrganizerService({
     try { await track(name, payload); } catch { /* best effort */ }
   };
   const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
+
+  // What the organizer owner / staff are told about why (owner rule 22 Oct 2026, as /me/kyc since #245): statusReason
+  // is the reviewer's KYC note, so it is shown only under a known partner-safe reason code. A sensitive code
+  // (suspected_fraud, duplicate_partner) becomes statusReasonCode 'under_review' with no note; a note with no
+  // case code behind it is not shown either (fail closed). EventOrganizer.statusReason keeps the real note for admins.
+  const organizerReason_ = (o, kycCase) => {
+    const code = kycCase?.reasonCode ?? null;
+    const note = o.statusReason ?? kycCase?.reasonNote ?? null;
+    if (!code || isSensitiveReason(code)) return { statusReasonCode: partnerReasonCode(code), statusReason: null };
+    return { statusReasonCode: code, statusReason: note };
+  };
+
   const organizerView_ = (o, kycCase = null) => ({
     id: o.id, name: o.name, status: o.status, timezone: o.timezone, kycCaseId: o.kycCaseId ?? kycCase?.id ?? null,
-    kycStatus: kycCase?.status ?? null, statusReason: o.statusReason ?? kycCase?.reasonNote ?? null,
+    kycStatus: kycCase?.status ?? null, ...organizerReason_(o, kycCase),
     contactPhone: o.contactPhone ?? null, contactEmail: o.contactEmail ?? null,
   });
 
