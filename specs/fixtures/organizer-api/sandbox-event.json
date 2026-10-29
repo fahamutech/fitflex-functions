@@ -1,0 +1,36 @@
+{
+  "id": "evt_sandbox",
+  "title": "FitFlex sandbox run",
+  "slug": "fitflex-sandbox-run",
+  "status": "published",
+  "startsAt": "2030-01-01T05:00:00.000Z",
+  "endsAt": "2030-01-01T11:00:00.000Z",
+  "timezone": "Africa/Dar_es_Salaam",
+  "categories": [
+    {
+      "id": "ecat_sandbox_5k",
+      "name": "5K",
+      "distanceM": 5000
+    },
+    {
+      "id": "ecat_sandbox_10k",
+      "name": "10K",
+      "distanceM": 10000
+    },
+    {
+      "id": "ecat_sandbox_21k",
+      "name": "Half marathon",
+      "distanceM": 21097
+    }
+  ],
+  "collectionPoints": [
+    {
+      "id": "ecp_sandbox_a",
+      "name": "Sandbox kit point A"
+    },
+    {
+      "id": "ecp_sandbox_b",
+      "name": "Sandbox kit point B"
+    }
+  ]
+}

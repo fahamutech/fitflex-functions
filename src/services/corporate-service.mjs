@@ -11,10 +11,15 @@ import {
 import { sameEmail } from '../shared/identifiers.mjs';
 
 const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
+// The activation PIN's hash never leaves the service (a 4-digit PIN's hash is trivially reversed).
+const withoutPinHash = row => (row ? (({ pinHash, ...rest }) => rest)(row) : row);
 
 export function createCorporateService({
   users, checkins, corporateAccounts, corporateEmployees, corporateBills, auditLog, settingsService,
   onAccountCreated = null,
+  // B5a: called after a new HR login is created (the bootstrap makes it an
+  // organisation user while ORG_ONLY_SPONSORS is on). Never blocks creation.
+  onHrUserCreated = null,
   billedByProgramme = null,
   // Verified-contacts helper: linking by email or number finds only a person
   // who has verified it (fail closed without it; user ids still work).
@@ -215,10 +220,10 @@ export function createCorporateService({
     await corporateAccounts.updateByIdAsync(corporateId, {
       seatsUsed: account.seatsUsed + 1, updatedAt: now(),
     });
-    await audit({ actor: actorId, action: 'corporate.staff.provision', target: employee.id, after: employee });
+    await audit({ actor: actorId, action: 'corporate.staff.provision', target: employee.id, after: withoutPinHash(employee) });
 
     // PIN is returned exactly once so HR can distribute it; it is never re-readable.
-    return { employee, pin };
+    return { employee: withoutPinHash(employee), pin };
   }
 
   /**
@@ -271,7 +276,7 @@ export function createCorporateService({
     if (!EMPLOYEE_STATUS.includes(status)) return { error: 'invalid_status', status: 400 };
     const employee = await corporateEmployees.findByIdAsync(employeeId);
     if (!employee || employee.corporateId !== corporateId) return { error: 'employee_not_found', status: 404 };
-    if (employee.status === status) return { employee, unchanged: true };
+    if (employee.status === status) return { employee: withoutPinHash(employee), unchanged: true };
 
     const patch = { status, updatedAt: now() };
     if (status === 'active' && !employee.activatedAt) patch.activatedAt = now();
@@ -286,15 +291,17 @@ export function createCorporateService({
         });
       }
     }
-    await audit({ actor: actorId, action: `corporate.staff.${status}`, target: employeeId, before: employee, after: updated });
-    return { employee: updated };
+    await audit({ actor: actorId, action: `corporate.staff.${status}`, target: employeeId, before: withoutPinHash(employee), after: withoutPinHash(updated) });
+    return { employee: withoutPinHash(updated) };
   }
 
   /**
    * Link an employee to their FitFlex member account (or unlink with a null
    * userId). The link is what lets the employee use the company's benefits.
    */
-  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId, actorType = null, memberRequestId = null }) {
+  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId, actorType = null, memberRequestId = null, organizationId = null }) {
+    // organizationId (B5a): the company's organisation when the link is asked from /org by an
+    // organisation user; stored on the member request so accepting it re-checks that access.
     const employee = await corporateEmployees.findByIdAsync(employeeId);
     if (!employee || employee.corporateId !== corporateId) return { error: 'employee_not_found', status: 404 };
     const unlink = [givenUserId, email, phone].every(v => v === null || v === undefined || v === '');
@@ -319,7 +326,7 @@ export function createCorporateService({
     const found = await findUserByContact(users, { userId: givenUserId, email, phone }, { require: givenUserId ? null : 'member', contacts: verifiedContacts });
     // An id that names nobody, or no member, gets the same answer as a real request (nothing stored, nobody told).
     if (askById && (found.error === 'user_not_found' || (found.user && found.user.userType !== 'member'))) {
-      return memberRequests.stub({ kind: 'employee_link', corporateId, employeeId, userId: givenUserId,
+      return memberRequests.stub({ kind: 'employee_link', corporateId, organizationId, employeeId, userId: givenUserId,
         details: { displayName: employee.displayName ?? null, department: employee.department ?? null } });
     }
     if (found.error) return found.error === 'member_account_required' ? { error: 'user_must_be_member', status: 400 } : found;
@@ -332,7 +339,7 @@ export function createCorporateService({
     if (askById) {
       if (employee.userId === userId) return { employee: (({ pinHash, ...rest }) => rest)(employee), unchanged: true };
       return memberRequests.create({
-        kind: 'employee_link', corporateId, employeeId, userId, requestedBy: actorId, requestedByType: actorType ?? 'corporate_hr',
+        kind: 'employee_link', corporateId, organizationId, employeeId, userId, requestedBy: actorId, requestedByType: actorType ?? 'corporate_hr',
         details: { displayName: employee.displayName ?? null, department: employee.department ?? null },
       });
     }
@@ -546,6 +553,9 @@ export function createCorporateService({
     };
     await users.insertAsync(row);
     await audit({ actor: actorId, action: 'corporate.hr.create', target: row.id, after: hrView(row) });
+    if (onHrUserCreated) {
+      try { await onHrUserCreated(row, actorId); } catch (err) { console.warn('[corporate] HR organisation user not made:', err?.message); }
+    }
     return { hrUser: hrView(row) };
   }
 

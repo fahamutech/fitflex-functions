@@ -329,6 +329,19 @@ export function partnerProgressOn() {
 }
 
 /**
+ * Phase B · B3a: gym staff whose PIN an owner chose must change it before
+ * anything else (owner decisions 2026-10-20). Off unless
+ * STAFF_PIN_CHANGE_REQUIRED is set: a gym_staff row's passwordChangeRequired
+ * is then ignored (no `pwc` on its sessions, no 403 password_change_required),
+ * POST /auth/pin/change and POST /owner/staff/:id/pin answer 404
+ * feature_disabled, and staff responses are unchanged. Portal admins (#219)
+ * are held regardless of this flag. See src/shared/credential-change.mjs.
+ */
+export function staffPinChangeRequiredOn() {
+  return on('STAFF_PIN_CHANGE_REQUIRED');
+}
+
+/**
  * A gym shared by several owners has ONE named payout owner (owner decision
  * 2026-10-22; Gym.payoutOwnerId). Off unless GYM_PAYOUT_OWNER is set: payout
  * eligibility, settlement payout gating and invoice payouts keep using the
@@ -379,6 +392,24 @@ export function vendorStatementDraftsOn() {
  */
 export function eventsModuleOn() {
   return on('EVENTS_MODULE');
+}
+
+/**
+ * Phase B · B5a: company sponsors move from the legacy HR area (/hr) to the
+ * organisation area (/org). Off unless ORG_ONLY_SPONSORS is set; off, nothing
+ * changes. On:
+ *  - a company HR login's session (POST /auth/login, Firebase, PIN, switch)
+ *    carries organizationUser / organizationRoles / organizationIds, so the
+ *    portal opens /org for it;
+ *  - people of a company's organisation are added, changed, linked and
+ *    imported through /b2b/organizations/:id/beneficiaries..., which write
+ *    through the company staff list (no managed_by_corporate dead end);
+ *  - a company HR login only ever reaches its own company's organisation;
+ *  - new HR logins are also made organisation users (role hr).
+ * The conversion of existing HR logins is scripts/hr-to-org.mjs.
+ */
+export function orgOnlySponsorsOn() {
+  return on('ORG_ONLY_SPONSORS');
 }
 
 /** S2: saving events and the Saved filter (GET /events/options.favourites). Needs EVENTS_MODULE too. */
@@ -456,6 +487,20 @@ export function requireEventsPaymentIntake(req, res, next) {
   if (!eventsPaymentIntakeOn()) return res.status(404).json({ error: 'feature_disabled' });
   next();
 }
+
+/**
+ * S5 (docs/design/events-s5-venue-api-and-webhooks.md §11.1): three dormant flags, each on only together with
+ * EVENTS_MODULE and EVENTS_REGISTRATION. KIT_OPS: ticket verification, kit handover, bibs, lookup, export and the
+ * live ticket wording. ORGANIZER_API: API clients and /v1/organizer. WEBHOOKS: endpoints, deliveries and the
+ * dispatcher jobs (which additionally need EVENTS_WEBHOOK_SECRET_KEY; see webhook-signing.mjs).
+ */
+export const eventsKitOpsOn = () => eventsRegistrationOn() && on('EVENTS_KIT_OPS');
+export const eventsOrganizerApiOn = () => eventsRegistrationOn() && on('EVENTS_ORGANIZER_API');
+export const eventsWebhooksOn = () => eventsRegistrationOn() && on('EVENTS_WEBHOOKS');
+const gate = test => (_req, res, next) => (test() ? next() : res.status(404).json({ error: 'feature_disabled' }));
+export const requireEventsKitOps = gate(eventsKitOpsOn);
+export const requireEventsOrganizerApi = gate(eventsOrganizerApiOn);
+export const requireEventsWebhooks = gate(eventsWebhooksOn);
 
 /**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
