@@ -242,6 +242,15 @@ export function heroImagesCmsOn() {
 }
 
 /**
+ * Partner hero photo and logo (plan partner-hero-media-plan.md slice 1). Off unless PARTNER_MEDIA is
+ * set: every /partner/media* and /admin/partner-media* route (file serving included) answers 404
+ * feature_disabled before sign-in is checked.
+ */
+export function partnerMediaOn() {
+  return on('PARTNER_MEDIA');
+}
+
+/**
  * S3: walk-in (counter) sales recorded by the vendor — POS, sales history, void. Off → the
  * /vendor/sales endpoints answer 404 feature_disabled.
  */
