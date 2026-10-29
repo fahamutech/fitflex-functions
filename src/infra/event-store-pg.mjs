@@ -61,7 +61,7 @@ const EVENT_COLUMNS = ['id', 'organizerId', 'slug', 'title', 'description', 'eve
   'heroImageUrl', 'heroThumbUrl', 'heroImageAlt', 'routeUrl', 'routeImageUrl', 'routeImageAlt', 'descriptionSw', 'venueCity', 'venueRegion', 'accessibility', 'inclusions', 'kitProvided',
   'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy', 'registrationOpensAt',
   'participantFields', 'duplicatePolicy',
-  // S5 (20270122090000): the payout schedule label (D33); the service decides who may set it and when.
+  // S5 (20270124090000): the payout schedule label (D33); the service decides who may set it and when.
   'payoutSchedule'];
 /** S3 (20270110090900): what a route may set on the order besides what the store derives; never money, status or the hold. */
 const ORDER_EXTRA_COLUMNS = ['createdByUserId', 'costCentre', 'purchaserReference', 'termsAcceptedAt', 'consentTextVersion'];

@@ -28,8 +28,8 @@ const MIGRATIONS = [
   // EventInventoryMovement and Refund; it must come down BEFORE the tables it widens).
   '20270110091100-events-payments-tickets.cjs',
   // S5: venue operations / payout schedule and the API + webhook columns. Down FAILS CLOSED on data; the suite's tables hold none at this point.
-  '20270122090000-events-ops-s5.cjs',
-  '20270122090100-events-integrations-s5.cjs',
+  '20270124090000-events-ops-s5.cjs',
+  '20270124090100-events-integrations-s5.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');
