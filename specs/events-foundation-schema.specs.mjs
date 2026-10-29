@@ -27,6 +27,9 @@ const MIGRATIONS = [
   // S4: payments, tickets and event refunds (additive columns / indexes on EventPayment, EventOrder, EventRegistration, EventTicket,
   // EventInventoryMovement and Refund; it must come down BEFORE the tables it widens).
   '20270110091100-events-payments-tickets.cjs',
+  // S5: venue operations / payout schedule and the API + webhook columns. Down FAILS CLOSED on data; the suite's tables hold none at this point.
+  '20270122090000-events-ops-s5.cjs',
+  '20270122090100-events-integrations-s5.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');
@@ -50,7 +53,7 @@ const TABLES = [
   'EventOrder', 'EventOrderLine', 'EventRegistration', 'EventTeam', 'EventTeamMember', 'EventInventoryMovement',
   'EventPayment', 'EventTicket', 'EventKitCollection', 'EventBibAssignment', 'EventResult', 'EventActivityLink',
   'EventMedalTemplate', 'EventMedalAward', 'AchievementDefinition', 'UserAchievement', 'RewardDefinition', 'RewardLedgerEntry', 'RewardRedemption',
-  'ApiClient', 'OutboxEvent', 'WebhookEndpoint', 'WebhookDelivery',
+  'ApiClient', 'OutboxEvent', 'WebhookEndpoint', 'WebhookDelivery', 'OrganizerIdempotency', 'ApiClientUsageDay', 'WebhookDeliveryAttempt',
 ];
 
 test('each foundation migration goes up, down and up again (newest first on the way down)', async () => {

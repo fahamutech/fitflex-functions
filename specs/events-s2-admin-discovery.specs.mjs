@@ -112,7 +112,7 @@ const base = (over = {}) => {
   return {
     title: 'Dar Half Marathon', eventType: 'road', timezone: 'Africa/Dar_es_Salaam', description: 'E'.repeat(50), descriptionSw: 'S'.repeat(50),
     startsAt, endsAt: new Date(+startsAt + 6 * H), registrationClosesAt: new Date(+startsAt - D), venueName: 'Coco Beach', venueAddress: 'Toure Drive', venueCity: 'Dar es Salaam', venueRegion: 'dar-es-salaam', lat: -6.75, lng: 39.27,
-    terms: { en: 'T'.repeat(120), sw: 'M'.repeat(120) }, refundPolicy: { preset: 'no_refund', text: {} }, contact: { email: 'race@example.com' }, ...over,
+    terms: { en: 'T'.repeat(120), sw: 'M'.repeat(120) }, refundPolicy: { preset: 'no_refund', text: {} }, contact: { email: 'race@example.com' }, payoutSchedule: 'monthly', ...over,
   };
 };
 
