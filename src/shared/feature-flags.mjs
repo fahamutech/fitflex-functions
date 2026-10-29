@@ -242,6 +242,15 @@ export function heroImagesCmsOn() {
 }
 
 /**
+ * Partner hero photo and logo (plan partner-hero-media-plan.md slice 1). Off unless PARTNER_MEDIA is
+ * set: every /partner/media* and /admin/partner-media* route (file serving included) answers 404
+ * feature_disabled before sign-in is checked.
+ */
+export function partnerMediaOn() {
+  return on('PARTNER_MEDIA');
+}
+
+/**
  * S3: walk-in (counter) sales recorded by the vendor — POS, sales history, void. Off → the
  * /vendor/sales endpoints answer 404 feature_disabled.
  */
@@ -282,6 +291,14 @@ export function vendorDocumentsOn() {
 }
 
 /**
+ * S6: vendor reports and their CSV / PDF exports (/vendor/reports/*). Off → every /vendor/reports route
+ * answers 404 feature_disabled. GET /vendor/tools/options says reports: false.
+ */
+export function vendorReportsOn() {
+  return vendorToolsFlag('VENDOR_REPORTS');
+}
+
+/**
  * S5: VAT — the vendor tax profile and its KYC review, product VAT codes, admin tax rates (maker ≠
  * checker) and VAT worked out on walk-in sales and on the vendor's part of paid app orders. Off →
  * those endpoints answer 404 feature_disabled and no sale or order gets VAT. Marketplace prices,
@@ -309,6 +326,32 @@ export function vendorDocumentsTinWithoutVatOn() {
  */
 export function partnerProgressOn() {
   return on('PARTNER_PROGRESS');
+}
+
+/**
+ * Phase B · B3a: gym staff whose PIN an owner chose must change it before
+ * anything else (owner decisions 2026-10-20). Off unless
+ * STAFF_PIN_CHANGE_REQUIRED is set: a gym_staff row's passwordChangeRequired
+ * is then ignored (no `pwc` on its sessions, no 403 password_change_required),
+ * POST /auth/pin/change and POST /owner/staff/:id/pin answer 404
+ * feature_disabled, and staff responses are unchanged. Portal admins (#219)
+ * are held regardless of this flag. See src/shared/credential-change.mjs.
+ */
+export function staffPinChangeRequiredOn() {
+  return on('STAFF_PIN_CHANGE_REQUIRED');
+}
+
+/**
+ * A gym shared by several owners has ONE named payout owner (owner decision
+ * 2026-10-22; Gym.payoutOwnerId). Off unless GYM_PAYOUT_OWNER is set: payout
+ * eligibility, settlement payout gating and invoice payouts keep using the
+ * first owner account found for the gym, as before. On: the named payout
+ * owner; a gym with exactly one owner uses that owner without any admin step;
+ * a gym with two or more owners and none named is not payable
+ * (payout_owner_required). See src/services/gym-payout-owner.mjs.
+ */
+export function gymPayoutOwnerOn() {
+  return on('GYM_PAYOUT_OWNER');
 }
 
 // ── Default-ON switches ──────────────────────────────────────────────────────
@@ -351,6 +394,24 @@ export function eventsModuleOn() {
   return on('EVENTS_MODULE');
 }
 
+/**
+ * Phase B · B5a: company sponsors move from the legacy HR area (/hr) to the
+ * organisation area (/org). Off unless ORG_ONLY_SPONSORS is set; off, nothing
+ * changes. On:
+ *  - a company HR login's session (POST /auth/login, Firebase, PIN, switch)
+ *    carries organizationUser / organizationRoles / organizationIds, so the
+ *    portal opens /org for it;
+ *  - people of a company's organisation are added, changed, linked and
+ *    imported through /b2b/organizations/:id/beneficiaries..., which write
+ *    through the company staff list (no managed_by_corporate dead end);
+ *  - a company HR login only ever reaches its own company's organisation;
+ *  - new HR logins are also made organisation users (role hr).
+ * The conversion of existing HR logins is scripts/hr-to-org.mjs.
+ */
+export function orgOnlySponsorsOn() {
+  return on('ORG_ONLY_SPONSORS');
+}
+
 /** S2: saving events and the Saved filter (GET /events/options.favourites). Needs EVENTS_MODULE too. */
 export function eventsFavouritesOn() {
   return eventsModuleOn() && on('EVENTS_FAVOURITES');
@@ -359,6 +420,36 @@ export function eventsFavouritesOn() {
 /** S3 (read here for the options probe only): member registration. Needs EVENTS_MODULE too. */
 export function eventsRegistrationOn() {
   return eventsModuleOn() && on('EVENTS_REGISTRATION');
+}
+
+/**
+ * S4: payment intake on the labelled manual confirmation path (D1). Needs EVENTS_MODULE and EVENTS_REGISTRATION.
+ * Off: GET /events/options.payment stays 'none' and S3 behaviour is unchanged.
+ */
+export function eventsPaymentsManualOn() {
+  return eventsRegistrationOn() && on('EVENTS_PAYMENTS_MANUAL');
+}
+
+/**
+ * S4: event orders payable by mobile money (Malipo by Tunzaa). Built dormant; stays off until the owner confirms
+ * Tunzaa as the launch provider (D1). Needs EVENTS_MODULE and EVENTS_REGISTRATION (the client, TUNZAA_PAYMENTS and
+ * canSettle() are checked where the provider is used).
+ */
+export function eventsPaymentsTunzaaOn() {
+  return eventsRegistrationOn() && on('EVENTS_PAYMENTS_TUNZAA');
+}
+
+/**
+ * S4 launch gate (security review M4): event payments are taken only with two admins on money (MONEY_SECOND_APPROVER) unless the
+ * owner explicitly accepts a single approver with EVENTS_ALLOW_SINGLE_APPROVER=1 (default off).
+ */
+export function eventsApproverGateOpen() {
+  return moneySecondApproverOn() || on('EVENTS_ALLOW_SINGLE_APPROVER');
+}
+
+/** S4: payment intake (initiate, provider prompt, corporate notice) is on in either mode. */
+export function eventsPaymentIntakeOn() {
+  return eventsPaymentsManualOn() || eventsPaymentsTunzaaOn();
 }
 
 const positiveNumber = (name, fallback) => {
@@ -384,6 +475,32 @@ export function requireEventsModule(req, res, next) {
   if (!eventsModuleOn()) return res.status(404).json({ error: 'feature_disabled' });
   next();
 }
+
+/** S3: the guard of every registration route (quote, orders, registrations, claims, teams, corporate, organizer / admin order reads): 404 feature_disabled unless EVENTS_MODULE and EVENTS_REGISTRATION are both on. */
+export function requireEventsRegistration(req, res, next) {
+  if (!eventsRegistrationOn()) return res.status(404).json({ error: 'feature_disabled' });
+  next();
+}
+
+/** S4: the guard of payment INTAKE routes: 404 feature_disabled unless an events payment flag is on (reads, tickets, cancel and refunds need only EVENTS_REGISTRATION). */
+export function requireEventsPaymentIntake(req, res, next) {
+  if (!eventsPaymentIntakeOn()) return res.status(404).json({ error: 'feature_disabled' });
+  next();
+}
+
+/**
+ * S5 (docs/design/events-s5-venue-api-and-webhooks.md §11.1): three dormant flags, each on only together with
+ * EVENTS_MODULE and EVENTS_REGISTRATION. KIT_OPS: ticket verification, kit handover, bibs, lookup, export and the
+ * live ticket wording. ORGANIZER_API: API clients and /v1/organizer. WEBHOOKS: endpoints, deliveries and the
+ * dispatcher jobs (which additionally need EVENTS_WEBHOOK_SECRET_KEY; see webhook-signing.mjs).
+ */
+export const eventsKitOpsOn = () => eventsRegistrationOn() && on('EVENTS_KIT_OPS');
+export const eventsOrganizerApiOn = () => eventsRegistrationOn() && on('EVENTS_ORGANIZER_API');
+export const eventsWebhooksOn = () => eventsRegistrationOn() && on('EVENTS_WEBHOOKS');
+const gate = test => (_req, res, next) => (test() ? next() : res.status(404).json({ error: 'feature_disabled' }));
+export const requireEventsKitOps = gate(eventsKitOpsOn);
+export const requireEventsOrganizerApi = gate(eventsOrganizerApiOn);
+export const requireEventsWebhooks = gate(eventsWebhooksOn);
 
 /**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:

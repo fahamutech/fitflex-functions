@@ -140,16 +140,6 @@ export function createCampaignService({
     return status?.ready ? null : { error: 'whatsapp_template_required', status: 400 };
   }
 
-  /**
-   * Security review of #257: the vendor app has no message settings yet, so
-   * vendors can't switch marketing off — FitFlex sends them service messages
-   * (announcement, renewal, payment) only, until it does.
-   */
-  function vendorMarketing(c) {
-    return (c.audience?.recipients === 'vendors' && c.category === 'marketing')
-      ? { error: 'vendor_marketing_not_available', status: 400 } : null;
-  }
-
   function readyToSend(c) {
     if (!c.purpose) return 'purpose_required';
     if (!c.audience) return 'audience_required';
@@ -223,8 +213,6 @@ export function createCampaignService({
    * { members, rows, counts }. Shared by preview and send.
    */
   async function plan(sender, campaign) {
-    const vm = vendorMarketing(campaign);
-    if (vm) return vm;
     const r = await segmentService.resolveAudience({
       sender: audienceSender(sender, campaign),
       recipients: campaign.audience.recipients || 'members',
@@ -283,8 +271,6 @@ export function createCampaignService({
     if (body.purpose === undefined && body.templateId == null) return { error: 'invalid_purpose', status: 400 };
     const f = await draftFields(body, scope, sender);
     if (f.error) return f;
-    const vm = vendorMarketing(f.patch);
-    if (vm) return vm;
     const at = now().toISOString();
     const row = {
       id: id('cmp'), senderType: scope, gymId: gym.gymId,
@@ -337,8 +323,6 @@ export function createCampaignService({
     if (!EDITABLE.includes(c.status)) return { error: 'not_editable', status: 409 };
     const f = await draftFields(body, c.senderType, sender);
     if (f.error) return f;
-    const vm = vendorMarketing({ ...c, ...f.patch });
-    if (vm) return vm;
     if (!Object.keys(f.patch).length) return { campaign: view(c) };
     const content = f.patch.content ?? c.content;
     const gym = await gymName(c);

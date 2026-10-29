@@ -16,11 +16,13 @@ const json = (value) => (value === undefined || value === null || typeof value =
 const at = (value) => (value ? new Date(value) : null);
 
 const ORDER_JSON = ['items', 'timeline', 'fulfilments'];
-const ORDER_DATES = ['createdAt', 'updatedAt', 'reservationExpiresAt'];
+const ORDER_DATES = ['createdAt', 'updatedAt', 'reservationExpiresAt', 'paidAt'];
 const ORDER_COLUMNS = new Set([
   'id', 'buyerId', 'buyerRole', 'items', 'totalTzs', 'status', 'deliveryMethod', 'pickupGymId', 'deliveryAddress',
   'paymentMethod', 'paymentStatus', 'paymentReference', 'timeline', 'settlementStatus', 'note', 'createdAt', 'updatedAt',
   'idempotencyKey', 'idempotencyFingerprint', 'stockState', 'reservationExpiresAt', 'reservationCycle', 'fulfilments',
+  // S6: when the payment was confirmed (vendor reports date app sales by it; settlement never reads it).
+  'paidAt',
 ]);
 const PAYMENT_COLUMNS = new Set([
   'id', 'memberId', 'orderId', 'amountTzs', 'currency', 'status', 'provider', 'reference', 'requestedAt', 'decidedAt', 'decidedBy', 'note',
@@ -241,12 +243,16 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     });
   }
 
-  /** The payment was confirmed. Only an order that is not cancelled and not already paid becomes paid. */
+  /**
+   * The payment was confirmed. Only an order that is not cancelled and not already paid becomes paid.
+   * S6: paidAt records when (vendor reports date app sales by it).
+   */
   async function markPaid(orderId, { patch = {} } = {}) {
+    const atTime = now();
     const rows = await db('ShopOrder')
       .where({ id: orderId }).whereNot({ status: 'cancelled' })
       .where((q) => q.whereNull('paymentStatus').orWhereNot('paymentStatus', 'paid'))
-      .update(orderRow({ ...patch, paymentStatus: 'paid', reservationExpiresAt: null, updatedAt: now() }))
+      .update(orderRow({ ...patch, paymentStatus: 'paid', reservationExpiresAt: null, paidAt: atTime, updatedAt: atTime }))
       .returning('*');
     if (rows.length) return { outcome: 'paid', order: out(rows[0]) };
     const order = out(await db('ShopOrder').where({ id: orderId }).first());
@@ -277,7 +283,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
           await trx('ShopStockMovement').insert(ledgerRow(orderId, line, 'reserve', cycle, -line.qty, atTime, taken.stock, taken.vendorId));
         }
         await trx('ShopOrder').where({ id: orderId }).update(orderRow({
-          ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved', reservationCycle: cycle, reservationExpiresAt: null, updatedAt: atTime,
+          ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved', reservationCycle: cycle, reservationExpiresAt: null, paidAt: atTime, updatedAt: atTime,
         }));
         return { revived: true, order: out(await trx('ShopOrder').where({ id: orderId }).first()) };
       });

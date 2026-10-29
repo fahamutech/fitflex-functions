@@ -143,7 +143,7 @@ const fullDocument = (version, over = {}) => ({
     { name: '21K', distanceM: 21097, startsAt: starts.toISOString(), capacity: 500, ticketTypes: [{ name: 'Early bird', priceTzs: 25000, capacity: 100 }, { name: 'Standard', priceTzs: 35000, capacity: null }] },
     { name: '5K', distanceM: 5000, startsAt: new Date(+starts + H).toISOString(), capacity: null, ticketTypes: [{ name: 'Fun run', priceTzs: 0, capacity: 1000 }] },
   ],
-  kitProvided: false,
+  kitProvided: false, payoutSchedule: 'biweekly',   // S5 (D33): required at submit
   terms: { en: 'T'.repeat(120), sw: 'M'.repeat(120) }, refundPolicy: { preset: 'refund_until_close' },
   contact: { email: 'race@example.com', phone: '0712345678' },
   ...over,

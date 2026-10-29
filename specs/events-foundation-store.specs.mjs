@@ -135,7 +135,7 @@ test('concurrency: two orders for the last place — exactly one succeeds, sold 
   const lost = results.filter(r => r.error);
   assert.equal(won.length, 1, JSON.stringify(results));
   assert.equal(lost.length, 1);
-  assert.deepEqual(lost[0], { error: 'capacity_unavailable', status: 409, ticketTypeId: f.ticketType.id });
+  assert.deepEqual(lost[0], { error: 'capacity_unavailable', status: 409, ticketTypeId: f.ticketType.id, requested: 1, remaining: 0 }); // S3 adds requested and remaining
   assert.deepEqual(await counters(f.ticketType.id), { sold: 0, held: 1, capacity: 1 });
   assert.equal((await db('EventOrder').where({ eventId: f.event.id }).count({ n: '*' }))[0].n, '1');
   assert.equal((await db('EventInventoryMovement').whereIn('orderId', db('EventOrder').where({ eventId: f.event.id }).select('id')).count({ n: '*' }))[0].n, '1');

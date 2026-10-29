@@ -6,6 +6,8 @@ import { buildDevIdentity, devMarketplaceProduct, DEV_GYM_ID, DEV_OWNER_GYM_ID }
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { identityFlag, recordFirebaseEvidenceOn } from '../shared/feature-flags.mjs';
+import { mustChangeStartCredential } from '../shared/credential-change.mjs';
+import { signInPhotoOrNull } from '../shared/media-src.mjs';
 
 const configuredAdminEmails = new Set(
   (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
@@ -70,6 +72,10 @@ export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink = null, auditLog = null, orgMemberships = null,
+  // Phase B · B5a: async (user) => { organizationUser, organizationRoles,
+  // organizationIds } | null — what a sign-in tells the portal about a company
+  // HR login (b2bService.organizationSessionMarks; null unless ORG_ONLY_SPONSORS).
+  organizationMarks = null,
   // Partner DOB security review M1: ({ user }) → null | { error: 'partner_under_18', status: 400 }.
   // A person whose stored date of birth is under 18 may not add a trainer or gym-owner role.
   partnerAgeGuard = async () => null,
@@ -126,9 +132,10 @@ export function createAuthService({
       organizerRole: user.organizerRole,
       // Identity V2 · I2 (C3a): the Person rides along; nothing reads it as `sub`.
       ...(identityFlag('V2_PERSONAS') && user.personId ? { pid: user.personId, ver: 2 } : {}),
-      // A portal admin still on the start password another admin chose: every
-      // route but the change-password one refuses this session (2026-10-19).
-      ...(user.passwordChangeRequired === true ? { pwc: true } : {}),
+      // A portal admin still on the start password another admin chose (2026-10-19),
+      // or gym staff still on the PIN their owner chose (B3a, behind
+      // STAFF_PIN_CHANGE_REQUIRED): every route but the change one refuses this session.
+      ...(mustChangeStartCredential(user) ? { pwc: true } : {}),
     };
   }
 
@@ -220,7 +227,7 @@ export function createAuthService({
       await users.upsertAsync(u => u.id === user.id, user);
     }
     await otps.upsertAsync(o => o.phone === phone, { ...otp, code: null });
-    const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone, ...(user.passwordChangeRequired === true ? { pwc: true } : {}) });
+    const token = signJwt({ sub: user.id, userType: user.userType, phone: user.phone, ...(mustChangeStartCredential(user) ? { pwc: true } : {}) });
     return { token, user: toSessionUser(user) };
   }
 
@@ -340,7 +347,8 @@ export function createAuthService({
         firebaseUid: user.firebaseUid || fb.uid,
         email: user.email || (emailHeldElsewhere ? null : fbEmail),
         displayName: fb.name || user.displayName,
-        photoUrl: fb.picture || user.photoUrl,
+        // Sign-in provider photo: only from an allowed host, else dropped (security fix 2026-10-28).
+        photoUrl: signInPhotoOrNull(fb.picture) || user.photoUrl,
         accountStatus: user.accountStatus || 'active',
         onboardingCompleted: user.onboardingCompleted || false,
         approvalStatus: user.approvalStatus || 'approved',
@@ -364,7 +372,7 @@ export function createAuthService({
         firebaseUid: fb.uid,
         email: fbEmail,
         displayName: fb.name,
-        photoUrl: fb.picture,
+        photoUrl: signInPhotoOrNull(fb.picture),
         userType: isAdminEmail ? 'admin' : newUserRole,
         approvalStatus: isAdminEmail ? 'approved' : approvalStatusForRole(newUserRole),
         accountStatus: 'active',
@@ -643,5 +651,28 @@ export function createAuthService({
     return { memberships: await orgMemberships.membershipsOfPerson(user.personId, { includeEnded }) };
   }
 
-  return { requestOtp, verifyOtp, login, firebaseSession, devLogin, myPersonas, switchPersona, addPersona, myMemberships, sessionForPerson, sessionFor };
+  /**
+   * B5a: add the organisation marks to a session's `user` (never to the JWT:
+   * organisation access is still decided per request). A lookup failure only
+   * leaves the marks out; it never blocks a sign-in.
+   */
+  async function withOrganizationMarks(result) {
+    if (!organizationMarks || !result?.token || !result.user) return result;
+    let marks = null;
+    try {
+      marks = await organizationMarks(result.user);
+    } catch (err) {
+      console.warn('[auth] organisation marks skipped:', err?.message);
+    }
+    return marks ? { ...result, user: { ...result.user, ...marks } } : result;
+  }
+  const marking = fn => async (...args) => withOrganizationMarks(await fn(...args));
+
+  return {
+    requestOtp, verifyOtp, devLogin, myPersonas, addPersona, myMemberships, sessionFor,
+    login: marking(login),
+    firebaseSession: marking(firebaseSession),
+    switchPersona: marking(switchPersona),
+    sessionForPerson: marking(sessionForPerson),
+  };
 }

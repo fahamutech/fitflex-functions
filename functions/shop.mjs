@@ -2,7 +2,8 @@
 import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService, vendorTaxService } from '../src/bootstrap/services.mjs';
+import { areaHeaderOf, areaRedactGuard, redactAreaId } from '../src/shared/area-request.mjs';
+import { shopService, shopHomeService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService, vendorTaxService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
 import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
@@ -63,22 +64,35 @@ async function requireActiveVendorStaff(req, res, next) {
 
 export const listShopProducts = {
   created, method: 'get', path: '/shop/products',
-  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither).',
-  onGuard: routeGuard('get', requireAuth()),
+  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither). SHOP_NEAR_YOU (docs/shop-near-you-api.md): header X-FF-Area: <GeoArea id worked out on the device; never stored or logged> → rows whose vendor delivers to that area carry deliversToViewerArea: true, only while personalisation is available and switched on and the area is usable; otherwise the body is unchanged. With SHOP_NEAR_YOU on and at least one usable area, ?maxDistanceKm= (the vendor-typed distance) is ignored; flag off: applied as before.',
+  onGuard: routeGuard('get', [areaRedactGuard, requireAuth()]),
   onRequest: async (req, res) => {
-    const { category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = req.query || {};
-    res.json(await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort }));
+    redactAreaId(req);
+    const { category, search, brand, vendorId, minPrice, maxPrice, minRating, delivery, promotions, sort } = req.query || {};
+    // QA2: with areas on, the vendor-typed distance filter is ignored (spec §7.3); flag off: as before.
+    const maxDistanceKm = (await shopHomeService.vendorDistanceIgnored()) ? undefined : req.query?.maxDistanceKm;
+    const rows = await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort });
+    res.json(await withBadge(req, rows));
   }
 };
 
+/** QA1: deliversToViewerArea on buyer rows (set only to true; absent when the badge does not apply). */
+async function withBadge(req, rows) {
+  const delivers = await shopHomeService.deliveryBadge({ claims: req.user, areaId: areaHeaderOf(req) });
+  if (!delivers) return rows;
+  const mark = row => (row && delivers(row.vendorId) ? { ...row, deliversToViewerArea: true } : row);
+  return Array.isArray(rows) ? rows.map(mark) : { ...mark(rows), ...(Array.isArray(rows?.similarProducts) ? { similarProducts: rows.similarProducts.map(mark) } : {}) };
+}
+
 export const getShopProduct = {
   created, method: 'get', path: '/shop/products/:id',
-  description: 'Buyer: product details (with vendorName), vendor, reviews and similar products (rows as in GET /shop/products).',
-  onGuard: routeGuard('get', requireAuth()),
+  description: 'Buyer: product details (with vendorName), vendor, reviews and similar products (rows as in GET /shop/products). SHOP_NEAR_YOU: header X-FF-Area as on GET /shop/products → deliversToViewerArea: true on the product and on similarProducts rows when it applies; otherwise the body is unchanged.',
+  onGuard: routeGuard('get', [areaRedactGuard, requireAuth()]),
   onRequest: async (req, res) => {
+    redactAreaId(req);
     const product = await shopService.getProduct(req.params.id);
     if (!product) return res.status(404).json({ error: 'product_not_found' });
-    res.json(product);
+    res.json(await withBadge(req, product));
   },
 };
 
@@ -111,19 +125,19 @@ const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' }
 
 export const vendorToolsOptionsRoute = {
   created, method: 'get', path: '/vendor/tools/options',
-  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). merch.productTargets: SHOP_PERSONALISATION is on (show the product form "Who it is for" fields: targetGender, targetAgeBands). merch.shopAreas: SHOP_NEAR_YOU is on (show the profile form "Where you sell" pickers: cityId, regionId, deliveryAreaIds; areas from GET /shop/areas). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
-  responseSample: { canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false } },
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). merch.productTargets: SHOP_PERSONALISATION is on (show the product form "Who it is for" fields: targetGender, targetAgeBands). merch.shopAreas: SHOP_NEAR_YOU is on (show the profile form "Where you sell" pickers: cityId, regionId, deliveryAreaIds; areas from GET /shop/areas). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). canSeeOrderMoney (S6): this caller may see commission and payouts — per-order commission / you receive, and the report App sales after commission (/vendor/reports/marketplace-net): the vendor account, vendor_staff with vendorRole admin or the `payments` permission (read from the stored staff record), or a FitFlex admin. Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
+  responseSample: { canSeeCost: true, canSeeOrderMoney: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
     const vendorId = req.user.userType === 'vendor' ? req.user.sub : req.user.userType === 'vendor_staff' ? req.user.vendorId : null;
-    res.json({ ...vendorToolsOptions(), canSeeCost: await shopService.canSeeCost(req.user), vatInForce: await vendorTaxService.vatInForce(vendorId) });
+    res.json({ ...vendorToolsOptions(), canSeeCost: await shopService.canSeeCost(req.user), canSeeOrderMoney: await shopService.canSeeOrderMoney(req.user), vatInForce: await vendorTaxService.vatInForce(vendorId) });
   },
 };
 
 export const vendorMeRoute = {
   created, method: 'get', path: '/vendor/me',
-  description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|sales|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost and vatInForce }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
-  responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false } } },
+  description: 'Vendor / vendor staff (VENDOR_TOOLS + VENDOR_PORTAL; off → 404 feature_disabled): who I am in my business, for the web portal. → { vendorId, businessName|null, userType: vendor|vendor_staff, vendorRole|null (staff only), permissions: [products|orders|sales|customers|reports|payments|staff] (the vendor account: all; staff: what the server lets them do, read from the stored staff record), approvalStatus|null, accountStatus|null (of the vendor account), tools: same object as GET /vendor/tools/options incl. canSeeCost, canSeeOrderMoney and vatInForce }. Staff no longer active, or of another vendor → 403 vendor_staff_inactive (a staff account that is suspended may get 403 account_suspended first, from the sign-in check).',
+  responseSample: { vendorId: 'usr_vendor_1', businessName: 'Dar Fitness Gear', userType: 'vendor_staff', vendorRole: 'orders_manager', permissions: ['orders'], approvalStatus: 'approved', accountStatus: 'active', tools: { canSeeCost: false, canSeeOrderMoney: false, stockLedger: false, portal: true, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false } } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
     const me = await shopService.vendorMe(req.user);
@@ -232,11 +246,11 @@ export const vendorProfile = {
   onRequest: async (req, res) => res.json(await shopService.vendorProfileFor(req.user) || {}),
 };
 export const vendorSaveProfile = {
-  created, method: 'put', path: '/vendor/profile', description: 'Vendor (account holder) or admin only: create, edit or publish business profile. vendor_staff → 403. Shop home slice 3 (additive, not flagged): optional cityId (a usable city or district: "Based in"), regionId (a usable region; filled from cityId when left out), deliveryAreaIds (usable areas of any level, ≤ 50; the country id = nationwide; [] = no delivery). Left out = unchanged; null clears cityId/regionId. The server sets areasSource: vendor. 400 invalid_area { field, ids, reason: unknown | inactive | wrong_level | not_in_region | too_many | not_a_list } (nothing saved). docs/shop-near-you-api.md.',
+  created, method: 'put', path: '/vendor/profile', description: 'Vendor (account holder) or admin only: create, edit or publish business profile. vendor_staff → 403. Shop home slice 3 (additive, not flagged): optional cityId (a usable city or district: "Based in"), regionId (a usable region; filled from cityId when left out), deliveryAreaIds (usable areas of any level, ≤ 50; the country id = nationwide; [] = no delivery). Left out = unchanged; null clears cityId/regionId. The server sets areasSource: vendor. 400 invalid_area { field, ids, reason: unknown | inactive | wrong_level | not_in_region | too_many | not_a_list } (nothing saved). docs/shop-near-you-api.md. logo / banner (security fix 2026-10-28): only data:image/(png|jpeg|webp);base64,… (≤ 1.4 MB decoded (MEDIA_SRC_MAX_BYTES), must decode as that raster, ≤ 2048 px a side) or our own /storage/<cid>/<file> path; a value already stored in the same field is accepted unchanged; anything else (another host, http(s), javascript:, SVG, oversize) → 400 invalid_media_src { field, reason } (nothing saved). Saves that decode a new image: 30 per 10 minutes per person (429 rate_limited { retryAfterSeconds }).',
   onGuard: routeGuard('put', requireAuth('vendor', 'admin')),
   onRequest: async (req, res) => {
     const result = await shopService.saveVendorProfile({ vendorId: req.user.sub, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing, allowed: result.allowed, field: result.field, ids: result.ids, reason: result.reason });
+    if (result.error) return res.status(result.status).json({ error: result.error, missing: result.missing, allowed: result.allowed, field: result.field, ids: result.ids, reason: result.reason, index: result.index, retryAfterSeconds: result.retryAfterSeconds });
     res.json(result.profile);
   },
 };
@@ -440,14 +454,14 @@ export const vendorUpdateOrderStatus = {
 };
 
 export const vendorPayments = {
-  created, method: 'get', path: '/vendor/payments', description: 'Vendor: sales and settlement dashboard. todaySalesTzs = my lines of orders placed today (EAT day) that are paid (not cancelled, refunded or unpaid), whatever their delivery status; weekly / monthly / pending / settled figures count delivered, paid orders.',
+  created, method: 'get', path: '/vendor/payments', description: 'Vendor: sales and settlement dashboard. todaySalesTzs = my lines of orders placed today (EAT day) that are paid (not cancelled, refunded or unpaid), whatever their delivery status; weekly / monthly / pending / settled figures count delivered, paid orders. S6 (additive): todayNetTzs, weeklyNetTzs, monthlyNetTzs, pendingSettlementNetTzs, settledNetTzs = the same orders after FitFlex commission (what I receive: each order line\'s payout as fixed when the order was placed), and settlements[].netTzs. Show "You receive" when present.',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('payments')]),
   onRequest: async (req, res) => res.json(await shopService.vendorPayments(req.user.vendorId || req.user.sub)),
 };
 export const vendorStatement = {
-  created, method: 'get', path: '/vendor/payments/statement', description: 'Vendor: download CSV statement.',
+  created, method: 'get', path: '/vendor/payments/statement', description: 'Vendor / staff with `reports`: download CSV statement (text/csv; charset=utf-8). Columns order_id, amount_tzs, order_status, payment_status, settlement_status, date (unchanged). S6: the file now starts with a UTF-8 byte-order mark, lines end in CRLF, and a text cell starting with = + - @ tab or CR is prefixed with \' (formula-injection safe).',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('reports')]),
-  onRequest: async (req, res) => { res.type('text/csv').send(await shopService.vendorStatement(req.user.vendorId || req.user.sub)); },
+  onRequest: async (req, res) => { res.type('text/csv; charset=utf-8').send(await shopService.vendorStatement(req.user.vendorId || req.user.sub)); },
 };
 
 export const vendorStatements = {

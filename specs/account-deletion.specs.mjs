@@ -73,7 +73,7 @@ test('deleteMyAccount: blocks a trainer with active bookings and keeps the accou
     user: { sub: trainerUser.id, userType: 'trainer' },
     body: {
       displayName: 'Booked Trainer',
-      photoUrl: 'https://example.com/booked.jpg',
+      photoUrl: '/storage/bafytest/booked.jpg',
       gender: 'male',
       bio: 'Has bookings',
       hourlyRateTzs: 15000,
