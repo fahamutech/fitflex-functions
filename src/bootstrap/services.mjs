@@ -167,6 +167,17 @@ import { eventsPaymentsManualOn, eventsPaymentsTunzaaOn } from '../shared/featur
 import { eventTicketKeyRing, eventsRefundTargetDays } from '../shared/events-config.mjs';
 import { eventsMaxParticipantsPerOrder, eventsConsentTextVersion } from '../shared/events-config.mjs';
 import { registerOrganizerLookup } from '../auth/events-authz.mjs';
+import { registerApiClientStore } from '../auth/organizer-api-auth.mjs';
+import { createEventsOpsService } from '../services/events-ops-service.mjs';
+import { createEventsSyncService } from '../services/events-sync-service.mjs';
+import { createEventsIntegrationsService } from '../services/events-integrations-service.mjs';
+import { createEventsWebhookService } from '../services/events-webhook-service.mjs';
+import { webhookKeyRing } from '../shared/webhook-signing.mjs';
+import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
+import {
+  eventsApiTokenTtlSeconds, eventsApiMaxClients, eventsApiDefaultRate, eventsApiAllowlist, eventsWebhookMaxEndpoints, eventsWebhookTimeoutMs, eventsWebhookMaxAttempts,
+  eventsWebhookBatch, eventsFeedLagSeconds, eventsExportMaxRows,
+} from '../shared/events-config.mjs';
 import { eventsFavouritesOn, eventsRegistrationOn, eventsClosingSoonHours, eventAutoCompleteGraceHours } from '../shared/feature-flags.mjs';
 import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
@@ -1243,10 +1254,21 @@ export const eventsOrganizerService = createEventsOrganizerService({
   // S3: the overview counters (eventsRegistrationService is defined below; only called later).
   registrationTotals: organizerId => eventsRegistrationService.organizerTotals(organizerId),
 });
-export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService });
+// S5: a bilingual in-app notice to an organizer's owner and admins (payout schedule changed, API client events, webhook auto-disabled).
+const notifyOrganizerTeam = async (organizerId, { id, type, en, sw, roles = ['owner', 'admin'] }) => {
+  const staff = await db('EventOrganizerStaff').where({ organizerId, status: 'active' }).whereIn('role', roles).select('userId');
+  for (const s of staff) {
+    const locale = await communicationPreferences.findByIdAsync(s.userId).then(p => p?.locale ?? null).catch(() => null);
+    const t = locale === 'sw' ? sw : en;
+    await notificationService.notify(s.userId, { id: `${id}_${s.userId}`.slice(0, 60), type, title: t.title, body: t.body, data: { organizerId, locale: locale === 'sw' ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body } });
+  }
+};
+export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService, notifyTeam: notifyOrganizerTeam });
 export const eventsDiscoveryService = createEventsDiscoveryService({
   catalogue: eventCatalogueStore, closingSoonHours: eventsClosingSoonHours,
   flags: { module: eventsModuleOn, favourites: eventsFavouritesOn, registration: eventsRegistrationOn },
+  // S5: the ops switches the apps and the portal read (webhooks is false without EVENTS_WEBHOOK_SECRET_KEY: fail closed).
+  opsOptions: () => ({ kit: eventsKitOpsOn(), api: eventsOrganizerApiOn(), webhooks: eventsWebhooksOn() && Boolean(webhookKeyRing()) }),
   // S3 (spec §3.1): the registration keys of the probe. payment is 'none' in S3 (S4 derives manual / provider).
   registrationOptions: () => ({
     holdTtlMinutes: eventStore.holdTtlMinutes(), maxParticipantsPerOrder: eventsMaxParticipantsPerOrder(), teams: true, corporate: true,
@@ -1280,6 +1302,8 @@ export const eventsRegistrationService = createEventsRegistrationService({
   senders: eventSenders,
   // S4: payments and refunds (defined below; read at request time).
   getPayments: () => eventsPaymentsService, getRefunds: () => eventsRefundsService,
+  // S5: the keyset roster, only while EVENTS_KIT_OPS is on.
+  getRosterSync: () => (eventsKitOpsOn() ? eventsSyncService : null),
 });
 export const eventsRosterService = createEventsRosterService({ db, registration: eventsRegistrationService, users, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService });
 
@@ -1317,5 +1341,51 @@ opsService.register({
     if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
     const r = await eventsOrganizerService.runLifecycle();
     return { processed: r.due, succeeded: r.moved, failed: r.failed, ...r };
+  },
+});
+
+// Marathon & running events · S5: venue operations, the organizer API and signed webhooks. All dormant: every route answers
+// 404 feature_disabled unless EVENTS_KIT_OPS / EVENTS_ORGANIZER_API / EVENTS_WEBHOOKS (each with EVENTS_MODULE and EVENTS_REGISTRATION) is on,
+// and the webhook jobs also need EVENTS_WEBHOOK_SECRET_KEY. docs/design/events-s5-venue-api-and-webhooks.md.
+export const eventsOpsService = createEventsOpsService({
+  db, eventStore, ticketRing: eventTicketKeyRing, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message),
+});
+export const eventsSyncService = createEventsSyncService({ db, feedLagSeconds: eventsFeedLagSeconds, exportMaxRows: eventsExportMaxRows });
+export const eventsIntegrationsService = createEventsIntegrationsService({
+  db, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message),
+  maxClients: eventsApiMaxClients, defaultRate: eventsApiDefaultRate, tokenTtlSeconds: eventsApiTokenTtlSeconds, allowlist: eventsApiAllowlist,
+});
+registerApiClientStore(eventsIntegrationsService.authStore);
+export const eventsWebhookService = createEventsWebhookService({
+  db, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message), keyRing: webhookKeyRing,
+  config: { maxEndpoints: eventsWebhookMaxEndpoints, timeoutMs: eventsWebhookTimeoutMs, maxAttempts: eventsWebhookMaxAttempts, batch: eventsWebhookBatch, lagSeconds: eventsFeedLagSeconds },
+});
+opsService.register({
+  name: 'event-webhook-fanout', title: 'Event webhook fan-out', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events webhooks (S5): turns unpublished outbox rows into deliveries for the SAME organizer\'s verified, subscribed endpoints (the organizer match is in the SQL join) and marks them published. Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set.',
+  run: async () => {
+    if (!eventsWebhooksOn() || !eventsWebhookService.enabled()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.fanout();
+    return { processed: r.rows, succeeded: r.rows, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-webhook-deliver', title: 'Event webhook delivery', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events webhooks (S5): sends due deliveries (SKIP LOCKED claim with a lease, SSRF re-check and pinned connection on every attempt, backoff 1m·5m·15m·1h·3h·6h·12h·24h, dead letter, auto-disable with a notice). Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set.',
+  run: async () => {
+    if (!eventsWebhooksOn() || !eventsWebhookService.enabled()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.deliverDue();
+    return { processed: r.claimed, succeeded: r.delivered, failed: r.failed + r.dead, ...r };
+  },
+});
+opsService.register({
+  name: 'event-webhook-retention', title: 'Event webhook retention', schedule: { type: 'daily', utc: '02:40' }, quiet: true,
+  description: 'Events webhooks and API (S5): attempts kept 30 days, deliveries and published outbox rows 90 days, idempotency rows 7 days, API usage rows 90 days; API client expiry notices at 14 and 3 days. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on.',
+  run: async () => {
+    if (!eventsRegistrationOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.retention();
+    const s = await eventsIntegrationsService.sweep();
+    const processed = r.attempts + r.deliveries + r.outbox + r.idempotency + s.notices + s.purged;
+    return { processed, succeeded: processed, failed: 0, ...r, ...s };
   },
 });

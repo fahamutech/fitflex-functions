@@ -60,7 +60,9 @@ const ORGANIZER_COLUMNS = ['id', 'ownerUserId', 'name', 'legalName', 'contactPho
 const EVENT_COLUMNS = ['id', 'organizerId', 'slug', 'title', 'description', 'eventType', 'status', 'startsAt', 'endsAt', 'timezone', 'venueName', 'venueAddress', 'lat', 'lng', 'routeMeta', 'termsSnapshot', 'refundPolicySnapshot', 'registrationClosesAt', 'publishedAt', 'cancelledAt', 'version',
   'heroImageUrl', 'heroThumbUrl', 'heroImageAlt', 'routeUrl', 'routeImageUrl', 'routeImageAlt', 'descriptionSw', 'venueCity', 'venueRegion', 'accessibility', 'inclusions', 'kitProvided',
   'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy', 'registrationOpensAt',
-  'participantFields', 'duplicatePolicy'];
+  'participantFields', 'duplicatePolicy',
+  // S5 (20270122090000): the payout schedule label (D33); the service decides who may set it and when.
+  'payoutSchedule'];
 /** S3 (20270110090900): what a route may set on the order besides what the store derives; never money, status or the hold. */
 const ORDER_EXTRA_COLUMNS = ['createdByUserId', 'costCentre', 'purchaserReference', 'termsAcceptedAt', 'consentTextVersion'];
 /** S3: per-registration columns the service computes (normalised contacts, consent proof, claim token hash, kit size, D19 group label). */

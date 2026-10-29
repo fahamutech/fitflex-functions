@@ -58,6 +58,12 @@ export function createEventsOrganizerService({
     try { await track(name, payload); } catch { /* best effort */ }
   };
   const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
+  /** S5: an outbox row for the event itself. Best effort and AFTER the change (the S2 store does not take a caller transaction); a failure is logged, never raised. */
+  async function emitEventOutbox(eventId, organizerId, type, payload) {
+    try {
+      await db.transaction(trx => eventStore.appendOutbox(trx, { type, aggregateType: 'event', aggregateId: eventId, organizerId, eventId, payload }));
+    } catch (err) { console.warn('[events] outbox row skipped:', type, err?.message); }
+  }
 
   const organizerView_ = (o, kycCase = null) => ({
     id: o.id, name: o.name, status: o.status, timezone: o.timezone, kycCaseId: o.kycCaseId ?? kycCase?.id ?? null,
@@ -209,6 +215,11 @@ export function createEventsOrganizerService({
     if (!EDITABLE_STATUSES.has(current.status)) return fail('invalid_transition', 409, { from: current.status, to: 'edit', allowed: [] });
 
     const { patch, nested, changeNote: rawNote } = parseEventPatch(body);
+    // S5 (D33): the payout schedule is free in a draft and locked from submission on; after publication only FitFlex changes it (admin route, with a reason).
+    if (patch.payoutSchedule !== undefined && current.status !== 'draft') {
+      if (patch.payoutSchedule === (current.payoutSchedule ?? null)) delete patch.payoutSchedule;
+      else return fail('payout_schedule_locked', 409, { eventId, status: current.status });
+    }
     const parsedNote = parseNote(rawNote);
     if (parsedNote.error) return fail('event_invalid', 422, { fields: parsedNote.fields.map(x => ({ ...x, path: `changeNote.${x.path.slice(5)}` })) });
     const changeNote = parsedNote.note;
@@ -241,6 +252,8 @@ export function createEventsOrganizerService({
       await catalogue.appendChangeLog({ eventId: current.id, actorUserId: actorId, actorRole: actorKind === 'admin' ? 'admin' : ctx.role, fields: paths, before: diff.before, after: diff.after, note: changeNote, material: material.length > 0 });
     }
     await audit(actorId, 'events.event_updated', current.id, { version: current.version }, { version: saved.event.version, fields: paths, material: material.length > 0 });
+    // S5: `event.updated` for webhooks and the API (paths only, never values); the payout schedule is not part of what organizers' systems see.
+    if (published) await emitEventOutbox(current.id, current.organizerId, 'event.updated', { eventId: current.id, version: saved.event.version, changedFields: paths, material: material.length > 0 });
     return { version: saved.event.version, updatedAt: new Date(saved.event.updatedAt).toISOString(), material: material.length > 0 };
   }
 
@@ -270,6 +283,7 @@ export function createEventsOrganizerService({
     if (actor.kind !== 'system' && ['published', 'registration_closed'].includes(moved.from)) {
       await catalogue.appendChangeLog({ eventId, actorUserId: actor.id, actorRole: actor.kind === 'admin' ? 'admin' : actor.role, fields: ['status'], before: { status: moved.from }, after: { status: to }, note: cancellation?.note ?? null, material: to === 'cancelled', reason: cancellation?.reason ?? null });
     }
+    if (to === 'cancelled') await emitEventOutbox(eventId, before.organizerId, 'event.cancelled', { eventId, cancelledAt: moved.event.cancelledAt, reasonCode: cancellation?.reason ?? 'admin' });
     if (to === 'submitted') await analytics('organizer_event_submitted', { eventId });
     if (to === 'published') await analytics('event_published', { eventId });
     return { status: to, from: moved.from, event: await eventStore.getEvent(eventId) };

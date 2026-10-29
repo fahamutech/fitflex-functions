@@ -305,6 +305,9 @@ export function createPgEventMoneyStore({ db, eventStore, now = () => new Date()
         }).onConflict('movementKey').ignore().returning('id');
         if (inserted.length) await trx('EventTicketType').where({ id: reg.ticketTypeId }).whereRaw('sold >= 1').update({ sold: trx.raw('sold - 1'), updatedAt: at });
       }
+      // S5 (spec §4.3, confirmation 12): a cancelled place gives its live bib number back in the same transaction.
+      const freed = await trx('EventBibAssignment').where({ registrationId: reg.id }).whereNull('releasedAt').update({ releasedAt: at, reason: 'registration_cancelled' });
+      if (freed) await trx('EventRegistration').where({ id: reg.id }).update({ bibNumber: null });
       await outbox(trx, event, 'registration.cancelled', 'registration', reg.id, { registrationId: reg.id, orderId: order.id, eventId: order.eventId, status: 'cancelled', reason: cancelReason });
     }
     return { cancelled, actorId };

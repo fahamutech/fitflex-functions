@@ -57,6 +57,8 @@ export function createEventsRegistrationService({
   config = {},
   // S4: the payment and refund services (declared after this one in bootstrap; read at request time).
   getPayments = () => null, getRefunds = () => null,
+  // S5: the keyset roster (events-sync-service.mjs); null while EVENTS_KIT_OPS is off, where the S3/S4 roster below is exactly as before.
+  getRosterSync = () => null,
 }) {
   const cfg = {
     maxParticipantsPerOrder: eventsMaxParticipantsPerOrder, corporateMaxRows: eventsCorporateMaxRows, teamMaxMembers: eventsTeamMaxMembers,
@@ -994,8 +996,16 @@ export function createEventsRegistrationService({
     // (d) the purchaser entered someone else with their own number.
     if (r.purchaserUserId === userId && r.consentBasis === 'purchaser_authorised') return fail('claim_own_contact', 409);
     const at = now();
-    const [updated] = await db('EventRegistration').where({ id: r.id }).whereNull('participantUserId')
-      .update({ participantUserId: userId, claimedAt: at, claimTokenHash: null, updatedAt: at }).returning('*');
+    // S5: the claim and its `registration.updated` outbox row commit together (organizers' change feed and webhooks); only a paid place is visible to them.
+    const updated = await db.transaction(async (trx) => {
+      const [row] = await trx('EventRegistration').where({ id: r.id }).whereNull('participantUserId')
+        .update({ participantUserId: userId, claimedAt: at, claimTokenHash: null, updatedAt: at }).returning('*');
+      if (row && row.status === 'confirmed') {
+        const ev = await trx('Event').where({ id: row.eventId }).first('organizerId');
+        await eventStore.appendOutbox(trx, { type: 'registration.updated', aggregateType: 'registration', aggregateId: row.id, organizerId: ev?.organizerId ?? null, eventId: row.eventId, payload: { registrationId: row.id, changed: ['claimed'] } });
+      }
+      return row;
+    });
     if (!updated) return fail('already_claimed', 409);
     await analytics('registration_claimed', { eventId: r.eventId, registrationId: r.id, via });
     // S4 (§3.8.5): when someone other than the purchaser claims a paid place, its ticket code changes at that moment.
@@ -1091,6 +1101,8 @@ export function createEventsRegistrationService({
   async function organizerListRegistrations({ ctx, eventId, query = {} }) {
     const joined = await organizerEvent(ctx, eventId);
     if (joined.error) return joined;
+    const sync = getRosterSync();
+    if (sync) return sync.rosterPage({ organizerId: ctx.organizer.id, eventId, query });
     const page = paginate(await rosterRows(joined, { status: query.status, categoryId: query.categoryId, q: query.q }), pageOpts(query));
     return { items: page.items, nextCursor: page.nextCursor === null ? null : String(page.nextCursor), total: page.total };
   }
