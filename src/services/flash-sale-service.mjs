@@ -406,12 +406,14 @@ export function createFlashSaleService({
     if (isContributor(s, actorId)) return fail('cannot_approve_own_submission', 403);
     const st = (await vendorStates(q, [s.vendorId])).get(s.vendorId);
     if (!st.ok) return fail(st.reason, 409);
+    // A moved price is said first (a price edit also sends the product back to review).
+    const now0 = await q.product(s.productId);
+    if (now0 && !now0.deletedAt && now0.vendorId === s.vendorId && priceMoved(s, now0)) {
+      return fail('sale_changed', 409, { reason: 'product_price_changed', regularPriceTzs: now0.priceTzs, regularPriceTzsAtSubmit: s.regularPriceTzsAtSubmit, discountPriceTzs: validDiscount(now0), discountPriceTzsAtSubmit: s.discountPriceTzsAtSubmit });
+    }
     const found = await productFor(q, s.productId, s.vendorId);
     if (found.error) return found.error;
     const product = found.product;
-    if (priceMoved(s, product)) {
-      return fail('sale_changed', 409, { reason: 'product_price_changed', regularPriceTzs: product.priceTzs, regularPriceTzsAtSubmit: s.regularPriceTzsAtSubmit, discountPriceTzs: validDiscount(product), discountPriceTzsAtSubmit: s.discountPriceTzsAtSubmit });
-    }
     const err = await rulesError(q, s, product, { checkLead: false, withPending: false });
     if (err) return err;
     const at = stamp();

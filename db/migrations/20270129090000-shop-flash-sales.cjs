@@ -142,3 +142,6 @@ exports.down = async function down(knex) {
   await knex.raw('DROP FUNCTION IF EXISTS fitflex_product_price_change()');
   await knex.schema.dropTableIfExists('ProductPriceChange');
 };
+
+// For specs: the fallback trigger used where btree_gist is unavailable (tested on its own).
+exports.OVERLAP_FALLBACK_SQL = OVERLAP_FN;

@@ -145,7 +145,7 @@ Unknown body fields → `400 unknown_field { fields }`. Dates not ISO → `400 i
 
 `effectivePrice(product, sale, now)` (`src/shared/shop-pricing.mjs`) = the **lowest** of `priceTzs`, a valid `discountPriceTzs` (0 < discount < price) and the sale price of an **approved** sale of this product and vendor whose window contains `now` (server clock). Products that buyers can't see (hidden, paused, deleted, unapproved, vendor suspended / not operational / blocked) never get a sale price, because they are not listed or sold at all.
 
-**Product rows** on `GET /shop/products`, `GET /shop/products/:id` (and its `similarProducts`), `GET /shop/vendors/:id` (store products) and `GET /shop/home` (`products{}`) gain:
+**Product rows** on `GET /shop/products`, `GET /shop/products/:id` (and its `similarProducts`), `GET /shop/vendors/:id` (store products), `GET /discover/products` (Explore cards; `sort=price_*` uses the effective price) and `GET /shop/home` (`products{}`) gain:
 - `effectivePriceTzs` (every row) — what checkout charges now;
 - `sale` (only while live): `{ id, salePriceTzs, wasPriceTzs, regularPriceTzs, discountPct, startsAt, endsAt }`.
 
@@ -176,7 +176,7 @@ Unknown body fields → `400 unknown_field { fields }`. Dates not ISO → `400 i
 
 **Vendor product edits** (`PUT /vendor/products/:id`, both with and without the stock ledger): while an **approved** sale of the product has not ended (scheduled or live), a body that changes `priceTzs` or `discountPriceTzs` → `409 sale_conflict { reason: "price_locked_by_flash_sale", saleId, startsAt, endsAt, effectiveStatus, fields }`. Sending the same values (old app builds send the whole form) is fine. Other fields (stock, variants, text) stay editable. `GET /vendor/products` rows carry `priceLock: { saleId, startsAt, endsAt, effectiveStatus }` while locked (absent otherwise).
 
-**Not changed**: walk-in (POS) prices (`POST /vendor/sales`, `walkInPrice`), vendor settlement and payout rules, `/discover/products` sorting (uses the stored price; see known gaps), `GET /admin/products`, reports.
+**Not changed**: walk-in (POS) prices (`POST /vendor/sales`, `walkInPrice`), vendor settlement and payout rules, `GET /admin/products`, vendor reports.
 
 ## Vendor notifications (inbox + push, EN + SW; SW drafts for native review)
 
@@ -203,7 +203,6 @@ Staff-created sales notify the vendor on approve and end too (they pay the disco
 
 - Shop payments are still **manual confirmation only**; a flash sale adds urgency to a flow that waits for a person. The price is protected, the payment timing is not.
 - **Vendor settlement is built but has never been exercised with real accounts**; flash-sale commission on the sale price relies on it (no settlement code changed).
-- `/discover/products` (Explore) still sorts by the stored price, and its cards carry no `sale`; the shop's own lists, product page, store and home are covered.
 - The 14-day rule looks at `priceTzs` raises only (owner rule). Removing a standing discount and then running a sale against the regular price is not blocked; the admin price history shows it.
 - A sale price of TSh 1 is allowed (no maximum discount). TSh 0 is not (a zero-total order would be marked paid at once).
 - Swahili strings are drafts for native review.
