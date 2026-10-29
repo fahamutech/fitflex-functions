@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, eventsModuleOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -148,6 +148,50 @@ export const eventLifecycle = {
     const r = await opsService.runJob('event-lifecycle');
     const s = r?.stats ?? {};
     if (s.moved) console.log(`[events] lifecycle: moved=${s.moved} due=${s.due} skipped=${s.skipped} failed=${s.failed}`);
+  }
+};
+
+export const eventPaymentReconciliation = {
+  created, rule: '25 * * * *', // hourly
+  description: 'Events payments (S4): re-applies approved payments whose order is not confirmed, settles Tunzaa prompts whose callback was lost (and expires stale ones), retries unsent claim invitations once, and re-applies paid refunds whose places were not updated. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Bounded to 100 rows per step; safe to rerun and to overlap (advisory lock, idempotent steps). The work, its run record and lock are in src/bootstrap/services.mjs (event-payment-reconciliation) and ops-service.mjs.',
+  onJob: async () => {
+    if (!eventsRegistrationOn()) return;
+    const r = await opsService.runJob('event-payment-reconciliation');
+    const s = r?.stats ?? {};
+    if (s.repaired || s.settled || s.expired || s.invited || s.refundsApplied || s.failed) console.log(`[events] payment reconciliation: repaired=${s.repaired} settled=${s.settled} expired=${s.expired} invited=${s.invited} refunds=${s.refundsApplied} failed=${s.failed}`);
+  }
+};
+
+export const eventWebhookFanout = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events webhooks (S5): fan unpublished outbox rows out to the SAME organizer\'s verified, subscribed endpoints (organizer match in the SQL join) and mark them published. Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set. Safe to rerun and to overlap (FOR UPDATE SKIP LOCKED, unique endpoint × event). The work, its run record and lock are in src/bootstrap/services.mjs (event-webhook-fanout).',
+  onJob: async () => {
+    if (!eventsWebhooksOn()) return;
+    const r = await opsService.runJob('event-webhook-fanout');
+    const s = r?.stats ?? {};
+    if (s.deliveries) console.log(`[events] webhook fan-out: rows=${s.rows} deliveries=${s.deliveries}`);
+  }
+};
+
+export const eventWebhookDeliver = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events webhooks (S5): deliver due webhook deliveries (lease claim, SSRF re-check and pinned connection on every attempt, retry schedule, dead letter, auto-disable). Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set. Safe to overlap (advisory lock and leases). The work is in src/bootstrap/services.mjs (event-webhook-deliver).',
+  onJob: async () => {
+    if (!eventsWebhooksOn()) return;
+    const r = await opsService.runJob('event-webhook-deliver');
+    const s = r?.stats ?? {};
+    if (s.claimed) console.log(`[events] webhook delivery: claimed=${s.claimed} delivered=${s.delivered} failed=${s.failed} dead=${s.dead}`);
+  }
+};
+
+export const eventWebhookRetention = {
+  created, rule: '40 2 * * *', // every day 02:40 UTC
+  description: 'Events (S5): webhook attempts kept 30 days, deliveries and published outbox rows 90 days, idempotency rows 7 days, API usage rows 90 days; API client expiry notices at 14 and 3 days. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Idempotent.',
+  onJob: async () => {
+    if (!eventsRegistrationOn()) return;
+    const r = await opsService.runJob('event-webhook-retention');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] retention: attempts=${s.attempts} deliveries=${s.deliveries} outbox=${s.outbox} idempotency=${s.idempotency} notices=${s.notices}`);
   }
 };
 

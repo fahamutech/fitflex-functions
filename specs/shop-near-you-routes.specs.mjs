@@ -14,7 +14,8 @@ import { sign } from '../src/auth/jwt.mjs';
 import { ensureInit } from '../functions/index.mjs';
 import { shopHome, shopAreas, resetShopHomeLimits } from '../functions/shop-home.mjs';
 import { getShopPreferences } from '../functions/shop-preferences.mjs';
-import { vendorProfile, vendorSaveProfile, adminListVendors, adminUpdateVendor, vendorToolsOptionsRoute } from '../functions/shop.mjs';
+import { vendorProfile, vendorSaveProfile, adminListVendors, adminUpdateVendor, vendorToolsOptionsRoute, listShopProducts, getShopProduct } from '../functions/shop.mjs';
+import { discoverProducts } from '../functions/discover.mjs';
 import { shopHomeService } from '../src/bootstrap/services.mjs';
 import { listGeoAreas, createGeoArea, updateGeoArea } from '../functions/promotions.mjs';
 
@@ -252,7 +253,10 @@ test('home: flag on + personalisation on → popular_near_you from the database;
   const near = out.body.sections.find(s => s.key === 'popular_near_you');
   assert.ok(near, JSON.stringify(out.body.sections));
   assert.deepEqual([...near.productIds].sort(), [...p.based, ...p.delivers].sort(), 'the far vendor (and its 0.5 km distance) is not near');
-  assert.deepEqual(near.reasonParams, { areaName: { en: N.district, sw: N.district } });
+  // QA1: the delivering vendor lists the region and the other is based in the city → the city is named.
+  assert.deepEqual(near.reasonParams, { areaName: { en: N.city, sw: N.city } });
+  assert.deepEqual(out.body.nearYou.areaName, { en: N.district, sw: N.district });
+  assert.deepEqual(near.viewAll, { path: '/shop/products', query: {} });
   for (const id of p.delivers) assert.equal(out.body.products[id].deliversToViewerArea, true);
   for (const id of p.based) assert.equal(out.body.products[id].deliversToViewerArea, undefined);
   assert.ok(seen.length > 0, 'queries were captured');
@@ -390,4 +394,116 @@ test('area Swahili names: POST /admin/geo-areas takes nameSw; PATCH sets / clear
   assert.equal((await call(updateGeoArea, portal(['campaigns']), { params: { id: A.district }, body: { name: 'x' } })).statusCode, 422);
   assert.equal((await call(updateGeoArea, portal(['campaigns']), { params: { id: A.district }, body: { nameSw: 5 } })).statusCode, 422);
   assert.equal((await call(updateGeoArea, portal(['campaigns']), { params: { id: 'nope-q' }, body: { nameSw: 'x' } })).statusCode, 404);
+});
+
+// ── QA1: the badge on GET /shop/products and GET /shop/products/:id ─────────
+
+test('QA1 products: X-FF-Area marks rows whose vendor delivers there; nothing written, the area in no query', async () => {
+  process.env.SHOP_PERSONALISATION = '1';
+  process.env.SHOP_NEAR_YOU = '1';
+  const { based, delivers, far, p } = await nearCatalogue();
+  const m = await member();
+  const mine = rows => rows.filter(r => [based, delivers, far].includes(r.vendorId));
+  const { out, seen } = await withQueries(() => call(listShopProducts, asMember(m), { query: { search: `Near-you ${tag}` }, headers: { 'x-ff-area': A.district } }));
+  assert.equal(out.statusCode, 200);
+  const rows = mine(out.body);
+  assert.equal(rows.length, 5);
+  for (const r of rows) assert.equal(r.deliversToViewerArea, r.vendorId === delivers ? true : undefined, r.vendorId);
+  assert.deepEqual(seen.filter(q => /^\s*(insert|update|delete)\b/i.test(q.sql)), []);
+  assert.deepEqual(seen.filter(q => q.sql.includes(A.district) || q.bindings.includes(A.district)), []);
+  // Product details: the product and its similar products.
+  const detail = await call(getShopProduct, asMember(m), { params: { id: p.delivers[0] }, headers: { 'x-ff-area': A.district } });
+  assert.equal(detail.statusCode, 200);
+  assert.equal(detail.body.deliversToViewerArea, true);
+  const sim = detail.body.similarProducts.filter(r => r.vendorId === delivers || r.vendorId === based);
+  assert.ok(sim.length > 0);
+  for (const r of sim) assert.equal(r.deliversToViewerArea, r.vendorId === delivers ? true : undefined);
+  const basedDetail = await call(getShopProduct, asMember(m), { params: { id: p.based[0] }, headers: { 'x-ff-area': A.district } });
+  assert.equal(basedDetail.body.deliversToViewerArea, undefined, 'based in only: no badge');
+  // The query is not read on these routes (header only).
+  const viaQuery = await call(listShopProducts, asMember(m), { query: { search: `Near-you ${tag}`, areaId: A.district } });
+  assert.ok(!mine(viaQuery.body).some(r => 'deliversToViewerArea' in r));
+});
+
+test('QA1 products: flag off / switch off / under 18 / unusable area → body byte-identical to no header', async () => {
+  process.env.SHOP_PERSONALISATION = '1';
+  const { p } = await nearCatalogue();
+  const adult = await member();
+  const minor = await member('2012-03-03');
+  const off = await member();
+  const offPerson = (await db('User').where({ id: off }).first()).personId;
+  await db('ShopPreference').insert({ personId: offPerson, subjectType: 'person', personalised: false, source: 'why_sheet', updatedBy: off, updatedAt: new Date() });
+  const same = async (who, area, label) => {
+    for (const [route, opts] of [[listShopProducts, { query: { search: `Near-you ${tag}` } }], [getShopProduct, { params: { id: p.delivers[0] } }]]) {
+      const plain = await call(route, asMember(who), opts);
+      const withArea = await call(route, asMember(who), { ...opts, headers: { 'x-ff-area': area } });
+      assert.equal(JSON.stringify(withArea.body), JSON.stringify(plain.body), `${label} ${route.path}`);
+      assert.ok(!JSON.stringify(withArea.body).includes('deliversToViewerArea'), label);
+    }
+  };
+  await same(adult, A.district, 'flag off');
+  process.env.SHOP_NEAR_YOU = '1';
+  await same(minor, A.district, 'under 18');
+  await same(off, A.district, 'switch off');
+  for (const area of [A.tiny, A.smallCity, A.off, 'tz', 'nope']) await same(adult, area, `area ${area}`);
+});
+
+test('QA1 products: the real request logger never prints the area for /shop/products or /shop/products/:id', async () => {
+  process.env.SHOP_PERSONALISATION = '1';
+  process.env.SHOP_NEAR_YOU = '1';
+  const { p } = await nearCatalogue();
+  const m = await member();
+  const lines = [];
+  const app = express();
+  app.use(morgan('dev', { stream: new Writable({ write(chunk, _enc, cb) { lines.push(String(chunk)); cb(); } }) }));
+  // As bfast-function mounts them: both guards by path prefix, then the handlers.
+  app.use(listShopProducts.path, listShopProducts.onGuard);
+  app.use(getShopProduct.path, getShopProduct.onGuard);
+  app.get(listShopProducts.path, listShopProducts.onRequest);
+  app.get(getShopProduct.path, getShopProduct.onRequest);
+  const server = app.listen(0);
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const auth = { authorization: `Bearer ${sign(asMember(m))}` };
+  try {
+    const list = await fetch(`${base}/shop/products?search=${encodeURIComponent(`Near-you ${tag}`)}`, { headers: { ...auth, 'x-ff-area': A.district } });
+    assert.ok((await list.json()).some(r => r.deliversToViewerArea === true));
+    const one = await fetch(`${base}/shop/products/${p.delivers[0]}?areaId=${A.district}`, { headers: { ...auth, 'x-ff-area': A.district } });
+    assert.equal((await one.json()).deliversToViewerArea, true);
+    for (const q of [`areaId=${A.district}`, `%61reaId=${A.district}`, `areaId[]=${A.district}`]) {
+      assert.equal((await fetch(`${base}/shop/products?${q}`, { headers: auth })).status, 200);
+      assert.equal((await fetch(`${base}/shop/products/${p.based[0]}?${q}`)).status, 401);
+    }
+    await new Promise(r => setTimeout(r, 50));
+  } finally {
+    await new Promise(r => server.close(r));
+  }
+  assert.equal(lines.length, 8, lines.join(''));
+  assert.deepEqual(lines.filter(l => l.includes(A.district) || /areaid/i.test(l) || l.includes('%61reaId')), [], lines.join(''));
+});
+
+// ── QA2: ?maxDistanceKm= (vendor-typed distance) is ignored once areas exist ───
+
+test('QA2 maxDistanceKm: flag off filters by the vendor-typed distance exactly as before; flag on with areas ignores it', async () => {
+  const v = await vendor({ cityId: A.city });
+  const near = await product(v, { distanceKm: 3, name: `QA2 dist ${tag}` });
+  const far = await product(v, { distanceKm: 30, name: `QA2 dist ${tag}` });
+  const none = await product(v, { name: `QA2 dist ${tag}` }); // no distance typed
+  const m = await member();
+  const ids = body => (Array.isArray(body) ? body : [...(body.featured || []), ...(body.items || body.results || [])]).map(r => r.id).filter(id => [near, far, none].includes(id)).sort();
+  const list = q => call(listShopProducts, asMember(m), { query: { search: `QA2 dist ${tag}`, ...q } });
+  const disc = q => call(discoverProducts, asMember(m), { query: { q: `QA2 dist ${tag}`, ...q } });
+  // Flag off: today's behaviour.
+  assert.deepEqual(ids((await list({ maxDistanceKm: '10' })).body), [near]);
+  assert.deepEqual(ids((await list({})).body), [near, far, none].sort());
+  const dOff = await disc({ maxDistanceKm: '10' });
+  assert.equal(dOff.statusCode, 200, JSON.stringify(dOff.body));
+  assert.deepEqual(ids(dOff.body), [near]);
+  // Flag on, areas configured (the seeded GeoArea rows): the filter is ignored on both routes.
+  process.env.SHOP_NEAR_YOU = '1';
+  assert.ok((await shopHomeService.areas()).length > 0);
+  assert.deepEqual(ids((await list({ maxDistanceKm: '10' })).body), [near, far, none].sort());
+  assert.deepEqual(JSON.stringify((await list({ maxDistanceKm: '10' })).body), JSON.stringify((await list({})).body), 'same as no filter');
+  assert.deepEqual(ids((await disc({ maxDistanceKm: '10' })).body), [near, far, none].sort());
+  // Other filters still apply.
+  assert.deepEqual(ids((await list({ maxDistanceKm: '10', maxPrice: '1' })).body), []);
 });

@@ -120,7 +120,7 @@ test('a company employee is linked to their member account by email or mobile nu
   const email = `zawadi.${tag}@contact.test`;
   const memberId = await account('member', { email });
 
-  const link = body => corporateService.linkEmployeeUser({ corporateId: corp.id, employeeId: employee.id, actorId: ADMIN.userId, ...body });
+  const link = body => corporateService.linkEmployeeUser({ corporateId: corp.id, employeeId: employee.id, actorId: ADMIN.userId, actorType: 'admin', ...body });
   assert.equal((await link({ email: `nobody.${tag}@contact.test` })).error, 'user_not_found');
   assert.equal((await link({ email })).employee.userId, memberId);
   assert.equal((await link({ userId: null })).employee.userId, null);   // unlink, as before
@@ -160,7 +160,7 @@ test('an email or number only typed onto a profile finds nobody: same user_not_f
   await corporateService.setStatus({ corporateId: corp.id, status: 'active', actorId: ADMIN.userId });
   const { employee } = await corporateService.provisionStaff({ corporateId: corp.id, body: { displayName: 'Planted Target', department: 'Ops' }, actorId: ADMIN.userId });
   for (const body of [{ email: plantedEmail }, { phone: plantedPhone }]) {
-    const out = await corporateService.linkEmployeeUser({ corporateId: corp.id, employeeId: employee.id, actorId: ADMIN.userId, ...body });
+    const out = await corporateService.linkEmployeeUser({ corporateId: corp.id, employeeId: employee.id, actorId: ADMIN.userId, actorType: 'admin', ...body });
     assert.deepEqual([out.error, out.status], ['user_not_found', 404], JSON.stringify(body));
   }
 

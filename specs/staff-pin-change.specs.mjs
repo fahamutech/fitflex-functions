@@ -5,7 +5,7 @@
 //
 // Contract, while STAFF_PIN_CHANGE_REQUIRED is on:
 //   - POST /owner/staff marks the new staff row; existing owner-made staff are
-//     marked by migration 20270121090000 (invitation-made staff never are);
+//     marked by migration 20270127090000 (invitation-made staff never are);
 //   - a marked staff member's sessions (Firebase sign-in and PIN sign-in) carry
 //     pwc: true, and every route except POST /auth/pin/change refuses them with
 //     403 password_change_required;
@@ -33,7 +33,7 @@ import { toSessionUser } from '../src/shared/session-user.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const marking = require('../db/migrations/20270121090000-staff-pin-change-marking.cjs');
+const marking = require('../db/migrations/20270127090000-staff-pin-change-marking.cjs');
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
 const devToken = payload => `dev:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;

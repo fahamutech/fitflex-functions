@@ -515,10 +515,33 @@ export function createB2BProgramService({
     return { benefits: out, asOf: day };
   }
 
+  /**
+   * What someone would get today if they joined this organisation as
+   * `beneficiary` (groupName, beneficiaryType): shown to a member deciding
+   * whether to accept an organisation's request. Read-only; a programme for
+   * selected people only can't include someone not yet on the list.
+   */
+  async function previewBenefits({ organizationId, beneficiary = {} }) {
+    const day = today();
+    const who = { id: null, status: 'active', enrolledAt: new Date().toISOString(), groupName: beneficiary.groupName ?? null, beneficiaryType: beneficiary.beneficiaryType ?? 'member' };
+    const out = [];
+    const orgPrograms = (await programs.filterByColumnAsync('organizationId', organizationId)).filter(p => programEffectiveStatus(p, day) === 'active');
+    for (const p of orgPrograms) {
+      for (const b of await benefits.filterByColumnAsync('programId', p.id)) {
+        if (!evaluateEligibility({ program: p, benefit: b, beneficiary: who, day }).eligible) continue;
+        out.push({
+          program: { id: p.id, name: p.name },
+          benefit: { id: b.id, name: b.name, benefitType: b.benefitType, fundingType: b.fundingType, fundingSummary: describeFunding(b), passTier: b.passTier ?? null, usageLimit: b.usageLimit, usagePeriod: b.usagePeriod },
+        });
+      }
+    }
+    return out;
+  }
+
   return {
     reference,
     createProgram, getProgram, listPrograms, adminListPrograms, updateProgram, setProgramStatus, expireDue,
     createBenefit, getBenefit, listBenefits, updateBenefit, setBenefitStatus,
-    listEligibleBeneficiaries, myBenefits,
+    listEligibleBeneficiaries, myBenefits, previewBenefits,
   };
 }

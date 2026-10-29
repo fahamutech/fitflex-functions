@@ -44,6 +44,8 @@ export function createEventsOrganizerService({
   db, eventStore, catalogue, users, identityLink = null, partnerKyc, invitations = null, orgMemberships = null, auditLog = null,
   notify = async () => {}, track = async () => {}, now = () => new Date(),
   closingSoonHours = () => DEFAULT_CLOSING_SOON_HOURS, autoCompleteGraceHours = () => 6,
+  // S3: (organizerId) → { registrationsTotal, awaitingPaymentTotal, confirmedTotal } for the overview (null until wired).
+  registrationTotals = null,
 }) {
   const nowIso = () => now().toISOString();
   const audit = async (actor, action, target, before, after) => {
@@ -56,7 +58,6 @@ export function createEventsOrganizerService({
     try { await track(name, payload); } catch { /* best effort */ }
   };
   const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
-
   const organizerView_ = (o, kycCase = null) => ({
     id: o.id, name: o.name, status: o.status, timezone: o.timezone, kycCaseId: o.kycCaseId ?? kycCase?.id ?? null,
     kycStatus: kycCase?.status ?? null, statusReason: o.statusReason ?? kycCase?.reasonNote ?? null,
@@ -131,8 +132,8 @@ export function createEventsOrganizerService({
     return {
       eventsTotal: all.length,
       publishedTotal: all.filter(j => ['published', 'registration_closed', 'in_progress'].includes(j.event.status)).length,
-      // S3 fills these (spec §5.1).
-      registrationsTotal: 0, awaitingPaymentTotal: 0, confirmedTotal: 0,
+      // S3 (registration service) fills these; zeros until it is wired.
+      ...(registrationTotals ? await registrationTotals(ctx.organizer.id) : { registrationsTotal: 0, awaitingPaymentTotal: 0, confirmedTotal: 0 }),
       nextEvents: next.map(j => rowView(j, { ...viewOpts(), allowedActions: actionsFor(ctx, j.event.status) })),
     };
   }
@@ -207,6 +208,11 @@ export function createEventsOrganizerService({
     if (!EDITABLE_STATUSES.has(current.status)) return fail('invalid_transition', 409, { from: current.status, to: 'edit', allowed: [] });
 
     const { patch, nested, changeNote: rawNote } = parseEventPatch(body);
+    // S5 (D33): the payout schedule is free in a draft and locked from submission on; after publication only FitFlex changes it (admin route, with a reason).
+    if (patch.payoutSchedule !== undefined && current.status !== 'draft') {
+      if (patch.payoutSchedule === (current.payoutSchedule ?? null)) delete patch.payoutSchedule;
+      else return fail('payout_schedule_locked', 409, { eventId, eventStatus: current.status });
+    }
     const parsedNote = parseNote(rawNote);
     if (parsedNote.error) return fail('event_invalid', 422, { fields: parsedNote.fields.map(x => ({ ...x, path: `changeNote.${x.path.slice(5)}` })) });
     const changeNote = parsedNote.note;
@@ -228,7 +234,11 @@ export function createEventsOrganizerService({
       const r = await catalogue.upsertNested(current.id, nested);
       if (r.error) return r;
     }
-    const saved = await eventStore.updateEvent(current.id, patch, { expectedVersion });
+    // S5 (M4): `event.updated` commits WITH the event row. The paths (never values) are known here already.
+    const saved = await eventStore.updateEvent(current.id, patch, {
+      expectedVersion,
+      inTransaction: published ? (trx, row) => eventStore.appendOutbox(trx, { type: 'event.updated', aggregateType: 'event', aggregateId: current.id, organizerId: current.organizerId, eventId: current.id, payload: { eventId: current.id, version: row.version, changedFields: paths, material: material.length > 0 } }) : null,
+    });
     if (saved.error) {
       if (saved.error === 'event_frozen_field') return fail('event_invalid', 422, { fields: [{ path: saved.field, code: 'frozen' }] });
       return saved;
@@ -239,6 +249,7 @@ export function createEventsOrganizerService({
       await catalogue.appendChangeLog({ eventId: current.id, actorUserId: actorId, actorRole: actorKind === 'admin' ? 'admin' : ctx.role, fields: paths, before: diff.before, after: diff.after, note: changeNote, material: material.length > 0 });
     }
     await audit(actorId, 'events.event_updated', current.id, { version: current.version }, { version: saved.event.version, fields: paths, material: material.length > 0 });
+    // S5: `event.updated` for webhooks and the API (paths only, never values); the payout schedule is not part of what organizers' systems see.
     return { version: saved.event.version, updatedAt: new Date(saved.event.updatedAt).toISOString(), material: material.length > 0 };
   }
 
@@ -256,7 +267,10 @@ export function createEventsOrganizerService({
       if (r.error) return r;
       sideBefore.version = r.event.version;
     }
-    const moved = await eventStore.transitionEvent(eventId, to);
+    // S5 (M4): `event.cancelled` commits WITH the status move.
+    const moved = await eventStore.transitionEvent(eventId, to, {
+      inTransaction: to === 'cancelled' ? (trx, row) => eventStore.appendOutbox(trx, { type: 'event.cancelled', aggregateType: 'event', aggregateId: eventId, organizerId: before.organizerId, eventId, payload: { eventId, cancelledAt: row.cancelledAt, reasonCode: cancellation?.reason ?? 'admin' } }) : null,
+    });
     if (moved.error) return moved;
     const raw = {};
     if (to === 'submitted') { raw.submittedAt = now(); raw.rejection = null; }

@@ -8,7 +8,8 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps, b2bBeneficiaryImportService, b2bLifecycleService } from '../src/bootstrap/services.mjs';
+import { orgOnlySponsorsOn } from '../src/shared/feature-flags.mjs';
+import { b2bMemberRequestService, b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps, b2bBeneficiaryImportService, b2bLifecycleService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -23,10 +24,13 @@ const requireBillingRead = [requireAuth('admin'), requireAcl('b2b_billing', 'b2b
 // Any signed-in user; the organisation membership check happens per request.
 const requireOrgAccess = [requireAuth(), requireAcl('b2b')];
 
+// An add by user id that now waits for the member to accept answers 202.
+const PENDING_MEMBER = 'pending_member_acceptance';
+
 function send(res, result, okStatus = 200) {
   const { error, status, ...payload } = result;
   if (error) return res.status(status).json({ error, ...payload });
-  return res.status(okStatus).json(payload);
+  return res.status(payload.outcome === PENDING_MEMBER ? 202 : okStatus).json(payload);
 }
 
 /** Resolve the caller's access to :id, then run the handler with it. */
@@ -98,12 +102,28 @@ export const myB2BOrganizations = {
   onRequest: async (req, res) => send(res, await b2bService.listMyOrganizations({ userId: req.user.sub, userType: req.user.userType })),
 };
 
+export const myB2BOrganizationSession = {
+  created, method: 'get', path: '/b2b/me/organization-session',
+  description: 'B5a: what a sign-in would tell the portal about the caller right now, without signing in again. Always { orgOnlySponsors } (whether ORG_ONLY_SPONSORS is on); while it is on and the caller is a company HR login that reaches its organisation, also { organizationUser: true, organizationRoles, organizationIds }, computed exactly as in the sign-in response. Any other caller (or the flag off) gets orgOnlySponsors only.',
+  responseSample: { orgOnlySponsors: true, organizationUser: true, organizationRoles: ['hr'], organizationIds: ['b2bo_0123456789ab'] },
+  onGuard: routeGuard('get', requireAuth()),
+  onRequest: async (req, res) => {
+    const marks = await b2bService.organizationSessionMarks({ userId: req.user.sub, userType: req.user.userType });
+    res.json({ orgOnlySponsors: orgOnlySponsorsOn(), ...(marks ?? {}) });
+  },
+};
+
 export const getB2BOrganization = {
   created, method: 'get', path: '/b2b/organizations/:id',
-  description: 'Organisation profile, KYB status and the caller\'s role and permissions.',
+  description: 'Organisation profile, KYB status and the caller\'s role and permissions. access.companyStaffManage (B5a): whether the caller may add, change, link and import a company\'s staff here (ORG_ONLY_SPONSORS on, a company\'s organisation, org role hr or admin only); false everywhere else.',
   onGuard: routeGuard('get', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, async access => ({
-    organization: access.org, access: { role: access.role, permissions: access.permissions },
+    organization: access.org,
+    access: {
+      role: access.role, permissions: access.permissions,
+      // B5a: true only where the caller may manage a company's staff from here (ORG_ONLY_SPONSORS on, a company's organisation, org role hr or admin).
+      companyStaffManage: b2bService.companyStaffManage(access),
+    },
   })),
 };
 
@@ -131,7 +151,7 @@ export const listB2BOrganizationUsers = {
 
 export const addB2BOrganizationUser = {
   created, method: 'post', path: '/b2b/organizations/:id/users',
-  description: 'Add someone who already has a FitFlex account to the organisation (users.manage). Name them by the email or the mobile number of their account, or by userId (one of the three). When several accounts share that email or number, the member account is used. Roles: owner, admin, manager, finance, hr, analyst, viewer.',
+  description: 'Add someone who already has a FitFlex account to the organisation (users.manage). Name them by the verified email or mobile number of their account, or by userId (one of the three). When several accounts share that email or number, the member account is used. Roles: owner, admin, manager, finance, hr, analyst, viewer. By userId (organisation users; not FitFlex admins) nobody is added yet: 202 { outcome: "pending_member_acceptance", memberRequest } and the person must accept in the app; until then they have no role.',
   requestSample: { email: 'grace@example.co.tz', role: 'finance', permissions: [] },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.addOrganizationUser({
@@ -178,7 +198,10 @@ export const getB2BBeneficiary = {
 
 export const enrollB2BBeneficiary = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries',
-  description: 'Enrol a FitFlex member (beneficiaries.manage), named by the email or mobile number of their member account, or by userId (one of the three). The organisation must be active. A mapped company enrols staff through /corporate/staff.',
+  description: 'Enrol someone (beneficiaries.manage). The organisation must be active. ' +
+    'OTHER ORGANISATIONS: a FitFlex member named by the verified email or mobile number of their member account, or by userId (one of the three). By userId (organisation users; not FitFlex admins) nobody is enrolled yet: 202 { outcome: "pending_member_acceptance", memberRequest }; the member must accept in the app, and until then the organisation sees nothing of them and is charged nothing (an id that names nobody gets the same 202, nothing stored). ' +
+    'A COMPANY\'S ORGANISATION (mirrored from Corporate): 409 managed_by_corporate (use /corporate/staff) unless ORG_ONLY_SPONSORS is on; then org roles hr and admin only (others 403 forbidden { requiredRoles }), and the person joins the company staff list through the company staff path (seat limit, billing): body { displayName (required), email?, phone?, userId?, groupName? (department), status?: pending|active }. The staff row always gets the name given here — nothing of the member\'s is copied before they accept — and an activation PIN, shown once. ' +
+    'Name only: 201 { beneficiary, pin, writtenThrough: "corporate_staff" }. Also named by userId or by email/phone: the row is added unlinked and the member is ASKED to accept the link — 202 { outcome: "pending_member_acceptance", memberRequest, beneficiary, pin, writtenThrough }; it is linked only when they accept. By userId an unknown id gets the same 202 (memberRequest.id null, nothing stored). By email/phone the reply is the same whether or not a member is behind the contact (memberRequest.id and memberRequest.userId are always null). A FitFlex platform admin links directly (201, the member is told when named by id). Link refusals (e.g. 409 already_enrolled, member_request_pending, 429 rate_limited / member_request_cooldown) add nobody (the seat is given back).',
   requestSample: { phone: '0712 345 678', beneficiaryType: 'policyholder', externalReference: 'POL-00123', groupName: 'Gold scheme', status: 'active' },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.enrollBeneficiary({
@@ -188,7 +211,7 @@ export const enrollB2BBeneficiary = {
 
 export const setB2BBeneficiaryStatus = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/:beneficiaryId/status',
-  description: 'Move a beneficiary between pending, active, suspended and inactive (beneficiaries.manage).',
+  description: 'Move a beneficiary between pending, active, suspended and inactive (beneficiaries.manage). A mapped company\'s employee: 409 managed_by_corporate, unless ORG_ONLY_SPONSORS is on — then active/suspended/inactive set the employee active/suspended/exited (exited frees the seat) through the company staff path.',
   requestSample: { status: 'suspended' },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.setBeneficiaryStatus({
@@ -202,6 +225,16 @@ export const deactivateB2BBeneficiary = {
   onGuard: routeGuard('delete', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.deactivateBeneficiary({
     access, beneficiaryId: req.params.beneficiaryId, actorId: req.user.sub,
+  })),
+};
+
+export const linkB2BBeneficiaryAccount = {
+  created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/:beneficiaryId/link',
+  description: 'B5a (404 unless ORG_ONLY_SPONSORS is on): link a company\'s employee to their FitFlex member account, or unlink (no contact, or userId null; an open link request is withdrawn too). Org roles hr and admin only (others 403 forbidden { requiredRoles }); 409 link_not_supported for anyone who is not company staff. By userId, email or mobile number (one of them) an organisation user only ASKS the member: 202 { outcome: "pending_member_acceptance", memberRequest, beneficiary, writtenThrough } and the record is linked when they accept (an unknown id gets the same 202, memberRequest.id null; by email/phone memberRequest.id and userId are always null). A FitFlex platform admin links directly: 200 { beneficiary, writtenThrough }. Unlink: 200.',
+  requestSample: { email: 'asha@nmbtz.com' },
+  onGuard: routeGuard('post', requireOrgAccess),
+  onRequest: (req, res) => inOrganization(req, res, access => b2bService.linkBeneficiaryAccount({
+    access, beneficiaryId: req.params.beneficiaryId, body: req.body || {}, actorId: req.user.sub,
   })),
 };
 
@@ -225,13 +258,47 @@ export const adminListB2BPrograms = {
 
 export const myB2BBenefits = {
   created, method: 'get', path: '/b2b/me/benefits',
-  description: 'The caller\'s B2B wellness benefits today, across every organisation that sponsors them (read-only; remaining allowance comes with usage tracking).',
+  description: 'The caller\'s B2B wellness benefits today, across every organisation that sponsors them (read-only; remaining allowance comes with usage tracking). memberRequests: organisations waiting for the caller to accept being added (same items as GET /b2b/me/member-requests).',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => {
     // Someone invited before they joined is enrolled now, rather than at the next run of the matching job.
     await b2bBeneficiaryImportService.matchInvites({ userId: req.user.sub }).catch(() => null);
-    return send(res, await programs.myBenefits({ userId: req.user.sub }));
+    const benefits = await programs.myBenefits({ userId: req.user.sub });
+    const requests = await b2bMemberRequestService.listForMember({ userId: req.user.sub }).catch(() => ({ items: [] }));
+    return send(res, { ...benefits, memberRequests: requests.items });
   },
+};
+
+// ── Member requests: an organisation asked to add the caller by user id ────
+
+export const myB2BMemberRequests = {
+  created, method: 'get', path: '/b2b/me/member-requests',
+  description: 'Organisations waiting for the caller to accept being added (named by user id): as a beneficiary, a company staff link, or an organisation user. Each item: who is asking, what they will see (A-02, English and Swahili), and the benefits the caller would get. Requests expire after B2B_MEMBER_REQUEST_TTL_DAYS days (default 14).',
+  onGuard: routeGuard('get', requireAuth()),
+  onRequest: async (req, res) => send(res, await b2bMemberRequestService.listForMember({ userId: req.user.sub })),
+};
+
+export const acceptMyB2BMemberRequest = {
+  created, method: 'post', path: '/b2b/me/member-requests/:requestId/accept',
+  description: 'Accept an organisation\'s request: the add happens now (enrolled, staff record linked, or organisation role given). Single use: 409 member_request_not_pending once answered, 410 member_request_expired after expiry, 404 for a request that is not the caller\'s.',
+  onGuard: routeGuard('post', requireAuth()),
+  onRequest: async (req, res) => send(res, await b2bMemberRequestService.accept({ userId: req.user.sub, requestId: req.params.requestId })),
+};
+
+export const declineMyB2BMemberRequest = {
+  created, method: 'post', path: '/b2b/me/member-requests/:requestId/decline',
+  description: 'Decline an organisation\'s request. Nothing is added; the organisation sees the request as declined.',
+  onGuard: routeGuard('post', requireAuth()),
+  onRequest: async (req, res) => send(res, await b2bMemberRequestService.decline({ userId: req.user.sub, requestId: req.params.requestId })),
+};
+
+export const cancelB2BMemberRequest = {
+  created, method: 'delete', path: '/b2b/organizations/:id/member-requests/:requestId',
+  description: 'Withdraw a request to add someone by user id that they have not answered (beneficiaries.manage for a beneficiary, users.manage for an organisation user).',
+  onGuard: routeGuard('delete', requireOrgAccess),
+  onRequest: (req, res) => inOrganization(req, res, access => b2bMemberRequestService.cancel({
+    access, requestId: req.params.requestId, actorId: req.user.sub,
+  })),
 };
 
 export const listB2BPrograms = {
@@ -933,7 +1000,7 @@ const people = b2bBeneficiaryImportService;
 
 export const importB2BBeneficiaries = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/import',
-  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account who has verified that email or number is enrolled; anyone else is invited (by email, and by SMS when listed with a mobile number) and enrolled once a member verifies that email or number (an email or number only typed onto a profile matches nobody). Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason, plus `emailCodesAvailable` (false: people listed by email only cannot verify it in the app yet, so ask for a mobile number too).',
+  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account who has verified that email or number is enrolled; anyone else is invited (by email, and by SMS when listed with a mobile number) and enrolled once a member verifies that email or number (an email or number only typed onto a profile matches nobody). Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason, plus `emailCodesAvailable` (false: people listed by email only cannot verify it in the app yet, so ask for a mobile number too). A mapped company: 409 managed_by_corporate, unless ORG_ONLY_SPONSORS is on — then each new person joins the company staff list (linked and active with a confirmed member account, otherwise unlinked and pending; nobody is invited), all-or-nothing on free seats (409 seat_limit_reached), and the reply adds companyStaff: true, seatsAvailable and credentials [{ line, employeeId, displayName, pin }] for the unlinked (shown once, never stored).',
   requestSample: { rawText: 'name,email,phone,group\nAsha Mollel,asha@example.com,0712345678,Finance', dryRun: true },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => people.importPeople({ access, body: req.body || {}, actorId: actor(req) })),

@@ -8,44 +8,9 @@ import { isTokenSession } from '../src/auth/promotion-token.mjs';
 import { shopHomeService } from '../src/bootstrap/services.mjs';
 import { shopHomeV2On, shopNearYouOn } from '../src/shared/feature-flags.mjs';
 
-/**
- * Slice 3: the viewer's area is location-derived and must never be logged. The app sends it in the
- * `X-FF-Area` header (review M3; headers are not in the request log line). `?areaId=` still works for
- * one release, so the in-process request logger (morgan in bfast-function), which writes
- * req.originalUrl when the response finishes, gets a URL without it: every parameter whose key,
- * percent-decoded and with any [..] suffix removed, is `areaid` (any case) is dropped before anything
- * else runs. Routing and req.query read req.url, which is left alone. Platform / ingress logs (BFast)
- * are outside this repo.
- */
-const keyOf = (pair) => {
-  const raw = pair.split('=')[0].replace(/\+/g, ' ');
-  let key = raw;
-  // Decode repeatedly (a key encoded twice stays encoded once after Express); a bad escape is matched raw.
-  for (let i = 0; i < 3; i += 1) { try { const next = decodeURIComponent(key); if (next === key) break; key = next; } catch { break; } }
-  return key.trim().toLowerCase().replace(/\[.*$/, '');
-};
-const isAreaKey = pair => keyOf(pair) === 'areaid';
-export function withoutAreaId(url) {
-  if (typeof url !== 'string') return url;
-  const at = url.indexOf('?');
-  if (at < 0) return url;
-  const hash = url.indexOf('#', at);
-  const query = url.slice(at + 1, hash < 0 ? undefined : hash);
-  const pairs = query.split('&');
-  if (!pairs.some(p => p && isAreaKey(p))) return url;
-  const kept = pairs.filter(p => p && !isAreaKey(p));
-  return kept.length ? `${url.slice(0, at)}?${kept.join('&')}` : url.slice(0, at);
-}
-export function redactAreaId(req) {
-  if (req && typeof req.originalUrl === 'string') req.originalUrl = withoutAreaId(req.originalUrl);
-}
-/** The viewer's area: the X-FF-Area header first, else ?areaId= (one more release). Never logged. */
-export function areaFromRequest(req) {
-  const h = req?.headers?.['x-ff-area'] ?? (typeof req?.get === 'function' ? req.get('x-ff-area') : undefined);
-  if (typeof h === 'string' && h.trim()) return h.trim();
-  const q = req?.query?.areaId;
-  return typeof q === 'string' ? q : undefined;
-}
+// The area helpers live in src/shared/area-request.mjs (also used by GET /shop/products, QA1).
+export { withoutAreaId, redactAreaId, areaFromRequest } from '../src/shared/area-request.mjs';
+import { redactAreaId, areaFromRequest } from '../src/shared/area-request.mjs';
 const redacting = guard => (req, res, next) => { redactAreaId(req); return guard(req, res, next); };
 
 const created = new Date().toISOString();
