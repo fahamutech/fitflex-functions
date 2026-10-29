@@ -13,6 +13,7 @@ import { requireAuth } from '../src/auth/jwt.mjs';
 import { shopService, vendorReportService, users } from '../src/bootstrap/services.mjs';
 import { vendorReportsOn, vendorStockLedgerOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
+import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 import { renderReportPdf, pdfGroupBy } from '../src/shared/vendor-report-pdf.mjs';
 import { reportFileName } from '../src/shared/vendor-reports.mjs';
 import { firstName } from '../src/shared/vendor-documents.mjs';
@@ -36,7 +37,30 @@ async function requireReportAccess(req, res, next) {
   }
   return next();
 }
-const guards = routeGuard('get', [requireAuth('vendor', 'vendor_staff'), requireReportAccess]);
+/**
+ * Security review #275: the flag is the FIRST guard — with VENDOR_REPORTS off every request (with or without a
+ * token) gets 404 feature_disabled before any token check or staff lookup.
+ */
+function requireReportsOn(req, res, next) {
+  if (!vendorReportsOn()) return res.status(404).json({ error: 'feature_disabled' });
+  return next();
+}
+/**
+ * Per vendor per minute, in memory per server (as S3–S5): report reads, and a tighter limit for exports
+ * (format=csv|pdf), which are heavier and are audited. Over it: 429 rate_limited { retryAfterSeconds } + Retry-After.
+ */
+export const VENDOR_REPORT_LIMITS = Object.freeze({ readsPerMinute: 120, exportsPerMinute: 10 });
+const readLimiter = createVendorLimiter({ perMinute: VENDOR_REPORT_LIMITS.readsPerMinute });
+const exportLimiter = createVendorLimiter({ perMinute: VENDOR_REPORT_LIMITS.exportsPerMinute });
+export const resetVendorReportLimits = () => { readLimiter.reset(); exportLimiter.reset(); };
+function limitReports(req, res, next) {
+  const vendorId = vendorOf(req.user);
+  const format = String(req.query?.format || 'json');
+  if (limitOrNull(readLimiter, vendorId, res)) return undefined;
+  if (['csv', 'pdf'].includes(format) && limitOrNull(exportLimiter, vendorId, res)) return undefined;
+  return next();
+}
+const guards = routeGuard('get', [requireReportsOn, requireAuth('vendor', 'vendor_staff'), requireReportAccess, limitReports]);
 const vendorOf = user => (user.userType === 'vendor_staff' ? user.vendorId : user.sub);
 const setHeader = (res, key, value) => (typeof res.setHeader === 'function' ? res.setHeader(key, value) : res.set?.(key, value));
 const send = (res, result) => {
@@ -77,7 +101,7 @@ async function summaryPdf(req, res, vendorId, result) {
 }
 
 const COMMON = 'Query: from, to (EAT dates YYYY-MM-DD, inclusive; both or neither — neither = this month so far), lang en|sw (CSV headers / PDF), format.';
-const ERRORS = 'Errors: 404 feature_disabled (VENDOR_TOOLS + VENDOR_REPORTS off), 403 vendor_permission_forbidden { requiredPermission: reports }, 400 invalid_range { reason: from_and_to_required | invalid_date | future | to_before_from | too_long, maxDays: 366 } | invalid_channel | invalid_format | invalid_lang | invalid_group_by | too_many_buckets { max: 120 }, 413 export_too_large { maxRows: 50000 } (CSV).';
+const ERRORS = 'Errors: 404 feature_disabled (VENDOR_TOOLS + VENDOR_REPORTS off; checked before the token), 429 rate_limited { retryAfterSeconds } + Retry-After (per vendor: 120 report calls a minute, 10 CSV/PDF exports a minute), 403 vendor_permission_forbidden { requiredPermission: reports }, 400 invalid_range { reason: from_and_to_required | invalid_date | future | to_before_from | too_long, maxDays: 366 } | invalid_channel | invalid_format | invalid_lang | invalid_group_by | too_many_buckets { max: 120 }, 413 export_too_large { maxRows: 50000 } (CSV).';
 const HEAD = 'Every JSON answer starts with { from, to, channel, groupBy? (grouped reports), generatedAt (ISO; "Updated {time}"), timezone: Africa/Dar_es_Salaam, inProgress (the period includes today: "(so far)"), channels: { app: true, walkIn (VENDOR_WALKIN_SALES on, or walk-in sales exist in the period) } }. Closed periods (to before today) may be served from a 10-minute server cache.';
 const CSV = 'format=csv → text/csv; charset=utf-8, attachment {business-slug}_{section}_{from}_{to}.csv: UTF-8 with BOM, CRLF, header row in the chosen language, money columns end "(TZS)", raw integers, dates YYYY-MM-DD (EAT), formula-injection safe; cost/payout columns only when allowed; every export writes one audit row (vendor_report_exported).';
 

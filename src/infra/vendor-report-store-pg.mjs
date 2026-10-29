@@ -25,6 +25,8 @@
 import { VISIBLE_TO_PARTNER } from '../services/partner-statement-workflow.mjs';
 
 const TZ = 'Africa/Dar_es_Salaam';
+/** Only timeline instants that look like ISO timestamps are cast (a malformed one would fail the whole query). */
+const ISO_AT = '^\\d{4}-\\d{2}-\\d{2}T';
 const plain = row => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v === 'bigint' ? Number(v) : v))) : null);
 const n = v => (v == null ? 0 : Number(v));
 const containment = vendorId => JSON.stringify([{ vendorId: String(vendorId) }]);
@@ -33,7 +35,7 @@ const arr = col => `(CASE WHEN jsonb_typeof(${col}) = 'array' THEN ${col} ELSE '
 /** The instant a cancelled order was cancelled: its last "cancelled" timeline entry, else updatedAt. */
 const CANCELLED_AT = `(CASE WHEN o.status = 'cancelled' THEN COALESCE(
   (SELECT max((e->>'at')::timestamptz) FROM jsonb_array_elements(${arr('o.timeline')}) e
-    WHERE e->>'status' = 'cancelled' AND e->>'at' ~ '^\\d{4}-\\d{2}-\\d{2}T'), o."updatedAt") END)`;
+    WHERE e->>'status' = 'cancelled' AND e->>'at' ~ '${ISO_AT}'), o."updatedAt") END)`;
 const BOUNDS = `bounds AS (SELECT ((?::date)::timestamp AT TIME ZONE '${TZ}') AS t0, (((?::date) + 1)::timestamp AT TIME ZONE '${TZ}') AS t1)`;
 
 export function createPgVendorReportStore({ db }) {
@@ -276,13 +278,15 @@ export function createPgVendorReportStore({ db }) {
    * A delivered order on a statement the vendor can see (submitted … paid) is grouped under that statement's
    * week with the statement LINE's figures, so a statement week equals its statement exactly; otherwise under
    * its delivery week (Monday, EAT) with vendorShareOfOrder's figures, statement null. Orders whose payout is
-   * not above 0 are left out, as settlement does.
+   * not above 0 are left out, as settlement does. Paid out = THIS vendor's own live settlement line is on a
+   * paid statement (security review #275 M1): ShopOrder.settlementStatus is order-wide and is set when ANY
+   * vendor's statement for the order is paid, so it is never used here.
    */
   async function marketplaceNet({ vendorId, from, to }) {
     const { rows } = await db.raw(`WITH ${BOUNDS},
       mine AS (
-        SELECT o.id, o.status, o."settlementStatus", o."paidAt",
-               COALESCE((SELECT (e->>'at')::timestamptz FROM jsonb_array_elements(${arr('o.timeline')}) WITH ORDINALITY t(e, ord)
+        SELECT o.id, o.status, o."paidAt",
+               COALESCE((SELECT CASE WHEN e->>'at' ~ '${ISO_AT}' THEN (e->>'at')::timestamptz END FROM jsonb_array_elements(${arr('o.timeline')}) WITH ORDINALITY t(e, ord)
                           WHERE e->>'status' IN ('delivered', 'fulfilled') ORDER BY ord DESC LIMIT 1), o."updatedAt", o."createdAt") AS delivered_at,
                sum(COALESCE((i->>'qty')::numeric, 0))::bigint AS items,
                sum(round(COALESCE((i->>'priceTzs')::numeric, 0) * COALESCE((i->>'qty')::numeric, 0)))::bigint AS sales,
@@ -305,7 +309,7 @@ export function createPgVendorReportStore({ db }) {
       classified AS (
         SELECT p.*,
                CASE WHEN p.status IN ('delivered', 'fulfilled') THEN
-                      CASE WHEN p.st_status = 'paid' OR p."settlementStatus" = 'settled' THEN 'paid_out' ELSE 'waiting' END
+                      CASE WHEN p.st_status = 'paid' THEN 'paid_out' ELSE 'waiting' END
                     ELSE 'not_delivered' END AS state,
                COALESCE(p.st_start, to_char(date_trunc('week', p.delivered_on::timestamp), 'YYYY-MM-DD')) AS week_start,
                COALESCE(p.st_end, to_char(date_trunc('week', p.delivered_on::timestamp) + interval '6 days', 'YYYY-MM-DD')) AS week_end,

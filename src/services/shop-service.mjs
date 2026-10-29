@@ -80,6 +80,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // VENDOR_VAT applies). A side table only; the order, its prices, commission and payout are untouched.
   // Never allowed to fail the order.
   onVendorOrderInvoices = async () => null,
+  // Payout display (security review #275 M1): (vendorId) → Set of order ids whose share for THIS vendor sits on a
+  // paid vendor statement. ShopOrder.settlementStatus is order-wide (set when any vendor's statement for the
+  // order is paid), so on a multi-vendor order it cannot say whether this vendor was paid. null = not wired
+  // (in-memory specs): the order-wide status is used as before.
+  vendorPaidOrderIds = null,
   // Vendor tools · S5: the product's VAT code (ProductPrivate.vatCode; private, never on /shop/*, never
   // re-queues approval). { on(), allowedCodes(), set({ vendorId, productId, vatCode, actorId }), codesOf(vendorId, ids), codesById(ids) }.
   productVat = null,
@@ -795,6 +800,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // One fulfilment per vendor: each vendor moves only their own.
       fulfilments: [...new Set(orderItems.map(item => item.vendorId).filter(Boolean))].map(vendorId => ({ vendorId, status: 'pending', timeline: [{ status: 'pending', at }], updatedAt: at })),
       reservationExpiresAt: free ? null : new Date(+placedAt + reservationTtlMinutes * 60_000).toISOString(),
+      // S6: an order with nothing to pay is paid when it is placed (vendor reports date app sales by paidAt).
+      ...(free ? { paidAt: at } : {}),
       createdAt: at, updatedAt: at,
     };
     // Stock stays reserved while the payment is confirmed.
@@ -1272,6 +1279,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * commission on the same orders (vendorShareOfOrder, read only: the order lines' commission and payout
    * as fixed when the order was placed; the payout engine is not involved), and each settlements[] row
    * carries netTzs.
+   * Settled / pending (security review #275 M1, payout display): settled = this vendor's own share of the order is
+   * on a paid statement (vendorPaidOrderIds), never the order-wide settlementStatus.
    */
   async function vendorPayments(vendorId) {
     const orders = await ordersOfVendor(vendorId);
@@ -1285,12 +1294,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const paidToday = orders.filter(order => order.paymentStatus === 'paid' && order.status !== 'cancelled' && placedToday(order));
     const weekly = delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week);
     const monthly = delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month);
-    const pending = delivered.filter(order => order.settlementStatus !== 'settled');
-    const settled = delivered.filter(order => order.settlementStatus === 'settled');
+    const paidIds = vendorPaidOrderIds ? await vendorPaidOrderIds(vendorId) : null;
+    const isSettled = order => (paidIds ? paidIds.has(order.id) : order.settlementStatus === 'settled');
+    const pending = delivered.filter(order => !isSettled(order));
+    const settled = delivered.filter(isSettled);
     return {
       todaySalesTzs: total(paidToday), weeklySalesTzs: total(weekly), monthlySalesTzs: total(monthly), pendingSettlementTzs: total(pending), settledPaymentsTzs: total(settled),
       todayNetTzs: total(paidToday, net), weeklyNetTzs: total(weekly, net), monthlyNetTzs: total(monthly, net), pendingSettlementNetTzs: total(pending, net), settledNetTzs: total(settled, net),
-      settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), netTzs: net(order), status: order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })),
+      settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), netTzs: net(order), status: paidIds ? (isSettled(order) ? 'settled' : 'pending') : order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })),
     };
   }
   /**

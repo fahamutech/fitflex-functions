@@ -28,8 +28,9 @@ import { setPdfkitLoaderForTests } from '../src/shared/vendor-document-pdf.mjs';
 import { vendorToolsOptionsRoute } from '../functions/shop.mjs';
 import {
   vendorReportSummary, vendorReportSales, vendorReportProducts, vendorReportStockValue, vendorReportProfit, vendorReportMarketplaceNet,
-  vendorReportCustomers, vendorReportPaymentMethods, resetVendorReportCache,
+  vendorReportCustomers, vendorReportPaymentMethods, resetVendorReportCache, resetVendorReportLimits, VENDOR_REPORT_LIMITS,
 } from '../functions/vendor-reports.mjs';
+import { createShopService } from '../src/services/shop-service.mjs';
 
 const migration = createRequire(import.meta.url)('../db/migrations/20270122090000-vendor-reports-paid-at.cjs');
 
@@ -39,7 +40,7 @@ const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
 const made = { users: [], products: [], orders: [] };
 const FLAGS = ['VENDOR_TOOLS', 'VENDOR_REPORTS', 'VENDOR_STOCK_LEDGER', 'VENDOR_CUSTOMERS'];
 const flagsOn = (list = FLAGS) => { for (const f of list) process.env[f] = '1'; };
-afterEach(() => { for (const f of FLAGS) delete process.env[f]; resetVendorReportCache(); setPdfkitLoaderForTests(null); });
+afterEach(() => { for (const f of FLAGS) delete process.env[f]; resetVendorReportCache(); resetVendorReportLimits(); setPdfkitLoaderForTests(null); });
 
 // ── harness ─────────────────────────────────────────────────────────────────
 
@@ -52,7 +53,7 @@ function res() {
   };
 }
 async function call(route, claims, { query = {} } = {}) {
-  const all = { authorization: `Bearer ${sign(claims)}` };
+  const all = claims ? { authorization: `Bearer ${sign(claims)}` } : {};
   const path = route.path;
   const req = { method: 'GET', baseUrl: path, path: '/', headers: all, params: {}, query, body: {}, get: name => all[String(name).toLowerCase()] ?? null };
   const out = res();
@@ -618,4 +619,119 @@ test('GET /vendor/payments/statement CSV: same columns, now BOM + CRLF via the s
   const lines = file.slice(1).split('\r\n');
   assert.equal(lines[0], 'order_id,amount_tzs,order_status,payment_status,settlement_status,date');
   assert.ok(lines.length >= 3 && !file.slice(1).replace(/\r\n/g, '').includes('\n'));
+});
+
+// ── security review #275 ────────────────────────────────────────────────────
+
+test('#275 M1: on a two-vendor order, paying vendor A\'s statement is not "paid out" for vendor B (report and /vendor/payments)', async () => {
+  const A = await vendor('Two A', { payable: true });
+  const B = await vendor('Two B', { payable: true });
+  const buyerId = await user('member');
+  const [maker, checker] = [await user('admin'), await user('admin')];
+  const shared = await appOrder({ buyerId, lines: [[A, uid('prd'), 30_000, 1], [B, uid('prd'), 20_000, 1]], paidAt: '2025-03-03T09:00:00Z', status: 'delivered',
+    timeline: [{ status: 'delivered', at: '2025-03-04T10:00:00Z' }] });
+  clock = new Date('2025-03-12T09:00:00Z');
+  try {
+    const eligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts, trainers });
+    const settle = createVendorSettlementService({ users, payoutEligibility: eligibility, now: () => clock, notify: async () => {} });
+    const prepared = await settle.prepare({ periodStart: '2025-03-03', actorId: maker });
+    const stA = prepared.statements.find(x => x.vendorId === A);
+    const stB = prepared.statements.find(x => x.vendorId === B);
+    assert.ok(stA && stB);
+    await settle.submit({ id: stA.id, actorId: maker });
+    await settle.approve({ id: stA.id, actorId: checker });
+    await settle.markPayable({ id: stA.id, actorId: checker });
+    assert.equal((await settle.pay({ id: stA.id, paymentReference: 'CRDB-A', actorId: checker })).statement?.status, 'paid');
+    assert.equal((await db('ShopOrder').where({ id: shared }).first()).settlementStatus, 'settled', 'the order-wide status is settled by A\'s payment');
+
+    const r = svc();
+    const week = async v => (await r.report('marketplace-net', { vendorId: v, access: OWNER, query: { from: '2025-03-03', to: '2025-03-09' } })).data;
+    const a = await week(A), b = await week(B);
+    assert.deepEqual([a.status.paidOut.payoutTzs, a.status.waiting.payoutTzs], [27_000, 0]);
+    assert.deepEqual([b.status.paidOut.orders, b.status.paidOut.payoutTzs, b.status.waiting.payoutTzs], [0, 0, 18_000], 'B has not been paid');
+    assert.deepEqual([b.weeks[0].paidOut, b.weeks[0].statement], [false, null], "B's statement is still a draft");
+
+    const payA = await shopService.vendorPayments(A);
+    const payB = await shopService.vendorPayments(B);
+    assert.deepEqual([payA.settledPaymentsTzs, payA.settledNetTzs, payA.pendingSettlementNetTzs], [30_000, 27_000, 0]);
+    assert.deepEqual([payB.settledPaymentsTzs, payB.settledNetTzs, payB.pendingSettlementTzs, payB.pendingSettlementNetTzs], [0, 0, 20_000, 18_000]);
+    assert.equal(payB.settlements.find(x => x.orderId === shared).status, 'pending');
+    assert.equal(payA.settlements.find(x => x.orderId === shared).status, 'settled');
+  } finally { clock = new Date('2026-10-15T21:30:00Z'); }
+});
+
+test('#275: the flag is checked first — off gives 404 feature_disabled with or without a token; on, no token is 401', async () => {
+  for (const route of [vendorReportSummary, vendorReportSales, vendorReportProfit, vendorReportMarketplaceNet]) {
+    assert.deepEqual((await call(route, null)).body, { error: 'feature_disabled' }, route.path);
+    assert.deepEqual((await call(route, { sub: 'usr_nobody', userType: 'member' })).body, { error: 'feature_disabled' });
+  }
+  flagsOn();
+  assert.equal((await call(vendorReportSales, null)).status, 401);
+});
+
+test('#275: per-vendor rate limits — report reads, and a tighter limit for CSV/PDF exports', async () => {
+  const { V } = await seedV();
+  flagsOn();
+  const q = { from: '2026-10-14', to: '2026-10-15', format: 'csv' };
+  for (let i = 0; i < VENDOR_REPORT_LIMITS.exportsPerMinute; i += 1) assert.equal((await call(vendorReportSales, as(V), { query: q })).status, 200);
+  const over = await call(vendorReportSales, as(V), { query: q });
+  assert.equal(over.status, 429);
+  assert.equal(over.body.error, 'rate_limited');
+  assert.ok(over.headers['Retry-After']);
+  assert.equal((await call(vendorReportSales, as(V), { query: { from: '2026-10-14', to: '2026-10-15' } })).status, 200, 'JSON reads have their own, larger allowance');
+  assert.equal((await call(vendorReportSales, as(seed.W), { query: q })).status, 200, 'per vendor');
+  resetVendorReportLimits();
+  for (let i = 0; i < VENDOR_REPORT_LIMITS.readsPerMinute; i += 1) await call(vendorReportPaymentMethods, as(V));
+  assert.equal((await call(vendorReportPaymentMethods, as(V))).status, 429);
+});
+
+test('#275: the report cache is capped by size as well as by entries', () => {
+  let t = 0;
+  const c = createReportCache({ ttlMs: 60_000, max: 1000, maxBytes: 2_000, now: () => t });
+  for (let i = 0; i < 50; i += 1) c.set(`k${i}`, { rows: 'x'.repeat(40) });
+  assert.ok(c.bytes() <= 2_000 && c.size() < 50, `${c.size()} entries, ${c.bytes()} bytes`);
+  assert.equal(c.get('k0'), undefined, 'the oldest went first');
+  assert.ok(c.get('k49'));
+  c.set('huge', { rows: 'x'.repeat(500) });
+  assert.equal(c.get('huge'), undefined, 'a value over a tenth of the cap is not cached');
+  t = 61_000;
+  assert.equal(c.get('k49'), undefined, 'expired');
+});
+
+test('#275: an order with nothing to pay is paid when placed and gets paidAt = createdAt; the backfill agrees', async () => {
+  const mem = (rows = []) => ({
+    rows, async filterAsync(fn) { return rows.filter(fn); }, async findAsync(fn) { return rows.find(fn) || null; },
+    async findByIdAsync(id) { return rows.find(r => r.id === id) || null; }, async insertAsync(row) { rows.push(row); return row; },
+    async updateByIdAsync(id, patch) { const i = rows.findIndex(r => r.id === id); if (i >= 0) rows[i] = { ...rows[i], ...patch }; return rows[i] || null; },
+    async upsertAsync(fn, row) { const i = rows.findIndex(fn); if (i >= 0) rows[i] = { ...rows[i], ...row }; else rows.push(row); return row; },
+  });
+  const shop = createShopService({
+    products: mem([{ id: 'p_free', vendorId: 'ven_f', name: 'Sample', priceTzs: 5_000, stock: 9, status: 'active', approvalStatus: 'approved' }]),
+    shopOrders: mem(), users: mem([{ id: 'ven_f', userType: 'vendor' }]), auditLog: { async insertAsync() {} }, marketplaceNotifications: mem(),
+  });
+  const placed = await shop.createOrder({ buyerId: 'm_free', body: { items: [{ productId: 'p_free', qty: 1 }], deliveryMethod: 'home_delivery', deliveryAddress: 'Sinza', paymentMethod: 'mpesa' } });
+  assert.equal(placed.order.paymentStatus, 'paid', 'no payment step configured: paid at placement');
+  assert.equal(placed.order.paidAt, placed.order.createdAt);
+
+  const V = await vendor('Free Shop');
+  const free = await appOrder({ buyerId: await user('member'), lines: [[V, uid('prd'), 0, 1]], status: 'accepted', paymentStatus: 'paid', createdAt: '2026-04-01T08:00:00Z' });
+  await db('ShopOrderLineCost').insert({ orderId: free, productId: uid('prd'), variant: '', vendorId: V, qty: 1, unitCostTzs: null, createdAt: new Date('2026-04-01T08:00:01Z') });
+  await migration.backfillPaidAt(db);
+  assert.equal((await db('ShopOrder').where({ id: free }).first()).paidAt.toISOString(), '2026-04-01T08:00:00.000Z', 'createdAt, as createOrder writes it');
+});
+
+test('#275: a malformed timeline instant does not break the payout report (cast is guarded)', async () => {
+  const M = await vendor('Odd Shop');
+  await appOrder({ buyerId: await user('member'), lines: [[M, uid('prd'), 10_000, 1]], paidAt: '2025-05-05T09:00:00Z', status: 'delivered',
+    timeline: [{ status: 'delivered', at: 'not-a-date' }], updatedAt: '2025-05-06T09:00:00Z' });
+  await appOrder({ buyerId: await user('member'), lines: [[M, uid('prd'), 10_000, 1]], paidAt: '2025-05-05T09:00:00Z', status: 'cancelled', paymentStatus: 'refunded',
+    timeline: [{ status: 'cancelled', at: 'yesterday' }], updatedAt: '2025-05-07T09:00:00Z' });
+  clock = new Date('2025-05-20T09:00:00Z');
+  try {
+    const r = svc();
+    const net = (await r.report('marketplace-net', { vendorId: M, access: OWNER, query: { from: '2025-05-01', to: '2025-05-11' } })).data;
+    assert.equal(net.totals.orderCount, 1, 'falls back to updatedAt');
+    const sales = (await r.report('sales', { vendorId: M, access: OWNER, query: { from: '2025-05-01', to: '2025-05-11' } })).data;
+    assert.deepEqual([sales.totals.grossTzs, sales.totals.refundTzs], [20_000, 10_000]);
+  } finally { clock = new Date('2026-10-15T21:30:00Z'); }
 });

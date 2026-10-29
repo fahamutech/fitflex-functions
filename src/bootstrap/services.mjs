@@ -342,6 +342,11 @@ export const shopService = createShopService({
   onVendorCustomerOrder: order => vendorCustomerService.marketplaceOrderPaid(order),
   // Vendor tools · S5: each vendor's invoice for the paid order is numbered (defined below; runs later).
   onVendorOrderInvoices: order => vendorDocumentService.orderPaid(order),
+  // Payout display (security review #275 M1): an order is settled FOR THIS VENDOR only when the vendor's own live
+  // statement line is on a paid statement; ShopOrder.settlementStatus is order-wide.
+  vendorPaidOrderIds: async (vendorId) => new Set((await db('VendorSettlementLine as l')
+    .join('VendorSettlement as s', 's.id', 'l.vendorSettlementId')
+    .where({ 'l.vendorId': vendorId, 'l.voided': false, 's.status': 'paid' }).select('l.orderId')).map(r => r.orderId)),
   // Vendor tools · S5: product VAT codes (VENDOR_TOOLS + VENDOR_VAT).
   productVat: {
     on: vendorVatOn,

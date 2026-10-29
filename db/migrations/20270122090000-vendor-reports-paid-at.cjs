@@ -9,12 +9,15 @@
 //     1. the decision time of its approved PaymentRequest,
 //     2. else when its line costs were snapshotted (ShopOrderLineCost.createdAt, written on payment),
 //     3. else its createdAt (only for an order still marked paid).
+//   An order with nothing to pay (totalTzs 0) was paid when it was placed: its createdAt — the same value
+//   createOrder now writes for such orders.
 //   "Was paid" = paymentStatus 'paid', or refund_pending/refunded for an order cancelled AFTER it was
 //   paid (its approved request was decided before its first cancellation, or it has line costs).
 //   An order whose money arrived only after it was cancelled (late payment, refund owed) was never a
 //   sale and keeps paidAt NULL.
-// - Indexes: ShopOrder(paidAt) (Q-10) and VendorCustomerPayment(vendorId, receivedOn) for "collected in
-//   the period". VendorSale(vendorId, soldAt, id) already exists (S3).
+// - Indexes: ShopOrder(paidAt) (Q-10), VendorCustomerPayment(vendorId, receivedOn) for "collected in
+//   the period", and VendorSettlementLine(vendorId, orderId) WHERE NOT voided — a vendor's own paid
+//   statement lines decide "paid out" (security review #275 M1). VendorSale(vendorId, soldAt, id) already exists (S3).
 //
 // Down: drops the indexes and the column (the backfilled values are derived data; nothing else is lost).
 
@@ -25,6 +28,7 @@ exports.up = async function up(knex) {
   });
   await knex.raw('CREATE INDEX IF NOT EXISTS shoporder_paid_at_index ON "ShopOrder" ("paidAt") WHERE "paidAt" IS NOT NULL');
   await knex.raw('CREATE INDEX IF NOT EXISTS vendorcustomerpayment_vendor_received_index ON "VendorCustomerPayment" ("vendorId", "receivedOn")');
+  await knex.raw('CREATE INDEX IF NOT EXISTS vendorsettlementline_vendor_live_index ON "VendorSettlementLine" ("vendorId", "orderId") WHERE voided = false');
   await exports.backfillPaidAt(knex);
 };
 
@@ -41,10 +45,10 @@ exports.backfillPaidAt = async function backfillPaidAt(knex) {
            (SELECT min((e->>'at')::timestamptz) FROM jsonb_array_elements(
                CASE WHEN jsonb_typeof(o.timeline) = 'array' THEN o.timeline ELSE '[]'::jsonb END) e
              WHERE e->>'status' = 'cancelled' AND e->>'at' ~ '^\\d{4}-\\d{2}-\\d{2}T') AS cancelled_at,
-           o."createdAt"
+           o."createdAt", o."totalTzs"
       FROM "ShopOrder" o`;
   const paid = await knex.raw(`
-    UPDATE "ShopOrder" o SET "paidAt" = COALESCE(s.approved_at, s.costed_at, s."createdAt")
+    UPDATE "ShopOrder" o SET "paidAt" = COALESCE(CASE WHEN s."totalTzs" = 0 THEN s."createdAt" END, s.approved_at, s.costed_at, s."createdAt")
       FROM (${sources} WHERE o."paidAt" IS NULL AND o."paymentStatus" = 'paid') s
      WHERE o.id = s.id AND o."paidAt" IS NULL
     RETURNING o.id`);
@@ -63,6 +67,7 @@ exports.backfillPaidAt = async function backfillPaidAt(knex) {
 
 /** @param {import('knex').Knex} knex */
 exports.down = async function down(knex) {
+  await knex.raw('DROP INDEX IF EXISTS vendorsettlementline_vendor_live_index');
   await knex.raw('DROP INDEX IF EXISTS vendorcustomerpayment_vendor_received_index');
   await knex.raw('DROP INDEX IF EXISTS shoporder_paid_at_index');
   await knex.schema.alterTable('ShopOrder', (table) => {

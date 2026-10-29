@@ -14,7 +14,7 @@
 // Every Swahili string here is a DRAFT for native review.
 import { slug } from './vendor-documents.mjs';
 
-export const REPORT_LIMITS = Object.freeze({ maxDays: 366, maxBuckets: 120, maxCsvRows: 50_000, cacheTtlMs: 10 * 60_000, cacheMaxEntries: 500, pdfBucketRows: 31 });
+export const REPORT_LIMITS = Object.freeze({ maxDays: 366, maxBuckets: 120, maxCsvRows: 50_000, cacheTtlMs: 10 * 60_000, cacheMaxEntries: 500, cacheMaxBytes: 16 * 1024 * 1024, pdfBucketRows: 31 });
 export const REPORT_TIMEZONE = 'Africa/Dar_es_Salaam';
 export const CHANNELS = ['all', 'app', 'walk_in'];
 export const GROUP_BYS = ['day', 'week', 'month'];
@@ -119,23 +119,34 @@ export function cover(stock, unitsInWindow) {
 
 // ── cache (closed periods only) ─────────────────────────────────────────────
 
-/** A small in-memory cache with a TTL and a hard size cap (oldest entry goes first). */
-export function createReportCache({ ttlMs = REPORT_LIMITS.cacheTtlMs, max = REPORT_LIMITS.cacheMaxEntries, now = () => Date.now() } = {}) {
+/**
+ * A small in-memory cache with a TTL and two hard caps (oldest entry goes first): `max` entries and about
+ * `maxBytes` of data (size ≈ 2 bytes per character of the value's JSON — security review #275). A value larger
+ * than a tenth of maxBytes is not cached at all.
+ */
+export function createReportCache({ ttlMs = REPORT_LIMITS.cacheTtlMs, max = REPORT_LIMITS.cacheMaxEntries, maxBytes = REPORT_LIMITS.cacheMaxBytes, now = () => Date.now() } = {}) {
   const entries = new Map();
+  let bytes = 0;
+  const drop = (key) => { const hit = entries.get(key); if (hit) { bytes -= hit.bytes; entries.delete(key); } };
   return {
     get(key) {
       const hit = entries.get(key);
       if (!hit) return undefined;
-      if (hit.expires <= now()) { entries.delete(key); return undefined; }
+      if (hit.expires <= now()) { drop(key); return undefined; }
       return hit.value;
     },
     set(key, value) {
-      entries.delete(key);
-      entries.set(key, { value, expires: now() + ttlMs });
-      while (entries.size > max) entries.delete(entries.keys().next().value);
+      drop(key);
+      if (!(ttlMs > 0)) return;
+      const size = (JSON.stringify(value)?.length || 0) * 2 + key.length * 2;
+      if (size > maxBytes / 10) return;
+      entries.set(key, { value, expires: now() + ttlMs, bytes: size });
+      bytes += size;
+      while (entries.size > max || bytes > maxBytes) drop(entries.keys().next().value);
     },
-    reset() { entries.clear(); },
+    reset() { entries.clear(); bytes = 0; },
     size: () => entries.size,
+    bytes: () => bytes,
   };
 }
 
