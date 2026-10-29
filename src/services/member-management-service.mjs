@@ -540,7 +540,7 @@ export function createMemberManagementService({
     const existing = await checkins.findAsync(
       (c) => c.memberId === memberId && gymIds.includes(c.gymId) && (c.businessDate || localDay(c.timestamp)) === today,
     );
-    if (existing) return { ok: true, checkin: existing, idempotent: true };
+    if (existing) return { ok: true, checkin: publicCheckin(existing), idempotent: true };
 
     const row = {
       id: randomUUID(),
@@ -568,9 +568,9 @@ export function createMemberManagementService({
         (c) => c.memberId === memberId && c.gymId === targetGymId && (c.businessDate || localDay(c.timestamp)) === today && c.status !== CHECKIN_STATUS.VOIDED,
       );
       if (!first) throw err;
-      return { ok: true, checkin: first, idempotent: true };
+      return { ok: true, checkin: publicCheckin(first), idempotent: true };
     }
-    return { ok: true, checkin: row };
+    return { ok: true, checkin: publicCheckin(row) };
   }
 
   async function renewMember({ owner, memberId, body }) {

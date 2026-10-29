@@ -5,7 +5,10 @@
 //
 // Privacy: no raw IP, user-agent string, PIN, QR payload or token is stored or logged. clientMeta is
 // { channel: 'web', uaFamily, ipHash } where ipHash = sha256(address + a salt that changes every UTC day), and it
-// is cleared after RETENTION_DAYS (purgeClientMeta).
+// is cleared after RETENTION_DAYS (purgeClientMeta), together with the intent id. authSessionId stays null until
+// the portal session carries a real session id (S5); the column is kept for that.
+// idempotencyKey is validated but NOT stored: replay safety comes from the intent (Checkin.intentId, unique) and the
+// one-visit-per-member-per-gym-per-day index.
 import { createHash, createHmac } from 'node:crypto';
 import { signIntent, verifyIntent } from '../shared/web-checkin-intent.mjs';
 import { extractQrPayload, publicRefFor } from './web-gym-profile-service.mjs';
@@ -95,13 +98,13 @@ export function createWebCheckinService({ gyms, checkInService, webGymProfile, d
     };
   }
 
-  /** Retention: clear the client metadata and session id of web check-ins older than RETENTION_DAYS. → rows changed. */
+  /** Retention: clear the client metadata, session id and intent id of web check-ins older than RETENTION_DAYS. → rows changed. */
   async function purgeClientMeta({ days = RETENTION_DAYS } = {}) {
     if (!db) return 0;
     const cutoff = new Date(now() - days * 86_400_000);
     return db('Checkin').where({ source: CHECKIN_SOURCE.WEB_GYM_QR_BY_MEMBER }).where('timestamp', '<', cutoff)
-      .where(b => b.whereNotNull('clientMeta').orWhereNotNull('authSessionId'))
-      .update({ clientMeta: null, authSessionId: null });
+      .where(b => b.whereNotNull('clientMeta').orWhereNotNull('authSessionId').orWhereNotNull('intentId'))
+      .update({ clientMeta: null, authSessionId: null, intentId: null });
   }
 
   return { createIntent, preview, confirm, purgeClientMeta, gymFromIntent };

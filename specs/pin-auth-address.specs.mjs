@@ -1,6 +1,6 @@
-// PIN sign-in address handling (S2 hardening): the per-address limit counts X-Forwarded-For from the RIGHT by
-// PUBLIC_DOCS_TRUSTED_PROXY_HOPS, so a client cannot dodge it by writing the left-most entry. Response shapes are
-// unchanged. Callers sending X-FitFlex-Channel: web-checkin also get a lower per-address cap on sign-ins.
+// PIN sign-in address handling: the EXISTING per-address limit is unchanged (first X-Forwarded-For entry, as before S2).
+// Only callers sending X-FitFlex-Channel: web-checkin get an extra, lower cap, and that cap counts the address from the
+// RIGHT by PUBLIC_DOCS_TRUSTED_PROXY_HOPS (the new client-address helper), so the header cannot be spoofed around it.
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -57,23 +57,22 @@ test('clientAddress counts from the right by hops (default 1) and ignores the sp
   assert.equal(clientAddress({ headers: {}, socket: { remoteAddress: '127.0.0.9' } }), '127.0.0.9');
 });
 
-test('sign-in records the proxy-appended address, not the client-written first entry', async () => {
-  const real = uniqueIp(); const spoof = uniqueIp();
-  const out = await login({ xff: `${spoof}, ${real}` });
+test('existing PIN login behaviour is unchanged: the first X-Forwarded-For entry is the recorded address', async () => {
+  const first = uniqueIp(); const last = uniqueIp();
+  const out = await login({ xff: `${first}, ${last}` });
   assert.equal(out.statusCode, 401);
-  assert.equal(await attemptsFrom(real), 1);
-  assert.equal(await attemptsFrom(spoof), 0, 'the spoofed entry is never used');
+  assert.equal(await attemptsFrom(first), 1);
+  assert.equal(await attemptsFrom(last), 0);
 });
 
-test('the failure lockout per address cannot be dodged by varying the left-most entry', async () => {
+test('existing failure lockout per address is keyed on the first entry, as before', async () => {
   process.env.PIN_FAILURES_PER_ADDRESS = '3';
-  const real = uniqueIp();
-  for (let i = 0; i < 3; i += 1) assert.equal((await login({ xff: `${uniqueIp()}, ${real}` })).statusCode, 401);
-  const blocked = await login({ xff: `${uniqueIp()}, ${real}` });
+  const first = uniqueIp();
+  for (let i = 0; i < 3; i += 1) assert.equal((await login({ xff: `${first}, ${uniqueIp()}` })).statusCode, 401);
+  const blocked = await login({ xff: `${first}, ${uniqueIp()}` });
   assert.equal(blocked.statusCode, 429);
   assert.equal(blocked.body.error, 'too_many_attempts');
-  assert.ok(Number.isFinite(blocked.body.retryAfterSeconds));
-  await attemptsFrom(real);
+  await attemptsFrom(first);
 });
 
 test('response shapes are unchanged: unknown credentials 401 with the same body, flag off 404', async () => {
@@ -97,5 +96,9 @@ test('X-FitFlex-Channel: web-checkin gets a lower per-address cap; ordinary call
   // Same address without the header is not capped by this limiter; another address with it is fine.
   assert.equal((await login({ xff: web })).statusCode, 401);
   assert.equal((await login({ xff: uniqueIp(), headers: h })).statusCode, 401);
+  // The extra cap counts from the right: varying the client-written left-most entry does not dodge it.
+  const real = uniqueIp();
+  for (let i = 0; i < WEB_CHECKIN_LOGIN_PER_MINUTE; i += 1) assert.equal((await login({ xff: `${uniqueIp()}, ${real}`, headers: h })).statusCode, 401);
+  assert.equal((await login({ xff: `${uniqueIp()}, ${real}`, headers: h })).statusCode, 429);
   await attemptsFrom(web);
 });

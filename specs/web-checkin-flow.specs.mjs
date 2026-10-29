@@ -261,7 +261,8 @@ test('confirm records exactly one web_gym_qr_by_member visit with minimal metada
   assert.equal(row.clientMeta.channel, 'web');
   assert.equal(row.clientMeta.uaFamily, 'chrome');
   assert.match(row.clientMeta.ipHash, /^[0-9a-f]{32}$/);
-  assert.ok(row.authSessionId && row.intentId);
+  assert.equal(row.authSessionId, null, 'no real session id exists yet (S5)');
+  assert.ok(row.intentId);
   const dump = JSON.stringify(row);
   assert.ok(!dump.includes('192.0.2.55') && !dump.includes('Mozilla') && !dump.includes(intentToken), 'no raw address, user-agent string or token is stored');
 });
@@ -477,5 +478,6 @@ test('service level: an expired intent is refused by the injected clock; retenti
   const [row] = await rowsFor(memberId);
   assert.equal(row.clientMeta, null);
   assert.equal(row.authSessionId, null);
+  assert.equal(row.intentId, null, 'the intent id is cleared too');
   assert.equal(row.source, 'web_gym_qr_by_member', 'the visit itself is kept');
 });

@@ -11,18 +11,15 @@ import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limi
 
 const created = new Date().toISOString();
 
-/**
- * The caller's network address, for the per-address limit. X-Forwarded-For is counted from the right by
- * PUBLIC_DOCS_TRUSTED_PROXY_HOPS (default 1): the left-most entry is client-written and was spoofable, so a
- * caller could dodge the per-address lockout by changing it.
- */
+/** The caller's network address, for the per-address limit (unchanged: the first X-Forwarded-For entry). */
 function addressOf(req) {
-  const address = clientAddress(req);
-  return address && address !== 'unknown' ? address : null;
+  const forwarded = String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.ip || req.socket?.remoteAddress || null;
 }
 
 // Callers that say they are the browser check-in page (X-FitFlex-Channel: web-checkin) get a lower per-address
 // cap on PIN sign-ins, on top of the existing failure lockout. The header can only add this cap, never lift one.
+// This cap (only) counts the address from the right of X-Forwarded-For by PUBLIC_DOCS_TRUSTED_PROXY_HOPS.
 export const WEB_CHECKIN_LOGIN_PER_MINUTE = 10;
 const webCheckinLoginLimiter = createVendorLimiter({ perMinute: WEB_CHECKIN_LOGIN_PER_MINUTE });
 export const resetWebCheckinLoginLimits = () => webCheckinLoginLimiter.reset();
@@ -44,7 +41,7 @@ export const pinLogin = {
   onRequest: async (req, res) => {
     if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
     if (isWebCheckinChannel(req)) {
-      const limited = limitOrNull(webCheckinLoginLimiter, addressOf(req) || 'unknown', res);
+      const limited = limitOrNull(webCheckinLoginLimiter, clientAddress(req), res);
       if (limited) return limited;
     }
     await send(res, await pinAuthService.login({ body: req.body || {}, ip: addressOf(req) }));

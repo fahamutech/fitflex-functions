@@ -124,6 +124,8 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       // Another scan recorded this visit a moment ago: one visit, one charge.
       const existing = duplicate ? await lostRace(err, { memberId, gymId: gym.id, now, meta }) : null;
       if (existing) return existing;
+      // The intent's earlier visit was voided since: final, this intent cannot make another.
+      if (isDuplicateIntent(err)) return { ok: false, failure: 'intent_used' };
       throw err;
     }
     recorded(row);

@@ -5,7 +5,6 @@
 // POST /me/web-checkins (confirm). Signing in alone never records a visit.
 // Never logged: q, intent tokens, session tokens, PINs, addresses, user-agent strings.
 import '../src/bootstrap/init.mjs';
-import { randomUUID } from 'node:crypto';
 import { requireAuth, bearerFrom, verifyPurpose, signPurpose, sign } from '../src/auth/jwt.mjs';
 import { gyms, users } from '../src/bootstrap/collections.mjs';
 import { gymService, settingsService, trainerService, moderationGate, partnerGate, checkInService } from '../src/bootstrap/services.mjs';
@@ -57,7 +56,6 @@ function webCheckinGuard(req, res, next) {
   if (!enabled()) return notFound(res);
   const claims = verifyPurpose(bearerFrom(req), WEB_CHECKIN_PURPOSE);
   if (claims) {
-    req.webCheckinSid = claims.sid ?? null;
     req.headers.authorization = `Bearer ${sign({ sub: claims.sub, userType: claims.userType, iat: claims.iat })}`;
   }
   return sessionGuard(req, res, next);
@@ -104,8 +102,7 @@ export const webCheckinSession = {
   onRequest: async (req, res) => {
     const limited = limitOrNull(userLimiter, `session:${req.user.sub}`, res);
     if (limited) return limited;
-    const sid = randomUUID();
-    const token = signPurpose(WEB_CHECKIN_PURPOSE, { sub: req.user.sub, userType: req.user.userType, sid }, WEB_CHECKIN_SESSION_TTL);
+    const token = signPurpose(WEB_CHECKIN_PURPOSE, { sub: req.user.sub, userType: req.user.userType }, WEB_CHECKIN_SESSION_TTL);
     send(res, 200, { token, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() });
   },
 };
@@ -129,7 +126,7 @@ export const webCheckinPreview = {
 
 export const webCheckinConfirm = {
   created, method: 'post', path: '/me/web-checkins',
-  description: 'Member or trainer (normal session or the web check-in token): { intentToken, confirm: true, idempotencyKey } → 200 { ok: true, idempotent, checkin { id, timestamp, gym { name } }, visitNumberInCycle? }. Same rules as the in-app scan; a repeat the same day (or a replayed intent) returns the existing visit with idempotent: true. Refusals are 409 { ok: false, failure } with the check-in codes plus invalid_intent, intent_expired, intent_used, gym_not_found. confirm other than true → 400 confirmation_required; idempotencyKey must be 8-100 characters of A-Z a-z 0-9 _ - → else 400 invalid_idempotency_key.',
+  description: 'Member or trainer (normal session or the web check-in token): { intentToken, confirm: true, idempotencyKey } → 200 { ok: true, idempotent, checkin { id, timestamp, gym { name } }, visitNumberInCycle? }. Same rules as the in-app scan; a repeat the same day (or a replayed intent) returns the existing visit with idempotent: true. Refusals are 409 { ok: false, failure } with the check-in codes plus invalid_intent, intent_expired, intent_used, gym_not_found. confirm other than true → 400 confirmation_required; idempotencyKey must be 8-100 characters of A-Z a-z 0-9 _ - → else 400 invalid_idempotency_key. The key is validated but not stored: replay safety comes from the intent and the one-visit-per-day index.',
   requestSample: { intentToken: '<token>', confirm: true, idempotencyKey: 'c0ffee00-1234' },
   onGuard: webCheckinGuard,
   onRequest: async (req, res) => {
@@ -139,7 +136,7 @@ export const webCheckinConfirm = {
       const { intentToken, confirm, idempotencyKey } = req.body || {};
       const out = await webCheckin.confirm({
         userId: req.user.sub, intentToken, confirm, idempotencyKey,
-        authSessionId: req.webCheckinSid ?? null, clientMeta: clientMetaOf(req),
+        authSessionId: null, clientMeta: clientMetaOf(req),
       });
       send(res, out.status, out.body);
     } catch {
@@ -150,7 +147,7 @@ export const webCheckinConfirm = {
 
 export const webCheckinRetention = {
   created, rule: '50 2 * * *', // every day 02:50 UTC
-  description: 'Browser check-in: clear the client metadata (browser family, daily-salted address hash) and session id of web check-ins older than 30 days. The visit itself is kept. Does nothing unless WEB_QR_CHECKIN is on. Idempotent.',
+  description: 'Browser check-in: clear the client metadata (browser family, daily-salted address hash), session id and intent id of web check-ins older than 30 days. The visit itself is kept. Does nothing unless WEB_QR_CHECKIN is on. Idempotent.',
   onJob: async () => {
     if (!webQrCheckinOn()) return;
     const n = await webCheckin.purgeClientMeta();

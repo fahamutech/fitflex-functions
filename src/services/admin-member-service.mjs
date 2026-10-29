@@ -1,6 +1,7 @@
 // Admin member management — list/upsert/status + per-member payments/check-ins/QR.
 // List responses are kept lean (lean subscription + pendingPayment projections)
 // so the admin members table gets a fast first paint even with many rows.
+import { publicCheckin } from '../shared/checkin-status.mjs';
 import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
@@ -145,7 +146,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     return (await checkins.filterAsync(c => c.memberId === memberId))
       .filter(c => { const ts = +new Date(c.timestamp); return ts >= fromTs && ts <= toTs; })
       .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
-      .map(c => ({ ...c, gym: gyms.find(g => g.id === c.gymId) || null }));
+      .map(c => ({ ...publicCheckin(c), gym: gyms.find(g => g.id === c.gymId) || null }));
   }
 
   async function setStatus({ memberId, status, actorId }) {
