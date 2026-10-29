@@ -64,14 +64,14 @@ async function requireActiveVendorStaff(req, res, next) {
 
 export const listShopProducts = {
   created, method: 'get', path: '/shop/products',
-  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither). SHOP_NEAR_YOU (docs/shop-near-you-api.md): header X-FF-Area: <GeoArea id worked out on the device; never stored or logged> → rows whose vendor delivers to that area carry deliversToViewerArea: true, only while personalisation is available and switched on and the area is usable; otherwise the body is unchanged. With SHOP_NEAR_YOU on and at least one usable area, ?maxDistanceKm= (the vendor-typed distance) is ignored; flag off: applied as before.',
+  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither). SHOP_NEAR_YOU (docs/shop-near-you-api.md): header X-FF-Area: <GeoArea id worked out on the device; never stored or logged> → rows whose vendor delivers to that area carry deliversToViewerArea: true, only while personalisation is available and switched on and the area is usable; otherwise the body is unchanged. With SHOP_NEAR_YOU on and at least one usable area, ?maxDistanceKm= (the vendor-typed distance) is ignored; flag off: applied as before. SHOP_FLASH_SALES on (docs/shop-flash-sales-api.md): every row has effectivePriceTzs (what checkout charges now) and, while a sale is live, sale { id, salePriceTzs, wasPriceTzs, regularPriceTzs, discountPct, startsAt, endsAt }; minPrice/maxPrice/price sorts use the effective price; promotions=true also includes products in a live sale; flashSale=true → only those. Off: unchanged.',
   onGuard: routeGuard('get', [areaRedactGuard, requireAuth()]),
   onRequest: async (req, res) => {
     redactAreaId(req);
-    const { category, search, brand, vendorId, minPrice, maxPrice, minRating, delivery, promotions, sort } = req.query || {};
+    const { category, search, brand, vendorId, minPrice, maxPrice, minRating, delivery, promotions, sort, flashSale } = req.query || {};
     // QA2: with areas on, the vendor-typed distance filter is ignored (spec §7.3); flag off: as before.
     const maxDistanceKm = (await shopHomeService.vendorDistanceIgnored()) ? undefined : req.query?.maxDistanceKm;
-    const rows = await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort });
+    const rows = await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort, flashSale });
     res.json(await withBadge(req, rows));
   }
 };
@@ -372,7 +372,7 @@ export const adminRecomputeProductStats = {
 
 export const createShopOrder = {
   created, method: 'post', path: '/me/shop-orders',
-  description: 'Any signed-in user: place a shop order. Stock is validated and reserved atomically. Send an Idempotency-Key header (8–100 chars) so a retry returns the original order instead of a second one; the order is unpaid (paymentStatus pending) until FitFlex confirms the payment.',
+  description: 'Any signed-in user: place a shop order. Stock is validated and reserved atomically. SHOP_FLASH_SALES on (PRICING PATH, docs/shop-flash-sales-api.md): each line is charged its effective price now (a live approved flash sale included; the line then has flashSaleId), items[].expectedPriceTzs (optional) = the unit price the app showed; a difference, or a sale window closing between pricing and the stock lock → 409 price_changed { productId, currentPriceTzs, lines: [{ productId, variant, expectedPriceTzs, currentPriceTzs, reason: sale_ended|sale_started|price_changed }], expectedTotalTzs, totalTzs } and nothing is reserved; expectedPriceTzs not a whole number ≥ 0 → 400 invalid_expected_price. Off: expectedPriceTzs is ignored and prices are as before. Send an Idempotency-Key header (8–100 chars) so a retry returns the original order instead of a second one; the order is unpaid (paymentStatus pending) until FitFlex confirms the payment.',
   requestSample: { items: [{ productId: 'prd_x', qty: 2 }], deliveryMethod: 'gym_pickup', pickupGymId: 'gym_x', paymentMethod: 'mpesa', paymentOutcome: 'success' },
   onGuard: routeGuard('post', requireAuth()),
   onRequest: async (req, res) => {
@@ -381,7 +381,13 @@ export const createShopOrder = {
       // A retried request carries the same key and gets the order it already made.
       idempotencyKey: req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'] || null,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId, ...(result.field ? { field: result.field } : {}), ...(result.limit ? { limit: result.limit } : {}), ...(result.variants ? { variants: result.variants } : {}) });
+    if (result.error) {
+      return res.status(result.status).json({
+        error: result.error, productId: result.productId, ...(result.field ? { field: result.field } : {}), ...(result.limit ? { limit: result.limit } : {}), ...(result.variants ? { variants: result.variants } : {}),
+        // SHOP_FLASH_SALES on only (docs/shop-flash-sales-api.md): which lines changed price and both totals.
+        ...(result.lines ? { currentPriceTzs: result.currentPriceTzs, lines: result.lines, expectedTotalTzs: result.expectedTotalTzs, totalTzs: result.totalTzs } : {}),
+      });
+    }
     if (result.replayed) res.set?.('Idempotent-Replay', 'true');
     res.status(201).json(buyerOrderView(result.order));
   }

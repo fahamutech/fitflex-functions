@@ -750,10 +750,10 @@ test('flag off: every banner route answers 404 feature_disabled before sign-in; 
   }
   const vendor = await vendorUser('Options');
   const off = await hit('GET', '/vendor/tools/options', { claims: { sub: vendor, userType: 'vendor' } });
-  assert.deepEqual(off.body.merch, { banners: false, productTargets: false, shopAreas: false });
+  assert.deepEqual(off.body.merch, { banners: false, productTargets: false, shopAreas: false, flashSales: false });
   process.env.SHOP_BANNERS = '1';
   const on = await hit('GET', '/vendor/tools/options', { claims: { sub: vendor, userType: 'vendor' } });
-  assert.deepEqual(on.body.merch, { banners: true, productTargets: false, shopAreas: false });
+  assert.deepEqual(on.body.merch, { banners: true, productTargets: false, shopAreas: false, flashSales: false });
   delete process.env.SHOP_BANNERS;
 });
 

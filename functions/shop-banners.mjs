@@ -10,10 +10,10 @@
 //   `promotions_approve` (never one's own: 403 cannot_approve_own_submission). Super-admins pass.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
-import { shopBannerService as svc, shopService } from '../src/bootstrap/services.mjs';
+import { shopBannerService as svc, shopService, flashSaleService } from '../src/bootstrap/services.mjs';
 import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
 import { BANNER_IMAGE_LIMITS } from '../src/shared/shop-banner-rules.mjs';
-import { shopBannersOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, shopFlashSalesOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 
@@ -38,6 +38,10 @@ const vendorGuard = method => routeGuard(method, [bannersEnabled, requireAuth('v
 const adminView = method => routeGuard(method, [bannersEnabled, requireAuth('admin'), requireAcl('promotions', 'promotions_approve')]);
 const adminManage = method => routeGuard(method, [bannersEnabled, requireAuth('admin'), requireAcl('promotions')]);
 const adminApprove = method => routeGuard(method, [bannersEnabled, requireAuth('admin'), requireAcl('promotions_approve')]);
+/** The merch queue: ?kind=flash_sale needs SHOP_FLASH_SALES (slice 4); any other kind needs SHOP_BANNERS, as before. */
+const merchEnabled = (req, res, next) => (req.query?.kind === 'flash_sale'
+  ? (shopFlashSalesOn() ? next() : res.status(404).json({ error: 'feature_disabled' }))
+  : bannersEnabled(req, res, next));
 
 // Per vendor, per minute, in memory per server (vendor-rate-limit.mjs): 429 rate_limited { retryAfterSeconds }.
 export const BANNER_RATE_LIMITS = Object.freeze({ create: 20, upload: 10, submit: 20 });
@@ -165,9 +169,15 @@ const adminRead = req => id => svc.adminGet({ id, viewer: viewerOf(req) });
 
 export const adminShopMerch = {
   created, method: 'get', path: '/admin/shop-merch',
-  description: 'Admin (promotions or promotions_approve; SHOP_BANNERS): the merch queue. ?kind=banner (the default; flash sales come in slice 4: anything else → 400 invalid_kind), ?tab=requests|scheduled|live|closed|drafts, ?status= (effective status), ?origin=vendor|staff, ?vendorId=, ?q= (seller, product or headline), ?limit, ?cursor. A vendor\'s drafts are never listed. requests are oldest-expiring first; the rest newest first. → { items: [banner (admin view)], total, nextCursor, counts: { requests, scheduled, live, closed, drafts } }.',
-  onGuard: adminView('get'),
-  onRequest: async (req, res) => send(res, await svc.adminList({ query: req.query || {}, viewer: viewerOf(req) })),
+  description: 'Admin (promotions or promotions_approve; SHOP_BANNERS): the merch queue. ?kind=banner (the default) | flash_sale (needs SHOP_FLASH_SALES instead; items are flash sales, docs/shop-flash-sales-api.md; also ?productId=) — anything else → 400 invalid_kind, ?tab=requests|scheduled|live|closed|drafts, ?status= (effective status), ?origin=vendor|staff, ?vendorId=, ?q= (seller, product or headline), ?limit, ?cursor. A vendor\'s drafts are never listed. requests are oldest-expiring first; the rest newest first. → { items: [banner (admin view)], total, nextCursor, counts: { requests, scheduled, live, closed, drafts } }.',
+  onGuard: routeGuard('get', [merchEnabled, requireAuth('admin'), requireAcl('promotions', 'promotions_approve')]),
+  onRequest: async (req, res) => {
+    if (req.query?.kind === 'flash_sale') {
+      const { kind, ...query } = req.query;
+      return send(res, await flashSaleService.adminList({ query, viewer: viewerOf(req) }));
+    }
+    return send(res, await svc.adminList({ query: req.query || {}, viewer: viewerOf(req) }));
+  },
 };
 
 export const adminGetShopBanner = {

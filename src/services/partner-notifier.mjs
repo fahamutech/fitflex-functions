@@ -226,6 +226,42 @@ export function createPartnerNotifier({
     };
   }
 
+  // Flash sales (SHOP_FLASH_SALES; spec shop-home-phase2 §4.3). Opens /vendor/merch?tab=sales&item=<saleId>.
+  // Swahili is a DRAFT for native review ("flash sale" = ofa ya muda mfupi, P1 glossary; End = sitisha).
+  function flashSaleMessage(kind, d, locale) {
+    const en = d.productName || 'your product';
+    const sw = d.productName || 'bidhaa yako';
+    const when = eatDate(d.startsAt);
+    const texts = {
+      approved: {
+        en: { title: 'Flash sale approved', body: `Your flash sale on "${en}" is approved. It goes live ${when}.` },
+        sw: { title: 'Ofa ya muda mfupi imeidhinishwa', body: `Ofa yako ya muda mfupi kwa "${sw}" imeidhinishwa. Itaanza ${when}.` },
+      },
+      rejected: {
+        en: { title: 'Flash sale rejected', body: `Your flash sale on "${en}" wasn't approved. See why.` },
+        sw: { title: 'Ofa ya muda mfupi imekataliwa', body: `Ofa yako ya muda mfupi kwa "${sw}" haikuidhinishwa. Tazama sababu.` },
+      },
+      expired: {
+        en: { title: 'Flash sale expired', body: `Your flash sale on "${en}" expired before review.` },
+        sw: { title: 'Ofa ya muda mfupi imeisha muda', body: `Ofa yako ya muda mfupi kwa "${sw}" imeisha muda kabla ya kukaguliwa.` },
+      },
+      ended: {
+        en: { title: 'Flash sale ended by FitFlex', body: `FitFlex ended your flash sale on "${en}".` },
+        sw: { title: 'Ofa ya muda mfupi imesitishwa na FitFlex', body: `FitFlex imesitisha ofa yako ya muda mfupi kwa "${sw}".` },
+      },
+    }[kind];
+    const text = locale === 'en' ? texts.en : texts.sw;
+    return {
+      type: `vendor_flash_sale_${kind}`,
+      title: text.title,
+      body: text.body,
+      data: {
+        saleId: d.saleId ?? '', open: 'merch', tab: 'sales', item: d.saleId ?? '', reason: d.reason ?? '',
+        titleSw: texts.sw.title, bodySw: texts.sw.body,
+      },
+    };
+  }
+
   // The shop's own event → what the vendor is told.
   const VENDOR_MESSAGES = {
     new_order: d => ({ type: 'vendor_new_order', title: 'New order', body: 'You have a new paid order to prepare.', data: { orderId: d.orderId ?? '' } }),
@@ -327,6 +363,12 @@ export function createPartnerNotifier({
     shop_banner_rejected: (d, locale) => bannerMessage('rejected', d, locale),
     shop_banner_expired: (d, locale) => bannerMessage('expired', d, locale),
     shop_banner_ended: (d, locale) => bannerMessage('ended', d, locale),
+  });
+  Object.assign(VENDOR_MESSAGES, {
+    flash_sale_approved: (d, locale) => flashSaleMessage('approved', d, locale),
+    flash_sale_rejected: (d, locale) => flashSaleMessage('rejected', d, locale),
+    flash_sale_expired: (d, locale) => flashSaleMessage('expired', d, locale),
+    flash_sale_ended: (d, locale) => flashSaleMessage('ended', d, locale),
   });
 
   /** Something happened in a vendor's shop. Events with no message here stay in the shop's own list only. */

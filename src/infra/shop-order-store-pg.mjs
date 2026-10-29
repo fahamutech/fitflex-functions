@@ -7,6 +7,7 @@
 // The service never sees knex; it talks to the port described in
 // src/services/shop-order-store-memory.mjs (which is also the contract).
 import { randomUUID } from 'node:crypto';
+import { standingPrice } from '../shared/shop-pricing.mjs';
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
@@ -122,6 +123,27 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
 
 
   /**
+   * PRICING PATH (flash sales). For each line priced with checkSale, the sale that applies now must be the
+   * one it was priced with (flashSaleId, or none): the window may have closed, a sale may have started,
+   * or staff may have ended it between pricing and this lock → price_changed (nothing reserved). The rows
+   * are read FOR SHARE, so ending or editing a sale waits for this order to commit. A live sale applies
+   * only when below the line's standing price (the price and discount are checked unchanged by reserveLine).
+   */
+  async function recheckSales(trx, lines, atTime) {
+    const checked = lines.filter(l => l.checkSale);
+    if (!checked.length) return;
+    const ids = [...new Set(checked.map(l => l.productId))].sort();
+    const live = await trx('FlashSale').whereIn('productId', ids).where({ status: 'approved' })
+      .where('startsAt', '<=', atTime).where('endsAt', '>', atTime).orderBy('id').forShare();
+    for (const line of [...checked].sort(byLine)) {
+      const standing = standingPrice(line);
+      const applies = live.filter(r => r.productId === line.productId && Number(r.salePriceTzs) > 0 && Number(r.salePriceTzs) < standing)
+        .sort((a, b) => Number(a.salePriceTzs) - Number(b.salePriceTzs))[0] || null;
+      if ((applies?.id ?? null) !== (line.flashSaleId ?? null)) throw shopError('price_changed', 409, line.productId);
+    }
+  }
+
+  /**
    * Reserve stock, create the order and its payment request — all or nothing.
    * lines: [{ productId, variant?, variantTracked?, qty, priceTzs, discountPriceTzs }] — the prices the order
    * was priced at; if the product's price moved in between, nothing is reserved and the buyer is asked to retry.
@@ -134,6 +156,9 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     const atTime = now();
     try {
       return await db.transaction(async (trx) => {
+        // Flash sales (SHOP_FLASH_SALES on: lines carry checkSale): re-read the live sales under a share
+        // lock, by this server's clock, before any stock moves.
+        await recheckSales(trx, lines, atTime);
         // Always in the same order, so two checkouts never wait on each other in a circle.
         for (const line of [...lines].sort(byLine)) {
           const taken = await reserveLine(trx, line, { requirePrice: true, atTime });

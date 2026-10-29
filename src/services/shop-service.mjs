@@ -12,7 +12,8 @@ import { csvDocument } from '../shared/csv-export.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
-import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn } from '../shared/feature-flags.mjs';
+import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn, shopFlashSalesOn } from '../shared/feature-flags.mjs';
+import { standingPrice, priceBreakdown, withPrice } from '../shared/shop-pricing.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { indexAreas, validateVendorAreas, touchesAreas } from '../shared/shop-areas.mjs';
@@ -62,7 +63,10 @@ export function buyerOrderView(order) {
 /** A review as the public sees it: no buyer or order identifiers. */
 export const publicReview = ({ id, productId, rating, comment, createdAt }) => ({ id, productId, rating, comment, createdAt });
 const bool = value => value === true || value === 'true' || value === '1' ? true : value === false || value === 'false' || value === '0' ? false : undefined;
-const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0) ? Number(product.discountPriceTzs) : Number(product.priceTzs || 0);
+// The seller's own price (discount price when below the price). Same rule as before flash sales; with
+// SHOP_FLASH_SALES on, buyer rows carry effectivePriceTzs (shop-pricing.mjs) and that is used instead.
+const priceOf = standingPrice;
+const priceNow = product => (product.effectivePriceTzs != null ? Number(product.effectivePriceTzs) : standingPrice(product));
 
 export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null,
   // Moderation: pending, rejected, suspended and hidden products and vendors are not shown to buyers.
@@ -114,8 +118,23 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   customersOn = vendorCustomersOn,
   // Shop home slice 3: GeoArea rows ({ allAsync }) for the vendor area fields. null → area fields are refused.
   geoAreas = null,
+  // Shop Phase 2 · slice 4 (SHOP_FLASH_SALES; PRICING PATH): flash-sale-service `pricing` —
+  // { liveByProduct(ids|null, at) → Map, lockOf(productId, at), locksOf(ids, at) → Map, wasSalePrice(productId, price, at),
+  //   withProductLock(productId, fn), effectiveStatus(sale) }. null, or the flag off: prices exactly as before.
+  flashSales = null,
+  flashSalesOn = shopFlashSalesOn,
   now = () => new Date() }) {
-  orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
+  orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now,
+    // The lock re-check of a flash sale's window (memory store; the Postgres store reads FlashSale itself).
+    liveSaleOf: async (productId, at) => (flashSales ? (await flashSales.liveByProduct([productId], at)).get(productId) || null : null) });
+  /** Flash sales apply now (flag on and wired). Off: every price path is exactly as before. */
+  const salesActive = () => Boolean(flashSales) && flashSalesOn();
+  /** Buyer rows + effectivePriceTzs (+ sale while live), read now by the server clock. Nothing cached. */
+  async function priced(rows, at = now()) {
+    if (!salesActive() || !rows.length) return rows;
+    const live = await flashSales.liveByProduct(rows.map(r => r.id), at);
+    return rows.map(r => withPrice(r, id => live.get(id), at));
+  }
   buyerRefs ||= createMemoryVendorBuyerRefStore();
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
@@ -223,7 +242,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   // includeTargets: internal (the shop home's personalisation); buyer rows never carry targetGender / targetAgeBands.
-  async function listProducts({ category, search, vendorId, includeArchived = false, includeTargets = false, brand, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = {}) {
+  // applySales (flag on): buyer rows get effectivePriceTzs / sale. The shop home passes false: it caches the
+  // catalogue and prices each answer itself. flashSale=true (flag on): only products in a live sale.
+  async function listProducts({ category, search, vendorId, includeArchived = false, includeTargets = false, brand, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort, flashSale, applySales = true } = {}) {
     let rows = await products.filterAsync(product => {
       if (product.deletedAt) return false;
       if (includeArchived) return true;
@@ -242,21 +263,25 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId))
         // Buyer-facing rows carry the seller's store name (QA round 2: the Visit-store heading survives a reload).
         .map(product => ({ ...(includeTargets === true ? product : withoutTargets(product)), vendorName: names.get(product.vendorId) ?? null }));
+      // Flash sales (flag on): priced only after every listing, KYC, moderation and suspension gate above.
+      if (applySales) rows = await priced(rows);
     }
+    const sales = !includeArchived && applySales && salesActive();
+    if (sales && bool(flashSale) === true) rows = rows.filter(product => product.sale);
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
     const deliveryFlag = bool(delivery);
     if (deliveryFlag !== undefined) rows = rows.filter(product => Boolean(product.deliveryAvailable) === deliveryFlag);
     if (minRating !== undefined) rows = rows.filter(product => Number(product.rating || 0) >= Number(minRating));
     if (maxDistanceKm !== undefined) rows = rows.filter(product => Number(product.distanceKm ?? Number.POSITIVE_INFINITY) <= Number(maxDistanceKm));
-    if (minPrice !== undefined) rows = rows.filter(product => priceOf(product) >= Number(minPrice));
-    if (maxPrice !== undefined) rows = rows.filter(product => priceOf(product) <= Number(maxPrice));
-    if (bool(promotions) === true) rows = rows.filter(product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0));
+    if (minPrice !== undefined) rows = rows.filter(product => priceNow(product) >= Number(minPrice));
+    if (maxPrice !== undefined) rows = rows.filter(product => priceNow(product) <= Number(maxPrice));
+    if (bool(promotions) === true) rows = rows.filter(product => (Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0)) || (sales && Boolean(product.sale)));
     const query = String(search || '').trim().toLowerCase();
     if (query) rows = rows.filter(product => [product.name, product.description, product.category, product.brand, product.sku].some(value => String(value || '').toLowerCase().includes(query)));
     if (sort === 'popularity') return rows.sort((a, b) => Number(b.soldCount || 0) - Number(a.soldCount || 0));
-    if (sort === 'price_asc') return rows.sort((a, b) => priceOf(a) - priceOf(b));
-    if (sort === 'price_desc') return rows.sort((a, b) => priceOf(b) - priceOf(a));
+    if (sort === 'price_asc') return rows.sort((a, b) => priceNow(a) - priceNow(b));
+    if (sort === 'price_desc') return rows.sort((a, b) => priceNow(b) - priceNow(a));
     if (sort === 'rating') return rows.sort((a, b) => Number(b.rating || 0) - Number(a.rating || 0));
     return rows.sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
@@ -267,7 +292,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!includeUnlisted && !(await listProducts({})).some(row => row.id === productId)) return null;
     const reviews = (await productReviews.filterAsync(review => review.productId === productId)).map(publicReview);
     const vendorUser = await users.findByIdAsync(product.vendorId);
-    return { ...withoutTargets(product), vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
+    // Flash sales (flag on): the listed product is priced now; an unlisted one never gets a sale price.
+    const base = includeUnlisted ? withoutTargets(product) : (await priced([withoutTargets(product)]))[0];
+    return { ...base, vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
   }
 
   /** Shape and size limits on what a vendor may store; null when fine. */
@@ -347,8 +374,39 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { ...out, product: (await withVatCodes(args.vendorId, [out.product]))[0] };
   }
 
+  /** Which price fields this body would change on `prior` (a missing discount counts as 0). */
+  const priceFieldsChanged = (prior, input) => [
+    input.priceTzs !== undefined && Number(input.priceTzs) !== Number(prior.priceTzs || 0) ? 'priceTzs' : null,
+    input.discountPriceTzs !== undefined && Number(input.discountPriceTzs || 0) !== Number(prior.discountPriceTzs || 0) ? 'discountPriceTzs' : null,
+  ].filter(Boolean);
+
+  /**
+   * Flash sales (flag on; spec DD-P2-4): while an approved sale of the product has not ended (scheduled
+   * or live), its price and discount price are locked → 409 sale_conflict. The check and the save run
+   * under the product's flash-sale lock, the one approvals take, so neither can slip in between the
+   * other's check and write. Sending the same values (old app builds send the whole form) is fine.
+   */
+  async function upsertProductCore(args) {
+    const input = args.body || {};
+    if (!args.productId || !salesActive() || (input.priceTzs === undefined && input.discountPriceTzs === undefined)) return upsertProductFields(args);
+    return flashSales.withProductLock(args.productId, async () => {
+      const prior = await products.findByIdAsync(args.productId);
+      const fields = prior && !prior.deletedAt && prior.vendorId === args.vendorId ? priceFieldsChanged(prior, input) : [];
+      if (fields.length) {
+        const lock = await flashSales.lockOf(args.productId, now());
+        if (lock) {
+          return {
+            error: 'sale_conflict', status: 409, reason: 'price_locked_by_flash_sale', fields,
+            saleId: lock.id, startsAt: lock.startsAt, endsAt: lock.endsAt, effectiveStatus: flashSales.effectiveStatus(lock),
+          };
+        }
+      }
+      return upsertProductFields(args);
+    });
+  }
+
   // keptImages: images a copy may carry over unchanged (duplicateProduct: the source product's own).
-  async function upsertProductCore({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [] }) {
+  async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [] }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
@@ -474,7 +532,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
 
   /** GET /vendor/products: own products, including archived (private fields with the ledger on; cost only with cost rights). */
   async function vendorListProducts(vendorId, { costAllowed = true } = {}) {
-    return vendorProductsView(vendorId, await listProducts({ vendorId, includeArchived: true }), { costAllowed });
+    const rows = await vendorProductsView(vendorId, await listProducts({ vendorId, includeArchived: true }), { costAllowed });
+    if (!salesActive() || !rows.length) return rows;
+    // Flash sales (flag on): which products have their prices locked by a scheduled or live sale.
+    const locks = await flashSales.locksOf(rows.map(r => r.id), now());
+    return rows.map((r) => {
+      const lock = locks.get(r.id);
+      return lock ? { ...r, priceLock: { saleId: lock.id, startsAt: lock.startsAt, endsAt: lock.endsAt, effectiveStatus: flashSales.effectiveStatus(lock) } } : r;
+    });
   }
 
   /**
@@ -705,6 +770,34 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   })).digest('hex');
 
   /**
+   * One line of a 409 price_changed: { productId, variant, expectedPriceTzs, currentPriceTzs, reason }.
+   * reason: sale_started (a sale is live now) · sale_ended (the price the app had was one of this
+   * product's flash-sale prices and none is live now) · price_changed (anything else).
+   */
+  async function changedLine(product, variant, expectedTzs, current, at = now()) {
+    let reason = 'price_changed';
+    if (current.sale) reason = 'sale_started';
+    else if (expectedTzs != null && await flashSales.wasSalePrice(product.id, expectedTzs, at)) reason = 'sale_ended';
+    return { productId: product.id, variant: variant || null, expectedPriceTzs: expectedTzs, currentPriceTzs: current.priceTzs, reason };
+  }
+  /** 409 price_changed (flag on): the first changed line on top (older clients), every changed line, both totals. */
+  function priceChangedError(changed, resolved, pricedLines, expected, fresh = null, liveNow = null, at = null) {
+    const unitNow = i => (pricedLines ? pricedLines[i].priceTzs : priceBreakdown(fresh[i], liveNow.get(fresh[i].id), at).priceTzs);
+    let totalTzs = 0;
+    let expectedTotalTzs = 0;
+    for (const [i, r] of resolved.entries()) {
+      const current = unitNow(i);
+      const e = expected.get(`${r.product.id}\u0000${r.variant || ''}`);
+      totalTzs += current * r.qty;
+      expectedTotalTzs += (e === undefined || e === -1 ? current : e) * r.qty;
+    }
+    return {
+      error: 'price_changed', status: 409, productId: changed[0].productId, currentPriceTzs: changed[0].currentPriceTzs,
+      lines: changed, expectedTotalTzs, totalTzs,
+    };
+  }
+
+  /**
    * Place an order. Prices come from the product rows, never from the request.
    * Stock is reserved, the order written and its payment request created in one
    * atomic step; a retry with the same idempotencyKey returns the original order.
@@ -731,6 +824,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (body?.paymentOutcome === 'failed') return { error: 'payment_failed', status: 402 };
     // The same product (and variant) on two lines is one line: stock is checked and reserved for the total.
     const wanted = new Map();
+    // Flash sales (flag on): the unit price the app showed, per line (optional; old clients send none).
+    const sales = salesActive();
+    const expected = new Map();
     for (const item of items) {
       const qty = Number(item?.qty || 0);
       if (!Number.isSafeInteger(qty) || qty <= 0 || qty > MAX_QTY_PER_LINE) return { error: 'invalid_quantity', status: 400 };
@@ -738,6 +834,12 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const variant = item.variant == null || item.variant === '' ? null : String(item.variant).trim();
       if (item.variant != null && typeof item.variant !== 'string') return { error: 'invalid_variant', status: 400, productId: item.productId };
       const lineKey = `${item.productId}\u0000${variant || ''}`;
+      if (sales && item.expectedPriceTzs != null) {
+        const e = Number(item.expectedPriceTzs);
+        if (!Number.isSafeInteger(e) || e < 0 || e > MAX_ORDER_TOTAL_TZS) return { error: 'invalid_expected_price', status: 400, productId: item.productId };
+        // Two lines of the same product and variant saying different prices: neither can be right.
+        expected.set(lineKey, expected.has(lineKey) && expected.get(lineKey) !== e ? -1 : e);
+      }
       const line = wanted.get(lineKey) || { productId: item.productId, variant, qty: 0 };
       line.qty += qty;
       wanted.set(lineKey, line);
@@ -788,12 +890,31 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     for (const vendorId of new Set(resolved.map(({ product }) => product.vendorId).filter(Boolean))) {
       rates.set(vendorId, vendorCommissionPct(await users.findByIdAsync(vendorId)));
     }
-    const orderItems = resolved.map(({ product, qty, variant, variantTracked }) => {
-      const priceTzs = priceOf(product);
+    // PRICING PATH. Flag off: the seller's own price, exactly as before. Flag on: the effective price now
+    // (shop-pricing.mjs: the lowest of price, discount price and a live approved flash sale, by this
+    // server's clock). Either way the commission is worked out on the price charged (the vendor bears
+    // any discount) and the line keeps that price for good: paying later, revival, refunds and
+    // settlement all read the line, never the product.
+    const pricedAt = now();
+    const live = sales ? await flashSales.liveByProduct(resolved.map(r => r.product.id), pricedAt) : null;
+    const pricedLines = resolved.map(r => (live ? priceBreakdown(r.product, live.get(r.product.id), pricedAt) : { priceTzs: priceOf(r.product), sale: null }));
+    if (sales && expected.size) {
+      const changed = [];
+      for (const [i, { product, variant }] of resolved.entries()) {
+        const e = expected.get(`${product.id}\u0000${variant || ''}`);
+        if (e === undefined || e === pricedLines[i].priceTzs) continue;
+        changed.push(await changedLine(product, variant, e === -1 ? null : e, pricedLines[i]));
+      }
+      if (changed.length) return priceChangedError(changed, resolved, pricedLines, expected);
+    }
+    const orderItems = resolved.map(({ product, qty, variant, variantTracked }, i) => {
+      const priceTzs = pricedLines[i].priceTzs;
       const { commissionPct, commissionTzs, vendorPayoutTzs } = priceOrderLine({ priceTzs, qty, commissionPct: rates.get(product.vendorId) ?? VENDOR_COMMISSION_PCT.default });
       return {
         productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs, image: product.images?.[0] || null, commissionPct, commissionTzs, vendorPayoutTzs,
         ...(variant ? { variant, ...(variantTracked ? { variantStockReserved: true } : {}) } : {}),
+        // Which flash sale set this line's price (flag on, sale live when priced).
+        ...(pricedLines[i].sale ? { flashSaleId: pricedLines[i].sale.id } : {}),
       };
     });
     const totalTzs = orderItems.reduce((sum, item) => sum + item.priceTzs * item.qty, 0);
@@ -823,10 +944,29 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     };
     const placed = await orderStore.placeOrder({
       order,
-      lines: resolved.map(({ product, qty, variant, variantTracked }) => ({ productId: product.id, variant, variantTracked, qty, priceTzs: Number(product.priceTzs || 0), discountPriceTzs: Number(product.discountPriceTzs || 0) })),
+      lines: resolved.map(({ product, qty, variant, variantTracked }, i) => ({
+        productId: product.id, variant, variantTracked, qty, priceTzs: Number(product.priceTzs || 0), discountPriceTzs: Number(product.discountPriceTzs || 0),
+        // Flag on: under the stock lock the store re-reads the live sale; a different one (window closed,
+        // a sale started or was ended) → price_changed and nothing is reserved.
+        ...(sales ? { checkSale: true, flashSaleId: pricedLines[i].sale?.id ?? null } : {}),
+      })),
       paymentRequest,
       idempotency: key ? { key: String(key), fingerprint } : null,
     });
+    if (placed.error === 'price_changed' && sales) {
+      // The price moved between pricing and the stock lock: say which lines and what they cost now.
+      const at = now();
+      const fresh = await Promise.all(resolved.map(async r => (await products.findByIdAsync(r.product.id)) || r.product));
+      const liveNow = await flashSales.liveByProduct(fresh.map(p => p.id), at);
+      const changed = [];
+      for (const [i, product] of fresh.entries()) {
+        const current = priceBreakdown(product, liveNow.get(product.id), at);
+        if (current.priceTzs === pricedLines[i].priceTzs && product.id !== placed.productId) continue;
+        const e = expected.get(`${product.id}\u0000${resolved[i].variant || ''}`);
+        changed.push(await changedLine(product, resolved[i].variant, e === undefined || e === -1 ? null : e, current, at));
+      }
+      return priceChangedError(changed, resolved, null, expected, fresh, liveNow, at);
+    }
     if (placed.error) return { error: placed.error, status: placed.status, productId: placed.productId };
     if (placed.replayed) return placed.order.paymentStatus === 'paid' ? { order: placed.order, status: 201, replayed: true } : { order: placed.order, paymentRequest: placed.paymentRequest, status: 202, replayed: true };
     await afterStockMoved(lines.map(l => l.productId));

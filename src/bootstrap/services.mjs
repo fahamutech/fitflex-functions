@@ -143,6 +143,8 @@ import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createShopBannerService } from '../services/shop-banner-service.mjs';
+import { createFlashSaleService } from '../services/flash-sale-service.mjs';
+import { createPgFlashSaleStore } from '../infra/flash-sale-store-pg.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
 import { createPartnerMediaService } from '../services/partner-media-service.mjs';
 import { createPgPartnerMediaStore } from '../infra/partner-media-store-pg.mjs';
@@ -350,8 +352,18 @@ export const trainerEngagementService = createTrainerEngagementService({
   // notificationService is created further down; this only runs later.
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Shop flash sales (SHOP_FLASH_SALES, Phase 2 slice 4; PRICING PATH): vendor proposals, staff approval
+// (two-person), and the live sale prices the shop, the home and checkout read (`pricing`). The routes,
+// the job and every pricing path check the flag; with it off no price changes.
+export const flashSaleService = createFlashSaleService({
+  store: createPgFlashSaleStore({ db }),
+  partnerGate, moderationGate,
+  // shopService is defined just below; this only runs later.
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
+  flashSales: flashSaleService.pricing,
   // Shop home slice 3: vendor "Based in" / "Delivers to" are checked against usable GeoAreas.
   geoAreas,
   // Stock reservation and cancellation are single database transactions.
@@ -1256,6 +1268,7 @@ export const shopPreferenceService = createShopPreferenceService({
 const SHOP_HISTORY_MAX_ORDERS = 500;
 export const shopHomeService = createShopHomeService({
   bannerFeed: args => shopBannerService.feed(args),
+  flashSales: flashSaleService.pricing,
   preferences: shopPreferenceService,
   buyerPaidOrders: ({ buyerIds, since }) => (buyerIds.length ? db('ShopOrder')
     .whereIn('buyerId', buyerIds).where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
