@@ -32,7 +32,8 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
+import { createHrOrgConversionService } from '../services/hr-org-conversion-service.mjs';
+import { orgOnlySponsorsOn, identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
 import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
@@ -451,12 +452,20 @@ export const corporateService = createCorporateService({
   onAccountCreated: (account, actorId) => b2bService.ensureOrganizationForCorporate({ corporateId: account.id, actorId }),
   // A company moved onto a programme is invoiced there, not by seat bills.
   billedByProgramme: corporateId => b2bBillingService.billedByProgramme(corporateId),
+  // B5a: with ORG_ONLY_SPONSORS on, a new HR login is also an organisation user (role hr).
+  onHrUserCreated: (row, actorId) => (orgOnlySponsorsOn() ? hrOrgConversionService.convertHrUser({ userId: row.id, actorId }) : null),
 });
 // B2B Foundation V1: generalised organisations next to Corporate (which it reads through).
 export const b2bService = createB2BService({
   users, corporateAccounts, corporateEmployees, partnerKycCases,
   organizations: b2bOrganizations, organizationUsers: b2bOrganizationUsers, beneficiaries: b2bBeneficiaries,
   auditLog, verifiedContacts, memberRequests: memberRequestsLater,
+  // B5a: people of a company's organisation are written through the company staff path (flag ORG_ONLY_SPONSORS).
+  corporateStaff: corporateService,
+});
+// B5a: company HR logins → organisation users with role hr (scripts/hr-to-org.mjs runs the same code).
+export const hrOrgConversionService = createHrOrgConversionService({
+  users, corporateAccounts, organizations: b2bOrganizations, organizationUsers: b2bOrganizationUsers, auditLog, b2bService,
 });
 // B2B Phase 2: wellness programmes and benefit rules (no usage counting or payouts).
 export const b2bProgramService = createB2BProgramService({
@@ -591,6 +600,8 @@ export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink: identityLinkService, auditLog, orgMemberships: orgMembershipService,
+  // B5a: a company HR login's session says which organisations it opens (ORG_ONLY_SPONSORS).
+  organizationMarks: user => b2bService.organizationSessionMarks({ userId: user.id, userType: user.userType }),
   partnerAgeGuard: ({ user }) => personalDetailsService.assertPartnerAge({ user }),
 });
 

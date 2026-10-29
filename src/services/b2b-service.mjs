@@ -19,6 +19,7 @@ import {
 import { INDUSTRY_SECTORS } from '../shared/corporate-constants.mjs';
 import { normalizeIdentifier } from '../shared/partner-kyc.mjs';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
+import { orgOnlySponsorsOn } from '../shared/feature-flags.mjs';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ADDRESS_FIELDS = ['line1', 'line2', 'city', 'region', 'country', 'postalCode'];
@@ -51,6 +52,11 @@ export function createB2BService({
   // by email or number finds only a person who has verified it. Without it,
   // nobody is found by email or number (fail closed); user ids still work.
   verifiedContacts = null,
+  // Phase B · B5a: the company staff path (corporate-service) that people of a
+  // company's organisation are written through while ORG_ONLY_SPONSORS is on.
+  // Without it those writes stay refused with managed_by_corporate.
+  corporateStaff = null,
+  orgOnlySponsors = orgOnlySponsorsOn,
   // Member requests (b2b-member-request-service): an organisation user who
   // names a member only by user id makes a request the member must accept
   // (security fix, owner decision 22 Oct 2026). Without it such adds are
@@ -352,13 +358,32 @@ export function createB2BService({
     let role = null;
     let grants = [];
     let orgUserId = null;
-    const membership = (await organizationUsers.filterByColumnAsync('userId', userId))
-      .find(m => m.organizationId === org.id && m.status === 'active');
-    if (membership) {
+    const rows = (await organizationUsers.filterByColumnAsync('userId', userId)).filter(m => m.organizationId === org.id);
+    const membership = rows.find(m => m.status === 'active');
+    if (orgOnlySponsors() && userType === 'corporate_hr') {
+      // B5a tenancy: a company HR login only ever reaches its own company's
+      // organisation, and only while the login is active. Once it has an
+      // organisation-user row (scripts/hr-to-org.mjs), that row decides: an
+      // organisation that suspends or removes it is not overruled by the
+      // read-through rule.
+      const hr = await users.findByIdAsync(userId);
+      const own = Boolean(hr?.corporateId) && hr.corporateId === org.legacyCorporateId && (hr.accountStatus ?? 'active') === 'active';
+      if (!own) return fail('organization_not_found', 404);
+      if (membership) {
+        ({ role } = membership);
+        grants = membership.permissions || [];
+        orgUserId = membership.id;
+      } else if (!rows.length) {
+        role = 'hr';
+      }
+    } else if (membership) {
       ({ role } = membership);
       grants = membership.permissions || [];
       orgUserId = membership.id;
-    } else if (org.legacyCorporateId && userType === 'corporate_hr') {
+    } else if (org.legacyCorporateId && userType === 'corporate_hr' && !rows.length) {
+      // Read-through only while the login has no row of its own here: once it
+      // has one (scripts/hr-to-org.mjs), a suspended or removed row is final,
+      // with or without ORG_ONLY_SPONSORS.
       const user = await users.findByIdAsync(userId);
       if (user?.corporateId === org.legacyCorporateId && (user.accountStatus ?? 'active') === 'active') role = 'hr';
     }
@@ -394,18 +419,43 @@ export function createB2BService({
     const memberships = (await organizationUsers.filterByColumnAsync('userId', userId)).filter(m => m.status === 'active');
     const orgIds = new Set(memberships.map(m => m.organizationId));
     const rows = orgIds.size ? await organizations.filterByColumnInAsync('id', [...orgIds]) : [];
+    let roleOf = new Map(memberships.map(m => [m.organizationId, m.role]));
     if (userType === 'corporate_hr') {
       const user = await users.findByIdAsync(userId);
-      if (user?.corporateId && (user.accountStatus ?? 'active') === 'active') {
-        const mapped = (await organizations.filterByColumnAsync('legacyCorporateId', user.corporateId))[0];
-        if (mapped && !orgIds.has(mapped.id)) rows.push(mapped);
+      const active = Boolean(user?.corporateId) && (user.accountStatus ?? 'active') === 'active';
+      const mapped = active ? (await organizations.filterByColumnAsync('legacyCorporateId', user.corporateId))[0] : null;
+      if (orgOnlySponsors()) {
+        // B5a tenancy: only its own company's organisation, decided as in resolveAccess.
+        const any = mapped ? (await organizationUsers.filterByColumnAsync('userId', userId)).filter(m => m.organizationId === mapped.id) : [];
+        const own = mapped && (any.some(m => m.status === 'active') || !any.length) ? [mapped] : [];
+        rows.splice(0, rows.length, ...own);
+        roleOf = new Map(own.map(o => [o.id, any.find(m => m.status === 'active')?.role ?? 'hr']));
+      } else if (mapped && !orgIds.has(mapped.id)) {
+        // As in resolveAccess: a row of its own (suspended or removed) decides.
+        const own = (await organizationUsers.filterByColumnAsync('userId', userId)).some(m => m.organizationId === mapped.id);
+        if (!own) rows.push(mapped);
       }
     }
-    const roleOf = new Map(memberships.map(m => [m.organizationId, m.role]));
     return {
       organizations: (await present(rows))
         .filter(o => o.status === 'active' || o.status === 'pending')
         .map(o => ({ ...o, role: roleOf.get(o.id) ?? 'hr' })),
+    };
+  }
+
+  /**
+   * B5a: what a sign-in tells the portal about a company HR login, so it opens
+   * /org instead of /hr. Null when ORG_ONLY_SPONSORS is off, for every other
+   * kind of account, and when the login reaches no organisation.
+   */
+  async function organizationSessionMarks({ userId, userType }) {
+    if (!orgOnlySponsors() || userType !== 'corporate_hr') return null;
+    const { organizations: mine } = await listMyOrganizations({ userId, userType });
+    if (!mine.length) return null;
+    return {
+      organizationUser: true,
+      organizationRoles: [...new Set(mine.map(o => o.role))],
+      organizationIds: mine.map(o => o.id),
     };
   }
 
@@ -426,8 +476,10 @@ export function createB2BService({
 
     // A mapped company's HR logins, read through from User (managed in /admin/corporate).
     if (access.org.legacyCorporateId && query.status !== 'removed') {
+      // An HR login that already has its own row (scripts/hr-to-org.mjs) is listed once, by that row.
+      const withRow = new Set((await organizationUsers.filterByColumnAsync('organizationId', access.org.id)).map(r => r.userId));
       const hr = (await users.filterByColumnAsync('corporateId', access.org.legacyCorporateId))
-        .filter(u => u.userType === 'corporate_hr')
+        .filter(u => u.userType === 'corporate_hr' && !withRow.has(u.id))
         .map(u => ({
           id: u.id, organizationId: access.org.id, userId: u.id, role: 'hr', permissions: [],
           status: (u.accountStatus ?? 'active') === 'active' ? 'active' : 'suspended',
@@ -483,6 +535,10 @@ export function createB2BService({
     }
     if (found.error) return found;
     const { user } = found;
+    // B5a tenancy: a company HR login belongs to its own company's organisation only.
+    if (orgOnlySponsors() && user.userType === 'corporate_hr' && user.corporateId !== access.org.legacyCorporateId) {
+      return fail('hr_login_other_company', 409);
+    }
     const live = (await organizationUsers.filterByColumnAsync('userId', user.id))
       .find(m => m.organizationId === access.org.id && m.status !== 'removed');
     if (live) return fail('already_organization_user', 409, { organizationUserId: live.id });
@@ -624,9 +680,51 @@ export function createB2BService({
     return out.filter(r => r.organization);
   }
 
+  // B5a: with ORG_ONLY_SPONSORS on, a company's staff are managed from the
+  // organisation too, so their rows are no longer read-only there, and those
+  // who may manage people see the same contact details HR sees in /corporate/staff.
+  const writesThrough = access => Boolean(orgOnlySponsors() && corporateStaff && access.org.legacyCorporateId);
+  // Owner decision (2026-10-22, review finding 5): on a company's organisation
+  // the company-staff powers — add staff (uses seats), change status / exit,
+  // link / unlink, see staff email and phone, receive activation PINs, import —
+  // belong to the organisation roles hr and admin only (a company HR login
+  // reads through as hr). Not owner, manager, finance, analyst or viewer, even
+  // with beneficiaries.manage. FitFlex platform admins keep them (they already
+  // have them through /corporate/staff?corporateId=). Other organisations are unchanged.
+  const COMPANY_STAFF_ROLES = new Set(['hr', 'admin']);
+  const companyStaffManage = access => writesThrough(access)
+    && (access.platformAdmin === true || COMPANY_STAFF_ROLES.has(access.role))
+    && can(access, 'beneficiaries.manage');
+  const notCompanyStaffRole = () => fail('forbidden', 403, { requiredRoles: [...COMPANY_STAFF_ROLES] });
+
+  function staffView(e, access, pending = null) {
+    const view = employeeView(e, access.org.id);
+    if (!writesThrough(access)) return view;
+    const manage = companyStaffManage(access);
+    return {
+      ...view,
+      readOnly: !manage,
+      employeeStatus: e.status,
+      linked: Boolean(e.userId),
+      ...(manage ? {
+        email: e.email ?? null, phone: e.phone ?? null,
+        // A link the member has not answered yet: when it was asked and until when (never who).
+        pendingLink: pending ? { status: 'pending_member_acceptance', createdAt: pending.createdAt ?? null, expiresAt: pending.expiresAt ?? null } : null,
+      } : {}),
+    };
+  }
+
+  async function withStaffViews(access, views) {
+    if (!writesThrough(access)) return views;
+    const corporateId = access.org.legacyCorporateId;
+    const staff = new Map((await corporateEmployees.filterByColumnAsync('corporateId', corporateId)).map(e => [e.id, e]));
+    const pending = companyStaffManage(access) && memberRequests ? await memberRequests.pendingForCorporate({ corporateId }) : new Map();
+    return views.map(v => (v.source === 'corporate_employee' && staff.has(v.id) ? staffView(staff.get(v.id), access, pending.get(v.id)) : v));
+  }
+
   async function listBeneficiaries({ access, query = {} }) {
     if (!can(access, 'beneficiaries.read')) return forbidden('beneficiaries.read');
-    const views = await allBeneficiaries(access.org);
+    const views = await withStaffViews(access, await allBeneficiaries(access.org));
     const needle = text(query.search)?.toLowerCase();
     const filtered = views
       .filter(b => (query.status ? b.status === query.status : true))
@@ -655,7 +753,7 @@ export function createB2BService({
     if (!found) return fail('beneficiary_not_found', 404);
     return {
       beneficiary: found.employee
-        ? employeeView(found.employee, access.org.id)
+        ? staffView(found.employee, access)
         : (await nativeViews([found.row]))[0],
     };
   }
@@ -666,7 +764,9 @@ export function createB2BService({
 
   async function enrollBeneficiary({ access, body = {}, actorId }, opts = {}) {
     if (!can(access, 'beneficiaries.manage')) return forbidden('beneficiaries.manage');
-    // Employer seats are billed and seat-limited by Corporate; enrol there.
+    // Employer seats are billed and seat-limited by Corporate; enrol there
+    // (B5a, flag on: through the same company staff path, from here).
+    if (writesThrough(access)) return companyStaffManage(access) ? enrollCompanyStaff({ access, body, actorId }) : notCompanyStaffRole();
     if (access.org.legacyCorporateId) return corporateManaged(access);
     if (access.org.status !== 'active') return fail('organization_not_active', 409, { organizationStatus: access.org.status });
 
@@ -736,7 +836,11 @@ export function createB2BService({
     if (!BENEFICIARY_TRANSITIONS[status]) return fail('invalid_status', 400, { allowed: Object.keys(BENEFICIARY_TRANSITIONS) });
     const found = await findBeneficiary(access, beneficiaryId);
     if (!found) return fail('beneficiary_not_found', 404);
-    if (found.employee) return corporateManaged(access);
+    if (found.employee) {
+      if (!writesThrough(access)) return corporateManaged(access);
+      if (!companyStaffManage(access)) return notCompanyStaffRole();
+      return setCompanyStaffStatus({ access, employee: found.employee, status, actorId });
+    }
 
     const { row } = found;
     if (row.status === status) return { beneficiary: (await nativeViews([row]))[0], unchanged: true };
@@ -754,6 +858,175 @@ export function createB2BService({
     return { beneficiary: (await nativeViews([updated]))[0] };
   }
 
+  // ── Company staff, written through from the organisation (B5a) ────────────
+
+  const STAFF_STATUS_FOR = Object.freeze({ active: 'active', suspended: 'suspended', inactive: 'exited' });
+
+  /** Turn a corporate-service refusal into the organisation's vocabulary where they differ. */
+  function staffError(out) {
+    const { error, status, ...extra } = out;
+    if (error === 'account_not_active') return fail('organization_not_active', 409, { organizationStatus: CORPORATE_TO_ORGANIZATION_STATUS[extra.accountStatus] ?? null });
+    if (error === 'user_must_be_member') return fail('beneficiary_must_be_member', 400);
+    if (error === 'user_already_linked') return fail('already_enrolled', 409, { beneficiaryId: extra.employeeId });
+    return fail(error, status, extra);
+  }
+
+  /**
+   * Ask a member to accept being linked to a company staff record, the way
+   * corporate-service does it (RC consent fix, owner decision 22 Oct 2026),
+   * from the company's organisation. Never links on its own; never tells the
+   * caller anything an id or a contact could reveal before the member accepts.
+   *
+   *  - FitFlex platform admin: links directly (by id the member is told, as RC does).
+   *  - by userId: corporateService.linkEmployeeUser makes the request; an id
+   *    that names nobody (or no member) gets RC's stub (same 202, nothing stored).
+   *  - by email / phone (verified, member account): the request is made for
+   *    that account. Nobody behind the contact: a stub. Either way the reply's
+   *    memberRequest has no id and no userId, so a contact cannot be tested.
+   * Returns { out, viaContact }: out is linkEmployeeUser's result ({ outcome:
+   * 'pending_member_acceptance', memberRequest } | { employee } | { employee,
+   * unchanged } | { error }); viaContact says the reply must be redacted.
+   */
+  async function requestStaffLink({ access, employee, body, actorId }) {
+    const corporateId = access.org.legacyCorporateId;
+    const base = { corporateId, employeeId: employee.id, actorId, organizationId: access.org.id };
+    const given = key => body[key] != null && String(body[key]).trim() !== '';
+    if (access.platformAdmin) {
+      return { out: await corporateStaff.linkEmployeeUser({ ...base, userId: body.userId ?? null, email: body.email ?? null, phone: body.phone ?? null, actorType: 'admin' }), viaContact: false };
+    }
+    const actorType = access.userType ?? 'member';
+    if (given('userId')) return { out: await corporateStaff.linkEmployeeUser({ ...base, userId: body.userId, actorType }), viaContact: false };
+
+    // By contact: the verified member account behind the email, then the number.
+    let user = null;
+    for (const key of ['email', 'phone'].filter(given)) {
+      const found = await findUserByContact(users, { [key]: body[key] }, { require: 'member', contacts: verifiedContacts });
+      if (found.user) { user = found.user; break; }
+      if (!['user_not_found', 'member_account_required'].includes(found.error)) return { out: found, viaContact: true };
+    }
+    if (user) return { out: await corporateStaff.linkEmployeeUser({ ...base, userId: user.id, actorType }), viaContact: true };
+    if (!memberRequests) return { out: consentUnavailable(), viaContact: true };
+    const limited = memberRequests.attempt(actorId);
+    if (limited) return { out: limited, viaContact: true };
+    return {
+      out: memberRequests.stub({ kind: 'employee_link', corporateId, organizationId: access.org.id, employeeId: employee.id, userId: null,
+        details: { displayName: employee.displayName ?? null, department: employee.department ?? null } }),
+      viaContact: true,
+    };
+  }
+
+  /** The reply's memberRequest: by contact without its id or the member's id (finding 4). */
+  const replyRequest = (memberRequest, viaContact) => (viaContact ? { ...memberRequest, id: null, userId: null } : memberRequest);
+
+  /** linkEmployeeUser's refusals that say nothing about the member, mapped; the rest as they are. */
+  const linkOutcome = out => (out.outcome === 'pending_member_acceptance' ? 'pending_member_acceptance' : out.unchanged ? 'unchanged' : 'linked');
+
+  /**
+   * Add someone to a company's staff from its organisation: an employee row
+   * through corporate-service (seat limit and billing included) with the name
+   * the organisation gives (required: nothing of the member's is copied before
+   * they accept), active when asked, with an activation PIN returned once.
+   * Named also by userId or by email/phone, the member is ASKED to accept the
+   * link (202 pending_member_acceptance; linked only on acceptance), as RC's
+   * consent flow does; a FitFlex platform admin links directly. Named only by
+   * name, the row is added unlinked (201).
+   */
+  async function enrollCompanyStaff({ access, body, actorId }) {
+    const corporateId = access.org.legacyCorporateId;
+    const status = body.status ?? 'pending';
+    if (!['pending', 'active'].includes(status)) return fail('invalid_status', 400, { allowed: ['pending', 'active'] });
+    const displayName = text(body.displayName, 120);
+    if (!displayName) return fail('display_name_required', 400);
+    const given = key => body[key] != null && String(body[key]).trim() !== '';
+    const named = given('userId') || given('email') || given('phone');
+
+    const provisioned = await corporateStaff.provisionStaff({
+      corporateId, actorId,
+      body: {
+        displayName,
+        email: given('email') ? normalizeEmail(body.email) : null,
+        phone: given('phone') ? (normalizePhone(body.phone) ?? String(body.phone).trim()) : null,
+        department: text(body.groupName, 100),
+      },
+    });
+    if (provisioned.error) return staffError(provisioned);
+    let employee = provisioned.employee;
+
+    let link = null;
+    let viaContact = false;
+    if (named) {
+      ({ out: link, viaContact } = await requestStaffLink({ access, employee, body, actorId }));
+      if (link.error) {
+        // Give the seat back rather than leave a stray row behind.
+        await corporateStaff.setEmployeeStatus({ corporateId, employeeId: employee.id, status: 'exited', actorId });
+        return staffError(link);
+      }
+      if (link.employee) employee = { ...employee, ...link.employee };
+    }
+    if (status === 'active') {
+      const activated = await corporateStaff.setEmployeeStatus({ corporateId, employeeId: employee.id, status: 'active', actorId });
+      if (activated.error) return staffError(activated);
+      employee = { ...employee, ...activated.employee };
+    }
+    const outcome = link ? linkOutcome(link) : 'added';
+    await audit({
+      actor: actorId, action: 'b2b.beneficiary.enroll_company_staff', target: employee.id,
+      after: {
+        organizationId: access.org.id, corporateId, employeeId: employee.id, status: employee.status, outcome,
+        linkedUserId: employee.userId ?? null,
+        ...(outcome === 'pending_member_acceptance' ? { memberRequestId: link.memberRequest?.id ?? null } : {}),
+      },
+    });
+    const beneficiary = staffView(employee, access);
+    const reply = { beneficiary, pin: provisioned.pin, writtenThrough: 'corporate_staff' };
+    if (outcome === 'pending_member_acceptance') return { outcome, memberRequest: replyRequest(link.memberRequest, viaContact), ...reply };
+    return reply;
+  }
+
+  async function setCompanyStaffStatus({ access, employee, status, actorId }) {
+    const current = EMPLOYEE_TO_BENEFICIARY_STATUS[employee.status] ?? 'pending';
+    if (current === status) return { beneficiary: staffView(employee, access), unchanged: true };
+    const allowed = BENEFICIARY_TRANSITIONS[current] || [];
+    if (!allowed.includes(status) || !STAFF_STATUS_FOR[status]) return fail('invalid_transition', 409, { from: current, to: status, allowed });
+    const out = await corporateStaff.setEmployeeStatus({
+      corporateId: access.org.legacyCorporateId, employeeId: employee.id, status: STAFF_STATUS_FOR[status], actorId,
+    });
+    if (out.error) return staffError(out);
+    return { beneficiary: staffView({ ...employee, ...out.employee }, access), writtenThrough: 'corporate_staff' };
+  }
+
+  /**
+   * Link a company employee to their FitFlex member account from the
+   * organisation, or unlink (no contact given). Linking follows the consent
+   * flow of requestStaffLink: an organisation user only ASKS the member
+   * (202 pending_member_acceptance); a FitFlex platform admin links directly.
+   * Only for a company's staff, org roles hr/admin, and ORG_ONLY_SPONSORS on.
+   */
+  async function linkBeneficiaryAccount({ access, beneficiaryId, body = {}, actorId }) {
+    if (!orgOnlySponsors()) return fail('not_found', 404);
+    if (!can(access, 'beneficiaries.manage')) return forbidden('beneficiaries.manage');
+    const found = await findBeneficiary(access, beneficiaryId);
+    if (!found) return fail('beneficiary_not_found', 404);
+    if (!found.employee || !writesThrough(access)) return fail('link_not_supported', 409);
+    if (!companyStaffManage(access)) return notCompanyStaffRole();
+    const corporateId = access.org.legacyCorporateId;
+    const unlink = ['userId', 'email', 'phone'].every(k => body[k] == null || String(body[k]).trim() === '');
+    const { out, viaContact } = unlink
+      ? { out: await corporateStaff.linkEmployeeUser({ corporateId, employeeId: found.employee.id, userId: null, actorId, organizationId: access.org.id }), viaContact: false }
+      : await requestStaffLink({ access, employee: found.employee, body, actorId });
+    if (out.error) return staffError(out);
+    const employee = out.employee ? { ...found.employee, ...out.employee } : found.employee;
+    const outcome = unlink ? 'unlinked' : linkOutcome(out);
+    await audit({
+      actor: actorId, action: `b2b.beneficiary.${outcome === 'unlinked' ? 'unlink' : 'link'}_company_staff`, target: found.employee.id,
+      after: { organizationId: access.org.id, corporateId, outcome, linkedUserId: employee.userId ?? null,
+        ...(outcome === 'pending_member_acceptance' ? { memberRequestId: out.memberRequest?.id ?? null } : {}) },
+    });
+    const reply = { beneficiary: staffView(employee, access), writtenThrough: 'corporate_staff' };
+    if (outcome === 'pending_member_acceptance') return { outcome, memberRequest: replyRequest(out.memberRequest, viaContact), ...reply };
+    return reply;
+  }
+
   const deactivateBeneficiary = ({ access, beneficiaryId, actorId }) =>
     setBeneficiaryStatus({ access, beneficiaryId, status: 'inactive', actorId });
 
@@ -761,9 +1034,10 @@ export function createB2BService({
     reference,
     createOrganization, getOrganization, listOrganizations, updateOrganization, setOrganizationStatus,
     ensureOrganizationForCorporate, syncCorporateOrganizations, organizationForCorporate,
-    resolveAccess, listMyOrganizations,
+    resolveAccess, listMyOrganizations, organizationSessionMarks,
     listOrganizationUsers, addOrganizationUser, updateOrganizationUser, removeOrganizationUser,
     allBeneficiaries, beneficiaryRelationshipsForUser,
     listBeneficiaries, getBeneficiary, enrollBeneficiary, setBeneficiaryStatus, deactivateBeneficiary,
+    linkBeneficiaryAccount, companyStaffWritable: writesThrough, companyStaffManage,
   };
 }

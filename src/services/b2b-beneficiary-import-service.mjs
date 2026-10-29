@@ -155,7 +155,12 @@ export function createB2BBeneficiaryImportService({
     if (!can(access, MANAGE)) return refuse(MANAGE);
     if (!actorId) return fail('actor_required', 403);
     const { org } = access;
-    if (org.legacyCorporateId) return fail('managed_by_corporate', 409, { corporateId: org.legacyCorporateId, use: '/corporate/staff/bulk' });
+    // A company's staff list is Corporate's. With ORG_ONLY_SPONSORS on it is
+    // imported into from here too, through the company staff path (B5a).
+    const companyStaff = Boolean(org.legacyCorporateId && b2bService.companyStaffWritable?.(access));
+    if (org.legacyCorporateId && !companyStaff) return fail('managed_by_corporate', 409, { corporateId: org.legacyCorporateId, use: '/corporate/staff/bulk' });
+    // Owner decision (finding 5): importing into a company's staff list is for org roles hr and admin only.
+    if (companyStaff && !b2bService.companyStaffManage?.(access)) return fail('forbidden', 403, { requiredRoles: ['hr', 'admin'] });
     if (org.status !== 'active') return fail('organization_not_active', 409, { organizationStatus: org.status });
     const given = Array.isArray(body.rows) ? body.rows.map((r, i) => ({ line: i + 1, ...r })) : parseImportText(body.rawText);
     if (!given.length) return fail('nothing_to_import', 400, { hint: 'One person per line: name, email, phone, group, reference, type.' });
@@ -174,6 +179,8 @@ export function createB2BBeneficiaryImportService({
       keys.forEach(k => seen.add(k));
       people.push({ line: raw.line, ...read.person });
     }
+
+    if (companyStaff) return importCompanyStaff({ access, given, people, problems, dryRun, actorId });
 
     const accounts = await accountsFor(people.map(p => p.email).filter(Boolean), people.map(p => p.phone).filter(Boolean));
     const live = await db(INVITE).where({ organizationId: org.id, status: 'invited' }).select('id', 'email', 'phone');
@@ -223,6 +230,76 @@ export function createB2BBeneficiaryImportService({
       problems: JSON.stringify(summary.problems.slice(0, 500)), createdAt: at, updatedAt: at });
     await audit({ actor: actorId, action: 'b2b.beneficiaries.import', target: org.id, after: { importId, ...counts } });
     return { importId, ...summary };
+  }
+
+  /**
+   * B5a: import into a company's staff list from its organisation. Each new
+   * person becomes a CorporateEmployee through b2bService.enrollBeneficiary
+   * (corporate-service underneath: seat limit, billing and audit as in
+   * /corporate/staff/bulk). Every row needs a name and is added pending and
+   * unlinked; a member whose verified email or number it lists is ASKED to
+   * accept the link (member-request consent) and is linked only if they do.
+   * Every row added gets its activation PIN once in `credentials` (never
+   * stored with the import). Nobody is invited. Someone
+   * already on the staff list (same account, email or number) is left alone,
+   * so the same list can be uploaded again. All-or-nothing on seats: a list
+   * needing more seats than are free adds nobody.
+   */
+  async function importCompanyStaff({ access, given, people, problems, dryRun, actorId }) {
+    const { org } = access;
+    const corporateId = org.legacyCorporateId;
+    const account = await db('CorporateAccount').where({ id: corporateId }).first();
+    if (!account || account.status !== 'active') return fail('organization_not_active', 409, { organizationStatus: org.status });
+    const staff = await db('CorporateEmployee').where({ corporateId }).whereNot({ status: 'exited' }).select('userId', 'email', 'phone');
+    const onListUser = new Set(staff.map(e => e.userId).filter(Boolean));
+    const onListEmail = new Set(staff.map(e => (e.email ? normalizeEmail(e.email) : null)).filter(Boolean));
+    const onListPhone = new Set(staff.map(e => (e.phone ? normalizePhone(e.phone) : null)).filter(Boolean));
+    const accounts = await accountsFor(people.map(p => p.email).filter(Boolean), people.map(p => p.phone).filter(Boolean));
+
+    const counts = { total: given.length, enrolled: 0, invited: 0, unchanged: 0, rejected: problems.length };
+    const toAdd = [];
+    for (const p of people) {
+      const userId = (p.email && accounts.byEmail.get(p.email)) || (p.phone && accounts.byPhone.get(p.phone)) || null;
+      if ((userId && onListUser.has(userId)) || (p.email && onListEmail.has(p.email)) || (p.phone && onListPhone.has(p.phone))) { counts.unchanged += 1; continue; }
+      if (!p.displayName) { counts.rejected += 1; problems.push({ line: p.line, name: null, contact: p.email ?? p.phone, problem: 'name_required' }); continue; }
+      toAdd.push({ ...p, userId });
+    }
+    const seatsAvailable = account.seatLimit > 0 ? Math.max(0, account.seatLimit - account.seatsUsed) : null;
+    if (seatsAvailable !== null && toAdd.length > seatsAvailable) {
+      return fail('seat_limit_reached', 409, { seatsAvailable, requested: toAdd.length, seatLimit: account.seatLimit });
+    }
+    const summaryOf = () => ({
+      ...counts, problems: problems.sort((a, b) => a.line - b.line), withoutEmail: people.filter(p => !p.email).length, withoutPhone: people.filter(p => !p.phone).length,
+      emailConfigured: emailSender().configured === true, smsConfigured: sms().configured === true, emailCodesAvailable: emailCodes() === true,
+      companyStaff: true, seatsAvailable,
+    });
+    if (dryRun) {
+      counts.enrolled = toAdd.length;
+      return { dryRun: true, ...summaryOf() };
+    }
+
+    const credentials = [];
+    for (const p of toAdd) {
+      // By contact, never by the matched account id: the member behind a verified
+      // contact is ASKED to accept the link (member-request consent), and the reply is the same either way.
+      const out = await b2bService.enrollBeneficiary({
+        access, actorId,
+        body: { email: p.email, phone: p.phone, displayName: p.displayName, groupName: p.groupName, status: 'pending' },
+      });
+      const where = { line: p.line, name: p.displayName, contact: p.email ?? p.phone };
+      if (out.error === 'already_enrolled') { counts.unchanged += 1; continue; }
+      if (out.error) { counts.rejected += 1; problems.push({ ...where, problem: out.error }); continue; }
+      counts.enrolled += 1;
+      // A PIN for every row added (linked or not), so the reply does not say who is a member.
+      if (out.pin) credentials.push({ line: p.line, employeeId: out.beneficiary.id, displayName: out.beneficiary.displayName, pin: out.pin });
+    }
+    const importId = newId('b2bim');
+    const at = stamp();
+    const summary = summaryOf();
+    await db(IMPORT).insert({ id: importId, organizationId: org.id, createdBy: actorId, total: counts.total, enrolled: counts.enrolled, invited: 0, unchanged: counts.unchanged, rejected: counts.rejected,
+      problems: JSON.stringify(summary.problems.slice(0, 500)), createdAt: at, updatedAt: at });
+    await audit({ actor: actorId, action: 'b2b.beneficiaries.import_company_staff', target: org.id, after: { importId, corporateId, ...counts } });
+    return { importId, ...summary, credentials };
   }
 
   async function listImports({ access }) {
