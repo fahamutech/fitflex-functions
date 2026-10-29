@@ -189,7 +189,7 @@ export const REPORT_LABELS = {
     appNet: 'Mauzo ya app baada ya makato', shopNet: 'Mauzo ya dukani baada ya makato', gross: 'Mauzo ya jumla', discounts: 'Punguzo', refunds: 'Marejesho', net: 'Mauzo baada ya makato',
     vatIncluded: 'VAT iliyomo', salesCount: 'Idadi ya mauzo', itemsSold: 'Bidhaa zilizouzwa', voided: 'Yamebatilishwa (hayahesabiwi): mauzo {n} · {amount}',
     product: 'Bidhaa', variant: 'Chaguo', removed: '(imeondolewa)', unitsSold: 'Idadi iliyouzwa', appUnits: 'Idadi ya app', shopUnits: 'Idadi ya dukani',
-    revenue: 'Mapato halisi', lastSold: 'Iliuzwa mwisho', inStock: 'Stock iliyopo', cover: 'Siku Stock itakazotosha', coverStatus: 'Hali ya Stock',
+    revenue: 'Mapato baada ya makato', lastSold: 'Iliuzwa mwisho', inStock: 'Stock iliyopo', cover: 'Siku Stock itakazotosha', coverStatus: 'Hali ya Stock',
     cover_ok: 'Siku {n}', cover_soon: 'Agiza tena karibuni', cover_none: 'Hakuna mauzo siku 30', cover_out: 'Imeisha', cover_untracked: '—', coverUnderOne: 'Chini ya siku 1',
     noSalesPeriod: 'Hakuna mauzo kipindi hiki', topProducts: 'Bidhaa zinazouzika zaidi', slowSellers: 'Zinazouzika polepole', never: 'Haijawahi',
     stockValue: 'Thamani ya Stock', asOf: 'Kufikia {time} leo. Kipindi ulichochagua hakitumiki hapa.', asOfDate: 'Kufikia {date}', sellingPrice: 'Bei ya kuuza',

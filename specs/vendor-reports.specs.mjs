@@ -428,7 +428,7 @@ test('CSV exports: headers in English or Swahili with (TZS), raw integers, formu
   assert.equal(owner.fileName, 'dar-fitness-gear_products_2026-10-14_2026-10-15.csv');
   const plain = await r.toCsv('products', await r.report('products', { vendorId: V, access: PLAIN, query: { ...q, lang: 'sw' } }), PLAIN, V);
   const swHeader = plain.csv.slice(1).split('\r\n')[0];
-  assert.match(swHeader, /^Bidhaa,Chaguo,Idadi iliyouzwa,.*Mapato halisi \(TZS\)/);
+  assert.match(swHeader, /^Bidhaa,Chaguo,Idadi iliyouzwa,.*Mapato baada ya makato \(TZS\)/);
   assert.ok(!/Faida|Profit/.test(swHeader), 'no profit column without canSeeCost');
   const sales = await r.toCsv('sales', await r.report('sales', { vendorId: V, access: OWNER, query: { from: '2026-10-14', to: '2026-10-15', format: 'csv' } }), OWNER, V);
   assert.deepEqual(sales.csv.slice(1).trimEnd().split('\r\n').slice(1), ['2026-10-14,2026-10-14,20000,84000,110000,6000,0,104000,0,2,3', '2026-10-15,2026-10-15,25000,105000,150000,0,20000,130000,13728,3,5']);
@@ -747,6 +747,8 @@ test('wording (2026-10-29): Swahili and English labels for CSV/PDF; "As of" show
     ['Mauzo ya app baada ya makato (TZS)', 'Mauzo ya dukani baada ya makato (TZS)', 'Mauzo ya jumla (TZS)', 'Punguzo (TZS)', 'Marejesho (TZS)', 'Mauzo baada ya makato (TZS)']);
   assert.equal(salesCsv({ buckets: [{ start: 'a', end: 'a', app: zero, walkIn: zero }] }, 'en').header[7], 'Net sales (TZS)');
   assert.equal(reportLabel('sw', 'variant'), 'Chaguo');
+  assert.equal(reportLabel('sw', 'revenue'), 'Mapato baada ya makato');
+  assert.equal(reportLabel('sw', 'netExVat'), 'Mauzo baada ya makato bila VAT');
   assert.equal(reportLabel('sw', 'topProducts'), 'Bidhaa zinazouzika zaidi');
   assert.equal(reportLabel('sw', 'uncostedSales'), 'Mauzo bila bei ya kununua');
   assert.deepEqual(['waiting', 'awaiting', 'paidOut', 'noStatement'].map(k => reportLabel('sw', k)),
