@@ -420,7 +420,15 @@ export function createB2BMemberRequestService({
   async function apply(row) {
     const d = row.details || {};
     if (row.kind === 'employee_link') {
-      if (row.requestedByType !== 'admin') {
+      if (row.requestedByType !== 'admin' && row.organizationId) {
+        // B5a: asked from the company's organisation (/org). The requester must
+        // still manage that company's staff there now (ORG_ONLY_SPONSORS on, org
+        // role hr or admin, the organisation still the company's).
+        const access = await b2bService.resolveAccess({ organizationId: row.organizationId, userId: row.requestedBy, userType: row.requestedByType });
+        if (access.error || access.org.legacyCorporateId !== row.corporateId || !b2bService.companyStaffManage?.(access)) {
+          return fail('request_no_longer_valid', 409, access.error ? { reason: access.error } : {});
+        }
+      } else if (row.requestedByType !== 'admin') {
         const hr = await db('User').where({ id: row.requestedBy }).first('userType', 'corporateId', 'accountStatus');
         if (!hr || hr.userType !== 'corporate_hr' || hr.corporateId !== row.corporateId || (hr.accountStatus ?? 'active') !== 'active') return fail('request_no_longer_valid', 409);
       }

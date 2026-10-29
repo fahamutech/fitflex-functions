@@ -109,6 +109,11 @@ after(async () => {
   }
   const orgIds = [...made.orgs, ...(made.corporates.length ? await db('B2BOrganization').whereIn('legacyCorporateId', made.corporates).pluck('id') : [])];
   const orgUserIds = orgIds.length ? await db('B2BOrganizationUser').whereIn('organizationId', orgIds).pluck('id') : [];
+  const reqIds = await db('B2BMemberRequest').where(b => { b.whereIn('organizationId', orgIds.length ? orgIds : ['-']).orWhereIn('corporateId', made.corporates.length ? made.corporates : ['-']); }).pluck('id');
+  if (reqIds.length) {
+    await db('AuditLog').whereIn('target', reqIds).del();
+    await db('B2BMemberRequest').whereIn('id', reqIds).del();
+  }
   if (orgUserIds.length) await db('AuditLog').whereIn('target', orgUserIds).del();
   if (made.corporates.length) await db('AuditLog').whereIn('target', made.corporates).del();
   if (orgIds.length) {
@@ -262,26 +267,34 @@ test('people: flag on, HR in /org sees the company staff and adds, suspends, lin
     const asha = list.body.items.find(b => b.id === viaCorporate.body.employee.id);
     assert.deepEqual([asha.source, asha.readOnly, asha.email, asha.employeeStatus, asha.linked], ['corporate_employee', false, 'asha@hr2org.example.com', 'pending', false]);
 
-    // Add from /org: a member by userId (linked, active) and someone by name only (unlinked, pending, PIN once).
-    const member = await account('member', { displayName: 'Baraka Member' });
-    const added = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { userId: member, groupName: 'Finance', status: 'active' } });
-    assert.equal(added.statusCode, 201, JSON.stringify(added.body));
-    assert.deepEqual([added.body.writtenThrough, added.body.beneficiary.status, added.body.beneficiary.userId, added.body.beneficiary.groupName], ['corporate_staff', 'active', member, 'Finance']);
+    // Add from /org: a member by userId (the member is ASKED; the row has HR's name, not the member's) and someone by name only.
+    const member = await account('member', { displayName: 'Real Member Name' });
+    const added = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { userId: member, displayName: 'Baraka Staff', groupName: 'Finance', status: 'active' } });
+    assert.equal(added.statusCode, 202, JSON.stringify(added.body));
+    assert.deepEqual([added.body.outcome, added.body.writtenThrough, added.body.beneficiary.status, added.body.beneficiary.userId, added.body.beneficiary.linked, added.body.beneficiary.displayName, added.body.beneficiary.groupName],
+      ['pending_member_acceptance', 'corporate_staff', 'active', null, false, 'Baraka Staff', 'Finance']);
+    assert.deepEqual([added.body.memberRequest.kind, added.body.memberRequest.userId, added.body.memberRequest.displayName, typeof added.body.memberRequest.id], ['employee_link', member, null, 'string']);
     assert.match(added.body.pin, /^\d{4}$/);
     assert.equal(added.body.beneficiary.pinHash, undefined);
-    const nameOnly = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'Chausiku Unlinked', email: 'nobody-yet@hr2org.example.com' } });
+    assert.equal((await db('CorporateEmployee').where({ id: added.body.beneficiary.id }).first()).userId, null, 'not linked before the member accepts');
+    // By id with no name: refused before anything (no name is ever copied from the account).
+    assert.deepEqual(await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { userId: member } }).then(r => [r.statusCode, r.body.error]), [400, 'display_name_required']);
+    // Same member again while asked: refused, and the seat is given back.
+    assert.deepEqual(await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { userId: member, displayName: 'Again' } }).then(r => [r.statusCode, r.body.error]), [409, 'member_request_pending']);
+    assert.equal(await seats(), 2);
+    const nameOnly = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'Chausiku Unlinked' } });
     assert.equal(nameOnly.statusCode, 201, JSON.stringify(nameOnly.body));
-    assert.deepEqual([nameOnly.body.beneficiary.status, nameOnly.body.beneficiary.email], ['pending', 'nobody-yet@hr2org.example.com']);
-    assert.equal('linked' in nameOnly.body.beneficiary || 'userId' in nameOnly.body.beneficiary, false, 'by contact the reply does not say whether they are a member');
+    assert.deepEqual([nameOnly.body.beneficiary.status, nameOnly.body.beneficiary.linked, 'outcome' in nameOnly.body], ['pending', false, false]);
     assert.equal(await seats(), 3);
-    const names = (await staffNow()).map(e => e.displayName).sort();
-    assert.deepEqual(names, ['Asha Mollel', 'Baraka Member', 'Chausiku Unlinked'], 'HR sees the same people in /corporate/staff');
-    // Same member twice, and the seat limit, are refused like /corporate/staff.
-    assert.deepEqual(await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { userId: member } }).then(r => [r.statusCode, r.body.error]), [409, 'already_enrolled']);
+    const staffList = await staffNow();
+    assert.deepEqual(staffList.filter(e => e.status !== 'exited').map(e => e.displayName).sort(), ['Asha Mollel', 'Baraka Staff', 'Chausiku Unlinked'], 'HR sees the same people in /corporate/staff');
+    assert.deepEqual(staffList.filter(e => e.displayName === 'Again').map(e => e.status), ['exited'], 'the refused add gave its seat back');
     assert.deepEqual(await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'One too many' } }).then(r => [r.statusCode, r.body.error]), [409, 'seat_limit_reached']);
-    // A non-member account cannot be linked.
-    const trainer = await account('trainer');
-    assert.deepEqual(await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { userId: trainer, displayName: 'T' } }).then(r => [r.statusCode, r.body.error]), [400, 'beneficiary_must_be_member']);
+    // The list shows the open request on the row (when and until when; never who).
+    const rows = (await call(listB2BBeneficiaries, { claims: hr.claims, params: P })).body.items;
+    const pendingRow = rows.find(b => b.id === added.body.beneficiary.id);
+    assert.equal(pendingRow.pendingLink.status, 'pending_member_acceptance');
+    assert.equal('userId' in pendingRow.pendingLink, false);
 
     // Status: suspend, then remove (exited frees the seat).
     const empId = added.body.beneficiary.id;
@@ -292,12 +305,14 @@ test('people: flag on, HR in /org sees the company staff and adds, suspends, lin
     assert.deepEqual([removed.statusCode, removed.body.beneficiary.status, removed.body.beneficiary.employeeStatus], [200, 'inactive', 'exited']);
     assert.equal(await seats(), 2);
 
-    // Link and unlink an existing employee from /org.
+    // Link from /org asks the member; unlink withdraws the request.
     const other = await account('member');
-    const linked = await call(linkB2BBeneficiaryAccount, { claims: hr.claims, params: { ...P, beneficiaryId: viaCorporate.body.employee.id }, body: { userId: other } });
-    assert.deepEqual([linked.statusCode, linked.body.beneficiary.userId, linked.body.beneficiary.linked], [200, other, true]);
+    const asked = await call(linkB2BBeneficiaryAccount, { claims: hr.claims, params: { ...P, beneficiaryId: viaCorporate.body.employee.id }, body: { userId: other } });
+    assert.deepEqual([asked.statusCode, asked.body.outcome, asked.body.beneficiary.linked, asked.body.memberRequest.userId], [202, 'pending_member_acceptance', false, other]);
+    const reqId = asked.body.memberRequest.id;
     const unlinked = await call(linkB2BBeneficiaryAccount, { claims: hr.claims, params: { ...P, beneficiaryId: viaCorporate.body.employee.id }, body: {} });
     assert.deepEqual([unlinked.statusCode, unlinked.body.beneficiary.userId], [200, null]);
+    assert.equal((await db('B2BMemberRequest').where({ id: reqId }).first()).status, 'cancelled');
 
     // An organisation user who is a member account (role hr) manages the same list.
     const access = await b2bService.resolveAccess({ organizationId: orgId, userId: (await admin()).sub, userType: 'admin' });
@@ -488,25 +503,89 @@ test('review 3: the script refuses --apply unless --db names the connected datab
   assert.deepEqual((await db('B2BOrganizationUser').where({ userId: hr.id })).map(r => r.role), ['hr']);
 });
 
-test('review 4: adding by name and contact answers the same whether or not a confirmed member is behind the contact', async () => {
-  const { orgId, hr } = await company();
+test('review 4 + consent: by name and contact the reply is the same 202 whether or not a confirmed member is behind it; the member is only asked', async () => {
+  const { corporateId, orgId, hr } = await company();
   const P = { id: orgId };
   const memberEmail = `${uid('m')}@hr2org.example.com`;
-  const member = await account('member', { email: memberEmail });
+  const member = await account('member', { email: memberEmail, displayName: 'Private Name' });
   await verifyContacts(db, member, { email: memberEmail });
   await flagOn(async () => {
-    const shape = r => ({ statusCode: r.statusCode, keys: Object.keys(r.body).sort(), beneficiaryKeys: Object.keys(r.body.beneficiary ?? {}).sort(), status: r.body.beneficiary?.status });
-    const withMember = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'Has account', email: memberEmail, status: 'active' } });
-    const withoutMember = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'No account', email: `${uid('n')}@hr2org.example.com`, status: 'active' } });
-    assert.equal(withMember.statusCode, 201, JSON.stringify(withMember.body));
-    assert.deepEqual(shape(withMember), shape(withoutMember));
-    assert.equal('linked' in withMember.body.beneficiary || 'userId' in withMember.body.beneficiary, false);
-    // It was linked all the same.
+    const strip = r => { const m = { ...r.body.memberRequest }; delete m.expiresAt; delete m.createdAt; delete m.employeeId; return { statusCode: r.statusCode, keys: Object.keys(r.body).sort(), outcome: r.body.outcome, memberRequest: m, beneficiaryKeys: Object.keys(r.body.beneficiary).sort(), linked: r.body.beneficiary.linked, userId: r.body.beneficiary.userId }; };
+    const withMember = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'Has account', email: memberEmail } });
+    const withoutMember = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { displayName: 'Has account', email: `${uid('n')}@hr2org.example.com` } });
+    assert.equal(withMember.statusCode, 202, JSON.stringify(withMember.body));
+    assert.deepEqual(strip(withMember), strip(withoutMember));
+    assert.deepEqual([withMember.body.memberRequest.id, withMember.body.memberRequest.userId, withMember.body.memberRequest.displayName], [null, null, null]);
+    // Behind the scenes: a real request for the member, none for the stranger; neither row linked; no name copied.
+    const reqs = await db('B2BMemberRequest').where({ corporateId });
+    assert.deepEqual(reqs.map(r => [r.kind, r.userId, r.organizationId, r.employeeId]), [['employee_link', member, orgId, withMember.body.beneficiary.id]]);
+    const rows = await db('CorporateEmployee').whereIn('id', [withMember.body.beneficiary.id, withoutMember.body.beneficiary.id]);
+    assert.deepEqual(rows.map(r => [r.userId, r.displayName]), [[null, 'Has account'], [null, 'Has account']]);
+    // The audit records what really happened.
+    const audits = await db('AuditLog').where({ action: 'b2b.beneficiary.enroll_company_staff' }).whereIn('target', rows.map(r => r.id));
+    const byTarget = Object.fromEntries(audits.map(a => [a.target, a.after]));
+    assert.deepEqual([byTarget[withMember.body.beneficiary.id].outcome, byTarget[withMember.body.beneficiary.id].memberRequestId], ['pending_member_acceptance', reqs[0].id]);
+    assert.equal(byTarget[withMember.body.beneficiary.id].linkedUserId, null);
+
+    // The member accepts in the app: now linked.
+    const { b2bMemberRequestService } = await import('../src/bootstrap/services.mjs');
+    const accepted = await b2bMemberRequestService.accept({ userId: member, requestId: reqs[0].id });
+    assert.equal(accepted.error, undefined, JSON.stringify(accepted));
     assert.equal((await db('CorporateEmployee').where({ id: withMember.body.beneficiary.id }).first()).userId, member);
+
     // By contact without a name: refused before any lookup, the same for both.
     const a = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { phone: '0712999888' } });
     const b = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { email: memberEmail } });
     assert.deepEqual([a.statusCode, a.body.error, b.statusCode, b.body.error], [400, 'display_name_required', 400, 'display_name_required']);
+  });
+});
+
+test('consent: by userId an unknown or non-member id gets RC\'s stub; an org user\'s request is re-checked on acceptance; a FitFlex admin links directly', async () => {
+  const { corporateId, orgId, hr } = await company();
+  const P = { id: orgId };
+  const a = await admin();
+  await flagOn(async () => {
+    // Unknown id and a trainer id: the same 202 as a real request, nothing stored.
+    const trainer = await account('trainer');
+    for (const userId of [`usr_nobody_${uid('x')}`, trainer]) {
+      const r = await call(enrollB2BBeneficiary, { claims: hr.claims, params: P, body: { userId, displayName: 'Probe' } });
+      assert.deepEqual([r.statusCode, r.body.outcome, r.body.memberRequest.id, r.body.memberRequest.displayName], [202, 'pending_member_acceptance', null, null], JSON.stringify(r.body));
+    }
+    assert.equal((await db('B2BMemberRequest').where({ corporateId })).length, 0);
+
+    // An organisation user (member account, role hr) asks; demoted before the member answers → no longer valid.
+    const access = await b2bService.resolveAccess({ organizationId: orgId, userId: a.sub, userType: 'admin' });
+    const orgHr = await account('member');
+    assert.equal((await b2bService.addOrganizationUser({ access, body: { userId: orgHr, role: 'hr' }, actorId: a.sub })).organizationUser.role, 'hr');
+    const m1 = await account('member');
+    const m2 = await account('member');
+    const r1 = await call(enrollB2BBeneficiary, { claims: { sub: orgHr, userType: 'member' }, params: P, body: { userId: m1, displayName: 'Org asked 1' } });
+    const r2 = await call(enrollB2BBeneficiary, { claims: { sub: orgHr, userType: 'member' }, params: P, body: { userId: m2, displayName: 'Org asked 2' } });
+    assert.deepEqual([r1.statusCode, r2.statusCode], [202, 202], JSON.stringify([r1.body, r2.body]));
+    const { b2bMemberRequestService } = await import('../src/bootstrap/services.mjs');
+    const ok = await b2bMemberRequestService.accept({ userId: m1, requestId: r1.body.memberRequest.id });
+    assert.equal(ok.error, undefined, JSON.stringify(ok));
+    assert.equal((await db('CorporateEmployee').where({ id: r1.body.beneficiary.id }).first()).userId, m1);
+    await db('B2BOrganizationUser').where({ userId: orgHr, organizationId: orgId }).update({ role: 'analyst' });
+    const stale = await b2bMemberRequestService.accept({ userId: m2, requestId: r2.body.memberRequest.id });
+    assert.equal(stale.error, 'request_no_longer_valid', JSON.stringify(stale));
+    assert.equal((await db('CorporateEmployee').where({ id: r2.body.beneficiary.id }).first()).userId, null);
+
+    // A FitFlex platform admin links directly (201, linked).
+    const m3 = await account('member');
+    const direct = await call(enrollB2BBeneficiary, { claims: a, params: P, body: { userId: m3, displayName: 'Admin added' } });
+    assert.equal(direct.statusCode, 201, JSON.stringify(direct.body));
+    assert.deepEqual([direct.body.beneficiary.linked, direct.body.beneficiary.userId, 'outcome' in direct.body], [true, m3, false]);
+
+    // Import: a row whose email a member has verified asks that member; nothing is linked.
+    const email = `${uid('imp')}@hr2org.example.com`;
+    const m4 = await account('member', { email });
+    await verifyContacts(db, m4, { email });
+    const imp = await call(importB2BBeneficiaries, { claims: hr.claims, params: P, body: { rawText: `name,email\nImported Person,${email}` } });
+    assert.deepEqual([imp.statusCode, imp.body.enrolled, imp.body.credentials.length], [200, 1, 1], JSON.stringify(imp.body));
+    const row = await db('CorporateEmployee').where({ corporateId, displayName: 'Imported Person' }).first();
+    assert.equal(row.userId, null);
+    assert.deepEqual((await db('B2BMemberRequest').where({ employeeId: row.id })).map(r => [r.userId, r.status]), [[m4, 'pending']]);
   });
 });
 
@@ -596,8 +675,9 @@ test('owner decision (finding 5): on a company\'s organisation only org roles hr
   await flagOn(async () => {
     const org = await call(getB2BOrganization, { claims: { sub: owner, userType: 'member' }, params: { id: native } });
     assert.equal(org.body.access.companyStaffManage, false);
+    // (RC consent: an organisation user's by-id add is a member request, 202 — unchanged by B5a.)
     const r = await call(enrollB2BBeneficiary, { claims: { sub: owner, userType: 'member' }, params: { id: native }, body: { userId: someone, status: 'active' } });
-    assert.equal(r.statusCode, 201, JSON.stringify(r.body));
+    assert.deepEqual([r.statusCode, r.body.outcome], [202, 'pending_member_acceptance'], JSON.stringify(r.body));
   });
   // Flag off: companyStaffManage is false for everyone, the company's HR login included.
   assert.equal((await flagOff(() => call(getB2BOrganization, { claims: hr.claims, params: P }))).body.access.companyStaffManage, false);

@@ -299,7 +299,9 @@ export function createCorporateService({
    * Link an employee to their FitFlex member account (or unlink with a null
    * userId). The link is what lets the employee use the company's benefits.
    */
-  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId, actorType = null, memberRequestId = null }) {
+  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId, actorType = null, memberRequestId = null, organizationId = null }) {
+    // organizationId (B5a): the company's organisation when the link is asked from /org by an
+    // organisation user; stored on the member request so accepting it re-checks that access.
     const employee = await corporateEmployees.findByIdAsync(employeeId);
     if (!employee || employee.corporateId !== corporateId) return { error: 'employee_not_found', status: 404 };
     const unlink = [givenUserId, email, phone].every(v => v === null || v === undefined || v === '');
@@ -324,7 +326,7 @@ export function createCorporateService({
     const found = await findUserByContact(users, { userId: givenUserId, email, phone }, { require: givenUserId ? null : 'member', contacts: verifiedContacts });
     // An id that names nobody, or no member, gets the same answer as a real request (nothing stored, nobody told).
     if (askById && (found.error === 'user_not_found' || (found.user && found.user.userType !== 'member'))) {
-      return memberRequests.stub({ kind: 'employee_link', corporateId, employeeId, userId: givenUserId,
+      return memberRequests.stub({ kind: 'employee_link', corporateId, organizationId, employeeId, userId: givenUserId,
         details: { displayName: employee.displayName ?? null, department: employee.department ?? null } });
     }
     if (found.error) return found.error === 'member_account_required' ? { error: 'user_must_be_member', status: 400 } : found;
@@ -337,7 +339,7 @@ export function createCorporateService({
     if (askById) {
       if (employee.userId === userId) return { employee: (({ pinHash, ...rest }) => rest)(employee), unchanged: true };
       return memberRequests.create({
-        kind: 'employee_link', corporateId, employeeId, userId, requestedBy: actorId, requestedByType: actorType ?? 'corporate_hr',
+        kind: 'employee_link', corporateId, organizationId, employeeId, userId, requestedBy: actorId, requestedByType: actorType ?? 'corporate_hr',
         details: { displayName: employee.displayName ?? null, department: employee.department ?? null },
       });
     }

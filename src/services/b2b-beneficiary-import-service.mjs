@@ -236,10 +236,11 @@ export function createB2BBeneficiaryImportService({
    * B5a: import into a company's staff list from its organisation. Each new
    * person becomes a CorporateEmployee through b2bService.enrollBeneficiary
    * (corporate-service underneath: seat limit, billing and audit as in
-   * /corporate/staff/bulk). Someone with a member account that has verified
-   * the email or number is linked and made active; anyone else is added
-   * unlinked and pending. Every row added gets its activation PIN once in
-   * `credentials` (never stored with the import), linked or not. Nobody is invited. Someone
+   * /corporate/staff/bulk). Every row needs a name and is added pending and
+   * unlinked; a member whose verified email or number it lists is ASKED to
+   * accept the link (member-request consent) and is linked only if they do.
+   * Every row added gets its activation PIN once in `credentials` (never
+   * stored with the import). Nobody is invited. Someone
    * already on the staff list (same account, email or number) is left alone,
    * so the same list can be uploaded again. All-or-nothing on seats: a list
    * needing more seats than are free adds nobody.
@@ -260,7 +261,7 @@ export function createB2BBeneficiaryImportService({
     for (const p of people) {
       const userId = (p.email && accounts.byEmail.get(p.email)) || (p.phone && accounts.byPhone.get(p.phone)) || null;
       if ((userId && onListUser.has(userId)) || (p.email && onListEmail.has(p.email)) || (p.phone && onListPhone.has(p.phone))) { counts.unchanged += 1; continue; }
-      if (!userId && !p.displayName) { counts.rejected += 1; problems.push({ line: p.line, name: null, contact: p.email ?? p.phone, problem: 'name_required' }); continue; }
+      if (!p.displayName) { counts.rejected += 1; problems.push({ line: p.line, name: null, contact: p.email ?? p.phone, problem: 'name_required' }); continue; }
       toAdd.push({ ...p, userId });
     }
     const seatsAvailable = account.seatLimit > 0 ? Math.max(0, account.seatLimit - account.seatsUsed) : null;
@@ -279,9 +280,11 @@ export function createB2BBeneficiaryImportService({
 
     const credentials = [];
     for (const p of toAdd) {
+      // By contact, never by the matched account id: the member behind a verified
+      // contact is ASKED to accept the link (member-request consent), and the reply is the same either way.
       const out = await b2bService.enrollBeneficiary({
         access, actorId,
-        body: { ...(p.userId ? { userId: p.userId } : {}), email: p.email, phone: p.phone, displayName: p.displayName, groupName: p.groupName, status: p.userId ? 'active' : 'pending' },
+        body: { email: p.email, phone: p.phone, displayName: p.displayName, groupName: p.groupName, status: 'pending' },
       });
       const where = { line: p.line, name: p.displayName, contact: p.email ?? p.phone };
       if (out.error === 'already_enrolled') { counts.unchanged += 1; continue; }
