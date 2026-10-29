@@ -57,22 +57,6 @@ export function publicRefFor(gymId) {
   return createHmac('sha256', key).update(String(gymId)).digest('base64url').slice(0, 16);
 }
 
-const text = q.trim();
-  if (!text || text.length > MAX_Q_LENGTH) return null;
-  if (text.startsWith('fitflex:gym:')) return text;
-  if (!/^https:\/\//i.test(text)) return null;
-  try {
-    const inner = new URL(text).searchParams.get('q');
-    return typeof inner === 'string' && inner.startsWith('fitflex:gym:') && inner.length <= MAX_Q_LENGTH ? inner : null;
-  } catch {
-    return null;
-  }
-}
-
-const SECRET = () => process.env.QR_HMAC_SECRET || 'fitflex-qr-dev-secret';
-/** An opaque reference for a gym that is stable but is not the internal id. */
-export const publicRefFor = gymId => createHmac('sha256', SECRET()).update(`web-gym-ref.${gymId}`).digest('base64url').slice(0, 16);
-
 const text = (v, max = 300) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
 const strings = (v, max = MAX_LIST) => (Array.isArray(v) ? v.map(x => text(x, 120)).filter(Boolean).slice(0, max) : []);
 const num = v => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : null);
