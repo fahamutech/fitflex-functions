@@ -77,7 +77,7 @@ async function user(userType, extra = {}) {
   made.users.push(id);
   return id;
 }
-const PROFILE = { businessName: 'Dar Fitness Gear', address: { line1: 'Plot 12, Mikocheni', city: 'Dar es Salaam' }, contactNumber: '+255700111222', status: 'published', logo: 'https://cdn.example.com/logo.png' };
+const PROFILE = { businessName: 'Dar Fitness Gear', address: { line1: 'Plot 12, Mikocheni', city: 'Dar es Salaam' }, contactNumber: '+255700111222', status: 'published', logo: '/storage/bafylogo/logo.webp' };
 async function vendor(extra = {}) {
   const id = await user('vendor', { createdAt: new Date('2026-01-01T00:00:00Z'), displayName: 'Asha Owner', vendorProfile: JSON.stringify(PROFILE), ...extra });
   const caseId = uid('kyc');
@@ -332,7 +332,9 @@ test('share a receipt: one link, token returned once, only its hash stored; publ
   assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
   assert.equal(page.headers.get('x-frame-options'), 'DENY');
   assert.match(page.headers.get('content-type'), /^text\/html; charset=utf-8/);
-  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; img-src 'self' https:\/\/cdn\.example\.com; style-src 'unsafe-inline'/);
+  // The logo is on our storage, shown from our own host (security fix 2026-10-28).
+  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; img-src 'self' https:\/\/docs\.fitflex\.example( \S+)?; style-src 'unsafe-inline'/);
+  assert.match(page.text, /<img class="logo" src="https:\/\/docs\.fitflex\.example\/storage\/bafylogo\/logo\.webp"/);
   assert.match(page.text, /<meta name="robots" content="noindex,nofollow">/);
   assert.equal(/<script/i.test(page.text), false, 'no JavaScript');
   assert.match(page.text, /<html lang="en">/);

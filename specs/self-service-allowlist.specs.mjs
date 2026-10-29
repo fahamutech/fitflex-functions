@@ -40,7 +40,7 @@ const FORGED = {
   id: 'trn_forged', pendingGymIds: ['gym_forged'], createdAt: '2020-01-01T00:00:00.000Z',
 };
 const OWN = {
-  displayName: 'Allowlist Kocha', photoUrl: 'https://example.com/a.jpg', gender: 'male',
+  displayName: 'Allowlist Kocha', photoUrl: '/storage/bafytest/a.jpg', gender: 'male',
   bio: 'Strength coach', hourlyRateTzs: 20000, experienceYears: 4, specialties: ['strength'],
 };
 

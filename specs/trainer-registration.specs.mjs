@@ -46,7 +46,7 @@ test('trainerRegister: rejects when gender is missing', async () => {
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Amina Trainer',
-      photoUrl: 'https://example.com/photo.jpg',
+      photoUrl: '/storage/bafytest/photo.jpg',
       bio: 'Yoga specialist',
       hourlyRateTzs: 15000,
       specialties: ['yoga'],
@@ -63,7 +63,7 @@ test('trainerRegister: rejects when gender value is invalid', async () => {
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Amina Trainer',
-      photoUrl: 'https://example.com/photo.jpg',
+      photoUrl: '/storage/bafytest/photo.jpg',
       gender: 'unknown',
       bio: 'Yoga specialist',
       hourlyRateTzs: 15000,
@@ -81,7 +81,7 @@ test('trainerRegister: succeeds with photoUrl and gender present', async () => {
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Baraka Kocha',
-      photoUrl: 'https://example.com/baraka.jpg',
+      photoUrl: '/storage/bafytest/baraka.jpg',
       gender: 'male',
       bio: 'Strength and conditioning coach',
       hourlyRateTzs: 20000,
@@ -90,7 +90,7 @@ test('trainerRegister: succeeds with photoUrl and gender present', async () => {
   }, out);
   assert.equal(out.statusCode, 200);
   assert.equal(out.body.displayName, 'Baraka Kocha');
-  assert.equal(out.body.photoUrl, 'https://example.com/baraka.jpg');
+  assert.equal(out.body.photoUrl, '/storage/bafytest/baraka.jpg');
   assert.equal(out.body.gender, 'male');
   assert.equal(out.body.approvalStatus, 'approved');
 });
@@ -102,7 +102,7 @@ test('trainerRegister: stores gender in profile and returns it', async () => {
     user: { sub: user.id, userType: 'trainer' },
     body: {
       displayName: 'Fatuma Kocha',
-      photoUrl: 'https://example.com/fatuma.jpg',
+      photoUrl: '/storage/bafytest/fatuma.jpg',
       gender: 'female',
       bio: 'Pilates expert',
       hourlyRateTzs: 18000,
