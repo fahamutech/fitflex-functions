@@ -392,8 +392,8 @@ for (const mode of ['off', 'on']) {
   test(`F1 (ledger ${mode}): an approved product goes back to review only when a reviewed value actually changes`, async () => {
     if (mode === 'on') ledgerOn();
     const v = await vendor();
-    const p = await listed(v, { description: 'Tasty', brand: 'FF', images: ['a.webp'], variants: [{ name: 'Vanilla' }] });
-    const formAsSent = { name: 'Whey', description: 'Tasty', category: 'supplements_nutrition', brand: 'FF', priceTzs: 20_000, discountPriceTzs: null, images: ['a.webp'], variants: [{ name: 'Vanilla' }] };
+    const p = await listed(v, { description: 'Tasty', brand: 'FF', images: ['/storage/bafytest/a.webp'], variants: [{ name: 'Vanilla' }] });
+    const formAsSent = { name: 'Whey', description: 'Tasty', category: 'supplements_nutrition', brand: 'FF', priceTzs: 20_000, discountPriceTzs: null, images: ['/storage/bafytest/a.webp'], variants: [{ name: 'Vanilla' }] };
     const status = async () => (await row(p.id)).approvalStatus;
     assert.equal((await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: formAsSent })).status, 200);
     assert.equal(await status(), 'approved', 'saving the form unchanged keeps it listed');
