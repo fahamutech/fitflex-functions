@@ -28,7 +28,8 @@ export function publicGym(gym) {
   return out;
 }
 
-export function createGymService({ gyms, users, checkins, auditLog }) {
+// onGymRemoved(gymId): follow-ups once a gym is gone (partner media purge, security review of functions#277 M2).
+export function createGymService({ gyms, users, checkins, auditLog, onGymRemoved = async () => {} }) {
   function normalizeGymPayload(body = {}, prior) {
     prior = prior || {};
     const images = Array.isArray(body.images)
@@ -211,6 +212,7 @@ export function createGymService({ gyms, users, checkins, auditLog }) {
     const hasCheckins = await checkins.findAsync(c => c.gymId === prior.id);
     if (assignedOperator || hasCheckins) return { error: 'gym_has_activity_or_operator', status: 409 };
     const removed = await gyms.removeAsync(g => g.id === prior.id);
+    try { await onGymRemoved(prior.id); } catch (err) { console.warn('[gym-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_deleted',

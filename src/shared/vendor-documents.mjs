@@ -18,6 +18,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { formatTsh } from './money-display.mjs';
 import { vatSummary } from './vendor-vat.mjs';
+import { isStoragePath } from './media-src.mjs';
 
 export const LINK_DOC_TYPES = ['receipt', 'invoice', 'payment_receipt', 'statement', 'order_invoice', 'credit_note'];
 export const LANGS = ['en', 'sw'];
@@ -50,6 +51,25 @@ export function publicBaseUrl(raw = process.env.PUBLIC_API_URL, { nodeEnv = proc
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && nodeEnv === 'test')) return null;
     return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
   } catch { return null; }
+}
+
+/**
+ * The logo a document shows (security fix 2026-10-28), or null: only an image on OUR storage —
+ * a /storage/<cid>/<file> path, resolved against PUBLIC_API_URL, or that same address already
+ * absolute on our host. Another host is never shown (a buyer opening the page would fetch it), and a
+ * data-URI logo (what the app stores today) is not put on documents either; neither is the PDF
+ * (it never embeds a logo). Null while PUBLIC_API_URL is unset.
+ */
+export function documentLogoUrl(logo, base = publicBaseUrl()) {
+  if (!base || typeof logo !== 'string' || !logo) return null;
+  if (isStoragePath(logo)) return `${base}${logo}`;
+  try {
+    const url = new URL(logo);
+    const ours = new URL(base);
+    const path = ours.pathname === '/' ? url.pathname : url.pathname.slice(ours.pathname.length);
+    if (url.origin === ours.origin && url.pathname.startsWith(ours.pathname) && isStoragePath(path) && !url.search && !url.hash && !url.username) return logo;
+  } catch { /* not a URL */ }
+  return null;
 }
 
 // ── labels (EN + SW; SW drafts for native review) ───────────────────────────

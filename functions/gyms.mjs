@@ -2,7 +2,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl, optionalSessionClaims } from '../src/auth/jwt.mjs';
 import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access.mjs';
-import { gymService, partnerGate, moderationGate } from '../src/bootstrap/services.mjs';
+import { gymService, partnerGate, moderationGate, gymPayoutOwner } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -46,11 +46,16 @@ export const getGym = {
   }
 };
 
+// Every admin gym row also says who is paid for it (GYM_PAYOUT_OWNER):
+// payoutOwnerId (stored, or null), owners [{ id, displayName, email }] and
+// payoutOwner { mode, ownerId, source, reason } — who would be paid now.
+const withPayoutOwner = async gym => (await gymPayoutOwner.decorateAdminGyms([gym]))[0];
+
 export const adminListGyms = {
   created, method: 'get', path: '/admin/gyms',
-  description: 'Admin: list gyms.',
+  description: 'Admin: list gyms. Each row also has payoutOwnerId, owners [{ id, displayName, email }] and payoutOwner { mode: named | first_owner, ownerId, source: named | only_owner | first_owner, reason: payout_owner_required | no_owner_account }.',
   onGuard: [requireAuth('admin'), requireAcl('gyms')],
-  onRequest: (req, res) => res.json(gymService.listAdmin({ full: req.query.full }))
+  onRequest: async (req, res) => res.json(await gymPayoutOwner.decorateAdminGyms(gymService.listAdmin({ full: req.query.full })))
 };
 
 export const adminUpsertGym = {
@@ -61,7 +66,37 @@ export const adminUpsertGym = {
   onRequest: async (req, res) => {
     const result = await gymService.upsert({ body: req.body || {}, actorId: req.user?.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
-    res.json(result.gym);
+    res.json(await withPayoutOwner(result.gym));
+  }
+};
+
+const payoutOwnerGuard = [requireAuth('admin'), requireAcl('gyms', 'owners')];
+
+export const adminGymPayoutOwner = {
+  created, method: 'get', path: '/admin/gyms/:id/payout-owner',
+  description: 'Admin: who is paid for a gym — { gymId, payoutOwnerId, owners [{ id, displayName, email }], payoutOwner { mode, ownerId, source, reason } }. reason payout_owner_required: 2+ owners and none named (GYM_PAYOUT_OWNER on).',
+  onGuard: payoutOwnerGuard,
+  onRequest: async (req, res) => {
+    const result = await gymPayoutOwner.adminView(req.params.id);
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  }
+};
+
+export const adminSetGymPayoutOwner = {
+  created, method: 'put', path: '/admin/gyms/:id/payout-owner',
+  description: 'Admin: name the gym\'s payout owner — body { ownerId } (must be one of the gym\'s owners: 409 not_a_gym_owner) — or clear it with { ownerId: null }. Audited (gym_payout_owner_set / gym_payout_owner_cleared). Answers as GET. Stored with GYM_PAYOUT_OWNER off too; only read when it is on.',
+  requestSample: { ownerId: 'usr_ab12cd34' },
+  onGuard: payoutOwnerGuard,
+  onRequest: async (req, res) => {
+    const body = req.body || {};
+    if (!('ownerId' in body)) return res.status(400).json({ error: 'ownerId_required' });
+    const result = await gymPayoutOwner.setPayoutOwner({ gymId: req.params.id, ownerId: body.ownerId, actorId: req.user?.sub });
+    if (result.error) {
+      const { error, status, ...extra } = result;
+      return res.status(status).json({ error, ...extra });
+    }
+    res.json(result);
   }
 };
 

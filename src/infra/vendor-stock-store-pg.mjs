@@ -170,7 +170,8 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
         const current = plain(await trx('Product').where({ id: productId }).forUpdate().first());
         if (!current || current.deletedAt) return fail('product_not_found', 404);
         if (current.vendorId !== vendorId) return fail('not_your_product', 403);
-        const plan = decide(current);
+        // decide may be async and read on this transaction (flash-sale price lock, review L4).
+        const plan = await decide(current, trx);
         if (plan.error) return plan;
         const trackedRemoved = variantsOf(current).filter(v => isTracked(v) && (plan.removed || []).includes(v.name)).map(v => v.name);
         const held = await reservedVariants(trx, productId, trackedRemoved);

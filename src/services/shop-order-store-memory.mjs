@@ -24,7 +24,10 @@
 
 import { countOrders } from '../shared/vendor-order-view.mjs';
 
-export function createMemoryShopOrderStore({ products, shopOrders, paymentRequests = null, now = () => new Date() }) {
+import { standingPrice } from '../shared/shop-pricing.mjs';
+
+// liveSaleOf(productId, at) → the approved flash sale live at `at` or null (lines with checkSale; see the pg store).
+export function createMemoryShopOrderStore({ products, shopOrders, paymentRequests = null, now = () => new Date(), liveSaleOf = async () => null }) {
   const nowIso = () => now().toISOString();
 
   const isSellable = (product) => Boolean(product && !product.deletedAt && product.status === 'active'
@@ -64,6 +67,11 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       if (variantProblem) return { error: variantProblem, status: variantProblem === 'variant_not_found' ? 404 : 409, productId: line.productId };
       if (Number(product.priceTzs || 0) !== line.priceTzs || Number(product.discountPriceTzs || 0) !== Number(line.discountPriceTzs || 0)) {
         return { error: 'price_changed', status: 409, productId: line.productId };
+      }
+      if (line.checkSale) {
+        const sale = await liveSaleOf(line.productId, now());
+        const applies = sale && product.homepageVisible !== false && Number(sale.salePriceTzs) > 0 && Number(sale.salePriceTzs) < standingPrice(line) ? sale.id : null;
+        if (applies !== (line.flashSaleId ?? null)) return { error: 'price_changed', status: 409, productId: line.productId };
       }
       current.push({ product, line });
     }
@@ -127,7 +135,8 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     if (!order) return { outcome: 'missing' };
     if (order.status === 'cancelled') return { outcome: 'cancelled', order };
     if (order.paymentStatus === 'paid') return { outcome: 'already_paid', order };
-    const updated = await shopOrders.updateByIdAsync(orderId, { ...patch, paymentStatus: 'paid', reservationExpiresAt: null, updatedAt: nowIso() });
+    const at = nowIso();
+    const updated = await shopOrders.updateByIdAsync(orderId, { ...patch, paymentStatus: 'paid', reservationExpiresAt: null, paidAt: at, updatedAt: at });
     return { outcome: 'paid', order: updated };
   }
 
@@ -153,7 +162,7 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     }
     const updated = await shopOrders.updateByIdAsync(orderId, {
       ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved',
-      reservationCycle: (order.reservationCycle || 1) + 1, reservationExpiresAt: null, updatedAt: nowIso(),
+      reservationCycle: (order.reservationCycle || 1) + 1, reservationExpiresAt: null, paidAt: nowIso(), updatedAt: nowIso(),
     });
     return { revived: true, order: updated };
   }

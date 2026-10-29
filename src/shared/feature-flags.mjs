@@ -143,6 +143,17 @@ export function shopNearYouOn() {
 }
 
 /**
+ * Shop home Phase 2 · slice 4: flash sales (docs/shop-flash-sales-api.md). PRICING PATH. Off unless
+ * SHOP_FLASH_SALES is set: every /vendor/flash-sales and /admin/flash-sales route answers 404
+ * feature_disabled before sign-in, and every price, product list, store, home and checkout answer is
+ * byte-identical to before (no sale fields, no flash_sale section, items[].expectedPriceTzs ignored,
+ * no price lock). Approved sales stay stored and apply again when it is back on.
+ */
+export function shopFlashSalesOn() {
+  return on('SHOP_FLASH_SALES');
+}
+
+/**
  * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
  * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
  * carries no `manual` block and subscribe / upgrade take no reference, exactly
@@ -213,8 +224,8 @@ export function vendorToolsOptions() {
     purchases: vendorToolsFlag('VENDOR_PURCHASES'),
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
-    // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
-    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn() },
+    // umbrella (a shop feature, not a vendor tool).
+    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn(), flashSales: shopFlashSalesOn() },
   };
 }
 
@@ -239,6 +250,15 @@ export function vendorBuyerContactOn() {
  */
 export function heroImagesCmsOn() {
   return on('HERO_IMAGES_CMS');
+}
+
+/**
+ * Partner hero photo and logo (plan partner-hero-media-plan.md slice 1). Off unless PARTNER_MEDIA is
+ * set: every /partner/media* and /admin/partner-media* route (file serving included) answers 404
+ * feature_disabled before sign-in is checked.
+ */
+export function partnerMediaOn() {
+  return on('PARTNER_MEDIA');
 }
 
 /**
@@ -282,6 +302,14 @@ export function vendorDocumentsOn() {
 }
 
 /**
+ * S6: vendor reports and their CSV / PDF exports (/vendor/reports/*). Off → every /vendor/reports route
+ * answers 404 feature_disabled. GET /vendor/tools/options says reports: false.
+ */
+export function vendorReportsOn() {
+  return vendorToolsFlag('VENDOR_REPORTS');
+}
+
+/**
  * S5: VAT — the vendor tax profile and its KYC review, product VAT codes, admin tax rates (maker ≠
  * checker) and VAT worked out on walk-in sales and on the vendor's part of paid app orders. Off →
  * those endpoints answer 404 feature_disabled and no sale or order gets VAT. Marketplace prices,
@@ -309,6 +337,32 @@ export function vendorDocumentsTinWithoutVatOn() {
  */
 export function partnerProgressOn() {
   return on('PARTNER_PROGRESS');
+}
+
+/**
+ * Phase B · B3a: gym staff whose PIN an owner chose must change it before
+ * anything else (owner decisions 2026-10-20). Off unless
+ * STAFF_PIN_CHANGE_REQUIRED is set: a gym_staff row's passwordChangeRequired
+ * is then ignored (no `pwc` on its sessions, no 403 password_change_required),
+ * POST /auth/pin/change and POST /owner/staff/:id/pin answer 404
+ * feature_disabled, and staff responses are unchanged. Portal admins (#219)
+ * are held regardless of this flag. See src/shared/credential-change.mjs.
+ */
+export function staffPinChangeRequiredOn() {
+  return on('STAFF_PIN_CHANGE_REQUIRED');
+}
+
+/**
+ * A gym shared by several owners has ONE named payout owner (owner decision
+ * 2026-10-22; Gym.payoutOwnerId). Off unless GYM_PAYOUT_OWNER is set: payout
+ * eligibility, settlement payout gating and invoice payouts keep using the
+ * first owner account found for the gym, as before. On: the named payout
+ * owner; a gym with exactly one owner uses that owner without any admin step;
+ * a gym with two or more owners and none named is not payable
+ * (payout_owner_required). See src/services/gym-payout-owner.mjs.
+ */
+export function gymPayoutOwnerOn() {
+  return on('GYM_PAYOUT_OWNER');
 }
 
 // ── Default-ON switches ──────────────────────────────────────────────────────
@@ -349,6 +403,24 @@ export function vendorStatementDraftsOn() {
  */
 export function eventsModuleOn() {
   return on('EVENTS_MODULE');
+}
+
+/**
+ * Phase B · B5a: company sponsors move from the legacy HR area (/hr) to the
+ * organisation area (/org). Off unless ORG_ONLY_SPONSORS is set; off, nothing
+ * changes. On:
+ *  - a company HR login's session (POST /auth/login, Firebase, PIN, switch)
+ *    carries organizationUser / organizationRoles / organizationIds, so the
+ *    portal opens /org for it;
+ *  - people of a company's organisation are added, changed, linked and
+ *    imported through /b2b/organizations/:id/beneficiaries..., which write
+ *    through the company staff list (no managed_by_corporate dead end);
+ *  - a company HR login only ever reaches its own company's organisation;
+ *  - new HR logins are also made organisation users (role hr).
+ * The conversion of existing HR logins is scripts/hr-to-org.mjs.
+ */
+export function orgOnlySponsorsOn() {
+  return on('ORG_ONLY_SPONSORS');
 }
 
 /** S2: saving events and the Saved filter (GET /events/options.favourites). Needs EVENTS_MODULE too. */
@@ -428,6 +500,20 @@ export function requireEventsPaymentIntake(req, res, next) {
 }
 
 /**
+ * S5 (docs/design/events-s5-venue-api-and-webhooks.md §11.1): three dormant flags, each on only together with
+ * EVENTS_MODULE and EVENTS_REGISTRATION. KIT_OPS: ticket verification, kit handover, bibs, lookup, export and the
+ * live ticket wording. ORGANIZER_API: API clients and /v1/organizer. WEBHOOKS: endpoints, deliveries and the
+ * dispatcher jobs (which additionally need EVENTS_WEBHOOK_SECRET_KEY; see webhook-signing.mjs).
+ */
+export const eventsKitOpsOn = () => eventsRegistrationOn() && on('EVENTS_KIT_OPS');
+export const eventsOrganizerApiOn = () => eventsRegistrationOn() && on('EVENTS_ORGANIZER_API');
+export const eventsWebhooksOn = () => eventsRegistrationOn() && on('EVENTS_WEBHOOKS');
+const gate = test => (_req, res, next) => (test() ? next() : res.status(404).json({ error: 'feature_disabled' }));
+export const requireEventsKitOps = gate(eventsKitOpsOn);
+export const requireEventsOrganizerApi = gate(eventsOrganizerApiOn);
+export const requireEventsWebhooks = gate(eventsWebhooksOn);
+
+/**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
  * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and
  * /admin/gym-owners/:id/personal-details answer 404 feature_disabled, and /trainer/register and
@@ -437,4 +523,47 @@ export function requireEventsPaymentIntake(req, res, next) {
  */
 export function partnerDobRequiredOn() {
   return on('PARTNER_DOB_REQUIRED');
+}
+
+/**
+ * Admin-portal audit M3. Off unless SELCOM_STRICT_AMOUNT is set. On: a Selcom
+ * "success" callback activates a waiting subscription only when it carries an
+ * `amount` AND an open payment request exists AND the amount equals the request's.
+ * Otherwise it is refused (409 amount_required / no_open_request / amount_mismatch)
+ * before the payment_id is claimed, so a corrected redelivery still works.
+ * Off: the old rule (amount compared only when both sides are present).
+ */
+export function selcomStrictAmountOn() {
+  return on('SELCOM_STRICT_AMOUNT');
+}
+
+/**
+ * Admin-portal audit S4. Off unless ADMIN_EMAILS_STRICT is set. On, in production
+ * with FITFLEX_ADMIN_EMAILS unset or blank: no email is trusted as a configured
+ * super-admin (the built-in fallback address is not used). Off: the fallback
+ * stays in use and a one-time warning is logged. Set FITFLEX_ADMIN_EMAILS before
+ * switching this on, or nobody signs in as an env super-admin. Note: with strict on and the
+ * variable unset, isConfiguredAdminEmail() is false for everyone, so the `env_admin_immutable`
+ * protection (env super-admins cannot be edited or deleted in the portal) also stops applying.
+ * A variable that is set but blank trusts nobody whether or not this flag is on.
+ */
+export function adminEmailsStrictOn(env = process.env) {
+  return TRUE_VALUES.has(String(env.ADMIN_EMAILS_STRICT ?? '').trim().toLowerCase());
+}
+
+/**
+ * Browser gym profile: the open, read-only gym page behind the printed gym QR (POST /public/gyms/resolve).
+ * Off unless WEB_GYM_PROFILE is set: the route answers 404 not_found, as if it did not exist.
+ */
+export function webGymProfileOn() {
+  return on('WEB_GYM_PROFILE');
+}
+
+/**
+ * Browser gym QR check-in (S2): the intent / preview / confirm routes and the short-lived web check-in session.
+ * Off unless WEB_QR_CHECKIN is set: every one of those routes answers 404 not_found, as if it did not exist.
+ * Also needs QR_HMAC_SECRET (without it the routes stay 404).
+ */
+export function webQrCheckinOn() {
+  return on('WEB_QR_CHECKIN');
 }
