@@ -459,8 +459,10 @@ test('delivery re-checks staff: no longer the vendor\'s admin → skipped', asyn
 // members (PUT /me/communication-preferences → CommunicationPreference, keyed
 // by the signed-in user's id), and the same per-channel rules decide who gets
 // a marketing message: in-app and push offers on unless switched off, SMS and
-// WhatsApp offers only once opted in, and an SMS/WhatsApp STOP blocks all.
-test('marketing to vendors honours each vendor\'s own opt-out per channel; service messages unchanged', async () => {
+// WhatsApp offers only once opted in, and the SMS/WhatsApp opt-out flag
+// (smsOptedOutAt / whatsappOptedOutAt) blocks all. Nothing handles an inbound
+// SMS STOP yet: the spec sets the SMS flag directly, it does not test STOP.
+test('marketing to vendors honours each vendor\'s own opt-out per channel (SMS opt-out flag set directly); service messages unchanged', async () => {
   const CAT2 = uid('vndcat2');
   const mine = { all: [{ field: 'vendorCategory', op: 'eq', value: CAT2 }] };
   const smsProvider = createFakeSmsProvider();
@@ -496,7 +498,7 @@ test('marketing to vendors honours each vendor\'s own opt-out per channel; servi
   v.noInApp = await mk('Neema NoInApp');
   v.noPush = await mk('Nuru NoPush');
   v.noSms = await mk('Nasra NoSms');
-  v.stopSms = await mk('Saidi StopSms');
+  v.smsFlag = await mk('Saidi SmsOptOutFlag');
   v.noWa = await mk('Nadia NoWhatsApp');
   v.defaults = await mk('Dalila Defaults'); // never opened message settings
 
@@ -512,8 +514,9 @@ test('marketing to vendors honours each vendor\'s own opt-out per channel; servi
   await put(v.noInApp, 'vendor', { ...both, inAppMarketing: false });
   await put(v.noPush, 'vendor', { ...both, pushMarketing: false });
   await put(v.noSms, 'vendor', { whatsappMarketing: true });
-  await put(v.stopSms, 'vendor', both);
-  await db('CommunicationPreference').where({ id: v.stopSms }).update({ smsOptedOutAt: new Date() }); // replied STOP
+  await put(v.smsFlag, 'vendor', both);
+  // The SMS opt-out flag set directly: no code sets it today (no inbound STOP handler).
+  await db('CommunicationPreference').where({ id: v.smsFlag }).update({ smsOptedOutAt: new Date() });
   await put(v.noWa, 'vendor', { smsMarketing: true });
   const got = await invoke(meRoutes.myCommunicationPreferences, { sub: v.noPush, userType: 'vendor' });
   assert.equal(got.statusCode, 200);
@@ -529,7 +532,7 @@ test('marketing to vendors honours each vendor\'s own opt-out per channel; servi
     [v.noInApp]: { in_app: 'in_app_marketing_off', push: null, whatsapp: null, sms: null },
     [v.noPush]: { in_app: null, push: 'push_marketing_off', whatsapp: null, sms: null },
     [v.noSms]: { in_app: null, push: null, whatsapp: null, sms: 'sms_marketing_not_opted_in' },
-    [v.stopSms]: { in_app: null, push: null, whatsapp: null, sms: 'sms_opted_out' },
+    [v.smsFlag]: { in_app: null, push: null, whatsapp: null, sms: 'sms_opted_out' },
     [v.noWa]: { in_app: null, push: null, whatsapp: 'whatsapp_marketing_not_opted_in', sms: null },
     [v.defaults]: { in_app: null, push: null, whatsapp: 'whatsapp_marketing_not_opted_in', sms: 'sms_marketing_not_opted_in' },
   };
@@ -542,7 +545,7 @@ test('marketing to vendors honours each vendor\'s own opt-out per channel; servi
   assert.deepEqual(promoPv.channels.sms, { eligible: 5, excluded: { sms_marketing_not_opted_in: 2, sms_opted_out: 1 } });
   assert.deepEqual(promoPv.channels.whatsapp, { eligible: 6, excluded: { whatsapp_marketing_not_opted_in: 2 } });
 
-  // Service messages are unchanged: offers switched off don't stop them; an SMS STOP still does.
+  // Service messages are unchanged: offers switched off don't stop them; the SMS opt-out flag still does.
   const annPv = await segAll.previewAudience({ sender: w.FF, recipients: 'vendors', filter: mine, purpose: 'announcement' });
   assert.equal(annPv.category, 'transactional');
   assert.deepEqual(annPv.channels.in_app, { eligible: 8, excluded: {} });
@@ -593,7 +596,7 @@ test('marketing to vendors honours each vendor\'s own opt-out per channel; servi
   assert.equal(await inboxHas(v.noPush), true);
   assert.equal(pushedTo(v.inAdmin), false, "staff's own push opt-out, not the vendor account's");
   assert.equal(textedTo(v.inAdmin), true);
-  for (const id of [v.noSms, v.stopSms, v.defaults]) assert.equal(textedTo(id), false, id);
+  for (const id of [v.noSms, v.smsFlag, v.defaults]) assert.equal(textedTo(id), false, id);
   assert.equal(textedTo(v.noWa), true);
 
   // Opting out after the message was queued is honoured at delivery (SMS checks again just before sending).
@@ -607,6 +610,21 @@ test('marketing to vendors honours each vendor\'s own opt-out per channel; servi
   assert.equal(textedTo(v.in), false);
   assert.equal(rows[`${v.noWa}:sms`].status, 'sent', 'another opted-in vendor still gets it');
 
+  // In-app and push offers switched off after an immediate send was queued: not delivered (review of #274).
+  const appId = await sendPromo(['in_app', 'push']);
+  rows = await rowsOf(appId);
+  assert.equal(rows[`${v.noSms}:in_app`].status, 'queued');
+  await put(v.noSms, 'vendor', { inAppMarketing: false, pushMarketing: false });
+  fcm.sent.length = 0;
+  await deliveryAll.runOnce();
+  rows = await rowsOf(appId);
+  assert.deepEqual([rows[`${v.noSms}:in_app`].status, rows[`${v.noSms}:in_app`].skipReason], ['skipped', 'in_app_marketing_off']);
+  assert.deepEqual([rows[`${v.noSms}:push`].status, rows[`${v.noSms}:push`].skipReason], ['skipped', 'push_marketing_off']);
+  assert.equal((await notificationService.inbox({ userId: v.noSms })).notifications.find(n => n.campaignId === appId), undefined);
+  assert.ok(!fcm.sent.some(s => s.data?.campaignId === appId && s.tokens.includes(tokens.get(v.noSms))));
+  assert.equal(rows[`${v.noWa}:in_app`].status, 'delivered', 'another vendor still gets it');
+  assert.equal(rows[`${v.noWa}:push`].status, 'sent');
+
   // A service SMS still reaches the vendor who switched SMS offers off.
   const { campaign: svc } = await campaignsAll.create(w.FF, {
     purpose: 'announcement', audience: { recipients: 'vendors', filter: mine },
@@ -617,5 +635,5 @@ test('marketing to vendors honours each vendor\'s own opt-out per channel; servi
   await deliveryAll.runOnce();
   rows = await rowsOf(svc.id);
   assert.equal(rows[`${v.in}:sms`].status, 'sent');
-  assert.equal(rows[`${v.stopSms}:sms`].skipReason, 'sms_opted_out', 'STOP still blocks service SMS');
+  assert.equal(rows[`${v.smsFlag}:sms`].skipReason, 'sms_opted_out', 'the SMS opt-out flag still blocks service SMS');
 });
