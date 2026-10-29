@@ -23,6 +23,8 @@ async function pdfkit() {
   if (typeof PDFDocument !== 'function') { PDFDocument = null; throw Object.assign(new Error('pdf_unavailable'), { code: 'pdf_unavailable' }); }
   return PDFDocument;
 }
+/** The pdfkit class, loaded lazily (shared with the S6 report PDF); throws code pdf_unavailable. */
+export const pdfkitClass = () => pdfkit();
 import { label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf } from './vendor-documents.mjs';
 
 const MM = 72 / 25.4;

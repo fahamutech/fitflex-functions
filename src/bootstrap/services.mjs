@@ -132,6 +132,9 @@ import { createCompanyDirectory } from '../services/company-directory.mjs';
 import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createVendorSettlementService } from '../services/vendor-settlement-service.mjs';
+import { createVendorReportService } from '../services/vendor-report-service.mjs';
+import { createPgVendorReportStore } from '../infra/vendor-report-store-pg.mjs';
+import { vendorStockLedgerOn, vendorWalkInSalesOn, vendorCustomersOn } from '../shared/feature-flags.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createModerationGate } from '../services/moderation-gate.mjs';
 import { createEntityResolver } from '../services/promotion-entities.mjs';
@@ -381,6 +384,17 @@ export const vendorDocumentService = createVendorDocumentService({
   renderHtml: renderDocumentHtml,
   renderManyHtml: renderDocumentsHtml,
   renderPdf: renderDocumentPdf,
+});
+// Vendor tools · S6: reports and their CSV / PDF exports — read only (dormant behind VENDOR_TOOLS +
+// VENDOR_REPORTS; the routes check the flag). Never writes orders, sales, statements or money.
+export const vendorReportService = createVendorReportService({
+  store: createPgVendorReportStore({ db }), users, auditLog,
+  // "Owed to you" / "Overdue" / aging come from S4 so the two screens always agree.
+  owedTotals: async (vendorId) => {
+    const out = await vendorCustomerService.aging({ vendorId, query: { limit: 1 } });
+    return out.error ? null : out.totals;
+  },
+  flags: { stockLedger: vendorStockLedgerOn, walkInSales: vendorWalkInSalesOn, customers: vendorCustomersOn },
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const productStatsRecomputeService = createProductStatsRecomputeService({ db });

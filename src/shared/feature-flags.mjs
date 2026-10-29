@@ -282,6 +282,14 @@ export function vendorDocumentsOn() {
 }
 
 /**
+ * S6: vendor reports and their CSV / PDF exports (/vendor/reports/*). Off → every /vendor/reports route
+ * answers 404 feature_disabled. GET /vendor/tools/options says reports: false.
+ */
+export function vendorReportsOn() {
+  return vendorToolsFlag('VENDOR_REPORTS');
+}
+
+/**
  * S5: VAT — the vendor tax profile and its KYC review, product VAT codes, admin tax rates (maker ≠
  * checker) and VAT worked out on walk-in sales and on the vendor's part of paid app orders. Off →
  * those endpoints answer 404 feature_disabled and no sale or order gets VAT. Marketplace prices,
