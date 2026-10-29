@@ -1,7 +1,7 @@
 // Member-facing subscription (Platform Pass) service — catalogue, subscribe,
 // self profile, check-in history, payment history.
 import { randomUUID } from 'node:crypto';
-import { CHECKIN_STATUS } from '../shared/checkin-status.mjs';
+import { CHECKIN_STATUS, publicCheckin } from '../shared/checkin-status.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
 import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
 import { trainerPassOptions, trainerGymAccess, hideTrainerPass } from '../shared/trainer-access.mjs';
@@ -528,7 +528,7 @@ export function createSubscriptionService({
   // newest first, capped at CHECKIN_RANGE_MAX_ROWS as a guard. A missing `to`
   // is now; a missing `from` is `to` minus 90 days; the window is at most 366 days.
   async function memberCheckIns(memberId, { from, to } = {}) {
-    const withGym = c => ({ ...c, gym: hideTrainerPass(publicGym(gyms.find(g => g.id === c.gymId) || null)) });
+    const withGym = c => ({ ...publicCheckin(c), gym: hideTrainerPass(publicGym(gyms.find(g => g.id === c.gymId) || null)) });
     const newestFirst = (a, b) => +new Date(b.timestamp) - +new Date(a.timestamp);
     const given = v => v !== undefined && v !== null && v !== '';
     if (!given(from) && !given(to)) {

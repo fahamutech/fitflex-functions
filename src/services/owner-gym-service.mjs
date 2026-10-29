@@ -1,5 +1,6 @@
 // Owner/operator gym management service — self-registration, gym CRUD scoped
 // to the owner's own gym(s), invoices/earnings, trainer↔gym linking.
+import { publicCheckin } from '../shared/checkin-status.mjs';
 import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
@@ -147,7 +148,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const ids = ownerGymIdsOf(owner);
     if (!ids.includes(gymId)) return { error: 'not_your_gym', status: 403 };
     const allGymCheckins = await checkins.filterAsync(c => c.gymId === gymId);
-    return { list: allGymCheckins.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp)).slice(0, 100).map(c => ({ ...c })) };
+    return { list: allGymCheckins.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp)).slice(0, 100).map(c => ({ ...publicCheckin(c) })) };
   }
 
   async function updateGym({ owner, gymId, body }) {
