@@ -139,6 +139,9 @@ import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createShopBannerService } from '../services/shop-banner-service.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
+import { createPartnerMediaService } from '../services/partner-media-service.mjs';
+import { createPgPartnerMediaStore } from '../infra/partner-media-store-pg.mjs';
+import { orgAuthzMode } from '../shared/feature-flags.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
 import { createShopHomeService } from '../services/shop-home-service.mjs';
 import { createShopPreferenceService } from '../services/shop-preference-service.mjs';
@@ -1142,6 +1145,14 @@ export const shopBannerService = createShopBannerService({
   publicStore: createZebraPublicStore(),
   partnerGate, moderationGate,
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
+// Partner hero photo and logo (PARTNER_MEDIA; plan partner-hero-media-plan.md): bytes in Postgres,
+// live at once, FitFlex reviews afterwards; takedowns tell the partner (inbox + push).
+export const partnerMediaService = createPartnerMediaService({
+  store: createPgPartnerMediaStore({ db }),
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  orgAuthzMode,
 });
 // "Personalised shop" switch (SHOP_PERSONALISATION, Phase 2 slice 2): one row per Person, no row = on.
 export const shopPreferenceService = createShopPreferenceService({
