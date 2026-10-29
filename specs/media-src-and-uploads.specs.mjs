@@ -4,7 +4,7 @@
 //    own /storage/<cid>/<file> path. Any other host or scheme → 400 invalid_media_src. A value already
 //    stored in the same field of the record is accepted unchanged. Sign-in provider photos are kept
 //    only from an allowed host. Gallery caps and a per-person decode rate limit.
-// 2. /storage/upload: only staff, partners, organizers, company HR or an active billing seat;
+// 2. /storage/upload: only staff, partners, organizers, company HR or an active billing seat (active or pending org);
 //    byte-level format check (no SVG); per-person rate limit first; one audit row per upload, and
 //    per refusal (never the file).
 // Service tests use the CI database; route tests mount every function file the way bfast does,
@@ -574,10 +574,40 @@ test('/storage/upload: a non-billing seat, a suspended seat or a seat in an inac
   const suspendedSeat = await user('member');
   await seat(suspendedSeat, activeOrg, 'finance', { status: 'suspended' });
   assert.equal((await proof({ sub: suspendedSeat, userType: 'member' })).status, 403, 'suspended seat');
+  for (const status of ['suspended', 'inactive']) {
+    const closedOrg = await org(status);
+    for (const role of ['owner', 'finance']) {
+      const member = await user('member');
+      await seat(member, closedOrg, role);
+      assert.equal((await proof({ sub: member, userType: 'member' })).status, 403, `${status} organisation, ${role}`);
+    }
+    const grantedClosed = await user('member');
+    await seat(grantedClosed, closedOrg, 'viewer', { permissions: ['billing.pay'] });
+    assert.equal((await proof({ sub: grantedClosed, userType: 'member' })).status, 403, `${status} organisation, billing.pay grant`);
+  }
+});
+
+test('/storage/upload: a billing seat in a PENDING organisation may upload proof of payment (owner decision 2026-10-29); non-billing or inactive seats there may not', async () => {
   const pendingOrg = await org('pending');
-  const pending = await user('member');
-  await seat(pending, pendingOrg, 'finance');
-  assert.equal((await proof({ sub: pending, userType: 'member' })).status, 403, 'pending organisation');
+  for (const role of ['owner', 'admin', 'finance', 'hr']) {
+    const member = await user('member');
+    await seat(member, pendingOrg, role);
+    assert.equal((await proof({ sub: member, userType: 'member' })).status, 200, `pending organisation, ${role}`);
+  }
+  const granted = await user('member');
+  await seat(granted, pendingOrg, 'viewer', { permissions: ['billing.pay'] });
+  assert.equal((await proof({ sub: granted, userType: 'member' })).status, 200, 'pending organisation, billing.pay grant');
+  for (const role of ['viewer', 'analyst', 'manager']) {
+    const member = await user('member');
+    await seat(member, pendingOrg, role);
+    assert.equal((await proof({ sub: member, userType: 'member' })).status, 403, `pending organisation, ${role}`);
+  }
+  const suspendedSeat = await user('member');
+  await seat(suspendedSeat, pendingOrg, 'finance', { status: 'suspended' });
+  assert.equal((await proof({ sub: suspendedSeat, userType: 'member' })).status, 403, 'pending organisation, suspended seat');
+  const removed = await user('member');
+  await seat(removed, pendingOrg, 'owner', { status: 'removed', removedAt: new Date() });
+  assert.equal((await proof({ sub: removed, userType: 'member' })).status, 403, 'pending organisation, removed seat');
 });
 
 test('/storage/upload: refusals are audited without the file; storage failures never echo upstream detail', async () => {
