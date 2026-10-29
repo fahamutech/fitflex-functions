@@ -5,7 +5,7 @@
 import { pdfkitClass } from './vendor-document-pdf.mjs';
 import { formatTsh } from './money-display.mjs';
 import { formatDateTime, formatDay } from './vendor-documents.mjs';
-import { reportLabel, periodInWords, methodName, coverText, bucketsOf, REPORT_LIMITS, statementLabel } from './vendor-reports.mjs';
+import { asOfText, reportLabel, periodInWords, methodName, coverText, bucketsOf, REPORT_LIMITS, statementLabel } from './vendor-reports.mjs';
 
 const MM = 72 / 25.4;
 const GREEN = '#1F7A3A';
@@ -114,7 +114,7 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
 
   if (stock) {
     h2(L('stockValue'));
-    note(L('asOf', { time: formatDateTime(stock.asOf, lang) }));
+    note(asOfText(lang, stock.asOf, new Date(summary.generatedAt)));
     pairs([[L('atRetail'), money(stock.totals.atRetailTzs)], ...(stock.totals.atCostTzs != null ? [[L('atCost'), money(stock.totals.atCostTzs)]] : []), [L('units'), String(stock.totals.units)], [L('products'), String(stock.totals.products)]]);
     if (stock.costUnknown?.count) note(L('costUnknown', { n: stock.costUnknown.count }));
   }

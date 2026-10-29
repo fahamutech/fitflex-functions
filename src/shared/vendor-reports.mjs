@@ -12,7 +12,7 @@
 //   the caller may see; a range that includes today is never cached (Q-10).
 // - No previous-period comparison (Q-17); stock value is "as of now" (Q-12).
 // Every Swahili string here is a DRAFT for native review.
-import { slug } from './vendor-documents.mjs';
+import { slug, swahiliTime, formatDay } from './vendor-documents.mjs';
 
 export const REPORT_LIMITS = Object.freeze({ maxDays: 366, maxBuckets: 120, maxCsvRows: 50_000, cacheTtlMs: 10 * 60_000, cacheMaxEntries: 500, cacheMaxBytes: 16 * 1024 * 1024, pdfBucketRows: 31 });
 export const REPORT_TIMEZONE = 'Africa/Dar_es_Salaam';
@@ -164,7 +164,7 @@ export const REPORT_LABELS = {
     revenue: 'Net revenue', lastSold: 'Last sold', inStock: 'In stock', cover: 'Days of cover', coverStatus: 'Cover',
     cover_ok: '{n} days', cover_soon: 'Reorder soon', cover_none: 'No sales in 30 days', cover_out: 'Out of stock', cover_untracked: '—', coverUnderOne: 'Less than 1 day',
     noSalesPeriod: 'No sales in this period', topProducts: 'Top products', slowSellers: 'Slow sellers', never: 'Never',
-    stockValue: 'Stock value', asOf: 'As of {time} today. The period you picked does not apply.', sellingPrice: 'Selling price',
+    stockValue: 'Stock value', asOf: 'As of {time} today. The period you picked does not apply.', asOfDate: 'As of {date}', sellingPrice: 'Selling price',
     atRetail: 'Value at selling price', atCost: 'Value at cost', costPrice: 'Cost price', unknown: 'Unknown', units: 'Units in stock', products: 'Products',
     costUnknown: '{n} products in stock have no cost price, so they are not in the cost value.',
     profit: 'Profit', netExVat: 'Net sales without VAT', commission: 'Commission', cogs: 'Cost of goods', margin: 'Margin', uncostedSales: 'Uncosted sales',
@@ -178,7 +178,7 @@ export const REPORT_LABELS = {
     methods: 'Payment methods', group: 'Group', method: 'Method', amount: 'Amount', count: 'Count', share: 'Share',
     byYou: 'Collected by you', viaFitFlex: 'Paid through FitFlex', netOfChange: 'Cash after change',
     figure: 'Figure', value: 'Value', none: 'None',
-    method_: { cash: 'Cash', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Card', bank: 'Bank', other: 'Other', unknown: 'Other' },
+    method_: { cash: 'Cash', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Card', bank: 'Bank transfer', other: 'Other', unknown: 'Other' },
     months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
   },
   sw: {
@@ -186,27 +186,27 @@ export const REPORT_LABELS = {
     footer: 'Takwimu ni kutoka kumbukumbu za FitFlex; si hati ya kodi.', pageOf: 'Ukurasa {n} kati ya {m}',
     allSales: 'Mauzo yote', appOnly: 'Mauzo ya app', shopOnly: 'Mauzo ya dukani', soFar: '(hadi sasa)',
     periodStart: 'Mwanzo wa kipindi', periodEnd: 'Mwisho wa kipindi', weekStart: 'Mwanzo wa wiki', weekEnd: 'Mwisho wa wiki',
-    appNet: 'Halisi ya app', shopNet: 'Halisi ya dukani', gross: 'Mauzo ya jumla', discounts: 'Punguzo', refunds: 'Marejesho', net: 'Mauzo halisi',
+    appNet: 'Mauzo ya app baada ya makato', shopNet: 'Mauzo ya dukani baada ya makato', gross: 'Mauzo ya jumla', discounts: 'Punguzo', refunds: 'Marejesho', net: 'Mauzo baada ya makato',
     vatIncluded: 'VAT iliyomo', salesCount: 'Idadi ya mauzo', itemsSold: 'Bidhaa zilizouzwa', voided: 'Yamebatilishwa (hayahesabiwi): mauzo {n} · {amount}',
-    product: 'Bidhaa', variant: 'Aina', removed: '(imeondolewa)', unitsSold: 'Idadi iliyouzwa', appUnits: 'Idadi ya app', shopUnits: 'Idadi ya dukani',
+    product: 'Bidhaa', variant: 'Chaguo', removed: '(imeondolewa)', unitsSold: 'Idadi iliyouzwa', appUnits: 'Idadi ya app', shopUnits: 'Idadi ya dukani',
     revenue: 'Mapato halisi', lastSold: 'Iliuzwa mwisho', inStock: 'Stock iliyopo', cover: 'Siku Stock itakazotosha', coverStatus: 'Hali ya Stock',
     cover_ok: 'Siku {n}', cover_soon: 'Agiza tena karibuni', cover_none: 'Hakuna mauzo siku 30', cover_out: 'Imeisha', cover_untracked: '—', coverUnderOne: 'Chini ya siku 1',
-    noSalesPeriod: 'Hakuna mauzo kipindi hiki', topProducts: 'Zinazouzika zaidi', slowSellers: 'Zinazouzika polepole', never: 'Haijawahi',
-    stockValue: 'Thamani ya Stock', asOf: 'Kufikia {time} leo. Kipindi ulichochagua hakitumiki hapa.', sellingPrice: 'Bei ya kuuza',
+    noSalesPeriod: 'Hakuna mauzo kipindi hiki', topProducts: 'Bidhaa zinazouzika zaidi', slowSellers: 'Zinazouzika polepole', never: 'Haijawahi',
+    stockValue: 'Thamani ya Stock', asOf: 'Kufikia {time} leo. Kipindi ulichochagua hakitumiki hapa.', asOfDate: 'Kufikia {date}', sellingPrice: 'Bei ya kuuza',
     atRetail: 'Thamani kwa bei ya kuuza', atCost: 'Thamani kwa bei ya kununua', costPrice: 'Bei ya kununua', unknown: 'Haijulikani', units: 'Idadi ya Stock', products: 'Bidhaa',
     costUnknown: 'Bidhaa {n} zilizopo kwenye Stock hazina bei ya kununua, kwa hiyo hazimo kwenye thamani kwa bei ya kununua.',
-    profit: 'Faida', netExVat: 'Mauzo halisi bila VAT', commission: 'Kamisheni', cogs: 'Gharama ya bidhaa', margin: 'Asilimia ya faida', uncostedSales: 'Mauzo bila bei ya kununua',
+    profit: 'Faida', netExVat: 'Mauzo baada ya makato bila VAT', commission: 'Kamisheni', cogs: 'Gharama ya bidhaa', margin: 'Asilimia ya faida', uncostedSales: 'Mauzo bila bei ya kununua',
     uncosted: 'Zimeuzwa bila bei ya kununua: bidhaa {n} · {amount}. Hazimo kwenye faida.', profitNoVat: 'Faida imehesabiwa bila VAT.',
     payouts: 'Mauzo ya app baada ya kamisheni', payoutsBasis: 'Oda za app pekee. Zimehesabiwa kwa tarehe ya delivery, sawa na taarifa zako za malipo.',
     orders: 'Oda', appSales: 'Mauzo ya app', youReceive: 'Unapokea', statement: 'Taarifa ya malipo',
-    notDelivered: 'Zimelipiwa, bado delivery', waiting: 'Zimefikishwa, zinasubiri malipo', paidOut: 'Yamelipwa', noStatement: 'Bado haiko kwenye taarifa', awaiting: 'Yanasubiri malipo',
+    notDelivered: 'Zimelipiwa, bado delivery', waiting: 'Delivery imekamilika, inasubiri malipo', paidOut: 'Imelipwa', noStatement: 'Bado haiko kwenye taarifa', awaiting: 'Inasubiri malipo',
     customers: 'Wateja na madeni', owed: 'Unachodai', overdue: 'Yaliyochelewa', agingCurrent: 'Bado muda haujafika', aging1: 'Siku 1–30 za kuchelewa', aging31: 'Siku 31–60 za kuchelewa',
     aging61: 'Siku 61–90 za kuchelewa', aging90: 'Zaidi ya siku 90 za kuchelewa', creditSalesCount: 'Mauzo ya mkopo', creditSales: 'Mauzo ya mkopo', collected: 'Yaliyokusanywa kutoka kwa wateja',
     buyersShop: 'Wateja walionunua (dukani)', buyersApp: 'Wateja walionunua (app)',
     methods: 'Njia za malipo', group: 'Kundi', method: 'Njia', amount: 'Kiasi', count: 'Idadi', share: 'Sehemu',
     byYou: 'Uliyopokea wewe', viaFitFlex: 'Yaliyolipwa kupitia FitFlex', netOfChange: 'Taslimu baada ya chenji',
     figure: 'Kipimo', value: 'Thamani', none: 'Hakuna',
-    method_: { cash: 'Taslimu', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Kadi', bank: 'Benki', other: 'Nyingine', unknown: 'Nyingine' },
+    method_: { cash: 'Taslimu', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Kadi', bank: 'Uhamisho wa benki', other: 'Nyingine', unknown: 'Nyingine' },
     months: ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'],
   },
 };
@@ -225,6 +225,22 @@ export function periodInWords(from, to, lang = 'en') {
   if (fy === ty && fm === tm) return `${fd}–${td} ${months[fm - 1]} ${fy}`;
   if (fy === ty) return `${fd} ${months[fm - 1]} – ${td} ${months[tm - 1]} ${ty}`;
   return `${fd} ${months[fm - 1]} ${fy} – ${td} ${months[tm - 1]} ${ty}`;
+}
+
+/** A time of day in EAT: English 24-hour "14:05"; Swahili 12-hour + day part "2:05 mchana" (glossary §5a). */
+export function eatTimeOfDay(instant, lang = 'en') {
+  const d = new Date(+new Date(instant) + EAT_MS);
+  const h = d.getUTCHours(), m = d.getUTCMinutes();
+  return lang === 'sw' ? swahiliTime(h, m) : `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+/**
+ * "As of …": the time only when `asOf` is today in EAT ("As of 14:05 today" / "Kufikia 2:05 mchana leo"),
+ * else the date ("As of 28 Oct 2026" / "Kufikia 28 Okt 2026").
+ */
+export function asOfText(lang, asOf, now = new Date()) {
+  return eatToday(new Date(asOf)) === eatToday(now)
+    ? reportLabel(lang, 'asOf', { time: eatTimeOfDay(asOf, lang) })
+    : reportLabel(lang, 'asOfDate', { date: formatDay(eatToday(new Date(asOf)), lang) });
 }
 
 /** File names (§10): ASCII, no customer names. */

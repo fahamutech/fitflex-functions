@@ -23,7 +23,7 @@ import { createVendorSettlementService } from '../src/services/vendor-settlement
 import { createPayoutEligibility } from '../src/services/payout-eligibility.mjs';
 import { priceOrderLine } from '../src/shared/marketplace-pricing.mjs';
 import { csvCell, csvDocument, CSV_BOM } from '../src/shared/csv-export.mjs';
-import { parseReportQuery, bucketsOf, cover, createReportCache, periodInWords, REPORT_LIMITS } from '../src/shared/vendor-reports.mjs';
+import { parseReportQuery, bucketsOf, cover, createReportCache, periodInWords, REPORT_LIMITS, asOfText, eatTimeOfDay, reportLabel, methodName, salesCsv, payoutsCsv, methodsCsv } from '../src/shared/vendor-reports.mjs';
 import { setPdfkitLoaderForTests } from '../src/shared/vendor-document-pdf.mjs';
 import { vendorToolsOptionsRoute } from '../functions/shop.mjs';
 import {
@@ -428,7 +428,7 @@ test('CSV exports: headers in English or Swahili with (TZS), raw integers, formu
   assert.equal(owner.fileName, 'dar-fitness-gear_products_2026-10-14_2026-10-15.csv');
   const plain = await r.toCsv('products', await r.report('products', { vendorId: V, access: PLAIN, query: { ...q, lang: 'sw' } }), PLAIN, V);
   const swHeader = plain.csv.slice(1).split('\r\n')[0];
-  assert.match(swHeader, /^Bidhaa,Aina,Idadi iliyouzwa,.*Mapato halisi \(TZS\)/);
+  assert.match(swHeader, /^Bidhaa,Chaguo,Idadi iliyouzwa,.*Mapato halisi \(TZS\)/);
   assert.ok(!/Faida|Profit/.test(swHeader), 'no profit column without canSeeCost');
   const sales = await r.toCsv('sales', await r.report('sales', { vendorId: V, access: OWNER, query: { from: '2026-10-14', to: '2026-10-15', format: 'csv' } }), OWNER, V);
   assert.deepEqual(sales.csv.slice(1).trimEnd().split('\r\n').slice(1), ['2026-10-14,2026-10-14,20000,84000,110000,6000,0,104000,0,2,3', '2026-10-15,2026-10-15,25000,105000,150000,0,20000,130000,13728,3,5']);
@@ -553,9 +553,12 @@ test('routes: CSV and PDF exports — headers, file names, one audit row each wi
   assert.equal(csv.status, 200);
   assert.equal(csv.headers['Content-Type'], 'text/csv; charset=utf-8');
   assert.equal(csv.headers['Content-Disposition'], 'attachment; filename="dar-fitness-gear_products_2026-10-14_2026-10-15.csv"');
+  assert.equal(csv.headers['Access-Control-Expose-Headers'], 'Content-Disposition', 'the portal can read the file name across origins');
   assert.ok(csv.body.startsWith(CSV_BOM) && csv.body.includes('Faida (TZS)'));
   const pdf = await call(vendorReportSummary, as(V), { query: { from: '2026-10-14', to: '2026-10-15', format: 'pdf' } });
   assert.equal(pdf.headers['Content-Type'], 'application/pdf');
+  assert.equal(pdf.headers['Access-Control-Expose-Headers'], 'Content-Disposition');
+  assert.match(pdf.headers['Content-Disposition'], /^attachment; filename="dar-fitness-gear_report_2026-10-14_2026-10-15\.pdf"$/);
   assert.ok(Buffer.isBuffer(pdf.body) && pdf.body.subarray(0, 5).toString() === '%PDF-');
   const text = pdfText(pdf.body);
   assert.match(text, /not a tax document/);
@@ -678,6 +681,8 @@ test('#275: per-vendor rate limits — report reads, and a tighter limit for CSV
   assert.equal(over.status, 429);
   assert.equal(over.body.error, 'rate_limited');
   assert.ok(over.headers['Retry-After']);
+  const json = await call(vendorReportSales, as(seed.W), { query: { from: '2026-10-14', to: '2026-10-15' } });
+  assert.equal(json.headers['Access-Control-Expose-Headers'], undefined, 'only file responses expose it');
   assert.equal((await call(vendorReportSales, as(V), { query: { from: '2026-10-14', to: '2026-10-15' } })).status, 200, 'JSON reads have their own, larger allowance');
   assert.equal((await call(vendorReportSales, as(seed.W), { query: q })).status, 200, 'per vendor');
   resetVendorReportLimits();
@@ -734,4 +739,33 @@ test('#275: a malformed timeline instant does not break the payout report (cast 
     const sales = (await r.report('sales', { vendorId: M, access: OWNER, query: { from: '2025-05-01', to: '2025-05-11' } })).data;
     assert.deepEqual([sales.totals.grossTzs, sales.totals.refundTzs], [20_000, 10_000]);
   } finally { clock = new Date('2026-10-15T21:30:00Z'); }
+});
+
+test('wording (2026-10-29): Swahili and English labels for CSV/PDF; "As of" shows the time only for today', () => {
+  const zero = { netTzs: 0, grossTzs: 0, discountTzs: 0, refundTzs: 0, vatIncludedTzs: 0, count: 0, itemsSold: 0 };
+  assert.deepEqual(salesCsv({ buckets: [] }, 'sw').header.slice(2, 8),
+    ['Mauzo ya app baada ya makato (TZS)', 'Mauzo ya dukani baada ya makato (TZS)', 'Mauzo ya jumla (TZS)', 'Punguzo (TZS)', 'Marejesho (TZS)', 'Mauzo baada ya makato (TZS)']);
+  assert.equal(salesCsv({ buckets: [{ start: 'a', end: 'a', app: zero, walkIn: zero }] }, 'en').header[7], 'Net sales (TZS)');
+  assert.equal(reportLabel('sw', 'variant'), 'Chaguo');
+  assert.equal(reportLabel('sw', 'topProducts'), 'Bidhaa zinazouzika zaidi');
+  assert.equal(reportLabel('sw', 'uncostedSales'), 'Mauzo bila bei ya kununua');
+  assert.deepEqual(['waiting', 'awaiting', 'paidOut', 'noStatement'].map(k => reportLabel('sw', k)),
+    ['Delivery imekamilika, inasubiri malipo', 'Inasubiri malipo', 'Imelipwa', 'Bado haiko kwenye taarifa']);
+  const weeks = [{ periodStartDate: '2026-10-05', periodEndDate: '2026-10-11', orderCount: 1, grossTzs: 1, commissionTzs: 0, payoutTzs: 1, statement: { id: 's', status: 'paid' } },
+    { periodStartDate: '2026-10-12', periodEndDate: '2026-10-18', orderCount: 1, grossTzs: 1, commissionTzs: 0, payoutTzs: 1, statement: { id: 't', status: 'submitted' } },
+    { periodStartDate: '2026-10-19', periodEndDate: '2026-10-25', orderCount: 1, grossTzs: 1, commissionTzs: 0, payoutTzs: 1, statement: null }];
+  assert.deepEqual(payoutsCsv({ weeks }, 'sw').rows.map(r => r[6]), ['Imelipwa', 'Inasubiri malipo', 'Bado haiko kwenye taarifa']);
+  assert.deepEqual([methodName('en', 'bank'), methodName('sw', 'bank')], ['Bank transfer', 'Uhamisho wa benki']);
+  assert.equal(methodsCsv({ byYou: [{ method: 'bank', amountTzs: 5, count: 1, sharePct: 100 }], viaFitFlex: [] }, 'sw').rows[0][1], 'Uhamisho wa benki');
+  // Times: English 24-hour, Swahili 12-hour + part of the day.
+  const at = new Date('2026-10-29T11:05:00Z'); // 14:05 EAT
+  assert.deepEqual([eatTimeOfDay(at, 'en'), eatTimeOfDay(at, 'sw')], ['14:05', '2:05 mchana']);
+  assert.equal(asOfText('en', at, at), 'As of 14:05 today. The period you picked does not apply.');
+  assert.equal(asOfText('sw', at, at), 'Kufikia 2:05 mchana leo. Kipindi ulichochagua hakitumiki hapa.');
+  assert.equal(asOfText('en', '2026-10-28T11:05:00Z', at), 'As of 28 Oct 2026');
+  assert.equal(asOfText('sw', '2026-10-28T11:05:00Z', at), 'Kufikia 28 Okt 2026');
+  // EAT day boundary: 21:30 UTC is already the next EAT day, so 20:30 UTC the same evening is "yesterday".
+  const late = new Date('2026-10-28T21:30:00Z'); // 00:30 EAT 29 Oct
+  assert.equal(asOfText('sw', late, late), 'Kufikia 12:30 usiku leo. Kipindi ulichochagua hakitumiki hapa.');
+  assert.equal(asOfText('en', '2026-10-28T20:30:00Z', late), 'As of 28 Oct 2026');
 });
