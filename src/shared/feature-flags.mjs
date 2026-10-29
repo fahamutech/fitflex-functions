@@ -482,3 +482,11 @@ export const requireEventsWebhooks = gate(eventsWebhooksOn);
 export function partnerDobRequiredOn() {
   return on('PARTNER_DOB_REQUIRED');
 }
+
+/**
+ * Browser gym profile: the open, read-only gym page behind the printed gym QR (POST /public/gyms/resolve).
+ * Off unless WEB_GYM_PROFILE is set: the route answers 404 not_found, as if it did not exist.
+ */
+export function webGymProfileOn() {
+  return on('WEB_GYM_PROFILE');
+}
