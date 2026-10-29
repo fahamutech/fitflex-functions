@@ -49,6 +49,10 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
     after: after == null ? null : JSON.stringify(typeof actor !== 'string' && actor.requestId ? { ...after, requestId: actor.requestId } : after),
   });
   const outbox = (trx, event, type, aggregateId, payload) => eventStore.appendOutbox(trx, { type, aggregateType: 'registration', aggregateId, organizerId: event.organizerId, eventId: event.id, payload });
+  /** M3: many outbox rows in ONE multi-row INSERT (up to 5,000 x 9 columns, under the 65,535 parameter limit), the LAST statement before commit, so the sequence lock is held briefly. */
+  const outboxMany = (trx, event, type, payloads) => (payloads.length
+    ? trx('OutboxEvent').insert(payloads.map(payload => ({ id: newId('obx'), type, aggregateType: 'registration', aggregateId: payload.registrationId, organizerId: event.organizerId, eventId: event.id, payload: JSON.stringify(payload), version: '1', createdAt: stamp() })))
+    : Promise.resolve());
   const analytics = async (name, payload) => { try { await audit('system', `analytics.${name}`, payload.eventId ?? 'events', null, payload); } catch { /* best effort */ } };
 
   const eventOf = async (organizerId, eventId) => plain(await db('Event').where({ id: String(eventId), organizerId }).first());
@@ -97,7 +101,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
       ids.length ? db('EventTicket').whereIn('registrationId', ids).orderBy([{ column: 'issuedAt', order: 'desc' }, { column: 'id', order: 'desc' }]) : [],
       ids.length ? db('EventTeamMember as m').join('EventTeam as t', 't.id', 'm.teamId').whereIn('m.registrationId', ids).select('m.registrationId', 't.name') : [],
       ids.length ? db('EventKitCollection').whereIn('registrationId', ids).where({ status: 'collected' }) : [],
-      ids.length ? db('EventBibAssignment').whereIn('registrationId', ids).whereNull('releasedAt').select('registrationId', 'assignedAt') : [],
+      ids.length ? db('EventBibAssignment').whereIn('registrationId', ids).whereNull('releasedAt').select('id', 'registrationId', 'assignedAt') : [],
     ]);
     const pointIds = [...new Set(collected.map(c => c.collectionPointId).filter(Boolean))];
     const staffIds = [...new Set(collected.map(c => c.staffUserId).filter(Boolean))];
@@ -114,6 +118,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
       pointName: new Map(points.map(p => [p.id, p.name])),
       staffFirst: new Map(staff.map(s => [s.id, String(s.displayName ?? '').trim().split(/\s+/)[0] || null])),
       bibAssignedAt: new Map(bibs.map(b => [b.registrationId, b.assignedAt])),
+      bibAssignmentId: new Map(bibs.map(b => [b.registrationId, b.id])),
     };
   }
 
@@ -126,7 +131,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
     const kit = { state: kitStateOf({ reg: r, hasActiveTicket: ticket?.status === 'active', event }) };
     if (taken) { kit.collectedAt = iso(taken.collectedAt); kit.collectionPointName = c.pointName.get(taken.collectionPointId) ?? null; }
     return {
-      displayName: cardName(r.firstName, r.lastName), ticketCode: ticket?.displayCode ?? null, categoryName: cat?.name ?? null, distanceM: cat ? Number(cat.distanceMeters) : null,
+      displayName: cardName(r.firstName, r.lastName), assignmentId: c.bibAssignmentId.get(r.id) ?? null, ticketCode: ticket?.displayCode ?? null, categoryName: cat?.name ?? null, distanceM: cat ? Number(cat.distanceMeters) : null,
       ticketTypeName: c.types.get(r.ticketTypeId) ?? null, teamName: c.teamBy.get(r.id) ?? null, bibNumber: r.bibNumber ?? null, kitSize: r.kitSize ?? null, kit, payment: paymentOf(r),
     };
   }
@@ -202,7 +207,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
     if (taken) {
       return {
         result: 'already_collected', registrationId: r.reg.id, card, warnings: warningsOf(event, r.reg, c, { point }),
-        collectedAt: iso(taken.collectedAt), collectionPointName: c.pointName.get(taken.collectionPointId) ?? null, byFirstName: c.staffFirst.get(taken.staffUserId) ?? null,
+        collectionId: taken.id, collectedAt: iso(taken.collectedAt), collectionPointName: c.pointName.get(taken.collectionPointId) ?? null, byFirstName: c.staffFirst.get(taken.staffUserId) ?? null,
         canCollect: false, canOverride: canOverride(actor),
       };
     }
@@ -215,7 +220,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
     const taken = plain(await db('EventKitCollection').where({ registrationId: regId, status: 'collected' }).first());
     const point = taken?.collectionPointId ? plain(await db('EventCollectionPoint').where({ id: taken.collectionPointId }).first('name')) : null;
     const who = taken?.staffUserId ? plain(await db('User').where({ id: taken.staffUserId }).first('displayName')) : null;
-    return fail('already_collected', 409, { collectedAt: iso(taken?.collectedAt), collectionPointName: point?.name ?? null, byFirstName: String(who?.displayName ?? '').trim().split(/\s+/)[0] || null, canOverride: canOverride(actor) });
+    return fail('already_collected', 409, { collectionId: taken?.id ?? null, collectedAt: iso(taken?.collectedAt), collectionPointName: point?.name ?? null, byFirstName: String(who?.displayName ?? '').trim().split(/\s+/)[0] || null, canOverride: canOverride(actor) });
   };
 
   function parseKitBody(body, event, activePoints) {
@@ -442,7 +447,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
 
   const noticeKit = (event, r) => notice(recipientOf(r), {
     id: `ntf_evkit_${r.id}`, type: 'event_kit_collected',
-    en: { title: 'Kit collected', body: `You collected your kit for ${event.title}.` }, sw: { title: 'Vifaa vimechukuliwa', body: `Umechukua vifaa vyako vya ${event.title}.` },
+    en: { title: 'Kit collected', body: `You collected your kit for ${event.title}.` }, sw: { title: 'Vifaa vimechukuliwa', body: `Umechukua vifaa vya mbio vya ${event.title}.` },
     data: { registrationId: r.id, eventId: event.id, route: ticketRoute(r) },
   });
   const noticeBib = (event, r, bibNumber) => notice(recipientOf(r), {
@@ -452,11 +457,19 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
   });
   /** Bulk and import: an inbox row each, NO push (a push storm of thousands is not wanted, spec §4.3). */
   async function inboxOnlyBibNotices(event, regs) {
-    const rows = regs.filter(r => recipientOf(r)).map(r => ({
-      id: `ntf_evbib_${r.id}_${r.bibNumber}`.slice(0, 60), userId: recipientOf(r), type: 'event_bib_assigned',
-      title: 'Your bib number is ready', body: `Your bib for ${event.title} is ${r.bibNumber}.`,
-      data: JSON.stringify({ type: 'event_bib_assigned', registrationId: r.id, eventId: event.id, bibNumber: r.bibNumber, route: ticketRoute(r), titleEn: 'Your bib number is ready', bodyEn: `Your bib for ${event.title} is ${r.bibNumber}.`, titleSw: 'Namba yako ya mbio iko tayari', bodySw: `Namba yako ya ${event.title} ni ${r.bibNumber}.` }),
-    }));
+    const locales = new Map();
+    const localeFor = async (userId) => { if (!locales.has(userId)) { let l = null; try { l = await localeOf(userId); } catch { l = null; } locales.set(userId, l === 'sw' ? 'sw' : 'en'); } return locales.get(userId); };
+    const rows = [];
+    for (const r of regs.filter(x => recipientOf(x))) {
+      const userId = recipientOf(r);
+      const en = { title: 'Your bib number is ready', body: `Your bib for ${event.title} is ${r.bibNumber}.` };
+      const sw = { title: 'Namba yako ya mbio iko tayari', body: `Namba yako ya ${event.title} ni ${r.bibNumber}.` };
+      const t = (await localeFor(userId)) === 'sw' ? sw : en;   // the recipient's language at the top level, both kept in data (like notice())
+      rows.push({
+        id: `ntf_evbib_${r.id}_${r.bibNumber}`.slice(0, 60), userId, type: 'event_bib_assigned', title: t.title, body: t.body,
+        data: JSON.stringify({ type: 'event_bib_assigned', registrationId: r.id, eventId: event.id, bibNumber: r.bibNumber, route: ticketRoute(r), locale: t === sw ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body }),
+      });
+    }
     for (let i = 0; i < rows.length; i += 500) await db('Notification').insert(rows.slice(i, i + 500)).onConflict('id').ignore();
   }
 
@@ -532,6 +545,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
     const event = await eventOf(organizerId, eventId);
     if (!event) return fail('event_not_found', 404);
     return idempotent({ actor, route: `POST bib-assignments/batch|${event.id}`, key, body }, async () => {
+      if (event.status === 'cancelled') return fail('event_cancelled', 409);
       const items = Array.isArray(body.items) ? body.items : null;
       if (!items || !items.length) return fail('validation_failed', 422, { fields: [{ path: 'items', code: 'required' }] });
       if (items.length > 500) return fail('payload_too_large', 413, { max: 500 });
@@ -610,7 +624,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
     const c = await cardContext(event, page);
     const items = page.map(r => ({
       registrationId: r.id, displayName: `${r.firstName} ${r.lastName}`.trim(), categoryName: c.cats.get(r.categoryId)?.name ?? null, bibNumber: r.bibNumber ?? null,
-      assignedAt: iso(c.bibAssignedAt.get(r.id)), kit: { state: kitStateOf({ reg: r, hasActiveTicket: c.ticketBy.get(r.id)?.status === 'active', event }) },
+      assignmentId: c.bibAssignmentId.get(r.id) ?? null, assignedAt: iso(c.bibAssignedAt.get(r.id)), kit: { state: kitStateOf({ reg: r, hasActiveTicket: c.ticketBy.get(r.id)?.status === 'active', event }) },
     }));
     const counts = await base().select(db.raw('count(*) FILTER (WHERE r."bibNumber" IS NOT NULL)::int AS assigned'), db.raw('count(*) FILTER (WHERE r."bibNumber" IS NULL)::int AS unassigned')).first();
     const last = page[page.length - 1];
@@ -681,13 +695,15 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
           const at = stamp();
           const ids = out.plan.map(x => x.registrationId).sort();
           const regs = new Map((await trx('EventRegistration').whereIn('id', ids).orderBy('id').forUpdate()).map(r => [r.id, plain(r)]));
+          const rows = [];
           for (const { registrationId, bibNumber } of out.plan) {
             const reg = regs.get(registrationId);
             if (reg.bibNumber || reg.status !== 'confirmed') throw refusal('preview_stale', 409);   // THROW: a return would commit the rows already written
             await assignBibTx(trx, { event, reg, bibNumber, actor, replace: false, reason: null, at, silent: true });
-            await outbox(trx, event, 'bib.assigned', reg.id, { registrationId: reg.id, eventId: event.id, categoryId: reg.categoryId, bibNumber, previousBibNumber: null });
+            rows.push({ registrationId: reg.id, eventId: event.id, categoryId: reg.categoryId, bibNumber, previousBibNumber: null });
           }
           await audit(actor, 'events.bibs_bulk_assigned', event.id, null, { count: out.plan.length, first: out.plan[0].bibNumber, last: out.plan[out.plan.length - 1].bibNumber }, trx);
+          await outboxMany(trx, event, 'bib.assigned', rows);   // last statement before commit (M3)
           return { status: 200, assigned: out.plan.length, first: out.plan[0].bibNumber, last: out.plan[out.plan.length - 1].bibNumber, plan: out.plan };
         }).then(async (res) => {
           if (res.plan) {
@@ -779,13 +795,15 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
           const at = stamp();
           const ids = out.pairs.map(x => x.registrationId).sort();
           const regs = new Map(ids.length ? (await trx('EventRegistration').whereIn('id', ids).orderBy('id').forUpdate()).map(r => [r.id, plain(r)]) : []);
+          const rows = [];
           for (const { registrationId, bibNumber } of out.pairs) {
             const reg = regs.get(registrationId);
             if (reg.bibNumber || reg.status !== 'confirmed') throw refusal('preview_stale', 409);   // THROW: a return would commit the rows already written
             await assignBibTx(trx, { event, reg, bibNumber, actor, replace: false, reason: null, at, silent: true });
-            await outbox(trx, event, 'bib.assigned', reg.id, { registrationId: reg.id, eventId: event.id, categoryId: reg.categoryId, bibNumber, previousBibNumber: null });
+            rows.push({ registrationId: reg.id, eventId: event.id, categoryId: reg.categoryId, bibNumber, previousBibNumber: null });
           }
           await audit(actor, 'events.bibs_imported', event.id, null, { count: out.pairs.length }, trx);
+          await outboxMany(trx, event, 'bib.assigned', rows);   // last statement before commit (M3)
           return { status: 200, imported: out.pairs.length, pairs: out.pairs };
         });
         if (res.pairs) {

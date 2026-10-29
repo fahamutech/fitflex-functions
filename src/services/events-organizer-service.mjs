@@ -58,13 +58,6 @@ export function createEventsOrganizerService({
     try { await track(name, payload); } catch { /* best effort */ }
   };
   const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
-  /** S5: an outbox row for the event itself. Best effort and AFTER the change (the S2 store does not take a caller transaction); a failure is logged, never raised. */
-  async function emitEventOutbox(eventId, organizerId, type, payload) {
-    try {
-      await db.transaction(trx => eventStore.appendOutbox(trx, { type, aggregateType: 'event', aggregateId: eventId, organizerId, eventId, payload }));
-    } catch (err) { console.warn('[events] outbox row skipped:', type, err?.message); }
-  }
-
   const organizerView_ = (o, kycCase = null) => ({
     id: o.id, name: o.name, status: o.status, timezone: o.timezone, kycCaseId: o.kycCaseId ?? kycCase?.id ?? null,
     kycStatus: kycCase?.status ?? null, statusReason: o.statusReason ?? kycCase?.reasonNote ?? null,
@@ -241,7 +234,11 @@ export function createEventsOrganizerService({
       const r = await catalogue.upsertNested(current.id, nested);
       if (r.error) return r;
     }
-    const saved = await eventStore.updateEvent(current.id, patch, { expectedVersion });
+    // S5 (M4): `event.updated` commits WITH the event row. The paths (never values) are known here already.
+    const saved = await eventStore.updateEvent(current.id, patch, {
+      expectedVersion,
+      inTransaction: published ? (trx, row) => eventStore.appendOutbox(trx, { type: 'event.updated', aggregateType: 'event', aggregateId: current.id, organizerId: current.organizerId, eventId: current.id, payload: { eventId: current.id, version: row.version, changedFields: paths, material: material.length > 0 } }) : null,
+    });
     if (saved.error) {
       if (saved.error === 'event_frozen_field') return fail('event_invalid', 422, { fields: [{ path: saved.field, code: 'frozen' }] });
       return saved;
@@ -253,7 +250,6 @@ export function createEventsOrganizerService({
     }
     await audit(actorId, 'events.event_updated', current.id, { version: current.version }, { version: saved.event.version, fields: paths, material: material.length > 0 });
     // S5: `event.updated` for webhooks and the API (paths only, never values); the payout schedule is not part of what organizers' systems see.
-    if (published) await emitEventOutbox(current.id, current.organizerId, 'event.updated', { eventId: current.id, version: saved.event.version, changedFields: paths, material: material.length > 0 });
     return { version: saved.event.version, updatedAt: new Date(saved.event.updatedAt).toISOString(), material: material.length > 0 };
   }
 
@@ -271,7 +267,10 @@ export function createEventsOrganizerService({
       if (r.error) return r;
       sideBefore.version = r.event.version;
     }
-    const moved = await eventStore.transitionEvent(eventId, to);
+    // S5 (M4): `event.cancelled` commits WITH the status move.
+    const moved = await eventStore.transitionEvent(eventId, to, {
+      inTransaction: to === 'cancelled' ? (trx, row) => eventStore.appendOutbox(trx, { type: 'event.cancelled', aggregateType: 'event', aggregateId: eventId, organizerId: before.organizerId, eventId, payload: { eventId, cancelledAt: row.cancelledAt, reasonCode: cancellation?.reason ?? 'admin' } }) : null,
+    });
     if (moved.error) return moved;
     const raw = {};
     if (to === 'submitted') { raw.submittedAt = now(); raw.rejection = null; }
@@ -283,7 +282,6 @@ export function createEventsOrganizerService({
     if (actor.kind !== 'system' && ['published', 'registration_closed'].includes(moved.from)) {
       await catalogue.appendChangeLog({ eventId, actorUserId: actor.id, actorRole: actor.kind === 'admin' ? 'admin' : actor.role, fields: ['status'], before: { status: moved.from }, after: { status: to }, note: cancellation?.note ?? null, material: to === 'cancelled', reason: cancellation?.reason ?? null });
     }
-    if (to === 'cancelled') await emitEventOutbox(eventId, before.organizerId, 'event.cancelled', { eventId, cancelledAt: moved.event.cancelledAt, reasonCode: cancellation?.reason ?? 'admin' });
     if (to === 'submitted') await analytics('organizer_event_submitted', { eventId });
     if (to === 'published') await analytics('event_published', { eventId });
     return { status: to, from: moved.from, event: await eventStore.getEvent(eventId) };

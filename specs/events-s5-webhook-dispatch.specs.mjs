@@ -338,7 +338,7 @@ test('the delivery log: every attempt with a REDACTED snippet; the payload as se
   assert.ok(!JSON.stringify(detail).includes(ep.secret));
   const list = await lab.svc.listDeliveries({ organizerId: f.organizer.id, query: { status: 'delivered' } });
   assert.equal(list.items.length, 1);
-  assert.deepEqual(Object.keys(list.items[0]).sort(), ['attemptCount', 'createdAt', 'endpointId', 'eventId', 'eventType', 'id', 'lastAttemptAt', 'lastError', 'nextAttemptAt', 'responseCode', 'status']);
+  assert.deepEqual(Object.keys(list.items[0]).sort(), ['attemptCount', 'createdAt', 'endpointId', 'eventType', 'id', 'lastAttemptAt', 'lastError', 'nextAttemptAt', 'outboxEventId', 'responseCode', 'status']);
   const o = await h.org();
   assert.deepEqual((await lab.svc.listDeliveries({ organizerId: o.id, query: {} })).items, []);
   assert.equal((await lab.svc.getDelivery({ organizerId: o.id, id: d.id })).error, 'delivery_not_found');

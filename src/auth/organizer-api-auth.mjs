@@ -13,16 +13,14 @@
 //
 // Failure behaviour (the one-answer rule): every failed token request is the SAME `401 { error: 'invalid_client' }` — unknown id,
 // wrong secret, revoked, expired, malformed body. The real reason goes to the audit log, never the response. The only different
-// answers are 429 (rate limited / locked) and 403 organizer_suspended | api_access_not_enabled, given only to a caller who already
+// answers are 429 (rate limited) and 403 organizer_suspended | api_access_not_enabled, given only to a caller who already
 // presented the right secret.
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { signPurpose, verifyPurpose, bearerFrom } from './jwt.mjs';
-import { createVendorLimiter } from '../shared/vendor-rate-limit.mjs';
+import { createCounterWindow } from '../shared/events-rate-limits.mjs';
 
 export const API_PURPOSE = 'organizer_api';
-export const FAILURES_BEFORE_LOCK = 20;
-export const LOCK_MINUTES = 15;
 export const CLIENT_ID_RE = /^ffc_[0-9a-f]{16}$/;
 export const SECRET_RE = /^ffs_(live|test)_[A-Za-z0-9_-]{43}$/;
 
@@ -49,38 +47,36 @@ export function matchSecret(client, secret, at = new Date()) {
 // ── Where the client row comes from ─────────────────────────────────────────
 
 let store = null;
-/** Register the SQL side at bootstrap (like registerOrganizerLookup): findById(id), findByClientId(clientId), noteFailure(id), clearFailures(id), touch(id). */
+/** Register the SQL side at bootstrap (like registerOrganizerLookup): findById(id), findByClientId(clientId), touch(id). */
 export function registerApiClientStore(impl) { store = impl; }
 
-const IP_LIMITER = createVendorLimiter({ perMinute: 20, maxTracked: 20_000 });
-const CLIENT_FAIL_LIMITER = createVendorLimiter({ perMinute: 10, maxTracked: 20_000 });
+// Failure limiters (in memory per server). Only FAILED exchanges are counted: a caller with valid credentials is never blocked by them, so a
+// shared or unknown source address (the platform's X-Forwarded-For behaviour is UNVERIFIED) cannot lock every integration out.
+const IP_FAILURES = createCounterWindow({ limit: 20, maxTracked: 20_000 });
+const CLIENT_FAILURES = createCounterWindow({ limit: 10, maxTracked: 20_000 });
 /** For specs. */
-export const resetApiAuthLimits = () => { IP_LIMITER.reset(); CLIENT_FAIL_LIMITER.reset(); RATE.clear(); touched.clear(); };
+export const resetApiAuthLimits = () => { IP_FAILURES.reset(); CLIENT_FAILURES.reset(); RATE.clear(); touched.clear(); };
 
 const INVALID_CLIENT = { status: 401, body: { error: 'invalid_client' } };
 
 /**
  * POST /v1/organizer/token. `input` = { clientId, clientSecret, ip }. → { ok: true, accessToken, expiresIn, client } or
  * { ok: false, status, body, reason, client? } where `reason` is for the AUDIT LOG only.
+ * There is NO lock-out of a client (a stranger who knows a client id must not be able to deny it): wrong secrets are only rate-limited per source
+ * address and per client_id (also for ids that do not exist: no oracle), and reported (audit + owner notice) by the integrations service.
  */
 export async function exchangeClientCredentials({ clientId, clientSecret, ip, ttlSeconds = 900, at = new Date() }) {
-  const ipLimit = IP_LIMITER.allow(`ip:${ip ?? 'anon'}`);
-  if (!ipLimit.ok) return { ok: false, status: 429, body: { error: 'rate_limited', retryAfterSeconds: ipLimit.retryAfterSeconds }, reason: 'ip_rate_limited', retryAfterSeconds: ipLimit.retryAfterSeconds };
   const shapeOk = typeof clientId === 'string' && CLIENT_ID_RE.test(clientId) && typeof clientSecret === 'string' && clientSecret.length <= 120;
   const client = shapeOk ? await store.findByClientId(clientId) : null;
-  const matched = matchSecret(client, shapeOk ? clientSecret : '', at);   // runs for unknown clients too
-  const fail = async (reason) => {
-    // Failures per client_id are counted whether or not the id exists (no oracle), and persisted for real clients (the lock survives restarts and servers).
-    const burst = CLIENT_FAIL_LIMITER.allow(`cid:${String(clientId).slice(0, 40)}`);
-    let locked = null;
-    if (client) locked = await store.noteFailure(client.id, { threshold: FAILURES_BEFORE_LOCK, lockMinutes: LOCK_MINUTES, at });
-    if (!burst.ok) return { ok: false, status: 429, body: { error: 'rate_limited', retryAfterSeconds: burst.retryAfterSeconds }, reason: 'client_rate_limited', client, retryAfterSeconds: burst.retryAfterSeconds, locked };
-    return { ok: false, ...INVALID_CLIENT, reason, client, locked };
+  const matched = matchSecret(client, shapeOk ? clientSecret : '', at);   // runs for unknown clients too (equal work)
+  const fail = (reason) => {
+    const ipKey = `ip:${ip ?? 'anon'}`;
+    const clientKey = `cid:${String(clientId).slice(0, 40)}`;
+    const blocked = IP_FAILURES.blocked(ipKey) ?? CLIENT_FAILURES.blocked(clientKey);
+    IP_FAILURES.hit(ipKey); CLIENT_FAILURES.hit(clientKey);
+    if (blocked) return { ok: false, status: 429, body: { error: 'rate_limited', retryAfterSeconds: blocked.retryAfterSeconds }, reason: 'failure_rate_limited', client, retryAfterSeconds: blocked.retryAfterSeconds, underlying: reason };
+    return { ok: false, ...INVALID_CLIENT, reason, client };
   };
-  if (client?.lockedUntil && +new Date(client.lockedUntil) > +at) {
-    const retry = Math.max(1, Math.ceil((+new Date(client.lockedUntil) - +at) / 1000));
-    return { ok: false, status: 429, body: { error: 'rate_limited', retryAfterSeconds: retry }, reason: 'client_locked', client, retryAfterSeconds: retry };
-  }
   if (!client) return fail(shapeOk ? 'unknown_client' : 'malformed');
   if (!matched) return fail('wrong_secret');
   if (client.status !== 'active') return fail('revoked');
@@ -89,7 +85,6 @@ export async function exchangeClientCredentials({ clientId, clientSecret, ip, tt
   if (client.organizerStatus === 'suspended') return { ok: false, status: 403, body: { error: 'organizer_suspended' }, reason: 'organizer_suspended', client };
   if (client.organizerStatus !== 'active') return { ok: false, status: 403, body: { error: 'organizer_not_active' }, reason: 'organizer_not_active', client };
   if (!client.apiAccessEnabled) return { ok: false, status: 403, body: { error: 'api_access_not_enabled' }, reason: 'api_access_not_enabled', client };
-  if (client.failedAttempts > 0) await store.clearFailures(client.id);
   // A token minted from the PREVIOUS secret carries the previous version, so it dies when the grace window ends.
   const sv = matched === 'previous' ? client.secretVersion - 1 : client.secretVersion;
   const accessToken = signPurpose(API_PURPOSE, { sub: client.id, cid: client.clientId, sv }, `${ttlSeconds}s`);

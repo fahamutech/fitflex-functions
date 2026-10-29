@@ -85,7 +85,7 @@ test('a caller holding the RIGHT secret is told why: suspended organizer 403, or
   assert.deepEqual((await exchange(creds(c), { ip: '10.7.1.2' })).body, { error: 'api_access_not_enabled' });
 });
 
-test('brute force: 10 failures a minute per client_id → 429 + Retry-After (also for ids that do not exist); 20 consecutive failures lock the client for 15 minutes even for the right secret; IP limit 20 a minute', async () => {
+test('failures only: 10 wrong secrets a minute per client_id and 20 per source address → 429 + Retry-After (also for ids that do not exist); the RIGHT secret is never blocked; NO lock-out; heavy failure is reported (audit + owner notice), not enforced', async () => {
   s5On();
   const o = await h.org();
   const c = await h.apiClient(o, {});
@@ -94,28 +94,30 @@ test('brute force: 10 failures a minute per client_id → 429 + Retry-After (als
   const limited = await exchange(wrong, { ip: '10.6.1.1' });
   assert.deepEqual([limited.status, limited.body.error], [429, 'rate_limited']);
   assert.ok(limited.body.retryAfterSeconds >= 1);
+  // the right secret still passes while wrong ones are being limited (valid credentials are not counted)
+  assert.equal((await exchange(creds(c), { ip: '10.6.1.2' })).status, 200);
   // an unknown id is limited the same way (no oracle)
   const ghost = { grant_type: 'client_credentials', client_id: 'ffc_aaaaaaaaaaaaaaaa', client_secret: wrong.client_secret };
   for (let i = 0; i < 10; i += 1) assert.equal((await exchange(ghost, { ip: `10.6.2.${i}` })).status, 401);
   assert.equal((await exchange(ghost, { ip: '10.6.3.1' })).status, 429);
-  // lock: 20 consecutive failures (the per-client_id burst window is reset between batches, as a minute passing would)
+  // NO LOCK: 25 failures spread over time never lock the client; the right secret works throughout; the columns are untouched
   resetApiAuthLimits();
-  await db('ApiClient').where({ id: c.client.id }).update({ failedAttempts: 0, lockedUntil: null });
-  for (let batch = 0; batch < 2; batch += 1) { for (let i = 0; i < 10; i += 1) await exchange(wrong, { ip: `10.5.${batch}.${i}` }); resetApiAuthLimits(); }
+  for (let batch = 0; batch < 3; batch += 1) { for (let i = 0; i < 9; i += 1) await exchange(wrong, { ip: `10.5.${batch}.${i}` }); resetApiAuthLimits(); }
   const row = await db('ApiClient').where({ id: c.client.id }).first();
-  assert.equal(row.failedAttempts, 20);
-  assert.ok(+new Date(row.lockedUntil) - Date.now() > 14 * 60_000);
-  const locked = await exchange(creds(c), { ip: '10.5.9.9' });
-  assert.deepEqual([locked.status, locked.body.error], [429, 'rate_limited'], 'the right secret is refused while locked');
-  assert.equal((await db('Notification').where({ userId: o.ownerUserId, type: 'organizer_api_client_locked' })).length, 1, 'the owner is told');
-  await db('ApiClient').where({ id: c.client.id }).update({ lockedUntil: new Date(Date.now() - 1000) });
-  assert.equal((await exchange(creds(c), { ip: '10.5.9.10' })).status, 200);
-  assert.equal((await db('ApiClient').where({ id: c.client.id }).first()).failedAttempts, 0, 'a success clears the counter');
-  // per IP
+  assert.deepEqual([row.failedAttempts, row.lockedUntil], [0, null], 'nothing is counted against the client row');
+  assert.equal((await exchange(creds(c), { ip: '10.5.9.9' })).status, 200);
+  // reporting: more than 20 failures within an hour → ONE audit row and ONE owner notice, no blocking
+  assert.equal((await db('AuditLog').where({ action: 'events.api_token_failures_high', target: c.client.id })).length, 1);
+  const note = await db('Notification').where({ userId: o.ownerUserId, type: 'organizer_api_client_failures' });
+  assert.equal(note.length, 1);
+  assert.ok(note[0].data.titleSw && !note[0].data.bodySw.includes('kushindwa'));
+  assert.equal((await db('Notification').where({ type: 'organizer_api_client_locked' })).length, 0, 'there is no lock notice any more');
+  // per source address: only FAILURES count — 30 valid exchanges from one address are all fine, then wrong ones are limited
   resetApiAuthLimits();
+  for (let i = 0; i < 30; i += 1) assert.equal((await exchange(creds(c), { ip: '10.4.0.1' })).status, 200);
   for (let i = 0; i < 20; i += 1) assert.equal((await exchange({ grant_type: 'client_credentials', client_id: `ffc_${String(i).padStart(16, '0')}`, client_secret: 'x' }, { ip: '10.4.0.1' })).status, 401);
-  assert.equal((await exchange(creds(c), { ip: '10.4.0.1' })).status, 429);
-  assert.equal((await exchange(creds(c), { ip: '10.4.0.2' })).status, 200);
+  assert.equal((await exchange({ grant_type: 'client_credentials', client_id: 'ffc_9999999999999999', client_secret: 'x' }, { ip: '10.4.0.1' })).status, 429);
+  assert.equal((await exchange(creds(c), { ip: '10.4.0.1' })).status, 200, 'a shared / unknown address cannot lock out valid callers');
 });
 
 test('TOKEN ISOLATION, both directions: a staff JWT on /v1 is 401 invalid_token; an API token on /organizer/* is 401 unauthenticated; a session is not an API token; other purposes and forged tokens are refused', async () => {

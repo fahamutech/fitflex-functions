@@ -61,7 +61,7 @@ const EVENT_COLUMNS = ['id', 'organizerId', 'slug', 'title', 'description', 'eve
   'heroImageUrl', 'heroThumbUrl', 'heroImageAlt', 'routeUrl', 'routeImageUrl', 'routeImageAlt', 'descriptionSw', 'venueCity', 'venueRegion', 'accessibility', 'inclusions', 'kitProvided',
   'schedule', 'sponsors', 'contact', 'terms', 'refundPolicy', 'registrationOpensAt',
   'participantFields', 'duplicatePolicy',
-  // S5 (20270124090000): the payout schedule label (D33); the service decides who may set it and when.
+  // S5 (20270126090000): the payout schedule label (D33); the service decides who may set it and when.
   'payoutSchedule'];
 /** S3 (20270110090900): what a route may set on the order besides what the store derives; never money, status or the hold. */
 const ORDER_EXTRA_COLUMNS = ['createdByUserId', 'costCentre', 'purchaserReference', 'termsAcceptedAt', 'consentTextVersion'];
@@ -87,9 +87,9 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
    * A compare-and-set view of one table for src/shared/conditional-update.mjs updateIf():
    * UPDATE ... WHERE id = ? AND <where> RETURNING *, or null when the row is missing or has moved on.
    */
-  const conditional = table => ({
+  const conditional = (table, q = db) => ({
     updateByIdWhereAsync: async (id, where, patch) => {
-      let query = db(table).where({ id });
+      let query = q(table).where({ id });
       for (const [column, expected] of Object.entries(where || {})) {
         query = Array.isArray(expected) ? query.whereIn(column, expected) : expected === null ? query.whereNull(column) : query.where(column, expected);
       }
@@ -160,7 +160,7 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
    * { error: 'event_frozen_field', status: 409, field } when slug / terms / refund policy are patched on
    * an event that is no longer draft or submitted. Status, version, publishedAt, cancelledAt never change here.
    */
-  async function updateEvent(id, patch, { expectedVersion }) {
+  async function updateEvent(id, patch, { expectedVersion, inTransaction = null }) {
     if (!isInt(expectedVersion) || expectedVersion < 1) return fail('expected_version_required', 400);
     const current = await getEvent(id);
     if (!current) return fail('event_not_found', 404);
@@ -170,13 +170,17 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
     }
     const columns = EVENT_COLUMNS.filter(c => !['id', 'organizerId', 'status', 'version', 'publishedAt', 'cancelledAt'].includes(c));
     // The status is re-checked in the same statement, so a publish racing this edit cannot let a frozen field through.
-    const saved = await updateIf(conditional('Event'), id, { version: expectedVersion, status: current.status }, { ...rowOf(columns, patch), version: expectedVersion + 1 });
+    // S5 (M4): `inTransaction(trx, event)` runs in the SAME transaction as the update (an outbox row that commits with the change).
+    const run = q => updateIf(conditional('Event', q), id, { version: expectedVersion, status: current.status }, { ...rowOf(columns, patch), version: expectedVersion + 1 });
+    const saved = inTransaction
+      ? await db.transaction(async (trx) => { const row = await run(trx); if (row) await inTransaction(trx, row); return row; })
+      : await run(db);
     if (saved) return { event: saved };
     return (await getEvent(id)) ? fail('version_conflict', 409, { eventId: id }) : fail('event_not_found', 404);
   }
 
   /** Move an event along ORG-006 under its row lock; publishedAt / cancelledAt follow the move. */
-  async function transitionEvent(id, to) {
+  async function transitionEvent(id, to, { inTransaction = null } = {}) {
     return db.transaction(async (trx) => {
       const current = plain(await trx('Event').where({ id }).forUpdate().first());
       if (!current) return fail('event_not_found', 404);
@@ -187,6 +191,7 @@ export function createPgEventStore({ db, now = () => new Date(), feeRule = NO_FE
       if (to === 'published' && !current.publishedAt) patch.publishedAt = at;
       if (to === 'cancelled') patch.cancelledAt = at;
       const [saved] = await trx('Event').where({ id }).update(patch).returning('*');
+      if (inTransaction) await inTransaction(trx, plain(saved), current.status);   // S5 (M4): same transaction as the move
       return { event: plain(saved), from: current.status, to };
     });
   }

@@ -18,7 +18,8 @@ import * as sandbox from '../src/shared/organizer-api-sandbox.mjs';
 
 void SECRET_RE; void CLIENT_ID_RE;
 const created = new Date().toISOString();
-const OPENAPI_PATH = new URL('../docs/api/organizer-api-v1.openapi.json', import.meta.url);
+// Read once at load (a request never touches the disk); a copy is served so PUBLIC_API_URL can be applied.
+const OPENAPI = JSON.parse(readFileSync(new URL('../docs/api/organizer-api-v1.openapi.json', import.meta.url), 'utf8'));
 
 const requestIdOf = (req) => {
   const given = String(req.headers?.['x-request-id'] ?? '');
@@ -42,7 +43,8 @@ function authed(...scopes) {
   };
 }
 const v1Guard = (method, ...scopes) => routeGuard(method, [requestIdGuard, requireEventsOrganizerApi, authed(...scopes)]);
-const v1HookGuard = (method) => routeGuard(method, [requestIdGuard, requireEventsOrganizerApi, requireEventsWebhooks, authed('webhooks:manage')]);
+const noSandbox = (req, res, next) => (req.apiClient?.environment === 'sandbox' ? res.status(403).json({ error: 'sandbox_not_supported' }) : next());
+const v1HookGuard = (method) => routeGuard(method, [requestIdGuard, requireEventsOrganizerApi, requireEventsWebhooks, authed('webhooks:manage'), noSandbox]);
 
 function reply(req, res, result, okStatus = 200) {
   let status = okStatus; let body;
@@ -89,7 +91,7 @@ function credentialsOf(req) {
 
 export const apiToken = {
   created, method: 'post', path: '/v1/organizer/token',
-  description: 'API client (EVENTS_ORGANIZER_API): exchange client credentials for a short-lived bearer token. JSON body { grant_type: "client_credentials", client_id, client_secret } or HTTP Basic (client_id:client_secret) with grant_type in the body. This is the ONLY route that accepts the secret. → 200 { access_token, token_type: "Bearer", expires_in: 900 } (no-store). EVERY failed exchange — unknown id, wrong secret, revoked, expired, malformed — is the same 401 { error: "invalid_client" } (the real reason goes to the audit log). 400 invalid_request (grant_type missing or not client_credentials); 403 organizer_suspended | organizer_not_active | api_access_not_enabled (only to a caller holding the right secret); 429 rate_limited + Retry-After (20/min per IP, 10 failures/min per client_id, 20 consecutive failures lock a client for 15 minutes).',
+  description: 'API client (EVENTS_ORGANIZER_API): exchange client credentials for a short-lived bearer token. JSON body { grant_type: "client_credentials", client_id, client_secret } or HTTP Basic (client_id:client_secret) with grant_type in the body. This is the ONLY route that accepts the secret. → 200 { access_token, token_type: "Bearer", expires_in: 900 } (no-store). EVERY failed exchange — unknown id, wrong secret, revoked, expired, malformed — is the same 401 { error: "invalid_client" } (the real reason goes to the audit log). 400 invalid_request (grant_type missing or not client_credentials); 403 organizer_suspended | organizer_not_active | api_access_not_enabled (only to a caller holding the right secret); 429 rate_limited + Retry-After (only FAILED exchanges are counted: 10/min per client_id, 20/min per source address; valid credentials are never blocked and a client is never locked out; many failures in an hour are reported to the owner).',
   onGuard: routeGuard('post', [requestIdGuard, requireEventsOrganizerApi]),
   onRequest: guarded(async (req, res) => {
     res.set?.('Cache-Control', 'no-store');
@@ -112,7 +114,7 @@ export const apiOpenapi = {
   description: 'Public (EVENTS_ORGANIZER_API): the OpenAPI 3.1 document of /v1/organizer, `servers[0].url` from PUBLIC_API_URL. Cacheable for an hour.',
   onGuard: routeGuard('get', [requestIdGuard, requireEventsOrganizerApi]),
   onRequest: guarded(async (req, res) => {
-    const doc = JSON.parse(readFileSync(OPENAPI_PATH, 'utf8'));
+    const doc = structuredClone(OPENAPI);
     const base = String(process.env.PUBLIC_API_URL || '').replace(/\/+$/, '');
     if (base) doc.servers = [{ url: base }];
     res.set?.('Cache-Control', 'public, max-age=3600');

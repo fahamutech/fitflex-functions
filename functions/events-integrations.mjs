@@ -38,6 +38,8 @@ const run = (handler, { noStore = false } = {}) => async (req, res) => {
 const apiWriters = method => routeGuard(method, [requireEventsOrganizerApi, requireAuth(...ORGANIZER_TYPES), requireActiveOrganizer('owner', 'admin')]);
 const apiReaders = method => routeGuard(method, [requireEventsOrganizerApi, requireAuth(...ORGANIZER_TYPES), requireOpenOrganizer('owner', 'admin')]);
 const hookWriters = method => routeGuard(method, [requireEventsWebhooks, requireAuth(...ORGANIZER_TYPES), requireActiveOrganizer('owner', 'admin')]);
+// D38: whoever can redirect event data is the OWNER. Create, change, rotate the secret, verify, enable and disable are owner-only; admins may read, test and retry.
+const hookOwner = method => routeGuard(method, [requireEventsWebhooks, requireAuth(...ORGANIZER_TYPES), requireActiveOrganizer('owner')]);
 const hookReaders = method => routeGuard(method, [requireEventsWebhooks, requireAuth(...ORGANIZER_TYPES), requireOpenOrganizer('owner', 'admin')]);
 const either = (req, res, next) => (eventsOrganizerApiOn() || eventsWebhooksOn() ? next() : res.status(404).json({ error: 'feature_disabled' }));
 const healthReaders = method => routeGuard(method, [either, requireAuth(...ORGANIZER_TYPES), requireOpenOrganizer('owner', 'admin')]);
@@ -92,8 +94,8 @@ export const organizerRevokeApiClient = {
 
 export const organizerCreateWebhookEndpoint = {
   created, method: 'post', path: '/organizer/webhook-endpoints',
-  description: 'Organizer owner / admin (organizer active; EVENTS_WEBHOOKS + EVENTS_WEBHOOK_SECRET_KEY): register an endpoint. Body { url (https, port 443, a DNS name that resolves ONLY to public addresses), events [registration.created | registration.paid | registration.cancelled | registration.updated | kit.collected | bib.assigned | event.updated | event.cancelled | refund.updated] (no wildcard), eventIds?, description? (≤200) } → 201 { endpoint, signingSecret } — `whsec_…` shown ONCE, stored AES-256-GCM encrypted. The endpoint starts unverified and receives only the verification challenge until POST …/verify succeeds. 400 invalid_url { reason: not_https | credentials_in_url | bad_port | ip_literal | blocked_host | blocked_address | unresolvable | too_long }; 409 endpoint_limit_reached; 422 invalid_event_type | validation_failed; 404 feature_disabled without the key. no-store.',
-  onGuard: hookWriters('post'),
+  description: 'Organizer OWNER only (D38; organizer active; EVENTS_WEBHOOKS + EVENTS_WEBHOOK_SECRET_KEY): register an endpoint. Body { url (https, port 443, a DNS name that resolves ONLY to public addresses), events [registration.created | registration.paid | registration.cancelled | registration.updated | kit.collected | bib.assigned | event.updated | event.cancelled | refund.updated] (no wildcard), eventIds?, description? (≤200) } → 201 { endpoint, signingSecret } — `whsec_…` shown ONCE, stored AES-256-GCM encrypted. The endpoint starts unverified and receives only the verification challenge until POST …/verify succeeds. 400 invalid_url { reason: not_https | credentials_in_url | bad_port | ip_literal | blocked_host | blocked_address | unresolvable | too_long }; 409 endpoint_limit_reached; 422 invalid_event_type | validation_failed; 404 feature_disabled without the key. no-store.',
+  onGuard: hookOwner('post'),
   onRequest: run(async (req, res) => send(res, await hooks.createEndpoint({ organizerId: organizerId(req), actorId: req.user.sub, body: req.body || {} }), 201), { noStore: true }),
 };
 
@@ -113,15 +115,15 @@ export const organizerGetWebhookEndpoint = {
 
 export const organizerUpdateWebhookEndpoint = {
   created, method: 'patch', path: '/organizer/webhook-endpoints/:id',
-  description: 'Organizer owner / admin (organizer active; EVENTS_WEBHOOKS): change { url?, events?, eventIds?, description? }. A changed URL is checked again and the handshake runs again at once → { endpoint, verification? { ok, host, reason? } }. 400 invalid_url; 422 invalid_event_type | validation_failed.',
-  onGuard: hookWriters('patch'),
+  description: 'Organizer OWNER only (D38; organizer active; EVENTS_WEBHOOKS): change { url?, events?, eventIds?, description? }. A changed URL is checked again and the handshake runs again at once → { endpoint, verification? { ok, host, reason? } }. 400 invalid_url; 422 invalid_event_type | validation_failed.',
+  onGuard: hookOwner('patch'),
   onRequest: run(async (req, res) => send(res, await hooks.updateEndpoint({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub, body: req.body || {} }))),
 };
 
 export const organizerVerifyWebhookEndpoint = {
   created, method: 'post', path: '/organizer/webhook-endpoints/:id/verify',
-  description: 'Organizer owner / admin (organizer active; EVENTS_WEBHOOKS): run the handshake now — a signed `endpoint.verification` request with a 32-character challenge that the endpoint must echo as 200 { "challenge": … } within 10 s → { ok, host, reason? }. Success sets verifiedAt; unverified endpoints receive no events.',
-  onGuard: hookWriters('post'),
+  description: 'Organizer OWNER only (D38; organizer active; EVENTS_WEBHOOKS): run the handshake now — a signed `endpoint.verification` request with a 32-character challenge that the endpoint must echo as 200 { "challenge": … } within 10 s → { ok, host, reason? }. Success sets verifiedAt; unverified endpoints receive no events.',
+  onGuard: hookOwner('post'),
   onRequest: run(async (req, res) => send(res, await hooks.verifyEndpoint({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub }))),
 };
 
@@ -134,22 +136,22 @@ export const organizerTestWebhookEndpoint = {
 
 export const organizerRotateWebhookSecret = {
   created, method: 'post', path: '/organizer/webhook-endpoints/:id/rotate-secret',
-  description: 'Organizer owner / admin (organizer active; EVENTS_WEBHOOKS): a NEW signing secret, shown once. Body { graceHours: 0 | 24 | 72 } (default 24): during the overlap every delivery carries two `v1=` signatures (new first). → { endpoint, signingSecret }. no-store.',
-  onGuard: hookWriters('post'),
+  description: 'Organizer OWNER only (D38; organizer active; EVENTS_WEBHOOKS): a NEW signing secret, shown once. Body { graceHours: 0 | 24 | 72 } (default 24): during the overlap every delivery carries two `v1=` signatures (new first). → { endpoint, signingSecret }. no-store.',
+  onGuard: hookOwner('post'),
   onRequest: run(async (req, res) => send(res, await hooks.rotateSecret({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub, body: req.body || {} })), { noStore: true }),
 };
 
 export const organizerDisableWebhookEndpoint = {
   created, method: 'post', path: '/organizer/webhook-endpoints/:id/disable',
-  description: 'Organizer owner / admin (organizer active; EVENTS_WEBHOOKS): switch an endpoint off. Endpoints are disabled, never deleted (the delivery log is history). → { endpoint, changed }.',
-  onGuard: hookWriters('post'),
+  description: 'Organizer OWNER only (D38; organizer active; EVENTS_WEBHOOKS): switch an endpoint off. Endpoints are disabled, never deleted (the delivery log is history). → { endpoint, changed }.',
+  onGuard: hookOwner('post'),
   onRequest: run(async (req, res) => send(res, await hooks.disableEndpoint({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub }))),
 };
 
 export const organizerEnableWebhookEndpoint = {
   created, method: 'post', path: '/organizer/webhook-endpoints/:id/enable',
-  description: 'Organizer owner / admin (organizer active; EVENTS_WEBHOOKS): switch a disabled endpoint on. The handshake must succeed first. Body { redeliverMissed?: true } also queues, once, the events of the last 7 days created after it was disabled → { endpoint, changed, requeued }. 409 verification_failed { reason }.',
-  onGuard: hookWriters('post'),
+  description: 'Organizer OWNER only (D38; organizer active; EVENTS_WEBHOOKS): switch a disabled endpoint on. The handshake must succeed first. Body { redeliverMissed?: true } also queues, once, the events of the last 7 days created after it was disabled → { endpoint, changed, requeued }. 409 verification_failed { reason }.',
+  onGuard: hookOwner('post'),
   onRequest: run(async (req, res) => send(res, await hooks.enableEndpoint({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub, body: req.body || {} }))),
 };
 

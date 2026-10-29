@@ -4,7 +4,7 @@
 // or its id is in EVENTS_API_ORGANIZER_ALLOWLIST. The secret is returned once, at create and at rotate, and is never
 // written to a log, an audit row, an analytics row or an error body.
 import { randomUUID } from 'node:crypto';
-import { newClientId, newClientSecret, hashSecret, FAILURES_BEFORE_LOCK } from '../auth/organizer-api-auth.mjs';
+import { newClientId, newClientSecret, hashSecret } from '../auth/organizer-api-auth.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const plain = row => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v === 'bigint' ? Number(v) : v))) : null);
@@ -38,14 +38,6 @@ export function createEventsIntegrationsService({
   const authStore = {
     findById: async id => shape(await joined().where('c.id', String(id)).first()),
     findByClientId: async clientId => shape(await joined().where('c.clientId', String(clientId)).first()),
-    /** Atomic: count the failure; at the threshold lock the client for `lockMinutes`. → { failedAttempts, lockedUntil } */
-    noteFailure: async (id, { threshold = FAILURES_BEFORE_LOCK, lockMinutes = 15, at = stamp() } = {}) => {
-      const { rows } = await db.raw(`UPDATE "ApiClient" SET "failedAttempts" = "failedAttempts" + 1,
-          "lockedUntil" = CASE WHEN "failedAttempts" + 1 >= ? THEN ?::timestamptz ELSE "lockedUntil" END, "updatedAt" = ?
-        WHERE id = ? RETURNING "failedAttempts", "lockedUntil"`, [threshold, new Date(+at + lockMinutes * 60_000), at, id]);
-      return rows[0] ?? null;
-    },
-    clearFailures: async id => db('ApiClient').where({ id }).update({ failedAttempts: 0, lockedUntil: null }),
     touch: async id => db('ApiClient').where({ id }).update({ lastUsedAt: stamp() }),
   };
 
@@ -142,7 +134,7 @@ export function createEventsIntegrationsService({
     await audit(actorId, 'events.api_client_created', saved.id, null, { clientId: saved.clientId, name, environment: body.environment, scopes: parsedScopes.scopes, eventIds: parsedEvents.eventIds, expiresAt: iso(row.expiresAt) });
     await tellOwners(organizerId, {
       id: `ntf_evapic_${saved.id}`, type: 'organizer_api_client_created',
-      en: { title: 'API client created', body: `An API client ${name} was created by ${ctx.actorName ?? 'a team member'}.` }, sw: { title: 'Mteja wa API ameundwa', body: `Mteja wa API ${name} ameundwa na ${ctx.actorName ?? 'mwanachama wa timu'}.` },
+      en: { title: 'API client created', body: `An API client ${name} was created by ${ctx.actorName ?? 'a team member'}.` }, sw: { title: 'Ruhusa ya API imeundwa', body: `Ruhusa ya API ${name} imeundwa na ${ctx.actorName ?? 'mwanachama wa timu'}.` },
     });
     return { status: 201, client: clientView(plain(saved), ctx.actorName ?? null), clientSecret: secret };
   }
@@ -198,19 +190,21 @@ export function createEventsIntegrationsService({
     const row = await own(ctx.organizer.id, id);
     if (!row) return fail('client_not_found', 404);
     if (row.status !== 'active') return fail('client_not_active', 409);
+    // D38: a client that can manage webhooks can redirect event data: only the owner may change its secret.
+    if ((row.scopes ?? []).includes('webhooks:manage') && ctx.role !== 'owner') return fail('forbidden_role', 403, { requiredRoles: ['owner'], scope: 'webhooks:manage' });
     const grace = body.graceHours === undefined ? 24 : body.graceHours;
     if (!GRACE_HOURS.includes(grace)) return fail('validation_failed', 422, { fields: [{ path: 'graceHours', code: 'invalid', allowed: [...GRACE_HOURS] }] });
     const at = stamp();
     const secret = newClientSecret(row.environment);
     const [saved] = await db('ApiClient').where({ id: row.id, status: 'active' }).update({
-      secretHash: hashSecret(secret), secretVersion: row.secretVersion + 1, rotatedAt: at, failedAttempts: 0, lockedUntil: null, updatedAt: at,
+      secretHash: hashSecret(secret), secretVersion: row.secretVersion + 1, rotatedAt: at, updatedAt: at,
       previousSecretHash: grace > 0 ? row.secretHash : null, previousSecretExpiresAt: grace > 0 ? new Date(+at + grace * 3_600_000) : null,
     }).returning('*');
     if (!saved) return fail('client_not_active', 409);
     await audit(actorId, 'events.api_client_rotated', row.id, null, { clientId: row.clientId, graceHours: grace });
     await tellOwners(ctx.organizer.id, {
       id: `ntf_evapir_${row.id}_${saved.secretVersion}`, type: 'organizer_api_client_rotated',
-      en: { title: 'API client secret changed', body: `The secret of API client ${row.name} was changed by ${ctx.actorName ?? 'a team member'}.` }, sw: { title: 'Siri ya mteja wa API imebadilishwa', body: `Siri ya mteja wa API ${row.name} imebadilishwa na ${ctx.actorName ?? 'mwanachama wa timu'}.` },
+      en: { title: 'API client secret changed', body: `The secret of API client ${row.name} was changed by ${ctx.actorName ?? 'a team member'}.` }, sw: { title: 'Siri ya ruhusa ya API imebadilishwa', body: `Siri ya ruhusa ya API ${row.name} imebadilishwa na ${ctx.actorName ?? 'mwanachama wa timu'}.` },
     });
     return { client: clientView(plain(saved), null), clientSecret: secret };
   }
@@ -227,7 +221,7 @@ export function createEventsIntegrationsService({
     if (!system) {
       await tellOwners(ctx.organizer.id, {
         id: `ntf_evapiv_${row.id}`, type: 'organizer_api_client_revoked',
-        en: { title: 'API client revoked', body: `API client ${row.name} was revoked by ${ctx.actorName ?? 'a team member'}.` }, sw: { title: 'Mteja wa API amefutwa', body: `Mteja wa API ${row.name} amefutwa na ${ctx.actorName ?? 'mwanachama wa timu'}.` },
+        en: { title: 'API client revoked', body: `API client ${row.name} was revoked by ${ctx.actorName ?? 'a team member'}.` }, sw: { title: 'Ruhusa ya API imeondolewa', body: `Ruhusa ya API ${row.name} imeondolewa na ${ctx.actorName ?? 'mwanachama wa timu'}.` },
       });
     }
     return { client: clientView(plain(saved), null), changed: true };
@@ -245,21 +239,34 @@ export function createEventsIntegrationsService({
     } catch { /* counters are best effort */ }
   }
 
-  const failureLog = new Map();
-  /** One audit row per client per 5 minutes (aggregated), carrying the REAL reason; a lock also tells the organizer owner. Never the id or secret presented. */
+  // Wrong-secret reporting (NO blocking): when one client has more than FAILURE_REPORT_AFTER failed exchanges within an hour, write ONE audit row and
+  // tell the owner, once per hour per client. In memory per server (a report is best effort; blocking would let a stranger deny a client).
+  const FAILURE_REPORT_AFTER = 20;
+  const failureWindows = new Map();
+  const reported = new Map();
+  const loggedAt = new Map();
   async function recordTokenFailure(result, { ip = null } = {}) {
     const client = result.client;
     if (!client) return;
     const t = +stamp();
-    if (t - (failureLog.get(client.id) ?? 0) >= 300_000) {
-      if (failureLog.size > 5000) failureLog.clear();
-      failureLog.set(client.id, t);
-      await audit('system', 'events.api_token_failed', client.id, null, { clientId: client.clientId, reason: result.reason, ...(ip ? { ip } : {}) });
+    if (failureWindows.size > 5000) failureWindows.clear();
+    const recent = (failureWindows.get(client.id) ?? []).filter(x => t - x < 3_600_000);
+    recent.push(t);
+    failureWindows.set(client.id, recent);
+    // The real reason, once per client per 5 minutes (never the id or secret presented).
+    if (t - (loggedAt.get(client.id) ?? 0) >= 300_000) {
+      if (loggedAt.size > 5000) loggedAt.clear();
+      loggedAt.set(client.id, t);
+      await audit('system', 'events.api_token_failed', client.id, null, { clientId: client.clientId, reason: result.underlying ?? result.reason, ...(ip ? { ip } : {}) });
     }
-    if (result.locked?.lockedUntil && result.locked.failedAttempts === FAILURES_BEFORE_LOCK) {
+    if (recent.length > FAILURE_REPORT_AFTER && t - (reported.get(client.id) ?? 0) >= 3_600_000) {
+      if (reported.size > 5000) reported.clear();
+      reported.set(client.id, t);
+      await audit('system', 'events.api_token_failures_high', client.id, null, { clientId: client.clientId, failuresLastHour: recent.length, reason: result.underlying ?? result.reason, ...(ip ? { ip } : {}) });
       await tellOwners(client.ownerId, {
-        id: `ntf_evapil_${client.id}_${Math.floor(t / 900_000)}`, type: 'organizer_api_client_locked',
-        en: { title: 'API client locked', body: `API client ${client.name} was locked for 15 minutes after repeated wrong secrets.` }, sw: { title: 'Mteja wa API amefungwa', body: `Mteja wa API ${client.name} amefungwa kwa dakika 15 baada ya siri zisizo sahihi kurudiwa.` },
+        id: `ntf_evapif_${client.id}_${Math.floor(t / 3_600_000)}`, type: 'organizer_api_client_failures',
+        en: { title: 'Wrong API secrets', body: `API client ${client.name} had ${recent.length} failed sign-ins in the last hour.` },
+        sw: { title: 'Siri za API zisizo sahihi', body: `Ruhusa ya API ${client.name} ilikuwa na majaribio ${recent.length} yaliyoshindikana ndani ya saa moja.` },
       });
     }
   }
@@ -274,7 +281,7 @@ export function createEventsIntegrationsService({
       for (const c of rows) {
         await tellOwners(c.ownerId, {
           id: `ntf_evapie_${c.id}_${days}`, type: 'organizer_api_client_expiring',
-          en: { title: 'API client expires soon', body: `API client ${c.name} expires in ${days} days.` }, sw: { title: 'Mteja wa API anaisha karibuni', body: `Mteja wa API ${c.name} anaisha baada ya siku ${days}.` },
+          en: { title: 'API client expires soon', body: `API client ${c.name} expires in ${days} days.` }, sw: { title: 'Ruhusa ya API inaisha karibuni', body: `Ruhusa ya API ${c.name} inaisha baada ya siku ${days}.` },
         });
         notices += 1;
       }

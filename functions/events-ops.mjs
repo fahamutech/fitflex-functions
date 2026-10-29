@@ -17,6 +17,7 @@ const ORGANIZER_TYPES = ['event_organizer', 'organizer_staff'];
 
 const verifyUser = createVendorLimiter({ perMinute: 120 });
 const verifyEvent = createVendorLimiter({ perMinute: 600 });
+export const verifyEventLimiterForSpecs = verifyEvent;
 const verifyFailures = createCounterWindow({ limit: 30 });
 const lookupLimiter = createVendorLimiter({ perMinute: 60 });
 const writeLimiter = createVendorLimiter({ perMinute: 120 });
@@ -63,7 +64,8 @@ export const organizerVerifyTicket = {
     const blocked = verifyFailures.blocked(req.user.sub);
     if (blocked) { res.set?.('Retry-After', String(blocked.retryAfterSeconds)); return res.status(429).json({ error: 'rate_limited', retryAfterSeconds: blocked.retryAfterSeconds }); }
     if (limitOrNull(verifyUser, `u:${req.user.sub}`, res)) return undefined;
-    if (limitOrNull(verifyEvent, `e:${req.params.id}`, res)) return undefined;
+    // keyed by (my organizer, the event id): a stranger's event id from the URL can never fill another organizer's bucket
+    if (limitOrNull(verifyEvent, `e:${organizerOf(req).organizer.id}:${req.params.id}`, res)) return undefined;
     const out = await ops.verifyTicket({ actor: staffActor(req), organizerId: organizerOf(req).organizer.id, eventId: req.params.id, body: req.body || {} });
     if (out.error === 'not_event_ticket' || ['unknown', 'wrong_event'].includes(out.result)) verifyFailures.hit(req.user.sub);
     return send(res, out);

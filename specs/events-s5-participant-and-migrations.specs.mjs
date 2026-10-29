@@ -68,8 +68,8 @@ test('scanning is false when the event has no kit, is not open for it, or is can
 });
 
 test('MIGRATIONS: up → down → up on an empty module restores the S4 shape exactly; every kind of S5 data makes `down` FAIL CLOSED with a reason', async () => {
-  const m1 = require('../db/migrations/20270124090000-events-ops-s5.cjs');
-  const m2 = require('../db/migrations/20270124090100-events-integrations-s5.cjs');
+  const m1 = require('../db/migrations/20270126090000-events-ops-s5.cjs');
+  const m2 = require('../db/migrations/20270126090100-events-integrations-s5.cjs');
   const ROLLBACK = Symbol('rollback');
   const inRollback = async fn => { try { await db.transaction(async (trx) => { await fn(trx); throw ROLLBACK; }); } catch (err) { if (err !== ROLLBACK) throw err; } };
   const cols = async (trx, table) => (await trx.raw(`SELECT column_name FROM information_schema.columns WHERE table_name = ? ORDER BY 1`, [table])).rows.map(r => r.column_name);

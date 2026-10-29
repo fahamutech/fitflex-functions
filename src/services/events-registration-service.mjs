@@ -115,6 +115,8 @@ export function createEventsRegistrationService({
     id: r.id, ticketTypeId: r.ticketTypeId, categoryId: r.categoryId, orderId: r.orderId, firstName: r.firstName, lastName: r.lastName,
     status: r.status, consentBasis: r.consentBasis, isSelf: claimStateOf(r) === 'self', claimState: claimStateOf(r),
     cancelReason: r.cancelReason ?? null, groupLabel: r.groupLabel ?? null, createdAt: iso(r.createdAt),
+    // S5: the bib the participant sees (behind EVENTS_KIT_OPS; absent otherwise, so the S4 answer is unchanged).
+    ...(getRosterSync() ? { bibNumber: r.bibNumber ?? null } : {}),
     ...(full ? {
       phone: r.phone ?? null, email: r.email ?? null, dateOfBirth: r.dateOfBirth ? String(r.dateOfBirth).slice(0, 10) : null, gender: r.gender ?? null,
       kitSize: r.kitSize ?? null, emergencyContact: r.emergencyContact ?? null, consentAt: iso(r.consentAt), consentTextVersion: r.consentTextVersion ?? null, claimedAt: iso(r.claimedAt),
@@ -817,6 +819,7 @@ export function createEventsRegistrationService({
       event: summaryOf(j), category: c ? { id: c.id, name: c.name, distanceM: Number(c.distanceMeters), startsAt: iso(c.startTime) } : null,
       ticketType: t ? { name: t.name } : null, status: r.status, orderId: r.orderId, orderReference: o?.reference ?? null, orderStatus: o?.status ?? null,
       holdExpiresAt: iso(o?.holdExpiresAt), claimState: claimStateOf(r), team: teams.get(r.id) ? { id: teams.get(r.id).id, name: teams.get(r.id).name } : null,
+      ...(getRosterSync() ? { bibNumber: r.bibNumber ?? null } : {}),   // S5: behind EVENTS_KIT_OPS
     };
   }
 

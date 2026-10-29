@@ -57,7 +57,7 @@ const schemas = {
   WebhookEndpointCreated: obj({ endpoint: ref('WebhookEndpoint'), signingSecret: { type: 'string', description: 'whsec_… shown ONCE.' } }),
   WebhookEndpointList: obj({ items: arr(ref('WebhookEndpoint')) }, ['items']),
   WebhookEndpointUpdated: obj({ endpoint: ref('WebhookEndpoint'), verification: obj({ ok: bool, host: nstr, reason: str }, ['ok']) }, ['endpoint']),
-  WebhookDeliveryList: obj({ items: arr(obj({ id: str, endpointId: str, eventType: str, eventId: str, status: { enum: ['pending', 'delivered', 'failed', 'dead'] }, attemptCount: int }, ['id', 'endpointId', 'eventType', 'eventId', 'status', 'attemptCount'])), nextCursor: nstr }),
+  WebhookDeliveryList: obj({ items: arr(obj({ id: str, endpointId: str, eventType: str, outboxEventId: str, status: { enum: ['pending', 'delivered', 'failed', 'dead'] }, attemptCount: int }, ['id', 'endpointId', 'eventType', 'outboxEventId', 'status', 'attemptCount'])), nextCursor: nstr }),
 };
 const errorResponses = codes => Object.fromEntries(codes.map(([code, desc]) => [String(code), { description: desc, content: { 'application/json': { schema: ref('Error') } } }]));
 const ok = (schemaName, description = 'OK', status = '200') => ({ [status]: { description, content: { 'application/json': { schema: ref(schemaName) } } } });

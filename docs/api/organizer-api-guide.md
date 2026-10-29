@@ -26,7 +26,7 @@ curl -s -X POST "$BASE/v1/organizer/token" -H 'Content-Type: application/json' \
 → { "access_token": "…", "token_type": "Bearer", "expires_in": 900 }
 ```
 
-HTTP Basic (`client_id:client_secret`) also works. This is the **only** request that carries the secret. Every failure is the same `401 {"error":"invalid_client"}` whether the id is unknown, the secret wrong, or the client revoked or expired. Twenty wrong secrets in a row lock the client for 15 minutes.
+HTTP Basic (`client_id:client_secret`) also works. This is the **only** request that carries the secret. Every failure is the same `401 {"error":"invalid_client"}` whether the id is unknown, the secret wrong, or the client revoked or expired. Wrong secrets are rate-limited (10 a minute per client id, 20 per source address; only failures are counted, so a valid exchange is never blocked) but a client is never locked out; the organizer owner is told when a client has many failures in an hour.
 
 Send `Authorization: Bearer <access_token>` on everything else and fetch a new token a minute before it expires. Scopes, revocation and expiry are checked on **every** call, so a revoked client stops working at once even with an unexpired token.
 
@@ -69,7 +69,7 @@ A second handover for the same registration is `409 already_collected` with the 
 
 Errors are `{ "error": "<code>", …extra }`. Every response has `X-Request-Id`; quote it to support. Common codes: `invalid_token`, `token_expired`, `insufficient_scope` (with `requiredScope`), `client_expired`, `organizer_suspended`, `api_access_not_enabled`, `event_not_found` (also for an event of another organizer or one outside your client's list), `invalid_cursor`, `invalid_limit`, `cursor_expired`, `idempotency_key_required`, `bib_taken`, `already_collected`, `rate_limited`.
 
-Each client may make at least 120 calls a minute (an admin can raise it to 600); beyond that you get `429` with `Retry-After` and `retryAfterSeconds`. Limits are per server, so treat the figure as "at least". The token route allows 20 requests a minute per IP.
+Each client may make at least 120 calls a minute (an admin can raise it to 600); beyond that you get `429` with `Retry-After` and `retryAfterSeconds`. Limits are per server, so treat the figure as "at least". On the token route, wrong secrets are limited to 20 a minute per source address.
 
 ## 7. Sandbox
 

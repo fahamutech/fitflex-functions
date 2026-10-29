@@ -2489,7 +2489,7 @@
                 "eventType": {
                   "type": "string"
                 },
-                "eventId": {
+                "outboxEventId": {
                   "type": "string"
                 },
                 "status": {
@@ -2508,7 +2508,7 @@
                 "id",
                 "endpointId",
                 "eventType",
-                "eventId",
+                "outboxEventId",
                 "status",
                 "attemptCount"
               ]

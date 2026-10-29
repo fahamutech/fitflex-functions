@@ -106,6 +106,12 @@ export function createEventsWebhookService({
     return { health, last24h: { delivered: counts.delivered, failed: counts.failed, dead: counts.dead }, pending: counts.pending, oldestPendingAgeSeconds: oldestAge };
   }
 
+  /** L10: do the stored secrets open under the current key ring (key id typo, key rotated without the previous one)? → { ok, unreadable } */
+  function keyHealth(rows) {
+    if (!enabled()) return { ok: false, unreadable: rows.length };
+    const unreadable = rows.filter(e => !secretsOf(e)).length;
+    return { ok: unreadable === 0, unreadable };
+  }
   const own = async (organizerId, id) => plain(await db('WebhookEndpoint').where({ id: String(id), organizerId }).first());
 
   async function tellTeam(organizerId, { id, type, en, sw, roles = ['owner', 'admin'] }) {
@@ -214,7 +220,7 @@ export function createEventsWebhookService({
     const rows = (await db('WebhookEndpoint').where({ organizerId }).orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id', order: 'desc' }])).map(plain);
     const items = [];
     for (const e of rows) items.push(endpointView(e, await healthOf(e)));
-    return { items, max: cfg.maxEndpoints(), types: [...WEBHOOK_EVENT_TYPES], available: enabled() };
+    return { items, max: cfg.maxEndpoints(), types: [...WEBHOOK_EVENT_TYPES], available: enabled(), keys: keyHealth(rows) };
   }
 
   async function getEndpoint({ organizerId, id }) {
@@ -252,6 +258,8 @@ export function createEventsWebhookService({
     if (!enabled()) return off();
     const e = await own(organizerId, id);
     if (!e) return fail('endpoint_not_found', 404);
+    const recentVerify = Number((await db('WebhookDeliveryAttempt').where({ endpointId: e.id, trigger: 'verify' }).where('startedAt', '>=', new Date(+stamp() - HOUR)).count({ n: '*' }).first()).n);
+    if (recentVerify >= 10) return fail('rate_limited', 429, { retryAfterSeconds: 3600 });
     const challenge = randomBytes(24).toString('base64url').slice(0, 32);
     const r = await attempt(e, { envelope: verificationEnvelope(challenge, stamp()), eventId: 'obx_verification', eventType: 'endpoint.verification', attemptNo: 1 });
     let ok = false;
@@ -355,7 +363,7 @@ export function createEventsWebhookService({
     return { attemptNo: a.attemptNo, trigger: a.trigger, startedAt: iso(a.startedAt), durationMs: a.durationMs, outcome: a.outcome, responseCode: a.responseCode, errorCode: a.errorCode, responseSnippet: a.responseSnippet, nextAttemptAt: iso(a.nextAttemptAt) };
   }
   const deliveryView = (d, o) => ({
-    id: d.id, endpointId: d.endpointId, eventType: projectOutbox(o)?.type ?? o.type, eventId: o.id, status: d.status, attemptCount: d.attemptCount, createdAt: iso(d.createdAt),
+    id: d.id, endpointId: d.endpointId, eventType: projectOutbox(o)?.type ?? o.type, outboxEventId: o.id, status: d.status, attemptCount: d.attemptCount, createdAt: iso(d.createdAt),
     lastAttemptAt: iso(d.lastAttemptAt), nextAttemptAt: d.status === 'pending' || d.status === 'failed' ? iso(d.nextAttemptAt) : null, responseCode: d.responseCode, lastError: d.lastError,
   });
 
@@ -457,7 +465,7 @@ export function createEventsWebhookService({
     const { rows } = await db.raw(`UPDATE "WebhookDelivery" SET "leaseUntil" = ?::timestamptz, "updatedAt" = ?
       WHERE id IN (SELECT d.id FROM "WebhookDelivery" d JOIN "WebhookEndpoint" e ON e.id = d."endpointId" JOIN "EventOrganizer" o ON o.id = e."organizerId"
         WHERE d.status IN ('pending', 'failed') AND d."nextAttemptAt" <= ? AND (d."leaseUntil" IS NULL OR d."leaseUntil" < ?)
-          AND e.status = 'active' AND o.status = 'active'
+          AND e.status = 'active' AND e."verifiedAt" IS NOT NULL AND o.status = 'active'
         ORDER BY d."nextAttemptAt" LIMIT ? FOR UPDATE OF d SKIP LOCKED)
       RETURNING *`, [new Date(+stamp() + 60_000), stamp(), stamp(), stamp(), limit]);
     return rows.map(plain);
@@ -514,7 +522,7 @@ export function createEventsWebhookService({
     const host = hostOf(e.url) ?? 'endpoint';
     await tellTeam(e.organizerId, {
       id: `ntf_evwhd_${e.id}_${Math.floor(+stamp() / DAY)}`, type: 'organizer_webhook_auto_disabled',
-      en: { title: 'Webhook turned off', body: `Webhook ${host} was turned off after repeated failures.` }, sw: { title: 'Webhook imezimwa', body: `Webhook ${host} imezimwa baada ya kushindwa mara nyingi.` },
+      en: { title: 'Webhook turned off', body: `Webhook ${host} was turned off after repeated failures.` }, sw: { title: 'Webhook imezimwa', body: `Webhook ${host} imezimwa baada ya majaribio mengi kushindikana.` },
     });
     return true;
   }
