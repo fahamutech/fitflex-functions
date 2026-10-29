@@ -720,7 +720,8 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
       const found = byCode
         ? await q('EventTicket as t').join('EventRegistration as r', 'r.id', 't.registrationId').where('r.eventId', event.id).whereIn('t.displayCode', idsInFile.map(v => v.toUpperCase())).where('t.status', 'active').select('r.*', 't.displayCode as code')
         : await q('EventRegistration as r').where('r.eventId', event.id).whereIn('r.id', idsInFile).select('r.*');
-      for (const r of found) regs.set(byCode ? r.code : r.id, plain(r));
+      // A ticket code is a support aid, not a key: two places of one event can share it (8 characters). An ambiguous code is refused, never guessed.
+      for (const r of found) { const k = byCode ? r.code : r.id; regs.set(k, [...(regs.get(k) ?? []), plain(r)]); }
     }
     const bibs = parsed.rows.map(r => normaliseBib(String(r.cells[bibCol] ?? '')));
     const wanted = [...new Set(bibs.filter(Boolean))];
@@ -734,7 +735,9 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
       const echo = neutralise(String(r.cells[bibCol] ?? '').trim().slice(0, 40));
       const reject = code => rows.push({ line: r.line, status: 'error', code, bibNumber: echo });
       if (!rawId || /^[=+\-@\t\r]/.test(rawId)) return reject('registration_not_found');
-      const reg = regs.get(byCode ? rawId.toUpperCase() : rawId);
+      const hits = regs.get(byCode ? rawId.toUpperCase() : rawId) ?? [];
+      if (hits.length > 1) return reject('ticket_code_ambiguous');
+      const reg = hits[0];
       if (!reg) return reject('registration_not_found');
       if (reg.status !== 'confirmed') return reject('registration_not_confirmed');
       if (!bibNumber) return reject('bib_invalid');

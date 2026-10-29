@@ -222,3 +222,15 @@ test('ATOMICITY: if the database fails halfway through a bulk apply or an import
     await db.raw('DROP FUNCTION IF EXISTS spec_s5_fail_second()');
   }
 });
+
+test('a ticket code shared by two places of one event is AMBIGUOUS in an import (never guessed), while the lookup shows both masked cards', async () => {
+  s5On();
+  const f = await h.kitEvent({ n: 2 });
+  await db('EventTicket').where({ id: f.regs[1].ticketId }).update({ displayCode: f.regs[0].displayCode });
+  const csv = `ticketCode,bibNumber\n${f.regs[0].displayCode},701\n`;
+  const prev = await call(organizerBibsImportPreview, f.organizer.admin, { params: { id: f.event.id }, body: { csv } });
+  assert.deepEqual(prev.body.rows, [{ line: 2, status: 'error', code: 'ticket_code_ambiguous', bibNumber: '701' }]);
+  const { organizerKitLookup } = await import('../functions/events-ops.mjs');
+  const look = await call(organizerKitLookup, f.organizer.ops, { params: { id: f.event.id }, query: { q: f.regs[0].displayCode } });
+  assert.equal(look.body.items.length, 2);
+});

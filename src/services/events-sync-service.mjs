@@ -7,7 +7,7 @@
 // scope), emergency contact, payer or payment data, user ids, claim tokens, ticket tokens or hashes.
 import { randomUUID } from 'node:crypto';
 import { kitStateOf } from '../shared/events-kit-view.mjs';
-import { maskName } from '../shared/events-participants.mjs';
+import { maskName, ageOnEventDay } from '../shared/events-participants.mjs';
 import { encodeCursor, decodeCursor, parseLimit, csvLine, sha256hex } from '../shared/events-ops-rules.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -16,19 +16,9 @@ const iso = v => (v ? new Date(v).toISOString() : null);
 export const FEED_TYPES = Object.freeze(['registration.created', 'registration.updated', 'registration.paid', 'registration.cancelled', 'kit.collected', 'bib.assigned']);
 export const FEED_RETENTION_DAYS = 90;
 export const EXPORT_COLUMNS = Object.freeze(['registrationId', 'ticketCode', 'firstName', 'lastName', 'categoryName', 'ticketTypeName', 'status', 'bibNumber', 'kitStatus', 'kitCollectedAt', 'kitSize', 'teamName', 'groupLabel', 'claimed']);
+/** A DATE column as 'YYYY-MM-DD': pg hands back a local-midnight Date, so read its LOCAL parts (toISOString would shift the day east of UTC). */
+const ymd = v => (v instanceof Date ? `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}` : v ? String(v).slice(0, 10) : null);
 const PUBLIC_STATUS = r => (r.status === 'confirmed' ? 'confirmed' : (['cancelled', 'refunded'].includes(r.status) && r.paidAt ? 'cancelled' : null));
-
-/** Completed years on the event's start date, in the event's own time zone. */
-export function ageOnEventDay(dateOfBirth, startsAt, timezone = 'Africa/Dar_es_Salaam') {
-  if (!dateOfBirth || !startsAt) return null;
-  const dob = (dateOfBirth instanceof Date ? dateOfBirth.toISOString() : String(dateOfBirth)).slice(0, 10);
-  let day;
-  try { day = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(startsAt)); } catch { return null; }
-  const [by, bm, bd] = dob.split('-').map(Number);
-  const [ey, em, ed] = day.split('-').map(Number);
-  if (![by, bm, bd, ey, em, ed].every(Number.isFinite)) return null;
-  return ey - by - (em < bm || (em === bm && ed < bd) ? 1 : 0);
-}
 
 export function createEventsSyncService({ db, now = () => new Date(), feedLagSeconds = () => 5, exportMaxRows = () => 20_000, audit = null }) {
   const stamp = () => new Date(now());
@@ -125,7 +115,7 @@ export function createEventsSyncService({ db, now = () => new Date(), feedLagSec
       bibNumber: cancelled ? null : (r.bibNumber ?? null), kit: kitOf(event, r, c), kitSize: cancelled ? null : (r.kitSize ?? null), ticketCode: c.ticketBy.get(r.id)?.displayCode ?? null,
       teamId: cancelled ? null : (c.teamBy.get(r.id)?.id ?? null), teamName: cancelled ? null : (c.teamBy.get(r.id)?.name ?? null), groupLabel: cancelled ? null : (r.groupLabel ?? null), claimed: Boolean(r.participantUserId),
     };
-    if (demographics) { out.gender = cancelled ? null : (r.gender ?? null); out.ageOnEventDay = cancelled ? null : ageOnEventDay(r.dateOfBirth, event.startsAt, event.timezone); }
+    if (demographics) { out.gender = cancelled ? null : (r.gender ?? null); out.ageOnEventDay = cancelled ? null : ageOnEventDay(ymd(r.dateOfBirth), event.startsAt, event.timezone); }
     return out;
   }
 

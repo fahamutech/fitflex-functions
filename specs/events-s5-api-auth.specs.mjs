@@ -215,3 +215,30 @@ test('per-client rate limit: 429 with Retry-After, retryAfterSeconds and X-RateL
   const gen = await call(apiListEvents, null, { headers: bearer(await other.token()) });
   assert.ok(gen.status === 200);
 });
+
+test('NOTHING is logged: across creation, exchange, failures, calls, errors and rotation the console never sees a client secret, an access token or a request body', async () => {
+  s5On();
+  const f = await h.kitEvent({ n: 1 });
+  const captured = [];
+  const originals = {};
+  for (const level of ['log', 'info', 'warn', 'error', 'debug']) { originals[level] = console[level]; console[level] = (...args) => { captured.push(args.map(a => (a instanceof Error ? `${a.message}\n${a.stack}` : typeof a === 'string' ? a : JSON.stringify(a))).join(' ')); }; }
+  let secrets;
+  try {
+    const c = await h.apiClient(f.organizer, { scopes: ['registrations:read', 'kit:write'] });
+    const bad = { ...creds(c), client_secret: `ffs_live_${'Z'.repeat(43)}` };
+    await exchange(bad, { ip: '10.9.1.1' });
+    await exchange({ grant_type: 'client_credentials', client_id: { x: 1 }, client_secret: [1] }, { ip: '10.9.1.2' });
+    const t = await c.token();
+    await call(apiListRegistrations, null, { params: { eventId: f.event.id }, headers: bearer(t) });
+    await call(apiCollectKit, null, { params: { eventId: f.event.id }, headers: { ...bearer(t), 'idempotency-key': 'nolog-key-0001' }, body: { method: 'scan', payload: f.regs[0].payload, collectionPointId: f.points[0].id } });
+    await call(apiListEvents, null, { headers: bearer('not.a.token') });
+    // a handler that throws
+    const res = { statusCode: 200, status(x) { this.statusCode = x; return this; }, json(b) { this.body = b; return this; }, set() { return this; } };
+    const req = { method: 'GET', headers: bearer(t), params: {}, query: { limit: { toString() { throw new Error('boom'); } } }, body: {}, ip: '10.9.1.3', get: () => null };
+    for (const g of [apiListEvents.onGuard].flat()) await g(req, res, () => {});
+    await apiListEvents.onRequest(req, res);
+    secrets = [c.secret, bad.client_secret, t, f.regs[0].payload, f.regs[0].token];
+  } finally { Object.assign(console, originals); }
+  const text = captured.join('\n');
+  for (const secret of secrets) assert.ok(!text.includes(secret), `a secret reached the console: ${secret.slice(0, 14)}…`);
+});

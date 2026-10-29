@@ -255,7 +255,7 @@ test('AUTO-DISABLE after sustained failure (30 in a row and the first 24 h ago):
   const back = await lab.svc.enableEndpoint({ organizerId: f.organizer.id, id: ep.id, actorId: f.organizer.ownerUserId, body: { redeliverMissed: true } });
   assert.deepEqual([back.changed, back.requeued, back.endpoint.status, back.endpoint.consecutiveFailures], [true, 1, 'active', 0]);
   await lab.svc.deliverDue();
-  assert.equal(eventCalls(lab).at(-1).parsed.data.registrationId, 'ereg_missed');
+  assert.ok(eventCalls(lab).some(c => c.parsed.data.registrationId === 'ereg_missed'), 'the missed event reached the receiver (alongside the retry of the one that failed)');
   // a manual disable is not an auto one, and the sustained-72h rule
   assert.equal((await lab.svc.disableEndpoint({ organizerId: f.organizer.id, id: ep.id, actorId: f.organizer.ownerUserId })).endpoint.status, 'disabled');
   assert.equal((await db('WebhookEndpoint').where({ id: ep.id }).first()).disabledReason, 'manual');

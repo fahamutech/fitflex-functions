@@ -157,7 +157,7 @@ export const organizerBibsBulk = {
 
 export const organizerBibsImportPreview = {
   created, method: 'post', path: `${base}/bib-assignments/import/preview`,
-  description: 'Organizer owner / admin (EVENTS_KIT_OPS): dry-run a CSV of bib numbers. Body { csv } (UTF-8, header row required with bibNumber and registrationId OR ticketCode, `,` or `;`, ≤2,000 rows and 512 KB; cells starting = + - @ tab CR are refused as ids and neutralised when echoed) → { total, ok, bad, rows [{ line, status: ok | error, code: registration_not_found | registration_not_confirmed | bib_invalid | bib_taken | bib_duplicate_in_file | registration_duplicate_in_file | already_assigned | null, bibNumber }], previewHash }. 413 payload_too_large | too_many_rows; 422 csv_invalid | csv_header_invalid. Writes nothing.',
+  description: 'Organizer owner / admin (EVENTS_KIT_OPS): dry-run a CSV of bib numbers. Body { csv } (UTF-8, header row required with bibNumber and registrationId OR ticketCode, `,` or `;`, ≤2,000 rows and 512 KB; cells starting = + - @ tab CR are refused as ids and neutralised when echoed) → { total, ok, bad, rows [{ line, status: ok | error, code: registration_not_found | registration_not_confirmed | bib_invalid | bib_taken | bib_duplicate_in_file | registration_duplicate_in_file | ticket_code_ambiguous | already_assigned | null, bibNumber }], previewHash }. 413 payload_too_large | too_many_rows; 422 csv_invalid | csv_header_invalid. Writes nothing.',
   onGuard: writers('post', 'owner', 'admin'),
   onRequest: stamped(async (req, res) => send(res, await ops.importPreview({ actor: staffActor(req), organizerId: organizerOf(req).organizer.id, eventId: req.params.id, body: req.body || {} }))),
 };
