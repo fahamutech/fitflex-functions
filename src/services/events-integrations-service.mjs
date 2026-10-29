@@ -11,9 +11,11 @@ const plain = row => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v =
 const iso = v => (v ? new Date(v).toISOString() : null);
 const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
 
-export const API_SCOPES = Object.freeze(['registrations:read', 'registrations:demographics', 'kit:write', 'bibs:write', 'webhooks:manage', 'results:write']);
-export const SELECTABLE_SCOPES = Object.freeze(['registrations:read', 'registrations:demographics', 'kit:write', 'bibs:write', 'webhooks:manage']);
-export const RESERVED_SCOPES = Object.freeze(['results:write']);
+// S6 (rule 6, owner reviews): results:write is activated (it can only SUBMIT provisional results, never verify, release, correct or
+// disqualify: D46) and results:read is new. Both need registrations:read for lookups and the EVENTS_RESULTS flag to do anything.
+export const API_SCOPES = Object.freeze(['registrations:read', 'registrations:demographics', 'kit:write', 'bibs:write', 'webhooks:manage', 'results:write', 'results:read']);
+export const SELECTABLE_SCOPES = Object.freeze(['registrations:read', 'registrations:demographics', 'kit:write', 'bibs:write', 'webhooks:manage', 'results:write', 'results:read']);
+export const RESERVED_SCOPES = Object.freeze([]);
 export const SANDBOX_EVENT_ID = 'evt_sandbox';
 export const GRACE_HOURS = Object.freeze([0, 24, 72]);
 const DAY = 86_400_000;
@@ -88,7 +90,7 @@ export function createEventsIntegrationsService({
       if (role !== 'owner') return fail('forbidden_role', 403, { requiredRoles: ['owner'], scope: 'webhooks:manage' });
       if (environment === 'sandbox') return fail('scope_not_available', 422, { scope: 'webhooks:manage', reason: 'sandbox' });
     }
-    if ((scopes.includes('kit:write') || scopes.includes('bibs:write') || scopes.includes('registrations:demographics')) && !scopes.includes('registrations:read')) {
+    if ((scopes.includes('kit:write') || scopes.includes('bibs:write') || scopes.includes('registrations:demographics') || scopes.includes('results:write') || scopes.includes('results:read')) && !scopes.includes('registrations:read')) {
       return fail('validation_failed', 422, { fields: [{ path: 'scopes', code: 'requires_registrations_read' }] });
     }
     return { scopes };

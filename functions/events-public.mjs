@@ -5,8 +5,9 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, optionalSessionClaims } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsModule, eventsFavouritesOn } from '../src/shared/feature-flags.mjs';
-import { eventsDiscoveryService as svc } from '../src/bootstrap/services.mjs';
+import { requireEventsModule, eventsFavouritesOn, eventsResultsOn, eventsRunsOn, eventsResultsPublicOn, eventsRewardsOn, eventsMedalArtOn } from '../src/shared/feature-flags.mjs';
+import { eventsRunDistanceToleranceBps, eventsRunLinkMaxDaysAfter } from '../src/shared/events-config.mjs';
+import { eventsDiscoveryService as svc, eventsResultsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -24,7 +25,12 @@ const favouritesGuard = method => routeGuard(method, [requireEventsModule, (req,
 export const eventsOptions = {
   created, method: 'get', path: '/events/options',
   description: 'Public, no auth: which parts of the events module this server has switched on → { discovery, favourites, registration, currency: "TZS", closingSoonHours, regions: [{ code, name { en, sw } }], timezones[], types[], distances[], prices[], sorts[] }. Answers { discovery: false, … } while EVENTS_MODULE is off (the only events route that never 404s).',
-  onRequest: async (_req, res) => res.json(svc.options()),
+  // S6 (additive): results { enabled, runs, public, rewards, medalArt } and runs { toleranceBps, maxDaysAfter }; every value is false / default while the flags are off.
+  onRequest: async (_req, res) => res.json({
+    ...svc.options(),
+    results: { enabled: eventsResultsOn(), runs: eventsRunsOn(), public: eventsResultsPublicOn(), rewards: eventsRewardsOn(), medalArt: eventsMedalArtOn() },
+    runs: { toleranceBps: eventsRunDistanceToleranceBps(), maxDaysAfter: eventsRunLinkMaxDaysAfter() },
+  }),
 };
 
 export const eventsList = {
@@ -38,7 +44,12 @@ export const eventDetail = {
   created, method: 'get', path: '/events/:idOrSlug',
   description: 'Public (optional auth for isSaved): one event by id or slug → EventDetail (summary + description { en, sw }, heroImageUrl, coverAlt, routeUrl, routeImageUrl, routeImageAlt, venue { address, lat, lng }, accessibility, inclusions, categories [{ id, name, distanceM, startsAt, capacity, availability, remaining (≤10 else null), eligibility, minAge, ticketTypes [{ id, name, priceTzs, currency, saleOpensAt, saleClosesAt, minPerOrder, maxPerOrder, availability }] }], collectionPoints, schedule, sponsors, contact, terms, refundPolicy, cancellation | null, shareUrl, publishedAt, updatedAt, version). Cancelled and completed events stay readable here; drafts, submitted and archived events are 404 event_not_found.',
   onGuard: routeGuard('get', [requireEventsModule]),
-  onRequest: async (req, res) => send(res, await svc.detail({ idOrSlug: req.params.idOrSlug, userId: optionalSessionClaims(req)?.sub ?? null })),
+  onRequest: async (req, res) => {
+    const out = await svc.detail({ idOrSlug: req.params.idOrSlug, userId: optionalSessionClaims(req)?.sub ?? null });
+    // S6 (additive, public fields only): the release stage of the event's results. Absent while EVENTS_RESULTS is off.
+    if (!out?.error && eventsResultsOn() && out?.id) out.results = await eventsResultsService.publicBlock(out.id).catch(() => null) ?? undefined;
+    return send(res, out);
+  },
 };
 
 export const saveEventFavourite = {

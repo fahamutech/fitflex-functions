@@ -173,6 +173,9 @@ import { createEventsOpsService } from '../services/events-ops-service.mjs';
 import { createEventsSyncService } from '../services/events-sync-service.mjs';
 import { createEventsIntegrationsService } from '../services/events-integrations-service.mjs';
 import { createEventsWebhookService } from '../services/events-webhook-service.mjs';
+import { createEventsResultsService } from '../services/events-results-service.mjs';
+import { eventsResultsOn, eventsRunsOn, eventsRewardsOn, eventsMedalArtOn, eventsResultsPublicOn } from '../shared/feature-flags.mjs';
+import { eventsResultsImportMaxRows, eventsResultsDisputeDefaultHours, eventsResultsPushMax, eventsResultsConsentVersions } from '../shared/events-config.mjs';
 import { webhookKeyRing } from '../shared/webhook-signing.mjs';
 import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
 import {
@@ -1429,3 +1432,14 @@ opsService.register({
     return { processed, succeeded: processed, failed: 0, ...r, ...s };
   },
 });
+
+// Marathon & running events · S6: results, run links, medals and rewards (docs/design/events-s6-runs-results-medals-rewards.md).
+// Dormant behind EVENTS_RESULTS / EVENTS_RUNS / EVENTS_RESULTS_PUBLIC / EVENTS_REWARDS / EVENTS_MEDAL_ART (each with EVENTS_MODULE and
+// EVENTS_REGISTRATION): with all five off every S6 route answers 404 feature_disabled and S5 behaviour is unchanged.
+export const eventsResultsService = createEventsResultsService({
+  db, eventStore,
+  notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+  importMaxRows: eventsResultsImportMaxRows, disputeDefaultHours: eventsResultsDisputeDefaultHours, pushMax: eventsResultsPushMax, clauseVersions: eventsResultsConsentVersions,
+  rewardsOn: eventsRewardsOn,
+});
+void eventsRunsOn; void eventsMedalArtOn; void eventsResultsPublicOn; void eventsResultsOn;

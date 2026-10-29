@@ -48,6 +48,7 @@ test('every mounted /v1/organizer route has an operation and every operation has
 
 test('the scope each operation documents is the scope the route enforces (a read-only client is refused with exactly that scope)', async () => {
   s5On();
+  process.env.EVENTS_RESULTS = '1'; // S6: the results routes are flag-gated before their scope check
   const f = await h.kitEvent({ n: 1 });
   const c = await h.apiClient(f.organizer, { scopes: ['registrations:read'] });
   const bearer = await c.bearer();
