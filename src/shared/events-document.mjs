@@ -10,9 +10,12 @@
 //   allowedActionsFor({ status, actor, role, organizerStatus }) → §7.2 action names
 //   summaryView / detailView / organizerView      → the §14 shapes
 import { normalizePhone } from './identifiers.mjs';
+import { parseParticipantFields, effectiveFields, DUPLICATE_POLICIES, FIELD_POLICIES, PARTICIPANT_FIELD_KEYS } from './events-participants.mjs';
+import { POLICY_PRESETS, normalisePolicy, validatePolicy, describePolicy } from './events-refund-policy.mjs';
 
 export const EVENT_TYPES = Object.freeze(['road', 'trail', 'fun', 'charity', 'virtual']);
-export const REFUND_PRESETS = Object.freeze(['no_refund', 'refund_until_close', 'custom']);
+// S4 adds the two machine-evaluable presets (full_until_days, tiered); published events with the S2 presets keep working.
+export const REFUND_PRESETS = POLICY_PRESETS;
 export const CANCEL_REASONS = Object.freeze(['weather', 'permit', 'safety', 'low_turnout', 'organizer_decision', 'other']);
 export const REJECT_REASONS = Object.freeze(['incomplete_details', 'permit_missing', 'pricing_unclear', 'terms_unclear', 'duplicate_event', 'policy_violation', 'other']);
 export const EVENT_ACTIONS = Object.freeze(['edit', 'submit', 'withdraw', 'approve', 'reject', 'cancel', 'complete', 'archive', 'delete']);
@@ -147,6 +150,9 @@ const PATCHABLE = {
   routeImageUrl: v => (v === null || isStr(v) ? v : undefined),
   routeImageAlt: v => (v === null || isStr(v) ? v : undefined),
   kitProvided: v => (typeof v === 'boolean' ? v : undefined),
+  // S3 (§3.3, D20): which participant fields are collected and the duplicate rule — material (ORG-007).
+  participantFields: parseParticipantFields,
+  duplicatePolicy: v => (isStr(v) ? v : undefined),
 };
 const BILINGUAL_FIELDS = ['description', 'accessibility', 'inclusions', 'terms'];
 
@@ -184,7 +190,11 @@ export function parseEventPatch(body = {}) {
   }
   if ('refundPolicy' in body) {
     const r = body.refundPolicy && typeof body.refundPolicy === 'object' ? body.refundPolicy : {};
-    patch.refundPolicy = { preset: isStr(r.preset) ? r.preset : null, text: bilingual(r.text) || { en: null, sw: null } };
+    // S4: days (full_until_days) and tiers (tiered) are kept for their preset only; validateEvent checks them.
+    const text = bilingual(r.text) || { en: null, sw: null };
+    patch.refundPolicy = { preset: isStr(r.preset) ? r.preset : null, text };
+    if (r.preset === 'full_until_days') patch.refundPolicy.days = Number.isInteger(r.days) ? r.days : (isStr(r.days) && /^\d+$/.test(r.days) ? Number(r.days) : null);
+    if (r.preset === 'tiered') patch.refundPolicy.tiers = Array.isArray(r.tiers) ? r.tiers.slice(0, 10).map(t => ({ daysBefore: Number.isInteger(t?.daysBefore) ? t.daysBefore : null, percent: Number.isInteger(t?.percent) ? t.percent : null })) : [];
   }
   if ('schedule' in body) {
     patch.schedule = Array.isArray(body.schedule)
@@ -259,6 +269,12 @@ export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHost
 
   // 1 Basics
   if (required('title', doc.title)) length('title', doc.title, 3, 80);
+  // S3: registration settings (optional; defaults apply when absent)
+  if (doc.duplicatePolicy !== undefined && doc.duplicatePolicy !== null && !DUPLICATE_POLICIES.includes(doc.duplicatePolicy)) add('duplicatePolicy', 'required');
+  if (doc.participantFields !== undefined && doc.participantFields !== null) {
+    if (typeof doc.participantFields !== 'object' || Array.isArray(doc.participantFields)) add('participantFields', 'required');
+    else for (const [k, v] of Object.entries(doc.participantFields)) if (!PARTICIPANT_FIELD_KEYS.includes(k) || !FIELD_POLICIES.includes(v)) add(`participantFields.${k}`, 'required');
+  }
   if (required('type', doc.eventType) && filled(doc.eventType) && !EVENT_TYPES.includes(doc.eventType)) add('type', 'required');
   for (const lang of ['en', 'sw']) {
     const v = lang === 'en' ? doc.description : doc.descriptionSw;
@@ -355,6 +371,10 @@ export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHost
   for (const lang of ['en', 'sw']) if (required(`terms.${lang}`, doc.terms?.[lang])) length(`terms.${lang}`, doc.terms?.[lang], 100, 20000);
   const preset = doc.refundPolicy?.preset;
   if (required('refundPolicy.preset', preset) && filled(preset) && !REFUND_PRESETS.includes(preset)) add('refundPolicy.preset', 'required');
+  // S4: the structured fields of the evaluable presets (only when the preset is chosen; a draft may be incomplete).
+  if (full && filled(preset) && REFUND_PRESETS.includes(preset)) {
+    for (const problem of validatePolicy(doc.refundPolicy)) add(problem.field, problem.code, problem.min !== undefined ? { min: problem.min, max: problem.max } : undefined);
+  }
   if (preset === 'custom') {
     for (const lang of ['en', 'sw']) if (required(`refundPolicy.text.${lang}`, doc.refundPolicy?.text?.[lang])) length(`refundPolicy.text.${lang}`, doc.refundPolicy?.text?.[lang], 50, 5000);
   } else {
@@ -386,7 +406,7 @@ export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHost
 
 // ── Change detection (§7.4) ─────────────────────────────────────────────────
 
-const MATERIAL_EVENT_FIELDS = ['startsAt', 'endsAt', 'timezone', 'venue.name', 'venue.address', 'venue.lat', 'venue.lng', 'routeUrl', 'routeImageUrl', 'registrationClosesAt', 'refundPolicy'];
+const MATERIAL_EVENT_FIELDS = ['startsAt', 'endsAt', 'timezone', 'venue.name', 'venue.address', 'venue.lat', 'venue.lng', 'routeUrl', 'routeImageUrl', 'registrationClosesAt', 'refundPolicy', 'participantFields', 'duplicatePolicy'];
 const MATERIAL_CATEGORY_FIELDS = ['distanceM', 'startsAt'];
 const MATERIAL_TICKET_FIELDS = ['priceTzs'];
 
@@ -402,6 +422,8 @@ export function flattenDocument(doc = {}) {
   for (const k of ['name', 'address', 'city', 'region', 'lat', 'lng']) out[`venue.${k}`] = scalar(doc.venue?.[k] ?? null);
   for (const k of ['email', 'phone', 'whatsapp']) out[`contact.${k}`] = doc.contact?.[k] ?? null;
   out.refundPolicy = JSON.stringify(doc.refundPolicy ?? null);
+  out.participantFields = JSON.stringify(doc.participantFields ?? null);
+  out.duplicatePolicy = doc.duplicatePolicy ?? null;
   out.schedule = JSON.stringify(doc.schedule ?? []);
   out.sponsors = JSON.stringify(doc.sponsors ?? []);
   for (const c of doc.categories || []) {
@@ -593,6 +615,17 @@ const pointView = p => ({
   instructions: { en: p.instructions?.en ?? null, sw: p.instructions?.sw ?? null },
 });
 
+/** The refund policy as the apps read it (S4): preset, the organizer's texts, the structured fields and the generated line (EN + SW; null for custom). */
+export function policyView(raw) {
+  const p = normalisePolicy(raw);
+  return {
+    preset: p.preset, text: { en: p.text.en, sw: p.text.sw },
+    ...(p.preset === 'full_until_days' ? { days: Number.isInteger(p.days) ? p.days : null } : {}),
+    ...(p.preset === 'tiered' ? { tiers: (p.tiers || []).map(t => ({ daysBefore: t.daysBefore ?? null, percent: t.percent ?? null })) } : {}),
+    generated: describePolicy(p),
+  };
+}
+
 /** EventDetail (§14.2): summary + the full public document. `shareUrl` is built by the caller. */
 export function detailView(joined, { now = new Date(), closingSoonHours = DEFAULT_CLOSING_SOON_HOURS, saved = null, shareUrl = null } = {}) {
   const { event: e, categories = [], collectionPoints = [] } = joined;
@@ -607,6 +640,9 @@ export function detailView(joined, { now = new Date(), closingSoonHours = DEFAUL
     accessibility: { en: e.accessibility?.en ?? null, sw: e.accessibility?.sw ?? null },
     inclusions: { en: e.inclusions?.en ?? null, sw: e.inclusions?.sw ?? null },
     kitProvided: e.kitProvided === true,
+    // S3 (§8.2): the effective participant field policy, so the registration form and the quote agree.
+    participantFields: effectiveFields(e, categories),
+    duplicatePolicy: DUPLICATE_POLICIES.includes(e.duplicatePolicy) ? e.duplicatePolicy : 'one_per_category',
     categories: categories.filter(c => c.status !== 'inactive').map(c => categoryView(c, summary.availability, opts)),
     collectionPoints: collectionPoints.filter(p => p.status !== 'inactive').map(pointView),
     schedule: (e.schedule || []).map(s => ({ at: iso(s.at), label: { en: s.label?.en ?? null, sw: s.label?.sw ?? null } })),
@@ -614,10 +650,7 @@ export function detailView(joined, { now = new Date(), closingSoonHours = DEFAUL
     contact: { email: e.contact?.email ?? null, phone: e.contact?.phone ?? null, whatsapp: e.contact?.whatsapp ?? null },
     // Participants see the frozen texts once there are any; before submission the working copy is all there is.
     terms: { en: e.termsSnapshot?.en ?? e.terms?.en ?? null, sw: e.termsSnapshot?.sw ?? e.terms?.sw ?? null },
-    refundPolicy: {
-      preset: e.refundPolicySnapshot?.preset ?? e.refundPolicy?.preset ?? null,
-      text: { en: e.refundPolicySnapshot?.text?.en ?? e.refundPolicy?.text?.en ?? null, sw: e.refundPolicySnapshot?.text?.sw ?? e.refundPolicy?.text?.sw ?? null },
-    },
+    refundPolicy: policyView(e.refundPolicySnapshot ?? e.refundPolicy),
     cancellation: e.cancellation ? { reason: e.cancellation.reason ?? null, note: { en: e.cancellation.note?.en ?? null, sw: e.cancellation.note?.sw ?? null } } : null,
     shareUrl, publishedAt: iso(e.publishedAt), updatedAt: iso(e.updatedAt), version: e.version,
   };
@@ -633,8 +666,10 @@ export function organizerView(joined, { now, closingSoonHours, allowedActions = 
   return {
     ...view,
     terms: { en: e.terms?.en ?? null, sw: e.terms?.sw ?? null },
-    refundPolicy: { preset: e.refundPolicy?.preset ?? null, text: { en: e.refundPolicy?.text?.en ?? null, sw: e.refundPolicy?.text?.sw ?? null } },
+    refundPolicy: policyView(e.refundPolicy),
     heroImageAlt: e.heroImageAlt ?? null,
+    participantFields: e.participantFields && typeof e.participantFields === 'object' ? { ...e.participantFields } : {},
+    effectiveParticipantFields: view.participantFields,
     status: e.status, version: e.version, allowedActions,
     submittedAt: iso(e.submittedAt),
     rejection: e.rejection ? { reason: e.rejection.reason ?? null, note: e.rejection.note ?? null, at: iso(e.rejection.at) } : null,

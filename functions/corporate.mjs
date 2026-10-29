@@ -18,6 +18,8 @@ async function scoped(req, res, handler) {
   const { error, status, ...payload } = await handler(actor.corporateId);
   // Services attach context alongside the error (seatLimit, errors, ...) — keep it.
   if (error) return res.status(status).json({ error, ...payload });
+  // A link by user id that now waits for the member to accept answers 202.
+  if (payload.outcome === 'pending_member_acceptance') return res.status(202).json(payload);
   return res.json(payload);
 }
 
@@ -171,11 +173,11 @@ export const corporateSetStaffStatus = {
 
 export const corporateLinkStaffUser = {
   created, method: 'post', path: '/corporate/staff/:id/link',
-  description: 'Corporate HR: link an employee to their FitFlex member account so they can use the company\'s benefits. Give the account\'s email, its mobile number or its userId (one of them). Send userId null to unlink.',
+  description: 'Corporate HR: link an employee to their FitFlex member account so they can use the company\'s benefits. Give the account\'s verified email, its mobile number or its userId (one of them). Send userId null to unlink (an open link request is withdrawn too). By userId (HR; not FitFlex admins) the record is not linked yet: 202 { outcome: "pending_member_acceptance", memberRequest } and the member must accept in the app. GET /corporate/staff shows it as pendingLink.',
   requestSample: { email: 'asha@nmbtz.com' },
   onGuard: requireHr,
   onRequest: (req, res) => scoped(req, res, corporateId => corporateService.linkEmployeeUser({
-    corporateId, employeeId: req.params.id, userId: req.body?.userId, email: req.body?.email, phone: req.body?.phone, actorId: req.user.sub,
+    corporateId, employeeId: req.params.id, userId: req.body?.userId, email: req.body?.email, phone: req.body?.phone, actorId: req.user.sub, actorType: req.user.userType,
   }))
 };
 

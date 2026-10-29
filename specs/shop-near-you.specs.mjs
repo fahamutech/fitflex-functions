@@ -34,6 +34,10 @@ const AREAS = [
   { id: 'tz-aru', level: 'region', name: 'Arusha', parentId: 'tz', lat: -3.38, lng: 36.68, radiusKm: 60, active: true },
   { id: 'tz-aru-city', level: 'city', name: 'Arusha', parentId: 'tz-aru', lat: -3.38, lng: 36.68, radiusKm: 15, active: true },
   { id: 'tz-aru-old', level: 'city', name: 'Old Town', parentId: 'tz-aru', lat: null, lng: null, radiusKm: null, active: false },
+  // Zanzibar, with Swahili names (QA1 truthful reasons).
+  { id: 'tz-znz', level: 'region', name: 'Zanzibar', parentId: 'tz', lat: -6.16, lng: 39.2, radiusKm: 60, active: true },
+  { id: 'tz-znz-city', level: 'city', name: 'Zanzibar City', nameSw: 'Mji wa Zanzibar', parentId: 'tz-znz', lat: -6.165, lng: 39.202, radiusKm: 12, active: true },
+  { id: 'tz-znz-stone', level: 'district', name: 'Stone Town', nameSw: 'Mji Mkongwe', parentId: 'tz-znz-city', lat: -6.163, lng: 39.189, radiusKm: 3, active: true },
   { id: 'tz-off', level: 'region', name: 'Closed Region', parentId: 'tz', lat: 0, lng: 0, radiusKm: 5, active: false },
   { id: 'tz-off-city', level: 'city', name: 'Closed City', parentId: 'tz-off', lat: 0, lng: 0, radiusKm: 5, active: true },
 ];
@@ -42,9 +46,9 @@ const IDX = indexAreas(AREAS);
 // ── pure area rules ─────────────────────────────────────────────────────────
 
 test('areas: usable = active all the way up; GET /shop/areas rows by level then name, names in both languages', () => {
-  assert.deepEqual([...IDX.usable].sort(), ['tz', 'tz-aru', 'tz-aru-city', 'tz-aru-small', 'tz-dar', 'tz-dar-city', 'tz-dar-ila', 'tz-dar-kino', 'tz-dar-nocircle', 'tz-dar-tiny']);
+  assert.deepEqual([...IDX.usable].sort(), ['tz', 'tz-aru', 'tz-aru-city', 'tz-aru-small', 'tz-dar', 'tz-dar-city', 'tz-dar-ila', 'tz-dar-kino', 'tz-dar-nocircle', 'tz-dar-tiny', 'tz-znz', 'tz-znz-city', 'tz-znz-stone']);
   const rows = publicAreas(AREAS);
-  assert.deepEqual(rows.map(r => r.id), ['tz', 'tz-aru', 'tz-dar', 'tz-aru-city', 'tz-dar-city', 'tz-aru-small', 'tz-dar-ila', 'tz-dar-kino', 'tz-dar-nocircle', 'tz-dar-tiny']);
+  assert.deepEqual(rows.map(r => r.id), ['tz', 'tz-aru', 'tz-dar', 'tz-znz', 'tz-aru-city', 'tz-dar-city', 'tz-aru-small', 'tz-znz-city', 'tz-dar-ila', 'tz-dar-kino', 'tz-dar-nocircle', 'tz-znz-stone', 'tz-dar-tiny']);
   assert.deepEqual(rows.find(r => r.id === 'tz-dar-kino'), { id: 'tz-dar-kino', level: 'district', name: 'Kinondoni', names: { en: 'Kinondoni', sw: 'Kinondoni' }, parentId: 'tz-dar-city', locatable: true, lat: -6.77, lng: 39.24, radiusKm: 6 });
   assert.deepEqual(rows.find(r => r.id === 'tz-dar-ila').names, { en: 'Ilala', sw: 'Ilala Kusini' }, 'the Swahili name when set');
   // M1: the country and areas below the minimum size stay listed (vendor pickers) but carry no circle.
@@ -56,8 +60,10 @@ test('areas: usable = active all the way up; GET /shop/areas rows by level then 
 });
 
 test('viewer area: district rolls up to its city; region has no city; unknown, inactive, malformed, country → ignored', () => {
-  assert.deepEqual(resolveViewerArea(IDX, 'tz-dar-kino'), { areaId: 'tz-dar-kino', name: 'Kinondoni', names: { en: 'Kinondoni', sw: 'Kinondoni' }, level: 'district', cityId: 'tz-dar-city', regionId: 'tz-dar', chain: ['tz-dar-kino', 'tz-dar-city', 'tz-dar', 'tz'] });
-  assert.deepEqual(resolveViewerArea(IDX, 'tz-dar-city'), { areaId: 'tz-dar-city', name: 'Dar es Salaam', names: { en: 'Dar es Salaam', sw: 'Dar es Salaam' }, level: 'city', cityId: 'tz-dar-city', regionId: 'tz-dar', chain: ['tz-dar-city', 'tz-dar', 'tz'] });
+  assert.deepEqual(resolveViewerArea(IDX, 'tz-dar-kino'), { areaId: 'tz-dar-kino', name: 'Kinondoni', names: { en: 'Kinondoni', sw: 'Kinondoni' }, level: 'district', cityId: 'tz-dar-city', regionId: 'tz-dar', rankArea: { id: 'tz-dar-city', names: { en: 'Dar es Salaam', sw: 'Dar es Salaam' } }, chain: ['tz-dar-kino', 'tz-dar-city', 'tz-dar', 'tz'] });
+  assert.deepEqual(resolveViewerArea(IDX, 'tz-dar-city'), { areaId: 'tz-dar-city', name: 'Dar es Salaam', names: { en: 'Dar es Salaam', sw: 'Dar es Salaam' }, level: 'city', cityId: 'tz-dar-city', regionId: 'tz-dar', rankArea: { id: 'tz-dar-city', names: { en: 'Dar es Salaam', sw: 'Dar es Salaam' } }, chain: ['tz-dar-city', 'tz-dar', 'tz'] });
+  assert.deepEqual(resolveViewerArea(IDX, 'tz-dar').rankArea, { id: 'tz-dar', names: { en: 'Dar es Salaam', sw: 'Dar es Salaam' } }, 'region viewer: the region');
+  assert.deepEqual(resolveViewerArea(IDX, 'tz-znz-stone').rankArea, { id: 'tz-znz-city', names: { en: 'Zanzibar City', sw: 'Mji wa Zanzibar' } });
   assert.equal(resolveViewerArea(IDX, 'tz-dar').cityId, null);
   assert.equal(resolveViewerArea(IDX, 'tz-dar').regionId, 'tz-dar');
   for (const bad of ['tz-dar-tiny', 'tz-dar-nocircle', 'tz-aru-small', 'tz', 'nope', 'tz-aru-old', 'tz-off-city', 'tz-off', '', ' tz-dar', 'tz-dar;drop', 'x'.repeat(200), undefined, null, 42, ['tz-dar'], { id: 'tz-dar' }]) {
@@ -73,6 +79,8 @@ const V = {
   e: { cityId: 'tz-aru-city', deliveryAreaIds: ['tz-aru'] },                // Arusha only
   k: { cityId: 'tz-dar-kino' },                                             // based in a district of Dar
   z: { cityId: 'tz-aru-old', deliveryAreaIds: ['tz-aru-old', 'tz-off'] },   // only unusable areas
+  zc: { cityId: 'tz-znz-city' },                                            // based in Zanzibar City, no delivery
+  zs: { cityId: 'tz-znz-city', deliveryAreaIds: ['tz-znz-stone'] },         // delivers to Stone Town only
 };
 const va = key => vendorAreasOf(V[key], IDX);
 
@@ -278,8 +286,11 @@ test('on: a district viewer gets vendors based in the city or delivering there; 
   assert.deepEqual(near.title, { en: 'Popular near you', sw: 'Maarufu karibu nawe' });
   assert.deepEqual(near.reasonCodes, ['delivers_to_area', 'seller_in_area']);
   assert.deepEqual(near.reason, { en: 'These sellers deliver to your current area.', sw: 'Wauzaji hawa wana delivery hadi eneo ulipo sasa.' });
-  assert.deepEqual(near.reasonParams, { areaName: { en: 'Kinondoni', sw: 'Kinondoni' } });
+  // QA1: delivery here comes from region / nationwide lists (and one district list), so the claim is
+  // made about the city, not Kinondoni; nearYou still names the viewer's own area.
+  assert.deepEqual(near.reasonParams, { areaName: { en: 'Dar es Salaam', sw: 'Dar es Salaam' } });
   assert.equal(near.hasMore, false);
+  assert.deepEqual(near.viewAll, { path: '/shop/products', query: {} }, 'QA1: no category in view all');
   for (const [id, row] of Object.entries(body.products)) {
     const delivers = ['v_b', 'v_c', 'v_d'].includes(row.vendorId);
     assert.equal(row.deliversToViewerArea, delivers ? true : undefined, `${id} ${row.vendorId}`);
@@ -399,7 +410,9 @@ test('ranking (M2, k = 5): local rank needs 5 distinct buyers picking up in the 
   const near = await nearOf(s, 'tz-dar-kino');
   assert.deepEqual(near.productIds.slice(0, 2), ['prd_003', 'prd_001'], 'local (k met) first, then global');
   assert.deepEqual(near.reasonCodes, ['popular_in_area', 'delivers_to_area', 'seller_in_area']);
-  assert.deepEqual(near.reason, { en: 'Popular with shoppers in Kinondoni.', sw: 'Maarufu kwa wanunuzi wa Kinondoni.' });
+  // QA1: popularity is counted per city, so the reason names the city, not the viewer's district.
+  assert.deepEqual(near.reason, { en: 'Popular with shoppers in Dar es Salaam.', sw: 'Maarufu kwa wanunuzi wa Dar es Salaam.' });
+  assert.deepEqual(near.reasonParams, { areaName: { en: 'Dar es Salaam', sw: 'Dar es Salaam' } });
   assert.ok(!near.productIds.includes('prd_009'), 'v_e does not serve Dar');
   const aru = await nearOf(s, 'tz-aru-city');
   assert.equal(aru.productIds[0], 'prd_009');
@@ -479,4 +492,72 @@ test('preferences: uses lists location only with SHOP_NEAR_YOU on and personalis
   assert.deepEqual(await usesOf({ personalisation: false, near: true }), []);
   await s.store.save({ personId: 'per1', subjectType: 'person', personalised: false, source: 'why_sheet', actorId: 'm1', at: NOW.toISOString() });
   assert.deepEqual(await usesOf({ personalisation: true, near: true }), []);
+});
+
+test('QA1 truthful reasons: the reason names the level its claim is computed at; nearYou keeps the viewer area', async () => {
+  const run = async (vendors, areaId) => {
+    const s = setup({ users: [ADULT], vendors, perVendor: 4, env: { SHOP_HOME_SECTIONS: 'popular_near_you' } });
+    const { body } = await s.service.home({ claims: claimsOf(ADULT), query: { areaId } });
+    const near = sec(body, 'popular_near_you');
+    return { near, nearYou: body.nearYou };
+  };
+  // Based in Dar (city-level claim), Kinondoni viewer → the city.
+  let { near, nearYou } = await run(['a'], 'tz-dar-kino');
+  assert.deepEqual([near.reasonCodes, near.reasonParams.areaName, near.reason.en], [['seller_in_area'], { en: 'Dar es Salaam', sw: 'Dar es Salaam' }, 'From sellers based in Dar es Salaam.']);
+  assert.deepEqual(nearYou.areaName, { en: 'Kinondoni', sw: 'Kinondoni' });
+  // Delivery listed for Kinondoni itself → the district may be named.
+  ({ near } = await run(['d'], 'tz-dar-kino'));
+  assert.deepEqual([near.reasonCodes, near.reasonParams.areaName], [['delivers_to_area'], { en: 'Kinondoni', sw: 'Kinondoni' }]);
+  // Mixed: one vendor lists the district, another only the region → the city.
+  ({ near } = await run(['b', 'd'], 'tz-dar-kino'));
+  assert.deepEqual([near.reasonCodes, near.reasonParams.areaName], [['delivers_to_area'], { en: 'Dar es Salaam', sw: 'Dar es Salaam' }]);
+  // A region-level viewer: the region.
+  ({ near, nearYou } = await run(['a'], 'tz-dar'));
+  assert.deepEqual([near.reasonParams.areaName, nearYou.areaName], [{ en: 'Dar es Salaam', sw: 'Dar es Salaam' }, { en: 'Dar es Salaam', sw: 'Dar es Salaam' }]);
+  // Zanzibar, Stone Town viewer (Swahili names): based in Zanzibar City → "Mji wa Zanzibar", never "Mji Mkongwe".
+  ({ near, nearYou } = await run(['zc'], 'tz-znz-stone'));
+  assert.deepEqual(near.reason, { en: 'From sellers based in Zanzibar City.', sw: 'Kutoka kwa wauzaji walioko Mji wa Zanzibar.' });
+  assert.deepEqual(near.reasonParams.areaName, { en: 'Zanzibar City', sw: 'Mji wa Zanzibar' });
+  assert.deepEqual(nearYou.areaName, { en: 'Stone Town', sw: 'Mji Mkongwe' });
+  // Delivers to Stone Town itself → the district name; with a nationwide vendor too → the city.
+  ({ near } = await run(['zs'], 'tz-znz-stone'));
+  assert.deepEqual([near.reasonCodes[0], near.reasonParams.areaName], ['delivers_to_area', { en: 'Stone Town', sw: 'Mji Mkongwe' }]);
+  ({ near } = await run(['zs', 'c'], 'tz-znz-stone'));
+  assert.deepEqual([near.reasonCodes[0], near.reasonParams.areaName], ['delivers_to_area', { en: 'Zanzibar City', sw: 'Mji wa Zanzibar' }]);
+});
+
+test('QA1 view all: popular_near_you never carries a category, even when every product shares one', async () => {
+  const s = setup({ users: [ADULT], vendors: ['a', 'b'], perVendor: 3, env: { SHOP_HOME_SECTIONS: 'popular_near_you' } });
+  for (const p of s.products.rows) p.category = 'supplements_nutrition';
+  const { body } = await s.service.home({ claims: claimsOf(ADULT), query: { areaId: 'tz-dar-city' } });
+  const near = sec(body, 'popular_near_you');
+  assert.deepEqual([near.viewAll, near.hasMore], [{ path: '/shop/products', query: {} }, false]);
+});
+
+test('QA1 deliveryBadge: same gating as the home — flag, personalisation, switch, usable area', async () => {
+  const s = setup({ users: [ADULT, { id: 'kid', userType: 'member', personId: 'perk', memberProfile: { dateOfBirth: '2013-01-01' } }], perVendor: 1 });
+  const fn = await s.service.deliveryBadge({ claims: claimsOf(ADULT), areaId: 'tz-dar-kino' });
+  assert.deepEqual(['v_a', 'v_b', 'v_c', 'v_d', 'v_e'].map(fn), [false, true, true, true, false]);
+  for (const areaId of [undefined, '', 'nope', 'tz', 'tz-dar-tiny']) assert.equal(await s.service.deliveryBadge({ claims: claimsOf(ADULT), areaId }), null, String(areaId));
+  assert.equal(await s.service.deliveryBadge({ claims: { sub: 'kid', userType: 'member' }, areaId: 'tz-dar-kino' }), null, 'under 18');
+  await s.store.save({ personId: 'per1', subjectType: 'person', personalised: false, source: 'why_sheet', actorId: 'm1', at: NOW.toISOString() });
+  assert.equal(await s.service.deliveryBadge({ claims: claimsOf(ADULT), areaId: 'tz-dar-kino' }), null, 'switch off');
+  for (const flags of [{ personalisation: true, near: false }, { personalisation: false, near: true }]) {
+    const t = setup({ users: [ADULT], flags });
+    assert.equal(await t.service.deliveryBadge({ claims: claimsOf(ADULT), areaId: 'tz-dar-kino' }), null, JSON.stringify(flags));
+    assert.equal(t.areaReads.n, flags.near ? t.areaReads.n : 0);
+  }
+  assert.deepEqual(s.writes, []);
+});
+
+test('QA2 vendorDistanceIgnored: only with SHOP_NEAR_YOU on and at least one usable area', async () => {
+  const make = (rows, near) => createShopHomeService({
+    shopService: { listProducts: async () => [] }, discoveryService: { discover: async () => ({ featured: [] }) },
+    promotionService: { listLive: async () => [] }, users: memStore(), recentPaidOrders: async () => [], now: () => NOW,
+    geoAreas: { allAsync: async () => rows }, nearYouOn: () => near,
+  });
+  assert.equal(await make(AREAS, true).vendorDistanceIgnored(), true);
+  assert.equal(await make(AREAS, false).vendorDistanceIgnored(), false, 'flag off: as before');
+  assert.equal(await make([], true).vendorDistanceIgnored(), false, 'no areas configured');
+  assert.equal(await make([{ id: 'x', level: 'region', name: 'X', parentId: null, active: false }], true).vendorDistanceIgnored(), false, 'only inactive areas');
 });

@@ -46,14 +46,19 @@ const event = machine(EVENT_STATUSES, {
  * is refund_pending → refunded, and a refused refund returns the order to confirmed.
  */
 export const ORDER_STATUSES = ['draft', 'awaiting_payment', 'confirmed', 'partially_cancelled', 'cancelled', 'expired', 'refund_pending', 'refunded'];
+// S4 widenings (each is used by exactly one primitive; docs/design/events-s4-payments-and-tickets.md §3.3):
+//   expired → confirmed          a late payment, ONLY through the rehold primitive (event-money-store-pg.mjs)
+//   refund_pending → cancelled   a refund refused after the places were already given back
+//   partially_cancelled → refunded   every owed refund of a part-cancelled order was paid
+// No route may call assertTransition('order', 'expired', 'confirmed') on its own (table-tested).
 const order = machine(ORDER_STATUSES, {
   draft: ['awaiting_payment', 'cancelled'],
   awaiting_payment: ['confirmed', 'cancelled', 'expired'],
   confirmed: ['partially_cancelled', 'cancelled', 'refund_pending'],
-  partially_cancelled: ['cancelled', 'refund_pending'],
-  refund_pending: ['refunded', 'confirmed'],
+  partially_cancelled: ['cancelled', 'refund_pending', 'refunded'],
+  refund_pending: ['refunded', 'confirmed', 'cancelled'],
   cancelled: [],
-  expired: [],
+  expired: ['confirmed'],
   refunded: [],
 });
 
@@ -63,12 +68,16 @@ const order = machine(ORDER_STATUSES, {
  * succeeded attempt can be reversed.
  */
 export const PAYMENT_ATTEMPT_STATUSES = ['created', 'pending', 'succeeded', 'failed', 'cancelled', 'expired', 'reversed', 'reconciliation_required'];
+// S4 widenings: failed → succeeded, for method 'manual' only and only through the two-person change of a
+// mistaken rejection (admin-payment-service confirmChange); the primitive checks the method. And
+// failed → reconciliation_required for the same path when the places are gone: money arrived for a payment
+// that had been rejected by mistake, so an unfulfilled-payment refund is owed.
 const paymentAttempt = machine(PAYMENT_ATTEMPT_STATUSES, {
   created: ['pending', 'succeeded', 'failed', 'cancelled', 'expired', 'reconciliation_required'],
   pending: ['succeeded', 'failed', 'cancelled', 'expired', 'reconciliation_required'],
   reconciliation_required: ['succeeded', 'failed', 'expired', 'cancelled'],
   succeeded: ['reversed'],
-  failed: [],
+  failed: ['succeeded', 'reconciliation_required'],
   cancelled: [],
   expired: [],
   reversed: [],
@@ -83,8 +92,9 @@ export const REGISTRATION_STATUSES = ['draft', 'reserved', 'confirmed', 'cancell
 const registration = machine(REGISTRATION_STATUSES, {
   draft: ['reserved', 'cancelled'],
   reserved: ['confirmed', 'cancelled'],
+  // S4 widening: cancelled → reserved revives a place cancelled by 'expired' (rehold only, checked there).
   confirmed: ['cancelled', 'transferred', 'refunded', 'disqualified'],
-  cancelled: ['refunded'],
+  cancelled: ['refunded', 'reserved'],
   transferred: [],
   refunded: [],
   disqualified: [],
@@ -153,6 +163,25 @@ export function assertTransition(kind, from, to) {
   const allowed = allowedTransitions(kind, from);
   if (allowed.includes(to)) return { ok: true, kind, from, to };
   return { error: 'invalid_transition', status: 409, kind, from, to, allowed: [...allowed] };
+}
+
+/**
+ * S4: the order status after any cancel or refund event, from its places and refunds (pure, table-tested):
+ *   any live (confirmed) place → confirmed, or partially_cancelled when some other place was cancelled;
+ *   no live place and a refund still owed (requested or approved) → refund_pending;
+ *   no live place, a refund paid and none open → refunded;
+ *   no live place and no refund rows → cancelled.
+ * `refunds` are the order's Refund rows of kind event_order (rejected ones do not count); unfulfilled-payment
+ * refunds are not part of an order's own status.
+ */
+export function deriveOrderStatus(_order, registrations = [], refunds = []) {
+  const paid = registrations.filter(r => ['confirmed', 'cancelled', 'refunded'].includes(r.status));
+  const live = paid.filter(r => r.status === 'confirmed');
+  const counted = refunds.filter(r => r.status !== 'rejected' && r.scope !== 'unfulfilled_payment');
+  if (live.length) return paid.length > live.length ? 'partially_cancelled' : 'confirmed';
+  if (counted.some(r => ['requested', 'approved'].includes(r.status))) return 'refund_pending';
+  if (counted.some(r => r.status === 'paid')) return 'refunded';
+  return 'cancelled';
 }
 
 /** A status with no way out. */

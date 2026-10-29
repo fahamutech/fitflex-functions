@@ -336,6 +336,8 @@ function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, conf
  * → { viewAll: { path, query }, faithful }
  */
 export function viewAllFor(key, picked) {
+  // QA1: no list filter matches "near you", and a category would hint at what local vendors sell.
+  if (key === 'popular_near_you') return { viewAll: { path: '/shop/products', query: {} }, faithful: false };
   const cats = uniq(picked.map(p => p.category));
   const category = cats.length === 1 && cats[0] ? { category: cats[0] } : {};
   const base = { best_sellers: { sort: 'popularity' }, recommended: { sort: 'popularity' }, deals: { promotions: 'true' } }[key] || {};
@@ -475,6 +477,21 @@ export function nearReasonCodes(productIds, location, vendorOf) {
   return codes;
 }
 
+/**
+ * QA1: the area the section's reason actually speaks about. popular_in_area and seller_in_area are
+ * worked out per city (region for a region-level viewer), so they name that, never the viewer's
+ * district. delivers_to_area names the viewer's district only when every delivering vendor shown
+ * lists that district itself; otherwise the city (or region).
+ */
+export function nearAreaName(code, productIds, location, vendorOf) {
+  const a = location.area;
+  const viewer = a.names ? { en: a.names.en, sw: a.names.sw } : { en: a.name, sw: a.name };
+  const rank = a.rankArea?.names ? { en: a.rankArea.names.en, sw: a.rankArea.names.sw } : viewer;
+  if (code !== 'delivers_to_area') return rank;
+  const delivering = productIds.map(id => location.vendors?.get(vendorOf(id))).filter(m => m?.delivers);
+  return delivering.length && delivering.every(m => m.deliversExact) ? viewer : rank;
+}
+
 const CATEGORY_BY_KEY = new Map(PRODUCT_CATEGORIES.map(c => [c.key, c]));
 
 /**
@@ -490,10 +507,9 @@ export function describeSections(sections, needs, personal = {}) {
     let reasonParams = null;
     const mine = personal[s.key] || {};
     if (s.key === 'popular_near_you' && needs.location) {
-      const a = needs.location.area;
-      const areaName = a.names ? { en: a.names.en, sw: a.names.sw } : { en: a.name, sw: a.name };
       reasonCodes = nearReasonCodes(s.productIds, needs.location, id => s.vendorOf?.(id));
       if (!reasonCodes.length) reasonCodes = ['seller_in_area'];
+      const areaName = nearAreaName(reasonCodes[0], s.productIds, needs.location, id => s.vendorOf?.(id));
       reason = NEAR_COPY[reasonCodes[0]](areaName);
       reasonParams = { areaName };
     }

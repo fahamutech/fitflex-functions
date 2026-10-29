@@ -7,7 +7,8 @@ import { paginate } from '../shared/pagination.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 
-export function createEventsAdminService({ db, catalogue, organizerService, now = () => new Date(), closingSoonHours = () => DEFAULT_CLOSING_SOON_HOURS }) {
+// S4: `getRefunds` is the events refund service (lazy; absent in unit contexts, where cancel is exactly the S2 one).
+export function createEventsAdminService({ db, catalogue, organizerService, now = () => new Date(), closingSoonHours = () => DEFAULT_CLOSING_SOON_HOURS, getRefunds = () => null }) {
   const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
   const actionsFor = status => allowedActionsFor({ status, actor: 'admin' });
 
@@ -76,11 +77,36 @@ export function createEventsAdminService({ db, catalogue, organizerService, now 
     if (!CANCEL_REASONS.includes(body.reason)) return fail('reason_code_required', 400, { allowed: [...CANCEL_REASONS] });
     const note = parseNote(body.note);
     if (note.error) return note;
+    // S4: the money the dialog showed must still be the money (checked before the irreversible move).
+    const refunds = getRefunds();
+    const raise = refunds && body.refundPaidOrders !== false;
+    if (raise) {
+      const preview = await refunds.eventCancelPreview({ eventId });
+      if (preview.error) return preview;
+      // The money the dialog showed must be sent back whenever paid orders exist (ruling c).
+      if (preview.paidOrders > 0 && body.expectedRefundableTzs == null) return fail('expected_refundable_required', 400, { refundableTzs: preview.refundableTzs });
+      if (body.expectedRefundableTzs != null && Number(body.expectedRefundableTzs) !== preview.refundableTzs) return fail('refundable_changed', 409, { refundableTzs: preview.refundableTzs });
+    }
     const moved = await organizerService.moveEvent(joined.event.id, 'cancelled', {
       actor: { id: actorId, kind: 'admin', role: 'admin' }, cancellation: { reason: body.reason, note: note.note ?? { en: null, sw: null } },
     });
     if (moved.error) return moved;
+    // Awaiting orders are released, paid places cancelled with tickets revoked, one refund request per paid order (idempotent, resumable).
+    if (raise) {
+      let batch;
+      try { batch = await refunds.runEventBatch({ eventId, actorId }); } catch (err) { batch = { error: 'batch_failed', message: String(err?.message ?? err).slice(0, 200) }; }
+      // The event is cancelled either way; an error is shown to the admin, who resumes with POST …/refund-batch (the sweep also does).
+      if (batch.error) return { status: moved.status, batch: { error: batch.error, status: batch.status ?? null, resumeWith: `/admin/events/${eventId}/refund-batch` } };
+      if (batch.touched) return { status: moved.status, batch: { batchId: batch.batchId, created: batch.created, existing: batch.existing, remaining: batch.remaining, amountTzs: batch.amountTzs, released: batch.released, failed: batch.failed } };
+    }
     return { status: moved.status };
+  }
+
+  /** GET /admin/events/:id/cancel-preview — what cancelling would do to money, before the dialog confirms. */
+  async function cancelPreview({ eventId }) {
+    const refunds = getRefunds();
+    if (!refunds) return fail('feature_disabled', 404);
+    return refunds.eventCancelPreview({ eventId });
   }
 
   async function archive({ eventId, actorId }) {
@@ -126,5 +152,5 @@ export function createEventsAdminService({ db, catalogue, organizerService, now 
     return paginate(await auditRows({ action: query.action ? String(query.action) : null }), { limit: Math.min(parseInt(query.limit, 10) || 20, 50), cursor: query.cursor });
   }
 
-  return { list, summary, detail, decision, cancel, archive, complete, eventAudit, audit };
+  return { list, summary, detail, decision, cancel, cancelPreview, archive, complete, eventAudit, audit };
 }

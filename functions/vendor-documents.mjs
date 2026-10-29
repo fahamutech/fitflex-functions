@@ -192,7 +192,17 @@ export function clientAddress(req, hops = trustedHops()) {
 
 function publicHeaders(res, { logoUrl = null } = {}) {
   let img = '';
-  if (logoUrl) { try { img = ` ${new URL(logoUrl).origin}`; } catch { img = ''; } }
+  if (logoUrl) {
+    try {
+      const url = new URL(logoUrl);
+      img = ` ${url.origin}`;
+      // /storage/… answers with a redirect to the storage service; the image must be allowed there too.
+      if (url.pathname.includes('/storage/') && process.env.ZEBRA_BASE_URL) {
+        const zebra = new URL(process.env.ZEBRA_BASE_URL).origin;
+        if (zebra !== url.origin) img += ` ${zebra}`;
+      }
+    } catch { img = ''; }
+  }
   setHeader(res, 'Cache-Control', 'no-store');
   setHeader(res, 'X-Robots-Tag', 'noindex, nofollow');
   setHeader(res, 'Referrer-Policy', 'no-referrer');

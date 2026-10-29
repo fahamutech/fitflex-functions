@@ -280,7 +280,7 @@ test('admin cancel (even with confirmed registrations, D12), complete and archiv
   assert.equal((await eventStore.commitOrder(order.order.id)).error, undefined);
   const admin = await superAdmin();
   assert.equal((await call(adminCancelEvent, admin, { params: { id: published.id }, body: { note: { en: 'x' } } })).body.error, 'reason_code_required');
-  assert.deepEqual((await call(adminCancelEvent, admin, { params: { id: published.id }, body: { reason: 'safety', note: { en: 'Flooding', sw: 'Mafuriko' } } })).body, { status: 'cancelled' });
+  assert.deepEqual((await call(adminCancelEvent, admin, { params: { id: published.id }, body: { reason: 'safety', note: { en: 'Flooding', sw: 'Mafuriko' }, expectedRefundableTzs: 0 } })).body, { status: 'cancelled' });   // S4: paid places exist, so the money shown must be sent back
   const row = await eventStore.getEvent(published.id);
   assert.equal(row.status, 'cancelled');
   assert.deepEqual(row.cancellation, { reason: 'safety', note: { en: 'Flooding', sw: 'Mafuriko' } });

@@ -93,13 +93,19 @@ export function resolveViewerArea(index, areaId, min = MIN_RADIUS_KM) {
   const area = index.byId.get(areaId);
   // Country, or too small / no circle to stand for a position (M1): ignored.
   if (!area || !locatable(area, min)) return null;
+  const cityId = area.level === 'region' ? null : ancestorOfLevel(index, areaId, 'city');
+  const regionId = ancestorOfLevel(index, areaId, 'region');
+  // QA1: the area a city-level claim is made at ("popular in", "based in"): the city, or the region
+  // for a region-level viewer. Never the viewer's district.
+  const rankId = cityId || regionId;
   return {
     areaId,
     name: area.name,
     names: namesOf(area),
     level: area.level,
-    cityId: area.level === 'region' ? null : ancestorOfLevel(index, areaId, 'city'),
-    regionId: ancestorOfLevel(index, areaId, 'region'),
+    cityId,
+    regionId,
+    rankArea: rankId ? { id: rankId, names: namesOf(index.byId.get(rankId)) } : { id: areaId, names: namesOf(area) },
     chain: chainOf(index, areaId),
   };
 }
@@ -117,6 +123,8 @@ export function vendorAreasOf(profile, index) {
 
 /** The vendor delivers to the viewer: one of its delivery areas is the viewer's area or above it. */
 export const deliversTo = (vendor, viewer) => Boolean(vendor && viewer && viewer.chain.some(id => vendor.delivery.has(id)));
+/** The vendor's delivery list names the viewer's own area (a district viewer: that district itself). */
+export const deliversExactly = (vendor, viewer) => Boolean(vendor && viewer && vendor.delivery.has(viewer.areaId));
 
 /** The vendor is based in the viewer's city (district → city), or in the viewer's region when the viewer is only known at region level. */
 export function basedIn(vendor, viewer) {

@@ -58,8 +58,8 @@ const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const newId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const text = (v, max) => (v == null ? null : String(v).trim().slice(0, max) || null);
 
-/** Split one CSV line, honouring double quotes. */
-function splitCsv(line) {
+/** Split one CSV line, honouring double quotes (also used by the events roster parser, S3). */
+export function splitCsv(line) {
   const out = [];
   let cell = '';
   let quoted = false;
@@ -197,7 +197,8 @@ export function createB2BBeneficiaryImportService({
       if (userId) {
         if (enrolledUsers.has(userId)) { counts.unchanged += 1; continue; }
         if (dryRun) { counts.enrolled += 1; continue; }
-        const out = await b2bService.enrollBeneficiary({ access, actorId, body: { userId, status: 'active', groupName: p.groupName, externalReference: p.externalReference, beneficiaryType: p.beneficiaryType } });
+        // Found by a VERIFIED email / number, not a bare user id: enrolled as before (no member request).
+        const out = await b2bService.enrollBeneficiary({ access, actorId, body: { userId, status: 'active', groupName: p.groupName, externalReference: p.externalReference, beneficiaryType: p.beneficiaryType } }, { verifiedContact: true });
         if (out.error === 'already_enrolled') counts.unchanged += 1;
         else if (out.error) { counts.rejected += 1; problems.push({ ...where, problem: out.error }); } else { counts.enrolled += 1; enrolledUsers.add(userId); }
         continue;
@@ -365,12 +366,12 @@ export function createB2BBeneficiaryImportService({
     const access = await b2bService.resolveAccess({ organizationId: invite.organizationId, userType: 'admin', userId: SYSTEM });
     if (access.error || access.org.status !== 'active') return { skipped: 'organization_not_active' };
     const out = await b2bService.enrollBeneficiary({ access, actorId: SYSTEM,
-      body: { userId, status: 'active', groupName: invite.groupName, externalReference: invite.externalReference, beneficiaryType: invite.beneficiaryType } });
+      body: { userId, status: 'active', groupName: invite.groupName, externalReference: invite.externalReference, beneficiaryType: invite.beneficiaryType } }, { verifiedContact: true });
     let beneficiaryId = out.beneficiary?.id ?? null;
     if (out.error === 'already_enrolled') beneficiaryId = out.beneficiaryId ?? null;
     else if (out.error === 'external_reference_in_use') {
       // The reference went to someone else in the meantime: enrol without it rather than leave the person out.
-      const again = await b2bService.enrollBeneficiary({ access, actorId: SYSTEM, body: { userId, status: 'active', groupName: invite.groupName, beneficiaryType: invite.beneficiaryType } });
+      const again = await b2bService.enrollBeneficiary({ access, actorId: SYSTEM, body: { userId, status: 'active', groupName: invite.groupName, beneficiaryType: invite.beneficiaryType } }, { verifiedContact: true });
       if (again.error && again.error !== 'already_enrolled') return { failed: again.error };
       beneficiaryId = again.beneficiary?.id ?? again.beneficiaryId ?? null;
     } else if (out.error) return { failed: out.error };
@@ -446,7 +447,7 @@ export function createB2BBeneficiaryImportService({
       confirmLine(invite),
       link ? `Get the app: ${link}` : null,
       '',
-      `What ${name} can see: once you join, ${name} can see your FitFlex activity (gym visits, trainer sessions, the workouts and steps you record, and your progress in its challenges). It cannot see your weight, height, or anything another sponsor gives you.`,
+      `What ${name} can see: once you join, ${name} can see your FitFlex activity, including activity from before you joined (gym visits, trainer sessions, the workouts and steps you record, and your progress in its challenges). It cannot see your weight, height, or anything another sponsor gives you.`,
       '',
       `If you do not want to take part, ignore this email or ask ${name} to remove you from its list.`,
     ].filter(l => l !== null);
