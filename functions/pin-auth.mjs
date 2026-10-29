@@ -6,14 +6,27 @@ import { requireAuth } from '../src/auth/jwt.mjs';
 import { pinAuthService, registrationService, partnerVerifiedFor, users } from '../src/bootstrap/services.mjs';
 import { identityFlag } from '../src/shared/feature-flags.mjs';
 import { smsSender, emailSender } from '../src/infra/verification-senders.mjs';
+import { clientAddress } from '../src/shared/client-address.mjs';
+import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 
 const created = new Date().toISOString();
 
-/** The caller's network address, for the per-address limit. */
+/**
+ * The caller's network address, for the per-address limit. X-Forwarded-For is counted from the right by
+ * PUBLIC_DOCS_TRUSTED_PROXY_HOPS (default 1): the left-most entry is client-written and was spoofable, so a
+ * caller could dodge the per-address lockout by changing it.
+ */
 function addressOf(req) {
-  const forwarded = String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
-  return forwarded || req.ip || req.socket?.remoteAddress || null;
+  const address = clientAddress(req);
+  return address && address !== 'unknown' ? address : null;
 }
+
+// Callers that say they are the browser check-in page (X-FitFlex-Channel: web-checkin) get a lower per-address
+// cap on PIN sign-ins, on top of the existing failure lockout. The header can only add this cap, never lift one.
+export const WEB_CHECKIN_LOGIN_PER_MINUTE = 10;
+const webCheckinLoginLimiter = createVendorLimiter({ perMinute: WEB_CHECKIN_LOGIN_PER_MINUTE });
+export const resetWebCheckinLoginLimits = () => webCheckinLoginLimiter.reset();
+const isWebCheckinChannel = req => String(req.headers?.['x-fitflex-channel'] || '').trim().toLowerCase() === 'web-checkin';
 
 async function send(res, result) {
   if (result.error) {
@@ -30,6 +43,10 @@ export const pinLogin = {
   requestSample: { phone: '0712345678', pin: '1234' },
   onRequest: async (req, res) => {
     if (!identityFlag('V2_PIN_LOGIN')) return res.status(404).json({ error: 'not_found' });
+    if (isWebCheckinChannel(req)) {
+      const limited = limitOrNull(webCheckinLoginLimiter, addressOf(req) || 'unknown', res);
+      if (limited) return limited;
+    }
     await send(res, await pinAuthService.login({ body: req.body || {}, ip: addressOf(req) }));
   },
 };

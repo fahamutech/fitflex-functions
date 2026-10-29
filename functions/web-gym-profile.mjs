@@ -6,6 +6,7 @@ import { gymService, settingsService, trainerService, moderationGate, partnerGat
 import { createWebGymProfileService } from '../src/services/web-gym-profile-service.mjs';
 import { webGymProfileOn } from '../src/shared/feature-flags.mjs';
 import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
+import { clientAddress } from '../src/shared/client-address.mjs';
 
 const created = new Date().toISOString();
 
@@ -15,17 +16,6 @@ const webGymProfile = createWebGymProfileService({ gymService, settingsService, 
 export const WEB_GYM_PROFILE_RATE_PER_MINUTE = 30;
 const limiter = createVendorLimiter({ perMinute: WEB_GYM_PROFILE_RATE_PER_MINUTE });
 export const resetWebGymProfileLimits = () => { limiter.reset(); webGymProfile.resetCache(); };
-
-/** The client address: X-Forwarded-For counted from the right by PUBLIC_DOCS_TRUSTED_PROXY_HOPS (default 1). */
-function clientAddress(req) {
-  const raw = process.env.PUBLIC_DOCS_TRUSTED_PROXY_HOPS;
-  const n = raw == null || String(raw).trim() === '' ? 1 : Number(raw);
-  const hops = Number.isInteger(n) && n >= 0 ? n : 1;
-  const direct = req.socket?.remoteAddress || req.ip || 'unknown';
-  if (hops === 0) return direct;
-  const chain = String(req.headers?.['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
-  return chain.length ? chain[Math.max(0, chain.length - hops)] : direct;
-}
 
 // Every answer (200, 404, 429, 500) is private and uncacheable, and varies by Origin in case CORS applies.
 const send = (res, status, body) => {

@@ -2,9 +2,10 @@
 // consuming a visit, the actual scan-to-checkin flow, recent activity, and
 // analytics for the owner/operator Home dashboard.
 import { resolveOperatorGymSelection, operatorGymIds } from '../shared/operator-gym-selection.mjs';
-import { CHECKIN_STATUS } from '../shared/checkin-status.mjs';
+import { CHECKIN_STATUS, publicCheckin } from '../shared/checkin-status.mjs';
 import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry, fundedBySubscription, visitNeedsVerifiedGym } from '../shared/check-in-rules.mjs';
 import { issue as issueQr, verify as verifyQrToken, issueGymQr, verifyGymQr } from '../auth/qr-token.mjs';
+import { extractQrPayload } from './web-gym-profile-service.mjs';
 
 function sameEatDate(a, b) {
   const fmt = new Intl.DateTimeFormat('en-CA', {
@@ -136,7 +137,7 @@ export function createOperatorService({
         // Gym staff learn that a sponsor covers the visit, not who the sponsor is or what it pays.
         ...(b2b ? { b2b: { covered: true } } : {}),
         checkin: result.checkin
-          ? { ...result.checkin, memberPublicId: await publicUserId(claim.userId) }
+          ? { ...publicCheckin(result.checkin), memberPublicId: await publicUserId(claim.userId) }
           : result.checkin,
       },
     };
@@ -148,7 +149,7 @@ export function createOperatorService({
     const list = allCheckins
       .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
       .slice(0, 50)
-      .map(c => ({ ...c, memberId: c.memberId }));
+      .map(c => ({ ...publicCheckin(c), memberId: c.memberId }));
     for (let i = 0; i < list.length; i++) {
       list[i].memberPublicId = await publicUserId(list[i].memberId);
       list[i].memberPhone = null;
@@ -305,11 +306,14 @@ export function createOperatorService({
    * scan, recorded as method 'member_scanned'.
    */
   async function memberScanGym({ memberId, gymQr }) {
-    const claim = verifyGymQr(gymQr);
+    // The signed payload itself (printed before) or the https URL carrying it as ?q= (web QR). Old codes keep working.
+    const claim = verifyGymQr(extractQrPayload(gymQr));
     if (!claim) return { status: 400, body: { ok: false, failure: 'invalid_gym_qr' } };
     const gym = gyms.find(g => g.id === claim.gymId);
     if (!gym) return { status: 404, body: { ok: false, failure: 'gym_not_found' } };
-    const result = await checkInService.perform({ memberId, gymId: gym.id, method: 'member_scanned' });
+    const performed = await checkInService.perform({ memberId, gymId: gym.id, method: 'member_scanned' });
+    // An idempotent repeat can return a web check-in row: strip its bookkeeping like every other response.
+    const result = performed.checkin ? { ...performed, checkin: publicCheckin(performed.checkin) } : performed;
     if (!result.ok) return { status: 409, body: { ...result, gym: { id: gym.id, name: gym.name, tier: gym.tier } } };
     return { status: 200, body: { ...result, gym: { id: gym.id, name: gym.name, tier: gym.tier } } };
   }
@@ -319,7 +323,10 @@ export function createOperatorService({
     const gym = gyms.find(g => g.id === gymId);
     if (!gym) return { status: 404, body: { error: 'gym_not_found' } };
     if (!isAdmin && !operatorGymIds(operator).includes(gym.id)) return { status: 403, body: { error: 'not_your_gym' } };
-    return { status: 200, body: { gymId: gym.id, gymName: gym.name, payload: issueGymQr(gym.id) } };
+    const payload = issueGymQr(gym.id);
+    // The URL form for the printed web QR, only once the permanent portal host is set (PORTAL_PUBLIC_URL).
+    const base = String(process.env.PORTAL_PUBLIC_URL || '').trim().replace(/\/+$/, '');
+    return { status: 200, body: { gymId: gym.id, gymName: gym.name, payload, ...(base ? { webUrl: `${base}/g/?q=${encodeURIComponent(payload)}` } : {}) } };
   }
 
   return { issueMemberQr, verifyQr, checkIn, recentCheckIns, dashboard, memberScanGym, gymEntranceQr };

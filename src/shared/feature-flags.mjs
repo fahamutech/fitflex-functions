@@ -547,3 +547,12 @@ export function adminEmailsStrictOn(env = process.env) {
 export function webGymProfileOn() {
   return on('WEB_GYM_PROFILE');
 }
+
+/**
+ * Browser gym QR check-in (S2): the intent / preview / confirm routes and the short-lived web check-in session.
+ * Off unless WEB_QR_CHECKIN is set: every one of those routes answers 404 not_found, as if it did not exist.
+ * Also needs QR_HMAC_SECRET (without it the routes stay 404).
+ */
+export function webQrCheckinOn() {
+  return on('WEB_QR_CHECKIN');
+}

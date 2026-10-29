@@ -9,7 +9,7 @@ import {
 } from '../shared/member-status.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
-import { CHECKIN_STATUS, CHECKIN_SOURCE, isDuplicateVisit } from '../shared/checkin-status.mjs';
+import { CHECKIN_STATUS, CHECKIN_SOURCE, isDuplicateVisit, publicCheckin } from '../shared/checkin-status.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 
 export function createMemberManagementService({
@@ -58,7 +58,7 @@ export function createMemberManagementService({
   }
 
   async function ownerCheckinsFor(memberId, gymIds) {
-    const rows = await checkins.filterAsync((c) => c.memberId === memberId && gymIds.includes(c.gymId));
+    const rows = (await checkins.filterAsync((c) => c.memberId === memberId && gymIds.includes(c.gymId))).map(publicCheckin);
     return rows.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
   }
 
