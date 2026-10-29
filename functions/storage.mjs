@@ -33,14 +33,17 @@ export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 //     kept so a later app build can move to uploads without a server change);
 //   - event organizers and their staff: event, route and sponsor images (portal event wizard);
 //   - company HR (corporate_hr), and any account holding an active BILLING seat (role owner, admin,
-//     finance or hr, or an explicit billing.pay grant) in an ACTIVE B2B organisation: proof of
-//     payment on the portal's "Pay" tab.
+//     finance or hr, or an explicit billing.pay grant) in an ACTIVE or PENDING B2B organisation
+//     (owner decision 2026-10-29: a pending organisation pays before activation): proof of payment
+//     on the portal's "Pay" tab. Suspended and inactive organisations are refused.
 // Anyone else (a plain member, gym_staff, a viewer/analyst/manager seat) → 403 upload_forbidden.
 export const UPLOAD_ROLES = Object.freeze([
   'admin', 'gym_operator', 'gym_owner', 'trainer', 'vendor', 'vendor_staff',
   'event_organizer', 'organizer_staff', 'corporate_hr',
 ]);
 export const UPLOAD_SEAT_ROLES = Object.freeze(['owner', 'admin', 'finance', 'hr']);
+// Organisation statuses whose billing seats may upload proof of payment (not suspended/inactive).
+export const UPLOAD_ORG_STATUSES = Object.freeze(['active', 'pending']);
 // Formats the bytes may be in (checked on the decoded file, not the declared type). No SVG, TIFF,
 // PDF or other formats sharp could otherwise read. Everything is re-encoded to WebP anyway.
 export const UPLOAD_FORMATS = Object.freeze(['jpeg', 'png', 'webp', 'gif', 'heif', 'avif']);
@@ -65,13 +68,14 @@ async function hasBillingSeat(userId) {
   if (!userId) return false;
   const seats = await db('B2BOrganizationUser as ou')
     .join('B2BOrganization as o', 'o.id', 'ou.organizationId')
-    .where({ 'ou.userId': userId, 'ou.status': 'active', 'o.status': 'active' })
+    .where({ 'ou.userId': userId, 'ou.status': 'active' })
+    .whereIn('o.status', UPLOAD_ORG_STATUSES)
     .select('ou.role', 'ou.permissions');
   return seats.some(seat => UPLOAD_SEAT_ROLES.includes(seat.role)
     || (Array.isArray(seat.permissions) && seat.permissions.includes('billing.pay')));
 }
 
-/** An allowed account type, or an active billing seat in an active organisation. */
+/** An allowed account type, or an active billing seat in an active or pending organisation. */
 export async function mayUpload(claims) {
   if (UPLOAD_ROLES.includes(claims?.userType)) return true;
   return hasBillingSeat(claims?.sub);
@@ -137,7 +141,7 @@ const toWebp = (buffer, maxDimension, quality) => sharp(buffer, { failOn: 'none'
 // redirect route.
 export const uploadStorageFile = {
   created, method: 'post', path: '/storage/upload',
-  description: 'Uploads a single image to the Zebra storage service. Content-Type: multipart/form-data, field name "file". Who (security fix 2026-10-28): admin, gym_operator, gym_owner, trainer, vendor, vendor_staff, event_organizer, organizer_staff, corporate_hr, or any account with an active billing seat (role owner, admin, finance or hr, or a billing.pay grant) in an active B2B organisation; anyone else (e.g. a plain member) → 403 upload_forbidden. The file must be ≤ 10 MB (413 file_too_large { maxBytes }) and its bytes must decode as JPEG, PNG, WebP, GIF, HEIF or AVIF (≤ 100 MP) — SVG, TIFF, PDF and anything else → 400 unsupported_file_type. 20 a minute and 200 a day per person, across all their accounts, checked first (429 rate_limited { retryAfterSeconds } + Retry-After). Every upload is written to the audit log (action storage_upload); refused ones (403/400/413/429) as storage_upload_refused, without the file. Storage failures answer 502 storage_upload_failed / 504 storage_upload_timed_out with no upstream detail. The image is always normalized to WebP and a WebP thumbnail is generated server-side; both are uploaded to Zebra. The address returned is public and permanent.',
+  description: 'Uploads a single image to the Zebra storage service. Content-Type: multipart/form-data, field name "file". Who (security fix 2026-10-28): admin, gym_operator, gym_owner, trainer, vendor, vendor_staff, event_organizer, organizer_staff, corporate_hr, or any account with an active billing seat (role owner, admin, finance or hr, or a billing.pay grant) in an active or pending B2B organisation (suspended/inactive organisations refused); anyone else (e.g. a plain member) → 403 upload_forbidden. The file must be ≤ 10 MB (413 file_too_large { maxBytes }) and its bytes must decode as JPEG, PNG, WebP, GIF, HEIF or AVIF (≤ 100 MP) — SVG, TIFF, PDF and anything else → 400 unsupported_file_type. 20 a minute and 200 a day per person, across all their accounts, checked first (429 rate_limited { retryAfterSeconds } + Retry-After). Every upload is written to the audit log (action storage_upload); refused ones (403/400/413/429) as storage_upload_refused, without the file. Storage failures answer 502 storage_upload_failed / 504 storage_upload_timed_out with no upstream detail. The image is always normalized to WebP and a WebP thumbnail is generated server-side; both are uploaded to Zebra. The address returned is public and permanent.',
   request: {
     headers: { 'Content-Type': 'multipart/form-data' },
     body: '(multipart form data with an image "file" field)'

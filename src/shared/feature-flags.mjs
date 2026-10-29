@@ -242,6 +242,15 @@ export function heroImagesCmsOn() {
 }
 
 /**
+ * Partner hero photo and logo (plan partner-hero-media-plan.md slice 1). Off unless PARTNER_MEDIA is
+ * set: every /partner/media* and /admin/partner-media* route (file serving included) answers 404
+ * feature_disabled before sign-in is checked.
+ */
+export function partnerMediaOn() {
+  return on('PARTNER_MEDIA');
+}
+
+/**
  * S3: walk-in (counter) sales recorded by the vendor — POS, sales history, void. Off → the
  * /vendor/sales endpoints answer 404 feature_disabled.
  */
@@ -465,6 +474,20 @@ export function requireEventsPaymentIntake(req, res, next) {
   if (!eventsPaymentIntakeOn()) return res.status(404).json({ error: 'feature_disabled' });
   next();
 }
+
+/**
+ * S5 (docs/design/events-s5-venue-api-and-webhooks.md §11.1): three dormant flags, each on only together with
+ * EVENTS_MODULE and EVENTS_REGISTRATION. KIT_OPS: ticket verification, kit handover, bibs, lookup, export and the
+ * live ticket wording. ORGANIZER_API: API clients and /v1/organizer. WEBHOOKS: endpoints, deliveries and the
+ * dispatcher jobs (which additionally need EVENTS_WEBHOOK_SECRET_KEY; see webhook-signing.mjs).
+ */
+export const eventsKitOpsOn = () => eventsRegistrationOn() && on('EVENTS_KIT_OPS');
+export const eventsOrganizerApiOn = () => eventsRegistrationOn() && on('EVENTS_ORGANIZER_API');
+export const eventsWebhooksOn = () => eventsRegistrationOn() && on('EVENTS_WEBHOOKS');
+const gate = test => (_req, res, next) => (test() ? next() : res.status(404).json({ error: 'feature_disabled' }));
+export const requireEventsKitOps = gate(eventsKitOpsOn);
+export const requireEventsOrganizerApi = gate(eventsOrganizerApiOn);
+export const requireEventsWebhooks = gate(eventsWebhooksOn);
 
 /**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:

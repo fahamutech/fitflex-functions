@@ -159,16 +159,17 @@ export const REPORT_LABELS = {
     allSales: 'All sales', appOnly: 'App sales', shopOnly: 'Shop sales', soFar: '(so far)',
     periodStart: 'Period start', periodEnd: 'Period end', weekStart: 'Week start', weekEnd: 'Week end',
     appNet: 'App net', shopNet: 'Shop net', gross: 'Gross sales', discounts: 'Discounts', refunds: 'Refunds', net: 'Net sales',
-    vatIncluded: 'VAT included', salesCount: 'Sales', itemsSold: 'Items sold', voided: 'Voided (not counted): {n} sales · {amount}',
+    vatIncluded: 'VAT included', salesCount: 'Sales', itemsSold: 'Items sold', voided: 'Voided (not counted): {n} sales · {amount}', voided_one: 'Voided (not counted): 1 sale · {amount}',
     product: 'Product', variant: 'Variant', removed: '(removed)', unitsSold: 'Units sold', appUnits: 'App units', shopUnits: 'Shop units',
     revenue: 'Net revenue', lastSold: 'Last sold', inStock: 'In stock', cover: 'Days of cover', coverStatus: 'Cover',
-    cover_ok: '{n} days', cover_soon: 'Reorder soon', cover_none: 'No sales in 30 days', cover_out: 'Out of stock', cover_untracked: '—', coverUnderOne: 'Less than 1 day',
+    cover_ok: '{n} days', cover_ok_one: '1 day', cover_soon: 'Reorder soon', cover_none: 'No sales in 30 days', cover_out: 'Out of stock', cover_untracked: '—', coverUnderOne: 'Less than 1 day',
     noSalesPeriod: 'No sales in this period', topProducts: 'Top products', slowSellers: 'Slow sellers', never: 'Never',
     stockValue: 'Stock value', asOf: 'As of {time} today. The period you picked does not apply.', asOfDate: 'As of {date}', sellingPrice: 'Selling price',
     atRetail: 'Value at selling price', atCost: 'Value at cost', costPrice: 'Cost price', unknown: 'Unknown', units: 'Units in stock', products: 'Products',
     costUnknown: '{n} products in stock have no cost price, so they are not in the cost value.',
+    costUnknown_one: '1 product in stock has no cost price, so it is not in the cost value.',
     profit: 'Profit', netExVat: 'Net sales without VAT', commission: 'Commission', cogs: 'Cost of goods', margin: 'Margin', uncostedSales: 'Uncosted sales',
-    uncosted: 'Sold without a cost price: {n} items · {amount}. Not in profit.', profitNoVat: 'Profit is worked out without VAT.',
+    uncosted: 'Sold without a cost price: {n} items · {amount}. Not in profit.', uncosted_one: 'Sold without a cost price: 1 item · {amount}. Not in profit.', profitNoVat: 'Profit is worked out without VAT.',
     payouts: 'App sales after commission', payoutsBasis: 'App orders only. Counted by delivery date, the same as your payout statements.',
     orders: 'Orders', appSales: 'App sales', youReceive: 'You receive', statement: 'Statement',
     notDelivered: 'Paid, not delivered yet', waiting: 'Delivered, waiting for payout', paidOut: 'Paid out', noStatement: 'Not on a statement yet', awaiting: 'Awaiting payout',
@@ -178,6 +179,7 @@ export const REPORT_LABELS = {
     methods: 'Payment methods', group: 'Group', method: 'Method', amount: 'Amount', count: 'Count', share: 'Share',
     byYou: 'Collected by you', viaFitFlex: 'Paid through FitFlex', netOfChange: 'Cash after change',
     figure: 'Figure', value: 'Value', none: 'None',
+    refundNumber: 'Credit note', refundDate: 'Date', saleNumber: 'Sale', restocked: 'Units back in stock',
     method_: { cash: 'Cash', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Card', bank: 'Bank transfer', other: 'Other', unknown: 'Other' },
     months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
   },
@@ -195,8 +197,9 @@ export const REPORT_LABELS = {
     stockValue: 'Thamani ya Stock', asOf: 'Kufikia {time} leo. Kipindi ulichochagua hakitumiki hapa.', asOfDate: 'Kufikia {date}', sellingPrice: 'Bei ya kuuza',
     atRetail: 'Thamani kwa bei ya kuuza', atCost: 'Thamani kwa bei ya kununua', costPrice: 'Bei ya kununua', unknown: 'Haijulikani', units: 'Idadi ya Stock', products: 'Bidhaa',
     costUnknown: 'Bidhaa {n} zilizopo kwenye Stock hazina bei ya kununua, kwa hiyo hazimo kwenye thamani kwa bei ya kununua.',
+    costUnknown_one: 'Bidhaa 1 iliyopo kwenye Stock haina bei ya kununua, kwa hiyo haimo kwenye thamani kwa bei ya kununua.',
     profit: 'Faida', netExVat: 'Mauzo baada ya makato bila VAT', commission: 'Kamisheni', cogs: 'Gharama ya bidhaa', margin: 'Asilimia ya faida', uncostedSales: 'Mauzo bila bei ya kununua',
-    uncosted: 'Zimeuzwa bila bei ya kununua: bidhaa {n} · {amount}. Hazimo kwenye faida.', profitNoVat: 'Faida imehesabiwa bila VAT.',
+    uncosted: 'Zimeuzwa bila bei ya kununua: bidhaa {n} · {amount}. Hazimo kwenye faida.', uncosted_one: 'Imeuzwa bila bei ya kununua: bidhaa 1 · {amount}. Haimo kwenye faida.', profitNoVat: 'Faida imehesabiwa bila VAT.',
     payouts: 'Mauzo ya app baada ya kamisheni', payoutsBasis: 'Oda za app pekee. Zimehesabiwa kwa tarehe ya delivery, sawa na taarifa zako za malipo.',
     orders: 'Oda', appSales: 'Mauzo ya app', youReceive: 'Unapokea', statement: 'Taarifa ya malipo',
     notDelivered: 'Zimelipiwa, bado delivery', waiting: 'Delivery imekamilika, inasubiri malipo', paidOut: 'Imelipwa', noStatement: 'Bado haiko kwenye taarifa', awaiting: 'Inasubiri malipo',
@@ -204,13 +207,22 @@ export const REPORT_LABELS = {
     aging61: 'Siku 61–90 za kuchelewa', aging90: 'Zaidi ya siku 90 za kuchelewa', creditSalesCount: 'Mauzo ya mkopo', creditSales: 'Mauzo ya mkopo', collected: 'Yaliyokusanywa kutoka kwa wateja',
     buyersShop: 'Wateja walionunua (dukani)', buyersApp: 'Wateja walionunua (app)',
     methods: 'Njia za malipo', group: 'Kundi', method: 'Njia', amount: 'Kiasi', count: 'Idadi', share: 'Sehemu',
-    byYou: 'Uliyopokea wewe', viaFitFlex: 'Yaliyolipwa kupitia FitFlex', netOfChange: 'Taslimu baada ya chenji',
+    byYou: 'Uliyokusanya wewe', viaFitFlex: 'Yaliyolipwa kupitia FitFlex', netOfChange: 'Taslimu baada ya chenji',
     figure: 'Kipimo', value: 'Thamani', none: 'Hakuna',
+    refundNumber: 'Hati ya marejesho', refundDate: 'Tarehe', saleNumber: 'Mauzo', restocked: 'Idadi iliyorudi kwenye Stock',
     method_: { cash: 'Taslimu', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Kadi', bank: 'Uhamisho wa benki', other: 'Nyingine', unknown: 'Nyingine' },
     months: ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'],
   },
 };
 const fillIn = (template, values = {}) => String(template).replace(/\{(\w+)\}/g, (_, k) => (values[k] == null ? '' : String(values[k])));
+/**
+ * A label with a count (UAT D10): the key's `_one` form when n is 1 and the language has one ("1 sale",
+ * "1 item", "1 day"), else the plural form with {n}.
+ */
+export const reportCount = (lang, key, n, values = {}) => {
+  const table = REPORT_LABELS[lang === 'sw' ? 'sw' : 'en'];
+  return reportLabel(lang, Number(n) === 1 && table[`${key}_one`] ? `${key}_one` : key, { ...values, n });
+};
 export const reportLabel = (lang, key, values) => fillIn(REPORT_LABELS[lang === 'sw' ? 'sw' : 'en'][key] ?? REPORT_LABELS.en[key] ?? key, values);
 export const methodName = (lang, method) => REPORT_LABELS[lang === 'sw' ? 'sw' : 'en'].method_[method] || String(method || '');
 /** A money column header: "Net sales (TZS)" / "Mauzo halisi (TZS)". */
@@ -269,7 +281,7 @@ const sumChannels = b => ({
 });
 
 export const coverText = (lang, row) => (row.coverState === 'ok' || (row.coverState === 'soon' && row.daysOfCover >= 1)
-  ? `${row.coverState === 'soon' ? `${reportLabel(lang, 'cover_soon')} · ` : ''}${reportLabel(lang, 'cover_ok', { n: row.daysOfCover })}`
+  ? `${row.coverState === 'soon' ? `${reportLabel(lang, 'cover_soon')} · ` : ''}${reportCount(lang, 'cover_ok', row.daysOfCover)}`
   : row.coverState === 'soon' ? `${reportLabel(lang, 'cover_soon')} · ${reportLabel(lang, 'coverUnderOne')}` : reportLabel(lang, `cover_${row.coverState}`));
 const productName = (lang, r) => `${r.name || ''}${r.removed ? ` ${reportLabel(lang, 'removed')}` : ''}`;
 
@@ -310,6 +322,13 @@ export function customersCsv(data, lang) {
     reportLabel(lang, 'buyersShop'), reportLabel(lang, 'buyersApp')];
   const a = data.aging;
   return { header, rows: [[data.owedTzs, data.overdueTzs, a.current, a.d1_30, a.d31_60, a.d61_90, a.d90plus, data.creditSales.count, data.creditSales.totalTzs, data.collectedTzs, data.buyers.shop, data.buyers.app]] };
+}
+
+/** Refunds (S7): header only until credit notes exist (UAT D16). */
+export function refundsCsv(data, lang) {
+  const header = [reportLabel(lang, 'refundNumber'), reportLabel(lang, 'refundDate'), reportLabel(lang, 'saleNumber'), moneyHeader(lang, 'amount'),
+    reportLabel(lang, 'method'), reportLabel(lang, 'restocked')];
+  return { header, rows: (data.rows || []).map(r => [r.number, eatDayOf(r.refundedAt), r.saleNumber, r.amountTzs, methodName(lang, r.method), r.restockedUnits]) };
 }
 
 export function methodsCsv(data, lang) {

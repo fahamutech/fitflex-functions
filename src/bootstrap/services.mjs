@@ -144,6 +144,9 @@ import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createShopBannerService } from '../services/shop-banner-service.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
+import { createPartnerMediaService } from '../services/partner-media-service.mjs';
+import { createPgPartnerMediaStore } from '../infra/partner-media-store-pg.mjs';
+import { orgAuthzMode } from '../shared/feature-flags.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
 import { createShopHomeService } from '../services/shop-home-service.mjs';
 import { createShopPreferenceService } from '../services/shop-preference-service.mjs';
@@ -165,6 +168,17 @@ import { eventsPaymentsManualOn, eventsPaymentsTunzaaOn } from '../shared/featur
 import { eventTicketKeyRing, eventsRefundTargetDays } from '../shared/events-config.mjs';
 import { eventsMaxParticipantsPerOrder, eventsConsentTextVersion } from '../shared/events-config.mjs';
 import { registerOrganizerLookup } from '../auth/events-authz.mjs';
+import { registerApiClientStore } from '../auth/organizer-api-auth.mjs';
+import { createEventsOpsService } from '../services/events-ops-service.mjs';
+import { createEventsSyncService } from '../services/events-sync-service.mjs';
+import { createEventsIntegrationsService } from '../services/events-integrations-service.mjs';
+import { createEventsWebhookService } from '../services/events-webhook-service.mjs';
+import { webhookKeyRing } from '../shared/webhook-signing.mjs';
+import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
+import {
+  eventsApiTokenTtlSeconds, eventsApiMaxClients, eventsApiDefaultRate, eventsApiAllowlist, eventsWebhookMaxEndpoints, eventsWebhookTimeoutMs, eventsWebhookMaxAttempts,
+  eventsWebhookBatch, eventsFeedLagSeconds, eventsExportMaxRows,
+} from '../shared/events-config.mjs';
 import { eventsFavouritesOn, eventsRegistrationOn, eventsClosingSoonHours, eventAutoCompleteGraceHours } from '../shared/feature-flags.mjs';
 import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
@@ -250,7 +264,11 @@ const { resolveRequestUser, publicUserId } = identityService;
 
 // A tier members still hold cannot be removed, renamed or switched off in Settings (409 tier_in_use).
 export const settingsService = createSettingsService({ platformSettings, auditLog, tierHolders: createTierHolders({ db }) });
-export const gymService = createGymService({ gyms, users, checkins, auditLog });
+// partnerMediaService is defined further down; the follow-ups are only called later.
+export const gymService = createGymService({
+  gyms, users, checkins, auditLog,
+  onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
+});
 // Who is paid for a gym shared by several owners (GYM_PAYOUT_OWNER, dormant by default).
 export const gymPayoutOwner = createGymPayoutOwner({ users, gyms, auditLog });
 // Tells gym owners, staff and vendors what happens at their gym or shop (inbox + push).
@@ -266,8 +284,12 @@ export const trainerService = createTrainerService({
   // Partner DOB review L3: the declared date of birth goes once the Person has no personas left
   // (deleting only the profile leaves the trainer's account, so this usually keeps it).
   onTrainerRemoved: async prior => {
+    // Partner media (functions#277 review M2): the profile's photo and logo go with it, whatever else fails.
+    const purged = partnerMediaService.purgeSubject('trainer', prior?.id, { cause: 'trainer_profile_deleted' }).catch(err => err);
     const row = prior?.userId ? await db('User').where({ id: prior.userId }).first('personId') : null;
     await forgetPersonDetails(db, { personId: row?.personId || null });
+    const result = await purged;
+    if (result instanceof Error) throw result;
   },
 });
 export const trainerBookingService = createTrainerBookingService({
@@ -615,6 +637,8 @@ export const accountService = createAccountService({
       () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
       // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
       () => forgetPersonDetails(db, { personId: deleted?.personId || null }),
+      // Partner media (functions#277 review M2): a vendor's, a trainer's or an owner's last gyms' photos and logos.
+      () => partnerMediaService.purgeAccount(deleted || { id: userId }, { cause: 'account_deleted' }),
     ]) {
       try { await step(); } catch (err) { errors.push(err); }
     }
@@ -683,7 +707,10 @@ export const operatorService = createOperatorService({
   gymOpenToPass,
 });
 
-export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate, gymPayoutOwner });
+export const ownerGymService = createOwnerGymService({
+  gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate, gymPayoutOwner,
+  onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
+});
 export const ownerStaffService = createOwnerStaffService({ users, auditLog, initFirebaseAdmin, getAdminAuth });
 
 export const adminMemberService = createAdminMemberService({
@@ -753,7 +780,13 @@ export const mobileMoneyService = createMobileMoneyService({
 });
 export const adminOwnerService = createAdminOwnerService({
   users, gyms, checkins, auditLog, gymService, gymPayoutOwner,
-  onOwnerRemoved: prior => forgetPersonDetails(db, { personId: prior?.personId || null }),
+  onOwnerRemoved: async (prior) => {
+    // Partner media (functions#277 review M2): gyms no open owner runs any more lose their photo and logo.
+    const purged = partnerMediaService.purgeAccount(prior, { cause: 'owner_deleted' }).catch(err => err);
+    await forgetPersonDetails(db, { personId: prior?.personId || null });
+    const result = await purged;
+    if (result instanceof Error) throw result;
+  },
 });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
@@ -1011,6 +1044,7 @@ export const registrationService = createRegistrationService({
   approvalStatusForRole, signPurpose, verifyPurpose,
   claimInvitations: personId => invitationService.claimFor(personId),
   linkingEnabled: () => identityFlag('V2_LINKING'),
+  onAccountClosed: row => partnerMediaService.purgeAccount(row, { cause: 'registration_withdrawn' }),
 });
 // A person with no profile yet: invited with a start PIN, or still to choose a role.
 export const onboardingService = createOnboardingService({
@@ -1176,6 +1210,14 @@ export const shopBannerService = createShopBannerService({
   partnerGate, moderationGate,
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
+// Partner hero photo and logo (PARTNER_MEDIA; plan partner-hero-media-plan.md): bytes in Postgres,
+// live at once, FitFlex reviews afterwards; takedowns tell the partner (inbox + push).
+export const partnerMediaService = createPartnerMediaService({
+  store: createPgPartnerMediaStore({ db }),
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  orgAuthzMode,
+});
 // "Personalised shop" switch (SHOP_PERSONALISATION, Phase 2 slice 2): one row per Person, no row = on.
 export const shopPreferenceService = createShopPreferenceService({
   store: createPgShopPreferenceStore({ db }), users, identityLink: identityLinkService,
@@ -1223,10 +1265,21 @@ export const eventsOrganizerService = createEventsOrganizerService({
   // S3: the overview counters (eventsRegistrationService is defined below; only called later).
   registrationTotals: organizerId => eventsRegistrationService.organizerTotals(organizerId),
 });
-export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService });
+// S5: a bilingual in-app notice to an organizer's owner and admins (payout schedule changed, API client events, webhook auto-disabled).
+const notifyOrganizerTeam = async (organizerId, { id, type, en, sw, roles = ['owner', 'admin'] }) => {
+  const staff = await db('EventOrganizerStaff').where({ organizerId, status: 'active' }).whereIn('role', roles).select('userId');
+  for (const s of staff) {
+    const locale = await communicationPreferences.findByIdAsync(s.userId).then(p => p?.locale ?? null).catch(() => null);
+    const t = locale === 'sw' ? sw : en;
+    await notificationService.notify(s.userId, { id: `${id}_${s.userId}`.slice(0, 60), type, title: t.title, body: t.body, data: { organizerId, locale: locale === 'sw' ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body } });
+  }
+};
+export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService, notifyTeam: notifyOrganizerTeam });
 export const eventsDiscoveryService = createEventsDiscoveryService({
   catalogue: eventCatalogueStore, closingSoonHours: eventsClosingSoonHours,
   flags: { module: eventsModuleOn, favourites: eventsFavouritesOn, registration: eventsRegistrationOn },
+  // S5: the ops switches the apps and the portal read (webhooks is false without EVENTS_WEBHOOK_SECRET_KEY: fail closed).
+  opsOptions: () => ({ kit: eventsKitOpsOn(), api: eventsOrganizerApiOn(), webhooks: eventsWebhooksOn() && Boolean(webhookKeyRing()) }),
   // S3 (spec §3.1): the registration keys of the probe. payment is 'none' in S3 (S4 derives manual / provider).
   registrationOptions: () => ({
     holdTtlMinutes: eventStore.holdTtlMinutes(), maxParticipantsPerOrder: eventsMaxParticipantsPerOrder(), teams: true, corporate: true,
@@ -1260,6 +1313,8 @@ export const eventsRegistrationService = createEventsRegistrationService({
   senders: eventSenders,
   // S4: payments and refunds (defined below; read at request time).
   getPayments: () => eventsPaymentsService, getRefunds: () => eventsRefundsService,
+  // S5: the keyset roster, only while EVENTS_KIT_OPS is on.
+  getRosterSync: () => (eventsKitOpsOn() ? eventsSyncService : null),
 });
 export const eventsRosterService = createEventsRosterService({ db, registration: eventsRegistrationService, users, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService });
 
@@ -1297,5 +1352,51 @@ opsService.register({
     if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
     const r = await eventsOrganizerService.runLifecycle();
     return { processed: r.due, succeeded: r.moved, failed: r.failed, ...r };
+  },
+});
+
+// Marathon & running events · S5: venue operations, the organizer API and signed webhooks. All dormant: every route answers
+// 404 feature_disabled unless EVENTS_KIT_OPS / EVENTS_ORGANIZER_API / EVENTS_WEBHOOKS (each with EVENTS_MODULE and EVENTS_REGISTRATION) is on,
+// and the webhook jobs also need EVENTS_WEBHOOK_SECRET_KEY. docs/design/events-s5-venue-api-and-webhooks.md.
+export const eventsOpsService = createEventsOpsService({
+  db, eventStore, ticketRing: eventTicketKeyRing, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message),
+});
+export const eventsSyncService = createEventsSyncService({ db, feedLagSeconds: eventsFeedLagSeconds, exportMaxRows: eventsExportMaxRows });
+export const eventsIntegrationsService = createEventsIntegrationsService({
+  db, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message),
+  maxClients: eventsApiMaxClients, defaultRate: eventsApiDefaultRate, tokenTtlSeconds: eventsApiTokenTtlSeconds, allowlist: eventsApiAllowlist,
+});
+registerApiClientStore(eventsIntegrationsService.authStore);
+export const eventsWebhookService = createEventsWebhookService({
+  db, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message), keyRing: webhookKeyRing,
+  config: { maxEndpoints: eventsWebhookMaxEndpoints, timeoutMs: eventsWebhookTimeoutMs, maxAttempts: eventsWebhookMaxAttempts, batch: eventsWebhookBatch, lagSeconds: eventsFeedLagSeconds },
+});
+opsService.register({
+  name: 'event-webhook-fanout', title: 'Event webhook fan-out', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events webhooks (S5): turns unpublished outbox rows into deliveries for the SAME organizer\'s verified, subscribed endpoints (the organizer match is in the SQL join) and marks them published. Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set.',
+  run: async () => {
+    if (!eventsWebhooksOn() || !eventsWebhookService.enabled()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.fanout();
+    return { processed: r.rows, succeeded: r.rows, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-webhook-deliver', title: 'Event webhook delivery', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events webhooks (S5): sends due deliveries (SKIP LOCKED claim with a lease, SSRF re-check and pinned connection on every attempt, backoff 1m·5m·15m·1h·3h·6h·12h·24h, dead letter, auto-disable with a notice). Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set.',
+  run: async () => {
+    if (!eventsWebhooksOn() || !eventsWebhookService.enabled()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.deliverDue();
+    return { processed: r.claimed, succeeded: r.delivered, failed: r.failed + r.dead, ...r };
+  },
+});
+opsService.register({
+  name: 'event-webhook-retention', title: 'Event webhook retention', schedule: { type: 'daily', utc: '02:40' }, quiet: true,
+  description: 'Events webhooks and API (S5): attempts kept 30 days, deliveries and published outbox rows 90 days, idempotency rows 7 days, API usage rows 90 days; API client expiry notices at 14 and 3 days. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on.',
+  run: async () => {
+    if (!eventsRegistrationOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.retention();
+    const s = await eventsIntegrationsService.sweep();
+    const processed = r.attempts + r.deliveries + r.outbox + r.idempotency + s.notices + s.purged;
+    return { processed, succeeded: processed, failed: 0, ...r, ...s };
   },
 });
