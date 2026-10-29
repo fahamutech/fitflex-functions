@@ -1,0 +1,2531 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FitFlex Organizer API",
+    "version": "1.0.0",
+    "description": "For organizers' timing, registration and kit-desk systems. Authentication: exchange a client id and secret at POST /v1/organizer/token for a 15-minute bearer token. Scopes, event restrictions, revocation and expiry are checked on every call. Dates are ISO 8601 UTC, JSON is camelCase, lists use opaque cursors. Organizers never receive participant phone or email through this API. See organizer-api-guide.md and organizer-webhooks.md."
+  },
+  "servers": [
+    {
+      "url": "https://api.example.invalid"
+    }
+  ],
+  "security": [
+    {
+      "oauth2": []
+    }
+  ],
+  "paths": {
+    "/v1/organizer/token": {
+      "post": {
+        "summary": "Exchange client credentials for a bearer token",
+        "description": "The only route that accepts the client secret. Every failed exchange is the same 401 invalid_client.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_client (identical for unknown id, wrong secret, revoked, expired)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "organizer_suspended | organizer_not_active | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/openapi.json": {
+      "get": {
+        "summary": "This document",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/events": {
+      "get": {
+        "summary": "List events",
+        "description": "Any valid client.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": null,
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque. Pass nextCursor from the previous page."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/events/{eventId}/registrations": {
+      "get": {
+        "summary": "List registrations (confirmed and cancelled-after-confirmed)",
+        "description": "Scope: registrations:read.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "registrations:read",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque. Pass nextCursor from the previous page."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "confirmed",
+                "cancelled"
+              ]
+            }
+          },
+          {
+            "name": "categoryId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "bib",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "assigned",
+                "unassigned"
+              ]
+            }
+          },
+          {
+            "name": "kit",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "collected",
+                "remaining",
+                "exception"
+              ]
+            }
+          },
+          {
+            "name": "updatedSince",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "event_not_found (also for another organizer's or an unlisted event)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/events/{eventId}/registration-changes": {
+      "get": {
+        "summary": "Change feed",
+        "description": "Scope: registrations:read.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "registrations:read",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque. Pass nextCursor from the previous page."
+          },
+          {
+            "name": "expand",
+            "in": "query",
+            "schema": {
+              "const": "registration"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeFeed"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "event_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "cursor_expired — do a full resync with GET registrations?updatedSince=",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/registrations/{registrationId}": {
+      "get": {
+        "summary": "One registration",
+        "description": "Scope: registrations:read.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "registrations:read",
+        "parameters": [
+          {
+            "name": "registrationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "registration_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/events/{eventId}/kit-collections": {
+      "post": {
+        "summary": "Record a kit handover",
+        "description": "Scope: kit:write.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "kit:write",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 100
+            },
+            "description": "Required on every write. A replay returns the original answer (200 + Idempotent-Replayed: true); the same key with another body is 409 idempotency_key_reused."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KitCollectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KitCollectionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "idempotency_key_required | not_event_ticket",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "registration_not_found | event_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "already_collected | ticket_revoked | registration_unpaid | idempotency_key_reused | request_in_progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "collection_point_required | manual_reason_required | note_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/events/{eventId}/bib-assignments": {
+      "post": {
+        "summary": "Assign a bib number",
+        "description": "Scope: bibs:write.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "bibs:write",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 100
+            },
+            "description": "Required on every write. A replay returns the original answer (200 + Idempotent-Replayed: true); the same key with another body is 409 idempotency_key_reused."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BibRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Assigned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BibResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "bib_taken | bib_already_assigned | registration_unpaid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "bib_invalid | reason_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/events/{eventId}/bib-assignments/batch": {
+      "post": {
+        "summary": "Assign up to 500 bib numbers (per item, not atomic)",
+        "description": "Scope: bibs:write.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "bibs:write",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 100
+            },
+            "description": "Required on every write. A replay returns the original answer (200 + Idempotent-Replayed: true); the same key with another body is 409 idempotency_key_reused."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BibBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BibBatchResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "payload_too_large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/webhook-endpoints": {
+      "get": {
+        "summary": "List webhook endpoints",
+        "description": "Scope: webhooks:manage.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "webhooks:manage",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Register a webhook endpoint",
+        "description": "Scope: webhooks:manage.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "webhooks:manage",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEndpointRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_url { reason }",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_event_type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/webhook-endpoints/{id}": {
+      "patch": {
+        "summary": "Change an endpoint",
+        "description": "Scope: webhooks:manage.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEndpointRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointUpdated"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/webhook-endpoints/{id}/rotate-secret": {
+      "post": {
+        "summary": "Rotate the signing secret (shown once)",
+        "description": "Scope: webhooks:manage.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointCreated"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/webhook-endpoints/{id}/test": {
+      "post": {
+        "summary": "Send one synthetic test event",
+        "description": "Scope: webhooks:manage.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/webhook-endpoints/{id}/verify": {
+      "post": {
+        "summary": "Run the verification handshake",
+        "description": "Scope: webhooks:manage.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ ok, host, reason? }",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/webhook-deliveries": {
+      "get": {
+        "summary": "The delivery log",
+        "description": "Scope: webhooks:manage.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque. Pass nextCursor from the previous page."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDeliveryList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/webhook-deliveries/{id}/retry": {
+      "post": {
+        "summary": "Retry a failed or dead delivery (bounded)",
+        "description": "Scope: webhooks:manage.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ queued } | { alreadyQueued }",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "registration.created": {
+      "post": {
+        "summary": "registration.created delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "registration.paid": {
+      "post": {
+        "summary": "registration.paid delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "registration.cancelled": {
+      "post": {
+        "summary": "registration.cancelled delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "registration.updated": {
+      "post": {
+        "summary": "registration.updated delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "kit.collected": {
+      "post": {
+        "summary": "kit.collected delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "bib.assigned": {
+      "post": {
+        "summary": "bib.assigned delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "event.updated": {
+      "post": {
+        "summary": "event.updated delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "event.cancelled": {
+      "post": {
+        "summary": "event.cancelled delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "refund.updated": {
+      "post": {
+        "summary": "refund.updated delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "oauth2": {
+        "type": "oauth2",
+        "flows": {
+          "clientCredentials": {
+            "tokenUrl": "/v1/organizer/token",
+            "scopes": {
+              "registrations:read": "Read registrations (names, category, status, bib, kit).",
+              "registrations:demographics": "Also gender and age on event day.",
+              "kit:write": "Record kit handovers.",
+              "bibs:write": "Assign bib numbers.",
+              "webhooks:manage": "Manage webhooks (granted by the organizer owner only)."
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "A stable machine code, e.g. invalid_client, insufficient_scope, event_not_found."
+          },
+          "requestId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "description": "Every error is { error, ...extra } (D5). 5xx bodies carry requestId."
+      },
+      "TokenRequest": {
+        "type": "object",
+        "properties": {
+          "grant_type": {
+            "const": "client_credentials"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant_type",
+          "client_id",
+          "client_secret"
+        ]
+      },
+      "TokenResponse": {
+        "type": "object",
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "const": "Bearer"
+          },
+          "expires_in": {
+            "type": "integer",
+            "example": 900
+          }
+        },
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in"
+        ]
+      },
+      "Category": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "distanceM": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "distanceM"
+        ]
+      },
+      "CollectionPoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "Event": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "startsAt": {
+            "type": "string"
+          },
+          "endsAt": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Category"
+            }
+          },
+          "collectionPoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CollectionPoint"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "slug",
+          "status",
+          "startsAt",
+          "endsAt",
+          "timezone",
+          "categories",
+          "collectionPoints"
+        ]
+      },
+      "EventList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ]
+      },
+      "Kit": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "enum": [
+              "not_ready",
+              "ready",
+              "collected",
+              "exception"
+            ]
+          },
+          "collectedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "Registration": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "categoryId": {
+            "type": "string"
+          },
+          "categoryName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ticketTypeId": {
+            "type": "string"
+          },
+          "ticketTypeName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "confirmed",
+              "cancelled"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "firstName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bibNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kit": {
+            "$ref": "#/components/schemas/Kit"
+          },
+          "kitSize": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ticketCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "teamId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "teamName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groupLabel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimed": {
+            "type": "boolean"
+          },
+          "gender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ageOnEventDay": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "eventId",
+          "categoryId",
+          "categoryName",
+          "ticketTypeId",
+          "ticketTypeName",
+          "orderId",
+          "status",
+          "createdAt",
+          "updatedAt",
+          "firstName",
+          "lastName",
+          "bibNumber",
+          "kit",
+          "kitSize",
+          "ticketCode",
+          "teamId",
+          "teamName",
+          "groupLabel",
+          "claimed"
+        ],
+        "description": "gender and ageOnEventDay exist only with the registrations:demographics scope. There is NO phone, email, date of birth, emergency contact, payer or payment field."
+      },
+      "RegistrationList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Registration"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ]
+      },
+      "RegistrationEnvelope": {
+        "type": "object",
+        "properties": {
+          "registration": {
+            "$ref": "#/components/schemas/Registration"
+          }
+        },
+        "required": [
+          "registration"
+        ]
+      },
+      "ChangeItem": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string",
+            "description": "The outbox id. Consumers dedupe on it; cursors may overlap."
+          },
+          "eventType": {
+            "enum": [
+              "registration.created",
+              "registration.updated",
+              "registration.paid",
+              "registration.cancelled",
+              "kit.collected",
+              "bib.assigned"
+            ]
+          },
+          "registrationId": {
+            "type": "string"
+          },
+          "changedAt": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "confirmed",
+              "cancelled"
+            ]
+          },
+          "changed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cancelledAt": {
+            "type": "string"
+          },
+          "reasonCode": {
+            "type": "string"
+          },
+          "registration": {
+            "$ref": "#/components/schemas/Registration",
+            "type": [
+              null,
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "seq",
+          "id",
+          "eventType",
+          "registrationId",
+          "changedAt",
+          "status"
+        ]
+      },
+      "ChangeFeed": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChangeItem"
+            }
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor",
+          "hasMore"
+        ]
+      },
+      "KitCollectionRequest": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "enum": [
+              "scan",
+              "manual"
+            ]
+          },
+          "payload": {
+            "type": "string",
+            "description": "The QR text (FFEV1:…) for method scan."
+          },
+          "registrationId": {
+            "type": "string"
+          },
+          "manualReason": {
+            "enum": [
+              "phone_lost",
+              "no_signal",
+              "screen_damaged",
+              "other"
+            ]
+          },
+          "collectionPointId": {
+            "type": "string"
+          },
+          "kitSize": {
+            "type": "string"
+          },
+          "bibNumber": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "collected",
+              "exception"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "Card": {
+        "type": "object",
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "ticketCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "categoryName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "distanceM": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ticketTypeName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "teamName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bibNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kitSize": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kit": {
+            "$ref": "#/components/schemas/Kit"
+          },
+          "payment": {
+            "enum": [
+              "paid",
+              "unpaid",
+              "refunded"
+            ]
+          }
+        },
+        "required": [
+          "displayName",
+          "kit",
+          "payment"
+        ]
+      },
+      "KitCollectionResponse": {
+        "type": "object",
+        "properties": {
+          "collection": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "collectedAt": {
+                "type": "string"
+              },
+              "collectionPointId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "status",
+              "collectedAt",
+              "collectionPointId"
+            ]
+          },
+          "card": {
+            "$ref": "#/components/schemas/Card"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "collection",
+          "card",
+          "warnings"
+        ]
+      },
+      "BibRequest": {
+        "type": "object",
+        "properties": {
+          "registrationId": {
+            "type": "string"
+          },
+          "bibNumber": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,11}$"
+          },
+          "replace": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "registrationId",
+          "bibNumber"
+        ]
+      },
+      "BibResponse": {
+        "type": "object",
+        "properties": {
+          "assignment": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "registrationId": {
+                "type": "string"
+              },
+              "bibNumber": {
+                "type": "string"
+              },
+              "assignedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "registrationId",
+              "bibNumber",
+              "assignedAt"
+            ]
+          },
+          "previousBibNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "assignment",
+          "previousBibNumber",
+          "warnings"
+        ]
+      },
+      "BibBatchRequest": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "clientRef": {
+                  "type": "string"
+                },
+                "registrationId": {
+                  "type": "string"
+                },
+                "bibNumber": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "registrationId",
+                "bibNumber"
+              ]
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "BibBatchResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "clientRef": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "bibNumber": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "clientRef",
+                "ok"
+              ]
+            }
+          }
+        },
+        "required": [
+          "results"
+        ]
+      },
+      "WebhookEnvelope": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The outbox id: stable across endpoints and retries — your dedupe key."
+          },
+          "type": {
+            "enum": [
+              "registration.created",
+              "registration.paid",
+              "registration.cancelled",
+              "registration.updated",
+              "kit.collected",
+              "bib.assigned",
+              "event.updated",
+              "event.cancelled",
+              "refund.updated"
+            ]
+          },
+          "version": {
+            "const": "1"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "organizerId": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "data": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "version",
+          "createdAt",
+          "organizerId",
+          "eventId",
+          "data"
+        ],
+        "description": "No names, phones, emails, amounts or tokens. Fetch authorised fields with GET /v1/organizer/registrations/{id}."
+      },
+      "WebhookEndpointRequest": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "https, port 443, a DNS name that resolves only to public addresses."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "registration.created",
+                "registration.paid",
+                "registration.cancelled",
+                "registration.updated",
+                "kit.collected",
+                "bib.assigned",
+                "event.updated",
+                "event.cancelled",
+                "refund.updated"
+              ]
+            }
+          },
+          "eventIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "events"
+        ]
+      },
+      "WebhookEndpoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "enum": [
+              "active",
+              "disabled"
+            ]
+          },
+          "verifiedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "health": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "events",
+          "status"
+        ]
+      },
+      "WebhookEndpointCreated": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "$ref": "#/components/schemas/WebhookEndpoint"
+          },
+          "signingSecret": {
+            "type": "string",
+            "description": "whsec_… shown ONCE."
+          }
+        },
+        "required": [
+          "endpoint",
+          "signingSecret"
+        ]
+      },
+      "WebhookEndpointList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEndpoint"
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "WebhookEndpointUpdated": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "$ref": "#/components/schemas/WebhookEndpoint"
+          },
+          "verification": {
+            "type": "object",
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "host": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "endpoint"
+        ]
+      },
+      "WebhookDeliveryList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "endpointId": {
+                  "type": "string"
+                },
+                "eventType": {
+                  "type": "string"
+                },
+                "eventId": {
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "pending",
+                    "delivered",
+                    "failed",
+                    "dead"
+                  ]
+                },
+                "attemptCount": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "endpointId",
+                "eventType",
+                "eventId",
+                "status",
+                "attemptCount"
+              ]
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ]
+      }
+    }
+  }
+}
