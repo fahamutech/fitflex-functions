@@ -683,7 +683,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
           const regs = new Map((await trx('EventRegistration').whereIn('id', ids).orderBy('id').forUpdate()).map(r => [r.id, plain(r)]));
           for (const { registrationId, bibNumber } of out.plan) {
             const reg = regs.get(registrationId);
-            if (reg.bibNumber || reg.status !== 'confirmed') return fail('preview_stale', 409);
+            if (reg.bibNumber || reg.status !== 'confirmed') throw refusal('preview_stale', 409);   // THROW: a return would commit the rows already written
             await assignBibTx(trx, { event, reg, bibNumber, actor, replace: false, reason: null, at, silent: true });
             await outbox(trx, event, 'bib.assigned', reg.id, { registrationId: reg.id, eventId: event.id, categoryId: reg.categoryId, bibNumber, previousBibNumber: null });
           }
@@ -778,7 +778,7 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
           const regs = new Map(ids.length ? (await trx('EventRegistration').whereIn('id', ids).orderBy('id').forUpdate()).map(r => [r.id, plain(r)]) : []);
           for (const { registrationId, bibNumber } of out.pairs) {
             const reg = regs.get(registrationId);
-            if (reg.bibNumber || reg.status !== 'confirmed') return fail('preview_stale', 409);
+            if (reg.bibNumber || reg.status !== 'confirmed') throw refusal('preview_stale', 409);   // THROW: a return would commit the rows already written
             await assignBibTx(trx, { event, reg, bibNumber, actor, replace: false, reason: null, at, silent: true });
             await outbox(trx, event, 'bib.assigned', reg.id, { registrationId: reg.id, eventId: event.id, categoryId: reg.categoryId, bibNumber, previousBibNumber: null });
           }

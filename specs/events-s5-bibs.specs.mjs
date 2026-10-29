@@ -196,3 +196,29 @@ test('the list: counts, filters, search by bib/code/name; timing may read, finan
   assert.equal((await call(organizerListBibs, f.organizer.ops, { params: { id: f.event.id }, query: { cursor: 'garbage' } })).body.error, 'invalid_cursor');
   assert.equal((await call(organizerListBibs, f.organizer.finance, { params: { id: f.event.id }, query: {} })).status, 403);
 });
+
+test('ATOMICITY: if the database fails halfway through a bulk apply or an import, NOTHING stays written (a real mid-statement failure, not a pre-check)', async () => {
+  s5On();
+  const f = await h.kitEvent({ n: 3 });
+  await db.raw(`CREATE OR REPLACE FUNCTION spec_s5_fail_second() RETURNS trigger AS $$ BEGIN IF NEW."bibNumber" IN ('ATOM-0002', 'ATOM-IMP2') THEN RAISE EXCEPTION 'spec: simulated failure on the second row'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+  await db.raw(`CREATE TRIGGER spec_s5_fail_second BEFORE INSERT ON "EventBibAssignment" FOR EACH ROW EXECUTE FUNCTION spec_s5_fail_second()`);
+  try {
+    const rule = { start: 1, prefix: 'atom-', padTo: 4, categoryId: f.categories[0].id };
+    const prev = await call(organizerBibsBulkPreview, f.organizer.admin, { params: { id: f.event.id }, body: rule });
+    assert.equal(prev.body.count, 3);
+    await assert.rejects(call(organizerBibsBulk, f.organizer.admin, { params: { id: f.event.id }, headers: { 'Idempotency-Key': key() }, body: { ...rule, previewHash: prev.body.previewHash } }), /simulated failure/);
+    assert.equal((await db('EventBibAssignment').where({ eventId: f.event.id }).count({ n: '*' }).first()).n, '0', 'the first row was rolled back with the rest');
+    assert.equal((await db('OutboxEvent').where({ eventId: f.event.id, type: 'bib.assigned' })).length, 0);
+    assert.equal((await db('EventRegistration').where({ eventId: f.event.id }).whereNotNull('bibNumber')).length, 0);
+    assert.equal((await db('AuditLog').where({ action: 'events.bibs_bulk_assigned', target: f.event.id })).length, 0);
+    assert.equal((await db('OrganizerIdempotency').where({ route: `POST bib-assignments/bulk|${f.event.id}` })).length, 0, 'the key is released, the caller can retry');
+    const csv = `registrationId,bibNumber\n${f.regs[0].id},ATOM-IMP1\n${f.regs[1].id},ATOM-IMP2\n${f.regs[2].id},ATOM-IMP3\n`;
+    const p = await call(organizerBibsImportPreview, f.organizer.admin, { params: { id: f.event.id }, body: { csv } });
+    assert.equal(p.body.ok, 3);
+    await assert.rejects(call(organizerBibsImport, f.organizer.admin, { params: { id: f.event.id }, headers: { 'Idempotency-Key': key() }, body: { csv, previewHash: p.body.previewHash } }), /simulated failure/);
+    assert.equal((await db('EventBibAssignment').where({ eventId: f.event.id }).count({ n: '*' }).first()).n, '0');
+  } finally {
+    await db.raw('DROP TRIGGER IF EXISTS spec_s5_fail_second ON "EventBibAssignment"');
+    await db.raw('DROP FUNCTION IF EXISTS spec_s5_fail_second()');
+  }
+});

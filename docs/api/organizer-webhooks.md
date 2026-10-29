@@ -10,7 +10,7 @@ Organizer owner or admin: **Integrations → Webhooks → Add endpoint**. Rules,
 * Every address the name resolves to must be public. Names that point at private, loopback, link-local, carrier-grade NAT, documentation, multicast or cloud-metadata addresses are refused (`invalid_url` with a reason). A name that later starts resolving privately fails its deliveries as `blocked_address`.
 * Redirects are **never** followed: answer on the registered URL.
 * FitFlex connects only to the address it validated, presents your hostname (SNI and `Host`), and validates your TLS certificate. A self-signed certificate fails.
-* Egress IPs: FitFlex does not publish fixed egress addresses; allow-list by signature, not by IP.
+* FitFlex cannot promise fixed egress IP addresses (the hosting platform decides): verify the signature, do not rely on the source IP.
 
 The signing secret (`whsec_…`) is shown **once**. **Verify** the endpoint: FitFlex sends a signed `endpoint.verification` request with a `challenge`; answer `200` with JSON `{"challenge":"<same value>"}` within 10 seconds. An unverified endpoint receives nothing else. After you change the URL, or re-enable an endpoint that was switched off, the handshake runs again.
 
@@ -106,7 +106,7 @@ function verify(array $secrets, array $headers, string $rawBody, ?int $now = nul
 
 ## Retries and failure
 
-Any answer other than `2xx` (including `3xx`, `408`, `429`, `5xx`, a timeout, a TLS or network error) is retried after about 1 minute, 5 minutes, 15 minutes, 1 hour, 3 hours, 6 hours, 12 hours, then every 24 hours (±20 %), up to 10 attempts (about two to three days), then the delivery is a **dead letter** you can retry by hand (5 retries per delivery per day). `410 Gone` ends it at once and switches the endpoint off. After sustained failure (30 failed attempts in a row over 24 hours, or no success for 72 hours with at least 10 failed deliveries) the endpoint is **switched off**, the organizer's owner and admins are told, and events that happen while it is off are not sent to it; **Enable** it again (the handshake runs) and choose to send what it missed from the last 7 days. The **Delivery log** shows every attempt with the response code and a redacted excerpt of your answer; request headers and bodies are not stored.
+Any answer other than `2xx` (including `3xx`, `408`, `429`, `5xx`, a timeout, a TLS or network error) is retried after about 1 minute, 5 minutes, 15 minutes, 1 hour, 3 hours, 6 hours, 12 hours, then every 24 hours (±20 %), up to 10 attempts (about three days), then the delivery is a **dead letter** you can retry by hand (5 retries per delivery per day). `410 Gone` ends it at once and switches the endpoint off. After sustained failure (30 failed attempts in a row over 24 hours, or no success for 72 hours with at least 10 failed deliveries) the endpoint is **switched off**, the organizer's owner and admins are told, and events that happen while it is off are not sent to it; **Enable** it again (the handshake runs) and choose to send what it missed from the last 7 days. The **Delivery log** shows every attempt with the response code and a redacted excerpt of your answer; request headers and bodies are not stored.
 
 ## Test
 
