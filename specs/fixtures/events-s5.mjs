@@ -181,15 +181,24 @@ export function webhookLab({ maxAttempts = 10, dns = { 'hooks.example.test': [PU
     config: { lagSeconds: () => 0, maxAttempts: () => maxAttempts, batch: () => 50 },
   });
   lab.advance = ms => { lab.offset += ms; };
+  // Timestamps have millisecond precision and a local database answers in under one: pause a few ms around the moments the rules compare
+  // (an endpoint is created BEFORE the events it should receive; a row is older than the scan that fans it out), so a fast machine cannot tie them.
+  const tick = () => new Promise(r => setTimeout(r, 4));
   lab.endpoint = async (organizer, { events = ['kit.collected', 'bib.assigned', 'registration.created'], url = 'https://hooks.example.test/hook', verify = true, eventIds = undefined } = {}) => {
+    await tick();
     const created = await lab.svc.createEndpoint({ organizerId: organizer.id, actorId: organizer.ownerUserId, body: { url, events, ...(eventIds ? { eventIds } : {}) } });
     assert.equal(created.status, 201, JSON.stringify(created));
     if (verify) assert.equal((await lab.svc.verifyEndpoint({ organizerId: organizer.id, id: created.endpoint.id, actorId: organizer.ownerUserId })).ok, true);
+    await tick();
     return { id: created.endpoint.id, secret: created.signingSecret, endpoint: created.endpoint };
   };
-  lab.emit = async (event, organizerId, type = 'kit.collected', payload = null, regId = 'ereg_lab') => db.transaction(trx => eventStore.appendOutbox(trx, {
-    type, aggregateType: 'registration', aggregateId: regId, organizerId, eventId: event.id,
-    payload: payload ?? { registrationId: regId, collectionPointId: 'ecp_lab', collectedAt: new Date().toISOString() },
-  }));
+  lab.emit = async (event, organizerId, type = 'kit.collected', payload = null, regId = 'ereg_lab') => {
+    const row = await db.transaction(trx => eventStore.appendOutbox(trx, {
+      type, aggregateType: 'registration', aggregateId: regId, organizerId, eventId: event.id,
+      payload: payload ?? { registrationId: regId, collectionPointId: 'ecp_lab', collectedAt: new Date().toISOString() },
+    }));
+    await tick();
+    return row;
+  };
   return lab;
 }
