@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   REPORT_LIMITS, REPORT_TIMEZONE, PRODUCT_SORTS, STOCK_SORTS, PRODUCTS_PAGE, COVER, parseReportQuery, bucketsOf, addDays, eatToday, pct1, cover,
-  createReportCache, salesCsv, productsCsv, stockCsv, profitCsv, payoutsCsv, customersCsv, methodsCsv, reportFileName, autoGroupBy,
+  createReportCache, refundsCsv, salesCsv, productsCsv, stockCsv, profitCsv, payoutsCsv, customersCsv, methodsCsv, reportFileName, autoGroupBy,
 } from '../shared/vendor-reports.mjs';
 import { csvDocument } from '../shared/csv-export.mjs';
 import { variantsOf, isTracked } from '../shared/vendor-stock.mjs';
@@ -34,7 +34,7 @@ const decodeOffset = c => {
   try { const m = /^o:(\d{1,7})$/.exec(Buffer.from(String(c), 'base64url').toString()); return m ? Number(m[1]) : null; } catch { return null; }
 };
 const METHOD_ORDER = ['cash', 'mpesa', 'airtel_money', 'mixx', 'halopesa', 'card', 'bank', 'other'];
-export const REPORT_SECTIONS = ['summary', 'sales', 'products', 'stock-value', 'profit', 'marketplace-net', 'customers', 'payment-methods'];
+export const REPORT_SECTIONS = ['summary', 'sales', 'products', 'stock-value', 'profit', 'marketplace-net', 'customers', 'payment-methods', 'refunds'];
 
 export function createVendorReportService({
   store, users, auditLog,
@@ -128,7 +128,12 @@ export function createVendorReportService({
         lastSoldAt: last.get(keyOf(productId, variant)) ?? null, stock, ...cover(stock, window.get(keyOf(productId, variant)) ?? 0),
         noSalesInPeriod: !(fact?.units > 0),
       };
-      if (access.cost) row.profitTzs = fact ? fact.costedNetExVat - fact.costedCommission - fact.cost : 0;
+      // UAT D1: no costed line → profit and margin are unknown (null), never 0.
+      if (access.cost) {
+        const known = Boolean(fact?.costedRows);
+        row.profitTzs = known ? fact.costedNetExVat - fact.costedCommission - fact.cost : null;
+        row.marginPct = known ? pct1(row.profitTzs, fact.costedNetExVat) : null;
+      }
       return row;
     };
     const sold = facts.map(f => rowFor(f.productId, f.variant, f, f.name));
@@ -173,29 +178,35 @@ export function createVendorReportService({
       store.byProduct({ vendorId, from: period.from, to: period.to, channel: period.channel }),
       store.productsOf(vendorId),
     ]);
-    const empty = () => ({ netExVatTzs: 0, commissionTzs: 0, costTzs: 0, profitTzs: 0, uncostedRevenueTzs: 0 });
+    const empty = () => ({ netExVatTzs: 0, commissionTzs: 0, costTzs: 0, profitTzs: null, uncostedRevenueTzs: 0, costedRows: 0 });
     const byKey = new Map(bucketsOf(period.from, period.to, period.groupBy).map(b => [b.key, { start: b.start, end: b.end, ...empty() }]));
     const channels = { app: empty(), walkIn: empty() };
     let hasVat = false;
     for (const r of rows) {
       const b = byKey.get(r.bucket);
       for (const t of [b, channels[r.channel === 'app' ? 'app' : 'walkIn']]) {
-        t.netExVatTzs += r.netExVat; t.commissionTzs += r.commission; t.costTzs += r.cost; t.uncostedRevenueTzs += r.uncostedNet;
+        t.netExVatTzs += r.netExVat; t.commissionTzs += r.commission; t.costTzs += r.cost; t.uncostedRevenueTzs += r.uncostedNet; t.costedRows += r.costedRows;
       }
       hasVat ||= r.hasVat;
     }
-    const finish = t => ({ ...t, profitTzs: t.netExVatTzs - t.commissionTzs - t.costTzs, marginPct: pct1(t.netExVatTzs - t.commissionTzs - t.costTzs, t.netExVatTzs) });
+    // UAT D1: a bucket / channel / period with no costed line has an unknown profit (null), never 0.
+    const finish = ({ costedRows, ...t }) => (costedRows
+      ? { ...t, profitTzs: t.netExVatTzs - t.commissionTzs - t.costTzs, marginPct: pct1(t.netExVatTzs - t.commissionTzs - t.costTzs, t.netExVatTzs) }
+      : { ...t, profitTzs: null, marginPct: null });
     const buckets = [...byKey.values()].map(finish);
     const sum = (k) => buckets.reduce((s, b) => s + b[k], 0);
     const netExVatTzs = sum('netExVatTzs'), commissionTzs = sum('commissionTzs'), costTzs = sum('costTzs');
-    const totals = { netExVatTzs, commissionTzs, costTzs, profitTzs: netExVatTzs - commissionTzs - costTzs, marginPct: pct1(netExVatTzs - commissionTzs - costTzs, netExVatTzs) };
+    const anyCosted = rows.some(r => r.costedRows > 0);
+    const totals = anyCosted
+      ? { netExVatTzs, commissionTzs, costTzs, profitTzs: netExVatTzs - commissionTzs - costTzs, marginPct: pct1(netExVatTzs - commissionTzs - costTzs, netExVatTzs) }
+      : { netExVatTzs, commissionTzs, costTzs, profitTzs: null, marginPct: null };
     const products = new Map(inventory.products.map(p => [p.id, p]));
     const named = f => {
       const p = products.get(f.productId);
       const removed = !p || Boolean(p.deletedAt);
       return { productId: f.productId, variant: f.variant || null, name: (!removed && p?.name) || f.name || null, removed };
     };
-    const byProduct = facts.filter(f => f.costedUnits || f.costedNetExVat || f.cost).map(f => {
+    const byProduct = facts.filter(f => f.costedRows > 0).map(f => {
       const profitTzs = f.costedNetExVat - f.costedCommission - f.cost;
       return { ...named(f), units: f.costedUnits, netExVatTzs: f.costedNetExVat, commissionTzs: f.costedCommission, costTzs: f.cost, profitTzs, marginPct: pct1(profitTzs, f.costedNetExVat) };
     }).sort((a, b) => b.profitTzs - a.profitTzs || byName(a, b));
@@ -271,13 +282,19 @@ export function createVendorReportService({
 
   const GROUPED = new Set(['summary', 'sales', 'profit']);
   const FORMATS = { summary: ['json', 'pdf'] };
-  const NO_CHANNEL = new Set(['stock-value', 'marketplace-net', 'customers']);
+  const NO_CHANNEL = new Set(['stock-value', 'marketplace-net', 'customers', 'refunds']);
 
   /**
    * One report section as data. → { data, period, access } or { error, status, … }. `access` as above;
    * `flagsOk` is checked by the caller for the whole area (VENDOR_TOOLS + VENDOR_REPORTS).
    */
-  async function report(section, { vendorId, access, query = {} }) {
+  /** UAT D2: every answer carries hasEverSold, computed fresh (never from the cache) — the first-use state. */
+  async function report(section, args) {
+    const out = await reportData(section, args);
+    if (out.error) return out;
+    return { ...out, data: { ...out.data, hasEverSold: await store.hasEverSold(args.vendorId) } };
+  }
+  async function reportData(section, { vendorId, access, query = {} }) {
     if (!REPORT_SECTIONS.includes(section)) return fail('report_not_found', 404);
     if (section === 'profit' && !access.cost) return fail('cost_not_allowed', 403);
     if (section === 'marketplace-net' && !access.payout) return fail('payout_not_allowed', 403);
@@ -290,6 +307,10 @@ export function createVendorReportService({
     if (period.error) return period;
     if (section === 'marketplace-net') period.channel = 'app';
 
+    if (section === 'refunds') {
+      // UAT D16: partial refunds on walk-in sales arrive with S7; until then there are none to list.
+      return { period, data: { ...(await head(vendorId, period, { grouped: false })), rows: [] } };
+    }
     if (section === 'stock-value') {
       // As of now: never cached, the period does not apply.
       const inventory = await store.productsOf(vendorId);
@@ -372,6 +393,7 @@ export function createVendorReportService({
     'marketplace-net': (d, lang) => payoutsCsv(d, lang),
     customers: (d, lang) => customersCsv(d, lang),
     'payment-methods': (d, lang) => methodsCsv(d, lang),
+    refunds: (d, lang) => refundsCsv(d, lang),
   };
   async function businessName(vendorId) {
     const vendor = await users.findByIdAsync(vendorId);

@@ -5,13 +5,15 @@
 import { pdfkitClass } from './vendor-document-pdf.mjs';
 import { formatTsh } from './money-display.mjs';
 import { formatDateTime, formatDay } from './vendor-documents.mjs';
-import { asOfText, reportLabel, periodInWords, methodName, coverText, bucketsOf, REPORT_LIMITS, statementLabel } from './vendor-reports.mjs';
+import { asOfText, reportLabel, reportCount, periodInWords, methodName, coverText, bucketsOf, REPORT_LIMITS, statementLabel } from './vendor-reports.mjs';
 
 const MM = 72 / 25.4;
 const GREEN = '#1F7A3A';
 const GREY = '#4B5563';
 const BLACK = '#111111';
 const money = v => formatTsh(v);
+/** UAT D12: percentages with one decimal, "25.0%"; unknown → "—". */
+export const pctText = v => (v == null ? '—' : `${Number(v).toFixed(1)}%`);
 const minus = v => (Number(v) > 0 ? `-${formatTsh(v)}` : formatTsh(0));
 
 function collect(doc) {
@@ -44,7 +46,10 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
   const bottom = () => doc.page.height - doc.page.margins.bottom - 28;
   const ensure = h => { if (doc.y + h > bottom()) { doc.addPage(); return true; } return false; };
   const P = (text, opts = {}, type = 'P') => root.add(doc.struct(type, () => { doc.text(text, opts.x ?? left, opts.y, { width: opts.width ?? width, align: opts.align }); }));
-  const h2 = text => { ensure(40); doc.y += 8; doc.font('Helvetica-Bold').fontSize(12).fillColor(BLACK); P(text, {}, 'H2'); doc.font('Helvetica').fontSize(10); doc.y += 2; };
+  // UAT D9: a heading moves to the next page unless the heading, a note and the table header with its first
+  // rows (≈ 110pt) fit under it — never an orphaned heading at the foot of a page.
+  const KEEP_WITH_NEXT = 110;
+  const h2 = text => { ensure(KEEP_WITH_NEXT); doc.y += 8; doc.font('Helvetica-Bold').fontSize(12).fillColor(BLACK); P(text, {}, 'H2'); doc.font('Helvetica').fontSize(10); doc.y += 2; };
   const note = text => { doc.font('Helvetica').fontSize(9).fillColor(GREY); P(text); doc.fillColor(BLACK).fontSize(10); };
 
   function table(columns, rows) {
@@ -97,7 +102,7 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
     ...(s.vatIncludedTzs ? [[L('vatIncluded'), money(s.vatIncludedTzs)]] : []),
     [L('salesCount'), String(s.saleCount + s.orderCount)], [L('itemsSold'), String(s.itemsSold)],
   ]);
-  if (s.voided?.count) note(L('voided', { n: s.voided.count, amount: money(s.voided.totalTzs) }));
+  if (s.voided?.count) note(reportCount(lang, 'voided', s.voided.count, { amount: money(s.voided.totalTzs) }));
   table([{ title: L('periodStart'), width: 90 }, { title: L('appNet'), align: 'right' }, { title: L('shopNet'), align: 'right' }, { title: L('net'), align: 'right' }, { title: L('salesCount'), width: 60, align: 'right' }],
     salesRows.map(b => [b.start === b.end ? formatDay(b.start, lang) : `${formatDay(b.start, lang)} – ${formatDay(b.end, lang)}`, money(b.app.netTzs), money(b.walkIn.netTzs), money(b.netTzs), String(b.app.count + b.walkIn.count)]));
 
@@ -116,13 +121,13 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
     h2(L('stockValue'));
     note(asOfText(lang, stock.asOf, new Date(summary.generatedAt)));
     pairs([[L('atRetail'), money(stock.totals.atRetailTzs)], ...(stock.totals.atCostTzs != null ? [[L('atCost'), money(stock.totals.atCostTzs)]] : []), [L('units'), String(stock.totals.units)], [L('products'), String(stock.totals.products)]]);
-    if (stock.costUnknown?.count) note(L('costUnknown', { n: stock.costUnknown.count }));
+    if (stock.costUnknown?.count) note(reportCount(lang, 'costUnknown', stock.costUnknown.count));
   }
   if (summary.profit) {
     const p = summary.profit;
     h2(L('profit'));
-    pairs([[L('netExVat'), money(p.netExVatTzs)], [L('commission'), minus(p.commissionTzs)], [L('cogs'), minus(p.costTzs)], [L('profit'), money(p.profitTzs)], [L('margin'), p.marginPct == null ? '—' : `${p.marginPct}%`]]);
-    if (p.uncosted.qty) note(L('uncosted', { n: p.uncosted.qty, amount: money(p.uncosted.revenueTzs) }));
+    pairs([[L('netExVat'), money(p.netExVatTzs)], [L('commission'), minus(p.commissionTzs)], [L('cogs'), minus(p.costTzs)], [L('profit'), p.profitTzs == null ? '—' : money(p.profitTzs)], [L('margin'), pctText(p.marginPct)]]);
+    if (p.uncosted.qty) note(reportCount(lang, 'uncosted', p.uncosted.qty, { amount: money(p.uncosted.revenueTzs) }));
     if (s.vatIncludedTzs) note(L('profitNoVat'));
   }
   if (summary.payouts) {
@@ -138,11 +143,11 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
     pairs([[L('owed'), money(summary.customers.owedTzs)], [L('overdue'), money(summary.customers.overdueTzs)], [L('collected'), money(summary.customers.collectedTzs)]]);
   }
   h2(L('methods'));
-  const groups = [[L('byYou'), pdf.methods.byYou.map(r => [r.method === 'cash' ? L('netOfChange') : methodName(lang, r.method), money(r.amountTzs), `${r.sharePct}%`])],
-    [L('viaFitFlex'), pdf.methods.viaFitFlex.map(r => [methodName(lang, r.paymentMethod), money(r.amountTzs), `${r.sharePct}%`])]];
+  const groups = [[L('byYou'), pdf.methods.byYou.map(r => [r.method === 'cash' ? L('netOfChange') : methodName(lang, r.method), money(r.amountTzs), pctText(r.sharePct)])],
+    [L('viaFitFlex'), pdf.methods.viaFitFlex.map(r => [methodName(lang, r.paymentMethod), money(r.amountTzs), pctText(r.sharePct)])]];
   for (const [group, rows] of groups) {
     if (!rows.length) continue;
-    doc.font('Helvetica-Bold').fontSize(10); P(group); doc.font('Helvetica');
+    ensure(KEEP_WITH_NEXT - 30); doc.font('Helvetica-Bold').fontSize(10); P(group); doc.font('Helvetica');
     table([{ title: L('method') }, { title: L('amount'), width: 120, align: 'right' }, { title: L('share'), width: 60, align: 'right' }], rows);
   }
 
