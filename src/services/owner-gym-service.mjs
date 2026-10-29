@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
+import { normalizePhone } from '../shared/identifiers.mjs';
 
 // What a gym owner may set when they add a trainer (the trainer edits it after).
 const OWNER_TRAINER_FIELDS = Object.freeze([
@@ -48,6 +49,16 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
   async function registerOwner({ user, body }) {
     const gymList = Array.isArray(body.gyms) ? body.gyms : [];
     if (gymList.length === 0) return { error: 'at_least_one_gym_required', status: 400 };
+    // The contact phone is unique per account type. Settle it before any gym is saved, so a number
+    // that belongs to another account is a clean 409 and leaves no half-registered gyms behind.
+    let phone = user.phone;
+    const sent = body.phone ? normalizePhone(body.phone) : null;
+    if (body.phone && !sent) return { error: 'invalid_phone', status: 400 };
+    if (sent && sent !== normalizePhone(user.phone)) {
+      const taken = await users.filterAsync(u => u.id !== user.id && u.userType === user.userType && u.phone && normalizePhone(u.phone) === sent);
+      if (taken.length) return { error: 'phone_in_use', status: 409 };
+      phone = body.phone;
+    }
     const status = await newGymStatus(user);
     const createdGyms = [];
     const gymIds = [];
@@ -79,7 +90,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     await users.upsertAsync(u => u.id === user.id, {
       ...user,
       displayName: body.displayName || user.displayName,
-      phone: body.phone || user.phone,
+      phone,
       gymId: gymIds[0],
       gymIds,
       onboardingCompleted: true,
