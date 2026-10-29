@@ -41,6 +41,7 @@ test('SCENARIO 19 — an outbox row of organizer B never produces a delivery for
   assert.deepEqual([(await deliveriesOf(epA.id)).length, (await deliveriesOf(epB.id)).length], [1, 5]);
   // a row whose organizer is NULL is only marked published
   const orphan = await db.transaction(trx => lab.svc && import('../src/bootstrap/services.mjs').then(m => m.eventStore.appendOutbox(trx, { type: 'kit.collected', aggregateType: 'registration', aggregateId: 'ereg_x', organizerId: null, eventId: a.event.id, payload: { registrationId: 'ereg_x' } })));
+  await new Promise(r => setTimeout(r, 5));   // a row written in the same millisecond as the scan is not older than it yet
   await lab.svc.fanout();
   assert.ok((await db('OutboxEvent').where({ id: orphan.id }).first()).publishedAt);
   assert.equal((await db('WebhookDelivery').where({ outboxEventId: orphan.id })).length, 0);
