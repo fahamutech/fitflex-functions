@@ -7,6 +7,17 @@ import { shopService, shopHomeService, vendorSettlementService, shopReconciliati
 import { buyerOrderView } from '../src/services/shop-service.mjs';
 import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
+import { canShowFlashSales, withoutSale } from '../src/shared/shop-caps.mjs';
+import { shopFlashSalesOn } from '../src/shared/feature-flags.mjs';
+
+/**
+ * SHOP_FLASH_SALES (docs/shop-flash-sales-api.md): rows keep effectivePriceTzs for everyone; the `sale`
+ * object only for clients that send X-FF-Shop-Caps: flash_sale. With the flag on the answer also
+ * carries the server time (header X-FF-Server-Now; serverNow in object bodies and in each `sale`).
+ * Flag off: unchanged.
+ */
+const saleRows = (req, rows) => (canShowFlashSales(req) ? rows : rows.map(withoutSale));
+const stampServerNow = (res) => { const at = new Date().toISOString(); res.set?.('X-FF-Server-Now', at); return at; };
 
 const created = new Date().toISOString();
 
@@ -72,7 +83,9 @@ export const listShopProducts = {
     // QA2: with areas on, the vendor-typed distance filter is ignored (spec §7.3); flag off: as before.
     const maxDistanceKm = (await shopHomeService.vendorDistanceIgnored()) ? undefined : req.query?.maxDistanceKm;
     const rows = await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort, flashSale });
-    res.json(await withBadge(req, rows));
+    if (!shopFlashSalesOn()) return res.json(await withBadge(req, rows));
+    stampServerNow(res);
+    return res.json(await withBadge(req, saleRows(req, rows)));
   }
 };
 
@@ -92,7 +105,10 @@ export const getShopProduct = {
     redactAreaId(req);
     const product = await shopService.getProduct(req.params.id);
     if (!product) return res.status(404).json({ error: 'product_not_found' });
-    res.json(await withBadge(req, product));
+    if (!shopFlashSalesOn()) return res.json(await withBadge(req, product));
+    const serverNow = stampServerNow(res);
+    const shown = canShowFlashSales(req) ? product : { ...withoutSale(product), similarProducts: (product.similarProducts || []).map(withoutSale) };
+    return res.json({ ...(await withBadge(req, shown)), serverNow });
   },
 };
 
@@ -102,7 +118,9 @@ export const getVendorStore = {
   onRequest: async (req, res) => {
     const store = await shopService.getVendorStore(req.params.id);
     if (!store) return res.status(404).json({ error: 'vendor_not_found' });
-    res.json(store);
+    if (!shopFlashSalesOn()) return res.json(store);
+    const serverNow = stampServerNow(res);
+    return res.json({ ...store, products: saleRows(req, store.products || []), serverNow });
   },
 };
 

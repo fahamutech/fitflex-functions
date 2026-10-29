@@ -21,12 +21,12 @@ import { createFlashSaleService } from '../src/services/flash-sale-service.mjs';
 import { createPgFlashSaleStore } from '../src/infra/flash-sale-store-pg.mjs';
 import { createPartnerNotifier } from '../src/services/partner-notifier.mjs';
 import { effectivePrice, standingPrice, priceBreakdown, saleLiveFor, discountPct } from '../src/shared/shop-pricing.mjs';
-import { maxSalePrice, priceRaiseError, parseSaleInput, SALE_RULES } from '../src/shared/flash-sale-rules.mjs';
+import { maxSalePrice, priceRaiseError, priceHistoryError, parseSaleInput, SALE_RULES } from '../src/shared/flash-sale-rules.mjs';
 import { priceOrderLine, vendorShareOfOrder } from '../src/shared/marketplace-pricing.mjs';
 import { walkInPrice } from '../src/shared/vendor-sale.mjs';
 
 await ensureInit();
-const migration = createRequire(import.meta.url)('../db/migrations/20270129090000-shop-flash-sales.cjs');
+const migration = createRequire(import.meta.url)('../db/migrations/20270129100000-shop-flash-sales.cjs');
 
 const uid = p => `${p}_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
 const HOUR = 3_600_000;
@@ -40,10 +40,12 @@ async function user(userType, extra = {}) {
   return id;
 }
 const vendorUser = (extra = {}) => user('vendor', { approvalStatus: 'approved', vendorProfile: JSON.stringify({ businessName: `Flash Shop ${randomUUID().slice(0, 4)}`, status: 'published' }), ...extra });
-async function product(vendorId, extra = {}) {
+/** A product; `listedDaysAgo` backdates its first price row (owner ruling (b): 14 days of history before a sale). */
+async function product(vendorId, extra = {}, { listedDaysAgo = 20 } = {}) {
   const id = uid('prd');
   await db('Product').insert({ id, vendorId, name: `Flash product ${id.slice(-4)}`, category: 'equipment', priceTzs: 100_000, stock: 10, soldCount: 0, status: 'active', approvalStatus: 'approved', updatedAt: new Date(), ...extra });
   made.products.push(id);
+  if (listedDaysAgo) await db('ProductPriceChange').where({ productId: id }).update({ at: new Date(Date.now() - listedDaysAgo * DAY) });
   return id;
 }
 const productRow = async id => db('Product').where({ id }).first();
@@ -337,15 +339,19 @@ test('two-person rule: whoever created, edited or sent a sale cannot decide it; 
   assert.equal(ok.saved.status, 'approved');
   assert.equal(ok.saved.wasPriceTzs, 100_000);
   assert.deepEqual(h.notices.map(n => [n.vendorId, n.type]), [[v, 'flash_sale_approved']], 'the vendor is told even about a FitFlex-made sale');
-  // The vendor sees it read-only (no actions), with no staff ids.
+  // The vendor sees it with no staff ids; it can't edit it, but (owner ruling (d)) it may end it.
   const mine = await h.svc.vendorList({ vendorId: v });
   assert.equal(mine.items.length, 1);
-  assert.deepEqual(mine.items[0].allowedActions, []);
+  assert.deepEqual(mine.items[0].allowedActions, ['end']);
   assert.equal(mine.items[0].createdBy, undefined);
-  assert.equal((await h.svc.vendorEnd({ scope: vendorScope(v), id: created.sale.id, actorId: v })).error, 'sale_not_found');
-  // History has every step.
+  assert.equal((await h.svc.update({ scope: vendorScope(v), id: created.sale.id, actorId: v, body: { salePriceTzs: 70_000 } })).error, 'sale_not_found');
+  const stopped = await h.svc.vendorEnd({ scope: vendorScope(v), id: created.sale.id, actorId: v });
+  assert.deepEqual([stopped.saved.status, stopped.saved.statusReason, stopped.saved.endedBy], ['ended', 'ended_by_vendor', v]);
+  // History has every step, and the vendor ending a FitFlex sale is audited as such.
   const steps = (await h.svc.adminGet({ id: created.sale.id, viewer: { actorId: ADMIN_Y } })).history.map(r => r.action);
-  assert.deepEqual(steps, ['flash_sale.created', 'flash_sale.updated', 'flash_sale.submitted', 'flash_sale.approved']);
+  assert.deepEqual(steps, ['flash_sale.created', 'flash_sale.updated', 'flash_sale.submitted', 'flash_sale.approved', 'flash_sale.ended', 'flash_sale.ended_by_vendor_on_staff_sale']);
+  const ended = (await h.svc.adminList({ query: { status: 'ended', productId: p }, viewer: {} })).items[0];
+  assert.deepEqual([ended.statusReason, ended.endedBy], ['ended_by_vendor', v]);
 });
 
 test('vendor flow: drafts are private; edits move the state; withdraw, end early, reject → edit → resend', async () => {
@@ -461,7 +467,7 @@ test('buyer prices at the window boundaries (ms): list, product page, filters, s
   h.t.clock = start;
   const live = await row();
   assert.equal(live.effectivePriceTzs, 69_000);
-  assert.deepEqual(live.sale, { id: a.id, salePriceTzs: 69_000, wasPriceTzs: 85_000, regularPriceTzs: 85_000, discountPct: 18, startsAt: a.sale.startsAt, endsAt: a.sale.endsAt });
+  assert.deepEqual(live.sale, { id: a.id, salePriceTzs: 69_000, wasPriceTzs: 85_000, regularPriceTzs: 85_000, discountPct: 18, startsAt: a.sale.startsAt, endsAt: a.sale.endsAt, serverNow: a.sale.startsAt });
   assert.deepEqual([live.priceTzs, live.discountPriceTzs], [85_000, 79_000], 'stored prices are left as they are');
   assert.equal((await h.shop.getProduct(a.productId)).sale.salePriceTzs, 69_000);
   assert.equal((await h.shop.listProducts({ category: cat, maxPrice: 70_000 })).length, 1, 'maxPrice uses the sale price');
@@ -623,8 +629,19 @@ test('vendor notices: approved, rejected, expired, ended by FitFlex — in the v
   assert.deepEqual(sent.map(s => s.type), ['vendor_flash_sale_approved', 'vendor_flash_sale_rejected', 'vendor_flash_sale_expired', 'vendor_flash_sale_ended', 'vendor_flash_sale_approved']);
   assert.equal(sent[0].body, 'Your flash sale on "Whey 1kg" is approved. It goes live 02/11/2026 10:00.');
   assert.equal(sent[4].title, 'Ofa ya muda mfupi imeidhinishwa');
-  assert.equal(sent[4].body, 'Ofa yako ya muda mfupi kwa "Whey 1kg" imeidhinishwa. Itaanza 02/11/2026 10:00.');
+  assert.equal(sent[4].body, 'Ofa yako ya muda mfupi kwa "Whey 1kg" imeidhinishwa. Itaanza 02/11/2026 10:00 asubuhi.');
+  assert.equal(sent[1].data.bodySw, 'Ofa yako ya muda mfupi kwa "Whey 1kg" imekataliwa. Tazama sababu.');
   assert.deepEqual([sent[3].data.titleSw, sent[3].data.reason], ['Ofa ya muda mfupi imesitishwa na FitFlex', 'Seller asked']);
+  // Swahili dates: 12-hour clock with the time of day; English stays 24-hour. [SW review]
+  const at = [];
+  for (const startsAt of ['2026-10-31T15:00:00Z', '2026-10-31T09:30:00Z', '2026-10-31T19:05:00Z', '2026-10-31T23:00:00Z']) {
+    await notifier.vendorEvent('v_sw', 'flash_sale_approved', { ...d, startsAt });
+    at.push(sent.at(-1).body.match(/Itaanza (.+)\.$/)[1]);
+  }
+  assert.deepEqual(at, ['31/10/2026 6:00 jioni', '31/10/2026 12:30 mchana', '31/10/2026 10:05 usiku', '01/11/2026 2:00 usiku']);
+  await notifier.vendorEvent('v_en', 'flash_sale_approved', { ...d, startsAt: '2026-10-31T15:00:00Z' });
+  assert.match(sent.at(-1).body, /goes live 31\/10\/2026 18:00\.$/);
+  assert.equal(sent.at(-1).data.bodySw, 'Ofa yako ya muda mfupi kwa "Whey 1kg" imeidhinishwa. Itaanza 31/10/2026 6:00 jioni.');
   for (const s of sent) {
     assert.ok(s.data.titleSw && s.data.bodySw);
     assert.deepEqual([s.data.open, s.data.tab, s.data.item], ['merch', 'sales', 'fls_1']);
@@ -648,4 +665,161 @@ test('admin detail: price check with 30-day history, discount line, price change
   assert.ok(q.counts.requests >= 1);
   assert.equal((await h.svc.adminList({ query: { tab: 'nope' }, viewer: {} })).error, 'invalid_tab');
   assert.equal(SALE_RULES.priceRaiseLookbackDays, 14);
+});
+
+// ── Review round 1 (2026-10-29): owner rulings, contract, security lows ──────
+
+test('ruling (b): a new or copied product needs 14 days of price history before a sale starts (422 price_history_too_short)', async () => {
+  const h = harness();
+  const v = await vendorUser();
+  const fresh = await product(v, {}, { listedDaysAgo: 0 });
+  const listedAt = new Date((await db('ProductPriceChange').where({ productId: fresh }).first()).at).toISOString();
+  const tooSoon = await h.svc.create({ scope: vendorScope(v), actorId: v, body: { productId: fresh, salePriceTzs: 80_000, startsAt: h.at(2 * HOUR), endsAt: h.at(DAY) } });
+  const earliest = new Date(new Date(listedAt).getTime() + 14 * DAY).toISOString();
+  assert.deepEqual(tooSoon, { error: 'price_history_too_short', status: 422, field: 'startsAt', listedAt, earliestStart: earliest });
+  const check = await h.svc.priceCheck({ vendorId: v, productId: fresh, startsAt: h.at(2 * HOUR) });
+  assert.deepEqual([check.ok, check.listedAt, check.historyEarliestStart], [false, listedAt, earliest]);
+  // Starting exactly 14 days after listing is allowed.
+  assert.ok((await h.svc.create({ scope: vendorScope(v), actorId: v, body: { productId: fresh, salePriceTzs: 80_000, startsAt: earliest, endsAt: new Date(new Date(earliest).getTime() + DAY).toISOString() } })).sale);
+  // A copy is a new product with its own (new) history, whatever the original's age.
+  const old = await product(v);
+  const copy = await h.shop.duplicateProduct({ vendorId: v, productId: old });
+  made.products.push(copy.product.id);
+  await db('Product').where({ id: copy.product.id }).update({ approvalStatus: 'approved' }); // copies start in review
+  assert.equal((await h.svc.create({ scope: vendorScope(v), actorId: v, body: { productId: copy.product.id, salePriceTzs: 80_000, startsAt: h.at(2 * HOUR), endsAt: h.at(DAY) } })).error, 'price_history_too_short');
+  assert.equal(priceHistoryError(null, new Date(Date.now() + DAY).toISOString(), new Date()).error, 'price_history_too_short', 'no row at all = listed now');
+  // Ruling (a): discount changes never count as a raise (checked in the rules test) — still true with history.
+  await db('Product').where({ id: old }).update({ discountPriceTzs: 95_000 });
+  assert.ok((await h.svc.create({ scope: vendorScope(v), actorId: v, body: { productId: old, salePriceTzs: 80_000, startsAt: h.at(2 * HOUR), endsAt: h.at(DAY) } })).sale);
+});
+
+test('ruling (b): the migration gives every existing product a baseline price row at migration time (source migration_baseline)', async () => {
+  const SENTINEL = 'roll_back_the_migration_test';
+  await assert.rejects(() => db.transaction(async (trx) => {
+    await migration.down(trx);
+    const v = uid('usr');
+    await trx('User').insert({ id: v, userType: 'vendor', displayName: 'Before history', accountStatus: 'active', updatedAt: new Date() });
+    const p = uid('prd');
+    await trx('Product').insert({ id: p, vendorId: v, name: 'Old stock', priceTzs: 42_000, stock: 1, status: 'active', approvalStatus: 'approved', updatedAt: new Date() });
+    await migration.up(trx);
+    const rows = await trx('ProductPriceChange').where({ productId: p });
+    assert.deepEqual(rows.map(r => [r.field, r.fromTzs, r.toTzs, r.source]), [['priceTzs', null, 42_000, 'migration_baseline']]);
+    const now = (await trx.raw('select now() as t')).rows[0].t;
+    assert.ok(Math.abs(new Date(rows[0].at).getTime() - new Date(now).getTime()) <= 1, 'listed at migration time (ms column)');
+    throw new Error(SENTINEL);
+  }), new RegExp(SENTINEL));
+  assert.equal((await db.raw(`SELECT 1 FROM pg_constraint WHERE conname = 'flashsale_one_approved_per_product'`)).rows.length, 1, 'schema intact after the rollback');
+});
+
+test('contract (4): the 1-hour lead applies to an edit only when it moves the start', async () => {
+  const h = harness();
+  const s = await pendingSale(h, { startIn: 2 * HOUR });
+  h.tick(90 * 60_000); // 30 minutes before the start
+  const priceOnly = await h.svc.update({ scope: vendorScope(s.vendor), id: s.id, actorId: s.vendor, body: { salePriceTzs: 79_000 } });
+  assert.equal(priceOnly.sale.salePriceTzs, 79_000);
+  const sameStart = await h.svc.update({ scope: vendorScope(s.vendor), id: s.id, actorId: s.vendor, body: { startsAt: priceOnly.sale.startsAt, salePriceTzs: 78_000 } });
+  assert.equal(sameStart.sale.salePriceTzs, 78_000, 'sending the same start is not a move');
+  const moved = await h.svc.update({ scope: vendorScope(s.vendor), id: s.id, actorId: s.vendor, body: { startsAt: h.at(40 * 60_000) } });
+  assert.equal(moved.error, 'start_too_soon');
+});
+
+test('contract (3): an approval that loses the database race says which sale won', async () => {
+  const base = harness();
+  const a = await approvedSale(base, { startIn: 2 * HOUR, length: DAY });
+  // A second pending sale on the same product, stored directly (the API would refuse the overlap).
+  const copy = await db('FlashSale').where({ id: a.id }).first();
+  const b = uid('fls');
+  await db('FlashSale').insert({ ...copy, id: b, editors: JSON.stringify([a.vendor]), status: 'pending_approval', approvedBy: null, approvedAt: null, wasPriceTzs: null, decidedBy: null, decidedAt: null,
+    regularPriceTzsAtSubmit: 100_000, discountPriceTzsAtSubmit: null, submittedBy: a.vendor, submittedAt: new Date(), expiresAt: new Date(new Date(copy.startsAt).getTime()), revision: 1 });
+  // A service whose own overlap check is blind, so only the database rule can stop it.
+  const pg = createPgFlashSaleStore({ db });
+  const blind = q => ({ ...q, salesOfProduct: async () => [] });
+  const svc = createFlashSaleService({ store: { ...pg, transaction: (pid, fn) => pg.transaction(pid, q => fn(blind(q))) }, now: () => new Date(base.t.clock), logger: { error() {} } });
+  const lost = await svc.approve({ id: b, actorId: ADMIN_Y, revision: 1 });
+  assert.deepEqual(lost, { error: 'sale_overlap', status: 409, saleId: a.id, startsAt: a.sale.startsAt, endsAt: a.sale.endsAt, effectiveStatus: 'approved' });
+  assert.equal((await db('FlashSale').where({ id: b }).first()).status, 'pending_approval', 'rolled back');
+});
+
+test('security L1: a product taken off the shop (homepageVisible false) is sold by id at its own price, never the sale price', async () => {
+  const h = harness();
+  const a = await approvedSale(h, { salePriceTzs: 69_000, productExtra: { priceTzs: 85_000 } });
+  h.tick(3 * HOUR);
+  await db('Product').where({ id: a.productId }).update({ homepageVisible: false });
+  assert.equal(await h.shop.getProduct(a.productId), null, 'not listed');
+  const buyer = await user('member');
+  const out = await order(h, buyer, [{ productId: a.productId, qty: 1 }]);
+  assert.equal(out.status, 202, JSON.stringify(out));
+  assert.deepEqual([out.order.items[0].priceTzs, 'flashSaleId' in out.order.items[0]], [85_000, false]);
+  // The lock re-check agrees with the pricing (no endless 409 loop).
+  assert.equal((await order(h, buyer, [{ productId: a.productId, qty: 1, expectedPriceTzs: 85_000 }])).status, 202);
+  assert.equal((await order(h, buyer, [{ productId: a.productId, qty: 1, expectedPriceTzs: 69_000 }])).lines[0].currentPriceTzs, 85_000);
+});
+
+test('security L2: suspending a vendor ends its scheduled and live sales (audited, vendor told); the job catches other suspensions', async () => {
+  const h = harness();
+  const live = await approvedSale(h);
+  const v = live.vendor;
+  const scheduled = await approvedSale(h, { vendor: v, startIn: 3 * DAY, length: DAY });
+  h.tick(3 * HOUR);
+  // An admin suspends the vendor (the shop's admin vendor update).
+  const shop = createShopService({ products, shopOrders, users, auditLog, paymentRequests, flashSales: h.svc.pricing, flashSalesOn: () => true, now: () => new Date(h.t.clock),
+    onVendorSuspended: (vendorId, actorId) => h.svc.endForSuspendedVendor(vendorId, actorId) });
+  const updated = await shop.adminUpdateVendor({ vendorId: v, body: { accountStatus: 'suspended' }, actorId: ADMIN_X });
+  assert.equal(updated.error, undefined, JSON.stringify(updated));
+  for (const id of [live.id, scheduled.id]) {
+    const row = await db('FlashSale').where({ id }).first();
+    assert.deepEqual([row.status, row.statusReason, row.endedBy], ['ended', 'vendor_suspended', ADMIN_X]);
+    assert.ok(await db('AuditLog').where({ target: id, action: 'flash_sale.ended' }).first());
+  }
+  assert.equal(h.notices.filter(n => n.vendorId === v && n.type === 'flash_sale_ended').length, 2);
+  assert.equal((await h.svc.vendorGet({ vendorId: v, id: live.id })).sale.endedByFitflex, true);
+  // Suspended some other way (e.g. directly / moderation): the lifecycle job ends it.
+  const other = await approvedSale(h);
+  await db('User').where({ id: other.vendor }).update({ accountStatus: 'suspended' });
+  const run = await h.svc.runLifecycle();
+  assert.ok(run.suspended >= 1);
+  assert.equal((await db('FlashSale').where({ id: other.id }).first()).statusReason, 'vendor_suspended');
+});
+
+test('security L4: a price edit checks the lock and saves on ONE transaction (no second pool connection)', async () => {
+  const h = harness();
+  for (const ledger of [false, true]) {
+    if (ledger) { process.env.VENDOR_TOOLS = '1'; process.env.VENDOR_STOCK_LEDGER = '1'; }
+    const v = await vendorUser();
+    const p = await product(v);
+    const shop = ledger
+      ? createShopService({ products, shopOrders, users, auditLog, paymentRequests, flashSales: h.svc.pricing, flashSalesOn: () => true, now: () => new Date(h.t.clock),
+        stockLedger: (await import('../src/infra/vendor-stock-store-pg.mjs')).createPgVendorStockStore({ db }) })
+      : h.shop;
+    const seen = [];
+    const listen = q => { if (/"Product"|"FlashSale"|pg_advisory/.test(q.sql)) seen.push({ sql: q.sql, tx: q.__knexTxId ?? null }); };
+    db.on('query', listen);
+    const out = await shop.upsertProduct({ vendorId: v, productId: p, body: { priceTzs: 110_000 } });
+    db.removeListener('query', listen);
+    assert.equal(out.error, undefined, JSON.stringify(out));
+    const locked = seen.find(q => /for update/i.test(q.sql) && /"Product"/.test(q.sql));
+    const saleRead = seen.find(q => /"FlashSale"/.test(q.sql));
+    const write = seen.find(q => /^update "Product"/i.test(q.sql));
+    assert.ok(locked && saleRead && write, `${ledger ? 'ledger' : 'plain'}: ${JSON.stringify(seen.map(q => q.sql.slice(0, 60)))}`);
+    assert.ok(locked.tx, 'inside a transaction');
+    assert.equal(saleRead.tx, locked.tx, 'the sale lock is read on the same transaction');
+    assert.equal(write.tx, locked.tx, 'and the price is written on it');
+    assert.ok(!seen.some(q => /pg_advisory/.test(q.sql)), 'no advisory lock held on a second connection');
+    assert.equal((await productRow(p)).priceTzs, 110_000);
+    delete process.env.VENDOR_TOOLS; delete process.env.VENDOR_STOCK_LEDGER;
+  }
+});
+
+test('contract (5): the staff product picker lists sellable products of vendors allowed to run a sale, with minimal fields', async () => {
+  const h = harness();
+  const v = await vendorUser();
+  const tag = randomUUID().slice(0, 6);
+  const ok = await product(v, { name: `Picker ${tag} rope`, priceTzs: 50_000, discountPriceTzs: 45_000 });
+  await product(v, { name: `Picker ${tag} hidden`, visibility: 'hidden' });
+  const suspended = await vendorUser({ accountStatus: 'suspended' });
+  await product(suspended, { name: `Picker ${tag} suspended` });
+  const out = await h.svc.adminProducts({ query: { q: `picker ${tag}` } });
+  assert.deepEqual(out.items.map(i => i.id), [ok]);
+  assert.deepEqual(Object.keys(out.items[0]).sort(), ['discountPriceTzs', 'effectivePriceTzs', 'id', 'image', 'maxSalePriceTzs', 'name', 'priceTzs', 'stock', 'vendorId', 'vendorName']);
+  assert.deepEqual([out.items[0].effectivePriceTzs, out.items[0].maxSalePriceTzs], [45_000, 44_999]);
 });

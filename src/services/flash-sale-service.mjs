@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto';
 import {
   SALE_EFFECTIVE_STATUSES, SALE_REJECT_CODES, REASON_MAX, SALE_RULES, DAY_MS,
   effectiveStatus, proposalExpiry, flashSaleConfigFromEnv, parseSaleInput, windowError, discountError,
-  priceRaiseError, latestRaise, isRaise, eatDate, overlaps, maxSalePrice,
+  priceRaiseError, priceHistoryError, latestRaise, isRaise, eatDate, overlaps, maxSalePrice,
 } from '../shared/flash-sale-rules.mjs';
 import { standingPrice, validDiscount, discountPct } from '../shared/shop-pricing.mjs';
 import { storeNameOf } from '../shared/vendor-name.mjs';
@@ -133,6 +133,9 @@ export function createFlashSaleService({
     const at = now();
     const shape = windowError(sale, { now: at, checkLead }) || discountError(sale.salePriceTzs, product);
     if (shape) return shape;
+    // New or copied products (owner ruling (b)): 14 days of price history before any sale starts.
+    const young = priceHistoryError(await q.firstPriceAt(sale.productId), sale.startsAt, at);
+    if (young) return young;
     const since = new Date(ms(sale.startsAt) - SALE_RULES.priceRaiseLookbackDays * DAY_MS).toISOString();
     const raised = priceRaiseError(await q.priceChanges(sale.productId, since), sale.startsAt);
     if (raised) return raised;
@@ -155,8 +158,10 @@ export function createFlashSaleService({
       if (['draft', 'pending_approval', 'rejected', 'approved'].includes(eff)) out.push('edit');
       if (eff === 'draft') out.push('submit');
       if (['draft', 'pending_approval', 'approved'].includes(eff)) out.push('withdraw');
-      if (side === 'vendor' && ['approved', 'live'].includes(eff)) out.push('end');
     }
+    // Owner ruling (d): the vendor pays the discount, so it may end ANY scheduled or live sale on its
+    // own products, FitFlex-made ones included.
+    if (side === 'vendor' && ['approved', 'live'].includes(eff)) out.push('end');
     if (side === 'admin' && canApprove) {
       if (eff === 'pending_approval' && !isContributor(s, actorId)) out.push('approve', 'reject');
       if (['approved', 'live'].includes(eff)) out.push('end');
@@ -193,7 +198,7 @@ export function createFlashSaleService({
     if (side === 'vendor') {
       return rows.map(s => ({
         ...commonView(s, products.get(s.productId)),
-        endedByFitflex: s.status === 'ended' && s.statusReason === 'ended_by_fitflex',
+        endedByFitflex: s.status === 'ended' && ['ended_by_fitflex', 'vendor_suspended'].includes(s.statusReason),
         allowedActions: actionsFor(s, { side: 'vendor' }),
       }));
     }
@@ -256,7 +261,12 @@ export function createFlashSaleService({
       });
     } catch (err) {
       // The database's one-approved-sale-per-product rule: someone else's approval won the race.
-      if (err?.code === EXCLUSION_VIOLATION) return fail('sale_overlap', 409);
+      // Say which sale won (contract (3)), read after the rollback.
+      if (err?.code === EXCLUSION_VIOLATION) {
+        const fresh = await store.getSale(id);
+        const winner = fresh ? (await store.approvedOverlapping(fresh.productId, fresh.startsAt, fresh.endsAt, fresh.id))[0] : null;
+        return fail('sale_overlap', 409, winner ? { saleId: winner.id, startsAt: winner.startsAt, endsAt: winner.endsAt, effectiveStatus: effectiveStatus(winner, now()) } : {});
+      }
       throw err;
     }
     if (result.error) return result;
@@ -317,7 +327,9 @@ export function createFlashSaleService({
       const blocked = await vendorBlocked(q, s.vendorId);
       if (blocked) return blocked;
       const merged = { ...s, ...parsed.value };
-      const err = await rulesError(q, merged, found.product);
+      // Contract (4): the 1-hour lead applies only when the start itself moves.
+      const startMoved = 'startsAt' in parsed.value && parsed.value.startsAt !== s.startsAt;
+      const err = await rulesError(q, merged, found.product, { checkLead: startMoved });
       if (err) return err;
       const at = stamp();
       const next = { ...parsed.value, revision: s.revision + 1, editors: withEditor(s, actorId), updatedAt: at };
@@ -380,11 +392,37 @@ export function createFlashSaleService({
     return { saved: await move(q, s, 'withdrawn', actorId, 'withdrawn', { expiresAt: null }) };
   });
 
-  /** The vendor stops its own sale early ("End now"), scheduled or live. */
-  const vendorEnd = ({ scope, id, actorId }) => act(id, scope, actorId, async (q, s) => {
+  /**
+   * The vendor stops a scheduled or live sale on its own products early ("End now") — its own
+   * proposals and (owner ruling (d)) FitFlex-made ones. Audited as flash_sale.ended with
+   * { byVendorOnStaffSale: true } for the latter; FitFlex sees it in the queue (ended_by_vendor).
+   */
+  const vendorEnd = ({ scope, id, actorId }) => act(id, { vendorRead: scope.vendorId }, actorId, async (q, s) => {
     if (!['approved', 'live'].includes(effectiveStatus(s, now()))) return invalid(s, 'ended');
-    return { saved: await move(q, s, 'ended', actorId, 'ended', { endedBy: actorId, endedAt: stamp(), statusReason: 'ended_by_vendor', statusReasonNote: null }) };
+    const saved = await move(q, s, 'ended', actorId, 'ended', { endedBy: actorId, endedAt: stamp(), statusReason: 'ended_by_vendor', statusReasonNote: null });
+    if (s.origin === 'staff') await audit(q, 'ended_by_vendor_on_staff_sale', actorId, saved, { status: s.status, createdBy: s.createdBy }, { status: 'ended', byVendorOnStaffSale: true });
+    return { saved };
   });
+
+  /**
+   * Security review L2: a suspended vendor's scheduled and live sales are ended (statusReason
+   * vendor_suspended), audited (flash_sale.ended) and the vendor told (flash_sale_ended). Called when an admin suspends the vendor
+   * and by the lifecycle job (which also catches moderation suspensions). → number ended.
+   */
+  async function endForSuspendedVendor(vendorId, actorId = SYSTEM_ACTOR) {
+    const at = now();
+    const open = (await store.listForVendor(vendorId)).filter(s => ['approved', 'live'].includes(effectiveStatus(s, at)));
+    let n = 0;
+    for (const s0 of open) {
+      const r = await store.transaction(s0.productId, async (q) => {
+        const s = await q.getSale(s0.id);
+        if (!s || !['approved', 'live'].includes(effectiveStatus(s, now()))) return null;
+        return move(q, s, 'ended', actorId, 'ended', { endedBy: actorId, endedAt: stamp(), statusReason: 'vendor_suspended', statusReasonNote: null });
+      });
+      if (r) { n += 1; await notice(r, 'ended'); }
+    }
+    return n;
+  }
 
   function sameRevision(s, revision) {
     if (revision == null || revision === '') return fail('revision_required', 400, { fields: ['revision'] });
@@ -406,8 +444,9 @@ export function createFlashSaleService({
     if (isContributor(s, actorId)) return fail('cannot_approve_own_submission', 403);
     const st = (await vendorStates(q, [s.vendorId])).get(s.vendorId);
     if (!st.ok) return fail(st.reason, 409);
-    // A moved price is said first (a price edit also sends the product back to review).
-    const now0 = await q.product(s.productId);
+    // A moved price is said first (a price edit also sends the product back to review). The row
+    // stays locked until the approval commits, so no price edit can land in between (review L4).
+    const now0 = await q.productForUpdate(s.productId);
     if (now0 && !now0.deletedAt && now0.vendorId === s.vendorId && priceMoved(s, now0)) {
       return fail('sale_changed', 409, { reason: 'product_price_changed', regularPriceTzs: now0.priceTzs, regularPriceTzsAtSubmit: s.regularPriceTzsAtSubmit, discountPriceTzs: validDiscount(now0), discountPriceTzsAtSubmit: s.discountPriceTzsAtSubmit });
     }
@@ -475,7 +514,14 @@ export function createFlashSaleService({
       if (r) out[r.kind].push(r.saved);
     }
     for (const s of out.expired) if (s.origin === 'vendor') await notice(s, 'expired');
-    return { expired: out.expired.length, ended: out.ended.length };
+    // L2 sweep: sales of vendors suspended any way (account or moderation) since the last run.
+    const open = await store.approvedNotEnded(at.toISOString());
+    const states = await vendorStates(store, open.map(s => s.vendorId));
+    let suspended = 0;
+    for (const vendorId of new Set(open.map(s => s.vendorId))) {
+      if (states.get(vendorId)?.reason === 'vendor_suspended') suspended += await endForSuspendedVendor(vendorId);
+    }
+    return { expired: out.expired.length, ended: out.ended.length, suspended };
   }
 
   async function notice(s, kind) {
@@ -508,9 +554,13 @@ export function createFlashSaleService({
     const changes = await store.priceChanges(productId, new Date(ms(start) - SALE_RULES.priceRaiseLookbackDays * DAY_MS).toISOString());
     const raise = priceRaiseError(changes, start);
     const at = now();
+    const young = priceHistoryError(await store.firstPriceAt(productId), start, at);
     const lock = (await store.approvedNotEnded(at.toISOString(), [productId]))[0] || null;
     return {
-      ok: !raise && !lock,
+      ok: !raise && !young && !lock,
+      // Owner ruling (b): the product's first price row and the first start it allows.
+      listedAt: young?.listedAt ?? (await store.firstPriceAt(productId)),
+      historyEarliestStart: young?.earliestStart ?? null,
       productId,
       regularPriceTzs: p.priceTzs,
       discountPriceTzs: validDiscount(p),
@@ -582,12 +632,15 @@ export function createFlashSaleService({
     const recent = await store.priceChanges(s.productId, since);
     const forRule = await store.priceChanges(s.productId, new Date(ms(s.startsAt) - SALE_RULES.priceRaiseLookbackDays * DAY_MS).toISOString());
     const raise = priceRaiseError(forRule, s.startsAt);
+    const listedAt = await store.firstPriceAt(s.productId);
+    const young = priceHistoryError(listedAt, s.startsAt, now());
     const regular = s.wasPriceTzs ?? product?.priceTzs ?? 0;
     return {
       sale: (await decorate(store, [s], 'admin', viewer))[0],
       history: history.map(r => ({ ...r, actorName: r.actor === SYSTEM_ACTOR ? null : names[r.actor] ?? null })),
       priceCheck: {
         passes14DayRule: !raise,
+        passesHistoryRule: !young, listedAt, historyEarliestStart: young?.earliestStart ?? null,
         raisedAt: raise?.raisedAt ?? null, raisedOn: raise?.raisedOn ?? null, earliestStart: raise?.earliestStart ?? null,
         priceHistory: recent.map(c => ({ ...c, raised: isRaise(c), on: eatDate(c.at) })),
         discountLine: { pct: discountPct(regular, s.salePriceTzs), savingTzs: Math.max(0, regular - s.salePriceTzs), sellerPays: true },
@@ -595,6 +648,23 @@ export function createFlashSaleService({
         lastRaiseAt: latestRaise(forRule)?.at ?? null,
       },
     };
+  }
+
+  /**
+   * Contract (5): the staff product picker for "Create sale" with `promotions` (read-only, minimal
+   * fields): products a buyer can find, of vendors allowed to run a sale. ?q (name), ?vendorId, ?limit ≤ 50.
+   */
+  async function adminProducts({ query = {} }) {
+    const needle = typeof query.q === 'string' ? query.q.trim().slice(0, 100) : '';
+    const limit = Math.min(Math.max(parseInt(query.limit, 10) || 20, 1), 50);
+    const rows = await store.pickerProducts({ q: needle, vendorId: typeof query.vendorId === 'string' ? query.vendorId : null, limit: limit * 3 });
+    const states = await vendorStates(store, rows.map(p => p.vendorId));
+    const items = rows.filter(p => productListed(p) && states.get(p.vendorId)?.ok).slice(0, limit).map(p => ({
+      id: p.id, name: p.name, vendorId: p.vendorId, vendorName: storeNameOf(states.get(p.vendorId).row),
+      priceTzs: p.priceTzs, discountPriceTzs: validDiscount(p), effectivePriceTzs: standingPrice(p),
+      maxSalePriceTzs: Math.min(maxSalePrice(p.priceTzs), standingPrice(p) - 1), stock: p.stock, image: p.images?.[0] ?? null,
+    }));
+    return { items };
   }
 
   // ── Pricing reads (shop-service, shop home, checkout). Nothing cached. ───────
@@ -608,9 +678,12 @@ export function createFlashSaleService({
       for (const s of rows) if (!out.has(s.productId) || s.salePriceTzs < out.get(s.productId).salePriceTzs) out.set(s.productId, s);
       return out;
     },
-    /** The approved sale that locks a product's prices at `at` (scheduled or live), else null. */
-    async lockOf(productId, at = now()) {
-      return (await store.approvedNotEnded(new Date(at).toISOString(), [productId]))
+    /**
+     * The approved sale that locks a product's prices at `at` (scheduled or live), else null. `q` =
+     * the store bound to the caller's transaction (read after it locked the Product row).
+     */
+    async lockOf(productId, at = now(), q = store) {
+      return (await q.approvedNotEnded(new Date(at).toISOString(), [productId]))
         .sort((a, b) => ms(a.startsAt) - ms(b.startsAt))[0] || null;
     },
     /** Map(productId → lock) for several products (vendor product list). */
@@ -626,15 +699,17 @@ export function createFlashSaleService({
       const t = new Date(at).getTime();
       return (await store.salesOfProduct(productId)).some(s => s.salePriceTzs === Number(priceTzs) && s.approvedBy && (s.status !== 'approved' || ms(s.endsAt) <= t || ms(s.startsAt) > t));
     },
-    /** Run fn while holding the product's flash-sale lock (price edits). */
-    withProductLock: (productId, fn) => store.withProductLock(productId, fn),
+    /** The store on another transaction (the stock ledger's product-form transaction). */
+    using: trx => store.using(trx),
+    /** Save a product (no ledger) in one transaction under its row lock: decide(current, q) → { patch } | { error }. */
+    updateProductLocked: (productId, decide) => store.updateProductLocked(productId, decide),
     effectiveStatus: s => effectiveStatus(s, now()),
   };
 
   return {
     create, update, submit, withdraw, vendorEnd, vendorList, vendorGet, priceCheck,
     approve, reject, end, adminList, adminGet,
-    runLifecycle,
+    runLifecycle, endForSuspendedVendor, adminProducts,
     pricing,
   };
 }

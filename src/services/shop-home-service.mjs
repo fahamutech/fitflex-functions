@@ -14,6 +14,7 @@ import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recomm
 import { purchaseHistoryFrom, audienceFrom, historyDaysFromEnv } from './shop-personalisation.mjs';
 import { shopBannersOn, shopPersonalisationOn, shopNearYouOn, shopFlashSalesOn } from '../shared/feature-flags.mjs';
 import { saleLiveFor, saleView, withPrice } from '../shared/shop-pricing.mjs';
+import { withoutSale } from '../shared/shop-caps.mjs';
 import { indexAreas, resolveViewerArea, vendorAreasOf, deliversTo, deliversExactly, basedIn, publicAreas, minRadiusFromEnv } from '../shared/shop-areas.mjs';
 
 /**
@@ -209,7 +210,10 @@ export function createShopHomeService({
     return (await identityLink.personasOf(user.personId)).filter(usable);
   }
 
-  async function home({ claims, query = {} }) {
+  // caps.flashSale: the client sent X-FF-Shop-Caps: flash_sale (route). Without it there is no
+  // flash_sale section and no `sale` objects, but rows still carry effectivePriceTzs and Deals still
+  // leaves out products in a live sale (everyone pays the lowest price).
+  async function home({ claims, query = {}, caps = {} }) {
     const user = await users.findByIdAsync(claims.sub);
     const personas = await personasOf(user);
     const heldUserTypes = personas.map(p => p.userType);
@@ -269,12 +273,12 @@ export function createShopHomeService({
         logger.error?.('[shop-home] flash sales failed:', err?.message);
       }
     }
-    const railSales = liveSales ? new Map([...liveSales].map(([id, sale]) => [id, saleView(rows0.get(id), sale)])) : null;
+    const railSales = liveSales ? new Map([...liveSales].map(([id, sale]) => [id, saleView(rows0.get(id), sale, at)])) : null;
     const out = buildShopHome({
       mode: query.mode, sessionUserType: claims.userType, heldUserTypes,
       memberProfile, trainerProfile, recentIds: query.recent, ownVendorIds,
       products: shared.products, suspendedVendorIds: shared.suspendedVendorIds, featured: shared.featured, paidPlacementIds: shared.paidPlacementIds, orders: shared.orders,
-      config: cfg, now: at, personalisation, flashSales: railSales,
+      config: cfg, now: at, personalisation, flashSales: railSales, flashSaleRail: caps.flashSale === true,
     });
     if (out.error) return { error: out.error, status: 403 };
 
@@ -287,7 +291,11 @@ export function createShopHomeService({
     // Slice 3: the "Delivers to your area" badge. Set only to true, never false.
     const delivers = id => Boolean(viewer) && deliversTo(shared.near.vendorAreas.get(rows.get(id)?.vendorId), viewer);
     // Slice 4: + effectivePriceTzs, + sale while live (flag on only; off the rows are exactly as before).
-    const priceRow = row => (liveSales ? withPrice(row, id => liveSales.get(id), at) : row);
+    const priceRow = (row) => {
+      if (!liveSales) return row;
+      const r = withPrice(row, id => liveSales.get(id), at);
+      return caps.flashSale === true ? r : withoutSale(r); // effectivePriceTzs (what is charged) stays for everyone
+    };
     const badge = (id, row) => { const r = priceRow(row); return delivers(id) ? { ...r, deliversToViewerArea: true } : r; };
     for (const section of out.sections) {
       for (const id of section.productIds) {

@@ -135,9 +135,11 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     const ids = [...new Set(checked.map(l => l.productId))].sort();
     const live = await trx('FlashSale').whereIn('productId', ids).where({ status: 'approved' })
       .where('startsAt', '<=', atTime).where('endsAt', '>', atTime).orderBy('id').forShare();
+    // L1: products an admin took off the shop (homepageVisible false) never get a sale price (shop-pricing.saleLiveFor).
+    const offShop = new Set((await trx('Product').whereIn('id', ids).where({ homepageVisible: false }).select('id')).map(r => r.id));
     for (const line of [...checked].sort(byLine)) {
       const standing = standingPrice(line);
-      const applies = live.filter(r => r.productId === line.productId && Number(r.salePriceTzs) > 0 && Number(r.salePriceTzs) < standing)
+      const applies = live.filter(r => r.productId === line.productId && !offShop.has(line.productId) && Number(r.salePriceTzs) > 0 && Number(r.salePriceTzs) < standing)
         .sort((a, b) => Number(a.salePriceTzs) - Number(b.salePriceTzs))[0] || null;
       if ((applies?.id ?? null) !== (line.flashSaleId ?? null)) throw shopError('price_changed', 409, line.productId);
     }

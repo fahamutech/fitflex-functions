@@ -70,7 +70,7 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
       }
       if (line.checkSale) {
         const sale = await liveSaleOf(line.productId, now());
-        const applies = sale && Number(sale.salePriceTzs) > 0 && Number(sale.salePriceTzs) < standingPrice(line) ? sale.id : null;
+        const applies = sale && product.homepageVisible !== false && Number(sale.salePriceTzs) > 0 && Number(sale.salePriceTzs) < standingPrice(line) ? sale.id : null;
         if (applies !== (line.flashSaleId ?? null)) return { error: 'price_changed', status: 409, productId: line.productId };
       }
       current.push({ product, line });

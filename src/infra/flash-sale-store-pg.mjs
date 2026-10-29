@@ -2,11 +2,14 @@
 // written by a database trigger) and the AuditLog rows written with them.
 //
 // Every change of state runs in one transaction holding the PRODUCT's advisory lock
-// ('flash_sale:<productId>'). The same lock is taken by vendor product saves that would change a
-// price while SHOP_FLASH_SALES is on (shop-service), so an approval can never slip in between a price
-// edit's check and its write, or the other way round. A sale's product never changes, so the lock
-// key is known before the row is read. The exclusion constraint (one approved sale per product) is
-// the last line of defence.
+// ('flash_sale:<productId>'); approvals also lock the Product ROW (FOR UPDATE) on that same
+// connection. Vendor price edits (SHOP_FLASH_SALES on) lock the same Product row in the very
+// transaction that saves them (updateProductLocked, or the stock ledger's form transaction) and look
+// for an approved sale after the lock, so an approval can never slip in between a price edit's check
+// and its write, or the other way round — and no request holds two pool connections (review L4).
+// A sale's product never changes, so the lock key is known before the row is read. The exclusion
+// constraint (one approved sale per product) is the last line of defence.
+import { prepareForKnex } from './knex-store.mjs';
 
 const LOCK_PREFIX = 'flash_sale:';
 /** SQLSTATE of the one-approved-sale-per-product constraint (or its trigger): the transaction is rolled back. */
@@ -98,6 +101,28 @@ function bind(q) {
       const [saved] = await sales().where({ id }).update(forWrite(SALE_FIELDS, JSON_FIELDS, patch)).returning('*');
       return saleFromDb(saved);
     },
+    /** The Product row, locked FOR UPDATE until this transaction ends (approvals). */
+    async productForUpdate(id) {
+      return productFromDb(await q('Product').where({ id: String(id) }).select(PRODUCT_COLUMNS).forUpdate().first());
+    },
+    /** When the product got its first price (first priceTzs row: its listing, or the migration baseline). */
+    async firstPriceAt(productId) {
+      const r = await q('ProductPriceChange').where({ productId, field: 'priceTzs' }).min({ at: 'at' }).first();
+      return r?.at ? iso(r.at) : null;
+    },
+    /** Approved sales of a product whose window overlaps [startsAt, endsAt), other than `exceptId`. */
+    async approvedOverlapping(productId, startsAt, endsAt, exceptId = null) {
+      let query = sales().where({ productId, status: 'approved' }).where('startsAt', '<', endsAt).where('endsAt', '>', startsAt);
+      if (exceptId) query = query.whereNot({ id: exceptId });
+      return (await query.orderBy('startsAt')).map(saleFromDb);
+    },
+    /** Staff picker: newest first, by name (ILIKE) and/or vendor. */
+    async pickerProducts({ q: needle = '', vendorId = null, limit = 60 }) {
+      let query = q('Product').whereNull('deletedAt').where({ status: 'active' }).select(PRODUCT_COLUMNS);
+      if (needle) query = query.whereILike('name', `%${needle.replace(/[%_\\]/g, m => `\\${m}`)}%`);
+      if (vendorId) query = query.where({ vendorId });
+      return (await query.orderBy([{ column: 'createdAt', order: 'desc' }, { column: 'id' }]).limit(limit)).map(productFromDb);
+    },
     async product(id) {
       if (!id) return null;
       return productFromDb(await q('Product').where({ id: String(id) }).select(PRODUCT_COLUMNS).first());
@@ -118,7 +143,7 @@ function bind(q) {
       let query = q('ProductPriceChange').where({ productId });
       if (since) query = query.where('at', '>=', since);
       return (await query.orderBy([{ column: 'at', order: 'desc' }, { column: 'id', order: 'desc' }]))
-        .map(r => ({ at: iso(r.at), field: r.field, fromTzs: r.fromTzs == null ? null : Number(r.fromTzs), toTzs: r.toTzs == null ? null : Number(r.toTzs) }));
+        .map(r => ({ at: iso(r.at), field: r.field, fromTzs: r.fromTzs == null ? null : Number(r.fromTzs), toTzs: r.toTzs == null ? null : Number(r.toTzs), source: r.source ?? 'trigger' }));
     },
     async displayNames(ids) {
       const wanted = [...new Set(ids.filter(Boolean))];
@@ -153,13 +178,21 @@ export function createPgFlashSaleStore({ db }) {
       await lock(trx, productId);
       return fn(bind(trx));
     }),
+    /** This store's reads on another transaction (the stock ledger's product-form transaction). */
+    using: trx => bind(trx),
     /**
-     * Hold the product's flash-sale lock while fn(store) runs (fn may write elsewhere, e.g. the
-     * product form through its own transaction). Used by product saves that change a price.
+     * Save a product (no stock ledger) in ONE transaction: lock its row FOR UPDATE, let
+     * decide(current, store) refuse ({ error }) or return { patch }, write the patch. → { product } | { error }.
      */
-    withProductLock: (productId, fn) => db.transaction(async (trx) => {
-      await lock(trx, productId);
-      return fn(bind(trx));
+    updateProductLocked: (productId, decide) => db.transaction(async (trx) => {
+      const current = await trx('Product').where({ id: productId }).forUpdate().first();
+      if (!current) return { error: 'product_not_found', status: 404 };
+      const out = await decide(current, bind(trx));
+      if (out.error) return out;
+      const write = prepareForKnex('products', out.patch, true);
+      if (Object.keys(write).length) await trx('Product').where({ id: productId }).update(write);
+      // Same shape as the products collection's updateByIdAsync (dates as ISO strings).
+      return { product: JSON.parse(JSON.stringify(await trx('Product').where({ id: productId }).first())) };
     }),
   };
 }

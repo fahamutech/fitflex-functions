@@ -123,6 +123,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   //   withProductLock(productId, fn), effectiveStatus(sale) }. null, or the flag off: prices exactly as before.
   flashSales = null,
   flashSalesOn = shopFlashSalesOn,
+  // Security review L2: an admin suspended a vendor → (vendorId, actorId) → end its scheduled and live flash sales.
+  onVendorSuspended = async () => null,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now,
     // The lock re-check of a flash sale's window (memory store; the Postgres store reads FlashSale itself).
@@ -389,24 +391,23 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   async function upsertProductCore(args) {
     const input = args.body || {};
     if (!args.productId || !salesActive() || (input.priceTzs === undefined && input.discountPriceTzs === undefined)) return upsertProductFields(args);
-    return flashSales.withProductLock(args.productId, async () => {
-      const prior = await products.findByIdAsync(args.productId);
-      const fields = prior && !prior.deletedAt && prior.vendorId === args.vendorId ? priceFieldsChanged(prior, input) : [];
-      if (fields.length) {
-        const lock = await flashSales.lockOf(args.productId, now());
-        if (lock) {
-          return {
-            error: 'sale_conflict', status: 409, reason: 'price_locked_by_flash_sale', fields,
-            saleId: lock.id, startsAt: lock.startsAt, endsAt: lock.endsAt, effectiveStatus: flashSales.effectiveStatus(lock),
-          };
-        }
-      }
-      return upsertProductFields(args);
-    });
+    // Run against the Product row as locked by the save's own transaction (review L4: one connection).
+    const priceGuard = async (current, q) => {
+      if (current.vendorId !== args.vendorId) return null; // the save refuses it itself
+      const fields = priceFieldsChanged(current, input);
+      if (!fields.length) return null;
+      const lock = await flashSales.lockOf(args.productId, now(), q);
+      return lock ? {
+        error: 'sale_conflict', status: 409, reason: 'price_locked_by_flash_sale', fields,
+        saleId: lock.id, startsAt: lock.startsAt, endsAt: lock.endsAt, effectiveStatus: flashSales.effectiveStatus(lock),
+      } : null;
+    };
+    return upsertProductFields({ ...args, priceGuard });
   }
 
   // keptImages: images a copy may carry over unchanged (duplicateProduct: the source product's own).
-  async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [] }) {
+  // priceGuard(current, store) → null | { error }: the flash-sale price lock, checked inside the save's transaction.
+  async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [], priceGuard = null }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
@@ -441,7 +442,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         // Fields, approval status, stock and ledger rows are written together, in one transaction.
         const saved = await stockLedger.applyProductForm({
           productId, vendorId, actorId,
-          decide: (current) => {
+          decide: async (current, trx) => {
+            if (priceGuard) {
+              const refused = await priceGuard(current, flashSales.using(trx));
+              if (refused) return refused;
+            }
             const plan = planStock(current, input, { ledger: true });
             if (plan.error) return plan;
             const fields = needsReview(current, plan.variants || null) ? { ...patch, approvalStatus: 'pending' } : patch;
@@ -459,6 +464,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (plan.stock !== undefined) patch.stock = plan.stock;
       // Back to review only when something FitFlex reviews actually changed (F1).
       if (needsReview(prior, plan.variants || null)) patch.approvalStatus = 'pending';
+      if (priceGuard) {
+        // Flash sales on and a price in the body: check and save in one transaction under the row lock.
+        const saved = await flashSales.updateProductLocked(productId, async (current, q) => (await priceGuard(current, q)) || { patch });
+        return saved.error ? saved : { product: saved.product };
+      }
       return { product: await products.updateByIdAsync(productId, patch) };
     }
     if (!input.name?.trim()) return { error: 'name_required', status: 400 };
@@ -758,6 +768,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined } : {}), ...(body?.commissionPct != null ? { commissionPct: patch.vendorProfile.commissionPct } : {}), ...(Object.keys(areas.patch).length ? { areas: areasOf(patch.vendorProfile) } : {}) },
     });
     if (patch.approvalStatus) await notifyVendor(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
+    // Flash sales (flag on; review L2): a newly suspended vendor's scheduled and live sales end now.
+    // The lifecycle job sweeps again (moderation suspensions too), so a failure here is only logged.
+    if (patch.accountStatus === 'suspended' && vendor.accountStatus !== 'suspended' && salesActive()) {
+      try { await onVendorSuspended(vendorId, actorId); } catch (err) { console.error('[shop] ending flash sales of suspended vendor failed:', err?.message); }
+    }
     return { vendor: updated };
   }
 

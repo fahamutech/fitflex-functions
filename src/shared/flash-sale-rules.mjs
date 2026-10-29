@@ -127,6 +127,19 @@ export function priceRaiseError(changes, startsAt) {
   });
 }
 
+/**
+ * New or copied products (owner ruling 2026-10-29 (b)): a sale may not start until 14 days after the
+ * product's FIRST price row (its listing, or the migration baseline for products that existed before
+ * price history). `listedAt` null (no row at all) counts as listed `now`.
+ * → null | { error: 'price_history_too_short', listedAt, earliestStart }.
+ */
+export function priceHistoryError(listedAt, startsAt, now = new Date()) {
+  const listed = listedAt == null ? ms(now) : ms(listedAt);
+  const earliest = listed + SALE_RULES.priceRaiseLookbackDays * DAY_MS;
+  if (ms(startsAt) >= earliest) return null;
+  return fail('price_history_too_short', 422, { field: 'startsAt', listedAt: new Date(listed).toISOString(), earliestStart: new Date(earliest).toISOString() });
+}
+
 export const isRaise = c => c.field === 'priceTzs' && c.fromTzs != null && c.toTzs != null && Number(c.toTzs) > Number(c.fromTzs);
 export function latestRaise(changes = []) {
   let best = null;

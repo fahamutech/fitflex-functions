@@ -53,6 +53,8 @@ async function product(vendorId, extra = {}) {
   const id = uid('prd');
   await db('Product').insert({ id, vendorId, name: `Flash route ${id.slice(-4)}`, category: 'equipment', priceTzs: 85_000, discountPriceTzs: 79_000, stock: 10, soldCount: 0, status: 'active', approvalStatus: 'approved', updatedAt: new Date(), createdAt: new Date(), ...extra });
   made.products.push(id);
+  // Listed 20 days ago (owner ruling (b): 14 days of price history before a sale may start).
+  await db('ProductPriceChange').where({ productId: id }).update({ at: new Date(Date.now() - 20 * DAY) });
   return id;
 }
 /** A sale stored as approved and live now (a past start can't be sent through the API). */
@@ -61,17 +63,18 @@ async function liveSale(vendorId, productId, { salePriceTzs = 69_000, startsAt =
   await db('FlashSale').insert({ id, origin: 'vendor', vendorId, productId, salePriceTzs, wasPriceTzs, startsAt, endsAt, status: 'approved', createdBy: vendorId, approvedBy: 'adm_direct', approvedAt: new Date(), editors: JSON.stringify([vendorId]) });
   return id;
 }
-async function hit(method, url, { claims, body } = {}) {
+async function hit(method, url, { claims, body, headers = {} } = {}) {
   const res = await fetch(`${base}${url}`, {
     method,
-    headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(claims ? { authorization: `Bearer ${sign(claims)}` } : {}) },
+    headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(claims ? { authorization: `Bearer ${sign(claims)}` } : {}), ...headers },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   const text = await res.text();
   let parsed = null;
   try { parsed = JSON.parse(text); } catch { parsed = text; }
-  return { status: res.status, body: parsed };
+  return { status: res.status, body: parsed, headers: res.headers };
 }
+const CAPS = { 'X-FF-Shop-Caps': 'flash_sale' };
 const asVendor = id => ({ sub: id, userType: 'vendor' });
 const asMember = id => ({ sub: id, userType: 'member' });
 const asAdmin = (id, acl) => ({ sub: id, userType: 'admin', portalUser: true, aclPermissions: acl });
@@ -193,7 +196,8 @@ test('shop home: flag off byte-identical and the sale store never read; on: flas
   assert.equal(reads, 0, 'the sale store is not even read');
 
   const four = [sale(1, 5 * HOUR), sale(2, 2 * HOUR), sale(3, 9 * HOUR), sale(4, 3 * HOUR)];
-  const on = (await createShopHomeService({ ...deps(four), flashSalesOn: () => true }).home({ claims })).body;
+  const caps = { flashSale: true };
+  const on = (await createShopHomeService({ ...deps(four), flashSalesOn: () => true }).home({ claims, caps })).body;
   assert.deepEqual(on.flashSales, { enabled: true });
   const [first] = on.sections;
   assert.equal(first.key, 'flash_sale');
@@ -202,30 +206,39 @@ test('shop home: flag off byte-identical and the sale store never read; on: flas
   assert.equal(first.endsAt, new Date(at.getTime() + 2 * HOUR).toISOString(), 'the earliest end shown');
   assert.deepEqual(first.productIds, ['p4', 'p3', 'p2', 'p1'], 'deepest discount first');
   assert.deepEqual(first.viewAll, { path: '/shop/products', query: { category: 'equipment', flashSale: 'true' } });
-  assert.deepEqual(on.products.p4.sale, { id: 's4', salePriceTzs: 36_000, wasPriceTzs: 50_000, regularPriceTzs: 50_000, discountPct: 28, startsAt: '2026-11-05T07:00:00.000Z', endsAt: four[3].endsAt });
+  assert.deepEqual(on.products.p4.sale, { id: 's4', salePriceTzs: 36_000, wasPriceTzs: 50_000, regularPriceTzs: 50_000, discountPct: 28, startsAt: '2026-11-05T07:00:00.000Z', endsAt: four[3].endsAt, serverNow: at.toISOString() });
   assert.equal(on.products.p4.effectivePriceTzs, 36_000);
   for (const s of on.sections.slice(1)) for (const id of ['p1', 'p2', 'p3', 'p4']) assert.ok(!s.productIds.includes(id), `${id} is in no other rail (${s.key})`);
   // Deals alone (SHOP_HOME_SECTIONS=deals): every seller-discounted product except those in a live sale.
   const dealsOnly = cfgSections => ({ config: () => shopHomeConfigFromEnv({ SHOP_HOME_MIN_ITEMS: '4', SHOP_HOME_SECTIONS: cfgSections }) });
-  const d = (await createShopHomeService({ ...deps(four.slice(0, 3)), ...dealsOnly('deals'), flashSalesOn: () => true }).home({ claims })).body;
+  const d = (await createShopHomeService({ ...deps(four.slice(0, 3)), ...dealsOnly('deals'), flashSalesOn: () => true }).home({ claims, caps })).body;
   assert.deepEqual(d.sections.map(s => s.key), ['deals'], 'three live sales: no flash rail');
   assert.deepEqual([...d.sections[0].productIds].sort(), ['p0', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'], 'never a Deal while in a live sale, rail or not');
   const dOff = (await createShopHomeService({ ...deps(four.slice(0, 3)), ...dealsOnly('deals'), flashSalesOn: () => false }).home({ claims })).body;
   assert.equal(dOff.sections[0].productIds.length, 10, 'flag off: Deals as before');
 
   // Three live sales: no rail; the products still show their sale price wherever they appear; never in Deals.
-  const three = (await createShopHomeService({ ...deps(four.slice(0, 3)), flashSalesOn: () => true }).home({ claims })).body;
+  const three = (await createShopHomeService({ ...deps(four.slice(0, 3)), flashSalesOn: () => true }).home({ claims, caps })).body;
   assert.ok(!three.sections.some(s => s.key === 'flash_sale'));
   assert.ok(!three.sections.find(s => s.key === 'deals')?.productIds.some(id => ['p1', 'p2', 'p3'].includes(id)));
   for (const id of ['p1', 'p2', 'p3']) if (three.products[id]) assert.equal(three.products[id].sale.id, `s${id.slice(1)}`);
   // A scheduled sale (not live yet) shows nothing; a sale from another vendor id is ignored.
   const notYet = { ...sale(5, DAY), startsAt: '2026-11-05T09:00:00.000Z' };
   const foreign = { ...sale(6, DAY), vendorId: 'v2' };
-  const odd = (await createShopHomeService({ ...deps([notYet, foreign]), flashSalesOn: () => true }).home({ claims })).body;
+  const odd = (await createShopHomeService({ ...deps([notYet, foreign]), flashSalesOn: () => true }).home({ claims, caps })).body;
   for (const id of ['p5', 'p6']) if (odd.products[id]) assert.equal(odd.products[id].sale, undefined);
   // A failed sale read leaves the page at stored prices.
-  const broken = await createShopHomeService({ ...deps(), flashSales: { liveByProduct: async () => { throw new Error('db down'); } }, flashSalesOn: () => true, logger: { error() {} } }).home({ claims });
+  const broken = await createShopHomeService({ ...deps(), flashSales: { liveByProduct: async () => { throw new Error('db down'); } }, flashSalesOn: () => true, logger: { error() {} } }).home({ claims, caps });
   assert.ok(!broken.body.sections.some(s => s.key === 'flash_sale'));
+
+  // Contract (1): a client without X-FF-Shop-Caps: flash_sale gets no flash_sale section and no `sale`
+  // objects — but is still charged, and shown as effectivePriceTzs, the sale price; Deals still leaves them out.
+  const plain = (await createShopHomeService({ ...deps(four), flashSalesOn: () => true }).home({ claims })).body;
+  assert.ok(!plain.sections.some(s => s.key === 'flash_sale'));
+  assert.ok(!JSON.stringify(plain.products).includes('"sale"'));
+  for (const id of ['p1', 'p2', 'p3', 'p4']) if (plain.products[id]) assert.equal(plain.products[id].effectivePriceTzs, four.find(x => x.productId === id).salePriceTzs);
+  const plainDeals = (await createShopHomeService({ ...deps(four), ...dealsOnly('deals'), flashSalesOn: () => true }).home({ claims })).body;
+  assert.ok(!plainDeals.sections[0].productIds.some(id => ['p1', 'p2', 'p3', 'p4'].includes(id)));
 });
 
 // ── The HTTP surface with the flag on ───────────────────────────────────────
@@ -270,10 +283,10 @@ test('routes: vendor proposes (staff need `products`), price check, admin queue 
   const q = await product(v);
   await liveSale(v, q);
   const member = await user('member');
-  const list = await hit('GET', `/shop/products?vendorId=${v}&flashSale=true`, { claims: asMember(member) });
+  const list = await hit('GET', `/shop/products?vendorId=${v}&flashSale=true`, { claims: asMember(member), headers: CAPS });
   assert.deepEqual(list.body.map(r => [r.id, r.effectivePriceTzs, r.sale.salePriceTzs]), [[q, 69_000, 69_000]]);
   const conflict = await hit('POST', '/me/shop-orders', { claims: asMember(member), body: cart([{ productId: q, qty: 1, expectedPriceTzs: 79_000 }]) });
-  assert.deepEqual(conflict, { status: 409, body: { error: 'price_changed', productId: q, currentPriceTzs: 69_000, lines: [{ productId: q, variant: null, expectedPriceTzs: 79_000, currentPriceTzs: 69_000, reason: 'sale_started' }], expectedTotalTzs: 79_000, totalTzs: 69_000 } });
+  assert.deepEqual({ status: conflict.status, body: conflict.body }, { status: 409, body: { error: 'price_changed', productId: q, currentPriceTzs: 69_000, lines: [{ productId: q, variant: null, expectedPriceTzs: 79_000, currentPriceTzs: 69_000, reason: 'sale_started' }], expectedTotalTzs: 79_000, totalTzs: 69_000 } });
   const ok = await hit('POST', '/me/shop-orders', { claims: asMember(member), body: cart([{ productId: q, qty: 1, expectedPriceTzs: 69_000 }]) });
   assert.equal(ok.status, 201, JSON.stringify(ok.body));
   made.orders.push(ok.body.id);
@@ -331,4 +344,52 @@ test('vendor settlement: an order placed in a flash sale is settled on its sale-
   // 2 × 69,000 = 138,000 sales; 10 % commission 13,800; the vendor receives 124,200.
   assert.deepEqual([detail.statement.salesTzs, detail.statement.commissionTzs, detail.statement.finalNetTzs], [138_000, 13_800, 124_200]);
   assert.deepEqual(detail.lines.map(l => [l.orderId, l.salesTzs, l.payoutTzs]), [[out.body.id, 138_000, 124_200]]);
+});
+
+test('contract (1)(2): X-FF-Shop-Caps gates the `sale` object (tolerant parsing), everyone pays the sale price; serverNow on product answers', async () => {
+  process.env.SHOP_FLASH_SALES = '1';
+  const v = await vendor();
+  const p = await product(v);
+  await liveSale(v, p);
+  const member = await user('member');
+  const list = async headers => (await hit('GET', `/shop/products?vendorId=${v}`, { claims: asMember(member), headers })).body[0];
+  const none = await list({});
+  assert.deepEqual([none.effectivePriceTzs, 'sale' in none], [69_000, false], 'no header: the price, not the sale object');
+  for (const value of ['flash_sale', ' Flash_Sale ', 'other,flash_sale', 'x; FLASH_SALE ;y', 'a b flash_sale']) {
+    assert.equal((await list({ 'X-FF-Shop-Caps': value })).sale?.salePriceTzs, 69_000, JSON.stringify(value));
+  }
+  for (const value of ['flash-sale', 'flashsale', 'flash_sales', '']) assert.equal('sale' in (await list({ 'X-FF-Shop-Caps': value })), false, JSON.stringify(value));
+  // serverNow: header on lists, top-level on the product page and inside each sale.
+  const r = await hit('GET', `/shop/products?vendorId=${v}`, { claims: asMember(member), headers: CAPS });
+  const stamped = r.headers.get('x-ff-server-now');
+  assert.ok(Number.isFinite(new Date(stamped).getTime()));
+  assert.ok(Math.abs(new Date(r.body[0].sale.serverNow).getTime() - Date.now()) < 60_000);
+  const page = await hit('GET', `/shop/products/${p}`, { claims: asMember(member), headers: CAPS });
+  assert.ok(page.body.serverNow && page.body.sale.serverNow);
+  const pagePlain = await hit('GET', `/shop/products/${p}`, { claims: asMember(member) });
+  assert.deepEqual([pagePlain.body.effectivePriceTzs, 'sale' in pagePlain.body, Boolean(pagePlain.body.serverNow)], [69_000, false, true]);
+  assert.ok((pagePlain.body.similarProducts || []).every(x => !('sale' in x)));
+  const store = await hit('GET', `/shop/vendors/${v}`, { claims: asMember(member) });
+  assert.ok(store.body.products.every(x => !('sale' in x)) && store.body.serverNow);
+  // Everyone is charged the sale price.
+  const out = await hit('POST', '/me/shop-orders', { claims: asMember(member), body: cart([{ productId: p, qty: 1 }]) });
+  made.orders.push(out.body.id);
+  assert.equal(out.body.totalTzs, 69_000);
+  // Flag off: no serverNow anywhere.
+  delete process.env.SHOP_FLASH_SALES;
+  const off = await hit('GET', `/shop/products/${p}`, { claims: asMember(member), headers: CAPS });
+  assert.deepEqual(['serverNow' in off.body, off.headers.get('x-ff-server-now')], [false, null]);
+});
+
+test('contract (5): GET /admin/flash-sale-products — promotions or promotions_approve may read it, no `shop` scope needed', async () => {
+  process.env.SHOP_FLASH_SALES = '1';
+  const v = await vendor();
+  const tag = randomUUID().slice(0, 6);
+  const p = await product(v, { name: `Route picker ${tag}` });
+  const admin = await user('admin');
+  for (const acl of [['promotions'], ['promotions_approve']]) {
+    const r = await hit('GET', `/admin/flash-sale-products?q=${encodeURIComponent(`route picker ${tag}`)}`, { claims: asAdmin(admin, acl) });
+    assert.deepEqual([r.status, r.body.items.map(i => i.id)], [200, [p]], acl.join());
+  }
+  assert.equal((await hit('GET', '/admin/flash-sale-products', { claims: asAdmin(admin, ['shop']) })).status, 403);
 });

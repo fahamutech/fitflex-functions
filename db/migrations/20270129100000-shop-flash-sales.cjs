@@ -13,6 +13,11 @@
 // - ProductPriceChange: every change of Product.priceTzs / discountPriceTzs, written by a trigger so
 //   no code path can skip it (the 14-day "price raised recently" rule and the admin price history).
 //   Bookkeeping only: written whether or not SHOP_FLASH_SALES is on.
+// - History baseline (owner ruling 2026-10-29 (b)): a sale may not start until 14 days after the
+//   product's FIRST price row. Every product that exists when this runs gets one baseline row
+//   (source 'migration_baseline', at = now), so existing products are treated like new ones: no
+//   sale before 14 days after this migration. AuditLog cannot be used to backdate it safely —
+//   vendor price edits were never audited (only admin-created products are), so it would miss raises.
 //
 // Dormant behind SHOP_FLASH_SALES. Additive and reversible: down drops both tables, the triggers and
 // their functions (btree_gist is left installed; it changes nothing on its own).
@@ -64,9 +69,14 @@ exports.up = async function up(knex) {
       t.integer('fromTzs');
       t.integer('toTzs');
       t.timestamp('at', { precision: 3, useTz: true }).notNullable().defaultTo(knex.fn.now());
+      // 'trigger' (a real change) | 'migration_baseline' (the price a product already had when history began).
+      t.text('source').notNullable().defaultTo('trigger');
       t.index(['productId', 'at']);
     });
     await knex.raw(`ALTER TABLE "ProductPriceChange" ADD CONSTRAINT productpricechange_field_chk CHECK ("field" IN ('priceTzs','discountPriceTzs'))`);
+    await knex.raw(`ALTER TABLE "ProductPriceChange" ADD CONSTRAINT productpricechange_source_chk CHECK ("source" IN ('trigger','migration_baseline'))`);
+    await knex.raw(`INSERT INTO "ProductPriceChange" ("productId", "field", "fromTzs", "toTzs", "at", "source")
+      SELECT "id", 'priceTzs', NULL, "priceTzs", now(), 'migration_baseline' FROM "Product"`);
   }
   await knex.raw(PRICE_FN);
   await knex.raw('DROP TRIGGER IF EXISTS product_price_change ON "Product"');

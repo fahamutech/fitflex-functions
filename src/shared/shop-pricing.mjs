@@ -31,6 +31,9 @@ export function validDiscount(product) {
 /** Is `sale` live for `product` at `now`? Approved, same product and vendor, inside its window, a real price. */
 export function saleLiveFor(product, sale, now = new Date()) {
   if (!product || !sale || sale.status !== 'approved') return false;
+  // Security review L1: a product an admin took off the shop (homepageVisible false) is still sold by
+  // id at its own price, as before, but never at a sale price (mirrors the catalogue gate).
+  if (product.homepageVisible === false) return false;
   if (sale.productId !== product.id || sale.vendorId !== product.vendorId) return false;
   const t = ms(now);
   const start = ms(sale.startsAt);
@@ -64,9 +67,10 @@ export function discountPct(regularTzs, saleTzs) {
 
 /**
  * The `sale` object buyer rows carry while a sale is live:
- * { id, salePriceTzs, wasPriceTzs, regularPriceTzs, discountPct, startsAt, endsAt }.
+ * { id, salePriceTzs, wasPriceTzs, regularPriceTzs, discountPct, startsAt, endsAt, serverNow }
+ * (serverNow = the server time the price was worked out at: count down against it, not the device clock).
  */
-export function saleView(product, sale) {
+export function saleView(product, sale, now = new Date()) {
   const was = int(sale.wasPriceTzs) || int(product.priceTzs);
   return {
     id: sale.id,
@@ -76,6 +80,7 @@ export function saleView(product, sale) {
     discountPct: discountPct(was, sale.salePriceTzs),
     startsAt: new Date(sale.startsAt).toISOString(),
     endsAt: new Date(sale.endsAt).toISOString(),
+    serverNow: new Date(now).toISOString(),
   };
 }
 
@@ -86,5 +91,5 @@ export function saleView(product, sale) {
 export function withPrice(row, saleOf, now) {
   const sale = saleOf(row.id) || null;
   const p = priceBreakdown(row, sale, now);
-  return p.sale ? { ...row, effectivePriceTzs: p.priceTzs, sale: saleView(row, p.sale) } : { ...row, effectivePriceTzs: p.priceTzs };
+  return p.sale ? { ...row, effectivePriceTzs: p.priceTzs, sale: saleView(row, p.sale, now) } : { ...row, effectivePriceTzs: p.priceTzs };
 }

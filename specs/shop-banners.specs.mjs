@@ -726,7 +726,7 @@ test('vendor notices: approved, rejected, expired and ended by FitFlex, in the v
   await notifier.vendorEvent('v_sw', 'shop_banner_approved', d);
   assert.deepEqual(sent.map(s => s.type), ['vendor_shop_banner_approved', 'vendor_shop_banner_rejected', 'vendor_shop_banner_expired', 'vendor_shop_banner_ended', 'vendor_shop_banner_approved']);
   assert.equal(sent[0].body, 'Your banner "Train with new gear" is approved. It goes live 21/10/2026 10:00.');
-  assert.equal(sent[4].body, 'Bango lako "Mazoezi na vifaa vipya" limeidhinishwa. Litaanza 21/10/2026 10:00.');
+  assert.equal(sent[4].body, 'Bango lako "Mazoezi na vifaa vipya" limeidhinishwa. Litaanza 21/10/2026 10:00 asubuhi.');
   // Glossary 2026-10-20: rejected = limekataliwa; End = sitisha (simamisha is reserved for Suspended).
   assert.deepEqual([sent[1].data.titleSw, sent[1].data.bodySw], ['Bango limekataliwa', 'Bango lako "Mazoezi na vifaa vipya" limekataliwa. Tazama sababu.']);
   assert.deepEqual([sent[3].data.titleSw, sent[3].data.bodySw], ['Bango limesitishwa na FitFlex', 'FitFlex imesitisha bango lako "Mazoezi na vifaa vipya".']);

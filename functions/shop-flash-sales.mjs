@@ -121,7 +121,7 @@ export const vendorWithdrawFlashSale = {
 
 export const vendorEndFlashSale = {
   created, method: 'post', path: '/vendor/flash-sales/:id/end',
-  description: 'Vendor / staff with `products` (SHOP_FLASH_SALES): "End now" on my scheduled or live sale (→ ended, ended_by_vendor; buyers pay the normal price from the next request). FitFlex-made sales → 404 sale_not_found. → { sale }.',
+  description: 'Vendor / staff with `products` (SHOP_FLASH_SALES): "End now" on a scheduled or live sale on my products — my own proposals and FitFlex-made ones (owner 2026-10-29; audited) → ended, ended_by_vendor; buyers pay the normal price from the next request. → { sale }.',
   onGuard: vendorGuard('post'),
   onRequest: async (req, res) => sendSale(res, await svc.vendorEnd({ scope: vendorScope(req), id: req.params.id, actorId: req.user.sub }), vendorRead(req)),
 };
@@ -129,6 +129,13 @@ export const vendorEndFlashSale = {
 // ── Admin ────────────────────────────────────────────────────────────────────
 
 const adminRead = req => id => svc.adminGet({ id, viewer: flashSaleViewerOf(req) });
+
+export const adminFlashSaleProducts = {
+  created, method: 'get', path: '/admin/flash-sale-products',
+  description: 'Admin (promotions or promotions_approve; SHOP_FLASH_SALES): the product picker for "Create sale" — read-only, minimal fields, no `shop` scope needed. Products a buyer can find (active, approved, visible, on the shop), of vendors allowed to run a sale. ?q= (name contains), ?vendorId=, ?limit (≤ 50, default 20). → { items: [{ id, name, vendorId, vendorName, priceTzs, discountPriceTzs, effectivePriceTzs, maxSalePriceTzs, stock, image }] }.',
+  onGuard: adminView('get'),
+  onRequest: async (req, res) => send(res, await svc.adminProducts({ query: req.query || {} })),
+};
 
 export const adminGetFlashSale = {
   created, method: 'get', path: '/admin/flash-sales/:id',

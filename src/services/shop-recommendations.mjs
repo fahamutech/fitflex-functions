@@ -364,13 +364,15 @@ export function viewAllFor(key, picked) {
  * products is left out, and the products it would have taken stay free for the sections after it.
  * → [{ key, productIds, hasMore, viewAll }]
  */
-export function assembleSections({ needs, eligible, featured = [], paidPlacementIds = [], sales = new Map(), now, config = {}, flashSales = null }) {
+// flashSaleRail false: live sales still keep their products out of Deals, but no flash_sale section is built.
+export function assembleSections({ needs, eligible, featured = [], paidPlacementIds = [], sales = new Map(), now, config = {}, flashSales = null, flashSaleRail = true }) {
   const cfg = { ...DEFAULT_ASSEMBLY, ...config };
   const rank = rankers({ needs, eligible, featured, paidPlacementIds, sales, now, config: cfg, flashSales });
-  const enabled = new Set(flashSales ? [FLASH_SALE_SECTION, ...cfg.sections] : cfg.sections);
+  const rail = Boolean(flashSales) && flashSaleRail;
+  const enabled = new Set(rail ? [FLASH_SALE_SECTION, ...cfg.sections] : cfg.sections);
   const used = new Set();
   const built = new Map();
-  for (const key of flashSales ? [FLASH_SALE_SECTION, ...ALLOCATION_ORDER] : ALLOCATION_ORDER) {
+  for (const key of rail ? [FLASH_SALE_SECTION, ...ALLOCATION_ORDER] : ALLOCATION_ORDER) {
     if (!enabled.has(key) || !rank[key]) continue;
     const free = rank[key]().filter(p => !used.has(p.id));
     const picked = free.slice(0, cfg.maxItems);
@@ -383,7 +385,7 @@ export function assembleSections({ needs, eligible, featured = [], paidPlacement
       ...(key === FLASH_SALE_SECTION ? { endsAt: new Date(Math.min(...picked.map(p => time(flashSales.get(p.id).endsAt)))).toISOString() } : {}),
     });
   }
-  return (flashSales ? [FLASH_SALE_SECTION, ...cfg.sections] : cfg.sections).filter(k => built.has(k)).map(k => built.get(k));
+  return (rail ? [FLASH_SALE_SECTION, ...cfg.sections] : cfg.sections).filter(k => built.has(k)).map(k => built.get(k));
 }
 
 // ── copy (English + Swahili; Swahili is a draft for native review) ───────────
@@ -457,7 +459,8 @@ const COPY = {
   // Slice 4. Title / reason from the P1 spec §10 (shop.home.flashSale, shop.why.flashSale). [SW review]
   flash_sale: {
     title: { all: { en: 'Flash sale', sw: 'Ofa ya muda mfupi' } },
-    reason: () => ({ en: 'The seller has set a discount for a limited time.', sw: 'Muuzaji ameweka punguzo kwa muda maalum.' }),
+    // [SW review] i18n review 2026-10-29: "kwa muda mfupi" (for a short time).
+    reason: () => ({ en: 'The seller has set a discount for a limited time.', sw: 'Muuzaji ameweka punguzo kwa muda mfupi.' }),
     codes: () => ['flash_sale_seller_discount'],
   },
   deals: {
@@ -625,7 +628,7 @@ const sameSections = (a, b) => a.length === b.length && a.every((s, i) => s.key 
  * Gender/age act after assembly, inside a rail: the set of products never changes, only their order.
  */
 // flashSales (slice 4; null = exactly as before): Map(productId → { discountPct, endsAt }) of live sales, worked out per request.
-export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, suspendedVendorIds = [], products, featured, paidPlacementIds, orders, config = {}, now, personalisation = null, flashSales = null }) {
+export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, suspendedVendorIds = [], products, featured, paidPlacementIds, orders, config = {}, now, personalisation = null, flashSales = null, flashSaleRail = true }) {
   const identity = resolveShoppingMode({ requested: mode, sessionUserType, heldUserTypes });
   if (identity.error) return identity;
   const p = personalisation;
@@ -634,7 +637,7 @@ export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProf
   let needs = buildNeeds({ mode: identity.mode, memberProfile, trainerProfile, recentIds, config, optedOut: Boolean(p?.optedOut), profileSignals: p?.profileSignals !== false, location });
   const { eligible } = filterEligible(products, { ownVendorIds, suspendedVendorIds });
   const sales = salesStats(orders, { now });
-  const assemble = n => assembleSections({ needs: n, eligible, featured, paidPlacementIds, sales, now, config, flashSales });
+  const assemble = n => assembleSections({ needs: n, eligible, featured, paidPlacementIds, sales, now, config, flashSales, flashSaleRail });
   let sections = assemble(needs);
   const personal = {};
   const signals = [];

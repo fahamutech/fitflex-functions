@@ -364,6 +364,7 @@ export const flashSaleService = createFlashSaleService({
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
   flashSales: flashSaleService.pricing,
+  onVendorSuspended: (vendorId, actorId) => flashSaleService.endForSuspendedVendor(vendorId, actorId),
   // Shop home slice 3: vendor "Based in" / "Delivers to" are checked against usable GeoAreas.
   geoAreas,
   // Stock reservation and cancellation are single database transactions.
