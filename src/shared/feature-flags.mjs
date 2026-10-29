@@ -458,6 +458,20 @@ export function requireEventsPaymentIntake(req, res, next) {
 }
 
 /**
+ * S5 (docs/design/events-s5-venue-api-and-webhooks.md §11.1): three dormant flags, each on only together with
+ * EVENTS_MODULE and EVENTS_REGISTRATION. KIT_OPS: ticket verification, kit handover, bibs, lookup, export and the
+ * live ticket wording. ORGANIZER_API: API clients and /v1/organizer. WEBHOOKS: endpoints, deliveries and the
+ * dispatcher jobs (which additionally need EVENTS_WEBHOOK_SECRET_KEY; see webhook-signing.mjs).
+ */
+export const eventsKitOpsOn = () => eventsRegistrationOn() && on('EVENTS_KIT_OPS');
+export const eventsOrganizerApiOn = () => eventsRegistrationOn() && on('EVENTS_ORGANIZER_API');
+export const eventsWebhooksOn = () => eventsRegistrationOn() && on('EVENTS_WEBHOOKS');
+const gate = test => (_req, res, next) => (test() ? next() : res.status(404).json({ error: 'feature_disabled' }));
+export const requireEventsKitOps = gate(eventsKitOpsOn);
+export const requireEventsOrganizerApi = gate(eventsOrganizerApiOn);
+export const requireEventsWebhooks = gate(eventsWebhooksOn);
+
+/**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
  * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and
  * /admin/gym-owners/:id/personal-details answer 404 feature_disabled, and /trainer/register and

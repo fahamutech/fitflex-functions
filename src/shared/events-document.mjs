@@ -23,6 +23,8 @@ export const PUBLIC_STATUSES = Object.freeze(['published', 'registration_closed'
 export const DISTANCE_BUCKETS = Object.freeze(['5k', '10k', '21k', '42k', 'other']);
 export const PRICE_BUCKETS = Object.freeze(['free', 'under_20k', 'under_50k', 'any']);
 export const SORTS = Object.freeze(['soonest', 'price_low', 'newest']);
+/** S5 (D33): how often FitFlex pays the organizer for an event's sales; a label the later settlement slice reads. */
+export const PAYOUT_SCHEDULES = Object.freeze(['biweekly', 'monthly']);
 /** A ticket type with no limit is stored at the spec's maximum (the S1 column is NOT NULL and bounds the inventory CHECK). */
 export const UNLIMITED_CAPACITY = 100000;
 export const DEFAULT_CLOSING_SOON_HOURS = 72;
@@ -153,6 +155,8 @@ const PATCHABLE = {
   // S3 (§3.3, D20): which participant fields are collected and the duplicate rule — material (ORG-007).
   participantFields: parseParticipantFields,
   duplicatePolicy: v => (isStr(v) ? v : undefined),
+  // S5 (D33): kept as sent (null clears it); validateEvent judges the value. Locked after submission by the service.
+  payoutSchedule: v => (v === undefined ? undefined : v),
 };
 const BILINGUAL_FIELDS = ['description', 'accessibility', 'inclusions', 'terms'];
 
@@ -345,6 +349,10 @@ export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHost
       if (isInt(t.minPerOrder) && isInt(t.maxPerOrder) && t.maxPerOrder < t.minPerOrder) add(`${q}.maxPerOrder`, 'maxGteMin');
     });
   });
+
+  // S5 (D33): required at submit, not at create; an invalid value is refused wherever it is sent.
+  if (doc.payoutSchedule !== undefined && doc.payoutSchedule !== null && !PAYOUT_SCHEDULES.includes(doc.payoutSchedule)) add('payoutSchedule', 'invalid');
+  else if (full && (doc.payoutSchedule === undefined || doc.payoutSchedule === null)) add('payoutSchedule', 'required');
 
   // 5 Kit & collection points
   const points = Array.isArray(doc.collectionPoints) ? doc.collectionPoints : [];
@@ -671,6 +679,7 @@ export function organizerView(joined, { now, closingSoonHours, allowedActions = 
     participantFields: e.participantFields && typeof e.participantFields === 'object' ? { ...e.participantFields } : {},
     effectiveParticipantFields: view.participantFields,
     status: e.status, version: e.version, allowedActions,
+    payoutSchedule: e.payoutSchedule ?? null,
     submittedAt: iso(e.submittedAt),
     rejection: e.rejection ? { reason: e.rejection.reason ?? null, note: e.rejection.note ?? null, at: iso(e.rejection.at) } : null,
     changeLogCount,
@@ -681,5 +690,5 @@ export function organizerView(joined, { now, closingSoonHours, allowedActions = 
 export function rowView(joined, { now, closingSoonHours, allowedActions = [] } = {}) {
   const s = summaryView(joined, { now, closingSoonHours });
   const live = (joined.categories || []).filter(c => c.status !== 'inactive');
-  return { ...s, categoriesCount: live.length, allowedActions, submittedAt: iso(joined.event.submittedAt), publishedAt: iso(joined.event.publishedAt) };
+  return { ...s, categoriesCount: live.length, allowedActions, submittedAt: iso(joined.event.submittedAt), publishedAt: iso(joined.event.publishedAt), payoutSchedule: joined.event.payoutSchedule ?? null };
 }
