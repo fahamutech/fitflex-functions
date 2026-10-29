@@ -147,5 +147,19 @@ export function latestRaise(changes = []) {
   return best;
 }
 
+/**
+ * The reason that goes with effectiveStatus, worked out at read time (QA UAT D7): time moves a sale
+ * on before the lifecycle job writes it down, and the reason must not wait for the job either.
+ *   pending past expiresAt → 'start_passed' (expiresAt was its start) | 'not_reviewed_in_time'
+ *   approved past endsAt   → 'window_passed'
+ * Otherwise the stored statusReason. The job stores exactly this value.
+ */
+export function effectiveReason(s, now = new Date()) {
+  const eff = effectiveStatus(s, now);
+  if (s.status === 'pending_approval' && eff === 'expired') return ms(s.startsAt) <= ms(s.expiresAt) ? 'start_passed' : 'not_reviewed_in_time';
+  if (s.status === 'approved' && eff === 'ended') return 'window_passed';
+  return s.statusReason ?? null;
+}
+
 /** Two windows [a.startsAt, a.endsAt) and [b.startsAt, b.endsAt) overlap. */
 export const overlaps = (a, b) => ms(a.startsAt) < ms(b.endsAt) && ms(b.startsAt) < ms(a.endsAt);
