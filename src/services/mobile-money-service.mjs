@@ -1,7 +1,8 @@
 // Mobile-money payment of a payment request (Malipo by Tunzaa).
 //
-// A payment request is created as before (pass, upgrade, gym plan). "Pay now"
-// asks the member's phone to approve exactly that request's amount; when the
+// A payment request is created as before (pass, upgrade, gym plan; with
+// TUNZAA_TRAINER_PRODUCTS also trainer sessions and a trainer's gym pass). "Pay now"
+// asks the payer's phone to approve exactly that request's amount; when the
 // provider confirms, the request is approved through the SAME path an admin
 // uses (adminPaymentService.decide), so every product, including pass
 // upgrades, is settled by one piece of code.
@@ -21,15 +22,32 @@ import { randomUUID } from 'node:crypto';
 import { toMsisdn, maybeSent } from '../integrations/payments/tunzaa.mjs';
 import { productTypeOfPayment, PRODUCT_TYPES } from '../shared/payment-product.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
+import {
+  MOBILE_MONEY_PROVIDER, CLAIM_PLACEHOLDER, isClaimPlaceholder, claimAge, mobileMoneyInFlight,
+} from '../shared/mobile-money-claim.mjs';
 
-const PROVIDER = 'tunzaa';
+const PROVIDER = MOBILE_MONEY_PROVIDER;
 const MANUAL = 'admin_approved';
-/** Products paid this way for now: FitFlex Pass (incl. upgrades) and a gym's own plans. */
-const PAYABLE = new Set([PRODUCT_TYPES.FITFLEX_PASS, PRODUCT_TYPES.GYM_SUBSCRIPTION]);
+/** Products paid this way: FitFlex Pass (incl. upgrades) and a gym's own plans. */
+const BASE_PAYABLE = Object.freeze([PRODUCT_TYPES.FITFLEX_PASS, PRODUCT_TYPES.GYM_SUBSCRIPTION]);
+/**
+ * B6a (TUNZAA_TRAINER_PRODUCTS): trainer products too. SHOP_ORDER is never paid
+ * this way (marketplace D-9: manual only).
+ */
+const TRAINER_PAYABLE = Object.freeze([PRODUCT_TYPES.TRAINER_SERVICE, PRODUCT_TYPES.TRAINER_GYM_PASS]);
+/**
+ * Which caller role pays which product (B6a). A trainer pays only their own
+ * trainer gym pass; a member pays everything else that is payable, never a
+ * trainer pass (that is the trainer persona's purchase).
+ */
+const ROLE_PRODUCTS = Object.freeze({
+  member: Object.freeze([...BASE_PAYABLE, PRODUCT_TYPES.TRAINER_SERVICE]),
+  trainer: Object.freeze([PRODUCT_TYPES.TRAINER_GYM_PASS]),
+});
+/** Mobile money is in Tanzanian shillings only. */
+const CURRENCY = 'TZS';
 const ACTOR = 'tunzaa';
-const PLACEHOLDER = 'pending:';
-/** A claim whose call never came back is given up after this long. */
-const CLAIM_TTL_MS = 2 * 60_000;
+const PLACEHOLDER = CLAIM_PLACEHOLDER;
 /** At most this many prompts per member / per phone in the window. */
 const LIMITS = { member: 5, phone: 3, windowMs: 10 * 60_000 };
 
@@ -49,10 +67,17 @@ export function createMobileMoneyService({
   // A pass or upgrade request for a tier that is no longer sold is not sent
   // to the phone. Wired to settingsService.isTierSellable in bootstrap.
   tierSellable = null,
-  // (request) → null | { error, status, ... }: would approving this request be refused right now?
-  // Wired to the trainer booking check (409 group_slot_rebooked), so money is not taken for a
-  // booking payment that cannot be approved and would only sit in `held`.
-  approvable = async () => null,
+  // B6a: the TUNZAA_TRAINER_PRODUCTS flag (effective only with TUNZAA_PAYMENTS). Read on every call.
+  trainerProducts = () => false,
+  // B6a (B1 security review): (request) → null | { error, status, bookingIds } before a
+  // prompt goes out for a trainer booking group (trainerBookingService.checkGroupPayment).
+  // Not wired: trainer sessions are not payable this way (fail closed).
+  beforeBookingPayment = null,
+  // Marathon & Events S4 (EVENTS_PAYMENTS_TUNZAA; built dormant). Absent / disabled: EVENT_ORDER is not payable this way and
+  // every other branch is untouched. { enabled(), beforePrompt(request), afterPrompt(request, txn), onHeld(request, reason, detail), onFailed(request, remark) }
+  eventOrders = null,
+  // Callbacks already fully processed: { has(id) → bool, mark(id) } (WebhookSeen). Used for event requests only.
+  webhookSeen = null,
 }) {
   const fail = (error, status, extra = {}) => ({ error, status, ...extra });
   const audit = (action, target, before, after) => auditLog?.insertAsync?.({
@@ -71,10 +96,45 @@ export function createMobileMoneyService({
     return true;
   }
 
+  const isOn = () => Boolean(enabled() && client && canSettle());
+  const roleOf = (role) => (role === 'trainer' ? 'trainer' : 'member');
+
+  const eventsOn = () => Boolean(eventOrders?.enabled?.());
+
+  /** The products payable this way right now, whoever pays. */
+  function payable() {
+    const set = new Set(BASE_PAYABLE);
+    if (eventsOn()) set.add(PRODUCT_TYPES.EVENT_ORDER);
+    if (trainerProducts()) {
+      for (const p of TRAINER_PAYABLE) if (p !== PRODUCT_TYPES.TRAINER_SERVICE || beforeBookingPayment) set.add(p);
+    }
+    return set;
+  }
+
+  /** May this caller role pay this product this way? Without B6a only members reach here. */
+  const roleMayPay = (role, product) => {
+    // An event order is a member's purchase, never a trainer's or an organisation's.
+    if (product === PRODUCT_TYPES.EVENT_ORDER) return roleOf(role) === 'member';
+    return !trainerProducts() || ROLE_PRODUCTS[roleOf(role)].includes(product);
+  };
+
   /** What the app needs to know before showing "Pay now". */
   function options() {
-    const on = Boolean(enabled() && client && canSettle());
+    const on = isOn();
     return { enabled: on, provider: PROVIDER, environment: on ? client.environment : null };
+  }
+
+  /**
+   * B6a: the product kinds the caller may pay by mobile money now (empty when paying is off,
+   * or for any role but member / trainer).
+   */
+  function payableProducts(role) {
+    if (!isOn() || !['member', 'trainer'].includes(role)) return [];
+    if (role === 'trainer' && !trainerProducts()) return [];
+    const set = payable();
+    const list = (trainerProducts() ? ROLE_PRODUCTS[role] : BASE_PAYABLE).filter((p) => set.has(p));
+    // S4: members may also pay an event order while the Tunzaa event flag is effective.
+    return role === 'member' && eventsOn() ? [...list, PRODUCT_TYPES.EVENT_ORDER] : list;
   }
 
   async function productOf(request) {
@@ -82,11 +142,21 @@ export function createMobileMoneyService({
     return productTypeOfPayment(request, sub);
   }
 
-  const isPlaceholder = (ref) => typeof ref === 'string' && ref.startsWith(PLACEHOLDER);
-  const placeholderAge = (ref) => now() - Number(String(ref).slice(PLACEHOLDER.length) || 0);
+  const isPlaceholder = isClaimPlaceholder;
+  const placeholderAge = (ref) => claimAge(ref, now());
   /** A prompt is out, or a call to send one is under way and recent. */
-  const inFlight = (r) => r.provider === PROVIDER && Boolean(r.reference)
-    && (!isPlaceholder(r.reference) || placeholderAge(r.reference) < CLAIM_TTL_MS);
+  const inFlight = (r) => mobileMoneyInFlight(r, now());
+
+  /**
+   * Has this transaction already confirmed another approved payment? Checked on every
+   * settlement, whatever MONEY_SECOND_APPROVER / MANUAL_PAY_INSTRUCTIONS say (B6a review).
+   */
+  async function transactionUsedElsewhere(request, txn) {
+    const same = typeof paymentRequests.filterByColumnAsync === 'function'
+      ? await paymentRequests.filterByColumnAsync('reference', txn)
+      : await paymentRequests.filterAsync((p) => p.reference === txn);
+    return same.some((p) => p.id !== request.id && p.status === 'approved');
+  }
 
   /** The member's own request, or an error. */
   async function ownRequest(memberId, id) {
@@ -100,30 +170,41 @@ export function createMobileMoneyService({
     id: r.id, status: r.status, amountTzs: r.amountTzs, provider: r.provider, reference: r.reference ?? null,
   });
 
-  /** Ask the member's phone to approve the request's amount. */
-  async function pay({ memberId, paymentRequestId, phone }) {
+  /**
+   * Ask the payer's phone to approve the request's amount. `role` is the caller's
+   * session role: 'member' (default) or, with B6a, 'trainer' for their own trainer pass.
+   */
+  async function pay({ memberId, paymentRequestId, phone, role = 'member' }) {
     if (!enabled() || !client || !canSettle()) return fail('feature_disabled', 404);
+    if (roleOf(role) === 'trainer' && !trainerProducts()) return fail('feature_disabled', 404);
     const own = await ownRequest(memberId, paymentRequestId);
     if (own.error) return own.error;
     const { request } = own;
     if (request.status !== 'pending') return fail('payment_not_pending', 409);
     // The member says they paid the Lipa Namba already (slice A3): a prompt now would charge twice.
     if (request.memberReference) return fail('manual_payment_submitted', 409);
-    // A booking group with a rejected session whose slot someone else has booked since cannot be approved
-    // (security review of #231): refuse before the phone is asked for money that would only be held.
-    const refusal = await approvable(request);
-    if (refusal?.error) {
-      const { error, status, ...extra } = refusal;
-      return fail(error, status || 409, extra);
-    }
     const product = await productOf(request);
-    if (!PAYABLE.has(product)) return fail('not_payable_this_way', 409);
+    if (!payable().has(product)) return fail('not_payable_this_way', 409);
+    // B6a: a trainer pays only their own trainer pass; a member never pays a trainer pass.
+    if (!roleMayPay(role, product)) return fail('not_payable_by_role', 403, { product });
+    if (request.currency && String(request.currency).toUpperCase() !== CURRENCY) return fail('unsupported_currency', 409);
+    // S4: an event order is prompted only while its hold stands, the event is open and every amount agrees (the order's own).
+    if (product === PRODUCT_TYPES.EVENT_ORDER) {
+      const problem = await eventOrders.beforePrompt(request);
+      if (problem?.error) return fail(problem.error, problem.status || 409, problem.expectedTzs != null ? { expectedTzs: problem.expectedTzs } : {});
+    }
     // Owner decision 2026-10-19: a tier not configured in Settings is not sold,
     // even on a request raised before it was taken off (fail closed).
     if (product === PRODUCT_TYPES.FITFLEX_PASS && tierSellable && !tierSellable(request.tier)) {
       return fail('tier_not_available', 409, { tier: request.tier ?? null });
     }
     if (!(request.amountTzs > 0)) return fail('invalid_amount', 409);
+    // B1 security review: a rejected session whose slot was booked by someone else since
+    // cannot come back, so no money is asked for it (an approval would be refused anyway).
+    if (product === PRODUCT_TYPES.TRAINER_SERVICE) {
+      const problem = await beforeBookingPayment(request);
+      if (problem?.error) return fail(problem.error, problem.status || 409, problem.bookingIds ? { bookingIds: problem.bookingIds } : {});
+    }
     const msisdn = toMsisdn(phone);
     if (!msisdn) return fail('invalid_phone', 400);
 
@@ -167,6 +248,10 @@ export function createMobileMoneyService({
     try {
       const updated = await paymentRequests.updateByIdAsync(request.id, { provider: PROVIDER, reference: transactionId });
       await audit('payment_mobile_money_requested', request.id, null, { transactionId, amountTzs: request.amountTzs });
+      // S4: the event payment becomes pending with the provider's transaction, and the hold is extended a little.
+      if (request.eventOrderId) {
+        try { await eventOrders.afterPrompt(request, transactionId); } catch (err) { await audit('payment_mobile_money_unrecorded', request.id, null, { transactionId, error: String(err?.message || err) }); }
+      }
       return { status: 202, state: 'in_progress', paymentRequest: view(updated) };
     } catch (err) {
       // The prompt is out but we could not record it: keep the claim; the callback settles it.
@@ -197,6 +282,7 @@ export function createMobileMoneyService({
           const remote = await client.checkStatus(late);
           if (remote.status === 'COMPLETED') {
             await audit('payment_mobile_money_orphaned', request.id, { status: request.status }, { transactionId: late, amountTzs: remote.amountTzs });
+            if (request.eventOrderId) await eventOrders.onHeld(request, 'request_closed', { transactionId: late });
           }
         } catch { /* the next callback retry looks again */ }
       }
@@ -219,7 +305,20 @@ export function createMobileMoneyService({
       // Money received must be what was asked: an amount we cannot read is not good enough.
       if (remote.amountTzs == null || remote.amountTzs !== Number(request.amountTzs)) {
         await audit('payment_mobile_money_amount_mismatch', request.id, { amountTzs: request.amountTzs }, { received: remote.amountTzs, transactionId: txn });
+        if (request.eventOrderId) await eventOrders.onHeld(request, 'amount_mismatch', { transactionId: txn });
         return { state: 'held', reason: 'amount_mismatch', paymentRequest: view(request) };
+      }
+      // The request records the prompt it is waiting on: money confirmed for a different
+      // transaction is not this request's (B6a review). Staff look; nothing is approved.
+      if (request.provider === PROVIDER && request.reference && !isPlaceholder(request.reference) && request.reference !== txn) {
+        await audit('payment_mobile_money_held', request.id, { reference: request.reference }, { error: 'transaction_mismatch', transactionId: txn, amountTzs: remote.amountTzs });
+        if (request.eventOrderId) await eventOrders.onHeld(request, 'transaction_mismatch', { transactionId: txn });
+        return { state: 'held', reason: 'transaction_mismatch', paymentRequest: view(request) };
+      }
+      // One transaction confirms one payment, flags or not.
+      if (await transactionUsedElsewhere(request, txn)) {
+        await audit('payment_mobile_money_held', request.id, null, { error: 'reference_already_used', transactionId: txn });
+        return { state: 'held', reason: 'reference_already_used', paymentRequest: view(request) };
       }
       if (!canSettle()) {
         await audit('payment_mobile_money_held', request.id, null, { error: 'sandbox_not_settled', transactionId: txn });
@@ -229,12 +328,15 @@ export function createMobileMoneyService({
         id: request.id, decision: 'approve', reference: txn, actorId: ACTOR, amountTzs: request.amountTzs,
         // The provider confirmed the money: that is the verification (MONEY_SECOND_APPROVER does not apply).
         automated: true,
+        // Event payments keep an allowlist-redacted copy of what the provider said (never the signature or a phone number).
+        ...(request.eventOrderId ? { providerPayload: remote.raw } : {}),
       });
       if (out.error === 'already_decided') {
         const latest = await paymentRequests.findByIdAsync(request.id);
         if (latest?.status !== 'approved') {
           // Money arrived for a request that was cancelled or rejected meanwhile: staff must look.
           await audit('payment_mobile_money_orphaned', request.id, { status: latest?.status }, { transactionId: txn, amountTzs: remote.amountTzs });
+          if (request.eventOrderId) await eventOrders.onHeld(request, 'request_closed', { transactionId: txn });
           return { state: 'held', reason: 'request_closed', paymentRequest: view(latest ?? request) };
         }
         return { state: 'completed', paymentRequest: view(latest) };
@@ -242,23 +344,43 @@ export function createMobileMoneyService({
       if (out.error) {
         // e.g. the plan being upgraded ended meanwhile: money is in, staff must look.
         await audit('payment_mobile_money_held', request.id, null, { error: out.error, transactionId: txn });
+        if (request.eventOrderId) await eventOrders.onHeld(request, out.error, { transactionId: txn });
         return { state: 'held', reason: out.error, paymentRequest: view(request) };
       }
       return { state: 'completed', paymentRequest: view(out.paymentRequest) };
     }
     if (remote.status === 'FAILED') {
       // Only an attempt we still hold is released; a late FAILED for an old one changes nothing.
-      if (request.reference === txn) await release(request, remote.remark || 'failed');
+      if (request.reference === txn) {
+        await release(request, remote.remark || 'failed');
+        // S4: the event attempt is over (EventPayment failed, request cancelled); the hold keeps running and the member can retry.
+        if (request.eventOrderId) await eventOrders.onFailed(request, remote.remark || null);
+      }
       return { state: 'failed', paymentRequest: view({ ...request, provider: MANUAL, reference: null }), remark: remote.remark };
     }
     return { state: 'in_progress', paymentRequest: view(request) };
   }
 
-  /** The member's app asking "has it gone through?" while the prompt is on their phone. */
-  async function refresh({ memberId, paymentRequestId }) {
+  /** The payer's app asking "has it gone through?" while the prompt is on their phone. */
+  async function refresh({ memberId, paymentRequestId, role = 'member' }) {
+    if (roleOf(role) === 'trainer' && !trainerProducts()) {
+      if (!client) return fail('forbidden', 403, { requiredRoles: ['member'] });
+      // B6a review: TUNZAA_TRAINER_PRODUCTS turned off while the trainer's own pass prompt is
+      // out — they may still ask how it went (not start a new one). Anything else answers as
+      // the member-only route did before (403 forbidden).
+      const request = await paymentRequests.findByIdAsync(paymentRequestId);
+      const ownLive = request && request.memberId === memberId && request.status === 'pending'
+        && request.provider === PROVIDER && Boolean(request.reference)
+        && (await productOf(request)) === PRODUCT_TYPES.TRAINER_GYM_PASS;
+      if (!ownLive) return fail('forbidden', 403, { requiredRoles: ['member'] });
+      const { state, reason, paymentRequest, remark } = await settle(request);
+      return { status: 200, state, reason, paymentRequest, remark };
+    }
     if (!client) return fail('feature_disabled', 404);
     const own = await ownRequest(memberId, paymentRequestId);
     if (own.error) return own.error;
+    // B6a: the same role rule as paying (a trainer looks at their own trainer pass only).
+    if (trainerProducts() && !roleMayPay(role, await productOf(own.request))) return fail('not_payable_by_role', 403);
     const { state, reason, paymentRequest, remark } = await settle(own.request);
     return { status: 200, state, reason, paymentRequest, remark };
   }
@@ -276,9 +398,23 @@ export function createMobileMoneyService({
     if (!requestId || !transactionId) return fail('invalid_payload', 400);
     const request = await paymentRequests.findByIdAsync(requestId);
     if (!request) return { status: 200, ok: true, ignored: 'unknown_reference' };
+    // S4 (event requests only): a callback that was fully processed once is a no-op the second time, without calling Tunzaa.
+    // It is recorded AFTER processing, so a crash midway does not swallow Tunzaa's retry. The state machine, the database's
+    // one-success-per-order index and the idempotent confirmation are the guarantees; this is the belt.
+    const seenKey = request.eventOrderId && webhookSeen ? `tunzaa:${transactionId}:${String(payload?.status ?? '').toUpperCase()}` : null;
+    if (seenKey && await webhookSeen.has(seenKey)) return { status: 200, ok: true, duplicate: true };
     const out = await settle(request, { transactionId });
+    if (seenKey && ['completed', 'failed'].includes(out.state)) await webhookSeen.mark(seenKey);
     return { status: 200, ok: true, state: out.state };
   }
 
-  return { options, pay, refresh, handleCallback };
+  /** The sweep (eventPaymentReconciliation): settle one request by id as the refresh route does. */
+  async function settleById(paymentRequestId) {
+    if (!client) return { state: 'none' };
+    const request = await paymentRequests.findByIdAsync(paymentRequestId);
+    if (!request) return { state: 'none' };
+    return settle(request);
+  }
+
+  return { options, payableProducts, pay, refresh, handleCallback, settleById };
 }

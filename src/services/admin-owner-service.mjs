@@ -4,8 +4,13 @@
 // fetches the full gym (with image) on demand via GET /gyms/:id when needed.
 import { randomUUID } from 'node:crypto';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
+import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 
-export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService }) {
+const gymIdsOf = row => (row?.gymIds || (row?.gymId ? [row.gymId] : []));
+
+// onOwnerRemoved(prior): after an admin deletes an owner row (partner DOB review L3: the Person's declared
+// date of birth and gender go once it has no personas left). Never fails the delete.
+export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService, gymPayoutOwner = null, onOwnerRemoved = async () => {} }) {
   /** Strip internal/sensitive fields from owner records for list responses. */
   function slimOwnerRow(row) {
     if (!row) return row;
@@ -80,20 +85,29 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'gym_owner_updated' : 'gym_owner_created',
-      target: id, before: prior ?? null, after: row
+      target: id, before: userAuditSnapshot(prior), after: userAuditSnapshot(row)
     });
-    return { created: !prior, owner: hydrateGymOwner(row) };
+    // Gym payout owner: taken off a gym they were the payout owner of → cleared
+    // (audited). A gym that now has 2+ owners and none named is reported, so
+    // the admin knows its payouts wait for a payout owner (GYM_PAYOUT_OWNER on).
+    const leftGyms = gymIdsOf(prior).filter(g => !row.gymIds.includes(g));
+    if (gymPayoutOwner && leftGyms.length) await gymPayoutOwner.clearForRemovedOwner({ ownerId: id, gymIds: leftGyms, actorId, reason: 'owner_removed_from_gym' });
+    const owner = hydrateGymOwner(row);
+    const needing = gymPayoutOwner ? await gymPayoutOwner.gymsNeedingPayoutOwner(row.gymIds) : [];
+    return { created: !prior, owner: needing.length ? { ...owner, payoutOwnerRequiredGymIds: needing } : owner };
   }
 
   async function remove({ id, actorId }) {
     const prior = await users.findAsync(u => u.id === id && u.userType === 'gym_operator');
     if (!prior) return { error: 'not_found', status: 404 };
     if (prior.gymId && await checkins.findAsync(c => c.gymId === prior.gymId)) return { error: 'gym_owner_has_checkin_activity', status: 409 };
+    if (gymPayoutOwner) await gymPayoutOwner.clearForRemovedOwner({ ownerId: prior.id, gymIds: gymIdsOf(prior), actorId, reason: 'owner_deleted' });
     const removed = await users.removeAsync(u => u.id === prior.id);
+    try { await onOwnerRemoved(prior); } catch (err) { console.warn('[admin-owner-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_owner_deleted',
-      target: prior.id, before: prior, after: null
+      target: prior.id, before: userAuditSnapshot(prior), after: null
     });
     return { owner: removed };
   }

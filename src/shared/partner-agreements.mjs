@@ -181,6 +181,9 @@ const PARTNER_TERMS = { gym_owner: GYM_OWNER_TERMS, trainer: TRAINER_TERMS, vend
 
 /** The agreements a partner type accepts in the app, in the order they are shown. */
 export function requiredAgreements(partnerType) {
+  // Events · S2: no organizer partner terms exist yet (legal text pending Tanzanian counsel); the KYC
+  // consent is asked for now and the terms item joins the checklist when the text lands.
+  if (partnerType === 'event_organizer') return [{ agreementType: 'kyc_consent', checklistKey: 'agreements.kyc_consent', text: KYC_CONSENT }];
   const terms = PARTNER_TERMS[partnerType];
   if (!terms) return []; // corporate partners sign a contract offline
   return [

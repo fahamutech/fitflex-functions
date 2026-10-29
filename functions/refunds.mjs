@@ -4,7 +4,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { refundService, trainerBookingService, shopService } from '../src/bootstrap/services.mjs';
+import { refundService, trainerBookingService, shopService, eventsRefundsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -20,14 +20,14 @@ const send = (res, result, ok = 200) => {
 
 export const memberCancelTrainerBooking = {
   created, method: 'post', path: '/me/trainer-bookings/:id/cancel',
-  description: 'Member: cancel one trainer session. Unpaid: any time before it starts. Paid: up to 24 hours before, refunded in full (409 cancellation_window_passed after that). → { booking, refund }',
+  description: 'Member: cancel one trainer session. Unpaid: any time before it starts. Paid: up to 24 hours before, refunded in full (409 cancellation_window_passed after that). 409 payment_in_progress while a mobile-money prompt is out for the session\'s payment. → { booking, refund }',
   onGuard: routeGuard('post', requireAuth('member')),
   onRequest: async (req, res) => send(res, await trainerBookingService.memberCancelBooking({ memberId: req.user.sub, bookingId: req.params.id })),
 };
 
 export const trainerCancelBooking = {
   created, method: 'post', path: '/trainer/bookings/:id/cancel',
-  description: 'Trainer: cancel a session any time before it starts. A paid session is refunded to the member in full. → { booking, refund }',
+  description: 'Trainer: cancel a session any time before it starts. A paid session is refunded to the member in full. 409 payment_in_progress while a mobile-money prompt is out for the session\'s payment. → { booking, refund }',
   onGuard: routeGuard('post', requireAuth('trainer')),
   onRequest: async (req, res) => send(res, await trainerBookingService.trainerCancelBooking({ userId: req.user.sub, bookingId: req.params.id })),
 };
@@ -59,14 +59,14 @@ export const requestRefund = {
 
 export const adminListRefunds = {
   created, method: 'get', path: '/admin/refunds',
-  description: 'Admin: refunds with who they are for. ?status=requested|approved|paid|rejected. Rows carry staff names requestedByName, decidedByName, paidByName (portal/admin user display name, else email; null for members, policy or unknown). With MONEY_SECOND_APPROVER on each row also has secondApproverRequired, approvalStage, approveNotBy, payNotBy.',
+  description: 'Admin: refunds with who they are for. ?status=requested|approved|paid|rejected. Event refunds (kind event_order) also carry event { id, title }, orderReference, scope (registration | order | event_cancelled | unfulfilled_payment), batchId, policySnapshot, payerPhone, organizationName. Rows carry staff names requestedByName, decidedByName, paidByName (portal/admin user display name, else email; null for members, policy or unknown). With MONEY_SECOND_APPROVER on each row also has secondApproverRequired, approvalStage, approveNotBy, payNotBy.',
   onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('payments')]),
   onRequest: async (req, res) => send(res, await refundService.adminList({ status: req.query?.status || undefined })),
 };
 
 export const adminRaiseRefund = {
   created, method: 'post', path: '/admin/refunds',
-  description: 'Admin: raise a refund for a confirmed pass or plan payment (approved at once; with MONEY_SECOND_APPROVER on it is left requested for another admin to approve). Body { paymentRequestId, amountTzs?, reasonCode?, note? }.',
+  description: 'Admin: raise a refund for a confirmed pass or plan payment (approved at once; with MONEY_SECOND_APPROVER on it is left requested for another admin to approve). Body { paymentRequestId, amountTzs?, reasonCode?, note? }. S4: for an APPROVED event payment whose order is not confirmed (money in, place not possible) send { eventPaymentId, amountTzs? (≤ the payment), reasonCode: "payment_error", note } instead → kind event_order, scope unfulfilled_payment (409 payment_not_unfulfilled when the order is confirmed: cancel it instead).',
   onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments')]),
   onRequest: async (req, res) => send(res, await refundService.adminRaise({ body: req.body || {}, actorId: req.user.sub }), 201),
 };
@@ -83,4 +83,20 @@ export const adminMarkRefundPaid = {
   description: 'Admin: record that an approved refund was sent. Body { paymentReference, paidTo? }. With MONEY_SECOND_APPROVER on, the admin who approved it cannot mark it paid (403 cannot_pay_own_approval), and a refund approved by policy that an admin started (cancelling a paid session or order, re-raising a shop refund) cannot be marked paid by that admin (403 cannot_pay_own_request).',
   onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments')]),
   onRequest: async (req, res) => send(res, await refundService.markPaid({ id: req.params.id, body: req.body || {}, actorId: req.user.sub })),
+};
+
+// ── S4: event refund batches (one row at a time through the existing rules) ─────────────────────────────
+
+export const adminDecideRefundBatch = {
+  created, method: 'post', path: '/admin/refunds/batch-decision',
+  description: 'Admin (scope payments): approve every REQUESTED refund of an event-cancellation batch. Body { batchId, decision: "approve", expectedTotalTzs, expectedCount } (409 batch_changed { totalTzs, count } when the batch moved). Each row applies the same rules as POST /admin/refunds/:id/decision: with MONEY_SECOND_APPROVER on, the admin who started the batch gets 403 cannot_approve_own_request for every row. → { approved, failed, results [{ refundId, ok, error? }] }. Rejecting stays per refund.',
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments')]),
+  onRequest: async (req, res) => send(res, await eventsRefundsService.batchDecision({ batchId: req.body?.batchId, decision: req.body?.decision, expectedTotalTzs: req.body?.expectedTotalTzs, expectedCount: req.body?.expectedCount, actorId: req.user.sub })),
+};
+
+export const adminMarkRefundBatchPaid = {
+  created, method: 'post', path: '/admin/refunds/batch-paid',
+  description: 'Admin (scope payments): record payouts row by row. Body { batchId, items: [{ refundId, paymentReference, paidTo? }] } (≤ 200). Each item follows the existing mark-paid rules (cannot_pay_own_approval | cannot_pay_own_request under MONEY_SECOND_APPROVER) → { paid, failed, results [{ refundId, ok, error? }] }; partial success is reported per item, never silent. It only RECORDS payouts: money still leaves by hand.',
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments')]),
+  onRequest: async (req, res) => send(res, await eventsRefundsService.batchPaid({ batchId: req.body?.batchId, items: req.body?.items, actorId: req.user.sub })),
 };

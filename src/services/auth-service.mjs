@@ -6,6 +6,7 @@ import { buildDevIdentity, devMarketplaceProduct, DEV_GYM_ID, DEV_OWNER_GYM_ID }
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { identityFlag, recordFirebaseEvidenceOn } from '../shared/feature-flags.mjs';
+import { signInPhotoOrNull } from '../shared/media-src.mjs';
 
 const configuredAdminEmails = new Set(
   (process.env.FITFLEX_ADMIN_EMAILS || 'mama27j@gmail.com')
@@ -26,6 +27,9 @@ export function normalizeRequestedRole(role) {
   if (role === 'vendor') return 'vendor';
   if (role === 'vendor_staff') return 'vendor_staff';
   if (role === 'corporate_hr') return 'corporate_hr';
+  // Marathon & running events · S2 (D3): the organizer persona and its staff, the vendor pattern mirrored.
+  if (role === 'event_organizer') return 'event_organizer';
+  if (role === 'organizer_staff') return 'organizer_staff';
   return 'member';
 }
 
@@ -67,6 +71,9 @@ export function createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink = null, auditLog = null, orgMemberships = null,
+  // Partner DOB security review M1: ({ user }) → null | { error: 'partner_under_18', status: 400 }.
+  // A person whose stored date of birth is under 18 may not add a trainer or gym-owner role.
+  partnerAgeGuard = async () => null,
 }) {
   /**
    * A trainer is "onboarded" once they have a trainer profile. Since 3 Oct 2026
@@ -115,6 +122,9 @@ export function createAuthService({
       vendorRole: user.vendorRole,
       vendorPermissions: user.vendorPermissions || [],
       corporateId: user.corporateId,
+      // Events · S2: the organizer copy (authoritative role is EventOrganizerStaff, read by events-authz).
+      organizerId: user.organizerId,
+      organizerRole: user.organizerRole,
       // Identity V2 · I2 (C3a): the Person rides along; nothing reads it as `sub`.
       ...(identityFlag('V2_PERSONAS') && user.personId ? { pid: user.personId, ver: 2 } : {}),
       // A portal admin still on the start password another admin chose: every
@@ -270,15 +280,35 @@ export function createAuthService({
     const emailOnlyMatches = candidates.filter(u => u.firebaseUid !== fb.uid);
     const requestedUserType = isAdminEmail ? 'admin' : selfRole;
 
-    if (!emailVerified && emailOnlyMatches.length) {
-      // Would the old email match have picked a row this uid does not own?
+    // Security fix (20 Oct 2026): a row reached only through its User.email,
+    // which anyone can type in, is someone else's unless it is genuinely
+    // unclaimed (an organisation-made profile nobody has signed into: O7) or
+    // its Person already holds this email verified. Every other email-only
+    // row is ignored, even when Firebase verified the email. The configured
+    // admin email keeps reaching admin rows. Without identity tables, none.
+    const trust = identityLink && emailOnlyMatches.length
+      ? await identityLink.emailOnlyTrust({ rows: emailOnlyMatches, email: fbEmail, uid: fb.uid })
+      : new Map();
+    const unclaimedEmailOnly = emailOnlyMatches.filter(u => trust.get(u.id)?.unclaimed);
+    const trustedEmailOnly = new Set(emailOnlyMatches
+      .filter(u => trust.get(u.id)?.trusted || (isAdminEmail && u.userType === 'admin'))
+      .map(u => u.id));
+
+    if (!emailVerified && unclaimedEmailOnly.length) {
+      // Would an email match pick an unclaimed row this uid does not own?
       const claimsEmailOnlyRow = requestedUserType
         ? !uidMatches.some(u => u.userType === requestedUserType)
-          && emailOnlyMatches.some(u => u.userType === requestedUserType)
+          && unclaimedEmailOnly.some(u => u.userType === requestedUserType)
         : uidMatches.length === 0;
       if (claimsEmailOnlyRow) return { error: 'email_verification_required', status: 409 };
     }
-    const identityMatches = emailVerified ? candidates : uidMatches;
+    const identityMatches = emailVerified
+      ? candidates.filter(u => u.firebaseUid === fb.uid || trustedEmailOnly.has(u.id))
+      : uidMatches;
+    // Rows holding this email that this sign-in ignores: a new or updated row
+    // must not collide with them on the (email, userType) index.
+    const ignoredEmailRows = candidates.filter(u => u.firebaseUid !== fb.uid
+      && !identityMatches.includes(u) && sameEmail(u.email, fbEmail));
     const v2Client = client === IDENTITY_V2_CLIENT && identityFlag('V2_PERSONAS') && Boolean(identityLink);
     const operationalMatches = identityMatches.filter(u => u.userType !== 'member');
     let user = requestedUserType
@@ -304,11 +334,15 @@ export function createAuthService({
       if (firebaseSignInEnded(user, fb)) return { error: 'session_ended', status: 401 };
       // Existing user: NEVER change their stored userType via this endpoint.
       // Only exception: configured admin email always stays admin.
+      // A row with no email takes this one, unless another row of its role
+      // already holds it (the unique index would refuse the whole sign-in).
+      const emailHeldElsewhere = ignoredEmailRows.some(u => u.userType === user.userType && u.id !== user.id);
       const patch = {
         firebaseUid: user.firebaseUid || fb.uid,
-        email: user.email || fbEmail,
+        email: user.email || (emailHeldElsewhere ? null : fbEmail),
         displayName: fb.name || user.displayName,
-        photoUrl: fb.picture || user.photoUrl,
+        // Sign-in provider photo: only from an allowed host, else dropped (security fix 2026-10-28).
+        photoUrl: signInPhotoOrNull(fb.picture) || user.photoUrl,
         accountStatus: user.accountStatus || 'active',
         onboardingCompleted: user.onboardingCompleted || false,
         approvalStatus: user.approvalStatus || 'approved',
@@ -324,19 +358,34 @@ export function createAuthService({
       if (newUserRole === 'admin' && !isAdminEmail) return { error: 'admin_self_registration_not_allowed', status: 403 };
       // Gym staff (receptionists etc.) must be pre-created by their gym owner.
       if (newUserRole === 'gym_staff') return { error: 'gym_staff_self_registration_not_allowed', status: 403 };
+      // Events · S2: an organizer persona comes from POST /me/organizer (under the caller's Person);
+      // organizer staff only ever arrive through a staff invitation.
+      if (newUserRole === 'event_organizer' || newUserRole === 'organizer_staff') return { error: 'organizer_self_registration_not_allowed', status: 403 };
       const row = {
         id: `usr_${randomUUID().slice(0, 8)}`,
         firebaseUid: fb.uid,
         email: fbEmail,
         displayName: fb.name,
-        photoUrl: fb.picture,
+        photoUrl: signInPhotoOrNull(fb.picture),
         userType: isAdminEmail ? 'admin' : newUserRole,
         approvalStatus: isAdminEmail ? 'approved' : approvalStatusForRole(newUserRole),
         accountStatus: 'active',
         onboardingCompleted: false,
         createdAt: new Date().toISOString()
       };
-      user = await users.upsertAsync(u => u.id === row.id, row);
+      // Other rows of this role holding the email, which this sign-in ignored.
+      // They are never changed (D-5 as revised 22 Oct 2026): the new row goes
+      // in without the email, so the (email, userType) index can't refuse it.
+      const holders = fbEmail ? ignoredEmailRows.filter(u => u.userType === row.userType) : [];
+      user = await users.upsertAsync(u => u.id === row.id, holders.length ? { ...row, email: null } : row);
+      if (holders.length && emailVerified && identityLink) {
+        // Recorded for review only; never blocks the sign-in.
+        try {
+          await identityLink.recordEmailCollision({ newUserId: user.id, email: fbEmail, heldUserIds: holders.map(u => u.id) });
+        } catch (err) {
+          console.warn('[auth] email collision not recorded:', err?.message);
+        }
+      }
     }
 
     // Identity V2 · I2: link this person's personas on verified evidence only.
@@ -562,6 +611,10 @@ export function createAuthService({
 
     const existing = (await identityLink.personasOf(caller.personId)).find(p => p.userType === type);
     if (existing) return { created: false, persona: existing, ...(await personaPayload(caller)) };
+    if (type === 'trainer' || type === 'gym_operator') {
+      const refused = await partnerAgeGuard({ user: caller });
+      if (refused) return refused;
+    }
 
     const result = await identityLink.createPersona({
       person, source: caller, userType: type, approvalStatus: approvalStatusForRole(type),

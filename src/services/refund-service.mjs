@@ -16,16 +16,17 @@ import { formatTsh } from '../shared/money-display.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
 import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
+import { refundView } from '../shared/events-money-views.mjs';
 import { staffNameLookup } from '../shared/staff-names.mjs';
 
-export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order'];
+export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order', 'event_order'];
 export const REFUND_STATUSES = ['requested', 'approved', 'paid', 'rejected'];
 /** Reasons a member may give when asking for a pass or plan refund. */
 export const MEMBER_REASONS = ['charged_twice', 'not_activated', 'other'];
 const REASONS = new Set([
   ...MEMBER_REASONS, 'member_cancelled', 'trainer_cancelled', 'vendor_cancelled', 'cancelled_by_fitflex', 'payment_error', 'sponsor_paid',
 ]);
-const SOURCE_FIELD = { subscription: 'paymentRequestId', trainer_booking: 'bookingId', shop_order: 'orderId' };
+const SOURCE_FIELD = { subscription: 'paymentRequestId', trainer_booking: 'bookingId', shop_order: 'orderId', event_order: 'eventOrderId' };
 const fail = (error, status = 400, extra = {}) => ({ error, status, ...extra });
 const nowIso = () => new Date().toISOString();
 const text = (v, max = 500) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
@@ -34,12 +35,26 @@ export function createRefundService({
   refunds, paymentRequests, subscriptions, users, auditLog,
   notify = async () => {},          // (userId, { type, title, body, data })
   onPaid = async () => {},          // (refund) → e.g. mark the order refunded
+  // S4 (kind 'event_order'; all default to no-ops so the other kinds are untouched):
+  onApproved = async () => {},      // (refund) → a manual-review request cancels the places when it is approved
+  beforePaid = async () => null,    // (refund) → null | { error, status }: a manual-review refund is not paid before its places are cancelled
+  onRejected = async () => {},      // (refund) → the places the refund covered are free again
+  tellEvent = null,                 // (refund, 'requested' | 'requested_by_fitflex' | 'approved' | 'rejected' | 'paid', { note, reference }) → bilingual notice
+  enrichRows = async () => new Map(), // (rows) → Map<refundId, { event, orderReference, scope, batchId, policySnapshot, payerPhone, organizationName }>
+  raiseForEventPayment = null,      // ({ body, actorId, secondApprover }) → the unfulfilled-payment refund of an event payment
   // A1: two admins on refunds (MONEY_SECOND_APPROVER). Off: unchanged.
   secondApprover = moneySecondApproverOn,
 }) {
   const money = formatTsh;
 
+  const EVENT_TELL = { refund_requested: 'requested', refund_preparing: 'requested_by_fitflex', refund_approved: 'approved', refund_rejected: 'rejected', refund_paid: 'paid' };
+
   async function tell(refund, type, title, body) {
+    // Event refunds are told bilingually by the events refund service; the other kinds keep their English push.
+    if (refund.kind === 'event_order' && tellEvent) {
+      try { await tellEvent(refund, EVENT_TELL[type] ?? 'requested', { note: type === 'refund_rejected' ? body : null, noteSw: type === 'refund_rejected' ? (refund.decisionNoteSw ?? null) : null, reference: refund.paymentReference ?? null }); } catch { /* a notification never blocks a refund */ }
+      return;
+    }
     try {
       await notify(refund.memberId, { id: `ntf_${type}_${refund.id}`, type, title, body, data: { refundId: refund.id, kind: refund.kind } });
     } catch { /* a notification never blocks a refund */ }
@@ -130,6 +145,8 @@ export function createRefundService({
    * once, unless MONEY_SECOND_APPROVER is on: then it waits for another admin.
    */
   async function adminRaise({ body = {}, actorId }) {
+    // S4: money that arrived for an event order whose places are not possible (kind event_order, unfulfilled payment only).
+    if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: secondApprover() });
     const request = body.paymentRequestId ? await paymentRequests.findByIdAsync(body.paymentRequestId) : null;
     if (!request) return fail('payment_not_found', 404);
     if (!request.subscriptionId) return fail('cancel_instead', 409);
@@ -156,6 +173,7 @@ export function createRefundService({
       return fail('cannot_approve_own_request', 403);
     }
     const note = text(body.note);
+    const noteSw = text(body.noteSw, 500);
     if (body.decision === 'reject' && !note) return fail('note_required');
     let amountTzs = prior.amountTzs;
     if (body.decision === 'approve' && body.amountTzs != null) {
@@ -166,7 +184,7 @@ export function createRefundService({
     // Only while it is still waiting: two staff members deciding at once cannot both succeed.
     const refund = await updateIf(refunds, id, { status: 'requested' }, {
       status: body.decision === 'approve' ? 'approved' : 'rejected', amountTzs,
-      decidedBy: actorId, decidedAt: at, decisionNote: note, updatedAt: at,
+      decidedBy: actorId, decidedAt: at, decisionNote: note, ...(noteSw ? { decisionNoteSw: noteSw } : {}), updatedAt: at,
     });
     if (!refund) return fail('already_decided', 409);
     // A pass or plan refunded in full stops giving access, when the reviewer says so.
@@ -174,6 +192,14 @@ export function createRefundService({
       await subscriptions.updateByIdAsync(refund.subscriptionId, { expiresAt: at, renewsAt: at });
     }
     await audit(`refund_${refund.status}`, actorId, prior, refund);
+    try {
+      if (refund.status === 'approved') await onApproved(refund);
+      else await onRejected(refund);
+    } catch (err) {
+      // The decision is recorded; the places were not updated. Say so where staff will find it (the sweep re-applies paid refunds).
+      console.error('[refunds] decided refund not applied to its source:', refund.id, err?.message);
+      try { await audit('refund_decided_source_not_updated', actorId, null, { id: refund.id, kind: refund.kind, error: String(err?.message || err).slice(0, 300) }); } catch { /* logged above */ }
+    }
     if (refund.status === 'approved') {
       await tell(refund, 'refund_approved', 'Refund approved', `Your refund of ${money(refund.amountTzs)} is approved. FitFlex will send it to the account you paid from.`);
     } else {
@@ -216,6 +242,8 @@ export function createRefundService({
     }
     const reference = text(body.paymentReference, 120);
     if (!reference) return fail('payment_reference_required');
+    const blocked = await beforePaid(prior);
+    if (blocked?.error) return fail(blocked.error, blocked.status || 409);
     const at = nowIso();
     // Only an approved refund that nobody has paid yet: a double click or two staff members record one payment.
     const refund = await updateIf(refunds, id, { status: 'approved' }, {
@@ -241,7 +269,13 @@ export function createRefundService({
 
   /** Member: my refunds, newest first. */
   async function listMine(memberId) {
-    return { refunds: (await refunds.filterByColumnAsync('memberId', memberId)).sort(byNewest) };
+    const rows = (await refunds.filterByColumnAsync('memberId', memberId)).sort(byNewest);
+    const extra = await enrichRows(rows);
+    // Event refunds also say which event and order they are for (the payer's phone and the policy internals stay with staff).
+    // Event refunds go back as the member-facing RefundView only (L1): no staff ids, notes, payout destination or reference until paid.
+    // An organisation's refund is shown only to a coordinator who still holds a billing role (ruling b).
+    const view = r => ({ ...refundView(r), kind: r.kind, eventOrderId: r.eventOrderId ?? null, event: extra.get(r.id).event, orderReference: extra.get(r.id).orderReference });
+    return { refunds: rows.filter(r => !extra.get(r.id)?.hiddenFromMember).map(r => (extra.has(r.id) ? view(r) : r)) };
   }
 
   /**
@@ -269,11 +303,13 @@ export function createRefundService({
     // Staff who acted on each row, by name (null for members, 'policy' and anyone not portal/admin staff).
     const nameOf = await staffNameLookup(users, rows, ['requestedBy', 'decidedBy', 'paidBy']);
     const twoAdmins = secondApprover();
+    const extra = await enrichRows(rows);
     return {
       refunds: rows.map((r) => {
         const u = byId.get(r.memberId);
         return {
           ...r,
+          ...(extra.has(r.id) ? (({ hiddenFromMember, ...rest }) => rest)(extra.get(r.id)) : {}),
           member: u ? { id: u.id, displayName: u.displayName || null, phone: u.phone || null, email: u.email || null } : null,
           requestedByName: nameOf(r.requestedBy),
           decidedByName: nameOf(r.decidedBy),

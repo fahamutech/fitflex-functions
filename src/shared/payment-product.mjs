@@ -6,6 +6,7 @@
 //   TRAINER_SERVICE   trainer session booking (bookingGroupId)
 //   TRAINER_GYM_PASS  a trainer's pass to train at a gym
 //   SHOP_ORDER        marketplace order (orderId)
+//   EVENT_ORDER       tickets for a marathon / running event (eventOrderId; Marathon & Events S4)
 
 export const PRODUCT_TYPES = Object.freeze({
   FITFLEX_PASS: 'FITFLEX_PASS',
@@ -13,6 +14,7 @@ export const PRODUCT_TYPES = Object.freeze({
   TRAINER_SERVICE: 'TRAINER_SERVICE',
   TRAINER_GYM_PASS: 'TRAINER_GYM_PASS',
   SHOP_ORDER: 'SHOP_ORDER',
+  EVENT_ORDER: 'EVENT_ORDER',
 });
 
 const BY_SUBSCRIPTION_TYPE = Object.freeze({
@@ -26,6 +28,8 @@ export const productTypeOfSubscription = (sub) => BY_SUBSCRIPTION_TYPE[sub?.type
 /** @param request a PaymentRequest row; @param sub its subscription, when it has one */
 export function productTypeOfPayment(request, sub = null) {
   if (!request) return null;
+  // S4: an event order is checked first, so it can never fall through to a subscription / shop reading.
+  if (request.eventOrderId) return PRODUCT_TYPES.EVENT_ORDER;
   if (request.bookingGroupId) return PRODUCT_TYPES.TRAINER_SERVICE;
   if (request.orderId) return PRODUCT_TYPES.SHOP_ORDER;
   const fromSub = productTypeOfSubscription(sub);

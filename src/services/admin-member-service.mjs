@@ -4,6 +4,8 @@
 import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
+import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
+import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 
 export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr }) {
   async function latestMemberSubscription(memberId) {
@@ -77,12 +79,15 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
       if (dup) return { error: 'email_already_used', status: 409, existingRole: dup.userType };
     }
     const priorProfile = prior?.memberProfile || {};
+    // Same rule as POST /me/profile: strict YYYY-MM-DD, a real date, 1901-01-01 to today; '' clears it.
+    const dob = parseDateOfBirthInput(body.memberProfile?.dateOfBirth);
+    if (dob.error) return dob;
     const memberProfile = {
       fitnessGoal: body.memberProfile?.fitnessGoal ?? priorProfile.fitnessGoal ?? null,
       fitnessLevel: body.memberProfile?.fitnessLevel ?? priorProfile.fitnessLevel ?? null,
       heightCm: body.memberProfile?.heightCm ?? priorProfile.heightCm ?? null,
       weightKg: body.memberProfile?.weightKg ?? priorProfile.weightKg ?? null,
-      dateOfBirth: body.memberProfile?.dateOfBirth ?? priorProfile.dateOfBirth ?? null,
+      dateOfBirth: dob.skip ? priorProfile.dateOfBirth ?? null : dob.value,
       gender: body.memberProfile?.gender ?? priorProfile.gender ?? null,
       preferredWorkoutTimes: Array.isArray(body.memberProfile?.preferredWorkoutTimes)
         ? body.memberProfile.preferredWorkoutTimes
@@ -106,7 +111,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'member_updated' : 'member_created',
-      target: id, before: prior ?? null, after: row
+      target: id, before: userAuditSnapshot(prior), after: userAuditSnapshot(row)
     });
     const enrichedSub = await latestMemberSubscription(id);
     const enrichedPendingPays = await paymentRequests.filterAsync(p => p.memberId === id && p.status === 'pending');
@@ -161,7 +166,7 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: `member_${status}`,
-      target: member.id, before, after
+      target: member.id, before: userAuditSnapshot(before), after: userAuditSnapshot(after)
     });
     return { member: after };
   }

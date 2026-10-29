@@ -73,6 +73,17 @@ export function createB2BAnalyticsService({
 
   // ── The organisation's people ─────────────────────────────────────────────
 
+  /**
+   * Whose own FitFlex activity (workouts, steps, gym visits, challenge
+   * progress) the organisation may see (A-02): people enrolled with it now.
+   * Someone still pending (listed but not started) or who has left
+   * (inactive / exited) is not shown, nor is anyone who has not accepted an
+   * organisation's request (they have no beneficiary row at all). What the
+   * organisation itself paid for (sponsored usage, pass check-ins) stays
+   * visible as its own records.
+   */
+  const showsActivity = person => !!person.userId && (person.status === 'active' || person.status === 'suspended');
+
   /** Everyone on the organisation's list (native beneficiaries and a mapped company's employees). */
   async function peopleOf(org, { group = null } = {}) {
     const all = await b2bService.allBeneficiaries(org);
@@ -230,6 +241,8 @@ export function createB2BAnalyticsService({
     if (f.group) f.beneficiaryIds = people.map(x => x.id);
     const day = today();
     const userIds = people.map(x => x.userId).filter(Boolean);
+    // Activity totals only count people whose activity the organisation may see (A-02).
+    const activityUserIds = people.filter(showsActivity).map(x => x.userId);
     const count = status => people.filter(x => x.status === status).length;
     const enrolled = count('active');
     const [start, end] = instants(p.from, p.to);
@@ -243,10 +256,10 @@ export function createB2BAnalyticsService({
       passCheckins(org.id, p.from, p.to, f).count({ c: '*' }),
       passCheckins(org.id, p.previous.from, p.previous.to, f).count({ c: '*' }),
       passFees(org.id, p.from, p.to, f),
-      engagement(org, userIds, p.from, p.to),
+      engagement(org, activityUserIds, p.from, p.to),
       sums(verified(org.id, p.from, p.to, f).groupBy('providerType', 'providerId').select('providerType', 'providerId').countDistinct({ people: 'beneficiaryId' })),
       passCheckins(org.id, p.from, p.to, f).groupBy('c.gymId').select('c.gymId as gymId').count({ c: '*' }).countDistinct({ people: 'e.beneficiaryId' }),
-      trend(org, userIds, p, f),
+      trend(org, activityUserIds, p, f),
       programs.filterByColumnAsync('organizationId', org.id),
     ]);
     const usage = money(use);
@@ -326,7 +339,7 @@ export function createB2BAnalyticsService({
     if (needle) list = list.filter(x => `${x.displayName ?? ''} ${x.externalReference ?? ''} ${x.groupName ?? ''}`.toLowerCase().includes(needle));
 
     const ids = list.map(x => x.id);
-    const userIds = list.map(x => x.userId).filter(Boolean);
+    const userIds = list.filter(showsActivity).map(x => x.userId);
     const [start, end] = instants(p.from, p.to);
     const f = { beneficiaryIds: ids };
     const [usage, passes, acts, visits] = ids.length ? await Promise.all([
@@ -347,8 +360,8 @@ export function createB2BAnalyticsService({
     let rows = list.map((x) => {
       const u = usageBy.get(x.id);
       const ps = passBy.get(x.id);
-      const a = x.userId ? actBy.get(x.userId) : null;
-      const v = x.userId ? visitBy.get(x.userId) : null;
+      const a = showsActivity(x) ? actBy.get(x.userId) : null;
+      const v = showsActivity(x) ? visitBy.get(x.userId) : null;
       const sponsoredUses = n(u?.uses);
       const onPass = n(ps?.c);
       return {
@@ -410,7 +423,7 @@ export function createB2BAnalyticsService({
     let activities = [];
     let otherVisits = [];
     let challenges = [];
-    if (who.userId) {
+    if (showsActivity(who)) {
       const sponsoredHere = new Set(passRows.map(r => r.id));
       const [acts, visits, funded, otherPasses] = await Promise.all([
         db('Activity').where({ userId: who.userId }).where('startedAt', '>=', start).where('startedAt', '<', end).orderBy('startedAt', 'desc').limit(cap)
@@ -438,6 +451,8 @@ export function createB2BAnalyticsService({
       beneficiary: {
         id: who.id, name: who.displayName ?? null, externalReference: who.externalReference ?? null, group: who.groupName ?? null,
         beneficiaryType: who.beneficiaryType, status: who.status, enrolledAt: who.enrolledAt ?? null, linkedToAccount: !!who.userId,
+        // False while pending or after leaving: their own activity is not shown (A-02).
+        activityShown: showsActivity(who),
       },
       totals: { ...money(use), passCheckins: passRows.length, activities: activities.length, otherGymVisits: otherVisits.length, capped: [usageRows, passRows, activities].some(r => r.length >= cap) },
       byBenefit: byBenefit.map(r => ({ benefitId: r.benefitId, benefitName: benefitName.get(r.benefitId) ?? null, ...money(r) })),
@@ -790,7 +805,7 @@ export function createB2BAnalyticsService({
       columns = [col('day', 'Date'), col('name', 'Name'), col('group', 'Group'), col('benefit', 'Benefit'), col('service', 'Service'), col('provider', 'Provider'), col('quantity', 'Quantity'),
         col('value', 'Service value (TZS)'), col('sponsor', 'Sponsor paid (TZS)'), col('member', 'Member paid (TZS)')];
     } else if (report === 'activity') {
-      const list = (await peopleOf(org)).filter(x => x.userId);
+      const list = (await peopleOf(org)).filter(showsActivity);
       const name = new Map(list.map(x => [x.userId, x]));
       const [start, end] = instants(p.from, p.to);
       const acts = list.length ? await db('Activity').whereIn('userId', list.map(x => x.userId)).where('startedAt', '>=', start).where('startedAt', '<', end).orderBy('startedAt').limit(maxExportRows + 1)
@@ -854,7 +869,7 @@ export function createB2BAnalyticsService({
       try {
         await notify(r.userId, {
           id: idOf(r), type: 'b2b_sponsor_visibility', title: `What ${name} can see`,
-          body: `${name} gives you benefits through FitFlex and can see your FitFlex activity: gym visits, workouts, steps and challenge progress. It cannot see your weight, height or anything from another sponsor. See Benefits for details.`,
+          body: `${name} gives you benefits through FitFlex and can see your FitFlex activity, including activity from before you joined: gym visits, workouts, steps and challenge progress. It cannot see your weight, height or anything from another sponsor. See Benefits for details.`,
           data: { organizationId: r.organizationId },
         });
         stats.sent += 1;

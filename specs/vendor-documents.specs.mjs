@@ -77,7 +77,7 @@ async function user(userType, extra = {}) {
   made.users.push(id);
   return id;
 }
-const PROFILE = { businessName: 'Dar Fitness Gear', address: { line1: 'Plot 12, Mikocheni', city: 'Dar es Salaam' }, contactNumber: '+255700111222', status: 'published', logo: 'https://cdn.example.com/logo.png' };
+const PROFILE = { businessName: 'Dar Fitness Gear', address: { line1: 'Plot 12, Mikocheni', city: 'Dar es Salaam' }, contactNumber: '+255700111222', status: 'published', logo: '/storage/bafylogo/logo.webp' };
 async function vendor(extra = {}) {
   const id = await user('vendor', { createdAt: new Date('2026-01-01T00:00:00Z'), displayName: 'Asha Owner', vendorProfile: JSON.stringify(PROFILE), ...extra });
   const caseId = uid('kyc');
@@ -332,7 +332,9 @@ test('share a receipt: one link, token returned once, only its hash stored; publ
   assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
   assert.equal(page.headers.get('x-frame-options'), 'DENY');
   assert.match(page.headers.get('content-type'), /^text\/html; charset=utf-8/);
-  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; img-src 'self' https:\/\/cdn\.example\.com; style-src 'unsafe-inline'/);
+  // The logo is on our storage, shown from our own host (security fix 2026-10-28).
+  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; img-src 'self' https:\/\/docs\.fitflex\.example( \S+)?; style-src 'unsafe-inline'/);
+  assert.match(page.text, /<img class="logo" src="https:\/\/docs\.fitflex\.example\/storage\/bafylogo\/logo\.webp"/);
   assert.match(page.text, /<meta name="robots" content="noindex,nofollow">/);
   assert.equal(/<script/i.test(page.text), false, 'no JavaScript');
   assert.match(page.text, /<html lang="en">/);
@@ -983,4 +985,79 @@ test('#229 contract: pdfkit is loaded lazily — without it the backend runs, HT
     assert.equal((await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id }, query: { format: 'html' } })).status, 200);
   } finally { setPdfkitLoaderForTests(null); }
   assert.equal((await open(`/d/${token}.pdf`)).status, 200, 'loads again once available');
+});
+
+// ── UAT (S5) ─────────────────────────────────────────────────────────────────
+
+test('UAT D4: discounts read "-TSh 1,500" on the page (list, table, totals), the A4 PDF and the 80mm PDF', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v, { name: 'Socks', priceTzs: 10_000, stock: 50 });
+  const sale = await sell(as(v), saleBody([{ productId: p.id, qty: 1, discountTzs: 1_500 }], cash(7_500), { discountTzs: 1_000 }));
+  const token = tokenOf((await shareSale(as(v), sale.id)).body.url);
+  const page = (await open(`/d/${token}`)).text;
+  assert.match(page, /Discount -TSh 1,500/, 'line, phone layout');
+  assert.match(page, /<td class="n">-TSh 1,500<\/td>/, 'line, table');
+  assert.match(page, /Discounts<\/span><span>-TSh 2,500</, 'totals');
+  assert.equal(/[\s>]-\d{1,3}(,\d{3})*\b/.test(page), false, 'no bare "-1,500"');
+  const a4 = pdfText((await open(`/d/${token}.pdf`)).buffer);
+  assert.match(a4, /-TSh 1,500/);
+  assert.match(a4, /-TSh 2,500/);
+  assert.equal(/(^|\s)-\d{1,3}(,\d{3})*\b/m.test(a4), false, 'no bare discount in the A4 PDF');
+  const thermal = pdfText((await open(`/d/${token}.pdf?paper=80mm`)).buffer);
+  assert.match(thermal, /-TSh 1,500/);
+  assert.match(thermal, /-TSh 2,500/);
+});
+
+test('UAT D6: listing and turning off links follow the document\'s own permission (customers-only staff on a cash receipt → 403)', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v, { priceTzs: 10_000, stock: 50 });
+  const customersOnly = await staff(v, ['customers']);
+  const salesOnly = await staff(v, ['sales']);
+  const ordersOnly = await staff(v, ['orders']);
+  const customer = await addCustomer(as(v), { name: 'Links Buyer' });
+  const cashSale = await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], cash(10_000)));
+  const creditSale = await sell(as(v), saleBody([{ productId: p.id, qty: 1 }], [], { kind: 'credit', customerId: customer.id }));
+  await shareSale(as(v), cashSale.id);
+  await shareSale(as(v), creditSale.id);
+  const list = (claims, docType, docId) => call(vendorDocumentLinks, claims, { query: { docType, docId } });
+  const revokeAll = (claims, docType, docId) => call(vendorRevokeDocumentLinks, claims, { body: { docType, docId } });
+  for (const docType of ['sale', 'receipt']) {
+    const out = await list(staffOf(customersOnly, v), docType, cashSale.id);
+    assert.deepEqual([out.status, out.body.error, out.body.requiredPermission], [403, 'vendor_permission_forbidden', 'sales'], docType);
+    assert.equal((await revokeAll(staffOf(customersOnly, v), docType, cashSale.id)).status, 403, docType);
+  }
+  assert.equal((await db('VendorDocumentLink').where({ docId: cashSale.id }).whereNull('revokedAt')).length, 1, 'nothing was turned off');
+  const credit = await list(staffOf(customersOnly, v), 'sale', creditSale.id);
+  assert.deepEqual([credit.status, credit.body.activeCount, credit.body.links[0].docType], [200, 1, 'invoice']);
+  assert.equal((await list(staffOf(salesOnly, v), 'sale', cashSale.id)).body.activeCount, 1);
+  assert.equal((await list(staffOf(salesOnly, v), 'invoice', creditSale.id)).body.activeCount, 1);
+  assert.equal((await list(staffOf(ordersOnly, v), 'sale', cashSale.id)).status, 403);
+  assert.equal((await list(staffOf(salesOnly, v), 'statement', customer.id)).status, 403);
+  assert.deepEqual((await list(as(v), 'invoice', cashSale.id)).body, { links: [], activeCount: 0 }, 'a cash sale has no invoice links');
+  const off = await revokeAll(staffOf(customersOnly, v), 'sale', creditSale.id);
+  assert.deepEqual([off.status, off.body.revokedCount], [200, 1]);
+});
+
+test('UAT D7: the 429, server-error and PDF-failed pages say their message once (short heading + one sentence)', async () => {
+  const { renderRateLimited, renderServerError, renderPdfFailed } = await import('../src/shared/vendor-document-html.mjs');
+  const bodyOf = html => html.slice(html.indexOf('<main>'));
+  const once = (html, text) => assert.equal(bodyOf(html).split(text).length - 1, 1, `${text} once`);
+  const en = renderRateLimited('en');
+  assert.match(en, /<title>Too many requests<\/title>/);
+  assert.match(bodyOf(en), /<h1>Too many requests<\/h1><p>Try again in a minute\.<\/p>/);
+  once(en, 'Too many requests'); once(en, 'Try again in a minute.');
+  const sw = renderRateLimited('sw');
+  assert.match(bodyOf(sw), /<h1>Maombi ni mengi mno<\/h1><p>Jaribu tena baada ya dakika moja\.<\/p>/);
+  once(sw, 'Jaribu tena baada ya dakika moja.');
+  const both = renderRateLimited(null);
+  once(both, 'Try again in a minute.'); once(both, 'Jaribu tena baada ya dakika moja.');
+  const pdf = renderPdfFailed('en', 'TOKEN');
+  assert.match(bodyOf(pdf), /<h1>PDF not available<\/h1><p>The PDF couldn&#39;t be made\. You can still view the page\.<\/p><p><a href="TOKEN\?lang=en">Back to the document<\/a><\/p>/);
+  once(pdf, 'couldn&#39;t be made');
+  const pdfSw = renderPdfFailed('sw', 'TOKEN');
+  assert.match(bodyOf(pdfSw), /<h1>PDF haipatikani<\/h1><p>Imeshindikana kutengeneza PDF\. Bado unaweza kuona ukurasa\.<\/p>/);
+  const err = renderServerError('en');
+  assert.match(bodyOf(err), /<h1>Something went wrong<\/h1><p>Try again later\.<\/p>/);
 });

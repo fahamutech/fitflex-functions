@@ -2,7 +2,18 @@
 import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { parseStringList } from '../shared/parse-list.mjs';
+import { checkMediaFields, storedMedia, signInPhotoOrNull } from '../shared/media-src.mjs';
 import { normalizeAvailability, normalizeSocialLinks } from '../shared/trainer-access.mjs';
+
+/**
+ * What a trainer may send when registering their own profile. Everything else
+ * on the row is FitFlex's: the verified badge, rating and review count, listing
+ * position and visibility, status, gym links, account id and email.
+ */
+export const TRAINER_REGISTER_FIELDS = Object.freeze([
+  'displayName', 'fullName', 'nickname', 'photoUrl', 'images', 'imageThumbnails', 'gender', 'specialties', 'bio',
+  'phone', 'hourlyRateTzs', 'sessionRateCurrency', 'experienceYears', 'availability', 'socialLinks',
+]);
 
 /** Limits on what a trainer can put on their own profile. */
 export const PROFILE_LIMITS = Object.freeze({ name: 80, bio: 2000, specialties: 20, images: 8, nickname: 30 });
@@ -50,6 +61,21 @@ const PRIVATE_GYM_FIELDS = Object.freeze([
   'commissionRate', 'paymentBank', 'paymentNumber', 'paymentNotes', 'tinNumber', 'homepageVisible', 'homepagePriority',
 ]);
 
+/** The image fields of a trainer row or patch, for checkMediaFields. */
+export const trainerMedia = row => ({ photoUrl: row?.photoUrl, images: row?.images, imageThumbnails: row?.imageThumbnails });
+/**
+ * Per-field `kept` for a trainer save. photoUrl and images are one picture set (the profile picture
+ * is images[0], and both the server and the app copy one into the other), so a stored value of
+ * either may stay in either; thumbnails keep only stored thumbnails. `signInPhoto`: the account's
+ * own sign-in photo, only when it passes the sign-in host allowlist (signInPhotoOrNull).
+ */
+/** What a stored trainer already holds, for checkMediaFields' capFloor (caps never block an existing gallery). */
+export const trainerCapFloor = prior => ({ images: prior?.images?.length ?? 0, imageThumbnails: prior?.imageThumbnails?.length ?? 0 });
+export function trainerKeptMedia(prior, { signInPhoto = null } = {}) {
+  const pictures = storedMedia(prior?.photoUrl, prior?.images, signInPhotoOrNull(signInPhoto));
+  return { photoUrl: pictures, images: pictures, imageThumbnails: storedMedia(prior?.imageThumbnails) };
+}
+
 export function publicTrainer(trainer) {
   if (!trainer) return trainer;
   const out = {};
@@ -62,7 +88,9 @@ export function publicTrainer(trainer) {
 
 export function createTrainerService({ trainers, gyms, trainerBookings, auditLog, gymService, partnerGate = OPEN_GATE,
   // A trainer asked to work at a gym: ({ gymId, trainer }) → void. Told to the gym's owner.
-  onGymRequest = async () => {} }) {
+  onGymRequest = async () => {},
+  // After an admin deletes a trainer profile (partner DOB review L3): (prior) → void. Never fails the delete.
+  onTrainerRemoved = async () => {} }) {
   const askedToJoin = async (gymIds, trainer) => {
     for (const gymId of gymIds) { try { await onGymRequest({ gymId, trainer }); } catch { /* best effort */ } }
   };
@@ -243,6 +271,7 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     if (!prior) return { error: 'not_found', status: 404 };
     if (await trainerBookings.findAsync(b => b.trainerId === prior.id)) return { error: 'trainer_has_bookings', status: 409 };
     const removed = await trainers.removeAsync(t => t.id === prior.id);
+    try { await onTrainerRemoved(prior); } catch (err) { console.warn('[admin-trainer-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'trainer_deleted',
@@ -275,8 +304,9 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     const linked = profile?.gymIds || [];
     const requested = parseStringList(body.gymIds, []).filter(id => !linked.includes(id));
     const pendingGymIds = [...new Set([...(profile?.pendingGymIds || []), ...requested])];
+    const own = Object.fromEntries(TRAINER_REGISTER_FIELDS.filter(k => body[k] !== undefined).map(k => [k, body[k]]));
     const row = normalizeTrainerPayload({
-      ...body,
+      ...own,
       gymIds: linked,
       pendingGymIds,
       id: profile?.id || undefined,
@@ -284,10 +314,20 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       email: user.email,
       displayName: body.displayName || user.displayName,
       photoUrl: body.photoUrl || user.photoUrl,
-      status: 'active',
+      // Registering again never lifts a suspension or an admin's deactivation.
+      status: profile?.status || 'active',
       // The profile is active at once; verification is the trainer's KYC (3 Oct 2026).
       approvalStatus: 'approved',
     }, profile || {});
+    // Photos are shown to every member: data URI or our own storage path only (media-src.mjs). What the
+    // profile already had is kept as is; the account's sign-in photo only from an allowed host.
+    const badMedia = await checkMediaFields(trainerMedia(row), {
+      kept: trainerKeptMedia(profile, { signInPhoto: user?.photoUrl }),
+      maxItems: { images: PROFILE_LIMITS.images, imageThumbnails: PROFILE_LIMITS.images },
+      capFloor: trainerCapFloor(profile),
+      actor: user?.personId || userId,
+    });
+    if (badMedia) return badMedia;
     await trainers.upsertAsync(t => t.id === row.id, row);
     // Only the gyms newly asked for, not ones already waiting.
     await askedToJoin(requested.filter(id => !(profile?.pendingGymIds || []).includes(id)), row);
@@ -334,7 +374,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
    * (null counts as "not sent"); each one sent is checked before anything is
    * saved, so a bad value is a clear 400 rather than a failed write.
    */
-  async function updateProfile({ userId, body = {} }) {
+  // personId: the person behind the account (route), so the photo-decode limit counts per person.
+  async function updateProfile({ userId, body = {}, personId = null }) {
     const profile = findProfileByUser(userId);
     if (!profile) return { error: 'trainer_profile_not_found', status: 404 };
     const socialError = socialLinksError(body);
@@ -376,7 +417,8 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
     // Photos: `images` is the trainer's gallery (first = profile picture).
     if (sent('images')) {
       const images = parseStringList(body.images, []);
-      if (images.length > PROFILE_LIMITS.images) return { ...fail('too_many_images'), max: PROFILE_LIMITS.images };
+      // Over the cap only when it also grows: a gallery stored before the cap can still be edited.
+      if (images.length > PROFILE_LIMITS.images && images.length > (profile.images || []).length) return { ...fail('too_many_images'), max: PROFILE_LIMITS.images };
       updates.images = images;
       updates.imageThumbnails = sent('imageThumbnails') ? parseStringList(body.imageThumbnails, []).slice(0, images.length) : [];
     }
@@ -386,6 +428,13 @@ export function createTrainerService({ trainers, gyms, trainerBookings, auditLog
       updates.images = [updates.photoUrl];
     }
     if (body.socialLinks !== undefined) updates.socialLinks = normalizeSocialLinks(body.socialLinks).links;
+    const badMedia = await checkMediaFields(trainerMedia(updates), {
+      kept: trainerKeptMedia(profile),
+      maxItems: { images: PROFILE_LIMITS.images, imageThumbnails: PROFILE_LIMITS.images },
+      capFloor: trainerCapFloor(profile),
+      actor: personId || userId,
+    });
+    if (badMedia) return badMedia;
     updates.updatedAt = new Date().toISOString();
     const updated = await trainers.updateAsync(t => t.id === profile.id, updates);
     return { trainer: hydrateTrainer(updated) };

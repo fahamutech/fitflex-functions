@@ -6,7 +6,12 @@ import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { isTokenSession } from '../src/auth/promotion-token.mjs';
 import { shopHomeService } from '../src/bootstrap/services.mjs';
-import { shopHomeV2On } from '../src/shared/feature-flags.mjs';
+import { shopHomeV2On, shopNearYouOn } from '../src/shared/feature-flags.mjs';
+
+// The area helpers live in src/shared/area-request.mjs (also used by GET /shop/products, QA1).
+export { withoutAreaId, redactAreaId, areaFromRequest } from '../src/shared/area-request.mjs';
+import { redactAreaId, areaFromRequest } from '../src/shared/area-request.mjs';
+const redacting = guard => (req, res, next) => { redactAreaId(req); return guard(req, res, next); };
 
 const created = new Date().toISOString();
 
@@ -31,23 +36,38 @@ export const resetShopHomeLimits = () => windows.clear();
 
 export const shopHome = {
   created, method: 'get', path: '/shop/home',
-  description: 'Any signed-in user (SHOP_HOME_V2): the shop landing page. Query: ?mode=member|trainer|owner|vendor_personal (a role this account holds; default = the signed-in role; otherwise 403 mode_not_allowed), ?recent=<comma ids, most recent first, max 20; never stored>, ?session=<promotion session id: Featured cards then carry promotion.token>. → { serverNow, currency, mode, personalised, signalsUsed, categories:[{key,en,sw,count}], sections:[{key,title{en,sw},reason{en,sw},reasonCodes,viewAll{path,query},productIds,hasMore}], products:{ id: product as in GET /shop/products } }. Out of stock and the viewer\'s own products never appear; a product is in one section at most; sections with fewer than SHOP_HOME_MIN_ITEMS (4) products are left out. Flag off: 404 feature_disabled. More than 60 calls a minute per user: 429 rate_limited. With SHOP_BANNERS on the body also has banners: [{ id, image{url1x,url2x,urlWide,focal}, imageAlt, headlineLead, headlineAccent, subline, ctaLabel, target{type,value}, origin, vendorName?, endsAt }] (live now for this mode; docs/shop-banners-api.md); with it off there is no banners key.',
+  description: 'Any signed-in user (SHOP_HOME_V2): the shop landing page. Query: ?mode=member|trainer|owner|vendor_personal (a role this account holds; default = the signed-in role; otherwise 403 mode_not_allowed), ?recent=<comma ids, most recent first, max 20; never stored>, ?session=<promotion session id: Featured cards then carry promotion.token>. → { serverNow, currency, mode, personalised, signalsUsed, categories:[{key,en,sw,count}], sections:[{key,title{en,sw},reason{en,sw},reasonCodes,viewAll{path,query},productIds,hasMore}], products:{ id: product as in GET /shop/products } }. Out of stock and the viewer\'s own products never appear; a product is in one section at most; sections with fewer than SHOP_HOME_MIN_ITEMS (4) products are left out. Flag off: 404 feature_disabled. More than 60 calls a minute per user: 429 rate_limited. With SHOP_BANNERS on the body also has banners: [{ id, image{url1x,url2x,urlWide,focal}, imageAlt, headlineLead, headlineAccent, subline, ctaLabel, target{type,value}, origin, vendorName?, endsAt }] (live now for this mode; docs/shop-banners-api.md); with it off there is no banners key. With SHOP_PERSONALISATION on the body also has personalisation: { available, enabled }, personalised is true only when purchase history or (member mode, adults) gender/age actually changed the page, signalsUsed may hold purchase_history / profile_gender / profile_age, and sections may carry reasonCodes bought_category / bought_product / profile_gender / profile_age with reasonParams { category } | { productName } (docs/shop-personalisation-api.md); with it off the body is unchanged. With SHOP_NEAR_YOU on (docs/shop-near-you-api.md): the viewer area in the X-FF-Area header (preferred; ?areaId= also accepted for one release) = <GeoArea id worked out on the device; region, city or district; never stored or logged; ignored unless personalisation is available and switched on; unknown, inactive, country or too small (radiusKm below 2 km district / 5 km city or region) → ignored>; the body also has nearYou: { available, areaId?, areaName{en,sw}? }, may have a popular_near_you section (reasonCodes popular_in_area / delivers_to_area / seller_in_area, reasonParams { areaName{en,sw} }) and product rows may carry deliversToViewerArea: true; signalsUsed may hold location. With it off the body is unchanged and areaId is ignored.',
   responseSample: {
     serverNow: '2026-10-19T08:00:00.000Z', currency: 'TZS', mode: 'member', personalised: false, signalsUsed: ['role'],
     categories: [{ key: 'equipment', en: 'Gym & fitness equipment', sw: 'Vifaa vya gym na mazoezi', count: 12 }],
     sections: [{ key: 'best_sellers', title: { en: 'Best sellers', sw: 'Zinazouzwa zaidi' }, reason: { en: 'The most bought on FitFlex in the last 30 days.', sw: 'Zilizonunuliwa zaidi kwenye FitFlex katika siku 30 zilizopita.' }, reasonCodes: ['best_sellers_30d'], viewAll: { path: '/shop/products', query: { sort: 'popularity' } }, productIds: ['prd_1'], hasMore: false }],
     products: { prd_1: { id: 'prd_1', name: 'Whey Protein 1kg', priceTzs: 85000 } },
   },
-  onGuard: requireAuth(),
+  // Redact first, so even a 401 / 404 / 429 log line has no areaId.
+  onGuard: redacting(requireAuth()),
   onRequest: async (req, res) => {
+    redactAreaId(req);
     if (!shopHomeV2On()) return res.status(404).json({ error: 'feature_disabled' });
     if (!allowShopHome(req.user.sub)) return res.status(429).json({ error: 'rate_limited' });
     const q = req.query || {};
     const out = await shopHomeService.home({
       claims: req.user,
-      query: { mode: q.mode, recent: q.recent, session: isTokenSession(q.session) ? q.session : undefined },
+      query: { mode: q.mode, recent: q.recent, session: isTokenSession(q.session) ? q.session : undefined, areaId: areaFromRequest(req) },
     });
     if (out.error) return res.status(out.status).json({ error: out.error });
     return res.json(out.body);
+  },
+};
+
+export const shopAreas = {
+  created, method: 'get', path: '/shop/areas',
+  description: 'Any signed-in user (SHOP_NEAR_YOU): the usable areas (GeoArea: active, with every parent active) for the device-side "near you" mapping and the vendor "Where you sell" pickers → { areas: [{ id, level: country|region|city|district, name, names{en,sw}, parentId, lat, lng, radiusKm }] }, by level then name. Non-personal: Cache-Control private, max-age=3600. Flag off: 404 feature_disabled. Contract: docs/shop-near-you-api.md.',
+  responseSample: { areas: [{ id: 'tz-dar-city', level: 'city', name: 'Dar es Salaam', names: { en: 'Dar es Salaam', sw: 'Dar es Salaam' }, parentId: 'tz-dar', lat: -6.792, lng: 39.208, radiusKm: 25 }] },
+  onGuard: requireAuth(),
+  onRequest: async (req, res) => {
+    if (!shopNearYouOn()) return res.status(404).json({ error: 'feature_disabled' });
+    const areas = await shopHomeService.areas();
+    if (typeof res.set === 'function') res.set('Cache-Control', 'private, max-age=3600');
+    return res.json({ areas });
   },
 };

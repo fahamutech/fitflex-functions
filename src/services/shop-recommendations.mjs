@@ -12,10 +12,14 @@
 // here; no model, no external service.
 //
 // Phase 1 (owner, 2026-10-19): role defaults, a declared member fitness goal, a
-// declared trainer specialty and the `recent` ids the app sends. Purchase
-// history, gender/age and location are Phase 2: the `needs` object has places
-// for them (see NEEDS_PHASE2_FIELDS) but nothing fills or reads them yet.
+// declared trainer specialty and the `recent` ids the app sends.
+// Phase 2 · slice 2 (SHOP_PERSONALISATION): purchase history fills `needs.purchaseHistory`, and
+// gender/age reorder within a rail after assembly (shop-personalisation.mjs).
+// Phase 2 · slice 3 (SHOP_NEAR_YOU): `needs.location` (the viewer's area, worked out on the device and
+// never stored) fills the "Popular near you" section. Without it that section is never built.
+// Without a `personalisation` input every function here behaves exactly as in Phase 1.
 import { PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
+import { reorderForAudience } from './shop-personalisation.mjs';
 
 // ── (a) identity ─────────────────────────────────────────────────────────────
 
@@ -92,11 +96,11 @@ export const DEFAULT_SPECIALTY_CATEGORIES = Object.freeze([
 ]);
 
 /**
- * Phase 2 places in the needs object. Documented so the shape is settled;
- * nothing sets them in Phase 1 and assembly ignores them:
- *   purchaseHistory  [{ productId, category, qty, at }]   the account's paid orders
- *   audience         { gender, age }                       only to reorder products that carry an explicit target, never to hide
- *   location         { areaIds, source: 'query'|'profile' } for a "popular near you" section
+ * Phase 2 places in the needs object:
+ *   purchaseHistory  shop-personalisation.purchaseHistoryFrom(): { categories, boughtProducts, recentNonConsumableIds } (slice 2)
+ *   audience         { gender, ageBand }: applied after assembly as a stable reorder, never here (slice 2)
+ *   location         slice 3: { area: { areaId, name, cityId, regionId, chain }, vendors: Map(vendorId → { basedIn, delivers }),
+ *                    areaSales: Map(productId → local pickup orders, 30 days) } for "Popular near you"
  */
 export const NEEDS_PHASE2_FIELDS = Object.freeze(['purchaseHistory', 'audience', 'location']);
 
@@ -121,19 +125,22 @@ export function parseRecentIds(value) {
  *   signalsUsed        which of these actually contributed
  *   purchaseHistory, audience, location: null (Phase 2, see NEEDS_PHASE2_FIELDS)
  */
-export function buildNeeds({ mode, memberProfile = null, trainerProfile = null, recentIds = [], config = {} }) {
+export function buildNeeds({ mode, memberProfile = null, trainerProfile = null, recentIds = [], config = {}, purchaseHistory = null, optedOut = false, profileSignals = true, location = null }) {
+  // Declared goal / specialty: not when switched off, nor (flag on) when personalisation is not available.
+  const useProfile = !optedOut && profileSignals;
   const roleMap = config.roleCategories || DEFAULT_ROLE_CATEGORIES;
   const goalMap = config.goalCategories || DEFAULT_GOAL_CATEGORIES;
   const specialtyRules = config.specialtyCategories || DEFAULT_SPECIALTY_CATEGORIES;
   const roleCategories = [...(roleMap[mode] || [])];
 
   let goalCategories = [];
-  if (mode === 'member' && memberProfile) {
+  // Switched off ("Personalised shop" off): no declared goal or specialty either; only the role.
+  if (mode === 'member' && memberProfile && useProfile) {
     const goals = uniq([...(Array.isArray(memberProfile.fitnessGoals) ? memberProfile.fitnessGoals : []), memberProfile.fitnessGoal].filter(g => typeof g === 'string'));
     goalCategories = uniq(goals.flatMap(g => goalMap[g] || []));
   }
   let specialtyCategories = [];
-  if (mode === 'trainer' && trainerProfile && Array.isArray(trainerProfile.specialties)) {
+  if (mode === 'trainer' && trainerProfile && Array.isArray(trainerProfile.specialties) && useProfile) {
     specialtyCategories = uniq(trainerProfile.specialties.filter(s => typeof s === 'string').flatMap((s) => {
       const text = s.toLowerCase();
       return specialtyRules.find(rule => rule.match.some(word => text.includes(word)))?.categories || [];
@@ -152,9 +159,11 @@ export function buildNeeds({ mode, memberProfile = null, trainerProfile = null, 
     categories: uniq([...goalCategories, ...specialtyCategories, ...roleCategories]),
     recentIds: recent,
     signalsUsed,
-    purchaseHistory: null,
+    optedOut: Boolean(optedOut),
+    purchaseHistory: optedOut ? null : purchaseHistory || null,
     audience: null,
-    location: null,
+    // Slice 3: only ever given when the person may be personalised and the switch is on.
+    location: optedOut ? null : location || null,
   };
 }
 
@@ -200,14 +209,19 @@ export function filterEligible(products, { ownVendorIds = [], suspendedVendorIds
  * Every section, in the default display order (design spec §5.1: Featured, then Best sellers, then
  * Recommended). SHOP_HOME_SECTIONS can choose and reorder them for display.
  */
-export const SECTION_KEYS = Object.freeze(['featured', 'best_sellers', 'recommended', 'essentials', 'recently_viewed', 'deals', 'new_arrivals']);
+// popular_near_you (slice 3) sits after Recommended and before Essentials (spec shop-home-phase2 §7.1). It is
+// only built when needs.location is set, so without it the page is exactly as before.
+export const SECTION_KEYS = Object.freeze(['featured', 'best_sellers', 'recommended', 'popular_near_you', 'essentials', 'recently_viewed', 'deals', 'new_arrivals']);
 /**
  * Which section gets a product that fits several (design DD-7: Featured > Best sellers > Recommended).
  * Recently viewed is the shopper's own explicit history (at most 20), so it takes its products before the
  * suggestion sections do; otherwise those would always have taken them and it would never show.
+ * Popular near you (slice 3) comes next, before Recommended: its pool is small (only vendors based in or
+ * delivering to the area), so after Recommended had taken its products it would rarely reach the minimum,
+ * while Recommended draws from the whole catalogue and refills easily.
  * This order is fixed; the display order above is configurable.
  */
-export const ALLOCATION_ORDER = Object.freeze(['featured', 'best_sellers', 'recently_viewed', 'recommended', 'essentials', 'deals', 'new_arrivals']);
+export const ALLOCATION_ORDER = Object.freeze(['featured', 'best_sellers', 'recently_viewed', 'popular_near_you', 'recommended', 'essentials', 'deals', 'new_arrivals']);
 export const DEFAULT_ASSEMBLY = Object.freeze({ sections: SECTION_KEYS, minItems: 4, maxItems: 12, newArrivalDays: 90 });
 
 /** SHOP_HOME_SECTIONS → the enabled keys in that order (unknown keys and repeats dropped). Empty → all. */
@@ -261,6 +275,11 @@ function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, conf
   const rank = new Map(needs.categories.map((c, i) => [c, i]));
   const byIdMap = new Map(eligible.map(p => [p.id, p]));
   const paid = new Set(paidPlacementIds || []);
+  // Purchase history (slice 2): bought categories first; a non-consumable bought in the last 30 days is not suggested again.
+  const hist = needs.purchaseHistory;
+  const boughtRank = new Map((hist?.categories || []).map((c, i) => [c, i]));
+  const boughtPos = p => (boughtRank.has(p.category) ? boughtRank.get(p.category) : 1e9);
+  const notJustBought = p => !hist?.recentNonConsumableIds?.has(p.id);
   return {
     // The Featured system's set, in this role's category order (a reorder, never a filter);
     // within a category, the Featured system's own order.
@@ -272,18 +291,31 @@ function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, conf
     },
     // Organic only: anything with a live paid or editorial placement is left out.
     // The role's own categories first, then what people shopping in this role buy, then everyone.
-    recommended: () => eligible.filter(p => !paid.has(p.id)).sort((a, b) =>
-      (rank.has(a.category) ? 0 : 1) - (rank.has(b.category) ? 0 : 1)
+    recommended: () => eligible.filter(p => !paid.has(p.id) && notJustBought(p)).sort((a, b) =>
+      (hist ? boughtPos(a) - boughtPos(b) : 0)
+      || (rank.has(a.category) ? 0 : 1) - (rank.has(b.category) ? 0 : 1)
       || roleOrdersOf(b) - roleOrdersOf(a) || ordersOf(b) - ordersOf(a) || tieBreak(a, b)),
     // Bought in paid orders in the last 30 days, most orders first. Never the stored soldCount.
     best_sellers: () => eligible.filter(p => ordersOf(p) > 0).sort((a, b) => ordersOf(b) - ordersOf(a) || unitsOf(b) - unitsOf(a) || byId(a, b)),
     // Round-robin over the needed categories (most specific first), so one category cannot fill it.
     // Organic like recommended: no paid or editorial placement.
     essentials: () => {
-      const lanes = needs.categories.map(c => eligible.filter(p => p.category === c && !paid.has(p.id)).sort((a, b) => ordersOf(b) - ordersOf(a) || tieBreak(a, b)));
+      const laneKeys = hist ? uniq([...hist.categories, ...needs.categories]) : needs.categories;
+      const lanes = laneKeys.map(c => eligible.filter(p => p.category === c && !paid.has(p.id) && notJustBought(p)).sort((a, b) => ordersOf(b) - ordersOf(a) || tieBreak(a, b)));
       const out = [];
       for (let i = 0; lanes.some(l => i < l.length); i += 1) for (const lane of lanes) if (lane[i]) out.push(lane[i]);
       return out;
+    },
+    // Slice 3: products whose vendor is based in or delivers to the viewer's area. Organic (no paid or
+    // editorial placement). Local pickup orders first, then all paid orders, then the usual tie-break.
+    // The vendor-typed distanceKm is never read.
+    popular_near_you: () => {
+      const loc = needs.location;
+      if (!loc?.vendors) return [];
+      const local = p => loc.areaSales?.get(p.id) || 0;
+      const matchOf = p => loc.vendors.get(p.vendorId);
+      return eligible.filter(p => { const m = matchOf(p); return m && (m.basedIn || m.delivers) && !paid.has(p.id) && notJustBought(p); })
+        .sort((a, b) => local(b) - local(a) || ordersOf(b) - ordersOf(a) || tieBreak(a, b));
     },
     // The app's order (most recent first); ids that are not eligible simply drop out.
     recently_viewed: () => needs.recentIds.map(id => byIdMap.get(id)).filter(Boolean),
@@ -304,6 +336,8 @@ function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, conf
  * → { viewAll: { path, query }, faithful }
  */
 export function viewAllFor(key, picked) {
+  // QA1: no list filter matches "near you", and a category would hint at what local vendors sell.
+  if (key === 'popular_near_you') return { viewAll: { path: '/shop/products', query: {} }, faithful: false };
   const cats = uniq(picked.map(p => p.category));
   const category = cats.length === 1 && cats[0] ? { category: cats[0] } : {};
   const base = { best_sellers: { sort: 'popularity' }, recommended: { sort: 'popularity' }, deals: { promotions: 'true' } }[key] || {};
@@ -391,6 +425,13 @@ const COPY = {
     },
     codes: (mode, needs) => [...(needs.goalCategories.length ? ['profile_goal'] : []), ...(needs.specialtyCategories.length ? ['trainer_specialty'] : []), 'role_context'],
   },
+  // Slice 3. Title from the existing app key shop.section.popular_near_you; the reason is worked out in
+  // describeSections from what actually put the products there. [SW review]
+  popular_near_you: {
+    title: { all: { en: 'Popular near you', sw: 'Maarufu karibu nawe' } },
+    reason: () => NEAR_COPY.delivers_to_area(),
+    codes: () => ['delivers_to_area'],
+  },
   recently_viewed: {
     title: { all: { en: 'Recently viewed', sw: 'Ulizotazama hivi karibuni' } },
     reason: () => ({ en: 'Products you opened recently on this device.', sw: 'Bidhaa ulizofungua hivi karibuni kwenye kifaa hiki.' }),
@@ -408,15 +449,104 @@ const COPY = {
   },
 };
 
-/** Titles, reasons and "view all" for assembled sections. */
-export function describeSections(sections, needs) {
+// Slice 2 copy. [SW review] Wording from the P1 spec §10.6 (shop.home.recommended, shop.why.boughtCategory,
+// shop.why.boughtProduct). No title or reason ever names a gender or an age group.
+const PERSONAL_COPY = {
+  recommendedTitle: { en: 'Recommended for you', sw: 'Zilizopendekezwa kwako' },
+  popularInShop: { en: 'Popular in the shop', sw: 'Maarufu dukani' },
+  generic: { en: "Suggested from what's popular on FitFlex.", sw: 'Imependekezwa kutokana na kinachopendwa kwenye FitFlex.' },
+  boughtCategory: c => ({ en: `You've bought ${c.en} before.`, sw: `Uliwahi kununua ${c.sw}.` }),
+  boughtProduct: name => ({ en: `Suggested because you bought ${name}.`, sw: `Imependekezwa kwa sababu ulinunua ${name}.` }),
+};
+// Slice 3 reasons, in the order they are listed. [SW review] delivers_to_area is the spec §10.6 fixed text.
+export const NEAR_REASON_CODES = Object.freeze(['popular_in_area', 'delivers_to_area', 'seller_in_area']);
+// `area` is { en, sw } (the place name in each language; Swahili names from GeoArea.nameSw, native review).
+const NEAR_COPY = {
+  popular_in_area: area => ({ en: `Popular with shoppers in ${area.en}.`, sw: `Maarufu kwa wanunuzi wa ${area.sw}.` }),
+  delivers_to_area: () => ({ en: 'These sellers deliver to your current area.', sw: 'Wauzaji hawa wana delivery hadi eneo ulipo sasa.' }),
+  seller_in_area: area => ({ en: `From sellers based in ${area.en}.`, sw: `Kutoka kwa wauzaji walioko ${area.sw}.` }),
+};
+
+/** Which near-you reasons hold for the products shown (closed list, NEAR_REASON_CODES order). */
+export function nearReasonCodes(productIds, location, vendorOf) {
+  const shown = productIds.map(id => ({ id, m: location?.vendors?.get(vendorOf(id)) })).filter(x => x.m);
+  const codes = [];
+  if (shown.some(x => (location.areaSales?.get(x.id) || 0) > 0)) codes.push('popular_in_area');
+  if (shown.some(x => x.m.delivers)) codes.push('delivers_to_area');
+  if (shown.some(x => x.m.basedIn)) codes.push('seller_in_area');
+  return codes;
+}
+
+/**
+ * QA1: the area the section's reason actually speaks about. popular_in_area and seller_in_area are
+ * worked out per city (region for a region-level viewer), so they name that, never the viewer's
+ * district. delivers_to_area names the viewer's district only when every delivering vendor shown
+ * lists that district itself; otherwise the city (or region).
+ */
+export function nearAreaName(code, productIds, location, vendorOf) {
+  const a = location.area;
+  const viewer = a.names ? { en: a.names.en, sw: a.names.sw } : { en: a.name, sw: a.name };
+  const rank = a.rankArea?.names ? { en: a.rankArea.names.en, sw: a.rankArea.names.sw } : viewer;
+  if (code !== 'delivers_to_area') return rank;
+  const delivering = productIds.map(id => location.vendors?.get(vendorOf(id))).filter(m => m?.delivers);
+  return delivering.length && delivering.every(m => m.deliversExact) ? viewer : rank;
+}
+
+const CATEGORY_BY_KEY = new Map(PRODUCT_CATEGORIES.map(c => [c.key, c]));
+
+/**
+ * Titles, reasons and "view all" for assembled sections. `personal` (slice 2, optional):
+ * { [sectionKey]: { history, gender, age } } — which personal signal changed that section.
+ */
+export function describeSections(sections, needs, personal = {}) {
   return sections.map((s) => {
     const copy = COPY[s.key];
+    let title = copy.title[needs.mode] || copy.title.all;
+    let reason = copy.reason(needs.mode, needs);
+    let reasonCodes = copy.codes(needs.mode, needs);
+    let reasonParams = null;
+    const mine = personal[s.key] || {};
+    if (s.key === 'popular_near_you' && needs.location) {
+      reasonCodes = nearReasonCodes(s.productIds, needs.location, id => s.vendorOf?.(id));
+      if (!reasonCodes.length) reasonCodes = ['seller_in_area'];
+      const areaName = nearAreaName(reasonCodes[0], s.productIds, needs.location, id => s.vendorOf?.(id));
+      reason = NEAR_COPY[reasonCodes[0]](areaName);
+      reasonParams = { areaName };
+    }
+    if (s.key === 'recommended' && needs.optedOut) {
+      // Switched off (P1 §8.2): the same suggestions as everyone, no personal reason.
+      title = PERSONAL_COPY.popularInShop;
+      reason = PERSONAL_COPY.generic;
+      reasonCodes = ['generic', 'role_context'];
+    }
+    const hist = needs.purchaseHistory;
+    if (mine.history && hist) {
+      const rebought = s.productIds.find(id => hist.boughtProducts.has(id) && hist.boughtProducts.get(id).name);
+      // Only a category the rail really shows after allocation (QA 2026-10-22): the reason must match the rail.
+      const topCategory = hist.categories.find(c => s.categories?.includes(c)) || null;
+      if (s.key === 'recommended' && (rebought || topCategory)) title = PERSONAL_COPY.recommendedTitle;
+      if (s.key === 'recommended' && rebought) {
+        const productName = hist.boughtProducts.get(rebought).name;
+        reason = PERSONAL_COPY.boughtProduct(productName);
+        reasonParams = { productName };
+        reasonCodes = ['bought_product', ...reasonCodes.filter(c => c !== 'popular_with_role' && c !== 'generic')];
+      } else if (topCategory && CATEGORY_BY_KEY.has(topCategory)) {
+        reason = PERSONAL_COPY.boughtCategory(CATEGORY_BY_KEY.get(topCategory));
+        reasonParams = { category: topCategory };
+        reasonCodes = ['bought_category', ...reasonCodes.filter(c => c !== 'popular_with_role' && c !== 'generic')];
+      }
+    }
+    const audienceCodes = [...(mine.gender ? ['profile_gender'] : []), ...(mine.age ? ['profile_age'] : [])];
+    if (audienceCodes.length) {
+      const at = reasonCodes.indexOf('role_context');
+      reasonCodes = at < 0 ? [...reasonCodes, ...audienceCodes] : [...reasonCodes.slice(0, at), ...audienceCodes, ...reasonCodes.slice(at)];
+    }
     return {
       key: s.key,
-      title: copy.title[needs.mode] || copy.title.all,
-      reason: copy.reason(needs.mode, needs),
-      reasonCodes: copy.codes(needs.mode, needs),
+      title,
+      reason,
+      reasonCodes,
+      ...(reasonParams ? { reasonParams } : {}),
       viewAll: s.viewAll || { path: '/shop/products', query: {} },
       productIds: s.productIds,
       hasMore: s.hasMore,
@@ -451,17 +581,92 @@ export function categoriesFor(mode, eligible) {
  * `allProductsCount` is how many products GET /shop/products lists (the input `products`), so the
  * app can show an "All products" grid when no section reached the minimum, or "getting ready" at 0.
  */
-export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, suspendedVendorIds = [], products, featured, paidPlacementIds, orders, config = {}, now }) {
+/** The sections where personal signals may act (organic suggestion rails only). */
+export const PERSONAL_SECTIONS = Object.freeze(['recommended', 'essentials']);
+const sameIds = (a, b) => a.length === b.length && a.every((id, i) => id === b[i]);
+const sameSections = (a, b) => a.length === b.length && a.every((s, i) => s.key === b[i].key && sameIds(s.productIds, b[i].productIds));
+
+/**
+ * All four layers. `products` are buyer-visible listings; `featured` is
+ * [{ productId }] from the Featured system in its order; `paidPlacementIds`
+ * are products with any live promotion; `orders` are recent paid orders.
+ * → { mode, signalsUsed, categories, allProductsCount, sections, personalised } or { error }
+ * `allProductsCount` is how many products GET /shop/products lists (the input `products`), so the
+ * app can show an "All products" grid when no section reached the minimum, or "getting ready" at 0.
+ *
+ * `personalisation` (slice 2; null = Phase 1 exactly): { optedOut, history, audienceFor(mode) → { gender, ageBand }, location? }.
+ * `location` (slice 3) is needs.location (see NEEDS_PHASE2_FIELDS): given only when SHOP_NEAR_YOU is on, personalisation is
+ * available and the switch is on, and the area was valid. It adds the popular_near_you section and the `location` signal.
+ * A personal signal counts as used only when it changed the page compared with the page without it.
+ * Gender/age act after assembly, inside a rail: the set of products never changes, only their order.
+ */
+export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, suspendedVendorIds = [], products, featured, paidPlacementIds, orders, config = {}, now, personalisation = null }) {
   const identity = resolveShoppingMode({ requested: mode, sessionUserType, heldUserTypes });
   if (identity.error) return identity;
-  const needs = buildNeeds({ mode: identity.mode, memberProfile, trainerProfile, recentIds, config });
+  const p = personalisation;
+  // Slice 3: the viewer's area, only when personalisation is on for them (the caller decides; repeated here).
+  const location = p && !p.optedOut && p.location ? p.location : null;
+  let needs = buildNeeds({ mode: identity.mode, memberProfile, trainerProfile, recentIds, config, optedOut: Boolean(p?.optedOut), profileSignals: p?.profileSignals !== false, location });
   const { eligible } = filterEligible(products, { ownVendorIds, suspendedVendorIds });
-  const sections = assembleSections({ needs, eligible, featured, paidPlacementIds, sales: salesStats(orders, { now }), now, config });
+  const sales = salesStats(orders, { now });
+  const assemble = n => assembleSections({ needs: n, eligible, featured, paidPlacementIds, sales, now, config });
+  let sections = assemble(needs);
+  const personal = {};
+  const signals = [];
+
+  if (p && !p.optedOut && p.history) {
+    const withHistory = { ...needs, purchaseHistory: p.history };
+    const changed = assemble(withHistory);
+    if (!sameSections(sections, changed)) {
+      for (const key of PERSONAL_SECTIONS) {
+        const before = sections.find(s => s.key === key);
+        const after = changed.find(s => s.key === key);
+        if (after && (!before || !sameIds(before.productIds, after.productIds))) personal[key] = { ...personal[key], history: true };
+      }
+      signals.push('purchase_history');
+      sections = changed;
+      needs = withHistory;
+    }
+  }
+
+  const audience = p && !p.optedOut && p.audienceFor ? p.audienceFor(identity.mode) : null;
+  if (audience && (audience.gender || audience.ageBand)) {
+    const rows = new Map(eligible.map(row => [row.id, row]));
+    const rowOf = id => rows.get(id);
+    let genderUsed = false;
+    let ageUsed = false;
+    sections = sections.map((s) => {
+      if (!PERSONAL_SECTIONS.includes(s.key)) return s;
+      const final = reorderForAudience(s.productIds, rowOf, audience);
+      // Used only when the final order differs. A signal counts when the page without it would differ
+      // from the final one, or when on its own it already gives the final order (both point the same way).
+      if (sameIds(final, s.productIds)) return s;
+      const byGender = reorderForAudience(s.productIds, rowOf, { gender: audience.gender });
+      const byAge = reorderForAudience(s.productIds, rowOf, { ageBand: audience.ageBand });
+      const g = !sameIds(final, byAge) || sameIds(final, byGender);
+      const a = !sameIds(final, byGender) || sameIds(final, byAge);
+      genderUsed ||= g;
+      ageUsed ||= a;
+      personal[s.key] = { ...personal[s.key], gender: g, age: a };
+      return { ...s, productIds: final };
+    });
+    if (genderUsed) signals.push('profile_gender');
+    if (ageUsed) signals.push('profile_age');
+  }
+
+  if (sections.some(s => s.key === 'popular_near_you')) signals.push('location');
+
+  // Categories each section shows (for the bought-category reason); vendors for the near-you reasons.
+  const catOf = new Map(eligible.map(row => [row.id, row.category]));
+  const vendorOfId = new Map(eligible.map(row => [row.id, row.vendorId]));
+  const vendorOf = id => vendorOfId.get(id);
+  const described = describeSections(sections.map(s => ({ ...s, categories: uniq(s.productIds.map(id => catOf.get(id))), vendorOf })), needs, personal);
   return {
     mode: identity.mode,
-    signalsUsed: needs.signalsUsed.filter(s => s !== 'recently_viewed' || sections.some(x => x.key === 'recently_viewed')),
+    signalsUsed: [...needs.signalsUsed.filter(s => s !== 'recently_viewed' || sections.some(x => x.key === 'recently_viewed')), ...signals],
     categories: categoriesFor(identity.mode, eligible),
     allProductsCount: (products || []).length,
-    sections: describeSections(sections, needs),
+    sections: described,
+    personalised: signals.length > 0,
   };
 }

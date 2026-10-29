@@ -1,6 +1,7 @@
 // Admin role-approval queue — owner, trainer and vendor profiles awaiting review.
 import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
+import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 
 export function createAdminApprovalService({ users, auditLog, partnerKycCases = null, partnerGate = null }) {
   /** Strip internal/sensitive fields from user records for list responses. */
@@ -42,7 +43,7 @@ export function createAdminApprovalService({ users, auditLog, partnerKycCases = 
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: `role_${status}`,
-      target: target.id, before, after: updated
+      target: target.id, before: userAuditSnapshot(before), after: userAuditSnapshot(updated)
     });
     return { user: toSessionUser(updated) };
   }

@@ -11,13 +11,14 @@ import { withLedgerDelete } from './fixtures/ledger-cleanup.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { gyms, b2bConsumptionService as usage } from '../src/bootstrap/services.mjs';
 import * as b2bRoutes from '../functions/b2b.mjs';
-import { adminOnboardCorporate, adminSetCorporateStatus, adminCreateHrUser, corporateProvisionStaff, corporateLinkStaffUser } from '../functions/corporate.mjs';
+import { adminOnboardCorporate, adminSetCorporateStatus, adminCreateHrUser, corporateProvisionStaff, corporateLinkStaffUser, corporateListStaff } from '../functions/corporate.mjs';
 
 await ensureInit();
 const {
   adminCreateB2BOrganization, adminSetB2BOrganizationStatus, addB2BOrganizationUser, enrollB2BBeneficiary,
   createB2BProgram, createB2BBenefit, setB2BBenefitStatus, setB2BProgramStatus,
   adminListB2BConsumptions, adminGetB2BConsumption, adminReverseB2BConsumption, adminEvaluateB2BUsage, getB2BProgramUsage, myB2BBenefits,
+  acceptMyB2BMemberRequest, declineMyB2BMemberRequest,
 } = b2bRoutes;
 
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
@@ -56,6 +57,7 @@ after(async () => {
     await db('CorporateAccount').whereIn('id', made.corporates).del();
   }
   for (const id of made.gyms) await gyms.removeAsync(g => g.id === id);
+  await db('B2BMemberRequest').whereIn('userId', made.users).del();
   await db('AuditLog').whereIn('actor', made.users).del();
   await db('User').whereIn('id', made.users).del();
 });
@@ -142,11 +144,26 @@ test('HR links an employee to a member account through the corporate route', asy
   const employeeId = (await call(corporateProvisionStaff, { claims: hrClaims, body: { displayName: 'Emp' } })).body.employee.id;
   const memberId = await user('member');
 
-  assert.equal((await call(corporateLinkStaffUser, { claims: { sub: memberId, userType: 'member' }, params: { id: employeeId }, body: { userId: memberId } })).statusCode, 403);
-  const linked = await call(corporateLinkStaffUser, { claims: hrClaims, params: { id: employeeId }, body: { userId: memberId } });
-  assert.deepEqual([linked.statusCode, linked.body.employee.userId], [200, memberId]);
+  const member = { sub: memberId, userType: 'member' };
+  assert.equal((await call(corporateLinkStaffUser, { claims: member, params: { id: employeeId }, body: { userId: memberId } })).statusCode, 403);
+  // HR naming a member by user id only asks; the record is linked when the member accepts (22 Oct 2026).
+  const asked = await call(corporateLinkStaffUser, { claims: hrClaims, params: { id: employeeId }, body: { userId: memberId } });
+  assert.deepEqual([asked.statusCode, asked.body.outcome, asked.body.memberRequest.employeeId], [202, 'pending_member_acceptance', employeeId]);
+  assert.equal((await db('CorporateEmployee').where({ id: employeeId }).first()).userId, null);
+  assert.equal((await call(corporateLinkStaffUser, { claims: hrClaims, params: { id: employeeId }, body: { userId: memberId } })).body.error, 'member_request_pending');
+  const listed = (await call(corporateListStaff, { claims: hrClaims })).body.employees.find(e => e.id === employeeId);
+  assert.deepEqual([listed.userId, listed.pendingLink.userId, listed.pendingLink.status], [null, memberId, 'pending_member_acceptance']);
+  const linked = await call(acceptMyB2BMemberRequest, { claims: member, params: { requestId: asked.body.memberRequest.id } });
+  assert.deepEqual([linked.statusCode, linked.body.employee.userId, linked.body.memberRequest.status], [200, memberId, 'accepted'], JSON.stringify(linked.body));
   const second = (await call(corporateProvisionStaff, { claims: hrClaims, body: { displayName: 'Emp 2' } })).body.employee.id;
   assert.equal((await call(corporateLinkStaffUser, { claims: hrClaims, params: { id: second }, body: { userId: memberId } })).body.error, 'user_already_linked');
+  // Unlinking withdraws an open request for that record too.
+  const third = (await call(corporateProvisionStaff, { claims: hrClaims, body: { displayName: 'Emp 3' } })).body.employee.id;
+  const other = await user('member');
+  const pending = await call(corporateLinkStaffUser, { claims: hrClaims, params: { id: third }, body: { userId: other } });
+  assert.equal((await call(corporateLinkStaffUser, { claims: hrClaims, params: { id: third }, body: { userId: null } })).body.employee.userId, null);
+  assert.equal((await db('B2BMemberRequest').where({ id: pending.body.memberRequest.id }).first()).status, 'cancelled');
+  assert.equal((await call(declineMyB2BMemberRequest, { claims: { sub: other, userType: 'member' }, params: { requestId: pending.body.memberRequest.id } })).statusCode, 409);
   assert.equal((await call(corporateLinkStaffUser, { claims: hrClaims, params: { id: employeeId }, body: { userId: null } })).body.employee.userId, null);
 });
 

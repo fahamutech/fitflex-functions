@@ -29,6 +29,8 @@ export function createSubscriptionService({
   auditLog = null,
   // Reference lookups (holders of a key, refused attempts per member); the database one in production.
   referenceStore = null,
+  // Marathon & Events S4: the event title / order reference of open EVENT_ORDER requests, one batch: (requests) → Map<requestId, { eventTitle, eventOrderReference }>.
+  eventLabels = async () => new Map(),
   now = () => Date.now(),
 }) {
   const references = referenceStore || memoryReferenceStore({ paymentRequests, auditLog });
@@ -489,9 +491,12 @@ export function createSubscriptionService({
     const allPendingPayments = await paymentRequests.filterAsync(p => p.memberId === uid && p.status === 'pending');
     const subIds = [...new Set(allPendingPayments.map(p => p.subscriptionId).filter(Boolean))];
     const subRows = subIds.length ? await subscriptions.filterAsync(s => subIds.includes(s.id)) : [];
+    // An event order's request says which event it is for (the app labels it "Event tickets · {event}"); it never holds the access slot below.
+    const eventRequests = allPendingPayments.filter(p => p.eventOrderId);
+    const labels = eventRequests.length ? await eventLabels(eventRequests) : new Map();
     const pendingPayments = allPendingPayments
       .sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))
-      .map(p => describePayment(p, subRows.find(s => s.id === p.subscriptionId) || null));
+      .map(p => ({ ...describePayment(p, subRows.find(s => s.id === p.subscriptionId) || null), ...(labels.get(p.id) ?? {}) }));
     const pendingPayment = pendingPayments.find(p => MEMBER_ACCESS_PRODUCTS.includes(p.productType)) || null;
     // The two access products side by side: a gym plan never hides the member's FitFlex Pass.
     const paidSubs = subs.filter(s => ['active', 'expired', 'suspended'].includes(s.status));

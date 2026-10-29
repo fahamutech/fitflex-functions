@@ -37,6 +37,8 @@ export const registrationLimits = () => ({
 export function createRegistrationService({
   db, users, codes, identityLink, pinAuth, sessionForPerson, approvalStatusForRole,
   signPurpose, verifyPurpose, claimInvitations = null, linkingEnabled = () => false, auditLog = null,
+  // A profile this registration made and then closed (partner media purge, functions#277 review M2).
+  onAccountClosed = async () => {},
 }) {
   const matchingRows = async identifier => (identifier.type === 'email'
     ? db('User').whereRaw('lower(btrim(email)) = ?', [identifier.value])
@@ -150,7 +152,10 @@ export function createRegistrationService({
     });
     if (linked.conflicts.some(c => c.kind === 'verified_identifier_collision' && c.identifierType === identifier.type)) {
       // Someone proved it in the same moment. A row we just made is withdrawn.
-      if (!reused) await db('User').where({ id: row.id }).update({ accountStatus: 'closed', updatedAt: db.fn.now() });
+      if (!reused) {
+        await db('User').where({ id: row.id }).update({ accountStatus: 'closed', updatedAt: db.fn.now() });
+        try { await onAccountClosed(row); } catch (err) { console.warn('[registration] close follow-up failed:', err?.message); }
+      }
       return { error: 'already_registered', status: 409 };
     }
     // Through the collection, so the hooks that follow a profile run.

@@ -18,6 +18,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { formatTsh } from './money-display.mjs';
 import { vatSummary } from './vendor-vat.mjs';
+import { isStoragePath } from './media-src.mjs';
 
 export const LINK_DOC_TYPES = ['receipt', 'invoice', 'payment_receipt', 'statement', 'order_invoice', 'credit_note'];
 export const LANGS = ['en', 'sw'];
@@ -52,6 +53,25 @@ export function publicBaseUrl(raw = process.env.PUBLIC_API_URL, { nodeEnv = proc
   } catch { return null; }
 }
 
+/**
+ * The logo a document shows (security fix 2026-10-28), or null: only an image on OUR storage —
+ * a /storage/<cid>/<file> path, resolved against PUBLIC_API_URL, or that same address already
+ * absolute on our host. Another host is never shown (a buyer opening the page would fetch it), and a
+ * data-URI logo (what the app stores today) is not put on documents either; neither is the PDF
+ * (it never embeds a logo). Null while PUBLIC_API_URL is unset.
+ */
+export function documentLogoUrl(logo, base = publicBaseUrl()) {
+  if (!base || typeof logo !== 'string' || !logo) return null;
+  if (isStoragePath(logo)) return `${base}${logo}`;
+  try {
+    const url = new URL(logo);
+    const ours = new URL(base);
+    const path = ours.pathname === '/' ? url.pathname : url.pathname.slice(ours.pathname.length);
+    if (url.origin === ours.origin && url.pathname.startsWith(ours.pathname) && isStoragePath(path) && !url.search && !url.hash && !url.username) return logo;
+  } catch { /* not a URL */ }
+  return null;
+}
+
 // ── labels (EN + SW; SW drafts for native review) ───────────────────────────
 
 export const DOC_LABELS = {
@@ -70,8 +90,10 @@ export const DOC_LABELS = {
     refunded: 'Refunded {amount} by {method}', receivedBy: 'Payment received by {business}.', notFiscal: 'This is not a TRA fiscal receipt.',
     copyNote: 'This is a copy of a document issued by {business}.', pageOf: 'Page {n} of {m}', langEn: 'English', langSw: 'Kiswahili',
     unavailableTitle: "This link isn't available", unavailableBody: 'The seller may have turned it off. Ask them to send it again.',
-    rateLimited: 'Too many requests. Try again in a minute.', serverError: 'Something went wrong. Try again later.',
-    pdfFailedPage: "The PDF couldn't be made. You can still view the page.", backToPage: 'Back to the document', downloadPdf: 'Download PDF',
+    // UAT D7: a short heading (also the tab title) and one sentence below it, so nothing reads twice.
+    rateLimitedTitle: 'Too many requests', rateLimited: 'Try again in a minute.',
+    serverErrorTitle: 'Something went wrong', serverError: 'Try again later.',
+    pdfFailedTitle: 'PDF not available', pdfFailedPage: "The PDF couldn't be made. You can still view the page.", backToPage: 'Back to the document', downloadPdf: 'Download PDF',
     tin: 'TIN {tin}', vrn: 'VRN {vrn}', aging: 'Not due yet {current} · 1–30 days {d1_30} · 31–60 days {d31_60} · 61–90 days {d61_90} · Over 90 days {d90plus}',
     waText: '{business}: {title} {number}, {amount}. View it here: {url}', smsText: '{business} {title} {number} {amount}: {url}',
     method: { cash: 'Cash', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Card', bank: 'Bank', other: 'Other' },
@@ -93,8 +115,9 @@ export const DOC_LABELS = {
     refunded: 'Imerejeshwa {amount} kwa {method}', receivedBy: 'Malipo yamepokelewa na {business}.', notFiscal: 'Hii si risiti ya kodi ya TRA.',
     copyNote: 'Hii ni nakala ya hati iliyotolewa na {business}.', pageOf: 'Ukurasa {n} kati ya {m}', langEn: 'English', langSw: 'Kiswahili',
     unavailableTitle: 'Kiungo hiki hakipatikani', unavailableBody: 'Huenda muuzaji amekizima. Mwombe akutumie tena.',
-    rateLimited: 'Maombi ni mengi mno. Jaribu tena baada ya dakika moja.', serverError: 'Kuna hitilafu. Jaribu tena baadaye.',
-    pdfFailedPage: 'PDF imeshindikana kutengenezwa. Bado unaweza kuona ukurasa.', backToPage: 'Rudi kwenye hati', downloadPdf: 'Pakua PDF',
+    rateLimitedTitle: 'Maombi ni mengi mno', rateLimited: 'Jaribu tena baada ya dakika moja.',
+    serverErrorTitle: 'Kuna hitilafu', serverError: 'Jaribu tena baadaye.',
+    pdfFailedTitle: 'PDF haipatikani', pdfFailedPage: 'Imeshindikana kutengeneza PDF. Bado unaweza kuona ukurasa.', backToPage: 'Rudi kwenye hati', downloadPdf: 'Pakua PDF',
     tin: 'TIN {tin}', vrn: 'VRN {vrn}', aging: 'Bado muda haujafika {current} · Siku 1–30 {d1_30} · Siku 31–60 {d31_60} · Siku 61–90 {d61_90} · Zaidi ya siku 90 {d90plus}',
     waText: '{business}: {title} {number}, {amount}. Itazame hapa: {url}', smsText: '{business} {title} {number} {amount}: {url}',
     method: { cash: 'Taslimu', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Kadi', bank: 'Benki', other: 'Nyingine' },
@@ -107,6 +130,8 @@ export const fill = (template, values = {}) => String(template).replace(/\{(\w+)
 export const label = (lang, key, values) => fill(DOC_LABELS[langOf(lang)][key] ?? DOC_LABELS.en[key] ?? key, values);
 export const methodLabel = (lang, method) => DOC_LABELS[langOf(lang)].method[method] || method;
 export const money = amount => formatTsh(amount);
+/** A discount: "-TSh 1,500" (UAT D4: discounts read like every other amount). */
+export const minusMoney = amount => `-${formatTsh(amount)}`;
 
 // ── dates (EAT, UTC+3, no daylight saving) ──────────────────────────────────
 

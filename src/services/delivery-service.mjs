@@ -25,7 +25,7 @@
 // switched off, the member opted out since the campaign was sent — and the
 // row is then `skipped` with the reason, not failed.
 import { randomUUID } from 'node:crypto';
-import { contentFor } from '../shared/communications.mjs';
+import { channelAllowed, contentFor } from '../shared/communications.mjs';
 import { directMemberships } from '../shared/communication-tenancy.mjs';
 
 export const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000];
@@ -152,15 +152,37 @@ export function createDeliveryService({
   };
 
   // Checked again just before sending (M11): the account may have been
-  // suspended or deleted since the message was queued, and a gym message
-  // only ever goes to a direct member of that gym.
+  // suspended or deleted since the message was queued, a gym message
+  // only ever goes to a direct member of that gym, and in-app/push offers
+  // follow the recipient's settings at delivery time.
   async function recipientBlock(msg) {
-    const user = await db('User').where({ id: msg.memberId }).first('id', 'accountStatus');
+    const user = await db('User').where({ id: msg.memberId })
+      .first('id', 'accountStatus', 'userType', 'vendorId', 'vendorRole', 'approvalStatus');
     if (!user) return 'member_not_found';
     if (user.accountStatus === 'suspended') return 'account_suspended';
+    // Vendor messages, as of now rather than when queued: a vendor closed or
+    // rejected since gets nothing, nor do its staff; staff no longer active
+    // get nothing, nor staff who are no longer the vendor's admins.
+    const vendorGone = (v) => !v || ['suspended', 'closed'].includes(v.accountStatus) || v.approvalStatus === 'rejected';
+    if (user.userType === 'vendor' && vendorGone(user)) return 'vendor_unavailable';
+    if (user.userType === 'vendor_staff') {
+      if ((user.accountStatus || 'active') !== 'active') return 'account_suspended';
+      if (user.vendorRole !== 'admin') return 'not_vendor_admin';
+      const vendor = user.vendorId ? await db('User').where({ id: user.vendorId }).first('accountStatus', 'approvalStatus') : null;
+      if (vendorGone(vendor)) return 'vendor_unavailable';
+    }
     if (msg.senderType === 'gym') {
       const ok = await directMemberships(db, [msg]);
       if (!ok.has(`${msg.gymId}:${msg.memberId}`)) return 'not_gym_member';
+    }
+    // Offers in the app and by push, as of now rather than when queued
+    // (security review of #274): a member or vendor who switched them off
+    // after the send gets nothing. WhatsApp and SMS check in their own
+    // channel services; service messages here can't be switched off.
+    if (msg.category === 'marketing' && (msg.channel === 'in_app' || msg.channel === 'push')) {
+      const prefs = await db('CommunicationPreference').where({ id: msg.memberId }).first();
+      const allowed = channelAllowed(prefs, msg.channel, 'marketing');
+      if (!allowed.allowed) return allowed.reason;
     }
     return null;
   }

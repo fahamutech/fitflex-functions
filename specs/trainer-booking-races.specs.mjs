@@ -190,8 +190,9 @@ test('race 2: mobile money is refused (409 group_slot_rebooked) for a booking pa
     paymentRequests, subscriptions: { findByIdAsync: async () => null }, adminPaymentService: null, auditLog: null,
     client: { environment: 'sandbox', initiatePayment: async () => { prompts += 1; return { transactionId: 'TXN-RACE-2' }; } },
     enabled: () => true, canSettle: () => true,
-    // As wired in bootstrap.
-    approvable: request => (request.bookingGroupId ? trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved') : null),
+    // As wired in bootstrap (B6a); trainer sessions payable this way (TUNZAA_TRAINER_PRODUCTS on).
+    trainerProducts: () => true,
+    beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
   });
   const out = await mobileMoney.pay({ memberId: s.memberId, paymentRequestId: requestId, phone: '0712345678' });
   assert.deepEqual(out, { error: 'group_slot_rebooked', status: 409, bookingIds: [takenId] });
@@ -200,19 +201,24 @@ test('race 2: mobile money is refused (409 group_slot_rebooked) for a booking pa
   assert.deepEqual([request.status, request.provider, request.reference], ['pending', 'admin_approved', null], 'not claimed for mobile money');
 });
 
-test('race 2: a request that can be approved goes on to the usual checks', async () => {
-  const request = { id: 'pay_ok', memberId: 'm', status: 'pending', bookingGroupId: 'tbg_ok', amountTzs: 1000, provider: 'admin_approved' };
-  let asked = 0;
+test('race 2: once its slot is free again, the same request is prompted', async () => {
+  const s = await scene();
+  const { requestId, second } = await rejectedGroup(s, eatSlot(11 * 24 * HOUR));
+  const other = await book(s, await user('member'), [second]);
+  assert.equal((await call(adminUpdatePaymentRequest, { claims: { sub: s.adminId, userType: 'admin' }, params: { id: requestId }, body: { status: 'pending' } })).statusCode, 200);
+  let prompts = 0;
   const mobileMoney = createMobileMoneyService({
-    paymentRequests: { findByIdAsync: async () => request }, subscriptions: { findByIdAsync: async () => null },
-    adminPaymentService: null, auditLog: null,
-    client: { environment: 'sandbox', initiatePayment: async () => ({ transactionId: 'T' }) },
-    enabled: () => true, canSettle: () => true,
-    approvable: async () => { asked += 1; return null; },
+    paymentRequests, subscriptions: { findByIdAsync: async () => null }, adminPaymentService: null, auditLog: { insertAsync: async () => {} },
+    client: { environment: 'sandbox', initiatePayment: async () => { prompts += 1; return { transactionId: `TXN-RACE-2-${randomUUID().slice(0, 6)}` }; } },
+    enabled: () => true, canSettle: () => true, trainerProducts: () => true,
+    beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
   });
-  // Trainer sessions are not sold by mobile money yet: that rule still applies after the check.
-  assert.deepEqual(await mobileMoney.pay({ memberId: 'm', paymentRequestId: 'pay_ok', phone: '0712345678' }), { error: 'not_payable_this_way', status: 409 });
-  assert.equal(asked, 1);
+  const pay = () => mobileMoney.pay({ memberId: s.memberId, paymentRequestId: requestId, phone: '0712345678' });
+  assert.equal((await pay()).error, 'group_slot_rebooked');
+  await db('TrainerBooking').where({ id: other.bookings[0].id }).update({ status: 'cancelled' });
+  const out = await pay();
+  assert.equal(out.status, 202, JSON.stringify(out));
+  assert.equal(prompts, 1);
 });
 
 // ── 3 ──────────────────────────────────────────────────────────────────────

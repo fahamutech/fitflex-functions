@@ -47,6 +47,15 @@ function page(rows, query = {}) {
 export function createB2BService({
   users, corporateAccounts, corporateEmployees, partnerKycCases,
   organizations, organizationUsers, beneficiaries, auditLog,
+  // Verified-contacts helper (src/shared/verified-contacts.mjs): adding someone
+  // by email or number finds only a person who has verified it. Without it,
+  // nobody is found by email or number (fail closed); user ids still work.
+  verifiedContacts = null,
+  // Member requests (b2b-member-request-service): an organisation user who
+  // names a member only by user id makes a request the member must accept
+  // (security fix, owner decision 22 Oct 2026). Without it such adds are
+  // refused (fail closed); FitFlex platform admins still add directly.
+  memberRequests = null,
   now = () => new Date(),
 }) {
   const stamp = () => now().toISOString();
@@ -337,7 +346,7 @@ export function createB2BService({
     if (!org) return fail('organization_not_found', 404);
     const view = await presentOne(org);
     if (userType === 'admin') {
-      return { org: view, platformAdmin: true, role: 'platform_admin', permissions: [...PERMISSIONS] };
+      return { org: view, platformAdmin: true, role: 'platform_admin', permissions: [...PERMISSIONS], userType };
     }
 
     let role = null;
@@ -358,11 +367,27 @@ export function createB2BService({
     let permissions = effectivePermissions(role, grants);
     if (view.status === 'pending') permissions = permissions.filter(p => READ_PERMISSIONS.includes(p));
     else if (view.status !== 'active') return fail('organization_not_active', 403, { organizationStatus: view.status });
-    return { org: view, platformAdmin: false, role, orgUserId, permissions };
+    return { org: view, platformAdmin: false, role, orgUserId, permissions, userType: userType ?? null };
   }
 
   const can = (access, permission) => access.permissions.includes(permission);
   const forbidden = permission => fail('forbidden', 403, { requiredPermission: permission });
+
+  /**
+   * A user id proves nothing about consent (ids show in feeds and groups), so
+   * when an organisation user names someone only by id, the member must
+   * accept first. Not for FitFlex platform admins, not for a verified email
+   * or number (unchanged), and not when the member has just accepted.
+   * `opts` comes from internal callers only, never from a request body.
+   */
+  const needsMemberConsent = (access, body, opts = {}) => !access.platformAdmin
+    && !opts.memberRequestId && !opts.verifiedContact
+    && body.userId != null && String(body.userId).trim() !== '';
+  const consentUnavailable = () => fail('member_consent_unavailable', 503);
+  /** A FitFlex platform admin adding someone directly by user id: the person is told (owner decision 22 Oct 2026). */
+  const adminAddsById = (access, body, opts = {}) => access.platformAdmin
+    && !opts.memberRequestId && !opts.verifiedContact
+    && body.userId != null && String(body.userId).trim() !== '';
 
   /** Organisations the caller belongs to (native memberships and corporate HR). */
   async function listMyOrganizations({ userId, userType }) {
@@ -388,6 +413,9 @@ export function createB2BService({
 
   const userSummary = u => (u ? { displayName: u.displayName ?? null, email: u.email ?? null, userType: u.userType } : null);
 
+  /** Requests the organisation made that the member has not answered yet. */
+  const pendingRequests = (access, kind) => (memberRequests ? memberRequests.pendingForOrganization({ organizationId: access.org.id, kind }) : []);
+
   async function listOrganizationUsers({ access, query = {} }) {
     if (!can(access, 'users.read')) return forbidden('users.read');
     const rows = (await organizationUsers.filterByColumnAsync('organizationId', access.org.id))
@@ -410,7 +438,8 @@ export function createB2BService({
       views.push(...hr);
     }
     views.sort((a, b) => String(a.user?.displayName ?? '').localeCompare(String(b.user?.displayName ?? '')));
-    return page(views, query);
+    // Not organisation users yet: asked by user id, waiting for the person to accept.
+    return { ...page(views, query), pendingMemberAcceptance: await pendingRequests(access, 'org_user') };
   }
 
   /** Grants an actor may hand out: never more than they hold; owners only by owners. */
@@ -430,7 +459,7 @@ export function createB2BService({
     return { permissions: [...new Set(permissions)] };
   }
 
-  async function addOrganizationUser({ access, body = {}, actorId }) {
+  async function addOrganizationUser({ access, body = {}, actorId }, opts = {}) {
     if (!can(access, 'users.manage')) return forbidden('users.manage');
     if (!ORGANIZATION_USER_ROLES.includes(body.role)) return fail('invalid_role', 400, { allowed: ORGANIZATION_USER_ROLES });
     const grants = readGrants(body.permissions);
@@ -439,14 +468,32 @@ export function createB2BService({
     const refused = checkGrant(access, { role: body.role, permissions });
     if (refused) return refused;
 
-    // By user id, or by the email or mobile number of their FitFlex account. An
+    // By user id, or by the verified email or mobile number of their FitFlex account. An
     // organisation user signs in to the portal with their member account.
-    const found = await findUserByContact(users, body, { prefer: 'member' });
+    const askById = needsMemberConsent(access, body, opts);
+    if (askById) {
+      if (!memberRequests) return consentUnavailable();
+      const limited = memberRequests.attempt(actorId);
+      if (limited) return limited;
+    }
+    const found = await findUserByContact(users, body, { prefer: 'member', contacts: verifiedContacts });
+    // An id that names nobody gets the same answer as a real request (nothing stored, nobody told).
+    if (askById && found.error === 'user_not_found') {
+      return memberRequests.stub({ kind: 'org_user', organizationId: access.org.id, userId: body.userId, details: { role: body.role, permissions } });
+    }
     if (found.error) return found;
     const { user } = found;
     const live = (await organizationUsers.filterByColumnAsync('userId', user.id))
       .find(m => m.organizationId === access.org.id && m.status !== 'removed');
     if (live) return fail('already_organization_user', 409, { organizationUserId: live.id });
+
+    // Named only by user id: no role until the person accepts.
+    if (askById) {
+      return memberRequests.create({
+        kind: 'org_user', organizationId: access.org.id, userId: user.id, requestedBy: actorId, requestedByType: access.userType,
+        details: { role: body.role, permissions },
+      });
+    }
 
     const at = stamp();
     const row = {
@@ -460,7 +507,10 @@ export function createB2BService({
       if (err.code === '23505') return fail('already_organization_user', 409);
       throw err;
     }
-    await audit({ actor: actorId, action: 'b2b.org_user.add', target: row.id, after: row });
+    await audit({ actor: actorId, action: 'b2b.org_user.add', target: row.id, after: opts.memberRequestId ? { ...row, memberRequestId: opts.memberRequestId } : row });
+    if (adminAddsById(access, body, opts) && memberRequests?.adminAdded) {
+      await memberRequests.adminAdded({ kind: 'org_user', organizationId: access.org.id, userId: user.id, actorId, role: row.role, resultId: row.id }).catch(() => null);
+    }
     return { organizationUser: { ...row, source: 'b2b', readOnly: false, user: userSummary(user) } };
   }
 
@@ -584,7 +634,8 @@ export function createB2BService({
       .filter(b => (query.group ? b.groupName === query.group : true))
       .filter(b => (needle ? [b.displayName, b.externalReference].some(v => v?.toLowerCase().includes(needle)) : true))
       .sort((a, b) => String(a.displayName ?? '').localeCompare(String(b.displayName ?? '')));
-    return page(filtered, query);
+    // Not beneficiaries yet: asked by user id, waiting for the member to accept. No data is shown for them anywhere.
+    return { ...page(filtered, query), pendingMemberAcceptance: await pendingRequests(access, 'beneficiary') };
   }
 
   /** The beneficiary with this id in the caller's organisation, native or read-through. */
@@ -613,7 +664,7 @@ export function createB2BService({
     corporateId: access.org.legacyCorporateId, use: '/corporate/staff',
   });
 
-  async function enrollBeneficiary({ access, body = {}, actorId }) {
+  async function enrollBeneficiary({ access, body = {}, actorId }, opts = {}) {
     if (!can(access, 'beneficiaries.manage')) return forbidden('beneficiaries.manage');
     // Employer seats are billed and seat-limited by Corporate; enrol there.
     if (access.org.legacyCorporateId) return corporateManaged(access);
@@ -624,8 +675,20 @@ export function createB2BService({
     const status = body.status ?? 'pending';
     if (!['pending', 'active'].includes(status)) return fail('invalid_status', 400, { allowed: ['pending', 'active'] });
 
-    // By user id, or by the email or mobile number of their member account.
-    const found = await findUserByContact(users, body, { require: body.userId ? null : 'member' });
+    // By user id, or by the verified email or mobile number of their member account.
+    const askById = needsMemberConsent(access, body, opts);
+    if (askById) {
+      if (!memberRequests) return consentUnavailable();
+      const limited = memberRequests.attempt(actorId);
+      if (limited) return limited;
+    }
+    const found = await findUserByContact(users, body, { require: body.userId ? null : 'member', contacts: verifiedContacts });
+    // An id that names nobody, or no member, gets the same answer as a real
+    // request (nothing stored, nobody told), so ids can't be probed this way.
+    if (askById && (found.error === 'user_not_found' || (found.user && found.user.userType !== 'member'))) {
+      return memberRequests.stub({ kind: 'beneficiary', organizationId: access.org.id, userId: body.userId,
+        details: { beneficiaryType, groupName: text(body.groupName, 100), externalReference: text(body.externalReference, 100), beneficiaryStatus: status } });
+    }
     if (found.error) return found.error === 'member_account_required' ? fail('beneficiary_must_be_member', 400) : found;
     const { user } = found;
     if (user.userType !== 'member') return fail('beneficiary_must_be_member', 400);
@@ -637,6 +700,14 @@ export function createB2BService({
       const taken = (await beneficiaries.filterByColumnAsync('organizationId', access.org.id))
         .some(b => b.externalReference === externalReference);
       if (taken) return fail('external_reference_in_use', 409);
+    }
+
+    // Named only by user id: nothing is enrolled, shown or charged until the member accepts.
+    if (askById) {
+      return memberRequests.create({
+        kind: 'beneficiary', organizationId: access.org.id, userId: user.id, requestedBy: actorId, requestedByType: access.userType,
+        details: { beneficiaryType, groupName: text(body.groupName, 100), externalReference, beneficiaryStatus: status },
+      });
     }
 
     const at = stamp();
@@ -653,7 +724,10 @@ export function createB2BService({
       if (err.code === '23505') return fail('already_enrolled', 409);
       throw err;
     }
-    await audit({ actor: actorId, action: 'b2b.beneficiary.enroll', target: row.id, after: row });
+    await audit({ actor: actorId, action: 'b2b.beneficiary.enroll', target: row.id, after: opts.memberRequestId ? { ...row, memberRequestId: opts.memberRequestId } : row });
+    if (adminAddsById(access, body, opts) && memberRequests?.adminAdded) {
+      await memberRequests.adminAdded({ kind: 'beneficiary', organizationId: access.org.id, userId: user.id, actorId, resultId: row.id }).catch(() => null);
+    }
     return { beneficiary: (await nativeViews([row]))[0] };
   }
 

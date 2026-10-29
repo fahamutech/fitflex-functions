@@ -1,19 +1,23 @@
 // FitFlex Marketplace domain service. All persistence is dependency-injected.
 import { formatTsh } from '../shared/money-display.mjs';
 import { PRODUCT_CATEGORY_KEYS, PRODUCT_CATEGORIES } from '../shared/product-categories.mjs';
+import { parseProductTargets, withoutTargets, targetsOf, TARGET_FIELDS, TARGET_AGE_BANDS } from '../shared/product-targets.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { storeNameOf } from '../shared/vendor-name.mjs';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { decideTransition, combinedStatus, fulfilmentsOf, anyAtLeast, canonicalStatus, nextStatuses, STATUSES, LEGACY_INPUTS } from '../shared/order-lifecycle.mjs';
-import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
+import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine, vendorShareOfOrder } from '../shared/marketplace-pricing.mjs';
+import { csvDocument } from '../shared/csv-export.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn } from '../shared/feature-flags.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
+import { indexAreas, validateVendorAreas, touchesAreas } from '../shared/shop-areas.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
+import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set([...STATUSES, ...LEGACY_INPUTS]);
@@ -59,7 +63,6 @@ export function buyerOrderView(order) {
 export const publicReview = ({ id, productId, rating, comment, createdAt }) => ({ id, productId, rating, comment, createdAt });
 const bool = value => value === true || value === 'true' || value === '1' ? true : value === false || value === 'false' || value === '0' ? false : undefined;
 const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0) ? Number(product.discountPriceTzs) : Number(product.priceTzs || 0);
-const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
 
 export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null,
   // Moderation: pending, rejected, suspended and hidden products and vendors are not shown to buyers.
@@ -78,6 +81,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // VENDOR_VAT applies). A side table only; the order, its prices, commission and payout are untouched.
   // Never allowed to fail the order.
   onVendorOrderInvoices = async () => null,
+  // Payout display (security review #275 M1): (vendorId) → Set of order ids whose share for THIS vendor sits on a
+  // paid vendor statement. ShopOrder.settlementStatus is order-wide (set when any vendor's statement for the
+  // order is paid), so on a multi-vendor order it cannot say whether this vendor was paid. null = not wired
+  // (in-memory specs): the order-wide status is used as before.
+  vendorPaidOrderIds = null,
   // Vendor tools · S5: the product's VAT code (ProductPrivate.vatCode; private, never on /shop/*, never
   // re-queues approval). { on(), allowedCodes(), set({ vendorId, productId, vatCode, actorId }), codesOf(vendorId, ids), codesById(ids) }.
   productVat = null,
@@ -104,6 +112,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   buyerContactOn = vendorBuyerContactOn,
   // S4: buyer.customerLinked on vendor orders only while VENDOR_TOOLS + VENDOR_CUSTOMERS are on.
   customersOn = vendorCustomersOn,
+  // Shop home slice 3: GeoArea rows ({ allAsync }) for the vendor area fields. null → area fields are refused.
+  geoAreas = null,
   now = () => new Date() }) {
   orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
   buyerRefs ||= createMemoryVendorBuyerRefStore();
@@ -138,10 +148,28 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return rest;
   }
 
+  /**
+   * Shop home slice 3: "Based in" (cityId: a city or district; regionId: a region) and "Delivers to"
+   * (deliveryAreaIds: any usable areas; the country = nationwide). Validated against usable GeoAreas;
+   * fields left out keep their stored value. Not flagged (stored either way, like product targets).
+   * → { patch } (empty when the body has no area field) | { error: 'invalid_area', status, field, ids, reason }
+   */
+  async function vendorAreaPatch(body, prior, source) {
+    if (!touchesAreas(body)) return { patch: {} };
+    if (!geoAreas) return { error: 'invalid_area', status: 400, field: 'cityId', ids: [], reason: 'unknown' };
+    const out = validateVendorAreas(body, prior, indexAreas(await geoAreas.allAsync()));
+    if (out.error) return out;
+    return { patch: { ...out.patch, areasSource: source } };
+  }
+  const AREA_KEYS = ['cityId', 'regionId', 'deliveryAreaIds', 'areasSource'];
+  const areasOf = profile => Object.fromEntries(AREA_KEYS.map(k => [k, profile?.[k] ?? null]));
+
   async function saveVendorProfile({ vendorId, body }) {
     const current = await users.findByIdAsync(vendorId);
     const prior = current?.vendorProfile || {};
     const publish = body?.publish === true;
+    const areas = await vendorAreaPatch(body, prior, 'vendor');
+    if (areas.error) return areas;
     if (body?.productCategories !== undefined) {
       const picked = Array.isArray(body.productCategories) ? body.productCategories : [];
       const unknown = picked.filter(key => !PRODUCT_CATEGORY_KEYS.has(key));
@@ -149,7 +177,12 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         return { error: 'invalid_product_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
       }
     }
-    const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
+    // Logo and banner: an image the app shows to every buyer, so only a data URI or our own storage path (media-src.mjs).
+    const badMedia = await checkMediaFields({ logo: body?.logo, banner: body?.banner }, {
+      kept: { logo: storedMedia(prior.logo), banner: storedMedia(prior.banner) }, actor: current?.personId || vendorId,
+    });
+    if (badMedia) return badMedia;
+    const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), ...areas.patch, vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
     const missing = PROFILE_REQUIRED.filter(key => {
       const value = profile[key];
       if (Array.isArray(value)) return !value.length;
@@ -189,7 +222,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { ...profile, rating, reviewCount: reviews.length, products: storeProducts, reviews };
   }
 
-  async function listProducts({ category, search, vendorId, includeArchived = false, brand, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = {}) {
+  // includeTargets: internal (the shop home's personalisation); buyer rows never carry targetGender / targetAgeBands.
+  async function listProducts({ category, search, vendorId, includeArchived = false, includeTargets = false, brand, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = {}) {
     let rows = await products.filterAsync(product => {
       if (product.deletedAt) return false;
       if (includeArchived) return true;
@@ -207,7 +241,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const names = new Map(accounts.map(user => [user.id, storeNameOf(user)]));
       rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId))
         // Buyer-facing rows carry the seller's store name (QA round 2: the Visit-store heading survives a reload).
-        .map(product => ({ ...product, vendorName: names.get(product.vendorId) ?? null }));
+        .map(product => ({ ...(includeTargets === true ? product : withoutTargets(product)), vendorName: names.get(product.vendorId) ?? null }));
     }
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
@@ -233,7 +267,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!includeUnlisted && !(await listProducts({})).some(row => row.id === productId)) return null;
     const reviews = (await productReviews.filterAsync(review => review.productId === productId)).map(publicReview);
     const vendorUser = await users.findByIdAsync(product.vendorId);
-    return { ...product, vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
+    return { ...withoutTargets(product), vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
   }
 
   /** Shape and size limits on what a vendor may store; null when fine. */
@@ -313,15 +347,21 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { ...out, product: (await withVatCodes(args.vendorId, [out.product]))[0] };
   }
 
-  async function upsertProductCore({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true }) {
+  // keptImages: images a copy may carry over unchanged (duplicateProduct: the source product's own).
+  async function upsertProductCore({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [] }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
+    // Who it's for (optional vendor tags): not reviewed, so changing them never re-queues approval.
+    const targets = parseProductTargets(input);
+    if (targets.error) return targets;
     if (ledgerOn() && !costAllowed && sendsCost(input)) return { error: 'cost_forbidden', status: 403 };
     if (productId) {
       const prior = await products.findByIdAsync(productId);
       if (!prior || prior.deletedAt) return { error: 'product_not_found', status: 404 };
       if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
+      const badMedia = await checkMediaFields({ images: input.images }, { kept: { images: storedMedia(prior.images) }, actor: actorId });
+      if (badMedia) return badMedia;
       if (input.name !== undefined && !String(input.name).trim()) return { error: 'name_required', status: 400 };
       if (input.priceTzs !== undefined && Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
       if (input.stock !== undefined && Number(input.stock) < 0) return { error: 'invalid_stock', status: 400 };
@@ -329,7 +369,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (input.category && input.category !== prior.category && !PRODUCT_CATEGORY_KEYS.has(input.category)) {
         return { error: 'invalid_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
       }
-      const patch = { updatedAt: nowIso() };
+      const patch = { updatedAt: nowIso(), ...targets.patch };
       if (input.name !== undefined) patch.name = String(input.name).trim();
       for (const field of ['description', 'category', 'brand', 'sku', 'visibility', 'deliveryAvailable']) if (input[field] !== undefined) patch[field] = input[field];
       for (const field of ['priceTzs', 'discountPriceTzs', 'weightKg', 'distanceKm']) if (input[field] !== undefined) patch[field] = input[field] === null ? null : Number(input[field]);
@@ -369,6 +409,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     }
     if (input.priceTzs == null || Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
     if (Number(input.stock ?? 0) < 0) return { error: 'invalid_stock', status: 400 };
+    const badMedia = await checkMediaFields({ images: input.images }, { kept: { images: storedMedia(keptImages) }, actor: actorId });
+    if (badMedia) return badMedia;
     const ledger = ledgerOn();
     const plan = ledger ? planStock(null, input, { ledger: true }) : null;
     if (plan?.error) return plan;
@@ -383,6 +425,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // reviews and the order store keeps soldCount. Whatever a vendor (or admin) sends for them is ignored.
       deliveryAvailable: input.deliveryAvailable !== false, status: 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
       homepageVisible: true, homepagePriority: 0, createdAt: at, updatedAt: at,
+      targetGender: targets.patch.targetGender ?? null, targetAgeBands: targets.patch.targetAgeBands ?? [],
     };
     if (ledger) {
       // The product and the first rows of its stock history are written together, in one transaction.
@@ -487,7 +530,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
     if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
-    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true });
+    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true, keptImages: prior.images || [] });
   }
   async function deleteProduct({ vendorId, productId }) {
     const prior = await products.findByIdAsync(productId);
@@ -497,8 +540,19 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { deleted: true };
   }
   /** GET /admin/products. With the ledger on, admins see the private fields too (cost included). */
-  async function adminListProducts() {
-    const rows = (await products.filterAsync(product => !product.deletedAt)).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
+  /**
+   * GET /admin/products. Optional filters on the vendor's tags (read-only for admins):
+   * targetGender = women | men | everyone (no tag); targetAgeBand = a band | all (no bands).
+   */
+  async function adminListProducts({ targetGender, targetAgeBand } = {}) {
+    const GENDERS = ['women', 'men', 'everyone'];
+    const BANDS = [...TARGET_AGE_BANDS, 'all'];
+    if (targetGender !== undefined && !GENDERS.includes(targetGender)) return { error: 'invalid_filter', status: 400, field: 'targetGender', allowed: GENDERS };
+    if (targetAgeBand !== undefined && !BANDS.includes(targetAgeBand)) return { error: 'invalid_filter', status: 400, field: 'targetAgeBand', allowed: BANDS };
+    const genderOk = p => targetGender === undefined || (targetGender === 'everyone' ? !p.targetGender : p.targetGender === targetGender);
+    const bandsOf = p => targetsOf(p).targetAgeBands; // every band counts as all ages
+    const bandOk = p => targetAgeBand === undefined || (targetAgeBand === 'all' ? bandsOf(p).length === 0 : bandsOf(p).includes(targetAgeBand));
+    const rows = (await products.filterAsync(product => !product.deletedAt && genderOk(product) && bandOk(product))).sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || String(a.name || '').localeCompare(String(b.name || '')));
     return vendorProductsView(null, rows, { costAllowed: true });
   }
 
@@ -536,7 +590,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!vendor || vendor.userType !== 'vendor') return { error: 'vendor_not_found', status: 404 };
     if (vendor.accountStatus === 'suspended') return { error: 'vendor_suspended', status: 409 };
     // The admin is the actor of the opening stock rows; cost and reorder level are stored as the vendor's would be.
-    const created = await upsertProduct({ vendorId, body, actorId, costAllowed: true });
+    // Who-it's-for tags are the vendor's to set in the app (spec Q-7): an admin-created product starts without them.
+    const vendorBody = Object.fromEntries(Object.entries(body || {}).filter(([key]) => !TARGET_FIELDS.includes(key)));
+    const created = await upsertProduct({ vendorId, body: vendorBody, actorId, costAllowed: true });
     if (created.error) return created;
     const requestedApproval = ['pending', 'approved', 'rejected'].includes(body?.approvalStatus)
       ? body.approvalStatus
@@ -625,12 +681,16 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       }
       patch.vendorProfile = { ...(vendor.vendorProfile || {}), vendorId, commissionPct: pct };
     }
+    // Shop home slice 3: staff map a vendor's areas (same rules as the vendor's own profile form).
+    const areas = await vendorAreaPatch(body, vendor.vendorProfile || {}, 'admin');
+    if (areas.error) return areas;
+    if (Object.keys(areas.patch).length) patch.vendorProfile = { ...(patch.vendorProfile || vendor.vendorProfile || {}), vendorId, ...areas.patch };
     const updated = await users.updateByIdAsync(vendorId, patch);
     await auditLog.insertAsync({
       id: randomUUID(), at: nowIso(), actor: actorId, action: 'vendor_management_updated',
       target: vendorId,
-      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor) },
-      after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined, commissionPct: patch.vendorProfile.commissionPct } : {}) },
+      before: { approvalStatus: vendor.approvalStatus, accountStatus: vendor.accountStatus, commissionPct: vendorCommissionPct(vendor), ...(Object.keys(areas.patch).length ? { areas: areasOf(vendor.vendorProfile) } : {}) },
+      after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined } : {}), ...(body?.commissionPct != null ? { commissionPct: patch.vendorProfile.commissionPct } : {}), ...(Object.keys(areas.patch).length ? { areas: areasOf(patch.vendorProfile) } : {}) },
     });
     if (patch.approvalStatus) await notifyVendor(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
     return { vendor: updated };
@@ -751,6 +811,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // One fulfilment per vendor: each vendor moves only their own.
       fulfilments: [...new Set(orderItems.map(item => item.vendorId).filter(Boolean))].map(vendorId => ({ vendorId, status: 'pending', timeline: [{ status: 'pending', at }], updatedAt: at })),
       reservationExpiresAt: free ? null : new Date(+placedAt + reservationTtlMinutes * 60_000).toISOString(),
+      // S6: an order with nothing to pay is paid when it is placed (vendor reports date app sales by paidAt).
+      ...(free ? { paidAt: at } : {}),
       createdAt: at, updatedAt: at,
     };
     // Stock stays reserved while the payment is confirmed.
@@ -1224,24 +1286,47 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * Sales dashboard. todaySalesTzs (Q-3, S2): this vendor's own lines of the orders placed today (EAT
    * calendar day) that are paid — not cancelled, refunded or still unpaid — whatever their delivery
    * status. The other figures still count delivered, paid orders.
+   * S6 (additive): each figure also comes as …NetTzs = what the vendor receives after FitFlex's
+   * commission on the same orders (vendorShareOfOrder, read only: the order lines' commission and payout
+   * as fixed when the order was placed; the payout engine is not involved), and each settlements[] row
+   * carries netTzs.
+   * Settled / pending (security review #275 M1, payout display): settled = this vendor's own share of the order is
+   * on a paid statement (vendorPaidOrderIds), never the order-wide settlementStatus.
    */
   async function vendorPayments(vendorId) {
     const orders = await ordersOfVendor(vendorId);
     const delivered = orders.filter(order => order.paymentStatus === 'paid' && ['delivered', 'fulfilled'].includes(order.status));
     const value = order => ownLines(order, vendorId).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
+    const net = order => (ownLines(order, vendorId).length ? vendorShareOfOrder(order, vendorId).payoutTzs : 0);
     const current = now(), week = +current - 7 * 86400000, month = +current - 30 * 86400000;
     const today = eatDayBounds(eatDate(current));
     const placedToday = order => { const t = +new Date(order.createdAt); return t >= today.start && t < today.end; };
-    const total = rows => rows.reduce((sum, order) => sum + value(order), 0);
-    return { todaySalesTzs: total(orders.filter(order => order.paymentStatus === 'paid' && order.status !== 'cancelled' && placedToday(order))), weeklySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week)), monthlySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month)), pendingSettlementTzs: total(delivered.filter(order => order.settlementStatus !== 'settled')), settledPaymentsTzs: total(delivered.filter(order => order.settlementStatus === 'settled')), settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), status: order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })) };
+    const total = (rows, of = value) => rows.reduce((sum, order) => sum + of(order), 0);
+    const paidToday = orders.filter(order => order.paymentStatus === 'paid' && order.status !== 'cancelled' && placedToday(order));
+    const weekly = delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week);
+    const monthly = delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month);
+    const paidIds = vendorPaidOrderIds ? await vendorPaidOrderIds(vendorId) : null;
+    const isSettled = order => (paidIds ? paidIds.has(order.id) : order.settlementStatus === 'settled');
+    const pending = delivered.filter(order => !isSettled(order));
+    const settled = delivered.filter(isSettled);
+    return {
+      todaySalesTzs: total(paidToday), weeklySalesTzs: total(weekly), monthlySalesTzs: total(monthly), pendingSettlementTzs: total(pending), settledPaymentsTzs: total(settled),
+      todayNetTzs: total(paidToday, net), weeklyNetTzs: total(weekly, net), monthlyNetTzs: total(monthly, net), pendingSettlementNetTzs: total(pending, net), settledNetTzs: total(settled, net),
+      settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), netTzs: net(order), status: paidIds ? (isSettled(order) ? 'settled' : 'pending') : order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })),
+    };
   }
+  /**
+   * GET /vendor/payments/statement. S6: written with the shared CSV helper — UTF-8 with a BOM, CRLF,
+   * formula-injection safe. Same header and columns as before.
+   */
   async function vendorStatement(vendorId) {
-    const lines = ['order_id,amount_tzs,order_status,payment_status,settlement_status,date'];
+    const rows = [];
     for (const order of await ordersOfVendor(vendorId)) {
       const amount = ownLines(order, vendorId).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
-      lines.push([order.id, amount, order.status, order.paymentStatus || 'unknown', order.settlementStatus || 'pending', order.updatedAt || order.createdAt].map(csv).join(','));
+      const at = order.updatedAt || order.createdAt;
+      rows.push([order.id, amount, order.status, order.paymentStatus || 'unknown', order.settlementStatus || 'pending', at instanceof Date ? at.toISOString() : at]);
     }
-    return `${lines.join('\n')}\n`;
+    return csvDocument(['order_id', 'amount_tzs', 'order_status', 'payment_status', 'settlement_status', 'date'], rows);
   }
 
   async function sendEnquiry({ buyerId, body }) {
@@ -1333,7 +1418,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       permissions,
       approvalStatus: vendor?.approvalStatus ?? null,
       accountStatus: vendor?.accountStatus ?? null,
-      tools: { ...vendorToolsOptions(), canSeeCost: await canSeeCost(claims) },
+      tools: { ...vendorToolsOptions(), canSeeCost: await canSeeCost(claims), canSeeOrderMoney: await canSeeOrderMoney(claims) },
     };
   }
   const staffView = ({ passwordHash, ...staff }) => staff;

@@ -8,7 +8,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps, b2bBeneficiaryImportService, b2bLifecycleService } from '../src/bootstrap/services.mjs';
+import { b2bMemberRequestService, b2bService, b2bProgramService, b2bConsumptionService, b2bBillingService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, b2bOps, b2bBeneficiaryImportService, b2bLifecycleService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
 
@@ -23,10 +23,13 @@ const requireBillingRead = [requireAuth('admin'), requireAcl('b2b_billing', 'b2b
 // Any signed-in user; the organisation membership check happens per request.
 const requireOrgAccess = [requireAuth(), requireAcl('b2b')];
 
+// An add by user id that now waits for the member to accept answers 202.
+const PENDING_MEMBER = 'pending_member_acceptance';
+
 function send(res, result, okStatus = 200) {
   const { error, status, ...payload } = result;
   if (error) return res.status(status).json({ error, ...payload });
-  return res.status(okStatus).json(payload);
+  return res.status(payload.outcome === PENDING_MEMBER ? 202 : okStatus).json(payload);
 }
 
 /** Resolve the caller's access to :id, then run the handler with it. */
@@ -131,7 +134,7 @@ export const listB2BOrganizationUsers = {
 
 export const addB2BOrganizationUser = {
   created, method: 'post', path: '/b2b/organizations/:id/users',
-  description: 'Add someone who already has a FitFlex account to the organisation (users.manage). Name them by the email or the mobile number of their account, or by userId (one of the three). When several accounts share that email or number, the member account is used. Roles: owner, admin, manager, finance, hr, analyst, viewer.',
+  description: 'Add someone who already has a FitFlex account to the organisation (users.manage). Name them by the verified email or mobile number of their account, or by userId (one of the three). When several accounts share that email or number, the member account is used. Roles: owner, admin, manager, finance, hr, analyst, viewer. By userId (organisation users; not FitFlex admins) nobody is added yet: 202 { outcome: "pending_member_acceptance", memberRequest } and the person must accept in the app; until then they have no role.',
   requestSample: { email: 'grace@example.co.tz', role: 'finance', permissions: [] },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.addOrganizationUser({
@@ -178,7 +181,7 @@ export const getB2BBeneficiary = {
 
 export const enrollB2BBeneficiary = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries',
-  description: 'Enrol a FitFlex member (beneficiaries.manage), named by the email or mobile number of their member account, or by userId (one of the three). The organisation must be active. A mapped company enrols staff through /corporate/staff.',
+  description: 'Enrol a FitFlex member (beneficiaries.manage), named by the verified email or mobile number of their member account, or by userId (one of the three). The organisation must be active. A mapped company enrols staff through /corporate/staff. By userId (organisation users; not FitFlex admins) nobody is enrolled yet: 202 { outcome: "pending_member_acceptance", memberRequest }; the member must accept in the app, and until then the organisation sees nothing of them and is charged nothing.',
   requestSample: { phone: '0712 345 678', beneficiaryType: 'policyholder', externalReference: 'POL-00123', groupName: 'Gold scheme', status: 'active' },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => b2bService.enrollBeneficiary({
@@ -225,13 +228,47 @@ export const adminListB2BPrograms = {
 
 export const myB2BBenefits = {
   created, method: 'get', path: '/b2b/me/benefits',
-  description: 'The caller\'s B2B wellness benefits today, across every organisation that sponsors them (read-only; remaining allowance comes with usage tracking).',
+  description: 'The caller\'s B2B wellness benefits today, across every organisation that sponsors them (read-only; remaining allowance comes with usage tracking). memberRequests: organisations waiting for the caller to accept being added (same items as GET /b2b/me/member-requests).',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => {
     // Someone invited before they joined is enrolled now, rather than at the next run of the matching job.
     await b2bBeneficiaryImportService.matchInvites({ userId: req.user.sub }).catch(() => null);
-    return send(res, await programs.myBenefits({ userId: req.user.sub }));
+    const benefits = await programs.myBenefits({ userId: req.user.sub });
+    const requests = await b2bMemberRequestService.listForMember({ userId: req.user.sub }).catch(() => ({ items: [] }));
+    return send(res, { ...benefits, memberRequests: requests.items });
   },
+};
+
+// ── Member requests: an organisation asked to add the caller by user id ────
+
+export const myB2BMemberRequests = {
+  created, method: 'get', path: '/b2b/me/member-requests',
+  description: 'Organisations waiting for the caller to accept being added (named by user id): as a beneficiary, a company staff link, or an organisation user. Each item: who is asking, what they will see (A-02, English and Swahili), and the benefits the caller would get. Requests expire after B2B_MEMBER_REQUEST_TTL_DAYS days (default 14).',
+  onGuard: routeGuard('get', requireAuth()),
+  onRequest: async (req, res) => send(res, await b2bMemberRequestService.listForMember({ userId: req.user.sub })),
+};
+
+export const acceptMyB2BMemberRequest = {
+  created, method: 'post', path: '/b2b/me/member-requests/:requestId/accept',
+  description: 'Accept an organisation\'s request: the add happens now (enrolled, staff record linked, or organisation role given). Single use: 409 member_request_not_pending once answered, 410 member_request_expired after expiry, 404 for a request that is not the caller\'s.',
+  onGuard: routeGuard('post', requireAuth()),
+  onRequest: async (req, res) => send(res, await b2bMemberRequestService.accept({ userId: req.user.sub, requestId: req.params.requestId })),
+};
+
+export const declineMyB2BMemberRequest = {
+  created, method: 'post', path: '/b2b/me/member-requests/:requestId/decline',
+  description: 'Decline an organisation\'s request. Nothing is added; the organisation sees the request as declined.',
+  onGuard: routeGuard('post', requireAuth()),
+  onRequest: async (req, res) => send(res, await b2bMemberRequestService.decline({ userId: req.user.sub, requestId: req.params.requestId })),
+};
+
+export const cancelB2BMemberRequest = {
+  created, method: 'delete', path: '/b2b/organizations/:id/member-requests/:requestId',
+  description: 'Withdraw a request to add someone by user id that they have not answered (beneficiaries.manage for a beneficiary, users.manage for an organisation user).',
+  onGuard: routeGuard('delete', requireOrgAccess),
+  onRequest: (req, res) => inOrganization(req, res, access => b2bMemberRequestService.cancel({
+    access, requestId: req.params.requestId, actorId: req.user.sub,
+  })),
 };
 
 export const listB2BPrograms = {
@@ -933,7 +970,7 @@ const people = b2bBeneficiaryImportService;
 
 export const importB2BBeneficiaries = {
   created, method: 'post', path: '/b2b/organizations/:id/beneficiaries/import',
-  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account is enrolled; someone who has not joined yet is invited (by email, and by SMS when listed with a mobile number) and enrolled when they join. Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason.',
+  description: 'Add many people at once (beneficiaries.manage). Give `rows` [{ name, email, phone, group, reference, type }] or `rawText` (CSV; with a header line the columns can be in any order, without one: name, email, phone, group, reference, type). Each person needs an email or a mobile number. Someone with a member account who has verified that email or number is enrolled; anyone else is invited (by email, and by SMS when listed with a mobile number) and enrolled once a member verifies that email or number (an email or number only typed onto a profile matches nobody). Up to 2,000 rows. `dryRun: true` checks the list without changing anything. Uploading the same list again adds nobody twice. Returns counts and every row that could not be used, with the reason, plus `emailCodesAvailable` (false: people listed by email only cannot verify it in the app yet, so ask for a mobile number too).',
   requestSample: { rawText: 'name,email,phone,group\nAsha Mollel,asha@example.com,0712345678,Finance', dryRun: true },
   onGuard: routeGuard('post', requireOrgAccess),
   onRequest: (req, res) => inOrganization(req, res, access => people.importPeople({ access, body: req.body || {}, actorId: actor(req) })),
