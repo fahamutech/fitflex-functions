@@ -68,8 +68,18 @@ const keysDeep = (v, acc = new Set()) => {
   return acc;
 };
 
-beforeEach(() => { process.env.WEB_GYM_PROFILE = '1'; resetWebGymProfileLimits(); });
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+const secretBefore = process.env.QR_HMAC_SECRET;
+const apiBefore = process.env.PUBLIC_API_URL;
+beforeEach(() => {
+  process.env.WEB_GYM_PROFILE = '1';
+  process.env.QR_HMAC_SECRET = 'spec-secret';
+  process.env.PUBLIC_API_URL = 'https://api.example.test';
+  resetWebGymProfileLimits();
+});
 after(async () => {
+  for (const [k, v] of [['QR_HMAC_SECRET', secretBefore], ['PUBLIC_API_URL', apiBefore]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  await db('ModerationState').whereIn('entityId', created.gyms).del();
   if (flagBefore === undefined) delete process.env.WEB_GYM_PROFILE; else process.env.WEB_GYM_PROFILE = flagBefore;
   for (const id of created.gyms) await gyms.removeAsync(g => g.id === id);
   if (created.gyms.length) await db('Gym').whereIn('id', created.gyms).del();
@@ -164,12 +174,12 @@ test('lang en|sw returns localized labels; unknown lang falls back to English', 
   const en = await resolve({ q: issueGymQr(id), lang: 'en' });
   const sw = await resolve({ q: issueGymQr(id), lang: 'sw' });
   const other = await resolve({ q: issueGymQr(id), lang: 'fr' });
-  assert.equal(en.body.membership.gymPlans[0].label, 'Daily');
-  assert.equal(sw.body.membership.gymPlans[0].label, 'Kila siku');
-  assert.equal(sw.body.labels.hours, 'Saa za kufungua');
+  assert.equal(en.body.membership.gymPlans[0].label, 'Daily plan');
+  assert.equal(sw.body.membership.gymPlans[0].label, 'Mpango wa siku');
+  assert.equal(sw.body.membership.gymPlans[0].period, 'kwa siku');
+  assert.ok(!('labels' in sw.body), 'no heading labels in the response');
   assert.equal(sw.body.lang, 'sw');
   assert.equal(other.body.lang, 'en');
-  assert.deepEqual(Object.keys(en.body.labels).sort(), Object.keys(sw.body.labels).sort());
 });
 
 test('regression: GET /gyms/:id and the member gym-QR scan route are unchanged', async () => {
@@ -180,4 +190,58 @@ test('regression: GET /gyms/:id and the member gym-QR scan route are unchanged',
   assert.ok(!('commissionRate' in detail.body));
   assert.equal(memberScanGymQr.method, 'post');
   assert.equal(memberScanGymQr.path, '/me/checkins/scan');
+});
+
+test('photos: valid data:image kept, our /storage path made absolute, other remote URLs and SVG dropped, byte budget and cap', async () => {
+  const big = `data:image/png;base64,${'A'.repeat(1_400_000)}`;          // ~1.05 MB decoded
+  const id = await makeGym({
+    images: ['https://tracker.example/x.png', 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', PNG, '/storage/cid1/a.jpg', big, big, '/storage/../x'],
+    thumbnails: [PNG],
+  });
+  const out = await resolve({ q: issueGymQr(id) });
+  assert.equal(out.statusCode, 200);
+  assert.equal(out.body.gym.thumbnail, PNG);
+  assert.deepEqual(out.body.gym.photos.slice(0, 2), [PNG, 'https://api.example.test/storage/cid1/a.jpg']);
+  assert.ok(!out.body.gym.photos.some(p => p.includes('tracker.example') || p.includes('svg')));
+  const total = out.body.gym.photos.filter(p => p.startsWith('data:')).reduce((n, p) => n + p.length * 0.75, 0);
+  assert.ok(total <= 1_500_000, 'inline photos stay within the byte budget');
+  assert.equal(out.body.gym.photos.filter(p => p.length > 1_000_000).length, 1, 'only one of the two large photos fits');
+  delete process.env.PUBLIC_API_URL;
+  const noBase = await resolve({ q: issueGymQr(id) });
+  assert.ok(!noBase.body.gym.photos.some(p => p.includes('/storage/')), 'no public API base: storage paths are dropped');
+});
+
+test('held back gyms answer the same 404: unlisted, suspended in moderation, suspended status', async () => {
+  const unlisted = await makeGym({ homepageVisible: false });
+  const suspended = await makeGym({ status: 'suspended' });
+  const held = await makeGym();
+  await db('ModerationState').insert({ id: `gym:${held}`, entityType: 'gym', entityId: held, status: 'suspended' });
+  resetWebGymProfileLimits();
+  for (const id of [unlisted, suspended, held]) {
+    const o = await resolve({ q: issueGymQr(id) });
+    assert.equal(o.statusCode, 404);
+    assert.deepEqual(o.body, { error: 'not_found' });
+  }
+});
+
+test('fails closed without QR_HMAC_SECRET; every answer is no-store and Vary: Origin; publicRef is not the raw id', async () => {
+  const id = await makeGym();
+  const ok = await resolve({ q: issueGymQr(id) });
+  const miss = await resolve({ q: 'nope' });
+  for (const o of [ok, miss]) { assert.equal(o.headers['Cache-Control'], 'no-store'); assert.equal(o.headers.Vary, 'Origin'); }
+  delete process.env.QR_HMAC_SECRET;
+  const off = await resolve({ q: issueGymQr(id) });
+  assert.equal(off.statusCode, 404);
+  assert.deepEqual(off.body, { error: 'not_found' });
+  assert.equal(off.headers['Cache-Control'], 'no-store');
+});
+
+test('class schedule is a string or a small known-key object, never arbitrary pass-through', async () => {
+  const id = await makeGym({ classes: [
+    { id: 'a', name: 'A', schedule: { day: 'Mon', start: '07:00', evil: '<script>', nested: { x: 1 } } },
+    { id: 'b', name: 'B', schedule: { nested: { x: 1 } } },
+    { id: 'c', name: 'C', schedule: ['x'] },
+  ] });
+  const out = await resolve({ q: issueGymQr(id) });
+  assert.deepEqual(out.body.gym.classes.map(c => c.schedule), [{ day: 'Mon', start: '07:00' }, null, null]);
 });
