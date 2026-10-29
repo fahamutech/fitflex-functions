@@ -47,6 +47,8 @@ async function admitUpload(req, res, next) {
 const previewLimiters = {
   partner: createVendorLimiter({ perMinute: PREVIEW_RATE.partnerPerMinute }),
   admin: createVendorLimiter({ perMinute: PREVIEW_RATE.adminPerMinute }),
+  // The partner picker is limited like the admin preview, with its own window.
+  subjects: createVendorLimiter({ perMinute: PREVIEW_RATE.adminPerMinute }),
 };
 export const resetPartnerMediaPreviewLimits = () => Object.values(previewLimiters).forEach(l => l.reset());
 
@@ -183,6 +185,14 @@ export const adminPartnerMediaList = {
   description: `Admin (moderation or moderation_decide; PARTNER_MEDIA; brand_media alone: only ?tab=live with ?subjectId, else 403 acl_forbidden — the Set-photo dialog): the Partner photos queue. Items of a partner that no longer exists are never listed. ?tab = to_review (default: live partner uploads not yet reviewed, oldest first; FitFlex-set items never) | live (newest first) | taken_down (newest takedown first); ?subjectType (or ?type) = gym | trainer | vendor; ?kind = hero | logo; ?q (partner name); ?subjectId; ?limit (≤ 100, default 25); ?cursor. → { items: [MediaItem (admin view: + ownUpload, previewUrl, statusChangedAt)], total, next (cursor | null) }. 400 invalid_tab | invalid_subject_type | invalid_kind.`,
   onGuard: adminView('get'),
   onRequest: safely('admin list', async (req, res) => send(res, await svc.adminList({ query: req.query || {}, actorId: actorOf(req), viewer: { canModerate: canModerate(req) } }))),
+};
+
+export const adminPartnerMediaSubjects = {
+  created, method: 'get', path: '/admin/partner-media/subjects',
+  description: `Admin (moderation, moderation_decide or brand_media; PARTNER_MEDIA): find a partner to set a photo or logo for. ?type = gym | trainer | vendor (required), ?q = part of the name (≥ 2 characters, case-insensitive; % and _ are literal), ?limit (≤ 25, default 10). → { items: [{ type, id, name }], total } by name. Names and ids only; the id is the one POST /admin/partner-media takes (gym id, trainer profile id, vendor account id). Only partners that exist and are not closed: any gym, trainer profiles with no account or an open one, open vendor accounts. ${PREVIEW_RATE.adminPerMinute} a minute per admin (429 rate_limited). 400 invalid_subject_type | q_too_short { minLength }.`,
+  onGuard: adminView('get'),
+  onRequest: safely('admin subjects', async (req, res) => limitOrNull(previewLimiters.subjects, req.user.sub, res)
+    || send(res, await svc.adminSubjects({ query: req.query || {} }))),
 };
 
 export const adminPartnerMediaConfirmation = {

@@ -185,6 +185,35 @@ function bind(q) {
       return { rows: rows.map(r => ({ ...mediaFromDb(r), subjectName: r.subjectName ?? null })), total: Number(n) };
     },
 
+    /**
+     * Partners whose name contains `search` (case-insensitive; LIKE wildcards in it are literal), for
+     * the admin "Set photo for this partner" picker. Only partners the set endpoint accepts and that are
+     * not closed: any gym; trainer profiles with no account or an open one; open vendor accounts.
+     * Ids are the ones POST /admin/partner-media takes. Names and ids only.
+     * → { rows: [{ id, name }], total }, by name then id.
+     */
+    async searchSubjects({ subjectType, search, limit }) {
+      const pattern = `%${likeEscape(search)}%`;
+      let base; let nameSql;
+      if (subjectType === 'gym') {
+        nameSql = 'g."name"';
+        base = () => q('Gym as g');
+      } else if (subjectType === 'trainer') {
+        nameSql = 'tp."displayName"';
+        base = () => q('TrainerProfile as tp').leftJoin('User as u', 'u.id', 'tp.userId')
+          .where(b => b.whereNull('tp.userId').orWhereNot('u.accountStatus', 'closed'));
+      } else {
+        nameSql = `coalesce(nullif(btrim(v."vendorProfile"->>'businessName'), ''), v."displayName")`;
+        base = () => q('User as v').where({ 'v.userType': 'vendor' }).whereNot('v.accountStatus', 'closed');
+      }
+      const matching = () => base().whereRaw(`${nameSql} ILIKE ? ESCAPE '\\'`, [pattern]);
+      const [{ n }] = await matching().count({ n: '*' });
+      const idCol = subjectType === 'gym' ? 'g.id' : subjectType === 'trainer' ? 'tp.id' : 'v.id';
+      const rows = await matching().select(q.raw(`${idCol} as id`), q.raw(`${nameSql} as name`))
+        .orderByRaw(`lower(${nameSql}) asc, ${idCol} asc`).limit(limit);
+      return { rows: rows.map(r => ({ id: r.id, name: r.name ?? null })), total: Number(n) };
+    },
+
     // ── Purge (review M2) ───────────────────────────────────────────────────
 
     /** Every not-yet-purged item of a partner, any status. */
