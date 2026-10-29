@@ -90,3 +90,21 @@ export const eventsLatePaymentGraceHours = () => intOr('EVENTS_LATE_PAYMENT_GRAC
 
 /** The ticket key ring, or null when EVENT_TICKET_SECRET is missing or shorter than 32 characters (fail closed: no payment is taken). */
 export const eventTicketKeyRing = () => ticketKeyRing(process.env);
+
+// ── S5: venue operations, the organizer API and webhooks (docs/design/events-s5-venue-api-and-webhooks.md §11.3) ──
+//   EVENTS_API_TOKEN_TTL_SECONDS 900   EVENTS_API_MAX_CLIENTS 10   EVENTS_API_DEFAULT_RATE 120
+//   EVENTS_WEBHOOK_MAX_ENDPOINTS 5     EVENTS_WEBHOOK_TIMEOUT_MS 10000   EVENTS_WEBHOOK_MAX_ATTEMPTS 10   EVENTS_WEBHOOK_BATCH 50
+//   EVENTS_FEED_LAG_SECONDS 5          EVENTS_EXPORT_MAX_ROWS 20000
+//   EVENTS_API_ORGANIZER_ALLOWLIST     optional comma list of organizer ids (the D39 pilot gate, besides the admin switch)
+//   EVENTS_WEBHOOK_SECRET_KEY (32 bytes, base64), EVENTS_WEBHOOK_SECRET_KEY_ID (k1), EVENTS_WEBHOOK_SECRET_KEY_PREVIOUS (JSON): see webhook-signing.mjs
+export const eventsApiTokenTtlSeconds = () => intOr('EVENTS_API_TOKEN_TTL_SECONDS', 900, { min: 60, max: 3600 });
+export const eventsApiMaxClients = () => intOr('EVENTS_API_MAX_CLIENTS', 10, { max: 100 });
+export const eventsApiDefaultRate = () => intOr('EVENTS_API_DEFAULT_RATE', 120, { max: 600 });
+export const eventsWebhookMaxEndpoints = () => intOr('EVENTS_WEBHOOK_MAX_ENDPOINTS', 5, { max: 50 });
+export const eventsWebhookTimeoutMs = () => intOr('EVENTS_WEBHOOK_TIMEOUT_MS', 10_000, { min: 1000, max: 30_000 });
+export const eventsWebhookMaxAttempts = () => intOr('EVENTS_WEBHOOK_MAX_ATTEMPTS', 10, { max: 20 });
+export const eventsWebhookBatch = () => intOr('EVENTS_WEBHOOK_BATCH', 50, { max: 200 });
+export const eventsFeedLagSeconds = () => intOr('EVENTS_FEED_LAG_SECONDS', 5, { min: 0, max: 300 });
+export const eventsExportMaxRows = () => intOr('EVENTS_EXPORT_MAX_ROWS', 20_000, { max: 200_000 });
+/** The env part of the D39 pilot gate: a Set of organizer ids (empty when unset). The admin switch (EventOrganizer.apiAccessEnabledAt) is the other part. */
+export const eventsApiAllowlist = () => new Set(String(process.env.EVENTS_API_ORGANIZER_ALLOWLIST ?? '').split(',').map(s => s.trim()).filter(Boolean));

@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { createInvoiceService } from '../src/services/invoice-service.mjs';
 import { invoiceService } from '../src/bootstrap/services.mjs';
 import { db } from '../src/infra/knex-store.mjs';
-const migration = createRequire(import.meta.url)('../db/migrations/20270126090000-gym-payout-invoice-unique.cjs');
+const migration = createRequire(import.meta.url)('../db/migrations/20270128090000-gym-payout-invoice-unique.cjs');
 
 function store(seed = []) {
   const rows = [...seed];

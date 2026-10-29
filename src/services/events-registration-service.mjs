@@ -57,6 +57,8 @@ export function createEventsRegistrationService({
   config = {},
   // S4: the payment and refund services (declared after this one in bootstrap; read at request time).
   getPayments = () => null, getRefunds = () => null,
+  // S5: the keyset roster (events-sync-service.mjs); null while EVENTS_KIT_OPS is off, where the S3/S4 roster below is exactly as before.
+  getRosterSync = () => null,
 }) {
   const cfg = {
     maxParticipantsPerOrder: eventsMaxParticipantsPerOrder, corporateMaxRows: eventsCorporateMaxRows, teamMaxMembers: eventsTeamMaxMembers,
@@ -113,6 +115,8 @@ export function createEventsRegistrationService({
     id: r.id, ticketTypeId: r.ticketTypeId, categoryId: r.categoryId, orderId: r.orderId, firstName: r.firstName, lastName: r.lastName,
     status: r.status, consentBasis: r.consentBasis, isSelf: claimStateOf(r) === 'self', claimState: claimStateOf(r),
     cancelReason: r.cancelReason ?? null, groupLabel: r.groupLabel ?? null, createdAt: iso(r.createdAt),
+    // S5: the bib the participant sees (behind EVENTS_KIT_OPS; absent otherwise, so the S4 answer is unchanged).
+    ...(getRosterSync() ? { bibNumber: r.bibNumber ?? null } : {}),
     ...(full ? {
       phone: r.phone ?? null, email: r.email ?? null, dateOfBirth: r.dateOfBirth ? String(r.dateOfBirth).slice(0, 10) : null, gender: r.gender ?? null,
       kitSize: r.kitSize ?? null, emergencyContact: r.emergencyContact ?? null, consentAt: iso(r.consentAt), consentTextVersion: r.consentTextVersion ?? null, claimedAt: iso(r.claimedAt),
@@ -815,6 +819,7 @@ export function createEventsRegistrationService({
       event: summaryOf(j), category: c ? { id: c.id, name: c.name, distanceM: Number(c.distanceMeters), startsAt: iso(c.startTime) } : null,
       ticketType: t ? { name: t.name } : null, status: r.status, orderId: r.orderId, orderReference: o?.reference ?? null, orderStatus: o?.status ?? null,
       holdExpiresAt: iso(o?.holdExpiresAt), claimState: claimStateOf(r), team: teams.get(r.id) ? { id: teams.get(r.id).id, name: teams.get(r.id).name } : null,
+      ...(getRosterSync() ? { bibNumber: r.bibNumber ?? null } : {}),   // S5: behind EVENTS_KIT_OPS
     };
   }
 
@@ -994,8 +999,16 @@ export function createEventsRegistrationService({
     // (d) the purchaser entered someone else with their own number.
     if (r.purchaserUserId === userId && r.consentBasis === 'purchaser_authorised') return fail('claim_own_contact', 409);
     const at = now();
-    const [updated] = await db('EventRegistration').where({ id: r.id }).whereNull('participantUserId')
-      .update({ participantUserId: userId, claimedAt: at, claimTokenHash: null, updatedAt: at }).returning('*');
+    // S5: the claim and its `registration.updated` outbox row commit together (organizers' change feed and webhooks); only a paid place is visible to them.
+    const updated = await db.transaction(async (trx) => {
+      const [row] = await trx('EventRegistration').where({ id: r.id }).whereNull('participantUserId')
+        .update({ participantUserId: userId, claimedAt: at, claimTokenHash: null, updatedAt: at }).returning('*');
+      if (row && row.status === 'confirmed') {
+        const ev = await trx('Event').where({ id: row.eventId }).first('organizerId');
+        await eventStore.appendOutbox(trx, { type: 'registration.updated', aggregateType: 'registration', aggregateId: row.id, organizerId: ev?.organizerId ?? null, eventId: row.eventId, payload: { registrationId: row.id, changed: ['claimed'] } });
+      }
+      return row;
+    });
     if (!updated) return fail('already_claimed', 409);
     await analytics('registration_claimed', { eventId: r.eventId, registrationId: r.id, via });
     // S4 (§3.8.5): when someone other than the purchaser claims a paid place, its ticket code changes at that moment.
@@ -1091,6 +1104,8 @@ export function createEventsRegistrationService({
   async function organizerListRegistrations({ ctx, eventId, query = {} }) {
     const joined = await organizerEvent(ctx, eventId);
     if (joined.error) return joined;
+    const sync = getRosterSync();
+    if (sync) return sync.rosterPage({ organizerId: ctx.organizer.id, eventId, query });
     const page = paginate(await rosterRows(joined, { status: query.status, categoryId: query.categoryId, q: query.q }), pageOpts(query));
     return { items: page.items, nextCursor: page.nextCursor === null ? null : String(page.nextCursor), total: page.total };
   }

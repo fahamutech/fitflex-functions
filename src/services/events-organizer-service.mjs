@@ -19,6 +19,7 @@ import {
   CANCEL_REASONS, DEFAULT_CLOSING_SOON_HOURS, NOTE_MAX,
 } from '../shared/events-document.mjs';
 import { paginate } from '../shared/pagination.mjs';
+import { isSensitiveReason, partnerReasonCode } from '../shared/partner-kyc.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -59,9 +60,20 @@ export function createEventsOrganizerService({
   };
   const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
 
+  // What the organizer owner / staff are told about why (owner rule 22 Oct 2026, as /me/kyc since #245): statusReason
+  // is the reviewer's KYC note, so it is shown only under a known partner-safe reason code. A sensitive code
+  // (suspected_fraud, duplicate_partner) becomes statusReasonCode 'under_review' with no note; a note with no
+  // case code behind it is not shown either (fail closed). EventOrganizer.statusReason keeps the real note for admins.
+  const organizerReason_ = (o, kycCase) => {
+    const code = kycCase?.reasonCode ?? null;
+    const note = o.statusReason ?? kycCase?.reasonNote ?? null;
+    if (!code || isSensitiveReason(code)) return { statusReasonCode: partnerReasonCode(code), statusReason: null };
+    return { statusReasonCode: code, statusReason: note };
+  };
+
   const organizerView_ = (o, kycCase = null) => ({
     id: o.id, name: o.name, status: o.status, timezone: o.timezone, kycCaseId: o.kycCaseId ?? kycCase?.id ?? null,
-    kycStatus: kycCase?.status ?? null, statusReason: o.statusReason ?? kycCase?.reasonNote ?? null,
+    kycStatus: kycCase?.status ?? null, ...organizerReason_(o, kycCase),
     contactPhone: o.contactPhone ?? null, contactEmail: o.contactEmail ?? null,
   });
 
@@ -209,6 +221,11 @@ export function createEventsOrganizerService({
     if (!EDITABLE_STATUSES.has(current.status)) return fail('invalid_transition', 409, { from: current.status, to: 'edit', allowed: [] });
 
     const { patch, nested, changeNote: rawNote } = parseEventPatch(body);
+    // S5 (D33): the payout schedule is free in a draft and locked from submission on; after publication only FitFlex changes it (admin route, with a reason).
+    if (patch.payoutSchedule !== undefined && current.status !== 'draft') {
+      if (patch.payoutSchedule === (current.payoutSchedule ?? null)) delete patch.payoutSchedule;
+      else return fail('payout_schedule_locked', 409, { eventId, eventStatus: current.status });
+    }
     const parsedNote = parseNote(rawNote);
     if (parsedNote.error) return fail('event_invalid', 422, { fields: parsedNote.fields.map(x => ({ ...x, path: `changeNote.${x.path.slice(5)}` })) });
     const changeNote = parsedNote.note;
@@ -230,7 +247,11 @@ export function createEventsOrganizerService({
       const r = await catalogue.upsertNested(current.id, nested);
       if (r.error) return r;
     }
-    const saved = await eventStore.updateEvent(current.id, patch, { expectedVersion });
+    // S5 (M4): `event.updated` commits WITH the event row. The paths (never values) are known here already.
+    const saved = await eventStore.updateEvent(current.id, patch, {
+      expectedVersion,
+      inTransaction: published ? (trx, row) => eventStore.appendOutbox(trx, { type: 'event.updated', aggregateType: 'event', aggregateId: current.id, organizerId: current.organizerId, eventId: current.id, payload: { eventId: current.id, version: row.version, changedFields: paths, material: material.length > 0 } }) : null,
+    });
     if (saved.error) {
       if (saved.error === 'event_frozen_field') return fail('event_invalid', 422, { fields: [{ path: saved.field, code: 'frozen' }] });
       return saved;
@@ -241,6 +262,7 @@ export function createEventsOrganizerService({
       await catalogue.appendChangeLog({ eventId: current.id, actorUserId: actorId, actorRole: actorKind === 'admin' ? 'admin' : ctx.role, fields: paths, before: diff.before, after: diff.after, note: changeNote, material: material.length > 0 });
     }
     await audit(actorId, 'events.event_updated', current.id, { version: current.version }, { version: saved.event.version, fields: paths, material: material.length > 0 });
+    // S5: `event.updated` for webhooks and the API (paths only, never values); the payout schedule is not part of what organizers' systems see.
     return { version: saved.event.version, updatedAt: new Date(saved.event.updatedAt).toISOString(), material: material.length > 0 };
   }
 
@@ -258,7 +280,10 @@ export function createEventsOrganizerService({
       if (r.error) return r;
       sideBefore.version = r.event.version;
     }
-    const moved = await eventStore.transitionEvent(eventId, to);
+    // S5 (M4): `event.cancelled` commits WITH the status move.
+    const moved = await eventStore.transitionEvent(eventId, to, {
+      inTransaction: to === 'cancelled' ? (trx, row) => eventStore.appendOutbox(trx, { type: 'event.cancelled', aggregateType: 'event', aggregateId: eventId, organizerId: before.organizerId, eventId, payload: { eventId, cancelledAt: row.cancelledAt, reasonCode: cancellation?.reason ?? 'admin' } }) : null,
+    });
     if (moved.error) return moved;
     const raw = {};
     if (to === 'submitted') { raw.submittedAt = now(); raw.rejection = null; }

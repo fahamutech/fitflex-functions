@@ -2,13 +2,18 @@
 // Every action writes an AuditLog row with the status before and after (`events.*` actions, read back by
 // the audit routes). Approval (→ published) needs an active organizer whose KYC case is approved
 // (follow-ups.md S2). Rejection sends the event back to draft with { reason, note, at } on the event.
-import { organizerView, rowView, allowedActionsFor, parseNote, CANCEL_REASONS, REJECT_REASONS, DEFAULT_CLOSING_SOON_HOURS } from '../shared/events-document.mjs';
+import { randomUUID } from 'node:crypto';
+import { organizerView, rowView, allowedActionsFor, parseNote, CANCEL_REASONS, REJECT_REASONS, DEFAULT_CLOSING_SOON_HOURS, PAYOUT_SCHEDULES } from '../shared/events-document.mjs';
 import { paginate } from '../shared/pagination.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 
 // S4: `getRefunds` is the events refund service (lazy; absent in unit contexts, where cancel is exactly the S2 one).
-export function createEventsAdminService({ db, catalogue, organizerService, now = () => new Date(), closingSoonHours = () => DEFAULT_CLOSING_SOON_HOURS, getRefunds = () => null }) {
+export function createEventsAdminService({
+  db, catalogue, organizerService, now = () => new Date(), closingSoonHours = () => DEFAULT_CLOSING_SOON_HOURS, getRefunds = () => null,
+  // S5: tell the organizer's owner and admins (bilingual in-app notice); absent in unit contexts.
+  notifyTeam = null,
+}) {
   const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
   const actionsFor = status => allowedActionsFor({ status, actor: 'admin' });
 
@@ -109,6 +114,39 @@ export function createEventsAdminService({ db, catalogue, organizerService, now 
     return refunds.eventCancelPreview({ eventId });
   }
 
+  /**
+   * S5 (D33): the ONLY way the payout schedule changes once the organizer has submitted. A published (or later) event, a scope-`events`
+   * admin, a reason of 10–300 characters. Writes AuditLog `events.payout_schedule_changed` { before, after, reason }, an EventChangeLog row
+   * (field payoutSchedule, not material, actor role admin) and tells the organizer's owner and admins. Not a material change: participants never see it.
+   */
+  async function changePayoutSchedule({ eventId, body = {}, actorId }) {
+    const joined = await catalogue.loadJoined(eventId);
+    if (!joined) return fail('event_not_found', 404);
+    if (!PAYOUT_SCHEDULES.includes(body.payoutSchedule)) return fail('event_invalid', 422, { fields: [{ path: 'payoutSchedule', code: 'invalid' }] });
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length < 10 || reason.length > 300) return fail('reason_required', 422, { min: 10, max: 300 });
+    if (!['published', 'registration_closed', 'in_progress', 'completed'].includes(joined.event.status)) return fail('invalid_transition', 409, { from: joined.event.status, to: 'payout_schedule', allowed: [] });
+    const before = joined.event.payoutSchedule ?? null;
+    if (before === body.payoutSchedule) return { payoutSchedule: before, changed: false };
+    await catalogue.patchEventRaw(joined.event.id, { payoutSchedule: body.payoutSchedule });
+    await db('AuditLog').insert({
+      id: `aud_${randomUUID().slice(0, 12)}`, at: now(), actor: actorId, action: 'events.payout_schedule_changed', target: joined.event.id,
+      before: JSON.stringify({ payoutSchedule: before }), after: JSON.stringify({ payoutSchedule: body.payoutSchedule, reason }),
+    });
+    await catalogue.appendChangeLog({ eventId: joined.event.id, actorUserId: actorId, actorRole: 'admin', fields: ['payoutSchedule'], before: { payoutSchedule: before }, after: { payoutSchedule: body.payoutSchedule }, note: null, material: false });
+    if (notifyTeam) {
+      const label = { biweekly: ['every two weeks', 'kila wiki mbili'], monthly: ['once a month', 'mara moja kwa mwezi'] }[body.payoutSchedule];
+      try {
+        await notifyTeam(joined.event.organizerId, {
+          id: `ntf_evpay_${joined.event.id}_${Date.now()}`, type: 'organizer_payout_schedule_changed',
+          en: { title: 'Payout schedule changed', body: `FitFlex changed the payout schedule for ${joined.event.title} to ${label[0]}.` },
+          sw: { title: 'Ratiba ya malipo imebadilishwa', body: `FitFlex imebadilisha ratiba ya malipo ya ${joined.event.title} kuwa ${label[1]}.` },
+        });
+      } catch { /* the change stands; the notice is best effort */ }
+    }
+    return { payoutSchedule: body.payoutSchedule, changed: true };
+  }
+
   async function archive({ eventId, actorId }) {
     const joined = await catalogue.loadJoined(eventId);
     if (!joined) return fail('event_not_found', 404);
@@ -152,5 +190,5 @@ export function createEventsAdminService({ db, catalogue, organizerService, now 
     return paginate(await auditRows({ action: query.action ? String(query.action) : null }), { limit: Math.min(parseInt(query.limit, 10) || 20, 50), cursor: query.cursor });
   }
 
-  return { list, summary, detail, decision, cancel, cancelPreview, archive, complete, eventAudit, audit };
+  return { list, summary, detail, decision, cancel, cancelPreview, archive, complete, eventAudit, audit, changePayoutSchedule };
 }

@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import { claimHoldsSession } from '../shared/credential-change.mjs';
 
 const IS_PROD = process.env.NODE_ENV === 'production';
 const SECRET = process.env.JWT_SECRET || (IS_PROD ? null : 'fitflex-dev-secret-change-me');
@@ -115,7 +116,9 @@ function authGuard(roles, { allowPasswordChange }) {
       return res.status(401).json({ error: 'session_ended' });
     }
     // Fail closed: only routes that opt in serve a session that must change its start password.
-    if (!allowPasswordChange && (claims.pwc === true || account?.passwordChangeRequired === true)) {
+    // The claim counts for gym staff only while STAFF_PIN_CHANGE_REQUIRED is on (B3a); the
+    // account answer is already worked out that way (src/shared/credential-change.mjs).
+    if (!allowPasswordChange && (claimHoldsSession(claims) || account?.passwordChangeRequired === true)) {
       return res.status(403).json({ error: PASSWORD_CHANGE_REQUIRED });
     }
     req.user = claims;
@@ -145,7 +148,7 @@ export function requireAuthAllowingPasswordChange(...roles) {
 export function optionalSessionClaims(req) {
   const token = bearerFrom(req);
   const claims = token ? verify(token) : null;
-  if (!claims || claims.purpose || claims.pwc === true) return null;
+  if (!claims || claims.purpose || claimHoldsSession(claims)) return null;
   return claims;
 }
 
