@@ -2,16 +2,26 @@
 import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { isPayable } from '../shared/partner-kyc.mjs';
+import { createGymPayoutOwner } from './gym-payout-owner.mjs';
 
-export function createInvoiceService({ invoices, gyms, users, gymPayouts, auditLog, partnerGate = OPEN_GATE, partnerSettlementAccounts = null }) {
+export function createInvoiceService({
+  invoices, gyms, users, gymPayouts, auditLog, partnerGate = OPEN_GATE, partnerSettlementAccounts = null,
+  gymPayoutOwner = createGymPayoutOwner({ users, gyms }),
+}) {
+  /** The owner a gym's invoice is paid to: first owner found (flag off) or the payout owner (GYM_PAYOUT_OWNER). */
+  const payeeOf = gymId => gymPayoutOwner.resolve(gymId);
+
   /**
    * Where a gym's payout may go. New partners' gyms are paid only once the
    * owner's KYC is approved and they have a verified payout account past its
    * cooling-off period. Existing partners' gyms (test gyms) and gyms with no
-   * owner account are exempt.
+   * owner account are exempt. With GYM_PAYOUT_OWNER on, a gym shared by 2+
+   * owners with no payout owner named is held (payout_owner_required).
    */
   async function payoutDestination(gymId) {
-    const owner = await users.findAsync(u => u.userType === 'gym_operator' && (u.gymId === gymId || (u.gymIds || []).includes(gymId)));
+    const payee = await payeeOf(gymId);
+    if (!payee.ok && payee.reason === 'payout_owner_required') return { error: 'payout_on_hold', status: 409, reason: 'payout_owner_required' };
+    const owner = payee.ok ? payee.owner : null;
     if (!owner || partnerGate.exempt(owner)) return { exempt: true };
     const kyc = await partnerGate.kycCaseFor(owner.id, 'gym_owner');
     if (!kyc || kyc.status !== 'approved') {
@@ -39,7 +49,8 @@ export function createInvoiceService({ invoices, gyms, users, gymPayouts, auditL
     if (!gymId || !amount) return { error: 'gymId and amount required', status: 400 };
     const gym = gyms.find(g => g.id === gymId);
     if (!gym) return { error: 'gym_not_found', status: 404 };
-    const owner = await users.findAsync(u => u.userType === 'gym_operator' && (u.gymId === gymId || (u.gymIds || []).includes(gymId)));
+    const payee = await payeeOf(gymId);
+    const owner = payee.ok ? payee.owner : null;
 
     const inv = {
       id: randomUUID(),

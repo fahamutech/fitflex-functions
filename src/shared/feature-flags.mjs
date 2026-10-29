@@ -291,6 +291,14 @@ export function vendorDocumentsOn() {
 }
 
 /**
+ * S6: vendor reports and their CSV / PDF exports (/vendor/reports/*). Off → every /vendor/reports route
+ * answers 404 feature_disabled. GET /vendor/tools/options says reports: false.
+ */
+export function vendorReportsOn() {
+  return vendorToolsFlag('VENDOR_REPORTS');
+}
+
+/**
  * S5: VAT — the vendor tax profile and its KYC review, product VAT codes, admin tax rates (maker ≠
  * checker) and VAT worked out on walk-in sales and on the vendor's part of paid app orders. Off →
  * those endpoints answer 404 feature_disabled and no sale or order gets VAT. Marketplace prices,
@@ -318,6 +326,19 @@ export function vendorDocumentsTinWithoutVatOn() {
  */
 export function partnerProgressOn() {
   return on('PARTNER_PROGRESS');
+}
+
+/**
+ * A gym shared by several owners has ONE named payout owner (owner decision
+ * 2026-10-22; Gym.payoutOwnerId). Off unless GYM_PAYOUT_OWNER is set: payout
+ * eligibility, settlement payout gating and invoice payouts keep using the
+ * first owner account found for the gym, as before. On: the named payout
+ * owner; a gym with exactly one owner uses that owner without any admin step;
+ * a gym with two or more owners and none named is not payable
+ * (payout_owner_required). See src/services/gym-payout-owner.mjs.
+ */
+export function gymPayoutOwnerOn() {
+  return on('GYM_PAYOUT_OWNER');
 }
 
 // ── Default-ON switches ──────────────────────────────────────────────────────
