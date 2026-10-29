@@ -127,7 +127,8 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     if (!order) return { outcome: 'missing' };
     if (order.status === 'cancelled') return { outcome: 'cancelled', order };
     if (order.paymentStatus === 'paid') return { outcome: 'already_paid', order };
-    const updated = await shopOrders.updateByIdAsync(orderId, { ...patch, paymentStatus: 'paid', reservationExpiresAt: null, updatedAt: nowIso() });
+    const at = nowIso();
+    const updated = await shopOrders.updateByIdAsync(orderId, { ...patch, paymentStatus: 'paid', reservationExpiresAt: null, paidAt: at, updatedAt: at });
     return { outcome: 'paid', order: updated };
   }
 
@@ -153,7 +154,7 @@ export function createMemoryShopOrderStore({ products, shopOrders, paymentReques
     }
     const updated = await shopOrders.updateByIdAsync(orderId, {
       ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved',
-      reservationCycle: (order.reservationCycle || 1) + 1, reservationExpiresAt: null, updatedAt: nowIso(),
+      reservationCycle: (order.reservationCycle || 1) + 1, reservationExpiresAt: null, paidAt: nowIso(), updatedAt: nowIso(),
     });
     return { revived: true, order: updated };
   }
