@@ -25,9 +25,12 @@ import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 const OPEN = ['pending', 'claimed'];
 // Held by exactly one accept while it creates the role (see accept()).
 const ACCEPTING = 'accepting';
-const INVITABLE_ROLES = { gym: ['staff', 'trainer', 'member'], vendor: ['staff'] };
+const INVITABLE_ROLES = { gym: ['staff', 'trainer', 'member'], vendor: ['staff'], organizer: ['staff'] };
 // The persona type that owns each kind of organisation.
-const OWNER_TYPE = { gym: 'gym_operator', vendor: 'vendor' };
+const OWNER_TYPE = { gym: 'gym_operator', vendor: 'vendor', organizer: 'event_organizer' };
+// Events · S2: the roles an organizer staff invitation may carry (never owner; spec §9).
+const ORGANIZER_STAFF_ROLES = ['admin', 'ops', 'finance', 'timing'];
+const ORG_ID_COLUMN = { gym: 'gymId', vendor: 'vendorId', organizer: 'organizerId' };
 // Staff and trainers are the owner's to invite; staff with the members scope may invite members.
 const OWNER_ONLY_ROLES = ['staff', 'trainer'];
 const toDate = v => { const d = new Date(v); return Number.isNaN(+d) ? null : d; };
@@ -80,15 +83,21 @@ export function createInvitationService({
   // to FitFlex (agreed 3 Oct 2026). All optional: without them an invitation
   // behaves as before (the organisation shares the link).
   senders = null, startPin = null, isRegistered = null, appLink = () => null, newTrainerProfile = null,
+  // (userId) → 'sw' | 'en' | null: the language the person chose for messages (CommunicationPreference.locale).
+  localeOf = async () => null,
 }) {
   const gymOf = gymId => (gymId ? db('Gym').where({ id: gymId }).first('id', 'name') : null);
   // An invitation or membership points at its organisation through gymId or vendorId.
-  const orgRef = (orgType, orgId) => ({ orgType, [orgType === 'vendor' ? 'vendorId' : 'gymId']: orgId });
-  const orgIdOf = inv => inv.gymId ?? inv.vendorId;
+  const orgRef = (orgType, orgId) => ({ orgType, [ORG_ID_COLUMN[orgType] || 'gymId']: orgId });
+  const orgIdOf = inv => inv.gymId ?? inv.vendorId ?? inv.organizerId;
   const orgOf = inv => (inv.orgType === 'vendor'
     ? db('Vendor').where({ id: inv.vendorId }).first('id', 'name')
-    : gymOf(inv.gymId));
-  const isOwner = (actor, orgType) => actor.userType === OWNER_TYPE[orgType];
+    : inv.orgType === 'organizer'
+      ? db('EventOrganizer').where({ id: inv.organizerId }).first('id', 'name')
+      : gymOf(inv.gymId));
+  // The owner persona; for organizers an admin staff member counts too (spec §2: admins manage staff).
+  const isOwner = (actor, orgType) => actor.userType === OWNER_TYPE[orgType]
+    || (orgType === 'organizer' && actor.userType === 'organizer_staff' && actor.organizerRole === 'admin');
   const audit = async (actor, action, target, after) => {
     if (!auditLog) return;
     await auditLog.insertAsync({ id: randomUUID(), at: new Date().toISOString(), actor, action, target, before: null, after });
@@ -99,6 +108,7 @@ export function createInvitationService({
     expiresAt: inv.expiresAt, createdAt: inv.createdAt, respondedAt: inv.respondedAt ?? null,
     ...(inv.payload?.plan ? { plan: inv.payload.plan, paidAmountTzs: inv.payload.payment?.amountTzs ?? null } : {}),
     ...(inv.payload?.vendorRole ? { vendorRole: inv.payload.vendorRole } : {}),
+    ...(inv.payload?.organizerRole ? { organizerRole: inv.payload.organizerRole } : {}),
     ...extra,
   });
   /** A paid invitation that lapsed unaccepted, not yet re-issued or refunded by the gym. */
@@ -135,6 +145,13 @@ export function createInvitationService({
     const invalid = permissions.filter(p => !vendorStaffPermissions.includes(p));
     if (invalid.length) return { error: 'invalid_staff_permissions', status: 400, invalid };
     return { payload: { vendorRole }, aclPermissions: permissions };
+  }
+
+  /** An organizer staff invitation carries the staff role (admin | ops | finance | timing). */
+  function organizerStaffAccess(body) {
+    const organizerRole = String(body?.organizerRole || body?.role === 'staff' && body?.staffRole || '');
+    if (!ORGANIZER_STAFF_ROLES.includes(organizerRole)) return { error: 'invalid_staff_role', status: 400, allowed: ORGANIZER_STAFF_ROLES };
+    return { payload: { organizerRole }, aclPermissions: [] };
   }
 
   /** Verified, live owner of an exact identifier, if any. */
@@ -229,12 +246,15 @@ export function createInvitationService({
     const identifier = parseIdentifier(body);
     if (!identifier) return { error: 'one_phone_or_email_required', status: 400 };
     const extra = orgType === 'vendor' ? vendorStaffAccess(body)
-      : role === 'member' ? memberPayload(body) : { payload: null };
+      : orgType === 'organizer' ? organizerStaffAccess(body)
+        : role === 'member' ? memberPayload(body) : { payload: null };
     if (extra.error) return extra;
     const aclPermissions = extra.aclPermissions ?? (role === 'staff' ? [...new Set(body.aclPermissions || [])] : []);
     if (orgType === 'gym') {
       const invalid = aclPermissions.filter(p => !ownerStaffAclScopes.includes(p));
       if (invalid.length) return { error: 'invalid_acl_scopes', status: 400, invalid };
+    } else if (orgType === 'organizer') {
+      if (!(await db('EventOrganizer').where({ id: orgId }).first('id'))) return { error: 'organisation_not_found', status: 409 };
     } else {
       // The vendor's organisation record (I4) must exist before anything can point at it.
       if (ensureVendor) await ensureVendor(orgId);
@@ -260,7 +280,7 @@ export function createInvitationService({
 
     const token = newToken();
     const row = {
-      id: id('inv'), gymId: null, vendorId: null, ...orgRef(orgType, orgId), role, targetPersonId,
+      id: id('inv'), gymId: null, vendorId: null, organizerId: null, ...orgRef(orgType, orgId), role, targetPersonId,
       identifierType: identifier.type, identifierValue: identifier.value, tokenHash: sha256(token),
       status: 'pending', requiresAcceptance: true, aclPermissions,
       payload: extra.payload ? JSON.stringify(extra.payload) : null,
@@ -335,18 +355,46 @@ export function createInvitationService({
     }
   }
 
-  /** In-app notice to a known Person's personas (best effort). */
+  // The in-app notice, in both languages (as INVITE_TEXT above); the organisation kind and the role are
+  // shown as words, never as codes. The organizer staff role (admin | ops | finance | timing) is named too.
+  const NOTICE_TEXT = {
+    en: {
+      title: 'You have an invitation',
+      body: (org, role) => `${org} invited you to join as ${role}.`,
+      org: { gym: 'A gym', vendor: 'A shop', organizer: 'An event organizer' },
+      role: { staff: 'staff', trainer: 'a trainer', member: 'a member', owner: 'owner', admin: 'admin', ops: 'operations staff', finance: 'finance staff', timing: 'timing staff' },
+    },
+    sw: {
+      title: 'Una mwaliko',
+      body: (org, role) => `${org} imekualika kujiunga kama ${role}.`,
+      org: { gym: 'Gym', vendor: 'Duka', organizer: 'Mwandaaji wa matukio' },
+      role: { staff: 'mfanyakazi', trainer: 'trainer', member: 'mwanachama', owner: 'mmiliki', admin: 'msimamizi', ops: 'mfanyakazi wa uendeshaji', finance: 'mfanyakazi wa fedha', timing: 'mfanyakazi wa muda' },
+    },
+  };
+  /** { title, body } of the notice for one language. */
+  function noticeText(inv, orgName, lang) {
+    const t = NOTICE_TEXT[lang];
+    const payload = typeof inv.payload === 'string' ? JSON.parse(inv.payload) : inv.payload;
+    const roleKey = inv.orgType === 'organizer' && inv.role === 'staff' && payload?.organizerRole ? payload.organizerRole : inv.role;
+    return { title: t.title, body: t.body(orgName || t.org[inv.orgType] || t.org.gym, t.role[roleKey] || t.role.staff) };
+  }
+
+  /** In-app notice to a known Person's personas (best effort), in the language each persona chose. */
   async function tellPerson(inv) {
     if (!notify || !inv.targetPersonId) return;
     try {
       const org = await orgOf(inv);
+      const en = noticeText(inv, org?.name, 'en');
+      const sw = noticeText(inv, org?.name, 'sw');
       const personas = await db('User').where({ personId: inv.targetPersonId }).select('id');
       for (const p of personas) {
+        let locale = null;
+        try { locale = await localeOf(p.id); } catch { locale = null; }
+        const text = locale === 'sw' ? sw : en;
         await notify(p.id, {
           id: `ntf_${inv.id}_${p.id}`.slice(0, 60), type: 'org_invitation',
-          title: 'You have an invitation',
-          body: `${org?.name || (inv.orgType === 'vendor' ? 'A shop' : 'A gym')} invited you to join as ${inv.role}.`,
-          data: { invitationId: inv.id, orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role },
+          title: text.title, body: text.body,
+          data: { invitationId: inv.id, orgType: inv.orgType, orgId: orgIdOf(inv), role: inv.role, locale: locale === 'sw' ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body },
         });
       }
     } catch (err) {
@@ -420,7 +468,7 @@ export function createInvitationService({
     const { inv } = found;
     const token = newToken();
     const row = {
-      id: id('inv'), orgType, gymId: orgId, vendorId: null, role: inv.role, targetPersonId: inv.targetPersonId,
+      id: id('inv'), orgType, gymId: orgId, vendorId: null, organizerId: null, role: inv.role, targetPersonId: inv.targetPersonId,
       identifierType: inv.identifierType, identifierValue: inv.identifierValue, tokenHash: sha256(token),
       status: 'pending', requiresAcceptance: true, aclPermissions: [],
       payload: JSON.stringify({ plan: inv.payload.plan, payment: inv.payload.payment, reissuedFrom: inv.id }),
@@ -540,7 +588,8 @@ export function createInvitationService({
     let result;
     try {
       if (inv.role === 'staff') {
-        result = inv.orgType === 'vendor' ? await acceptVendorStaff(user, inv) : await acceptStaff(user, inv);
+        result = inv.orgType === 'vendor' ? await acceptVendorStaff(user, inv)
+          : inv.orgType === 'organizer' ? await acceptOrganizerStaff(user, inv) : await acceptStaff(user, inv);
       } else if (inv.role === 'trainer') {
         result = await acceptTrainer(user, inv);
       } else {
@@ -617,6 +666,50 @@ export function createInvitationService({
     } catch (err) {
       if (err?.code === '23505') return { error: 'persona_identifier_in_use', status: 409 };
       throw err;
+    }
+    // Through the collection, so the I4 hook derives the staff membership.
+    await users.updateByIdAsync(staffId, { updatedAt: new Date().toISOString() });
+    return { personaId: staffId };
+  }
+
+  /**
+   * Events · S2: an organizer_staff persona for this Person at the inviting organizer, and its
+   * EventOrganizerStaff row (the authoritative role record). No credentials are set. A person already
+   * on another organizer's staff is refused (one staff persona, one organizer, as vendor staff).
+   */
+  async function acceptOrganizerStaff(user, inv) {
+    const role = inv.payload?.organizerRole;
+    if (!ORGANIZER_STAFF_ROLES.includes(role)) return { error: 'invalid_staff_role', status: 400 };
+    // Only a verified (active) organizer takes on staff (security review #249); the invitation stays open.
+    const organizer = await db('EventOrganizer').where({ id: inv.organizerId }).first('id', 'status');
+    if (organizer?.status !== 'active') return { error: 'organizer_not_active', status: 409, organizerStatus: organizer?.status ?? null };
+    const existing = await db('User').where({ personId: user.personId, userType: 'organizer_staff' }).first();
+    let staffId = existing?.id ?? null;
+    if (existing) {
+      if (existing.organizerId && existing.organizerId !== inv.organizerId) return { error: 'already_staff_elsewhere', status: 409 };
+      await db('User').where({ id: existing.id }).update({ organizerId: inv.organizerId, organizerRole: role, accountStatus: 'active', updatedAt: new Date() });
+    } else {
+      staffId = `usr_${randomUUID().slice(0, 8)}`;
+      try {
+        await db('User').insert({
+          id: staffId, personId: user.personId, userType: 'organizer_staff',
+          firebaseUid: user.firebaseUid ?? null, email: user.email ?? null,
+          displayName: user.displayName ?? null, photoUrl: user.photoUrl ?? null,
+          accountStatus: 'active', approvalStatus: 'approved', onboardingCompleted: true,
+          organizerId: inv.organizerId, organizerRole: role,
+          createdAt: new Date(), updatedAt: new Date(),
+        });
+      } catch (err) {
+        if (err?.code === '23505') return { error: 'persona_identifier_in_use', status: 409 };
+        throw err;
+      }
+    }
+    const active = await db('EventOrganizerStaff').where({ organizerId: inv.organizerId, userId: staffId, status: 'active' }).first('id');
+    if (!active) {
+      await db('EventOrganizerStaff').insert({
+        id: `eos_${randomUUID().replace(/-/g, '').slice(0, 16)}`, organizerId: inv.organizerId, userId: staffId, role, status: 'active',
+        addedBy: inv.invitedBy ?? null, createdAt: new Date(), updatedAt: new Date(),
+      });
     }
     // Through the collection, so the I4 hook derives the staff membership.
     await users.updateByIdAsync(staffId, { updatedAt: new Date().toISOString() });

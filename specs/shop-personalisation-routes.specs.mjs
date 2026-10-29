@@ -387,10 +387,10 @@ test('home + preferences: a stored date in another format fails closed; no date 
   await shopOrder(legacy, [{ productId: p, name: 'Roller', qty: 1 }]);
   const out = await call(shopHome, asMember(legacy));
   assert.deepEqual(out.body.personalisation, { available: false, enabled: false });
-  assert.deepEqual((await call(getShopPreferences, asMember(legacy))).body, { personalised: true, available: false, historyDays: 365, uses: [] });
+  assert.deepEqual((await call(getShopPreferences, asMember(legacy))).body, { personalised: true, available: false, historyDays: 365, mode: 'member', uses: [] });
   const noDob = await user('member', { memberProfile: JSON.stringify({ gender: 'female' }) });
   await shopOrder(noDob, [{ productId: p, name: 'Roller', qty: 1 }]);
-  assert.deepEqual((await call(getShopPreferences, asMember(noDob))).body, { personalised: true, available: true, historyDays: 365, uses: ['purchase_history'] });
+  assert.deepEqual((await call(getShopPreferences, asMember(noDob))).body, { personalised: true, available: true, historyDays: 365, mode: 'member', uses: ['purchase_history'] });
   process.env.SHOP_HISTORY_DAYS = '30';
   assert.equal((await call(getShopPreferences, asMember(noDob))).body.historyDays, 30);
   delete process.env.SHOP_HISTORY_DAYS;

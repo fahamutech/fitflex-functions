@@ -18,6 +18,7 @@ export function registerB2BJobs({
   b2bBeneficiaryImportService = null,
   b2bLifecycleService = null,
   b2bWatchService = null,
+  b2bMemberRequestService = null,
   now = () => new Date(),
 }) {
   ops.register({
@@ -157,6 +158,17 @@ export function registerB2BJobs({
         if (sms.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${sms.failed} invitation SMS were not accepted`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:sms`, detail: sms });
         else if (sms.sent) await ctx.clear(`item:${ctx.job}:sms`, 'SMS sent.');
         return { processed: matched.matched + emails.sent + emails.failed, succeeded: matched.enrolled + emails.sent, failed: matched.failed + emails.failed, enrolled: matched.enrolled, emailsSent: email.sent, smsSent: sms.sent, emailsWaiting: email.notConfigured ? email.due : 0, smsWaiting: sms.notConfigured ? sms.due : 0 };
+      },
+    });
+  }
+
+  if (b2bMemberRequestService) {
+    ops.register({
+      name: 'b2b-member-request-expiry', title: 'Member request expiry', schedule: { type: 'every', minutes: 60 }, quiet: true,
+      description: 'Closes requests to add a member by user id that the member has not answered in time (B2B_MEMBER_REQUEST_TTL_DAYS, default 14 days).',
+      run: async () => {
+        const r = await b2bMemberRequestService.expireDue();
+        return { processed: r.expired, succeeded: r.expired, failed: 0, expired: r.expired };
       },
     });
   }

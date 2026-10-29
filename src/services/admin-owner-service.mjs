@@ -4,10 +4,13 @@
 // fetches the full gym (with image) on demand via GET /gyms/:id when needed.
 import { randomUUID } from 'node:crypto';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
+import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 
 const gymIdsOf = row => (row?.gymIds || (row?.gymId ? [row.gymId] : []));
 
-export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService, gymPayoutOwner = null }) {
+// onOwnerRemoved(prior): after an admin deletes an owner row (partner DOB review L3: the Person's declared
+// date of birth and gender go once it has no personas left). Never fails the delete.
+export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymService, gymPayoutOwner = null, onOwnerRemoved = async () => {} }) {
   /** Strip internal/sensitive fields from owner records for list responses. */
   function slimOwnerRow(row) {
     if (!row) return row;
@@ -82,7 +85,7 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: prior ? 'gym_owner_updated' : 'gym_owner_created',
-      target: id, before: prior ?? null, after: row
+      target: id, before: userAuditSnapshot(prior), after: userAuditSnapshot(row)
     });
     // Gym payout owner: taken off a gym they were the payout owner of → cleared
     // (audited). A gym that now has 2+ owners and none named is reported, so
@@ -100,10 +103,11 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     if (prior.gymId && await checkins.findAsync(c => c.gymId === prior.gymId)) return { error: 'gym_owner_has_checkin_activity', status: 409 };
     if (gymPayoutOwner) await gymPayoutOwner.clearForRemovedOwner({ ownerId: prior.id, gymIds: gymIdsOf(prior), actorId, reason: 'owner_deleted' });
     const removed = await users.removeAsync(u => u.id === prior.id);
+    try { await onOwnerRemoved(prior); } catch (err) { console.warn('[admin-owner-delete] follow-up failed:', err?.message); }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_owner_deleted',
-      target: prior.id, before: prior, after: null
+      target: prior.id, before: userAuditSnapshot(prior), after: null
     });
     return { owner: removed };
   }

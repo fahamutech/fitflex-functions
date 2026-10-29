@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, eventsModuleOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, eventsModuleOn, eventsRegistrationOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -137,6 +137,28 @@ export const eventHoldExpiry = {
     const r = await opsService.runJob('event-hold-expiry');
     const s = r?.stats ?? {};
     if (s.released) console.log(`[events] holds expired: released=${s.released} due=${s.due} skipped=${s.skipped}`);
+  }
+};
+
+export const eventLifecycle = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Events: automatic lifecycle moves — published → registration_closed at registrationClosesAt, published / registration_closed → in_progress at startsAt, in_progress → completed at endsAt + EVENT_AUTO_COMPLETE_GRACE_HOURS (default 6). Does nothing unless EVENTS_MODULE is on. Safe to rerun (each move is a guarded transition). The work, its run record and lock are in src/bootstrap/services.mjs (event-lifecycle) and ops-service.mjs.',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-lifecycle');
+    const s = r?.stats ?? {};
+    if (s.moved) console.log(`[events] lifecycle: moved=${s.moved} due=${s.due} skipped=${s.skipped} failed=${s.failed}`);
+  }
+};
+
+export const eventPaymentReconciliation = {
+  created, rule: '25 * * * *', // hourly
+  description: 'Events payments (S4): re-applies approved payments whose order is not confirmed, settles Tunzaa prompts whose callback was lost (and expires stale ones), retries unsent claim invitations once, and re-applies paid refunds whose places were not updated. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Bounded to 100 rows per step; safe to rerun and to overlap (advisory lock, idempotent steps). The work, its run record and lock are in src/bootstrap/services.mjs (event-payment-reconciliation) and ops-service.mjs.',
+  onJob: async () => {
+    if (!eventsRegistrationOn()) return;
+    const r = await opsService.runJob('event-payment-reconciliation');
+    const s = r?.stats ?? {};
+    if (s.repaired || s.settled || s.expired || s.invited || s.refundsApplied || s.failed) console.log(`[events] payment reconciliation: repaired=${s.repaired} settled=${s.settled} expired=${s.expired} invited=${s.invited} refunds=${s.refundsApplied} failed=${s.failed}`);
   }
 };
 

@@ -131,6 +131,18 @@ export function shopPersonalisationOn() {
 }
 
 /**
+ * Shop home Phase 2 · slice 3: "Popular near you" (docs/shop-near-you-api.md). Off unless SHOP_NEAR_YOU
+ * is set: GET /shop/home is byte-identical to before (no `nearYou` key, no popular_near_you section,
+ * `areaId` ignored), GET /shop/areas answers 404 feature_disabled, /shop/preferences never lists
+ * `location`, and /vendor/tools/options says merch.shopAreas: false. Even on, near-you applies only when
+ * personalisation is available and switched on for the person (so SHOP_PERSONALISATION must be on too).
+ * Vendor area fields (cityId, regionId, deliveryAreaIds) are validated and stored either way.
+ */
+export function shopNearYouOn() {
+  return on('SHOP_NEAR_YOU');
+}
+
+/**
  * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
  * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
  * carries no `manual` block and subscribe / upgrade take no reference, exactly
@@ -202,7 +214,7 @@ export function vendorToolsOptions() {
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
-    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn() },
+    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn() },
   };
 }
 
@@ -350,4 +362,92 @@ export function vendorStatementDraftsOn() {
  */
 export function eventsModuleOn() {
   return on('EVENTS_MODULE');
+}
+
+/** S2: saving events and the Saved filter (GET /events/options.favourites). Needs EVENTS_MODULE too. */
+export function eventsFavouritesOn() {
+  return eventsModuleOn() && on('EVENTS_FAVOURITES');
+}
+
+/** S3 (read here for the options probe only): member registration. Needs EVENTS_MODULE too. */
+export function eventsRegistrationOn() {
+  return eventsModuleOn() && on('EVENTS_REGISTRATION');
+}
+
+/**
+ * S4: payment intake on the labelled manual confirmation path (D1). Needs EVENTS_MODULE and EVENTS_REGISTRATION.
+ * Off: GET /events/options.payment stays 'none' and S3 behaviour is unchanged.
+ */
+export function eventsPaymentsManualOn() {
+  return eventsRegistrationOn() && on('EVENTS_PAYMENTS_MANUAL');
+}
+
+/**
+ * S4: event orders payable by mobile money (Malipo by Tunzaa). Built dormant; stays off until the owner confirms
+ * Tunzaa as the launch provider (D1). Needs EVENTS_MODULE and EVENTS_REGISTRATION (the client, TUNZAA_PAYMENTS and
+ * canSettle() are checked where the provider is used).
+ */
+export function eventsPaymentsTunzaaOn() {
+  return eventsRegistrationOn() && on('EVENTS_PAYMENTS_TUNZAA');
+}
+
+/**
+ * S4 launch gate (security review M4): event payments are taken only with two admins on money (MONEY_SECOND_APPROVER) unless the
+ * owner explicitly accepts a single approver with EVENTS_ALLOW_SINGLE_APPROVER=1 (default off).
+ */
+export function eventsApproverGateOpen() {
+  return moneySecondApproverOn() || on('EVENTS_ALLOW_SINGLE_APPROVER');
+}
+
+/** S4: payment intake (initiate, provider prompt, corporate notice) is on in either mode. */
+export function eventsPaymentIntakeOn() {
+  return eventsPaymentsManualOn() || eventsPaymentsTunzaaOn();
+}
+
+const positiveNumber = (name, fallback) => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+/** S2: an open event is "closing soon" this many hours before registration closes (default 72). */
+export const EVENTS_CLOSING_SOON_HOURS_DEFAULT = 72;
+export function eventsClosingSoonHours() {
+  return positiveNumber('EVENTS_CLOSING_SOON_HOURS', EVENTS_CLOSING_SOON_HOURS_DEFAULT);
+}
+
+/** S2: the eventLifecycle job marks an in-progress event completed this many hours after endsAt (default 6). */
+export const EVENT_AUTO_COMPLETE_GRACE_HOURS_DEFAULT = 6;
+export function eventAutoCompleteGraceHours() {
+  const n = Number(process.env.EVENT_AUTO_COMPLETE_GRACE_HOURS);
+  return Number.isFinite(n) && n >= 0 ? n : EVENT_AUTO_COMPLETE_GRACE_HOURS_DEFAULT;
+}
+
+/** The route guard every events route but GET /events/options uses: 404 feature_disabled while the module is off. */
+export function requireEventsModule(req, res, next) {
+  if (!eventsModuleOn()) return res.status(404).json({ error: 'feature_disabled' });
+  next();
+}
+
+/** S3: the guard of every registration route (quote, orders, registrations, claims, teams, corporate, organizer / admin order reads): 404 feature_disabled unless EVENTS_MODULE and EVENTS_REGISTRATION are both on. */
+export function requireEventsRegistration(req, res, next) {
+  if (!eventsRegistrationOn()) return res.status(404).json({ error: 'feature_disabled' });
+  next();
+}
+
+/** S4: the guard of payment INTAKE routes: 404 feature_disabled unless an events payment flag is on (reads, tickets, cancel and refunds need only EVENTS_REGISTRATION). */
+export function requireEventsPaymentIntake(req, res, next) {
+  if (!eventsPaymentIntakeOn()) return res.status(404).json({ error: 'feature_disabled' });
+  next();
+}
+
+/**
+ * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
+ * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and
+ * /admin/gym-owners/:id/personal-details answer 404 feature_disabled, and /trainer/register and
+ * /gym-owner/register ignore `dateOfBirth` (and the owner's `gender`) exactly as before. On: a date of
+ * birth sent there is checked (400 invalid_field, 400 partner_under_18) and saved on the Person. The
+ * server never refuses a registration for leaving it out (old app builds keep working); the app asks.
+ */
+export function partnerDobRequiredOn() {
+  return on('PARTNER_DOB_REQUIRED');
 }

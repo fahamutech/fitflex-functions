@@ -723,19 +723,36 @@ export function createPromotionService({
     const coords = ['lat', 'lng', 'radiusKm'].map(k => (body?.[k] == null ? null : Number(body[k])));
     if (coords.some(c => c !== null && !Number.isFinite(c))) return fail('invalid_coordinates', 422);
     if ((coords[0] !== null && Math.abs(coords[0]) > 90) || (coords[1] !== null && Math.abs(coords[1]) > 180) || (coords[2] !== null && coords[2] <= 0)) return fail('invalid_coordinates', 422);
+    // Shop near-you i18n: the Swahili place name (optional; absent = same as name). Native review.
+    const nameSw = body?.nameSw == null ? null : text(body.nameSw, 120);
+    if (body?.nameSw != null && typeof body.nameSw !== 'string') return fail('invalid_name_sw', 422, { field: 'nameSw' });
     const id = text(body?.id, 80) || `${parent.id}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
     if (await geoAreas.findByIdAsync(id)) return fail('area_exists', 409);
     const at = stamp();
-    const row = { id, level, name, parentId: parent.id, lat: coords[0], lng: coords[1], radiusKm: coords[2], active: true, createdAt: at, updatedAt: at };
+    const row = { id, level, name, nameSw: nameSw || null, parentId: parent.id, lat: coords[0], lng: coords[1], radiusKm: coords[2], active: true, createdAt: at, updatedAt: at };
     await geoAreas.insertAsync(row);
     await audit({ actor: actorId, action: 'promotion.geo_area_created', target: id, after: row });
     return { area: row };
   }
 
+  /** Shop near-you i18n: set or clear an area's Swahili name. Body { nameSw: string (≤ 120) | null }. Audited. */
+  async function updateArea({ id, body, actorId }) {
+    if (!actorId) return fail('actor_required', 403);
+    const area = await geoAreas.findByIdAsync(id);
+    if (!area) return fail('area_not_found', 404);
+    if (!body || !Object.prototype.hasOwnProperty.call(body, 'nameSw')) return fail('nothing_to_update', 422, { allowed: ['nameSw'] });
+    if (body.nameSw !== null && typeof body.nameSw !== 'string') return fail('invalid_name_sw', 422, { field: 'nameSw' });
+    const nameSw = body.nameSw === null ? null : text(body.nameSw, 120) || null;
+    if ((area.nameSw ?? null) === nameSw) return { area };
+    const updated = await geoAreas.updateByIdAsync(id, { nameSw, updatedAt: stamp() });
+    await audit({ actor: actorId, action: 'promotion.geo_area_updated', target: id, before: { nameSw: area.nameSw ?? null }, after: { nameSw } });
+    return { area: updated || { ...area, nameSw } };
+  }
+
   return {
     reference, list, get, create, update, submit, approve, reject, reopen, schedule, activate, pause, resume, cancel, complete,
     preview, runLifecycle, holdForEntity, listLive, overview, limits, setLimit,
-    createCampaign, updateCampaign, setCampaignStatus, listCampaigns, getCampaign, listAreas, createArea,
+    createCampaign, updateCampaign, setCampaignStatus, listCampaigns, getCampaign, listAreas, createArea, updateArea,
     placementsFor, searchEntities, searchPartners,
   };
 }

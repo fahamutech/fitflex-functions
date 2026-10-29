@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import knexFactory from 'knex';
+import { redactAuditValue } from '../shared/audit-redact.mjs';
 import pg from 'pg';
 
 // pg returns NUMERIC/DECIMAL as strings to avoid precision loss. Ours are all
@@ -631,12 +632,12 @@ export function collection(name) {
 // Known scalar columns per model — only these are written to PG.
 // Unknown fields are silently dropped (preserving JSON-store compat).
 const ALLOWED_FIELDS = {
-  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','termsVersion','termsAcceptedAt','passwordChangeRequired','startPasswordHash','sessionsValidAfter','passwordChangeClaimedAt','createdAt','updatedAt']),
+  users:            new Set(['id','firebaseUid','phone','email','displayName','photoUrl','userType','accountStatus','approvalStatus','passwordHash','approvalNote','onboardingCompleted','portalUser','aclPermissions','memberProfile','gymId','gymIds','vendorProfile','vendorId','vendorRole','vendorPermissions','corporateId','organizerId','organizerRole','termsVersion','termsAcceptedAt','passwordChangeRequired','startPasswordHash','sessionsValidAfter','passwordChangeClaimedAt','createdAt','updatedAt']),
   gyms:            new Set(['id','name','tier','location','venueType','accessMode','operatingHours','perVisitRate','ratePerDay','ratePerWeek','ratePerMonth','commissionRate','status','homepageVisible','homepagePriority','images','thumbnails','coordinates','amenities','equipment','verified','classes','trainerPass','regionId','cityId','paymentBank','paymentNumber','paymentNotes','tinNumber','rating','reviewCount','payoutOwnerId','createdAt','updatedAt']),
   subscriptions:    new Set(['id','memberId','type','tier','plan','status','startedAt','cycleStartedAt','renewsAt','expiresAt','homeGymId','paymentRef','createdAt']),
   checkins:         new Set(['id','memberId','gymId','timestamp','method','subscriptionType','passTier','visitNumberInCycle','gymTier','creditsDeductedTzs','visitConsumed',
                               'status','statusReason','statusChangedBy','statusChangedAt','voidedAt','voidedBy','voidReason','subscriptionId','businessDate','source']),
-  payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','orderId','currency','tier','plan','gymId','amountTzs','status','provider','reference','memberReference','memberReferenceKey','payerPhone','note','requestedAt','decidedAt','decidedBy','verifiedBy','verifiedAt','changeRequestedStatus','changeRequestedBy','changeRequestedAt','changeRequestReason']),
+  payment_requests: new Set(['id','memberId','subscriptionId','bookingGroupId','orderId','currency','tier','plan','gymId','amountTzs','status','provider','reference','memberReference','memberReferenceKey','payerPhone','note','requestedAt','decidedAt','decidedBy','verifiedBy','verifiedAt','changeRequestedStatus','changeRequestedBy','changeRequestedAt','changeRequestReason','eventOrderId']),
   invoices:         new Set(['id','gymId','gymName','ownerId','ownerName','amount','status','note','periodStart','periodEnd','receiptUrl','paymentReference','createdAt','createdBy','paidAt']),
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
   trainers:         new Set(['id','userId','email','phone','displayName','fullName','nickname','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','regionId','cityId','availability','socialLinks','createdAt','updatedAt']),
@@ -691,7 +692,7 @@ const ALLOWED_FIELDS = {
   b2b_programs:           new Set(['id','organizationId','name','description','programType','status','statusReason','statusChangedAt','startDate','endDate','eligibility','budgetTzs','discountBps','activatedAt','activatedBy','createdBy','createdAt','updatedAt']),
   moderation_states:    new Set(['id','entityType','entityId','status','reason','decidedBy','decidedAt','createdAt','updatedAt']),
   moderation_events:    new Set(['id','entityType','entityId','action','fromStatus','toStatus','reason','actor','at']),
-  geo_areas:            new Set(['id','level','name','parentId','lat','lng','radiusKm','active','createdAt','updatedAt']),
+  geo_areas:            new Set(['id','level','name','nameSw','parentId','lat','lng','radiusKm','active','createdAt','updatedAt']),
   promotion_campaigns:  new Set(['id','name','description','status','statusReason','startsAt','endsAt','geoScope','createdBy','createdAt','updatedAt']),
   promotions:           new Set(['id','entityType','entityId','type','status','statusReason','statusChangedAt','campaignId','partnerRef','startsAt','endsAt','priority','boostWeight','geoScope','audience','categories','isCommercial','relationshipType','commercialRef','disclosureLabel','notes','createdBy','submittedBy','submittedAt','approvedBy','approvedAt','activatedAt','pausedAt','createdAt','updatedAt']),
   promotion_placements: new Set(['id','promotionId','placement']),
@@ -720,7 +721,7 @@ const ALLOWED_FIELDS = {
   gym_settlement_lines:        new Set(['id','runId','mode','gymSettlementId','memberCycleSettlementId','memberId','gymId','qualifyingVisitCount','heldVisitCount','bracket','rawPreliminaryTzs','preliminaryTzs','monotonicGuardApplied','networkAdjustmentTzs','finalTzs','rateCardSnapshot','calculationBasis','createdAt']),
   settlement_visits:           new Set(['id','runId','mode','memberCycleSettlementId','lineId','checkinId','gymId','businessDate','outcome','eligibility','allowanceSlot','active','createdAt']),
   settlement_adjustments:      new Set(['id','gymSettlementId','amountTzs','type','reason','status','sourceSettlementId','sourceCheckinId','createdBy','approvedBy','approvedAt','createdAt','updatedAt','appliedAt','rejectedBy','rejectReason','sourceMemberCycleSettlementId']),
-  refunds:                     new Set(['id','memberId','kind','subscriptionId','bookingId','orderId','paymentRequestId','amountTzs','currency','reasonCode','note','status','requestedBy','requestedRole','decidedBy','decidedAt','decisionNote','paidBy','paidAt','paymentReference','paidTo','createdAt','updatedAt']),
+  refunds:                     new Set(['id','memberId','kind','subscriptionId','bookingId','orderId','paymentRequestId','amountTzs','currency','reasonCode','note','status','requestedBy','requestedRole','decidedBy','decidedAt','decisionNote','paidBy','paidAt','paymentReference','paidTo','createdAt','updatedAt','eventId','eventOrderId','eventRegistrationId','organizerId','organizationId','scope','policySnapshot','batchId','eventPaymentId','decisionNoteSw']),
   partner_kyc_events:          new Set(['id','caseId','round','eventType','fromStatus','toStatus','targetType','targetId','actorId','actorRole','reasonCode','note','data','at']),
   hero_images:                 new Set(['id','privateProvider','privateKey','sha256','status','width','height','focalX','focalY','variants','textZoneLuminance','source','photographer','licence','licenceRef','people','consentRef','rightsConfirmedBy','rightsConfirmedAt','noFacesConfirmedBy','noFacesConfirmedAt','createdBy','createdAt','updatedAt','unpublishedInPublication','purpose','vendorId','confirmationVersion']),
   hero_slot_drafts:            new Set(['slotId','imageId','position','updatedBy','updatedAt']),
@@ -745,6 +746,7 @@ const JSON_FIELDS = {
   gyms: ['operatingHours', 'coordinates', 'classes', 'trainerPass'],
   platform_settings: ['subscriptionTiers', 'payoutBands', 'manualPayment'],
   audit_log: ['before', 'after'],
+  refunds: ['policySnapshot'],
   shop_orders: ['items', 'timeline', 'fulfilments'],
   trainer_engagements: ['messages'],
   products: ['variants'],
@@ -825,6 +827,13 @@ function prepareForKnex(name, data, isUpdate = false) {
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {
       const val = cleaned[f];
       cleaned[f] = typeof val === 'number' ? new Date(val) : new Date(val);
+    }
+  }
+
+  // Credential keys never reach AuditLog, whatever a caller passes.
+  if (name === 'audit_log') {
+    for (const f of ['before', 'after']) {
+      if (cleaned[f] && typeof cleaned[f] === 'object') cleaned[f] = redactAuditValue(cleaned[f]);
     }
   }
 

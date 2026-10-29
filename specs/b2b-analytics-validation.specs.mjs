@@ -240,7 +240,7 @@ test('a company set up under Companies: employees are its people, departments it
   // Two of the three have joined FitFlex.
   for (const s of staff.slice(0, 2)) {
     s.userId = await user('member', s.name);
-    const linked = await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: s.id, userId: s.userId, actorId: BILLER });
+    const linked = await corporateService.linkEmployeeUser({ corporateId: account.id, employeeId: s.id, userId: s.userId, actorId: BILLER, actorType: 'admin' });
     assert.ok(!linked.error, JSON.stringify(linked));
   }
   const orgId = (await b2bService.organizationForCorporate({ corporateId: account.id })).organization.id;
