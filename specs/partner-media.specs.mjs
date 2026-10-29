@@ -30,7 +30,8 @@ import { createVendorLimiter } from '../src/shared/vendor-rate-limit.mjs';
 import {
   ADMIN_CONFIRMATION, PARTNER_CONFIRMATION, REASON_TEXT, TAKEDOWN_REASONS, takenDownMessage, settingsRoute,
 } from '../src/shared/partner-media-rules.mjs';
-import { looksLikeSvg, prepareLogoUpload, buildLogoVariants, sniffImageType, pixelSha256 } from '../src/infra/hero-image-file.mjs';
+import { looksLikeSvg, prepareLogoUpload, buildLogoVariants, sniffImageType, pixelSha256, HERO_LIMITS, LOGO_LIMITS } from '../src/infra/hero-image-file.mjs';
+import { crc32, deflateSync } from 'node:zlib';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
 await ensureInit();
@@ -247,8 +248,11 @@ test('texts: partner and admin confirmations and every reason exist in English a
     version: PARTNER_CONFIRMATION.version, status: 'draft_pending_counsel',
     rights: { ...PARTNER_CONFIRMATION.rights }, ownLogo: { ...PARTNER_CONFIRMATION.ownLogo },
   });
-  assert.deepEqual(r.body.limits.hero, { minWidth: 1080, maxBytes: 15 * 1024 * 1024, types: ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'] });
-  assert.deepEqual(r.body.limits.logo, { minSide: 256, maxBytes: 2 * 1024 * 1024, types: ['image/png', 'image/jpeg', 'image/webp'] });
+  assert.deepEqual(r.body.limits.hero, { minWidth: 1080, maxBytes: 15 * 1024 * 1024, maxPixels: 50_000_000, types: ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'] });
+  assert.deepEqual(r.body.limits.logo, { minSide: 256, maxSide: 4000, maxBytes: 2 * 1024 * 1024, types: ['image/png', 'image/jpeg', 'image/webp'] });
+  // The limits the apps are told are the ones the pipeline enforces.
+  assert.equal(r.body.limits.hero.maxPixels, HERO_LIMITS.maxPixels);
+  assert.equal(r.body.limits.logo.maxSide, LOGO_LIMITS.maxSide);
   assert.doesNotMatch(JSON.stringify(r.body), /people|faces/i);
   const a = await hit('GET', '/admin/partner-media/confirmation', { claims: adminClaims(P.brand, ['brand_media']) });
   assert.equal(a.status, 200);
@@ -1115,4 +1119,30 @@ test('sharp settings are not changed by partner uploads (the gate alone limits t
   assert.equal((await heroFor(owner(), { gymId: P.gymA })).status, 201);
   assert.equal((await logoFor(owner(), { gymId: P.gymA })).status, 201);
   assert.equal(sharp.concurrency(), beforeThreads);
+});
+
+// ── Contract-checker (final round) ──────────────────────────────────────────
+
+/** A PNG of a few bytes declaring width × height (IHDR, a tiny IDAT, IEND): enough for the size checks, which run before any decode. */
+function pngHeader(width, height) {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body) >>> 0);
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 6; // 8-bit RGBA
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(Buffer.alloc(16))), chunk('IEND', Buffer.alloc(0))]);
+}
+
+test('contract: 413 file_too_large carries maxPixels (photos over 50 MP) or maxSide (logos over 4000 px); 503 image_service_busy carries retryAfterSeconds', async () => {
+  const huge = await heroFor(owner(), { gymId: P.gymA }, pngHeader(10_000, 6_000));
+  assert.deepEqual([huge.status, huge.body.error, huge.body.maxPixels], [413, 'file_too_large', 50_000_000]);
+  const wide = await logoFor(owner(), { gymId: P.gymA }, pngHeader(5_000, 400));
+  assert.deepEqual([wide.status, wide.body.error, wide.body.maxSide], [413, 'file_too_large', 4000]);
+  const busy = createPartnerMediaService({ store: createPgPartnerMediaStore({ db }), imageGate: { run: async () => ({ busy: true }) }, logger: { error() {}, warn() {} } });
+  const r = await busy.upload({ claims: owner(), kind: 'hero', gymId: P.gymA, file: { buffer: PHOTO }, fields: HERO_FIELDS() });
+  assert.deepEqual([r.status, r.error, r.retryAfterSeconds], [503, 'image_service_busy', 5]);
 });

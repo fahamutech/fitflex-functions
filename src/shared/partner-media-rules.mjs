@@ -24,6 +24,8 @@ export const PARTNER_MEDIA_LIMITS = Object.freeze({
   hero: Object.freeze({
     minWidth: 1080,
     maxBytes: 15 * 1024 * 1024,
+    // The decoder's limit (HERO_LIMITS.maxPixels in hero-image-file.mjs): width × height before rotation.
+    maxPixels: 50_000_000,
     types: Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']),
   }),
   logo: Object.freeze({

@@ -270,9 +270,16 @@ export function createPartnerMediaService({
     version: PARTNER_CONFIRMATION.version, status: PARTNER_CONFIRMATION.status,
     rights: { ...PARTNER_CONFIRMATION.rights }, ownLogo: { ...PARTNER_CONFIRMATION.ownLogo },
   });
+  // Every limit the server checks, so the apps can refuse a file before sending it (contract-checker).
   const limitsView = () => ({
-    hero: { minWidth: PARTNER_MEDIA_LIMITS.hero.minWidth, maxBytes: PARTNER_MEDIA_LIMITS.hero.maxBytes, types: [...PARTNER_MEDIA_LIMITS.hero.types] },
-    logo: { minSide: PARTNER_MEDIA_LIMITS.logo.minSide, maxBytes: PARTNER_MEDIA_LIMITS.logo.maxBytes, types: [...PARTNER_MEDIA_LIMITS.logo.types] },
+    hero: {
+      minWidth: PARTNER_MEDIA_LIMITS.hero.minWidth, maxBytes: PARTNER_MEDIA_LIMITS.hero.maxBytes,
+      maxPixels: PARTNER_MEDIA_LIMITS.hero.maxPixels, types: [...PARTNER_MEDIA_LIMITS.hero.types],
+    },
+    logo: {
+      minSide: PARTNER_MEDIA_LIMITS.logo.minSide, maxSide: PARTNER_MEDIA_LIMITS.logo.maxSide,
+      maxBytes: PARTNER_MEDIA_LIMITS.logo.maxBytes, types: [...PARTNER_MEDIA_LIMITS.logo.types],
+    },
   });
 
   // ── Partner: read ───────────────────────────────────────────────────────────

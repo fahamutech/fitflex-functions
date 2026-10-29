@@ -59,9 +59,14 @@ Returns `200`:
   hero: { live: MediaItem|null, lastTakedown: MediaItem|null },
   logo: { live, lastTakedown },
   confirmation: { version, status:'draft_pending_counsel', rights{en,sw}, ownLogo{en,sw} },
-  limits: { hero{minWidth:1080,maxBytes:15728640,types[]}, logo{minSide:256,maxBytes:2097152,types[]} } }
+  limits: { hero{minWidth:1080,maxBytes:15728640,maxPixels:50000000,types[]}, logo{minSide:256,maxSide:4000,maxBytes:2097152,types[]} } }
 ```
 - `lastTakedown` is set only when there is no live item and nothing was uploaded after the takedown.
+- `limits` holds every size the server checks, so the apps can refuse a file before sending it:
+  - `hero.maxPixels`: width × height as stored, before rotation;
+  - `logo.maxSide`: the longest side.
+
+  The same values come back in the `413` body when a file breaks them.
 - The response carries a weak `ETag` and `Cache-Control: private, no-cache`. `If-None-Match` → `304`.
 - Errors: `400 gym_id_required`, `403 not_your_gym | acl_forbidden`, `404 subject_not_found`.
 
@@ -73,7 +78,7 @@ Returns `200`:
   - **20 successful uploads a day** (O-P5, `scope: 'partner'`). Refused or failed attempts never use these 20, so a teammate's failures can't lock the owner out (re-review R5).
   - Counted under the partner's lock; the successful count is checked again inside the save transaction.
 - **Over a limit:** `429 rate_limited { retryAfterSeconds, limit: 'minute'|'day', scope: 'person'|'partner'|'partner_attempts', max }`, with `Retry-After`.
-- **Image jobs:** at most 2 partner images are decoded at once per server process, with up to 20 waiting. Beyond that: `503 image_service_busy { retryAfterSeconds }`. sharp's own settings are not changed, so hero photos, shop banners and KYC files are unaffected.
+- **Image jobs:** at most 2 partner images are decoded at once per server process, with up to 20 waiting. Beyond that: `503 image_service_busy { retryAfterSeconds }` (5), also sent as `Retry-After`; try again after that. sharp's own settings are not changed, so hero photos, shop banners and KYC files are unaffected.
 - **Magic bytes (L7):** a file whose first bytes are not JPEG, PNG, WebP or HEIF/AVIF (logos: JPEG, PNG, WebP only) is refused with `400 unsupported_file_type { reason: 'not_an_accepted_image' }` before any decoder sees it. SVG still gets `svg_not_allowed`.
 
 ### `POST /partner/media/hero` (multipart)
@@ -100,11 +105,14 @@ With `auto`, the plate is dark when the alpha-weighted luminance of the logo is 
 - `403`: `not_your_gym`, `acl_forbidden {requiredScope: gyms|own_profile|vendor_admin}`
 - `404`: `subject_not_found` (also when the partner was deleted while the file was being cleaned)
 - `409`: `image_taken_down_before`. The same file was taken down before (O-P2, review L1). "Same" means the same uploaded bytes (sha256) or the same decoded cleaned pixels (`pixelSha256`, which catches metadata-only edits). For gyms, takedowns at any gym of the same owner count.
-- `413`: `file_too_large {maxBytes|maxSide}`
+- `413`: `file_too_large` with exactly one of:
+  - `{ maxBytes }`: the file is larger than `limits.*.maxBytes` (15 MB photo, 2 MB logo);
+  - `{ maxPixels }`: a photo over `limits.hero.maxPixels` (50,000,000 px, width × height);
+  - `{ maxSide }`: a logo wider or taller than `limits.logo.maxSide` (4000 px).
 - `422`: `variant_over_budget`
 - `429`: `rate_limited` (see Upload limits)
 - `500`: `image_save_failed`
-- `503`: `image_service_busy`, `rate_limit_unavailable`
+- `503`: `image_service_busy { retryAfterSeconds }` (with `Retry-After`), `rate_limit_unavailable`
 
 ### `GET /partner/media/:id/file?variant=`
 - Photos: `variant` is `x2` (default, 1080 wide, ≤ 150 KB) or `x1` (540, ≤ 60 KB). Logos: `logo256` (default) or `logo128` (each ≤ 40 KB, alpha kept).
