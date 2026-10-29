@@ -148,3 +148,48 @@ export function harness() {
 
   return { ...base, org, kitEvent, addRegistrations, apiClient, cleanup, made5, webhookService: eventsWebhookService };
 }
+
+// ── A webhook lab: a service instance with a fake clock, an injected resolver and a scripted receiver ──
+import { createEventsWebhookService } from '../../src/services/events-webhook-service.mjs';
+import { webhookKeyRing } from '../../src/shared/webhook-signing.mjs';
+
+export const PUBLIC_IP = '93.184.216.34';
+/**
+ * { svc, clock, calls, notes, script, dns } — `script` is a queue of receiver steps: { status, body? } | { throw: 'timeout' | 'tls_error' | 'network_error', cause? };
+ * when empty the receiver answers 200. The verification handshake is answered correctly unless `lab.verifyAnswer` says otherwise.
+ */
+export function webhookLab({ maxAttempts = 10, dns = { 'hooks.example.test': [PUBLIC_IP] } } = {}) {
+  // The clock follows real time (rows written by the stores carry real time) plus an offset the spec can advance.
+  const lab = { offset: 0, calls: [], notes: [], script: [], dns: { ...dns }, verifyAnswer: 'echo' };
+  lab.clock = { get t() { return Date.now() + lab.offset; } };
+  const resolve = async (host) => { if (!(host in lab.dns)) throw Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }); return lab.dns[host].map(address => ({ address, family: address.includes(':') ? 6 : 4 })); };
+  const sendHttp = async ({ url, addresses, headers, body }) => {
+    const parsed = JSON.parse(body);
+    lab.calls.push({ url, addresses, headers, body, parsed, at: lab.clock.t });
+    if (parsed.type === 'endpoint.verification') {
+      if (lab.verifyAnswer === 'echo') return { status: 200, headers: { 'content-type': 'application/json' }, snippet: JSON.stringify({ challenge: parsed.challenge }) };
+      if (lab.verifyAnswer === 'wrong') return { status: 200, headers: { 'content-type': 'application/json' }, snippet: JSON.stringify({ challenge: 'nope' }) };
+      return { status: 500, headers: {}, snippet: 'down' };
+    }
+    const step = lab.script.shift() ?? { status: 200 };
+    if (step.throw) throw Object.assign(new Error(step.throw), { code: step.throw, cause: step.cause });
+    return { status: step.status, headers: { 'content-type': step.contentType ?? 'text/plain' }, snippet: step.body ?? '' };
+  };
+  lab.svc = createEventsWebhookService({
+    db, keyRing: () => webhookKeyRing(process.env), now: () => new Date(lab.clock.t), resolve, sendHttp, random: () => 0.5,
+    notify: async (userId, message) => { lab.notes.push({ userId, ...message }); }, localeOf: async () => null,
+    config: { lagSeconds: () => 0, maxAttempts: () => maxAttempts, batch: () => 50 },
+  });
+  lab.advance = ms => { lab.offset += ms; };
+  lab.endpoint = async (organizer, { events = ['kit.collected', 'bib.assigned', 'registration.created'], url = 'https://hooks.example.test/hook', verify = true, eventIds = undefined } = {}) => {
+    const created = await lab.svc.createEndpoint({ organizerId: organizer.id, actorId: organizer.ownerUserId, body: { url, events, ...(eventIds ? { eventIds } : {}) } });
+    assert.equal(created.status, 201, JSON.stringify(created));
+    if (verify) assert.equal((await lab.svc.verifyEndpoint({ organizerId: organizer.id, id: created.endpoint.id, actorId: organizer.ownerUserId })).ok, true);
+    return { id: created.endpoint.id, secret: created.signingSecret, endpoint: created.endpoint };
+  };
+  lab.emit = async (event, organizerId, type = 'kit.collected', payload = null, regId = 'ereg_lab') => db.transaction(trx => eventStore.appendOutbox(trx, {
+    type, aggregateType: 'registration', aggregateId: regId, organizerId, eventId: event.id,
+    payload: payload ?? { registrationId: regId, collectionPointId: 'ecp_lab', collectedAt: new Date().toISOString() },
+  }));
+  return lab;
+}
