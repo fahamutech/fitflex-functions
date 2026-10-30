@@ -92,11 +92,13 @@ test('roles and flags: only an owner or admin manages clients; timing / ops / fi
   assert.equal((await create(o.owner, {})).status, 404);
 });
 
-test('scopes are a closed list: unknown → invalid_scope; results:write reserved; webhooks:manage is the OWNER\'s alone and never on sandbox; write scopes need registrations:read', async () => {
+test('scopes are a closed list: unknown → invalid_scope; results:write / results:read are selectable since S6 (and need registrations:read); webhooks:manage is the OWNER\'s alone and never on sandbox; write scopes need registrations:read', async () => {
   s5On();
   const o = await h.org();
   assert.deepEqual([(await create(o.owner, { scopes: ['admin:everything'] })).status, (await create(o.owner, { scopes: ['admin:everything'] })).body.error], [422, 'invalid_scope']);
-  assert.equal((await create(o.owner, { scopes: ['registrations:read', 'results:write'] })).body.error, 'scope_not_available');
+  assert.equal((await create(o.owner, { scopes: ['registrations:read', 'results:write', 'results:read'] })).status, 201);
+  assert.equal((await create(o.owner, { scopes: ['results:write'] })).body.error, 'validation_failed');
+  assert.equal((await create(o.owner, { scopes: ['results:read'] })).body.error, 'validation_failed');
   assert.equal((await create(o.owner, { scopes: [] })).body.error, 'validation_failed');
   assert.equal((await create(o.owner, { scopes: ['kit:write'] })).body.error, 'validation_failed');
   const adminTry = await create(o.admin, { scopes: ['registrations:read', 'webhooks:manage'] });

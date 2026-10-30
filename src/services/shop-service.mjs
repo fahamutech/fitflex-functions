@@ -18,7 +18,7 @@ import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, 
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { indexAreas, validateVendorAreas, touchesAreas } from '../shared/shop-areas.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
-import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
+import { checkMediaFields, storedMedia, mediaSrcMaxBytes } from '../shared/media-src.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set([...STATUSES, ...LEGACY_INPUTS]);
@@ -33,7 +33,10 @@ export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manage
 // `sales` (vendor tools · S3): walk-in sales — record, history, void. Backfilled onto existing staff
 // with vendorRole admin or sales by migration 20261230120000-vendor-walkin-sales.
 export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff']);
-const PRODUCT_REVIEW_FIELDS = new Set(['name', 'description', 'category', 'brand', 'priceTzs', 'discountPriceTzs', 'images', 'variants']);
+// Price and discount price are not reviewed (owner decision 2026-10-29): changing them never sends an approved
+// product back to pending or hides it. They stay guarded by validation, the flash-sale price lock, the
+// ProductPriceChange history (trigger) and a `product_price_changed` audit row. Moderation can still hide a product.
+const PRODUCT_REVIEW_FIELDS = new Set(['name', 'description', 'category', 'brand', 'images', 'variants']);
 const PUBLIC_PROFILE_FIELDS = ['vendorId', 'businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'status'];
 const publicProfile = profile => profile?.status === 'published'
   ? Object.fromEntries(PUBLIC_PROFILE_FIELDS.filter(key => profile[key] !== undefined).map(key => [key, profile[key]]))
@@ -310,7 +313,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (input[field] != null && !isMoneyInt(input[field], { allowZero: field === 'discountPriceTzs' })) return { error: field === 'priceTzs' ? 'priceTzs_required' : 'invalid_field', status: 400, field };
     }
     if (input.stock != null && (!Number.isInteger(Number(input.stock)) || Number(input.stock) < 0 || Number(input.stock) > 1_000_000)) return { error: 'invalid_stock', status: 400 };
-    if (input.images != null && (!Array.isArray(input.images) || input.images.length > 10 || input.images.some(i => typeof i !== 'string' || i.length > 500))) return { error: 'invalid_field', status: 400, field: 'images' };
+    // The app sends each photo inline as a data URI, far over 500 characters: those are capped at the
+    // media-src size (checkMediaFields then decodes them); any other string (a /storage path) stays ≤ 500.
+    const dataUriMax = 64 + 4 * Math.ceil(mediaSrcMaxBytes() / 3);
+    if (input.images != null && (!Array.isArray(input.images) || input.images.length > 10 || input.images.some(i => typeof i !== 'string' || i.length > (i.startsWith('data:') ? dataUriMax : 500)))) return { error: 'invalid_field', status: 400, field: 'images' };
     if (input.variants != null) {
       const v = input.variants;
       const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && x.name.length <= 60
@@ -405,6 +411,22 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return upsertProductFields({ ...args, priceGuard });
   }
 
+  const pricesOf = row => ({ priceTzs: Number(row?.priceTzs || 0), discountPriceTzs: row?.discountPriceTzs == null ? null : Number(row.discountPriceTzs) });
+  /**
+   * Who changed a product's price (owner decision 2026-10-29: price edits are not reviewed, so admins see them here).
+   * One `product_price_changed` audit row when the saved price or discount price differs from the one before the
+   * save; the ProductPriceChange rows (trigger) stay the price history the 14-day rule reads.
+   */
+  async function auditPriceEdit(productId, actorId, before, saved) {
+    if (!before || !saved) return;
+    const after = pricesOf(saved);
+    if (after.priceTzs === before.priceTzs && Number(after.discountPriceTzs || 0) === Number(before.discountPriceTzs || 0)) return;
+    await auditLog.insertAsync({
+      id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_price_changed', target: productId,
+      before, after: { ...after, vendorId: saved.vendorId, approvalStatus: saved.approvalStatus || null },
+    });
+  }
+
   // keptImages: images a copy may carry over unchanged (duplicateProduct: the source product's own).
   // priceGuard(current, store) → null | { error }: the flash-sale price lock, checked inside the save's transaction.
   async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [], priceGuard = null }) {
@@ -434,6 +456,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       for (const field of ['priceTzs', 'discountPriceTzs', 'weightKg', 'distanceKm']) if (input[field] !== undefined) patch[field] = input[field] === null ? null : Number(input[field]);
       if (Array.isArray(input.images)) patch.images = input.images;
       if (input.status && PRODUCT_STATUSES.has(input.status)) patch.status = input.status;
+      let pricesBefore = pricesOf(prior); // replaced by the locked row's prices where the save takes a lock
       const needsReview = (current, variants) => current.approvalStatus === 'approved'
         && Object.keys(input).some(field => PRODUCT_REVIEW_FIELDS.has(field)) && reviewChanged(current, input, variants);
       if (ledgerOn()) {
@@ -450,10 +473,12 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
             const plan = planStock(current, input, { ledger: true });
             if (plan.error) return plan;
             const fields = needsReview(current, plan.variants || null) ? { ...patch, approvalStatus: 'pending' } : patch;
+            pricesBefore = pricesOf(current);
             return { ...plan, fields, privates: privatesFrom(input) };
           },
         });
         if (saved.error) return saved;
+        await auditPriceEdit(productId, actorId, pricesBefore, saved.product);
         await afterStockMoved([productId]);
         return { product: (await vendorProductsView(vendorId, [saved.product], { costAllowed }))[0] };
       }
@@ -466,10 +491,17 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (needsReview(prior, plan.variants || null)) patch.approvalStatus = 'pending';
       if (priceGuard) {
         // Flash sales on and a price in the body: check and save in one transaction under the row lock.
-        const saved = await flashSales.updateProductLocked(productId, async (current, q) => (await priceGuard(current, q)) || { patch });
-        return saved.error ? saved : { product: saved.product };
+        const saved = await flashSales.updateProductLocked(productId, async (current, q) => {
+          pricesBefore = pricesOf(current);
+          return (await priceGuard(current, q)) || { patch };
+        });
+        if (saved.error) return saved;
+        await auditPriceEdit(productId, actorId, pricesBefore, saved.product);
+        return { product: saved.product };
       }
-      return { product: await products.updateByIdAsync(productId, patch) };
+      const updated = await products.updateByIdAsync(productId, patch);
+      await auditPriceEdit(productId, actorId, pricesBefore, updated);
+      return { product: updated };
     }
     if (!input.name?.trim()) return { error: 'name_required', status: 400 };
     if (input.category && !keepCategory && !PRODUCT_CATEGORY_KEYS.has(input.category)) {

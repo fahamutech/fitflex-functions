@@ -13,7 +13,7 @@ import { exchangeClientCredentials, resetApiAuthLimits } from '../../src/auth/or
 export { uid, phone, D, H, db, s4Off };
 export const WEBHOOK_KEY = randomBytes(32).toString('base64');
 export const S5_ENV = ['EVENTS_KIT_OPS', 'EVENTS_ORGANIZER_API', 'EVENTS_WEBHOOKS', 'EVENTS_WEBHOOK_SECRET_KEY', 'EVENTS_WEBHOOK_SECRET_KEY_ID', 'EVENTS_WEBHOOK_SECRET_KEY_PREVIOUS',
-  'EVENTS_API_ORGANIZER_ALLOWLIST', 'EVENTS_API_MAX_CLIENTS', 'EVENTS_API_DEFAULT_RATE', 'EVENTS_WEBHOOK_MAX_ENDPOINTS', 'EVENTS_WEBHOOK_MAX_ATTEMPTS', 'EVENTS_FEED_LAG_SECONDS', 'EVENTS_EXPORT_MAX_ROWS'];
+  'EVENTS_API_ORGANIZER_ALLOWLIST', 'EVENTS_RESULTS', 'EVENTS_API_MAX_CLIENTS', 'EVENTS_API_DEFAULT_RATE', 'EVENTS_WEBHOOK_MAX_ENDPOINTS', 'EVENTS_WEBHOOK_MAX_ATTEMPTS', 'EVENTS_FEED_LAG_SECONDS', 'EVENTS_EXPORT_MAX_ROWS'];
 
 /** EVENTS_MODULE + EVENTS_REGISTRATION (+ the ticket secret) and the three S5 flags (kit / api / webhooks), the webhook key, no feed lag. */
 export function s5On({ kit = true, api = true, webhooks = true, key = true } = {}) {

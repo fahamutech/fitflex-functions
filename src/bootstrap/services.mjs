@@ -81,6 +81,8 @@ import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
 import { createPartnerNotifier } from '../services/partner-notifier.mjs';
+import { createSecurityEventService } from '../services/security-event-service.mjs';
+import { webCheckinAlertsOn } from '../shared/feature-flags.mjs';
 import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createRecommendationEngine } from '../services/training/recommendation-engine.mjs';
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
@@ -175,6 +177,14 @@ import { createEventsOpsService } from '../services/events-ops-service.mjs';
 import { createEventsSyncService } from '../services/events-sync-service.mjs';
 import { createEventsIntegrationsService } from '../services/events-integrations-service.mjs';
 import { createEventsWebhookService } from '../services/events-webhook-service.mjs';
+import { createEventsResultsService } from '../services/events-results-service.mjs';
+import { eventsResultsOn, eventsRunsOn, eventsRewardsOn, eventsMedalArtOn, eventsResultsPublicOn } from '../shared/feature-flags.mjs';
+import { createEventsRewardService } from '../services/events-reward-service.mjs';
+import { createEventsMedalService } from '../services/events-medal-service.mjs';
+import { createEventsAwardService } from '../services/events-award-service.mjs';
+import { eventsAwardBatch } from '../shared/events-config.mjs';
+import { createEventsRunLinkService } from '../services/events-run-link-service.mjs';
+import { eventsRunDistanceToleranceBps, eventsRunLinkMaxDaysAfter, eventsResultsImportMaxRows, eventsResultsDisputeDefaultHours, eventsResultsPushMax, eventsResultsConsentVersions } from '../shared/events-config.mjs';
 import { webhookKeyRing } from '../shared/webhook-signing.mjs';
 import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
 import {
@@ -464,6 +474,9 @@ const memberRequestsLater = {
   stub: args => b2bMemberRequestService.stub(args),
   adminAdded: args => b2bMemberRequestService.adminAdded(args),
   create: args => b2bMemberRequestService.create(args),
+  createByContact: args => b2bMemberRequestService.createByContact(args),
+  createFromInvite: args => b2bMemberRequestService.createFromInvite(args),
+  cancelForInvite: args => b2bMemberRequestService.cancelForInvite(args),
   pendingForOrganization: args => b2bMemberRequestService.pendingForOrganization(args),
   pendingForCorporate: args => b2bMemberRequestService.pendingForCorporate(args),
   cancelForEmployee: args => b2bMemberRequestService.cancelForEmployee(args),
@@ -555,6 +568,8 @@ export const opsService = createOpsService({ db });
 // Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
 export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
   db, b2bService, emailSender: () => emailSender(), verifiedContacts,
+  // Consent slice (a): an invite that matches a member asks them (B2BMemberRequest) instead of enrolling them.
+  memberRequests: memberRequestsLater,
   // Whether FitFlex can send email codes, i.e. whether someone listed by email
   // only can verify that address in the app (same source as emailCodes in GET /auth/options).
   emailCodes: () => emailSender().configured === true,
@@ -647,6 +662,7 @@ export const subscriptionService = createSubscriptionService({
 export const accountService = createAccountService({
   users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
   memberDobGuard: args => personalDetailsService.assertMemberProfileAge(args),
+  ownsEventOrganizer: async ({ userId }) => Boolean(await db('EventOrganizer').where({ ownerUserId: userId }).first('id')),
   // promotionEventsService is defined at the end of this file; this only runs later.
   // A deleted account lets its username go (held 90 days). usernameService is defined further down.
   // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
@@ -673,9 +689,17 @@ export const accountService = createAccountService({
 // Until a gym's owner is verified, only the gym's own members check in there.
 // One check for the check-in and the scanner preview.
 const gymOpenToPass = gymId => partnerGate.isGymOperational(gymId);
+// Security events + web check-in alert (S3). notificationService is created further down; this only runs later.
+export const securityEventService = createSecurityEventService({
+  db, gyms, deviceTokens,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  alertsOn: webCheckinAlertsOn,
+});
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
-  onCheckin: checkin => partnerNotifier.gymCheckin(checkin),
+  // Two independent reactions; neither can block or fail the other or the check-in (S3: web check-in security alert).
+  onCheckin: checkin => Promise.allSettled([partnerNotifier.gymCheckin(checkin), securityEventService.handleCheckin(checkin)]),
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
   gymOpenToPass,
@@ -1443,3 +1467,60 @@ opsService.register({
     return { processed, succeeded: processed, failed: 0, ...r, ...s };
   },
 });
+
+// Marathon & running events · S6: results, run links, medals and rewards (docs/design/events-s6-runs-results-medals-rewards.md).
+// Dormant behind EVENTS_RESULTS / EVENTS_RUNS / EVENTS_RESULTS_PUBLIC / EVENTS_REWARDS / EVENTS_MEDAL_ART (each with EVENTS_MODULE and
+// EVENTS_REGISTRATION): with all five off every S6 route answers 404 feature_disabled and S5 behaviour is unchanged.
+export const eventsResultsService = createEventsResultsService({
+  db, eventStore, localeOf: eventsLocaleOf,
+  notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+  importMaxRows: eventsResultsImportMaxRows, disputeDefaultHours: eventsResultsDisputeDefaultHours, pushMax: eventsResultsPushMax, clauseVersions: eventsResultsConsentVersions,
+  rewardsOn: eventsRewardsOn,
+});
+export const eventsRunLinkService = createEventsRunLinkService({
+  db, results: eventsResultsService, recordRun: (memberId, body) => activityService.recordRun(memberId, body),
+  toleranceBps: eventsRunDistanceToleranceBps, maxDaysAfter: eventsRunLinkMaxDaysAfter,
+});
+export const eventsRewardService = createEventsRewardService({
+  db, ticketRing: eventTicketKeyRing, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+});
+import { createEventsMedalArtService, MEDAL_ART_CONFIRMATION } from '../services/events-medal-art-service.mjs';
+import { eventsMedalArtMaxBytes, eventsMedalArtMaxPixels, eventsMedalArtUploadsPerDay } from '../shared/events-config.mjs';
+export const eventsMedalService = createEventsMedalService({ db, results: eventsResultsService, medalArtOn: eventsMedalArtOn, artConfirmation: () => MEDAL_ART_CONFIRMATION });
+export const eventsMedalArtService = createEventsMedalArtService({
+  db, results: eventsResultsService, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+  maxBytes: eventsMedalArtMaxBytes, maxPixels: eventsMedalArtMaxPixels, uploadsPerDay: eventsMedalArtUploadsPerDay,
+});
+export const eventsAwardService = createEventsAwardService({
+  db, results: eventsResultsService, medals: eventsMedalService, rewards: eventsRewardService, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message), batch: eventsAwardBatch,
+});
+// S6 jobs. The award jobs run only while EVENTS_REWARDS is on, so tasks queued by releases wait (and are processed) once rewards are switched on.
+opsService.register({
+  name: 'event-awards-run', title: 'Event awards', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events (S6): takes a batch of award tasks (FOR UPDATE SKIP LOCKED) and awards or revokes medals, achievements and earned rewards from the current results. The only writer of awards. Does nothing unless EVENTS_REWARDS is on.',
+  run: async () => {
+    if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsAwardService.runBatch();
+    return { processed: r.claimed, succeeded: r.done, failed: r.failed, ...r };
+  },
+});
+opsService.register({
+  name: 'event-awards-reconcile', title: 'Event awards reconcile', schedule: { type: 'every', minutes: 10 }, quiet: true,
+  description: 'Events (S6): finds cancelled or refunded places, cancelled events and new claims and queues award tasks; lapses reserved perks past their expiry. Reads registrations, so no payment code changes. Does nothing unless EVENTS_REWARDS is on.',
+  run: async () => {
+    if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsAwardService.reconcile();
+    return { processed: r.queued + r.expiredReservations, succeeded: r.queued + r.expiredReservations, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-reward-expire', title: 'Event reward expiry', schedule: { type: 'daily', utc: '23:00' }, quiet: true,
+  description: 'Events (S6): writes an expire entry for unspent reward units older than their definition\'s expiryDays (02:00 Africa/Dar_es_Salaam). Does nothing unless EVENTS_REWARDS is on.',
+  run: async () => {
+    if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsRewardService.expireUnits();
+    const sweep = await db('EventMedalArtUploadAttempt').where('createdAt', '<', new Date(Date.now() - 2 * 86_400_000)).del();
+    return { processed: r.expired + sweep, succeeded: r.expired + sweep, failed: 0, ...r, attemptsSwept: sweep };
+  },
+});
+void eventsRunsOn; void eventsMedalArtOn; void eventsResultsPublicOn; void eventsResultsOn;
