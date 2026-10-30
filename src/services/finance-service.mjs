@@ -1,6 +1,7 @@
 // Finance service — legacy gym usage/billing summaries, the legacy
 // period-based distribution report (read-only: it no longer creates
 // invoices), and simple book-keeping (money in vs out).
+import { DELETED_PERSON_LABEL } from '../shared/deleted-person.mjs';
 
 export function createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService }) {
   /**
@@ -131,7 +132,7 @@ export function createFinanceService({ gyms, checkins, invoices, users, gymPayou
         gymId: gym.id,
         gymName: gym.name,
         memberId: c.memberId,
-        memberName: member?.displayName || null,
+        memberName: member ? member.displayName || null : DELETED_PERSON_LABEL,
         memberEmail: member?.email || null,
         date: c.timestamp,
         billingType: 'day',
@@ -221,7 +222,7 @@ export function createFinanceService({ gyms, checkins, invoices, users, gymPayou
           gymOwed += memberOwed;
           memberDetails.push({
             memberId,
-            memberName: member?.displayName || member?.email || memberId,
+            memberName: member ? member.displayName || member.email || memberId : DELETED_PERSON_LABEL,
             visitCount: dates.length,
             billingType,
             amount: Math.round(memberOwed),
@@ -305,7 +306,7 @@ export function createFinanceService({ gyms, checkins, invoices, users, gymPayou
         date: p.decidedAt || p.requestedAt,
         type: 'income',
         category: 'subscription',
-        description: `${p.tier?.toUpperCase() || 'Pass'} subscription — ${member?.displayName || member?.email || p.memberId}`,
+        description: `${p.tier?.toUpperCase() || 'Pass'} subscription — ${member ? member.displayName || member.email || p.memberId : DELETED_PERSON_LABEL}`,
         amount: p.amountTzs || 0,
         reference: p.reference,
         memberId: p.memberId

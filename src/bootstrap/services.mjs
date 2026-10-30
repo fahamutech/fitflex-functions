@@ -11,6 +11,8 @@ import { createIdentifierChangeService } from '../services/identifier-change-ser
 import { createAccountRecoveryService } from '../services/account-recovery-service.mjs';
 import { randomUUID } from 'node:crypto';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
+import { firebaseAdminConfigured } from '../shared/firebase-identity.mjs';
+import { createAccountErasure } from '../infra/account-erasure-store-pg.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
 import { createSettlementConfigService } from '../services/settlement-config-service.mjs';
@@ -659,31 +661,32 @@ export const subscriptionService = createSubscriptionService({
   auditLog, referenceStore: paymentReferenceStore,
   eventLabels: requests => eventsPaymentsService.paymentLabels(requests),
 });
+// Account deletion (owner decision 2026-10-30). usernames are handled inside the erasure itself; the
+// services below are defined further down this file, and these only run later.
+const accountErasure = createAccountErasure({
+  db,
+  steps: [
+    // Promotion analytics stop saying who a customer was.
+    (trx, { userId }) => promotionEventsService.forgetUser(userId, { q: trx }),
+    // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
+    // their link to the account unless money is owed.
+    (trx, { userId }) => vendorCustomerService.forgetBuyer(userId, { q: trx }),
+    // The "Personalised shop" switch goes once the Person has no personas left.
+    (trx, { userId, personId }) => forgetShopPreference(trx, { userId, personId }),
+    // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
+    (trx, { personId }) => forgetPersonDetails(trx, { personId }),
+  ],
+});
 export const accountService = createAccountService({
-  users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
+  users, trainers, trainerBookings, checkins, approvalStatusForRole,
+  eraseAccount: (userId, options) => accountErasure.erase(userId, options),
+  initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
+  firebaseConfigured: () => portalFirebaseAdmin.configured(),
   memberDobGuard: args => personalDetailsService.assertMemberProfileAge(args),
   ownsEventOrganizer: async ({ userId }) => Boolean(await db('EventOrganizer').where({ ownerUserId: userId }).first('id')),
-  // promotionEventsService is defined at the end of this file; this only runs later.
-  // A deleted account lets its username go (held 90 days). usernameService is defined further down.
-  // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
-  // their link to the account unless money is owed. Each step runs even if another fails.
-  onAccountDeleted: async (userId, deleted = null) => {
-    const errors = [];
-    for (const step of [
-      () => promotionEventsService.forgetUser(userId),
-      () => usernameService.forgetUser(userId),
-      () => vendorCustomerService.forgetBuyer(userId),
-      // The "Personalised shop" switch goes once the Person has no personas left.
-      () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
-      // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
-      () => forgetPersonDetails(db, { personId: deleted?.personId || null }),
-      // Partner media (functions#277 review M2): a vendor's, a trainer's or an owner's last gyms' photos and logos.
-      () => partnerMediaService.purgeAccount(deleted || { id: userId }, { cause: 'account_deleted' }),
-    ]) {
-      try { await step(); } catch (err) { errors.push(err); }
-    }
-    if (errors.length) throw errors[0];
-  },
+  // Partner media (functions#277 review M2): a vendor's, a trainer's or an owner's last gyms' photos and logos.
+  // The stored row goes along so this can see which ones. Nothing here touches another table's data.
+  onAccountDeleted: (userId, deleted = null) => partnerMediaService.purgeAccount(deleted || { id: userId }, { cause: 'account_deleted' }),
 });
 
 // Until a gym's owner is verified, only the gym's own members check in there.
@@ -880,7 +883,7 @@ export const invoiceService = createInvoiceService({
   invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts, gymPayoutOwner, db,
 });
 // Replaceable, so specs can stand in for the Firebase admin SDK.
-export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth };
+export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth, configured: firebaseAdminConfigured };
 export const portalUserService = createPortalUserService({
   users, auditLog, isConfiguredAdminEmail, db,
   initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),

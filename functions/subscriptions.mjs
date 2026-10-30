@@ -66,7 +66,7 @@ export const me = {
 
 export const deleteMyAccount = {
   created, method: 'delete', path: '/me',
-  description: 'Authenticated user: permanently delete own account + Firebase identity (Play Store account-deletion requirement). Blocked if the account has data that requires an assisted transfer first (gym owner with check-in activity, trainer with bookings).',
+  description: 'Authenticated user: permanently delete own account + Firebase identity (Play Store account-deletion requirement). Only this persona goes: another role on the same sign-in keeps the shared login and details. Personal data is removed; payments, check-ins, bookings and orders stay, anonymised, so no statement or total changes. All of it happens in one transaction: 200 { ok, message }, or 503 { error: account_deletion_failed, message, messageSw } and nothing changed, so it can be retried. 404 user_not_found: already deleted (a retry whose first answer was lost counts as success). 409 gym_owner_has_checkin_activity | trainer_has_bookings | organizer_owner: needs an assisted transfer first.',
   onGuard: routeGuard('delete', requireAuth()),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
