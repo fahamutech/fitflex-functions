@@ -68,12 +68,12 @@ export function createEventsResultsService({
   }
 
   /** The event of an organizer (or any event for a FitFlex admin), with its categories. */
-  async function load({ organizerId = null, eventId }) {
-    const q = db('Event').where({ id: String(eventId) });
+  async function load({ organizerId = null, eventId, q: conn = db }) {
+    const q = conn('Event').where({ id: String(eventId) });
     if (organizerId) q.where({ organizerId });
     const event = plain(await q.first());
     if (!event) return null;
-    const categories = (await db('EventCategory').where({ eventId: event.id }).orderBy('distanceMeters', 'desc').orderBy('name')).map(plain);
+    const categories = (await conn('EventCategory').where({ eventId: event.id }).orderBy('distanceMeters', 'desc').orderBy('name')).map(plain);
     return { event, categories };
   }
 
@@ -1012,7 +1012,7 @@ export function createEventsResultsService({
         await trx('EventCategory').where({ id }).update({ resultRules: JSON.stringify(merged), updatedAt: at });
       }
       await audit(actor, 'events.results_settings_changed', ctx.event.id, { policy: current }, { policy: v.policy, categories: [...patches.keys()] }, trx);
-      const fresh = await load({ organizerId, eventId });
+      const fresh = await load({ organizerId, eventId, q: trx });
       return { settings: settingsOf(fresh.event, fresh.categories), status: 200 };
     }));
   }
