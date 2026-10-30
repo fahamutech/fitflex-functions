@@ -406,8 +406,10 @@ for (const mode of ['off', 'on']) {
     assert.equal((await call(listShopProducts, { sub: uid('usr'), userType: 'member' }, { query: { vendorId: v } })).body.some(x => x.id === p.id), true);
     await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, name: 'Whey  ' } });
     assert.equal(await status(), 'approved', 'surrounding spaces are not a change');
-    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, priceTzs: 21_000 } });
-    assert.equal(await status(), 'pending', 'a new price is reviewed');
+    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, priceTzs: 21_000, discountPriceTzs: 19_000 } });
+    assert.equal(await status(), 'approved', 'price and discount are not reviewed (owner decision 2026-10-29)');
+    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, name: 'Whey Gold' } });
+    assert.equal(await status(), 'pending', 'a new name is reviewed');
   });
 }
 
