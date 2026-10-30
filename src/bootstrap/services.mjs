@@ -1455,7 +1455,13 @@ export const eventsRunLinkService = createEventsRunLinkService({
 export const eventsRewardService = createEventsRewardService({
   db, ticketRing: eventTicketKeyRing, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
 });
-export const eventsMedalService = createEventsMedalService({ db, results: eventsResultsService, medalArtOn: eventsMedalArtOn });
+import { createEventsMedalArtService, MEDAL_ART_CONFIRMATION } from '../services/events-medal-art-service.mjs';
+import { eventsMedalArtMaxBytes, eventsMedalArtMaxPixels, eventsMedalArtUploadsPerDay } from '../shared/events-config.mjs';
+export const eventsMedalService = createEventsMedalService({ db, results: eventsResultsService, medalArtOn: eventsMedalArtOn, artConfirmation: () => MEDAL_ART_CONFIRMATION });
+export const eventsMedalArtService = createEventsMedalArtService({
+  db, results: eventsResultsService, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+  maxBytes: eventsMedalArtMaxBytes, maxPixels: eventsMedalArtMaxPixels, uploadsPerDay: eventsMedalArtUploadsPerDay,
+});
 export const eventsAwardService = createEventsAwardService({
   db, results: eventsResultsService, medals: eventsMedalService, rewards: eventsRewardService, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message), batch: eventsAwardBatch,
 });
