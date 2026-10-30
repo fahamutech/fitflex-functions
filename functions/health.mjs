@@ -1,4 +1,4 @@
-// Static/public pages — health probe, privacy policy, account-deletion instructions.
+// Static/public pages — health probe, privacy policy, account-deletion instructions, support.
 const created = new Date().toISOString();
 
 export const health = {
@@ -196,4 +196,78 @@ export const deleteAccount = {
     .type('text/html; charset=utf-8')
     .set('Cache-Control', 'public, max-age=3600')
     .send(deleteAccountHtml)
+};
+
+const SUPPORT_WHATSAPP_URL = 'https://wa.me/255786670499';
+
+const supportHtml = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FitFlex Support</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; line-height: 1.6; color: #111827; background: #ffffff; }
+    main { max-width: 880px; margin: 0 auto; padding: 40px 20px 64px; }
+    h1, h2 { line-height: 1.25; color: #111827; }
+    h1 { font-size: 32px; margin: 0 0 8px; }
+    h2 { font-size: 22px; margin: 32px 0 8px; }
+    p, li { font-size: 16px; }
+    .section-divider { margin-top: 48px; padding-top: 32px; border-top: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>FitFlex Support</h1>
+    <p>Need help with your pass, a payment, a gym check-in, a trainer booking, a shop order or your account? Message the FitFlex team and we will help you.</p>
+
+    <h2>Contact us</h2>
+    <p>WhatsApp: <a href="${SUPPORT_WHATSAPP_URL}">+255 786 670 499</a></p>
+    <p>In the app, open the Profile tab and tap Help.</p>
+
+    <h2>When you message us</h2>
+    <ul>
+      <li>Tell us the phone number or email on your FitFlex account.</li>
+      <li>Say what happened, and for a payment include the date and amount.</li>
+    </ul>
+
+    <h2>More information</h2>
+    <ul>
+      <li><a href="/privacy-policy">Privacy Policy</a></li>
+      <li><a href="/delete-account">Delete your account</a></li>
+    </ul>
+
+    <section class="section-divider" lang="sw">
+      <h1>Msaada wa FitFlex</h1>
+      <p>Unahitaji msaada kuhusu pasi yako, malipo, kuingia gym, kuweka miadi na trainer, oda ya duka au akaunti yako? Tuma ujumbe kwa timu ya FitFlex nasi tutakusaidia.</p>
+
+      <h2>Wasiliana nasi</h2>
+      <p>WhatsApp: <a href="${SUPPORT_WHATSAPP_URL}">+255 786 670 499</a></p>
+      <p>Ndani ya app, fungua kichupo cha Wasifu kisha gusa Msaada.</p>
+
+      <h2>Unapotutumia ujumbe</h2>
+      <ul>
+        <li>Tuambie namba ya simu au barua pepe iliyo kwenye akaunti yako ya FitFlex.</li>
+        <li>Eleza kilichotokea, na kwa malipo weka tarehe na kiasi.</li>
+      </ul>
+
+      <h2>Maelezo zaidi</h2>
+      <ul>
+        <li><a href="/privacy-policy">Sera ya Faragha</a></li>
+        <li><a href="/delete-account">Futa akaunti yako</a></li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>`;
+
+export const support = {
+  created, method: 'get', path: '/support',
+  description: 'Public: FitFlex support contact page for the App Store listing and app users.',
+  responseSample: '<!doctype html><html lang="en">...</html>',
+  onRequest: (_req, res) => res
+    .status(200)
+    .type('text/html; charset=utf-8')
+    .set('Cache-Control', 'public, max-age=3600')
+    .send(supportHtml)
 };
