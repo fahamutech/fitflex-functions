@@ -172,16 +172,19 @@ export function visibilityOf(reg, event, category, clauseVersions = []) {
   }
   const chosen = Boolean(reg.resultsVisibilitySetAt);
   if (chosen) return { current: reg.resultsVisibility, canChange: true, allowed: [...VISIBILITIES], reason: null };
-  const carries = clauseVersions.includes(reg.consentTextVersion);
+  // Default visibility (M2): the full name only when the participant THEMSELF registered / claimed with a consent text that carries the clause
+  // (consentBasis self); a place bought by someone else, or by an organisation, starts bib-only until the participant chooses.
+  const carries = clauseVersions.includes(reg.consentTextVersion) && reg.consentBasis === 'self' && Boolean(reg.participantUserId);
   return { current: carries ? 'standard' : 'bib_only', canChange: true, allowed: [...VISIBILITIES], reason: carries ? null : 'ask' };
 }
 
 /** What a board shows for a name, per visibility and the organizer's publicNames policy. null = the row is omitted. */
+export const ANONYMOUS = Symbol('anonymous');
 export function boardName({ firstName, lastName }, visibility, publicNames = 'initial') {
   if (visibility === 'hidden') return null;
-  if (visibility === 'bib_only' || publicNames === 'bib_only') return 'Runner';
+  if (visibility === 'bib_only' || publicNames === 'bib_only') return ANONYMOUS;
   const first = String(firstName ?? '').trim();
-  if (!first) return 'Runner';
+  if (!first) return ANONYMOUS;
   const initial = lastInitial(lastName);
   return initial ? `${first} ${initial}` : first;
 }

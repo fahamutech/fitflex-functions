@@ -12,6 +12,27 @@ export const MEDAL_ART_PREVIEWS = Object.freeze({ p240: 240, p480: 480 });
 const ACCEPTED = new Set(['jpeg', 'png', 'webp']);
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 
+/**
+ * A 64-bit difference hash (dHash) of the picture: 9x8 greyscale (transparency flattened on white), one bit per horizontal neighbour. A re-saved,
+ * re-sized or re-compressed copy of the same design lands within a few bits of the original, so a taken-down design stays blocked. → 16 hex chars.
+ */
+export async function dHash(image) {
+  const { data } = await sharp(image).flatten({ background: '#ffffff' }).greyscale().resize(9, 8, { fit: 'fill' }).raw().toBuffer({ resolveWithObject: true });
+  let bits = 0n;
+  for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) bits = (bits << 1n) | (data[y * 9 + x] < data[y * 9 + x + 1] ? 1n : 0n);
+  return bits.toString(16).padStart(16, '0');
+}
+/** Number of differing bits between two dHashes. */
+export function hamming(a, b) {
+  let x = BigInt(`0x${a}`) ^ BigInt(`0x${b}`); let n = 0;
+  while (x) { n += Number(x & 1n); x >>= 1n; }
+  return n;
+}
+/** Two designs this close (of 64 bits) count as the same design. */
+export const DHASH_MAX_DISTANCE = 6;
+/** A flat or near-flat picture hashes to (almost) all zeros and would "match" every plain design: only pictures with real structure are compared perceptually. */
+export const dHashIsMeaningful = h => { const ones = [...BigInt(`0x${h}`).toString(2)].filter(c => c === '1').length; return ones >= 8 && ones <= 56; };
+
 /** An APNG carries an acTL chunk before its first IDAT; an animated WebP carries an ANIM chunk. */
 function looksAnimated(buf, type) {
   if (type === 'png') { const idat = buf.indexOf('IDAT'); const act = buf.indexOf('acTL'); return act !== -1 && (idat === -1 || act < idat); }
@@ -67,5 +88,5 @@ export async function prepareMedalArt(input, limits = {}) {
     const { data, info: i } = await sharp(master).resize({ width: size, height: size, fit: 'cover' }).webp({ quality: 70 }).toBuffer({ resolveWithObject: true });
     files.push({ variant, buffer: data, width: i.width, height: i.height });
   }
-  return { files, master, width: width, height: height, sha256: sha256(master), pixelSha256: await pixelSha256(master) };
+  return { files, master, width: width, height: height, sha256: sha256(master), pixelSha256: await pixelSha256(master), dHash: await dHash(master) };
 }

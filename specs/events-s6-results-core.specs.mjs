@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
 import * as routes from '../functions/events-results.mjs';
 import { harness, s6On, s6Off, db } from './fixtures/events-s6.mjs';
-import { deriveStage, parseTime, competitionRanks, computeRanks, boardName } from '../src/shared/events-results-rules.mjs';
+import { deriveStage, parseTime, competitionRanks, computeRanks, boardName, ANONYMOUS } from '../src/shared/events-results-rules.mjs';
 import { projectOutbox, WEBHOOK_EVENT_TYPES } from '../src/shared/webhook-events.mjs';
 import { eventStore } from '../src/bootstrap/services.mjs';
 import { RESULT_REASONS } from '../db/migrations/20270131090000-events-results-s6.cjs';
@@ -60,7 +60,7 @@ test('pure rules: times, stage table, ranks with ties, reason list parity with t
   assert.equal(r.get('d').categoryRank, 1);
   assert.equal(computeRanks(rows, new Set()).get('a').overallRank, null);
   assert.equal(boardName({ firstName: 'Asha', lastName: 'Mollel' }, 'standard'), 'Asha M.');
-  assert.equal(boardName({ firstName: 'Asha', lastName: 'Mollel' }, 'bib_only'), 'Runner');
+  assert.equal(boardName({ firstName: 'Asha', lastName: 'Mollel' }, 'bib_only'), ANONYMOUS);
   assert.equal(boardName({ firstName: 'Asha', lastName: 'Mollel' }, 'hidden'), null);
 });
 
@@ -183,8 +183,11 @@ test('manual entry: pending for a time, settled for DNF; verified results need a
   const enter = (reg, body, actor = a.timing) => svc.enter({ ...ctx(f, actor), registrationId: reg.id, key: h.key(), body });
   const e1 = await enter(f.regs[0], { finishStatus: 'finished', netTime: '0:51:00' });
   assert.equal(e1.result.verificationStatus, 'pending_verification');
+  // a timing partner's DNF waits for a human; an owner's is settled
   const e2 = await enter(f.regs[1], { finishStatus: 'dnf' });
-  assert.equal(e2.result.verificationStatus, 'verified');
+  assert.equal(e2.result.verificationStatus, 'pending_verification');
+  const e2b = await enter(f.regs[1], { finishStatus: 'dnf' }, a.owner);
+  assert.equal(e2b.result.verificationStatus, 'verified');
   assert.equal((await db('EventRegistration').where({ id: f.regs[1].id }).first()).resultStatus, 'dnf');
   assert.equal((await enter(f.regs[0], { finishStatus: 'finished', netTime: 'bad' })).error, 'validation_failed');
   assert.equal((await enter(f.regs[0], { finishStatus: 'finished', netTime: '0:52:00' })).result.revision, 2);
@@ -310,7 +313,8 @@ test('privacy: minors bib only, hidden omitted, legacy consent defaults to bib o
   s6On({ pub: true });
   const b = await svc.board({ userId: viewer, eventId: f.event.id, query: {} });
   const byBib = Object.fromEntries(b.items.map(i => [i.bibNumber, i.displayName]));
-  assert.deepEqual(byBib, { 1001: 'Amina M.', 1002: 'Runner', 1004: 'Runner' });
+  assert.deepEqual(byBib, { 1001: 'Amina M.', 1002: null, 1004: null }, 'anonymous rows carry no name; the client writes "Runner {bib}" / "Mkimbiaji {bib}"');
+  assert.deepEqual(b.anonymousLabel, { en: 'Runner', sw: 'Mkimbiaji' });
   assert.deepEqual(b.mine, { rank: 1, bibNumber: '1001' });
   assert.equal(JSON.stringify(b).match(/phone|email|dateOfBirth|emergency/i), null);
   const minor = await svc.myResult({ userId: f.regs[1].userId, registrationId: f.regs[1].id });

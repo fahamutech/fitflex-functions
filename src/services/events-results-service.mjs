@@ -19,7 +19,7 @@ import { assertTransition } from '../shared/events-lifecycle.mjs';
 import {
   FINISH_STATUSES, IMPORT_SOURCES, REJECT_REASONS, CORRECT_REASONS, DQ_REASONS, DISPUTE_REASONS, VISIBILITIES, SETTLED_VERIFICATIONS, sha256hex,
   parseTime, rankingTime, deriveStage, registrationStatusOf, categoryStage, computeRanks, visibilityOf, boardName, boardTreatedAsMinor,
-  policyOf, rulesOf, validateSettings,
+  policyOf, rulesOf, validateSettings, ANONYMOUS,
 } from '../shared/events-results-rules.mjs';
 import { parseResultsCsv, STATUS_WORDS } from '../shared/events-results-csv.mjs';
 import { encodeCursor, decodeCursor, parseLimit, normaliseBib, cardName, neutralise } from '../shared/events-ops-rules.mjs';
@@ -42,7 +42,7 @@ const STAFF_DECIDE = ['owner', 'admin'];
 const PENDING = 'pending_verification';
 
 export function createEventsResultsService({
-  db, eventStore, notice = async () => {}, now = () => new Date(),
+  db, eventStore, notice = async () => {}, localeOf = async () => null, now = () => new Date(),
   importMaxRows = () => 5000, disputeDefaultHours = () => 168, pushMax = () => 500, clauseVersions = () => [], awardsOn = () => true, rewardsOn = () => false,
 }) {
   const stamp = () => new Date(now());
@@ -298,7 +298,7 @@ export function createEventsResultsService({
    * Turn parsed rows into a plan against the live data. Pure reads (the caller decides when to lock). → { items, totals, hash }.
    * item: { line, clientRef, status: 'ok' | 'problem', code, warnings[], action, reg, input, bib }.
    */
-  async function planRows({ q = db, event, categories, rows, sourceType, sourceLabel, basis = null }) {
+  async function planRows({ q = db, event, categories, rows, sourceType, sourceLabel, basis = null, actor = null }) {
     const bibs = [...new Set(rows.map(r => normaliseBib(r.bib)).filter(Boolean))];
     const ids = [...new Set(rows.map(r => r.registrationId).filter(Boolean))];
     const regs = (bibs.length || ids.length)
@@ -348,6 +348,7 @@ export function createEventsResultsService({
       const cur = currentBy.get(reg.id) ?? null;
       const curStatus = cur ? registrationStatusOf(cur) : 'not_submitted';
       if (['verified', 'corrected', 'disqualified'].includes(curStatus)) return bad('already_official');
+      if (timingBlocked(actor, cur)) return bad('not_your_entry');
       if (r.rank) item.warnings.push('rank_ignored');
       const rules = rulesOf(category);
       const useBasis = basis ?? rules.timeBasis;
@@ -381,7 +382,12 @@ export function createEventsResultsService({
     return { items, problems, hash, matched, confirmed };
   }
 
+  /** A timing partner may add and revise ITS OWN pending rows; a settled row or somebody else's pending row is the owner's / admin's to change (L4). */
+  const timingBlocked = (actor, cur) => actor?.kind === 'staff' && actor.role === 'timing' && Boolean(cur)
+    && !(cur.verificationStatus === 'rejected' || (cur.verificationStatus === PENDING && cur.submittedByUserId === actor.userId));
+
   const MESSAGES = {
+    not_your_entry: 'This result was entered by someone else or is already settled. Ask an owner or admin to change it.',
     bib_not_found: 'No registered runner has this bib number.', bib_invalid: 'The bib number is not valid.', bib_duplicate_in_file: 'This runner appears more than once in the file.',
     registration_not_confirmed: 'This place is not confirmed.', category_mismatch: 'The category does not match the runner\'s registration.',
     time_missing_for_finisher: 'A finisher needs a time.', time_invalid: 'The time is not written as H:MM:SS.', time_out_of_range: 'The time must be more than zero and less than 24 hours.',
@@ -428,7 +434,7 @@ export function createEventsResultsService({
     if (src.error) return src.error;
     const parsed = parseResultsCsv(body.csv, { maxRows: importMaxRows() });
     if (parsed.error) return fail(parsed.error === 'too_large' ? 'payload_too_large' : parsed.error === 'too_many_rows' ? 'too_many_rows' : 'csv_invalid', parsed.error === 'too_large' ? 413 : parsed.error === 'too_many_rows' ? 413 : 422, { reason: parsed.error, ...(parsed.missing ? { missing: parsed.missing } : {}) });
-    const plan = await planRows({ event: ctx.event, categories: ctx.categories, rows: parsed.rows, sourceType: src.sourceType, sourceLabel: src.label, basis: src.basis });
+    const plan = await planRows({ event: ctx.event, categories: ctx.categories, rows: parsed.rows, sourceType: src.sourceType, sourceLabel: src.label, basis: src.basis, actor });
     return previewView(plan);
   }
 
@@ -437,7 +443,8 @@ export function createEventsResultsService({
     if (item.action === 'unchanged') return null;
     const reg = plain(await trx('EventRegistration').where({ id: item.reg.id }).forUpdate().first());
     const prev = plain(await trx('EventResult').where({ registrationId: reg.id, isCurrent: true }).first());
-    const staffSettled = actor.kind !== 'api' && ['dnf', 'dns'].includes(item.input.finishStatus);
+    // only an owner / admin settles a DNF / DNS (a timing partner's rows wait for a human decision, like an API client's)
+    const staffSettled = actor.kind === 'staff' && STAFF_DECIDE.includes(actor.role) && ['dnf', 'dns'].includes(item.input.finishStatus);
     const dq = item.input.finishStatus === 'dq';
     const input = {
       ...item.input, importId,
@@ -466,7 +473,7 @@ export function createEventsResultsService({
       try {
         return await db.transaction(async (trx) => {
           await lockEvent(trx, ctx.event.id);
-          const plan = await planRows({ q: trx, event: ctx.event, categories: ctx.categories, rows: parsed.rows, sourceType: src.sourceType, sourceLabel: src.label, basis: src.basis });
+          const plan = await planRows({ q: trx, event: ctx.event, categories: ctx.categories, rows: parsed.rows, sourceType: src.sourceType, sourceLabel: src.label, basis: src.basis, actor });
           if (plan.hash !== body.previewHash) return fail('preview_stale', 409);
           if (plan.problems.length) return fail('import_has_errors', 409, { problems: plan.problems.length, rows: plan.problems.slice(0, 50).map(i => ({ line: i.line, bib: i.bib, code: i.code })) });
           const importId = newId('eimp');
@@ -603,7 +610,8 @@ export function createEventsResultsService({
       const prev = plain(await trx('EventResult').where({ registrationId: reg.id, isCurrent: true }).first());
       const curStatus = prev ? registrationStatusOf(prev) : 'not_submitted';
       if (['verified', 'corrected', 'disqualified'].includes(curStatus)) return fail('already_official', 409, { hint: 'use_correction' });
-      const settled = finishStatus !== 'finished';
+      if (timingBlocked(actor, prev)) return fail('not_your_entry', 409);
+      const settled = finishStatus !== 'finished' && STAFF_DECIDE.includes(actor.role);
       const category = ctx.categories.find(c => c.id === reg.categoryId);
       const row = await writeRevision(trx, {
         category, reg, prev,
@@ -820,6 +828,12 @@ export function createEventsResultsService({
       const row = await currentOf(trx, ctx.event, resultId);
       if (!row) return fail('result_not_found', 404);
       if (!row.isCurrent || row.revision !== want) return fail('result_changed', 409, { currentRevision: row.revision });
+      if (adminOk) {
+        // D59: FitFlex steps in only when the organizer cannot (not active) or a question has been open for more than 7 days.
+        const organizer = plain(await trx('EventOrganizer').where({ id: ctx.event.organizerId }).first('status'));
+        const stale = await trx('EventResultDispute').where({ registrationId: row.registrationId, status: 'open' }).where('createdAt', '<', new Date(+stamp() - 7 * DAY)).first('id');
+        if (organizer?.status === 'active' && !stale) return fail('organizer_can_resolve', 409);
+      }
       return kind === 'correct' ? correctIn(trx, { ctx, actor, row, body }) : disqualifyIn(trx, { ctx, actor, row, body });
     }));
     return afterCorrection(out, ctx, actor);
@@ -941,8 +955,15 @@ export function createEventsResultsService({
 
   // ── Notices ───────────────────────────────────────────────────────────────
 
+  /** An inbox row without a push (releases above EVENTS_RESULTS_PUSH_MAX). Title and body follow the person's language; both stay in data. */
   async function inboxOnly(userId, { id, type, en, sw, data }) {
-    await db('Notification').insert({ id: id.slice(0, 60), userId, type, title: en.title, body: en.body, data: JSON.stringify({ ...data, type, locale: 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body }), createdAt: stamp() }).onConflict('id').ignore();
+    let locale = null;
+    try { locale = await localeOf(userId); } catch { locale = null; }
+    const t = locale === 'sw' ? sw : en;
+    await db('Notification').insert({
+      id: id.slice(0, 60), userId, type, title: t.title, body: t.body,
+      data: JSON.stringify({ ...data, type, locale: locale === 'sw' ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body }), createdAt: stamp(),
+    }).onConflict('id').ignore();
   }
 
   async function tellParticipant(registrationId, event, kind, { id, route, outcome = null }) {
@@ -1136,7 +1157,8 @@ export function createEventsResultsService({
     const row = plain(await db('EventResult').where({ registrationId: reg.id, isCurrent: true }).first());
     const open = await openDisputes(db, [reg.id]);
     const stage = reg.status === 'confirmed' ? deriveStage({ row, release: byCategory.get(reg.categoryId) ?? 'none', disputeOpen: open.has(reg.id) }) : 'none';
-    const base = { registrationId: reg.id, eventId: ctx.event.id, eventTitle: ctx.event.title, eventType: ctx.event.eventType, categoryId: reg.categoryId, categoryName: category?.name ?? null, distanceMeters: num(category?.distanceMeters), bibNumber: reg.bibNumber ?? null };
+    const base = { registrationId: reg.id, eventId: ctx.event.id, eventTitle: ctx.event.title, eventType: ctx.event.eventType, categoryId: reg.categoryId, categoryName: category?.name ?? null, distanceMeters: num(category?.distanceMeters), bibNumber: reg.bibNumber ?? null,
+      registrationStatus: reg.status, eventCancelled: ctx.event.status === 'cancelled', claimNeeded: !reg.participantUserId };
     if (viewer === 'purchaser_status_only') return { ...base, stage, viewer, finishStatus: stage === 'none' ? null : (row?.finishStatus ?? null) };
     const release = latestRelease(releases, reg.categoryId);
     const visibleRow = row && stage !== 'none' ? row : null;
@@ -1282,7 +1304,7 @@ export function createEventsResultsService({
     const policy = policyOf(event, disputeDefaultHours());
     const rows = chosen.length ? (await db('EventRegistration as r').join('EventResult as e', function join() { this.on('e.registrationId', 'r.id').andOn('e.isCurrent', db.raw('true')); })
       .where('r.eventId', event.id).where('r.status', 'confirmed').whereIn('r.categoryId', chosen.map(c => c.id)).whereNot('e.verificationStatus', 'rejected')
-      .select('r.id', 'r.firstName', 'r.lastName', 'r.bibNumber', 'r.categoryId', 'r.dateOfBirth', 'r.resultsVisibility', 'r.resultsVisibilitySetAt', 'r.consentTextVersion', 'r.participantUserId',
+      .select('r.id', 'r.firstName', 'r.lastName', 'r.bibNumber', 'r.categoryId', 'r.dateOfBirth', 'r.resultsVisibility', 'r.resultsVisibilitySetAt', 'r.consentTextVersion', 'r.consentBasis', 'r.participantUserId',
         'e.verificationStatus', 'e.finishStatus', 'e.elapsedMs', 'e.overallRank', 'e.categoryRank', 'e.sourceType')).map(plain) : [];
     const catBy = new Map(categories.map(c => [c.id, c]));
     const disputes = await openDisputes(db, rows.map(r => r.id));
@@ -1294,15 +1316,19 @@ export function createEventsResultsService({
       const stage = deriveStage({ row: r, release: stageNow, disputeOpen: disputes.has(r.id) });
       if (stage === 'none') continue;
       if (r.participantUserId === userId) mine = { rank: query.categoryId || chosen.length === 1 ? r.categoryRank : r.overallRank, bibNumber: r.bibNumber ?? null };
-      const vis = boardTreatedAsMinor(r, event, category) ? 'bib_only' : visibilityOf(r, event, category, clauseVersions()).current;
+      // visibilityOf already makes a minor bib-only, and keeps a minor's own choice of 'hidden' (H1)
+      const vis = visibilityOf(r, event, category, clauseVersions()).current;
       const name = boardName(r, vis, policy.publicNames);
       if (name === null) continue;
-      const noTime = ['dnf', 'dns', 'dq'].includes(r.finishStatus) || r.verificationStatus === 'disqualified';
+      const pendingNoTime = r.verificationStatus === 'pending_verification' && ['dnf', 'dns', 'dq'].includes(r.finishStatus);
+      const noTime = pendingNoTime || ['dnf', 'dns', 'dq'].includes(r.finishStatus) || r.verificationStatus === 'disqualified';
       shaped.push({
-        rank: noTime ? null : (query.categoryId ? r.categoryRank : r.overallRank), bibNumber: r.bibNumber ?? null, displayName: name, elapsedMs: noTime ? null : num(r.elapsedMs),
-        finishStatus: r.verificationStatus === 'disqualified' ? 'dq' : r.finishStatus, stage, sourceType: r.sourceType,
+        rank: noTime ? null : (query.categoryId ? r.categoryRank : r.overallRank), bibNumber: r.bibNumber ?? null,
+        displayName: name === ANONYMOUS ? null : name, anonymous: name === ANONYMOUS, elapsedMs: noTime ? null : num(r.elapsedMs),
+        // an unverified DNF / DNS / DQ (an API submission) is only 'pending' on a board until a human decides (L3)
+        finishStatus: pendingNoTime ? 'pending' : r.verificationStatus === 'disqualified' ? 'dq' : r.finishStatus, stage, sourceType: r.sourceType,
         badges: [...(r.verificationStatus === 'corrected' ? ['corrected'] : []), ...(disputes.has(r.id) ? ['under_review'] : [])],
-        _name: vis === 'standard' && name !== 'Runner' ? name.toLowerCase() : '', _g: noTime ? 1 : 0, _id: r.id,
+        _name: vis === 'standard' && name !== ANONYMOUS ? name.toLowerCase() : '', _g: noTime ? 1 : 0, _id: r.id,
       });
     }
     const term = typeof query.q === 'string' ? query.q.trim().toLowerCase() : '';
@@ -1312,7 +1338,7 @@ export function createEventsResultsService({
     const page = filtered.slice(offset, offset + limit).map(({ _name, _g, _id, ...rest }) => rest);
     const rel = chosen.length === 1 ? latestRelease(releases, chosen[0].id) : (chosen.every(c => byCategory.get(c.id) === 'official') ? latestRelease(releases, null) : null);
     return {
-      event: { title: event.title, eventType: event.eventType, timezone: event.timezone },
+      event: { title: event.title, eventType: event.eventType, timezone: event.timezone }, anonymousLabel: { en: 'Runner', sw: 'Mkimbiaji' },
       release: { stage: chosen.length && chosen.every(c => byCategory.get(c.id) === 'official') ? 'official' : (chosen.length ? 'provisional' : 'none'), releasedAt: rel?.releasedAt ?? null },
       categories: released.map(c => ({ id: c.id, name: c.name, distanceMeters: num(c.distanceMeters), stage: byCategory.get(c.id) })),
       items: page, mine, nextCursor: offset + limit < filtered.length ? encodeCursor({ o: offset + limit }) : null,
@@ -1359,10 +1385,10 @@ export function createEventsResultsService({
   // ── Additive decorations of existing member / public responses ────────────
 
   /** `resultStage`, `resultsVisibility` and `medalsCount` for rows of GET /me/event-registrations[/:id]. */
-  async function decorateRegistrations(items) {
+  async function decorateRegistrations(items, userId = null) {
     const ids = items.map(i => i.id).filter(Boolean);
     if (!ids.length) return items;
-    const regs = (await db('EventRegistration').whereIn('id', ids).select('id', 'eventId', 'categoryId', 'resultsVisibility', 'resultsVisibilitySetAt', 'dateOfBirth', 'consentTextVersion')).map(plain);
+    const regs = (await db('EventRegistration').whereIn('id', ids)  .select('id', 'eventId', 'categoryId', 'resultsVisibility', 'resultsVisibilitySetAt', 'dateOfBirth', 'consentTextVersion', 'consentBasis', 'participantUserId')).map(plain);
     const rows = (await db('EventResult').whereIn('registrationId', ids).where({ isCurrent: true })).map(plain);
     const rowBy = new Map(rows.map(r => [r.registrationId, r]));
     const eventIds = [...new Set(regs.map(r => r.eventId))];
@@ -1376,6 +1402,8 @@ export function createEventsResultsService({
       const reg = regBy.get(item.id);
       if (!reg) return item;
       const stage = categoryStage(releases.filter(r => r.eventId === reg.eventId), reg.categoryId);
+      // A place the viewer bought but somebody else claimed: a status chip only (D57, M5): no visibility choice, no medal count.
+      if (userId && reg.participantUserId && reg.participantUserId !== userId) return { ...item, resultStage: deriveStage({ row: rowBy.get(item.id) ?? null, release: stage, disputeOpen: open.has(item.id) }) };
       const vis = visibilityOf(reg, events.get(reg.eventId), cats.get(reg.categoryId), clauseVersions());
       return { ...item, resultStage: deriveStage({ row: rowBy.get(item.id) ?? null, release: stage, disputeOpen: open.has(item.id) }), resultsVisibility: vis.current, medalsCount: medals.get(item.id) ?? 0 };
     });

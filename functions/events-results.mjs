@@ -5,6 +5,7 @@
 // No request body is logged. Every write needs an Idempotency-Key; X-Request-Id is stamped on every response.
 import { randomUUID } from 'node:crypto';
 import '../src/bootstrap/init.mjs';
+import { errorText } from '../src/shared/events-results-copy.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { requireActiveOrganizer, requireOpenOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
@@ -34,7 +35,7 @@ function send(res, result, okStatus = 200) {
   if (result?.error) {
     const { error, status, ...extra } = result;
     if (extra.retryAfterSeconds) res.set?.('Retry-After', String(extra.retryAfterSeconds));
-    return res.status(status || 400).json({ error, ...extra });
+    return res.status(status || 400).json({ error, ...errorText(error), ...extra });
   }
   const { status, replayed, ...body } = result ?? {};
   if (replayed) res.set?.('Idempotent-Replayed', 'true');

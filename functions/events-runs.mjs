@@ -2,6 +2,7 @@
 // EVENTS_MODULE, EVENTS_REGISTRATION, EVENTS_RESULTS and EVENTS_RUNS are on. The GPS route is never returned to an organizer, admin or API client.
 import { randomUUID } from 'node:crypto';
 import '../src/bootstrap/init.mjs';
+import { errorText } from '../src/shared/events-results-copy.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsRuns } from '../src/shared/feature-flags.mjs';
@@ -14,7 +15,7 @@ export const resetEventsRunsLimits = () => writeLimiter.reset();
 const member = method => routeGuard(method, [requireEventsRuns, requireAuth('member')]);
 const send = (req, res, result, okStatus = 200) => {
   res.set?.('X-Request-Id', req.requestId);
-  if (result?.error) { const { error, status, ...extra } = result; if (extra.retryAfterSeconds) res.set?.('Retry-After', String(extra.retryAfterSeconds)); return res.status(status || 400).json({ error, ...extra }); }
+  if (result?.error) { const { error, status, ...extra } = result; if (extra.retryAfterSeconds) res.set?.('Retry-After', String(extra.retryAfterSeconds)); return res.status(status || 400).json({ error, ...errorText(error), ...extra }); }
   const { status, replayed, ...body } = result ?? {};
   if (replayed) res.set?.('Idempotent-Replayed', 'true');
   return res.status(Number.isInteger(status) ? status : okStatus).json(body);

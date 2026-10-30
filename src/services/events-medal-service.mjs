@@ -14,7 +14,7 @@ const num = v => (v === null || v === undefined ? null : Number(v));
 const STAFF_READ = ['owner', 'admin', 'timing'];
 const STAFF_WRITE = ['owner', 'admin'];
 const ruleSummary = r => (r.type === 'finish' ? { en: 'Finish the race', sw: 'Maliza mbio' }
-  : r.type === 'placing' ? { en: `Finish in the top ${r.top} (${r.scope})`, sw: `Maliza ndani ya ${r.top} bora (${r.scope === 'overall' ? 'jumla' : 'kategoria'})` }
+  : r.type === 'placing' ? { en: `Finish in the top ${r.top} (${r.scope})`, sw: `Maliza ndani ya ${r.top} bora (${r.scope === 'overall' ? 'jumla' : 'kundi'})` }
     : { en: 'Finish under the set time', sw: 'Maliza chini ya muda uliowekwa' });
 
 export function createEventsMedalService({ db, results, now = () => new Date(), medalArtOn = () => false, artConfirmation = () => null }) {
@@ -144,7 +144,9 @@ export function createEventsMedalService({ db, results, now = () => new Date(), 
   async function awardViews(awardRows) {
     if (!awardRows.length) return [];
     const templates = new Map((await db('EventMedalTemplate').whereIn('id', [...new Set(awardRows.map(a => a.medalTemplateId))])).map(t => [t.id, plain(t)]));
-    const events = new Map((await db('Event').whereIn('id', [...new Set(awardRows.map(a => a.eventId))]).select('id', 'title')).map(e => [e.id, e.title]));
+    const evRows = (await db('Event as e').join('EventOrganizer as o', 'o.id', 'e.organizerId').whereIn('e.id', [...new Set(awardRows.map(a => a.eventId))]).select('e.id', 'e.title', 'o.name as organizerName')).map(plain);
+    const events = new Map(evRows.map(e => [e.id, e.title]));
+    const organizers = new Map(evRows.map(e => [e.id, e.organizerName]));
     const cats = new Map((await db('EventCategory').whereIn('id', [...new Set([...templates.values()].map(t => t.categoryId).filter(Boolean))]).select('id', 'name')).map(c => [c.id, c.name]));
     const regCats = new Map((await db('EventRegistration').whereIn('id', awardRows.map(a => a.registrationId)).select('id', 'categoryId')).map(r => [r.id, r.categoryId]));
     const regCatNames = new Map((await db('EventCategory').whereIn('id', [...new Set(regCats.values())]).select('id', 'name')).map(c => [c.id, c.name]));
@@ -154,7 +156,7 @@ export function createEventsMedalService({ db, results, now = () => new Date(), 
       const t = templates.get(a.medalTemplateId);
       const r = results$.get(a.sourceResultId);
       return {
-        id: a.id, eventId: a.eventId, eventTitle: events.get(a.eventId) ?? null, categoryName: cats.get(t.categoryId) ?? regCatNames.get(regCats.get(a.registrationId)) ?? null, templateId: t.id, tier: t.tier,
+        id: a.id, eventId: a.eventId, eventTitle: events.get(a.eventId) ?? null, organizerName: organizers.get(a.eventId) ?? null, categoryName: cats.get(t.categoryId) ?? regCatNames.get(regCats.get(a.registrationId)) ?? null, templateId: t.id, tier: t.tier,
         name: t.name, description: t.description ?? {}, art: artOf(t, arts.get(t.artId)), status: a.awardStatus, awardedAt: iso(a.awardedAt), revokedAt: iso(a.revokedAt), reasonCode: a.reasonCode ?? null,
         resultSummary: { rank: r ? (t.rule?.scope === 'overall' ? r.overallRank : r.categoryRank) : null, elapsedMs: r ? num(r.elapsedMs) : null },
       };

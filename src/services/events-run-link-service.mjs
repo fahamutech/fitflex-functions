@@ -196,6 +196,10 @@ export function createEventsRunLinkService({ db, results, recordRun, now = () =>
       if (pre.error) return pre;
       const clash = await conflicts(db, { reg: ctx.reg, virtual: pre.virtual, activityId: null });
       if (clash) return clash;
+      if (pre.virtual) {
+        const cur = plain(await db('EventResult').where({ registrationId: ctx.reg.id, isCurrent: true }).first());
+        if (cur && ['verified', 'corrected', 'disqualified'].includes(registrationStatusOf(cur))) return fail('result_exists', 409);
+      }
       linkId = newId();
       try {
         await db('EventActivityLink').insert({ id: linkId, registrationId: ctx.reg.id, linkType: pre.virtual ? 'event_run' : 'evidence', matchStatus: 'pending', clientRef, requestSha256: requestSha, submittedAt: stamp(), createdAt: stamp() });
@@ -207,6 +211,7 @@ export function createEventsRunLinkService({ db, results, recordRun, now = () =>
     // The claim row exists: record the run (or find the one a crashed attempt already recorded), then fill the link.
     const firstT = clean[0]?.[0]?.[3];
     let activity = null;
+    let recordedHere = false;
     if (existing && firstT) {
       activity = plain(await db('Activity').where({ userId, source: 'fitflex', startedAt: new Date(firstT) }).whereNotIn('id', db('EventActivityLink').whereNotNull('activityId').select('activityId')).first());
     }
@@ -214,16 +219,19 @@ export function createEventsRunLinkService({ db, results, recordRun, now = () =>
       const saved = await recordRun(userId, { type: 'running', segments: body.segments, notes: body.notes, shareWith: body.shareWith });
       if (saved.error) { if (!existing) await db('EventActivityLink').where({ id: linkId }).del(); return fail(saved.error, saved.status || 400); }
       activity = saved.activity;
+      recordedHere = true;
     }
+    // A refusal after the run was recorded here must not leave the run behind: the app then saves it itself, once (no orphan, no duplicate).
+    const dropOrphan = async () => { if (recordedHere) { await db('ActivityRoute').where({ id: activity.id }).del(); await db('Activity').where({ id: activity.id }).del(); } };
     const a = await assess(ctx, userId, activity);
-    if (a.error) { await db('EventActivityLink').where({ id: linkId }).del(); return { ...a, activity: { id: activity.id } }; }
+    if (a.error) { await db('EventActivityLink').where({ id: linkId }).del(); await dropOrphan(); return a; }
     try {
       return await db.transaction(async (trx) => {
         const done = await commit(trx, { ctx, userId, linkId, activity, analysis: { ...a.analysis, checks: { ...a.analysis.checks, droppedPointsPct: rawPoints ? Math.max(0, Math.round(((rawPoints - cleanPoints) / rawPoints) * 100)) : null }, flags: [...new Set([...a.analysis.flags, ...(rawPoints && Math.round(((rawPoints - cleanPoints) / rawPoints) * 100) > 15 ? ['many_dropped_points'] : [])])] }, clientRef, requestSha, virtual: a.virtual, newLink: false });
         return { link: view(done.link, { canUnlink: true }), activity, result: resultView(done.result), status: 201 };
       });
     } catch (err) {
-      if (err.refusal) { await db('EventActivityLink').where({ id: linkId }).del(); return { ...err.refusal, activity: { id: activity.id } }; }
+      if (err.refusal) { await db('EventActivityLink').where({ id: linkId }).del(); await dropOrphan(); return err.refusal; }
       throw err;
     }
   }

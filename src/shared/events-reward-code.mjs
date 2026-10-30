@@ -19,10 +19,16 @@ const base32 = (buf, len) => {
 /** Domain-separated key from the ticket secret (no new secret to manage). */
 export const deriveKey = secret => createHmac('sha256', String(secret)).update('reward-code-v1').digest();
 
-/** → "FFR-XXXXXXXX" for a redemption id, from the CURRENT ticket key; null without a key ring (fail closed). */
-export function codeFor(ring, redemptionId) {
+/**
+ * → "FFR-XXXXXXXX" for a redemption id; null without a key ring (fail closed). `keyId` is the key the redemption was CLAIMED under (stored on
+ * the row): after EVENT_TICKET_SECRET rotates the code is still derived from that key while it sits in EVENT_TICKET_SECRET_PREVIOUS, so a
+ * reserved perk is never orphaned. null when that key is gone.
+ */
+export function codeFor(ring, redemptionId, keyId = null) {
   if (!ring?.secret) return null;
-  return `FFR-${base32(createHmac('sha256', deriveKey(ring.secret)).update(String(redemptionId)).digest(), 8)}`;
+  const secret = !keyId || keyId === ring.keyId ? ring.secret : ring.previous?.[keyId];
+  if (!secret) return null;
+  return `FFR-${base32(createHmac('sha256', deriveKey(secret)).update(String(redemptionId)).digest(), 8)}`;
 }
 
 /** What a person typed → the canonical code, or null. Case, spaces and dashes are forgiven; O → 0, I and L → 1. */

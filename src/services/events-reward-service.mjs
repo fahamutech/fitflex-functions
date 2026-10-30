@@ -232,7 +232,8 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
   async function cancelIn(trx, redemption, { reason, status = 'cancelled', adminNote = null, by = null }) {
     const at = stamp();
     await trx('RewardRedemption').where({ id: redemption.id, status: 'reserved' }).update({ status, adminNote, updatedAt: at, ...(by ? { redeemedBy: null } : {}) });
-    if (redemption.ledgerEntryId) {
+    // An anonymised redemption (its user was deleted) has no one to give a unit back to: only the status changes (M5).
+    if (redemption.ledgerEntryId && redemption.userId) {
       await trx('RewardLedgerEntry').insert({
         id: newId('rle'), userId: redemption.userId, rewardDefinitionId: redemption.rewardDefinitionId, entryType: 'reverse', points: 1, sourceType: 'redemption', sourceId: redemption.id,
         reversesEntryId: redemption.ledgerEntryId, idempotencyKey: `reverse:${redemption.ledgerEntryId}`, occurredAt: at, createdAt: at,
@@ -244,6 +245,28 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
   // ── Member: wallet, ledger, claim ─────────────────────────────────────────
 
   const titleOf = d => d.title;
+
+  const hms = ms => { const t = Math.floor(Number(ms) / 1000); return `${Math.floor(t / 3600)}:${String(Math.floor((t % 3600) / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; };
+  /**
+   * Which event a reward came from, for the wallet and the certificate: the event title and a bilingual one-line result, from the user's latest live
+   * earn of that definition (its medal, achievement or event result → the registration). { eventTitle, resultLine } or nulls.
+   */
+  async function contextOf(userId, definitionId, q = db) {
+    if (!userId) return {};
+    const earn = plain(await q('RewardLedgerEntry as e').where({ 'e.userId': userId, 'e.rewardDefinitionId': definitionId, 'e.entryType': 'earn' }).orderBy('e.occurredAt', 'desc').first('e.sourceType', 'e.sourceId'));
+    if (!earn) return {};
+    let registrationId = null;
+    if (earn.sourceType === 'event_result') registrationId = earn.sourceId;
+    else if (earn.sourceType === 'event_medal') registrationId = (await q('EventMedalAward').where({ id: earn.sourceId }).first('registrationId'))?.registrationId ?? null;
+    else if (earn.sourceType === 'achievement') registrationId = (await q('UserAchievement').where({ id: earn.sourceId }).first('sourceId'))?.sourceId ?? null;
+    if (!registrationId) return {};
+    const row = plain(await q('EventRegistration as r').join('Event as ev', 'ev.id', 'r.eventId').join('EventCategory as c', 'c.id', 'r.categoryId')
+      .leftJoin('EventResult as x', function join() { this.on('x.registrationId', 'r.id').andOn('x.isCurrent', q.raw('true')); })
+      .where('r.id', registrationId).first('ev.title as eventTitle', 'c.name as categoryName', 'x.elapsedMs', 'x.finishStatus'));
+    if (!row) return {};
+    const time = row.finishStatus === 'finished' && row.elapsedMs !== null ? hms(row.elapsedMs) : null;
+    return { eventTitle: row.eventTitle, resultLine: time ? { en: `Finished ${row.categoryName} in ${time}`, sw: `Alimaliza ${row.categoryName} kwa ${time}` } : null };
+  }
 
   async function wallet({ userId }) {
     const entries = (await db('RewardLedgerEntry').where({ userId }).orderBy('occurredAt')).map(plain);
@@ -266,9 +289,12 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
     }
     const ring = ticketRing();
     const reds = (await db('RewardRedemption').where({ userId }).orderBy('reservedAt', 'desc').limit(100)).map(plain);
+    const ctxByDef = new Map();
+    for (const d of new Set(reds.map(r => r.rewardDefinitionId))) ctxByDef.set(d, await contextOf(userId, d));
     const redemptions = reds.map(r => ({
       id: r.id, definitionId: r.rewardDefinitionId, title: defs.get(r.rewardDefinitionId)?.title ?? null, status: r.status, redeemMode: defs.get(r.rewardDefinitionId)?.redeemMode ?? null,
-      code: r.status === 'reserved' ? codeFor(ring, r.id) : null, expiresAt: iso(r.expiresAt), redeemedAt: iso(r.redeemedAt),
+      code: r.status === 'reserved' ? codeFor(ring, r.id, r.codeKeyId) : null, expiresAt: iso(r.expiresAt), redeemedAt: iso(r.redeemedAt),
+      eventTitle: ctxByDef.get(r.rewardDefinitionId)?.eventTitle ?? null, resultLine: ctxByDef.get(r.rewardDefinitionId)?.resultLine ?? null,
     }));
     void at;
     return { available, redemptions, expired };
@@ -290,17 +316,25 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
     };
   }
 
-  const redemptionView = (r, ring) => ({ id: r.id, definitionId: r.rewardDefinitionId, status: r.status, code: r.status === 'reserved' ? codeFor(ring, r.id) : null, expiresAt: iso(r.expiresAt), redeemedAt: iso(r.redeemedAt) });
+  const redemptionView = (r, ring, context = {}) => ({ id: r.id, definitionId: r.rewardDefinitionId, status: r.status, code: r.status === 'reserved' ? codeFor(ring, r.id, r.codeKeyId) : null, expiresAt: iso(r.expiresAt), redeemedAt: iso(r.redeemedAt), eventTitle: context.eventTitle ?? null, resultLine: context.resultLine ?? null });
 
   async function claim({ userId, key, body = {} }) {
     if (typeof body.rewardDefinitionId !== 'string' || !body.rewardDefinitionId) return fail('validation_failed', 422, { fields: [{ path: 'rewardDefinitionId', code: 'required' }] });
     if (typeof key !== 'string' || key.length < 8 || key.length > 100) return fail(key ? 'invalid_idempotency_key' : 'idempotency_key_required', 400);
     const idemKey = `${userId}:${key}`.slice(0, 140);
-    const prior = plain(await db('RewardRedemption').where({ idempotencyKey: idemKey }).first());
-    if (prior) return prior.rewardDefinitionId === body.rewardDefinitionId ? { redemption: redemptionView(prior, ticketRing()), status: 200, replayed: true } : fail('idempotency_key_reused', 409);
     const ring = ticketRing();
+    const replayOf = async (q) => {
+      const prior = plain(await q('RewardRedemption').where({ idempotencyKey: idemKey }).first());
+      if (!prior) return null;
+      return prior.rewardDefinitionId === body.rewardDefinitionId ? { redemption: redemptionView(prior, ring, await contextOf(userId, prior.rewardDefinitionId)), status: 200, replayed: true } : fail('idempotency_key_reused', 409);
+    };
+    const early = await replayOf(db);
+    if (early) return early;
     return db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`rwd:${userId}:${body.rewardDefinitionId}`]);
+      // A retry of the same key that lost the lock race to its own first attempt replays that answer; it is never a 409 (L8).
+      const again = await replayOf(trx);
+      if (again) return again;
       const def = plain(await trx('RewardDefinition').where({ id: body.rewardDefinitionId }).first());
       if (!def || def.status !== 'active') return fail('reward_unavailable', 409);
       if (def.redeemMode === 'perk' && !ring) return fail('rewards_unavailable', 503);
@@ -311,16 +345,16 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
       const code = perk ? codeFor(ring, id) : null;
       const [row] = await trx('RewardRedemption').insert({
         id, userId, rewardDefinitionId: def.id, ledgerEntryId: entryId, codeHash: hashCode(code ?? `cert:${id}`), status: perk ? 'reserved' : 'redeemed', reservedAt: at,
-        redeemedAt: perk ? null : at, expiresAt: perk ? new Date(+at + PERK_HOLD_DAYS * DAY) : null, redeemedByRole: perk ? null : 'self', idempotencyKey: idemKey, createdAt: at, updatedAt: at,
+        redeemedAt: perk ? null : at, expiresAt: perk ? new Date(+at + PERK_HOLD_DAYS * DAY) : null, redeemedByRole: perk ? null : 'self', codeKeyId: perk ? ring.keyId : null, idempotencyKey: idemKey, createdAt: at, updatedAt: at,
       }).returning('*');
       await audit(userId, 'events.reward_claimed', def.id, null, { redemptionId: id, redeemMode: def.redeemMode }, trx);
-      return { redemption: { ...redemptionView(plain(row), ring), ...(perk ? {} : { certificate: { title: def.title, terms: def.terms } }) }, status: 201 };
+      return { redemption: { ...redemptionView(plain(row), ring, await contextOf(userId, def.id, trx)), ...(perk ? {} : { certificate: { title: def.title, terms: def.terms } }) }, status: 201 };
     });
   }
 
   async function getRedemption({ userId, id }) {
     const r = plain(await db('RewardRedemption').where({ id: String(id), userId }).first());
-    return r ? { redemption: redemptionView(r, ticketRing()) } : fail('not_found', 404);
+    return r ? { redemption: redemptionView(r, ticketRing(), await contextOf(userId, r.rewardDefinitionId)) } : fail('not_found', 404);
   }
 
   // ── Admin desk (scope events): lookup, mark used, cancel ──────────────────
@@ -345,7 +379,8 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
   async function adminView(r) {
     const def = plain(await db('RewardDefinition').where({ id: r.rewardDefinitionId }).first());
     const user = r.userId ? plain(await db('User').where({ id: r.userId }).first('displayName')) : null;
-    return { id: r.id, definitionId: r.rewardDefinitionId, title: def?.title ?? null, member: maskName(user?.displayName), status: r.status, expiresAt: iso(r.expiresAt), redeemedAt: iso(r.redeemedAt), needsReview: r.needsReview };
+    const context = await contextOf(r.userId, r.rewardDefinitionId);
+    return { id: r.id, definitionId: r.rewardDefinitionId, title: def?.title ?? null, member: maskName(user?.displayName), eventTitle: context.eventTitle ?? null, resultLine: context.resultLine ?? null, status: r.status, expiresAt: iso(r.expiresAt), redeemedAt: iso(r.redeemedAt), needsReview: r.needsReview };
   }
 
   async function adminRedeem({ admin, id, body = {} }) {
@@ -367,7 +402,7 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
       const r = plain(await trx('RewardRedemption').where({ id: String(id) }).forUpdate().first());
       if (!r) return fail('not_found', 404);
       if (r.status !== 'reserved') return fail('invalid_transition', 409, { from: r.status, to: 'cancelled' });
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`rwd:${r.userId}:${r.rewardDefinitionId}`]);
+      if (r.userId) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`rwd:${r.userId}:${r.rewardDefinitionId}`]);
       await cancelIn(trx, r, { reason: 'admin', adminNote: typeof body.note === 'string' ? body.note.trim().slice(0, 200) || null : null });
       await audit(admin, 'events.reward_cancelled', r.id, { status: 'reserved' }, { status: 'cancelled' }, trx);
       return { redemption: await adminView({ ...r, status: 'cancelled' }) };
@@ -455,15 +490,17 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
   /** Reserved perks past expiresAt lapse and the unit returns. */
   async function expireReservations() {
     const due = (await db('RewardRedemption').where({ status: 'reserved' }).where('expiresAt', '<', stamp()).limit(500)).map(plain);
-    let n = 0;
+    let n = 0; let failed = 0;
     for (const r of due) {
-      await db.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`rwd:${r.userId}:${r.rewardDefinitionId}`]);
-        const fresh = plain(await trx('RewardRedemption').where({ id: r.id }).forUpdate().first());
-        if (fresh.status === 'reserved') { await expireIn(trx, fresh); n += 1; }
-      });
+      try {
+        await db.transaction(async (trx) => {
+          if (r.userId) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`rwd:${r.userId}:${r.rewardDefinitionId}`]);
+          const fresh = plain(await trx('RewardRedemption').where({ id: r.id }).forUpdate().first());
+          if (fresh.status === 'reserved') { await expireIn(trx, fresh); n += 1; }
+        });
+      } catch (err) { failed += 1; console.warn('[events-rewards] reservation expiry skipped:', r.id, err?.message); }
     }
-    return { expiredReservations: n };
+    return { expiredReservations: n, expiryFailed: failed };
   }
 
   void sha256hex; void COPY; void notice;

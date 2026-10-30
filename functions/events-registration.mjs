@@ -112,7 +112,7 @@ export const listMyEventRegistrations = {
   // S6 (additive, EVENTS_RESULTS): each row gains resultStage, resultsVisibility, medalsCount.
   onRequest: async (req, res) => {
     const out = await svc.listRegistrations({ userId: req.user.sub, query: req.query || {} });
-    if (!out?.error && eventsResultsOn() && Array.isArray(out?.items)) out.items = await eventsResultsService.decorateRegistrations(out.items);
+    if (!out?.error && eventsResultsOn() && Array.isArray(out?.items)) out.items = await eventsResultsService.decorateRegistrations(out.items, req.user.sub);
     return send(res, out);
   },
 };

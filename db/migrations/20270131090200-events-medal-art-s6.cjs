@@ -2,7 +2,7 @@
 // Design: docs/design/events-s6-runs-results-medals-rewards.md §7.7.
 //
 // - EventMedalArt: one row per upload, `live` | `replaced` | `removed` | `taken_down` (all but live are final); one live row
-//   per template; rights confirmation (version, user, time); sha256 / pixelSha256 are written ONLY when FitFlex takes a file
+//   per template; rights confirmation (version, user, time); sha256 / pixelSha256 / dHash (a 64-bit perceptual hash) are written ONLY when FitFlex takes a file
 //   down, so the same file (or a re-saved copy) is refused afterwards.
 // - EventMedalArtFile: the bytes (WebP only) in the database like partner media; deleting the rows deletes the image.
 // - EventMedalArtUploadAttempt: one row per attempt, written BEFORE the body is read (caps count refusals too).
@@ -42,6 +42,7 @@ exports.up = async function up(knex) {
     t.text('uploadedBy');
     t.text('sha256');
     t.text('pixelSha256');
+    t.text('dHash');
     t.timestamp('purgedAt', { precision: 3 });
     t.timestamp('createdAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
     t.timestamp('updatedAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());

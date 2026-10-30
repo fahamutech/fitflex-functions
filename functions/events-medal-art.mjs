@@ -114,14 +114,14 @@ function sendImage(res, file, cache) {
 
 export const serveMedalArt = {
   created, method: 'get', path: '/events/medal-art/:artId/file',
-  description: 'Signed in (EVENTS_MEDAL_ART): a medal design as image/webp. ?variant=m512|m256|m128 (default m512; the master is never served). Allowed: a member who holds or held a medal from that template, staff of the event\'s organizer, a FitFlex admin with the events scope. Everyone else, a signed-out caller, an unknown id and a removed or taken-down design get 404 (never 403): clients then show the built-in design from MedalAward.art.artKey. Headers: nosniff, inline, Content-Security-Policy default-src \'none\', Cache-Control private, max-age=86400.',
+  description: 'Signed in (EVENTS_MEDAL_ART): a medal design as image/webp. ?variant=m512|m256|m128 (default m512; the master is never served). Allowed: a member who holds or held a medal from that template, staff of the event\'s organizer, a FitFlex admin with the events scope. Everyone else, a signed-out caller, an unknown id and a removed or taken-down design get 404 (never 403): clients then show the built-in design from MedalAward.art.artKey. Headers: nosniff, inline, Content-Security-Policy default-src \'none\', Cache-Control private, max-age=300, must-revalidate (a design that is taken down is gone within five minutes).',
   onGuard: routeGuard('get', [requireEventsMedalArt, requireAuth()]),
   onRequest: stamped(async (req, res) => {
     if (limitOrNull(serveLimiter, `s:${req.user.sub}`, res)) return undefined;
     const { portalUser, aclPermissions } = req.user;
     const adminEvents = req.user.userType === 'admin' && (!portalUser || (Array.isArray(aclPermissions) && aclPermissions.includes('events')));
     const out = await svc.serve({ viewer: { userId: req.user.sub, userType: req.user.userType, adminEvents }, artId: req.params.artId, variant: req.query?.variant ?? 'm512' });
-    return out.error ? res.status(404).json({ error: 'not_found' }) : sendImage(res, out.file, 'private, max-age=86400');
+    return out.error ? res.status(404).json({ error: 'not_found' }) : sendImage(res, out.file, 'private, max-age=300, must-revalidate');
   }),
 };
 

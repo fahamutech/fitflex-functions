@@ -20,7 +20,8 @@ const solid = (w, h2, fmt = 'png', color = { r: 20, g: 120, b: 60, alpha: 1 }) =
 /** Something that is not a flat colour, so budgets and hashes mean something. */
 const noisy = async (w, fmt = 'png', seed = 1) => {
   const raw = Buffer.alloc(w * w * 3);
-  for (let i = 0; i < raw.length; i += 1) raw[i] = ((i * 31 + seed * 17) ^ (i >> 5)) & 255;
+  let a = (seed * 2654435761) >>> 0; // mulberry32: different seeds give unrelated pictures
+  for (let i = 0; i < raw.length; i += 1) { a = (a + 0x6D2B79F5) >>> 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; raw[i] = (((t ^ (t >>> 14)) >>> 0) % 256); }
   return sharp(raw, { raw: { width: w, height: w, channels: 3 } })[fmt]().toBuffer();
 };
 const resetAttempts = () => db('EventMedalArtUploadAttempt').del();
@@ -182,7 +183,7 @@ test('caps count refusals BEFORE the body is read (a refused attempt never uses 
 test('the shared decode gate: beyond its queue a request is 503 busy (retry later) and nothing is stored', async () => {
   const { o, f, t } = await setup();
   const svc = createEventsMedalArtService({ db, results: h.service, gate: createJobGate({ max: 1, maxWaiting: 0 }) });
-  const png = await noisy(900, 'png', 21);
+  const png = await noisy(640, 'png', 21);
   const actor = { kind: 'staff', userId: o.ownerUserId, role: 'owner', requestId: 'req_gate' };
   const run = async () => { const admission = await svc.admit({ actor, organizerId: o.id, eventId: f.event.id, templateId: t.id, key: h.key() }); return svc.store({ actor, admission, buffer: png, confirmationVersion: V, key: h.key() }); };
   const out = await Promise.all([run(), run(), run()]);
@@ -299,7 +300,7 @@ test('serving: award holders, organizer staff and an events admin get the file; 
   const sink = { statusCode: 200, status(c) { this.statusCode = c; return this; }, set(k, v) { headers[k] = v; return this; }, end(b) { this.sent = b; return this; }, json(b) { this.sent = b; return this; } };
   await art.serveMedalArt.onRequest({ user: { sub: f.regs[0].userId, userType: 'member' }, params: { artId: id }, query: {}, headers: {} }, sink);
   assert.deepEqual([headers['Content-Type'], headers['X-Content-Type-Options'], headers['Content-Disposition'], headers['Content-Security-Policy'], headers['Cache-Control']],
-    ['image/webp', 'nosniff', 'inline', "default-src 'none'", 'private, max-age=86400']);
+    ['image/webp', 'nosniff', 'inline', "default-src 'none'", 'private, max-age=300, must-revalidate']);
   assert.equal((await meta(sink.sent)).format, 'webp');
   assert.equal((await meta(sink.sent)).width, 512);
   // a regular member's medal payload now carries the custom art id; flag off → built-in only and the file route disappears

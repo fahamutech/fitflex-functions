@@ -7,7 +7,7 @@
 // attempts never use the successful-upload allowance), the rights confirmation (draft text pending counsel), one live art per template,
 // replacement / removal that really deletes bytes, takedown that keeps only the hashes, and the authorisation of who may fetch a file.
 import { randomUUID } from 'node:crypto';
-import { prepareMedalArt } from '../infra/medal-art-file.mjs';
+import { prepareMedalArt, dHash, hamming, DHASH_MAX_DISTANCE, dHashIsMeaningful } from '../infra/medal-art-file.mjs';
 import { createJobGate } from './partner-media-service.mjs';
 import { createIdempotency } from '../shared/organizer-idempotency.mjs';
 import { pixelSha256, sha256 } from '../infra/hero-image-file.mjs';
@@ -98,6 +98,9 @@ export function createEventsMedalArtService({
       if (confirmationVersion !== required.version) return fail('confirmation_outdated', 409, { current: required });
       const blocked = await db('EventMedalArt').where({ status: 'taken_down' }).where(function same() { this.where('sha256', p.sha256).orWhere('pixelSha256', p.pixelSha256); }).first('id');
       if (blocked) return fail('file_not_allowed', 409);
+      // a re-sized or re-compressed copy of a taken-down design is the same design: compare perceptual hashes too
+      const similar = dHashIsMeaningful(p.dHash) && (await db('EventMedalArt').where({ status: 'taken_down' }).whereNotNull('dHash').select('dHash')).some(r => hamming(r.dHash, p.dHash) <= DHASH_MAX_DISTANCE);
+      if (similar) return fail('file_not_allowed', 409);
       const alt = {};
       for (const lang of ['en', 'sw']) {
         const v = altText?.[lang];
@@ -261,7 +264,7 @@ export function createEventsMedalArtService({
       if (!art) return fail('not_found', 404);
       if (art.status !== 'live') return fail('invalid_transition', 409, { from: art.status, to: 'taken_down' });
       const master = await trx('EventMedalArtFile').where({ artId: art.id, variant: 'master' }).first('bytes');
-      const hashes = master ? { sha256: sha256(master.bytes), pixelSha256: await pixelSha256(master.bytes) } : { sha256: null, pixelSha256: null };
+      const hashes = master ? { sha256: sha256(master.bytes), pixelSha256: await pixelSha256(master.bytes), dHash: await dHash(master.bytes).then(h => (dHashIsMeaningful(h) ? h : null)) } : { sha256: null, pixelSha256: null, dHash: null };
       const at = stamp();
       await trx('EventMedalArtFile').where({ artId: art.id }).del();
       const [row] = await trx('EventMedalArt').where({ id: art.id }).update({ status: 'taken_down', reason: body.reason, reasonNote: note || null, decidedBy: admin, decidedAt: at, statusChangedBy: admin, statusChangedAt: at, updatedAt: at, purgedAt: at, ...hashes }).returning('*');

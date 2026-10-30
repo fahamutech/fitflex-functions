@@ -53,4 +53,4 @@ export function parseResultsCsv(text, { maxRows = 5000 } = {}) {
 }
 
 /** A small sample file for the portal's "Download sample CSV". */
-export const SAMPLE_CSV = 'bib,status,net_time,gun_time,category,note\n1001,finished,0:52:08,0:52:31,10K,\n1002,finished,1:01:44,1:02:09,10K,\n1003,dnf,,,10K,Withdrew at 6 km\n1004,dns,,,5K,\n';
+export const SAMPLE_CSV = 'bib,status,net_time,gun_time,category,note\n1001,finished,0:52:08,0:52:31,10K,\n1002,finished,1:01:44,1:02:09,10K,\n1003,dnf,,,10K,6 km\n1004,dns,,,5K,\n';

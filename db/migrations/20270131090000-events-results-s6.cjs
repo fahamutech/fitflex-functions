@@ -174,7 +174,7 @@ exports.up = async function up(knex) {
   await knex.raw(`UPDATE "EventRegistration" r SET "resultsVisibility" = 'bib_only'
     FROM "Event" e
     WHERE e.id = r."eventId" AND r."resultsVisibility" = 'standard'
-      AND (r."consentTextVersion" IS NULL OR NOT (r."consentTextVersion" = ANY(string_to_array(?, ',')))
+      AND (r."consentBasis" IS DISTINCT FROM 'self' OR r."participantUserId" IS NULL OR r."consentTextVersion" IS NULL OR NOT (r."consentTextVersion" = ANY(string_to_array(?, ',')))
         OR (r."dateOfBirth" IS NOT NULL AND date_part('year', age((e."startsAt" AT TIME ZONE e.timezone)::date, r."dateOfBirth")) < 18))`, [clause.join(',')]);
 
   // ── EventAwardTask ──

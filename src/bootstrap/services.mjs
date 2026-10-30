@@ -1462,7 +1462,7 @@ opsService.register({
 // Dormant behind EVENTS_RESULTS / EVENTS_RUNS / EVENTS_RESULTS_PUBLIC / EVENTS_REWARDS / EVENTS_MEDAL_ART (each with EVENTS_MODULE and
 // EVENTS_REGISTRATION): with all five off every S6 route answers 404 feature_disabled and S5 behaviour is unchanged.
 export const eventsResultsService = createEventsResultsService({
-  db, eventStore,
+  db, eventStore, localeOf: eventsLocaleOf,
   notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
   importMaxRows: eventsResultsImportMaxRows, disputeDefaultHours: eventsResultsDisputeDefaultHours, pushMax: eventsResultsPushMax, clauseVersions: eventsResultsConsentVersions,
   rewardsOn: eventsRewardsOn,

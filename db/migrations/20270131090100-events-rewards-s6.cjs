@@ -13,6 +13,7 @@
 // - RewardLedgerEntry / RewardRedemption: userId nullable + SET NULL + anonymisedAt; redemption gets expiry, note, role, review flag.
 //
 // Down FAILS CLOSED once S6 reward data exists.
+// Note: the registration trigger below touches resultsVisibility, which migration 20270131090000 adds; rewards sorts after it.
 
 const BUILT_IN_ART = ['finisher_green', 'finisher_gold', 'podium_gold', 'podium_silver', 'podium_bronze', 'time_blue', 'charity_red', 'virtual_teal'];
 const list = values => values.map(v => `'${v}'`).join(', ');
@@ -20,8 +21,8 @@ const list = values => values.map(v => `'${v}'`).join(', ');
 const ACHIEVEMENTS = [
   { key: 'first_event_finish', title: { en: 'First event finished', sw: 'Tukio la kwanza limekamilika' }, criteria: { type: 'event_finishes', count: 1 } },
   { key: 'first_10k_finish', title: { en: 'First 10K finished', sw: '10K ya kwanza imekamilika' }, criteria: { type: 'distance_finish', minMeters: 10000, count: 1 } },
-  { key: 'half_marathon_finish', title: { en: 'Half marathon finisher', sw: 'Mshindi wa nusu marathoni' }, criteria: { type: 'distance_finish', minMeters: 21000, count: 1 } },
-  { key: 'marathon_finish', title: { en: 'Marathon finisher', sw: 'Mshindi wa marathoni' }, criteria: { type: 'distance_finish', minMeters: 42000, count: 1 } },
+  { key: 'half_marathon_finish', title: { en: 'Half marathon finisher', sw: 'Amemaliza nusu marathoni' }, criteria: { type: 'distance_finish', minMeters: 21000, count: 1 } },
+  { key: 'marathon_finish', title: { en: 'Marathon finisher', sw: 'Amemaliza marathoni' }, criteria: { type: 'distance_finish', minMeters: 42000, count: 1 } },
   { key: 'three_events_year', title: { en: '3 events in 12 months', sw: 'Matukio 3 ndani ya miezi 12' }, criteria: { type: 'event_finishes', count: 3, windowDays: 365 } },
 ];
 
@@ -90,7 +91,11 @@ exports.up = async function up(knex) {
   // with the person; the person fields follow the separate retention rule).
   await knex.raw(`CREATE OR REPLACE FUNCTION event_registration_participant_removed() RETURNS trigger AS $$
     BEGIN
-      IF OLD."participantUserId" IS NOT NULL AND NEW."participantUserId" IS NULL THEN NEW."claimedAt" := NULL; END IF;
+      IF OLD."participantUserId" IS NOT NULL AND NEW."participantUserId" IS NULL THEN
+        NEW."claimedAt" := NULL;
+        -- the person is gone: nothing about them may appear on a board (M1)
+        NEW."resultsVisibility" := 'hidden'; NEW."resultsVisibilitySetAt" := now();
+      END IF;
       RETURN NEW;
     END;
   $$ LANGUAGE plpgsql`);
@@ -100,6 +105,7 @@ exports.up = async function up(knex) {
   await knex.raw(`ALTER TABLE "RewardRedemption"
     ADD COLUMN "anonymisedAt" timestamptz(3),
     ADD COLUMN "expiresAt" timestamptz(3),
+    ADD COLUMN "codeKeyId" text,
     ADD COLUMN "adminNote" text,
     ADD COLUMN "redeemedByRole" text,
     ADD COLUMN "needsReview" boolean NOT NULL DEFAULT false`);
