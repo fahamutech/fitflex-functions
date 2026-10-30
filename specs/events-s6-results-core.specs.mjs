@@ -427,7 +427,7 @@ test('settings: validation refuses unknown keys, lock after the first official r
   assert.deepEqual(ok.settings, { timeBasis: 'gun', cutoffMinutes: 90, disputeWindowHours: 48, publicNames: 'bib_only' });
   await h.importCsv(f, a.owner, h.csvOf([['1001', 'finished', '0:50:00', '0:50:30']]));
   await verify(f, a.owner, (await rowOf(f)).id);
-  assert.equal((await rowOf(f)).elapsedMs, 3_030_000 * 1 === 0 ? 0 : 3_030_000 - 0);
+  assert.equal(Number((await rowOf(f)).elapsedMs), 3_030_000);
   await released(f, a.owner);
   assert.equal((await svc.updateSettings({ ...ctx(f, a.owner), key: h.key(), body: { cutoffMinutes: 60 } })).error, 'settings_locked');
   assert.equal((await svc.updateSettings({ ...ctx(f, a.owner), key: h.key(), body: { disputeWindowHours: 24 } })).error, 'settings_locked');
