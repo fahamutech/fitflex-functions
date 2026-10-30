@@ -12,7 +12,7 @@ import {
 import { apiListWebhookEndpoints, apiAssignBibBatch } from '../functions/events-organizer-api.mjs';
 import { getMyEventRegistration } from '../functions/events-registration.mjs';
 import { adminCancelEvent } from '../functions/events-admin.mjs';
-import { harness, s5On, s5Off, db, uid, webhookLab } from './fixtures/events-s5.mjs';
+import { harness, s5On, s5Off, db, uid, webhookLab, eventually } from './fixtures/events-s5.mjs';
 import { isBlockedAddress } from '../src/shared/webhook-url-guard.mjs';
 import { eventsWebhookService } from '../src/bootstrap/services.mjs';
 
@@ -178,11 +178,7 @@ test('SWAHILI — bulk / import inbox notices are in the recipient\'s language a
   assert.equal(col.status, 201);
   // The kit notice is sent after the response without being awaited (events-ops-service noticeKit(...).catch()),
   // so the row can land a moment after the 201: wait for it (up to ~5 s) instead of reading once.
-  let kit;
-  for (let i = 0; i < 50 && !kit; i += 1) {
-    kit = await db('Notification').where({ userId: f.regs[1].userId, type: 'event_kit_collected' }).first();
-    if (!kit) await new Promise(r => setTimeout(r, 100));
-  }
+  const kit = await eventually(() => db('Notification').where({ userId: f.regs[1].userId, type: 'event_kit_collected' }).first());
   assert.ok(kit, 'the kit-collected notification is written');
   assert.match(kit.data.bodySw, /^Umechukua vifaa vya mbio vya /);
   // the API client wording: a "ruhusa" (permission), never "mteja", never kushindwa / imeshindwa

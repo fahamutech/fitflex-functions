@@ -7,7 +7,7 @@ import { ensureInit } from '../functions/index.mjs';
 import { apiToken, apiListEvents, apiListRegistrations, apiCollectKit } from '../functions/events-organizer-api.mjs';
 import { organizerListApiClients, organizerRevokeApiClient, resetEventsIntegrationsLimits } from '../functions/events-integrations.mjs';
 import { organizerListRegistrations } from '../functions/events-organizer.mjs';
-import { harness, s5On, s5Off, db } from './fixtures/events-s5.mjs';
+import { harness, s5On, s5Off, db, eventually } from './fixtures/events-s5.mjs';
 import { sign, signPurpose, verify, verifyPurpose, requireAuth } from '../src/auth/jwt.mjs';
 import { resetApiAuthLimits, API_PURPOSE } from '../src/auth/organizer-api-auth.mjs';
 
@@ -211,8 +211,8 @@ test('per-client rate limit: 429 with Retry-After, retryAfterSeconds and X-RateL
   assert.equal(limited.body.error, 'rate_limited');
   assert.ok(limited.body.retryAfterSeconds >= 1 && Number(limited.headers['Retry-After']) >= 1);
   assert.equal((await call(apiListEvents, null, { headers: bearer(await other.token()) })).status, 200, 'another client is unaffected');
-  await new Promise(r => setTimeout(r, 30));
-  const day = await db('ApiClientUsageDay').where({ apiClientId: c.client.id }).first();
+  // the usage counter is written after the response without being awaited
+  const day = await eventually(() => db('ApiClientUsageDay').where({ apiClientId: c.client.id }).first(), { until: d => d && d.requests >= 4 && d.rateLimited >= 1 });
   assert.ok(day.requests >= 4 && day.rateLimited >= 1);
   const gen = await call(apiListEvents, null, { headers: bearer(await other.token()) });
   assert.ok(gen.status === 200);
