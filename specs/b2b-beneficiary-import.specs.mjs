@@ -1,6 +1,8 @@
 // B2B Phase 7, slice 2 against the CI database: bulk import, invites for
-// people who have not joined yet, enrolment when they do, invitation emails
-// and reminders, and who may do what.
+// people who have not joined yet, invitation emails and reminders, and who
+// may do what. Since consent slice (a) (owner decision 22 Oct 2026, re-confirmed
+// 29 Oct) nobody is enrolled by an import or an invite match: the member is
+// asked in the app (B2BMemberRequest, source invite) and enrolled on accepting.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -13,6 +15,7 @@ import {
   createB2BBeneficiaryImportService, parseImportText, readImportRow, MAX_IMPORT_ROWS, MAX_EMAILS_PER_INVITE, MAX_SMS_PER_INVITE, SMS_MAX_LENGTH,
 } from '../src/services/b2b-beneficiary-import-service.mjs';
 import { createOpsService } from '../src/services/ops-service.mjs';
+import { createB2BMemberRequestService } from '../src/services/b2b-member-request-service.mjs';
 import { registerB2BJobs } from '../src/services/b2b-jobs.mjs';
 import {
   importB2BBeneficiaries, listB2BBeneficiaryInvites, cancelB2BBeneficiaryInvite, resendB2BBeneficiaryInvite, listB2BBeneficiaryImports,
@@ -57,15 +60,25 @@ async function orgUser(orgId, role) {
 function harness({ configured = true, sms = true, smsEnabled = true, at = new Date(), appLink = 'https://example.test/get-fitflex' } = {}) {
   const clock = { now: new Date(at) };
   const sent = { email: [], sms: [], inbox: [], failNext: 0, smsFailNext: 0 };
+  const requests = createB2BMemberRequestService({ db, b2bService, corporateService, now: () => clock.now, notify: async (userId, m) => { sent.inbox.push({ userId, ...m }); } });
   const svc = createB2BBeneficiaryImportService({
-    db, b2bService, now: () => clock.now, appLink: () => appLink, smsEnabled: () => smsEnabled,
+    db, b2bService, memberRequests: requests, now: () => clock.now, appLink: () => appLink, smsEnabled: () => smsEnabled,
     smsSender: () => (sms ? { configured: true, send: async (to, m) => { if (sent.smsFailNext > 0) { sent.smsFailNext -= 1; return { ok: false, error: 'provider_rejected' }; } sent.sms.push({ to, ...m }); return { ok: true }; } } : { configured: false }),
     emailSender: () => (configured ? { configured: true, send: async (to, m) => { if (sent.failNext > 0) { sent.failNext -= 1; return { ok: false, error: 'provider_rejected' }; } sent.email.push({ to, ...m }); return { ok: true }; } } : { configured: false }),
     notify: async (userId, m) => { sent.inbox.push({ userId, ...m }); },
   });
   const days = (n) => { clock.now = new Date(+clock.now + n * 86_400_000); };
-  return { svc, sent, clock, days };
+  /** The member accepts the request an invite of this organisation made. */
+  const accept = async (userId, orgId) => {
+    const row = await db('B2BMemberRequest').where({ userId, organizationId: orgId, status: 'pending' }).first();
+    assert.ok(row, `no open request for ${userId} in ${orgId}`);
+    const out = await requests.accept({ userId, requestId: row.id });
+    assert.ok(out.beneficiary, JSON.stringify(out));
+    return out;
+  };
+  return { svc, sent, clock, days, requests, accept };
 }
+const requestsOf = orgId => db('B2BMemberRequest').where({ organizationId: orgId }).orderBy('createdAt');
 const invitesOf = (orgId, status = 'invited') => db('B2BBeneficiaryInvite').where({ organizationId: orgId, status }).orderBy('email');
 const peopleOf = async orgId => (await b2bService.allBeneficiaries((await access(orgId)).org));
 
@@ -102,6 +115,8 @@ after(async () => {
     await db('CorporateEmployee').whereIn('corporateId', made.corporates).del();
     await db('CorporateAccount').whereIn('id', made.corporates).del();
   }
+  if (orgIds.length) await db('B2BMemberRequest').whereIn('organizationId', orgIds).del();
+  if (orgIds.length) await db('B2BBeneficiaryInviteMatch').whereIn('organizationId', orgIds).del();
   await db('AuditLog').whereIn('actor', [...made.users, 'system:b2b-beneficiary-invites']).del();
   const persons = await purgeIdentity(db, made.users);
   await db('User').whereIn('id', made.users).del();
@@ -130,7 +145,7 @@ test('rules: reading a pasted list, with or without a header, and what makes a r
 
 // ── Import ───────────────────────────────────────────────────────────────────
 
-test('import: members are enrolled, people who have not joined are invited, bad rows are named, and nobody is added twice', async () => {
+test('import: nobody is enrolled and nobody is looked up; everyone new is invited and a member behind a verified contact is asked; bad rows are named; nobody is added twice', async () => {
   const orgId = await sponsor();
   const h = harness();
   const a = await access(orgId);
@@ -155,26 +170,47 @@ test('import: members are enrolled, people who have not joined are invited, bad 
 
   // A dry run says what would happen and changes nothing.
   const dry = await h.svc.importPeople({ access: a, body: { rawText, dryRun: true }, actorId: OPERATOR });
-  assert.deepEqual([dry.dryRun, dry.total, dry.enrolled, dry.invited, dry.unchanged, dry.rejected, dry.withoutEmail, dry.emailConfigured, dry.smsConfigured], [true, 9, 2, 3, 1, 3, 2, true, true]);
-  assert.deepEqual([(await peopleOf(orgId)).length, (await invitesOf(orgId)).length, (await db('B2BBeneficiaryImport').where({ organizationId: orgId })).length], [1, 0, 0]);
+  assert.deepEqual([dry.dryRun, dry.total, dry.enrolled, dry.invited, dry.unchanged, dry.rejected, dry.withoutEmail, dry.emailConfigured, dry.smsConfigured], [true, 9, 0, 6, 0, 3, 2, true, true]);
+  assert.deepEqual([(await peopleOf(orgId)).length, (await invitesOf(orgId)).length, (await db('B2BBeneficiaryImport').where({ organizationId: orgId })).length, (await requestsOf(orgId)).length], [1, 0, 0, 0]);
 
   const done = await h.svc.importPeople({ access: a, body: { rawText }, actorId: OPERATOR });
-  assert.deepEqual([done.total, done.enrolled, done.invited, done.unchanged, done.rejected], [9, 2, 3, 1, 3]);
+  // The same counts whoever has an account (an import by a FitFlex admin too).
+  assert.deepEqual([done.total, done.enrolled, done.invited, done.unchanged, done.rejected], [9, 0, 6, 0, 3]);
   assert.deepEqual(done.problems.map(p => [p.line, p.problem]), [[8, 'email_or_phone_required'], [9, 'invalid_email'], [10, 'listed_twice']]);
-  const list = await peopleOf(orgId);
-  assert.deepEqual(list.map(b => [b.displayName, b.groupName, b.externalReference, b.beneficiaryType, b.status]).sort((x, y) => String(x[0]).localeCompare(String(y[0]))).slice(0, 2),
-    [['Asha Mollel', 'Finance', 'EMP-1', 'employee', 'active'], ['Baraka Juma', 'Ops', 'EMP-2', 'employee', 'active']]);
+  // Nobody was enrolled, and nobody asked, by the import itself (matching is the job's).
+  assert.deepEqual((await peopleOf(orgId)).map(b => b.userId), [already]);
+  assert.equal((await requestsOf(orgId)).length, 0);
+  await h.svc.matchInvites();
   const invites = await invitesOf(orgId);
+  // Every invite, member or not, already on the list or not, stays exactly as imported.
   assert.deepEqual(invites.map(i => [i.displayName, i.email, !!i.phone, i.groupName, i.externalReference, !!i.nextEmailAt, !!i.nextSmsAt]).sort((x, y) => x[0].localeCompare(y[0])),
-    [['Coach', mail('trainer'), false, 'Ops', null, true, false], ['Juma Omari', null, true, 'Ops', null, false, true], ['Neema Said', mail('neema'), false, 'Finance', 'EMP-3', true, false]]);
+    [['Asha Mollel', mail('asha'), false, 'Finance', 'EMP-1', true, false], ['Baraka Juma', null, true, 'Ops', 'EMP-2', false, true], ['Coach', mail('trainer'), false, 'Ops', null, true, false],
+      ['Juma Omari', null, true, 'Ops', null, false, true], ['Neema Said', mail('neema'), false, 'Finance', 'EMP-3', true, false], ['On List', mail('onlist'), false, 'Ops', null, true, false]]);
+  assert.equal(new Set(invites.map(i => +new Date(i.updatedAt))).size, 1, 'no invite row was written by matching');
+  // The members behind verified contacts were asked; the one already on the list was not.
+  const asked = await requestsOf(orgId);
+  assert.deepEqual(asked.map(r => [r.source, r.status, r.kind, r.requestedByType]), [['invite', 'pending', 'beneficiary', 'system'], ['invite', 'pending', 'beneficiary', 'system']]);
+  assert.deepEqual(h.sent.inbox.map(m => m.type), ['b2b_member_request', 'b2b_member_request']);
+  // The organisation sees invites only: nothing says who was asked.
+  const shown = await h.svc.listInvites({ access: a });
+  assert.ok(shown.items.every(i => !('memberRequestId' in i)));
+  assert.deepEqual((await b2bService.listBeneficiaries({ access: a })).pendingMemberAcceptance, []);
   const [record] = await db('B2BBeneficiaryImport').where({ organizationId: orgId });
-  assert.deepEqual([record.total, record.enrolled, record.invited, record.unchanged, record.rejected, record.problems.length, record.createdBy], [9, 2, 3, 1, 3, 3, OPERATOR]);
+  assert.deepEqual([record.total, record.enrolled, record.invited, record.unchanged, record.rejected, record.problems.length, record.createdBy], [9, 0, 6, 0, 3, 3, OPERATOR]);
   assert.equal((await db('AuditLog').where({ action: 'b2b.beneficiaries.import', target: orgId })).length, 1);
 
-  // The same file again: everyone is already there. Changed details on an invite are taken.
+  // Asha accepts: enrolled with what the organisation listed; her invite shows enrolled.
+  const asha = (await db('User').where({ email: mail('asha') }).first('id')).id;
+  await h.accept(asha, orgId);
+  assert.deepEqual((await peopleOf(orgId)).filter(b => b.userId === asha).map(b => [b.displayName, b.groupName, b.externalReference, b.beneficiaryType, b.status]), [['Asha Mollel', 'Finance', 'EMP-1', 'employee', 'active']]);
+  assert.deepEqual((await invitesOf(orgId, 'enrolled')).map(i => i.email), [mail('asha')]);
+
+  // The same file again: everyone still invited is left alone (changed details on an invite are taken);
+  // Asha (accepted, invite closed) gets a fresh invite (accounts are not looked up at import).
   const again = await h.svc.importPeople({ access: a, body: { rawText: rawText.replace('Neema Said', 'Neema S. Said').replace(`${mail('neema')},,Finance`, `${mail('neema')},,Sales`) }, actorId: OPERATOR });
-  assert.deepEqual([again.enrolled, again.invited, again.unchanged, again.rejected], [0, 0, 6, 3]);
-  assert.deepEqual([(await peopleOf(orgId)).length, (await invitesOf(orgId)).length], [3, 3]);
+  assert.deepEqual([again.enrolled, again.invited, again.unchanged, again.rejected], [0, 1, 5, 3]);
+  await h.svc.matchInvites();
+  assert.deepEqual([(await peopleOf(orgId)).length, (await invitesOf(orgId)).length, (await requestsOf(orgId)).length], [2, 6, 2]);
   assert.deepEqual((await invitesOf(orgId)).filter(i => i.email === mail('neema')).map(i => [i.displayName, i.groupName]), [['Neema S. Said', 'Sales']]);
   // Two uploads at the same moment do not double anyone either.
   const fresh = `x,${mail('race')}`;
@@ -202,7 +238,7 @@ test('import: a company managed under Companies keeps its own staff list', async
 
 // ── Joining ──────────────────────────────────────────────────────────────────
 
-test('an invited person is enrolled when they join, once, with what the organisation listed; other organisations\' invites are separate', async () => {
+test('an invited person is asked when they join, once per invite, and enrolled with what the organisation listed only when they accept; other organisations\' invites are separate', async () => {
   const orgA = await sponsor('A');
   const orgB = await sponsor('B');
   const h = harness();
@@ -211,32 +247,41 @@ test('an invited person is enrolled when they join, once, with what the organisa
   await h.svc.importPeople({ access: await access(orgB), body: { rows: [{ name: 'Neema Said', email: mail('join'), group: 'Members' }] }, actorId: OPERATOR });
 
   // Nobody has joined: nothing happens.
-  assert.deepEqual(await h.svc.matchInvites(), { ...(await h.svc.matchInvites()), enrolled: 0 });
+  assert.deepEqual([(await requestsOf(orgA)).length, (await requestsOf(orgB)).length], [0, 0]);
   const neema = await user({ email: mail('join'), name: 'Neema Said' });
   const byPhone = await user({ phone: p });
   await user({ userType: 'trainer', email: mail('never') });                          // a trainer account is not the member being waited for
 
   const run = await h.svc.matchInvites();
-  assert.deepEqual([run.enrolled >= 3, run.failed], [true, 0]);
+  assert.deepEqual([run.asked >= 3, run.failed], [true, 0]);
+  // Asked, not enrolled: the organisations see nothing yet and their invites stay invited.
+  assert.deepEqual([(await peopleOf(orgA)).length, (await peopleOf(orgB)).length, (await invitesOf(orgA)).length, (await invitesOf(orgB)).length], [0, 0, 3, 1]);
+  // The member is asked, once per organisation, in the app.
+  assert.deepEqual(h.sent.inbox.filter(m => m.userId === neema).map(m => m.type), ['b2b_member_request', 'b2b_member_request']);
+  assert.match(h.sent.inbox.find(m => m.userId === neema).body, /wants to add you to its wellness programme on FitFlex\. If you accept, it will see your FitFlex activity, including activity from before you joined/);
+  // Again, and many at once: nobody is asked twice.
+  await Promise.all([h.svc.matchInvites(), h.svc.matchInvites(), h.svc.matchInvites({ userId: neema })]);
+  assert.deepEqual([(await requestsOf(orgA)).length, (await requestsOf(orgB)).length, h.sent.inbox.filter(m => m.userId === neema).length], [2, 1, 2]);
+
+  await h.accept(neema, orgA);
+  await h.accept(neema, orgB);
+  await h.accept(byPhone, orgA);
   const inA = await peopleOf(orgA);
   assert.deepEqual(inA.map(b => [b.userId, b.groupName, b.externalReference, b.beneficiaryType, b.status]).sort((x, y) => x[0].localeCompare(y[0])),
     [[neema, 'Finance', 'EMP-9', 'employee', 'active'], [byPhone, null, null, 'member', 'active']].sort((x, y) => x[0].localeCompare(y[0])));
   assert.deepEqual((await peopleOf(orgB)).map(b => [b.userId, b.groupName]), [[neema, 'Members']]);
   assert.deepEqual([(await invitesOf(orgA)).map(i => i.email), (await invitesOf(orgA, 'enrolled')).length, (await invitesOf(orgB, 'enrolled'))[0].beneficiaryId !== null], [[mail('never')], 2, true]);
-  // The member is told, once per organisation.
-  assert.deepEqual(h.sent.inbox.filter(m => m.userId === neema).map(m => m.type), ['b2b_beneficiary_enrolled', 'b2b_beneficiary_enrolled']);
-  assert.match(h.sent.inbox.find(m => m.userId === neema).body, /has added you to its wellness programme/);
-  // Again, and many at once: nobody is enrolled twice.
-  await Promise.all([h.svc.matchInvites(), h.svc.matchInvites(), h.svc.matchInvites({ userId: neema })]);
+  // Matching again after that changes nothing.
+  await Promise.all([h.svc.matchInvites(), h.svc.matchInvites({ userId: neema })]);
   assert.deepEqual([(await peopleOf(orgA)).length, (await peopleOf(orgB)).length, h.sent.inbox.filter(m => m.userId === neema).length], [2, 1, 2]);
 
-  // Added by hand in the meantime: the invite closes without a second row.
+  // Added by hand in the meantime: no second row, nobody asked, and the invite is left as it is (no messages reach them).
   const late = await user({ email: mail('late') });
   await h.svc.importPeople({ access: await access(orgA), body: { rows: [{ email: mail('late2') }] }, actorId: OPERATOR });
   await db('B2BBeneficiaryInvite').where({ organizationId: orgA, email: mail('late2') }).update({ email: mail('late') });
   await b2bService.enrollBeneficiary({ access: await access(orgA), body: { userId: late, status: 'active' }, actorId: OPERATOR });
   await h.svc.matchInvites({ userId: late });
-  assert.deepEqual([(await peopleOf(orgA)).filter(b => b.userId === late).length, (await db('B2BBeneficiaryInvite').where({ organizationId: orgA, email: mail('late') }).first()).status], [1, 'enrolled']);
+  assert.deepEqual([(await peopleOf(orgA)).filter(b => b.userId === late).length, (await db('B2BBeneficiaryInvite').where({ organizationId: orgA, email: mail('late') }).first()).status, (await requestsOf(orgA)).filter(r => r.userId === late).length], [1, 'invited', 0]);
 
   // Cancelled: joining later does not enrol.
   const orgC = await sponsor('C');
@@ -248,11 +293,15 @@ test('an invited person is enrolled when they join, once, with what the organisa
   const gone = await user({ email: mail('cancelled') });
   await h.svc.matchInvites({ userId: gone });
   assert.equal((await peopleOf(orgC)).length, 0);
-  // And can be invited afresh.
-  assert.equal((await h.svc.importPeople({ access: ac, body: { rows: [{ email: mail('cancelled') }] }, actorId: OPERATOR })).enrolled, 1);
+  assert.equal((await requestsOf(orgC)).length, 0);
+  // And can be invited afresh: the same reply as for anyone, and the member is asked.
+  const fresh = await h.svc.importPeople({ access: ac, body: { rows: [{ email: mail('cancelled') }] }, actorId: OPERATOR });
+  assert.deepEqual([fresh.enrolled, fresh.invited], [0, 1]);
+  await h.svc.matchInvites({ userId: gone });
+  assert.deepEqual((await requestsOf(orgC)).map(r => [r.userId, r.status]), [[gone, 'pending']]);
 });
 
-test('a member who opens their benefits is enrolled there and then', async () => {
+test('a member who opens their benefits is asked there and then, and has the benefits once they accept', async () => {
   const orgId = await sponsor();
   const a = await access(orgId);
   const { program } = await b2bProgramService.createProgram({ access: a, body: { name: 'Import programme', startDate: '2026-01-01' }, actorId: OPERATOR });
@@ -263,9 +312,16 @@ test('a member who opens their benefits is enrolled there and then', async () =>
   const done = await call(importB2BBeneficiaries, { claims: { sub: OPERATOR, userType: 'admin' }, params: { id: orgId }, body: { rows: [{ name: 'Fresh Member', email: mail('fresh') }] } });
   assert.deepEqual([done.statusCode, done.body.invited], [200, 1]);
   const member = await user({ email: mail('fresh') });
-  const mine = await call(b2bRoutes.myB2BBenefits ?? Object.values(b2bRoutes).find(r => r?.path === '/b2b/me/benefits'), { claims: { sub: member, userType: 'member' } });
+  const benefitsRoute = b2bRoutes.myB2BBenefits ?? Object.values(b2bRoutes).find(r => r?.path === '/b2b/me/benefits');
+  const mine = await call(benefitsRoute, { claims: { sub: member, userType: 'member' } });
   assert.equal(mine.statusCode, 200);
-  assert.deepEqual(mine.body.benefits.map(b => b.name ?? b.benefit?.name), ['Gym visits']);
+  assert.deepEqual(mine.body.benefits, []);
+  assert.deepEqual(mine.body.memberRequests.map(r => [r.kind, r.organization.id, r.source, r.benefits.map(b => b.name ?? b.benefit?.name)]), [['beneficiary', orgId, 'invite', ['Gym visits']]]);
+  assert.equal((await invitesOf(orgId)).length, 1);
+  const accepted = await call(b2bRoutes.acceptB2BMemberRequest ?? Object.values(b2bRoutes).find(r => r?.path === '/b2b/me/member-requests/:requestId/accept'), { claims: { sub: member, userType: 'member' }, params: { requestId: mine.body.memberRequests[0].id } });
+  assert.equal(accepted.statusCode, 200, JSON.stringify(accepted.body));
+  const after2 = await call(benefitsRoute, { claims: { sub: member, userType: 'member' } });
+  assert.deepEqual([after2.body.benefits.map(b => b.name ?? b.benefit?.name), after2.body.memberRequests.length], [['Gym visits'], 0]);
   assert.equal((await invitesOf(orgId)).length, 0);
 });
 
@@ -282,21 +338,22 @@ test('emails: the invitation, a reminder after 3 days and another after 10, then
   await run();
   assert.deepEqual(mine().map(e => e.to).sort(), [mail('m1'), mail('m2'), mail('m3')]);
   const first = mine().find(e => e.to === mail('m1'));
-  assert.equal(first.subject, 'Import Mail has added you to FitFlex');
-  for (const expected of [/^Hello Neema,/, /sign up as a member with this email address/, new RegExp(mail('m1').replace(/\./g, '\\.')), /Get the app: https:\/\/example\.test\/get-fitflex/, /What Import Mail can see/, /cannot see your weight, height/, /ask Import Mail to remove you/]) assert.match(first.text, expected);
+  assert.equal(first.subject, 'Import Mail invites you to FitFlex');
+  for (const expected of [/^Hello Neema,/, /^Import Mail wants to add you to its wellness programme on FitFlex\.$/m, /sign up as a member with this email address/, /The app will then ask you whether you accept; nothing is shared with Import Mail unless you do/, /if you accept, Import Mail can see your FitFlex activity, including activity from before you joined/, new RegExp(mail('m1').replace(/\./g, '\\.')), /Get the app: https:\/\/example\.test\/get-fitflex/, /What Import Mail can see/, /cannot see your weight, height/, /ask Import Mail to remove you/]) assert.match(first.text, expected);
   assert.match(mine().find(e => e.to === mail('m2')).text, /^Hello,/);
   await run();
   assert.equal(mine().length, 3);                                                     // nothing is due again yet
 
-  // m2 joins; m3 is cancelled. Only m1 is reminded.
+  // m2 joins and accepts; m3 is cancelled. Only m1 is reminded.
   const joined = await user({ email: mail('m2') });
   await h.svc.matchInvites({ userId: joined });
+  await h.accept(joined, orgId);
   const m3 = (await invitesOf(orgId)).find(i => i.email === mail('m3'));
   await h.svc.cancelInvite({ access: a, inviteId: m3.id, actorId: OPERATOR });
   h.days(2); await run();
   assert.equal(mine().length, 3);
   h.days(1.1); await run();
-  assert.deepEqual(mine().slice(3).map(e => [e.to, e.subject]), [[mail('m1'), 'Reminder: your FitFlex benefits from Import Mail']]);
+  assert.deepEqual(mine().slice(3).map(e => [e.to, e.subject]), [[mail('m1'), 'Reminder: Import Mail invites you to FitFlex']]);
   h.days(5); await run();
   assert.equal(mine().length, 4);
   h.days(2); await run();
@@ -377,7 +434,7 @@ test('SMS: people listed with a mobile number get the invitation and one reminde
   assert.deepEqual([texts(p1).length, texts(p2).length, h.sent.email.filter(e => e.to === mail('both')).length, h.sent.email.filter(e => e.to === mail('eonly')).length, h.sent.sms.length], [1, 1, 1, 1, 2]);
   const first = texts(p1)[0].text;
   // With a 30-character name the link and the confirm-your-number line don't both fit: the link is left out, never the line.
-  assert.equal(first, 'Import Kilimanjaro Breweries & added you to its wellness programme on FitFlex. Join as a member with this number, or confirm it under Mobile number and email.');
+  assert.equal(first, 'Import Kilimanjaro Breweries & invites you to its wellness programme on FitFlex. Join as a member with this number, or confirm it under Mobile number and email.');
   assert.ok(first.length <= SMS_MAX_LENGTH && /^[\x20-\x7E]+$/.test(first), first);
   await run();
   assert.equal(h.sent.sms.length, 2);                                                 // nothing due again yet
@@ -414,6 +471,7 @@ test('SMS: people listed with a mobile number get the invitation and one reminde
   assert.equal(texts(p4).length, 1);
   const joined = await user({ phone: p4 });
   await h.svc.matchInvites({ userId: joined });
+  await h.accept(joined, orgId);
   h.days(4); await run();
   assert.equal(texts(p4).length, 1);
 });
