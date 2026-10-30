@@ -46,6 +46,7 @@ import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
 import { registerOrgMembershipLookup } from '../auth/org-authz.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
 import { createAccountService } from '../services/account-service.mjs';
+import { TERMINAL as ORDER_TERMINAL_STATUSES } from '../shared/order-lifecycle.mjs';
 import { createOperatorService } from '../services/operator-service.mjs';
 import { createOwnerGymService } from '../services/owner-gym-service.mjs';
 import { createOwnerStaffService, GYM_STAFF_ACL_SCOPES } from '../services/owner-staff-service.mjs';
@@ -684,6 +685,9 @@ export const accountService = createAccountService({
   firebaseConfigured: () => portalFirebaseAdmin.configured(),
   memberDobGuard: args => personalDetailsService.assertMemberProfileAge(args),
   ownsEventOrganizer: async ({ userId }) => Boolean(await db('EventOrganizer').where({ ownerUserId: userId }).first('id')),
+  hasOpenPaidOrder: async ({ userId }) => Boolean(await db('ShopOrder')
+    .where({ buyerId: userId, paymentStatus: 'paid' })
+    .whereNotIn('status', [...ORDER_TERMINAL_STATUSES, 'fulfilled']).first('id')),
   // Partner media (functions#277 review M2): a vendor's, a trainer's or an owner's last gyms' photos and logos.
   // The stored row goes along so this can see which ones. Nothing here touches another table's data.
   onAccountDeleted: (userId, deleted = null) => partnerMediaService.purgeAccount(deleted || { id: userId }, { cause: 'account_deleted' }),

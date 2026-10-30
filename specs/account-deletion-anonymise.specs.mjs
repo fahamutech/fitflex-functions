@@ -83,7 +83,7 @@ async function world() {
   await db('Refund').insert({ id: uid('rfd'), memberId: id, kind: 'subscription', paymentRequestId: payId, amountTzs: 1000, reasonCode: 'other', note: 'Asha asked', paidTo: phone, status: 'requested', createdAt: at, updatedAt: at });
   await db('TrainerSession').insert({ id: uid('ses'), trainerId: uid('trn'), memberId: id, customerName: PERSON_NAME, customerEmail: email, customerPhone: phone, date: '2026-10-30', slot: '10:00', source: 'manual', status: 'scheduled', amountTzs: 20000 });
   const orderId = uid('ord');
-  await db('ShopOrder').insert({ id: orderId, buyerId: id, buyerRole: 'member', items: JSON.stringify([{ productId: uid('prd'), vendorId, name: 'Mat', qty: 1, priceTzs: 30000 }]), totalTzs: 30000, status: 'paid', paymentStatus: 'paid', deliveryMethod: 'home_delivery', deliveryAddress: 'Plot 12, Sinza', note: 'Call Asha at the gate', paidAt: at, updatedAt: at });
+  await db('ShopOrder').insert({ id: orderId, buyerId: id, buyerRole: 'member', items: JSON.stringify([{ productId: uid('prd'), vendorId, name: 'Mat', qty: 1, priceTzs: 30000 }]), totalTzs: 30000, status: 'delivered', paymentStatus: 'paid', deliveryMethod: 'home_delivery', deliveryAddress: 'Plot 12, Sinza', note: 'Call Asha at the gate', paidAt: at, updatedAt: at });
   const gymReview = uid('grev');
   await db('GymReview').insert({ id: gymReview, gymId, memberId: id, rating: 4, text: 'Asha loves this gym', status: 'published', updatedAt: at });
   await db('DeviceToken').insert({ id: uid('dvc'), userId: id, token: uid('token'), platform: 'android' });
@@ -439,6 +439,25 @@ test('blocked cases are unchanged and touch nothing', async () => {
   } finally {
     await db('EventOrganizer').where({ id: organizerRow }).del();
   }
+
+  // A paid order on its way: blocked and nothing is touched, until it is finished.
+  const buyer = uid('usr_buyer');
+  await db('User').insert({ id: buyer, userType: 'member', accountStatus: 'active', updatedAt: at });
+  const order = uid('ord');
+  const placeOrder = { id: order, buyerId: buyer, buyerRole: 'member', items: '[]', totalTzs: 1000, deliveryMethod: 'home_delivery', deliveryAddress: 'Plot 7, Mikocheni', updatedAt: at };
+  await db('ShopOrder').insert({ ...placeOrder, status: 'dispatched', paymentStatus: 'paid' });
+  const open = await del(buyer);
+  assert.deepEqual([open.statusCode, open.body.error], [409, 'open_paid_order']);
+  assert.ok(open.body.messageSw);
+  assert.ok(await db('User').where({ id: buyer }).first());
+  assert.equal((await db('ShopOrder').where({ id: order }).first()).deliveryAddress, 'Plot 7, Mikocheni');
+
+  // Unpaid, and each finished state, no longer stand in the way.
+  await db('ShopOrder').where({ id: order }).update({ status: 'pending', paymentStatus: 'pending' });
+  await db('ShopOrder').insert({ ...placeOrder, id: uid('ord'), status: 'cancelled', paymentStatus: 'paid' });
+  await db('ShopOrder').insert({ ...placeOrder, id: uid('ord'), status: 'delivered', paymentStatus: 'paid' });
+  await db('ShopOrder').insert({ ...placeOrder, id: uid('ord'), status: 'fulfilled', paymentStatus: 'paid' });
+  assert.equal((await del(buyer)).statusCode, 200);
 });
 
 test('append-only logs still refuse everything except clearing the personal value', async () => {

@@ -19,12 +19,22 @@ export function createAccountService({
   memberDobGuard = async () => null,
   // S6 (D53): ({ userId }) → true when the user owns an event organizer (EventOrganizer.ownerUserId is RESTRICT: transfer or close it first).
   ownsEventOrganizer = async () => false,
+  // ({ userId }) → true when a paid order of theirs is still on its way: deleting would take the delivery
+  // address and the buyer's contact from the vendor (owner decision 2026-10-30).
+  hasOpenPaidOrder = async () => false,
 }) {
   async function deleteMyAccount(user) {
     if (await ownsEventOrganizer({ userId: user.id })) {
       return {
         error: 'organizer_owner', status: 409,
         message: 'Transfer or close your organizer account first.', messageSw: 'Hamisha au funga akaunti yako ya mwandaaji kwanza.',
+      };
+    }
+    if (await hasOpenPaidOrder({ userId: user.id })) {
+      return {
+        error: 'open_paid_order', status: 409,
+        message: 'You have a paid order that has not been delivered. You can delete your account once it is delivered or cancelled.',
+        messageSw: 'Una oda iliyolipiwa ambayo bado haijafikishwa. Unaweza kufuta akaunti yako ikishafikishwa au kughairiwa.',
       };
     }
     if (user.userType === 'gym_operator') {

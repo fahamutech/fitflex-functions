@@ -173,6 +173,7 @@ const deleteAccountHtml = `<!doctype html>
 
     <h2>When We Cannot Delete Straight Away</h2>
     <p>Some accounts need a handover first, and the app will tell you: a gym owner whose gym has check-ins, a trainer with bookings, and the owner of an event organizer. Contact us on <a href="https://wa.me/255786670499">WhatsApp</a> and we will help you transfer or close them.</p>
+    <p>If you have a paid shop order that has not been delivered, you can delete your account once it is delivered or cancelled.</p>
 
     <h2>Contact</h2>
     <p>For questions about account or data deletion, contact FitFlex on WhatsApp at <a href="https://wa.me/255786670499">+255 786 670 499</a>.</p>
@@ -223,6 +224,7 @@ const deleteAccountHtml = `<!doctype html>
 
       <h2>Pale Tusipoweza Kufuta Papo Hapo</h2>
       <p>Baadhi ya akaunti zinahitaji makabidhiano kwanza, na app itakuambia: mmiliki wa gym ambayo ina watu waliowahi kuingia, trainer mwenye booking, na mmiliki wa akaunti ya mwandaaji wa matukio. Wasiliana nasi kupitia <a href="https://wa.me/255786670499">WhatsApp</a> tukusaidie kuzihamisha au kuzifunga.</p>
+      <p>Ukiwa na oda ya duka iliyolipiwa ambayo bado haijafikishwa, unaweza kufuta akaunti yako ikishafikishwa au kughairiwa.</p>
 
       <h2>Mawasiliano</h2>
       <p>Kwa maswali kuhusu kufuta akaunti au taarifa, wasiliana na FitFlex kupitia WhatsApp <a href="https://wa.me/255786670499">+255 786 670 499</a>.</p>
