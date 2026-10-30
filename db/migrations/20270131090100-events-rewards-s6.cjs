@@ -147,7 +147,7 @@ exports.down = async function down(knex) {
   await knex.raw(`ALTER TABLE "RewardRedemption" DROP CONSTRAINT IF EXISTS rewardredemption_userid_foreign`);
   await knex.raw(`ALTER TABLE "RewardRedemption" ALTER COLUMN "userId" SET NOT NULL`);
   await knex.raw(`ALTER TABLE "RewardRedemption" ADD CONSTRAINT rewardredemption_userid_foreign FOREIGN KEY ("userId") REFERENCES "User"(id) ON DELETE RESTRICT ON UPDATE CASCADE`);
-  await knex.raw(`ALTER TABLE "RewardRedemption" DROP COLUMN "needsReview", DROP COLUMN "redeemedByRole", DROP COLUMN "adminNote", DROP COLUMN "expiresAt", DROP COLUMN "anonymisedAt"`);
+  await knex.raw(`ALTER TABLE "RewardRedemption" DROP COLUMN "needsReview", DROP COLUMN "redeemedByRole", DROP COLUMN "adminNote", DROP COLUMN "codeKeyId", DROP COLUMN "expiresAt", DROP COLUMN "anonymisedAt"`);
 
   await knex.raw(`CREATE OR REPLACE FUNCTION reward_ledger_entry_immutable() RETURNS trigger AS $$
     BEGIN
