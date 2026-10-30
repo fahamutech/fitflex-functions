@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -192,6 +192,39 @@ export const eventWebhookRetention = {
     const r = await opsService.runJob('event-webhook-retention');
     const s = r?.stats ?? {};
     if (s.processed) console.log(`[events] retention: attempts=${s.attempts} deliveries=${s.deliveries} outbox=${s.outbox} idempotency=${s.idempotency} notices=${s.notices}`);
+  }
+};
+
+export const eventAwardsRun = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events (S6): take a batch of award tasks (FOR UPDATE SKIP LOCKED) and award or revoke medals, achievements and earned rewards from the current results. The only writer of awards. Does nothing unless EVENTS_REWARDS is on. Safe to rerun and to overlap. The work is in src/bootstrap/services.mjs (event-awards-run).',
+  onJob: async () => {
+    if (!eventsRewardsOn()) return;
+    const r = await opsService.runJob('event-awards-run');
+    const s = r?.stats ?? {};
+    if (s.claimed) console.log(`[events] awards: claimed=${s.claimed} done=${s.done} failed=${s.failed} retried=${s.retried}`);
+  }
+};
+
+export const eventAwardsReconcile = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'Events (S6): queue award tasks for cancelled or refunded places, cancelled events and new claims; lapse reserved perks past their expiry. Does nothing unless EVENTS_REWARDS is on. Idempotent. The work is in src/bootstrap/services.mjs (event-awards-reconcile).',
+  onJob: async () => {
+    if (!eventsRewardsOn()) return;
+    const r = await opsService.runJob('event-awards-reconcile');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] awards reconcile: queued=${s.queued} reservations=${s.expiredReservations}`);
+  }
+};
+
+export const eventRewardExpire = {
+  created, rule: '0 23 * * *', // 23:00 UTC = 02:00 Africa/Dar_es_Salaam
+  description: 'Events (S6): expire unspent reward units older than their definition\'s expiryDays and sweep medal-art upload attempts older than two days. Does nothing unless EVENTS_REWARDS is on. Idempotent (expire:<earnEntryId> keys). The work is in src/bootstrap/services.mjs (event-reward-expire).',
+  onJob: async () => {
+    if (!eventsRewardsOn()) return;
+    const r = await opsService.runJob('event-reward-expire');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] reward expiry: expired=${s.expired} attemptsSwept=${s.attemptsSwept}`);
   }
 };
 

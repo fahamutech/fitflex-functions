@@ -135,7 +135,7 @@ export function createEventsResultsService({
     const { byCategory } = await stagesOf(trx, event, categories);
     const official = new Set([...byCategory].filter(([, s]) => s === 'official').map(([id]) => id));
     const rows = (await trx('EventResult as e').join('EventRegistration as r', 'r.id', 'e.registrationId').join('EventCategory as c', 'c.id', 'r.categoryId')
-      .where('r.eventId', event.id).where('e.isCurrent', true)
+      .where('r.eventId', event.id).where('e.isCurrent', true).where('r.status', 'confirmed')
       .select('e.id', 'e.registrationId', 'e.overallRank', 'e.categoryRank', 'e.verificationStatus', 'e.finishStatus', 'e.elapsedMs', 'e.withinCutoff', 'r.categoryId', 'c.distanceMeters')).map(plain);
     const ranks = computeRanks(rows.map(r => ({ ...r, distanceMeters: r.distanceMeters })), official);
     const at = stamp();

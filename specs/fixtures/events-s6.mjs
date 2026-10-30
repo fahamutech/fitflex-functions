@@ -94,8 +94,10 @@ export function harness() {
         await trx('EventResultRelease').whereIn('eventId', events).del();
         await trx.raw('ALTER TABLE "EventResultRelease" ENABLE TRIGGER ALL');
       });
-      await db('RewardDefinition').where('triggerEventId', 'in', events).update({ status: 'ended', triggerEventId: null }).catch(() => {});
+      await db('RewardDefinition').where('triggerEventId', 'in', events).update({ triggerEventId: null });
     }
+    // reward definitions are global and the ledger is append-only: end every definition so a later spec file never earns from this one
+    await db('RewardDefinition').whereNot({ status: 'ended' }).update({ status: 'ended' });
     await base.cleanup();
     s6Off();
   }
