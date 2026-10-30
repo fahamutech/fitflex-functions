@@ -38,6 +38,7 @@ export function harness() {
     made6.events.push(f.event.id);
     const startsAt = eventOver.startsAt ?? new Date(Date.now() - 2 * H);
     await db('Event').where({ id: f.event.id }).update({ status: 'in_progress', startsAt, endsAt: eventOver.endsAt ?? new Date(+startsAt + 6 * H), publishedAt: new Date(+startsAt - 20 * D) });
+    f.event = await db('Event').where({ id: f.event.id }).first();
     const regs5 = m ? await base.addRegistrations({ eventId: f.event.id, ticketType: f.categories[1].tickets[0], n: m }) : [];
     f.regs.forEach((r, i) => { r.bib = String(1001 + i); });
     regs5.forEach((r, i) => { r.bib = String(2001 + i); });

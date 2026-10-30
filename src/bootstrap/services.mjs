@@ -175,7 +175,8 @@ import { createEventsIntegrationsService } from '../services/events-integrations
 import { createEventsWebhookService } from '../services/events-webhook-service.mjs';
 import { createEventsResultsService } from '../services/events-results-service.mjs';
 import { eventsResultsOn, eventsRunsOn, eventsRewardsOn, eventsMedalArtOn, eventsResultsPublicOn } from '../shared/feature-flags.mjs';
-import { eventsResultsImportMaxRows, eventsResultsDisputeDefaultHours, eventsResultsPushMax, eventsResultsConsentVersions } from '../shared/events-config.mjs';
+import { createEventsRunLinkService } from '../services/events-run-link-service.mjs';
+import { eventsRunDistanceToleranceBps, eventsRunLinkMaxDaysAfter, eventsResultsImportMaxRows, eventsResultsDisputeDefaultHours, eventsResultsPushMax, eventsResultsConsentVersions } from '../shared/events-config.mjs';
 import { webhookKeyRing } from '../shared/webhook-signing.mjs';
 import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
 import {
@@ -1441,5 +1442,9 @@ export const eventsResultsService = createEventsResultsService({
   notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
   importMaxRows: eventsResultsImportMaxRows, disputeDefaultHours: eventsResultsDisputeDefaultHours, pushMax: eventsResultsPushMax, clauseVersions: eventsResultsConsentVersions,
   rewardsOn: eventsRewardsOn,
+});
+export const eventsRunLinkService = createEventsRunLinkService({
+  db, results: eventsResultsService, recordRun: (memberId, body) => activityService.recordRun(memberId, body),
+  toleranceBps: eventsRunDistanceToleranceBps, maxDaysAfter: eventsRunLinkMaxDaysAfter,
 });
 void eventsRunsOn; void eventsMedalArtOn; void eventsResultsPublicOn; void eventsResultsOn;
