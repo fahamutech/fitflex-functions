@@ -567,3 +567,13 @@ export function webGymProfileOn() {
 export function webQrCheckinOn() {
   return on('WEB_QR_CHECKIN');
 }
+
+/**
+ * Browser check-in security alert (S3): a push + inbox message to the member when a gym check-in was made from a web
+ * browser, and the "Security activity" list. Off unless WEB_CHECKIN_ALERTS is set, and only effective while
+ * WEB_QR_CHECKIN is also on. With it off the SecurityEvent record is still written but nothing is sent.
+ * Launch gate: keep OFF until the app's security-activity screen (S4) is live.
+ */
+export function webCheckinAlertsOn() {
+  return webQrCheckinOn() && on('WEB_CHECKIN_ALERTS');
+}
