@@ -81,6 +81,8 @@ import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
 import { createPartnerNotifier } from '../services/partner-notifier.mjs';
+import { createSecurityEventService } from '../services/security-event-service.mjs';
+import { webCheckinAlertsOn } from '../shared/feature-flags.mjs';
 import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createRecommendationEngine } from '../services/training/recommendation-engine.mjs';
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
@@ -687,9 +689,17 @@ export const accountService = createAccountService({
 // Until a gym's owner is verified, only the gym's own members check in there.
 // One check for the check-in and the scanner preview.
 const gymOpenToPass = gymId => partnerGate.isGymOperational(gymId);
+// Security events + web check-in alert (S3). notificationService is created further down; this only runs later.
+export const securityEventService = createSecurityEventService({
+  db, gyms, deviceTokens,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  alertsOn: webCheckinAlertsOn,
+});
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
-  onCheckin: checkin => partnerNotifier.gymCheckin(checkin),
+  // Two independent reactions; neither can block or fail the other or the check-in (S3: web check-in security alert).
+  onCheckin: checkin => Promise.allSettled([partnerNotifier.gymCheckin(checkin), securityEventService.handleCheckin(checkin)]),
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
   gymOpenToPass,
