@@ -514,6 +514,23 @@ export const requireEventsOrganizerApi = gate(eventsOrganizerApiOn);
 export const requireEventsWebhooks = gate(eventsWebhooksOn);
 
 /**
+ * S6 (docs/design/events-s6-runs-results-medals-rewards.md §13.1): five dormant flags, all off by default; every one needs
+ * EVENTS_MODULE and EVENTS_REGISTRATION. RESULTS: results, disputes, visibility, /v1 results routes, result webhooks, award jobs.
+ * RUNS (needs RESULTS): run links. RESULTS_PUBLIC (needs RESULTS): the signed-in board. REWARDS (needs RESULTS): medals,
+ * achievements, ledger, wallet, redemption, the admin reward desk. MEDAL_ART (needs REWARDS): organizer medal artwork.
+ */
+export const eventsResultsOn = () => eventsRegistrationOn() && on('EVENTS_RESULTS');
+export const eventsRunsOn = () => eventsResultsOn() && on('EVENTS_RUNS');
+export const eventsResultsPublicOn = () => eventsResultsOn() && on('EVENTS_RESULTS_PUBLIC');
+export const eventsRewardsOn = () => eventsResultsOn() && on('EVENTS_REWARDS');
+export const eventsMedalArtOn = () => eventsRewardsOn() && on('EVENTS_MEDAL_ART');
+export const requireEventsResults = gate(eventsResultsOn);
+export const requireEventsRuns = gate(eventsRunsOn);
+export const requireEventsResultsPublic = gate(eventsResultsPublicOn);
+export const requireEventsRewards = gate(eventsRewardsOn);
+export const requireEventsMedalArt = gate(eventsMedalArtOn);
+
+/**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
  * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and
  * /admin/gym-owners/:id/personal-details answer 404 feature_disabled, and /trainer/register and

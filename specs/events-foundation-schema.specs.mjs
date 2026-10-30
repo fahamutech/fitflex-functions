@@ -30,6 +30,10 @@ const MIGRATIONS = [
   // S5: venue operations / payout schedule and the API + webhook columns. Down FAILS CLOSED on data; the suite's tables hold none at this point.
   '20270126090000-events-ops-s5.cjs',
   '20270126090100-events-integrations-s5.cjs',
+  // S6: results, rewards and medal artwork (they reference ApiClient, EventRegistration and the S1 reward tables, so they come down first).
+  '20270131090000-events-results-s6.cjs',
+  '20270131090100-events-rewards-s6.cjs',
+  '20270131090200-events-medal-art-s6.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');

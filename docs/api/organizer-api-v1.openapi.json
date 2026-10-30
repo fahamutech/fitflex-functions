@@ -823,6 +823,317 @@
         }
       }
     },
+    "/v1/organizer/events/{eventId}/results": {
+      "get": {
+        "summary": "List current results",
+        "description": "Scope: results:read.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "results:read",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque. Pass nextCursor from the previous page."
+          },
+          {
+            "name": "categoryId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "updatedSince",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "event_not_found (also for another organizer's or an unlisted event)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/events/{eventId}/results/releases": {
+      "get": {
+        "summary": "Release history",
+        "description": "Scope: results:read.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "results:read",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultReleaseList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "event_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizer/events/{eventId}/results/imports": {
+      "post": {
+        "summary": "Submit up to 500 provisional results (per row, not atomic)",
+        "description": "Scope: results:write.",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "x-scope": "results:write",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 100
+            },
+            "description": "Required on every write. A replay returns the original answer (200 + Idempotent-Replayed: true); the same key with another body is 409 idempotency_key_reused."
+          },
+          {
+            "name": "dryRun",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Validate only; nothing is stored."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResultsImportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultsImportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "idempotency_key_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_token | token_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "insufficient_scope { requiredScope } | organizer_suspended | client_expired | api_access_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "event_not_open_for_results | event_cancelled | idempotency_key_reused | request_in_progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "validation_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited { retryAfterSeconds } (Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/organizer/webhook-endpoints": {
       "get": {
         "summary": "List webhook endpoints",
@@ -1543,6 +1854,86 @@
           }
         }
       }
+    },
+    "result.verified": {
+      "post": {
+        "summary": "result.verified delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "result.published": {
+      "post": {
+        "summary": "result.published delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "result.corrected": {
+      "post": {
+        "summary": "result.corrected delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
+    },
+    "result.disputed": {
+      "post": {
+        "summary": "result.disputed delivery",
+        "description": "Headers: X-FitFlex-Event-Id (dedupe on it), X-FitFlex-Event-Type, X-FitFlex-Timestamp (unix seconds), X-FitFlex-Delivery-Attempt, X-FitFlex-Signature: v1=hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)). Answer 2xx quickly.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1557,7 +1948,9 @@
               "registrations:demographics": "Also gender and age on event day.",
               "kit:write": "Record kit handovers.",
               "bibs:write": "Assign bib numbers.",
-              "webhooks:manage": "Manage webhooks (granted by the organizer owner only)."
+              "webhooks:manage": "Manage webhooks (granted by the organizer owner only).",
+              "results:read": "Read results and release history (needs registrations:read).",
+              "results:write": "Submit PROVISIONAL results. It cannot verify, release, correct or disqualify them (needs registrations:read)."
             }
           }
         }
@@ -2247,6 +2640,288 @@
           "items"
         ]
       },
+      "ResultItem": {
+        "type": "object",
+        "properties": {
+          "registrationId": {
+            "type": "string"
+          },
+          "resultId": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "bibNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "categoryId": {
+            "type": "string"
+          },
+          "finishStatus": {
+            "enum": [
+              "finished",
+              "dnf",
+              "dns",
+              "dq"
+            ]
+          },
+          "verificationStatus": {
+            "enum": [
+              "pending_verification",
+              "verified",
+              "rejected",
+              "corrected",
+              "disqualified"
+            ]
+          },
+          "stage": {
+            "enum": [
+              "none",
+              "provisional",
+              "official",
+              "corrected",
+              "disputed",
+              "disqualified",
+              "rejected"
+            ]
+          },
+          "sourceType": {
+            "enum": [
+              "timing_provider",
+              "organizer_verified",
+              "fitflex_gps",
+              "manual_unverified"
+            ]
+          },
+          "netElapsedMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "gunElapsedMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "elapsedMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "overallRank": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "categoryRank": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "registrationId",
+          "resultId",
+          "revision",
+          "bibNumber",
+          "categoryId",
+          "finishStatus",
+          "verificationStatus",
+          "stage",
+          "sourceType",
+          "netElapsedMs",
+          "gunElapsedMs",
+          "elapsedMs",
+          "overallRank",
+          "categoryRank",
+          "updatedAt"
+        ],
+        "description": "No names and no contact data. Ranks are set by FitFlex on official release. Use revision to order updates."
+      },
+      "ResultList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResultItem"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ]
+      },
+      "ResultReleaseList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "categoryId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "stage": {
+                  "enum": [
+                    "provisional",
+                    "official"
+                  ]
+                },
+                "action": {
+                  "enum": [
+                    "release",
+                    "withdraw"
+                  ]
+                },
+                "releasedAt": {
+                  "type": "string"
+                },
+                "resultCount": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "categoryId",
+                "stage",
+                "action",
+                "releasedAt",
+                "resultCount"
+              ]
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "ResultsImportRequest": {
+        "type": "object",
+        "properties": {
+          "sourceLabel": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "timeBasis": {
+            "enum": [
+              "net",
+              "gun"
+            ]
+          },
+          "rows": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "clientRef": {
+                  "type": "string"
+                },
+                "bib": {
+                  "type": "string"
+                },
+                "registrationId": {
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "finished",
+                    "dnf",
+                    "dns",
+                    "dq"
+                  ]
+                },
+                "netTime": {
+                  "type": "string",
+                  "description": "H:MM:SS or HH:MM:SS.mmm"
+                },
+                "gunTime": {
+                  "type": "string"
+                },
+                "category": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "clientRef"
+              ]
+            }
+          }
+        },
+        "required": [
+          "rows"
+        ]
+      },
+      "ResultsImportResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "clientRef": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "resultId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "action": {
+                  "enum": [
+                    "created",
+                    "revised",
+                    "unchanged",
+                    null
+                  ]
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "clientRef",
+                "ok"
+              ]
+            }
+          }
+        },
+        "required": [
+          "results"
+        ]
+      },
       "BibBatchResponse": {
         "type": "object",
         "properties": {
@@ -2296,7 +2971,11 @@
               "bib.assigned",
               "event.updated",
               "event.cancelled",
-              "refund.updated"
+              "refund.updated",
+              "result.verified",
+              "result.published",
+              "result.corrected",
+              "result.disputed"
             ]
           },
           "version": {
@@ -2348,7 +3027,11 @@
                 "bib.assigned",
                 "event.updated",
                 "event.cancelled",
-                "refund.updated"
+                "refund.updated",
+                "result.verified",
+                "result.published",
+                "result.corrected",
+                "result.disputed"
               ]
             }
           },
