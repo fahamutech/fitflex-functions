@@ -223,6 +223,13 @@ export const SECTION_KEYS = Object.freeze(['featured', 'best_sellers', 'recommen
  */
 export const ALLOCATION_ORDER = Object.freeze(['featured', 'best_sellers', 'recently_viewed', 'popular_near_you', 'recommended', 'essentials', 'deals', 'new_arrivals']);
 export const DEFAULT_ASSEMBLY = Object.freeze({ sections: SECTION_KEYS, minItems: 4, maxItems: 12, newArrivalDays: 90 });
+/**
+ * Slice 4 (SHOP_FLASH_SALES): the flash_sale rail is built only when the caller passes `flashSales`
+ * (productId → live sale). It is first in allocation (P1 DD-7: Flash sale > Featured > Best sellers …)
+ * and first in display (P1 §5.1), and is not part of SHOP_HOME_SECTIONS. Without `flashSales` nothing
+ * here changes.
+ */
+export const FLASH_SALE_SECTION = 'flash_sale';
 
 /** SHOP_HOME_SECTIONS → the enabled keys in that order (unknown keys and repeats dropped). Empty → all. */
 export function parseSectionList(value) {
@@ -268,7 +275,7 @@ export function salesStats(orders, { now, days = 30 } = {}) {
 }
 
 /** Each section's candidates, best first, before de-duplication and limits. */
-function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, config }) {
+function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, config, flashSales = null }) {
   const ordersOf = p => sales.get(p.id)?.orders || 0;
   const unitsOf = p => sales.get(p.id)?.units || 0;
   const roleOrdersOf = p => sales.get(p.id)?.byMode?.[needs.mode] || 0;
@@ -319,7 +326,13 @@ function rankers({ needs, eligible, featured, paidPlacementIds, sales, now, conf
     },
     // The app's order (most recent first); ids that are not eligible simply drop out.
     recently_viewed: () => needs.recentIds.map(id => byIdMap.get(id)).filter(Boolean),
-    deals: () => eligible.filter(onSale).sort((a, b) => discountPct(b) - discountPct(a) || tieBreak(a, b)),
+    // A product in a live flash sale is never a "Deal" (spec shop-home-phase2 §8.4), rail or not.
+    deals: () => eligible.filter(p => onSale(p) && !flashSales?.has(p.id)).sort((a, b) => discountPct(b) - discountPct(a) || tieBreak(a, b)),
+    // Slice 4: products in a live flash sale; deepest discount first, then the soonest to end.
+    ...(flashSales ? {
+      [FLASH_SALE_SECTION]: () => eligible.filter(p => flashSales.has(p.id)).sort((a, b) => (flashSales.get(b.id).discountPct - flashSales.get(a.id).discountPct)
+        || time(flashSales.get(a.id).endsAt) - time(flashSales.get(b.id).endsAt) || tieBreak(a, b)),
+    } : {}),
     new_arrivals: () => {
       const since = time(now) - config.newArrivalDays * 86_400_000;
       return eligible.filter(p => time(p.createdAt) >= since).sort((a, b) => time(b.createdAt) - time(a.createdAt) || byId(a, b));
@@ -340,8 +353,8 @@ export function viewAllFor(key, picked) {
   if (key === 'popular_near_you') return { viewAll: { path: '/shop/products', query: {} }, faithful: false };
   const cats = uniq(picked.map(p => p.category));
   const category = cats.length === 1 && cats[0] ? { category: cats[0] } : {};
-  const base = { best_sellers: { sort: 'popularity' }, recommended: { sort: 'popularity' }, deals: { promotions: 'true' } }[key] || {};
-  const faithful = ['best_sellers', 'recommended', 'deals'].includes(key) || (key === 'essentials' && Boolean(category.category));
+  const base = { best_sellers: { sort: 'popularity' }, recommended: { sort: 'popularity' }, deals: { promotions: 'true' }, [FLASH_SALE_SECTION]: { flashSale: 'true' } }[key] || {};
+  const faithful = ['best_sellers', 'recommended', 'deals', FLASH_SALE_SECTION].includes(key) || (key === 'essentials' && Boolean(category.category));
   return { viewAll: { path: '/shop/products', query: { ...category, ...base } }, faithful };
 }
 
@@ -351,22 +364,28 @@ export function viewAllFor(key, picked) {
  * products is left out, and the products it would have taken stay free for the sections after it.
  * → [{ key, productIds, hasMore, viewAll }]
  */
-export function assembleSections({ needs, eligible, featured = [], paidPlacementIds = [], sales = new Map(), now, config = {} }) {
+// flashSaleRail false: live sales still keep their products out of Deals, but no flash_sale section is built.
+export function assembleSections({ needs, eligible, featured = [], paidPlacementIds = [], sales = new Map(), now, config = {}, flashSales = null, flashSaleRail = true }) {
   const cfg = { ...DEFAULT_ASSEMBLY, ...config };
-  const rank = rankers({ needs, eligible, featured, paidPlacementIds, sales, now, config: cfg });
-  const enabled = new Set(cfg.sections);
+  const rank = rankers({ needs, eligible, featured, paidPlacementIds, sales, now, config: cfg, flashSales });
+  const rail = Boolean(flashSales) && flashSaleRail;
+  const enabled = new Set(rail ? [FLASH_SALE_SECTION, ...cfg.sections] : cfg.sections);
   const used = new Set();
   const built = new Map();
-  for (const key of ALLOCATION_ORDER) {
+  for (const key of rail ? [FLASH_SALE_SECTION, ...ALLOCATION_ORDER] : ALLOCATION_ORDER) {
     if (!enabled.has(key) || !rank[key]) continue;
     const free = rank[key]().filter(p => !used.has(p.id));
     const picked = free.slice(0, cfg.maxItems);
     if (picked.length < cfg.minItems) continue;
     for (const p of picked) used.add(p.id);
     const { viewAll, faithful } = viewAllFor(key, picked);
-    built.set(key, { key, productIds: picked.map(p => p.id), hasMore: faithful && free.length > picked.length, viewAll });
+    built.set(key, {
+      key, productIds: picked.map(p => p.id), hasMore: faithful && free.length > picked.length, viewAll,
+      // The countdown: the earliest end among the sale products shown (count down against serverNow).
+      ...(key === FLASH_SALE_SECTION ? { endsAt: new Date(Math.min(...picked.map(p => time(flashSales.get(p.id).endsAt)))).toISOString() } : {}),
+    });
   }
-  return cfg.sections.filter(k => built.has(k)).map(k => built.get(k));
+  return (rail ? [FLASH_SALE_SECTION, ...cfg.sections] : cfg.sections).filter(k => built.has(k)).map(k => built.get(k));
 }
 
 // ── copy (English + Swahili; Swahili is a draft for native review) ───────────
@@ -436,6 +455,13 @@ const COPY = {
     title: { all: { en: 'Recently viewed', sw: 'Ulizotazama hivi karibuni' } },
     reason: () => ({ en: 'Products you opened recently on this device.', sw: 'Bidhaa ulizofungua hivi karibuni kwenye kifaa hiki.' }),
     codes: () => ['recently_viewed'],
+  },
+  // Slice 4. Title / reason from the P1 spec §10 (shop.home.flashSale, shop.why.flashSale). [SW review]
+  flash_sale: {
+    title: { all: { en: 'Flash sale', sw: 'Ofa ya muda mfupi' } },
+    // [SW review] i18n review 2026-10-29: "kwa muda mfupi" (for a short time).
+    reason: () => ({ en: 'The seller has set a discount for a limited time.', sw: 'Muuzaji ameweka punguzo kwa muda mfupi.' }),
+    codes: () => ['flash_sale_seller_discount'],
   },
   deals: {
     title: { all: { en: 'Deals', sw: 'Ofa' } },
@@ -550,6 +576,7 @@ export function describeSections(sections, needs, personal = {}) {
       viewAll: s.viewAll || { path: '/shop/products', query: {} },
       productIds: s.productIds,
       hasMore: s.hasMore,
+      ...(s.endsAt ? { endsAt: s.endsAt } : {}),
     };
   });
 }
@@ -600,7 +627,8 @@ const sameSections = (a, b) => a.length === b.length && a.every((s, i) => s.key 
  * A personal signal counts as used only when it changed the page compared with the page without it.
  * Gender/age act after assembly, inside a rail: the set of products never changes, only their order.
  */
-export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, suspendedVendorIds = [], products, featured, paidPlacementIds, orders, config = {}, now, personalisation = null }) {
+// flashSales (slice 4; null = exactly as before): Map(productId → { discountPct, endsAt }) of live sales, worked out per request.
+export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProfile, trainerProfile, recentIds, ownVendorIds, suspendedVendorIds = [], products, featured, paidPlacementIds, orders, config = {}, now, personalisation = null, flashSales = null, flashSaleRail = true }) {
   const identity = resolveShoppingMode({ requested: mode, sessionUserType, heldUserTypes });
   if (identity.error) return identity;
   const p = personalisation;
@@ -609,7 +637,7 @@ export function buildShopHome({ mode, sessionUserType, heldUserTypes, memberProf
   let needs = buildNeeds({ mode: identity.mode, memberProfile, trainerProfile, recentIds, config, optedOut: Boolean(p?.optedOut), profileSignals: p?.profileSignals !== false, location });
   const { eligible } = filterEligible(products, { ownVendorIds, suspendedVendorIds });
   const sales = salesStats(orders, { now });
-  const assemble = n => assembleSections({ needs: n, eligible, featured, paidPlacementIds, sales, now, config });
+  const assemble = n => assembleSections({ needs: n, eligible, featured, paidPlacementIds, sales, now, config, flashSales, flashSaleRail });
   let sections = assemble(needs);
   const personal = {};
   const signals = [];

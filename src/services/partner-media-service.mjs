@@ -29,7 +29,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import {
-  ADMIN_CONFIRMATION, DEFAULT_VARIANT, IMAGE_JOBS, MEDIA_KINDS, NOTE_MAX, OVERRIDE_REASON_MAX, PARTNER_CONFIRMATION, PARTNER_MEDIA_LIMITS,
+  ADMIN_CONFIRMATION, DEFAULT_VARIANT, SUBJECT_SEARCH, IMAGE_JOBS, MEDIA_KINDS, NOTE_MAX, OVERRIDE_REASON_MAX, PARTNER_CONFIRMATION, PARTNER_MEDIA_LIMITS,
   PLATE_CHOICES, PREVIEW_VARIANT_OF_WIDTH, PREVIEW_WIDTHS, SERVED_VARIANTS, SUBJECT_TYPES, SUBJECT_TYPE_OF_ROLE, TAKEDOWN_REASONS,
   UPLOAD_RATE, confirmed, parseFocal, settingsRoute, takenDownMessage,
 } from '../shared/partner-media-rules.mjs';
@@ -621,6 +621,21 @@ export function createPartnerMediaService({
     return v && v.accountStatus !== 'closed' ? { type, id, name: vendorNameOf(v) } : null;
   }
 
+  /**
+   * GET /admin/partner-media/subjects?type=&q=&limit= — find a partner to set a photo or logo for
+   * (brand_media's picker). Names and ids only; the id is the one POST /admin/partner-media takes.
+   */
+  async function adminSubjects({ query = {} }) {
+    const subjectType = query.type ?? query.subjectType;
+    if (!SUBJECT_TYPES.includes(subjectType)) return fail('invalid_subject_type', 400, { field: 'type', allowed: SUBJECT_TYPES });
+    const search = typeof query.q === 'string' ? query.q.trim() : '';
+    if (search.length < SUBJECT_SEARCH.minQuery) return fail('q_too_short', 400, { field: 'q', minLength: SUBJECT_SEARCH.minQuery });
+    const raw = parseInt(query.limit, 10);
+    const limit = Number.isFinite(raw) && raw > 0 ? Math.min(raw, SUBJECT_SEARCH.maxLimit) : SUBJECT_SEARCH.defaultLimit;
+    const { rows, total } = await store.searchSubjects({ subjectType, search: search.slice(0, SUBJECT_SEARCH.maxQuery), limit });
+    return { items: rows.map(r => ({ type: subjectType, id: r.id, name: r.name })), total };
+  }
+
   /** GET /admin/partner-media/:id/preview?w= — 404 when the partner no longer exists (review M2). */
   async function adminPreview({ id, width = null }) {
     const item = await store.getMedia(id);
@@ -923,7 +938,7 @@ export function createPartnerMediaService({
 
   return {
     resolveAccess, overview, file, preview, admitUpload, upload, remove,
-    adminList, adminPreview, markReviewed, takeDown, adminConfirmation, adminSet, adminUpdate,
+    adminList, adminSubjects, adminPreview, markReviewed, takeDown, adminConfirmation, adminSet, adminUpdate,
     purgeSubject, purgeAccount, purgeOrphans, sweep,
     resetLimits: () => { minuteLimiter.reset(); userMinuteLimiter.reset(); },
   };

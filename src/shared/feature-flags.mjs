@@ -143,6 +143,17 @@ export function shopNearYouOn() {
 }
 
 /**
+ * Shop home Phase 2 · slice 4: flash sales (docs/shop-flash-sales-api.md). PRICING PATH. Off unless
+ * SHOP_FLASH_SALES is set: every /vendor/flash-sales and /admin/flash-sales route answers 404
+ * feature_disabled before sign-in, and every price, product list, store, home and checkout answer is
+ * byte-identical to before (no sale fields, no flash_sale section, items[].expectedPriceTzs ignored,
+ * no price lock). Approved sales stay stored and apply again when it is back on.
+ */
+export function shopFlashSalesOn() {
+  return on('SHOP_FLASH_SALES');
+}
+
+/**
  * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
  * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
  * carries no `manual` block and subscribe / upgrade take no reference, exactly
@@ -213,8 +224,8 @@ export function vendorToolsOptions() {
     purchases: vendorToolsFlag('VENDOR_PURCHASES'),
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
-    // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
-    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn() },
+    // umbrella (a shop feature, not a vendor tool).
+    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn(), flashSales: shopFlashSalesOn() },
   };
 }
 
@@ -515,9 +526,44 @@ export function partnerDobRequiredOn() {
 }
 
 /**
+ * Admin-portal audit M3. Off unless SELCOM_STRICT_AMOUNT is set. On: a Selcom
+ * "success" callback activates a waiting subscription only when it carries an
+ * `amount` AND an open payment request exists AND the amount equals the request's.
+ * Otherwise it is refused (409 amount_required / no_open_request / amount_mismatch)
+ * before the payment_id is claimed, so a corrected redelivery still works.
+ * Off: the old rule (amount compared only when both sides are present).
+ */
+export function selcomStrictAmountOn() {
+  return on('SELCOM_STRICT_AMOUNT');
+}
+
+/**
+ * Admin-portal audit S4. Off unless ADMIN_EMAILS_STRICT is set. On, in production
+ * with FITFLEX_ADMIN_EMAILS unset or blank: no email is trusted as a configured
+ * super-admin (the built-in fallback address is not used). Off: the fallback
+ * stays in use and a one-time warning is logged. Set FITFLEX_ADMIN_EMAILS before
+ * switching this on, or nobody signs in as an env super-admin. Note: with strict on and the
+ * variable unset, isConfiguredAdminEmail() is false for everyone, so the `env_admin_immutable`
+ * protection (env super-admins cannot be edited or deleted in the portal) also stops applying.
+ * A variable that is set but blank trusts nobody whether or not this flag is on.
+ */
+export function adminEmailsStrictOn(env = process.env) {
+  return TRUE_VALUES.has(String(env.ADMIN_EMAILS_STRICT ?? '').trim().toLowerCase());
+}
+
+/**
  * Browser gym profile: the open, read-only gym page behind the printed gym QR (POST /public/gyms/resolve).
  * Off unless WEB_GYM_PROFILE is set: the route answers 404 not_found, as if it did not exist.
  */
 export function webGymProfileOn() {
   return on('WEB_GYM_PROFILE');
+}
+
+/**
+ * Browser gym QR check-in (S2): the intent / preview / confirm routes and the short-lived web check-in session.
+ * Off unless WEB_QR_CHECKIN is set: every one of those routes answers 404 not_found, as if it did not exist.
+ * Also needs QR_HMAC_SECRET (without it the routes stay 404).
+ */
+export function webQrCheckinOn() {
+  return on('WEB_QR_CHECKIN');
 }

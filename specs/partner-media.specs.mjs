@@ -209,7 +209,7 @@ test('flag off: every partner-media route answers 404 feature_disabled before si
   const routes = [
     ['GET', '/partner/media'], ['POST', '/partner/media/hero'], ['POST', '/partner/media/logo'], ['GET', '/partner/media/x/file'],
     ['GET', '/partner/media/x/file?variant=x2'], ['GET', '/partner/media/x/preview'], ['DELETE', '/partner/media/x'],
-    ['GET', '/admin/partner-media'], ['GET', '/admin/partner-media/confirmation'], ['GET', '/admin/partner-media/x/preview'],
+    ['GET', '/admin/partner-media'], ['GET', '/admin/partner-media/subjects?type=gym&q=ar'], ['GET', '/admin/partner-media/confirmation'], ['GET', '/admin/partner-media/x/preview'],
     ['POST', '/admin/partner-media/x/reviewed'], ['POST', '/admin/partner-media/x/take-down'], ['POST', '/admin/partner-media'],
     ['PATCH', '/admin/partner-media/x'],
   ];
@@ -1145,4 +1145,91 @@ test('contract: 413 file_too_large carries maxPixels (photos over 50 MP) or maxS
   const busy = createPartnerMediaService({ store: createPgPartnerMediaStore({ db }), imageGate: { run: async () => ({ busy: true }) }, logger: { error() {}, warn() {} } });
   const r = await busy.upload({ claims: owner(), kind: 'hero', gymId: P.gymA, file: { buffer: PHOTO }, fields: HERO_FIELDS() });
   assert.deepEqual([r.status, r.error, r.retryAfterSeconds], [503, 'image_service_busy', 5]);
+});
+
+// ── Partner picker: GET /admin/partner-media/subjects ───────────────────────
+
+test('subjects: case-insensitive name search per type, ids the set endpoint takes, names and ids only', async () => {
+  const sa = adminClaims(P.super);
+  const pii = await user('vendor', { approvalStatus: 'approved', email: 'owner.private@example.com', phone: '+255700000111', vendorProfile: JSON.stringify({ businessName: 'Arena Supplies', address: 'Plot 7, Kariakoo' }) });
+  made.subjects.push(pii);
+  const g = await hit('GET', '/admin/partner-media/subjects?type=gym&q=ARENA', { claims: sa });
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const ours = g.body.items.filter(i => made.gyms.includes(i.id));
+  assert.deepEqual(ours.map(i => i.name), ['Arena Two', 'Mazoezi Arena'], 'by name, case-insensitive');
+  for (const i of g.body.items) assert.deepEqual(Object.keys(i).sort(), ['id', 'name', 'type']);
+  assert.ok(g.body.total >= 2);
+  const t = await hit('GET', '/admin/partner-media/subjects?type=trainer&q=coach%20one', { claims: sa });
+  assert.deepEqual(t.body.items, [{ type: 'trainer', id: P.tp1, name: 'Coach One' }], 'the trainer profile id');
+  const v = await hit('GET', '/admin/partner-media/subjects?type=vendor&q=arena%20sup', { claims: sa });
+  assert.deepEqual(v.body.items, [{ type: 'vendor', id: pii, name: 'Arena Supplies' }], 'the vendor account id, by store name');
+  assert.doesNotMatch(JSON.stringify(v.body), /owner\.private|255700000111|Kariakoo/, 'no email, phone or address');
+  // The id is the one POST /admin/partner-media takes.
+  assert.equal((await brandSet('vendor', v.body.items[0].id, 'logo')).status, 201);
+  assert.equal((await brandSet('trainer', t.body.items[0].id)).status, 201);
+  // limit: default 10, at most 25.
+  for (let i = 0; i < 27; i += 1) await gym(`Picker Gym ${String(i).padStart(2, '0')}`);
+  const dflt = await hit('GET', '/admin/partner-media/subjects?type=gym&q=picker%20gym', { claims: sa });
+  assert.deepEqual([dflt.body.items.length, dflt.body.total], [10, 27]);
+  assert.equal((await hit('GET', '/admin/partner-media/subjects?type=gym&q=picker%20gym&limit=100', { claims: sa })).body.items.length, 25);
+  assert.equal((await hit('GET', '/admin/partner-media/subjects?type=gym&q=picker%20gym&limit=3', { claims: sa })).body.items[2].name, 'Picker Gym 02');
+});
+
+test('subjects: closed vendors and trainers whose account is closed are left out; account-less trainer profiles stay', async () => {
+  const sa = adminClaims(P.super);
+  const closedVendor = await user('vendor', { accountStatus: 'closed', vendorProfile: JSON.stringify({ businessName: 'Shut Shop Zeta' }) });
+  const openVendor = await user('vendor', { vendorProfile: JSON.stringify({ businessName: 'Open Shop Zeta' }) });
+  const closedTrainerUser = await user('trainer', { accountStatus: 'closed' });
+  await trainerProfile(closedTrainerUser, 'Coach Zeta Closed');
+  const studio = await trainerProfile(null, 'Coach Zeta Studio');
+  const v = await hit('GET', '/admin/partner-media/subjects?type=vendor&q=zeta', { claims: sa });
+  assert.deepEqual(v.body.items.map(i => i.id), [openVendor]);
+  assert.equal(v.body.items.some(i => i.id === closedVendor), false);
+  const t = await hit('GET', '/admin/partner-media/subjects?type=trainer&q=zeta', { claims: sa });
+  assert.deepEqual(t.body.items.map(i => i.id), [studio]);
+  assert.equal(t.body.total, 1);
+});
+
+test('subjects: LIKE wildcards in q are literal', async () => {
+  const sa = adminClaims(P.super);
+  const pct = await gym('100% Fit_Club');
+  await gym('1000 FitXClub');
+  await gym('Back\\slash Gym');
+  const names = async q => (await hit('GET', `/admin/partner-media/subjects?type=gym&q=${encodeURIComponent(q)}`, { claims: sa })).body.items.filter(i => made.gyms.includes(i.id)).map(i => i.name);
+  assert.deepEqual(await names('0%'), ['100% Fit_Club'], '% is not "anything"');
+  assert.deepEqual(await names('t_c'), ['100% Fit_Club'], '_ is not "any one character"');
+  assert.deepEqual(await names('%%'), [], 'nothing has two percent signs');
+  assert.deepEqual(await names('__'), [], 'nothing has two underscores');
+  assert.deepEqual(await names('k\\s'), ['Back\\slash Gym'], 'a backslash is literal too');
+  assert.ok(pct);
+});
+
+test('subjects: guard, validation and rate limit', async () => {
+  const u = '/admin/partner-media/subjects?type=gym&q=arena';
+  assert.equal((await hit('GET', u)).status, 401);
+  assert.equal((await hit('GET', u, { claims: owner() })).status, 403, 'partners are not admins');
+  assert.equal((await hit('GET', u, { claims: claimsOf(P.member, 'member') })).status, 403);
+  const promo = await hit('GET', u, { claims: adminClaims(P.brand, ['promotions']) });
+  assert.deepEqual([promo.status, promo.body.error], [403, 'acl_forbidden']);
+  for (const acl of [['brand_media'], ['moderation'], ['moderation_decide']]) {
+    assert.equal((await hit('GET', u, { claims: adminClaims(P.brand, acl) })).status, 200, acl[0]);
+  }
+  const sa = adminClaims(P.super);
+  for (const bad of ['', '&type=member', '&type=admin']) {
+    const r = await hit('GET', `/admin/partner-media/subjects?q=arena${bad}`, { claims: sa });
+    assert.deepEqual([r.status, r.body.error], [400, 'invalid_subject_type'], bad);
+  }
+  for (const q of ['', 'a', '%20a%20']) {
+    const r = await hit('GET', `/admin/partner-media/subjects?type=gym&q=${q}`, { claims: sa });
+    assert.deepEqual([r.status, r.body.error, r.body.minLength], [400, 'q_too_short', 2], `q=${q}`);
+  }
+  resetPartnerMediaPreviewLimits();
+  const limiter = adminClaims(P.modOnly, ['moderation']);
+  for (let i = 0; i < 300; i += 1) assert.equal((await hit('GET', u, { claims: limiter })).status, 200);
+  const limited = await hit('GET', u, { claims: limiter });
+  assert.deepEqual([limited.status, limited.body.error], [429, 'rate_limited']);
+  assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+  assert.equal((await hit('GET', u, { claims: sa })).status, 200, 'per admin');
+  // Its own window: previews of the limited admin still work.
+  assert.equal((await hit('GET', '/admin/partner-media?tab=live', { claims: limiter })).status, 200);
 });

@@ -143,6 +143,8 @@ import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createShopBannerService } from '../services/shop-banner-service.mjs';
+import { createFlashSaleService } from '../services/flash-sale-service.mjs';
+import { createPgFlashSaleStore } from '../infra/flash-sale-store-pg.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
 import { createPartnerMediaService } from '../services/partner-media-service.mjs';
 import { createPgPartnerMediaStore } from '../infra/partner-media-store-pg.mjs';
@@ -185,6 +187,7 @@ import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
 import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
+import { createPgTrainerSlotStore } from '../infra/trainer-slot-store-pg.mjs';
 import { createPersonalDetailsService } from '../services/personal-details-service.mjs';
 import { forgetPersonDetails } from '../infra/person-details-store-pg.mjs';
 import {
@@ -229,7 +232,13 @@ function pinPepper() {
 // persona never suspends the Person (invariant 30).
 registerAccountStatusLookup(async id => {
   const user = await users.findByIdAsync(id);
-  if (!user) return null;
+  if (!user) {
+    // S1: a portal user who was DELETED (remove() audits portal_user_deleted) is reported missing,
+    // and requireAuth fails closed on it for portal staff tokens. An id with no row and no such
+    // record keeps the old pass-through (existing behaviour; such a token cannot be minted in production).
+    const deleted = await db('AuditLog').where({ action: 'portal_user_deleted', target: id }).first('id');
+    return deleted ? { status: null, missing: true } : null;
+  }
   if (user.accountStatus === 'suspended') return 'suspended';
   // Sessions issued before this are over: the later of the profile's own cut-off
   // (a portal admin changed their start password) and the Person's (I7a: a PIN
@@ -304,6 +313,8 @@ export const trainerBookingService = createTrainerBookingService({
   outcomesOn: trainerSessionOutcomesOn,
   // Outcome changes lock the statement and the booking, write conditionally and keep draft lines in step.
   outcomeStore: createPgTrainerOutcomeStore({ db }),
+  // New bookings and revived sessions take the trainer slot's lock, so a slot is never held twice.
+  slotStore: createPgTrainerSlotStore({ db }),
   // Sessions on a live trainer statement line, with that statement's status.
   statementLines: async (bookingIds) => {
     const rows = await db('TrainerSettlementLine as l').join('TrainerSettlement as s', 's.id', 'l.trainerSettlementId')
@@ -341,8 +352,19 @@ export const trainerEngagementService = createTrainerEngagementService({
   // notificationService is created further down; this only runs later.
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Shop flash sales (SHOP_FLASH_SALES, Phase 2 slice 4; PRICING PATH): vendor proposals, staff approval
+// (two-person), and the live sale prices the shop, the home and checkout read (`pricing`). The routes,
+// the job and every pricing path check the flag; with it off no price changes.
+export const flashSaleService = createFlashSaleService({
+  store: createPgFlashSaleStore({ db }),
+  partnerGate, moderationGate,
+  // shopService is defined just below; this only runs later.
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
+  flashSales: flashSaleService.pricing,
+  onVendorSuspended: (vendorId, actorId) => flashSaleService.endForSuspendedVendor(vendorId, actorId),
   // Shop home slice 3: vendor "Based in" / "Delivers to" are checked against usable GeoAreas.
   geoAreas,
   // Stock reservation and cancellation are single database transactions.
@@ -744,9 +766,19 @@ export const adminPaymentService = createAdminPaymentService({
   // An upgraded pass is the same plan: tell the member, nothing else (it is no new membership or conversion).
   onPassUpgraded: sub => notificationService.notifySubscriptionActivated(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
-  onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
+  onBookingPayment: (groupId, status, opts) => trainerBookingService.applyPaymentToGroup(groupId, status, opts),
   // 409 group_slot_rebooked { bookingIds } when a rejected session's slot was booked by someone else since.
   beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
+  // The same, found only after the decision was written (a race): the decision was undone; staff must look.
+  onBookingPaymentRefused: ({ request, refusal, rolledBack, actorId }) => opsService.raise({
+    type: 'payment_conflict', severity: 'high',
+    title: rolledBack
+      ? `Trainer booking payment ${request.id} was put back: a session's slot was booked by someone else`
+      : `Trainer booking payment ${request.id} could not be put back after its group refused it — check it by hand`,
+    dedupeKey: `trainer_group_slot_rebooked:${request.id}`,
+    entityType: 'payment_request', entityId: request.id,
+    detail: { bookingGroupId: request.bookingGroupId, bookingIds: refusal.bookingIds || [], rolledBack, actorId },
+  }),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
   beforeOrderPayment: (request, opts) => shopService.checkOrderPayment(request, opts),
   // Marathon & Events S4 (EVENT_ORDER; eventsPaymentsService is defined further down, these only run at request time).
@@ -826,7 +858,7 @@ export const settlementViewService = createSettlementViewService({ gyms, users, 
 // raises each gym's difference as an adjustment (settlement Phase 6).
 export const settlementClawbackService = createSettlementClawbackService({ configService: settlementConfigService, workflow: settlementWorkflowService });
 export const invoiceService = createInvoiceService({
-  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts, gymPayoutOwner,
+  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts, gymPayoutOwner, db,
 });
 // Replaceable, so specs can stand in for the Firebase admin SDK.
 export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth };
@@ -1242,6 +1274,7 @@ export const shopPreferenceService = createShopPreferenceService({
 const SHOP_HISTORY_MAX_ORDERS = 500;
 export const shopHomeService = createShopHomeService({
   bannerFeed: args => shopBannerService.feed(args),
+  flashSales: flashSaleService.pricing,
   preferences: shopPreferenceService,
   buyerPaidOrders: ({ buyerIds, since }) => (buyerIds.length ? db('ShopOrder')
     .whereIn('buyerId', buyerIds).where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)

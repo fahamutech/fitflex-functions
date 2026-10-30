@@ -7,6 +7,10 @@ import { createGymPayoutOwner } from './gym-payout-owner.mjs';
 export function createInvoiceService({
   invoices, gyms, users, gymPayouts, auditLog, partnerGate = OPEN_GATE, partnerSettlementAccounts = null,
   gymPayoutOwner = createGymPayoutOwner({ users, gyms }),
+  // Knex handle. With it, "mark paid" is one transaction: a conditional UPDATE (status <> 'paid')
+  // and, only if a row changed, the payout insert; two concurrent paid updates yield ONE payout.
+  // Null (unit specs with in-memory stores) falls back to a read-then-write guard.
+  db = null,
 }) {
   /** The owner a gym's invoice is paid to: first owner found (flag off) or the payout owner (GYM_PAYOUT_OWNER). */
   const payeeOf = gymId => gymPayoutOwner.resolve(gymId);
@@ -97,10 +101,32 @@ export function createInvoiceService({
     if (receiptUrl !== undefined) updates.receiptUrl = receiptUrl;
     if (paymentReference !== undefined) updates.paymentReference = paymentReference;
     if (note !== undefined) updates.note = note;
+    let updated;
+    if (status === 'paid' && db) {
+      // Audit M4, atomic: only the request that flips the status creates the payout.
+      const paidAt = new Date().toISOString();
+      updated = await db.transaction(async trx => {
+        const flipped = await trx('Invoice').where({ id: inv.id }).whereNot('status', 'paid')
+          .update({ ...updates, status: 'paid', paidAt }).returning('*');
+        if (flipped.length) {
+          await trx('GymPayout').insert({
+            id: randomUUID(), gymId: inv.gymId, invoiceId: inv.id, amount: inv.amount, status: 'paid',
+            periodStart: inv.periodStart || null, periodEnd: inv.periodEnd || null, paidAt,
+            reference: paymentReference || receiptUrl || null,
+          }).onConflict().ignore(); // the partial unique index on invoiceId is the backstop
+          return flipped[0];
+        }
+        // Already paid (maybe a moment ago, by another request): other fields still update, no payout.
+        const rest = await trx('Invoice').where({ id: inv.id }).update(updates).returning('*');
+        return rest[0];
+      });
+    } else {
     if (status === 'paid') {
       updates.status = 'paid';
       updates.paidAt = new Date().toISOString();
-      await gymPayouts.insertAsync({
+      // Audit M4: a payout row only on the transition to paid (read-then-write fallback without db).
+      if (inv.status === 'paid') delete updates.paidAt;
+      else await gymPayouts.insertAsync({
         id: randomUUID(),
         gymId: inv.gymId,
         invoiceId: inv.id,
@@ -114,8 +140,8 @@ export function createInvoiceService({
     } else if (status) {
       updates.status = status;
     }
-
-    const updated = await invoices.updateByIdAsync(inv.id, updates);
+    updated = await invoices.updateByIdAsync(inv.id, updates);
+    }
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'invoice_updated',

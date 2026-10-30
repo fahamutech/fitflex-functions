@@ -49,14 +49,13 @@ const publicShape = variant => {
 /**
  * Did the vendor change what FitFlex reviews? Only a value that differs from the stored one counts
  * (F1: the app sends every field on every save). `variants` is the merged list about to be stored.
+ * Price and discount price are not reviewed (owner decision 2026-10-29).
  */
 export function reviewChanged(current, input, variants = null) {
   if (input.name !== undefined && String(input.name).trim() !== String(current.name ?? '').trim()) return true;
   for (const field of ['description', 'category', 'brand']) {
     if (input[field] !== undefined && blank(input[field]) !== blank(current[field])) return true;
   }
-  if (input.priceTzs !== undefined && Number(input.priceTzs) !== Number(current.priceTzs ?? 0)) return true;
-  if (input.discountPriceTzs !== undefined && Number(input.discountPriceTzs || 0) !== Number(current.discountPriceTzs || 0)) return true;
   if (Array.isArray(input.images) && JSON.stringify(input.images) !== JSON.stringify(Array.isArray(current.images) ? current.images : [])) return true;
   if (variants) {
     const before = variantsOf(current).map(publicShape);

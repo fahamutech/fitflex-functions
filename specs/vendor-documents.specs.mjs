@@ -131,17 +131,24 @@ async function paidOrder(buyerId, items) {
 const shareSale = (claims, id, body = {}) => call(vendorShareSale, claims, { params: { id }, body });
 const tokenOf = url => url.split('/d/')[1].split('?')[0];
 
+/**
+ * The data of a stream that starts at `start`, cut by its dictionary's /Length. Never trim the newline before
+ * `endstream` instead: a deflate stream ends in its Adler-32 checksum, so 1 in 256 end in 0x0D and a
+ * `/\r?\n$/` trim eats that byte — the stream no longer inflates and the PDF reads as empty (CI run 40639757780).
+ */
+const streamData = (s, dictStart, start) => s.slice(start, start + Number(s.slice(dictStart, start).match(/\/Length (\d+)/)[1]));
+
 /** Text drawn in a pdfkit PDF (inflates the content streams, decodes the hex strings). */
 function pdfText(buffer) {
   const s = buffer.toString('latin1');
   let out = '';
-  const re = /stream\r?\n/g;
-  let m;
-  while ((m = re.exec(s))) {
-    const start = m.index + m[0].length;
-    const end = s.indexOf('endstream', start);
-    let data;
-    try { data = zlib.inflateSync(Buffer.from(s.slice(start, end).replace(/\r?\n$/, ''), 'latin1')).toString('latin1'); } catch { continue; }
+  for (let i = s.indexOf('\nstream\n'); i !== -1;) {
+    const dictStart = s.lastIndexOf(' 0 obj', i);
+    const start = i + '\nstream\n'.length;
+    const raw = streamData(s, dictStart, start);
+    i = s.indexOf('\nstream\n', start + raw.length);
+    if (!/\/Filter \/FlateDecode/.test(s.slice(dictStart, start))) continue;
+    const data = zlib.inflateSync(Buffer.from(raw, 'latin1')).toString('latin1');
     for (const t of data.matchAll(/\[(.*?)\]\s*TJ/g)) out += `${[...t[1].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join('')}\n`;
   }
   return out;
@@ -912,7 +919,7 @@ function pdfRuns(buffer) {
     for (const f of fontDict.matchAll(/\/(F\d+) (\d+) 0 R/g)) fonts.set(f[1], objects.get(f[2]).match(/\/BaseFont \/([\w-]+)/)[1]);
     for (const ref of (body.match(/\/Contents \[?([\d\s0R]+)\]?/)?.[1] || '').matchAll(/(\d+) 0 R/g)) {
       const obj = objects.get(ref[1]);
-      const raw = obj.slice(obj.indexOf('stream') + 7, obj.lastIndexOf('endstream')).replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+      const raw = streamData(obj, 0, obj.indexOf('\nstream\n') + '\nstream\n'.length);
       const data = zlib.inflateSync(Buffer.from(raw, 'latin1')).toString('latin1');
       let font = 'Helvetica', size = 10, x = 0, y = 0;
       for (const op of data.matchAll(/\/(F\d+) ([\d.]+) Tf|1 0 0 1 ([-\d.]+) ([-\d.]+) Tm|\[(.*?)\] TJ/g)) {
