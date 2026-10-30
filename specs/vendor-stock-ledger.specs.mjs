@@ -118,7 +118,7 @@ test('GET /vendor/tools/options: everything off by default; a tool needs the umb
   assert.equal(off.status, 200);
   assert.deepEqual(off.body, {
     canSeeCost: true, canSeeOrderMoney: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false,
-    vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false },
+    vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false, flashSales: false },
   });
   process.env.VENDOR_STOCK_LEDGER = '1';
   assert.equal((await call(vendorToolsOptionsRoute, as(v))).body.stockLedger, false, 'no umbrella, no tool');
@@ -406,8 +406,10 @@ for (const mode of ['off', 'on']) {
     assert.equal((await call(listShopProducts, { sub: uid('usr'), userType: 'member' }, { query: { vendorId: v } })).body.some(x => x.id === p.id), true);
     await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, name: 'Whey  ' } });
     assert.equal(await status(), 'approved', 'surrounding spaces are not a change');
-    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, priceTzs: 21_000 } });
-    assert.equal(await status(), 'pending', 'a new price is reviewed');
+    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, priceTzs: 21_000, discountPriceTzs: 19_000 } });
+    assert.equal(await status(), 'approved', 'price and discount are not reviewed (owner decision 2026-10-29)');
+    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, name: 'Whey Gold' } });
+    assert.equal(await status(), 'pending', 'a new name is reviewed');
   });
 }
 

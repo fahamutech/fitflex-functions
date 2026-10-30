@@ -134,6 +134,7 @@ The item becomes `removed`. Its bytes are deleted and its sha256 is cleared. Ret
 | Method and path | Scope | Body / query | Answer |
 |---|---|---|---|
 | `GET /admin/partner-media` | `moderation` or `moderation_decide`. `brand_media` alone: only `tab=live` with `subjectId`, else `403 acl_forbidden { requiredScope: 'moderation' }` (review L3) | `tab=to_review` (default; live partner uploads, oldest first) `\|live` (newest first) `\|taken_down` (newest takedown first); `subjectType` (or `type`); `kind`; `q` (partner name); `subjectId`; `limit` ≤ 100; `cursor` | `{ items[], total, next }`. Items of a partner that no longer exists are never listed. |
+| `GET /admin/partner-media/subjects` | `moderation`, `moderation_decide` or `brand_media` | `type=gym\|trainer\|vendor` (required), `q` (≥ 2 characters), `limit` (≤ 25, default 10) | `{ items: [{ type, id, name }], total }`, by name. See "Partner picker" below |
 | `GET /admin/partner-media/:id/preview?w=` | `moderation`, `moderation_decide` or `brand_media` | | Stored WebP, `no-store`, 300 a minute per admin. Non-live → `404 image_not_found`; partner gone → `404 media_not_found` |
 | `POST /admin/partner-media/:id/reviewed` | `moderation_decide` | `{ revision }` | `{ item }`. Errors: `400 revision_required`, `403 own_upload`, `404 media_gone`, `409 stale_revision {revision}`, `409 not_editable` |
 | `POST /admin/partner-media/:id/take-down` | `moderation_decide` | `{ revision, reason, note? }` | `{ item }`. Bytes are deleted; reason, note, who, when and sha256 are kept; the partner is notified. Errors: `400 reason_required`, `invalid_reason {allowed\|allowedFor}`, `note_required`, `note_too_long`, `revision_required`; `404 media_gone`; `409 stale_revision`, `not_editable` |
@@ -155,6 +156,18 @@ Reason codes:
 - **Title and body:** the §44.3 text. The note is never included.
 - **`data`:** `{ mediaId, kind, subjectType, subjectId, gymId (gyms), reason, route, open:'brand_media', titleEn, bodyEn, titleSw, bodySw }`.
 - **`route`:** `/owner/brand-media?gymId=…`, `/trainer/brand-media` or `/vendor/brand-media`.
+
+## Partner picker: `GET /admin/partner-media/subjects`
+For the portal's "Set photo for this partner" dialog, so an admin with only `brand_media` can find a partner without the full queue.
+- **Query:** `type` = `gym` | `trainer` | `vendor` (required; `subjectType` is accepted too); `q` = part of the name, at least 2 characters after trimming; `limit` ≤ 25, default 10.
+- **Matching:** case-insensitive "contains" on the name: the gym name, the trainer profile's display name, or the vendor's store name (else its display name). `%`, `_` and `\` in `q` are matched literally.
+- **Answer:** `{ items: [{ type, id, name }], total }`, sorted by name then id. `total` counts every match; `items` holds at most `limit`.
+- **Ids:** `id` is exactly what `POST /admin/partner-media` takes as `subjectId`: the gym id, the trainer **profile** id, the vendor **account** id.
+- **Names and ids only:** never an email, phone, address or any other field.
+- **Who is listed:** partners that exist and are not closed. That means any gym (gyms have no closed state), trainer profiles with no account or an open one, and vendor accounts that are not closed.
+- **Guard:** the same as the admin view (`moderation`, `moderation_decide` or `brand_media`; super-admins pass), behind `PARTNER_MEDIA` (off → `404 feature_disabled` before sign-in).
+- **Rate limit:** 300 a minute per admin, the same as the admin preview, with its own window (`429 rate_limited { retryAfterSeconds }` + `Retry-After`).
+- **Errors:** `400 invalid_subject_type { allowed }`, `400 q_too_short { minLength: 2 }`.
 
 ## Purge when a partner goes (review M2)
 - **When it runs:**

@@ -58,3 +58,24 @@ async function verifiedAccounts(users, contacts, contact) {
   const ids = await contacts.userIdsFor(contact);
   return (await Promise.all(ids.map(id => users.findByIdAsync(id)))).filter(Boolean);
 }
+
+/**
+ * The one email address or mobile number in a body, normalised, without
+ * looking anyone up: { contact: { type, value } }, { contact: null } when a
+ * user id was given instead, or the same 400s as findUserByContact.
+ */
+export function readContact({ userId, email, phone } = {}) {
+  const filled = v => v != null && String(v).trim() !== '';
+  const given = [userId, email, phone].filter(filled);
+  if (given.length === 0) return fail('user_contact_required', 400, { hint: 'Give an email address, a mobile number or a user id.' });
+  if (given.length > 1) return fail('one_user_contact_only', 400);
+  if (filled(userId)) return { contact: null };
+  if (filled(email)) {
+    const value = normalizeEmail(email);
+    if (!value || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) return fail('invalid_email', 400);
+    return { contact: { type: 'email', value } };
+  }
+  const value = normalizePhone(phone);
+  if (!value) return fail('invalid_phone', 400, { hint: 'For example 0712 345 678 or +255712345678.' });
+  return { contact: { type: 'phone', value } };
+}

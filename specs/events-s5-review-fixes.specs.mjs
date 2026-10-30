@@ -176,9 +176,14 @@ test('SWAHILI — bulk / import inbox notices are in the recipient\'s language a
   assert.equal(en.data.titleSw, 'Namba yako ya mbio iko tayari');
   const col = await call(organizerCollectKit, f.organizer.ops, { params: { id: f.event.id }, headers: { 'Idempotency-Key': key() }, body: { method: 'scan', payload: f.regs[1].payload, collectionPointId: f.points[0].id } });
   assert.equal(col.status, 201);
-  // the kit notice is sent fire-and-forget after the response (a failed notice must not fail the handover): wait for it instead of racing it
-  let kit = null;
-  for (let i = 0; i < 40 && !kit; i += 1) { kit = await db('Notification').where({ userId: f.regs[1].userId, type: 'event_kit_collected' }).first(); if (!kit) await new Promise(r => setTimeout(r, 50)); }
+  // The kit notice is sent after the response without being awaited (events-ops-service noticeKit(...).catch()),
+  // so the row can land a moment after the 201: wait for it (up to ~5 s) instead of reading once.
+  let kit;
+  for (let i = 0; i < 50 && !kit; i += 1) {
+    kit = await db('Notification').where({ userId: f.regs[1].userId, type: 'event_kit_collected' }).first();
+    if (!kit) await new Promise(r => setTimeout(r, 100));
+  }
+  assert.ok(kit, 'the kit-collected notification is written');
   assert.match(kit.data.bodySw, /^Umechukua vifaa vya mbio vya /);
   // the API client wording: a "ruhusa" (permission), never "mteja", never kushindwa / imeshindwa
   const { readFileSync } = await import('node:fs');

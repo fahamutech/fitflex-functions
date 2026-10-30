@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn } from '../src/shared/feature-flags.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService } from '../src/bootstrap/services.mjs';
+import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -126,6 +126,16 @@ export const shopBannerLifecycle = {
     if (!shopBannersOn()) return;
     const r = await shopBannerService.runLifecycle();
     if (r.expired || r.ended) console.log(`[shop-banners] expired=${r.expired} ended=${r.ended}`);
+  }
+};
+
+export const flashSaleLifecycle = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Shop flash sales: write down what time has decided — proposals not reviewed within SHOP_PROPOSAL_EXPIRY_DAYS (14) or by their start become expired (a vendor\'s own proposal: the vendor is told), approved sales past their end become ended. Prices never wait for this: every price read works the window out from the server clock. Does nothing unless SHOP_FLASH_SALES is on. Idempotent.',
+  onJob: async () => {
+    if (!shopFlashSalesOn()) return;
+    const r = await flashSaleService.runLifecycle();
+    if (r.expired || r.ended) console.log(`[flash-sales] expired=${r.expired} ended=${r.ended}`);
   }
 };
 

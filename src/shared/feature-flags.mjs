@@ -143,6 +143,17 @@ export function shopNearYouOn() {
 }
 
 /**
+ * Shop home Phase 2 · slice 4: flash sales (docs/shop-flash-sales-api.md). PRICING PATH. Off unless
+ * SHOP_FLASH_SALES is set: every /vendor/flash-sales and /admin/flash-sales route answers 404
+ * feature_disabled before sign-in, and every price, product list, store, home and checkout answer is
+ * byte-identical to before (no sale fields, no flash_sale section, items[].expectedPriceTzs ignored,
+ * no price lock). Approved sales stay stored and apply again when it is back on.
+ */
+export function shopFlashSalesOn() {
+  return on('SHOP_FLASH_SALES');
+}
+
+/**
  * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
  * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
  * carries no `manual` block and subscribe / upgrade take no reference, exactly
@@ -213,8 +224,8 @@ export function vendorToolsOptions() {
     purchases: vendorToolsFlag('VENDOR_PURCHASES'),
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
-    // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
-    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn() },
+    // umbrella (a shop feature, not a vendor tool).
+    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn(), flashSales: shopFlashSalesOn() },
   };
 }
 
@@ -563,4 +574,13 @@ export function adminEmailsStrictOn(env = process.env) {
  */
 export function webGymProfileOn() {
   return on('WEB_GYM_PROFILE');
+}
+
+/**
+ * Browser gym QR check-in (S2): the intent / preview / confirm routes and the short-lived web check-in session.
+ * Off unless WEB_QR_CHECKIN is set: every one of those routes answers 404 not_found, as if it did not exist.
+ * Also needs QR_HMAC_SECRET (without it the routes stay 404).
+ */
+export function webQrCheckinOn() {
+  return on('WEB_QR_CHECKIN');
 }

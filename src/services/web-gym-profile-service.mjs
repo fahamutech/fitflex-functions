@@ -131,13 +131,18 @@ export function createWebGymProfileService({ gymService, settingsService, traine
   const resetCache = () => { blockedCache = { at: -Infinity, set: new Set() }; };
 
   /** The same gates the member gym list applies: active, listed, not held back in moderation; plus the owner's KYC. */
-  async function lookup(payload) {
-    const verified = verifyGymQr(payload);
-    const blocked = await blockedGyms();      // same work for every miss
-    if (!verified || blocked.has(verified.gymId)) return null;
-    const gym = gymService.findById(verified.gymId);
+  async function lookupById(gymId) {
+    const blocked = await blockedGyms();
+    if (!gymId || blocked.has(gymId)) return null;
+    const gym = gymService.findById(gymId);
     if (!gym || gym.status !== 'active' || gym.homepageVisible === false) return null;
     return (await partnerGate.isGymOperational(gym.id)) ? gym : null;
+  }
+
+  async function lookup(payload) {
+    const verified = verifyGymQr(payload);
+    if (!verified) { await blockedGyms(); return null; }      // same work for every miss
+    return lookupById(verified.gymId);
   }
 
   function plansOf(gym, L) {
@@ -217,5 +222,5 @@ export function createWebGymProfileService({ gymService, settingsService, traine
     };
   }
 
-  return { resolve, extractQrPayload, resetCache };
+  return { resolve, lookup, lookupById, extractQrPayload, resetCache };
 }

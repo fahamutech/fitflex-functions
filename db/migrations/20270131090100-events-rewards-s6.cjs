@@ -7,7 +7,7 @@
 // stay forbidden. Everything else (any other column, any other UPDATE) still raises.
 //
 // - EventMedalTemplate: tier, built-in artwork key, description, sort order, rule must be an object (artId arrives with
-//   the artwork tables in 20270129090200).
+//   the artwork tables in 20270131090200).
 // - EventMedalAward: reason code and who revoked. UserAchievement: reason code. Five achievements are seeded (idempotent).
 // - RewardDefinition: trigger, reversal policy, redeem mode, cooldown. valueTzs must stay empty at launch (service rule).
 // - RewardLedgerEntry / RewardRedemption: userId nullable + SET NULL + anonymisedAt; redemption gets expiry, note, role, review flag.

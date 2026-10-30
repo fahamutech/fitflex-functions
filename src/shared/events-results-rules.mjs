@@ -7,7 +7,7 @@ export const SOURCE_TYPES = Object.freeze(['timing_provider', 'organizer_verifie
 export const IMPORT_SOURCES = Object.freeze(['timing_provider', 'organizer_verified']);
 export const FINISH_STATUSES = Object.freeze(['finished', 'dnf', 'dns', 'dq']);
 export const SETTLED_VERIFICATIONS = Object.freeze(['verified', 'corrected']);
-/** Closed reason lists (spec §6.3, §6.6); the union is the EventResult.reasonCode CHECK (migration 20270129090000). */
+/** Closed reason lists (spec §6.3, §6.6); the union is the EventResult.reasonCode CHECK (migration 20270131090000). */
 export const REJECT_REASONS = Object.freeze(['not_a_valid_run', 'data_error', 'duplicate', 'other']);
 export const CORRECT_REASONS = Object.freeze(['timing_error', 'wrong_bib', 'late_finish_data', 'other']);
 export const DQ_REASONS = Object.freeze(['rule_violation', 'course_cut', 'wrong_category', 'equipment', 'identity', 'virtual_evidence', 'other']);

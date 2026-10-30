@@ -19,11 +19,20 @@ export const CHECKIN_SOURCE = Object.freeze({
   MEMBER_QR_BY_STAFF: 'member_qr_by_staff', // staff scanned the member's QR
   GYM_QR_BY_MEMBER:   'gym_qr_by_member',   // member scanned the gym's entrance QR
   OWNER_MANUAL:       'owner_manual',       // owner/staff checked a direct member in by hand
-  ADMIN_BACKFILL:     'admin_backfill'
+  ADMIN_BACKFILL:     'admin_backfill',
+  WEB_GYM_QR_BY_MEMBER: 'web_gym_qr_by_member' // member scanned the gym QR with the phone camera and confirmed in the browser
 });
+
+/**
+ * The one list of allowed Checkin.source values (the database check checkin_source_ck mirrors it).
+ * The access_device change (docs/access-integration/PHASE1_ASSESSMENT_AND_DESIGN.md) must add its value
+ * to THIS list (CHECKIN_SOURCE above) and to a new migration that re-adds the constraint.
+ */
+export const CHECKIN_SOURCE_VALUES = Object.freeze(Object.values(CHECKIN_SOURCE));
 
 /** check-in-service `method` → source. */
 export function sourceForMethod(method) {
+  if (method === 'web_scanned') return CHECKIN_SOURCE.WEB_GYM_QR_BY_MEMBER;
   return method === 'member_scanned' ? CHECKIN_SOURCE.GYM_QR_BY_MEMBER : CHECKIN_SOURCE.MEMBER_QR_BY_STAFF;
 }
 
@@ -65,6 +74,10 @@ export function checkStatusChange({ from, to, reason }) {
   return { ok: true, reason: text };
 }
 
+/** The database refused a web check-in because its intent already recorded a visit (a replayed confirm). */
+export const isDuplicateIntent = (err) => err?.code === '23505'
+  && /checkin_intent_id_uq/.test(`${err.constraint || ''} ${err.message || ''}`);
+
 /**
  * The database refused a check-in because the member already has a live one
  * at this gym today (two scans racing each other). The caller returns the
@@ -72,3 +85,13 @@ export function checkStatusChange({ from, to, reason }) {
  */
 export const isDuplicateVisit = (err) => err?.code === '23505'
   && /checkin_one_visit_per_day_uq|checkin_memberid_gymid_timestamp_unique/.test(`${err.constraint || ''} ${err.message || ''}`);
+
+// Web check-in (S2) bookkeeping that belongs in the audit trail, not on member- or owner-facing APIs.
+const WEB_ONLY_FIELDS = Object.freeze(['authSessionId', 'clientMeta', 'intentId']);
+/** A check-in row as a member or gym owner may be shown it: the web-only bookkeeping removed. */
+export function publicCheckin(row) {
+  if (!row || typeof row !== 'object') return row;
+  const out = { ...row };
+  for (const k of WEB_ONLY_FIELDS) delete out[k];
+  return out;
+}

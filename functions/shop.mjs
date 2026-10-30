@@ -7,6 +7,17 @@ import { shopService, shopHomeService, vendorSettlementService, shopReconciliati
 import { buyerOrderView } from '../src/services/shop-service.mjs';
 import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
+import { canShowFlashSales, withoutSale } from '../src/shared/shop-caps.mjs';
+import { shopFlashSalesOn } from '../src/shared/feature-flags.mjs';
+
+/**
+ * SHOP_FLASH_SALES (docs/shop-flash-sales-api.md): rows keep effectivePriceTzs for everyone; the `sale`
+ * object only for clients that send X-FF-Shop-Caps: flash_sale. With the flag on the answer also
+ * carries the server time (header X-FF-Server-Now; serverNow in object bodies and in each `sale`).
+ * Flag off: unchanged.
+ */
+const saleRows = (req, rows) => (canShowFlashSales(req) ? rows : rows.map(withoutSale));
+const stampServerNow = (res) => { const at = new Date().toISOString(); res.set?.('X-FF-Server-Now', at); return at; };
 
 const created = new Date().toISOString();
 
@@ -64,15 +75,17 @@ async function requireActiveVendorStaff(req, res, next) {
 
 export const listShopProducts = {
   created, method: 'get', path: '/shop/products',
-  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither). SHOP_NEAR_YOU (docs/shop-near-you-api.md): header X-FF-Area: <GeoArea id worked out on the device; never stored or logged> → rows whose vendor delivers to that area carry deliversToViewerArea: true, only while personalisation is available and switched on and the area is usable; otherwise the body is unchanged. With SHOP_NEAR_YOU on and at least one usable area, ?maxDistanceKm= (the vendor-typed distance) is ignored; flag off: applied as before.',
+  description: 'Any signed-in user: browse the shop catalogue. Query: ?category=&search=&vendorId= …. Each row is the product plus vendorName (the seller\'s business name, else the vendor account\'s display name; null if neither). SHOP_NEAR_YOU (docs/shop-near-you-api.md): header X-FF-Area: <GeoArea id worked out on the device; never stored or logged> → rows whose vendor delivers to that area carry deliversToViewerArea: true, only while personalisation is available and switched on and the area is usable; otherwise the body is unchanged. With SHOP_NEAR_YOU on and at least one usable area, ?maxDistanceKm= (the vendor-typed distance) is ignored; flag off: applied as before. SHOP_FLASH_SALES on (docs/shop-flash-sales-api.md): every row has effectivePriceTzs (what checkout charges now) and, while a sale is live, sale { id, salePriceTzs, wasPriceTzs, regularPriceTzs, discountPct, startsAt, endsAt }; minPrice/maxPrice/price sorts use the effective price; promotions=true also includes products in a live sale; flashSale=true → only those. Off: unchanged.',
   onGuard: routeGuard('get', [areaRedactGuard, requireAuth()]),
   onRequest: async (req, res) => {
     redactAreaId(req);
-    const { category, search, brand, vendorId, minPrice, maxPrice, minRating, delivery, promotions, sort } = req.query || {};
+    const { category, search, brand, vendorId, minPrice, maxPrice, minRating, delivery, promotions, sort, flashSale } = req.query || {};
     // QA2: with areas on, the vendor-typed distance filter is ignored (spec §7.3); flag off: as before.
     const maxDistanceKm = (await shopHomeService.vendorDistanceIgnored()) ? undefined : req.query?.maxDistanceKm;
-    const rows = await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort });
-    res.json(await withBadge(req, rows));
+    const rows = await shopService.listProducts({ category, search, brand, vendorId, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort, flashSale });
+    if (!shopFlashSalesOn()) return res.json(await withBadge(req, rows));
+    stampServerNow(res);
+    return res.json(await withBadge(req, saleRows(req, rows)));
   }
 };
 
@@ -92,7 +105,10 @@ export const getShopProduct = {
     redactAreaId(req);
     const product = await shopService.getProduct(req.params.id);
     if (!product) return res.status(404).json({ error: 'product_not_found' });
-    res.json(await withBadge(req, product));
+    if (!shopFlashSalesOn()) return res.json(await withBadge(req, product));
+    const serverNow = stampServerNow(res);
+    const shown = canShowFlashSales(req) ? product : { ...withoutSale(product), similarProducts: (product.similarProducts || []).map(withoutSale) };
+    return res.json({ ...(await withBadge(req, shown)), serverNow });
   },
 };
 
@@ -102,7 +118,9 @@ export const getVendorStore = {
   onRequest: async (req, res) => {
     const store = await shopService.getVendorStore(req.params.id);
     if (!store) return res.status(404).json({ error: 'vendor_not_found' });
-    res.json(store);
+    if (!shopFlashSalesOn()) return res.json(store);
+    const serverNow = stampServerNow(res);
+    return res.json({ ...store, products: saleRows(req, store.products || []), serverNow });
   },
 };
 
@@ -206,7 +224,7 @@ export const vendorCreateProduct = {
 
 export const vendorUpdateProduct = {
   created, method: 'put', path: '/vendor/products/:id',
-  description: 'Vendor: update own product (price, stock, status...). The product goes back to review only when a reviewed field (name, description, category, brand, price, discount, images, variant names) actually changes. `variants` are merged by name: a variant sent without `stock` keeps its stored stock. With VENDOR_STOCK_LEDGER on: a `stock` that differs is recorded as a `count` adjustment (note product_form); costTzs / reorderLevel (product and per variant; null clears) are stored privately; when variants keep stock, every variant must (400 variant_stock_mixed), the body `stock` is ignored and the product stock moves only by what variant counts moved (each recorded); optional `stockSeen` (product) / `variants[].stockSeen` = the count the form showed → 409 stock_changed { currentStock, variant? } if it has moved; dropping a variant that still has stock → 409 variant_has_stock { variant, stock }, or that an open order holds units of → 409 variant_has_reservations { variant }; duplicate names → 400 duplicate_variant. costTzs (product or variant) may be sent only by the vendor account or vendor_staff with vendorRole admin, else 403 cost_forbidden; leaving it out keeps the stored cost. Also with the ledger on, checkout of a product whose variants keep stock requires `variant` (400 variant_required { variants }). Tags left out keep their stored values; targetGender null clears it, targetAgeBands [] clears the bands. Optional "who it is for" tags (docs/shop-personalisation-api.md): targetGender = women | men | null (everyone) and targetAgeBands = a list of 18_29, 30_44, 45_59, 60_plus ([] or all four = all ages; stored as []). Anything else → 400 invalid_field { field: targetGender | targetAgeBands, allowed }. They are not reviewed (never send the product back to pending) and are never on buyer-facing rows.',
+  description: 'Vendor: update own product (price, stock, status...). The product goes back to review only when a reviewed field (name, description, category, brand, images, variant names) actually changes. Price and discount price are not reviewed (owner decision 2026-10-29): changing them keeps an approved product approved and listed; each change is audited (product_price_changed) and kept in the price history; while an approved flash sale of the product is scheduled or live they are locked → 409 sale_conflict { reason: price_locked_by_flash_sale }. `variants` are merged by name: a variant sent without `stock` keeps its stored stock. With VENDOR_STOCK_LEDGER on: a `stock` that differs is recorded as a `count` adjustment (note product_form); costTzs / reorderLevel (product and per variant; null clears) are stored privately; when variants keep stock, every variant must (400 variant_stock_mixed), the body `stock` is ignored and the product stock moves only by what variant counts moved (each recorded); optional `stockSeen` (product) / `variants[].stockSeen` = the count the form showed → 409 stock_changed { currentStock, variant? } if it has moved; dropping a variant that still has stock → 409 variant_has_stock { variant, stock }, or that an open order holds units of → 409 variant_has_reservations { variant }; duplicate names → 400 duplicate_variant. costTzs (product or variant) may be sent only by the vendor account or vendor_staff with vendorRole admin, else 403 cost_forbidden; leaving it out keeps the stored cost. Also with the ledger on, checkout of a product whose variants keep stock requires `variant` (400 variant_required { variants }). Tags left out keep their stored values; targetGender null clears it, targetAgeBands [] clears the bands. Optional "who it is for" tags (docs/shop-personalisation-api.md): targetGender = women | men | null (everyone) and targetAgeBands = a list of 18_29, 30_44, 45_59, 60_plus ([] or all four = all ages; stored as []). Anything else → 400 invalid_field { field: targetGender | targetAgeBands, allowed }. They are not reviewed (never send the product back to pending) and are never on buyer-facing rows.',
   onGuard: routeGuard('put', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
   onRequest: async (req, res) => {
     const result = await shopService.upsertProduct({
@@ -372,7 +390,7 @@ export const adminRecomputeProductStats = {
 
 export const createShopOrder = {
   created, method: 'post', path: '/me/shop-orders',
-  description: 'Any signed-in user: place a shop order. Stock is validated and reserved atomically. Send an Idempotency-Key header (8–100 chars) so a retry returns the original order instead of a second one; the order is unpaid (paymentStatus pending) until FitFlex confirms the payment.',
+  description: 'Any signed-in user: place a shop order. Stock is validated and reserved atomically. SHOP_FLASH_SALES on (PRICING PATH, docs/shop-flash-sales-api.md): each line is charged its effective price now (a live approved flash sale included; the line then has flashSaleId), items[].expectedPriceTzs (optional) = the unit price the app showed; a difference, or a sale window closing between pricing and the stock lock → 409 price_changed { productId, currentPriceTzs, lines: [{ productId, variant, expectedPriceTzs, currentPriceTzs, reason: sale_ended|sale_started|price_changed }], expectedTotalTzs, totalTzs } and nothing is reserved; expectedPriceTzs not a whole number ≥ 0 → 400 invalid_expected_price. Off: expectedPriceTzs is ignored and prices are as before. Send an Idempotency-Key header (8–100 chars) so a retry returns the original order instead of a second one; the order is unpaid (paymentStatus pending) until FitFlex confirms the payment.',
   requestSample: { items: [{ productId: 'prd_x', qty: 2 }], deliveryMethod: 'gym_pickup', pickupGymId: 'gym_x', paymentMethod: 'mpesa', paymentOutcome: 'success' },
   onGuard: routeGuard('post', requireAuth()),
   onRequest: async (req, res) => {
@@ -381,7 +399,13 @@ export const createShopOrder = {
       // A retried request carries the same key and gets the order it already made.
       idempotencyKey: req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'] || null,
     });
-    if (result.error) return res.status(result.status).json({ error: result.error, productId: result.productId, ...(result.field ? { field: result.field } : {}), ...(result.limit ? { limit: result.limit } : {}), ...(result.variants ? { variants: result.variants } : {}) });
+    if (result.error) {
+      return res.status(result.status).json({
+        error: result.error, productId: result.productId, ...(result.field ? { field: result.field } : {}), ...(result.limit ? { limit: result.limit } : {}), ...(result.variants ? { variants: result.variants } : {}),
+        // SHOP_FLASH_SALES on only (docs/shop-flash-sales-api.md): which lines changed price and both totals.
+        ...(result.lines ? { currentPriceTzs: result.currentPriceTzs, lines: result.lines, expectedTotalTzs: result.expectedTotalTzs, totalTzs: result.totalTzs } : {}),
+      });
+    }
     if (result.replayed) res.set?.('Idempotent-Replay', 'true');
     res.status(201).json(buyerOrderView(result.order));
   }

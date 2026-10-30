@@ -13,7 +13,7 @@
 // - EventRegistration.resultsVisibility, Event.resultsPolicy, EventAwardTask (coalescing work queue).
 //
 // Additive. Nothing here is read until EVENTS_RESULTS is on. Down FAILS CLOSED once S6 data exists.
-// Sorts after 20270128090000-gym-payout-invoice-unique (the design named 20270128…; that stamp was taken on RC).
+// Sorts after RC's newest at branch time, 20270130090000-b2b-member-requests-by-contact (the design named 20270128…; those stamps were taken on RC).
 
 const RESULT_REASONS = [
   'not_a_valid_run', 'data_error', 'duplicate', 'other', 'replaced_by_participant',

@@ -7,7 +7,7 @@ import { harness, s6On, s6Off, db } from './fixtures/events-s6.mjs';
 import { deriveStage, parseTime, competitionRanks, computeRanks, boardName } from '../src/shared/events-results-rules.mjs';
 import { projectOutbox, WEBHOOK_EVENT_TYPES } from '../src/shared/webhook-events.mjs';
 import { eventStore } from '../src/bootstrap/services.mjs';
-import { RESULT_REASONS } from '../db/migrations/20270129090000-events-results-s6.cjs';
+import { RESULT_REASONS } from '../db/migrations/20270131090000-events-results-s6.cjs';
 import { ALL_REASONS } from '../src/shared/events-results-rules.mjs';
 
 await ensureInit();
@@ -67,7 +67,7 @@ test('pure rules: times, stage table, ranks with ties, reason list parity with t
 test('migration down fails closed once S6 data exists', async () => {
   const { f, a } = await setup({ n: 1 });
   await h.importCsv(f, a.owner, h.csvOf([['1001', 'finished', '0:50:00', '']]));
-  const mig = (await import('../db/migrations/20270129090000-events-results-s6.cjs')).default ?? (await import('../db/migrations/20270129090000-events-results-s6.cjs'));
+  const mig = (await import('../db/migrations/20270131090000-events-results-s6.cjs')).default ?? (await import('../db/migrations/20270131090000-events-results-s6.cjs'));
   await assert.rejects(db.transaction(trx => mig.down(trx)), /fails closed/);
 });
 

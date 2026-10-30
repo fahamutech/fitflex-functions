@@ -51,6 +51,8 @@ export const PREVIEW_VARIANT_OF_WIDTH = Object.freeze({ 240: 'p240', 480: 'p480'
 export const PREVIEW_RATE = Object.freeze({ partnerPerMinute: 120, adminPerMinute: 300 });
 /** Review M3: at most this many partner images are decoded at once in one server process; more waiting → 503. */
 export const IMAGE_JOBS = Object.freeze({ concurrent: 2, maxWaiting: 20 });
+/** GET /admin/partner-media/subjects: the partner picker. */
+export const SUBJECT_SEARCH = Object.freeze({ minQuery: 2, maxQuery: 100, defaultLimit: 10, maxLimit: 25 });
 /** A FitFlex reason for putting back a file taken down at a person's request (review L2). */
 export const OVERRIDE_REASON_MAX = 500;
 

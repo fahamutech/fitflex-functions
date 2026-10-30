@@ -143,6 +143,8 @@ import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createShopBannerService } from '../services/shop-banner-service.mjs';
+import { createFlashSaleService } from '../services/flash-sale-service.mjs';
+import { createPgFlashSaleStore } from '../infra/flash-sale-store-pg.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
 import { createPartnerMediaService } from '../services/partner-media-service.mjs';
 import { createPgPartnerMediaStore } from '../infra/partner-media-store-pg.mjs';
@@ -358,8 +360,19 @@ export const trainerEngagementService = createTrainerEngagementService({
   // notificationService is created further down; this only runs later.
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Shop flash sales (SHOP_FLASH_SALES, Phase 2 slice 4; PRICING PATH): vendor proposals, staff approval
+// (two-person), and the live sale prices the shop, the home and checkout read (`pricing`). The routes,
+// the job and every pricing path check the flag; with it off no price changes.
+export const flashSaleService = createFlashSaleService({
+  store: createPgFlashSaleStore({ db }),
+  partnerGate, moderationGate,
+  // shopService is defined just below; this only runs later.
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
+  flashSales: flashSaleService.pricing,
+  onVendorSuspended: (vendorId, actorId) => flashSaleService.endForSuspendedVendor(vendorId, actorId),
   // Shop home slice 3: vendor "Based in" / "Delivers to" are checked against usable GeoAreas.
   geoAreas,
   // Stock reservation and cancellation are single database transactions.
@@ -459,6 +472,9 @@ const memberRequestsLater = {
   stub: args => b2bMemberRequestService.stub(args),
   adminAdded: args => b2bMemberRequestService.adminAdded(args),
   create: args => b2bMemberRequestService.create(args),
+  createByContact: args => b2bMemberRequestService.createByContact(args),
+  createFromInvite: args => b2bMemberRequestService.createFromInvite(args),
+  cancelForInvite: args => b2bMemberRequestService.cancelForInvite(args),
   pendingForOrganization: args => b2bMemberRequestService.pendingForOrganization(args),
   pendingForCorporate: args => b2bMemberRequestService.pendingForCorporate(args),
   cancelForEmployee: args => b2bMemberRequestService.cancelForEmployee(args),
@@ -550,6 +566,8 @@ export const opsService = createOpsService({ db });
 // Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
 export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
   db, b2bService, emailSender: () => emailSender(), verifiedContacts,
+  // Consent slice (a): an invite that matches a member asks them (B2BMemberRequest) instead of enrolling them.
+  memberRequests: memberRequestsLater,
   // Whether FitFlex can send email codes, i.e. whether someone listed by email
   // only can verify that address in the app (same source as emailCodes in GET /auth/options).
   emailCodes: () => emailSender().configured === true,
@@ -1265,6 +1283,7 @@ export const shopPreferenceService = createShopPreferenceService({
 const SHOP_HISTORY_MAX_ORDERS = 500;
 export const shopHomeService = createShopHomeService({
   bannerFeed: args => shopBannerService.feed(args),
+  flashSales: flashSaleService.pricing,
   preferences: shopPreferenceService,
   buyerPaidOrders: ({ buyerIds, since }) => (buyerIds.length ? db('ShopOrder')
     .whereIn('buyerId', buyerIds).where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
