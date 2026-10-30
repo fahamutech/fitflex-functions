@@ -4,6 +4,7 @@
 // onto TrainerProfile.
 import { randomUUID } from 'node:crypto';
 import { shortName } from '../shared/public-name.mjs';
+import { DELETED_PERSON_LABEL } from '../shared/deleted-person.mjs';
 
 const MIN_RATING = 1;
 const MAX_RATING = 5;
@@ -124,7 +125,7 @@ export function createTrainerReviewService({ usernames = null, trainerReviews, t
     return Promise.all(rows.map(async r => {
       const u = await users.findByIdAsync(r.memberId);
       const t = await trainers.findByIdAsync(r.trainerId);
-      return { ...r, memberName: u?.displayName || null, trainerName: t?.displayName || null };
+      return { ...r, memberName: u ? u.displayName || null : DELETED_PERSON_LABEL, trainerName: t?.displayName || null };
     }));
   }
 
@@ -137,7 +138,7 @@ export function createTrainerReviewService({ usernames = null, trainerReviews, t
     return Promise.all(rows.map(async r => {
       const u = await users.findByIdAsync(r.memberId);
       const t = await trainers.findByIdAsync(r.trainerId);
-      return { ...r, memberName: u?.displayName || null, trainerName: t?.displayName || null };
+      return { ...r, memberName: u ? u.displayName || null : DELETED_PERSON_LABEL, trainerName: t?.displayName || null };
     }));
   }
 
