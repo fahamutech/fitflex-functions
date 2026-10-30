@@ -33,7 +33,6 @@ exports.up = async function up(knex) {
     ADD COLUMN "artKey" text NOT NULL DEFAULT 'finisher_green',
     ADD COLUMN description jsonb NOT NULL DEFAULT '{}',
     ADD COLUMN "sortOrder" integer NOT NULL DEFAULT 0`);
-  await knex.raw(`ALTER TABLE "EventMedalTemplate" ALTER COLUMN "artKey" DROP DEFAULT`);
   await knex.raw(`ALTER TABLE "EventMedalTemplate"
     ADD CONSTRAINT eventmedaltemplate_tier_check CHECK (tier IN ('finisher', 'gold', 'silver', 'bronze', 'time', 'other')),
     ADD CONSTRAINT eventmedaltemplate_art_key_check CHECK ("artKey" IN (${list(BUILT_IN_ART)})),
@@ -57,7 +56,6 @@ exports.up = async function up(knex) {
     ADD COLUMN "reversalPolicy" text NOT NULL DEFAULT 'revoke_unredeemed',
     ADD COLUMN "redeemMode" text NOT NULL DEFAULT 'certificate',
     ADD COLUMN "perUserCooldownDays" integer`);
-  await knex.raw(`ALTER TABLE "RewardDefinition" ALTER COLUMN "triggerType" DROP DEFAULT`);
   await knex.raw(`ALTER TABLE "RewardDefinition"
     ADD CONSTRAINT rewarddefinition_trigger_check CHECK ("triggerType" IN ('event_finish', 'medal', 'achievement')),
     ADD CONSTRAINT rewarddefinition_reversal_check CHECK ("reversalPolicy" IN ('revoke_unredeemed', 'revoke_all')),
@@ -86,10 +84,17 @@ exports.up = async function up(knex) {
   $$ LANGUAGE plpgsql`);
 
   // ── Account deletion of a participant (rule 6 area) ──
-  // eventregistration_claimed_check (S3) said "claimedAt set => participantUserId set". Deleting the user sets participantUserId NULL (the
-  // foreign key action), which that check refused, so a member who had claimed an event place could not delete their account at all.
-  // The claim stays as history on the registration (the person fields follow the separate retention rule); the check is dropped.
-  await knex.raw(`ALTER TABLE "EventRegistration" DROP CONSTRAINT IF EXISTS eventregistration_claimed_check`);
+  // eventregistration_claimed_check (S3) says "claimedAt set => participantUserId set". Deleting the user makes the foreign key action set
+  // participantUserId NULL, which that check refused, so a member who had claimed an event place could not delete their account at all.
+  // The check STAYS; a BEFORE UPDATE trigger clears claimedAt in the same row when the participant is removed (the claim relationship is gone
+  // with the person; the person fields follow the separate retention rule).
+  await knex.raw(`CREATE OR REPLACE FUNCTION event_registration_participant_removed() RETURNS trigger AS $$
+    BEGIN
+      IF OLD."participantUserId" IS NOT NULL AND NEW."participantUserId" IS NULL THEN NEW."claimedAt" := NULL; END IF;
+      RETURN NEW;
+    END;
+  $$ LANGUAGE plpgsql`);
+  await knex.raw(`CREATE TRIGGER event_registration_participant_removed BEFORE UPDATE OF "participantUserId" ON "EventRegistration" FOR EACH ROW EXECUTE FUNCTION event_registration_participant_removed()`);
 
   // ── Redemptions ──
   await knex.raw(`ALTER TABLE "RewardRedemption"
@@ -127,7 +132,8 @@ exports.down = async function down(knex) {
   ].filter(([n]) => n > 0).map(([, why]) => why);
   if (blockers.length) throw new Error(`events S6 (rewards) down refused (fails closed): ${blockers.join('; ')}.`);
 
-  await knex.raw(`ALTER TABLE "EventRegistration" ADD CONSTRAINT eventregistration_claimed_check CHECK (("claimedAt" IS NULL) OR ("participantUserId" IS NOT NULL)) NOT VALID`);
+  await knex.raw(`DROP TRIGGER IF EXISTS event_registration_participant_removed ON "EventRegistration"`);
+  await knex.raw(`DROP FUNCTION IF EXISTS event_registration_participant_removed()`);
   await knex.raw(`DROP TRIGGER IF EXISTS reward_redemption_anonymise ON "RewardRedemption"`);
   await knex.raw(`DROP FUNCTION IF EXISTS reward_redemption_anonymise()`);
   await knex.raw(`DROP INDEX IF EXISTS rewardredemption_status_expiry_idx`);
