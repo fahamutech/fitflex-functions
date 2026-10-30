@@ -302,6 +302,35 @@ test('product images: another host is refused on create and update; our storage 
   assert.equal(kept.error, undefined, JSON.stringify(kept));
 });
 
+test('product images: the app\'s inline photo (data URI, far over 500 characters) saves on create and update over HTTP', async () => {
+  // What the vendor product form sends: an 800 px WebP at quality 80, inline as a data URI.
+  const photo = await sharp({ create: { width: 800, height: 800, channels: 3, noise: { type: 'gaussian', mean: 128, sigma: 30 } } }).webp({ quality: 80 }).toBuffer();
+  const appPhoto = dataUri('webp', photo);
+  assert.ok(appPhoto.length > 500);
+  const vendor = await user('vendor', { vendorProfile: { businessName: 'Photo Shop', status: 'published' } });
+  const claims = { sub: vendor, userType: 'vendor' };
+  const created = await hit('POST', '/vendor/products', { claims, body: { name: 'Mat', category: 'equipment', priceTzs: 1000, images: [appPhoto] } });
+  assert.equal(created.status, 201, JSON.stringify(created.body).slice(0, 300));
+  made.products.push(created.body.id);
+  assert.deepEqual(created.body.images, [appPhoto]);
+  const second = dataUri('jpeg', JPEG);
+  const updated = await hit('PUT', `/vendor/products/${created.body.id}`, { claims, body: { images: [appPhoto, second] } });
+  assert.equal(updated.status, 200, JSON.stringify(updated.body).slice(0, 300));
+  assert.deepEqual(updated.body.images, [appPhoto, second]);
+  // Still refused: an SVG data URI, bytes that are not an image, and a data URI over the 2 MB decoded cap.
+  const svg = await shopService.upsertProduct({ vendorId: vendor, body: { name: 'Mat', category: 'equipment', priceTzs: 1000, images: [BAD.svgDataUri] } });
+  assert.equal(svg.error, 'invalid_media_src');
+  const fake = await shopService.upsertProduct({ vendorId: vendor, body: { name: 'Mat', category: 'equipment', priceTzs: 1000, images: [`data:image/png;base64,${Buffer.alloc(900, 7).toString('base64')}`] } });
+  assert.deepEqual([fake.error, fake.reason], ['invalid_media_src', 'not_an_image']);
+  const huge = `data:image/png;base64,${Buffer.alloc(mediaSrcMaxBytes() + 3).toString('base64')}`;
+  const tooBig = await shopService.upsertProduct({ vendorId: vendor, body: { name: 'Mat', category: 'equipment', priceTzs: 1000, images: [huge] } });
+  assert.equal(tooBig.status, 400);
+  assert.equal(tooBig.field, 'images');
+  // A non-data string keeps the 500-character cap.
+  const longPath = await shopService.upsertProduct({ vendorId: vendor, body: { name: 'Mat', category: 'equipment', priceTzs: 1000, images: [`/storage/bafy/${'a'.repeat(500)}.webp`] } });
+  assert.deepEqual([longPath.error, longPath.field], ['invalid_field', 'images']);
+});
+
 test('trainer photos: updateProfile and register refuse other hosts; data URIs and kept values pass', async () => {
   const userId = await user('trainer', { photoUrl: 'https://lh3.googleusercontent.com/a/sign-in-photo' });
   const id = uid('trn');
