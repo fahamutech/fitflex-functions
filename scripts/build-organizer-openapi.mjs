@@ -49,6 +49,19 @@ const schemas = {
   BibRequest: obj({ registrationId: str, bibNumber: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9-]{0,11}$' }, replace: bool, reason: { type: 'string', minLength: 10, maxLength: 300 } }, ['registrationId', 'bibNumber']),
   BibResponse: obj({ assignment: obj({ id: str, registrationId: str, bibNumber: str, assignedAt: str }), previousBibNumber: nstr, warnings: arr(str) }),
   BibBatchRequest: obj({ items: { type: 'array', maxItems: 500, items: obj({ clientRef: str, registrationId: str, bibNumber: str }, ['registrationId', 'bibNumber']) } }),
+  ResultItem: obj({
+    registrationId: str, resultId: str, revision: int, bibNumber: nstr, categoryId: str, finishStatus: { enum: ['finished', 'dnf', 'dns', 'dq'] },
+    verificationStatus: { enum: ['pending_verification', 'verified', 'rejected', 'corrected', 'disqualified'] }, stage: { enum: ['none', 'provisional', 'official', 'corrected', 'disputed', 'disqualified', 'rejected'] },
+    sourceType: { enum: ['timing_provider', 'organizer_verified', 'fitflex_gps', 'manual_unverified'] }, netElapsedMs: nullable(int), gunElapsedMs: nullable(int), elapsedMs: nullable(int),
+    overallRank: nullable(int), categoryRank: nullable(int), updatedAt: str,
+  }, undefined, { description: 'No names and no contact data. Ranks are set by FitFlex on official release. Use revision to order updates.' }),
+  ResultList: obj({ items: arr(ref('ResultItem')), nextCursor: nstr }),
+  ResultReleaseList: obj({ items: arr(obj({ categoryId: nstr, stage: { enum: ['provisional', 'official'] }, action: { enum: ['release', 'withdraw'] }, releasedAt: str, resultCount: int })) }),
+  ResultsImportRequest: obj({
+    sourceLabel: { type: 'string', maxLength: 60 }, timeBasis: { enum: ['net', 'gun'] },
+    rows: { type: 'array', minItems: 1, maxItems: 500, items: obj({ clientRef: str, bib: str, registrationId: str, status: { enum: ['finished', 'dnf', 'dns', 'dq'] }, netTime: { type: 'string', description: 'H:MM:SS or HH:MM:SS.mmm' }, gunTime: str, category: str }, ['clientRef']) },
+  }, ['rows']),
+  ResultsImportResponse: obj({ results: arr(obj({ clientRef: str, ok: bool, resultId: nstr, action: { enum: ['created', 'revised', 'unchanged', null] }, error: nstr }, ['clientRef', 'ok'])) }),
   BibBatchResponse: obj({ results: arr(obj({ clientRef: str, ok: bool, bibNumber: str, error: str }, ['clientRef', 'ok'])) }),
   WebhookEnvelope: obj({ id: { type: 'string', description: 'The outbox id: stable across endpoints and retries — your dedupe key.' }, type: { enum: [...WEBHOOK_EVENT_TYPES] }, version: { const: '1' }, createdAt: str, organizerId: str, eventId: nstr, data: { type: 'object' } },
     undefined, { description: 'No names, phones, emails, amounts or tokens. Fetch authorised fields with GET /v1/organizer/registrations/{id}.' }),
@@ -108,6 +121,15 @@ const doc = {
     '/v1/organizer/events/{eventId}/bib-assignments/batch': { post: op('Assign up to 500 bib numbers (per item, not atomic)', 'bibs:write', {
       parameters: [eventIdP, idem], requestBody: { required: true, content: { 'application/json': { schema: ref('BibBatchRequest') } } }, responses: { ...ok('BibBatchResponse'), ...errorResponses([[413, 'payload_too_large']]) },
     }) },
+    '/v1/organizer/events/{eventId}/results': { get: op('List current results', 'results:read', {
+      parameters: [eventIdP, limitP, cursorP, { name: 'categoryId', in: 'query', schema: str }, { name: 'status', in: 'query', schema: str }, { name: 'updatedSince', in: 'query', schema: { type: 'string', format: 'date-time' } }],
+      responses: { ...ok('ResultList'), ...errorResponses([[404, 'event_not_found (also for another organizer\'s or an unlisted event)']]) },
+    }) },
+    '/v1/organizer/events/{eventId}/results/releases': { get: op('Release history', 'results:read', { parameters: [eventIdP], responses: { ...ok('ResultReleaseList'), ...errorResponses([[404, 'event_not_found']]) } }) },
+    '/v1/organizer/events/{eventId}/results/imports': { post: op('Submit up to 500 provisional results (per row, not atomic)', 'results:write', {
+      parameters: [eventIdP, idem, { name: 'dryRun', in: 'query', schema: bool, description: 'Validate only; nothing is stored.' }], requestBody: { required: true, content: { 'application/json': { schema: ref('ResultsImportRequest') } } },
+      responses: { ...ok('ResultsImportResponse'), ...errorResponses([[400, 'idempotency_key_required'], [409, 'event_not_open_for_results | event_cancelled | idempotency_key_reused | request_in_progress'], [422, 'validation_failed']]) },
+    }) },
     '/v1/organizer/webhook-endpoints': {
       get: op('List webhook endpoints', 'webhooks:manage', { responses: ok('WebhookEndpointList') }),
       post: op('Register a webhook endpoint', 'webhooks:manage', { requestBody: { required: true, content: { 'application/json': { schema: ref('WebhookEndpointRequest') } } }, responses: { ...ok('WebhookEndpointCreated', 'Created', '201'), ...errorResponses([[400, 'invalid_url { reason }'], [422, 'invalid_event_type']]) } }),
@@ -126,6 +148,7 @@ const doc = {
   components: {
     securitySchemes: { oauth2: { type: 'oauth2', flows: { clientCredentials: { tokenUrl: '/v1/organizer/token', scopes: {
       'registrations:read': 'Read registrations (names, category, status, bib, kit).', 'registrations:demographics': 'Also gender and age on event day.', 'kit:write': 'Record kit handovers.', 'bibs:write': 'Assign bib numbers.', 'webhooks:manage': 'Manage webhooks (granted by the organizer owner only).',
+      'results:read': 'Read results and release history (needs registrations:read).', 'results:write': 'Submit PROVISIONAL results. It cannot verify, release, correct or disqualify them (needs registrations:read).',
     } } } } },
     schemas,
   },

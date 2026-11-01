@@ -13,8 +13,16 @@ export function createAccountService({
   // Partner DOB security review M1 (variant 3): ({ user, dateOfBirth }) → null | { error, status }.
   // Refuses a member date of birth under 18 for a person who holds a trainer or gym-owner role.
   memberDobGuard = async () => null,
+  // S6 (D53): ({ userId }) → true when the user owns an event organizer (EventOrganizer.ownerUserId is RESTRICT: transfer or close it first).
+  ownsEventOrganizer = async () => false,
 }) {
   async function deleteMyAccount(user) {
+    if (await ownsEventOrganizer({ userId: user.id })) {
+      return {
+        error: 'organizer_owner', status: 409,
+        message: 'Transfer or close your organizer account first.', messageSw: 'Hamisha au funga akaunti yako ya mwandaaji kwanza.',
+      };
+    }
     if (user.userType === 'gym_operator') {
       const ownedGymIds = user.gymIds || (user.gymId ? [user.gymId] : []);
       let hasGymActivity = false;

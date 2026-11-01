@@ -108,3 +108,20 @@ export const eventsFeedLagSeconds = () => intOr('EVENTS_FEED_LAG_SECONDS', 5, { 
 export const eventsExportMaxRows = () => intOr('EVENTS_EXPORT_MAX_ROWS', 20_000, { max: 200_000 });
 /** The env part of the D39 pilot gate: a Set of organizer ids (empty when unset). The admin switch (EventOrganizer.apiAccessEnabledAt) is the other part. */
 export const eventsApiAllowlist = () => new Set(String(process.env.EVENTS_API_ORGANIZER_ALLOWLIST ?? '').split(',').map(s => s.trim()).filter(Boolean));
+
+// ── S6: runs, results, medals and rewards (docs/design/events-s6-runs-results-medals-rewards.md §13.2) ──
+//   EVENTS_RUN_DISTANCE_TOLERANCE_BPS 200      EVENTS_RUN_LINK_MAX_DAYS_AFTER 7       EVENTS_RESULTS_IMPORT_MAX_ROWS 5000
+//   EVENTS_RESULTS_DISPUTE_DEFAULT_HOURS 168   EVENTS_AWARD_BATCH 200                 EVENTS_RESULTS_PUSH_MAX 500
+//   EVENTS_MEDAL_ART_MAX_BYTES 2097152         EVENTS_MEDAL_ART_MAX_PIXELS 16000000   EVENTS_MEDAL_ART_UPLOADS_PER_DAY 20
+//   EVENTS_RESULTS_CONSENT_VERSIONS            comma list of consent-text versions that carry the public-results clause (unset = none: everyone starts bib-only)
+// Reward codes reuse EVENT_TICKET_SECRET through a derived key (events-reward-code.mjs); there is no new secret.
+export const eventsRunDistanceToleranceBps = () => intOr('EVENTS_RUN_DISTANCE_TOLERANCE_BPS', 200, { min: 0, max: 500 });
+export const eventsRunLinkMaxDaysAfter = () => intOr('EVENTS_RUN_LINK_MAX_DAYS_AFTER', 7, { min: 0, max: 60 });
+export const eventsResultsImportMaxRows = () => intOr('EVENTS_RESULTS_IMPORT_MAX_ROWS', 5000, { max: 20_000 });
+export const eventsResultsDisputeDefaultHours = () => intOr('EVENTS_RESULTS_DISPUTE_DEFAULT_HOURS', 168, { min: 24, max: 720 });
+export const eventsAwardBatch = () => intOr('EVENTS_AWARD_BATCH', 200, { max: 2000 });
+export const eventsResultsPushMax = () => intOr('EVENTS_RESULTS_PUSH_MAX', 500, { min: 0, max: 100_000 });
+export const eventsMedalArtMaxBytes = () => intOr('EVENTS_MEDAL_ART_MAX_BYTES', 2_097_152, { min: 65_536, max: 2_097_152 });
+export const eventsMedalArtMaxPixels = () => intOr('EVENTS_MEDAL_ART_MAX_PIXELS', 16_000_000, { min: 262_144, max: 16_000_000 });
+export const eventsMedalArtUploadsPerDay = () => intOr('EVENTS_MEDAL_ART_UPLOADS_PER_DAY', 20, { max: 200 });
+export const eventsResultsConsentVersions = () => String(process.env.EVENTS_RESULTS_CONSENT_VERSIONS ?? '').split(',').map(s => s.trim()).filter(Boolean);

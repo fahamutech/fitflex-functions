@@ -12,8 +12,8 @@ import { readFileSync } from 'node:fs';
 import '../src/bootstrap/init.mjs';
 import { requireApiClient, exchangeClientCredentials, SECRET_RE, CLIENT_ID_RE } from '../src/auth/organizer-api-auth.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsOrganizerApi, requireEventsWebhooks, eventsKitOpsOn as kitOpsGate } from '../src/shared/feature-flags.mjs';
-import { eventsOpsService as ops, eventsSyncService as sync, eventsIntegrationsService as integrations, eventsWebhookService as hooks } from '../src/bootstrap/services.mjs';
+import { requireEventsOrganizerApi, requireEventsWebhooks, requireEventsResults, eventsKitOpsOn as kitOpsGate } from '../src/shared/feature-flags.mjs';
+import { eventsOpsService as ops, eventsSyncService as sync, eventsIntegrationsService as integrations, eventsWebhookService as hooks, eventsResultsService as results } from '../src/bootstrap/services.mjs';
 import * as sandbox from '../src/shared/organizer-api-sandbox.mjs';
 
 void SECRET_RE; void CLIENT_ID_RE;
@@ -214,6 +214,50 @@ export const apiAssignBibBatch = {
     }
     if (outOfScope(req, req.params.eventId)) return reply(req, res, notFound());
     return reply(req, res, await ops.assignBibBatch({ actor: apiActor(req), organizerId: req.apiClient.organizerId, eventId: req.params.eventId, key: idemKey(req), body: req.body || {} }));
+  }),
+};
+
+// ── Results (S6; EVENTS_RESULTS + EVENTS_ORGANIZER_API; scopes results:read / results:write) ──
+// An API client can SUBMIT provisional results and read results. It cannot verify, reject, release, correct or disqualify (D46): no such
+// route exists here, and the service refuses every decision for an API actor.
+
+const resultsGuard = (method, scope) => routeGuard(method, [requestIdGuard, requireEventsOrganizerApi, requireEventsResults, authed(scope)]);
+
+export const apiListResults = {
+  created, method: 'get', path: '/v1/organizer/events/:eventId/results',
+  description: 'API client, scope results:read (+ EVENTS_RESULTS): current results of an event. ?categoryId&status (pending_verification | verified | rejected | corrected | disqualified | finished | dnf | dns | dq)&updatedSince (ISO)&limit (≤200)&cursor → { items [{ registrationId, resultId, revision, bibNumber, categoryId, finishStatus, verificationStatus, stage, sourceType, netElapsedMs, gunElapsedMs, elapsedMs, overallRank, categoryRank, updatedAt }], nextCursor }. No names, no contact data. 404 event_not_found for another organizer\'s or an unlisted event.',
+  onGuard: resultsGuard('get', 'results:read'),
+  onRequest: guarded(async (req, res) => {
+    if (isSandbox(req)) return reply(req, res, req.params.eventId === sandbox.SANDBOX_EVENT_ID ? sandbox.sandboxResultList({ query: req.query || {} }) : notFound());
+    if (outOfScope(req, req.params.eventId)) return reply(req, res, notFound());
+    return reply(req, res, await results.apiList({ organizerId: req.apiClient.organizerId, eventId: req.params.eventId, query: req.query || {} }));
+  }),
+};
+
+export const apiResultReleases = {
+  created, method: 'get', path: '/v1/organizer/events/:eventId/results/releases',
+  description: 'API client, scope results:read (+ EVENTS_RESULTS): the release history of an event → { items [{ categoryId (null = whole event), stage: provisional | official, action: release | withdraw, releasedAt, resultCount }] }.',
+  onGuard: resultsGuard('get', 'results:read'),
+  onRequest: guarded(async (req, res) => {
+    if (isSandbox(req)) return reply(req, res, req.params.eventId === sandbox.SANDBOX_EVENT_ID ? sandbox.sandboxReleases() : notFound());
+    if (outOfScope(req, req.params.eventId)) return reply(req, res, notFound());
+    return reply(req, res, await results.apiReleases({ organizerId: req.apiClient.organizerId, eventId: req.params.eventId }));
+  }),
+};
+
+export const apiImportResults = {
+  created, method: 'post', path: '/v1/organizer/events/:eventId/results/imports',
+  description: 'API client, scope results:write (+ EVENTS_RESULTS): submit up to 500 PROVISIONAL results. Idempotency-Key REQUIRED and covers the whole call. Body { sourceLabel? (≤60), timeBasis?: net | gun, rows: [{ clientRef, bib | registrationId, status?: finished | dnf | dns | dq, netTime?, gunTime?, category? }] }; ?dryRun=true validates only. → 200 { results [{ clientRef, ok, resultId | null, action: created | revised | unchanged | null, error | null }] }. NOT atomic across rows (each row is its own transaction). Results are always sourceType timing_provider, pending_verification (an organizer verifies), attributed to the API client; a verified result answers already_official. 409 event_not_open_for_results | event_cancelled; 422 validation_failed.',
+  onGuard: resultsGuard('post', 'results:write'),
+  onRequest: guarded(async (req, res) => {
+    const dryRun = ['1', 'true'].includes(String(req.query?.dryRun ?? ''));
+    if (isSandbox(req)) {
+      if (req.params.eventId !== sandbox.SANDBOX_EVENT_ID) return reply(req, res, notFound());
+      if (!dryRun && !idemKey(req)) return reply(req, res, { error: 'idempotency_key_required', status: 400 });
+      return reply(req, res, sandbox.sandboxResultsImport({ body: req.body || {} }));
+    }
+    if (outOfScope(req, req.params.eventId)) return reply(req, res, notFound());
+    return reply(req, res, await results.apiImport({ actor: apiActor(req), organizerId: req.apiClient.organizerId, eventId: req.params.eventId, key: idemKey(req), body: req.body || {}, dryRun }));
   }),
 };
 

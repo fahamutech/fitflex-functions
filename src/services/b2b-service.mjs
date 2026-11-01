@@ -9,7 +9,7 @@
 // rows appear as `employee` beneficiaries. Those read-through rows are
 // read-only here; they change through the existing corporate routes, so seat
 // limits and billing can't be bypassed.
-import { findUserByContact } from '../shared/user-contact.mjs';
+import { findUserByContact, readContact } from '../shared/user-contact.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   ORGANIZATION_TYPES, ORGANIZATION_TRANSITIONS, ORGANIZATION_USER_ROLES, ORGANIZATION_USER_STATUS,
@@ -399,20 +399,27 @@ export function createB2BService({
   const forbidden = permission => fail('forbidden', 403, { requiredPermission: permission });
 
   /**
-   * A user id proves nothing about consent (ids show in feeds and groups), so
-   * when an organisation user names someone only by id, the member must
-   * accept first. Not for FitFlex platform admins, not for a verified email
-   * or number (unchanged), and not when the member has just accepted.
-   * `opts` comes from internal callers only, never from a request body.
+   * Nobody is added to an organisation by someone else without agreeing. A
+   * user id proves nothing about consent (ids show in feeds and groups), and
+   * neither does knowing someone's email or number (consent slice (a), owner
+   * decision 22 Oct 2026, re-confirmed 29 Oct). So when an organisation user
+   * names someone, by id or by contact, the member must accept first. Not for
+   * FitFlex platform admins (they add directly and the person is told), and
+   * not when the member has just accepted (`opts.memberRequestId`, from
+   * b2b-member-request-service only, never from a request body).
+   *   'id'       named by user id      → memberRequests.create (or stub)
+   *   'contact'  named by email/number → memberRequests.createByContact
+   *   null       add directly
    */
-  const needsMemberConsent = (access, body, opts = {}) => !access.platformAdmin
-    && !opts.memberRequestId && !opts.verifiedContact
-    && body.userId != null && String(body.userId).trim() !== '';
+  const filled = v => v != null && String(v).trim() !== '';
+  const consentPath = (access, body, opts = {}) => {
+    if (access.platformAdmin || opts.memberRequestId) return null;
+    if (filled(body.userId)) return 'id';
+    return filled(body.email) || filled(body.phone) ? 'contact' : null;
+  };
   const consentUnavailable = () => fail('member_consent_unavailable', 503);
-  /** A FitFlex platform admin adding someone directly by user id: the person is told (owner decision 22 Oct 2026). */
-  const adminAddsById = (access, body, opts = {}) => access.platformAdmin
-    && !opts.memberRequestId && !opts.verifiedContact
-    && body.userId != null && String(body.userId).trim() !== '';
+  /** A FitFlex platform admin adding someone directly, by id or contact: the person is told (owner decision 22 Oct 2026). */
+  const adminDirectAdd = (access, opts = {}) => access.platformAdmin && !opts.memberRequestId;
 
   /** Organisations the caller belongs to (native memberships and corporate HR). */
   async function listMyOrganizations({ userId, userType }) {
@@ -522,9 +529,26 @@ export function createB2BService({
 
     // By user id, or by the verified email or mobile number of their FitFlex account. An
     // organisation user signs in to the portal with their member account.
-    const askById = needsMemberConsent(access, body, opts);
-    if (askById) {
+    const path = consentPath(access, body, opts);
+    const askById = path === 'id';
+    if (path) {
+      const read = readContact(body);
+      if (read.error) return read;
       if (!memberRequests) return consentUnavailable();
+      if (path === 'contact') {
+        // The same answer whoever is behind the contact; only a person who may be asked is told.
+        return memberRequests.createByContact({
+          kind: 'org_user', organizationId: access.org.id, contact: read.contact, requestedBy: actorId, requestedByType: access.userType,
+          details: { role: body.role, permissions },
+          resolve: async () => {
+            const found = await findUserByContact(users, body, { prefer: 'member', contacts: verifiedContacts });
+            if (!found.user) return null;
+            if (orgOnlySponsors() && found.user.userType === 'corporate_hr' && found.user.corporateId !== access.org.legacyCorporateId) return null;
+            const live = (await organizationUsers.filterByColumnAsync('userId', found.user.id)).find(m => m.organizationId === access.org.id && m.status !== 'removed');
+            return live ? null : found.user.id;
+          },
+        });
+      }
       const limited = memberRequests.attempt(actorId);
       if (limited) return limited;
     }
@@ -564,7 +588,7 @@ export function createB2BService({
       throw err;
     }
     await audit({ actor: actorId, action: 'b2b.org_user.add', target: row.id, after: opts.memberRequestId ? { ...row, memberRequestId: opts.memberRequestId } : row });
-    if (adminAddsById(access, body, opts) && memberRequests?.adminAdded) {
+    if (adminDirectAdd(access, opts) && memberRequests?.adminAdded) {
       await memberRequests.adminAdded({ kind: 'org_user', organizationId: access.org.id, userId: user.id, actorId, role: row.role, resultId: row.id }).catch(() => null);
     }
     return { organizationUser: { ...row, source: 'b2b', readOnly: false, user: userSummary(user) } };
@@ -766,7 +790,7 @@ export function createB2BService({
     if (!can(access, 'beneficiaries.manage')) return forbidden('beneficiaries.manage');
     // Employer seats are billed and seat-limited by Corporate; enrol there
     // (B5a, flag on: through the same company staff path, from here).
-    if (writesThrough(access)) return companyStaffManage(access) ? enrollCompanyStaff({ access, body, actorId }) : notCompanyStaffRole();
+    if (writesThrough(access)) return companyStaffManage(access) ? enrollCompanyStaff({ access, body, actorId, fromImport: opts.fromImport === true }) : notCompanyStaffRole();
     if (access.org.legacyCorporateId) return corporateManaged(access);
     if (access.org.status !== 'active') return fail('organization_not_active', 409, { organizationStatus: access.org.status });
 
@@ -776,9 +800,30 @@ export function createB2BService({
     if (!['pending', 'active'].includes(status)) return fail('invalid_status', 400, { allowed: ['pending', 'active'] });
 
     // By user id, or by the verified email or mobile number of their member account.
-    const askById = needsMemberConsent(access, body, opts);
-    if (askById) {
+    const path = consentPath(access, body, opts);
+    const askById = path === 'id';
+    if (path) {
+      const read = readContact(body);
+      if (read.error) return read;
       if (!memberRequests) return consentUnavailable();
+      if (path === 'contact') {
+        // Checks about the organisation's own list first (they say nothing about the person).
+        const externalReference = text(body.externalReference, 100);
+        if (externalReference && (await beneficiaries.filterByColumnAsync('organizationId', access.org.id)).some(b => b.externalReference === externalReference)) {
+          return fail('external_reference_in_use', 409);
+        }
+        // The same answer whoever is behind the contact; only a member who may be asked is told.
+        return memberRequests.createByContact({
+          kind: 'beneficiary', organizationId: access.org.id, contact: read.contact, requestedBy: actorId, requestedByType: access.userType,
+          details: { beneficiaryType, groupName: text(body.groupName, 100), externalReference, beneficiaryStatus: status },
+          resolve: async () => {
+            const found = await findUserByContact(users, body, { require: 'member', contacts: verifiedContacts });
+            if (!found.user || found.user.userType !== 'member') return null;
+            const enrolled = (await beneficiaries.filterByColumnAsync('userId', found.user.id)).some(b => b.organizationId === access.org.id);
+            return enrolled ? null : found.user.id;
+          },
+        });
+      }
       const limited = memberRequests.attempt(actorId);
       if (limited) return limited;
     }
@@ -825,7 +870,7 @@ export function createB2BService({
       throw err;
     }
     await audit({ actor: actorId, action: 'b2b.beneficiary.enroll', target: row.id, after: opts.memberRequestId ? { ...row, memberRequestId: opts.memberRequestId } : row });
-    if (adminAddsById(access, body, opts) && memberRequests?.adminAdded) {
+    if (adminDirectAdd(access, opts) && memberRequests?.adminAdded) {
       await memberRequests.adminAdded({ kind: 'beneficiary', organizationId: access.org.id, userId: user.id, actorId, resultId: row.id }).catch(() => null);
     }
     return { beneficiary: (await nativeViews([row]))[0] };
@@ -880,43 +925,37 @@ export function createB2BService({
    *  - FitFlex platform admin: links directly (by id the member is told, as RC does).
    *  - by userId: corporateService.linkEmployeeUser makes the request; an id
    *    that names nobody (or no member) gets RC's stub (same 202, nothing stored).
-   *  - by email / phone (verified, member account): the request is made for
-   *    that account. Nobody behind the contact: a stub. Either way the reply's
-   *    memberRequest has no id and no userId, so a contact cannot be tested.
+   *  - by email / phone: corporateService.linkEmployeeUser makes a request by
+   *    contact (consent slice (a)): stored whether or not a verified member is
+   *    behind it, the same reply either way (memberRequest.userId null), and
+   *    only a member who may be asked is told. When both are given the email
+   *    is used.
    * Returns { out, viaContact }: out is linkEmployeeUser's result ({ outcome:
    * 'pending_member_acceptance', memberRequest } | { employee } | { employee,
-   * unchanged } | { error }); viaContact says the reply must be redacted.
+   * unchanged } | { error }).
    */
-  async function requestStaffLink({ access, employee, body, actorId }) {
+  async function requestStaffLink({ access, employee, body, actorId, fromImport = false }) {
     const corporateId = access.org.legacyCorporateId;
     const base = { corporateId, employeeId: employee.id, actorId, organizationId: access.org.id };
-    const given = key => body[key] != null && String(body[key]).trim() !== '';
+    // A bulk import never links, not even a FitFlex admin's (consent slice (a)): the member is asked.
+    if (access.platformAdmin && fromImport) {
+      return { out: await corporateStaff.linkEmployeeUser({ ...base, ...byContact(body), actorType: 'admin', askMember: true }), viaContact: true };
+    }
     if (access.platformAdmin) {
       return { out: await corporateStaff.linkEmployeeUser({ ...base, userId: body.userId ?? null, email: body.email ?? null, phone: body.phone ?? null, actorType: 'admin' }), viaContact: false };
     }
     const actorType = access.userType ?? 'member';
-    if (given('userId')) return { out: await corporateStaff.linkEmployeeUser({ ...base, userId: body.userId, actorType }), viaContact: false };
-
-    // By contact: the verified member account behind the email, then the number.
-    let user = null;
-    for (const key of ['email', 'phone'].filter(given)) {
-      const found = await findUserByContact(users, { [key]: body[key] }, { require: 'member', contacts: verifiedContacts });
-      if (found.user) { user = found.user; break; }
-      if (!['user_not_found', 'member_account_required'].includes(found.error)) return { out: found, viaContact: true };
-    }
-    if (user) return { out: await corporateStaff.linkEmployeeUser({ ...base, userId: user.id, actorType }), viaContact: true };
-    if (!memberRequests) return { out: consentUnavailable(), viaContact: true };
-    const limited = memberRequests.attempt(actorId);
-    if (limited) return { out: limited, viaContact: true };
-    return {
-      out: memberRequests.stub({ kind: 'employee_link', corporateId, organizationId: access.org.id, employeeId: employee.id, userId: null,
-        details: { displayName: employee.displayName ?? null, department: employee.department ?? null } }),
-      viaContact: true,
-    };
+    if (filled(body.userId)) return { out: await corporateStaff.linkEmployeeUser({ ...base, userId: body.userId, actorType }), viaContact: false };
+    return { out: await corporateStaff.linkEmployeeUser({ ...base, ...byContact(body), actorType }), viaContact: true };
   }
 
-  /** The reply's memberRequest: by contact without its id or the member's id (finding 4). */
-  const replyRequest = (memberRequest, viaContact) => (viaContact ? { ...memberRequest, id: null, userId: null } : memberRequest);
+  /** By contact: the email (the number tried too when nobody has verified the email, as before), else the number. */
+  const byContact = body => (filled(body.email)
+    ? { email: body.email, fallbackPhone: filled(body.phone) ? body.phone : null }
+    : { phone: body.phone });
+
+  /** The reply's memberRequest: by contact never the member's id (finding 4; orgView already leaves it out). */
+  const replyRequest = (memberRequest, viaContact) => (viaContact ? { ...memberRequest, userId: null } : memberRequest);
 
   /** linkEmployeeUser's refusals that say nothing about the member, mapped; the rest as they are. */
   const linkOutcome = out => (out.outcome === 'pending_member_acceptance' ? 'pending_member_acceptance' : out.unchanged ? 'unchanged' : 'linked');
@@ -931,7 +970,7 @@ export function createB2BService({
    * consent flow does; a FitFlex platform admin links directly. Named only by
    * name, the row is added unlinked (201).
    */
-  async function enrollCompanyStaff({ access, body, actorId }) {
+  async function enrollCompanyStaff({ access, body, actorId, fromImport = false }) {
     const corporateId = access.org.legacyCorporateId;
     const status = body.status ?? 'pending';
     if (!['pending', 'active'].includes(status)) return fail('invalid_status', 400, { allowed: ['pending', 'active'] });
@@ -955,7 +994,7 @@ export function createB2BService({
     let link = null;
     let viaContact = false;
     if (named) {
-      ({ out: link, viaContact } = await requestStaffLink({ access, employee, body, actorId }));
+      ({ out: link, viaContact } = await requestStaffLink({ access, employee, body, actorId, fromImport }));
       if (link.error) {
         // Give the seat back rather than leave a stray row behind.
         await corporateStaff.setEmployeeStatus({ corporateId, employeeId: employee.id, status: 'exited', actorId });

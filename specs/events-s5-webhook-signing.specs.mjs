@@ -121,8 +121,8 @@ test('the retry schedule: 1m · 5m · 15m · 1h · 3h · 6h · 12h · 24h (the l
 });
 
 test('what organizers may be sent: a closed type list, no wildcard, payments / tickets / reserved never; refund rows are mapped; the unfulfilled-payment refund is dropped; projectors are allowlists', () => {
-  assert.deepEqual([...WEBHOOK_EVENT_TYPES].sort(), ['bib.assigned', 'event.cancelled', 'event.updated', 'kit.collected', 'refund.updated', 'registration.cancelled', 'registration.created', 'registration.paid', 'registration.updated']);
-  for (const t of ['*', 'registration.*', 'payment.succeeded', 'payment.failed', 'ticket.issued', 'ticket.revoked', 'registration.reserved', 'result.verified', 'endpoint.verification', 'refund.requested', 'refund.paid']) assert.equal(isSubscribable(t), false, t);
+  assert.deepEqual([...WEBHOOK_EVENT_TYPES].sort(), ['bib.assigned', 'event.cancelled', 'event.updated', 'kit.collected', 'refund.updated', 'registration.cancelled', 'registration.created', 'registration.paid', 'registration.updated', 'result.corrected', 'result.disputed', 'result.published', 'result.verified']); // S6 added the four result types
+  for (const t of ['*', 'registration.*', 'payment.succeeded', 'payment.failed', 'ticket.issued', 'ticket.revoked', 'registration.reserved', 'result.*', 'result.created', 'endpoint.verification', 'refund.requested', 'refund.paid']) assert.equal(isSubscribable(t), false, t);
   const row = (type, payload) => ({ id: 'obx_1', type, organizerId: 'eorg_1', eventId: 'evt_1', createdAt: new Date('2027-01-01T00:00:00Z'), payload });
   for (const internal of ['payment.succeeded', 'payment.failed', 'ticket.issued', 'ticket.revoked', 'registration.reserved', 'something.else']) assert.equal(projectOutbox(row(internal, { amountTzs: 1 })), null, internal);
   // PII and money in an outbox payload never reach the envelope

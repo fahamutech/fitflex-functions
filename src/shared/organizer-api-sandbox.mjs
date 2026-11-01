@@ -109,3 +109,61 @@ export function sandboxBib({ clientId, body = {} }) {
   remember(`${clientId}:bib:${bib}`);
   return { status: 201, assignment: { id: `ebn_sandbox_${reg.id.slice(-2)}`, registrationId: reg.id, bibNumber: bib, assignedAt: new Date().toISOString() }, previousBibNumber: reg.bibNumber ?? null, warnings: [] };
 }
+
+// ── S6: results (spec §8.4). 25 fake runners with three statuses; reads come from here, writes are validated and persist nothing. ──
+
+const RESULT_BASE = Date.parse('2030-01-01T05:30:00.000Z');
+/** Results of the fake runners 1–24 (#25 is the cancelled place and has none): 1–15 verified, 16–20 pending_verification, 21–22 dnf, 23–24 dns. */
+export function sandboxResults() {
+  const regs = sandboxRegistrations();
+  const rows = [];
+  for (let n = 1; n <= 24; n += 1) {
+    const reg = regs[n - 1];
+    const finished = n <= 20;
+    const elapsed = finished ? (1800 + n * 47) * 1000 : null;
+    const verified = n <= 15;
+    rows.push({
+      registrationId: reg.id, resultId: `eres_sandbox_${pad(n)}`, revision: 1, bibNumber: reg.bibNumber, categoryId: reg.categoryId,
+      finishStatus: finished ? 'finished' : n <= 22 ? 'dnf' : 'dns', verificationStatus: verified ? 'verified' : n <= 20 ? 'pending_verification' : 'verified',
+      stage: verified ? 'official' : n <= 20 ? 'provisional' : 'official', sourceType: 'timing_provider',
+      netElapsedMs: elapsed, gunElapsedMs: elapsed === null ? null : elapsed + 21_000, elapsedMs: elapsed,
+      overallRank: verified ? n : null, categoryRank: verified ? Math.ceil(n / 3) : null, updatedAt: new Date(RESULT_BASE + n * 60_000).toISOString(),
+    });
+  }
+  return rows;
+}
+export function sandboxResultList({ query = {} }) {
+  let rows = sandboxResults();
+  if (query.categoryId) rows = rows.filter(r => r.categoryId === String(query.categoryId));
+  if (query.status) rows = rows.filter(r => r.verificationStatus === String(query.status) || r.finishStatus === String(query.status));
+  if (query.updatedSince) { const t = Date.parse(String(query.updatedSince)); if (Number.isNaN(t)) return { error: 'invalid_request', status: 400, field: 'updatedSince' }; rows = rows.filter(r => Date.parse(r.updatedAt) >= t); }
+  const limit = parseLimit(query.limit);
+  if (limit === null) return { error: 'invalid_request', status: 400, field: 'limit' };
+  const cursor = query.cursor ? decodeCursor(query.cursor) : null;
+  if (query.cursor && !cursor) return { error: 'invalid_cursor', status: 400 };
+  const start = Number.isInteger(cursor?.o) ? cursor.o : 0;
+  const page = rows.slice(start, start + limit);
+  return { items: page, nextCursor: start + limit < rows.length ? encodeCursor({ o: start + limit }) : null };
+}
+export const sandboxReleases = () => ({ items: CATS.map(c => ({ categoryId: c.id, stage: 'provisional', action: 'release', releasedAt: new Date(RESULT_BASE).toISOString(), resultCount: 8 })) });
+
+/** A results batch against the sandbox: every row is checked like the live route and answered, nothing is stored. */
+export function sandboxResultsImport({ body = {} }) {
+  const rows = Array.isArray(body.rows) ? body.rows : null;
+  if (!rows || !rows.length || rows.length > 500) return { error: 'validation_failed', status: 422, fields: [{ path: 'rows', code: rows && rows.length > 500 ? 'too_many' : 'required' }] };
+  const regs = sandboxRegistrations();
+  const existing = new Map(sandboxResults().map(r => [r.registrationId, r]));
+  const results = rows.map((r, i) => {
+    const clientRef = typeof r?.clientRef === 'string' ? r.clientRef.slice(0, 100) : `#${i + 1}`;
+    const bib = normaliseBib(r?.bib ?? '');
+    const reg = r?.registrationId ? regs.find(x => x.id === r.registrationId) : regs.find(x => x.bibNumber === bib);
+    if (!reg || reg.status !== 'confirmed') return { clientRef, ok: false, resultId: null, action: null, error: 'bib_not_found' };
+    const status = String(r?.status ?? (r?.netTime ? 'finished' : '')).toLowerCase();
+    if (!['finished', 'dnf', 'dns', 'dq'].includes(status)) return { clientRef, ok: false, resultId: null, action: null, error: 'status_invalid' };
+    if (status === 'finished' && !/^(\d{1,2}:)?\d{1,2}:\d{2}(\.\d{1,3})?$/.test(String(r?.netTime ?? r?.gunTime ?? ''))) return { clientRef, ok: false, resultId: null, action: null, error: r?.netTime || r?.gunTime ? 'time_invalid' : 'time_missing_for_finisher' };
+    const cur = existing.get(reg.id);
+    if (cur?.verificationStatus === 'verified' && cur.finishStatus === 'finished') return { clientRef, ok: false, resultId: cur.resultId, action: null, error: 'already_official' };
+    return { clientRef, ok: true, resultId: cur?.resultId ?? `eres_sandbox_new_${pad(i + 1)}`, action: cur ? 'revised' : 'created', error: null };
+  });
+  return { results, status: 200 };
+}

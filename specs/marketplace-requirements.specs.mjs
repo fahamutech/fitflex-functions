@@ -128,12 +128,18 @@ test('marketplace: rich products are approval gated, filterable and sortable', a
   assert.equal(popular[0].name, 'Yoga Mat');
 });
 
-test('marketplace: material vendor edits return an approved product to review', async () => {
+test('marketplace: material vendor edits return an approved product to review (price edits do not: owner decision 2026-10-29)', async () => {
   const { service } = makeService();
   const productId = await approvedProduct(service);
 
-  const updated = await service.upsertProduct({
+  const repriced = await service.upsertProduct({
     vendorId: 'vendor-1', productId, body: { priceTzs: 90000 },
+  });
+  assert.equal(repriced.product.approvalStatus, 'approved');
+  assert.equal((await service.listProducts({})).some(product => product.id === productId), true);
+
+  const updated = await service.upsertProduct({
+    vendorId: 'vendor-1', productId, body: { name: 'Renamed product' },
   });
 
   assert.equal(updated.product.approvalStatus, 'pending');

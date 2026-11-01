@@ -1,6 +1,6 @@
 // Corporate wellness (B2B) — account onboarding, seat provisioning, telemetry
 // dashboard and seat billing. Pure DI: receives store collections via the factory.
-import { findUserByContact } from '../shared/user-contact.mjs';
+import { findUserByContact, readContact } from '../shared/user-contact.mjs';
 import { randomUUID, randomInt } from 'node:crypto';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import {
@@ -299,7 +299,9 @@ export function createCorporateService({
    * Link an employee to their FitFlex member account (or unlink with a null
    * userId). The link is what lets the employee use the company's benefits.
    */
-  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId, actorType = null, memberRequestId = null, organizationId = null }) {
+  async function linkEmployeeUser({ corporateId, employeeId, userId: givenUserId, email = null, phone = null, actorId, actorType = null, memberRequestId = null, organizationId = null, askMember = false, fallbackPhone = null }) {
+    // Internal callers only: askMember asks even when a FitFlex admin acts (a bulk import never links);
+    // fallbackPhone is a number to try when nobody has verified the email (the request stays keyed on the email).
     // organizationId (B5a): the company's organisation when the link is asked from /org by an
     // organisation user; stored on the member request so accepting it re-checks that access.
     const employee = await corporateEmployees.findByIdAsync(employeeId);
@@ -312,13 +314,33 @@ export function createCorporateService({
       await audit({ actor: actorId, action: 'corporate.staff.unlink', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId: null } });
       return { employee: (({ pinHash, ...rest }) => rest)(updated) };
     }
-    // Named only by user id (a user id proves nothing): the member must accept
-    // before the record is linked and the company sees their activity.
-    // FitFlex platform admins (actorType 'admin') still link directly.
+    // Named by user id (which proves nothing) or by email / number (knowing
+    // someone's contact is not their agreement either; consent slice (a)): the
+    // member must accept before the record is linked and the company sees
+    // their activity. FitFlex platform admins (actorType 'admin') still link
+    // directly, and the member is told.
     const byIdOnly = givenUserId != null && String(givenUserId).trim() !== '';
-    const askById = byIdOnly && actorType !== 'admin' && !memberRequestId;
-    if (askById) {
+    const ask = (actorType !== 'admin' || askMember) && !memberRequestId;
+    const askById = byIdOnly && ask;
+    if (ask) {
+      const read = readContact({ userId: givenUserId, email, phone });
+      if (read.error) return read;
       if (!memberRequests) return { error: 'member_consent_unavailable', status: 503 };
+      if (read.contact) {
+        // The same answer whoever is behind the contact; only a member who may be asked is told.
+        return memberRequests.createByContact({
+          kind: 'employee_link', corporateId, organizationId, employeeId, contact: read.contact, requestedBy: actorId, requestedByType: actorType ?? 'corporate_hr',
+          details: { displayName: employee.displayName ?? null, department: employee.department ?? null },
+          resolve: async () => {
+            let found = await findUserByContact(users, { email, phone }, { require: 'member', contacts: verifiedContacts });
+            if (!found.user && email && fallbackPhone) found = await findUserByContact(users, { phone: fallbackPhone }, { require: 'member', contacts: verifiedContacts });
+            if (!found.user || found.user.userType !== 'member' || employee.userId === found.user.id) return null;
+            const taken = (await corporateEmployees.filterByColumnAsync('userId', found.user.id))
+              .some(e => e.corporateId === corporateId && e.id !== employeeId && e.status !== 'exited');
+            return taken ? null : found.user.id;
+          },
+        });
+      }
       const limited = memberRequests.attempt(actorId);
       if (limited) return limited;
     }
@@ -347,8 +369,8 @@ export function createCorporateService({
     // Linked another way: an open request for this record is closed.
     if (memberRequests && !memberRequestId) await memberRequests.cancelForEmployee({ corporateId, employeeId, actorId });
     await audit({ actor: actorId, action: 'corporate.staff.link', target: employeeId, before: { userId: employee.userId ?? null }, after: { userId, ...(memberRequestId ? { memberRequestId } : {}) } });
-    // A FitFlex platform admin linked them directly by user id: they are told (owner decision 22 Oct 2026).
-    if (byIdOnly && actorType === 'admin' && !memberRequestId && employee.userId !== userId && memberRequests?.adminAdded) {
+    // A FitFlex platform admin linked them directly, by user id or contact: they are told (owner decision 22 Oct 2026).
+    if (actorType === 'admin' && !memberRequestId && employee.userId !== userId && memberRequests?.adminAdded) {
       await memberRequests.adminAdded({ kind: 'employee_link', corporateId, employeeId, userId, actorId, resultId: employeeId }).catch(() => null);
     }
     return { employee: (({ pinHash, ...rest }) => rest)(updated) };

@@ -11,6 +11,8 @@
 export const WEBHOOK_EVENT_TYPES = Object.freeze([
   'registration.created', 'registration.paid', 'registration.cancelled', 'registration.updated',
   'kit.collected', 'bib.assigned', 'event.updated', 'event.cancelled', 'refund.updated',
+  // S6 (results): ids and codes only, never a name or a time; the integration fetches authorised fields with the results API.
+  'result.verified', 'result.published', 'result.corrected', 'result.disputed',
 ]);
 export const WEBHOOK_TEST_TYPES = Object.freeze(WEBHOOK_EVENT_TYPES.map(t => `${t}.test`));
 export const ENVELOPE_VERSION = '1';
@@ -18,6 +20,9 @@ export const MAX_BODY_BYTES = 16 * 1024;
 
 const CANCEL_CODES = new Set(['cancelled', 'expired', 'payment_failed', 'admin', 'changed_mind', 'wrong_details', 'duplicate', 'refunded', 'event_cancelled', 'other']);
 const CHANGED = new Set(['claimed', 'details', 'team', 'kit', 'bib', 'anonymised']);
+const FINISH = new Set(['finished', 'dnf', 'dns', 'dq']);
+const STAGES = new Set(['provisional', 'official']);
+const DISPUTE_STATES = new Set(['open', 'upheld', 'rejected', 'withdrawn']);
 const iso = v => (v ? new Date(v).toISOString() : null);
 const str = (v, max = 100) => (typeof v === 'string' && v.length <= max ? v : null);
 
@@ -30,6 +35,10 @@ const PROJECTORS = {
   'bib.assigned': p => ({ registrationId: str(p.registrationId), categoryId: str(p.categoryId), bibNumber: str(p.bibNumber, 12), previousBibNumber: str(p.previousBibNumber, 12) }),
   'event.updated': p => ({ eventId: str(p.eventId), version: Number.isInteger(p.version) ? p.version : null, changedFields: (Array.isArray(p.changedFields) ? p.changedFields : []).filter(f => typeof f === 'string' && f.length <= 120).slice(0, 50), material: p.material === true }),
   'event.cancelled': p => ({ eventId: str(p.eventId), cancelledAt: iso(p.cancelledAt), reasonCode: str(p.reasonCode, 40) }),
+  'result.verified': p => ({ registrationId: str(p.registrationId), resultId: str(p.resultId), revision: Number.isInteger(p.revision) ? p.revision : null, finishStatus: FINISH.has(p.finishStatus) ? p.finishStatus : null }),
+  'result.published': p => ({ eventId: str(p.eventId), categoryId: str(p.categoryId), stage: STAGES.has(p.stage) ? p.stage : null, releasedAt: iso(p.releasedAt), resultCount: Number.isInteger(p.resultCount) ? p.resultCount : null }),
+  'result.corrected': p => ({ registrationId: str(p.registrationId), resultId: str(p.resultId), revision: Number.isInteger(p.revision) ? p.revision : null, previousRevision: Number.isInteger(p.previousRevision) ? p.previousRevision : null, finishStatus: FINISH.has(p.finishStatus) ? p.finishStatus : null, material: true }),
+  'result.disputed': p => ({ registrationId: str(p.registrationId), resultId: str(p.resultId), disputeId: str(p.disputeId), status: DISPUTE_STATES.has(p.status) ? p.status : null }),
   'refund.updated': p => ({ orderId: str(p.orderId), eventId: str(p.eventId), scope: str(p.scope, 40), status: ['requested', 'paid'].includes(p.status) ? p.status : null }),
 };
 

@@ -7,7 +7,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, bearerFrom, verifyPurpose, signPurpose, sign } from '../src/auth/jwt.mjs';
 import { gyms, users } from '../src/bootstrap/collections.mjs';
-import { gymService, settingsService, trainerService, moderationGate, partnerGate, checkInService } from '../src/bootstrap/services.mjs';
+import { gymService, settingsService, trainerService, moderationGate, partnerGate, checkInService, securityEventService } from '../src/bootstrap/services.mjs';
 import { createWebGymProfileService } from '../src/services/web-gym-profile-service.mjs';
 import { createWebCheckinService, uaFamilyOf, ipHashOf } from '../src/services/web-checkin-service.mjs';
 import { webQrCheckinOn } from '../src/shared/feature-flags.mjs';
@@ -18,7 +18,7 @@ import { db } from '../src/infra/knex-store.mjs';
 const created = new Date().toISOString();
 
 const webGymProfile = createWebGymProfileService({ gymService, settingsService, trainerService, moderationGate, partnerGate });
-const webCheckin = createWebCheckinService({ gyms, checkInService, webGymProfile, db });
+const webCheckin = createWebCheckinService({ gyms, checkInService, webGymProfile, db, alertWillQueue: securityEventService.alertWillQueue });
 
 export const WEB_CHECKIN_PURPOSE = 'web_checkin';
 export const WEB_CHECKIN_SESSION_TTL = '15m';
@@ -126,7 +126,7 @@ export const webCheckinPreview = {
 
 export const webCheckinConfirm = {
   created, method: 'post', path: '/me/web-checkins',
-  description: 'Member or trainer (normal session or the web check-in token): { intentToken, confirm: true, idempotencyKey } → 200 { ok: true, idempotent, checkin { id, timestamp, gym { name } }, visitNumberInCycle? }. Same rules as the in-app scan; a repeat the same day (or a replayed intent) returns the existing visit with idempotent: true. Refusals are 409 { ok: false, failure } with the check-in codes plus invalid_intent, intent_expired, intent_used, gym_not_found. confirm other than true → 400 confirmation_required; idempotencyKey must be 8-100 characters of A-Z a-z 0-9 _ - → else 400 invalid_idempotency_key. The key is validated but not stored: replay safety comes from the intent and the one-visit-per-day index.',
+  description: 'Member or trainer (normal session or the web check-in token): { intentToken, confirm: true, idempotencyKey } → 200 { ok: true, idempotent, alertQueued, checkin { id, timestamp, gym { name } }, visitNumberInCycle? }. Same rules as the in-app scan; a repeat the same day (or a replayed intent) returns the existing visit with idempotent: true. alertQueued is true only when this call recorded a NEW visit, WEB_CHECKIN_ALERTS is on and the member has at least one registered device (it does not wait for the push); false otherwise. Refusals are 409 { ok: false, failure } with the check-in codes plus invalid_intent, intent_expired, intent_used, gym_not_found. confirm other than true → 400 confirmation_required; idempotencyKey must be 8-100 characters of A-Z a-z 0-9 _ - → else 400 invalid_idempotency_key. The key is validated but not stored: replay safety comes from the intent and the one-visit-per-day index.',
   requestSample: { intentToken: '<token>', confirm: true, idempotencyKey: 'c0ffee00-1234' },
   onGuard: webCheckinGuard,
   onRequest: async (req, res) => {

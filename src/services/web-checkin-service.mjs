@@ -36,7 +36,7 @@ export function ipHashOf(address, nowMs = Date.now()) {
   return createHash('sha256').update(`${String(address || 'unknown')}|${salt}`).digest('hex').slice(0, 32);
 }
 
-export function createWebCheckinService({ gyms, checkInService, webGymProfile, db = null, now = () => Date.now() }) {
+export function createWebCheckinService({ gyms, checkInService, webGymProfile, db = null, now = () => Date.now(), alertWillQueue = null }) {
   /** → { intentToken, expiresAt, gym: { publicRef, name } } or null (one answer for every kind of miss). */
   async function createIntent({ q }) {
     const payload = extractQrPayload(q);
@@ -87,11 +87,18 @@ export function createWebCheckinService({ gyms, checkInService, webGymProfile, d
     });
     if (!result.ok) return refusal(result.failure);
     const c = result.checkin;
+    // S3: true only for a newly recorded visit when the alert will go out (flags on and a registered device). It
+    // does not wait for the push and says nothing about anyone else's account.
+    let alertQueued = false;
+    if (result.idempotent !== true && alertWillQueue) {
+      try { alertQueued = (await alertWillQueue(userId)) === true; } catch { alertQueued = false; }
+    }
     return {
       status: 200,
       body: {
         ok: true,
         idempotent: result.idempotent === true,
+        alertQueued,
         checkin: { id: c.id, timestamp: c.timestamp, gym: { name: g.gym.name } },
         ...(Number.isFinite(result.visitNumberInCycle) ? { visitNumberInCycle: result.visitNumberInCycle } : {}),
       },

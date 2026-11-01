@@ -143,12 +143,12 @@ export function registerB2BJobs({
   if (b2bBeneficiaryImportService) {
     ops.register({
       name: 'b2b-beneficiary-invites', title: 'Beneficiary invites', schedule: { type: 'every', minutes: 10 }, quiet: true,
-      description: 'Enrols invited people who have since joined FitFlex, and sends the invitation messages that are due: by email the invitation and reminders after 3 and 10 days, by SMS the invitation and one reminder after 3 days.',
+      description: 'Asks invited people who have since joined FitFlex (and verified the invited email or number) in the app whether they accept; they are enrolled only if they do. Also sends the invitation messages that are due: by email the invitation and reminders after 3 and 10 days, by SMS the invitation and one reminder after 3 days.',
       run: async (ctx) => {
         const matched = await b2bBeneficiaryImportService.matchInvites();
         const emails = await b2bBeneficiaryImportService.sendDue();
-        if (matched.failed) await ctx.raise({ type: 'job_item_failed', severity: 'medium', title: `${matched.failed} invited ${matched.failed === 1 ? 'person' : 'people'} could not be enrolled after joining`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:enrol`, detail: matched });
-        else if (matched.matched) await ctx.clear(`item:${ctx.job}:enrol`, 'Enrolled.');
+        if (matched.failed) await ctx.raise({ type: 'job_item_failed', severity: 'medium', title: `${matched.failed} invited ${matched.failed === 1 ? 'person' : 'people'} could not be asked after joining`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:enrol`, detail: matched });
+        else if (matched.matched) await ctx.clear(`item:${ctx.job}:enrol`, 'Asked.');
         const { email, sms } = emails;
         if (email.notConfigured) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${email.due} invitation email(s) are waiting: the email sender is not set up`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:email-setup`, detail: email });
         else if (email.due) await ctx.clear(`item:${ctx.job}:email-setup`, 'The email sender is set up.');
@@ -157,7 +157,7 @@ export function registerB2BJobs({
         // SMS that is switched off or not set up is not a fault: those invites simply get no SMS.
         if (sms.failed) await ctx.raise({ type: 'job_item_failed', severity: 'low', title: `${sms.failed} invitation SMS were not accepted`, entityType: 'job', entityId: ctx.job, dedupeKey: `item:${ctx.job}:sms`, detail: sms });
         else if (sms.sent) await ctx.clear(`item:${ctx.job}:sms`, 'SMS sent.');
-        return { processed: matched.matched + emails.sent + emails.failed, succeeded: matched.enrolled + emails.sent, failed: matched.failed + emails.failed, enrolled: matched.enrolled, emailsSent: email.sent, smsSent: sms.sent, emailsWaiting: email.notConfigured ? email.due : 0, smsWaiting: sms.notConfigured ? sms.due : 0 };
+        return { processed: matched.matched + emails.sent + emails.failed, succeeded: matched.asked + matched.alreadyOnList + emails.sent, failed: matched.failed + emails.failed, asked: matched.asked, alreadyOnList: matched.alreadyOnList, emailsSent: email.sent, smsSent: sms.sent, emailsWaiting: email.notConfigured ? email.due : 0, smsWaiting: sms.notConfigured ? sms.due : 0 };
       },
     });
   }
@@ -165,10 +165,11 @@ export function registerB2BJobs({
   if (b2bMemberRequestService) {
     ops.register({
       name: 'b2b-member-request-expiry', title: 'Member request expiry', schedule: { type: 'every', minutes: 60 }, quiet: true,
-      description: 'Closes requests to add a member by user id that the member has not answered in time (B2B_MEMBER_REQUEST_TTL_DAYS, default 14 days).',
+      description: 'Closes requests to add a member that the member has not answered in time (B2B_MEMBER_REQUEST_TTL_DAYS, default 14 days), and clears the email or number typed on requests closed for more than B2B_MEMBER_REQUEST_CONTACT_RETENTION_DAYS (default 30).',
       run: async () => {
         const r = await b2bMemberRequestService.expireDue();
-        return { processed: r.expired, succeeded: r.expired, failed: 0, expired: r.expired };
+        const p = b2bMemberRequestService.purgeContacts ? await b2bMemberRequestService.purgeContacts() : { cleared: 0 };
+        return { processed: r.expired + p.cleared, succeeded: r.expired + p.cleared, failed: 0, expired: r.expired, contactsCleared: p.cleared };
       },
     });
   }

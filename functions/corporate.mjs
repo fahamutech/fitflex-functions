@@ -173,7 +173,7 @@ export const corporateSetStaffStatus = {
 
 export const corporateLinkStaffUser = {
   created, method: 'post', path: '/corporate/staff/:id/link',
-  description: 'Corporate HR: link an employee to their FitFlex member account so they can use the company\'s benefits. Give the account\'s verified email, its mobile number or its userId (one of them). Send userId null to unlink (an open link request is withdrawn too). By userId (HR; not FitFlex admins) the record is not linked yet: 202 { outcome: "pending_member_acceptance", memberRequest } and the member must accept in the app. GET /corporate/staff shows it as pendingLink.',
+  description: 'Corporate HR: link an employee to their FitFlex member account so they can use the company\'s benefits. Give the account\'s verified email, its mobile number or its userId (one of them). Send userId null to unlink (an open link request is withdrawn too). HR (not FitFlex admins) never links directly, by userId or by email/phone: 202 { outcome: "pending_member_acceptance", memberRequest } and the member must accept in the app. By email/phone the reply is the same whether or not a member is behind the contact (memberRequest.userId null; the request is stored either way and simply expires when nobody can be asked; the same contact again returns the same request). GET /corporate/staff shows it as pendingLink. FitFlex admins link directly (200) and the member is told (b2b_admin_added).',
   requestSample: { email: 'asha@nmbtz.com' },
   onGuard: requireHr,
   onRequest: (req, res) => scoped(req, res, corporateId => corporateService.linkEmployeeUser({
