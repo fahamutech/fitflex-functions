@@ -25,6 +25,8 @@ export const PORTAL_ACL_SCOPES = [
   'brand_media',
   // Read-only audit log viewer (GET /admin/audit-log).
   'audit',
+  // Refunds: deciding and paying are separate grants once REFUND_SPLIT_SCOPES is on (listing/raising stay `payments`).
+  'refunds_approve', 'refunds_pay',
 ];
 
 /** Shortest password accepted when an admin replaces the start password (Firebase's own floor is 6). */
