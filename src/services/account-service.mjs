@@ -1,26 +1,40 @@
 // Self-service account operations shared across all roles: profile save and
 // account deletion (Play Store account-deletion requirement).
-import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
 import { checkMediaFields, storedMedia } from '../shared/media-src.mjs';
 
 export function createAccountService({
-  users, trainers, trainerBookings, checkins, auditLog,
+  users, trainers, trainerBookings, checkins,
   initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
-  // Called once the account is gone, e.g. to stop promotion analytics saying who a customer was: (userId) => void.
+  // Removes or anonymises everything about the account, in one transaction (src/infra/account-erasure-store-pg.mjs):
+  // (userId, { beforeCommit }) → { ok, trainerProfileId } | { missing: true }. Throws and leaves everything as it was on failure.
+  eraseAccount,
+  // False on a local or CI server with no Firebase project: there is no login to delete.
+  firebaseConfigured = () => true,
+  // Called once the account is gone, for what cannot share its transaction: (userId, user) => void.
   onAccountDeleted = async () => {},
   // Partner DOB security review M1 (variant 3): ({ user, dateOfBirth }) → null | { error, status }.
   // Refuses a member date of birth under 18 for a person who holds a trainer or gym-owner role.
   memberDobGuard = async () => null,
   // S6 (D53): ({ userId }) → true when the user owns an event organizer (EventOrganizer.ownerUserId is RESTRICT: transfer or close it first).
   ownsEventOrganizer = async () => false,
+  // ({ userId }) → true when a paid order of theirs is still on its way: deleting would take the delivery
+  // address and the buyer's contact from the vendor (owner decision 2026-10-30).
+  hasOpenPaidOrder = async () => false,
 }) {
   async function deleteMyAccount(user) {
     if (await ownsEventOrganizer({ userId: user.id })) {
       return {
         error: 'organizer_owner', status: 409,
         message: 'Transfer or close your organizer account first.', messageSw: 'Hamisha au funga akaunti yako ya mwandaaji kwanza.',
+      };
+    }
+    if (await hasOpenPaidOrder({ userId: user.id })) {
+      return {
+        error: 'open_paid_order', status: 409,
+        message: 'You have a paid order that has not been delivered. You can delete your account once it is delivered or cancelled.',
+        messageSw: 'Una oda iliyolipiwa ambayo bado haijafikishwa. Unaweza kufuta akaunti yako ikishafikishwa au kughairiwa.',
       };
     }
     if (user.userType === 'gym_operator') {
@@ -45,27 +59,40 @@ export function createAccountService({
       };
     }
 
-    const sharedIdentity = user.firebaseUid
-      ? await users.findAsync(u => u.id !== user.id && u.firebaseUid === user.firebaseUid)
-      : null;
-    if (user.firebaseUid && !sharedIdentity) {
+    // The Firebase login goes last, inside the transaction: if Firebase refuses, everything rolls back
+    // and the person is still signed in and can try again. If the commit itself then failed the login
+    // would be gone but the data not; a retry with the same session finishes it (user-not-found below).
+    const deleteFirebaseLogin = async ({ firebaseUid, firebaseShared }) => {
+      if (!firebaseUid || firebaseShared || !firebaseConfigured()) return;
       try {
         initFirebaseAdmin();
-        await getAdminAuth().deleteUser(user.firebaseUid);
+        await getAdminAuth().deleteUser(firebaseUid);
       } catch (fbErr) {
-        console.warn('[account-delete] Firebase user deletion failed:', fbErr?.message);
+        if (fbErr?.code === 'auth/user-not-found') return;
+        throw fbErr;
       }
-    }
+    };
 
-    if (trainerProfile) await trainers.removeAsync(t => t.id === trainerProfile.id);
-    await users.removeAsync(u => u.id === user.id);
-    // The stored row goes along (second argument) so follow-ups can see its Person.
-    try { await onAccountDeleted(user.id, user); } catch (err) { console.warn('[account-delete] follow-up failed:', err?.message); }
-    await auditLog.insertAsync({
-      id: randomUUID(), at: new Date().toISOString(),
-      actor: user.id, action: 'self_account_deleted',
-      target: user.id, before: { email: user.email, phone: user.phone, userType: user.userType }, after: null,
-    });
+    let erased;
+    try {
+      erased = await eraseAccount(user.id, { beforeCommit: deleteFirebaseLogin });
+    } catch (err) {
+      console.error('[account-delete] failed, nothing was deleted:', err?.message);
+      return {
+        error: 'account_deletion_failed', status: 503,
+        message: 'We could not delete your account just now. Nothing was removed. Please try again.',
+        messageSw: 'Hatukuweza kufuta akaunti yako sasa hivi. Hakuna kilichoondolewa. Tafadhali jaribu tena.',
+      };
+    }
+    if (erased.missing) return { error: 'user_not_found', status: 404 };
+
+    // Only the in-memory copy is left of a trainer profile; the row went in the transaction.
+    if (erased.trainerProfileId) {
+      try { await trainers.removeAsync(t => t.id === erased.trainerProfileId); } catch (err) { console.warn('[account-delete] trainer cache:', err?.message); }
+    }
+    // Partner media can only be judged once the account is gone ("does this gym still have an owner?").
+    // The account is deleted by now, so this cannot undo it; the nightly media sweep removes what it missed.
+    try { await onAccountDeleted(user.id, user); } catch (err) { console.error('[account-delete] follow-up failed, the nightly sweep will retry:', err?.message); }
     return { ok: true, message: 'Your account and personal data have been deleted.' };
   }
 

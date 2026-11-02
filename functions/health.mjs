@@ -28,7 +28,7 @@ const privacyPolicyHtml = `<!doctype html>
 <body>
   <main>
     <h1>FitFlex Privacy Policy</h1>
-    <p class="muted">Last updated: October 5, 2026</p>
+    <p class="muted">Last updated: October 30, 2026</p>
 
     <p>FitFlex provides fitness membership, gym access, trainer booking, payment, and check-in services. This Privacy Policy explains how FitFlex collects, uses, shares, and protects information when you use the FitFlex mobile app, portals, websites, and related services.</p>
 
@@ -63,7 +63,7 @@ const privacyPolicyHtml = `<!doctype html>
     <p>We retain information for as long as needed to provide FitFlex services, comply with legal and accounting obligations, resolve disputes, prevent fraud, and maintain audit records. Retention periods may vary by data type and legal requirement.</p>
 
     <h2>Data Deletion</h2>
-    <p>You may request account or personal data deletion by contacting us at privacy@fitflex.af. We may need to retain limited records when required for legal, accounting, fraud prevention, dispute resolution, or safety purposes. If deletion is not immediately possible, we will explain the reason and complete deletion or anonymization when retention is no longer required.</p>
+    <p>You can delete your account yourself in the app (Profile, then Delete account), or ask us on WhatsApp at <a href="https://wa.me/255786670499">+255 786 670 499</a>. Your personal data is then removed. Payment, invoice, subscription, check-in, booking and order records are kept in anonymised form, without your name or contact details, because the money and visit totals of gyms, trainers and vendors depend on them. We may need to retain limited other records when required for legal, accounting, fraud prevention, dispute resolution, or safety purposes. If deletion is not immediately possible, we will explain the reason and complete deletion or anonymization when retention is no longer required. The full details are on our <a href="/delete-account">account deletion page</a>.</p>
 
     <h2>Security</h2>
     <p>We use administrative, technical, and organizational safeguards designed to protect personal information. No internet service is completely secure, so we cannot guarantee absolute security. You should keep your login credentials and devices secure.</p>
@@ -85,11 +85,12 @@ const privacyPolicyHtml = `<!doctype html>
 
     <section class="section-divider" lang="sw">
       <h1>Sera ya Faragha ya FitFlex</h1>
-      <p class="muted">Ilisasishwa mwisho: Oktoba 5, 2026</p>
+      <p class="muted">Ilisasishwa mwisho: Oktoba 30, 2026</p>
       <p>FitFlex hukusanya na kutumia taarifa zinazohitajika kutoa huduma za uanachama wa mazoezi, kuingia gym kwa QR, malipo, vipindi na ma-trainer, usaidizi kwa wateja, usalama, na uboreshaji wa huduma.</p>
       <p>Hatuiuzi taarifa binafsi. Tunaweza kushiriki taarifa zinazohitajika na gym, ma-trainer, watoa huduma za malipo, uthibitisho, hosting, usaidizi, au mamlaka pale inapohitajika kuendesha huduma, kulinda watumiaji, au kutimiza matakwa ya kisheria.</p>
       <p>Mwajiri, kampuni ya bima, klabu au taasisi nyingine ("mdhamini") inaweza kukupa benefits kupitia FitFlex. Ukiwa kwenye orodha ya mdhamini, mdhamini huyo anaweza kuona shughuli zako za FitFlex: jina na hali yako kwenye orodha yake, benefits ulizonazo na kiasi ulichotumia, kuingia kwako gym na vipindi vya ma-trainer pamoja na tarehe na mahali, mazoezi na shughuli unazorekodi, na maendeleo yako kwenye challenge na vikundi vya mdhamini. Mdhamini hawezi kuona uzito wako, urefu wako, kalori, maelezo, njia ulizorekodi, taarifa za malipo, wala benefits, challenge au kikundi cha mdhamini mwingine. Usipotaka mdhamini aone taarifa hizi, mwombe akuondoe kwenye orodha yake au tuandikie kupitia privacy@fitflex.af; utaacha kupata benefits za mdhamini huyo.</p>
-      <p>Unaweza kuomba kusahihisha au kufuta taarifa zako kwa kutuandikia kupitia privacy@fitflex.af. Baadhi ya kumbukumbu zinaweza kuhifadhiwa kwa muda unaohitajika kwa sheria, uhasibu, usalama, kuzuia udanganyifu, au kutatua migogoro.</p>
+      <!-- Swahili: needs native review. Legal text: draft pending Tanzanian counsel. -->
+      <p>Unaweza kufuta akaunti yako mwenyewe ndani ya app (Wasifu, kisha Futa akaunti), au utuombe kupitia WhatsApp <a href="https://wa.me/255786670499">+255 786 670 499</a>. Taarifa zako binafsi huondolewa. Kumbukumbu za malipo, ankara, usajili, kuingia gym, booking na oda huhifadhiwa bila jina wala mawasiliano yako, kwa sababu jumla za fedha na ziara za gym, ma-trainer na wauzaji zinategemea kumbukumbu hizo. Baadhi ya kumbukumbu nyingine zinaweza kuhifadhiwa kwa muda unaohitajika kwa sheria, uhasibu, usalama, kuzuia udanganyifu, au kutatua migogoro. Maelezo kamili yapo kwenye <a href="/delete-account">ukurasa wa kufuta akaunti</a>. Kusahihisha taarifa zako, tuandikie kupitia WhatsApp hiyo hiyo.</p>
     </section>
   </main>
 </body>
@@ -126,62 +127,107 @@ const deleteAccountHtml = `<!doctype html>
 <body>
   <main>
     <h1>Delete Your FitFlex Account</h1>
-    <p class="muted">Last updated: July 10, 2026</p>
+    <p class="muted">Last updated: October 30, 2026</p>
+    <!-- Legal text: draft pending Tanzanian counsel. Swahili below: needs native review. -->
 
-    <p>This page explains how to request deletion of your FitFlex account and associated personal data, for members, gym owners, and trainers.</p>
+    <p>This page explains how to delete your FitFlex account, for members, trainers, gym owners and vendors, what is deleted, and what is kept in anonymised form.</p>
 
-    <h2>How to Request Deletion In the App</h2>
+    <h2>Delete Your Account in the App</h2>
     <ol>
       <li>Open the FitFlex app and sign in.</li>
-      <li>Go to the <strong>Profile</strong> tab.</li>
-      <li>Under <strong>Account Settings</strong>, tap <strong>Help</strong> to contact FitFlex Support via WhatsApp.</li>
-      <li>Send a message stating you want your FitFlex account deleted, including the phone number or email used on your account.</li>
-      <li>Support will verify your identity and confirm once your account and data are deleted or scheduled for deletion.</li>
+      <li>Go to <strong>Profile</strong> (vendors: the <strong>Business</strong> tab; partners waiting for approval: the waiting screen).</li>
+      <li>Tap <strong>Delete account</strong>.</li>
+      <li>Read what will happen, then type <strong>DELETE</strong> (or <strong>FUTA</strong> in Swahili) to confirm.</li>
     </ol>
+    <p>Deletion happens straight away and cannot be undone. If you use one sign-in for more than one role, for example member and trainer, only the role you are in is deleted; the others keep working, and your shared sign-in stays until the last one is gone.</p>
 
-    <h2>Alternative: Request by Email</h2>
-    <p>You can also request deletion without using the app by emailing <strong>privacy@fitflex.af</strong> from the address linked to your account, with the subject "Delete My Account".</p>
+    <h2>Without the App</h2>
+    <p>Message us on WhatsApp at <a href="https://wa.me/255786670499"><strong>+255 786 670 499</strong></a> from the number on your account, or give us the number or email on your account, and say you want it deleted. We will confirm it is you first.</p>
 
     <h2>What Gets Deleted</h2>
     <ul>
-      <li>Your profile information, such as name, phone number, email address, and profile photo.</li>
-      <li>Membership, subscription, and check-in history linked to your account.</li>
-      <li>Trainer or gym operator profile details, where applicable.</li>
+      <li>Your profile: name, phone number, email address, photo, date of birth, gender, username and preferences.</li>
+      <li>Your sign-in: login, PIN, verification codes and recovery requests.</li>
+      <li>Push notification tokens on your devices, your notifications and the messages sent to you.</li>
+      <li>Your activity: workouts, runs and recorded GPS routes, goals, training plans, and challenge entries.</li>
+      <li>Your social data: friends, followers, invitations, groups, comments and likes.</li>
+      <li>Your conversations with trainers and vendors.</li>
+      <li>The words of your reviews. The star rating stays, with no name or photo, so that gym, trainer and product ratings stay correct.</li>
+      <li>Trainer, gym owner and vendor profile details, photos and logos, where they apply. A vendor's products leave the shop.</li>
     </ul>
 
-    <h2>What May Be Retained</h2>
-    <p>We may retain limited records, such as payment/transaction history and support communications, where required for legal, accounting, fraud prevention, dispute resolution, or safety purposes. These records are retained only as long as necessary and are not used for any other purpose.</p>
+    <h2>What Is Kept, in Anonymised Form</h2>
+    <p>These records stay, without your name, phone number, email, address, photo or notes:</p>
+    <ul>
+      <li>Payments, refunds and invoices.</li>
+      <li>Memberships and passes.</li>
+      <li>Gym check-ins.</li>
+      <li>Trainer bookings and sessions.</li>
+      <li>Shop orders.</li>
+      <li>Event orders and registrations.</li>
+    </ul>
+    <p>We keep them because gyms, trainers and vendors are paid from them, and because accounting, tax and dispute rules need them. Removing them would change amounts already owed or paid. They show as "Deleted member" and can no longer be linked to you through your account.</p>
 
-    <h2>How Long It Takes</h2>
-    <p>Account deletion requests are typically processed within 30 days. If deletion cannot happen immediately, we will explain why and complete deletion or anonymization once retention is no longer required.</p>
+    <h2>What May Be Kept Unchanged</h2>
+    <p>A tax invoice or similar document that has already been issued may have to stay as issued, with the details it was issued with, for as long as tax law requires. Identity and business documents that partners uploaded for verification are kept or deleted according to our legal obligations. We keep these only as long as the law requires, and do not use them for anything else.</p>
+
+    <h2>When We Cannot Delete Straight Away</h2>
+    <p>Some accounts need a handover first, and the app will tell you: a gym owner whose gym has check-ins, a trainer with bookings, and the owner of an event organizer. Contact us on <a href="https://wa.me/255786670499">WhatsApp</a> and we will help you transfer or close them.</p>
+    <p>If you have a paid shop order that has not been delivered, you can delete your account once it is delivered or cancelled.</p>
 
     <h2>Contact</h2>
-    <p>For questions about account or data deletion, contact FitFlex at privacy@fitflex.af.</p>
+    <p>For questions about account or data deletion, contact FitFlex on WhatsApp at <a href="https://wa.me/255786670499">+255 786 670 499</a>.</p>
 
     <section class="section-divider" lang="sw">
       <h1>Futa Akaunti Yako ya FitFlex</h1>
-      <p class="muted">Ilisasishwa mwisho: Julai 10, 2026</p>
-      <p>Ukurasa huu unaelezea jinsi ya kuomba kufutwa kwa akaunti yako ya FitFlex na taarifa zako binafsi, kwa wanachama, wamiliki wa gym, na ma-trainer.</p>
+      <p class="muted">Ilisasishwa mwisho: Oktoba 30, 2026</p>
+      <p>Ukurasa huu unaelezea jinsi ya kufuta akaunti yako ya FitFlex, kwa wanachama, ma-trainer, wamiliki wa gym na wauzaji, nini kinafutwa, na nini kinahifadhiwa bila kukutambulisha.</p>
 
-      <h2>Jinsi ya Kuomba Ndani ya App</h2>
+      <h2>Futa Akaunti Yako Ndani ya App</h2>
       <ol>
         <li>Fungua app ya FitFlex na uingie.</li>
-        <li>Fungua kichupo cha <strong>Wasifu</strong>.</li>
-        <li>Chini ya <strong>Mipangilio ya akaunti</strong>, gusa <strong>Msaada</strong> kuwasiliana na Usaidizi wa FitFlex kupitia WhatsApp.</li>
-        <li>Tuma ujumbe ukieleza unataka akaunti yako ya FitFlex ifutwe, ukijumuisha namba ya simu au barua pepe iliyotumika kwenye akaunti.</li>
-        <li>Timu ya usaidizi itathibitisha utambulisho wako na kukujulisha baada ya akaunti na taarifa zako kufutwa.</li>
+        <li>Nenda kwenye <strong>Wasifu</strong> (wauzaji: kichupo cha <strong>Biashara</strong>; washirika wanaosubiri kuidhinishwa: ukurasa wa kusubiri).</li>
+        <li>Gusa <strong>Futa akaunti</strong>.</li>
+        <li>Soma kitakachotokea, kisha andika <strong>FUTA</strong> (au <strong>DELETE</strong> kwa Kiingereza) kuthibitisha.</li>
       </ol>
+      <p>Akaunti hufutwa papo hapo na haiwezi kurudishwa. Ukitumia njia moja ya kuingia kwa majukumu zaidi ya moja, kwa mfano mwanachama na trainer, jukumu ulilopo ndilo pekee linalofutwa; mengine yanaendelea kufanya kazi, na njia yako ya kuingia inabaki hadi jukumu la mwisho liondoke.</p>
 
-      <h2>Njia Nyingine: Ombi kwa Barua Pepe</h2>
-      <p>Unaweza pia kuomba kufutwa bila kutumia app kwa kutuma barua pepe kwa <strong>privacy@fitflex.af</strong> kutoka anwani iliyounganishwa na akaunti yako, ukiandika "Delete My Account" kwenye kichwa cha ujumbe.</p>
+      <h2>Bila Kutumia App</h2>
+      <p>Tutumie ujumbe WhatsApp <a href="https://wa.me/255786670499"><strong>+255 786 670 499</strong></a> kutoka namba iliyo kwenye akaunti yako, au tupe namba au barua pepe iliyo kwenye akaunti yako, na useme unataka ifutwe. Tutathibitisha kwanza kuwa ni wewe.</p>
 
       <h2>Taarifa Zinazofutwa</h2>
-      <p>Taarifa za wasifu wako, historia ya uanachama na malipo, na taarifa za ma-trainer au wamiliki wa gym zinazohusiana na akaunti yako.</p>
+      <ul>
+        <li>Wasifu wako: jina, namba ya simu, barua pepe, picha, tarehe ya kuzaliwa, jinsia, jina la mtumiaji na mapendeleo.</li>
+        <li>Njia yako ya kuingia: akaunti ya kuingia, PIN, misimbo ya uthibitisho na maombi ya kurejesha akaunti.</li>
+        <li>Tokeni za arifa kwenye vifaa vyako, arifa zako na ujumbe uliotumiwa.</li>
+        <li>Shughuli zako: mazoezi, mbio na njia za GPS ulizorekodi, malengo, mipango ya mazoezi na ushiriki kwenye challenge.</li>
+        <li>Taarifa zako za kijamii: marafiki, wafuasi, mialiko, vikundi, maoni na kupenda.</li>
+        <li>Mazungumzo yako na ma-trainer na wauzaji.</li>
+        <li>Maneno ya maoni yako ya tathmini. Nyota zinabaki, bila jina wala picha, ili ukadiriaji wa gym, ma-trainer na bidhaa ubaki sahihi.</li>
+        <li>Taarifa za wasifu wa trainer, mmiliki wa gym au muuzaji, picha na nembo, pale zinapohusika. Bidhaa za muuzaji zinaondolewa dukani.</li>
+      </ul>
 
-      <h2>Taarifa Zinazoweza Kuhifadhiwa</h2>
-      <p>Tunaweza kuhifadhi kumbukumbu chache, kama historia ya malipo na mawasiliano ya usaidizi, pale inapohitajika kisheria, kwa uhasibu, kuzuia udanganyifu, au kutatua migogoro, kwa muda unaohitajika tu.</p>
+      <h2>Kinachohifadhiwa Bila Kukutambulisha</h2>
+      <p>Kumbukumbu hizi zinabaki, bila jina, namba ya simu, barua pepe, anwani, picha wala maelezo yako:</p>
+      <ul>
+        <li>Malipo, marejesho ya fedha na ankara.</li>
+        <li>Uanachama na pasi.</li>
+        <li>Kuingia gym.</li>
+        <li>Booking na vipindi vya ma-trainer.</li>
+        <li>Oda za duka.</li>
+        <li>Oda na usajili wa matukio.</li>
+      </ul>
+      <p>Tunazihifadhi kwa sababu gym, ma-trainer na wauzaji hulipwa kutokana nazo, na kwa sababu sheria za uhasibu, kodi na utatuzi wa migogoro zinazihitaji. Kuziondoa kungebadilisha kiasi kilichokwisha kudaiwa au kulipwa. Zinaonekana kama "Mwanachama aliyefutwa" na haziwezi tena kuunganishwa nawe kupitia akaunti yako.</p>
 
-      <p>Ombi za kufuta akaunti kwa kawaida zinashughulikiwa ndani ya siku 30. Kwa maswali, wasiliana na FitFlex kupitia privacy@fitflex.af.</p>
+      <h2>Kinachoweza Kubaki Bila Kubadilishwa</h2>
+      <p>Ankara ya kodi au hati kama hiyo iliyokwisha kutolewa inaweza kulazimika kubaki kama ilivyotolewa, na taarifa zake, kwa muda unaotakiwa na sheria ya kodi. Nyaraka za utambulisho na biashara ambazo washirika walipakia kwa uthibitisho zinahifadhiwa au kufutwa kulingana na wajibu wetu wa kisheria. Tunazihifadhi kwa muda unaotakiwa na sheria tu, na hatuzitumii kwa jambo jingine.</p>
+
+      <h2>Pale Tusipoweza Kufuta Papo Hapo</h2>
+      <p>Baadhi ya akaunti zinahitaji makabidhiano kwanza, na app itakuambia: mmiliki wa gym ambayo ina watu waliowahi kuingia, trainer mwenye booking, na mmiliki wa akaunti ya mwandaaji wa matukio. Wasiliana nasi kupitia <a href="https://wa.me/255786670499">WhatsApp</a> tukusaidie kuzihamisha au kuzifunga.</p>
+      <p>Ukiwa na oda ya duka iliyolipiwa ambayo bado haijafikishwa, unaweza kufuta akaunti yako ikishafikishwa au kughairiwa.</p>
+
+      <h2>Mawasiliano</h2>
+      <p>Kwa maswali kuhusu kufuta akaunti au taarifa, wasiliana na FitFlex kupitia WhatsApp <a href="https://wa.me/255786670499">+255 786 670 499</a>.</p>
     </section>
   </main>
 </body>

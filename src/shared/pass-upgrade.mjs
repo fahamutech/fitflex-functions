@@ -10,7 +10,8 @@
 
 import { effectiveSubscriptionStatus } from './subscription-status.mjs';
 
-const NOTE_PREFIX = 'upgrade:';
+export const UPGRADE_NOTE_PREFIX = 'upgrade:';
+const NOTE_PREFIX = UPGRADE_NOTE_PREFIX;
 
 /** Sponsored (company-funded) passes are made by the B2B billing module with ids sub_b2be_… */
 export const isSponsoredPassId = (id) => String(id || '').startsWith('sub_b2be');
