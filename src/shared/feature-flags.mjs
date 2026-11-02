@@ -594,3 +594,14 @@ export function webQrCheckinOn() {
 export function webCheckinAlertsOn() {
   return webQrCheckinOn() && on('WEB_CHECKIN_ALERTS');
 }
+
+/**
+ * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_SERVER_CONFIRM is set. On: a Selcom
+ * "success" callback is confirmed with Selcom through an injectable client before a
+ * subscription is activated; if the client cannot confirm (including "not configured",
+ * the only implementation today) the callback is refused with 503 and the payment_id
+ * is not consumed. Do not switch on until a real Selcom status client exists.
+ */
+export function selcomWebhookServerConfirmOn() {
+  return on('SELCOM_WEBHOOK_SERVER_CONFIRM');
+}

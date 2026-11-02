@@ -1,4 +1,5 @@
-import { selcomStrictAmountOn } from '../shared/feature-flags.mjs';
+import { selcomStrictAmountOn, selcomWebhookServerConfirmOn } from '../shared/feature-flags.mjs';
+import { createNotConfiguredSelcomClient } from '../integrations/payments/selcom-confirm.mjs';
 import { activationDates } from '../shared/subscription-status.mjs';
 
 // Payment-provider webhook handling — Selcom (idempotent on payment_id).
@@ -11,6 +12,9 @@ export function createWebhookService({
   // Lifecycle automations: a membership paid for, or a payment that failed.
   onSubscriptionActivated = async () => {},
   onPaymentFailed = async () => {},
+  // Audit M2 (SELCOM_WEBHOOK_SERVER_CONFIRM): asks Selcom whether the payment is real.
+  // Default fails closed ("not configured"); see integrations/payments/selcom-confirm.mjs.
+  confirmClient = createNotConfiguredSelcomClient(),
 }) {
   /** Remember a payment_id; false when another delivery of it already got there. */
   async function claim(paymentId) {
@@ -50,6 +54,21 @@ export function createWebhookService({
       // The money received must be what was asked for this exact product.
       if (request && amount != null && Number(amount) !== Number(request.amountTzs)) {
         return { error: 'amount_mismatch', status: 409 };
+      }
+      // Audit M2 (SELCOM_WEBHOOK_SERVER_CONFIRM): the callback is only a trigger; Selcom must
+      // confirm it. Fails closed and before claim(), so the payment_id stays free for a retry.
+      if (selcomWebhookServerConfirmOn() && sub.status === 'payment_pending') {
+        let confirmation;
+        try {
+          confirmation = await confirmClient.confirm({ paymentId: payment_id, subscriptionId: sub.id, amount });
+        } catch {
+          return { error: 'confirmation_unavailable', status: 503 };
+        }
+        const expected = request ? Number(request.amountTzs) : (amount != null && amount !== '' ? Number(amount) : null);
+        const confirmedAmount = confirmation?.amount == null ? null : Number(confirmation.amount);
+        if (!confirmation?.confirmed || (expected != null && confirmedAmount !== expected)) {
+          return { error: 'confirmation_failed', status: 409 };
+        }
       }
       if (!(await claim(payment_id))) return { ok: true, idempotent: true };
       if (sub.status !== 'payment_pending') return { ok: true, ignored: 'not_payment_pending' };
