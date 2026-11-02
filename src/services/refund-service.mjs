@@ -144,17 +144,20 @@ export function createRefundService({
    * Admin: raise a refund for any confirmed pass or plan payment. Approved at
    * once, unless MONEY_SECOND_APPROVER is on: then it waits for another admin.
    */
-  async function adminRaise({ body = {}, actorId }) {
+  async function adminRaise({ body = {}, actorId, held = null }) {
+    // `held` ({ maxAmountTzs }) is passed only by the held-payments worklist, which has already checked that the
+    // request has a provider-confirmed payment nobody could take. It alone relaxes payment_not_confirmed and
+    // cancel_instead below; the amount cap, the two-admin rule and one-refund-per-payment all still apply.
     // S4: money that arrived for an event order whose places are not possible (kind event_order, unfulfilled payment only).
     if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: secondApprover() });
     const request = body.paymentRequestId ? await paymentRequests.findByIdAsync(body.paymentRequestId) : null;
     if (!request) return fail('payment_not_found', 404);
-    if (!request.subscriptionId) return fail('cancel_instead', 409);
-    if (request.status !== 'approved') return fail('payment_not_confirmed', 409);
-    const amountTzs = body.amountTzs ?? request.amountTzs;
-    if (Number(amountTzs) > Number(request.amountTzs)) return fail('amount_exceeds_payment', 400);
+    if (!held && !request.subscriptionId) return fail('cancel_instead', 409);
+    if (!held && request.status !== 'approved') return fail('payment_not_confirmed', 409);
+    const amountTzs = body.amountTzs ?? (held ? held.maxAmountTzs : null) ?? request.amountTzs;
+    if (Number(amountTzs) > Number(held ? held.maxAmountTzs : request.amountTzs)) return fail('amount_exceeds_payment', 400);
     const out = await raise({
-      memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId,
+      memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId ?? null,
       amountTzs, currency: request.currency || 'TZS', reasonCode: body.reasonCode || 'payment_error', note: body.note,
       requestedBy: actorId, requestedRole: 'admin', approved: !secondApprover(),
     });

@@ -133,6 +133,8 @@ import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerProgressService } from '../services/partner-progress-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
+import { createHeldPaymentsService } from '../services/held-payments-service.mjs';
+import { heldPaymentsWorklistOn } from '../shared/feature-flags.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createCompanyDirectory } from '../services/company-directory.mjs';
@@ -1056,6 +1058,8 @@ export const refundService = createRefundService({
   enrichRows: rows => eventsRefundsService.enrich(rows),
   raiseForEventPayment: args => eventsRefundsService.adminRaiseForPayment(args),
 });
+// Held payments worklist (audit M5; HELD_PAYMENTS_WORKLIST): provider money no request could take, and its refund.
+export const heldPaymentsService = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: heldPaymentsWorklistOn });
 // A sponsor-covered trainer session returns what the member paid for it (no double charge).
 export const b2bSponsorRefundService = createB2BSponsorRefundService({ db, refundService, trainerBookings });
 

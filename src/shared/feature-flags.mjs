@@ -181,6 +181,17 @@ export function moneySecondApproverOn() {
 }
 
 /**
+ * Held-payments worklist (audit M5): money a provider confirmed that no request could take
+ * (request cancelled or rejected meanwhile, amount or transaction mismatch, reference reused)
+ * is listed for staff at GET /admin/payments/held and refunded from POST
+ * /admin/payments/held/:paymentRequestId/refund. Off unless HELD_PAYMENTS_WORKLIST is set:
+ * both routes answer 404 feature_disabled.
+ */
+export function heldPaymentsWorklistOn() {
+  return on('HELD_PAYMENTS_WORKLIST');
+}
+
+/**
  * Vendor business tools (plan docs/plans/vendor-business-tools-plan.md).
  * VENDOR_TOOLS is the umbrella: a slice flag is on only when both it and
  * VENDOR_TOOLS are on. Everything is off unless set. Writes that are pure
