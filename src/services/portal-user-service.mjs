@@ -23,6 +23,8 @@ export const PORTAL_ACL_SCOPES = [
   'moderation', 'moderation_decide', 'promotions', 'promotions_approve', 'campaigns', 'promotion_analytics',
   // Admin-managed app photos: upload, edit and publish (one admin publishes alone, owner decision D-4).
   'brand_media',
+  // Read-only audit log viewer (GET /admin/audit-log).
+  'audit',
   // Refunds: deciding and paying are separate grants once REFUND_SPLIT_SCOPES is on (listing/raising stay `payments`).
   'refunds_approve', 'refunds_pay',
 ];

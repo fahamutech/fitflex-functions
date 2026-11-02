@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { validateManualPaymentSettings } from '../shared/manual-payment.mjs';
 import { defaultSubscriptionTiers } from '../shared/default-subscription-tiers.mjs';
 import { PASS_GYM_ACCESS } from '../shared/check-in-rules.mjs';
+import { checkReason } from '../shared/admin-reason.mjs';
 
 const DEFAULT_SPECIALTIES = [
   'Yoga', 'Cardio', 'Aerobics', 'Weight Loss', 'Muscle Gain', 'Dance',
@@ -16,7 +17,7 @@ const DEFAULT_SPECIALTIES = [
   'Kickboxing', 'Calisthenics', 'Martial Arts',
 ];
 
-export function createSettingsService({ platformSettings, auditLog, tierHolders = async () => 0 }) {
+export function createSettingsService({ platformSettings, auditLog, tierHolders = async () => 0, transaction = null }) {
   function ensureDefaultSettings() {
     const existing = platformSettings.find(s => s.id === 'platform');
     if (existing) return existing;
@@ -184,7 +185,13 @@ export function createSettingsService({ platformSettings, auditLog, tierHolders 
     return null;
   }
 
+  // Cosmetic settings (trainer specialties) need no reason; pricing, payout and payment settings do.
+  const REASONED_KEYS = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency', 'manualPayment'];
+
   async function adminUpdate({ body, actorId }) {
+    const sensitive = REASONED_KEYS.some(k => body[k] !== undefined);
+    const checked = checkReason(body.reason, { required: sensitive });
+    if (checked.error) return checked;
     if (body.subscriptionTiers !== undefined) {
       const invalid = invalidTiers(body.subscriptionTiers);
       if (invalid) return invalid;
@@ -205,12 +212,25 @@ export function createSettingsService({ platformSettings, auditLog, tierHolders 
       updates.manualPayment = checked.value;
     }
     updates.updatedAt = new Date().toISOString();
-    const updated = await platformSettings.updateAsync(s => s.id === 'platform', updates);
-    await auditLog.insertAsync({
+    // One database transaction: the settings change and its audit row commit together or not at all
+    // (the in-memory copy changes only after the commit). `transaction` is always wired in production.
+    const auditRow = (after) => ({
       id: randomUUID(), at: updates.updatedAt,
       actor: actorId, action: 'settings_updated',
-      target: 'platform', before, after: updated
+      target: 'platform', before, after,
+      reason: checked.reason
     });
+    let updated;
+    if (transaction) {
+      updated = await transaction(async (trx) => {
+        const next = await platformSettings.updateTrxAsync(trx, s => s.id === 'platform', updates);
+        await auditLog.insertTrxAsync(trx, auditRow(next));
+        return next;
+      });
+    } else {
+      updated = await platformSettings.updateAsync(s => s.id === 'platform', updates);
+      await auditLog.insertAsync(auditRow(updated));
+    }
     return updated;
   }
 

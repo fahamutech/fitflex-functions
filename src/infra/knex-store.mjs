@@ -28,7 +28,14 @@ const idleTimeoutMillis = Number(process.env.DB_POOL_IDLE_TIMEOUT_MS) || 30000;
 const db = knexFactory({
   client: 'pg',
   connection: connectionString,
-  pool: { min: 0, max: 10, idleTimeoutMillis },
+  pool: {
+    min: 0, max: 10, idleTimeoutMillis,
+    // Test-only: lets spec cleanup delete AuditLog rows. The append-only trigger honours this setting only in a database
+    // whose name matches ^fitflex_ci(_[A-Za-z0-9]+)*$ (see migration 20270202090000-audit-log-append-only).
+    ...(process.env.FITFLEX_USE_CI_DB === '1' ? {
+      afterCreate: (conn, done) => conn.query("SET fitflex.audit_test_bypass = 'on'", err => done(err, conn)),
+    } : {}),
+  },
 });
 export { db };
 
@@ -248,7 +255,7 @@ export function collection(name) {
 
   // ─── Shared DB-persist helpers (used by both primed and db-only modes) ───
 
-  async function _persistInsert(row) {
+  async function _persistInsert(row, q = db) {
     if (name === 'trainers') {
       const { fields, gymIds } = trainerToDb(row);
       await db.transaction(async (trx) => {
@@ -264,11 +271,11 @@ export function collection(name) {
         .merge({ code: row.code, userType: row.userType, expiresAt: new Date(row.expiresAt) });
     } else {
       const writeData = prepareForKnex(name, row);
-      await db(meta.table).insert(writeData);
+      await q(meta.table).insert(writeData);
     }
   }
 
-  async function _persistUpdate(pk, id, patch) {
+  async function _persistUpdate(pk, id, patch, q = db) {
     if (name === 'trainers') {
       const { fields, gymIds } = trainerToDb(patch);
       const updateData = { ...fields, updatedAt: new Date() };
@@ -285,10 +292,32 @@ export function collection(name) {
     } else {
       const writeData = prepareForKnex(name, patch, true);
       if (Object.keys(writeData).length) {
-        await db(meta.table).where({ [pk]: id }).update(writeData);
+        await q(meta.table).where({ [pk]: id }).update(writeData);
       }
     }
   }
+
+  // Same normalisation as _findByIdFromDb, but read inside the caller's transaction.
+  async function _readByIdIn(trx, id) {
+    let row = await trx(meta.table).where({ [pkField(name)]: id }).first();
+    if (row && meta.transform) row = meta.transform(row);
+    return row ? JSON.parse(JSON.stringify(row, (_, v) => typeof v === 'bigint' ? Number(v) : v)) : null;
+  }
+
+  // Transaction-joined writes (simple tables only): the caller owns db.transaction and commits or rolls back all of it.
+  const trxWrites = {
+    /** Insert inside the caller's transaction. */
+    insertTrxAsync: async (trx, row) => {
+      if (isPrimed) throw new Error(`knex-store: "${name}" is cached in memory; use its cache-aware transaction method`);
+      await _persistInsert(row, trx); return row;
+    },
+    /** Update by primary key inside the caller's transaction; resolves to the row as the transaction sees it. */
+    updateByIdTrxAsync: async (trx, id, patch) => {
+      if (isPrimed) throw new Error(`knex-store: "${name}" is cached in memory; use updateTrxAsync`);
+      await _persistUpdate(pkField(name), id, patch, trx);
+      return _readByIdIn(trx, id);
+    },
+  };
 
   async function _persistUpsert(row) {
     if (name === 'otps') {
@@ -398,6 +427,26 @@ export function collection(name) {
         const pk = pkField(name);
         const id = updated[pk];
         if (id) _persistUpdate(pk, id, patch).catch(err => console.error(`[knex-store] update ${name} (id=${id}):`, err.message));
+        return updated;
+      },
+
+      ...trxWrites,
+
+      /**
+       * Update inside the caller's transaction. The in-memory copy changes only once that transaction commits
+       * (a rollback leaves it as it was).
+       */
+      updateTrxAsync: async (trx, pred, patch) => {
+        const data = getSyncData();
+        const cur = data.find(pred);
+        if (!cur) return null;
+        const pk = pkField(name);
+        await _persistUpdate(pk, cur[pk], patch, trx);
+        const updated = { ...cur, ...patch };
+        trx.executionPromise.then(() => {
+          const i = data.findIndex(r => r[pk] === cur[pk]);
+          if (i >= 0) data[i] = { ...data[i], ...patch };
+        }, () => {});
         return updated;
       },
 
@@ -540,6 +589,8 @@ export function collection(name) {
       return row;
     },
 
+    ...trxWrites,
+
     /** Awaitable insert — use for critical paths */
     insertAsync: async (row) => {
       await _persistInsert(row);
@@ -642,7 +693,7 @@ const ALLOWED_FIELDS = {
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
   trainers:         new Set(['id','userId','email','phone','displayName','fullName','nickname','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','regionId','cityId','availability','socialLinks','createdAt','updatedAt']),
   trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','discountFundedBy','paymentRequestId','status','cancelledAt','cancelledBy','createdAt','updatedAt']),
-  audit_log:        new Set(['id','at','actor','action','target','before','after']),
+  audit_log:        new Set(['id','at','actor','action','target','before','after','reason']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','manualPayment','updatedAt']),
   webhook_seen:     new Set(['id','at']),
   otps:             new Set(['phone','code','userType','expiresAt']),
