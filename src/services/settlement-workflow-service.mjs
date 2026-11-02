@@ -40,6 +40,7 @@
 // Each step is one transaction with the row locked, and is audited.
 import { randomUUID } from 'node:crypto';
 import { readReceiptUrl } from '../shared/receipt-url.mjs';
+import { statementPaySecondPersonOn } from '../shared/feature-flags.mjs';
 import { db as defaultDb } from '../infra/knex-store.mjs';
 import { statementNet } from '../shared/settlement-rows.mjs';
 
@@ -173,6 +174,7 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
   /** payable → paid: record that the money went, and the payout. */
   const pay = ({ id, paymentReference, receiptUrl, actorId }, opts) => step(id, 'paid', actorId, async (s, q) => {
     if (s.status !== 'payable') return wrongStatus(s, 'payable');
+    if (statementPaySecondPersonOn() && s.approvedBy && s.approvedBy === actorId) return fail('cannot_pay_own_approval', 403);
     if (!text(paymentReference)) return fail('payment_reference_required', 400);
     const receipt = readReceiptUrl(receiptUrl);
     if (receipt === undefined) return fail('invalid_receipt_url', 400, { hint: 'an https:// link' });

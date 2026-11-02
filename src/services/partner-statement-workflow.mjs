@@ -21,6 +21,7 @@
 // Each step is one transaction with the row locked, and is audited.
 import { randomUUID } from 'node:crypto';
 import { readReceiptUrl } from '../shared/receipt-url.mjs';
+import { statementPaySecondPersonOn } from '../shared/feature-flags.mjs';
 
 export const STATEMENT_STATUSES = ['draft', 'submitted', 'approved', 'payable', 'paid', 'voided'];
 const HOLDABLE = ['draft', 'submitted', 'approved', 'payable'];
@@ -119,6 +120,7 @@ export function createStatementWorkflow({ db, table, lineTable, lineKey, auditPr
   /** payable → paid: record that the money went. */
   const pay = ({ id, paymentReference, receiptUrl, actorId }) => step(id, 'paid', actorId, async (s) => {
     if (s.status !== 'payable') return wrongStatus(s, 'payable');
+    if (statementPaySecondPersonOn() && s.approvedBy && s.approvedBy === actorId) return fail('cannot_pay_own_approval', 403);
     if (!text(paymentReference)) return fail('payment_reference_required', 400);
     const receipt = readReceiptUrl(receiptUrl);
     if (receipt === undefined) return fail('invalid_receipt_url', 400, { hint: 'an https:// link' });
