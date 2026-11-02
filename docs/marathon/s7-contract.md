@@ -15,8 +15,8 @@ This file is written in the first slice and updated with every slice. A section 
 ## `GET /events/options` (additive; an older client ignores new keys)
 ```
 analytics: { enabled }                                   // EVENTS_ANALYTICS
-waitlist:  { enabled, offerHours, maxActivePerUser }     // EVENTS_WAITLIST            (pending)
-ops:       { kit, api, webhooks, kitOffline }            // kitOffline: EVENTS_KIT_OFFLINE and a usable ticket secret   (pending)
+waitlist:  { enabled, offerHours, maxActivePerUser }     // EVENTS_WAITLIST
+ops:       { kit, api, webhooks, kitOffline }            // kitOffline: EVENTS_KIT_OFFLINE and a usable ticket secret
 payments:  { blockedReason: null | "second_approver_off" | "no_ticket_secret" | "flag_off" }   // H14   (pending)
 ```
 
@@ -85,5 +85,36 @@ Admin (scope `events`, flag `EVENTS_KIT_OFFLINE`): `GET /admin/events/:id/kit-of
 Webhooks: no new type; `kit.collected` and `bib.assigned` fire once per accepted item at sync time. Notices: `event_kit_collected` to the participant at sync, `organizer_kit_desk_removed` to the staff user, `organizer_kit_offline_invalid_burst` (essential) to owners and admins when one batch has more than 20 `invalid_token` items.
 
 Jobs: `event-kit-offline-purge` (daily 23:30 UTC). Env: `EVENTS_OFFLINE_SESSION_HOURS` 36, `EVENTS_OFFLINE_MAX_DEVICES` 10, `EVENTS_OFFLINE_MAX_PER_USER` 2, `EVENTS_OFFLINE_MAX_ROWS` 20000, `EVENTS_OFFLINE_SYNC_BATCH` 200, `EVENTS_OFFLINE_MAX_PENDING` 2000, `EVENTS_OFFLINE_CLOCK_TOLERANCE_SECONDS` 300, `EVENTS_OFFLINE_MIN_DESK_BUILD` (unset; an integer build number), `EVENTS_OFFLINE_SCAN_KEEP_DAYS` 180, `EVENTS_OFFLINE_MAX_BIB_RANGE` 5000.
-## B. Waitlist (B2) (pending)
+## B. Waitlist (B2)
+Flag `EVENTS_WAITLIST` (needs `EVENTS_MODULE` and `EVENTS_REGISTRATION`). Off: every route below is `404 feature_disabled`, ticket types carry **no** `waitlist` key, nothing gates a purchase.
+
+**Model.** One signed-in member, one place, for themselves, in one sold-out ticket type, with a verified phone or email (D70). Waiting costs nothing and holds nothing. Strict first in, first offered per ticket type (database sequence). When a place opens the server creates a **normal order** (`awaiting_payment`) for the head of the line from the details given at joining; from there it is the existing S3/S4 flow (hold timer, manual payment, 24 h confirmation, refund rules). The hold is the **offer window**: `clamp(hours until registration closes / 4, 2 h, EVENTS_WAITLIST_OFFER_HOURS)`, never past the close; no offers inside the last `EVENTS_WAITLIST_MIN_OFFER_MINUTES` (120) and none in quiet hours (21:00 to 07:00 event time, `EVENTS_WAITLIST_QUIET_HOURS`, `off` disables). The app counts down from `serverTime` and the order's `holdExpiresAt`, never the phone clock.
+
+**Queue gate.** While a ticket type has a `waiting` or `offered` entry, creating any other order for it answers `409 waitlist_active { ticketTypeId }`, and the ticket type reads `availability: "sold_out"` even when a place is free (so old app builds show "Sold out"). New builds read `waitlist.state`.
+
+Additive reads:
+- `GET /events/:id` (and `GET /events/:id` ticket types): event `waitlist: { enabled }`; each ticket type `waitlist: { state: "none" | "open" | "closed" }` (`open`: a member can join or is queued; `closed`: sold out but new sign-ups are stopped or the line is closed; `none`: nothing to wait for, or the waitlist cannot work now, for example payments are off for a priced ticket).
+- `GET /events/options`: `waitlist: { enabled, offerHours, maxActivePerUser }`.
+- `GET /me/event-orders`: each row gains `source: "waitlist" | null` (key absent while the flag is off).
+
+Member (JWT `member`):
+
+| Route | Body | Success | Errors |
+|---|---|---|---|
+| `POST /me/events/:id/waitlist` | `{ ticketTypeId, participants: [one self participant exactly as the checkout takes it], consent: { accepted: true, textVersion }, locale? }` | `201 { entry: { id, status: "waiting", position, ticketTypeId, ticketTypeName, categoryName, priceTzs, currency, joinedAt } }` | `404 event_not_found`, `409 not_sold_out`, `409 waitlist_unavailable { reason: registration_closed \| waitlist_closed \| sale_closed \| payments_unavailable }`, `409 already_registered`, `409 waitlist_full`, `409 waitlist_limit_reached { max }`, `409 waitlist_lapse_limit`, `403 verification_required`, `422 validation_failed { fields }`, `422 consent_required { current }`, `429 rate_limited` (10 joins an hour) |
+| `GET /me/event-waitlist` | | `{ items: [{ id, eventId, eventTitle, startsAt, timezone, ticketTypeName, categoryName, status, position?, joinedAt, blockedReason?, offer?: { orderId, expiresAt, amountTzs, currency }, endedAt?, endedReason? }], serverTime }` (`status`: waiting offered converted expired declined left removed closed; the queue length is never sent) | |
+| `DELETE /me/event-waitlist/:id` | | `200 { entry: { id, status } }` (`left`, or `declined` for an offered entry, which cancels its held order) | `404 entry_not_found`, `409 already_ended`, `409 payment_pending` |
+| `POST /me/event-waitlist/:id/reconfirm` | `{ consent: { accepted: true, textVersion } }` | `200 { entry: { id, status, position } }` | `409 not_blocked`, `422 consent_required` |
+
+`blockedReason: "reconsent"`: the consent text changed after joining; the entry keeps its place but is skipped until the member reconfirms.
+
+Organizer (JWT; `/organizer/events/:id/waitlist`): `GET` (owner admin ops finance; a suspended organizer may read) -> `{ enabled, closedAt, byTicketType: [{ ticketTypeId, name, waiting, offered, converted, expired, left }], totals }` (**counts only**: no names, no positions, no promote or reorder). `PATCH { enabled }` (owner admin, active organizer) stops or resumes **new** sign-ups -> `{ enabled, closedAt: null }`, `409 waitlist_closed` after a close. `POST …/waitlist/close` (owner admin) ends the line for good, tells everyone waiting, leaves offers already made to run out -> `{ enabled: false, closedAt, closed }`.
+
+Admin (scope `events`): `GET /admin/events/:id/waitlist?ticketTypeId&status&cursor&limit` -> `{ items: [{ id, seq, status, ticketTypeId, joinedAt, name: "Amina M." }], nextCursor }` (no contact data). `POST /admin/events/:id/waitlist/:entryId/remove { reason (10-300), reasonSw? (10-300) }` -> `{ entry: { id, status: "removed" } }`; an offered entry cancels its unpaid order (`409 payment_pending` if a payment is waiting for a decision).
+
+Notices (server strings `{en, sw}`; type -> deep link): `event_waitlist_joined` (in-app only), `event_waitlist_offer` -> `/member/events/orders/<orderId>`, `event_waitlist_offer_reminder` (one hour left) -> same, `event_waitlist_offer_expired`, `event_waitlist_closed`, `event_waitlist_removed` -> `/member/events/waitlist`. The offer replaces the usual "registration received" notice for the order.
+
+Jobs: `event-waitlist-promote` (every minute: reconcile converted / expired / declined, send reminders, end entries whose sale closed, offer freed places; also nudged right after a hold expires) and `event-waitlist-purge` (daily 23:15 UTC: stored details cleared 24 h after an entry ends, ended rows deleted after `EVENTS_WAITLIST_KEEP_DAYS`). A late payment after the offer expired follows the S4 re-reserve-or-refund rule and has no priority over the line. Env: `EVENTS_WAITLIST_OFFER_HOURS` 12, `EVENTS_WAITLIST_MIN_OFFER_MINUTES` 120, `EVENTS_WAITLIST_MAX_ACTIVE_PER_USER` 5, `EVENTS_WAITLIST_MAX_QUEUE` 500, `EVENTS_WAITLIST_MAX_LAPSES` 2, `EVENTS_WAITLIST_QUIET_HOURS` `21-7`, `EVENTS_WAITLIST_KEEP_DAYS` 90.
+
+Order create (`POST /me/event-orders`, additive errors): `409 waitlist_active { ticketTypeId }`, `409 unpaid_places_limit { limit }` (H5, see D).
 ## D. Hardening (B4) (pending)

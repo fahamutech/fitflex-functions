@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -389,5 +389,27 @@ export const eventKitOfflinePurge = {
     const r = await opsService.runJob('event-kit-offline-purge');
     const s = r?.stats ?? {};
     if (s.processed) console.log(`[events] offline purge: expired=${s.expired} revoked=${s.revoked} scans=${s.scans} devices=${s.devices}`);
+  }
+};
+
+export const eventWaitlistPromote = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events (S7): reconcile waitlist offers and offer freed places to the head of each line (a normal order for the member; quiet hours 21:00 to 07:00 event time). Does nothing unless EVENTS_WAITLIST is on. Safe to overlap (advisory lock per ticket type, one order per entry by idempotency key). The work is in src/bootstrap/services.mjs (event-waitlist-promote).',
+  onJob: async () => {
+    if (!eventsWaitlistOn()) return;
+    const r = await opsService.runJob('event-waitlist-promote');
+    const s = r?.stats ?? {};
+    if (s.offered || s.closed) console.log(`[events] waitlist: offered=${s.offered} closed=${s.closed} skippedEntries=${s.skippedEntries}`);
+  }
+};
+
+export const eventWaitlistPurge = {
+  created, rule: '15 23 * * *', // every day 23:15 UTC
+  description: 'Events (S7): clear stored registration details of ended waitlist entries after 24 hours and delete old ended entries. Does nothing unless EVENTS_WAITLIST is on. Idempotent. The work is in src/bootstrap/services.mjs (event-waitlist-purge).',
+  onJob: async () => {
+    if (!eventsWaitlistOn()) return;
+    const r = await opsService.runJob('event-waitlist-purge');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] waitlist purge: cleared=${s.cleared} deleted=${s.deleted}`);
   }
 };

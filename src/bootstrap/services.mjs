@@ -192,6 +192,8 @@ import { webhookKeyRing } from '../shared/webhook-signing.mjs';
 import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
 import { eventsKitOfflineOn, eventsWaitlistOn, eventsAnalyticsOn } from '../shared/feature-flags.mjs';
 import { createEventsAnalyticsService } from '../services/events-analytics-service.mjs';
+import { createEventsWaitlistService } from '../services/events-waitlist-service.mjs';
+import { eventsWaitlistOfferHours, eventsWaitlistMinOfferMinutes, eventsWaitlistMaxActivePerUser, eventsWaitlistMaxQueue, eventsWaitlistMaxLapses, eventsWaitlistQuietHours, eventsWaitlistKeepDays } from '../shared/events-config.mjs';
 import { createEventsKitOfflineService } from '../services/events-kit-offline-service.mjs';
 import { eventsOfflineSessionHours, eventsOfflineMaxDevices, eventsOfflineMaxPerUser, eventsOfflineMaxRows, eventsOfflineSyncBatch, eventsOfflineMaxPending, eventsOfflineClockToleranceSeconds, eventsOfflineMinDeskBuild, eventsOfflineScanKeepDays, eventsOfflineMaxBibRange } from '../shared/events-config.mjs';
 import { setApiErrorSink } from '../shared/events-api-error.mjs';
@@ -620,7 +622,7 @@ export const eventStore = createPgEventStore({
   db,
   // S3: after an expired order's release commits, the purchaser is told once (eventsRegistrationService is
   // defined further down; the hook only runs later, from the job).
-  hooks: { afterExpire: result => eventsRegistrationService.onOrderExpired(result) },
+  hooks: { afterExpire: async (result) => { await eventsRegistrationService.onOrderExpired(result); if (eventsWaitlistOn()) await eventsWaitlistService.nudge(result); } },
 });
 // S4: the composable money primitives (confirm / rehold / cancel paid places / refund effects). Dormant with the payment flags.
 export const eventMoneyStore = createPgEventMoneyStore({ db, eventStore });
@@ -1335,7 +1337,7 @@ export const heroImageService = createHeroImageService({
 
 // Marathon & running events · S2: organizer capability, event management, admin moderation, discovery.
 // Dormant behind EVENTS_MODULE (every route but GET /events/options answers 404 feature_disabled).
-export const eventCatalogueStore = createPgEventCatalogueStore({ db });
+export const eventCatalogueStore = createPgEventCatalogueStore({ db, waitlistOn: eventsWaitlistOn });
 registerOrganizerLookup(userId => eventCatalogueStore.organizerForUser(userId));
 export const eventsOrganizerService = createEventsOrganizerService({
   db, eventStore, catalogue: eventCatalogueStore, users, identityLink: identityLinkService, partnerKyc: partnerKycService,
@@ -1359,6 +1361,7 @@ export const eventsDiscoveryService = createEventsDiscoveryService({
   catalogue: eventCatalogueStore, closingSoonHours: eventsClosingSoonHours,
   flags: { module: eventsModuleOn, favourites: eventsFavouritesOn, registration: eventsRegistrationOn },
   // S5: the ops switches the apps and the portal read (webhooks is false without EVENTS_WEBHOOK_SECRET_KEY: fail closed).
+  waitlistView: () => (eventsWaitlistOn() ? eventsWaitlistService.view() : null),
   opsOptions: () => ({ kit: eventsKitOpsOn(), api: eventsOrganizerApiOn(), webhooks: eventsWebhooksOn() && Boolean(webhookKeyRing()), kitOffline: eventsKitOfflineOn() && Boolean(eventTicketKeyRing()) }),
   // S3 (spec §3.1): the registration keys of the probe. payment is 'none' in S3 (S4 derives manual / provider).
   registrationOptions: () => ({
@@ -1395,6 +1398,8 @@ export const eventsRegistrationService = createEventsRegistrationService({
   getPayments: () => eventsPaymentsService, getRefunds: () => eventsRefundsService,
   // S5: the keyset roster, only while EVENTS_KIT_OPS is on.
   getRosterSync: () => (eventsKitOpsOn() ? eventsSyncService : null),
+  // S7: the queue gate, the order `source` and the view flags, only while EVENTS_WAITLIST is on.
+  getWaitlist: () => (eventsWaitlistOn() ? eventsWaitlistService : null),
 });
 export const eventsRosterService = createEventsRosterService({ db, registration: eventsRegistrationService, users, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService });
 
@@ -1571,6 +1576,38 @@ export const eventsKitOfflineService = createEventsKitOfflineService({
   config: {
     sessionHours: eventsOfflineSessionHours, maxDevices: eventsOfflineMaxDevices, maxPerUser: eventsOfflineMaxPerUser, maxRows: eventsOfflineMaxRows, syncBatch: eventsOfflineSyncBatch,
     maxPending: eventsOfflineMaxPending, clockToleranceSeconds: eventsOfflineClockToleranceSeconds, minDeskBuild: eventsOfflineMinDeskBuild, scanKeepDays: eventsOfflineScanKeepDays, maxBibRange: eventsOfflineMaxBibRange,
+  },
+});
+// S7 · B2: the waitlist (docs/design/events-s7-hardening-and-pilot.md §4). RULE 6 AREA. Dormant behind EVENTS_WAITLIST. An offer is a real order
+// created through the registration service with a system actor; nothing in the store, payment or refund code changes.
+export const eventsWaitlistService = createEventsWaitlistService({
+  db, registration: eventsRegistrationService, eventStore, users, verifiedContacts, localeOf: eventsLocaleOf,
+  track: (name, props, opts) => eventsAnalyticsService.track(name, props, opts),
+  notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+  paymentsMode: () => eventsPaymentsService.mode(), consentVersion: eventsConsentTextVersion,
+  config: {
+    offerHours: eventsWaitlistOfferHours, minOfferMinutes: eventsWaitlistMinOfferMinutes, maxActivePerUser: eventsWaitlistMaxActivePerUser, maxQueue: eventsWaitlistMaxQueue,
+    maxLapses: eventsWaitlistMaxLapses, quietHours: eventsWaitlistQuietHours, keepDays: eventsWaitlistKeepDays,
+  },
+});
+opsService.register({
+  name: 'event-waitlist-promote', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event waitlist promotion', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events (S7): reconciles waitlist offers (converted, expired, declined, one-hour reminder), ends entries whose sale closed, and offers freed places to the head of each line by creating a normal order for the member (hold = the offer window, quiet hours 21:00 to 07:00 event time). Does nothing unless EVENTS_WAITLIST is on.',
+  run: async () => {
+    if (!eventsWaitlistOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const rec = await eventsWaitlistService.reconcile();
+    const r = await eventsWaitlistService.promote();
+    const processed = r.attempted + r.closed + rec.converted + rec.expired + rec.declined + rec.reminded;
+    return { processed, succeeded: processed, failed: 0, ...r, reconciled: rec };
+  },
+});
+opsService.register({
+  name: 'event-waitlist-purge', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event waitlist purge', schedule: { type: 'daily', utc: '23:15' }, quiet: true,
+  description: 'Events (S7): clears the stored registration details of waitlist entries 24 hours after they ended and deletes ended entries older than EVENTS_WAITLIST_KEEP_DAYS. Does nothing unless EVENTS_WAITLIST is on.',
+  run: async () => {
+    if (!eventsWaitlistOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWaitlistService.purge();
+    return { processed: r.cleared + r.deleted, succeeded: r.cleared + r.deleted, failed: 0, ...r };
   },
 });
 opsService.register({
