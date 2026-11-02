@@ -182,7 +182,8 @@ test('guessing is limited per identifier and per network address', async () => {
     assert.equal(limited.body.error, 'too_many_attempts');
   }, { PIN_FAILURES_PER_IDENTIFIER: '3' });
   await on(async () => {
-    const ip = '203.0.113.77';
+    // A fresh address per run: failures are stored in AuthAttempt and outlive the run.
+    const ip = `198.18.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
     for (let i = 0; i < 3; i += 1) assert.equal((await post(pinLogin, { phone: localPhone(), pin: '0000' }, ip)).statusCode, 401);
     const p = await personWithPin();
     assert.equal((await post(pinLogin, { phone: p.local, pin: p.pin }, ip)).statusCode, 429, 'one address cannot try many accounts');
