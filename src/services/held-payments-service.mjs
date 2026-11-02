@@ -43,7 +43,7 @@ function blockedBy(row, request) {
  * (in-memory specs). A held refund is kind 'subscription' with the payment request as source and a null subscriptionId.
  */
 export function createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled = () => true, transact = null }) {
-  const run = transact ?? (fn => fn({ lockRequest: id => paymentRequests.findByIdAsync(id), refunds, auditLog }));
+  const run = transact ?? (fn => fn({ lockRequest: id => paymentRequests.findByIdAsync(id), lockTransaction: async () => {}, refunds, auditLog }));
   const off = fail('feature_disabled', 404);
 
   /** One entry per (payment request, transaction): the earliest audit row, whatever the polls repeated. */
@@ -63,21 +63,50 @@ export function createHeldPaymentsService({ auditLog, paymentRequests, refunds, 
   const liveRefund = async paymentRequestId =>
     (await refunds.filterByColumnAsync('paymentRequestId', paymentRequestId)).find(r => r.status !== 'rejected') || null;
 
+  const liveStatus = r => r && r.status !== 'rejected';
+
+  /**
+   * The provider's transaction may already be accounted for: the orphaned branch of mobile-money-service does not
+   * check that (only its held branch does), so the same transaction can show on a closed request while it approved
+   * another one, or on two closed requests. A refund would then pay the same money twice. True when
+   *  (a) another PaymentRequest carries this transaction as its reference and is approved, or
+   *  (b) a live held refund was already raised for this transaction (on any request), or
+   *  (c) another request with a held row for this transaction already has a live refund.
+   * `rows` is the held rows already read (heldRows()).
+   */
+  async function transactionAccountedFor(request, transactionId, rows) {
+    if (!transactionId) return false;
+    const same = await paymentRequests.filterByColumnAsync('reference', transactionId);
+    if (same.some(p => p.id !== request.id && p.status === 'approved')) return true;
+    for (const a of await auditLog.filterByColumnAsync('action', 'payment_held_refund_raised')) {
+      if (a.target === request.id || String(a.after?.transactionId ?? '') !== transactionId || !a.after?.refundId) continue; // this request's own refund is refund_already_requested
+      if (liveStatus(await refunds.findByIdAsync(a.after.refundId))) return true;
+    }
+    for (const h of rows) {
+      if (h.transactionId !== transactionId || h.row.target === request.id) continue;
+      if (await liveRefund(h.row.target)) return true;
+    }
+    return false;
+  }
+
   async function list({ status = 'open' } = {}) {
     if (!enabled()) return off;
     if (!HELD_STATUSES.includes(status)) return fail('invalid_status', 400, { allowed: HELD_STATUSES });
     const items = [];
-    for (const { row, transactionId } of await heldRows()) {
+    const all = await heldRows();
+    for (const { row, transactionId } of all) {
       const request = await paymentRequests.findByIdAsync(row.target);
       if (!request || request.status === 'approved') continue; // taken after all: nothing is held
       const refund = await liveRefund(request.id);
       if ((status === 'resolved') !== Boolean(refund)) continue;
+      const blockedReason = refund ? 'already_refunded'
+        : blockedBy(row, request) ?? (await transactionAccountedFor(request, transactionId, all) ? 'reference_already_used' : null);
       items.push({
         paymentRequestId: request.id, transactionId, amountTzs: amountOf(row),
         memberId: request.memberId, reason: reasonOf(row), at: iso(row.at), refundId: refund?.id ?? null,
         requestStatus: request.status, productType: request.productType ?? null,
         refundStatus: refund?.status ?? null,
-        refundable: !refund && !blockedBy(row, request), notRefundableReason: refund ? 'already_refunded' : blockedBy(row, request),
+        refundable: blockedReason === null, notRefundableReason: blockedReason,
         amountReceivedKnown: amountOf(row) != null,
       });
     }
@@ -94,7 +123,8 @@ export function createHeldPaymentsService({ auditLog, paymentRequests, refunds, 
     const request = await paymentRequests.findByIdAsync(paymentRequestId);
     if (!request) return fail('payment_not_found', 404);
     if (request.eventOrderId) return fail('use_event_refund', 409); // event money is refunded by the events flow
-    const match = (await heldRows()).find(h => h.row.target === request.id && h.transactionId === transactionId);
+    const all = await heldRows();
+    const match = all.find(h => h.row.target === request.id && h.transactionId === transactionId);
     if (!match || request.status === 'approved') return fail('not_held', 409);
     const blocked = blockedBy(match.row, request);
     if (blocked) return fail('not_refundable', 409, { reason: blocked });
@@ -108,6 +138,9 @@ export function createHeldPaymentsService({ auditLog, paymentRequests, refunds, 
     let out;
     try {
       out = await run(async tx => {
+        // One refund at a time per provider transaction (advisory lock), then the same checks against committed data.
+        await tx.lockTransaction(transactionId);
+        if (await transactionAccountedFor(request, transactionId, all)) return fail('not_refundable', 409, { reason: 'reference_already_used' });
         // Re-read under a row lock: a late approval cannot slip in between this check and the refund insert.
         const fresh = await tx.lockRequest(request.id);
         if (!fresh || !CLOSED.has(fresh.status)) return fail('not_refundable', 409, { reason: 'request_not_closed' });

@@ -1062,6 +1062,7 @@ export const refundService = createRefundService({
 export const heldPaymentsService = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: heldPaymentsWorklistOn,
   // The request row is locked and re-read, and the refund and its audit rows are written, in one transaction.
   transact: fn => db.transaction(async trx => fn({
+    lockTransaction: txn => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`held-refund:${txn}`]),
     lockRequest: id => trx('PaymentRequest').where({ id }).forUpdate().first(),
     refunds: {
       filterByColumnAsync: (col, value) => trx('Refund').where({ [col]: value }),

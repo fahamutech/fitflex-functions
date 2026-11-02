@@ -34,13 +34,14 @@ function fixture({ twoAdmins = false, enabled = true, lateStatus = null } = {}) 
     { id: 'pr_rejected', memberId: 'm2', status: 'rejected', amountTzs: 30000, productType: 'SHOP_ORDER' },
     { id: 'pr_ok', memberId: 'm3', status: 'approved', amountTzs: 20000, subscriptionId: 'sub1' },
     { id: 'pr_pending', memberId: 'm5', status: 'pending', amountTzs: 40000, productType: 'FITFLEX_PASS' },
+    { id: 'pr_closed2', memberId: 'm6', status: 'cancelled', amountTzs: 50000, productType: 'FITFLEX_PASS' },
     { id: 'pr_event', memberId: 'm4', status: 'cancelled', amountTzs: 10000, eventOrderId: 'evo1' },
   ]);
   const users = memStore([]);
   const refundService = createRefundService({ refunds, paymentRequests, subscriptions: memStore(), users, auditLog, secondApprover: () => twoAdmins });
   const held = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: () => enabled,
     // lateStatus simulates an approval landing between the list and the locked re-read.
-    ...(lateStatus ? { transact: fn => fn({ lockRequest: async id => ({ ...(await paymentRequests.findByIdAsync(id)), status: lateStatus }), refunds, auditLog }) } : {}) });
+    ...(lateStatus ? { transact: fn => fn({ lockTransaction: async () => {}, lockRequest: async id => ({ ...(await paymentRequests.findByIdAsync(id)), status: lateStatus }), refunds, auditLog }) } : {}) });
   let n = 0;
   const log = (action, target, after, at) => auditLog.insertAsync({ id: `a${++n}`, at: at ?? `2026-11-0${n}T10:00:00.000Z`, actor: 'system:mobile-money', action, target, before: null, after });
   return { refunds, auditLog, paymentRequests, refundService, held, log };
@@ -203,6 +204,46 @@ test('a request still pending is never refundable here, and a late approval is c
   assert.equal(out.error, 'not_refundable');
   assert.equal(late.refunds.rows.length, 0);
   assert.equal(late.auditLog.rows.some(a => a.action === 'payment_held_refund_raised'), false);
+});
+
+test('the same provider transaction is refundable once: already approved elsewhere, or already refunded on another request', async () => {
+  const r = (f, id, tx = 'TX1') => f.held.raiseRefund({ paymentRequestId: id, body: body({ transactionId: tx }), actorId: 'adm1' });
+  // (a) T approved another request (reference == T): the orphaned row on a cancelled request is not refundable.
+  const a = fixture();
+  await a.paymentRequests.insertAsync({ id: 'pr_other', memberId: 'm9', status: 'approved', reference: 'TX1', amountTzs: 50000 });
+  await a.log('payment_mobile_money_orphaned', 'pr_closed', { transactionId: 'TX1', amountTzs: 50000 });
+  const item = (await a.held.list({})).items[0];
+  assert.deepEqual([item.refundable, item.notRefundableReason], [false, 'reference_already_used']);
+  const outA = await r(a, 'pr_closed');
+  assert.equal(outA.error, 'not_refundable');
+  assert.equal(outA.reason, 'reference_already_used');
+  assert.equal(a.refunds.rows.length, 0);
+  // Two cancelled requests with the same orphaned T: the first refund works, the second is refused (c and b).
+  const b = fixture();
+  await b.log('payment_mobile_money_orphaned', 'pr_closed', { transactionId: 'TX1', amountTzs: 50000 });
+  await b.log('payment_mobile_money_orphaned', 'pr_closed2', { transactionId: 'TX1', amountTzs: 50000 });
+  assert.equal((await b.held.list({})).items.every(i => i.refundable), true);
+  assert.equal((await r(b, 'pr_closed')).refund.status, 'approved');
+  const open = (await b.held.list({})).items;
+  assert.deepEqual(open.map(i => [i.paymentRequestId, i.refundable, i.notRefundableReason]), [['pr_closed2', false, 'reference_already_used']]);
+  const second = await r(b, 'pr_closed2');
+  assert.equal(second.error, 'not_refundable');
+  assert.equal(b.refunds.rows.length, 1);
+  // (c) alone: the refund exists on the other request but its raise audit row is gone (older data).
+  const c = fixture();
+  await c.log('payment_mobile_money_orphaned', 'pr_closed', { transactionId: 'TX1', amountTzs: 50000 });
+  await c.log('payment_mobile_money_orphaned', 'pr_closed2', { transactionId: 'TX1', amountTzs: 50000 });
+  await c.refunds.insertAsync({ id: 'rfd_x', memberId: 'm1', kind: 'subscription', paymentRequestId: 'pr_closed', status: 'requested', amountTzs: 50000 });
+  assert.equal((await r(c, 'pr_closed2')).error, 'not_refundable');
+  // (b) alone: a live held refund for T is recorded in the audit trail, and no other held row for T has a refund.
+  const d = fixture();
+  await d.log('payment_mobile_money_orphaned', 'pr_closed2', { transactionId: 'TX1', amountTzs: 50000 });
+  await d.refunds.insertAsync({ id: 'rfd_y', memberId: 'm1', kind: 'subscription', paymentRequestId: 'pr_gone', status: 'approved', amountTzs: 50000 });
+  await d.log('payment_held_refund_raised', 'pr_gone', { refundId: 'rfd_y', transactionId: 'TX1' });
+  assert.equal((await r(d, 'pr_closed2')).error, 'not_refundable');
+  // A rejected refund frees the transaction again.
+  await d.refunds.updateByIdAsync('rfd_y', { status: 'rejected' });
+  assert.equal((await r(d, 'pr_closed2')).refund.status, 'approved');
 });
 
 after(async () => { await db.destroy?.(); });
