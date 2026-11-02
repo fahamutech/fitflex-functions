@@ -50,7 +50,7 @@ test('the token is absent from everything a logger could print after redaction',
   };
   redactWebhookToken(req);
   assert.equal(JSON.stringify(req).includes(SECRET), false);
-  assert.equal(req.originalUrl, '/webhooks/selcom?a=1&token=[redacted]&b=2');
+  assert.equal(req.originalUrl, '/webhooks/selcom?a=1&b=2');
 });
 
 // --- replay
@@ -176,5 +176,31 @@ test('real Express app over HTTP: a logger placed after the gate cannot see the 
     await new Promise(r => setTimeout(r, 50));
     assert.ok(seen.length >= 6);
     for (const line of seen) assert.equal(line.includes(SECRET), false, line);
+  } finally { server.close(); }
+});
+
+test('encoded, mixed-case, repeated and array token keys authenticate or not, but never survive redaction (real HTTP)', async () => {
+  const { default: express } = await import('express');
+  process.env.SELCOM_WEBHOOK_SECRET = SECRET;
+  const seen = [];
+  const app = express();
+  app.post('/w', (req, res) => {
+    const ok = hasWebhookToken(req);
+    redactWebhookToken(req);
+    seen.push(JSON.stringify({ o: req.originalUrl, u: req.url, q: req.query, p1: req._parsedUrl, p2: req._parsedOriginalUrl }));
+    res.status(ok ? 200 : 403).json({ ok });
+  });
+  const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
+  const base = `http://127.0.0.1:${server.address().port}/w`;
+  try {
+    const forms = [`?%74oken=${SECRET}`, `?a=1&%54OKEN=${SECRET}&b=2`, `?Token=${SECRET}`, `?token=x&token=${SECRET}`, `?token[]=${SECRET}`, `?%74oken%5B0%5D=${SECRET}&c=3`, `?t%6Fken=${SECRET}#f`];
+    for (const f of forms) {
+      const r = await fetch(base + f, { method: 'POST' });
+      assert.ok([200, 403].includes(r.status));
+    }
+    // the plainly encoded key really does authenticate (Express decodes it), which is why it must be scrubbed
+    assert.equal((await fetch(`${base}?%74oken=${SECRET}`, { method: 'POST' })).status, 200);
+    for (const line of seen) assert.equal(line.includes(SECRET), false, line);
+    assert.equal(JSON.parse(seen[1]).o, '/w?a=1&b=2');
   } finally { server.close(); }
 });

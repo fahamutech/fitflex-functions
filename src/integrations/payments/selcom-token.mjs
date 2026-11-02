@@ -22,10 +22,26 @@ export function hasWebhookToken(req, expected = process.env.SELCOM_WEBHOOK_SECRE
 }
 
 const HEADER = 'x-selcom-webhook-token';
-const stripToken = url => url.replace(/(^|[?&])token=[^&#]*/gi, '$1token=[redacted]');
+// True when a query key, once percent-decoded, is "token" (any case, also token[] / token[0]).
+function isTokenKey(raw) {
+  let key = raw.replace(/\+/g, ' ');
+  try { key = decodeURIComponent(key); } catch { /* keep the raw key */ }
+  return /^token(\[[^\]]*\])*$/i.test(key.trim());
+}
+const dropTokenPairs = q => q.split('&').filter(pair => !isTokenKey(pair.split('=')[0])).join('&');
+// Works on a full URL/path ("/x?a=1&%74oken=s"), a "?query" search string, or a bare query string.
+function stripToken(url) {
+  const hash = url.indexOf('#');
+  const tail = hash >= 0 ? url.slice(hash) : '';
+  const body = hash >= 0 ? url.slice(0, hash) : url;
+  const q = body.indexOf('?');
+  if (q < 0) return dropTokenPairs(body) + tail;
+  const rest = dropTokenPairs(body.slice(q + 1));
+  return body.slice(0, q) + (rest ? `?${rest}` : '') + tail;
+}
 const redactedCopy = obj => {
-  const copy = { ...obj };
-  if ('token' in copy) copy.token = '[redacted]';
+  const copy = {};
+  for (const [k, v] of Object.entries(obj)) if (!isTokenKey(k)) copy[k] = v;
   return copy;
 };
 function setOwn(req, key, value) {
@@ -52,7 +68,7 @@ export function redactWebhookToken(req) {
   }
   let query;
   try { query = req.query; } catch { query = null; }
-  if (query && typeof query === 'object' && 'token' in query) setOwn(req, 'query', redactedCopy(query));
+  if (query && typeof query === 'object' && Object.keys(query).some(isTokenKey)) setOwn(req, 'query', redactedCopy(query));
   if (req.headers && HEADER in req.headers) {
     const headers = { ...req.headers, [HEADER]: '[redacted]' };
     setOwn(req, 'headers', headers);
