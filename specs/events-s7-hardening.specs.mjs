@@ -268,6 +268,7 @@ test('retention: UNSET it does nothing and writes nothing; set, it clears contac
   const recent = await h.kitEvent({ n: 1 });
   for (const reg of f.regs) await db('EventRegistration').where({ id: reg.id }).update({ phone: '+255700000001', email: 'a@b.test', dateOfBirth: '1990-01-01', gender: 'f', emergencyContact: JSON.stringify({ name: 'X', phone: '+255700000002' }), phoneNormalized: '+255700000001', emailNormalized: 'a@b.test', bibNumber: `B${reg.id.slice(-8)}`, claimTokenHash: `h${reg.id}` });
   await db('EventRegistration').where({ id: recent.regs[0].id }).update({ phone: '+255700000003', email: 'c@d.test' });
+  const startedAt = new Date();
   const before = await db('AuditLog').where({ action: 'events.registration_anonymised' }).count().then(r => Number(r[0].count));
   assert.deepEqual(await eventsRetentionService.run(), { skipped: 'not_configured', rows: 0, events: 0 });
   assert.equal(await db('AuditLog').where({ action: 'events.registration_anonymised' }).count().then(r => Number(r[0].count)), before, 'unset: not even an audit row');
@@ -288,8 +289,9 @@ test('retention: UNSET it does nothing and writes nothing; set, it clears contac
     assert.equal(row.status, 'confirmed');
   }
   assert.equal((await db('EventRegistration').where({ id: recent.regs[0].id }).first()).phone, '+255700000003', 'a recent event is untouched');
-  const audit = await db('AuditLog').where({ action: 'events.registration_anonymised' }).orderBy('at', 'desc').first();
-  assert.ok(audit.after.rows >= 2 && audit.after.events >= 1);
+  // Not "the latest row": two runs a millisecond apart share the same `at` (timestamp(3)), so the order between them is arbitrary.
+  const audits = await db('AuditLog').where({ action: 'events.registration_anonymised' }).where('at', '>=', startedAt);
+  assert.ok(audits.some(a => a.after.rows >= 2 && a.after.events >= 1), JSON.stringify(audits.map(a => a.after)));
   assert.equal((await eventsRetentionService.run()).rows, 0, 'each registration is cleared once');
   delete process.env.EVENTS_RETENTION_MONTHS;
   // the deleted-purchaser setting
