@@ -5,7 +5,7 @@ import { ensureInit } from '../functions/index.mjs';
 import {
   organizerAssignBib, organizerReleaseBib, organizerBibsBulkPreview, organizerBibsBulk, organizerBibsImportPreview, organizerBibsImport, organizerListBibs, organizerCollectKit, resetEventsOpsLimits,
 } from '../functions/events-ops.mjs';
-import { harness, s5On, db, uid } from './fixtures/events-s5.mjs';
+import { harness, s5On, db, uid, eventually } from './fixtures/events-s5.mjs';
 import { eventMoneyStore } from '../src/bootstrap/services.mjs';
 
 await ensureInit();
@@ -29,7 +29,7 @@ test('assign: 201, upper-cased, the registration view, outbox, audit and the par
   assert.equal(out.length, 1);
   assert.deepEqual(out[0].payload, { registrationId: f.regs[0].id, eventId: f.event.id, categoryId: f.categories[0].id, bibNumber: '5K-001', previousBibNumber: null });
   assert.equal((await db('AuditLog').where({ action: 'events.bib_assigned', target: f.event.id })).length, 1);
-  assert.equal((await db('Notification').where({ userId: f.regs[0].userId, type: 'event_bib_assigned' })).length, 1);
+  assert.equal((await eventually(() => db('Notification').where({ userId: f.regs[0].userId, type: 'event_bib_assigned' }))).length, 1);   // sent after the response, not awaited
   for (const bad of ['', '-1', 'a b', 'x'.repeat(13), 'é1', null]) assert.deepEqual([(await assign(f.organizer.ops, f, { registrationId: f.regs[1].id, bibNumber: bad })).status, bad], [422, bad]);
   await db('EventRegistration').where({ id: f.regs[1].id }).update({ status: 'reserved' });
   assert.equal((await assign(f.organizer.ops, f, { registrationId: f.regs[1].id, bibNumber: '77' })).body.error, 'registration_unpaid');

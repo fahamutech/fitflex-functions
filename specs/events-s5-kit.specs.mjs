@@ -3,7 +3,7 @@ import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
 import { organizerCollectKit, organizerCorrectKit, organizerKitHistory, organizerKitSummary, organizerKitLookup, resetEventsOpsLimits } from '../functions/events-ops.mjs';
-import { harness, s5On, s5Off, db, uid } from './fixtures/events-s5.mjs';
+import { harness, s5On, s5Off, db, uid, eventually } from './fixtures/events-s5.mjs';
 
 await ensureInit();
 const h = harness();
@@ -29,7 +29,7 @@ test('scan handover: 201 with the card; one collected row; kitStatus, outbox, au
   assert.equal(out.length, 1);
   assert.deepEqual(Object.keys(out[0].payload).sort(), ['collectedAt', 'collectionPointId', 'registrationId']);
   assert.equal((await db('AuditLog').where({ action: 'events.kit_collected', target: f.event.id })).length, 1);
-  const note = await db('Notification').where({ userId: f.regs[0].userId, type: 'event_kit_collected' });
+  const note = await eventually(() => db('Notification').where({ userId: f.regs[0].userId, type: 'event_kit_collected' }));   // sent after the response, not awaited
   assert.equal(note.length, 1);
   assert.equal(note[0].data.titleSw, 'Vifaa vimechukuliwa');
   assert.ok(note[0].data.route.endsWith('/ticket'));

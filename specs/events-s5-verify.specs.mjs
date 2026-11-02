@@ -3,7 +3,7 @@ import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
 import { organizerVerifyTicket, resetEventsOpsLimits } from '../functions/events-ops.mjs';
-import { harness, s5On, s5Off, db } from './fixtures/events-s5.mjs';
+import { harness, s5On, s5Off, db, eventually } from './fixtures/events-s5.mjs';
 import { deriveToken, ticketKeyRing, QR_PREFIX } from '../src/shared/events-ticket-token.mjs';
 import { TICKET_SECRET } from './fixtures/events-s4.mjs';
 
@@ -59,8 +59,7 @@ test('unknown: a forged MAC, a rotated (old) token, and another organizer\'s tic
   assert.ok(!JSON.stringify(cross.body).includes(b.event.title + 'x'));
   // a failed outcome writes at most one audit row per actor per outcome per minute, with no payload
   await verify(a.organizer.ops, a.event.id, b.regs[0].payload);
-  await new Promise(r => setTimeout(r, 50));
-  const audits = await db('AuditLog').where({ action: 'events.ticket_verify_failed', target: a.event.id });
+  const audits = await eventually(() => db('AuditLog').where({ action: 'events.ticket_verify_failed', target: a.event.id }));   // written without being awaited
   assert.equal(audits.length, 1);
   assert.ok(!JSON.stringify(audits[0]).includes(b.regs[0].token));
 });
