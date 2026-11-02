@@ -636,6 +636,26 @@ export function webCheckinAlertsOn() {
 }
 
 /**
+ * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_SERVER_CONFIRM is set. On: a Selcom
+ * "success" callback is confirmed with Selcom through an injectable client before a
+ * subscription is activated; if the client cannot confirm (including "not configured",
+ * the only implementation today) the callback is refused with 503 and the payment_id
+ * is not consumed. Do not switch on until a real Selcom status client exists.
+ */
+export function selcomWebhookServerConfirmOn() {
+  return on('SELCOM_WEBHOOK_SERVER_CONFIRM');
+}
+
+/**
+ * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_QUERY_TOKEN_OFF is set. On: the Selcom
+ * webhook rejects the legacy ?token= query form and accepts only the x-selcom-webhook-token
+ * header. Switch on once Selcom has been reconfigured to send the header.
+ */
+export function selcomWebhookQueryTokenOff() {
+  return on('SELCOM_WEBHOOK_QUERY_TOKEN_OFF');
+}
+
+/**
  * Admin-portal audit S2/S3. Off unless ADMIN_REASONS_REQUIRED is set. On, an admin must give a non-empty `reason`
  * to suspend a member, delete a gym owner, or change pricing/payout/payment platform settings: 400 reason_required
  * otherwise. Off, a reason is optional (and stored in AuditLog.reason when given).
