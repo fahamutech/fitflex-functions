@@ -5,6 +5,7 @@
 // No request body is logged. Every write needs an Idempotency-Key; X-Request-Id is stamped on every response.
 import { randomUUID } from 'node:crypto';
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { errorText } from '../src/shared/events-results-copy.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { requireActiveOrganizer, requireOpenOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
@@ -33,6 +34,7 @@ const idemKey = req => req.headers?.['idempotency-key'];
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('results', result.status || 400);
     const { error, status, ...extra } = result;
     if (extra.retryAfterSeconds) res.set?.('Retry-After', String(extra.retryAfterSeconds));
     return res.status(status || 400).json({ error, ...errorText(error), ...extra });
@@ -162,6 +164,16 @@ export const organizerRejectResult = decision('reject', 'reject', 'reject a pend
 export const organizerCorrectResult = decision('correct', 'correct', 'correct a verified, corrected or disqualified result (inserts revision n+1, status corrected; recomputes ranks; queues medals; tells the participant). Body { expectedRevision, netTime?, gunTime?, finishStatus?: finished | dnf | dns, reasonCode: timing_error | wrong_bib | late_finish_data | other, note (10–300) } → { result }. 422 no_change; 409 invalid_transition.');
 export const organizerDisqualifyResult = decision('disqualify', 'disqualify', 'disqualify a result (inserts revision n+1, status disqualified; medals and event-linked rewards are revoked by the award engine). Body { expectedRevision, reasonCode: rule_violation | course_cut | wrong_category | equipment | identity | virtual_evidence | other, note? (≤300) } → { result }.');
 
+export const organizerCorrectPreview = {
+  created, method: 'post', path: `${base}/results/:resultId/correct/preview`,
+  description: 'Organizer owner / admin ONLY (EVENTS_RESULTS; S7 H12): what a correction would do, without doing it. Same body as …/correct { expectedRevision, netTime?, gunTime?, finishStatus?, reasonCode, note (10-300) } → { revision, rankBefore { overall, category }, rankAfter { overall, category }, othersShifted, medalsAffected } (counts only, no names; ranks are null until the category has an official release). The real correction runs inside a transaction that is always rolled back, so nothing is stored, announced or queued. No Idempotency-Key. Show it, then send …/correct with the same expectedRevision: it answers 409 result_changed when the result moved in between. Errors as …/correct (422 no_change | validation_failed, 409 invalid_transition | result_changed).',
+  onGuard: writers('post', 'owner', 'admin'),
+  onRequest: stamped(async (req, res) => {
+    if (limitOrNull(writeLimiter, `w:${req.user.sub}`, res)) return undefined;
+    return send(res, await svc.correctPreview({ ...ctxOf(req), resultId: req.params.resultId, body: req.body || {} }));
+  }),
+};
+
 export const organizerBulkVerifyPreview = {
   created, method: 'post', path: `${base}/results/verify-bulk/preview`,
   description: 'Organizer owner / admin (EVENTS_RESULTS): count the pending results that have NO flags (flagged GPS runs and dq rows are excluded). Body { categoryId?, filter?: "pending_clean" } → { previewHash, count, excludedFlagged }.',
@@ -225,6 +237,13 @@ export const organizerResultsSettings = {
 
 // ── FitFlex admin (scope events): read, and audited exceptions (D59) ─────────
 
+// S7 (H10): declared before the /:id admin routes of this file; the path has a fixed second segment.
+export const adminResultDisputes = {
+  created, method: 'get', path: '/admin/events/results/disputes',
+  description: 'Admin (scope events; EVENTS_RESULTS; S7 H10): result questions across events. ?status=open (default)|upheld|rejected|withdrawn&olderThanDays&organizerStatus&cursor&limit (≤200) → { items [{ id, eventId, eventTitle, organizerName, organizerStatus, openedAt, ageDays, status, adminMayResolve (true once open more than 7 days or the organizer is not active, D59) }], nextCursor, counts { open, olderThan7Days, organizerInactive } }. Resolve with the existing POST /admin/events/:id/results/disputes/:disputeId/resolve.',
+  onGuard: admin('get'),
+  onRequest: stamped(async (req, res) => send(res, await svc.adminDisputes({ query: req.query || {} }))),
+};
 export const adminResultsSummary = {
   created, method: 'get', path: '/admin/events/:id/results/summary',
   description: 'Admin (scope events; EVENTS_RESULTS): the same summary as the organizer\'s Results tab for any event.',

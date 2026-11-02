@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -357,4 +357,81 @@ export const opsDailySummary = {
   created, rule: '30 5 * * *', // every day 05:30 UTC = 08:30 EAT
   description: 'Operations: email the addresses in OPS_ALERT_EMAILS a summary of the exceptions still waiting. Sent only when something is waiting.',
   onJob: () => opsService.runJob('ops-daily-summary'),
+};
+
+export const eventAnalyticsRollup = {
+  created, rule: '20 * * * *', // hourly at :20
+  description: 'Events (S7): sum the existing analytics audit rows into daily counters (cursor, exactly once) and delete counters older than EVENTS_ANALYTICS_KEEP_DAYS. Does nothing unless EVENTS_ANALYTICS is on. Safe to rerun and to overlap. The work is in src/bootstrap/services.mjs (event-analytics-rollup).',
+  onJob: async () => {
+    if (!eventsAnalyticsOn()) return;
+    const r = await opsService.runJob('event-analytics-rollup');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] analytics roll-up: rows=${s.rows} purged=${s.purged}`);
+  }
+};
+
+export const eventHealthAlert = {
+  created, rule: '*/15 * * * *', // every 15 minutes
+  description: 'Events (S7): evaluate the alert rules A1 to A13 and email OPS_ALERT_EMAILS (ids and counts only; one email per rule and subject per 6 hours). Does nothing unless EVENTS_ANALYTICS is on. The work is in src/bootstrap/services.mjs (event-health-alert).',
+  onJob: async () => {
+    if (!eventsAnalyticsOn()) return;
+    const r = await opsService.runJob('event-health-alert');
+    const s = r?.stats ?? {};
+    if (s.firing) console.log(`[events] health alerts: firing=${s.firing} sent=${s.sent} skipped=${s.skipped}`);
+  }
+};
+
+export const eventKitOfflinePurge = {
+  created, rule: '30 23 * * *', // every day 23:30 UTC
+  description: 'Events (S7): mark offline desks past their expiry as expired, remove desks of staff who left the organizer, delete offline scan records older than EVENTS_OFFLINE_SCAN_KEEP_DAYS. Does nothing unless EVENTS_KIT_OFFLINE is on. Idempotent. The work is in src/bootstrap/services.mjs (event-kit-offline-purge).',
+  onJob: async () => {
+    if (!eventsKitOfflineOn()) return;
+    const r = await opsService.runJob('event-kit-offline-purge');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] offline purge: expired=${s.expired} revoked=${s.revoked} scans=${s.scans} devices=${s.devices}`);
+  }
+};
+
+export const eventWaitlistPromote = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events (S7): reconcile waitlist offers and offer freed places to the head of each line (a normal order for the member; quiet hours 21:00 to 07:00 event time). Does nothing unless EVENTS_WAITLIST is on. Safe to overlap (advisory lock per ticket type, one order per entry by idempotency key). The work is in src/bootstrap/services.mjs (event-waitlist-promote).',
+  onJob: async () => {
+    if (!eventsWaitlistOn()) return;
+    const r = await opsService.runJob('event-waitlist-promote');
+    const s = r?.stats ?? {};
+    if (s.offered || s.closed) console.log(`[events] waitlist: offered=${s.offered} closed=${s.closed} skippedEntries=${s.skippedEntries}`);
+  }
+};
+
+export const eventWaitlistPurge = {
+  created, rule: '15 23 * * *', // every day 23:15 UTC
+  description: 'Events (S7): clear stored registration details of ended waitlist entries after 24 hours and delete old ended entries. Does nothing unless EVENTS_WAITLIST is on. Idempotent. The work is in src/bootstrap/services.mjs (event-waitlist-purge).',
+  onJob: async () => {
+    if (!eventsWaitlistOn()) return;
+    const r = await opsService.runJob('event-waitlist-purge');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] waitlist purge: cleared=${s.cleared} deleted=${s.deleted}`);
+  }
+};
+
+export const eventOrganizerStatusSweep = {
+  created, rule: '25 * * * *', // hourly at :25
+  description: 'Events (S7): re-derive every event organizer\'s status from its KYC case and audit each correction. Does nothing unless EVENTS_MODULE is on. Idempotent. The work is in src/bootstrap/services.mjs (event-organizer-status-sweep).',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-organizer-status-sweep');
+    const s = r?.stats ?? {};
+    if (s.corrected) console.log(`[events] organizer status sweep: checked=${s.checked} corrected=${s.corrected}`);
+  }
+};
+
+export const eventRegistrationAnonymise = {
+  created, rule: '10 1 * * *', // every day 01:10 UTC
+  description: 'Events (S7): clear contact and sensitive fields of registrations older than EVENTS_RETENTION_MONTHS (keeps first name, last initial, bib and results). Ships UNSET: with EVENTS_RETENTION_MONTHS and EVENTS_DELETED_USER_ANONYMISE_DAYS unset it does nothing. Idempotent. The work is in src/bootstrap/services.mjs (event-registration-anonymise).',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-registration-anonymise');
+    const s = r?.stats ?? {};
+    if (s.rows) console.log(`[events] anonymised: events=${s.events} rows=${s.rows}`);
+  }
 };

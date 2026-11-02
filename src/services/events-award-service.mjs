@@ -107,7 +107,10 @@ export function createEventsAwardService({ db, results, medals, rewards, notice 
 
     // ── rewards: earn what the current standing earns, undo what it no longer does ──
     const active = (await trx('RewardDefinition').where({ status: 'active' })).map(plain);
+    // S7 (H6, D80): medals above are unaffected, but a reward is EARNED only for an event FitFlex marked rewardsEligible (default false), so no
+    // organizer can create events to farm rewards. Reversal below still runs for anything earned before the switch changed.
     const earn = async (def, sourceType, sourceId) => {
+      if (event.rewardsEligible !== true) return;
       const out = await rewards.earnIn(trx, { definitionId: def.id, userId, sourceType, sourceId, categoryId: reg.categoryId });
       if (out.entry) tell.push({ userId, id: `evrw:${out.entry.id}`, type: 'event_reward_earned', copy: COPY.rewardEarned({ reward: def.title.en }), swCopy: COPY.rewardEarned({ reward: sw(def.title) }), route: '/member/events/rewards' });
     };
