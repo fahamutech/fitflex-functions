@@ -5,6 +5,7 @@
 // No request body is logged. Every write needs an Idempotency-Key; X-Request-Id is stamped on every response.
 import { randomUUID } from 'node:crypto';
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { errorText } from '../src/shared/events-results-copy.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { requireActiveOrganizer, requireOpenOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
@@ -33,6 +34,7 @@ const idemKey = req => req.headers?.['idempotency-key'];
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('results', result.status || 400);
     const { error, status, ...extra } = result;
     if (extra.retryAfterSeconds) res.set?.('Retry-After', String(extra.retryAfterSeconds));
     return res.status(status || 400).json({ error, ...errorText(error), ...extra });

@@ -4,6 +4,7 @@
 // is flag-gated and rate-limited per IP. Routes with fixed sub-paths (claimable, claim, lookup) are declared
 // before their /:id siblings so they are mounted first. Rate limits (spec §8.9) are in-memory per server.
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsRegistration, eventsResultsOn } from '../src/shared/feature-flags.mjs';
@@ -30,6 +31,7 @@ const headerOf = (req, name) => req.headers?.[name] ?? req.headers?.[name.toLowe
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('registration', result.status || 400);
     const { error, status, ...extra } = result;
     return res.status(status || 400).json({ error, ...extra });
   }

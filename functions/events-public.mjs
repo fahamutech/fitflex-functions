@@ -5,7 +5,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, optionalSessionClaims } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsModule, eventsFavouritesOn, eventsResultsOn, eventsRunsOn, eventsResultsPublicOn, eventsRewardsOn, eventsMedalArtOn } from '../src/shared/feature-flags.mjs';
+import { requireEventsModule, eventsFavouritesOn, eventsResultsOn, eventsRunsOn, eventsResultsPublicOn, eventsRewardsOn, eventsMedalArtOn, eventsAnalyticsOn } from '../src/shared/feature-flags.mjs';
 import { eventsRunDistanceToleranceBps, eventsRunLinkMaxDaysAfter } from '../src/shared/events-config.mjs';
 import { eventsDiscoveryService as svc, eventsResultsService } from '../src/bootstrap/services.mjs';
 
@@ -30,6 +30,8 @@ export const eventsOptions = {
     ...svc.options(),
     results: { enabled: eventsResultsOn(), runs: eventsRunsOn(), public: eventsResultsPublicOn(), rewards: eventsRewardsOn(), medalArt: eventsMedalArtOn() },
     runs: { toleranceBps: eventsRunDistanceToleranceBps(), maxDaysAfter: eventsRunLinkMaxDaysAfter() },
+    // S7 (additive): an older client ignores these; a server without the flag answers enabled: false.
+    analytics: { enabled: eventsAnalyticsOn() },
   }),
 };
 

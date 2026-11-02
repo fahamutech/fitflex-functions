@@ -190,6 +190,10 @@ import { createEventsRunLinkService } from '../services/events-run-link-service.
 import { eventsRunDistanceToleranceBps, eventsRunLinkMaxDaysAfter, eventsResultsImportMaxRows, eventsResultsDisputeDefaultHours, eventsResultsPushMax, eventsResultsConsentVersions } from '../shared/events-config.mjs';
 import { webhookKeyRing } from '../shared/webhook-signing.mjs';
 import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
+import { eventsKitOfflineOn, eventsWaitlistOn, eventsAnalyticsOn } from '../shared/feature-flags.mjs';
+import { createEventsAnalyticsService } from '../services/events-analytics-service.mjs';
+import { setApiErrorSink } from '../shared/events-api-error.mjs';
+import { eventsAnalyticsKeepDays, eventsAlertRules, eventsManualConfirmSlaHours, eventsRetentionMonths } from '../shared/events-config.mjs';
 import {
   eventsApiTokenTtlSeconds, eventsApiMaxClients, eventsApiDefaultRate, eventsApiAllowlist, eventsWebhookMaxEndpoints, eventsWebhookTimeoutMs, eventsWebhookMaxAttempts,
   eventsWebhookBatch, eventsFeedLagSeconds, eventsExportMaxRows,
@@ -619,7 +623,7 @@ export const eventStore = createPgEventStore({
 // S4: the composable money primitives (confirm / rehold / cancel paid places / refund effects). Dormant with the payment flags.
 export const eventMoneyStore = createPgEventMoneyStore({ db, eventStore });
 opsService.register({
-  name: 'event-hold-expiry', title: 'Event hold expiry', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  name: 'event-hold-expiry', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event hold expiry', schedule: { type: 'every', minutes: 5 }, quiet: true,
   description: 'Gives back the places of unpaid event orders whose hold has lapsed (order expired, registrations cancelled). Does nothing unless EVENTS_MODULE is on.',
   run: async () => {
     if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1410,7 +1414,7 @@ export const eventsRefundsService = createEventsRefundService({
   senders: eventSenders, ops: opsService,
 });
 opsService.register({
-  name: 'event-payment-reconciliation', title: 'Event payment reconciliation', schedule: { type: 'every', minutes: 60 }, quiet: true, domain: 'finance',
+  name: 'event-payment-reconciliation', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event payment reconciliation', schedule: { type: 'every', minutes: 60 }, quiet: true, domain: 'finance',
   description: 'Event payments: re-applies approved payments whose order is not confirmed, settles Tunzaa prompts whose callback was lost (and expires stale ones), retries unsent claim invitations once, and re-applies paid refunds whose places were not updated. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Bounded to 100 rows per step; safe to run twice.',
   run: async () => {
     if (!eventsRegistrationOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1420,7 +1424,7 @@ opsService.register({
   },
 });
 opsService.register({
-  name: 'event-lifecycle', title: 'Event lifecycle', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  name: 'event-lifecycle', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event lifecycle', schedule: { type: 'every', minutes: 5 }, quiet: true,
   description: 'Moves events along automatically: published → registration_closed at registrationClosesAt, → in_progress at startsAt, in_progress → completed at endsAt + EVENT_AUTO_COMPLETE_GRACE_HOURS (default 6). Does nothing unless EVENTS_MODULE is on.',
   run: async () => {
     if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1446,7 +1450,7 @@ export const eventsWebhookService = createEventsWebhookService({
   config: { maxEndpoints: eventsWebhookMaxEndpoints, timeoutMs: eventsWebhookTimeoutMs, maxAttempts: eventsWebhookMaxAttempts, batch: eventsWebhookBatch, lagSeconds: eventsFeedLagSeconds },
 });
 opsService.register({
-  name: 'event-webhook-fanout', title: 'Event webhook fan-out', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  name: 'event-webhook-fanout', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event webhook fan-out', schedule: { type: 'every', minutes: 1 }, quiet: true,
   description: 'Events webhooks (S5): turns unpublished outbox rows into deliveries for the SAME organizer\'s verified, subscribed endpoints (the organizer match is in the SQL join) and marks them published. Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set.',
   run: async () => {
     if (!eventsWebhooksOn() || !eventsWebhookService.enabled()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1455,7 +1459,7 @@ opsService.register({
   },
 });
 opsService.register({
-  name: 'event-webhook-deliver', title: 'Event webhook delivery', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  name: 'event-webhook-deliver', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event webhook delivery', schedule: { type: 'every', minutes: 1 }, quiet: true,
   description: 'Events webhooks (S5): sends due deliveries (SKIP LOCKED claim with a lease, SSRF re-check and pinned connection on every attempt, backoff 1m·5m·15m·1h·3h·6h·12h·24h, dead letter, auto-disable with a notice). Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set.',
   run: async () => {
     if (!eventsWebhooksOn() || !eventsWebhookService.enabled()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1464,7 +1468,7 @@ opsService.register({
   },
 });
 opsService.register({
-  name: 'event-webhook-retention', title: 'Event webhook retention', schedule: { type: 'daily', utc: '02:40' }, quiet: true,
+  name: 'event-webhook-retention', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event webhook retention', schedule: { type: 'daily', utc: '02:40' }, quiet: true,
   description: 'Events webhooks and API (S5): attempts kept 30 days, deliveries and published outbox rows 90 days, idempotency rows 7 days, API usage rows 90 days; API client expiry notices at 14 and 3 days. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on.',
   run: async () => {
     if (!eventsRegistrationOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1503,7 +1507,7 @@ export const eventsAwardService = createEventsAwardService({
 });
 // S6 jobs. The award jobs run only while EVENTS_REWARDS is on, so tasks queued by releases wait (and are processed) once rewards are switched on.
 opsService.register({
-  name: 'event-awards-run', title: 'Event awards', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  name: 'event-awards-run', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event awards', schedule: { type: 'every', minutes: 1 }, quiet: true,
   description: 'Events (S6): takes a batch of award tasks (FOR UPDATE SKIP LOCKED) and awards or revokes medals, achievements and earned rewards from the current results. The only writer of awards. Does nothing unless EVENTS_REWARDS is on.',
   run: async () => {
     if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1512,7 +1516,7 @@ opsService.register({
   },
 });
 opsService.register({
-  name: 'event-awards-reconcile', title: 'Event awards reconcile', schedule: { type: 'every', minutes: 10 }, quiet: true,
+  name: 'event-awards-reconcile', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event awards reconcile', schedule: { type: 'every', minutes: 10 }, quiet: true,
   description: 'Events (S6): finds cancelled or refunded places, cancelled events and new claims and queues award tasks; lapses reserved perks past their expiry. Reads registrations, so no payment code changes. Does nothing unless EVENTS_REWARDS is on.',
   run: async () => {
     if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1521,13 +1525,58 @@ opsService.register({
   },
 });
 opsService.register({
-  name: 'event-reward-expire', title: 'Event reward expiry', schedule: { type: 'daily', utc: '23:00' }, quiet: true,
+  name: 'event-reward-expire', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event reward expiry', schedule: { type: 'daily', utc: '23:00' }, quiet: true,
   description: 'Events (S6): writes an expire entry for unspent reward units older than their definition\'s expiryDays (02:00 Africa/Dar_es_Salaam). Does nothing unless EVENTS_REWARDS is on.',
   run: async () => {
     if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
     const r = await eventsRewardService.expireUnits();
     const sweep = await db('EventMedalArtUploadAttempt').where('createdAt', '<', new Date(Date.now() - 2 * 86_400_000)).del();
     return { processed: r.expired + sweep, succeeded: r.expired + sweep, failed: 0, ...r, attemptsSwept: sweep };
+  },
+});
+
+// Marathon & running events · S7: analytics counters, the launch dashboard and the alert rules (docs/design/events-s7-hardening-and-pilot.md §5).
+// Dormant behind EVENTS_ANALYTICS (needs EVENTS_MODULE and EVENTS_REGISTRATION): track() does nothing, the endpoint and the Health tab answer
+// 404 feature_disabled, and both jobs return at once while it is off.
+export const eventsAnalyticsService = createEventsAnalyticsService({
+  db, enabled: eventsAnalyticsOn, emailSender: () => emailSender(), keepDays: eventsAnalyticsKeepDays, alertRules: eventsAlertRules,
+  jobStatus: () => opsService.jobStatus(),
+  // Which flag a job needs before it is expected to run (alert A5 and the "late" marker only count jobs whose flag is on).
+  jobFlags: {
+    'event-hold-expiry': eventsModuleOn, 'event-lifecycle': eventsModuleOn, 'event-payment-reconciliation': eventsRegistrationOn,
+    'event-webhook-fanout': eventsWebhooksOn, 'event-webhook-deliver': eventsWebhooksOn, 'event-webhook-retention': eventsRegistrationOn,
+    'event-awards-run': eventsRewardsOn, 'event-awards-reconcile': eventsRewardsOn, 'event-reward-expire': eventsRewardsOn,
+    'event-waitlist-promote': eventsWaitlistOn, 'event-waitlist-purge': eventsWaitlistOn, 'event-kit-offline-purge': eventsKitOfflineOn,
+    'event-analytics-rollup': eventsAnalyticsOn, 'event-health-alert': eventsAnalyticsOn, 'event-organizer-status-sweep': eventsModuleOn,
+    'event-registration-anonymise': () => eventsRetentionMonths() !== null,
+  },
+  setup: () => ({
+    flags: {
+      module: eventsModuleOn(), registration: eventsRegistrationOn(), kitOps: eventsKitOpsOn(), kitOffline: eventsKitOfflineOn(), waitlist: eventsWaitlistOn(), analytics: eventsAnalyticsOn(),
+      webhooks: eventsWebhooksOn(), organizerApi: eventsOrganizerApiOn(), results: eventsResultsOn(), rewards: eventsRewardsOn(), medalArt: eventsMedalArtOn(),
+    },
+    payment: eventsPaymentsService.mode(), retentionConfigured: eventsRetentionMonths() !== null, consentTextVersion: eventsConsentTextVersion(),
+  }),
+  manualConfirmHours: eventsManualConfirmSlaHours, refundTargetDays: eventsRefundTargetDays,
+});
+setApiErrorSink((group, cls) => eventsAnalyticsService.track('api_error', { group, class: cls }));
+opsService.register({
+  name: 'event-analytics-rollup', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event analytics roll-up', schedule: { type: 'every', minutes: 60 }, quiet: true,
+  description: 'Events (S7): sums the existing `analytics.%` audit rows into daily counters (cursor, exactly once) and deletes counters older than EVENTS_ANALYTICS_KEEP_DAYS. Does nothing unless EVENTS_ANALYTICS is on.',
+  run: async () => {
+    if (!eventsAnalyticsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsAnalyticsService.rollup();
+    const p = await eventsAnalyticsService.purge();
+    return { processed: r.rows + p.deleted, succeeded: r.rows + p.deleted, failed: 0, ...r, purged: p.deleted };
+  },
+});
+opsService.register({
+  name: 'event-health-alert', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event health alerts', schedule: { type: 'every', minutes: 15 }, quiet: true,
+  description: 'Events (S7): evaluates the alert rules A1 to A13 and emails OPS_ALERT_EMAILS (one email per rule and subject per 6 hours; ids and counts only). With no recipients nothing is sent; the Health tab still shows what fires. Does nothing unless EVENTS_ANALYTICS is on.',
+  run: async () => {
+    if (!eventsAnalyticsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsAnalyticsService.runAlerts();
+    return { processed: r.firing, succeeded: r.sent, failed: 0, ...r };
   },
 });
 void eventsRunsOn; void eventsMedalArtOn; void eventsResultsPublicOn; void eventsResultsOn;

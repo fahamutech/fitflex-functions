@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -357,4 +357,26 @@ export const opsDailySummary = {
   created, rule: '30 5 * * *', // every day 05:30 UTC = 08:30 EAT
   description: 'Operations: email the addresses in OPS_ALERT_EMAILS a summary of the exceptions still waiting. Sent only when something is waiting.',
   onJob: () => opsService.runJob('ops-daily-summary'),
+};
+
+export const eventAnalyticsRollup = {
+  created, rule: '20 * * * *', // hourly at :20
+  description: 'Events (S7): sum the existing analytics audit rows into daily counters (cursor, exactly once) and delete counters older than EVENTS_ANALYTICS_KEEP_DAYS. Does nothing unless EVENTS_ANALYTICS is on. Safe to rerun and to overlap. The work is in src/bootstrap/services.mjs (event-analytics-rollup).',
+  onJob: async () => {
+    if (!eventsAnalyticsOn()) return;
+    const r = await opsService.runJob('event-analytics-rollup');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] analytics roll-up: rows=${s.rows} purged=${s.purged}`);
+  }
+};
+
+export const eventHealthAlert = {
+  created, rule: '*/15 * * * *', // every 15 minutes
+  description: 'Events (S7): evaluate the alert rules A1 to A13 and email OPS_ALERT_EMAILS (ids and counts only; one email per rule and subject per 6 hours). Does nothing unless EVENTS_ANALYTICS is on. The work is in src/bootstrap/services.mjs (event-health-alert).',
+  onJob: async () => {
+    if (!eventsAnalyticsOn()) return;
+    const r = await opsService.runJob('event-health-alert');
+    const s = r?.stats ?? {};
+    if (s.firing) console.log(`[events] health alerts: firing=${s.firing} sent=${s.sent} skipped=${s.skipped}`);
+  }
 };

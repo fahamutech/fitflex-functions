@@ -4,6 +4,7 @@
 // secret) appear in exactly two responses each: create and rotate. Guards are wrapped in routeGuard.
 import { randomUUID } from 'node:crypto';
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { requireActiveOrganizer, requireOpenOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
@@ -22,6 +23,7 @@ const requestIdOf = (req) => {
 };
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('webhook', result.status || 400);
     const { error, status, ...extra } = result;
     return res.status(status || 400).json({ error, ...extra });
   }
