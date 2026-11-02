@@ -1059,7 +1059,17 @@ export const refundService = createRefundService({
   raiseForEventPayment: args => eventsRefundsService.adminRaiseForPayment(args),
 });
 // Held payments worklist (audit M5; HELD_PAYMENTS_WORKLIST): provider money no request could take, and its refund.
-export const heldPaymentsService = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: heldPaymentsWorklistOn });
+export const heldPaymentsService = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: heldPaymentsWorklistOn,
+  // The request row is locked and re-read, and the refund and its audit rows are written, in one transaction.
+  transact: fn => db.transaction(async trx => fn({
+    lockRequest: id => trx('PaymentRequest').where({ id }).forUpdate().first(),
+    refunds: {
+      filterByColumnAsync: (col, value) => trx('Refund').where({ [col]: value }),
+      insertAsync: async row => (await trx('Refund').insert(row).returning('*'))[0],
+    },
+    auditLog: { insertAsync: row => trx('AuditLog').insert(row) },
+  })),
+});
 // A sponsor-covered trainer session returns what the member paid for it (no double charge).
 export const b2bSponsorRefundService = createB2BSponsorRefundService({ db, refundService, trainerBookings });
 

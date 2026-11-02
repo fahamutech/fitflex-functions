@@ -26,18 +26,21 @@ function memStore(rows = []) {
   };
 }
 
-function fixture({ twoAdmins = false, enabled = true } = {}) {
+function fixture({ twoAdmins = false, enabled = true, lateStatus = null } = {}) {
   const refunds = memStore();
   const auditLog = memStore();
   const paymentRequests = memStore([
     { id: 'pr_closed', memberId: 'm1', status: 'cancelled', amountTzs: 50000, productType: 'FITFLEX_PASS', subscriptionId: null },
     { id: 'pr_rejected', memberId: 'm2', status: 'rejected', amountTzs: 30000, productType: 'SHOP_ORDER' },
     { id: 'pr_ok', memberId: 'm3', status: 'approved', amountTzs: 20000, subscriptionId: 'sub1' },
+    { id: 'pr_pending', memberId: 'm5', status: 'pending', amountTzs: 40000, productType: 'FITFLEX_PASS' },
     { id: 'pr_event', memberId: 'm4', status: 'cancelled', amountTzs: 10000, eventOrderId: 'evo1' },
   ]);
   const users = memStore([]);
   const refundService = createRefundService({ refunds, paymentRequests, subscriptions: memStore(), users, auditLog, secondApprover: () => twoAdmins });
-  const held = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: () => enabled });
+  const held = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: () => enabled,
+    // lateStatus simulates an approval landing between the list and the locked re-read.
+    ...(lateStatus ? { transact: fn => fn({ lockRequest: async id => ({ ...(await paymentRequests.findByIdAsync(id)), status: lateStatus }), refunds, auditLog }) } : {}) });
   let n = 0;
   const log = (action, target, after, at) => auditLog.insertAsync({ id: `a${++n}`, at: at ?? `2026-11-0${n}T10:00:00.000Z`, actor: 'system:mobile-money', action, target, before: null, after });
   return { refunds, auditLog, paymentRequests, refundService, held, log };
@@ -56,11 +59,15 @@ test('a payment that arrived for a closed request appears on the open worklist, 
   assert.deepEqual({ ...row, at: undefined }, {
     paymentRequestId: 'pr_closed', transactionId: 'TX1', amountTzs: 50000, memberId: 'm1', reason: 'request_closed', at: undefined,
     refundId: null, requestStatus: 'cancelled', productType: 'FITFLEX_PASS', refundStatus: null,
+    refundable: true, notRefundableReason: null, amountReceivedKnown: true,
   });
   assert.equal(row.at, '2026-11-01T10:00:00.000Z');
   const other = items.find(i => i.paymentRequestId === 'pr_rejected');
   assert.equal(other.reason, 'reference_already_used');
-  assert.equal(other.amountTzs, 30000); // not in the audit row: the request's own amount
+  assert.equal(other.amountTzs, null); // the audit row does not say what was received: never guessed from the request
+  assert.equal(other.amountReceivedKnown, false);
+  assert.equal(other.refundable, false); // informational only
+  assert.equal(other.notRefundableReason, 'reference_already_used');
   assert.deepEqual((await f.held.list({ status: 'resolved' })).items, []);
   assert.equal((await f.held.list({ status: 'nope' })).error, 'invalid_status');
 });
@@ -147,6 +154,55 @@ test('flag off: the service and both routes answer 404 feature_disabled', async 
       assert.equal(out.body.error, 'feature_disabled');
     }
   } finally { if (saved === undefined) delete process.env.HELD_PAYMENTS_WORKLIST; else process.env.HELD_PAYMENTS_WORKLIST = saved; }
+});
+
+test('reference_already_used and sandbox_not_settled rows are listed but never refundable', async () => {
+  const f = fixture();
+  await f.log('payment_mobile_money_held', 'pr_closed', { error: 'reference_already_used', transactionId: 'TX1' });
+  await f.log('payment_mobile_money_held', 'pr_rejected', { error: 'sandbox_not_settled', transactionId: 'TX2', amountTzs: 30000 });
+  const { items } = await f.held.list({});
+  assert.deepEqual(items.map(i => [i.paymentRequestId, i.refundable, i.notRefundableReason]).sort(),
+    [['pr_closed', false, 'reference_already_used'], ['pr_rejected', false, 'sandbox_not_settled']]);
+  for (const [id, tx] of [['pr_closed', 'TX1'], ['pr_rejected', 'TX2']]) {
+    const out = await f.held.raiseRefund({ paymentRequestId: id, body: body({ transactionId: tx, amountTzs: 1000 }), actorId: 'adm1' });
+    assert.equal(out.error, 'not_refundable');
+    assert.equal(out.status, 409);
+  }
+  assert.equal(f.refunds.rows.length, 0);
+});
+
+test('the cap is what was received: unknown amount needs an explicit amount, capped at the request', async () => {
+  const f = fixture();
+  await f.log('payment_mobile_money_amount_mismatch', 'pr_closed', { received: null, transactionId: 'TX1' });
+  const r = b => f.held.raiseRefund({ paymentRequestId: 'pr_closed', body: body(b), actorId: 'adm1' });
+  assert.equal((await r({})).error, 'amount_unknown');
+  assert.equal((await r({ amountTzs: 50001 })).error, 'amount_exceeds_payment');
+  assert.equal((await r({ amountTzs: 0 })).error, 'invalid_amount');
+  const ok = await r({ amountTzs: 45000 });
+  assert.equal(ok.refund.amountTzs, 45000);
+  assert.equal(f.auditLog.rows.find(a => a.action === 'payment_held_refund_raised').after.amountReceivedKnown, false);
+  // A known received amount below the request is the cap, even though the request was larger.
+  const g = fixture();
+  await g.log('payment_mobile_money_amount_mismatch', 'pr_closed', { received: 10000, transactionId: 'TX1' });
+  assert.equal((await g.held.raiseRefund({ paymentRequestId: 'pr_closed', body: body({ amountTzs: 10001 }), actorId: 'a' })).error, 'amount_exceeds_payment');
+  assert.equal((await g.held.raiseRefund({ paymentRequestId: 'pr_closed', body: body(), actorId: 'a' })).refund.amountTzs, 10000);
+});
+
+test('a request still pending is never refundable here, and a late approval is caught at raise time', async () => {
+  const f = fixture();
+  await f.log('payment_mobile_money_held', 'pr_pending', { error: 'transaction_mismatch', transactionId: 'TX1', amountTzs: 40000 });
+  const row = (await f.held.list({})).items[0];
+  assert.equal(row.reason, 'transaction_mismatch');
+  assert.equal(row.refundable, false);
+  assert.equal(row.notRefundableReason, 'request_not_closed');
+  assert.equal((await f.held.raiseRefund({ paymentRequestId: 'pr_pending', body: body(), actorId: 'a' })).error, 'not_refundable');
+  // Listed as closed, approved by the time the row is locked: refused, nothing written.
+  const late = fixture({ lateStatus: 'approved' });
+  await late.log('payment_mobile_money_orphaned', 'pr_closed', { transactionId: 'TX1', amountTzs: 50000 });
+  const out = await late.held.raiseRefund({ paymentRequestId: 'pr_closed', body: body(), actorId: 'a' });
+  assert.equal(out.error, 'not_refundable');
+  assert.equal(late.refunds.rows.length, 0);
+  assert.equal(late.auditLog.rows.some(a => a.action === 'payment_held_refund_raised'), false);
 });
 
 after(async () => { await db.destroy?.(); });
