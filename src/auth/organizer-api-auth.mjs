@@ -146,7 +146,8 @@ export function requireApiClient(...requiredScopes) {
     const missing = requiredScopes.find(s => !scopes.includes(s));
     if (missing) return reject(403, { error: 'insufficient_scope', requiredScope: missing });
     req.apiClient = { id: client.id, clientId: client.clientId, organizerId: client.ownerId, scopes, eventIds: Array.isArray(client.eventIds) ? client.eventIds : null, environment: client.environment, rateLimitPerMinute: client.rateLimitPerMinute };
-    if (at - (touched.get(client.id) ?? 0) > 60_000) { touched.set(client.id, at); if (touched.size > 5000) touched.clear(); store.touch(client.id).catch(() => {}); }
+    // The last-used stamp is awaited (one UPDATE per client per minute at most) so it has landed when the call returns; a failure never blocks the call.
+    if (at - (touched.get(client.id) ?? 0) > 60_000) { touched.set(client.id, at); if (touched.size > 5000) touched.clear(); await store.touch(client.id).catch(() => {}); }
     return next();
   };
 }

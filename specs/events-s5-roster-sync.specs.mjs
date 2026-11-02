@@ -196,7 +196,11 @@ test('export: fixed columns, BOM, CRLF, every cell quoted, formula cells neutral
   assert.ok(injected.includes('"\'@SUM(1+1)"'));
   const cancelled = lines.find(l => l.includes(plain[1].id));
   assert.match(cancelled, /^"[^"]+","[^"]*","","","10K","Early","cancelled"/);
-  assert.ok(!/secret@example|female|1990|Mama|255700000000|phone|email/i.test(text), 'no contact, DOB, gender or emergency data anywhere');
+  // Read every cell except registrationId and ticketCode: those are random (hex ids, ticket codes) and can contain e.g. "1990" by chance.
+  // The header is asserted exactly above, so no contact column can hide behind them.
+  const cells = lines.map(l => l.slice(1, -1).split('","').slice(2).join('\n')).join('\n');
+  const leak = cells.match(/secret@example|female|1990|Mama|255700000000|phone|email/i);
+  assert.equal(leak?.[0] ?? null, null, 'no contact, DOB, gender or emergency data anywhere');   // the message names what matched
   assert.ok(res.ended);
   // helpers
   assert.equal(csvCell('a"b\nc'), '"a""b c"');
