@@ -4,6 +4,7 @@
 // strands a member who already paid or blocks money going back. Every route is wrapped in routeGuard (bfast mounts guards
 // method-blind). Rate limits (§3.15) are in memory per server: the unique indexes, not the limiters, protect money.
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsRegistration, requireEventsPaymentIntake } from '../src/shared/feature-flags.mjs';
@@ -29,6 +30,7 @@ const headerOf = (req, name) => req.headers?.[name] ?? req.headers?.[name.toLowe
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('payment', result.status || 400);
     const { error, status, ...extra } = result;
     return res.status(status || 400).json({ error, ...extra });
   }

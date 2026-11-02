@@ -3,10 +3,20 @@
 // on a pass or plan payment, are decided and paid by FitFlex staff.
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
+import { refundSplitScopesOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { refundService, trainerBookingService, shopService, eventsRefundsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
+
+// REFUND_SPLIT_SCOPES: off, `payments` opens decide/pay exactly as before; on, `refunds_approve` / `refunds_pay`
+// are required instead (checked per request). The coarse requireAcl on each route admits either grant;
+// this narrows it to the right one for the flag's state. Super-admins pass both.
+const aclApprove = { off: requireAcl('payments'), on: requireAcl('refunds_approve') };
+const aclPay = { off: requireAcl('payments'), on: requireAcl('refunds_pay') };
+const splitGate = (g) => (req, res, next) => (refundSplitScopesOn() ? g.on : g.off)(req, res, next);
+const approveGate = splitGate(aclApprove);
+const payGate = splitGate(aclPay);
 
 const send = (res, result, ok = 200) => {
   if (result.error) {
@@ -73,15 +83,15 @@ export const adminRaiseRefund = {
 
 export const adminDecideRefund = {
   created, method: 'post', path: '/admin/refunds/:id/decision',
-  description: 'Admin: approve or reject a requested refund. Body { decision: approve | reject, note? (required to reject; the member sees it), amountTzs? (approve less than asked), endAccess? (end the pass or plan now) }. With MONEY_SECOND_APPROVER on, the admin who raised a refund cannot approve it (403 cannot_approve_own_request).',
-  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments')]),
+  description: 'Admin: approve or reject a requested refund (scope payments; refunds_approve when REFUND_SPLIT_SCOPES is on). Body { decision: approve | reject, note? (required to reject; the member sees it), amountTzs? (approve less than asked), endAccess? (end the pass or plan now) }. With MONEY_SECOND_APPROVER on, the admin who raised a refund cannot approve it (403 cannot_approve_own_request).',
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments', 'refunds_approve'), approveGate]),
   onRequest: async (req, res) => send(res, await refundService.decide({ id: req.params.id, body: req.body || {}, actorId: req.user.sub })),
 };
 
 export const adminMarkRefundPaid = {
   created, method: 'post', path: '/admin/refunds/:id/paid',
-  description: 'Admin: record that an approved refund was sent. Body { paymentReference, paidTo? }. With MONEY_SECOND_APPROVER on, the admin who approved it cannot mark it paid (403 cannot_pay_own_approval), and a refund approved by policy that an admin started (cancelling a paid session or order, re-raising a shop refund) cannot be marked paid by that admin (403 cannot_pay_own_request).',
-  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments')]),
+  description: 'Admin: record that an approved refund was sent (scope payments; refunds_pay when REFUND_SPLIT_SCOPES is on). Body { paymentReference, paidTo? }. With MONEY_SECOND_APPROVER on, the admin who approved it cannot mark it paid (403 cannot_pay_own_approval), and a refund approved by policy that an admin started (cancelling a paid session or order, re-raising a shop refund) cannot be marked paid by that admin (403 cannot_pay_own_request).',
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments', 'refunds_pay'), payGate]),
   onRequest: async (req, res) => send(res, await refundService.markPaid({ id: req.params.id, body: req.body || {}, actorId: req.user.sub })),
 };
 
@@ -89,14 +99,14 @@ export const adminMarkRefundPaid = {
 
 export const adminDecideRefundBatch = {
   created, method: 'post', path: '/admin/refunds/batch-decision',
-  description: 'Admin (scope payments): approve every REQUESTED refund of an event-cancellation batch. Body { batchId, decision: "approve", expectedTotalTzs, expectedCount } (409 batch_changed { totalTzs, count } when the batch moved). Each row applies the same rules as POST /admin/refunds/:id/decision: with MONEY_SECOND_APPROVER on, the admin who started the batch gets 403 cannot_approve_own_request for every row. → { approved, failed, results [{ refundId, ok, error? }] }. Rejecting stays per refund.',
-  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments')]),
+  description: 'Admin (scope payments, or refunds_approve when REFUND_SPLIT_SCOPES is on): approve every REQUESTED refund of an event-cancellation batch. Body { batchId, decision: "approve", expectedTotalTzs, expectedCount } (409 batch_changed { totalTzs, count } when the batch moved). Each row applies the same rules as POST /admin/refunds/:id/decision: with MONEY_SECOND_APPROVER on, the admin who started the batch gets 403 cannot_approve_own_request for every row. → { approved, failed, results [{ refundId, ok, error? }] }. Rejecting stays per refund.',
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments', 'refunds_approve'), approveGate]),
   onRequest: async (req, res) => send(res, await eventsRefundsService.batchDecision({ batchId: req.body?.batchId, decision: req.body?.decision, expectedTotalTzs: req.body?.expectedTotalTzs, expectedCount: req.body?.expectedCount, actorId: req.user.sub })),
 };
 
 export const adminMarkRefundBatchPaid = {
   created, method: 'post', path: '/admin/refunds/batch-paid',
-  description: 'Admin (scope payments): record payouts row by row. Body { batchId, items: [{ refundId, paymentReference, paidTo? }] } (≤ 200). Each item follows the existing mark-paid rules (cannot_pay_own_approval | cannot_pay_own_request under MONEY_SECOND_APPROVER) → { paid, failed, results [{ refundId, ok, error? }] }; partial success is reported per item, never silent. It only RECORDS payouts: money still leaves by hand.',
-  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments')]),
+  description: 'Admin (scope payments, or refunds_pay when REFUND_SPLIT_SCOPES is on): record payouts row by row. Body { batchId, items: [{ refundId, paymentReference, paidTo? }] } (≤ 200). Each item follows the existing mark-paid rules (cannot_pay_own_approval | cannot_pay_own_request under MONEY_SECOND_APPROVER) → { paid, failed, results [{ refundId, ok, error? }] }; partial success is reported per item, never silent. It only RECORDS payouts: money still leaves by hand.',
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('payments', 'refunds_pay'), payGate]),
   onRequest: async (req, res) => send(res, await eventsRefundsService.batchPaid({ batchId: req.body?.batchId, items: req.body?.items, actorId: req.user.sub })),
 };

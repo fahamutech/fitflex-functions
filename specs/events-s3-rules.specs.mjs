@@ -91,8 +91,8 @@ test('findDuplicatesInRequest: same normalised phone or email twice in one categ
 });
 
 test('consent texts, masking, fingerprints, codes, tokens, closed reason set', () => {
-  const c = consentTextFor('2026-10-draft');
-  assert.equal(c.version, '2026-10-draft');
+  const c = consentTextFor('2026-11-draft');
+  assert.equal(c.version, '2026-11-draft');
   for (const k of ['self', 'purchaser_authorised', 'organisation']) { assert.ok(c[k].en.length > 40); assert.ok(c[k].sw.length > 40); }
   assert.equal(maskName('Neema Abdallah'), 'N**** A*******');
   assert.equal(maskFirstName('Asha'), 'A***');
@@ -153,5 +153,5 @@ test('configuration readers: fee rule and organisation discounts parse strictly;
   assert.equal(eventsMaxParticipantsPerOrder(), 10);
   process.env.EVENTS_MAX_PARTICIPANTS_PER_ORDER = '3';
   assert.equal(eventsMaxParticipantsPerOrder(), 3);
-  assert.equal(eventsConsentTextVersion(), '2026-10-draft');
+  assert.equal(eventsConsentTextVersion(), '2026-11-draft');
 });

@@ -37,10 +37,21 @@ export function createEventsMedalService({ db, results, now = () => new Date(), 
     return categoryId ? rows.some(r => r.categoryId === categoryId) : true;
   }
 
-  async function view(t, event, categories, { counts, arts, q = db }) {
+  /**
+   * S7 (H13): the template's art block also says WHY the built-in design is shown after a FitFlex take-down: `status` is live | taken_down | none
+   * and `takedown { reasonCode, at }` is present for a taken-down design that has not been replaced by a live one. Counts, codes and times only.
+   */
+  const artWithStatus = (t, art, takedown) => {
+    const base = artOf(t, art);
+    if (base.source === 'custom') return { ...base, status: 'live' };
+    if (takedown) return { ...base, status: 'taken_down', takedown: { reasonCode: takedown.reason, at: iso(takedown.decidedAt) } };
+    return { ...base, status: 'none' };
+  };
+
+  async function view(t, event, categories, { counts, arts, takedowns = new Map(), q = db }) {
     return {
       id: t.id, eventId: t.eventId, categoryId: t.categoryId, name: t.name, description: t.description ?? {}, tier: t.tier, rule: t.rule, ruleSummary: ruleSummary(t.rule),
-      sortOrder: t.sortOrder, status: t.status, art: artOf(t, arts.get(t.artId)), awardedCount: counts.get(t.id) ?? 0, locked: await scopeLocked(q, event, categories, t.categoryId),
+      sortOrder: t.sortOrder, status: t.status, art: artWithStatus(t, arts.get(t.artId), takedowns.get(t.id)), awardedCount: counts.get(t.id) ?? 0, locked: await scopeLocked(q, event, categories, t.categoryId),
     };
   }
 
@@ -56,8 +67,10 @@ export function createEventsMedalService({ db, results, now = () => new Date(), 
     const templates = (await db('EventMedalTemplate').where({ eventId: ctx.event.id }).orderBy('sortOrder').orderBy('createdAt')).map(plain);
     const counts = new Map((await db('EventMedalAward').where({ eventId: ctx.event.id, awardStatus: 'awarded' }).groupBy('medalTemplateId').select('medalTemplateId').count({ n: '*' })).map(r => [r.medalTemplateId, Number(r.n)]));
     const arts = new Map((await db('EventMedalArt').whereIn('id', templates.map(t => t.artId).filter(Boolean))).map(a => [a.id, plain(a)]));
+    const down = templates.length ? (await db('EventMedalArt').whereIn('templateId', templates.map(t => t.id)).where({ status: 'taken_down' }).orderBy('decidedAt')).map(plain) : [];
+    const takedowns = new Map(down.map(a => [a.templateId, a]));   // the latest wins (ordered ascending)
     return {
-      items: await Promise.all(templates.map(t => view(t, ctx.event, ctx.categories, { counts, arts }))),
+      items: await Promise.all(templates.map(t => view(t, ctx.event, ctx.categories, { counts, arts, takedowns }))),
       builtInArt: [...BUILT_IN_ART], ...(medalArtOn() ? { artConfirmation: artConfirmation() } : {}),
     };
   }

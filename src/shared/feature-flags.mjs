@@ -181,6 +181,37 @@ export function moneySecondApproverOn() {
 }
 
 /**
+ * Held-payments worklist (audit M5): money a provider confirmed that no request could take
+ * (request cancelled or rejected meanwhile, amount or transaction mismatch, reference reused)
+ * is listed for staff at GET /admin/payments/held and refunded from POST
+ * /admin/payments/held/:paymentRequestId/refund. Off unless HELD_PAYMENTS_WORKLIST is set:
+ * both routes answer 404 feature_disabled.
+ */
+export function heldPaymentsWorklistOn() {
+  return on('HELD_PAYMENTS_WORKLIST');
+}
+
+/**
+ * Phase 1 slice A · split refund scopes. Off unless REFUND_SPLIT_SCOPES is set: refund decisions and
+ * paying (POST /admin/refunds/:id/decision, /paid, /batch-decision, /batch-paid) stay open to staff
+ * holding `payments`, exactly as before. On, deciding needs `refunds_approve` and paying needs
+ * `refunds_pay`; listing and raising stay on `payments`. Super-admins are unaffected. Grant the new
+ * scopes to existing staff BEFORE turning it on: a `payments`-only user loses approve and pay.
+ */
+export function refundSplitScopesOn() {
+  return on('REFUND_SPLIT_SCOPES');
+}
+
+/**
+ * Phase 1 slice A · F2. Off unless STATEMENT_PAY_SECOND_PERSON is set. On, the admin who approved a gym,
+ * trainer or vendor payout statement cannot mark it paid (403 cannot_pay_own_approval). Independent
+ * of MONEY_SECOND_APPROVER.
+ */
+export function statementPaySecondPersonOn() {
+  return on('STATEMENT_PAY_SECOND_PERSON');
+}
+
+/**
  * Vendor business tools (plan docs/plans/vendor-business-tools-plan.md).
  * VENDOR_TOOLS is the umbrella: a slice flag is on only when both it and
  * VENDOR_TOOLS are on. Everything is off unless set. Writes that are pure
@@ -530,6 +561,15 @@ export const requireEventsResultsPublic = gate(eventsResultsPublicOn);
 export const requireEventsRewards = gate(eventsRewardsOn);
 export const requireEventsMedalArt = gate(eventsMedalArtOn);
 
+// S7 (docs/design/events-s7-hardening-and-pilot.md §7.1): three dormant flags, each needing EVENTS_MODULE and EVENTS_REGISTRATION
+// (the offline desk also needs EVENTS_KIT_OPS). With all three off S6 behaviour is unchanged. Guards answer 404 feature_disabled.
+export const eventsKitOfflineOn = () => eventsKitOpsOn() && on('EVENTS_KIT_OFFLINE');
+export const eventsWaitlistOn = () => eventsRegistrationOn() && on('EVENTS_WAITLIST');
+export const eventsAnalyticsOn = () => eventsRegistrationOn() && on('EVENTS_ANALYTICS');
+export const requireEventsKitOffline = gate(eventsKitOfflineOn);
+export const requireEventsWaitlist = gate(eventsWaitlistOn);
+export const requireEventsAnalytics = gate(eventsAnalyticsOn);
+
 /**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
  * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and
@@ -613,4 +653,13 @@ export function selcomWebhookServerConfirmOn() {
  */
 export function selcomWebhookQueryTokenOff() {
   return on('SELCOM_WEBHOOK_QUERY_TOKEN_OFF');
+}
+
+/**
+ * Admin-portal audit S2/S3. Off unless ADMIN_REASONS_REQUIRED is set. On, an admin must give a non-empty `reason`
+ * to suspend a member, delete a gym owner, or change pricing/payout/payment platform settings: 400 reason_required
+ * otherwise. Off, a reason is optional (and stored in AuditLog.reason when given).
+ */
+export function adminReasonsRequiredOn() {
+  return on('ADMIN_REASONS_REQUIRED');
 }

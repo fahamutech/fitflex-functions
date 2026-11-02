@@ -16,7 +16,9 @@ const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const CHECK_VIOLATION = '23514';
 const UNIQUE_VIOLATION = '23505';
 
-export function createPgEventCatalogueStore({ db, now = () => new Date() }) {
+// S7: while the waitlist is on, ticket types that have a LIVE queue (a waiting or offered entry) are marked `waitlistQueued`, which the document
+// views read as "exhausted" (the places are for the line). `waitlistOn` is injected so the store stays flag-free and tests can drive it.
+export function createPgEventCatalogueStore({ db, now = () => new Date(), waitlistOn = () => false }) {
   // ── Organizers and staff ──────────────────────────────────────────────────
 
   /** The active organizer role of a user: { organizer, role, staffId } or null. */
@@ -85,8 +87,12 @@ export function createPgEventCatalogueStore({ db, now = () => new Date() }) {
       q('EventTicketType').whereIn('eventId', eventIds).orderBy(['createdAt', 'id']),
       q('EventCollectionPoint').whereIn('eventId', eventIds).orderBy(['createdAt', 'id']),
     ]);
+    const queued = waitlistOn() && tts.length
+      ? new Set((await q('EventWaitlistEntry').whereIn('eventId', eventIds).whereIn('status', ['waiting', 'offered']).distinct('ticketTypeId')).map(r => r.ticketTypeId))
+      : null;
     const ticketsByCategory = new Map();
-    for (const t of tts.map(plain)) { if (!ticketsByCategory.has(t.categoryId)) ticketsByCategory.set(t.categoryId, []); ticketsByCategory.get(t.categoryId).push(t); }
+    for (const t of tts.map(plain)) {
+      if (queued && queued.has(t.id)) t.waitlistQueued = true; if (!ticketsByCategory.has(t.categoryId)) ticketsByCategory.set(t.categoryId, []); ticketsByCategory.get(t.categoryId).push(t); }
     const categories = new Map();
     for (const c of cats.map(plain)) { if (!categories.has(c.eventId)) categories.set(c.eventId, []); categories.get(c.eventId).push({ ...c, ticketTypes: ticketsByCategory.get(c.id) || [] }); }
     const points = new Map();

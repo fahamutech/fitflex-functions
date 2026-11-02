@@ -3,10 +3,11 @@
 // EVENTS_MODULE is off. Routes with fixed sub-paths (summary, audit) are declared before /:id so they
 // are mounted first.
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsModule, requireEventsRegistration } from '../src/shared/feature-flags.mjs';
-import { eventsAdminService as svc, eventsRegistrationService as registration, eventsPaymentsService as payments, eventsRefundsService as refunds } from '../src/bootstrap/services.mjs';
+import { requireEventsModule, requireEventsRegistration, requireEventsAnalytics } from '../src/shared/feature-flags.mjs';
+import { eventsAdminService as svc, eventsAnalyticsService as analyticsSvc, eventsRegistrationService as registration, eventsPaymentsService as payments, eventsRefundsService as refunds } from '../src/bootstrap/services.mjs';
 import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 
 const created = new Date().toISOString();
@@ -23,6 +24,7 @@ const hasPaymentsScope = req => !req.user?.portalUser || (Array.isArray(req.user
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('admin', result.status || 400);
     const { error, status, ...extra } = result;
     return res.status(status || 400).json({ error, ...extra });
   }
@@ -48,6 +50,22 @@ export const adminEventsAudit = {
   description: 'Admin (scope events): every events.* audit row, newest first. ?action=<events.published | published | …>&cursor&limit → { items: [{ id, at, actor { id, name }, action, target, reason, note, before, after }], nextCursor, total }.',
   onGuard: guard('get'),
   onRequest: async (req, res) => send(res, await svc.audit({ query: req.query || {} })),
+};
+
+// S7 (§5.5, §5.7): declared before /:id so it is mounted first. EVENTS_ANALYTICS gates it; the payments block needs the payments scope too.
+export const adminEventsHealth = {
+  created, method: 'get', path: '/admin/events/health',
+  description: 'Admin (scope events; EVENTS_ANALYTICS): the launch dashboard. ?days=1|7|30&eventId → { generatedAt, rolledUpAt, periodDays, eventId, setup { flags, retentionConfigured, alertsConfigured, consentTextVersion }, funnel [{ name, count, ratioToPrevious }], payments? (only with the payments scope: manualWaiting, rejected, lateCases, reconciliationRequired), refunds, webhooks, kit, results, rewards, waitlist, jobs [{ name, schedule, lastRunAt, outcome, lastSuccessAt, flagOn, late }], errors [{ group, class, count }], alerts [{ rule, subject, severity, runbook, counts }] }. A group that cannot be read answers { error: "unavailable" } in its own slot. Numbers come from the tables; counters answer only the client funnel steps and the S7 events. Counts of events, not people. 400 invalid_days; 404 event_not_found | feature_disabled.',
+  onGuard: routeGuard('get', [requireEventsModule, requireEventsAnalytics, requireAuth('admin'), requireAcl('events')]),
+  onRequest: async (req, res) => send(res, await analyticsSvc.health({ days: Number(req.query?.days ?? 1), eventId: req.query?.eventId || null, scopes: hasPaymentsScope(req) ? ['payments'] : [] })),
+};
+
+// S7 (H17): declared before /:id so it is mounted first. Finds an organizer for the Operations tab without a direct API call.
+export const adminListEventOrganizers = {
+  created, method: 'get', path: '/admin/events/organizers',
+  description: 'Admin (scope events): find an organizer. ?q (name prefix or substring, or the exact organizer id)&apiAccess=true|false&cursor&limit (≤100) → { items [{ id, name, status, apiAccessEnabled, activeClients, activeEndpoints }], nextCursor }. Counts only: no secrets, no client ids, no endpoint URLs.',
+  onGuard: guard('get'),
+  onRequest: async (req, res) => send(res, await svc.listOrganizers({ query: req.query || {} })),
 };
 
 export const adminGetEvent = {
