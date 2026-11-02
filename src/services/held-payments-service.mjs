@@ -108,6 +108,7 @@ export function createHeldPaymentsService({ auditLog, paymentRequests, refunds, 
         refundStatus: refund?.status ?? null,
         refundable: blockedReason === null, notRefundableReason: blockedReason,
         amountReceivedKnown: amountOf(row) != null,
+        requestAmountTzs: num(request.amountTzs), // the refund cap when the provider-confirmed amount is unknown
       });
     }
     items.sort((a, b) => +new Date(b.at) - +new Date(a.at));
