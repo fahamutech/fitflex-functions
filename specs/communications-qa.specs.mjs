@@ -209,10 +209,18 @@ test('audience — a large audience (1,200 members): counted, confirmed, queued 
   assert.ok(Date.now() - started < 60_000, `planning and queueing took ${Date.now() - started} ms`);
 
   // The dispatcher takes it in batches; nothing is sent twice.
+  // claim() takes due rows from every campaign, so rows another test (or a
+  // leftover on a reused DB) left queued share the batches. Keep going until
+  // this campaign has nothing queued, hand foreign rows straight back, and
+  // never stop just because one batch held none of ours.
   const claimed = [];
-  for (let run = 0; run < 10; run += 1) {
-    const batch = (await delivery.claim(250)).filter(r => r.campaignId === campaign.id);
-    if (!batch.length) break;
+  const queuedOurs = async () => Number((await rowsOf(campaign.id).whereIn('status', ['queued', 'sending']).count({ n: '*' }))[0].n);
+  for (let run = 0; run < 100 && await queuedOurs() > 0; run += 1) {
+    const all = await delivery.claim(250);
+    const foreign = all.filter(r => r.campaignId !== campaign.id);
+    if (foreign.length) await db('CommunicationMessage').whereIn('id', foreign.map(r => r.id)).update({ status: 'queued', attempts: db.raw('"attempts" - 1') });
+    const batch = all.filter(r => r.campaignId === campaign.id);
+    if (!batch.length) continue;
     claimed.push(batch.length);
     for (const row of batch) await delivery.deliver(row);
   }

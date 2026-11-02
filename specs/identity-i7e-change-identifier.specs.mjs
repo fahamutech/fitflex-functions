@@ -21,8 +21,9 @@ function res() {
     json(b) { this.body = b; return this; },
   };
 }
+const runOctet = Math.floor(Math.random() * 200) + 20; // per run: AuthAttempt rows outlive the run
 let addressCounter = 0;
-const freshAddress = () => `10.12.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
+const freshAddress = () => `10.${runOctet}.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
 async function authed(route, claims, body) {
   const req = { headers: { authorization: `Bearer ${sign(claims)}`, 'x-forwarded-for': freshAddress() }, body };
   const out = res();
