@@ -49,7 +49,18 @@ export function createEventsAdminService({
     return {
       ...organizerView(joined, { ...viewOpts(), allowedActions: actionsFor(joined.event.status), changeLogCount: await catalogue.countChangeLog(joined.event.id) }),
       organizer: organizerCard(joined.organizer, permit), permitOnFile: permit,
+      // S7 (additive): the reward switch (H6) and the waitlist at a glance (counts only).
+      rewardsEligible: joined.event.rewardsEligible === true,
+      waitlist: await waitlistCounts(joined.event.id),
     };
+  }
+
+  /** Counts of waitlist entries by status for the admin event view; zeros while the table is empty. */
+  async function waitlistCounts(eventId) {
+    try {
+      const rows = await db('EventWaitlistEntry').where({ eventId }).groupBy('status').select('status').count({ n: '*' });
+      return { enabled: undefined, waiting: Number(rows.find(r => r.status === 'waiting')?.n ?? 0), offered: Number(rows.find(r => r.status === 'offered')?.n ?? 0) };
+    } catch { return null; }
   }
 
   async function decision({ eventId, body = {}, actorId }) {
@@ -190,5 +201,95 @@ export function createEventsAdminService({
     return paginate(await auditRows({ action: query.action ? String(query.action) : null }), { limit: Math.min(parseInt(query.limit, 10) || 20, 50), cursor: query.cursor });
   }
 
-  return { list, summary, detail, decision, cancel, cancelPreview, archive, complete, eventAudit, audit, changePayoutSchedule };
+
+  // ── S7: incident controls (H6, H16, H17; docs/design/events-s7-hardening-and-pilot.md §6.1, D80, D84, D85) ──────────────────
+
+  const reasonOf = (body) => {
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length < 10 || reason.length > 300) return fail('reason_required', 422, { min: 10, max: 300 });
+    let reasonSw = null;
+    if (body.reasonSw !== undefined && body.reasonSw !== null && body.reasonSw !== '') {
+      reasonSw = String(body.reasonSw).trim();
+      if (reasonSw.length < 10 || reasonSw.length > 300) return fail('reason_required', 422, { min: 10, max: 300, field: 'reasonSw' });
+    }
+    return { reason, reasonSw: reasonSw ?? `(kwa Kiingereza) ${reason}` , explicitSw: reasonSw !== null };
+  };
+  const auditRow = (actorId, action, target, before, after) => db('AuditLog').insert({
+    id: `aud_${randomUUID().slice(0, 12)}`, at: now(), actor: actorId, action, target, before: before == null ? null : JSON.stringify(before), after: after == null ? null : JSON.stringify(after),
+  });
+
+  /** H16 (D85): pause (published → registration_closed) or resume (→ published) one event's registrations. Reason required; the organizer is told. */
+  async function setRegistrationState({ eventId, body = {}, actorId }) {
+    const joined = await catalogue.loadJoined(eventId);
+    if (!joined) return fail('event_not_found', 404);
+    if (!['closed', 'open'].includes(body.state)) return fail('validation_failed', 422, { fields: [{ path: 'state', code: 'invalid' }] });
+    const why = reasonOf(body);
+    if (why.error) return why;
+    const to = body.state === 'closed' ? 'registration_closed' : 'published';
+    const from = joined.event.status;
+    if (from !== (to === 'published' ? 'registration_closed' : 'published')) return fail('invalid_transition', 409, { from, to });
+    if (to === 'published' && joined.event.registrationClosesAt && +new Date(joined.event.registrationClosesAt) <= +now()) return fail('registration_window_over', 409);
+    const moved = await organizerService.moveEvent(joined.event.id, to, { actor: { id: actorId, kind: 'admin', role: 'admin' }, note: why.reason });
+    if (moved.error) return moved;
+    await auditRow(actorId, 'events.admin_registration_state_changed', joined.event.id, { status: from }, { status: to, reason: why.reason });
+    if (notifyTeam) {
+      const paused = to === 'registration_closed';
+      try {
+        await notifyTeam(joined.event.organizerId, {
+          id: `ntf_evrs_${joined.event.id}_${Date.now()}`, type: paused ? 'organizer_registration_paused' : 'organizer_registration_resumed',
+          en: paused ? { title: 'Registrations paused', body: `FitFlex paused registrations for ${joined.event.title}. ${why.reason}` } : { title: 'Registrations resumed', body: `FitFlex resumed registrations for ${joined.event.title}. ${why.reason}` },
+          sw: paused ? { title: 'Usajili umesitishwa', body: `FitFlex imesitisha usajili wa ${joined.event.title}. ${why.reasonSw}` } : { title: 'Usajili umeendelea', body: `FitFlex imeruhusu usajili wa ${joined.event.title} kuendelea. ${why.reasonSw}` },
+        });
+      } catch { /* the move stands; the notice is best effort */ }
+    }
+    return { eventStatus: to, from };
+  }
+
+  /** H6 (D80): the per-event reward switch. Medals are unaffected; rewards are earned only while this is true (default false). */
+  async function setRewardsEligible({ eventId, body = {}, actorId }) {
+    const joined = await catalogue.loadJoined(eventId);
+    if (!joined) return fail('event_not_found', 404);
+    if (typeof body.eligible !== 'boolean') return fail('validation_failed', 422, { fields: [{ path: 'eligible', code: 'boolean' }] });
+    const why = reasonOf(body);
+    if (why.error) return why;
+    const before = joined.event.rewardsEligible === true;
+    if (before === body.eligible) return { rewardsEligible: before, changed: false };
+    await db('Event').where({ id: joined.event.id }).update({ rewardsEligible: body.eligible, updatedAt: now() });
+    await auditRow(actorId, 'events.rewards_eligible_changed', joined.event.id, { rewardsEligible: before }, { rewardsEligible: body.eligible, reason: why.reason });
+    if (notifyTeam) {
+      try {
+        await notifyTeam(joined.event.organizerId, {
+          id: `ntf_evre_${joined.event.id}_${Date.now()}`, type: 'organizer_rewards_eligibility_changed',
+          en: { title: 'Rewards setting changed', body: `Rewards for ${joined.event.title} are now ${body.eligible ? 'on' : 'off'}.` },
+          sw: { title: 'Mpangilio wa zawadi umebadilika', body: `Zawadi za ${joined.event.title} sasa ${body.eligible ? 'zimewashwa' : 'zimezimwa'}.` },
+        });
+      } catch { /* best effort */ }
+    }
+    return { rewardsEligible: body.eligible, changed: true };
+  }
+
+  /** H17: find an organizer without a direct API call (the Operations tab). */
+  async function listOrganizers({ query = {} }) {
+    const limit = Math.min(Math.max(parseInt(query.limit, 10) || 25, 1), 100);
+    let q = db('EventOrganizer as o').orderBy([{ column: 'o.name' }, { column: 'o.id' }]);
+    const term = typeof query.q === 'string' ? query.q.trim().slice(0, 80) : '';
+    if (term) q = q.where(b => b.whereILike('o.name', `%${term.replace(/[%_]/g, m => `\\${m}`)}%`).orWhere('o.id', term));
+    if (query.apiAccess === 'true' || query.apiAccess === 'false') q = query.apiAccess === 'true' ? q.whereNotNull('o.apiAccessEnabledAt') : q.whereNull('o.apiAccessEnabledAt');
+    if (query.cursor) { const after = Buffer.from(String(query.cursor), 'base64url').toString('utf8'); const [name, id] = after.split('\u0000'); if (name === undefined || !id) return fail('invalid_cursor', 400); q = q.whereRaw('(o.name, o.id) > (?, ?)', [name, id]); }
+    const rows = await q.limit(limit + 1).select('o.id', 'o.name', 'o.status', 'o.apiAccessEnabledAt');
+    const page = rows.slice(0, limit);
+    const ids = page.map(r => r.id);
+    const clients = ids.length ? await db('ApiClient').where({ ownerType: 'organizer', status: 'active' }).whereIn('ownerId', ids).groupBy('ownerId').select('ownerId').count({ n: '*' }) : [];
+    const hooks = ids.length ? await db('WebhookEndpoint').where({ status: 'active' }).whereIn('organizerId', ids).groupBy('organizerId').select('organizerId').count({ n: '*' }) : [];
+    const last = page[page.length - 1];
+    return {
+      items: page.map(r => ({
+        id: r.id, name: r.name, status: r.status, apiAccessEnabled: Boolean(r.apiAccessEnabledAt),
+        activeClients: Number(clients.find(c => c.ownerId === r.id)?.n ?? 0), activeEndpoints: Number(hooks.find(c => c.organizerId === r.id)?.n ?? 0),
+      })),
+      nextCursor: rows.length > limit && last ? Buffer.from(`${last.name}\u0000${last.id}`).toString('base64url') : null,
+    };
+  }
+
+  return { list, summary, detail, decision, cancel, cancelPreview, archive, complete, eventAudit, audit, changePayoutSchedule, setRegistrationState, setRewardsEligible, listOrganizers };
 }

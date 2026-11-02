@@ -839,6 +839,85 @@ export function createEventsResultsService({
     return afterCorrection(out, ctx, actor);
   }
 
+  /**
+   * S7 (H12): what a correction would do, WITHOUT doing it. The real correction runs inside a transaction that is always rolled back, so the
+   * numbers are exactly what the confirm would produce (including a shifted board and the awards it would re-evaluate) and nothing is stored,
+   * announced or queued. → { rankBefore, rankAfter, othersShifted, medalsAffected, revision } (counts only, no names).
+   */
+  async function correctPreview({ actor, organizerId = null, eventId, resultId, body = {} }) {
+    const adminOk = actor.kind === 'admin';
+    if (!adminOk && !allowed(actor, 'decide')) return fail('forbidden_role', 403);
+    const ctx = await load({ organizerId: adminOk ? null : organizerId, eventId });
+    if (!ctx) return fail('event_not_found', 404);
+    const want = expectedRevision(body);
+    if (want === null) return needRevision();
+    if (ctx.event.status === 'cancelled') return fail('event_cancelled', 409);
+    const ROLLBACK = Symbol('preview');
+    let out;
+    try {
+      await db.transaction(async (trx) => {
+        await lockEvent(trx, ctx.event.id);
+        const row = await currentOf(trx, ctx.event, resultId);
+        if (!row) { out = fail('result_not_found', 404); throw ROLLBACK; }
+        if (!row.isCurrent || row.revision !== want) { out = fail('result_changed', 409, { currentRevision: row.revision }); throw ROLLBACK; }
+        const ranksOf = async () => new Map((await trx('EventResult').where({ isCurrent: true }).whereIn('registrationId', trx('EventRegistration').where({ eventId: ctx.event.id }).select('id'))
+          .select('registrationId', 'overallRank', 'categoryRank')).map(r => [r.registrationId, r]));
+        const before = await ranksOf();
+        const started = stamp();
+        const done = await correctIn(trx, { ctx, actor, row, body });
+        if (done.error) { out = done; throw ROLLBACK; }
+        const after = await ranksOf();
+        const mine = row.registrationId;
+        let shifted = 0;
+        for (const [id, a] of after) { const b = before.get(id); if (id !== mine && b && (b.overallRank !== a.overallRank || b.categoryRank !== a.categoryRank)) shifted += 1; }
+        const queued = (await trx('EventAwardTask').where({ eventId: ctx.event.id }).where('createdAt', '>=', started).distinct('registrationId')).map(r => r.registrationId);
+        const medals = queued.length ? Number((await trx('EventMedalAward').whereIn('registrationId', queued).where({ awardStatus: 'awarded' }).count({ n: '*' }).first()).n) : 0;
+        out = {
+          revision: row.revision,
+          rankBefore: { overall: before.get(mine)?.overallRank ?? null, category: before.get(mine)?.categoryRank ?? null },
+          rankAfter: { overall: after.get(mine)?.overallRank ?? null, category: after.get(mine)?.categoryRank ?? null },
+          othersShifted: shifted, medalsAffected: medals,
+        };
+        throw ROLLBACK;
+      });
+    } catch (err) { if (err !== ROLLBACK) throw err; }
+    return out;
+  }
+
+  /**
+   * S7 (H10, S6 gap): the admin's list of result questions across events. `adminMayResolve` follows D59: true once a question is more than 7 days
+   * old or its organizer is not active. Counts only, masked nothing personal: event title, organizer name, ages.
+   */
+  async function adminDisputes({ query = {} }) {
+    const limit = parseLimit(query.limit, { dflt: 50, max: 200 });
+    if (limit === null) return fail('invalid_limit', 400);
+    const status = ['open', 'upheld', 'rejected', 'withdrawn'].includes(query.status) ? query.status : 'open';
+    const at = +stamp();
+    let q = db('EventResultDispute as d').join('EventRegistration as r', 'r.id', 'd.registrationId').join('Event as e', 'e.id', 'r.eventId').join('EventOrganizer as o', 'o.id', 'e.organizerId').where('d.status', status);
+    if (query.olderThanDays !== undefined && query.olderThanDays !== '') {
+      const n = Number(query.olderThanDays);
+      if (!Number.isInteger(n) || n < 0 || n > 3650) return fail('validation_failed', 422, { fields: [{ path: 'olderThanDays', code: 'invalid' }] });
+      q = q.where('d.createdAt', '<', new Date(at - n * DAY));
+    }
+    if (query.organizerStatus) q = q.where('o.status', String(query.organizerStatus));
+    if (query.cursor) {
+      const cur = decodeCursor(query.cursor);
+      if (!cur?.t || !cur?.i) return fail('invalid_cursor', 400);
+      q = q.whereRaw('(d."createdAt", d.id) > (?, ?)', [new Date(cur.t), String(cur.i)]);
+    }
+    const rows = (await q.orderBy([{ column: 'd.createdAt' }, { column: 'd.id' }]).limit(limit + 1)
+      .select('d.id', 'd.createdAt', 'd.status', 'e.id as eventId', 'e.title as eventTitle', 'o.name as organizerName', 'o.status as organizerStatus')).map(plain);
+    const page = rows.slice(0, limit);
+    const items = page.map((d) => {
+      const ageDays = Math.floor((at - +new Date(d.createdAt)) / DAY);
+      return { id: d.id, eventId: d.eventId, eventTitle: d.eventTitle, organizerName: d.organizerName, organizerStatus: d.organizerStatus, openedAt: new Date(d.createdAt).toISOString(), ageDays, status: d.status, adminMayResolve: d.status === 'open' && (ageDays >= 7 || +new Date(d.createdAt) < at - 7 * DAY || d.organizerStatus !== 'active') };
+    });
+    const open = await db('EventResultDispute as d').join('EventRegistration as r', 'r.id', 'd.registrationId').join('Event as e', 'e.id', 'r.eventId').join('EventOrganizer as o', 'o.id', 'e.organizerId').where('d.status', 'open')
+      .select(db.raw('count(*)::int as total'), db.raw(`count(*) filter (where d."createdAt" < ?)::int as stale`, [new Date(at - 7 * DAY)]), db.raw(`count(*) filter (where o.status <> 'active')::int as inactive`)).first();
+    const last = page[page.length - 1];
+    return { items, nextCursor: rows.length > limit && last ? encodeCursor({ t: +new Date(last.openedAt), i: last.id }) : null, counts: { open: open.total, olderThan7Days: open.stale, organizerInactive: open.inactive } };
+  }
+
   async function afterCorrection(out, ctx, actor) {
     if (out.error || !out._notify) return out;
     const { _notify: n, ...rest } = out;
@@ -1423,7 +1502,7 @@ export function createEventsResultsService({
   return {
     summary, list, detail, importPreview, importApply, importsList, apiImport, enter, verify, reject, bulkPreview, bulkApply, correct, disqualify,
     releasePreview, release, withdraw, updateSettings, disputesList, disputeResolve, myResult, myResults, setVisibility, raiseDispute, withdrawDispute, board,
-    apiList, apiReleases, decorateRegistrations, publicBlock,
+    apiList, apiReleases, decorateRegistrations, publicBlock, correctPreview, adminDisputes,
     hooks, internals: { load, stagesOf, writeRevision, recomputeRanks, idempotent, audit, outbox, lockEvent, allowed, stamp, tellParticipant, tellOrganizer, inboxOnly, rowOf: currentOf, regOf, awardsOn, rewardsOn },
   };
 }

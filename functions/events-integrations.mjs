@@ -180,6 +180,13 @@ export const organizerRetryWebhookDelivery = {
   onRequest: run(async (req, res) => send(res, await hooks.retryDelivery({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub }))),
 };
 
+export const organizerRedeliverWebhookEndpoint = {
+  created, method: 'post', path: '/organizer/webhook-endpoints/:id/redeliver',
+  description: 'Organizer OWNER only (D42; organizer active; EVENTS_WEBHOOKS): send the events of a time range to this endpoint again (a receiver was down). Body { from, to (ISO instants, at most 7 days apart, not in the future), types? [subscribable event types] } → { queued, scanned }. Only this organizer\'s own events are ever read; at most 5,000 events a request, 3 requests an hour per organizer. Deliveries that exist are reset to pending (same event id, so receivers dedupe); missing ones are created. Audited as events.webhook_redelivery_requested. 404 endpoint_not_found; 409 endpoint_not_active; 422 validation_failed | range_too_large { maxDays } | too_many_events { max }; 429 rate_limited.',
+  onGuard: hookOwner('post'),
+  onRequest: run(async (req, res) => send(res, await hooks.redeliver({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub, body: req.body || {} }))),
+};
+
 export const organizerIntegrationsHealth = {
   created, method: 'get', path: '/organizer/integrations/health',
   description: 'Organizer owner / admin (EVENTS_ORGANIZER_API or EVENTS_WEBHOOKS): the aggregate for the Overview card → { webhooks { endpoints, healthy, degraded, failing, disabled, unverified, deadLast24h } | null, apiClients { active, expiringSoon } | null }.',

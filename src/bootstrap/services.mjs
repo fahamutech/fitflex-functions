@@ -192,12 +192,14 @@ import { webhookKeyRing } from '../shared/webhook-signing.mjs';
 import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
 import { eventsKitOfflineOn, eventsWaitlistOn, eventsAnalyticsOn } from '../shared/feature-flags.mjs';
 import { createEventsAnalyticsService } from '../services/events-analytics-service.mjs';
+import { createEventsRetentionService } from '../services/events-retention-service.mjs';
+import { eventsDeletedUserAnonymiseDays } from '../shared/events-config.mjs';
 import { createEventsWaitlistService } from '../services/events-waitlist-service.mjs';
 import { eventsWaitlistOfferHours, eventsWaitlistMinOfferMinutes, eventsWaitlistMaxActivePerUser, eventsWaitlistMaxQueue, eventsWaitlistMaxLapses, eventsWaitlistQuietHours, eventsWaitlistKeepDays } from '../shared/events-config.mjs';
 import { createEventsKitOfflineService } from '../services/events-kit-offline-service.mjs';
 import { eventsOfflineSessionHours, eventsOfflineMaxDevices, eventsOfflineMaxPerUser, eventsOfflineMaxRows, eventsOfflineSyncBatch, eventsOfflineMaxPending, eventsOfflineClockToleranceSeconds, eventsOfflineMinDeskBuild, eventsOfflineScanKeepDays, eventsOfflineMaxBibRange } from '../shared/events-config.mjs';
 import { setApiErrorSink } from '../shared/events-api-error.mjs';
-import { eventsAnalyticsKeepDays, eventsAlertRules, eventsManualConfirmSlaHours, eventsRetentionMonths } from '../shared/events-config.mjs';
+import { eventsWebhookPerHostBatch, eventsAnalyticsKeepDays, eventsAlertRules, eventsManualConfirmSlaHours, eventsRetentionMonths } from '../shared/events-config.mjs';
 import {
   eventsApiTokenTtlSeconds, eventsApiMaxClients, eventsApiDefaultRate, eventsApiAllowlist, eventsWebhookMaxEndpoints, eventsWebhookTimeoutMs, eventsWebhookMaxAttempts,
   eventsWebhookBatch, eventsFeedLagSeconds, eventsExportMaxRows,
@@ -1454,7 +1456,8 @@ export const eventsIntegrationsService = createEventsIntegrationsService({
 registerApiClientStore(eventsIntegrationsService.authStore);
 export const eventsWebhookService = createEventsWebhookService({
   db, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message), keyRing: webhookKeyRing,
-  config: { maxEndpoints: eventsWebhookMaxEndpoints, timeoutMs: eventsWebhookTimeoutMs, maxAttempts: eventsWebhookMaxAttempts, batch: eventsWebhookBatch, lagSeconds: eventsFeedLagSeconds },
+  track: (name, props, opts) => eventsAnalyticsService.track(name, props, opts),
+  config: { perHostBatch: eventsWebhookPerHostBatch, maxEndpoints: eventsWebhookMaxEndpoints, timeoutMs: eventsWebhookTimeoutMs, maxAttempts: eventsWebhookMaxAttempts, batch: eventsWebhookBatch, lagSeconds: eventsFeedLagSeconds },
 });
 opsService.register({
   name: 'event-webhook-fanout', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event webhook fan-out', schedule: { type: 'every', minutes: 1 }, quiet: true,
@@ -1555,14 +1558,14 @@ export const eventsAnalyticsService = createEventsAnalyticsService({
     'event-awards-run': eventsRewardsOn, 'event-awards-reconcile': eventsRewardsOn, 'event-reward-expire': eventsRewardsOn,
     'event-waitlist-promote': eventsWaitlistOn, 'event-waitlist-purge': eventsWaitlistOn, 'event-kit-offline-purge': eventsKitOfflineOn,
     'event-analytics-rollup': eventsAnalyticsOn, 'event-health-alert': eventsAnalyticsOn, 'event-organizer-status-sweep': eventsModuleOn,
-    'event-registration-anonymise': () => eventsRetentionMonths() !== null,
+    'event-registration-anonymise': () => eventsRetentionMonths() !== null || eventsDeletedUserAnonymiseDays() !== null,
   },
   setup: () => ({
     flags: {
       module: eventsModuleOn(), registration: eventsRegistrationOn(), kitOps: eventsKitOpsOn(), kitOffline: eventsKitOfflineOn(), waitlist: eventsWaitlistOn(), analytics: eventsAnalyticsOn(),
       webhooks: eventsWebhooksOn(), organizerApi: eventsOrganizerApiOn(), results: eventsResultsOn(), rewards: eventsRewardsOn(), medalArt: eventsMedalArtOn(),
     },
-    payment: eventsPaymentsService.mode(), retentionConfigured: eventsRetentionMonths() !== null, consentTextVersion: eventsConsentTextVersion(),
+    payment: eventsPaymentsService.mode(), retentionConfigured: eventsRetentionMonths() !== null || eventsDeletedUserAnonymiseDays() !== null, consentTextVersion: eventsConsentTextVersion(),
   }),
   manualConfirmHours: eventsManualConfirmSlaHours, refundTargetDays: eventsRefundTargetDays,
 });
@@ -1608,6 +1611,25 @@ opsService.register({
     if (!eventsWaitlistOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
     const r = await eventsWaitlistService.purge();
     return { processed: r.cleared + r.deleted, succeeded: r.cleared + r.deleted, failed: 0, ...r };
+  },
+});
+// S7 · retention (RULE 6 AREA): ships UNSET. Both settings unset = the job does nothing.
+export const eventsRetentionService = createEventsRetentionService({ db, months: eventsRetentionMonths, deletedUserDays: eventsDeletedUserAnonymiseDays });
+opsService.register({
+  name: 'event-registration-anonymise', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event registration anonymisation', schedule: { type: 'daily', utc: '01:10' }, quiet: true,
+  description: 'Events (S7, D79): for events completed, cancelled or archived more than EVENTS_RETENTION_MONTHS ago (and places of deleted purchasers after EVENTS_DELETED_USER_ANONYMISE_DAYS), clears phone, email, date of birth, gender, emergency contact and claim token data; keeps first name, last initial, bib and results. With both settings unset it does nothing.',
+  run: async () => {
+    const r = await eventsRetentionService.run();
+    return { processed: r.rows, succeeded: r.rows, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-organizer-status-sweep', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event organizer status sweep', schedule: { type: 'every', minutes: 60 }, quiet: true,
+  description: 'Events (S7, H7): re-derives every event organizer\'s status from its KYC case through the same primitive the KYC hook uses and audits each correction (a failed hook after a committed decision is then repaired within the hour). Does nothing unless EVENTS_MODULE is on.',
+  run: async () => {
+    if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsOrganizerService.sweepOrganizerStatus();
+    return { processed: r.corrected, succeeded: r.corrected, failed: 0, ...r };
   },
 });
 opsService.register({

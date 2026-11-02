@@ -447,6 +447,40 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
     };
   }
 
+  /**
+   * S7 (H11, S6 gap): recent redemptions for the reward desk. Masked person (first name and last initial), reward title, code STATE and times.
+   * NEVER the code, its hash or the user id. → { items, nextCursor }.
+   */
+  async function listRedemptions({ query = {} }) {
+    const limit = parseLimit(query.limit, { dflt: 50, max: 200 });
+    if (limit === null) return fail('invalid_request', 400, { field: 'limit' });
+    const status = query.status ? String(query.status) : null;
+    if (status && !['reserved', 'redeemed', 'cancelled', 'expired'].includes(status)) return fail('invalid_request', 400, { field: 'status' });
+    let q = db('RewardRedemption as r').join('RewardDefinition as d', 'd.id', 'r.rewardDefinitionId').leftJoin('User as u', 'u.id', 'r.userId');
+    if (status) q = q.where('r.status', status);
+    if (query.cursor) {
+      const cur = decodeCursor(query.cursor);
+      if (!cur?.at || !cur?.id) return fail('invalid_cursor', 400);
+      q = q.whereRaw('(r."createdAt", r.id) < (?, ?)', [new Date(cur.at), String(cur.id)]);
+    }
+    const rows = (await q.orderBy([{ column: 'r.createdAt', order: 'desc' }, { column: 'r.id', order: 'desc' }]).limit(limit + 1)
+      .select('r.id', 'r.status', 'r.reservedAt', 'r.redeemedAt', 'r.expiresAt', 'r.createdAt', 'r.needsReview', 'r.anonymisedAt', 'd.title', 'd.redeemMode', 'u.displayName')).map(plain);
+    const page = rows.slice(0, limit);
+    const mask = (name, anonymised) => {
+      if (anonymised || !name) return null;
+      const parts = String(name).trim().split(/\s+/);
+      return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.` : parts[0];
+    };
+    const last = page[page.length - 1];
+    return {
+      items: page.map(r => ({
+        id: r.id, person: mask(r.displayName, r.anonymisedAt), reward: { en: r.title?.en ?? null, sw: r.title?.sw ?? null }, redeemMode: r.redeemMode,
+        codeState: r.status, claimedAt: iso(r.reservedAt ?? r.createdAt), redeemedAt: iso(r.redeemedAt), expiresAt: iso(r.expiresAt), needsReview: r.needsReview === true,
+      })),
+      nextCursor: rows.length > limit && last ? encodeCursor({ at: last.createdAt, id: last.id }) : null,
+    };
+  }
+
   async function listTasks({ query = {} }) {
     const state = query.state ? String(query.state) : 'failed';
     if (!['pending', 'running', 'done', 'failed'].includes(state)) return fail('invalid_request', 400, { field: 'state' });
@@ -506,6 +540,6 @@ export function createEventsRewardService({ db, ticketRing = () => null, notice 
   void sha256hex; void COPY; void notice;
   return {
     createDefinition, updateDefinition, activate, pause, end, listDefinitions, earnIn, reverseSourceIn, cancelIn, balanceIn, wallet, myLedger, claim, getRedemption,
-    lookup, adminRedeem, adminCancel, adminLedger, adminSummary, listTasks, retryTask, expireUnits, expireReservations,
+    lookup, adminRedeem, adminCancel, adminLedger, adminSummary, listTasks, listRedemptions, retryTask, expireUnits, expireReservations,
   };
 }

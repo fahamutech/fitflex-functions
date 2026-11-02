@@ -38,6 +38,7 @@ const MIGRATIONS = [
   '20270202090000-events-analytics-s7.cjs',
   '20270202090100-events-kit-offline-s7.cjs',
   '20270202090200-events-waitlist-s7.cjs',
+  '20270202090300-events-hardening-s7.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');

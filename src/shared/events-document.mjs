@@ -284,7 +284,8 @@ export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHost
     const v = lang === 'en' ? doc.description : doc.descriptionSw;
     if (required(`description.${lang}`, v)) length(`description.${lang}`, v, 40, 4000);
   }
-  if (required('timezone', doc.timezone) && filled(doc.timezone) && !validTimezone(doc.timezone)) add('timezone', 'required');
+  // S7 (H8, follow-up S2 L6): at submit the zone must be one of the published GET /events/options.timezones, not any IANA name Intl happens to know.
+  if (required('timezone', doc.timezone) && filled(doc.timezone) && (!validTimezone(doc.timezone) || (mode === 'submit' && !TIMEZONES.includes(doc.timezone)))) add('timezone', 'required');
   const starts = ms(doc.startsAt); const ends = ms(doc.endsAt);
   const regOpens = ms(doc.registrationOpensAt); const regCloses = ms(doc.registrationClosesAt);
   required('startsAt', doc.startsAt, Boolean);

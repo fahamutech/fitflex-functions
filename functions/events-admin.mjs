@@ -60,6 +60,14 @@ export const adminEventsHealth = {
   onRequest: async (req, res) => send(res, await analyticsSvc.health({ days: Number(req.query?.days ?? 1), eventId: req.query?.eventId || null, scopes: hasPaymentsScope(req) ? ['payments'] : [] })),
 };
 
+// S7 (H17): declared before /:id so it is mounted first. Finds an organizer for the Operations tab without a direct API call.
+export const adminListEventOrganizers = {
+  created, method: 'get', path: '/admin/events/organizers',
+  description: 'Admin (scope events): find an organizer. ?q (name prefix or substring, or the exact organizer id)&apiAccess=true|false&cursor&limit (≤100) → { items [{ id, name, status, apiAccessEnabled, activeClients, activeEndpoints }], nextCursor }. Counts only: no secrets, no client ids, no endpoint URLs.',
+  onGuard: guard('get'),
+  onRequest: async (req, res) => send(res, await svc.listOrganizers({ query: req.query || {} })),
+};
+
 export const adminGetEvent = {
   created, method: 'get', path: '/admin/events/:id',
   description: 'Admin (scope events): the full document (as the organizer sees it, both languages) + organizer { id, name, status, kycCaseId, permitOnFile }, permitOnFile and the admin allowedActions (approve | reject | edit | cancel | complete | archive). 404 event_not_found.',

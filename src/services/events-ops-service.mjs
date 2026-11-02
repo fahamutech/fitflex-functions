@@ -76,7 +76,10 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
         try { result = await work(); } catch (err) { await db('OrganizerIdempotency').where({ id }).del(); throw err; }
         if (!result || result.error || (Number.isInteger(result.status) && result.status >= 300)) { await db('OrganizerIdempotency').where({ id }).del(); return result; }
         const { status = 200, ...payload } = result;
-        await db('OrganizerIdempotency').where({ id }).update({ state: 'done', status, response: JSON.stringify(payload) });
+        // S7 (H2): the work has COMMITTED; failing to store the answer must not surface as an error (a retry would then meet already_collected).
+        for (let tryNo = 0; tryNo < 3; tryNo += 1) {
+          try { await db('OrganizerIdempotency').where({ id }).update({ state: 'done', status, response: JSON.stringify(payload) }); break; } catch { /* retry; the in_progress row ages out */ }
+        }
         return result;
       }
       const row = plain(await db('OrganizerIdempotency').where({ scopeType, scopeId, key, route }).first());
@@ -320,16 +323,21 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
         if (err.code === UNIQUE && /bib/.test(err.constraint ?? '')) return fail('bib_taken', 409);
         throw err;
       }
-      const fresh = plain(await db('EventRegistration').where({ id: reg.id }).first());
-      const c = await cardContext(event, [fresh]);
+      // S7 (H2, follow-up S5 L7): the handover is COMMITTED. Everything below is best effort and can never throw out of the idempotent wrapper:
+      // the stored answer is built from the committed result, so a retry returns the original answer (replayed), never already_collected.
+      let fresh = null; let card = null;
+      try {
+        fresh = plain(await db('EventRegistration').where({ id: reg.id }).first());
+        card = cardOf(event, fresh, await cardContext(event, [fresh]));
+      } catch (err) { console.warn('[events] kit card skipped after commit:', reg.id, err?.message); }
       if (parsed.status === 'collected') {
-        noticeKit(event, fresh).catch(() => {});
-        if (result.bib?.assignment) noticeBib(event, fresh, result.bib.assignment.bibNumber).catch(() => {});
+        Promise.resolve().then(() => noticeKit(event, fresh ?? reg)).catch(() => {});
+        if (result.bib?.assignment) Promise.resolve().then(() => noticeBib(event, fresh ?? reg, result.bib.assignment.bibNumber)).catch(() => {});
       }
-      await analytics('kit_collected', { eventId: event.id, categoryId: fresh.categoryId, method: actor.kind === 'api' ? 'api' : parsed.method, collectionPointId: parsed.collectionPointId });
+      await analytics('kit_collected', { eventId: event.id, categoryId: (fresh ?? reg).categoryId, method: actor.kind === 'api' ? 'api' : parsed.method, collectionPointId: parsed.collectionPointId }).catch(() => {});
       return {
         status: 201, collection: { id: result.id, status: parsed.status, collectedAt: iso(result.at), collectionPointId: parsed.collectionPointId },
-        card: cardOf(event, fresh, c), warnings: result.warnings,
+        card, warnings: result.warnings,
       };
     });
   }
@@ -530,9 +538,11 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
           return { ...done, warnings: collected && !done.unchanged ? ['bib_changed_after_collection'] : [] };
         });
         if (!out.unchanged) {
-          const fresh = plain(await db('EventRegistration').where({ id: reg0.id }).first());
-          noticeBib(event, fresh, bibNumber).catch(() => {});
-          await analytics('bib_assigned', { eventId: event.id, mode: actor.kind === 'api' ? 'api' : 'single', count: 1 });
+          // S7 (H2): committed; the follow-ups are best effort and never change the answer.
+          let fresh = reg0;
+          try { fresh = plain(await db('EventRegistration').where({ id: reg0.id }).first()) ?? reg0; } catch { /* keep the earlier row */ }
+          Promise.resolve().then(() => noticeBib(event, fresh, bibNumber)).catch(() => {});
+          await analytics('bib_assigned', { eventId: event.id, mode: actor.kind === 'api' ? 'api' : 'single', count: 1 }).catch(() => {});
         }
         return { status: out.unchanged ? 200 : 201, assignment: out.assignment, previousBibNumber: out.previous, warnings: out.warnings };
       } catch (err) { const e = bibErrors(err); if (e) return e; throw err; }

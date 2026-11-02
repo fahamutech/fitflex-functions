@@ -36,7 +36,7 @@ const call = async (route, claims, opts = {}) => {
 afterEach(() => { flagsOff(); resetEventsRegistrationLimits(); });
 after(async () => { await h.cleanup(); await db.destroy(); });
 
-const CONSENT = '2026-10-draft';
+const CONSENT = '2026-11-draft';
 const key = () => `chk_${uid('').slice(1)}`;
 const orderBody = (eventId, lines, participants, extra = {}) => ({ eventId, lines, participants, acceptedTerms: true, consentTextVersion: CONSENT, ...extra });
 /** A member with a verified phone, as a signed-up person has. */
@@ -780,9 +780,9 @@ test('Swahili: order notice uses the 12-hour clock and one/other plurals; fallba
   assert.ok(!/Someone|An organisation/.test(claimNotice.data.bodySw));
   // consent wording and the label without the draft suffix
   const q = await call(quoteEventOrder, c.claims, { body: { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], participants: [self(f.ticket.id, c)] } });
-  assert.match(q.body.consentText.self.sw, /kushirikisha taarifa/);
-  assert.equal(q.body.consentText.version, '2026-10-draft');
-  assert.equal(q.body.consentText.versionLabel, '2026-10');
+  assert.match(q.body.consentText.self.sw, /inashirikisha jina langu/);   // S7 draft text (2026-11-draft)
+  assert.equal(q.body.consentText.version, '2026-11-draft');
+  assert.equal(q.body.consentText.versionLabel, '2026-11');
 });
 
 test('L9 / Swahili: inviteClaims refuses an unpaid order; for a paid one it sends both languages (or the recipient\'s) and rotates the token', async () => {

@@ -5,11 +5,20 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, optionalSessionClaims } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsModule, eventsFavouritesOn, eventsResultsOn, eventsRunsOn, eventsResultsPublicOn, eventsRewardsOn, eventsMedalArtOn, eventsAnalyticsOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
+import { requireEventsModule, eventsFavouritesOn, eventsResultsOn, eventsRunsOn, eventsResultsPublicOn, eventsRewardsOn, eventsMedalArtOn, eventsAnalyticsOn, eventsWaitlistOn, eventsApproverGateOpen } from '../src/shared/feature-flags.mjs';
+import { eventTicketKeyRing } from '../src/shared/events-config.mjs';
 import { eventsRunDistanceToleranceBps, eventsRunLinkMaxDaysAfter, eventsWaitlistOfferHours, eventsWaitlistMaxActivePerUser } from '../src/shared/events-config.mjs';
-import { eventsDiscoveryService as svc, eventsResultsService } from '../src/bootstrap/services.mjs';
+import { eventsDiscoveryService as svc, eventsResultsService, eventsPaymentsService } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
+
+/** S7 (H14): why payments are off, in a word the portal can turn into a sentence. null = payments can be taken. Read-only: the payment service decides. */
+const paymentsBlockedReason = () => {
+  if (eventsPaymentsService.mode() !== 'none') return null;
+  if (!eventTicketKeyRing()) return 'no_ticket_secret';
+  if (!eventsApproverGateOpen()) return 'second_approver_off';
+  return 'flag_off';
+};
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
@@ -32,6 +41,7 @@ export const eventsOptions = {
     runs: { toleranceBps: eventsRunDistanceToleranceBps(), maxDaysAfter: eventsRunLinkMaxDaysAfter() },
     // S7 (additive): an older client ignores these; a server without the flag answers enabled: false.
     analytics: { enabled: eventsAnalyticsOn() },
+    payments: { blockedReason: paymentsBlockedReason() },
     waitlist: { enabled: eventsWaitlistOn(), offerHours: eventsWaitlistOfferHours(), maxActivePerUser: eventsWaitlistMaxActivePerUser() },
   }),
 };

@@ -413,3 +413,25 @@ export const eventWaitlistPurge = {
     if (s.processed) console.log(`[events] waitlist purge: cleared=${s.cleared} deleted=${s.deleted}`);
   }
 };
+
+export const eventOrganizerStatusSweep = {
+  created, rule: '25 * * * *', // hourly at :25
+  description: 'Events (S7): re-derive every event organizer\'s status from its KYC case and audit each correction. Does nothing unless EVENTS_MODULE is on. Idempotent. The work is in src/bootstrap/services.mjs (event-organizer-status-sweep).',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-organizer-status-sweep');
+    const s = r?.stats ?? {};
+    if (s.corrected) console.log(`[events] organizer status sweep: checked=${s.checked} corrected=${s.corrected}`);
+  }
+};
+
+export const eventRegistrationAnonymise = {
+  created, rule: '10 1 * * *', // every day 01:10 UTC
+  description: 'Events (S7): clear contact and sensitive fields of registrations older than EVENTS_RETENTION_MONTHS (keeps first name, last initial, bib and results). Ships UNSET: with EVENTS_RETENTION_MONTHS and EVENTS_DELETED_USER_ANONYMISE_DAYS unset it does nothing. Idempotent. The work is in src/bootstrap/services.mjs (event-registration-anonymise).',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-registration-anonymise');
+    const s = r?.stats ?? {};
+    if (s.rows) console.log(`[events] anonymised: events=${s.events} rows=${s.rows}`);
+  }
+};

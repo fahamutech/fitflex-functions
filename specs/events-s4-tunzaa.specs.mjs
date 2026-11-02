@@ -81,7 +81,7 @@ async function setup({ price = 20000, capacity = 10 } = {}) {
 }
 async function place(f, b, n = 1) {
   const participants = Array.from({ length: n }, (_, i) => (i === 0 ? { ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: b.phone, consentBasis: 'self' } : { ticketTypeId: f.ticket.id, firstName: 'Zawadi', lastName: 'Mollel', phone: phone(), consentBasis: 'purchaser_authorised' }));
-  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: n }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants };
+  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: n }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants };
   const q = await call(quoteEventOrder, b.claims, { body });
   const r = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } });
   assert.equal(r.status, 201, JSON.stringify(r.body));

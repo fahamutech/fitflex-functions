@@ -6,7 +6,7 @@
 //   EVENTS_CORPORATE_MAX_ROWS          500    roster rows one corporate order may hold (413 too_many_rows above)
 //   EVENTS_TEAM_MAX_MEMBERS            50     default team size when EventTeam.maxMembers is null
 //   EVENTS_CLAIM_TOKEN_DAYS            90     claim link lifetime
-//   EVENTS_CONSENT_TEXT_VERSION        2026-10-draft
+//   EVENTS_CONSENT_TEXT_VERSION        2026-11-draft
 //   EVENTS_FEE_RULE                    (none) JSON fee rule for src/shared/events-pricing.mjs (D21: no member fee unless set)
 //   EVENTS_ORG_DISCOUNTS               {}     JSON { "<organizationId>": { "pct": 10 } } — server-side only (follow-ups S3)
 //   EVENT_HOLD_TTL_MINUTES             30     S1 (read through the store's holdTtlMinutes)
@@ -29,7 +29,7 @@ export const DEFAULT_MAX_PARTICIPANTS_PER_ORDER = 10;
 export const DEFAULT_CORPORATE_MAX_ROWS = 500;
 export const DEFAULT_TEAM_MAX_MEMBERS = 50;
 export const DEFAULT_CLAIM_TOKEN_DAYS = 90;
-export const DEFAULT_CONSENT_TEXT_VERSION = '2026-10-draft';
+export const DEFAULT_CONSENT_TEXT_VERSION = '2026-11-draft';   // S7: the rewritten draft text (kit status and bib added, over-statement removed)
 
 export const eventsMaxParticipantsPerOrder = () => intOr('EVENTS_MAX_PARTICIPANTS_PER_ORDER', DEFAULT_MAX_PARTICIPANTS_PER_ORDER, { max: 1000 });
 export const eventsCorporateMaxRows = () => intOr('EVENTS_CORPORATE_MAX_ROWS', DEFAULT_CORPORATE_MAX_ROWS, { max: 5000 });

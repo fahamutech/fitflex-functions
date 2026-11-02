@@ -45,10 +45,10 @@ async function runPool(tasks, limit) {
 
 export function createEventsWebhookService({
   db, notify = async () => {}, localeOf = async () => null, now = () => new Date(), keyRing = () => null,
-  resolve = defaultResolve, sendHttp = null, random = Math.random,
+  resolve = defaultResolve, sendHttp = null, random = Math.random, track = async () => {},
   config = {},
 }) {
-  const cfg = { maxEndpoints: () => 5, timeoutMs: () => 10_000, maxAttempts: () => 10, batch: () => 50, lagSeconds: () => 5, ...config };
+  const cfg = { maxEndpoints: () => 5, timeoutMs: () => 10_000, maxAttempts: () => 10, batch: () => 50, lagSeconds: () => 5, perHostBatch: () => 5, ...config };
   const stamp = () => new Date(now());
   const audit = (actor, action, target, before, after) => db('AuditLog').insert({
     id: `aud_${randomUUID().slice(0, 12)}`, at: stamp(), actor, action, target,
@@ -416,6 +416,45 @@ export function createEventsWebhookService({
     return { queued: true, delivery: { id: d.id, status: 'pending' } };
   }
 
+  /**
+   * S7 (H4, follow-up S5): the owner asks for the events of a time range to be sent again to ONE endpoint (a receiver was down for a day).
+   * Only that organizer's own outbox rows are ever read (the organizer id is in the WHERE), at most 7 days and 5,000 rows per request, 3 requests
+   * an hour per organizer. A delivery that exists is reset to pending (same event id, so receivers dedupe); a missing one is created.
+   */
+  async function redeliver({ organizerId, id, actorId, body = {} }) {
+    if (!enabled()) return off();
+    const e = await own(organizerId, id);
+    if (!e) return fail('endpoint_not_found', 404);
+    if (e.status !== 'active' || !e.verifiedAt) return fail('endpoint_not_active', 409);
+    const from = new Date(body.from); const to = new Date(body.to);
+    if (Number.isNaN(+from) || Number.isNaN(+to) || +to <= +from) return fail('validation_failed', 422, { fields: [{ path: 'from', code: 'invalid_range' }] });
+    if (+to - +from > 7 * DAY) return fail('range_too_large', 422, { maxDays: 7 });
+    if (+to > +stamp() + 60_000) return fail('validation_failed', 422, { fields: [{ path: 'to', code: 'in_the_future' }] });
+    let types = null;
+    if (body.types !== undefined && body.types !== null) {
+      if (!Array.isArray(body.types) || !body.types.length || body.types.some(t => typeof t !== 'string' || !isSubscribable(t))) return fail('validation_failed', 422, { fields: [{ path: 'types', code: 'invalid' }] });
+      types = body.types;
+    }
+    const recent = Number((await db('AuditLog').where({ action: 'events.webhook_redelivery_requested', target: organizerId }).where('at', '>=', new Date(+stamp() - HOUR)).count({ n: '*' }).first()).n);
+    if (recent >= 3) return fail('rate_limited', 429, { retryAfterSeconds: 3600 });
+    const rows = (await db('OutboxEvent').where({ organizerId }).whereBetween('createdAt', [from, to]).orderBy([{ column: 'createdAt' }, { column: 'id' }]).limit(5001)).map(plain);
+    if (rows.length > 5000) return fail('too_many_events', 422, { max: 5000 });
+    const subscribed = Array.isArray(e.events) ? e.events : [];
+    const eventIds = Array.isArray(e.eventIds) ? e.eventIds : null;
+    let queued = 0;
+    for (const row of rows) {
+      const projected = projectOutbox(row);
+      if (!projected || !subscribed.includes(projected.type) || (types && !types.includes(projected.type))) continue;
+      if (eventIds && !eventIds.includes(row.eventId)) continue;
+      const reset = await db('WebhookDelivery').where({ endpointId: e.id, outboxEventId: row.id }).update({ status: 'pending', nextAttemptAt: stamp(), leaseUntil: null, deliveredAt: null, manualRetryCount: db.raw('"manualRetryCount" + 1'), updatedAt: stamp() });
+      if (reset) { queued += 1; continue; }
+      await db('WebhookDelivery').insert({ id: `whd_${randomUUID().replace(/-/g, '').slice(0, 16)}`, endpointId: e.id, outboxEventId: row.id, status: 'pending', attemptCount: 0, nextAttemptAt: stamp(), createdAt: stamp(), updatedAt: stamp() }).onConflict(['endpointId', 'outboxEventId']).ignore();
+      queued += 1;
+    }
+    await audit(actorId, 'events.webhook_redelivery_requested', organizerId, null, { endpointId: e.id, from: from.toISOString(), to: to.toISOString(), queued, ...(types ? { types } : {}) });
+    return { queued, scanned: rows.length };
+  }
+
   async function integrationsHealth({ organizerId }) {
     const rows = (await db('WebhookEndpoint').where({ organizerId })).map(plain);
     const counts = { healthy: 0, degraded: 0, failing: 0, disabled: 0, unverified: 0 };
@@ -461,15 +500,36 @@ export function createEventsWebhookService({
     return { rows, deliveries };
   }
 
-  async function claimDue(limit) {
+  /**
+   * S7 (H1): at most `perHost` due deliveries per receiving host per claim. A host that is slow or down can therefore hold only a handful of
+   * leases and workers; every other host's deliveries are claimed in the same round instead of waiting behind it. The candidate ids are chosen
+   * with a window function (no lock), then claimed with FOR UPDATE SKIP LOCKED as before.
+   */
+  async function claimDue(limit, perHost = cfg.perHostBatch()) {
     const { rows } = await db.raw(`UPDATE "WebhookDelivery" SET "leaseUntil" = ?::timestamptz, "updatedAt" = ?
-      WHERE id IN (SELECT d.id FROM "WebhookDelivery" d JOIN "WebhookEndpoint" e ON e.id = d."endpointId" JOIN "EventOrganizer" o ON o.id = e."organizerId"
-        WHERE d.status IN ('pending', 'failed') AND d."nextAttemptAt" <= ? AND (d."leaseUntil" IS NULL OR d."leaseUntil" < ?)
-          AND e.status = 'active' AND e."verifiedAt" IS NOT NULL AND o.status = 'active'
-        ORDER BY d."nextAttemptAt" LIMIT ? FOR UPDATE OF d SKIP LOCKED)
-      RETURNING *`, [new Date(+stamp() + 60_000), stamp(), stamp(), stamp(), limit]);
+      WHERE id IN (SELECT d.id FROM "WebhookDelivery" d
+        WHERE d.id IN (SELECT id FROM (
+            SELECT d2.id, d2."nextAttemptAt", row_number() OVER (PARTITION BY substring(e.url from '^[A-Za-z]+://([^/\\?#]+)') ORDER BY d2."nextAttemptAt", d2.id) AS rn
+            FROM "WebhookDelivery" d2 JOIN "WebhookEndpoint" e ON e.id = d2."endpointId" JOIN "EventOrganizer" o ON o.id = e."organizerId"
+            WHERE d2.status IN ('pending', 'failed') AND d2."nextAttemptAt" <= ? AND (d2."leaseUntil" IS NULL OR d2."leaseUntil" < ?)
+              AND e.status = 'active' AND e."verifiedAt" IS NOT NULL AND o.status = 'active') x
+          WHERE rn <= ? ORDER BY "nextAttemptAt" LIMIT ?)
+        AND d.status IN ('pending', 'failed') AND (d."leaseUntil" IS NULL OR d."leaseUntil" < ?)
+        FOR UPDATE OF d SKIP LOCKED)
+      RETURNING *`, [new Date(+stamp() + 60_000), stamp(), stamp(), stamp(), perHost, limit, stamp()]);
     return rows.map(plain);
   }
+
+  const failureClass = (r) => {
+    const code = String(r.errorCode ?? r.outcome ?? '');
+    if (/timeout/i.test(code)) return 'timeout';
+    if (/dns|enotfound|resolve/i.test(code)) return 'dns';
+    if (/tls|ssl|cert/i.test(code)) return 'tls';
+    if (/block|ssrf|private|forbidden_host|url/i.test(code)) return 'blocked';
+    if (Number(r.responseCode) >= 500) return 'http_5xx';
+    if (Number(r.responseCode) >= 400) return 'http_4xx';
+    return 'other';
+  };
 
   async function deadLetter(d, e, o, { outcome, errorCode, trigger }) {
     await attemptRow(e, d.id, d.attemptCount + 1, trigger, { outcome, durationMs: 0, responseCode: null, snippet: null, errorCode });
@@ -512,6 +572,9 @@ export function createEventsWebhookService({
     await db('WebhookEndpoint').where({ id: e.id }).update({ consecutiveFailures: db.raw('"consecutiveFailures" + 1'), firstFailureAt: db.raw('COALESCE("firstFailureAt", ?::timestamptz)', [at]), updatedAt: at });
     if (gone) await autoDisable(e, 'endpoint_gone');
     else await maybeAutoDisable(e.id);
+    // S7 analytics: only the CLASS of the failure is counted, never the URL, host or endpoint id.
+    const klass = failureClass(r);
+    track(dead ? 'webhook_delivery_gave_up' : 'webhook_delivery_failed', { class: klass }, { eventId: o.eventId ?? null });
     return dead ? 'dead' : 'failed';
   }
 
@@ -546,8 +609,15 @@ export function createEventsWebhookService({
     if (!enabled()) return { skipped: 'no_key', claimed: 0, delivered: 0, failed: 0, dead: 0 };
     const t0 = +stamp();
     const stats = { claimed: 0, delivered: 0, failed: 0, dead: 0 };
+    // S7 (H1): a claim is capped per host, so a short claim no longer means "nothing left": keep claiming until nothing new comes back. A delivery
+    // that was already tried in this run (and is still due, e.g. its attempt threw) is handed back, never tried twice in one run.
+    const seen = new Set();
     for (;;) {
-      const claimed = await claimDue(cfg.batch());
+      const all = await claimDue(cfg.batch());
+      const stale = all.filter(d => seen.has(d.id));
+      if (stale.length) await db('WebhookDelivery').whereIn('id', stale.map(d => d.id)).update({ leaseUntil: null, updatedAt: stamp() });
+      const claimed = all.filter(d => !seen.has(d.id));
+      claimed.forEach(d => seen.add(d.id));
       stats.claimed += claimed.length;
       if (!claimed.length) break;
       const endpoints = new Map((await db('WebhookEndpoint').whereIn('id', [...new Set(claimed.map(d => d.endpointId))]).select('id', 'url')).map(e => [e.id, hostOf(e.url) ?? e.id]));
@@ -557,6 +627,12 @@ export function createEventsWebhookService({
         const queue = [...list];
         await Promise.all(Array.from({ length: Math.min(2, queue.length) }, async () => {
           while (queue.length) {
+            // H1: when the time budget of this run is spent the leases of what is left are given back at once, not after 60 seconds.
+            if (+stamp() - t0 > budgetMs) {
+              const left = queue.splice(0).map(x => x.id);
+              if (left.length) await db('WebhookDelivery').whereIn('id', left).update({ leaseUntil: null, updatedAt: stamp() }).catch(() => {});
+              break;
+            }
             const d = queue.shift();
             let outcome;
             try { outcome = await deliverOne(d); } catch (err) { console.warn('[events] webhook delivery error:', d.id, err?.message); await db('WebhookDelivery').where({ id: d.id }).update({ leaseUntil: null, updatedAt: stamp() }).catch(() => {}); outcome = 'failed'; }
@@ -565,7 +641,7 @@ export function createEventsWebhookService({
         }));
       });
       await runPool(hostTasks, 10);
-      if (claimed.length < cfg.batch() || +stamp() - t0 > budgetMs) break;
+      if (+stamp() - t0 > budgetMs) break;
     }
     const oldest = await db('WebhookDelivery').whereIn('status', ['pending', 'failed']).min({ m: 'createdAt' }).first();
     return { ...stats, oldestPendingAgeSeconds: oldest?.m ? Math.round((+stamp() - +new Date(oldest.m)) / 1000) : 0 };
@@ -576,14 +652,21 @@ export function createEventsWebhookService({
     const at = +stamp();
     const attempts = await db('WebhookDeliveryAttempt').where('startedAt', '<', new Date(at - 30 * DAY)).del();
     const deliveries = await db('WebhookDelivery').where('createdAt', '<', new Date(at - 90 * DAY)).whereIn('status', ['delivered', 'dead']).del();
-    const outbox = await db('OutboxEvent').whereNotNull('publishedAt').where('createdAt', '<', new Date(at - 90 * DAY)).del();
+    // S7 (H3, follow-up S5 L8): outbox rows older than the feed retention (90 days) go whether published or not, in batches of 5,000, so rows that
+    // never fanned out (no endpoint, webhooks off) cannot pile up. A feed cursor older than 90 days is already answered 410 cursor_expired.
+    let outbox = 0;
+    for (;;) {
+      const res = await db.raw(`DELETE FROM "OutboxEvent" WHERE id IN (SELECT id FROM "OutboxEvent" WHERE "createdAt" < ? ORDER BY "createdAt" LIMIT 5000)`, [new Date(at - 90 * DAY)]);
+      outbox += res.rowCount ?? 0;
+      if ((res.rowCount ?? 0) < 5000) break;
+    }
     const idempotency = await db('OrganizerIdempotency').where('expiresAt', '<', new Date(at)).del();
     return { attempts, deliveries, outbox, idempotency };
   }
 
   return {
     enabled, createEndpoint, listEndpoints, getEndpoint, updateEndpoint, verifyEndpoint, testSend, rotateSecret, disableEndpoint, enableEndpoint,
-    listDeliveries, getDelivery, retryDelivery, integrationsHealth, adminDisableAll, adminSummary, fanout, deliverDue, retention,
+    listDeliveries, getDelivery, retryDelivery, redeliver, integrationsHealth, adminDisableAll, adminSummary, fanout, deliverDue, retention,
     internals: { attempt, healthOf, maybeAutoDisable, deliverOne, claimDue },
   };
 }

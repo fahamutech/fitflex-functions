@@ -258,18 +258,22 @@ export function findDuplicatesInRequest(participants, categoryOf = p => p.catego
 
 // ── Consent texts (spec §3.11; drafts pending Tanzanian counsel) ─────────────
 
+// S7 (D79, follow-up S5): PROPOSED DRAFT, wording for counsel (docs/marathon/s7-contract.md). The S3 text said FitFlex shares contact details and the
+// date of birth with the organizer, which the product does not do (D36, D37: the organizer sees a name, category, ticket type, bib, kit size and
+// kit status, never phone, email, date of birth, gender or emergency contact), and it left out the kit status and the bib number the organizer
+// really receives. Version 2026-11-draft. TODO(sw-review): every Swahili sentence needs native review.
 const CONSENT = Object.freeze({
   self: {
-    en: 'I agree to the event terms and refund policy and to FitFlex sharing my registration details (name, contact, date of birth, kit size) with the organizer for this event.',
-    sw: 'Nakubali masharti ya tukio na sera ya marejesho, na FitFlex kushirikisha taarifa zangu za usajili (jina, mawasiliano, tarehe ya kuzaliwa, saizi ya vifaa vya mbio) na mwandaaji wa tukio hili.',
+    en: 'I agree to the event terms and refund policy. FitFlex shares my name, race category, ticket type, bib number, kit size and kit collection status with the organizer to run this event. My phone number, email, date of birth, gender and emergency contact are kept by FitFlex and are not shared with the organizer.',
+    sw: 'Nakubali masharti ya tukio na sera ya marejesho. FitFlex inashirikisha jina langu, aina ya mbio, aina ya tiketi, namba ya mbio, saizi ya vifaa vya mbio na hali ya kuchukua vifaa vya mbio na mwandaaji ili kuendesha tukio hili. Namba yangu ya simu, barua pepe, tarehe ya kuzaliwa, jinsia na mtu wa dharura vinabaki FitFlex na havishirikishwi na mwandaaji.',
   },
   purchaser_authorised: {
-    en: 'I confirm I have each listed person\'s permission to register them and to share their details with FitFlex and the organizer. They will be invited to claim their place.',
-    sw: 'Nathibitisha nina ruhusa ya kila mtu aliyeorodheshwa kumsajili na kushirikisha taarifa zake na FitFlex na mwandaaji. Wataalikwa kuchukua tiketi yao.',
+    en: 'I confirm I have each listed person\'s permission to register them. FitFlex shares their name, race category, ticket type, bib number, kit size and kit collection status with the organizer; their phone number, email, date of birth, gender and emergency contact are kept by FitFlex. They will be invited to claim their place.',
+    sw: 'Nathibitisha nina ruhusa ya kila mtu aliyeorodheshwa kumsajili. FitFlex inashirikisha jina lake, aina ya mbio, aina ya tiketi, namba ya mbio, saizi ya vifaa vya mbio na hali ya kuchukua vifaa vya mbio na mwandaaji; namba ya simu, barua pepe, tarehe ya kuzaliwa, jinsia na mtu wa dharura vinabaki FitFlex. Wataalikwa kuchukua tiketi yao.',
   },
   organisation: {
-    en: 'We confirm our organisation has each listed person\'s permission to register them for this event and to share their details with FitFlex and the organizer.',
-    sw: 'Tunathibitisha shirika letu lina ruhusa ya kila mtu aliyeorodheshwa kumsajili kwenye tukio hili na kushirikisha taarifa zake na FitFlex na mwandaaji.',
+    en: 'We confirm our organisation has each listed person\'s permission to register them for this event. FitFlex shares their name, race category, ticket type, bib number, kit size and kit collection status with the organizer; their phone number, email, date of birth, gender and emergency contact are kept by FitFlex.',
+    sw: 'Tunathibitisha shirika letu lina ruhusa ya kila mtu aliyeorodheshwa kumsajili kwenye tukio hili. FitFlex inashirikisha jina lake, aina ya mbio, aina ya tiketi, namba ya mbio, saizi ya vifaa vya mbio na hali ya kuchukua vifaa vya mbio na mwandaaji; namba ya simu, barua pepe, tarehe ya kuzaliwa, jinsia na mtu wa dharura vinabaki FitFlex.',
   },
 });
 
