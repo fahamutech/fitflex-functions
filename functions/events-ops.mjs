@@ -8,8 +8,8 @@ import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { requireActiveOrganizer, requireOpenOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { requireEventsKitOps } from '../src/shared/feature-flags.mjs';
-import { eventsOpsService as ops, eventsSyncService as sync } from '../src/bootstrap/services.mjs';
+import { requireEventsKitOps, eventsKitOfflineOn } from '../src/shared/feature-flags.mjs';
+import { eventsOpsService as ops, eventsSyncService as sync, eventsKitOfflineService as offlineKit } from '../src/bootstrap/services.mjs';
 import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 import { createCounterWindow } from '../src/shared/events-rate-limits.mjs';
 
@@ -104,9 +104,14 @@ export const organizerKitHistory = {
 
 export const organizerKitSummary = {
   created, method: 'get', path: `${base}/kit/summary`,
-  description: 'Organizer owner / admin / ops (EVENTS_KIT_OPS): the desk progress header → { confirmed, collected, remaining, exceptions, byCategory [{ categoryId, name, confirmed, collected }], byCollectionPoint [{ collectionPointId, name, collected }] }.',
+  description: 'Organizer owner / admin / ops (EVENTS_KIT_OPS): the desk progress header → { confirmed, collected, remaining, exceptions, byCategory [{ categoryId, name, confirmed, collected }], byCollectionPoint [{ collectionPointId, name, collected }], offline? { desks, pendingReported, needsReview } (S7, only with EVENTS_KIT_OFFLINE) }.',
   onGuard: readers('get', 'owner', 'admin', 'ops'),
-  onRequest: stamped(async (req, res) => send(res, await ops.kitSummary({ organizerId: organizerOf(req).organizer.id, eventId: req.params.id }))),
+  onRequest: stamped(async (req, res) => {
+    const out = await ops.kitSummary({ organizerId: organizerOf(req).organizer.id, eventId: req.params.id });
+    // S7 (additive): the offline desk block, only while EVENTS_KIT_OFFLINE is on (S5 answers are byte-identical otherwise).
+    if (!out.error && eventsKitOfflineOn()) out.offline = await offlineKit.summaryBlock(req.params.id).catch(() => null) ?? undefined;
+    return send(res, out);
+  }),
 };
 
 export const organizerKitLookup = {

@@ -846,6 +846,6 @@ export function createEventsOpsService({ db, eventStore, ticketRing = () => null
   return {
     verifyTicket, collectKit, correctKit, kitHistory, kitSummary, assignBib, assignBibBatch, releaseBib, listBibs,
     bulkPreview, bulkApply, importPreview, importApply, lookup,
-    internals: { idempotent, cardContext, cardOf, eventOf, audit, canOverride, canCollect, canAssign },
+    internals: { idempotent, cardContext, cardOf, eventOf, audit, outbox, analytics, notice, noticeKit, noticeBib, warningsOf, canOverride, canCollect, canAssign, stamp, newId },
   };
 }

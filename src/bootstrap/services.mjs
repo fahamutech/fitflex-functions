@@ -192,6 +192,8 @@ import { webhookKeyRing } from '../shared/webhook-signing.mjs';
 import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
 import { eventsKitOfflineOn, eventsWaitlistOn, eventsAnalyticsOn } from '../shared/feature-flags.mjs';
 import { createEventsAnalyticsService } from '../services/events-analytics-service.mjs';
+import { createEventsKitOfflineService } from '../services/events-kit-offline-service.mjs';
+import { eventsOfflineSessionHours, eventsOfflineMaxDevices, eventsOfflineMaxPerUser, eventsOfflineMaxRows, eventsOfflineSyncBatch, eventsOfflineMaxPending, eventsOfflineClockToleranceSeconds, eventsOfflineMinDeskBuild, eventsOfflineScanKeepDays, eventsOfflineMaxBibRange } from '../shared/events-config.mjs';
 import { setApiErrorSink } from '../shared/events-api-error.mjs';
 import { eventsAnalyticsKeepDays, eventsAlertRules, eventsManualConfirmSlaHours, eventsRetentionMonths } from '../shared/events-config.mjs';
 import {
@@ -1357,7 +1359,7 @@ export const eventsDiscoveryService = createEventsDiscoveryService({
   catalogue: eventCatalogueStore, closingSoonHours: eventsClosingSoonHours,
   flags: { module: eventsModuleOn, favourites: eventsFavouritesOn, registration: eventsRegistrationOn },
   // S5: the ops switches the apps and the portal read (webhooks is false without EVENTS_WEBHOOK_SECRET_KEY: fail closed).
-  opsOptions: () => ({ kit: eventsKitOpsOn(), api: eventsOrganizerApiOn(), webhooks: eventsWebhooksOn() && Boolean(webhookKeyRing()) }),
+  opsOptions: () => ({ kit: eventsKitOpsOn(), api: eventsOrganizerApiOn(), webhooks: eventsWebhooksOn() && Boolean(webhookKeyRing()), kitOffline: eventsKitOfflineOn() && Boolean(eventTicketKeyRing()) }),
   // S3 (spec §3.1): the registration keys of the probe. payment is 'none' in S3 (S4 derives manual / provider).
   registrationOptions: () => ({
     holdTtlMinutes: eventStore.holdTtlMinutes(), maxParticipantsPerOrder: eventsMaxParticipantsPerOrder(), teams: true, corporate: true,
@@ -1560,6 +1562,27 @@ export const eventsAnalyticsService = createEventsAnalyticsService({
   manualConfirmHours: eventsManualConfirmSlaHours, refundTargetDays: eventsRefundTargetDays,
 });
 setApiErrorSink((group, cls) => eventsAnalyticsService.track('api_error', { group, class: cls }));
+// S7 · B1: the offline kit desk (docs/design/events-s7-hardening-and-pilot.md §3). RULE 6 AREA. Dormant behind EVENTS_KIT_OFFLINE (needs EVENTS_KIT_OPS).
+export const eventsKitOfflineService = createEventsKitOfflineService({
+  db, ops: eventsOpsService, ticketRing: eventTicketKeyRing, feedLagSeconds: eventsFeedLagSeconds, localeOf: eventsLocaleOf,
+  track: (name, props, opts) => eventsAnalyticsService.track(name, props, opts),
+  notice: (userId, message) => eventsOpsService.internals.notice(userId, message),
+  notifyTeam: (organizerId, message) => notifyOrganizerTeam(organizerId, message),
+  config: {
+    sessionHours: eventsOfflineSessionHours, maxDevices: eventsOfflineMaxDevices, maxPerUser: eventsOfflineMaxPerUser, maxRows: eventsOfflineMaxRows, syncBatch: eventsOfflineSyncBatch,
+    maxPending: eventsOfflineMaxPending, clockToleranceSeconds: eventsOfflineClockToleranceSeconds, minDeskBuild: eventsOfflineMinDeskBuild, scanKeepDays: eventsOfflineScanKeepDays, maxBibRange: eventsOfflineMaxBibRange,
+  },
+});
+opsService.register({
+  name: 'event-kit-offline-purge', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event offline desk purge', schedule: { type: 'daily', utc: '23:30' }, quiet: true,
+  description: 'Events (S7): marks offline desks past their expiry as expired, removes desks of staff who left the organizer, and deletes offline scan records older than EVENTS_OFFLINE_SCAN_KEEP_DAYS (scans still waiting for review are kept). Does nothing unless EVENTS_KIT_OFFLINE is on.',
+  run: async () => {
+    if (!eventsKitOfflineOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsKitOfflineService.purge();
+    const processed = r.expired + r.revoked + r.scans + r.devices;
+    return { processed, succeeded: processed, failed: 0, ...r };
+  },
+});
 opsService.register({
   name: 'event-analytics-rollup', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event analytics roll-up', schedule: { type: 'every', minutes: 60 }, quiet: true,
   description: 'Events (S7): sums the existing `analytics.%` audit rows into daily counters (cursor, exactly once) and deletes counters older than EVENTS_ANALYTICS_KEEP_DAYS. Does nothing unless EVENTS_ANALYTICS is on.',

@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn } from '../src/shared/feature-flags.mjs';
+import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -378,5 +378,16 @@ export const eventHealthAlert = {
     const r = await opsService.runJob('event-health-alert');
     const s = r?.stats ?? {};
     if (s.firing) console.log(`[events] health alerts: firing=${s.firing} sent=${s.sent} skipped=${s.skipped}`);
+  }
+};
+
+export const eventKitOfflinePurge = {
+  created, rule: '30 23 * * *', // every day 23:30 UTC
+  description: 'Events (S7): mark offline desks past their expiry as expired, remove desks of staff who left the organizer, delete offline scan records older than EVENTS_OFFLINE_SCAN_KEEP_DAYS. Does nothing unless EVENTS_KIT_OFFLINE is on. Idempotent. The work is in src/bootstrap/services.mjs (event-kit-offline-purge).',
+  onJob: async () => {
+    if (!eventsKitOfflineOn()) return;
+    const r = await opsService.runJob('event-kit-offline-purge');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] offline purge: expired=${s.expired} revoked=${s.revoked} scans=${s.scans} devices=${s.devices}`);
   }
 };
