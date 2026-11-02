@@ -20,9 +20,10 @@ function res() {
     json(b) { this.body = b; return this; },
   };
 }
+const runOctet = Math.floor(Math.random() * 200) + 20; // per run: AuthAttempt rows outlive the run
 let addressCounter = 0;
 /** Each test signs in from its own address unless it says otherwise. */
-const freshAddress = () => `10.7.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
+const freshAddress = () => `10.${runOctet}.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
 async function post(route, body, ip = freshAddress()) {
   const out = res();
   await route.onRequest({ body, headers: { 'x-forwarded-for': ip } }, out);

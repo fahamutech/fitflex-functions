@@ -19,8 +19,9 @@ function res() {
     json(b) { this.body = b; return this; },
   };
 }
+const runOctet = Math.floor(Math.random() * 200) + 20; // per run: AuthAttempt rows outlive the run
 let addressCounter = 0;
-const freshAddress = () => `10.9.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
+const freshAddress = () => `10.${runOctet}.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
 async function post(route, body, ip = freshAddress()) {
   const out = res();
   await route.onRequest({ body, headers: { 'x-forwarded-for': ip } }, out);
@@ -174,7 +175,7 @@ test('forgot PIN gives the same answer for a number nobody uses, and sends nothi
 
 test('forgot PIN requests are limited per network address', async () => {
   await on(async () => {
-    const ip = '203.0.113.91';
+    const ip = `198.18.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`; // AuthAttempt outlives the run
     for (let i = 0; i < 2; i += 1) assert.equal((await post(pinResetStart, { phone: localPhone() }, ip)).statusCode, 200);
     const limited = await post(pinResetStart, { phone: localPhone() }, ip);
     assert.deepEqual([limited.statusCode, limited.body.error], [429, 'too_many_attempts']);
