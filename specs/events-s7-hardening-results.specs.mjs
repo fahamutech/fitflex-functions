@@ -98,9 +98,29 @@ test('H10: the admin dispute list: open by default, adminMayResolve after 7 days
   assert.equal(inactive.items.find(i => i.id === d.dispute.id).adminMayResolve, true);
   assert.ok(inactive.counts.organizerInactive >= 1);
   await db('EventOrganizer').where({ id: o.id }).update({ status: 'active', statusReason: null });
+  // (c) the next page works (the cursor uses createdAt)
+  const d2 = await svc.raiseDispute({ userId: f.regs[1].userId, registrationId: f.regs[1].id, body: { reasonCode: 'time_wrong', note: 'Second question' } });
+  assert.equal(d2.status, 201, JSON.stringify(d2));
+  const p1 = (await list({ limit: '1' })).body;
+  assert.equal(p1.items.length, 1);
+  assert.ok(p1.nextCursor, 'a second page exists');
+  const p2 = (await list({ limit: '1', cursor: p1.nextCursor })).body;
+  assert.equal(p2.items.length, 1);
+  assert.notEqual(p2.items[0].id, p1.items[0].id);
+  assert.equal((await list({ cursor: 'not-a-cursor' })).status, 400);
   assert.equal((await list({ olderThanDays: 'abc' })).status, 422);
   assert.equal((await list({}, { sub: admin.sub, userType: 'admin', portalUser: true, aclPermissions: ['users'] })).status, 403);
   assert.deepEqual((await list({ status: 'upheld' })).body.items.filter(i => i.id === d.dispute.id), []);
+});
+
+test('(e) the results summary says what an organizer SAVED per race, so "unset" is told from the default net', async () => {
+  const { f, a } = await setup({ n: 1 });
+  const before = await svc.summary({ actor: a.owner, organizerId: f.organizer.id, eventId: f.event.id });
+  assert.deepEqual(before.perCategory[0].rulesOverride, { timeBasis: null, cutoffMinutes: null, virtualDistanceToleranceBps: null });
+  assert.equal(before.perCategory[0].rules.timeBasis, 'net');
+  await svc.updateSettings({ ...ctx(f, a.owner), key: h.key(), body: { categories: [{ id: f.categories[0].id, timeBasis: 'gun', cutoffMinutes: 90 }] } });
+  const after = await svc.summary({ actor: a.owner, organizerId: f.organizer.id, eventId: f.event.id });
+  assert.deepEqual(after.perCategory.find(c => c.categoryId === f.categories[0].id).rulesOverride, { timeBasis: 'gun', cutoffMinutes: 90, virtualDistanceToleranceBps: null });
 });
 
 test('H11: recent redemptions for the reward desk: a masked person, the reward, the code STATE and times; never a code, a hash or a user id', async () => {

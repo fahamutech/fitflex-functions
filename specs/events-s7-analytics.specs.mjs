@@ -70,6 +70,20 @@ test('the allowlist: unknown names and keys are dropped, values outside a closed
   assert.deepEqual(cols.sort(), ['count', 'day', 'dims', 'dimsKey', 'eventId', 'id', 'name', 'updatedAt']);
 });
 
+test('(b) the cancel screens do not need an event id: accepted without one, counted with a valid one, an unknown one is dropped to none', async () => {
+  s7On({ analytics: true });
+  const f = await h.kitEvent({ n: 0 });
+  const out = await post(await member(), [
+    { name: 'cancel_preview_viewed', props: { scope: 'order' } },
+    { name: 'cancel_confirmed', props: { scope: 'place', mode: 'policy', eventId: f.event.id } },
+    { name: 'cancel_confirmed', props: { scope: 'place', mode: 'full', eventId: 'evt_unknown1' } },
+  ]);
+  assert.deepEqual(out.body, { accepted: 3, dropped: 0 });
+  assert.equal(await total('cancel_preview_viewed'), 1);
+  assert.equal(await total('cancel_confirmed'), 2);
+  assert.equal(await total('cancel_confirmed', f.event.id), 1);
+});
+
 test('the same counter is incremented, not duplicated; the day is the Dar es Salaam day', async () => {
   s7On({ analytics: true });
   const claims = await member();

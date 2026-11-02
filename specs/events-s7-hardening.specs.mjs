@@ -314,6 +314,9 @@ test('consent text draft: states what the organizer really receives (name, categ
     assert.match(text[basis].en, /not shared with the organizer|kept by FitFlex/);
     assert.ok(!/share[sd]? my registration details \(name, contact, date of birth/.test(text[basis].en));
     assert.match(text[basis].sw, /namba ya mbio/);
+    assert.match(text[basis].sw, /vinabaki kwa FitFlex/);
+    assert.match(text[basis].sw, /inamshirikisha mwandaaji/);
+    assert.match(text[basis].en, /demographic access/);
     assert.match(text[basis].sw, /vifaa vya mbio/);
   }
   assert.equal(text.versionLabel, '2026-11');

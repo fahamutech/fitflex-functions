@@ -780,7 +780,7 @@ test('Swahili: order notice uses the 12-hour clock and one/other plurals; fallba
   assert.ok(!/Someone|An organisation/.test(claimNotice.data.bodySw));
   // consent wording and the label without the draft suffix
   const q = await call(quoteEventOrder, c.claims, { body: { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], participants: [self(f.ticket.id, c)] } });
-  assert.match(q.body.consentText.self.sw, /inashirikisha jina langu/);   // S7 draft text (2026-11-draft)
+  assert.match(q.body.consentText.self.sw, /inamshirikisha mwandaaji jina langu/);   // S7 draft text (2026-11-draft)
   assert.equal(q.body.consentText.version, '2026-11-draft');
   assert.equal(q.body.consentText.versionLabel, '2026-11');
 });

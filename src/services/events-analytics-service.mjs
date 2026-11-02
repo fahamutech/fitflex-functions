@@ -11,7 +11,7 @@
 // Privacy (spec §5.2): a counter is (day, name, eventId | none, closed dimensions) -> count. No user, registration, order, session or
 // device id, no IP, no free text. Unknown names and keys are dropped; values outside a closed set become 'other'.
 import { randomUUID } from 'node:crypto';
-import { shapeEvent, dimsKeyOf, darDay, counterFromAudit, APP_EVENT_NAMES } from '../shared/events-analytics-rules.mjs';
+import { shapeEvent, dimsKeyOf, darDay, counterFromAudit, APP_EVENT_NAMES, ANALYTICS_EVENTS } from '../shared/events-analytics-rules.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const num = v => Number(v) || 0;
@@ -92,7 +92,11 @@ export function createEventsAnalyticsService({
     const known = new Set(ids.length ? (await db('Event').whereIn('id', ids).whereIn('status', ['published', 'registration_closed', 'in_progress', 'completed', 'cancelled']).select('id')).map(r => r.id) : []);
     const day = darDay(stamp());
     for (const s of shapedAll) {
-      if (s.eventId && !known.has(s.eventId)) { dropped += 1; continue; }
+      if (s.eventId && !known.has(s.eventId)) {
+        // A name that REQUIRES an event is dropped; one that only accepts it (cancel screens) is counted without it.
+        if (ANALYTICS_EVENTS[s.name]?.event) { dropped += 1; continue; }
+        s.eventId = null;
+      }
       try { await upsertCounter(db, { day, ...s }); accepted += 1; } catch { dropped += 1; }
     }
     return { status: 202, accepted, dropped };

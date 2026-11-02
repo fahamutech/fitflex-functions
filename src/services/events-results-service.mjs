@@ -41,6 +41,16 @@ const STAFF_READ = ['owner', 'admin', 'timing'];
 const STAFF_DECIDE = ['owner', 'admin'];
 const PENDING = 'pending_verification';
 
+/** The values an organizer SAVED for a race, null where nothing was saved (so the portal can tell "unset" from the default net). */
+const overridesOf = (category) => {
+  const r = category?.resultRules && typeof category.resultRules === 'object' ? category.resultRules : {};
+  return {
+    timeBasis: r.timeBasis === 'gun' || r.timeBasis === 'net' ? r.timeBasis : null,
+    cutoffMinutes: Number.isInteger(r.cutoffMinutes) ? r.cutoffMinutes : null,
+    virtualDistanceToleranceBps: Number.isInteger(r.virtualDistanceToleranceBps) ? r.virtualDistanceToleranceBps : null,
+  };
+};
+
 export function createEventsResultsService({
   db, eventStore, notice = async () => {}, localeOf = async () => null, now = () => new Date(),
   importMaxRows = () => 5000, disputeDefaultHours = () => 168, pushMax = () => 500, clauseVersions = () => [], awardsOn = () => true, rewardsOn = () => false,
@@ -217,7 +227,7 @@ export function createEventsResultsService({
         confirmed: Number(k.confirmed ?? 0), finished: Number(k.finished ?? 0), dnf: Number(k.dnf ?? 0), dns: Number(k.dns ?? 0), dq: Number(k.dq ?? 0),
         pending: Number(k.pending ?? 0), rejected: Number(k.rejected ?? 0), noResult: Number(k.noResult ?? 0), flagged: flaggedBy.get(c.id) ?? 0,
         release: { stage: byCategory.get(c.id) ?? 'none', releasedAt: rel?.releasedAt ?? null, releasedBy: rel?.releasedBy ? { name: names.get(rel.releasedBy) ?? null } : null },
-        disputesOpen: disputesBy.get(c.id) ?? 0, rules: rulesOf(c),
+        disputesOpen: disputesBy.get(c.id) ?? 0, rules: rulesOf(c), rulesOverride: overridesOf(c),
       };
     });
     const importsCount = Number((await db('EventResultImport').where({ eventId: event.id }).count({ n: '*' }).first()).n);
@@ -915,7 +925,7 @@ export function createEventsResultsService({
     const open = await db('EventResultDispute as d').join('EventRegistration as r', 'r.id', 'd.registrationId').join('Event as e', 'e.id', 'r.eventId').join('EventOrganizer as o', 'o.id', 'e.organizerId').where('d.status', 'open')
       .select(db.raw('count(*)::int as total'), db.raw(`count(*) filter (where d."createdAt" < ?)::int as stale`, [new Date(at - 7 * DAY)]), db.raw(`count(*) filter (where o.status <> 'active')::int as inactive`)).first();
     const last = page[page.length - 1];
-    return { items, nextCursor: rows.length > limit && last ? encodeCursor({ t: +new Date(last.openedAt), i: last.id }) : null, counts: { open: open.total, olderThan7Days: open.stale, organizerInactive: open.inactive } };
+    return { items, nextCursor: rows.length > limit && last ? encodeCursor({ t: +new Date(last.createdAt), i: last.id }) : null, counts: { open: open.total, olderThan7Days: open.stale, organizerInactive: open.inactive } };
   }
 
   async function afterCorrection(out, ctx, actor) {

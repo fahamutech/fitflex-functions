@@ -45,8 +45,9 @@ export const ANALYTICS_EVENTS = Object.freeze({
   ticket_opened: app({}, { event: true }),
   ticket_rotated: app({}, { event: true }),
   invitation_resent: app({}, { event: true }),
-  cancel_preview_viewed: app({ scope: SCOPE }, { event: true }),
-  cancel_confirmed: app({ scope: SCOPE, mode: CANCEL_MODE }, { event: true }),
+  // The cancel screens are opened from a ticket or an order, where the app may not carry an event id: it is optional here, counted when valid.
+  cancel_preview_viewed: app({ scope: SCOPE }, { event: false }),
+  cancel_confirmed: app({ scope: SCOPE, mode: CANCEL_MODE }, { event: false }),
   run_started: app({ platform }, { event: true }),
   waitlist_cta_viewed: app({}, { event: true }),
   waitlist_join_started: app({}, { event: true }),
@@ -133,8 +134,9 @@ export function shapeEvent(input, { from = 'server' } = {}) {
     const raw = input.eventId ?? props.eventId;
     if (typeof raw !== 'string' || !EVENT_ID_RE.test(raw)) return null;
     eventId = raw;
-  } else if (typeof input.eventId === 'string' && EVENT_ID_RE.test(input.eventId)) {
-    eventId = input.eventId;
+  } else {
+    const raw = input.eventId ?? props.eventId;
+    if (typeof raw === 'string' && EVENT_ID_RE.test(raw)) eventId = raw;
   }
   const n = Number.isInteger(input.n) && input.n >= 1 ? Math.min(input.n, MAX_INCREMENT) : 1;
   return { name, eventId, dims, n };
