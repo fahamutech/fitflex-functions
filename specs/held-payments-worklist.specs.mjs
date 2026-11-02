@@ -60,13 +60,14 @@ test('a payment that arrived for a closed request appears on the open worklist, 
   assert.deepEqual({ ...row, at: undefined }, {
     paymentRequestId: 'pr_closed', transactionId: 'TX1', amountTzs: 50000, memberId: 'm1', reason: 'request_closed', at: undefined,
     refundId: null, requestStatus: 'cancelled', productType: 'FITFLEX_PASS', refundStatus: null,
-    refundable: true, notRefundableReason: null, amountReceivedKnown: true,
+    refundable: true, notRefundableReason: null, amountReceivedKnown: true, requestAmountTzs: 50000,
   });
   assert.equal(row.at, '2026-11-01T10:00:00.000Z');
   const other = items.find(i => i.paymentRequestId === 'pr_rejected');
   assert.equal(other.reason, 'reference_already_used');
   assert.equal(other.amountTzs, null); // the audit row does not say what was received: never guessed from the request
   assert.equal(other.amountReceivedKnown, false);
+  assert.equal(other.requestAmountTzs, 30000); // request amount, so the portal can show the maximum refundable
   assert.equal(other.refundable, false); // informational only
   assert.equal(other.notRefundableReason, 'reference_already_used');
   assert.deepEqual((await f.held.list({ status: 'resolved' })).items, []);
