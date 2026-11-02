@@ -192,6 +192,26 @@ export function heldPaymentsWorklistOn() {
 }
 
 /**
+ * Phase 1 slice A · split refund scopes. Off unless REFUND_SPLIT_SCOPES is set: refund decisions and
+ * paying (POST /admin/refunds/:id/decision, /paid, /batch-decision, /batch-paid) stay open to staff
+ * holding `payments`, exactly as before. On, deciding needs `refunds_approve` and paying needs
+ * `refunds_pay`; listing and raising stay on `payments`. Super-admins are unaffected. Grant the new
+ * scopes to existing staff BEFORE turning it on: a `payments`-only user loses approve and pay.
+ */
+export function refundSplitScopesOn() {
+  return on('REFUND_SPLIT_SCOPES');
+}
+
+/**
+ * Phase 1 slice A · F2. Off unless STATEMENT_PAY_SECOND_PERSON is set. On, the admin who approved a gym,
+ * trainer or vendor payout statement cannot mark it paid (403 cannot_pay_own_approval). Independent
+ * of MONEY_SECOND_APPROVER.
+ */
+export function statementPaySecondPersonOn() {
+  return on('STATEMENT_PAY_SECOND_PERSON');
+}
+
+/**
  * Vendor business tools (plan docs/plans/vendor-business-tools-plan.md).
  * VENDOR_TOOLS is the umbrella: a slice flag is on only when both it and
  * VENDOR_TOOLS are on. Everything is off unless set. Writes that are pure
