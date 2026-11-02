@@ -83,6 +83,7 @@ test('join: 201 with the position; the second member is second; the detail shows
   const mine = await call(listMyEventWaitlist, a.claims, {});
   assert.equal(mine.body.items.length, 1);
   assert.deepEqual([mine.body.items[0].status, mine.body.items[0].position, mine.body.items[0].eventTitle], ['waiting', 1, 'Dar Half Marathon']);
+  assert.deepEqual([mine.body.items[0].ticketTypeId, mine.body.items[0].priceTzs, mine.body.items[0].currency, mine.body.items[0].utcOffsetMinutes, mine.body.items[0].timezoneAbbr], [f.ticket.id, 20000, 'TZS', 180, 'EAT']);
   assert.ok(mine.body.serverTime);
   assert.ok(!JSON.stringify(mine.body).includes('queueLength'));
   const note = await eventually(() => db('Notification').where({ userId: a.id, type: 'event_waitlist_joined' }));
@@ -334,26 +335,69 @@ test('ineligible head of line: an inactive account ends its entry and the next p
   assert.equal((await entryOf(ec)).status, 'waiting');
 });
 
-test('a transient failure never moves an entry behind the others; after three skips it ends', async () => {
+test('M3: a member\'s own limit (an unpaid order elsewhere) DEFERS the entry: it keeps its place, is not counted toward the skips, is told once, and gets the next place when the limit lifts', async () => {
   s7On({ waitlist: true });
   const f = await soldOutEvent();
   const a = await member(); const b = await member();
   const ea = (await join(f, a)).body.entry.id; const eb = (await join(f, b)).body.entry.id;
-  // a holds an unpaid order in another event: its first place leaves room only up to the cap, so a second order is a transient unpaid_places_limit skip
   const other = await h.kitEvent({ n: 0, categories: [{ name: '5K', distanceMeters: 5000, tickets: [{ name: 'Fun', priceTzs: 10000, capacity: 50, maxPerOrder: 10 }] }] });
   process.env.EVENTS_MAX_UNPAID_PLACES_PER_USER = '1';
   const held = await call(createEventOrder, a.claims, { headers: { 'Idempotency-Key': `buy_${uid('').slice(1)}` }, body: { eventId: other.event.id, lines: [{ ticketTypeId: other.ticket.id, quantity: 1 }], participants: [{ ticketTypeId: other.ticket.id, ...self(a) }], acceptedTerms: true, consentTextVersion: eventsConsentTextVersion(), expectedTotalTzs: 10000 } });
   assert.equal(held.status, 201, JSON.stringify(held.body));
-  await free(f, 2);
-  await eventsWaitlistService.promote();
-  assert.equal((await entryOf(ea)).status, 'waiting');
-  assert.equal((await entryOf(ea)).skipCount, 1);
+  await free(f, 3);
+  for (let i = 0; i < 4; i += 1) await eventsWaitlistService.promote();
+  const row = await entryOf(ea);
+  assert.deepEqual([row.status, row.skipCount], ['waiting', 0], 'four runs later it is still waiting and never counted as a skip');
   assert.equal((await entryOf(eb)).status, 'offered', 'the next person gets the place; a keeps its seq');
-  await free(f); await eventsWaitlistService.promote();
-  assert.equal((await entryOf(ea)).skipCount, 2);
-  await free(f); await eventsWaitlistService.promote();
-  assert.equal((await entryOf(ea)).status, 'closed');
-  assert.equal((await entryOf(ea)).endedReason, 'not_eligible');
+  const notes = await eventually(() => db('Notification').where({ userId: a.id, type: 'event_waitlist_deferred' }));
+  assert.equal(notes.length, 1, 'told exactly once');
+  assert.match(notes[0].data.bodySw, /Namba yako kwenye orodha inabaki/);
+  // the limit lifts: pay or cancel the other order
+  await db('EventOrder').where({ purchaserUserId: a.id }).update({ status: 'cancelled', closedAt: new Date(), closeReason: 'cancelled' });
+  await db('EventRegistration').where({ purchaserUserId: a.id }).update({ status: 'cancelled', cancelledAt: new Date() });
+  await eventsWaitlistService.promote();
+  assert.equal((await entryOf(ea)).status, 'offered');
+  assert.equal(await db('EventWaitlistEntry').where({ id: ea, skipCount: 0 }).count().then(r => Number(r[0].count)), 1);
+  // a failure that is not the member's limit still counts: three of them end the entry
+  const c = await member();
+  const ec = (await join(f, c)).body.entry.id;
+  await db('EventWaitlistEntry').where({ id: ec }).update({ skipCount: 2 });
+  await free(f);
+  const real = eventsWaitlistService.internals.classify;
+  assert.equal(real({ error: 'hold_limit_reached' }).act, 'defer');
+  assert.equal(real({ error: 'unpaid_places_limit' }).act, 'defer');
+  assert.equal(real({ error: 'something_else' }).act, 'skip');
+  assert.equal(real({ error: 'event_not_open' }).act, 'stop_type', 'a pause is not a close');
+  assert.equal(real({ error: 'registration_closed' }).act, 'close_all');
+});
+
+test('M4: a pause by FitFlex or a ticket type switched off leaves the line waiting and stops promotion; only a cancelled event or a passed close time ends it; resume restores', async () => {
+  s7On({ waitlist: true });
+  const f = await soldOutEvent();
+  const a = await member();
+  const e = (await join(f, a)).body.entry.id;
+  await free(f);
+  await db('Event').where({ id: f.event.id }).update({ status: 'registration_closed' });   // an admin pause: the close time is still in the future
+  await eventsWaitlistService.promote();   // other tests' entries may be in the table: judge this line by its own rows
+  assert.equal((await entryOf(e)).status, 'waiting');
+  await db('Event').where({ id: f.event.id }).update({ status: 'published' });
+  await db('EventTicketType').where({ id: f.ticket.id }).update({ status: 'inactive' });   // an organizer switched the ticket off for now
+  await eventsWaitlistService.promote();
+  assert.equal((await entryOf(e)).status, 'waiting');
+  await db('EventTicketType').where({ id: f.ticket.id }).update({ status: 'active' });
+  await db('EventCategory').where({ id: f.categories[0].id }).update({ status: 'inactive' });
+  await eventsWaitlistService.promote();
+  assert.equal((await entryOf(e)).status, 'waiting');
+  await db('EventCategory').where({ id: f.categories[0].id }).update({ status: 'active' });
+  await eventsWaitlistService.promote();
+  assert.equal((await entryOf(e)).status, 'offered', 'resumed: the first in line is offered');
+  // terminal reasons still end it
+  const g = await soldOutEvent();
+  const b = await member();
+  const eb = (await join(g, b)).body.entry.id;
+  await db('Event').where({ id: g.event.id }).update({ status: 'in_progress' });
+  await eventsWaitlistService.promote();
+  assert.deepEqual([(await entryOf(eb)).status, (await entryOf(eb)).endedReason], ['closed', 'sale_closed']);
 });
 
 test('quiet hours hold the offers back; "off" releases them; too little time before registration closes means no offer', async () => {

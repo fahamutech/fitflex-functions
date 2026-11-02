@@ -14,6 +14,7 @@ import { storeRefusal } from '../infra/event-store-pg.mjs';
 import { localHourMinuteIn, localTimeIn } from '../shared/events-participants.mjs';
 import { swahiliTime } from '../shared/vendor-documents.mjs';
 import { cardName, encodeCursor, decodeCursor, parseLimit } from '../shared/events-ops-rules.mjs';
+import { tzInfo } from '../shared/events-document.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const plain = row => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v === 'bigint' ? Number(v) : v))) : null);
@@ -24,7 +25,12 @@ const HOUR = 3_600_000;
 const LIVE = ['waiting', 'offered'];
 const MAX_PER_RUN = 10;
 const MAX_SKIPS = 3;
-const SALE_CLOSED_ERRORS = new Set(['registration_closed', 'sale_closed', 'event_not_open', 'ticket_type_inactive', 'category_inactive']);
+// M4: only a TIME-based close ends the line. A paused event (event_not_open), an organizer who switched a ticket type or category off for now: the
+// entries stay waiting and promotion just stops until it comes back.
+const SALE_CLOSED_ERRORS = new Set(['registration_closed', 'sale_closed']);
+const PAUSED_ERRORS = new Set(['event_not_open', 'ticket_type_inactive', 'category_inactive', 'sale_not_open']);
+// M3: the member's own limits (an unpaid order elsewhere, too many unpaid places) are not their fault and not a failure: the entry waits, keeps its place.
+const LIMIT_ERRORS = new Set(['hold_limit_reached', 'unpaid_places_limit']);
 const INTENT_FIELDS = ['firstName', 'lastName', 'phone', 'email', 'dateOfBirth', 'gender', 'emergencyContact', 'kitSize', 'groupLabel'];
 
 export function createEventsWaitlistService({
@@ -127,6 +133,8 @@ export function createEventsWaitlistService({
 
     try {
       const entry = await db.transaction(async (trx) => {
+        // Low: one join per member at a time, so the per-category and per-member limits cannot be raced past by two parallel requests.
+        await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`wlj:${userId}`]);
         const locked = plain(await trx('EventTicketType').where({ id: tt.id }).forUpdate().first());
         const queued = await trx('EventWaitlistEntry').where({ ticketTypeId: tt.id }).whereIn('status', LIVE).first('id');
         if (Number(locked.sold) + Number(locked.held) < Number(locked.capacity) && !queued) throw storeRefusal('not_sold_out', 409);
@@ -170,11 +178,12 @@ export function createEventsWaitlistService({
     const rows = (await db('EventWaitlistEntry as w').join('Event as e', 'e.id', 'w.eventId').join('EventTicketType as t', 't.id', 'w.ticketTypeId').join('EventCategory as c', 'c.id', 'w.categoryId')
       .leftJoin('EventOrder as o', 'o.id', 'w.orderId').where('w.userId', userId).where(b => b.whereIn('w.status', LIVE).orWhere('w.endedAt', '>=', since))
       .orderBy([{ column: 'w.joinedAt', order: 'desc' }, { column: 'w.id' }])
-      .select('w.*', 'e.title as eventTitle', 'e.startsAt', 'e.timezone', 't.name as ticketTypeName', 'c.name as categoryName', 'o.holdExpiresAt as orderHoldExpiresAt', 'o.totalTzs as orderTotal', 'o.currency as orderCurrency')).map(plain);
+      .select('w.*', 'e.title as eventTitle', 'e.startsAt', 'e.timezone', 't.name as ticketTypeName', 't.priceTzs as ticketPriceTzs', 't.currency as ticketCurrency', 'c.name as categoryName', 'o.holdExpiresAt as orderHoldExpiresAt', 'o.totalTzs as orderTotal', 'o.currency as orderCurrency')).map(plain);
     const items = [];
     for (const r of rows) {
       items.push({
-        id: r.id, eventId: r.eventId, eventTitle: r.eventTitle, startsAt: iso(r.startsAt), timezone: r.timezone, ticketTypeName: r.ticketTypeName, categoryName: r.categoryName,
+        id: r.id, eventId: r.eventId, eventTitle: r.eventTitle, startsAt: iso(r.startsAt), timezone: r.timezone, ...tzInfo(r.timezone, r.startsAt),
+        ticketTypeId: r.ticketTypeId, ticketTypeName: r.ticketTypeName, priceTzs: Number(r.ticketPriceTzs), currency: r.ticketCurrency || 'TZS', categoryName: r.categoryName,
         status: r.status, ...(r.status === 'waiting' ? { position: await positionOf(r) } : {}), joinedAt: iso(r.joinedAt), ...(r.blockedReason ? { blockedReason: r.blockedReason } : {}),
         ...(r.status === 'offered' && r.orderId ? { offer: { orderId: r.orderId, expiresAt: iso(r.orderHoldExpiresAt ?? r.offerExpiresAt), amountTzs: r.orderTotal ?? 0, currency: r.orderCurrency || 'TZS' } } : {}),
         ...(r.endedAt ? { endedAt: iso(r.endedAt), endedReason: r.endedReason } : {}),
@@ -241,13 +250,17 @@ export function createEventsWaitlistService({
     return rows.length;
   }
 
-  /** Waiting entries whose event was cancelled or whose sale / registration is over end here (§4.3). */
+  /**
+   * Waiting entries end only for a TERMINAL reason (M4): the event was cancelled, or registration is over for good (the event moved on to
+   * in_progress / completed / archived, or the registration close time of the event, category or ticket type has passed). A pause by FitFlex
+   * (registration_closed before its time), an organizer who closed new sign-ups for now, or a ticket type or category switched off leave the
+   * entries waiting; promotion simply does not run until the sale is back.
+   */
   async function closeStale() {
     const at = stamp();
     const rows = await db('EventWaitlistEntry as w').join('Event as e', 'e.id', 'w.eventId').join('EventCategory as c', 'c.id', 'w.categoryId').join('EventTicketType as t', 't.id', 'w.ticketTypeId')
       .where('w.status', 'waiting')
-      .where(b => b.where('e.status', '<>', 'published').orWhere('e.registrationClosesAt', '<=', at).orWhere('c.registrationClosesAt', '<=', at).orWhere('t.saleClosesAt', '<=', at)
-        .orWhere('t.status', 'inactive').orWhere('c.status', 'inactive'))
+      .where(b => b.whereIn('e.status', ['cancelled', 'in_progress', 'completed', 'archived']).orWhere('e.registrationClosesAt', '<=', at).orWhere('c.registrationClosesAt', '<=', at).orWhere('t.saleClosesAt', '<=', at))
       .select('w.id', 'e.status as eventStatus');
     const cancelled = rows.filter(r => r.eventStatus === 'cancelled').map(r => r.id);
     const closed = rows.filter(r => r.eventStatus !== 'cancelled').map(r => r.id);
@@ -286,6 +299,8 @@ export function createEventsWaitlistService({
       return { act: 'close', reason: dup ? 'registered_elsewhere' : 'not_eligible' };
     }
     if (SALE_CLOSED_ERRORS.has(res.error)) return { act: 'close_all' };
+    if (PAUSED_ERRORS.has(res.error)) return { act: 'stop_type' };
+    if (LIMIT_ERRORS.has(res.error)) return { act: 'defer', error: res.error };
     if (res.error === 'consent_version_stale') return { act: 'block' };
     return { act: 'skip', error: res.error };
   };
@@ -326,6 +341,8 @@ export function createEventsWaitlistService({
     return { act: 'offered' };
   }
 
+  const ctxEventTitle = (entry, event) => event.title;
+
   async function promoteType(typeId, stats) {
     // One promoter per ticket type at a time (the nudge and the job can overlap). A transaction-scoped advisory lock, NOT a row lock: the
     // order creation takes its own FOR UPDATE on the ticket type row from another connection.
@@ -362,6 +379,17 @@ export function createEventsWaitlistService({
           stats.closed += await endEntries(ids, { reason: 'sale_closed' });
           return;
         }
+        if (out.act === 'defer') {
+          // M3: the member's own limit. The entry keeps its seq, is NOT counted toward the skips, and is told once (deterministic notice id).
+          stats.deferred += 1;
+          notice(entry.userId, {
+            id: `ntf_ewd_${entry.id}`, type: 'event_waitlist_deferred',
+            en: { title: 'A ticket is waiting for you', body: `A ticket for ${ctxEventTitle(entry, event)} is available for you, but you already hold unpaid places. Pay for them or cancel them and we will offer you this one. Your place in the line is kept.` },
+            sw: { title: 'Tiketi inakusubiri', body: `Tiketi ya ${ctxEventTitle(entry, event)} inapatikana kwa ajili yako, lakini tayari una tiketi ambazo hazijalipiwa. Lipia au ghairi hizo nasi tutakupa hii. Namba yako kwenye orodha inabaki.` },
+            data: { eventId: entry.eventId, entryId: entry.id, route: routeOf.list() },
+          }).catch(() => {});
+          continue;
+        }
         if (out.act === 'block') { await db('EventWaitlistEntry').where({ id: entry.id }).update({ blockedReason: 'reconsent', updatedAt: stamp() }); continue; }
         // A transient failure never moves the entry behind the others; after MAX_SKIPS it ends (not_eligible).
         const skips = entry.skipCount + 1;
@@ -373,7 +401,7 @@ export function createEventsWaitlistService({
 
   /** The job (every minute) and, with `eventId`, the nudge after a hold expires. */
   async function promote({ eventId = null } = {}) {
-    const stats = { types: 0, attempted: 0, offered: 0, closed: 0, skippedEntries: 0 };
+    const stats = { types: 0, attempted: 0, offered: 0, closed: 0, skippedEntries: 0, deferred: 0 };
     stats.closed += await closeStale();
     const types = await db('EventWaitlistEntry as w').join('EventTicketType as t', 't.id', 'w.ticketTypeId').join('Event as e', 'e.id', 'w.eventId')
       .where('w.status', 'waiting').whereNull('w.blockedReason').where('e.status', 'published').whereRaw('t.capacity - t.sold - t.held >= 1')
@@ -415,7 +443,7 @@ export function createEventsWaitlistService({
           notice(r.userId, {
             id: `ntf_ewr_${r.id}`, type: 'event_waitlist_offer_reminder',
             en: { title: '1 hour left to pay', body: `Your held ticket for ${r.title} goes to the next person at ${t.timeEn}.` },
-            sw: { title: 'Saa 1 imebaki kulipa', body: `Tiketi yako iliyoshikiliwa ya ${r.title} itapewa mtu anayefuata saa ${t.timeSw}.` },
+            sw: { title: 'Saa 1 imebaki kulipa', body: `Tiketi yako iliyoshikiliwa ya ${r.title} itapewa mtu anayefuata ifikapo ${t.timeSw}.` },
             data: { eventId: r.eventId, entryId: r.id, orderId: r.orderId, route: routeOf.order(r.orderId) },
           }).catch(() => {});
         }
