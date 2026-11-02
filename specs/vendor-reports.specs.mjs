@@ -25,7 +25,7 @@ import { priceOrderLine } from '../src/shared/marketplace-pricing.mjs';
 import { csvCell, csvDocument, CSV_BOM } from '../src/shared/csv-export.mjs';
 import { parseReportQuery, bucketsOf, cover, createReportCache, periodInWords, REPORT_LIMITS, asOfText, eatTimeOfDay, reportLabel, reportCount, productsCsv, profitCsv, methodName, salesCsv, payoutsCsv, methodsCsv } from '../src/shared/vendor-reports.mjs';
 import { setPdfkitLoaderForTests } from '../src/shared/vendor-document-pdf.mjs';
-import { renderReportPdf, pctText } from '../src/shared/vendor-report-pdf.mjs';
+import { renderReportPdf, pctText, pdfMoney, pdfUnits, pdfDeduction } from '../src/shared/vendor-report-pdf.mjs';
 import { vendorToolsOptionsRoute } from '../functions/shop.mjs';
 import {
   vendorReportSummary, vendorReportSales, vendorReportProducts, vendorReportStockValue, vendorReportProfit, vendorReportMarketplaceNet,
@@ -147,20 +147,28 @@ const svc = (extra = {}) => createVendorReportService({
 const OWNER = { cost: true, payout: true, customers: true };
 const PLAIN = { cost: false, payout: false, customers: false };
 
-/** Text drawn in a pdfkit PDF (inflates the content streams, decodes the hex strings). */
-function pdfText(buffer) {
+/**
+ * The decoded content streams of a pdfkit PDF, one per page. Exact on purpose: only the one newline pdfkit adds before
+ * `endstream` is removed (compressed bytes may themselves end in CR), and a stream that will not inflate throws
+ * rather than silently losing a page.
+ */
+function contentStreams(buffer) {
   const s = buffer.toString('latin1');
-  let out = '';
-  const re = /stream\r?\n/g;
+  const out = [];
+  const re = /<<[^>]*\/FlateDecode[^>]*>>\s*stream\n/g;
   let m;
   while ((m = re.exec(s))) {
     const start = m.index + m[0].length;
-    const end = s.indexOf('endstream', start);
-    let data;
-    try { data = zlib.inflateSync(Buffer.from(s.slice(start, end).replace(/\r?\n$/, ''), 'latin1')).toString('latin1'); } catch { continue; }
-    for (const t of data.matchAll(/\[(.*?)\]\s*TJ/g)) out += `${[...t[1].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join('')}\n`;
+    const length = Number(/\/Length (\d+)/.exec(m[0])[1]);
+    out.push(zlib.inflateSync(Buffer.from(s.slice(start, start + length), 'latin1')).toString('latin1'));
   }
   return out;
+}
+const decodeRun = inner => [...inner.matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join('');
+
+/** Text drawn in a pdfkit PDF (inflates the content streams, decodes the hex strings). */
+function pdfText(buffer) {
+  return contentStreams(buffer).map(data => [...data.matchAll(/\[(.*?)\]\s*TJ/g)].map(t => `${decodeRun(t[1])}\n`).join('')).join('');
 }
 
 // ── the seed: vendor V, October 2026 ────────────────────────────────────────
@@ -882,17 +890,118 @@ test('UAT D9/D10/D12 in the PDF: no section heading is the last thing on a page;
 
 /** The text runs of each page of a pdfkit PDF, in drawing order (one content stream per page here). */
 function pdfPages(buffer) {
-  const s = buffer.toString('latin1');
-  const pages = [];
-  const re = /stream\r?\n/g;
-  let m;
-  while ((m = re.exec(s))) {
-    const start = m.index + m[0].length;
-    const end = s.indexOf('endstream', start);
-    let data;
-    try { data = zlib.inflateSync(Buffer.from(s.slice(start, end).replace(/\r?\n$/, ''), 'latin1')).toString('latin1'); } catch { continue; }
-    const runs = [...data.matchAll(/\[(.*?)\]\s*TJ/g)].map(t => [...t[1].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join(''));
-    if (runs.length) pages.push(runs);
-  }
-  return pages;
+  return contentStreams(buffer).map(data => [...data.matchAll(/\[(.*?)\]\s*TJ/g)].map(t => decodeRun(t[1]))).filter(runs => runs.length);
 }
+
+// ── UAT retest 2026-11-03 ───────────────────────────────────────────────────
+
+/**
+ * Every text run of a pdfkit PDF, in drawing order, with its font. A run in the Symbol font with the code 0x2D is the
+ * real minus sign (it is glued to the run after it). A plain text extract cannot tell that from garbage bytes.
+ */
+function pdfRuns(buffer) {
+  const s = buffer.toString('latin1');
+  const symbolObject = /(\d+) 0 obj\s*<<[^>]*\/BaseFont \/Symbol/.exec(s)?.[1];
+  const symbolName = symbolObject ? new RegExp(`/(F\\d+) ${symbolObject} 0 R`).exec(s)?.[1] : undefined;
+  const runs = [];
+  for (const data of contentStreams(buffer)) {
+    let font = null;
+    let pendingMinus = false;
+    for (const t of data.matchAll(/\/(F\d+) [\d.]+ Tf|\[(.*?)\]\s*TJ/g)) {
+      if (t[1]) { font = t[1]; continue; }
+      const text = decodeRun(t[2]);
+      if (font === symbolName && text === '-') { pendingMinus = true; continue; }
+      runs.push(`${pendingMinus ? '−' : ''}${text}`);
+      pendingMinus = false;
+    }
+  }
+  return runs;
+}
+const after2 = (runs, label) => runs[runs.indexOf(label) + 1];
+
+test('N5: the PDF number formats — U+2212 everywhere, a deduction shows what it does to the total', () => {
+  assert.deepEqual([pdfMoney(-60_000), pdfMoney(60_000), pdfMoney(0), pdfMoney(null)], ['−TSh 60,000', 'TSh 60,000', 'TSh 0', 'TSh 0']);
+  assert.deepEqual([pdfUnits(-3), pdfUnits(3), pdfUnits(0)], ['−3', '3', '0']);
+  assert.deepEqual([pdfDeduction(6_000), pdfDeduction(-6_000), pdfDeduction(0)], ['−TSh 6,000', 'TSh 6,000', 'TSh 0'], 'never "−TSh 0"');
+  assert.equal(pctText(-23.34), '−23.3%');
+  assert.equal(reportCount('en', 'uncosted', -1, { n: '−1', amount: 'x' }), 'Sold without a cost price: −1 item · x. Not in profit.');
+});
+
+test('N5: a period with only a refund — the PDF prints real minus signs, reversals as real amounts, rows add up; the CSV keeps plain numbers', async () => {
+  const R = await vendor('Refund Shop');
+  const pid = await product(R, { name: 'Whey', priceTzs: 20_000, stock: 9, costTzs: 13_000 });
+  const order = await appOrder({ buyerId: await user('member'), lines: [[R, pid, 20_000, 3]], paidAt: '2026-10-14T09:00:00Z', status: 'cancelled', paymentStatus: 'refunded', timeline: [{ status: 'cancelled', at: '2026-10-15T11:00:00Z' }] });
+  await db('ShopOrderLineCost').insert({ orderId: order, productId: pid, variant: '', vendorId: R, qty: 3, unitCostTzs: 13_000 });
+  const r = svc();
+  const query = { from: '2026-10-15', to: '2026-10-15' };
+  const sum = (await r.report('summary', { vendorId: R, access: OWNER, query })).data;
+  assert.deepEqual([sum.sales.netTzs, sum.sales.itemsSold, sum.profit.netExVatTzs, sum.profit.commissionTzs, sum.profit.costTzs, sum.profit.profitTzs], [-60_000, -3, -60_000, -6_000, -39_000, -15_000]);
+  const sales = (await r.report('sales', { vendorId: R, access: OWNER, query })).data.buckets;
+  const pdf = await renderReportPdf({ summary: sum, salesRows: sales, businessName: 'Refund Shop', lang: 'en' });
+
+  const runs = pdfRuns(pdf);
+  assert.ok(runs.every(t => !t.includes('"\x12')), 'U+2212 never reaches Helvetica (its hex 2212 would print a quote and a control byte)');
+  assert.ok(runs.every(t => !t.includes('-TSh') && !t.includes('TSh -')), 'one negative format only');
+  assert.equal(after2(runs, 'Refunds'), '−TSh 60,000');
+  assert.equal(after2(runs, 'Items sold'), '−3');
+  assert.equal(after2(runs, 'Net sales without VAT'), '−TSh 60,000');
+  assert.equal(after2(runs, 'Commission'), 'TSh 6,000', 'the reversal is printed, not 0');
+  assert.equal(after2(runs, 'Cost of goods'), 'TSh 39,000', 'the reversal is printed, not 0');
+  assert.equal(runs[runs.lastIndexOf('Profit') + 1], '−TSh 15,000');
+  assert.equal(-60_000 + 6_000 + 39_000, -15_000, 'the printed rows add up to the printed total');
+  const product1 = runs[runs.indexOf('Whey') + 1];
+  assert.equal(product1, '−3', 'units in the Top products table');
+
+  const csv = await r.toCsv('sales', await r.report('sales', { vendorId: R, access: OWNER, query: { ...query, format: 'csv' } }), OWNER, R);
+  assert.equal(csv.csv.slice(1).trimEnd().split('\r\n')[1], '2026-10-15,2026-10-15,-60000,0,0,0,60000,-60000,0,0,-3', 'plain numbers, ASCII minus, no quote prefix');
+  assert.ok(!csv.csv.includes('−'));
+  const profit = await r.toCsv('profit', await r.report('profit', { vendorId: R, access: OWNER, query: { ...query, format: 'csv' } }), OWNER, R);
+  assert.equal(profit.csv.slice(1).trimEnd().split('\r\n')[1], '2026-10-15,2026-10-15,-60000,-6000,-39000,-15000,25,0');
+});
+
+test('N6: a new vendor\'s PDF says None / Hakuna under Payment methods, like the other empty sections', async () => {
+  const N = await vendor('Brand New Shop');
+  const r = svc();
+  const query = { from: '2026-10-15', to: '2026-10-15' };
+  const sum = (await r.report('summary', { vendorId: N, access: OWNER, query })).data;
+  assert.equal(sum.hasEverSold, false);
+  const sales = (await r.report('sales', { vendorId: N, access: OWNER, query })).data.buckets;
+  const en = pdfRuns(await renderReportPdf({ summary: sum, salesRows: sales, businessName: 'Brand New Shop', lang: 'en' }));
+  assert.equal(after2(en, 'Payment methods'), 'None');
+  assert.equal(after2(en, 'Top products'), 'None');
+  const sw = pdfRuns(await renderReportPdf({ summary: sum, salesRows: sales, businessName: 'Brand New Shop', lang: 'sw' }));
+  assert.equal(after2(sw, 'Njia za malipo'), 'Hakuna');
+  assert.equal(after2(sw, 'Bidhaa zinazouzika zaidi'), 'Hakuna');
+  // With payments the section lists them and says no "None".
+  const { V } = await seedV();
+  const full = (await r.report('summary', { vendorId: V, access: OWNER, query: { from: '2026-10-14', to: '2026-10-15' } })).data;
+  const withMethods = pdfRuns(await renderReportPdf({ summary: full, salesRows: [], businessName: 'x', lang: 'en' }));
+  assert.equal(after2(withMethods, 'Payment methods'), 'Collected by you');
+});
+
+test('profit contract: a costed product that nets to zero is profitTzs 0 + marginPct null; null profit means only "no line had a cost price"', async () => {
+  const Z = await vendor('Zero Net Shop');
+  const costed = await product(Z, { name: 'Costed', priceTzs: 20_000, stock: 9, costTzs: 13_000 });
+  const uncosted = await product(Z, { name: 'No Cost', priceTzs: 20_000, stock: 9 });
+  const buyerId = await user('member');
+  const timeline = [{ status: 'cancelled', at: '2026-10-15T11:00:00Z' }];
+  const o1 = await appOrder({ buyerId, lines: [[Z, costed, 20_000, 1]], paidAt: '2026-10-15T09:00:00Z', status: 'cancelled', paymentStatus: 'refunded', timeline });
+  await db('ShopOrderLineCost').insert({ orderId: o1, productId: costed, variant: '', vendorId: Z, qty: 1, unitCostTzs: 13_000 });
+  await appOrder({ buyerId, lines: [[Z, uncosted, 20_000, 1]], paidAt: '2026-10-15T09:00:00Z', status: 'cancelled', paymentStatus: 'refunded', timeline });
+  const r = svc();
+  const query = { from: '2026-10-15', to: '2026-10-15' };
+  const rows = (await r.report('products', { vendorId: Z, access: OWNER, query })).data.rows;
+  const zero = rows.find(x => x.productId === costed);
+  const none = rows.find(x => x.productId === uncosted);
+  assert.deepEqual([zero.unitsSold, zero.netRevenueTzs, zero.profitTzs, zero.marginPct], [0, 0, 0, null], 'costed, nets to zero');
+  assert.deepEqual([none.unitsSold, none.netRevenueTzs, none.profitTzs, none.marginPct], [0, 0, null, null], 'no line had a cost price');
+  const p = (await r.report('profit', { vendorId: Z, access: OWNER, query })).data;
+  assert.deepEqual([p.totals.profitTzs, p.totals.marginPct], [0, null]);
+  assert.deepEqual(p.byProduct.map(x => [x.productId, x.profitTzs, x.marginPct]), [[costed, 0, null]]);
+  assert.deepEqual(p.buckets.map(b => [b.profitTzs, b.marginPct]), [[0, null]]);
+  assert.deepEqual([p.byChannel.app.profitTzs, p.byChannel.walkIn.profitTzs], [0, null], 'a channel with no costed line stays null');
+  const file = await r.toCsv('products', await r.report('products', { vendorId: Z, access: OWNER, query: { ...query, format: 'csv' } }), OWNER, Z);
+  const lines = file.csv.slice(1).trimEnd().split('\r\n');
+  assert.ok(lines.find(l => l.startsWith('Costed,')).endsWith(',0'));
+  assert.ok(lines.find(l => l.startsWith('No Cost,')).endsWith(','));
+});
