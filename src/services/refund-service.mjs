@@ -15,7 +15,7 @@
 import { formatTsh } from '../shared/money-display.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
-import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
+import { moneySecondApproverOn, refundSplitScopesOn } from '../shared/feature-flags.mjs';
 import { refundView } from '../shared/events-money-views.mjs';
 import { staffNameLookup } from '../shared/staff-names.mjs';
 
@@ -44,6 +44,7 @@ export function createRefundService({
   raiseForEventPayment = null,      // ({ body, actorId, secondApprover }) → the unfulfilled-payment refund of an event payment
   // A1: two admins on refunds (MONEY_SECOND_APPROVER). Off: unchanged.
   secondApprover = moneySecondApproverOn,
+  splitScopes = refundSplitScopesOn,   // REFUND_SPLIT_SCOPES: an admin-raised refund waits for a refunds_approve holder
 }) {
   const money = formatTsh;
 
@@ -70,6 +71,9 @@ export function createRefundService({
     return (await refunds.filterByColumnAsync(field, sourceId)).find(r => r.kind === kind && r.status !== 'rejected') || null;
   }
 
+  // A refund a staff member raises is not approved by the raise when either flag is on: someone else decides it.
+  const adminRaiseWaits = () => secondApprover() || splitScopes();
+
   /**
    * Raise a refund. `approved: true` is for refunds the terms grant outright
    * (an in-time cancellation); otherwise it waits for a decision.
@@ -78,6 +82,9 @@ export function createRefundService({
   async function raise({ memberId, kind, sourceId, subscriptionId = null, paymentRequestId = null, amountTzs, currency = 'TZS',
     reasonCode, note = null, requestedBy = null, requestedRole = 'system', approved = false }) {
     if (!REFUND_KINDS.includes(kind)) return fail('invalid_kind');
+    // REFUND_SPLIT_SCOPES: raising must not stand in for approving. Any staff-started refund (raise endpoint, shop raise-refund,
+    // admin cancellation) is left requested, whatever the caller asked for.
+    if (requestedRole === 'admin' && approved && splitScopes()) approved = false;
     if (!REASONS.has(reasonCode)) return fail('invalid_reason', 400, { allowed: [...REASONS] });
     const amount = Math.round(Number(amountTzs));
     if (!Number.isFinite(amount) || amount <= 0) return fail('nothing_to_refund', 409);
@@ -106,7 +113,7 @@ export function createRefundService({
     await audit('refund_raised', requestedBy, null, refund);
     if (approved) {
       await tell(refund, 'refund_approved', 'Refund on its way', `Your refund of ${money(amount)} is approved. FitFlex will send it to the account you paid from.`);
-    } else if (requestedRole === 'admin' && secondApprover()) {
+    } else if (requestedRole === 'admin' && adminRaiseWaits()) {
       // Flag on: FitFlex raised it and a second admin still has to approve it. The member never asked,
       // so "we have your request" would be wrong. (Server notifications are English only: known gap.)
       await tell(refund, 'refund_preparing', 'Refund being prepared', `FitFlex is preparing a refund of ${money(amount)} for your payment. We will tell you when it is sent.`);
@@ -146,7 +153,7 @@ export function createRefundService({
    */
   async function adminRaise({ body = {}, actorId }) {
     // S4: money that arrived for an event order whose places are not possible (kind event_order, unfulfilled payment only).
-    if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: secondApprover() });
+    if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: adminRaiseWaits() });
     const request = body.paymentRequestId ? await paymentRequests.findByIdAsync(body.paymentRequestId) : null;
     if (!request) return fail('payment_not_found', 404);
     if (!request.subscriptionId) return fail('cancel_instead', 409);
@@ -156,7 +163,7 @@ export function createRefundService({
     const out = await raise({
       memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId,
       amountTzs, currency: request.currency || 'TZS', reasonCode: body.reasonCode || 'payment_error', note: body.note,
-      requestedBy: actorId, requestedRole: 'admin', approved: !secondApprover(),
+      requestedBy: actorId, requestedRole: 'admin', approved: !adminRaiseWaits(),
     });
     if (out.existing) return fail('refund_already_requested', 409, { refund: out.refund });
     return out;
@@ -169,7 +176,7 @@ export function createRefundService({
     if (!prior) return fail('refund_not_found', 404);
     if (prior.status !== 'requested') return fail('already_decided', 409, { refundStatus: prior.status });
     // Flag on: whoever raised a refund cannot approve it (rejecting your own is allowed: no money moves).
-    if (body.decision === 'approve' && secondApprover() && prior.requestedRole === 'admin' && prior.requestedBy === actorId) {
+    if (body.decision === 'approve' && adminRaiseWaits() && prior.requestedRole === 'admin' && prior.requestedBy === actorId) {
       return fail('cannot_approve_own_request', 403);
     }
     const note = text(body.note);

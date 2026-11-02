@@ -174,7 +174,11 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
   /** payable → paid: record that the money went, and the payout. */
   const pay = ({ id, paymentReference, receiptUrl, actorId }, opts) => step(id, 'paid', actorId, async (s, q) => {
     if (s.status !== 'payable') return wrongStatus(s, 'payable');
-    if (statementPaySecondPersonOn() && s.approvedBy && s.approvedBy === actorId) return fail('cannot_pay_own_approval', 403);
+    if (statementPaySecondPersonOn()) {
+      // A legacy statement with no recorded approver cannot be shown to differ from the payer: refuse rather than let anyone pay.
+      if (!s.approvedBy) return fail('approver_unknown', 409);
+      if (s.approvedBy === actorId) return fail('cannot_pay_own_approval', 403);
+    }
     if (!text(paymentReference)) return fail('payment_reference_required', 400);
     const receipt = readReceiptUrl(receiptUrl);
     if (receipt === undefined) return fail('invalid_receipt_url', 400, { hint: 'an https:// link' });

@@ -150,3 +150,97 @@ for (const [kind, build] of Object.entries(cases)) {
     });
   }));
 }
+
+// ── legacy statements with no recorded approver ──────────────────────────────
+
+for (const kind of ['gym', 'trainer', 'vendor']) {
+  test(`${kind}: flag ON a payable statement with no approvedBy is refused 409 approver_unknown; flag OFF it can be paid`, async () => {
+    const table = kind === 'gym' ? 'GymSettlement' : kind === 'trainer' ? 'TrainerSettlement' : 'VendorSettlement';
+    // A paid gym statement must have an approver (DB check), so only the refusal is exercised for gym.
+    for (const [flag, expectPaid] of kind === 'gym' ? [['1', false]] : [['1', false], [undefined, true]]) {
+      await inRollback(async (trx) => withEnv({ STATEMENT_PAY_SECOND_PERSON: flag }, async () => {
+        const s = await cases[kind](trx);
+        await toPayable(s);
+        await trx.raw(`ALTER TABLE "${table}" DISABLE TRIGGER USER`);
+        await trx(table).where({ id: s.id }).update({ approvedBy: null });
+        await trx.raw(`ALTER TABLE "${table}" ENABLE TRIGGER USER`);
+        const r = await s.workflow.pay({ id: s.id, paymentReference: 'REF-L', actorId: 'anyone' });
+        if (expectPaid) assert.equal(r.statement.status, 'paid');
+        else {
+          assert.deepEqual(r, { error: 'approver_unknown', status: 409 });
+          assert.equal((await trx(table).where({ id: s.id }).first()).status, 'payable');
+        }
+      }));
+    }
+  });
+}
+
+// ── the pay routes take the actor from the token, never the body ─────────────
+
+test('gym, trainer and vendor pay routes take the actor from the token only: a body actorId is ignored', async () => {
+  const gym = await import('../functions/admin-settlements.mjs');
+  const trainer = await import('../functions/trainer-settlements.mjs');
+  const vendor = await import('../functions/vendor-settlements.mjs');
+  for (const ep of [gym.adminPayStatement, trainer.adminPayTrainerSettlement, vendor.adminPayVendorSettlement]) {
+    assert.ok(ep, 'route found');
+    const res = { code: 200, body: null, status(c) { this.code = c; return this; }, json(b) { this.body = b; return this; } };
+    // No signed-in actor on the request. If the body could name the actor, this would get past actor_required.
+    await ep.onRequest({ params: { id: 'nope' }, user: {}, body: { actorId: 'spoofed', approvedBy: 'spoofed', paymentReference: 'R' } }, res);
+    assert.deepEqual([res.code, res.body?.error], [403, 'actor_required'], ep.path);
+  }
+});
+
+// ── raise is tied to approve under REFUND_SPLIT_SCOPES ───────────────────────
+
+import { createRefundService } from '../src/services/refund-service.mjs';
+function memStore(rows = []) {
+  return {
+    rows,
+    async allAsync() { return [...rows]; },
+    async findAsync(fn) { return rows.find(fn) || null; },
+    async findByIdAsync(id) { return rows.find(r => r.id === id) || null; },
+    async filterByColumnAsync(col, value) { return rows.filter(r => r[col] === value); },
+    async filterAsync(fn) { return rows.filter(fn); },
+    async filterByColumnInAsync(col, ids) { return rows.filter(r => ids.includes(r[col])); },
+    async insertAsync(row) { rows.push(row); return row; },
+    async updateByIdAsync(id, patch) { const i = rows.findIndex(r => r.id === id); if (i >= 0) rows[i] = { ...rows[i], ...patch }; return rows[i] || null; },
+  };
+}
+function refundFixture({ split }) {
+  const refunds = memStore();
+  const svc = createRefundService({
+    refunds, paymentRequests: memStore([{ id: 'pr1', memberId: 'm1', subscriptionId: 'sub1', amountTzs: 60_000, status: 'approved' }]),
+    subscriptions: memStore([{ id: 'sub1' }]), users: memStore([{ id: 'm1', displayName: 'Asha' }]), auditLog: memStore(),
+    secondApprover: () => false, splitScopes: () => split, notify: async () => {},
+  });
+  return { svc, refunds };
+}
+
+test('split ON: an admin-raised refund stays requested; the raiser cannot approve it, another approver can', async () => {
+  const f = refundFixture({ split: true });
+  const { refund } = await f.svc.adminRaise({ body: { paymentRequestId: 'pr1' }, actorId: 'raiser' });
+  assert.equal(refund.status, 'requested');
+  assert.equal(refund.decidedBy, null);
+  assert.deepEqual(await f.svc.decide({ id: refund.id, body: { decision: 'approve' }, actorId: 'raiser' }), { error: 'cannot_approve_own_request', status: 403 });
+  assert.equal((await f.refunds.findByIdAsync(refund.id)).status, 'requested');
+  const ok = await f.svc.decide({ id: refund.id, body: { decision: 'approve' }, actorId: 'approver' });
+  assert.equal(ok.refund.status, 'approved');
+});
+
+test('split ON: any staff-started refund through raise() (shop raise-refund, admin cancellation) is held; system and member ones are not', async () => {
+  const f = refundFixture({ split: true });
+  const base = { memberId: 'm1', kind: 'shop_order', amountTzs: 1000, reasonCode: 'payment_error' };
+  const admin = await f.svc.raise({ ...base, sourceId: 'o1', requestedBy: 'a1', requestedRole: 'admin', approved: true });
+  assert.equal(admin.refund.status, 'requested');
+  const system = await f.svc.raise({ ...base, sourceId: 'o2', requestedBy: 'system', requestedRole: 'system', approved: true });
+  assert.equal(system.refund.status, 'approved');
+});
+
+test('split OFF: admin-raised is approved at once and the raiser can still pay it, as before', async () => {
+  const f = refundFixture({ split: false });
+  const { refund } = await f.svc.adminRaise({ body: { paymentRequestId: 'pr1' }, actorId: 'a1' });
+  assert.equal(refund.status, 'approved');
+  assert.equal(refund.decidedBy, 'policy');
+  const admin = await f.svc.raise({ memberId: 'm1', kind: 'shop_order', sourceId: 'o1', amountTzs: 1000, reasonCode: 'payment_error', requestedBy: 'a1', requestedRole: 'admin', approved: true });
+  assert.equal(admin.refund.status, 'approved');
+});
