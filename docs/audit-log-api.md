@@ -28,7 +28,7 @@ request fails (500). The owner delete writes its audit row first, so if that fai
 A database trigger refuses UPDATE, DELETE and TRUNCATE. Exceptions: (1) account erasure's personal-key scrub
 (`fitflex.audit_scrub`, set inside the erasure transaction): only before/after may change and only by removing data
 (NEW must be NULL or contained in OLD); (2) a test bypass honoured only in databases named `^fitflex_ci(_[A-Za-z0-9]+)*$`.
-Indexes for the viewer are built CONCURRENTLY by migration 20270202090100.
+Indexes for the viewer ((at,id), (actor,at), (target,at); ascending, scanned backwards for newest-first) are built CONCURRENTLY by migration 20270202090100.
 
 **Note for counsel:** on account deletion the audit trail is scrubbed of personal keys rather than kept or deleted whole.
 Whether that is the right retention rule is a legal question (see the legal review pack).

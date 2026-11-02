@@ -1,13 +1,16 @@
 // Indexes for the audit log viewer (GET /admin/audit-log): newest first, optionally narrowed by actor or target.
+// Ascending on purpose: Postgres scans a btree backwards for the viewer's newest-first order, and an ascending index keeps rows
+// with the same timestamp in insertion order for ORDER BY at ASC (many specs and reports rely on that); a DESC index would
+// reverse them.
 // Built CONCURRENTLY so a large AuditLog is not locked against writes while they build, which is why this migration
 // is not transactional. If a build is interrupted Postgres leaves an INVALID index behind: drop it and run again
 // (up removes an invalid copy first). Reversible: down drops them.
 exports.config = { transaction: false };
 
 const INDEXES = {
-  auditlog_at_id_idx: '(at DESC, id DESC)',
-  auditlog_actor_at_idx: '(actor, at DESC, id DESC)',
-  auditlog_target_at_idx: '(target, at DESC, id DESC)',
+  auditlog_at_id_idx: '(at, id)',
+  auditlog_actor_at_idx: '(actor, at)',
+  auditlog_target_at_idx: '(target, at)',
 };
 
 exports.up = async function up(knex) {
