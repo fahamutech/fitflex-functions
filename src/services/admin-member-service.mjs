@@ -7,6 +7,7 @@ import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
 import { userAuditSnapshot } from '../shared/audit-redact.mjs';
+import { checkReason } from '../shared/admin-reason.mjs';
 
 export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr }) {
   async function latestMemberSubscription(memberId) {
@@ -149,8 +150,11 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
       .map(c => ({ ...publicCheckin(c), gym: gyms.find(g => g.id === c.gymId) || null }));
   }
 
-  async function setStatus({ memberId, status, actorId }) {
+  async function setStatus({ memberId, status, actorId, reason: rawReason }) {
     if (!['active', 'suspended'].includes(status)) return { error: 'invalid_status', status: 400 };
+    // Suspending needs a reason when ADMIN_REASONS_REQUIRED is on; activating never does.
+    const checked = checkReason(rawReason, { required: status === 'suspended' });
+    if (checked.error) return checked;
     const member = await users.findAsync(u => u.id === memberId && u.userType === 'member');
     if (!member) return { error: 'not_found', status: 404 };
     const beforeSub = await latestMemberSubscription(member.id);
@@ -164,11 +168,19 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
       });
     }
     const after = { ...updatedUser, subscription: updatedSub };
-    await auditLog.insertAsync({
-      id: randomUUID(), at: new Date().toISOString(),
-      actor: actorId, action: `member_${status}`,
-      target: member.id, before: userAuditSnapshot(before), after: userAuditSnapshot(after)
-    });
+    // Not best-effort: if the audit row cannot be written the change is put back and the request fails.
+    try {
+      await auditLog.insertAsync({
+        id: randomUUID(), at: new Date().toISOString(),
+        actor: actorId, action: `member_${status}`,
+        target: member.id, before: userAuditSnapshot(before), after: userAuditSnapshot(after),
+        reason: checked.reason
+      });
+    } catch (err) {
+      await users.updateByIdAsync(member.id, { accountStatus: member.accountStatus }).catch(() => {});
+      if (sub) await subscriptions.updateByIdAsync(sub.id, { status: sub.status }).catch(() => {});
+      throw err;
+    }
     return { member: after };
   }
 

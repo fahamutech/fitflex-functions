@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { validateManualPaymentSettings } from '../shared/manual-payment.mjs';
 import { defaultSubscriptionTiers } from '../shared/default-subscription-tiers.mjs';
 import { PASS_GYM_ACCESS } from '../shared/check-in-rules.mjs';
+import { checkReason } from '../shared/admin-reason.mjs';
 
 const DEFAULT_SPECIALTIES = [
   'Yoga', 'Cardio', 'Aerobics', 'Weight Loss', 'Muscle Gain', 'Dance',
@@ -184,7 +185,13 @@ export function createSettingsService({ platformSettings, auditLog, tierHolders 
     return null;
   }
 
+  // Cosmetic settings (trainer specialties) need no reason; pricing, payout and payment settings do.
+  const REASONED_KEYS = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency', 'manualPayment'];
+
   async function adminUpdate({ body, actorId }) {
+    const sensitive = REASONED_KEYS.some(k => body[k] !== undefined);
+    const checked = checkReason(body.reason, { required: sensitive });
+    if (checked.error) return checked;
     if (body.subscriptionTiers !== undefined) {
       const invalid = invalidTiers(body.subscriptionTiers);
       if (invalid) return invalid;
@@ -206,11 +213,20 @@ export function createSettingsService({ platformSettings, auditLog, tierHolders 
     }
     updates.updatedAt = new Date().toISOString();
     const updated = await platformSettings.updateAsync(s => s.id === 'platform', updates);
-    await auditLog.insertAsync({
-      id: randomUUID(), at: updates.updatedAt,
-      actor: actorId, action: 'settings_updated',
-      target: 'platform', before, after: updated
-    });
+    // Not best-effort: if the audit row cannot be written the settings are put back and the request fails.
+    try {
+      await auditLog.insertAsync({
+        id: randomUUID(), at: updates.updatedAt,
+        actor: actorId, action: 'settings_updated',
+        target: 'platform', before, after: updated,
+        reason: checked.reason
+      });
+    } catch (err) {
+      const restore = { ...before };
+      for (const k of Object.keys(updates)) if (!(k in before)) restore[k] = null;   // a key the row did not have is cleared
+      await platformSettings.updateAsync(s => s.id === 'platform', restore).catch(() => {});
+      throw err;
+    }
     return updated;
   }
 

@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { userAuditSnapshot } from '../shared/audit-redact.mjs';
+import { checkReason } from '../shared/admin-reason.mjs';
 
 const gymIdsOf = row => (row?.gymIds || (row?.gymId ? [row.gymId] : []));
 
@@ -97,18 +98,22 @@ export function createAdminOwnerService({ users, gyms, checkins, auditLog, gymSe
     return { created: !prior, owner: needing.length ? { ...owner, payoutOwnerRequiredGymIds: needing } : owner };
   }
 
-  async function remove({ id, actorId }) {
+  async function remove({ id, actorId, reason: rawReason }) {
+    const checked = checkReason(rawReason);
+    if (checked.error) return checked;
     const prior = await users.findAsync(u => u.id === id && u.userType === 'gym_operator');
     if (!prior) return { error: 'not_found', status: 404 };
     if (prior.gymId && await checkins.findAsync(c => c.gymId === prior.gymId)) return { error: 'gym_owner_has_checkin_activity', status: 409 };
-    if (gymPayoutOwner) await gymPayoutOwner.clearForRemovedOwner({ ownerId: prior.id, gymIds: gymIdsOf(prior), actorId, reason: 'owner_deleted' });
-    const removed = await users.removeAsync(u => u.id === prior.id);
-    try { await onOwnerRemoved(prior); } catch (err) { console.warn('[admin-owner-delete] follow-up failed:', err?.message); }
+    // Not best-effort: the audit row is written FIRST (a delete cannot be put back), so if it fails nothing is deleted.
     await auditLog.insertAsync({
       id: randomUUID(), at: new Date().toISOString(),
       actor: actorId, action: 'gym_owner_deleted',
-      target: prior.id, before: userAuditSnapshot(prior), after: null
+      target: prior.id, before: userAuditSnapshot(prior), after: null,
+      reason: checked.reason
     });
+    if (gymPayoutOwner) await gymPayoutOwner.clearForRemovedOwner({ ownerId: prior.id, gymIds: gymIdsOf(prior), actorId, reason: 'owner_deleted' });
+    const removed = await users.removeAsync(u => u.id === prior.id);
+    try { await onOwnerRemoved(prior); } catch (err) { console.warn('[admin-owner-delete] follow-up failed:', err?.message); }
     return { owner: removed };
   }
 

@@ -28,7 +28,14 @@ const idleTimeoutMillis = Number(process.env.DB_POOL_IDLE_TIMEOUT_MS) || 30000;
 const db = knexFactory({
   client: 'pg',
   connection: connectionString,
-  pool: { min: 0, max: 10, idleTimeoutMillis },
+  pool: {
+    min: 0, max: 10, idleTimeoutMillis,
+    // Test-only: lets spec cleanup delete AuditLog rows. The append-only trigger honours this setting only in a database
+    // whose name contains "_ci" (see migration 20270202090000-audit-log-append-only).
+    ...(process.env.FITFLEX_USE_CI_DB === '1' ? {
+      afterCreate: (conn, done) => conn.query("SET fitflex.audit_test_bypass = 'on'", err => done(err, conn)),
+    } : {}),
+  },
 });
 export { db };
 
@@ -642,7 +649,7 @@ const ALLOWED_FIELDS = {
   gym_payouts:      new Set(['id','gymId','invoiceId','amount','status','periodStart','periodEnd','paidAt','reference','createdAt','gymSettlementId','gymSettlementMode']),
   trainers:         new Set(['id','userId','email','phone','displayName','fullName','nickname','photoUrl','images','imageThumbnails','gender','specialties','bio','rating','reviewCount','hourlyRateTzs','sessionRateCurrency','experienceYears','status','approvalStatus','verified','homepageVisible','homepagePriority','pendingGymIds','regionId','cityId','availability','socialLinks','createdAt','updatedAt']),
   trainer_bookings: new Set(['id','groupId','memberId','trainerId','gymId','date','slot','currency','listPriceTzs','discountPct','amountTzs','commissionPct','commissionTzs','trainerPayoutTzs','discountFundedBy','paymentRequestId','status','cancelledAt','cancelledBy','createdAt','updatedAt']),
-  audit_log:        new Set(['id','at','actor','action','target','before','after']),
+  audit_log:        new Set(['id','at','actor','action','target','before','after','reason']),
   platform_settings: new Set(['id','subscriptionTiers','payoutBands','paymentPeriodDays','payoutModel','currency','manualPayment','updatedAt']),
   webhook_seen:     new Set(['id','at']),
   otps:             new Set(['phone','code','userType','expiresAt']),

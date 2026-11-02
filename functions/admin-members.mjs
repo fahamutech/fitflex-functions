@@ -54,10 +54,10 @@ export const adminMemberCheckins = {
 
 export const adminSetMemberStatus = {
   created, method: 'post', path: '/admin/members/:id/status',
-  description: 'Admin: activate or suspend a member and latest subscription.',
+  description: 'Admin: activate or suspend a member and latest subscription. Optional body.reason (stored in the audit log); required (400 reason_required) to suspend when ADMIN_REASONS_REQUIRED is on. If the audit row cannot be written the change is undone and the request fails.',
   onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('members')]),
   onRequest: async (req, res) => {
-    const result = await adminMemberService.setStatus({ memberId: req.params.id, status: req.body?.status, actorId: req.user.sub });
+    const result = await adminMemberService.setStatus({ memberId: req.params.id, status: req.body?.status, actorId: req.user.sub, reason: req.body?.reason });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result.member);
   }

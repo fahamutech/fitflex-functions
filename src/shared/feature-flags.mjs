@@ -594,3 +594,12 @@ export function webQrCheckinOn() {
 export function webCheckinAlertsOn() {
   return webQrCheckinOn() && on('WEB_CHECKIN_ALERTS');
 }
+
+/**
+ * Admin-portal audit S2/S3. Off unless ADMIN_REASONS_REQUIRED is set. On, an admin must give a non-empty `reason`
+ * to suspend a member, delete a gym owner, or change pricing/payout/payment platform settings: 400 reason_required
+ * otherwise. Off, a reason is optional (and stored in AuditLog.reason when given).
+ */
+export function adminReasonsRequiredOn() {
+  return on('ADMIN_REASONS_REQUIRED');
+}

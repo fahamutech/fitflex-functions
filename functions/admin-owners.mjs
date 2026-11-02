@@ -25,10 +25,10 @@ export const adminUpsertGymOwner = {
 
 export const adminDeleteGymOwner = {
   created, method: 'delete', path: '/admin/gym-owners/:id',
-  description: 'Admin: delete a gym owner/operator profile if it has no check-in activity.',
+  description: 'Admin: delete a gym owner/operator profile if it has no check-in activity. Optional reason (body.reason or ?reason=, stored in the audit log); required (400 reason_required) when ADMIN_REASONS_REQUIRED is on. The audit row is written first: if that fails nothing is deleted.',
   onGuard: [requireAuth('admin'), requireAcl('owners')],
   onRequest: async (req, res) => {
-    const result = await adminOwnerService.remove({ id: req.params.id, actorId: req.user?.sub });
+    const result = await adminOwnerService.remove({ id: req.params.id, actorId: req.user?.sub, reason: req.body?.reason ?? req.query?.reason });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json({ ok: true, owner: result.owner });
   }
