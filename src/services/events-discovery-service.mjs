@@ -37,10 +37,15 @@ export function createEventsDiscoveryService({
   // S3 (spec §3.1): the registration keys added to the probe while EVENTS_REGISTRATION is on (holdTtlMinutes, maxParticipantsPerOrder, payment, teams, corporate, claim, consentTextVersion).
   registrationOptions = () => ({}),
   // S5 (spec §11.1): which of the three ops flags are usable now ({ kit, api, webhooks }); all false while off.
-  opsOptions = () => ({ kit: false, api: false, webhooks: false }),
+  opsOptions = () => ({ kit: false, api: false, webhooks: false, kitOffline: false }),
+  // S7: { on, paymentsOk } while EVENTS_WAITLIST is on (ticket types then carry `waitlist: { state }`), else null.
+  waitlistView = () => null,
 }) {
   const on = name => Boolean(flags[name]?.());
-  const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
+  const viewOpts = () => {
+    const w = waitlistView();
+    return { now: now(), closingSoonHours: closingSoonHours(), ...(w?.on ? { waitlist: true, waitlistPaymentsOk: w.paymentsOk !== false } : {}) };
+  };
 
   /** Spec §13: the flag probe. Never 404s; `discovery` false while EVENTS_MODULE is off. */
   function options() {
@@ -51,7 +56,7 @@ export function createEventsDiscoveryService({
       favourites: discovery && on('favourites'),
       registration,
       ...(registration ? registrationOptions() : {}),
-      ops: registration ? opsOptions() : { kit: false, api: false, webhooks: false },
+      ops: registration ? opsOptions() : { kit: false, api: false, webhooks: false, kitOffline: false },
       payoutSchedules: [...PAYOUT_SCHEDULES],
       currency: 'TZS',
       closingSoonHours: closingSoonHours(),

@@ -6,6 +6,7 @@
 // reading need beneficiaries.manage; placing and cancelling need an ORG_BILLING role (owner | admin | finance).
 // Existing B2B routes are untouched.
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsRegistration, requireEventsPaymentIntake } from '../src/shared/feature-flags.mjs';
@@ -28,6 +29,7 @@ const headerOf = (req, name) => req.headers?.[name] ?? req.headers?.[name.toLowe
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('registration', result.status || 400);
     const { error, status, ...extra } = result;
     return res.status(status || 400).json({ error, ...extra });
   }

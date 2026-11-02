@@ -17,7 +17,7 @@ const { call, db } = h;
 afterEach(() => flagsOff());
 after(async () => { await h.cleanup(); await db.destroy(); });
 
-const CONSENT = '2026-10-draft';
+const CONSENT = '2026-11-draft';
 const key = () => `corp_${uid('').slice(1)}`;
 const WORDS = ['Asha', 'Baraka', 'Zuwena', 'Hamisi', 'Neema', 'Juma', 'Grace', 'Tumaini', 'Joyce', 'Rehema'];
 const csvRow = (i, over = {}) => ({ firstName: `${WORDS[i % WORDS.length]}${'a'.repeat(Math.floor(i / WORDS.length))}`, lastName: 'Mollel', phone: phone(), category: '10K', ...over });

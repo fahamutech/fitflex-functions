@@ -4,6 +4,7 @@
 // secret) appear in exactly two responses each: create and rotate. Guards are wrapped in routeGuard.
 import { randomUUID } from 'node:crypto';
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { requireActiveOrganizer, requireOpenOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
@@ -22,6 +23,7 @@ const requestIdOf = (req) => {
 };
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('webhook', result.status || 400);
     const { error, status, ...extra } = result;
     return res.status(status || 400).json({ error, ...extra });
   }
@@ -176,6 +178,13 @@ export const organizerRetryWebhookDelivery = {
   description: 'Organizer owner / admin (organizer active; EVENTS_WEBHOOKS): retry a failed or dead delivery now. Bounded: 5 manual retries per delivery per 24 h and 30 per endpoint per hour (429 rate_limited). Idempotent: already queued → 200 { alreadyQueued: true }. The event id is unchanged, so receivers dedupe. 409 already_delivered.',
   onGuard: hookWriters('post'),
   onRequest: run(async (req, res) => send(res, await hooks.retryDelivery({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub }))),
+};
+
+export const organizerRedeliverWebhookEndpoint = {
+  created, method: 'post', path: '/organizer/webhook-endpoints/:id/redeliver',
+  description: 'Organizer OWNER only (D42; organizer active; EVENTS_WEBHOOKS): send the events of a time range to this endpoint again (a receiver was down). Body { from, to (ISO instants, at most 7 days apart, not in the future), types? [subscribable event types] } → { queued, scanned }. Only this organizer\'s own events are ever read; at most 5,000 events a request, 3 requests an hour per organizer. Deliveries that exist are reset to pending (same event id, so receivers dedupe); missing ones are created. Audited as events.webhook_redelivery_requested. 404 endpoint_not_found; 409 endpoint_not_active; 422 validation_failed | range_too_large { maxDays } | too_many_events { max }; 429 rate_limited.',
+  onGuard: hookOwner('post'),
+  onRequest: run(async (req, res) => send(res, await hooks.redeliver({ organizerId: organizerId(req), id: req.params.id, actorId: req.user.sub, body: req.body || {} }))),
 };
 
 export const organizerIntegrationsHealth = {

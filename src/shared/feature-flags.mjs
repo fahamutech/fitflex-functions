@@ -530,6 +530,15 @@ export const requireEventsResultsPublic = gate(eventsResultsPublicOn);
 export const requireEventsRewards = gate(eventsRewardsOn);
 export const requireEventsMedalArt = gate(eventsMedalArtOn);
 
+// S7 (docs/design/events-s7-hardening-and-pilot.md §7.1): three dormant flags, each needing EVENTS_MODULE and EVENTS_REGISTRATION
+// (the offline desk also needs EVENTS_KIT_OPS). With all three off S6 behaviour is unchanged. Guards answer 404 feature_disabled.
+export const eventsKitOfflineOn = () => eventsKitOpsOn() && on('EVENTS_KIT_OFFLINE');
+export const eventsWaitlistOn = () => eventsRegistrationOn() && on('EVENTS_WAITLIST');
+export const eventsAnalyticsOn = () => eventsRegistrationOn() && on('EVENTS_ANALYTICS');
+export const requireEventsKitOffline = gate(eventsKitOfflineOn);
+export const requireEventsWaitlist = gate(eventsWaitlistOn);
+export const requireEventsAnalytics = gate(eventsAnalyticsOn);
+
 /**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
  * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and

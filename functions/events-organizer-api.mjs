@@ -10,6 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireApiClient, exchangeClientCredentials, SECRET_RE, CLIENT_ID_RE } from '../src/auth/organizer-api-auth.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsOrganizerApi, requireEventsWebhooks, requireEventsResults, eventsKitOpsOn as kitOpsGate } from '../src/shared/feature-flags.mjs';
@@ -48,7 +49,7 @@ const v1HookGuard = (method) => routeGuard(method, [requestIdGuard, requireEvent
 
 function reply(req, res, result, okStatus = 200) {
   let status = okStatus; let body;
-  if (result?.error) { const { error, status: s, ...extra } = result; status = s || 400; body = { error, ...extra }; } else {
+  if (result?.error) { const { error, status: s, ...extra } = result; status = s || 400; noteApiError('webhook', status); body = { error, ...extra }; } else {
     const { status: s, replayed, ...rest } = result ?? {};
     if (replayed) res.set?.('Idempotent-Replayed', 'true');
     if (Number.isInteger(s)) status = s;
