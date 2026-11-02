@@ -2,11 +2,11 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { db } from '../src/infra/knex-store.mjs';
+import { db, collection } from '../src/infra/knex-store.mjs';
 import { users, subscriptions, platformSettings, auditLog as auditCollection } from '../src/bootstrap/services.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { createAuditLogService, AUDIT_PAGE_MAX } from '../src/services/audit-log-service.mjs';
-import { redactAuditForDisplay, isSecretLookingKey } from '../src/shared/audit-redact.mjs';
+import { redactAuditForDisplay, isSecretLookingKey, isSecretUrl } from '../src/shared/audit-redact.mjs';
 import { readFileSync } from 'node:fs';
 import { createAdminMemberService } from '../src/services/admin-member-service.mjs';
 import { createAdminOwnerService } from '../src/services/admin-owner-service.mjs';
@@ -14,6 +14,7 @@ import { createSettingsService } from '../src/services/settings-service.mjs';
 import { adminListAuditLog } from '../functions/admin-audit-log.mjs';
 import { adminDeleteGymOwner } from '../functions/admin-owners.mjs';
 import { adminSetMemberStatus } from '../functions/admin-members.mjs';
+
 import { PORTAL_ACL_SCOPES } from '../src/services/portal-user-service.mjs';
 import { memoryPlatformSettings, TEST_TIERS } from './fixtures/tier-settings.mjs';
 
@@ -368,4 +369,31 @@ test('routes pass body.reason through; the owner delete ignores ?reason=', () =>
   assert.match(String(adminDeleteGymOwner.onRequest), /req\.body\?\.reason/);
   assert.doesNotMatch(String(adminDeleteGymOwner.onRequest), /query/);
   assert.match(String(adminSetMemberStatus.onRequest), /reason/);
+});
+
+test('viewer redaction round 2: more key names, unsplit lowercase names, signed links', () => {
+  for (const k of ['verificationCode', 'code', 'privateKey', 'signingKey', 'nida', 'passport', 'idNumber', 'bankAccount', 'accountNo',
+    'iban', 'authorization', 'signature', 'passcode', 'webhooksecret', 'WEBHOOKSECRET', 'refreshtokenvalue', 'dbpassword', 'clientsecret'])
+    assert.ok(isSecretLookingKey(k), k);
+  for (const k of ['displayName', 'shipping', 'accountName', 'status', 'timing', 'action', 'currency'])
+    assert.ok(!isSecretLookingKey(k), k);
+  for (const u of ['https://x.test/a?token=abc', 'https://x.test/a?x=1&Signature=zz', '//cdn.test/f?sig=1', '/reset?code=123',
+    'https://x.test/a#access_token=1', 'https://x.test/?apiKey=k', 'https://x.test/?X-Amz-Signature=1'])
+    assert.ok(isSecretUrl(u), u);
+  for (const u of ['https://x.test/a?page=2', 'https://x.test/photo.jpg', 'plain text token=1', 'hello?token=1', 42])
+    assert.ok(!isSecretUrl(u), String(u));
+  const out = redactAuditForDisplay({ link: 'https://x.test/a?token=abc', ok: 'https://x.test/a?page=2', nested: [{ webhooksecret: 'w', verificationCode: '123456', note: 'kept' }] });
+  assert.deepEqual(out, { link: '[redacted link]', ok: 'https://x.test/a?page=2', nested: [{ note: 'kept' }] });
+});
+
+test('knex-store: the plain transaction helpers refuse a primed (cached) collection', async () => {
+  const primedCol = collection('platform_settings');
+  const trx = await db.transaction();
+  try {
+    await assert.rejects(primedCol.insertTrxAsync(trx, { id: 'x' }), /cache/);
+    await assert.rejects(primedCol.updateByIdTrxAsync(trx, 'platform', { currency: 'TZS' }), /cache/);
+    assert.equal(typeof primedCol.updateTrxAsync, 'function');
+  } finally { await trx.rollback(); }
+  const plain = collection('audit_log');
+  assert.equal(typeof plain.insertTrxAsync, 'function');
 });

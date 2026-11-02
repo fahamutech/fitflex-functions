@@ -31,7 +31,7 @@ const db = knexFactory({
   pool: {
     min: 0, max: 10, idleTimeoutMillis,
     // Test-only: lets spec cleanup delete AuditLog rows. The append-only trigger honours this setting only in a database
-    // whose name contains "_ci" (see migration 20270202090000-audit-log-append-only).
+    // whose name matches ^fitflex_ci(_[A-Za-z0-9]+)*$ (see migration 20270202090000-audit-log-append-only).
     ...(process.env.FITFLEX_USE_CI_DB === '1' ? {
       afterCreate: (conn, done) => conn.query("SET fitflex.audit_test_bypass = 'on'", err => done(err, conn)),
     } : {}),
@@ -307,9 +307,13 @@ export function collection(name) {
   // Transaction-joined writes (simple tables only): the caller owns db.transaction and commits or rolls back all of it.
   const trxWrites = {
     /** Insert inside the caller's transaction. */
-    insertTrxAsync: async (trx, row) => { await _persistInsert(row, trx); return row; },
+    insertTrxAsync: async (trx, row) => {
+      if (isPrimed) throw new Error(`knex-store: "${name}" is cached in memory; use its cache-aware transaction method`);
+      await _persistInsert(row, trx); return row;
+    },
     /** Update by primary key inside the caller's transaction; resolves to the row as the transaction sees it. */
     updateByIdTrxAsync: async (trx, id, patch) => {
+      if (isPrimed) throw new Error(`knex-store: "${name}" is cached in memory; use updateTrxAsync`);
       await _persistUpdate(pkField(name), id, patch, trx);
       return _readByIdIn(trx, id);
     },

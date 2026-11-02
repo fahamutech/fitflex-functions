@@ -29,9 +29,13 @@ export function redactAuditValue(value) {
 // whole word of the camelCase / snake_case name, so "shipping" is not "pin") is removed, and payment account
 // numbers are masked to their last three digits.
 const SECRET_WORDS = new Set([
-  'secret', 'secrets', 'token', 'tokens', 'hash', 'hashes', 'password', 'passwords', 'pin', 'pins', 'otp', 'tin',
+  'secret', 'secrets', 'token', 'tokens', 'hash', 'hashes', 'password', 'passwords', 'passcode', 'pin', 'pins', 'otp', 'tin',
   'apikey', 'nationalid', 'accountnumber',
+  'code', 'verificationcode', 'privatekey', 'signingkey', 'nida', 'passport', 'idnumber',
+  'bankaccount', 'accountno', 'iban', 'authorization', 'signature',
 ]);
+// Unsplit names ("webhooksecret", "refreshtokenvalue", "dbpassword") are caught by substring on the lower-cased key.
+const SECRET_SUBSTRINGS = ['secret', 'token', 'password', 'passcode', 'apikey', 'privatekey', 'signingkey'];
 const MASKED_KEYS = new Set(['lipanamba']);   // platform settings: manualPayment.lipaNamba
 
 function keyWords(key) {
@@ -41,7 +45,17 @@ function keyWords(key) {
 }
 /** True when an audit key looks like credential or identity-number material. */
 export function isSecretLookingKey(key) {
-  return SECRET_KEYS.has(key) || keyWords(key).some(w => SECRET_WORDS.has(w));
+  const flat = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+  return SECRET_KEYS.has(key) || SECRET_SUBSTRINGS.some(w => flat.includes(w)) || keyWords(key).some(w => SECRET_WORDS.has(w));
+}
+// A URL-like string whose query/fragment carries a credential-looking parameter (signed links, magic links, API keys).
+const URL_LIKE = /^(?:[a-z][a-z0-9+.-]*:)?\/\/|^\/[^\s]*\?/i;
+const SECRET_PARAM = /[?&#;]([^=&#;\s]*)=/g;
+const SECRET_PARAM_NAME = /token|signature|sig$|secret|password|passcode|apikey|api_key|key$|auth|code$|credential|otp|pin$/i;
+export function isSecretUrl(v) {
+  if (typeof v !== 'string' || !URL_LIKE.test(v)) return false;
+  for (const m of v.matchAll(SECRET_PARAM)) if (SECRET_PARAM_NAME.test(m[1])) return true;
+  return false;
 }
 const maskNumber = v => {
   const digits = String(v ?? '').replace(/\D/g, '');
@@ -51,6 +65,7 @@ const maskNumber = v => {
 /** redactAuditValue plus the key-pattern removal and account-number masking, for what the viewer returns. */
 export function redactAuditForDisplay(value) {
   if (Array.isArray(value)) return value.map(redactAuditForDisplay);
+  if (typeof value === 'string') return isSecretUrl(value) ? '[redacted link]' : value;
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
   const out = {};
   for (const [k, v] of Object.entries(value)) {
