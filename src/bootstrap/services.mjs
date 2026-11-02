@@ -133,6 +133,8 @@ import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerProgressService } from '../services/partner-progress-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
+import { createHeldPaymentsService } from '../services/held-payments-service.mjs';
+import { heldPaymentsWorklistOn } from '../shared/feature-flags.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createCompanyDirectory } from '../services/company-directory.mjs';
@@ -1055,6 +1057,19 @@ export const refundService = createRefundService({
   tellEvent: async (refund, type, extra) => eventsRefundsService.tellRefund(refund, await db('Event').where({ id: refund.eventId }).first('title'), type, extra),
   enrichRows: rows => eventsRefundsService.enrich(rows),
   raiseForEventPayment: args => eventsRefundsService.adminRaiseForPayment(args),
+});
+// Held payments worklist (audit M5; HELD_PAYMENTS_WORKLIST): provider money no request could take, and its refund.
+export const heldPaymentsService = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: heldPaymentsWorklistOn,
+  // The request row is locked and re-read, and the refund and its audit rows are written, in one transaction.
+  transact: fn => db.transaction(async trx => fn({
+    lockTransaction: txn => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`held-refund:${txn}`]),
+    lockRequest: id => trx('PaymentRequest').where({ id }).forUpdate().first(),
+    refunds: {
+      filterByColumnAsync: (col, value) => trx('Refund').where({ [col]: value }),
+      insertAsync: async row => (await trx('Refund').insert(row).returning('*'))[0],
+    },
+    auditLog: { insertAsync: row => trx('AuditLog').insert(row) },
+  })),
 });
 // A sponsor-covered trainer session returns what the member paid for it (no double charge).
 export const b2bSponsorRefundService = createB2BSponsorRefundService({ db, refundService, trainerBookings });

@@ -22,7 +22,7 @@ const ALLOWLIST = {
   'GET /admin/settings/specialties': 'functions/admin-settings.mjs adminGetSpecialties',
 };
 
-const RECORDED_ADMIN_ROUTES = 365; // recorded 2026-10-29
+const RECORDED_ADMIN_ROUTES = 367; // recorded 2026-11-02 (held-payments worklist adds 2)
 const TOLERANCE = 5;
 
 const staffId = `usr_sweep_${randomUUID().slice(0, 8)}`;

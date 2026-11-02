@@ -61,14 +61,14 @@ export function createRefundService({
     } catch { /* a notification never blocks a refund */ }
   }
 
-  async function audit(action, actor, before, after) {
-    await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actor || null, action, target: after.id, before, after });
+  async function audit(action, actor, before, after, store = auditLog) {
+    await store.insertAsync({ id: randomUUID(), at: nowIso(), actor: actor || null, action, target: after.id, before, after });
   }
 
   /** The refund still in play (not rejected) for a booking, order or payment, if any. */
-  async function liveFor(kind, sourceId) {
+  async function liveFor(kind, sourceId, store = refunds) {
     const field = SOURCE_FIELD[kind];
-    return (await refunds.filterByColumnAsync(field, sourceId)).find(r => r.kind === kind && r.status !== 'rejected') || null;
+    return (await store.filterByColumnAsync(field, sourceId)).find(r => r.kind === kind && r.status !== 'rejected') || null;
   }
 
   // A refund a staff member raises is not approved by the raise when either flag is on: someone else decides it.
@@ -80,7 +80,11 @@ export function createRefundService({
    * Raising one that is already in play returns the existing refund.
    */
   async function raise({ memberId, kind, sourceId, subscriptionId = null, paymentRequestId = null, amountTzs, currency = 'TZS',
-    reasonCode, note = null, requestedBy = null, requestedRole = 'system', approved = false }) {
+    reasonCode, note = null, requestedBy = null, requestedRole = 'system', approved = false, tx = null }) {
+    // `tx` ({ refunds, auditLog }) is the held-payments worklist writing the refund and its audit rows inside its own
+    // database transaction; every other caller leaves it null and uses the shared stores.
+    const refundStore = tx?.refunds ?? refunds;
+    const auditStore = tx?.auditLog ?? auditLog;
     if (!REFUND_KINDS.includes(kind)) return fail('invalid_kind');
     // REFUND_SPLIT_SCOPES: raising must not stand in for approving. Any staff-started refund (raise endpoint, shop raise-refund,
     // admin cancellation) is left requested, whatever the caller asked for.
@@ -88,7 +92,7 @@ export function createRefundService({
     if (!REASONS.has(reasonCode)) return fail('invalid_reason', 400, { allowed: [...REASONS] });
     const amount = Math.round(Number(amountTzs));
     if (!Number.isFinite(amount) || amount <= 0) return fail('nothing_to_refund', 409);
-    const existing = await liveFor(kind, sourceId);
+    const existing = await liveFor(kind, sourceId, refundStore);
     if (existing) return { refund: existing, existing: true };
     const at = nowIso();
     const row = {
@@ -105,12 +109,12 @@ export function createRefundService({
     };
     let refund;
     try {
-      refund = await refunds.insertAsync(row);
+      refund = await refundStore.insertAsync(row);
     } catch (err) {
-      if (err.code !== '23505') throw err; // raised at the same moment by someone else
+      if (err.code !== '23505' || tx) throw err; // raised at the same moment by someone else; in a transaction the caller maps the conflict (it is already aborted)
       return { refund: await liveFor(kind, sourceId), existing: true };
     }
-    await audit('refund_raised', requestedBy, null, refund);
+    await audit('refund_raised', requestedBy, null, refund, auditStore);
     if (approved) {
       await tell(refund, 'refund_approved', 'Refund on its way', `Your refund of ${money(amount)} is approved. FitFlex will send it to the account you paid from.`);
     } else if (requestedRole === 'admin' && adminRaiseWaits()) {
@@ -151,19 +155,23 @@ export function createRefundService({
    * Admin: raise a refund for any confirmed pass or plan payment. Approved at
    * once, unless MONEY_SECOND_APPROVER is on: then it waits for another admin.
    */
-  async function adminRaise({ body = {}, actorId }) {
+  async function adminRaise({ body = {}, actorId, held = null }) {
+    // `held` ({ maxAmountTzs, tx? }) is passed only by the held-payments worklist, which has already checked that the
+    // request has a provider-confirmed payment nobody could take. It alone relaxes payment_not_confirmed and
+    // cancel_instead below; the amount cap, the two-admin rule and one-refund-per-payment all still apply.
     // S4: money that arrived for an event order whose places are not possible (kind event_order, unfulfilled payment only).
     if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: adminRaiseWaits() });
     const request = body.paymentRequestId ? await paymentRequests.findByIdAsync(body.paymentRequestId) : null;
     if (!request) return fail('payment_not_found', 404);
-    if (!request.subscriptionId) return fail('cancel_instead', 409);
-    if (request.status !== 'approved') return fail('payment_not_confirmed', 409);
-    const amountTzs = body.amountTzs ?? request.amountTzs;
-    if (Number(amountTzs) > Number(request.amountTzs)) return fail('amount_exceeds_payment', 400);
+    if (!held && !request.subscriptionId) return fail('cancel_instead', 409);
+    if (!held && request.status !== 'approved') return fail('payment_not_confirmed', 409);
+    const amountTzs = body.amountTzs ?? (held ? held.maxAmountTzs : null) ?? request.amountTzs;
+    if (held && !(Number(amountTzs) > 0)) return fail('nothing_to_refund', 409);
+    if (Number(amountTzs) > Number(held ? held.maxAmountTzs : request.amountTzs)) return fail('amount_exceeds_payment', 400);
     const out = await raise({
-      memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId,
+      memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId ?? null,
       amountTzs, currency: request.currency || 'TZS', reasonCode: body.reasonCode || 'payment_error', note: body.note,
-      requestedBy: actorId, requestedRole: 'admin', approved: !adminRaiseWaits(),
+      requestedBy: actorId, requestedRole: 'admin', approved: !adminRaiseWaits(), tx: held?.tx ?? null,
     });
     if (out.existing) return fail('refund_already_requested', 409, { refund: out.refund });
     return out;
