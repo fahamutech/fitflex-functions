@@ -197,7 +197,7 @@ import { eventsDeletedUserAnonymiseDays } from '../shared/events-config.mjs';
 import { createEventsWaitlistService } from '../services/events-waitlist-service.mjs';
 import { eventsWaitlistOfferHours, eventsWaitlistMinOfferMinutes, eventsWaitlistMaxActivePerUser, eventsWaitlistMaxQueue, eventsWaitlistMaxLapses, eventsWaitlistQuietHours, eventsWaitlistKeepDays } from '../shared/events-config.mjs';
 import { createEventsKitOfflineService } from '../services/events-kit-offline-service.mjs';
-import { eventsOfflineSessionHours, eventsOfflineMaxDevices, eventsOfflineMaxPerUser, eventsOfflineMaxRows, eventsOfflineSyncBatch, eventsOfflineMaxPending, eventsOfflineClockToleranceSeconds, eventsOfflineMinDeskBuild, eventsOfflineScanKeepDays, eventsOfflineMaxBibRange } from '../shared/events-config.mjs';
+import { eventsOfflineSessionHours, eventsOfflineMaxDevices, eventsOfflineMaxPerUser, eventsOfflineMaxRows, eventsOfflineSyncBatch, eventsOfflineMaxPending, eventsOfflineMaxStoredScans, eventsOfflineClockToleranceSeconds, eventsOfflineMinDeskBuild, eventsOfflineScanKeepDays, eventsOfflineMaxBibRange } from '../shared/events-config.mjs';
 import { setApiErrorSink } from '../shared/events-api-error.mjs';
 import { eventsWebhookPerHostBatch, eventsAnalyticsKeepDays, eventsAlertRules, eventsManualConfirmSlaHours, eventsRetentionMonths } from '../shared/events-config.mjs';
 import {
@@ -1578,7 +1578,7 @@ export const eventsKitOfflineService = createEventsKitOfflineService({
   notifyTeam: (organizerId, message) => notifyOrganizerTeam(organizerId, message),
   config: {
     sessionHours: eventsOfflineSessionHours, maxDevices: eventsOfflineMaxDevices, maxPerUser: eventsOfflineMaxPerUser, maxRows: eventsOfflineMaxRows, syncBatch: eventsOfflineSyncBatch,
-    maxPending: eventsOfflineMaxPending, clockToleranceSeconds: eventsOfflineClockToleranceSeconds, minDeskBuild: eventsOfflineMinDeskBuild, scanKeepDays: eventsOfflineScanKeepDays, maxBibRange: eventsOfflineMaxBibRange,
+    maxPending: eventsOfflineMaxPending, maxStoredScans: eventsOfflineMaxStoredScans, clockToleranceSeconds: eventsOfflineClockToleranceSeconds, minDeskBuild: eventsOfflineMinDeskBuild, scanKeepDays: eventsOfflineScanKeepDays, maxBibRange: eventsOfflineMaxBibRange,
   },
 });
 // S7 · B2: the waitlist (docs/design/events-s7-hardening-and-pilot.md §4). RULE 6 AREA. Dormant behind EVENTS_WAITLIST. An offer is a real order

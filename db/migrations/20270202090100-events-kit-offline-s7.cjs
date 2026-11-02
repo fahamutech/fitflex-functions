@@ -10,7 +10,7 @@
 //
 // Additive. Down FAILS CLOSED once any S7 offline data exists (devices, scans, `offline` collections, traced bibs).
 
-const OUTCOMES = ['accepted', 'duplicate', 'revoked_after_scan', 'event_closed', 'after_revoke', 'organizer_suspended', 'invalid_token', 'unknown_ticket', 'wrong_event', 'validation_failed'];
+const OUTCOMES = ['accepted', 'duplicate', 'revoked_after_scan', 'event_closed', 'after_revoke', 'after_expiry', 'organizer_suspended', 'invalid_token', 'unknown_ticket', 'wrong_event', 'validation_failed'];
 const BIB_OUTCOMES = ['assigned', 'same_already', 'not_applied', 'format_invalid', 'out_of_range', 'no_range', 'taken', 'registration_has_other'];
 const MANUAL_REASONS = ['phone_lost', 'no_signal', 'screen_damaged', 'other'];
 const list = values => values.map(v => `'${v}'`).join(', ');

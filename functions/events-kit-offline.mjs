@@ -72,8 +72,8 @@ export const organizerListOfflineDesks = {
 
 export const organizerRevokeOfflineDesk = {
   created, method: 'post', path: `${base}/devices/:deviceId/revoke`,
-  description: 'Organizer owner / admin (EVENTS_KIT_OFFLINE): remove a desk (a lost or stolen phone). Idempotency-Key required. Body { reason (10-300), reasonSw? (10-300) } → 200 { device }. Takes effect at the desk\'s next contact: it may still SEND its unsent scans (items stamped after the removal are filed for review as after_revoke), then it wipes its list. The staff member is told. 404 device_not_found; 409 already_ended; 422 reason_required.',
-  onGuard: writers('post', 'owner', 'admin'),
+  description: 'Organizer owner / admin (any desk) / ops (a desk they created themselves, else 403 forbidden_role) (EVENTS_KIT_OFFLINE): remove a desk (a lost or stolen phone, or one that must start over). Idempotency-Key required. Body { reason (10-300), reasonSw? (10-300) } → 200 { device }. Takes effect at the desk\'s next contact: it may still SEND its unsent scans, but everything received after the removal is filed for a person (after_revoke), judged by the server\'s receipt time, then it wipes its list. The staff member is told. 404 device_not_found; 409 already_ended; 422 reason_required.',
+  onGuard: writers('post', 'owner', 'admin', 'ops'),
   onRequest: stamped(async (req, res) => {
     if (limitOrNull(writeLimiter, `w:${req.user.sub}`, res)) return undefined;
     return send(res, await svc.revokeDevice({ ...ctx(req), deviceId: req.params.deviceId, key: idemKey(req), body: req.body || {} }));
@@ -88,7 +88,7 @@ export const organizerOfflineSnapshot = {
     const q = req.query || {};
     const delta = q.sinceSeq !== undefined && q.sinceSeq !== '';
     if (!q.cursor && limitOrNull(delta ? deltaLimiter : fullLimiter, `${delta ? 'd' : 'f'}:${q.deviceId ?? 'none'}`, res)) return undefined;
-    return send(res, await svc.snapshot({ ...ctx(req), query: q }));
+    return send(res, await svc.snapshot({ ...ctx(req), organizer: organizerOf(req).organizer, query: q }));
   }),
 };
 

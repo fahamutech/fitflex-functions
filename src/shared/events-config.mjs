@@ -141,10 +141,11 @@ export const eventsOfflineMaxPerUser = () => intOr('EVENTS_OFFLINE_MAX_PER_USER'
 export const eventsOfflineMaxRows = () => intOr('EVENTS_OFFLINE_MAX_ROWS', 20_000, { max: 200_000 });
 export const eventsOfflineSyncBatch = () => intOr('EVENTS_OFFLINE_SYNC_BATCH', 200, { max: 500 });
 export const eventsOfflineMaxPending = () => intOr('EVENTS_OFFLINE_MAX_PENDING', 2000, { max: 20_000 });
+export const eventsOfflineMaxStoredScans = () => eventsOfflineMaxPending() * 5;
 export const eventsOfflineClockToleranceSeconds = () => intOr('EVENTS_OFFLINE_CLOCK_TOLERANCE_SECONDS', 300, { max: 3600 });
 export const eventsOfflineMinDeskBuild = () => intOr('EVENTS_OFFLINE_MIN_DESK_BUILD', 0, { min: 0, max: 1_000_000 });
 export const eventsOfflineScanKeepDays = () => intOr('EVENTS_OFFLINE_SCAN_KEEP_DAYS', 180, { max: 3650 });
-export const eventsOfflineMaxBibRange = () => intOr('EVENTS_OFFLINE_MAX_BIB_RANGE', 5000, { max: 100_000 });
+export const eventsOfflineMaxBibRange = () => intOr('EVENTS_OFFLINE_MAX_BIB_RANGE', 5000, { max: 5000 });   // the database CHECK allows at most 5,000 numbers per block
 
 export const eventsWaitlistOfferHours = () => intOr('EVENTS_WAITLIST_OFFER_HOURS', 12, { max: 72 });
 export const eventsWaitlistMinOfferMinutes = () => intOr('EVENTS_WAITLIST_MIN_OFFER_MINUTES', 120, { max: 1440 });

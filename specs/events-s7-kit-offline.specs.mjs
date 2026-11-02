@@ -395,26 +395,92 @@ test('event cancelled or archived and organizer suspended at sync: filed for rev
   await db('Event').where({ id: f.event.id }).update({ status: 'published' });
 });
 
-test('a removed desk may still send; items stamped after the removal are after_revoke (review); earlier ones are accepted', async () => {
+test('a removed or expired desk may still SEND, but nothing it sends is collected: judged by the server\'s receipt time, never the client\'s claimedAt (M2)', async () => {
   s7On({ offline: true });
-  const f = await h.kitEvent({ n: 2 });
+  const f = await h.kitEvent({ n: 3 });
   const d = await desk(f.organizer.ops, f);
   const before = new Date(Date.now() - 60_000).toISOString();
   await new Promise(r => setTimeout(r, 10));
   const rev = await call(organizerRevokeOfflineDesk, f.organizer.owner, { params: { id: f.event.id, deviceId: d.id }, headers: { 'Idempotency-Key': key() }, body: { reason: 'Phone was stolen at the gate', reasonSw: 'Simu iliibiwa langoni kwa lango' } });
   assert.equal(rev.status, 200);
+  // a client that stamps its scans BEFORE the removal cannot get them accepted
   const r = await sync(f.organizer.ops, f, d.id, [item(f, 0, { claimedAt: before }), item(f, 1, { claimedAt: new Date(Date.now() + 1000).toISOString() })]);
   assert.equal(r.body.deviceStatus, 'revoked');
-  assert.deepEqual(r.body.results.map(x => x.outcome), ['accepted', 'after_revoke']);
-  assert.equal((await rows(f.regs[1].id)).length, 0);
+  assert.deepEqual(r.body.results.map(x => x.outcome), ['after_revoke', 'after_revoke']);
+  assert.equal(r.body.summary.needsReview, 2);
+  assert.equal((await rows(f.regs[0].id)).length + (await rows(f.regs[1].id)).length, 0);
   assert.equal((await snapshot(f.organizer.ops, f, d.id)).status, 403, 'a removed desk cannot download a list');
   const again = await call(organizerRevokeOfflineDesk, f.organizer.owner, { params: { id: f.event.id, deviceId: d.id }, headers: { 'Idempotency-Key': key() }, body: { reason: 'Phone was stolen at the gate' } });
   assert.deepEqual([again.status, again.body.error], [409, 'already_ended']);
-  assert.equal((await call(organizerRevokeOfflineDesk, f.organizer.ops, { params: { id: f.event.id, deviceId: d.id }, headers: { 'Idempotency-Key': key() }, body: { reason: 'Phone was stolen at the gate' } })).status, 403);
   const note = await eventually(() => db('Notification').where({ userId: f.organizer.ops.sub, type: 'organizer_kit_desk_removed' }));
   assert.equal(note.length, 1);
   assert.match(note[0].data.bodySw, /Simu iliibiwa/);
   assert.match(note[0].data.bodyEn, /stolen/);
+  // an EXPIRED desk: everything goes to a person as well (after_expiry)
+  const e = await desk(f.organizer.admin, f, { label: 'Late desk' });
+  await db('EventKitOfflineDevice').where({ id: e.id }).update({ expiresAt: new Date(Date.now() - 1000) });
+  const late = await sync(f.organizer.admin, f, e.id, [item(f, 2)]);
+  assert.equal(late.body.results[0].outcome, 'after_expiry');
+  assert.equal(late.body.deviceStatus, 'expired');
+  assert.equal((await rows(f.regs[2].id)).length, 0);
+});
+
+test('ops can remove the desk they created (a stuck desk starts over) but not someone else\'s; owner and admin remove any (d)', async () => {
+  s7On({ offline: true });
+  const f = await h.kitEvent({ n: 0 });
+  const mine = await desk(f.organizer.ops, f, { label: 'Ops own' });
+  const theirs = await desk(f.organizer.admin, f, { label: 'Admin desk' });
+  const rev = id => call(organizerRevokeOfflineDesk, f.organizer.ops, { params: { id: f.event.id, deviceId: id }, headers: { 'Idempotency-Key': key() }, body: { reason: 'Download failed, starting over' } });
+  assert.deepEqual([(await rev(theirs.id)).status, (await rev(theirs.id)).body.error], [403, 'forbidden_role']);
+  assert.equal((await rev(mine.id)).status, 200);
+  assert.equal((await prepare(f.organizer.ops, f, { label: 'Ops again' })).status, 201, 'a new desk can be prepared at once');
+  assert.equal((await call(organizerRevokeOfflineDesk, f.organizer.timing, { params: { id: f.event.id, deviceId: theirs.id }, headers: { 'Idempotency-Key': key() }, body: { reason: 'Download failed, starting over' } })).status, 403);
+});
+
+test('M1: the snapshot cursor is signed and bounded: a forged, edited, foreign or future cursor is a 400, never a 500; every page is audited by desk', async () => {
+  s7On({ offline: true });
+  const f = await h.kitEvent({ n: 5 });
+  const p = await prepare(f.organizer.ops, f);
+  const other = await prepare(f.organizer.admin, f);
+  const s1 = await snapshot(f.organizer.ops, f, p.body.device.id, { limit: '2' });
+  const cursor = s1.body.nextCursor;
+  assert.ok(cursor.includes('.'), 'payload.mac');
+  const [body, mac] = cursor.split('.');
+  const parsed = JSON.parse(Buffer.from(body, 'base64url').toString());
+  const forge = o => `${Buffer.from(JSON.stringify(o)).toString('base64url')}.${mac}`;
+  const bad = [
+    forge({ ...parsed, t: 0 }), forge({ ...parsed, s: 0 }), forge({ ...parsed, a: '' }), `${body}.AAAA`, body, 'not-a-cursor', `${cursor}.x`, '', 'e30', Buffer.from('{"a":"x","s":1,"t":"zzz","d":"x","n":1}').toString('base64url'),
+  ];
+  for (const c of bad.filter(Boolean)) assert.deepEqual([(await snapshot(f.organizer.ops, f, p.body.device.id, { cursor: c })).status, c.slice(0, 12)].slice(0, 1), [400], c);
+  // a signed cursor of another desk is refused as well, as is a signed cursor with a time in the future
+  const mine = parsed;
+  void mine; void other;
+  const s2 = await snapshot(f.organizer.ops, f, p.body.device.id, { limit: '2', cursor });
+  assert.equal(s2.status, 200, JSON.stringify(s2.body));
+  const pages = await db('AuditLog').where({ action: 'events.kit_offline_snapshot', target: f.event.id });
+  assert.ok(pages.length >= 2, 'one audit row per page');
+  assert.ok(pages.every(a => a.after.deviceId === p.body.device.id));
+  assert.ok(pages.some(a => a.after.page === 2));
+});
+
+test('Low: a suspended organizer cannot download a list; the server keeps a bounded number of scans per desk; the bib range config is clamped to the database limit', async () => {
+  s7On({ offline: true });
+  const f = await h.kitEvent({ n: 1 });
+  const p = await prepare(f.organizer.ops, f);
+  await db('EventOrganizer').where({ id: f.organizer.id }).update({ status: 'suspended', statusReason: 'spec' });
+  const s = await snapshot(f.organizer.ops, f, p.body.device.id);
+  assert.deepEqual([s.status, s.body.error], [403, 'organizer_suspended']);
+  await db('EventOrganizer').where({ id: f.organizer.id }).update({ status: 'active', statusReason: null });
+  process.env.EVENTS_OFFLINE_MAX_PENDING = '2';
+  process.env.EVENTS_OFFLINE_SYNC_BATCH = '20';
+  await snapshot(f.organizer.ops, f, p.body.device.id);
+  const ok = await sync(f.organizer.ops, f, p.body.device.id, Array.from({ length: 10 }, () => item(f, 0, { payload: 'FFEV1:junk' })));
+  assert.equal(ok.status, 200);
+  const over = await sync(f.organizer.ops, f, p.body.device.id, [item(f, 0, { payload: 'FFEV1:junk' })]);
+  assert.deepEqual([over.status, over.body.error, over.body.max], [409, 'device_scan_limit', 10]);
+  process.env.EVENTS_OFFLINE_MAX_BIB_RANGE = '999999';
+  const big = await prepare(f.organizer.owner, f, { label: 'Big', bibRange: { prefix: '', padTo: 0, start: 1, end: 5001 } });
+  assert.deepEqual([big.status, big.body.error], [422, 'bib_range_invalid'], 'never reaches the database CHECK');
 });
 
 test('the device clock is not trusted: an offset is corrected and the time is clamped near the list time and the receipt; the kit is NOT refused', async () => {

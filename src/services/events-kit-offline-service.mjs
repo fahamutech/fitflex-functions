@@ -17,7 +17,7 @@
 //
 // Nothing here stores a token, a token hash or a payload. Organizers never receive phone, email, date of birth, gender or emergency
 // contact (D36, D37): snapshot rows carry a masked name, the display code, the bib and the kit state.
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { parseToken, verifyToken, sha256hex, QR_PREFIX } from '../shared/events-ticket-token.mjs';
 import { KIT_OPEN_STATUSES } from '../shared/events-kit-view.mjs';
 import { normaliseBib, cardName, encodeCursor, decodeCursor, parseLimit, MANUAL_REASONS } from '../shared/events-ops-rules.mjs';
@@ -34,7 +34,7 @@ const KIT_SIZES = ['xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl'];
 const CLIENT_REF_RE = /^[A-Za-z0-9-]{8,64}$/;
 const BATCH_ID_RE = /^[A-Za-z0-9._:-]{8,100}$/;
 const SYNC_BUDGET_MS = 20_000;
-const REVIEW_OUTCOMES = new Set(['duplicate', 'revoked_after_scan', 'event_closed', 'after_revoke', 'organizer_suspended']);
+const REVIEW_OUTCOMES = new Set(['duplicate', 'revoked_after_scan', 'event_closed', 'after_revoke', 'after_expiry', 'organizer_suspended']);
 const NO_REVIEW_BIB = new Set([null, undefined, 'assigned', 'same_already']);
 export const MANAGE_ROLES = Object.freeze(['owner', 'admin']);
 export const DESK_ROLES = Object.freeze(['owner', 'admin', 'ops']);
@@ -84,10 +84,32 @@ export function createEventsKitOfflineService({
 }) {
   const cfg = {
     sessionHours: () => 36, maxDevices: () => 10, maxPerUser: () => 2, maxRows: () => 20_000, syncBatch: () => 200, maxPending: () => 2000,
-    clockToleranceSeconds: () => 300, minDeskBuild: () => 0, scanKeepDays: () => 180, maxBibRange: () => 5000, ...config,
+    clockToleranceSeconds: () => 300, minDeskBuild: () => 0, scanKeepDays: () => 180, maxBibRange: () => 5000, maxStoredScans: () => 10_000, ...config,
   };
   const I = ops.internals;
   const stamp = () => new Date(now());
+
+  // M1 (security review): the snapshot cursor is signed with a key derived from the ticket secret, so a client cannot forge `t`, `s`, `a` or `n`.
+  // A cursor that does not verify, or whose time is outside the desk's life, is a plain 400 invalid_cursor (never a 500).
+  const cursorKey = () => { const r = ticketRing(); return r ? createHmac('sha256', r.secret).update('fitflex.kit-offline.snapshot-cursor.v1').digest() : null; };
+  const signCursor = (obj) => {
+    const key = cursorKey();
+    const body = Buffer.from(JSON.stringify(obj)).toString('base64url');
+    return `${body}.${createHmac('sha256', key ?? 'none').update(body).digest('base64url').slice(0, 32)}`;
+  };
+  function readCursor(raw, device) {
+    const key = cursorKey();
+    if (!key || typeof raw !== 'string' || raw.length > 600) return null;
+    const [body, mac, extra] = raw.split('.');
+    if (!body || !mac || extra !== undefined) return null;
+    const want = createHmac('sha256', key).update(body).digest('base64url').slice(0, 32);
+    if (mac.length !== want.length || !timingSafeEqual(Buffer.from(mac), Buffer.from(want))) return null;
+    let c;
+    try { c = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); } catch { return null; }
+    if (!c || typeof c.a !== 'string' || !Number.isSafeInteger(c.s) || c.d !== device.id || !Number.isFinite(c.t)) return null;
+    if (c.t > +stamp() + 1000 || c.t < +new Date(device.issuedAt) - 1000) return null;
+    return c;
+  }
 
   // ── Devices ─────────────────────────────────────────────────────────────────
 
@@ -231,11 +253,17 @@ export function createEventsKitOfflineService({
     return { status: 200, device: deviceView({ ...d, status: 'revoked' }) };
   }
   async function revokeDevice({ actor, organizerId, eventId, deviceId, key, body = {} }) {
-    if (!MANAGE_ROLES.includes(actor.role)) return fail('forbidden_role', 403);
+    if (!DESK_ROLES.includes(actor.role)) return fail('forbidden_role', 403);
     const event = await I.eventOf(organizerId, eventId);
     if (!event) return fail('event_not_found', 404);
-    return I.idempotent({ actor, route: `POST kit-offline/devices/revoke|${event.id}|${deviceId}`, key, body },
-      () => revokeCore({ event, deviceId, by: actor.userId, reason: body.reason, reasonSw: body.reasonSw, actorLabel: actor }));
+    return I.idempotent({ actor, route: `POST kit-offline/devices/revoke|${event.id}|${deviceId}`, key, body }, async () => {
+      // Owner and admin may remove any desk; ops may remove the desk they created (a stuck desk is theirs to start over from).
+      if (!MANAGE_ROLES.includes(actor.role)) {
+        const own = await loadDevice(event.id, deviceId);
+        if (!own || own.staffUserId !== actor.userId) return fail('forbidden_role', 403);
+      }
+      return revokeCore({ event, deviceId, by: actor.userId, reason: body.reason, reasonSw: body.reasonSw, actorLabel: actor });
+    });
   }
 
   // ── Snapshot (the ticket list) ─────────────────────────────────────────────
@@ -277,8 +305,10 @@ export function createEventsKitOfflineService({
   }
 
   /** GET snapshot: a full list (paged by registration id) or, with sinceSeq, only what changed since. */
-  async function snapshot({ actor, organizerId, eventId, query = {} }) {
+  async function snapshot({ actor, organizerId, organizer = null, eventId, query = {} }) {
     if (!DESK_ROLES.includes(actor.role)) return fail('forbidden_role', 403);
+    // Low: a suspended organizer may send what it already collected, but may not download the list of tickets again.
+    if (organizer?.status === 'suspended') return fail('organizer_suspended', 403);
     const event = await I.eventOf(organizerId, eventId);
     if (!event) return fail('event_not_found', 404);
     const device = await ownDevice(event, query.deviceId, actor);
@@ -297,8 +327,8 @@ export function createEventsKitOfflineService({
 
     let cursor = null;
     if (query.cursor) {
-      cursor = decodeCursor(query.cursor);
-      if (!cursor || typeof cursor.a !== 'string' || !Number.isSafeInteger(cursor.s) || cursor.d !== device.id) return fail('invalid_cursor', 400);
+      cursor = readCursor(query.cursor, device);
+      if (!cursor) return fail('invalid_cursor', 400);
     }
     const first = !cursor;
     const takenAt = cursor ? new Date(cursor.t) : stamp();
@@ -326,23 +356,23 @@ export function createEventsKitOfflineService({
       const have = new Set(regs.map(r => r.id));
       removed = pageIds.filter(id => !have.has(id));
       const rows = await shapeRows(event, regs, lateral);
-      await finishSnapshot({ event, device, seq, takenAt, rows: rows.length, first, delta });
-      return pageOut({ event, device, seq, takenAt, rowCount: null, rows, removed, nextCursor: hasMore ? encodeCursor({ a: pageIds[pageIds.length - 1], s: seq, t: +takenAt, n: 0, d: device.id }) : null, delta: true, sinceSeq });
+      await finishSnapshot({ event, device, seq, takenAt, rows: rows.length, first, delta, pageRows: rows.length });
+      return pageOut({ event, device, seq, takenAt, rowCount: null, rows, removed, nextCursor: hasMore ? signCursor({ a: pageIds[pageIds.length - 1], s: seq, t: +takenAt, n: 0, d: device.id }) : null, delta: true, sinceSeq });
     }
     const fetched = (await q).map(plain);
     const page = fetched.slice(0, limit);
     const lateral = new Map(page.map(r => [r.id, { tokenHash: r._hash, status: r._tstatus, revokeReason: r._treason, displayCode: r._code }]));
     const rows = await shapeRows(event, page, lateral);
     const last = page[page.length - 1];
-    const nextCursor = fetched.length > limit && last ? encodeCursor({ a: last.id, s: seq, t: +takenAt, n: rowCount, d: device.id }) : null;
-    if (first) await finishSnapshot({ event, device, seq, takenAt, rows: rowCount, first, delta: false });
+    const nextCursor = fetched.length > limit && last ? signCursor({ a: last.id, s: seq, t: +takenAt, n: rowCount, d: device.id }) : null;
+    await finishSnapshot({ event, device, seq, takenAt, rows: rowCount, first, delta: false, pageRows: rows.length });
     return pageOut({ event, device, seq, takenAt, rowCount, rows, removed: [], nextCursor, delta: false });
   }
 
-  async function finishSnapshot({ event, device, seq, takenAt, rows, first, delta }) {
-    if (!first) return;
-    await db('EventKitOfflineDevice').where({ id: device.id }).update({ snapshotSeq: seq, snapshotTakenAt: takenAt, ...(delta ? {} : { snapshotRows: rows }), updatedAt: stamp() });
-    await I.audit(typeof device === 'object' ? { kind: 'staff', userId: device.staffUserId } : 'system', 'events.kit_offline_snapshot', event.id, null, { deviceId: device.id, rows: rows ?? 0, delta });
+  async function finishSnapshot({ event, device, seq, takenAt, rows, first, delta, pageRows }) {
+    if (first) await db('EventKitOfflineDevice').where({ id: device.id }).update({ snapshotSeq: seq, snapshotTakenAt: takenAt, ...(delta ? {} : { snapshotRows: rows }), updatedAt: stamp() });
+    // M1: every page is audited by desk, so a scripted walk over the list is visible (the first page also records the total).
+    await I.audit({ kind: 'staff', userId: device.staffUserId }, 'events.kit_offline_snapshot', event.id, null, { deviceId: device.id, rows: first ? (rows ?? 0) : undefined, pageRows, page: first ? 1 : 2, delta });
   }
 
   async function pageOut({ event, device, seq, takenAt, rowCount, rows, removed, nextCursor, delta, sinceSeq = null }) {
@@ -392,11 +422,14 @@ export function createEventsKitOfflineService({
   };
 
   /** The clock rule (§3.7 rule 10): correct by the reported offset, clamp to [snapshot − tolerance, received + tolerance]. */
-  function correctTime(claimedAt, offsetMs, { snapshotTakenAt, receivedAt }) {
+  function correctTime(claimedAt, offsetMs, { snapshotTakenAt, issuedAt, receivedAt }) {
     const tol = cfg.clockToleranceSeconds() * 1000;
     const claimed = +new Date(claimedAt);
     const base = Number.isFinite(claimed) ? claimed - offsetMs : +receivedAt;
-    const lo = snapshotTakenAt ? +new Date(snapshotTakenAt) - tol : -Infinity;
+    // M2: the floor is the moment the desk was registered (a scan cannot predate its desk), or the list time minus the tolerance when that is later.
+    // With no list downloaded yet the floor is the desk's own issue time, never an arbitrary past instant.
+    const floor = Math.max(issuedAt ? +new Date(issuedAt) : -Infinity, snapshotTakenAt ? +new Date(snapshotTakenAt) - tol : -Infinity);
+    const lo = Number.isFinite(floor) ? floor : +receivedAt - tol;
     const hi = +receivedAt + tol;
     const clamped = Math.min(Math.max(base, lo), hi);
     return { at: new Date(clamped), adjusted: !Number.isFinite(claimed) || clamped !== base };
@@ -469,7 +502,7 @@ export function createEventsKitOfflineService({
     const finish = async (over) => save(db, over);
 
     if (!validItem(item)) return { row: await finish({ outcome: 'validation_failed' }) };
-    const { at: correctedAt, adjusted } = correctTime(item.claimedAt, offsetMs, { snapshotTakenAt: device.snapshotTakenAt, receivedAt });
+    const { at: correctedAt, adjusted } = correctTime(item.claimedAt, offsetMs, { snapshotTakenAt: device.snapshotTakenAt, issuedAt: device.issuedAt, receivedAt });
     const common = { claimedAt: Number.isFinite(+new Date(item.claimedAt)) ? new Date(item.claimedAt) : null, correctedAt };
     const flags = { ...(adjusted ? { clock_adjusted: true } : {}) };
 
@@ -486,7 +519,10 @@ export function createEventsKitOfflineService({
     const withReg = { ...common, registrationId: reg.id, manualReason: item.method === 'manual' ? item.manualReason : null };
     if (organizer.status === 'suspended') return { row: await finish({ ...withReg, outcome: 'organizer_suspended', flags }), reg };
     if (['cancelled', 'archived'].includes(event.status)) return { row: await finish({ ...withReg, outcome: 'event_closed', flags }), reg };
-    if (device.status === 'revoked' && device.revokedAt && +correctedAt > +new Date(device.revokedAt)) return { row: await finish({ ...withReg, outcome: 'after_revoke', flags }), reg };
+    // M2: judged by the SERVER's receipt time, never by the client's claimedAt. A desk that was removed or has expired may still SEND (so nothing
+    // collected is stranded), but nothing it sends is collected automatically: every item goes to a person.
+    if (device.status === 'revoked' && device.revokedAt && +receivedAt >= +new Date(device.revokedAt)) return { row: await finish({ ...withReg, outcome: 'after_revoke', flags }), reg };
+    if (device.status === 'expired' || +receivedAt > +new Date(device.expiresAt)) return { row: await finish({ ...withReg, outcome: 'after_expiry', flags }), reg };
 
     // The point, the size and the warnings are claims too: checked against the event, never trusted.
     const warnings = [];
@@ -566,6 +602,9 @@ export function createEventsKitOfflineService({
     const offsetMs = Number.isFinite(offsetRaw) && Math.abs(offsetRaw) <= 7 * 24 * HOUR ? Math.round(offsetRaw) : 0;
     const receivedAt = stamp();
     const started = Date.now();
+    // Low: a desk cannot make the server store scans without limit (the desk's own cap is EVENTS_OFFLINE_MAX_PENDING; the server keeps 5 times that).
+    const storedAlready = Number((await db('EventKitOfflineScan').where({ deviceId: device.id }).count({ n: '*' }).first()).n);
+    if (storedAlready + body.items.length > cfg.maxStoredScans()) return fail('device_scan_limit', 409, { max: cfg.maxStoredScans() });
 
     const results = []; const summary = { accepted: 0, duplicate: 0, needsReview: 0, bibExceptions: 0, rejected: 0, deferred: 0 };
     const touched = new Map();
@@ -668,7 +707,7 @@ export function createEventsKitOfflineService({
     else q = q.where('s.reviewStatus', status);
     if (query.cursor) {
       const cur = decodeCursor(query.cursor);
-      if (!cur?.t || !cur?.i) return fail('invalid_cursor', 400);
+      if (!Number.isFinite(cur?.t) || typeof cur?.i !== 'string' || cur.t > Date.now() + 1000 || cur.t < 0) return fail('invalid_cursor', 400);
       q = q.whereRaw('(s."receivedAt", s.id) < (?, ?)', [new Date(cur.t), String(cur.i)]);
     }
     const rows = (await q.orderBy([{ column: 's.receivedAt', order: 'desc' }, { column: 's.id', order: 'desc' }]).limit(limit + 1)
