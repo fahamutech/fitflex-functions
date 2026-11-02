@@ -287,7 +287,7 @@ export const partnerVerifiedFor = async user => (
 const { resolveRequestUser, publicUserId } = identityService;
 
 // A tier members still hold cannot be removed, renamed or switched off in Settings (409 tier_in_use).
-export const settingsService = createSettingsService({ platformSettings, auditLog, tierHolders: createTierHolders({ db }) });
+export const settingsService = createSettingsService({ platformSettings, auditLog, tierHolders: createTierHolders({ db }), transaction: fn => db.transaction(fn) });
 // partnerMediaService is defined further down; the follow-ups are only called later.
 export const gymService = createGymService({
   gyms, users, checkins, auditLog,
@@ -778,6 +778,7 @@ export const ownerStaffService = createOwnerStaffService({
 
 export const adminMemberService = createAdminMemberService({
   users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr,
+  transaction: fn => db.transaction(fn),
 });
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog, gyms,

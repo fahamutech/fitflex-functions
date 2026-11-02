@@ -9,7 +9,7 @@ import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
 import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 import { checkReason } from '../shared/admin-reason.mjs';
 
-export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr }) {
+export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr, transaction = null }) {
   async function latestMemberSubscription(memberId) {
     const subs = await subscriptions.filterByColumnAsync('memberId', memberId);
     return subs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
@@ -159,28 +159,28 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     if (!member) return { error: 'not_found', status: 404 };
     const beforeSub = await latestMemberSubscription(member.id);
     const before = { ...member, subscription: beforeSub };
-    const updatedUser = await users.updateByIdAsync(member.id, { accountStatus: status });
     const sub = await latestMemberSubscription(member.id);
-    let updatedSub = sub;
-    if (sub) {
-      updatedSub = await subscriptions.updateByIdAsync(sub.id, {
-        status: status === 'suspended' ? 'suspended' : (sub.status === 'suspended' ? 'active' : sub.status)
-      });
-    }
-    const after = { ...updatedUser, subscription: updatedSub };
-    // Not best-effort: if the audit row cannot be written the change is put back and the request fails.
-    try {
-      await auditLog.insertAsync({
+    const subStatus = status === 'suspended' ? 'suspended' : (sub?.status === 'suspended' ? 'active' : sub?.status);
+    // One database transaction: the status change(s) and the audit row commit together or not at all.
+    // `transaction` is always wired in production (bootstrap/services.mjs); specs with in-memory stores omit it.
+    const write = async (trx) => {
+      const t = (fn, fallback) => (trx ? fn(trx) : fallback());
+      const updatedUser = await t(x => users.updateByIdTrxAsync(x, member.id, { accountStatus: status }),
+        () => users.updateByIdAsync(member.id, { accountStatus: status }));
+      const updatedSub = sub
+        ? await t(x => subscriptions.updateByIdTrxAsync(x, sub.id, { status: subStatus }), () => subscriptions.updateByIdAsync(sub.id, { status: subStatus }))
+        : sub;
+      const result = { ...updatedUser, subscription: updatedSub };
+      const row = {
         id: randomUUID(), at: new Date().toISOString(),
         actor: actorId, action: `member_${status}`,
-        target: member.id, before: userAuditSnapshot(before), after: userAuditSnapshot(after),
+        target: member.id, before: userAuditSnapshot(before), after: userAuditSnapshot(result),
         reason: checked.reason
-      });
-    } catch (err) {
-      await users.updateByIdAsync(member.id, { accountStatus: member.accountStatus }).catch(() => {});
-      if (sub) await subscriptions.updateByIdAsync(sub.id, { status: sub.status }).catch(() => {});
-      throw err;
-    }
+      };
+      await t(x => auditLog.insertTrxAsync(x, row), () => auditLog.insertAsync(row));
+      return result;
+    };
+    const after = transaction ? await transaction(write) : await write(null);
     return { member: after };
   }
 

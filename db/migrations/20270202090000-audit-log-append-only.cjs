@@ -5,25 +5,28 @@
 //    person tries them. Two narrow exceptions, both explicit:
 //    - Account erasure scrubs personal keys out of before/after (account-erasure-store-pg.mjs scrubAuditTrail). It sets the
 //      transaction-local setting fitflex.audit_scrub = 'on' and may then change ONLY the before/after columns.
+//      The scrub can only REMOVE data: NEW.before / NEW.after must be NULL or contained in the old value (jsonb <@), never
+//      added to or rewritten.
 //    - Test cleanup. A session that sets fitflex.audit_test_bypass = 'on' may delete/update, but ONLY when the database name
-//      contains "_ci" (the isolated CI databases). src/infra/knex-store.mjs sets it on every pooled connection when
+//      matches ^fitflex_ci(_[A-Za-z0-9]+)*$ (the isolated CI databases; fitflex_circle, fitflex_city, prod_cicd do not). src/infra/knex-store.mjs sets it on every pooled connection when
 //      FITFLEX_USE_CI_DB=1. On any other database name the setting is ignored.
 // 3. An index for the keyset-paginated viewer (GET /admin/audit-log), newest first.
 //
 // Reversible: down drops the triggers, the function, the index and the column.
 exports.up = async function up(knex) {
   await knex.raw(`ALTER TABLE "AuditLog" ADD COLUMN IF NOT EXISTS reason text`);
-  await knex.raw(`CREATE INDEX IF NOT EXISTS auditlog_at_id_idx ON "AuditLog" (at DESC, id DESC)`);
 
   await knex.raw(`CREATE OR REPLACE FUNCTION audit_log_append_only() RETURNS trigger AS $$
     BEGIN
-      IF current_setting('fitflex.audit_test_bypass', true) = 'on' AND current_database() LIKE '%\\_ci%' THEN
+      IF current_setting('fitflex.audit_test_bypass', true) = 'on' AND current_database() ~ '^fitflex_ci(_[A-Za-z0-9]+)*$' THEN
         IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
         IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
         RETURN NULL;
       END IF;
       IF TG_OP = 'UPDATE' AND current_setting('fitflex.audit_scrub', true) = 'on'
-         AND (to_jsonb(NEW) - 'before' - 'after') = (to_jsonb(OLD) - 'before' - 'after') THEN
+         AND (to_jsonb(NEW) - 'before' - 'after') = (to_jsonb(OLD) - 'before' - 'after')
+         AND (NEW.before IS NULL OR (OLD.before IS NOT NULL AND NEW.before <@ OLD.before))
+         AND (NEW.after IS NULL OR (OLD.after IS NOT NULL AND NEW.after <@ OLD.after)) THEN
         RETURN NEW;
       END IF;
       RAISE EXCEPTION 'AuditLog rows are append-only (% refused)', TG_OP USING ERRCODE = 'P0001';
@@ -41,6 +44,5 @@ exports.down = async function down(knex) {
   await knex.raw(`DROP TRIGGER IF EXISTS auditlog_no_change ON "AuditLog"`);
   await knex.raw(`DROP TRIGGER IF EXISTS auditlog_no_truncate ON "AuditLog"`);
   await knex.raw(`DROP FUNCTION IF EXISTS audit_log_append_only()`);
-  await knex.raw(`DROP INDEX IF EXISTS auditlog_at_id_idx`);
   await knex.raw(`ALTER TABLE "AuditLog" DROP COLUMN IF EXISTS reason`);
 };

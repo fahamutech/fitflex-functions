@@ -3,9 +3,11 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
-import { users } from '../src/bootstrap/services.mjs';
+import { users, subscriptions, platformSettings, auditLog as auditCollection } from '../src/bootstrap/services.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { createAuditLogService, AUDIT_PAGE_MAX } from '../src/services/audit-log-service.mjs';
+import { redactAuditForDisplay, isSecretLookingKey } from '../src/shared/audit-redact.mjs';
+import { readFileSync } from 'node:fs';
 import { createAdminMemberService } from '../src/services/admin-member-service.mjs';
 import { createAdminOwnerService } from '../src/services/admin-owner-service.mjs';
 import { createSettingsService } from '../src/services/settings-service.mjs';
@@ -245,25 +247,125 @@ test('reasons: pricing/payment settings need a reason when ON, cosmetic ones do 
   } finally { delete process.env.ADMIN_REASONS_REQUIRED; }
 });
 
-test('audit failure fails the action: member status, settings are put back; owner is not deleted', async () => {
-  const down = sink({ fail: true });
-  const { svc, users } = memberSvc(down);
-  await assert.rejects(svc.setStatus({ memberId: 'usr_m1', status: 'suspended', actorId: 'a' }), /audit down/);
-  assert.equal(users.rows[0].accountStatus, 'active', 'suspension undone');
+// A real transaction: the audit insert fails, so the change must not survive in the database.
+test('audit failure fails the action: member status and settings roll back in the database; owner is not deleted', async () => {
+  const transaction = fn => db.transaction(fn);
+  const failing = { ...auditCollection, insertTrxAsync: async () => { throw new Error('audit down'); }, insertAsync: async () => { throw new Error('audit down'); } };
 
-  const { s, platformSettings } = settings(down);
-  await s.adminUpdate({ body: { paymentPeriodDays: 7 }, actorId: 'a' }).catch(() => {}); // fails too: audit is down
-  await assert.rejects(s.adminUpdate({ body: { paymentPeriodDays: 99 }, actorId: 'a' }), /audit down/);
-  assert.notEqual(platformSettings.rows[0].paymentPeriodDays, 99, 'settings restored');
-  assert.ok(!platformSettings.rows[0].paymentPeriodDays, 'a key that did not exist before is cleared again');
+  const memberId = `usr_atom_${run}`;
+  const subId = `sub_atom_${run}`;
+  await db('User').insert({ id: memberId, userType: 'member', displayName: 'Atomic', accountStatus: 'active', updatedAt: new Date() });
+  await db('Subscription').insert({ id: subId, memberId, tier: 'basic', status: 'active', startDate: new Date(), endDate: new Date(Date.now() + 864e5), updatedAt: new Date() }).catch(() => {});
+  try {
+    const svc = createAdminMemberService({ users, subscriptions, paymentRequests: store(), checkins: store(), gyms: [], auditLog: failing, issueQr: () => 'qr', transaction });
+    await assert.rejects(svc.setStatus({ memberId, status: 'suspended', actorId: 'a' }), /audit down/);
+    assert.equal((await db('User').where({ id: memberId }).first()).accountStatus, 'active', 'suspension rolled back');
+    const sub = await db('Subscription').where({ id: subId }).first();
+    if (sub) assert.equal(sub.status, 'active', 'subscription rolled back');
+    // And the happy path commits both with the audit row.
+    const ok = createAdminMemberService({ users, subscriptions, paymentRequests: store(), checkins: store(), gyms: [], auditLog: auditCollection, issueQr: () => 'qr', transaction });
+    assert.equal((await ok.setStatus({ memberId, status: 'suspended', actorId: ACTOR, reason: 'atomic ok' })).error, undefined);
+    assert.equal((await db('User').where({ id: memberId }).first()).accountStatus, 'suspended');
+    const row = await db('AuditLog').where({ target: memberId, action: 'member_suspended' }).first();
+    assert.equal(row.reason, 'atomic ok');
+  } finally {
+    await db('AuditLog').where({ target: memberId }).del();
+    await db('Subscription').where({ id: subId }).del();
+    await db('User').where({ id: memberId }).del();
+  }
+
+  // Settings: the real platform row and its in-memory copy stay as they were.
+  await primed();
+  const live = platformSettings.find(r => r.id === 'platform');
+  const rowBefore = await db('PlatformSettings').where({ id: 'platform' }).first();
+  const settingsSvc = createSettingsService({ platformSettings, auditLog: failing, tierHolders: async () => 0, transaction });
+  await assert.rejects(settingsSvc.adminUpdate({ body: { paymentPeriodDays: 99 }, actorId: 'a' }), /audit down/);
+  const rowAfter = await db('PlatformSettings').where({ id: 'platform' }).first();
+  assert.equal(rowAfter.paymentPeriodDays, rowBefore.paymentPeriodDays, 'database unchanged');
+  assert.equal(platformSettings.find(r => r.id === 'platform').paymentPeriodDays, live.paymentPeriodDays, 'cache unchanged');
+  assert.notEqual(rowAfter.paymentPeriodDays, 99);
 
   const owners = store([{ id: 'usr_o2', userType: 'gym_operator', gymId: null, gymIds: [] }]);
-  const osvc = createAdminOwnerService({ users: owners, gyms: [], checkins: store(), auditLog: down, gymService: { slimGymRef: g => g } });
+  const osvc = createAdminOwnerService({ users: owners, gyms: [], checkins: store(), auditLog: sink({ fail: true }), gymService: { slimGymRef: g => g } });
   await assert.rejects(osvc.remove({ id: 'usr_o2', actorId: 'a' }), /audit down/);
   assert.equal(owners.rows.length, 1, 'owner not deleted');
 });
 
-test('routes pass body.reason through', () => {
-  assert.match(String(adminDeleteGymOwner.onRequest), /reason/);
+test('settings commit: the audit row and the new value land together, cache follows the commit', async () => {
+  const transaction = fn => db.transaction(fn);
+  await primed();
+  const original = (await db('PlatformSettings').where({ id: 'platform' }).first()).paymentPeriodDays;
+  const svc = createSettingsService({ platformSettings, auditLog: auditCollection, tierHolders: async () => 0, transaction });
+  try {
+    const res = await svc.adminUpdate({ body: { paymentPeriodDays: 17, reason: 'atomic settings' }, actorId: ACTOR });
+    assert.equal(res.paymentPeriodDays, 17);
+    assert.equal((await db('PlatformSettings').where({ id: 'platform' }).first()).paymentPeriodDays, 17);
+    assert.equal(platformSettings.find(r => r.id === 'platform').paymentPeriodDays, 17);
+    const row = await db('AuditLog').where({ actor: ACTOR, action: 'settings_updated' }).first();
+    assert.equal(row.reason, 'atomic settings');
+  } finally {
+    await db('PlatformSettings').where({ id: 'platform' }).update({ paymentPeriodDays: original });
+    platformSettings.find(r => r.id === 'platform').paymentPeriodDays = original;
+    await db('AuditLog').where({ actor: ACTOR, action: 'settings_updated' }).del();
+  }
+});
+
+// The platform row is primed into memory asynchronously at startup; make sure it is there (creating it on a fresh DB).
+async function primed() {
+  for (let i = 0; i < 50 && !platformSettings.find(r => r.id === 'platform'); i++) await new Promise(r => setTimeout(r, 100));
+  createSettingsService({ platformSettings, auditLog: auditCollection }).ensureDefaultSettings();
+  for (let i = 0; i < 50 && !(await db('PlatformSettings').where({ id: 'platform' }).first()); i++) await new Promise(r => setTimeout(r, 100));
+}
+
+// ── trigger details ──────────────────────────────────────────────────────────
+test('trigger: the scrub can only remove data; the test bypass pattern is strict', async () => {
+  const id = await put({ before: { email: 'a@x.test', phone: '1' }, after: { n: { a: 1, b: 2 } } });
+  const scrub = async sql => strict(async trx => {
+    await trx.raw(`SELECT set_config('fitflex.audit_scrub', 'on', true)`);
+    return trx.raw(sql, [id]);
+  });
+  // adding a key, rewriting a value, or growing a nested object is refused
+  await assert.rejects(scrub(`UPDATE "AuditLog" SET before = before || '{"new":1}'::jsonb WHERE id = ?`), /append-only/);
+  await assert.rejects(scrub(`UPDATE "AuditLog" SET before = '{"email":"other@x.test"}'::jsonb WHERE id = ?`), /append-only/);
+  await assert.rejects(scrub(`UPDATE "AuditLog" SET after = '{"n":{"a":1,"z":9}}'::jsonb WHERE id = ?`), /append-only/);
+  await assert.rejects(scrub(`UPDATE "AuditLog" SET action = 'x', before = before - 'phone' WHERE id = ?`), /append-only/);
+  // removing keys (also nested) is fine; the transaction is rolled back by strict()
+  await scrub(`UPDATE "AuditLog" SET after = '{"n":{"a":1}}'::jsonb WHERE id = ?`);
+  const src = readFileSync(new URL('../db/migrations/20270202090000-audit-log-append-only.cjs', import.meta.url), 'utf8');
+  const pattern = src.match(/current_database\(\) ~ '([^']+)'/)[1];
+  for (const [name, ok] of [['fitflex_ci', true], ['fitflex_ci_sliceB_1102', true], ['fitflex_ci_b2b', true], ['fitflex_circle', false],
+    ['fitflex_city', false], ['prod_cicd', false], ['fitflex', false], ['fitflex_ci-prod', false], ['xfitflex_ci', false]]) {
+    const { rows: [{ m }] } = await db.raw('select ? ~ ? as m', [name, pattern]);
+    assert.equal(m, ok, name);
+  }
+});
+
+// ── redaction ────────────────────────────────────────────────────────────────
+test('viewer redaction: key patterns removed as whole words, account numbers masked', () => {
+  for (const k of ['apiKey', 'api_key', 'clientSecret', 'accessToken', 'passwordHash', 'pin', 'otpCode', 'nationalId', 'national_id', 'tin', 'accountNumber', 'bankAccountNumber', 'tokenHash'])
+    assert.ok(isSecretLookingKey(k), k);
+  for (const k of ['shipping', 'mapping', 'displayName', 'action', 'timing', 'status', 'accountName', 'opinion'])
+    assert.ok(!isSecretLookingKey(k), k);
+  const out = redactAuditForDisplay({
+    manualPayment: { lipaNamba: '5123456789', accountName: 'FitFlex', network: 'M-Pesa' },
+    vendor: { tin: '123-456', bankAccountNumber: '0150123', nationalId: 'X', apiKey: 'k', shipping: 'ok' },
+    list: [{ secretNote: 'x', fine: 1 }],
+  });
+  assert.equal(out.manualPayment.lipaNamba, '*******789');
+  assert.equal(out.manualPayment.accountName, 'FitFlex');
+  assert.deepEqual(out.vendor, { shipping: 'ok' });
+  assert.deepEqual(out.list, [{ fine: 1 }]);
+});
+
+test('viewer: settings audit rows come back with the Lipa Namba masked', async () => {
+  await put({ action: 'spec_mask', after: { manualPayment: { lipaNamba: '5123456', accountName: 'FitFlex' } } });
+  const { items } = await viewer.list({ actor: ACTOR, action: 'spec_mask' });
+  assert.equal(items[0].after.manualPayment.lipaNamba, '****456');
+  assert.ok(!JSON.stringify(items).includes('5123456'));
+});
+
+test('routes pass body.reason through; the owner delete ignores ?reason=', () => {
+  assert.match(String(adminDeleteGymOwner.onRequest), /req\.body\?\.reason/);
+  assert.doesNotMatch(String(adminDeleteGymOwner.onRequest), /query/);
   assert.match(String(adminSetMemberStatus.onRequest), /reason/);
 });

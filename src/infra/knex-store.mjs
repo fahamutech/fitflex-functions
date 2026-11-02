@@ -255,7 +255,7 @@ export function collection(name) {
 
   // ─── Shared DB-persist helpers (used by both primed and db-only modes) ───
 
-  async function _persistInsert(row) {
+  async function _persistInsert(row, q = db) {
     if (name === 'trainers') {
       const { fields, gymIds } = trainerToDb(row);
       await db.transaction(async (trx) => {
@@ -271,11 +271,11 @@ export function collection(name) {
         .merge({ code: row.code, userType: row.userType, expiresAt: new Date(row.expiresAt) });
     } else {
       const writeData = prepareForKnex(name, row);
-      await db(meta.table).insert(writeData);
+      await q(meta.table).insert(writeData);
     }
   }
 
-  async function _persistUpdate(pk, id, patch) {
+  async function _persistUpdate(pk, id, patch, q = db) {
     if (name === 'trainers') {
       const { fields, gymIds } = trainerToDb(patch);
       const updateData = { ...fields, updatedAt: new Date() };
@@ -292,10 +292,28 @@ export function collection(name) {
     } else {
       const writeData = prepareForKnex(name, patch, true);
       if (Object.keys(writeData).length) {
-        await db(meta.table).where({ [pk]: id }).update(writeData);
+        await q(meta.table).where({ [pk]: id }).update(writeData);
       }
     }
   }
+
+  // Same normalisation as _findByIdFromDb, but read inside the caller's transaction.
+  async function _readByIdIn(trx, id) {
+    let row = await trx(meta.table).where({ [pkField(name)]: id }).first();
+    if (row && meta.transform) row = meta.transform(row);
+    return row ? JSON.parse(JSON.stringify(row, (_, v) => typeof v === 'bigint' ? Number(v) : v)) : null;
+  }
+
+  // Transaction-joined writes (simple tables only): the caller owns db.transaction and commits or rolls back all of it.
+  const trxWrites = {
+    /** Insert inside the caller's transaction. */
+    insertTrxAsync: async (trx, row) => { await _persistInsert(row, trx); return row; },
+    /** Update by primary key inside the caller's transaction; resolves to the row as the transaction sees it. */
+    updateByIdTrxAsync: async (trx, id, patch) => {
+      await _persistUpdate(pkField(name), id, patch, trx);
+      return _readByIdIn(trx, id);
+    },
+  };
 
   async function _persistUpsert(row) {
     if (name === 'otps') {
@@ -405,6 +423,26 @@ export function collection(name) {
         const pk = pkField(name);
         const id = updated[pk];
         if (id) _persistUpdate(pk, id, patch).catch(err => console.error(`[knex-store] update ${name} (id=${id}):`, err.message));
+        return updated;
+      },
+
+      ...trxWrites,
+
+      /**
+       * Update inside the caller's transaction. The in-memory copy changes only once that transaction commits
+       * (a rollback leaves it as it was).
+       */
+      updateTrxAsync: async (trx, pred, patch) => {
+        const data = getSyncData();
+        const cur = data.find(pred);
+        if (!cur) return null;
+        const pk = pkField(name);
+        await _persistUpdate(pk, cur[pk], patch, trx);
+        const updated = { ...cur, ...patch };
+        trx.executionPromise.then(() => {
+          const i = data.findIndex(r => r[pk] === cur[pk]);
+          if (i >= 0) data[i] = { ...data[i], ...patch };
+        }, () => {});
         return updated;
       },
 
@@ -546,6 +584,8 @@ export function collection(name) {
       _persistInsert(row).then(() => invalidate(name)).catch(err => console.error(`[knex-store] insert ${name} (id=${row.id || row.phone || '?'}):`, err.message));
       return row;
     },
+
+    ...trxWrites,
 
     /** Awaitable insert — use for critical paths */
     insertAsync: async (row) => {

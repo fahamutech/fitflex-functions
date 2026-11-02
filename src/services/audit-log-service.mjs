@@ -1,5 +1,5 @@
 // Read-only audit log viewer (admin-portal audit S2): filters + keyset pagination over AuditLog.
-import { redactAuditValue, userAuditSnapshot } from '../shared/audit-redact.mjs';
+import { redactAuditForDisplay, userAuditSnapshot } from '../shared/audit-redact.mjs';
 
 export const AUDIT_PAGE_DEFAULT = 50;
 export const AUDIT_PAGE_MAX = 200;
@@ -15,8 +15,8 @@ function decodeCursor(raw) {
 
 /** Old rows may hold a whole User row; reduce those to the audit allow-list, strip credentials from the rest. */
 function redactForViewer(value) {
-  if (value && typeof value === 'object' && !Array.isArray(value) && 'userType' in value) return userAuditSnapshot(value);
-  return redactAuditValue(value ?? null);
+  if (value && typeof value === 'object' && !Array.isArray(value) && 'userType' in value) return redactAuditForDisplay(userAuditSnapshot(value));
+  return redactAuditForDisplay(value ?? null);
 }
 
 export function createAuditLogService({ db }) {
