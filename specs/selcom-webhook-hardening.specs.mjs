@@ -113,3 +113,68 @@ test('flag on + default (not configured) client fails closed', async () => {
   assert.equal(subscriptions.rows[0].status, 'payment_pending');
   assert.equal(webhookSeen.rows.length, 0);
 });
+
+// --- server confirm: an amount we require
+test('flag on + no open request and no numeric amount: 409, client never asked, nothing consumed', async () => {
+  process.env.SELCOM_WEBHOOK_SERVER_CONFIRM = 'on';
+  let asked = 0;
+  const subscriptions = store([{ id: 's1', status: 'payment_pending' }]);
+  const webhookSeen = store();
+  const svc = createWebhookService({ subscriptions, webhookSeen, paymentRequests: store(), confirmClient: { confirm: async () => { asked++; return { confirmed: true, amount: 999 }; } } });
+  for (const amount of [undefined, null, '', 'abc']) {
+    const r = await svc.handleSelcom({ payment_id: 'p9', status: 'success', subscription_id: 's1', amount });
+    assert.deepEqual([r.error, r.status], ['confirmation_requires_amount', 409]);
+  }
+  assert.equal(asked, 0);
+  assert.equal(subscriptions.rows[0].status, 'payment_pending');
+  assert.equal(webhookSeen.rows.length, 0);
+});
+
+// --- query form can be switched off
+test('SELCOM_WEBHOOK_QUERY_TOKEN_OFF rejects ?token= but keeps the header', () => {
+  process.env.SELCOM_WEBHOOK_SECRET = SECRET;
+  process.env.SELCOM_WEBHOOK_QUERY_TOKEN_OFF = 'on';
+  try {
+    assert.equal(hasWebhookToken({ headers: {}, query: { token: SECRET } }), false);
+    assert.equal(hasWebhookToken({ headers: { 'x-selcom-webhook-token': SECRET }, query: {} }), true);
+  } finally { delete process.env.SELCOM_WEBHOOK_QUERY_TOKEN_OFF; }
+});
+
+test('empty token and empty/unset secret never match', () => {
+  process.env.SELCOM_WEBHOOK_SECRET = SECRET;
+  assert.equal(hasWebhookToken({ headers: { 'x-selcom-webhook-token': '' }, query: { token: '' } }), false);
+  assert.equal(hasWebhookToken({ headers: {}, query: { token: ['x', SECRET] } }), false);
+  process.env.SELCOM_WEBHOOK_SECRET = '';
+  assert.equal(hasWebhookToken({ headers: { 'x-selcom-webhook-token': '' }, query: { token: '' } }), false);
+});
+
+// --- redaction on a real Express request, over real HTTP
+test('real Express app over HTTP: a logger placed after the gate cannot see the token (header and query)', async () => {
+  const { default: express } = await import('express');
+  process.env.SELCOM_WEBHOOK_SECRET = SECRET;
+  const seen = [];
+  const app = express();
+  app.use(express.json());
+  app.post('/webhooks/selcom', (req, res) => {
+    const ok = hasWebhookToken(req);
+    redactWebhookToken(req);
+    // a "logger" that runs after the handler started: logs everything it can reach
+    res.on('finish', () => seen.push(JSON.stringify({
+      originalUrl: req.originalUrl, url: req.url, query: req.query, headers: req.headers, rawHeaders: req.rawHeaders,
+      p1: req._parsedUrl, p2: req._parsedOriginalUrl,
+    })));
+    seen.push(JSON.stringify({ originalUrl: req.originalUrl, query: req.query, headers: req.headers, rawHeaders: req.rawHeaders }));
+    res.status(ok ? 200 : 403).json({ ok });
+  });
+  const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
+  const base = `http://127.0.0.1:${server.address().port}/webhooks/selcom`;
+  try {
+    const viaHeader = await fetch(base, { method: 'POST', headers: { 'content-type': 'application/json', 'x-selcom-webhook-token': SECRET }, body: '{}' });
+    const viaQuery = await fetch(`${base}?a=1&token=${SECRET}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const wrong = await fetch(`${base}?token=nope`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.deepEqual([viaHeader.status, viaQuery.status, wrong.status], [200, 200, 403]);
+    await new Promise(r => setTimeout(r, 50));
+    assert.ok(seen.length >= 6);
+    for (const line of seen) assert.equal(line.includes(SECRET), false, line);
+  } finally { server.close(); }
+});

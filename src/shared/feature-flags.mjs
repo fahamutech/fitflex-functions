@@ -605,3 +605,12 @@ export function webCheckinAlertsOn() {
 export function selcomWebhookServerConfirmOn() {
   return on('SELCOM_WEBHOOK_SERVER_CONFIRM');
 }
+
+/**
+ * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_QUERY_TOKEN_OFF is set. On: the Selcom
+ * webhook rejects the legacy ?token= query form and accepts only the x-selcom-webhook-token
+ * header. Switch on once Selcom has been reconfigured to send the header.
+ */
+export function selcomWebhookQueryTokenOff() {
+  return on('SELCOM_WEBHOOK_QUERY_TOKEN_OFF');
+}

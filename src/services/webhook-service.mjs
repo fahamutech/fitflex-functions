@@ -59,12 +59,17 @@ export function createWebhookService({
       // confirm it. Fails closed and before claim(), so the payment_id stays free for a retry.
       if (selcomWebhookServerConfirmOn() && sub.status === 'payment_pending') {
         let confirmation;
+        // Decided before asking Selcom, so no outside call is made for a callback we cannot verify.
+        const expectedEarly = request ? Number(request.amountTzs) : (amount != null && amount !== '' ? Number(amount) : null);
+        if (expectedEarly == null || !Number.isFinite(expectedEarly)) return { error: 'confirmation_requires_amount', status: 409 };
         try {
           confirmation = await confirmClient.confirm({ paymentId: payment_id, subscriptionId: sub.id, amount });
         } catch {
           return { error: 'confirmation_unavailable', status: 503 };
         }
         const expected = request ? Number(request.amountTzs) : (amount != null && amount !== '' ? Number(amount) : null);
+        // Fail closed: confirmation must compare an amount we require (an open request's, or the callback's).
+        if (expected == null || !Number.isFinite(expected)) return { error: 'confirmation_requires_amount', status: 409 };
         const confirmedAmount = confirmation?.amount == null ? null : Number(confirmation.amount);
         if (!confirmation?.confirmed || (expected != null && confirmedAmount !== expected)) {
           return { error: 'confirmation_failed', status: 409 };
