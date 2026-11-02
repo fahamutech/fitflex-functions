@@ -465,6 +465,29 @@ export function createEventsOrganizerService({
     return saved;
   }
 
+  /**
+   * S7 (H7, follow-up S2 L9): the hook above can fail after the KYC decision committed. Hourly, every organizer's status is re-derived from its KYC
+   * case through the same primitive; each correction is audited. → { checked, corrected }.
+   */
+  async function sweepOrganizerStatus({ limit = 1000 } = {}) {
+    const rows = await db('EventOrganizer as o').join('PartnerKycCase as k', 'k.id', 'o.kycCaseId').orderBy('o.id').limit(limit)
+      .select('o.id as organizerId', 'o.status as current', 'k.*');
+    let corrected = 0;
+    for (const r of rows) {
+      const { organizerId, current, ...kycCase } = r;
+      const want = organizerStatusOf(kycCase);
+      if (want === current) continue;
+      try {
+        const saved = await syncOrganizerStatus(kycCase);
+        if (saved && saved.status !== current) {
+          corrected += 1;
+          await audit('system', 'events.organizer_status_corrected', organizerId, { status: current }, { status: saved.status, kycCaseId: kycCase.id, kycStatus: kycCase.status });
+        }
+      } catch (err) { console.warn('[events] organizer status sweep failed for', organizerId, err?.message); }
+    }
+    return { checked: rows.length, corrected };
+  }
+
   // ── The eventLifecycle job (§7.1 automatic transitions) ─────────────────
 
   async function runLifecycle({ at = now() } = {}) {
@@ -484,6 +507,6 @@ export function createEventsOrganizerService({
 
   return {
     createOrganizer, me, summary, listEvents, createEvent, getEvent, patchEvent, transition, deleteEvent, changes,
-    listStaff, inviteStaff, changeStaffRole, removeStaff, syncOrganizerStatus, runLifecycle, moveEvent, actionsFor,
+    listStaff, inviteStaff, changeStaffRole, removeStaff, syncOrganizerStatus, sweepOrganizerStatus, runLifecycle, moveEvent, actionsFor,
   };
 }

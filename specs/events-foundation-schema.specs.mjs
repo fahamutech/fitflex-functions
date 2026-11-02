@@ -34,6 +34,11 @@ const MIGRATIONS = [
   '20270131090000-events-results-s6.cjs',
   '20270131090100-events-rewards-s6.cjs',
   '20270131090200-events-medal-art-s6.cjs',
+  // S7: analytics counters, the offline kit desk, the waitlist (they reference EventKitCollection, EventBibAssignment, EventOrder and Event, so they come down first). Down FAILS CLOSED on data.
+  '20270202090000-events-analytics-s7.cjs',
+  '20270202090100-events-kit-offline-s7.cjs',
+  '20270202090200-events-waitlist-s7.cjs',
+  '20270202090300-events-hardening-s7.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');

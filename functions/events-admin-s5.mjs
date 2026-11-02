@@ -2,6 +2,7 @@
 // Portal ACL scope `events`. Every route answers 404 feature_disabled while EVENTS_MODULE is off. The payout schedule is a label for the
 // later settlement slice: nothing here promises a date or an amount. Guards are wrapped in routeGuard.
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsModule, requireEventsOrganizerApi, requireEventsWebhooks, eventsOrganizerApiOn, eventsWebhooksOn } from '../src/shared/feature-flags.mjs';
@@ -11,7 +12,7 @@ import { eventCatalogueStore } from '../src/bootstrap/services.mjs';
 const created = new Date().toISOString();
 const guard = (method, flag = requireEventsModule) => routeGuard(method, [flag, requireAuth('admin'), requireAcl('events')]);
 function send(res, result, okStatus = 200) {
-  if (result?.error) { const { error, status, ...extra } = result; return res.status(status || 400).json({ error, ...extra }); }
+  if (result?.error) { noteApiError('admin', result.status || 400); const { error, status, ...extra } = result; return res.status(status || 400).json({ error, ...extra }); }
   return res.status(okStatus).json(result);
 }
 const organizerOfEvent = async eventId => (await eventCatalogueStore.loadJoined(eventId))?.event?.organizerId ?? null;

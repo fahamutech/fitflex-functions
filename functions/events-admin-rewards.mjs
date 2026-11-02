@@ -79,6 +79,11 @@ export const adminCancelReward = {
   description: 'Admin (scope events; EVENTS_REWARDS): cancel a reserved perk; the unit returns to the member → { redemption }.',
   onGuard: admin('post'), onRequest: stamped(async (req, res) => send(req, res, await svc.adminCancel({ admin: req.user.sub, id: req.params.id, body: req.body || {} }))),
 };
+export const adminListRewardRedemptions = {
+  created, method: 'get', path: '/admin/reward-redemptions',
+  description: 'Admin (scope events; EVENTS_REWARDS; S7 H11): recent redemptions, newest first. ?status=reserved|redeemed|cancelled|expired&cursor&limit (≤200) → { items [{ id, person ("Amina M." or null once anonymised), reward { en, sw }, redeemMode, codeState (the redemption status), claimedAt, redeemedAt, expiresAt, needsReview }], nextCursor }. NEVER a code, a code hash or a user id.',
+  onGuard: admin('get'), onRequest: stamped(async (req, res) => send(req, res, await svc.listRedemptions({ query: req.query || {} }))),
+};
 export const adminAwardTasks = {
   created, method: 'get', path: '/admin/event-award-tasks',
   description: 'Admin (scope events; EVENTS_REWARDS): award tasks by state (default failed) → { items [{ id, eventId, registrationId, reason, state, attempts, lastError, createdAt }] }.',

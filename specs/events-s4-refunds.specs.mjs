@@ -45,7 +45,7 @@ async function paid(f, b, n = 1, { admins = null } = {}) {
   const participants = Array.from({ length: n }, (_, i) => (i === 0
     ? { ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: b.phone, consentBasis: 'self' }
     : { ticketTypeId: f.ticket.id, firstName: 'Zawadi', lastName: 'Mollel', phone: phone(), consentBasis: 'purchaser_authorised' }));
-  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: n }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants };
+  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: n }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants };
   const q = await call(quoteEventOrder, b.claims, { body });
   const o = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } });
   assert.equal(o.status, 201, JSON.stringify(o.body));
@@ -318,7 +318,7 @@ test('scenario 10: an event with 3 paid orders and 2 unpaid is cancelled — unp
   // two unpaid orders: one with a payment waiting for staff
   const waiting = await member(); const idle = await member();
   const mk = async (u) => {
-    const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: u.phone, consentBasis: 'self' }] };
+    const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: u.phone, consentBasis: 'self' }] };
     const q = await call(quoteEventOrder, u.claims, { body });
     return (await call(createEventOrder, u.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
   };
@@ -391,7 +391,7 @@ test('unfulfilled-payment refunds: admin raises one for an approved payment whos
   assert.equal((await call(adminRaiseRefund, a, { body: { eventPaymentId: okPay.id, reasonCode: 'payment_error' } })).body.error, 'payment_not_unfulfilled');
   // an approved payment whose order was cancelled underneath
   const u = await member();
-  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: u.phone, consentBasis: 'self' }] };
+  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: u.phone, consentBasis: 'self' }] };
   const q = await call(quoteEventOrder, u.claims, { body });
   const o = (await call(createEventOrder, u.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
   await call(payForEventOrder, u.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: u.phone } });

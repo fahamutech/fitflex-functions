@@ -32,7 +32,7 @@ async function corporateOrder(n = 2) {
   const f = await eventOf();
   const org = await h.organization();
   const finance = await org.member('finance');
-  const body = { eventId: f.event.id, rows: rowsFor(n), acceptedTerms: true, consentTextVersion: '2026-10-draft', expectedTotalTzs: 20000 * n };
+  const body = { eventId: f.event.id, rows: rowsFor(n), acceptedTerms: true, consentTextVersion: '2026-11-draft', expectedTotalTzs: 20000 * n };
   const r = await call(createB2BEventOrder, finance, { params: { id: org.id }, headers: { 'Idempotency-Key': key() }, body });
   assert.equal(r.status, 201, JSON.stringify(r.body));
   return { f, org, finance, orderId: r.body.order.id, order: r.body.order, total: 20000 * n, next: r.body.next };
@@ -140,7 +140,7 @@ test('claim invitations (D15): sent only after the order is confirmed, one per u
     { ticketTypeId: f.ticket.id, firstName: 'Zawadi', lastName: 'Mollel', phone: friendPhone, consentBasis: 'purchaser_authorised' },
   ];
   void noContact;
-  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 2 }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants };
+  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 2 }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants };
   const q = await call(quoteEventOrder, b.claims, { body });
   const o = (await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
   // nothing is sent before payment
@@ -192,7 +192,7 @@ test('finance: totals only — paid, refunded, pending, awaiting, commission on 
   const buy = async (n) => {
     const b = await member();
     const participants = Array.from({ length: n }, (_, i) => ({ ticketTypeId: f.ticket.id, firstName: ['Neema', 'Zawadi', 'Asha'][i], lastName: 'Mollel', phone: i === 0 ? b.phone : phone(), consentBasis: i === 0 ? 'self' : 'purchaser_authorised' }));
-    const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: n }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants };
+    const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: n }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants };
     const q = await call(quoteEventOrder, b.claims, { body });
     const o = (await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
     const ref = txId();
@@ -245,7 +245,7 @@ test('the admin order panel: full payer phone with the payments scope, masked wi
   s4On(); await saveManualDetails();
   const f = await eventOf();
   const b = await member();
-  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: b.phone, consentBasis: 'self' }] };
+  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: b.phone, consentBasis: 'self' }] };
   const q = await call(quoteEventOrder, b.claims, { body });
   const o = (await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
   await call(payForEventOrder, b.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: b.phone } });

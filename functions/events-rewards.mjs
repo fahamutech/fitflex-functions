@@ -4,6 +4,7 @@
 // `GET /me/rewards` (challenge rewards) is a different system and is not touched.
 import { randomUUID } from 'node:crypto';
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { errorText } from '../src/shared/events-results-copy.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { requireActiveOrganizer, requireOpenOrganizer, organizerOf } from '../src/auth/events-authz.mjs';
@@ -20,7 +21,7 @@ export const resetEventsRewardsLimits = () => { writeLimiter.reset(); claimLimit
 const staffActor = req => ({ kind: 'staff', userId: req.user.sub, role: organizerOf(req).role, requestId: req.requestId });
 const send = (req, res, result, okStatus = 200) => {
   res.set?.('X-Request-Id', req.requestId);
-  if (result?.error) { const { error, status, ...extra } = result; if (extra.retryAfterSeconds) res.set?.('Retry-After', String(extra.retryAfterSeconds)); return res.status(status || 400).json({ error, ...errorText(error), ...extra }); }
+  if (result?.error) { noteApiError('rewards', result.status || 400); const { error, status, ...extra } = result; if (extra.retryAfterSeconds) res.set?.('Retry-After', String(extra.retryAfterSeconds)); return res.status(status || 400).json({ error, ...errorText(error), ...extra }); }
   const { status, replayed, ...body } = result ?? {};
   if (replayed) res.set?.('Idempotent-Replayed', 'true');
   return res.status(Number.isInteger(status) ? status : okStatus).json(body);

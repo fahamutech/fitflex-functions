@@ -274,6 +274,10 @@ export function createOpsService({ db, now = () => new Date(), logger = console 
         };
         if (!def.quiet) await db(RUN).where({ id: runId }).update(finished);
         else if (processed > 0 || failed > 0) await db(RUN).insert({ ...record, ...finished });
+        if (def.heartbeat) {
+          // Quiet jobs leave no JobRun row when idle; this is what "last success" is read from for them (S7 alert A5, migration events-analytics-s7).
+          await db.raw(`INSERT INTO "JobControl" (job, paused, "changedAt", "lastOkAt") VALUES (?, false, ?, ?) ON CONFLICT (job) DO UPDATE SET "lastOkAt" = EXCLUDED."lastOkAt"`, [name, finished.finishedAt, finished.finishedAt]).catch(() => {});
+        }
         await clear(`job_failed:${name}`, { by: `system:${name}`, resolution: `Finished on run ${runId}.` });
         return { job: name, slot, runId, status: 'ok', attempt: record.attempt, processed, succeeded: finished.succeeded, failed, stats };
       });
@@ -324,6 +328,7 @@ export function createOpsService({ db, now = () => new Date(), logger = console 
     const controls = new Map((names.length ? await db(CONTROL).whereIn('job', names) : []).map(c => [c.job, c]));
     const out = [];
     for (const def of jobs.values()) {
+      if (typeof def.hidden === 'function' && def.hidden()) continue;   // S7 (H15): event jobs are not listed while their module is off
       const { slot, due } = slotAt(def.schedule, at);
       const [last] = await db(RUN).where({ job: def.name }).orderBy('startedAt', 'desc').limit(1);
       const lastOk = await db(RUN).where({ job: def.name, status: 'ok' }).orderBy('startedAt', 'desc').first('startedAt', 'finishedAt');
@@ -340,7 +345,7 @@ export function createOpsService({ db, now = () => new Date(), logger = console 
       out.push({
         name: def.name, title: def.title, description: def.description ?? null, domain: def.domain, schedule: def.schedule, state,
         paused, pauseReason: paused ? control.reason : null, currentSlot: slot, currentSlotDue: due, currentSlotDone: slotOk, attemptsThisSlot: failures + (slotOk ? 1 : 0),
-        nextDue: nextDue(def.schedule, at), lastSuccessAt: lastOk?.finishedAt ?? null,
+        nextDue: nextDue(def.schedule, at), lastSuccessAt: [lastOk?.finishedAt, control?.lastOkAt].filter(Boolean).sort((a, b) => +new Date(b) - +new Date(a))[0] ?? null,
         lastRun: last ? { id: last.id, status: last.status, trigger: last.trigger, startedAt: last.startedAt, finishedAt: last.finishedAt, processed: last.processed, succeeded: last.succeeded, failed: last.failed, error: last.error } : null,
       });
     }

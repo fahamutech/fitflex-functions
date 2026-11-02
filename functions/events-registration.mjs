@@ -4,6 +4,7 @@
 // is flag-gated and rate-limited per IP. Routes with fixed sub-paths (claimable, claim, lookup) are declared
 // before their /:id siblings so they are mounted first. Rate limits (spec §8.9) are in-memory per server.
 import '../src/bootstrap/init.mjs';
+import { noteApiError } from '../src/shared/events-api-error.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { requireEventsRegistration, eventsResultsOn } from '../src/shared/feature-flags.mjs';
@@ -30,6 +31,7 @@ const headerOf = (req, name) => req.headers?.[name] ?? req.headers?.[name.toLowe
 
 function send(res, result, okStatus = 200) {
   if (result?.error) {
+    noteApiError('registration', result.status || 400);
     const { error, status, ...extra } = result;
     return res.status(status || 400).json({ error, ...extra });
   }
@@ -48,6 +50,8 @@ export const quoteEventOrder = {
   onGuard: member('post'),
   onRequest: async (req, res) => {
     if (limitOrNull(limiters.quote, `quote:${req.user.sub}`, res)) return undefined;
+    // S7 (H9): joining a team by code is a guessing surface; it shares the lookup route's limiter wherever it is tried.
+    if (req.body?.team?.joinCode !== undefined && limitOrNull(limiters.lookup, `lookup:${req.user.sub}`, res)) return undefined;
     return send(res, await svc.quote({ userId: req.user.sub, body: req.body || {} }));
   },
 };
@@ -58,6 +62,7 @@ export const createEventOrder = {
   onGuard: member('post'),
   onRequest: async (req, res) => {
     if (limitOrNull(limiters.order, `order:${req.user.sub}`, res)) return undefined;
+    if (req.body?.team?.joinCode !== undefined && limitOrNull(limiters.lookup, `lookup:${req.user.sub}`, res)) return undefined;   // S7 (H9)
     return send(res, await svc.createOrder({ userId: req.user.sub, body: req.body || {}, idempotencyKey: headerOf(req, 'Idempotency-Key') }), 201);
   },
 };

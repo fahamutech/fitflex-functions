@@ -180,6 +180,9 @@ export function webhookLab({ maxAttempts = 10, dns = { 'hooks.example.test': [PU
       if (lab.verifyAnswer === 'wrong') return { status: 200, headers: { 'content-type': 'application/json' }, snippet: JSON.stringify({ challenge: 'nope' }) };
       return { status: 500, headers: {}, snippet: 'down' };
     }
+    // S7 (H1): a host can be made slow on purpose (lab.hostDelayMs[host] = ms) to prove one slow receiver cannot hold the others up.
+    const slow = lab.hostDelayMs?.[new URL(url).host];
+    if (slow) await new Promise(r => setTimeout(r, slow));
     const step = lab.script.shift() ?? { status: 200 };
     if (step.throw) throw Object.assign(new Error(step.throw), { code: step.throw, cause: step.cause });
     return { status: step.status, headers: { 'content-type': step.contentType ?? 'text/plain' }, snippet: step.body ?? '' };

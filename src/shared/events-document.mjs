@@ -284,7 +284,8 @@ export function validateEvent(doc, { mode = 'patch', now = new Date(), imageHost
     const v = lang === 'en' ? doc.description : doc.descriptionSw;
     if (required(`description.${lang}`, v)) length(`description.${lang}`, v, 40, 4000);
   }
-  if (required('timezone', doc.timezone) && filled(doc.timezone) && !validTimezone(doc.timezone)) add('timezone', 'required');
+  // S7 (H8, follow-up S2 L6): at submit the zone must be one of the published GET /events/options.timezones, not any IANA name Intl happens to know.
+  if (required('timezone', doc.timezone) && filled(doc.timezone) && (!validTimezone(doc.timezone) || (mode === 'submit' && !TIMEZONES.includes(doc.timezone)))) add('timezone', 'required');
   const starts = ms(doc.startsAt); const ends = ms(doc.endsAt);
   const regOpens = ms(doc.registrationOpensAt); const regCloses = ms(doc.registrationClosesAt);
   required('startsAt', doc.startsAt, Boolean);
@@ -482,7 +483,27 @@ export function diffOf(before, after, paths) {
 
 // ── Availability (§11.3, §16.1) ─────────────────────────────────────────────
 
-const exhausted = t => (t.sold ?? 0) + (t.held ?? 0) >= (t.capacity ?? 0);
+// S7: a ticket type with a live waitlist reads as exhausted even when a place is free (the places are for the line, §4.6), so an old app build
+// shows "Sold out" instead of an error. `waitlistQueued` is set by the catalogue store only while EVENTS_WAITLIST is on.
+const exhausted = t => (t.sold ?? 0) + (t.held ?? 0) >= (t.capacity ?? 0) || t.waitlistQueued === true;
+const physicallyExhausted = t => (t.sold ?? 0) + (t.held ?? 0) >= (t.capacity ?? 0);
+
+/**
+ * S7 (§4.9): the waitlist state of one ticket type for the apps: 'open' (a member can join or is queued), 'closed' (sold out but the
+ * organizer stopped new sign-ups or closed the line) or 'none' (nothing to wait for, or the waitlist cannot work now).
+ * `opts.event` is the event row; `cat` the category row. Pure.
+ */
+export function waitlistStateOf(event, cat, t, { now = new Date(), waitlistPaymentsOk = true } = {}) {
+  const at = +now;
+  if (!event || event.status !== 'published') return 'none';
+  if (event.registrationOpensAt && +new Date(event.registrationOpensAt) > at) return 'none';
+  if (event.registrationClosesAt && +new Date(event.registrationClosesAt) <= at) return 'none';
+  if (cat && (cat.status === 'inactive' || (cat.registrationClosesAt && +new Date(cat.registrationClosesAt) <= at))) return 'none';
+  if (t.status === 'inactive' || saleNotOpen(t, at) || saleOver(t, at)) return 'none';
+  if (!physicallyExhausted(t) && t.waitlistQueued !== true) return 'none';
+  if (Number(t.priceTzs) > 0 && !waitlistPaymentsOk) return 'none';
+  return event.waitlistEnabled === false || event.waitlistClosedAt ? 'closed' : 'open';
+}
 const saleNotOpen = (t, at) => Boolean(t.saleOpensAt) && +new Date(t.saleOpensAt) > at;
 const saleOver = (t, at) => Boolean(t.saleClosesAt) && +new Date(t.saleClosesAt) <= at;
 
@@ -595,11 +616,13 @@ export function summaryView(joined, { now = new Date(), closingSoonHours = DEFAU
   };
 }
 
-function ticketView(t, opts) {
+function ticketView(t, opts, cat = null) {
   return {
     id: t.id, name: t.name, priceTzs: Number(t.priceTzs), currency: t.currency || 'TZS', capacity: capacityOut(t.capacity),
     saleOpensAt: iso(t.saleOpensAt), saleClosesAt: iso(t.saleClosesAt), minPerOrder: t.minPerOrder, maxPerOrder: t.maxPerOrder,
     availability: ticketAvailability(t, opts), status: t.status,
+    // S7 (additive): only while EVENTS_WAITLIST is on, so every answer is byte-identical otherwise.
+    ...(opts.waitlist ? { waitlist: { state: waitlistStateOf(opts.event, cat, t, opts) } } : {}),
   };
 }
 
@@ -613,7 +636,7 @@ function categoryView(c, eventAvailability, opts) {
     availability: categoryAvailability(eventAvailability, tickets, opts),
     remaining: remaining !== null && remaining <= 10 ? remaining : null,
     eligibility: { en: c.eligibility?.en ?? null, sw: c.eligibility?.sw ?? null }, minAge: c.minAge ?? null,
-    ticketTypes: tickets.map(t => ticketView(t, opts)),
+    ticketTypes: tickets.map(t => ticketView(t, opts, c)),
   };
 }
 
@@ -635,10 +658,10 @@ export function policyView(raw) {
 }
 
 /** EventDetail (§14.2): summary + the full public document. `shareUrl` is built by the caller. */
-export function detailView(joined, { now = new Date(), closingSoonHours = DEFAULT_CLOSING_SOON_HOURS, saved = null, shareUrl = null } = {}) {
+export function detailView(joined, { now = new Date(), closingSoonHours = DEFAULT_CLOSING_SOON_HOURS, saved = null, shareUrl = null, waitlist = false, waitlistPaymentsOk = true } = {}) {
   const { event: e, categories = [], collectionPoints = [] } = joined;
   const summary = summaryView(joined, { now, closingSoonHours, saved });
-  const opts = { now, closingSoonHours, registrationClosesAt: e.registrationClosesAt };
+  const opts = { now, closingSoonHours, registrationClosesAt: e.registrationClosesAt, ...(waitlist ? { event: e, waitlist: true, waitlistPaymentsOk } : {}) };
   return {
     ...summary,
     description: { en: e.description ?? null, sw: e.descriptionSw ?? null },
@@ -651,6 +674,8 @@ export function detailView(joined, { now = new Date(), closingSoonHours = DEFAUL
     // S3 (§8.2): the effective participant field policy, so the registration form and the quote agree.
     participantFields: effectiveFields(e, categories),
     duplicatePolicy: DUPLICATE_POLICIES.includes(e.duplicatePolicy) ? e.duplicatePolicy : 'one_per_category',
+    // S7 (additive): the event-level waitlist switch the apps read next to each ticket type's own state.
+    ...(waitlist ? { waitlist: { enabled: e.waitlistEnabled !== false && !e.waitlistClosedAt } } : {}),
     categories: categories.filter(c => c.status !== 'inactive').map(c => categoryView(c, summary.availability, opts)),
     collectionPoints: collectionPoints.filter(p => p.status !== 'inactive').map(pointView),
     schedule: (e.schedule || []).map(s => ({ at: iso(s.at), label: { en: s.label?.en ?? null, sw: s.label?.sw ?? null } })),

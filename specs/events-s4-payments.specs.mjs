@@ -20,7 +20,7 @@ const call = h.call;
 afterEach(() => { s4Off(); resetEventsRegistrationLimits(); resetEventsPaymentLimits(); });
 after(async () => { await clearManualDetails(); await h.cleanup(); await db.destroy(); });
 
-const CONSENT = '2026-10-draft';
+const CONSENT = '2026-11-draft';
 const key = () => `s4_${uid('').slice(1)}`;
 const buyer = async () => { const p = phone(); const sub = await h.user({ phone: p }); return { claims: h.claimsOf(sub), sub, phone: p }; };
 const orderBody = (eventId, ticketTypeId, b, n = 1) => ({
