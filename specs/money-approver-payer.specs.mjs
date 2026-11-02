@@ -244,3 +244,15 @@ test('split OFF: admin-raised is approved at once and the raiser can still pay i
   const admin = await f.svc.raise({ memberId: 'm1', kind: 'shop_order', sourceId: 'o1', amountTzs: 1000, reasonCode: 'payment_error', requestedBy: 'a1', requestedRole: 'admin', approved: true });
   assert.equal(admin.refund.status, 'approved');
 });
+
+test('split ON: whoever approved a refund cannot record it paid, even holding both scopes; another person can. Split OFF: unchanged', async () => {
+  const on = refundFixture({ split: true });
+  const { refund } = await on.svc.adminRaise({ body: { paymentRequestId: 'pr1' }, actorId: 'raiser' });
+  await on.svc.decide({ id: refund.id, body: { decision: 'approve' }, actorId: 'both' });
+  assert.deepEqual(await on.svc.markPaid({ id: refund.id, body: { paymentReference: 'R1' }, actorId: 'both' }), { error: 'cannot_pay_own_approval', status: 403 });
+  assert.equal((await on.svc.markPaid({ id: refund.id, body: { paymentReference: 'R1' }, actorId: 'payer' })).refund.status, 'paid');
+
+  const off = refundFixture({ split: false });
+  const r = await off.svc.adminRaise({ body: { paymentRequestId: 'pr1' }, actorId: 'a1' });
+  assert.equal((await off.svc.markPaid({ id: r.refund.id, body: { paymentReference: 'R2' }, actorId: 'a1' })).refund.status, 'paid');
+});

@@ -240,7 +240,8 @@ export function createRefundService({
     if (prior.status === 'paid') return fail('already_paid', 409, { refundStatus: 'paid' });
     if (prior.status !== 'approved') return fail('refund_not_approved', 409, { refundStatus: prior.status });
     // Flag on: whoever approved a refund does not also record it paid. Policy approvals ('policy') are not people.
-    if (secondApprover() && prior.decidedBy && prior.decidedBy === actorId) return fail('cannot_pay_own_approval', 403);
+    // REFUND_SPLIT_SCOPES counts too: one person holding both refunds_approve and refunds_pay still cannot do both (super-admin included).
+    if (adminRaiseWaits() && prior.decidedBy && prior.decidedBy === actorId) return fail('cannot_pay_own_approval', 403);
     // A refund approved by policy but started by a staff member (admin cancelling a paid session or
     // order, re-raising a missing shop refund) had one person behind it: someone else records it paid.
     // Refunds a member, vendor or trainer started stay payable by any admin.
