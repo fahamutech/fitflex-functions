@@ -80,7 +80,8 @@ test('a refund resolves the held row and cannot be raised twice', async () => {
   const out = await f.held.raiseRefund({ paymentRequestId: 'pr_closed', body: body({ note: 'late money' }), actorId: 'adm1' });
   assert.equal(out.error, undefined);
   assert.equal(out.refund.amountTzs, 50000);
-  assert.equal(out.refund.status, 'approved'); // flag off: approved at once, as POST /admin/refunds
+  assert.equal(out.refund.status, 'requested'); // held refunds are never policy-approved, flags off or on
+  assert.equal(out.refund.decidedBy, null);
   assert.equal(out.refund.paymentRequestId, 'pr_closed');
   assert.equal(out.refund.reasonCode, 'payment_error');
   assert.ok(f.auditLog.rows.some(r => r.action === 'payment_held_refund_raised' && r.target === 'pr_closed' && r.actor === 'adm1' && r.after.transactionId === 'TX1'));
@@ -119,6 +120,26 @@ test('the relaxed rule is only for held rows, and the other checks hold', async 
   // A partial amount is allowed up to what was held.
   const part = await r('pr_closed', body({ amountTzs: 20000 }));
   assert.equal(part.refund.amountTzs, 20000);
+});
+
+test('both second-person flags off: a held refund is requested; paying before approval is refused; approve then pay works', async () => {
+  const f = fixture();
+  await f.log('payment_mobile_money_orphaned', 'pr_closed', { transactionId: 'TX1', amountTzs: 50000 });
+  const out = await f.held.raiseRefund({ paymentRequestId: 'pr_closed', body: body(), actorId: 'adm1' });
+  assert.equal(out.refund.status, 'requested');
+  assert.equal(out.refund.decidedBy, null);
+  const early = await f.refundService.markPaid({ id: out.refund.id, body: { paymentReference: 'R0' }, actorId: 'adm1' });
+  assert.deepEqual([early.error, early.status], ['refund_not_approved', 409]);
+  assert.equal((await f.refundService.decide({ id: out.refund.id, body: { decision: 'approve' }, actorId: 'adm2' })).refund.status, 'approved');
+  assert.equal((await f.refundService.markPaid({ id: out.refund.id, body: { paymentReference: 'R1' }, actorId: 'adm3' })).refund.status, 'paid');
+});
+
+test('both flags off: a non-held admin refund is still approved at once (unchanged)', async () => {
+  const f = fixture();
+  const out = await f.refundService.adminRaise({ body: { paymentRequestId: 'pr_ok', reasonCode: 'payment_error' }, actorId: 'adm1' });
+  assert.equal(out.error, undefined);
+  assert.equal(out.refund.status, 'approved');
+  assert.equal(out.refund.decidedBy, 'policy');
 });
 
 test('MONEY_SECOND_APPROVER on: the raised refund waits for a different admin, who pays it, not the approver', async () => {
@@ -224,7 +245,7 @@ test('the same provider transaction is refundable once: already approved elsewhe
   await b.log('payment_mobile_money_orphaned', 'pr_closed', { transactionId: 'TX1', amountTzs: 50000 });
   await b.log('payment_mobile_money_orphaned', 'pr_closed2', { transactionId: 'TX1', amountTzs: 50000 });
   assert.equal((await b.held.list({})).items.every(i => i.refundable), true);
-  assert.equal((await r(b, 'pr_closed')).refund.status, 'approved');
+  assert.equal((await r(b, 'pr_closed')).refund.status, 'requested');
   const open = (await b.held.list({})).items;
   assert.deepEqual(open.map(i => [i.paymentRequestId, i.refundable, i.notRefundableReason]), [['pr_closed2', false, 'reference_already_used']]);
   const second = await r(b, 'pr_closed2');
@@ -244,7 +265,7 @@ test('the same provider transaction is refundable once: already approved elsewhe
   assert.equal((await r(d, 'pr_closed2')).error, 'not_refundable');
   // A rejected refund frees the transaction again.
   await d.refunds.updateByIdAsync('rfd_y', { status: 'rejected' });
-  assert.equal((await r(d, 'pr_closed2')).refund.status, 'approved');
+  assert.equal((await r(d, 'pr_closed2')).refund.status, 'requested');
 });
 
 after(async () => { await db.destroy?.(); });

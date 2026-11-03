@@ -154,6 +154,7 @@ export function createRefundService({
   /**
    * Admin: raise a refund for any confirmed pass or plan payment. Approved at
    * once, unless MONEY_SECOND_APPROVER is on: then it waits for another admin.
+   * A refund raised from the held-payments worklist (`held`) is the exception: it is always left `requested`.
    */
   async function adminRaise({ body = {}, actorId, held = null }) {
     // `held` ({ maxAmountTzs, tx? }) is passed only by the held-payments worklist, which has already checked that the
@@ -171,7 +172,9 @@ export function createRefundService({
     const out = await raise({
       memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId ?? null,
       amountTzs, currency: request.currency || 'TZS', reasonCode: body.reasonCode || 'payment_error', note: body.note,
-      requestedBy: actorId, requestedRole: 'admin', approved: !adminRaiseWaits(), tx: held?.tx ?? null,
+      requestedBy: actorId, requestedRole: 'admin', // A held-payment refund is never policy-approved: it is always left `requested`, whatever the second-person flags say,
+      // so a separate approve step (and then the mark-paid step) is always needed.
+      approved: held ? false : !adminRaiseWaits(), tx: held?.tx ?? null,
     });
     if (out.existing) return fail('refund_already_requested', 409, { refund: out.refund });
     return out;
