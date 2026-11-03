@@ -835,7 +835,7 @@ test('UAT D2: hasEverSold on every answer, fresh even when the period is cached'
   assert.equal((await cachedSvc.report('sales', { vendorId: P, access: OWNER, query: q })).data.hasEverSold, true, 'a paid app order counts');
 });
 
-test('UAT D16: GET /vendor/reports/refunds → { …envelope, rows: [] } until S7, with the same guards', async () => {
+test('UAT D16 / S7: GET /vendor/reports/refunds → { …envelope, rows, totals } (empty without credit notes), with the same guards', async () => {
   const { V } = await seedV();
   assert.deepEqual((await call(vendorReportRefunds, null)).body, { error: 'feature_disabled' });
   flagsOn();
@@ -845,9 +845,11 @@ test('UAT D16: GET /vendor/reports/refunds → { …envelope, rows: [] } until S
   const ok = await call(vendorReportRefunds, as(V), { query: { from: '2026-10-14', to: '2026-10-15', channel: 'app' } });
   assert.equal(ok.status, 200);
   assert.deepEqual(ok.body.rows, []);
+  assert.deepEqual(ok.body.totals, { count: 0, amountTzs: 0, paidOutTzs: 0, balanceReducedTzs: 0, restockedUnits: 0, revertedCount: 0 });
   assert.deepEqual([ok.body.from, ok.body.to, ok.body.channel, ok.body.timezone, ok.body.hasEverSold], ['2026-10-14', '2026-10-15', 'all', 'Africa/Dar_es_Salaam', true]);
   const csv = await call(vendorReportRefunds, as(V), { query: { from: '2026-10-14', to: '2026-10-15', format: 'csv' } });
-  assert.equal(csv.body, `${CSV_BOM}Credit note,Date,Sale,Amount (TZS),Method,Units back in stock\r\n`);
+  // S7: the Type column (Refund / Undone) and the paid-back / balance columns.
+  assert.equal(csv.body, `${CSV_BOM}Credit note,Date,Sale,Type,Amount (TZS),Paid back (TZS),Taken off balances (TZS),Method,Units back in stock\r\n`);
   assert.equal((await call(vendorReportRefunds, as(V), { query: { format: 'pdf' } })).body.error, 'invalid_format');
 });
 

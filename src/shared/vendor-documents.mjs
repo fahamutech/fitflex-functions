@@ -86,9 +86,14 @@ export const DOC_LABELS = {
     paidWith: 'Paid with {numbers}', paidTowards: 'Paid towards', stillOwed: 'Still owed', asOf: 'As of {date}', openSales: 'Unpaid pay-later sales',
     recentPayments: 'Payments (last 90 days)', totalOwed: 'Total owed', daysOverdue: '{n} days overdue', sold: 'Sold', due: 'Due', balance: 'Balance',
     statusPaid: 'Paid', statusPayLater: 'Pay later', statusPaidInFull: 'Paid in full', statusCancelled: 'Cancelled',
+    statusRefunded: 'Refunded', statusSettledByCreditNote: 'Settled by credit note',
     cancelled: 'Cancelled on {date}. {business} cancelled this document.', watermark: 'CANCELLED · IMEBATILISHWA',
     refunded: 'Refunded {amount} by {method}', receivedBy: 'Payment received by {business}.', notFiscal: 'This is not a TRA fiscal receipt.',
     copyNote: 'This is a copy of a document issued by {business}.', pageOf: 'Page {n} of {m}', langEn: 'English', langSw: 'Kiswahili',
+    // S7 credit notes (design spec docs/design/vendor-refunds-s7.md §8.6).
+    forInvoice: 'For invoice {number}', saleDate: 'Sold on {date}', statusIssued: 'Issued', returnedItems: 'Returned items', refundTotal: 'Refund total',
+    balanceReduced: 'Taken off the balance {amount}', nothingPaidBack: 'No money paid back.', refundGivenBy: 'Refund given by {business}.',
+    refundsOnSale: 'Refunds', totalAfterRefunds: 'Total after refunds',
     unavailableTitle: "This link isn't available", unavailableBody: 'The seller may have turned it off. Ask them to send it again.',
     // UAT D7: a short heading (also the tab title) and one sentence below it, so nothing reads twice.
     rateLimitedTitle: 'Too many requests', rateLimited: 'Try again in a minute.',
@@ -111,9 +116,15 @@ export const DOC_LABELS = {
     paidWith: 'Imelipwa kwa {numbers}', paidTowards: 'Imelipia', stillOwed: 'Bado anadaiwa', asOf: 'Kufikia {date}', openSales: 'Mauzo ya mkopo ambayo hayajalipwa',
     recentPayments: 'Malipo (siku 90 zilizopita)', totalOwed: 'Jumla inayodaiwa', daysOverdue: 'Imechelewa siku {n}', sold: 'Imeuzwa', due: 'Mwisho wa kulipa', balance: 'Salio',
     statusPaid: 'Imelipwa', statusPayLater: 'Mkopo', statusPaidInFull: 'Imelipwa yote', statusCancelled: 'Imebatilishwa',
+    // S7 (security review #318 M1) — DRAFTS for native review.
+    statusRefunded: 'Imerejeshwa yote', statusSettledByCreditNote: 'Deni limefutwa kwa hati ya marejesho',
     cancelled: 'Imebatilishwa tarehe {date}. {business} imebatilisha hati hii.', watermark: 'CANCELLED · IMEBATILISHWA',
     refunded: 'Imerejeshwa {amount} kwa {method}', receivedBy: 'Malipo yamepokelewa na {business}.', notFiscal: 'Hii si risiti ya kodi ya TRA.',
     copyNote: 'Hii ni nakala ya hati iliyotolewa na {business}.', pageOf: 'Ukurasa {n} kati ya {m}', langEn: 'English', langSw: 'Kiswahili',
+    // S7 credit notes — DRAFTS for native review.
+    forInvoice: 'Kwa ankara {number}', saleDate: 'Iliuzwa {date}', statusIssued: 'Imetolewa', returnedItems: 'Bidhaa zilizorudishwa', refundTotal: 'Jumla ya marejesho',
+    balanceReduced: 'Imepunguzwa kwenye deni {amount}', nothingPaidBack: 'Hakuna pesa iliyorudishwa.', refundGivenBy: 'Marejesho yametolewa na {business}.',
+    refundsOnSale: 'Marejesho', totalAfterRefunds: 'Jumla baada ya marejesho',
     unavailableTitle: 'Kiungo hiki hakipatikani', unavailableBody: 'Huenda muuzaji amekizima. Mwombe akutumie tena.',
     rateLimitedTitle: 'Maombi ni mengi mno', rateLimited: 'Jaribu tena baada ya dakika moja.',
     serverErrorTitle: 'Kuna hitilafu', serverError: 'Jaribu tena baadaye.',
@@ -214,6 +225,24 @@ const vatBlock = (lines) => {
 };
 
 /**
+ * The status of a walk-in sale's receipt / invoice (S7, security review #318 M1). A refund never makes a
+ * pay-later sale look "Paid in full" when it was the refund that cleared what was owed:
+ *   cancelled              — voided;
+ *   refunded               — every shilling of it was refunded (active refunds ≥ total);
+ *   paid                   — a cash sale (partly refunded or not: the customer paid at the counter);
+ *   pay_later              — a pay-later sale with something still owed;
+ *   settled_by_credit_note — a pay-later sale with nothing owed, where refunds took part of the balance off;
+ *   paid_in_full           — a pay-later sale paid off by the customer.
+ */
+export function saleDocumentStatus(s) {
+  if (s.status === 'voided') return 'cancelled';
+  if (Number(s.refundedTzs || 0) >= Number(s.totalTzs) && Number(s.totalTzs) > 0) return 'refunded';
+  if (s.kind !== 'credit') return 'paid';
+  if (Number(s.balanceTzs) > 0) return 'pay_later';
+  return Number(s.balanceReducedTzs || 0) > 0 ? 'settled_by_credit_note' : 'paid_in_full';
+}
+
+/**
  * A walk-in sale (cash receipt or credit invoice) as a document. `src` comes from the document store:
  * { sale (row), lines (rows), payments (rows), customer { name, forgotten }|null, servedByName, allocations
  *   [{ number, amountTzs, receivedOn, voided }], seller (snapshot or current profile), today }.
@@ -229,7 +258,7 @@ export function saleDocument(src, lang = 'en') {
     docType: credit ? 'invoice' : 'receipt',
     number: credit ? s.invoiceNumber || s.number : s.number,
     ...(credit && s.invoiceNumber ? { saleRef: s.number } : {}),
-    status: voided ? 'cancelled' : !credit ? 'paid' : s.balanceTzs > 0 ? 'pay_later' : 'paid_in_full',
+    status: saleDocumentStatus(s),
     issuedAt: new Date(s.soldAt).toISOString(),
     lang: langOf(lang),
     seller: seller(src.seller),
@@ -253,13 +282,52 @@ export function saleDocument(src, lang = 'en') {
       liveStatus: {
         asOf: src.today,
         balanceTzs: voided ? 0 : s.balanceTzs,
-        ...(s.balanceTzs === 0 && !voided && live.length ? { paidInFullAt: [...live].sort((a, b) => (a.receivedOn < b.receivedOn ? -1 : 1)).pop().receivedOn } : {}),
+        ...(s.balanceTzs === 0 && !voided && live.length && saleDocumentStatus(s) === 'paid_in_full' ? { paidInFullAt: [...live].sort((a, b) => (a.receivedOn < b.receivedOn ? -1 : 1)).pop().receivedOn } : {}),
         paidWith: live.map(a => a.number),
       },
     } : {}),
     ...(voided ? { cancelledAt: new Date(s.voidedAt).toISOString() } : {}),
   };
+  // S7 §6.3: the active refunds (credit notes) against this sale, and the total after them. Undone ones are left out.
+  const refunds = (src.refunds || []).filter(r => r.amountTzs != null);
+  if (refunds.length && !voided) {
+    doc.refunds = refunds.map(r => ({ number: r.number, refundedAt: new Date(r.refundedAt).toISOString(), amountTzs: r.amountTzs }));
+    doc.totalAfterRefundsTzs = s.totalTzs - refunds.reduce((sum, r) => sum + r.amountTzs, 0);
+  }
   return doc;
+}
+
+/**
+ * S7 §6.1: a credit note (one refund on a walk-in sale). src from the refund store: { refund (row), lines
+ * [{ nameSnapshot, variant, qty, amountTzs, vatTzs, vatCode, vatRatePct, lineNo }], sale { number, invoiceNumber,
+ * kind, soldAt }, customer { name }|null, servedByName, seller (snapshot at issue) }. Allowlist: never the
+ * customer's phone, email or address, buyerUserId, cost, the refund reason, the undo reason or restock flags.
+ */
+export function creditNoteDocument(src, lang = 'en') {
+  const r = src.refund;
+  const cancelled = r.status === 'reverted';
+  const lines = [...src.lines].sort((a, b) => a.lineNo - b.lineNo);
+  const applied = lines.some(l => l.vatCode);
+  const credit = src.sale.kind === 'credit';
+  return {
+    docType: 'credit_note',
+    number: r.number,
+    saleRef: { number: src.sale.number, ...(credit && src.sale.invoiceNumber ? { invoiceNumber: src.sale.invoiceNumber } : {}), soldAt: src.sale.soldAt ? new Date(src.sale.soldAt).toISOString() : null },
+    status: cancelled ? 'cancelled' : 'issued',
+    issuedAt: new Date(r.createdAt).toISOString(),
+    lang: langOf(lang),
+    seller: seller(src.seller),
+    ...(src.customer?.name ? { customer: { name: src.customer.name } } : {}),
+    ...(firstName(src.servedByName) ? { servedBy: { firstName: firstName(src.servedByName) } } : {}),
+    lines: lines.map(l => ({ name: l.nameSnapshot, variant: l.variant || null, qty: l.qty, amountTzs: l.amountTzs, ...(applied && l.vatCode ? { vatCode: l.vatCode } : {}) })),
+    totalTzs: r.amountTzs,
+    ...(applied
+      ? vatBlock(lines.filter(l => l.vatCode).map(l => ({ vatCode: l.vatCode, vatRatePct: Number(l.vatRatePct), vatTzs: l.vatTzs, netTzs: l.amountTzs })))
+      : { vatIncludedTzs: 0, vatSummary: [] }),
+    balanceReducedTzs: r.balanceReducedTzs,
+    paidOut: r.paidOutTzs > 0 ? { method: r.method, ...(r.reference ? { reference: r.reference } : {}), amountTzs: r.paidOutTzs } : null,
+    ...(cancelled ? { cancelledAt: new Date(r.revertedAt).toISOString() } : {}),
+  };
 }
 
 /**
@@ -353,11 +421,26 @@ export function orderInvoiceDocument(src, lang = 'en') {
   };
 }
 
+/** A credit note's "For receipt R-…" / "For invoice INV-…" line (S7 §6.1 block 2). */
+export const creditNoteForLine = (doc, lang) => (doc.saleRef?.invoiceNumber
+  ? label(lang, 'forInvoice', { number: doc.saleRef.invoiceNumber }) : label(lang, 'forReceipt', { number: doc.saleRef?.number || '' }));
+/** A credit note's settlement lines (§6.1 block 8): taken off the balance, refunded by a method, or nothing paid back. */
+export function creditNoteSettlement(doc, lang) {
+  const out = [];
+  if (doc.balanceReducedTzs > 0) out.push(label(lang, 'balanceReduced', { amount: money(doc.balanceReducedTzs) }));
+  if (doc.paidOut) out.push(`${label(lang, 'refunded', { amount: money(doc.paidOut.amountTzs), method: methodLabel(lang, doc.paidOut.method) })}${doc.paidOut.reference ? ` (${doc.paidOut.reference})` : ''}`);
+  if (!out.length) out.push(label(lang, 'nothingPaidBack'));
+  return out;
+}
+
 /** The document's title in a language: "Receipt", "Ankara", … */
 export const titleOf = (doc, lang) => label(lang, doc.docType);
 
 /** Status label key; a cancelled app ORDER reads "Imeghairiwa", a voided sale/payment "Imebatilishwa". */
-export const STATUS_KEYS = { paid: 'statusPaid', pay_later: 'statusPayLater', paid_in_full: 'statusPaidInFull', cancelled: 'statusCancelled' };
+export const STATUS_KEYS = {
+  paid: 'statusPaid', pay_later: 'statusPayLater', paid_in_full: 'statusPaidInFull', cancelled: 'statusCancelled', issued: 'statusIssued',
+  refunded: 'statusRefunded', settled_by_credit_note: 'statusSettledByCreditNote',
+};
 export const statusKeyOf = doc => (doc.status === 'cancelled' && doc.docType === 'order_invoice' ? 'statusCancelledOrder' : STATUS_KEYS[doc.status]);
 /** The cancelled banner and watermark for a document (order: "imeghairiwa"; sale/payment: "imebatilishwa"). */
 export function cancelledBanner(doc, lang) {

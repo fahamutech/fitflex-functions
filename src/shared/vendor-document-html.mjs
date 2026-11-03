@@ -2,7 +2,7 @@
 // view the portal shows in a sandboxed iframe) and the error pages. One template for every document type,
 // from the document JSON (src/shared/vendor-documents.mjs). No JavaScript, no third-party requests (only
 // the vendor's https logo), every value escaped. Design spec §4, §5, §9.
-import { DOC_LABELS, label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner } from './vendor-documents.mjs';
+import { DOC_LABELS, label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, creditNoteForLine, creditNoteSettlement } from './vendor-documents.mjs';
 
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ESC[c]);
@@ -24,6 +24,7 @@ h2{font-size:16px;margin:20px 0 6px}
 .badge{display:inline-block;min-width:auto;padding:2px 10px;border-radius:999px;font-size:14px;font-weight:600;border:1px solid}
 .paid{color:#14532D;background:#DCFCE7;border-color:#86EFAC}.pay_later{color:#1E3A8A;background:#DBEAFE;border-color:#93C5FD}
 .paid_in_full{color:#14532D;background:#DCFCE7;border-color:#86EFAC}.cancelled{color:#7F1D1D;background:#FEE2E2;border-color:#FCA5A5}
+.issued{color:#1F2937;background:#F3F4F6;border-color:#D1D5DB}.refunded,.settled_by_credit_note{color:#1F2937;background:#F3F4F6;border-color:#D1D5DB}
 .banner{border:2px solid #B91C1C;background:#FEF2F2;color:#7F1D1D;border-radius:8px;padding:10px 12px;margin:12px 0;font-weight:600}
 dl.line{margin:0;padding:8px 0;border-bottom:1px solid #E5E7EB;display:grid;grid-template-columns:1fr auto;gap:2px 12px}
 dl.line dt{font-weight:600}dl.line dd{margin:0;text-align:right}dl.line dd.sub{grid-column:1/3;text-align:left;color:#4B5563;font-size:14px}
@@ -60,6 +61,27 @@ ${doc.soldVia ? `<div class="muted">${esc(doc.soldVia)}</div>` : ''}</section>`;
 
 const vatCell = (lang, code, ratePct) => (code === 'E' || ratePct == null ? L(lang, 'exempt') : `${esc(Number(ratePct).toString())}%`);
 
+/** S7 §6.1 block 5: a credit note's returned items (qty × name, amount, VAT code). Never restock flags or reasons. */
+function returnedItemsBlock(doc, lang) {
+  if (!doc.lines?.length) return '';
+  const rows = doc.lines.map(l => `<dl class="line"><dt>${esc(`${l.qty} × ${l.name}${l.variant ? ` (${l.variant})` : ''}`)}</dt><dd>${esc(money(l.amountTzs))}${l.vatCode ? ` ${esc(l.vatCode)}` : ''}</dd></dl>`).join('');
+  return `<section aria-labelledby="h-lines"><h2 id="h-lines">${L(lang, 'returnedItems')}</h2>${rows}</section>`;
+}
+/** S7 §6.1 block 6: refund total (+ VAT included). */
+function creditTotalsBlock(doc, lang) {
+  return `<div class="totals"><div class="grand"><span>${L(lang, 'refundTotal')}</span><span>${esc(money(doc.totalTzs))}</span></div>
+${doc.vatSummary?.length ? `<div class="muted"><span>${L(lang, 'includesVat', { amount: money(doc.vatIncludedTzs) })}</span></div>` : ''}</div>`;
+}
+/** S7 §6.1 block 8: how the refund was settled (balance, paid back by a method, or nothing paid back). */
+const creditSettlementBlock = (doc, lang) => `<div class="box">${creditNoteSettlement(doc, lang).map(t => `<div>${esc(t)}</div>`).join('')}</div>`;
+/** S7 §6.3: a sale's own receipt / invoice lists its active credit notes and the total after them. */
+function saleRefundsBlock(doc, lang) {
+  if (!doc.refunds?.length) return '';
+  const rows = doc.refunds.map(r => `<div class="totals"><div><span>${esc(`${r.number} · ${formatDay(r.refundedAt, lang)}`)}</span><span>${esc(minusMoney(r.amountTzs))}</span></div></div>`).join('');
+  return `<section aria-labelledby="h-refunds"><h2 id="h-refunds">${L(lang, 'refundsOnSale')}</h2>${rows}
+<div class="totals"><div class="grand"><span>${L(lang, 'totalAfterRefunds')}</span><span>${esc(money(doc.totalAfterRefundsTzs))}</span></div></div></section>`;
+}
+
 function linesBlock(doc, lang) {
   if (!doc.lines?.length) return '';
   const hasVat = doc.lines.some(l => l.vatCode);
@@ -92,7 +114,7 @@ function vatBlock(doc, lang) {
 }
 
 function paymentsBlock(doc, lang) {
-  if (doc.docType === 'statement') return '';
+  if (doc.docType === 'statement' || doc.docType === 'credit_note') return '';
   const parts = [];
   if (doc.paymentMethod) parts.push(`<div>${L(lang, 'paidBy', { method: methodLabel(lang, doc.paymentMethod) })}</div>`);
   for (const p of doc.payments || []) {
@@ -159,8 +181,10 @@ function documentBody(doc, l, mode) {
   const title = titleOf(doc, l);
   const business = doc.seller?.businessName || '';
   const heading = doc.number ? `${title} ${doc.number}` : title;
+  const credit = doc.docType === 'credit_note';
   const sub = [
-    doc.saleRef ? label(l, 'saleRef', { number: doc.saleRef }) : null,
+    credit ? creditNoteForLine(doc, l) : null,
+    !credit && doc.saleRef ? label(l, 'saleRef', { number: doc.saleRef }) : null,
     doc.orderShortRef ? label(l, 'orderRef', { ref: doc.orderShortRef }) : null,
   ].filter(Boolean);
   const meta = [
@@ -169,18 +193,20 @@ function documentBody(doc, l, mode) {
     doc.customer?.name ? `<div>${L(l, 'customer', { name: doc.customer.name })}</div>` : '',
     doc.dueDate ? `<div>${L(l, 'dueBy', { date: formatDay(doc.dueDate, l) })}</div>` : '',
     doc.servedBy?.firstName ? `<div>${L(l, 'servedBy', { name: doc.servedBy.firstName })}</div>` : '',
+    credit && doc.saleRef?.soldAt ? `<div>${L(l, 'saleDate', { date: formatDay(doc.saleRef.soldAt, l) })}</div>` : '',
   ].join('');
   const status = doc.status ? `<span class="badge ${esc(doc.status)}">${L(l, statusKeyOf(doc))}</span>` : '';
   const banner = doc.status === 'cancelled' ? `<div class="banner" role="note">${esc(cancelledBanner(doc, l))}</div>` : '';
   const footer = [
     ['receipt', 'payment_receipt'].includes(doc.docType) && doc.status !== 'cancelled' ? `<div>${L(l, 'receivedBy', { business })}</div>` : '',
+    credit ? `<div>${L(l, 'refundGivenBy', { business })}</div>` : '',
     `<div>${L(l, 'notFiscal')}</div>`,
     mode === 'public' ? `<div>${L(l, 'copyNote', { business })}</div>` : '',
   ].join('');
   const body = `<main><div class="head"><div class="left">${sellerBlock(doc, l)}</div><div class="right">
 <h1>${esc(heading)}</h1>${sub.map(s => `<div class="muted">${esc(s)}</div>`).join('')}<div>${status}</div></div></div>
 ${banner}<section aria-labelledby="h-meta"><h2 id="h-meta" style="position:absolute;left:-9999px">${L(l, 'date')}</h2>${meta}</section>
-${linesBlock(doc, l)}${totalsBlock(doc, l)}${vatBlock(doc, l)}${paymentsBlock(doc, l)}${statementBlock(doc, l)}
+${credit ? `${returnedItemsBlock(doc, l)}${creditTotalsBlock(doc, l)}${vatBlock(doc, l)}${creditSettlementBlock(doc, l)}` : `${linesBlock(doc, l)}${totalsBlock(doc, l)}${vatBlock(doc, l)}${paymentsBlock(doc, l)}${saleRefundsBlock(doc, l)}`}${statementBlock(doc, l)}
 <footer>${footer}</footer></main>`;
   return { body, heading, business };
 }

@@ -30,7 +30,7 @@ const cancelledAtOf = (order) => {
   return [...entries].reverse().find(e => e?.status === 'cancelled')?.at ?? order.updatedAt ?? null;
 };
 
-export function createPgVendorDocumentStore({ db, customerStore, vatOn = () => false, now = () => new Date() }) {
+export function createPgVendorDocumentStore({ db, customerStore, refundStore = null, vatOn = () => false, now = () => new Date() }) {
   async function namesOf(q, ids) {
     const wanted = [...new Set(ids.filter(Boolean))];
     if (!wanted.length) return new Map();
@@ -60,6 +60,8 @@ export function createPgVendorDocumentStore({ db, customerStore, vatOn = () => f
     ]);
     const names = await namesOf(db, [sale.createdBy]);
     return {
+      // S7 §6.3: the sale's ACTIVE credit notes (undone ones are not listed on the receipt / invoice).
+      refunds: refundStore ? await refundStore.activeRefundsOfSale(vendorId, saleId) : [],
       sale: { ...sale, dueDate: dayOf(sale.dueDate) },
       lines: lines.map(plain), payments: payments.map(plain),
       allocations: allocations.map(plain).map(a => ({ number: a.number, amountTzs: a.amountTzs, receivedOn: dayOf(a.receivedOn), voided: a.voidedAt != null })),
@@ -239,7 +241,11 @@ export function createPgVendorDocumentStore({ db, customerStore, vatOn = () => f
   /** The customer behind a statement link deleted their FitFlex account (#229 M1). */
   const customerForgotten = async (vendorId, customerId) => Boolean(await db('VendorCustomer').where({ id: customerId, vendorId }).whereNotNull('forgottenAt').first('id'));
 
+  /** S7: a refund of this vendor as a credit note's source. null = not this vendor's. */
+  const refundSource = async (vendorId, refundId) => (refundStore ? refundStore.refundSource(vendorId, refundId) : null);
+
   return {
+    refundSource,
     saleSource, paymentSource, statementSource, issueOrderInvoice, orderInvoiceSource, orderVendorsForBuyer, vendorsOf,
     createLink, listLinks, getLink, saleDocType, revoke, liveLinkByHash, touch, vendorExists, customerForgotten,
   };

@@ -2,6 +2,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createWebhookService } from '../src/services/webhook-service.mjs';
+import { createNotConfiguredSelcomClient } from '../src/integrations/payments/selcom-confirm.mjs';
 import { hasWebhookToken, redactWebhookToken } from '../src/integrations/payments/selcom-token.mjs';
 
 const SECRET = 'whsec_test_123';
@@ -105,9 +106,24 @@ test('flag on + client throws: 503, nothing activates, claim not consumed', asyn
   assert.equal(webhookSeen.rows.length, 0);
 });
 
-test('flag on + default (not configured) client fails closed', async () => {
+test('flag on + default (not configured) client: the service refuses to be built (boot guard)', () => {
   process.env.SELCOM_WEBHOOK_SERVER_CONFIRM = 'on';
+  const origErr = console.error; console.error = () => {};
+  try {
+    assert.throws(() => setup(), /selcom_server_confirm_requires_client/);
+    assert.throws(() => createWebhookService({ subscriptions: store(), webhookSeen: store(), confirmClient: createNotConfiguredSelcomClient() }), /selcom_server_confirm_requires_client/);
+  } finally { console.error = origErr; }
+});
+
+test('flag off + default (not configured) client: builds and activates as before', async () => {
+  const { svc, subscriptions } = setup();
+  assert.deepEqual(await call(svc), { ok: true });
+  assert.equal(subscriptions.rows[0].status, 'active');
+});
+
+test('flag flipped on after boot with the not-configured client still fails closed (503, nothing consumed)', async () => {
   const { svc, subscriptions, webhookSeen } = setup();
+  process.env.SELCOM_WEBHOOK_SERVER_CONFIRM = 'on';
   const r = await call(svc);
   assert.deepEqual([r.error, r.status], ['confirmation_unavailable', 503]);
   assert.equal(subscriptions.rows[0].status, 'payment_pending');

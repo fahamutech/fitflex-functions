@@ -275,7 +275,8 @@ export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn 
                WHERE s."vendorId" = ? AND s."customerId" = ? AND s.kind = 'credit' AND s.status = 'completed' AND s."balanceTzs" > 0
                ORDER BY s."dueDate", s."soldAt", s.id`, [today, vendorId, customerId]),
       db('VendorSale').where({ vendorId, customerId, status: 'completed' })
-        .first(db.raw('count(*)::int AS n'), db.raw('COALESCE(sum("totalTzs"), 0)::bigint AS total'), db.raw('max("soldAt") AS last')),
+        // S7: shop sales after refunds (net of ACTIVE refunds; "after refunds" in the apps).
+        .first(db.raw('count(*)::int AS n'), db.raw('COALESCE(sum("totalTzs" - "refundedTzs"), 0)::bigint AS total'), db.raw('max("soldAt") AS last')),
     ]);
     let app = { n: 0, total: 0, last: null };
     if (row.source === 'marketplace' && row.buyerUserId) {

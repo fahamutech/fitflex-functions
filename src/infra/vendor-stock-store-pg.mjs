@@ -37,7 +37,9 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       document: r.orderId ? { type: 'order', id: r.orderId, number: null, shortRef: shortRef(r.orderId) }
         // S3: a walk-in sale (or its void) points at the sale and its receipt number.
         : ['sale', 'sale_void'].includes(r.kind) && r.sourceId ? { type: 'sale', id: r.sourceId, number: r.saleNumber ?? null }
-          : null,
+          // S7: a refund's restock (or its undo) points at the refund and its credit-note number.
+          : ['refund', 'refund_revert'].includes(r.kind) && r.sourceId ? { type: 'refund', id: r.sourceId, number: r.refundNumber ?? null }
+            : null,
       createdAt: r.createdAt,
     };
   }
@@ -335,7 +337,8 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     let q = scope(db('ShopStockMovement as m').leftJoin('User as u', 'u.id', 'm.actorId')
       // Only this vendor's sales: a ledger row of their product names a sale of theirs.
       .leftJoin('VendorSale as s', function joinSale() { this.on('s.id', '=', 'm.sourceId').andOn('s.vendorId', '=', db.raw('?', [vendorId])); })
-      .select('m.*', 'u.displayName as actorName', 's.number as saleNumber'));
+      .leftJoin('VendorSaleRefund as vr', function joinRefund() { this.on('vr.id', '=', 'm.sourceId').andOn('vr.vendorId', '=', db.raw('?', [vendorId])); })
+      .select('m.*', 'u.displayName as actorName', 's.number as saleNumber', 'vr.number as refundNumber'));
     if (from) q = q.where('m.createdAt', '>=', from);
     if (to) q = q.where('m.createdAt', '<', to);
     if (after) q = q.where(w => w.where('m.createdAt', '<', after.t).orWhere(x => x.where('m.createdAt', '=', after.t).andWhere('m.id', '<', after.id)));

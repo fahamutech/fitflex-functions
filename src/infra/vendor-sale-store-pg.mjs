@@ -34,6 +34,7 @@ import { vatForSale, sellerSnapshotOf } from './vendor-tax-store-pg.mjs';
 import { vatSummary } from '../shared/vendor-vat.mjs';
 import { INVOICE_DOC_TYPE, invoiceNumber } from '../shared/vendor-documents.mjs';
 import { vendorVatOn } from '../shared/feature-flags.mjs';
+import { lineNetOf, refundStateOf } from '../shared/vendor-refund.mjs';
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
@@ -70,8 +71,11 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
   }
 
   /** The sale as vendors see it. Never the unit cost (S6), never internals (fingerprint, seq). */
-  function saleView(sale, lines, payments, names, { customer = null, allocations = [] } = {}) {
+  function saleView(sale, lines, payments, names, { customer = null, allocations = [], refunds = [] } = {}) {
     const s = plain(sale);
+    const ls = lines.map(plain);
+    const lineNetTotal = ls.reduce((sum, l) => sum + lineNetOf(l), 0);
+    const refundedTzs = s.refundedTzs || 0;
     return {
       id: s.id, number: s.number, status: s.status, kind: s.kind,
       // S5: credit sales carry an INV number (the document number; R- stays the sale ref). VAT is contained
@@ -87,6 +91,10 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
       subtotalTzs: s.subtotalTzs, lineDiscountTzs: s.lineDiscountTzs, discountTzs: s.discountTzs,
       totalTzs: s.totalTzs, paidTzs: s.paidTzs, changeTzs: s.changeTzs,
       note: s.note ?? null,
+      // S7: refunds (credit notes) against this sale — active totals, and every refund (active and undone).
+      refundedTzs, refundableTzs: lineNetTotal - refundedTzs, netAfterRefundsTzs: s.totalTzs - refundedTzs,
+      refundState: refundStateOf(ls), balanceReducedTzs: s.balanceReducedTzs || 0,
+      refunds: refunds.map(plain).map(r => ({ id: r.id, number: r.number, status: r.status, refundedAt: iso(r.createdAt), amountTzs: r.amountTzs })),
       createdBy: person(s.createdBy, names.get(s.createdBy)),
       voidedBy: person(s.voidedBy, names.get(s.voidedBy)), voidedAt: iso(s.voidedAt), voidReason: s.voidReason ?? null,
       lines: lines.map(plain).sort((a, b) => a.lineNo - b.lineNo).map(l => ({
@@ -95,6 +103,8 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
         priceChangedBy: person(l.priceChangedBy, names.get(l.priceChangedBy)),
         discountTzs: l.discountTzs, lineTotalTzs: l.lineTotalTzs,
         vatCode: l.vatCode ?? null, vatRatePct: Number(l.vatRatePct || 0), vatTzs: l.vatTzs ?? 0,
+        lineNetTzs: lineNetOf(l), refundedQty: l.refundedQty || 0, refundableQty: l.qty - (l.refundedQty || 0), refundedTzs: l.refundedTzs || 0,
+        refundedVatTzs: l.refundedVatTzs || 0,
       })),
       payments: payments.map(plain).sort((a, b) => a.position - b.position).map(p => ({
         method: p.method, amountTzs: p.amountTzs, reference: p.reference ?? null,
@@ -105,16 +115,18 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
   async function load(q, where) {
     const sale = await q('VendorSale').where(where).first();
     if (!sale) return null;
-    const [lines, payments, customer, allocations] = await Promise.all([
+    const [lines, payments, customer, allocations, refunds] = await Promise.all([
       q('VendorSaleLine').where({ saleId: sale.id }),
       q('VendorSalePayment').where({ saleId: sale.id }),
       sale.customerId ? q('VendorCustomer').where({ id: sale.customerId, vendorId: sale.vendorId }).first('name', 'forgottenAt') : null,
       q('VendorPaymentAllocation as a').join('VendorCustomerPayment as p', function joinPayment() { this.on('p.id', 'a.paymentId').andOn('p.vendorId', 'a.vendorId'); })
         .where({ 'a.saleId': sale.id, 'a.vendorId': sale.vendorId })
         .orderBy([{ column: 'p.seq' }]).select('a.paymentId', 'p.number', 'a.amountTzs', 'p.receivedOn', 'a.voidedAt'),
+      q('VendorSaleRefund').where({ saleId: sale.id, vendorId: sale.vendorId }).orderBy([{ column: 'createdAt' }, { column: 'id' }])
+        .select('id', 'number', 'status', 'createdAt', 'amountTzs'),
     ]);
     const names = await namesOf(q, [sale.createdBy, sale.voidedBy, ...lines.map(l => l.priceChangedBy)]);
-    return { row: plain(sale), view: saleView(sale, lines, payments, names, { customer, allocations }), lines: lines.map(plain) };
+    return { row: plain(sale), view: saleView(sale, lines, payments, names, { customer, allocations, refunds }), lines: lines.map(plain) };
   }
 
   /** A sale of this vendor by id (of this customer, when given); another vendor's sale is not found. */
@@ -319,6 +331,11 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
         const refused = canVoid(sale);
         if (refused) throw Object.assign(new Error(refused.error), { refusal: refused });
         if (sale.status === 'voided') throw refusal('already_voided', 409, { voidedAt: iso(sale.voidedAt) });
+        // S7 (Q-3): ACTIVE refunds block a void (undo them first, or refund the rest). Undone refunds do not:
+        // their stock was taken back, so the void's full give-back stays right. Checked whatever the flag.
+        const activeRefunds = await trx('VendorSaleRefund').where({ saleId, vendorId, status: 'active' })
+          .orderBy([{ column: 'seq' }]).select('id', 'number');
+        if (activeRefunds.length) throw refusal('has_refunds', 409, { refunds: activeRefunds.map(r => ({ id: r.id, number: r.number })) });
         // S4 (Q-2): customer payments allocated to this sale must be voided first; no money moves silently.
         const live = await trx('VendorPaymentAllocation as a')
           .join('VendorCustomerPayment as p', function joinPayment() { this.on('p.id', 'a.paymentId').andOn('p.vendorId', 'a.vendorId'); })
@@ -411,7 +428,8 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
 
     const customerIds = [...new Set(page.map(r => r.customerId).filter(Boolean))];
     const [items, overridden, pays, names, customers] = await Promise.all([
-      ids.length ? db('VendorSaleLine').whereIn('saleId', ids).groupBy('saleId').select('saleId').sum({ n: 'qty' }) : [],
+      ids.length ? db('VendorSaleLine').whereIn('saleId', ids).groupBy('saleId').select('saleId',
+        db.raw('bool_or("refundedQty" > 0) AS "anyRefunded"'), db.raw('bool_and("refundedQty" = qty) AS "allRefunded"')).sum({ n: 'qty' }) : [],
       ids.length ? db('VendorSaleLine').whereIn('saleId', ids).whereRaw('"unitPriceTzs" <> "listPriceTzs"').distinct('saleId') : [],
       ids.length ? db('VendorSalePayment').whereIn('saleId', ids).orderBy(['saleId', 'position']).select('saleId', 'method') : [],
       namesOf(db, page.map(r => r.createdBy)),
@@ -419,6 +437,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
     ]);
     const customerNames = new Map(customers.map(c => [c.id, { name: c.name ?? null, forgotten: c.forgottenAt != null }]));
     const itemCount = new Map(items.map(r => [r.saleId, Number(r.n)]));
+    const refundStates = new Map(items.map(r => [r.saleId, !r.anyRefunded ? 'none' : r.allRefunded ? 'full' : 'partial']));
     const withOverride = new Set(overridden.map(r => r.saleId));
     const methods = new Map();
     for (const p of pays) {
@@ -447,6 +466,32 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
     if (amounts.has('cash')) amounts.set('cash', amounts.get('cash') - Number(totals.changeTzs));
     const byMethod = PAYMENT_METHODS.filter(m => amounts.has(m)).map(m => ({ method: m, amountTzs: amounts.get(m) }));
 
+    // S7: refunds made in the range (by refund date) minus undos made in the range (by undo date), of this
+    // vendor's sales that match the kind / customer filters; createdBy=me = refunds I made. A voided sale's
+    // refunds are left out (they were all undone before the void, and the voided sale is in no total).
+    // byMethod stays money received; refundsByMethod is money paid back (paidOutTzs).
+    const refundScope = (q) => {
+      q.join('VendorSale as s', function joinSale() { this.on('s.id', 'r.saleId').andOn('s.vendorId', 'r.vendorId'); })
+        .where('r.vendorId', vendorId).where('s.status', 'completed');
+      if (createdBy) q.where('r.createdBy', createdBy);
+      if (customerId) q.where('s.customerId', customerId);
+      if (kind) q.where('s.kind', kind);
+      return q;
+    };
+    const inRange = (q, col) => { if (from) q.where(col, '>=', from); if (to) q.where(col, '<', to); return q; };
+    const [made, undone] = await Promise.all([
+      inRange(refundScope(db('VendorSaleRefund as r')), 'r.createdAt').groupBy('r.method')
+        .select('r.method', db.raw('count(*)::int AS n'), db.raw('COALESCE(sum(r."amountTzs"), 0)::bigint AS amount'), db.raw('COALESCE(sum(r."paidOutTzs"), 0)::bigint AS paid')),
+      inRange(refundScope(db('VendorSaleRefund as r')), 'r.revertedAt').whereNotNull('r.revertedAt').groupBy('r.method')
+        .select('r.method', db.raw('COALESCE(sum(r."amountTzs"), 0)::bigint AS amount'), db.raw('COALESCE(sum(r."paidOutTzs"), 0)::bigint AS paid')),
+    ]);
+    const refundCount = made.reduce((s2, r) => s2 + Number(r.n), 0);
+    const refundTzs = made.reduce((s2, r) => s2 + Number(r.amount), 0) - undone.reduce((s2, r) => s2 + Number(r.amount), 0);
+    const paidBack = new Map();
+    for (const r of made) if (r.method) paidBack.set(r.method, (paidBack.get(r.method) || 0) + Number(r.paid));
+    for (const r of undone) if (r.method) paidBack.set(r.method, (paidBack.get(r.method) || 0) - Number(r.paid));
+    const refundsByMethod = PAYMENT_METHODS.filter(m => paidBack.has(m) && paidBack.get(m) !== 0).map(m => ({ method: m, amountTzs: paidBack.get(m) }));
+
     return {
       sales: page.map(r => ({
         id: r.id, number: r.number, soldAt: iso(r.soldAt), recordedAt: iso(r.createdAt), status: r.status,
@@ -455,15 +500,20 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
         createdBy: person(r.createdBy, names.get(r.createdBy)),
         kind: r.kind, balanceTzs: r.balanceTzs, dueDate: dayOf(r.dueDate),
         customer: r.customerId ? { id: r.customerId, name: customerNames.get(r.customerId)?.name ?? null, forgotten: customerNames.get(r.customerId)?.forgotten ?? false } : null,
+        refundedTzs: r.refundedTzs || 0, refundState: refundStates.get(r.id) || 'none',
       })),
       nextCursor: rows.length > limit ? encodeCursor(page[page.length - 1]) : null,
       summary: {
         count: Number(totals.count), totalTzs: Number(totals.totalTzs), voidedCount: Number(totals.voidedCount),
         discountTzs: Number(totals.discountTzs), overrideCount: Number(totals.overrideCount), lateCount: Number(totals.lateCount), byMethod,
         payLaterTzs: Number(totals.payLaterTzs), owedTzs: Number(totals.owedTzs),
+        refundCount, refundTzs, netTzs: Number(totals.totalTzs) - refundTzs, refundsByMethod,
       },
     };
   }
 
-  return { record, replayOf, get, list, voidSale };
+  /** S7: the sale view (and its raw row and lines) inside a caller's transaction. null = not found. */
+  const loadSale = (q, where) => load(q, where);
+
+  return { record, replayOf, get, list, voidSale, loadSale };
 }
