@@ -11,7 +11,7 @@ const guard = requireAuth('member', 'trainer');
 
 export const securityActivity = {
   created, method: 'get', path: '/me/security-activity',
-  description: 'Member or trainer (404 not_found while WEB_QR_CHECKIN is off): GET ?limit=&before= → { events: [{ id, kind: "web_checkin", occurredAt, gym: { id, name }, channel: "web", status: "notified" | "recorded" }], next? }. Newest first; only your own events; limit default 20, max 50; pass `next` back as `before` for the following page. gym.id is the same gym id the member gym APIs return. Cache-Control: no-store.',
+  description: 'Member or trainer (404 not_found while WEB_QR_CHECKIN is off): GET ?limit=&before= → { events: [{ id, kind: "web_checkin", occurredAt, gym: { id, name }, channel: "web", status: "inbox" | "recorded" }], next? }. Newest first; only your own events; limit default 20, max 50; pass `next` back as `before` for the following page. gym.id is the same gym id the member gym APIs return. Cache-Control: no-store.',
   onGuard: (req, res, next) => {
     if (!webQrCheckinOn()) { res.set?.('Cache-Control', 'no-store'); return res.status(404).json({ error: 'not_found' }); }
     return guard(req, res, next);
@@ -30,9 +30,8 @@ export const securityActivity = {
 
 export const securityEventRetention = {
   created, rule: '55 2 * * *', // every day 02:55 UTC
-  description: 'Security events older than 13 months are deleted. Runs only while WEB_QR_CHECKIN is on (events are written then, with or without WEB_CHECKIN_ALERTS). Idempotent.',
+  description: 'Security events older than 13 months are deleted. Runs regardless of WEB_QR_CHECKIN and WEB_CHECKIN_ALERTS (purge is data hygiene, not feature behaviour). Idempotent.',
   onJob: async () => {
-    if (!webQrCheckinOn()) return;
     const n = await securityEventService.purgeExpired();
     if (n) console.log(`[security-event] retention: deleted ${n} event(s) older than 13 months`);
   },

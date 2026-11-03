@@ -239,6 +239,30 @@ test('push payload carries only type, notificationId, eventId, gymId, open; noth
   assert.ok(!FORBIDDEN.test(JSON.stringify(sent[0].data)));
 });
 
+test('push shows generic text with no gym name or time (EN), the inbox row keeps them', async () => {
+  const gymId = await makeGym(); const memberId = await makeUser();
+  const { svc, sent } = harness();
+  await svc.handleCheckin(webRow(memberId, gymId));
+  const gymName = (await gyms.findByIdAsync(gymId)).name;
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].notification.title, 'Security alert');
+  assert.equal(sent[0].notification.body, 'New activity on your FitFlex account. Open the app to review.');
+  assert.ok(!JSON.stringify(sent[0]).includes(gymName), 'gym name not in push');
+  assert.ok(!/\d{2}\/\d{2}\/\d{4}/.test(JSON.stringify(sent[0])), 'no date in push');
+  const row = await db('Notification').where({ userId: memberId }).first();
+  assert.ok(row.body.includes(gymName), 'inbox keeps gym name');
+});
+
+test('push is Swahili (draft) when the member locale is sw, still without gym or time', async () => {
+  const gymId = await makeGym(); const memberId = await makeUser({ locale: 'sw' });
+  const { svc, sent } = harness();
+  await svc.handleCheckin(webRow(memberId, gymId));
+  const gymName = (await gyms.findByIdAsync(gymId)).name;
+  assert.equal(sent[0].notification.title, 'Tahadhari ya usalama');
+  assert.equal(sent[0].notification.body, 'Kuna shughuli mpya kwenye akaunti yako ya FitFlex. Fungua programu kukagua.');
+  assert.ok(!JSON.stringify(sent[0]).includes(gymName));
+});
+
 test('hook idempotency: handling the same check-in twice leaves one event and one message (and one push)', async () => {
   const gymId = await makeGym(); const memberId = await makeUser();
   const { svc, sent } = harness();
@@ -351,7 +375,7 @@ test('/me/security-activity: dormant 404; own rows only; shape; limit clamp; pag
   assert.equal(p1.body.events.length, 2);
   const e = p1.body.events[0];
   assert.deepEqual(Object.keys(e).sort(), ['channel', 'gym', 'id', 'kind', 'occurredAt', 'status']);
-  assert.equal(e.kind, 'web_checkin'); assert.equal(e.channel, 'web'); assert.equal(e.status, 'notified');
+  assert.equal(e.kind, 'web_checkin'); assert.equal(e.channel, 'web'); assert.equal(e.status, 'inbox');
   assert.equal(e.occurredAt, new Date(base + 4 * 60_000).toISOString());
   assert.equal(e.gym.id, gymB);
   assert.equal(e.gym.name, (await gyms.findByIdAsync(gymB)).name);
@@ -388,14 +412,14 @@ test('cross-member isolation: member B confirming sees no trace of A; the same s
   assert.equal(listB.body.events[0].id, eventIdFor(ob.body.checkin.id));
 });
 
-test('retention: events older than 13 months are deleted, newer kept; job is a no-op while WEB_QR_CHECKIN is off', async () => {
+test('retention: events older than 13 months are deleted, newer kept; the job runs with WEB_QR_CHECKIN off', async () => {
   const memberId = await makeUser();
   const old = { id: uid('sev'), userId: memberId, kind: 'web_checkin', checkinId: uid('chk'), occurredAt: new Date(Date.now() - 14 * 31 * 86_400_000), notifyState: 'none' };
   const fresh = { id: uid('sev'), userId: memberId, kind: 'web_checkin', checkinId: uid('chk'), occurredAt: new Date(Date.now() - 12 * 28 * 86_400_000), notifyState: 'none' };
   await db('SecurityEvent').insert([old, fresh]);
   delete process.env.WEB_QR_CHECKIN;
   await securityEventRetention.onJob();
-  assert.equal((await db('SecurityEvent').where({ userId: memberId })).length, 2);
+  assert.deepEqual((await db('SecurityEvent').where({ userId: memberId })).map(r => r.id), [fresh.id]);
   process.env.WEB_QR_CHECKIN = '1';
   await securityEventRetention.onJob();
   const left = await db('SecurityEvent').where({ userId: memberId });
