@@ -604,6 +604,13 @@ test('credit sales (AC-16..19): the balance comes off first, then money back; th
   const profile = async () => (await call(vendorCustomerGet, as(v), { params: { id: c.id } })).body;
   const aging = async () => (await call(vendorReceivablesAging, as(v))).body;
   assert.deepEqual([(await profile()).customer.owedTzs, (await aging()).totals.owedTzs], [20_000, 20_000]);
+  // List rows and the profile's open sales carry balanceReducedTzs (additive, whatever the flag).
+  const listRow = async () => (await call(vendorListSales, as(v))).body.sales.find(x => x.id === sale.id);
+  assert.deepEqual([(await listRow()).balanceReducedTzs, (await listRow()).balanceTzs], [30_000, 20_000]);
+  assert.deepEqual((await profile()).customer.openSales.map(x => [x.id, x.balanceTzs, x.balanceReducedTzs]), [[sale.id, 20_000, 30_000]]);
+  delete process.env.VENDOR_REFUNDS;
+  assert.equal((await listRow()).balanceReducedTzs, 30_000, 'with VENDOR_REFUNDS off too');
+  process.env.VENDOR_REFUNDS = '1';
   // 40,000: 20,000 off the balance (now 0), 20,000 paid back by the chosen method.
   const r2 = await refundOk(as(v), sale.id, body([{ saleLineId: l.id, qty: 4 }], { method: 'cash' }));
   assert.deepEqual([r2.refund.balanceReducedTzs, r2.refund.paidOutTzs, r2.refund.method, r2.sale.balanceTzs], [20_000, 20_000, 'cash', 0]);
