@@ -195,7 +195,9 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
   }
   h2(L('methods'));
   const groups = [[L('byYou'), pdf.methods.byYou.map(r => [r.method === 'cash' ? L('netOfChange') : methodName(lang, r.method), money(r.amountTzs), pctText(r.sharePct)])],
-    [L('viaFitFlex'), pdf.methods.viaFitFlex.map(r => [methodName(lang, r.paymentMethod), money(r.amountTzs), pctText(r.sharePct)])]];
+    [L('viaFitFlex'), pdf.methods.viaFitFlex.map(r => [methodName(lang, r.paymentMethod), money(r.amountTzs), pctText(r.sharePct)])],
+    // S7: money paid back on refunds — its own group, never part of the shares above.
+    [L('paidBack'), (pdf.methods.paidBack || []).map(r => [methodName(lang, r.method), money(r.amountTzs), ''])]];
   // Retest N6: no payments in the period reads like the other empty sections, not a bare heading.
   if (!groups.some(([, rows]) => rows.length)) note(L('none'));
   for (const [group, rows] of groups) {

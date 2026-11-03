@@ -89,6 +89,10 @@ export const DOC_LABELS = {
     cancelled: 'Cancelled on {date}. {business} cancelled this document.', watermark: 'CANCELLED · IMEBATILISHWA',
     refunded: 'Refunded {amount} by {method}', receivedBy: 'Payment received by {business}.', notFiscal: 'This is not a TRA fiscal receipt.',
     copyNote: 'This is a copy of a document issued by {business}.', pageOf: 'Page {n} of {m}', langEn: 'English', langSw: 'Kiswahili',
+    // S7 credit notes (design spec docs/design/vendor-refunds-s7.md §8.6).
+    forInvoice: 'For invoice {number}', saleDate: 'Sold on {date}', statusIssued: 'Issued', returnedItems: 'Returned items', refundTotal: 'Refund total',
+    balanceReduced: 'Taken off the balance {amount}', nothingPaidBack: 'No money paid back.', refundGivenBy: 'Refund given by {business}.',
+    refundsOnSale: 'Refunds', totalAfterRefunds: 'Total after refunds',
     unavailableTitle: "This link isn't available", unavailableBody: 'The seller may have turned it off. Ask them to send it again.',
     // UAT D7: a short heading (also the tab title) and one sentence below it, so nothing reads twice.
     rateLimitedTitle: 'Too many requests', rateLimited: 'Try again in a minute.',
@@ -114,6 +118,10 @@ export const DOC_LABELS = {
     cancelled: 'Imebatilishwa tarehe {date}. {business} imebatilisha hati hii.', watermark: 'CANCELLED · IMEBATILISHWA',
     refunded: 'Imerejeshwa {amount} kwa {method}', receivedBy: 'Malipo yamepokelewa na {business}.', notFiscal: 'Hii si risiti ya kodi ya TRA.',
     copyNote: 'Hii ni nakala ya hati iliyotolewa na {business}.', pageOf: 'Ukurasa {n} kati ya {m}', langEn: 'English', langSw: 'Kiswahili',
+    // S7 credit notes — DRAFTS for native review.
+    forInvoice: 'Kwa ankara {number}', saleDate: 'Iliuzwa {date}', statusIssued: 'Imetolewa', returnedItems: 'Bidhaa zilizorudishwa', refundTotal: 'Jumla ya marejesho',
+    balanceReduced: 'Imepunguzwa kwenye deni {amount}', nothingPaidBack: 'Hakuna pesa iliyorudishwa.', refundGivenBy: 'Marejesho yametolewa na {business}.',
+    refundsOnSale: 'Marejesho', totalAfterRefunds: 'Jumla baada ya marejesho',
     unavailableTitle: 'Kiungo hiki hakipatikani', unavailableBody: 'Huenda muuzaji amekizima. Mwombe akutumie tena.',
     rateLimitedTitle: 'Maombi ni mengi mno', rateLimited: 'Jaribu tena baada ya dakika moja.',
     serverErrorTitle: 'Kuna hitilafu', serverError: 'Jaribu tena baadaye.',
@@ -259,7 +267,46 @@ export function saleDocument(src, lang = 'en') {
     } : {}),
     ...(voided ? { cancelledAt: new Date(s.voidedAt).toISOString() } : {}),
   };
+  // S7 §6.3: the active refunds (credit notes) against this sale, and the total after them. Undone ones are left out.
+  const refunds = (src.refunds || []).filter(r => r.amountTzs != null);
+  if (refunds.length && !voided) {
+    doc.refunds = refunds.map(r => ({ number: r.number, refundedAt: new Date(r.refundedAt).toISOString(), amountTzs: r.amountTzs }));
+    doc.totalAfterRefundsTzs = s.totalTzs - refunds.reduce((sum, r) => sum + r.amountTzs, 0);
+  }
   return doc;
+}
+
+/**
+ * S7 §6.1: a credit note (one refund on a walk-in sale). src from the refund store: { refund (row), lines
+ * [{ nameSnapshot, variant, qty, amountTzs, vatTzs, vatCode, vatRatePct, lineNo }], sale { number, invoiceNumber,
+ * kind, soldAt }, customer { name }|null, servedByName, seller (snapshot at issue) }. Allowlist: never the
+ * customer's phone, email or address, buyerUserId, cost, the refund reason, the undo reason or restock flags.
+ */
+export function creditNoteDocument(src, lang = 'en') {
+  const r = src.refund;
+  const cancelled = r.status === 'reverted';
+  const lines = [...src.lines].sort((a, b) => a.lineNo - b.lineNo);
+  const applied = lines.some(l => l.vatCode);
+  const credit = src.sale.kind === 'credit';
+  return {
+    docType: 'credit_note',
+    number: r.number,
+    saleRef: { number: src.sale.number, ...(credit && src.sale.invoiceNumber ? { invoiceNumber: src.sale.invoiceNumber } : {}), soldAt: src.sale.soldAt ? new Date(src.sale.soldAt).toISOString() : null },
+    status: cancelled ? 'cancelled' : 'issued',
+    issuedAt: new Date(r.createdAt).toISOString(),
+    lang: langOf(lang),
+    seller: seller(src.seller),
+    ...(src.customer?.name ? { customer: { name: src.customer.name } } : {}),
+    ...(firstName(src.servedByName) ? { servedBy: { firstName: firstName(src.servedByName) } } : {}),
+    lines: lines.map(l => ({ name: l.nameSnapshot, variant: l.variant || null, qty: l.qty, amountTzs: l.amountTzs, ...(applied && l.vatCode ? { vatCode: l.vatCode } : {}) })),
+    totalTzs: r.amountTzs,
+    ...(applied
+      ? vatBlock(lines.filter(l => l.vatCode).map(l => ({ vatCode: l.vatCode, vatRatePct: Number(l.vatRatePct), vatTzs: l.vatTzs, netTzs: l.amountTzs })))
+      : { vatIncludedTzs: 0, vatSummary: [] }),
+    balanceReducedTzs: r.balanceReducedTzs,
+    paidOut: r.paidOutTzs > 0 ? { method: r.method, ...(r.reference ? { reference: r.reference } : {}), amountTzs: r.paidOutTzs } : null,
+    ...(cancelled ? { cancelledAt: new Date(r.revertedAt).toISOString() } : {}),
+  };
 }
 
 /**
@@ -353,11 +400,23 @@ export function orderInvoiceDocument(src, lang = 'en') {
   };
 }
 
+/** A credit note's "For receipt R-…" / "For invoice INV-…" line (S7 §6.1 block 2). */
+export const creditNoteForLine = (doc, lang) => (doc.saleRef?.invoiceNumber
+  ? label(lang, 'forInvoice', { number: doc.saleRef.invoiceNumber }) : label(lang, 'forReceipt', { number: doc.saleRef?.number || '' }));
+/** A credit note's settlement lines (§6.1 block 8): taken off the balance, refunded by a method, or nothing paid back. */
+export function creditNoteSettlement(doc, lang) {
+  const out = [];
+  if (doc.balanceReducedTzs > 0) out.push(label(lang, 'balanceReduced', { amount: money(doc.balanceReducedTzs) }));
+  if (doc.paidOut) out.push(`${label(lang, 'refunded', { amount: money(doc.paidOut.amountTzs), method: methodLabel(lang, doc.paidOut.method) })}${doc.paidOut.reference ? ` (${doc.paidOut.reference})` : ''}`);
+  if (!out.length) out.push(label(lang, 'nothingPaidBack'));
+  return out;
+}
+
 /** The document's title in a language: "Receipt", "Ankara", … */
 export const titleOf = (doc, lang) => label(lang, doc.docType);
 
 /** Status label key; a cancelled app ORDER reads "Imeghairiwa", a voided sale/payment "Imebatilishwa". */
-export const STATUS_KEYS = { paid: 'statusPaid', pay_later: 'statusPayLater', paid_in_full: 'statusPaidInFull', cancelled: 'statusCancelled' };
+export const STATUS_KEYS = { paid: 'statusPaid', pay_later: 'statusPayLater', paid_in_full: 'statusPaidInFull', cancelled: 'statusCancelled', issued: 'statusIssued' };
 export const statusKeyOf = doc => (doc.status === 'cancelled' && doc.docType === 'order_invoice' ? 'statusCancelledOrder' : STATUS_KEYS[doc.status]);
 /** The cancelled banner and watermark for a document (order: "imeghairiwa"; sale/payment: "imebatilishwa"). */
 export function cancelledBanner(doc, lang) {

@@ -22,6 +22,12 @@
 //   orders, by the EAT date of their last "delivered" timeline entry (vendorShareOfOrder / deliveredOn in
 //   vendor-settlement-service.mjs), orders already on a statement the vendor can see are grouped under that
 //   statement's week with the statement line's own figures.
+// - S7 walk-in refunds (credit notes; design spec docs/design/vendor-refunds-s7.md §2.11): each refund line is a
+//   `refund` row on the refund's EAT day (qty −q, refund +amount, net −amount, VAT −vat, cost −q × unit cost only
+//   when restocked — a unit not put back keeps its cost, M-8 — null when the line has no cost); an UNDO repeats the
+//   refund's lines on the undo's EAT day with every sign flipped, so a refund and its undo in one period cancel and
+//   a closed period never changes (S6 Q-4). Refunds of a sale that was later voided are left out with the sale
+//   (a sale with active refunds cannot be voided, so all of them were undone first).
 import { VISIBLE_TO_PARTNER } from '../services/partner-statement-workflow.mjs';
 
 const TZ = 'Africa/Dar_es_Salaam';
@@ -58,6 +64,20 @@ export function createPgVendorReportStore({ db }) {
                s."soldAt" AS at, s."customerId" AS buyer
           FROM "VendorSale" s JOIN "VendorSaleLine" l ON l."saleId" = s.id AND l."vendorId" = s."vendorId", bounds b
          WHERE s."vendorId" = ? AND s.status = 'completed' AND s."soldAt" >= b.t0 AND s."soldAt" < b.t1
+      ),
+      walk_refund AS (
+        SELECT 'walk_in'::text AS channel, 'refund'::text AS kind, r.id AS doc_id, ${eatDay('ev.at')} AS day,
+               l."productId" AS product_id, l.variant AS variant, l."nameSnapshot" AS name,
+               (-ev.sign * rl.qty)::bigint AS qty, (ev.sign * rl.qty)::bigint AS refund_qty, 0::bigint AS gross, 0::bigint AS discount,
+               (ev.sign * rl."amountTzs")::bigint AS refund, (-ev.sign * rl."amountTzs")::bigint AS net, (-ev.sign * rl."vatTzs")::bigint AS vat, 0::bigint AS commission,
+               CASE WHEN l."unitCostTzs" IS NULL THEN NULL WHEN rl.restock THEN (-ev.sign)::bigint * rl.qty * l."unitCostTzs" ELSE 0::bigint END AS cost,
+               ev.at AS at, s."customerId" AS buyer
+          FROM "VendorSaleRefund" r
+          JOIN "VendorSale" s ON s.id = r."saleId" AND s."vendorId" = r."vendorId"
+          JOIN "VendorSaleRefundLine" rl ON rl."refundId" = r.id AND rl."vendorId" = r."vendorId"
+          JOIN "VendorSaleLine" l ON l.id = rl."saleLineId" AND l."vendorId" = r."vendorId"
+          CROSS JOIN LATERAL (VALUES (r."createdAt", 1), (r."revertedAt", -1)) ev(at, sign), bounds b
+         WHERE r."vendorId" = ? AND s.status = 'completed' AND ev.at IS NOT NULL AND ev.at >= b.t0 AND ev.at < b.t1
       ),
       app_in AS (
         SELECT o.id, o."paidAt", o."buyerId", o.items, ${CANCELLED_AT} AS cancelled_at
@@ -104,9 +124,9 @@ export function createPgVendorReportStore({ db }) {
           FROM app_priced p, bounds b WHERE p.cancelled_at >= b.t0 AND p.cancelled_at < b.t1
       ),
       facts AS (
-        SELECT * FROM (SELECT * FROM walk UNION ALL SELECT * FROM app) f WHERE (?::text = 'all' OR f.channel = ?::text)
+        SELECT * FROM (SELECT * FROM walk UNION ALL SELECT * FROM walk_refund UNION ALL SELECT * FROM app) f WHERE (?::text = 'all' OR f.channel = ?::text)
       )`;
-    const bindings = [from, to, vendorId, containment(vendorId), String(vendorId), vendorId, channel, channel];
+    const bindings = [from, to, vendorId, vendorId, containment(vendorId), String(vendorId), vendorId, channel, channel];
     return { sql, bindings };
   }
 
@@ -131,11 +151,36 @@ export function createPgVendorReportStore({ db }) {
     return { count: n(rows[0]?.count), totalTzs: n(rows[0]?.total) };
   }
 
-  /** Is there any walk-in sale (completed or voided) in the period? (channels.walkIn) */
+  /** Is there any walk-in sale (completed or voided), or (S7) any refund or undo, in the period? (channels.walkIn) */
   async function hasWalkIn({ vendorId, from, to }) {
     const { rows } = await db.raw(`WITH ${BOUNDS}
-      SELECT EXISTS (SELECT 1 FROM "VendorSale" s, bounds b WHERE s."vendorId" = ? AND s."soldAt" >= b.t0 AND s."soldAt" < b.t1) AS found`, [from, to, vendorId]);
+      SELECT EXISTS (SELECT 1 FROM "VendorSale" s, bounds b WHERE s."vendorId" = ? AND s."soldAt" >= b.t0 AND s."soldAt" < b.t1)
+          OR EXISTS (SELECT 1 FROM "VendorSaleRefund" r, bounds b WHERE r."vendorId" = ?
+                       AND ((r."createdAt" >= b.t0 AND r."createdAt" < b.t1) OR (r."revertedAt" >= b.t0 AND r."revertedAt" < b.t1))) AS found`, [from, to, vendorId, vendorId]);
     return Boolean(rows[0]?.found);
+  }
+
+  /**
+   * S7: the Refunds report — one row per refund made in the period (type refund, its EAT day) and per undo made in
+   * the period (type revert, the undo's EAT day, money and units negative), oldest first. Refunds of a voided sale
+   * are left out (as in the sales figures).
+   */
+  async function refundEvents({ vendorId, from, to }) {
+    const { rows } = await db.raw(`WITH ${BOUNDS}
+      SELECT CASE WHEN ev.sign = 1 THEN 'refund' ELSE 'revert' END AS type, r.id, r.number, ev.at, ${eatDay('ev.at')}::text AS day,
+             r."saleId", s.number AS sale_number, ev.sign * r."amountTzs" AS amount, ev.sign * r."paidOutTzs" AS paid_out,
+             ev.sign * r."balanceReducedTzs" AS balance_reduced, r.method, r.status,
+             ev.sign * (SELECT COALESCE(sum(rl.qty), 0) FROM "VendorSaleRefundLine" rl WHERE rl."refundId" = r.id AND rl.restock)::int AS restocked
+        FROM "VendorSaleRefund" r
+        JOIN "VendorSale" s ON s.id = r."saleId" AND s."vendorId" = r."vendorId"
+        CROSS JOIN LATERAL (VALUES (r."createdAt", 1), (r."revertedAt", -1)) ev(at, sign), bounds b
+       WHERE r."vendorId" = ? AND s.status = 'completed' AND ev.at IS NOT NULL AND ev.at >= b.t0 AND ev.at < b.t1
+       ORDER BY ev.at, r.seq, ev.sign DESC`, [from, to, vendorId]);
+    return rows.map(plain).map(r => ({
+      type: r.type, refundId: r.id, number: r.number, at: new Date(r.at).toISOString(), date: r.day, saleId: r.saleId, saleNumber: r.sale_number,
+      amountTzs: n(r.amount), paidOutTzs: n(r.paid_out), balanceReducedTzs: n(r.balance_reduced), method: r.method ?? null,
+      restockedUnits: n(r.restocked), status: r.status,
+    }));
   }
 
   /** Per product + variant in the period: units, net revenue, and the costed / uncosted split for profit. */
@@ -197,7 +242,16 @@ export function createPgVendorReportStore({ db }) {
         SELECT i->>'productId', COALESCE(i->>'variant', ''), COALESCE((i->>'qty')::numeric, 0)::bigint
           FROM "ShopOrder" o CROSS JOIN LATERAL jsonb_array_elements(${arr('o.items')}) i, bounds b
          WHERE o.items @> ?::jsonb AND o."paidAt" >= b.t0 AND o."paidAt" < b.t1 AND o.status <> 'cancelled' AND i->>'vendorId' = ?
-      ) x GROUP BY 1, 2`, [from, to, vendorId, containment(vendorId), String(vendorId)]);
+        UNION ALL
+        -- S7: units are net of walk-in refunds made in the window (and of undos, added back on the undo's date).
+        SELECT l."productId", l.variant, (-ev.sign * rl.qty)::bigint
+          FROM "VendorSaleRefund" r
+          JOIN "VendorSale" s ON s.id = r."saleId" AND s."vendorId" = r."vendorId"
+          JOIN "VendorSaleRefundLine" rl ON rl."refundId" = r.id AND rl."vendorId" = r."vendorId"
+          JOIN "VendorSaleLine" l ON l.id = rl."saleLineId" AND l."vendorId" = r."vendorId"
+          CROSS JOIN LATERAL (VALUES (r."createdAt", 1), (r."revertedAt", -1)) ev(at, sign), bounds b
+         WHERE r."vendorId" = ? AND s.status = 'completed' AND ev.at IS NOT NULL AND ev.at >= b.t0 AND ev.at < b.t1
+      ) x GROUP BY 1, 2`, [from, to, vendorId, containment(vendorId), String(vendorId), vendorId]);
     return new Map(rows.map(plain).map(r => [`${r.product_id}\u0000${r.variant || ''}`, n(r.units)]));
   }
 
@@ -248,7 +302,16 @@ export function createPgVendorReportStore({ db }) {
     const change = await db.raw(`WITH ${BOUNDS}
       SELECT COALESCE(sum(s."changeTzs"), 0)::bigint AS change FROM "VendorSale" s, bounds b
        WHERE s."vendorId" = ? AND s.status = 'completed' AND s."soldAt" >= b.t0 AND s."soldAt" < b.t1`, [from, to, vendorId]);
+    // S7: money the vendor paid back on refunds (paidOutTzs) by method — refunds on their date minus undos on theirs.
+    const paidBack = await db.raw(`WITH ${BOUNDS}
+      SELECT r.method, sum(ev.sign * r."paidOutTzs")::bigint AS amount, sum(ev.sign)::int AS count
+        FROM "VendorSaleRefund" r
+        JOIN "VendorSale" s ON s.id = r."saleId" AND s."vendorId" = r."vendorId"
+        CROSS JOIN LATERAL (VALUES (r."createdAt", 1), (r."revertedAt", -1)) ev(at, sign), bounds b
+       WHERE r."vendorId" = ? AND s.status = 'completed' AND r."paidOutTzs" > 0 AND ev.at IS NOT NULL AND ev.at >= b.t0 AND ev.at < b.t1
+       GROUP BY 1`, [from, to, vendorId]);
     return {
+      paidBack: paidBack.rows.map(plain).map(r => ({ method: r.method, amount: n(r.amount), count: n(r.count) })),
       salePayments: sale.rows.map(plain).map(r => ({ method: r.method, amount: n(r.amount), count: n(r.count) })),
       customerPayments: pmt.rows.map(plain).map(r => ({ method: r.method, amount: n(r.amount), count: n(r.count) })),
       changeTzs: n(change.rows[0]?.change),
@@ -268,10 +331,18 @@ export function createPgVendorReportStore({ db }) {
             AND "receivedOn" BETWEEN ?::date AND ?::date)::bigint AS collected,
         (SELECT count(DISTINCT s."customerId") FROM "VendorSale" s, bounds b WHERE s."vendorId" = ? AND s.status = 'completed'
             AND s."customerId" IS NOT NULL AND s."soldAt" >= b.t0 AND s."soldAt" < b.t1)::int AS buyers_shop,
-        (SELECT count(DISTINCT o."buyerId") FROM "ShopOrder" o, bounds b WHERE o.items @> ?::jsonb AND o."paidAt" >= b.t0 AND o."paidAt" < b.t1)::int AS buyers_app`,
-    [from, to, vendorId, vendorId, vendorId, from, to, vendorId, containment(vendorId)]);
+        (SELECT count(DISTINCT o."buyerId") FROM "ShopOrder" o, bounds b WHERE o.items @> ?::jsonb AND o."paidAt" >= b.t0 AND o."paidAt" < b.t1)::int AS buyers_app,
+        (SELECT COALESCE(sum(ev.sign * r."balanceReducedTzs"), 0) FROM "VendorSaleRefund" r
+            JOIN "VendorSale" s ON s.id = r."saleId" AND s."vendorId" = r."vendorId"
+            CROSS JOIN LATERAL (VALUES (r."createdAt", 1), (r."revertedAt", -1)) ev(at, sign), bounds b
+           WHERE r."vendorId" = ? AND s.status = 'completed' AND ev.at IS NOT NULL AND ev.at >= b.t0 AND ev.at < b.t1)::bigint AS refunded_off`,
+    [from, to, vendorId, vendorId, vendorId, from, to, vendorId, containment(vendorId), vendorId]);
     const r = plain(rows[0]);
-    return { creditSales: { count: n(r.credit_count), totalTzs: n(r.credit_total) }, collectedTzs: n(r.collected), buyers: { shop: n(r.buyers_shop), app: n(r.buyers_app) } };
+    return {
+      creditSales: { count: n(r.credit_count), totalTzs: n(r.credit_total) }, collectedTzs: n(r.collected), buyers: { shop: n(r.buyers_shop), app: n(r.buyers_app) },
+      // S7: balance taken off pay-later sales by refunds in the period (minus undos in it). Not money received.
+      refundedOffTzs: n(r.refunded_off),
+    };
   }
 
   /**
@@ -349,5 +420,5 @@ export function createPgVendorReportStore({ db }) {
     return Boolean(rows[0]?.found);
   }
 
-  return { hasEverSold, factsCte, salesByBucket, voided, hasWalkIn, byProduct, profitByBucket, unitsInWindow, lastSold, productsOf, paymentMethods, customerActivity, marketplaceNet };
+  return { hasEverSold, factsCte, salesByBucket, voided, hasWalkIn, refundEvents, byProduct, profitByBucket, unitsInWindow, lastSold, productsOf, paymentMethods, customerActivity, marketplaceNet };
 }

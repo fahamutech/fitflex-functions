@@ -301,6 +301,15 @@ export function vendorWalkInSalesOn() {
 }
 
 /**
+ * Vendor tools · S7: making, undoing and sharing refunds on walk-in sales. On only with VENDOR_TOOLS +
+ * VENDOR_WALKIN_SALES + VENDOR_REFUNDS (refunds live on walk-in sales). Reading refunds already made only
+ * needs walk-in sales: they are bookkeeping facts of the sale (design spec docs/design/vendor-refunds-s7.md §0.2).
+ */
+export function vendorRefundsOn() {
+  return vendorWalkInSalesOn() && vendorToolsFlag('VENDOR_REFUNDS');
+}
+
+/**
  * S4: vendor customers, pay-later (credit) sales, customer payments, balances and aging, and the
  * daily overdue digest. Off → the /vendor/customers and /vendor/receivables endpoints answer 404
  * feature_disabled, POST /vendor/sales refuses a customer or pay later, and the digest job sends nothing.

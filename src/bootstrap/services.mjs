@@ -64,6 +64,8 @@ import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
 import { createPgVendorSaleStore } from '../infra/vendor-sale-store-pg.mjs';
 import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
+import { createPgVendorRefundStore } from '../infra/vendor-refund-store-pg.mjs';
+import { createVendorRefundService } from '../services/vendor-refund-service.mjs';
 import { createPgVendorCustomerStore } from '../infra/vendor-customer-store-pg.mjs';
 import { createVendorCustomerService } from '../services/vendor-customer-service.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
@@ -446,6 +448,14 @@ export const vendorSaleService = createVendorSaleService({
   afterStockMoved: productIds => shopService.afterStockMoved(productIds),
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
+// Vendor tools · S7: refunds on walk-in sales — credit notes, restock, undo (dormant behind VENDOR_TOOLS +
+// VENDOR_WALKIN_SALES + VENDOR_REFUNDS for writes; the routes check the flags). No commission, no settlement.
+const vendorRefundStore = createPgVendorRefundStore({ db, saleStore: vendorSaleStore });
+export const vendorRefundService = createVendorRefundService({
+  store: vendorRefundStore,
+  afterStockMoved: productIds => shopService.afterStockMoved(productIds),
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
 // Vendor tools · S4: customers, pay-later balances, customer payments, aging and the overdue digest
 // (dormant behind VENDOR_TOOLS + VENDOR_CUSTOMERS; the routes and the digest job check the flag).
 const vendorCustomerStore = createPgVendorCustomerStore({ db });
@@ -460,7 +470,7 @@ export const vendorCustomerService = createVendorCustomerService({
 // Vendor tools · S5: share links, public page, PDF, order invoices (dormant behind VENDOR_TOOLS +
 // VENDOR_DOCUMENTS; order invoice numbering on payment is bookkeeping and runs regardless).
 export const vendorDocumentService = createVendorDocumentService({
-  store: createPgVendorDocumentStore({ db, customerStore: vendorCustomerStore, vatOn: vendorVatOn }),
+  store: createPgVendorDocumentStore({ db, customerStore: vendorCustomerStore, refundStore: vendorRefundStore, vatOn: vendorVatOn }),
   renderHtml: renderDocumentHtml,
   renderManyHtml: renderDocumentsHtml,
   renderPdf: renderDocumentPdf,

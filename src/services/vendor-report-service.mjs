@@ -265,7 +265,12 @@ export function createVendorReportService({
         .sort((a, b) => b.amountTzs - a.amountTzs || METHOD_ORDER.indexOf(a.method) - METHOD_ORDER.indexOf(b.method)));
     }
     const viaFitFlex = period.channel === 'walk_in' ? [] : withShare(m.app.map(r => ({ paymentMethod: r.method, amountTzs: r.amount, count: r.count })).sort((a, b) => b.amountTzs - a.amountTzs));
-    return { byYou, viaFitFlex };
+    // S7: "Paid back by you (refunds)" — its own group, never summed with money in. Balance taken off a pay-later
+    // sale is not money and is not listed. Refunds on their date minus undos on theirs.
+    const paidBack = period.channel === 'app' ? [] : (m.paidBack || []).filter(r => r.amount !== 0 || r.count !== 0)
+      .map(r => ({ method: r.method, amountTzs: r.amount, count: r.count }))
+      .sort((a, b) => b.amountTzs - a.amountTzs || METHOD_ORDER.indexOf(a.method) - METHOD_ORDER.indexOf(b.method));
+    return { byYou, viaFitFlex, paidBack };
   }
 
   async function customersData(vendorId, period) {
@@ -308,8 +313,16 @@ export function createVendorReportService({
     if (section === 'marketplace-net') period.channel = 'app';
 
     if (section === 'refunds') {
-      // UAT D16: partial refunds on walk-in sales arrive with S7; until then there are none to list.
-      return { period, data: { ...(await head(vendorId, period, { grouped: false })), rows: [] } };
+      // S7 §2.11: walk-in credit notes made in the period and undos made in it (undo rows negative). Not cached:
+      // refunds and undos are dated "now", so a closed period's rows never change anyway.
+      const rows = await store.refundEvents({ vendorId, from: period.from, to: period.to });
+      const refunds = rows.filter(r => r.type === 'refund');
+      const sum = k => rows.reduce((t, r) => t + r[k], 0);
+      const totals = {
+        count: refunds.length, amountTzs: sum('amountTzs'), paidOutTzs: sum('paidOutTzs'), balanceReducedTzs: sum('balanceReducedTzs'),
+        restockedUnits: sum('restockedUnits'), revertedCount: rows.length - refunds.length,
+      };
+      return { period, data: { ...(await head(vendorId, period, { grouped: false })), rows, totals } };
     }
     if (section === 'stock-value') {
       // As of now: never cached, the period does not apply.
@@ -358,7 +371,7 @@ export function createVendorReportService({
       sales: { ...sales.totals, buckets: sales.buckets.map(b => ({ start: b.start, end: b.end, netTzs: b.netTzs })) },
       topProducts: products.sold.slice().sort(SORTERS.revenue).slice(0, 5).map(r => ({ productId: r.productId, variant: r.variant, name: r.name, removed: r.removed, unitsSold: r.unitsSold, netRevenueTzs: r.netRevenueTzs })),
       slowCount: products.slow.filter(r => r.noSalesInPeriod).length,
-      methods: { byYou: methods.byYou.slice(0, 3), viaFitFlex: methods.viaFitFlex.slice(0, 3) },
+      methods: { byYou: methods.byYou.slice(0, 3), viaFitFlex: methods.viaFitFlex.slice(0, 3), paidBack: methods.paidBack.slice(0, 3) },
       // Kept for the PDF only (top 10, slow 10, all methods); not part of the JSON contract.
       _pdf: { top: products.sold.slice().sort(SORTERS.revenue).slice(0, 10), slow: products.slow.slice().sort(SORTERS.slow).slice(0, 10), methods },
     };

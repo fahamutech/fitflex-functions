@@ -180,6 +180,7 @@ export const REPORT_LABELS = {
     byYou: 'Collected by you', viaFitFlex: 'Paid through FitFlex', netOfChange: 'Cash after change',
     figure: 'Figure', value: 'Value', none: 'None',
     refundNumber: 'Credit note', refundDate: 'Date', saleNumber: 'Sale', restocked: 'Units back in stock',
+    refundType: 'Type', type_refund: 'Refund', type_revert: 'Undone', paidBack: 'Paid back by you (refunds)', refundPaidOut: 'Paid back', offBalances: 'Taken off balances',
     method_: { cash: 'Cash', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Card', bank: 'Bank transfer', other: 'Other', unknown: 'Other' },
     months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
   },
@@ -210,6 +211,7 @@ export const REPORT_LABELS = {
     byYou: 'Uliyokusanya wewe', viaFitFlex: 'Yaliyolipwa kupitia FitFlex', netOfChange: 'Taslimu baada ya chenji',
     figure: 'Kipimo', value: 'Thamani', none: 'Hakuna',
     refundNumber: 'Hati ya marejesho', refundDate: 'Tarehe', saleNumber: 'Mauzo', restocked: 'Idadi iliyorudi kwenye Stock',
+    refundType: 'Aina', type_refund: 'Marejesho', type_revert: 'Yametenduliwa', paidBack: 'Uliyorudisha wewe (marejesho)', refundPaidOut: 'Yaliyorudishwa', offBalances: 'Yaliyopunguzwa kwenye madeni',
     method_: { cash: 'Taslimu', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Kadi', bank: 'Uhamisho wa benki', other: 'Nyingine', unknown: 'Nyingine' },
     months: ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'],
   },
@@ -324,11 +326,15 @@ export function customersCsv(data, lang) {
   return { header, rows: [[data.owedTzs, data.overdueTzs, a.current, a.d1_30, a.d31_60, a.d61_90, a.d90plus, data.creditSales.count, data.creditSales.totalTzs, data.collectedTzs, data.buyers.shop, data.buyers.app]] };
 }
 
-/** Refunds (S7): header only until credit notes exist (UAT D16). */
+/** Refunds (S7 §2.11): one row per credit note and per undo (Type Refund / Undone; amounts negative on Undone rows). */
 export function refundsCsv(data, lang) {
-  const header = [reportLabel(lang, 'refundNumber'), reportLabel(lang, 'refundDate'), reportLabel(lang, 'saleNumber'), moneyHeader(lang, 'amount'),
-    reportLabel(lang, 'method'), reportLabel(lang, 'restocked')];
-  return { header, rows: (data.rows || []).map(r => [r.number, eatDayOf(r.refundedAt), r.saleNumber, r.amountTzs, methodName(lang, r.method), r.restockedUnits]) };
+  const header = [reportLabel(lang, 'refundNumber'), reportLabel(lang, 'refundDate'), reportLabel(lang, 'saleNumber'), reportLabel(lang, 'refundType'),
+    moneyHeader(lang, 'amount'), moneyHeader(lang, 'refundPaidOut'), moneyHeader(lang, 'offBalances'), reportLabel(lang, 'method'), reportLabel(lang, 'restocked')];
+  return {
+    header,
+    rows: (data.rows || []).map(r => [r.number, r.date, r.saleNumber, reportLabel(lang, `type_${r.type}`), r.amountTzs, r.paidOutTzs, r.balanceReducedTzs,
+      r.method ? methodName(lang, r.method) : '', r.restockedUnits]),
+  };
 }
 
 export function methodsCsv(data, lang) {
@@ -336,6 +342,8 @@ export function methodsCsv(data, lang) {
   const rows = [
     ...data.byYou.map(r => [reportLabel(lang, 'byYou'), r.method === 'cash' ? reportLabel(lang, 'netOfChange') : methodName(lang, r.method), r.amountTzs, r.count, r.sharePct]),
     ...data.viaFitFlex.map(r => [reportLabel(lang, 'viaFitFlex'), methodName(lang, r.paymentMethod), r.amountTzs, r.count, r.sharePct]),
+    // S7: money paid back on refunds, its own group (no share: it is never summed with money in).
+    ...(data.paidBack || []).map(r => [reportLabel(lang, 'paidBack'), methodName(lang, r.method), r.amountTzs, r.count, '']),
   ];
   return { header, rows };
 }

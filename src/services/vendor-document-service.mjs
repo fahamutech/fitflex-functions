@@ -11,7 +11,7 @@
 // The routes check the flag (VENDOR_TOOLS + VENDOR_DOCUMENTS) and resolve the caller's access first.
 import {
   newToken, hashToken, validToken, langOf, publicBaseUrl, shareTexts, saleDocument, paymentDocument, statementSnapshot,
-  statementDocument, orderInvoiceDocument, firstName, pdfFileName, LANGS, PAPERS,
+  statementDocument, orderInvoiceDocument, creditNoteDocument, firstName, pdfFileName, LANGS, PAPERS,
 } from '../shared/vendor-documents.mjs';
 import { eatDate } from '../shared/vendor-order-view.mjs';
 
@@ -24,15 +24,20 @@ export const KIND_DOC_TYPES = Object.freeze({
   sale: ['receipt', 'invoice'], receipt: ['receipt'], invoice: ['invoice'],
   payment: ['payment_receipt'], payment_receipt: ['payment_receipt'],
   statement: ['statement'], order: ['order_invoice'], order_invoice: ['order_invoice'],
+  // S7: a refund on a walk-in sale is shared as its credit note (CN-…).
+  refund: ['credit_note'], credit_note: ['credit_note'],
 });
-const KIND_OF = { receipt: 'sale', invoice: 'sale', sale: 'sale', payment: 'payment', payment_receipt: 'payment', statement: 'statement', order: 'order', order_invoice: 'order' };
-const NOT_FOUND = { sale: 'sale_not_found', payment: 'payment_not_found', statement: 'customer_not_found', order: 'order_not_found' };
+const KIND_OF = {
+  receipt: 'sale', invoice: 'sale', sale: 'sale', payment: 'payment', payment_receipt: 'payment', statement: 'statement', order: 'order', order_invoice: 'order',
+  refund: 'refund', credit_note: 'refund',
+};
+const NOT_FOUND = { sale: 'sale_not_found', payment: 'payment_not_found', statement: 'customer_not_found', order: 'order_not_found', refund: 'refund_not_found' };
 /**
  * Security review #229 L2: what a caller needs to even ASK for a kind, checked before anything is loaded
  * (so staff without it cannot probe ids or make an order invoice get numbered). A sale needs any of its
  * document permissions; the exact one (receipt → sales, invoice → sales or customers) is checked after.
  */
-const KIND_PERMISSIONS = Object.freeze({ sale: ['sales', 'customers'], payment: ['customers'], statement: ['customers'], order: ['orders'] });
+const KIND_PERMISSIONS = Object.freeze({ sale: ['sales', 'customers'], payment: ['customers'], statement: ['customers'], order: ['orders'], refund: ['sales'] });
 function precheck(kind, access) {
   const k = KIND_OF[kind];
   if (!k) return { error: 'invalid_doc_type', status: 400, allowed: Object.keys(KIND_OF) };
@@ -63,6 +68,12 @@ export function createVendorDocumentService({ store, renderHtml, renderManyHtml,
       // Under /vendor/customers/:id/payments/:paymentId the payment must be that customer's.
       if (!src || (customerId && src.customerId !== customerId)) return { error: NOT_FOUND.payment, status: 404 };
       return { doc: paymentDocument(src, lang), docType: 'payment_receipt', docId: src.payment.id, customerId: src.customerId };
+    }
+    if (k === 'refund') {
+      // S7: a credit note. A reverted refund reads Cancelled (its links keep working; no new ones: Q-2 rule).
+      const src = await store.refundSource(vendorId, id);
+      if (!src) return { error: NOT_FOUND.refund, status: 404 };
+      return { doc: creditNoteDocument(src, lang), docType: 'credit_note', docId: src.refund.id };
     }
     if (k === 'statement') {
       const src = await store.statementSource(vendorId, id, today());
