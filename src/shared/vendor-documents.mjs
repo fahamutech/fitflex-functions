@@ -141,8 +141,11 @@ export const fill = (template, values = {}) => String(template).replace(/\{(\w+)
 export const label = (lang, key, values) => fill(DOC_LABELS[langOf(lang)][key] ?? DOC_LABELS.en[key] ?? key, values);
 export const methodLabel = (lang, method) => DOC_LABELS[langOf(lang)].method[method] || method;
 export const money = amount => formatTsh(amount);
-/** A discount: "-TSh 1,500" (UAT D4: discounts read like every other amount). */
-export const minusMoney = amount => `-${formatTsh(amount)}`;
+/**
+ * An amount taken off: "−TSh 1,500" with a real minus sign U+2212, as the apps and the S6 reports (UAT D4: discounts
+ * read like every other amount; S7 UAT L-2: no ASCII hyphen). PDFs draw it through the Symbol font (pdf-minus.mjs).
+ */
+export const minusMoney = amount => `\u2212${formatTsh(amount)}`;
 
 // ── dates (EAT, UTC+3, no daylight saving) ──────────────────────────────────
 

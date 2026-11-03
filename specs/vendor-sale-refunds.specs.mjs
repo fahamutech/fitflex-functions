@@ -22,7 +22,7 @@ import { vendorToolsOptionsRoute, vendorCreateProduct, vendorStockMovements, cre
 import { vendorRecordSale, vendorGetSale, vendorListSales, vendorVoidSale, resetVendorSalesLimits, allowVendorSale, VENDOR_SALES_LIMIT } from '../functions/vendor-sales.mjs';
 import { vendorRefundSale, vendorRevertRefund, vendorListRefunds, vendorGetRefund } from '../functions/vendor-refunds.mjs';
 import { vendorCustomersCreate, vendorCustomerGet, vendorCustomerUpdate, vendorCustomerRecordPayment, vendorCustomerVoidPayment, vendorReceivablesAging, resetVendorCustomerLimits } from '../functions/vendor-customers.mjs';
-import { vendorShareRefund, vendorShareSale, vendorDocumentView, resetVendorDocumentLimits } from '../functions/vendor-documents.mjs';
+import { vendorShareRefund, vendorShareSale, vendorShareOrder, vendorDocumentView, resetVendorDocumentLimits } from '../functions/vendor-documents.mjs';
 import { vendorReportSummary, vendorReportSales, vendorReportProfit, vendorReportRefunds, vendorReportPaymentMethods, vendorReportCustomers, vendorReportProducts, resetVendorReportCache, resetVendorReportLimits } from '../functions/vendor-reports.mjs';
 import { cumulativeShare, refundLineAmounts, splitRefund, refundMethod, parseRefund, refundFingerprint, creditNoteNumber, refundStateOf } from '../src/shared/vendor-refund.mjs';
 import { creditNoteDocument, saleDocumentStatus } from '../src/shared/vendor-documents.mjs';
@@ -155,6 +155,40 @@ function pdfText(buffer) {
     for (const t of data.matchAll(/\[(.*?)\]\s*TJ/g)) out += `${[...t[1].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join('')}\n`;
   }
   return out;
+}
+
+/**
+ * Every text run of a pdfkit PDF in drawing order; a run in the Symbol font with code 0x2D is the real minus sign
+ * U+2212 (S6 retest N5 approach) and is glued to the run after it. A plain text extract cannot tell that from garbage.
+ */
+function minusRuns(buffer) {
+  const s = buffer.toString('latin1');
+  const symbolObject = /(\d+) 0 obj\s*<<[^>]*\/BaseFont \/Symbol/.exec(s)?.[1];
+  const symbolName = symbolObject ? new RegExp(`/(F\\d+) ${symbolObject} 0 R`).exec(s)?.[1] : undefined;
+  const runs = [];
+  for (let i = s.indexOf('\nstream\n'); i !== -1;) {
+    const dictStart = s.lastIndexOf(' 0 obj', i);
+    const start = i + '\nstream\n'.length;
+    const raw = streamData(s, dictStart, start);
+    i = s.indexOf('\nstream\n', start + raw.length);
+    if (!/\/Filter \/FlateDecode/.test(s.slice(dictStart, start))) continue;
+    const data = zlib.inflateSync(Buffer.from(raw, 'latin1')).toString('latin1');
+    let font = null;
+    let pending = false;
+    for (const t of data.matchAll(/\/(F\d+) [\d.]+ Tf|\[(.*?)\]\s*TJ/g)) {
+      if (t[1]) { font = t[1]; continue; }
+      const text = [...t[2].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join('');
+      if (font === symbolName && text === '-') { pending = true; continue; }
+      runs.push(`${pending ? '−' : ''}${text}`);
+      pending = false;
+    }
+  }
+  return runs;
+}
+/** No U+2212 reached Helvetica (its bytes would print garbage) and no ASCII "-TSh" is left. */
+function assertRealMinus(runs, amounts, where) {
+  assert.ok(runs.every(t => !t.includes('"\x12') && !t.includes('-TSh')), `${where}: one negative format, drawn from Symbol`);
+  for (const a of amounts) assert.ok(runs.some(t => t.includes(`−TSh ${a}`)), `${where}: −TSh ${a}`);
 }
 
 after(async () => {
@@ -940,7 +974,14 @@ test('credit note (§6): JSON / HTML / PDF content, EN + SW; A-02 (no phone, rea
   const receipt = (await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id } })).body.doc;
   assert.deepEqual([receipt.refunds.map(x => [x.number, x.amountTzs]), receipt.totalAfterRefundsTzs], [[['CN-000001', 45_000]], 45_000]);
   const receiptHtml = (await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id }, query: { format: 'html' } })).body;
-  assert.ok(receiptHtml.includes('Total after refunds') && receiptHtml.includes('-TSh 45,000'));
+  assert.ok(receiptHtml.includes('Total after refunds') && receiptHtml.includes('\u2212TSh 45,000'), 'U+2212, as the apps and S6 (UAT L-2)');
+  assert.equal(receiptHtml.includes('-TSh'), false);
+  const receiptSw = (await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id }, query: { format: 'html', lang: 'sw' } })).body;
+  assert.ok(receiptSw.includes('Jumla baada ya marejesho') && receiptSw.includes('\u2212TSh 45,000'));
+  for (const query of [{ format: 'pdf' }, { format: 'pdf', lang: 'sw' }, { format: 'pdf', paper: '80mm' }, { format: 'pdf', paper: '80mm', lang: 'sw' }]) {
+    const out = await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id }, query });
+    assertRealMinus(minusRuns(Buffer.from(out.body)), ['45,000'], JSON.stringify(query));
+  }
 
   // Share, then undo: the credit note reads Cancelled; no new links; the old link still opens and says so.
   const shared = await call(vendorShareRefund, as(v), { params: { id: r.refund.id }, body: { lang: 'en' } });
@@ -1041,6 +1082,23 @@ test('undo shares the sales rate limit (security review #318 L2): over 120 a min
   assert.ok(VENDOR_SALES_LIMIT.perMinute >= 120);
   resetVendorSalesLimits();
   assert.equal((await undo(as(v), r.refund.id)).status, 200);
+});
+
+test('share order (S7 UAT): permission and tenancy before the PUBLIC_API_URL 503 — another vendor gets 404 for a refund, a sale or an order; the owner still gets 503', async () => {
+  on();
+  delete process.env.PUBLIC_API_URL;
+  const v = await vendor();
+  const other = await vendor();
+  const p = await product(v, { priceTzs: 1_000, stock: 5 });
+  const sale = await sell(as(v), [{ productId: p.id, qty: 2 }], cash(2_000));
+  const r = await refundOk(as(v), sale.id, body([{ saleLineId: sale.lines[0].id, qty: 1 }]));
+  assert.deepEqual(await call(vendorShareRefund, as(other), { params: { id: r.refund.id }, body: {} }), { status: 404, body: { error: 'refund_not_found' } });
+  assert.deepEqual(await call(vendorShareSale, as(other), { params: { id: sale.id }, body: {} }), { status: 404, body: { error: 'sale_not_found' } });
+  assert.deepEqual(await call(vendorShareOrder, as(other), { params: { id: 'ord_not_theirs' }, body: {} }), { status: 404, body: { error: 'order_not_found' } });
+  const ordersOnly = await staff(v, ['orders']);
+  assert.equal((await call(vendorShareRefund, staffOf(ordersOnly, v), { params: { id: r.refund.id }, body: {} })).status, 403, 'permission before 503');
+  assert.deepEqual(await call(vendorShareRefund, as(v), { params: { id: r.refund.id }, body: {} }), { status: 503, body: { error: 'public_url_not_configured' } }, 'the owner: no address set');
+  assert.equal(await db('VendorDocumentLink').whereIn('vendorId', [v, other]).count('* as n').first().then(x => Number(x.n)), 0);
 });
 
 // ── migration ────────────────────────────────────────────────────────────────
