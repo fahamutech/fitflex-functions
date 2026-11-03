@@ -53,11 +53,19 @@ export const eventsList = {
   onRequest: async (req, res) => send(res, await svc.list({ query: req.query || {}, userId: optionalSessionClaims(req)?.sub ?? null })),
 };
 
+// bfast-function mounts a file's exports in alphabetical order (a module namespace is sorted), so `eventDetail` is
+// mounted before `eventsOptions` and GET /events/options reaches this route and its guard first. The fixed word
+// keeps its meaning here: no events-module guard (the probe never 404s) and the options answer.
+const isOptionsProbe = req => req?.params?.idOrSlug === 'options'
+  || String(req?.originalUrl ?? req?.url ?? '').split('?')[0].replace(/\/+$/, '') === '/events/options';
+const detailGuard = routeGuard('get', [(req, res, next) => (isOptionsProbe(req) ? next() : requireEventsModule(req, res, next))]);
+
 export const eventDetail = {
   created, method: 'get', path: '/events/:idOrSlug',
   description: 'Public (optional auth for isSaved): one event by id or slug → EventDetail (summary + description { en, sw }, heroImageUrl, coverAlt, routeUrl, routeImageUrl, routeImageAlt, venue { address, lat, lng }, accessibility, inclusions, categories [{ id, name, distanceM, startsAt, capacity, availability, remaining (≤10 else null), eligibility, minAge, ticketTypes [{ id, name, priceTzs, currency, saleOpensAt, saleClosesAt, minPerOrder, maxPerOrder, availability }] }], collectionPoints, schedule, sponsors, contact, terms, refundPolicy, cancellation | null, shareUrl, publishedAt, updatedAt, version). Cancelled and completed events stay readable here; drafts, submitted and archived events are 404 event_not_found.',
-  onGuard: routeGuard('get', [requireEventsModule]),
+  onGuard: detailGuard,
   onRequest: async (req, res) => {
+    if (isOptionsProbe(req)) return eventsOptions.onRequest(req, res);
     const out = await svc.detail({ idOrSlug: req.params.idOrSlug, userId: optionalSessionClaims(req)?.sub ?? null });
     // S6 (additive, public fields only): the release stage of the event's results. Absent while EVENTS_RESULTS is off.
     if (!out?.error && eventsResultsOn() && out?.id) out.results = await eventsResultsService.publicBlock(out.id).catch(() => null) ?? undefined;
