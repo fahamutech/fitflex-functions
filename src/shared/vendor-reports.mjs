@@ -169,7 +169,7 @@ export const REPORT_LABELS = {
     costUnknown: '{n} products in stock have no cost price, so they are not in the cost value.',
     costUnknown_one: '1 product in stock has no cost price, so it is not in the cost value.',
     profit: 'Profit', netExVat: 'Net sales without VAT', commission: 'Commission', cogs: 'Cost of goods', margin: 'Margin', uncostedSales: 'Uncosted sales',
-    uncosted: 'Sold without a cost price: {n} items · {amount}. Not in profit.', uncosted_one: 'Sold without a cost price: 1 item · {amount}. Not in profit.', profitNoVat: 'Profit is worked out without VAT.',
+    uncosted: 'Sold without a cost price: {n} items · {amount}. Not in profit.', uncosted_one: 'Sold without a cost price: {n} item · {amount}. Not in profit.', profitNoVat: 'Profit is worked out without VAT.',
     payouts: 'App sales after commission', payoutsBasis: 'App orders only. Counted by delivery date, the same as your payout statements.',
     orders: 'Orders', appSales: 'App sales', youReceive: 'You receive', statement: 'Statement',
     notDelivered: 'Paid, not delivered yet', waiting: 'Delivered, waiting for payout', paidOut: 'Paid out', noStatement: 'Not on a statement yet', awaiting: 'Awaiting payout',
@@ -199,7 +199,7 @@ export const REPORT_LABELS = {
     costUnknown: 'Bidhaa {n} zilizopo kwenye Stock hazina bei ya kununua, kwa hiyo hazimo kwenye thamani kwa bei ya kununua.',
     costUnknown_one: 'Bidhaa 1 iliyopo kwenye Stock haina bei ya kununua, kwa hiyo haimo kwenye thamani kwa bei ya kununua.',
     profit: 'Faida', netExVat: 'Mauzo baada ya makato bila VAT', commission: 'Kamisheni', cogs: 'Gharama ya bidhaa', margin: 'Asilimia ya faida', uncostedSales: 'Mauzo bila bei ya kununua',
-    uncosted: 'Zimeuzwa bila bei ya kununua: bidhaa {n} · {amount}. Hazimo kwenye faida.', uncosted_one: 'Imeuzwa bila bei ya kununua: bidhaa 1 · {amount}. Haimo kwenye faida.', profitNoVat: 'Faida imehesabiwa bila VAT.',
+    uncosted: 'Zimeuzwa bila bei ya kununua: bidhaa {n} · {amount}. Hazimo kwenye faida.', uncosted_one: 'Imeuzwa bila bei ya kununua: bidhaa {n} · {amount}. Haimo kwenye faida.', profitNoVat: 'Faida imehesabiwa bila VAT.',
     payouts: 'Mauzo ya app baada ya kamisheni', payoutsBasis: 'Oda za app pekee. Zimehesabiwa kwa tarehe ya delivery, sawa na taarifa zako za malipo.',
     orders: 'Oda', appSales: 'Mauzo ya app', youReceive: 'Unapokea', statement: 'Taarifa ya malipo',
     notDelivered: 'Zimelipiwa, bado delivery', waiting: 'Delivery imekamilika, inasubiri malipo', paidOut: 'Imelipwa', noStatement: 'Bado haiko kwenye taarifa', awaiting: 'Inasubiri malipo',
@@ -217,11 +217,11 @@ export const REPORT_LABELS = {
 const fillIn = (template, values = {}) => String(template).replace(/\{(\w+)\}/g, (_, k) => (values[k] == null ? '' : String(values[k])));
 /**
  * A label with a count (UAT D10): the key's `_one` form when n is 1 and the language has one ("1 sale",
- * "1 item", "1 day"), else the plural form with {n}.
+ * "1 item", "1 day"), else the plural form with {n}. `values.n` may give the text to print for n ("−1").
  */
 export const reportCount = (lang, key, n, values = {}) => {
   const table = REPORT_LABELS[lang === 'sw' ? 'sw' : 'en'];
-  return reportLabel(lang, Number(n) === 1 && table[`${key}_one`] ? `${key}_one` : key, { ...values, n });
+  return reportLabel(lang, Math.abs(Number(n)) === 1 && table[`${key}_one`] ? `${key}_one` : key, { n, ...values });
 };
 export const reportLabel = (lang, key, values) => fillIn(REPORT_LABELS[lang === 'sw' ? 'sw' : 'en'][key] ?? REPORT_LABELS.en[key] ?? key, values);
 export const methodName = (lang, method) => REPORT_LABELS[lang === 'sw' ? 'sw' : 'en'].method_[method] || String(method || '');

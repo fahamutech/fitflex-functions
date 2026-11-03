@@ -11,10 +11,26 @@ const MM = 72 / 25.4;
 const GREEN = '#1F7A3A';
 const GREY = '#4B5563';
 const BLACK = '#111111';
-const money = v => formatTsh(v);
+// Retest N5: one negative format, "−TSh 60,000" and "−3", with a real minus sign (U+2212).
+// The built-in Helvetica cannot print U+2212: WinAnsi has no code for it and pdfkit would write garbage bytes. The
+// built-in Symbol font has the glyph at code 0x2D, so `putMinusText` draws it from there. No font file is embedded
+// (S5 Q-17). pdfkit knows neither Symbol's ascender nor this glyph's width, so both are placed by hand.
+const MINUS = '\u2212';
+const SYMBOL_MINUS_EM = 0.549; // Symbol.afm: minus WX 549
+const HELVETICA_ASCENDER_EM = 0.718; // Helvetica.afm: Ascender 718
+/** An amount that may be negative: "TSh 60,000" / "−TSh 60,000". */
+export const pdfMoney = v => (Number(v) < 0 ? `${MINUS}${formatTsh(-Number(v))}` : formatTsh(v));
+/** A unit count that may be negative (net of refunds): "3" / "−3". */
+export const pdfUnits = v => (Number(v) < 0 ? `${MINUS}${-Number(v)}` : String(Number(v || 0)));
+/**
+ * A figure that is taken OFF the line above it (discounts, refunds, commission, cost), shown as what it does to the
+ * total so the rows add up: 6,000 taken off reads "−TSh 6,000". A reversal in the period (commissionTzs −6,000 after a
+ * cancelled order) gives the money back and reads "TSh 6,000": −60,000 + 6,000 + 40,000 = −14,000.
+ */
+export const pdfDeduction = v => pdfMoney(-Number(v || 0));
+const money = pdfMoney;
 /** UAT D12: percentages with one decimal, "25.0%"; unknown → "—". */
-export const pctText = v => (v == null ? '—' : `${Number(v).toFixed(1)}%`);
-const minus = v => (Number(v) > 0 ? `-${formatTsh(v)}` : formatTsh(0));
+export const pctText = v => (v == null ? '—' : `${Number(v) < 0 ? MINUS : ''}${Math.abs(Number(v)).toFixed(1)}%`);
 
 function collect(doc) {
   return new Promise((resolve, reject) => {
@@ -45,12 +61,40 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
   const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
   const bottom = () => doc.page.height - doc.page.margins.bottom - 28;
   const ensure = h => { if (doc.y + h > bottom()) { doc.addPage(); return true; } return false; };
-  const P = (text, opts = {}, type = 'P') => root.add(doc.struct(type, () => { doc.text(text, opts.x ?? left, opts.y, { width: opts.width ?? width, align: opts.align }); }));
+  const widthOf = (text, size) => text.split(MINUS).reduce((w, part, i) => w + doc.widthOfString(part) + (i ? SYMBOL_MINUS_EM * size : 0), 0);
+  /** Text in Helvetica at `size` that contains U+2212: greedy wrap, then Helvetica and Symbol runs placed by hand. */
+  function putMinusText(text, x, y, boxWidth, align, size) {
+    const lines = [];
+    for (const word of text.split(' ')) {
+      const line = lines.length ? `${lines[lines.length - 1]} ${word}` : word;
+      if (lines.length && widthOf(line, size) <= boxWidth) lines[lines.length - 1] = line;
+      else lines.push(word);
+    }
+    const height = doc.currentLineHeight(true);
+    lines.forEach((line, i) => {
+      const lineY = y + i * height;
+      let cursor = align === 'right' ? x + boxWidth - widthOf(line, size) : x;
+      line.split(MINUS).forEach((part, index) => {
+        if (index) {
+          doc.font('Symbol').text('-', cursor, lineY + HELVETICA_ASCENDER_EM * size, { lineBreak: false });
+          doc.font('Helvetica');
+          cursor += SYMBOL_MINUS_EM * size;
+        }
+        if (part) { doc.text(part, cursor, lineY, { lineBreak: false }); cursor += doc.widthOfString(part); }
+      });
+    });
+    doc.x = x;
+    doc.y = y + lines.length * height;
+  }
+  const P = (text, opts = {}, type = 'P') => root.add(doc.struct(type, () => {
+    if (String(text).includes(MINUS)) putMinusText(String(text), opts.x ?? left, opts.y ?? doc.y, opts.width ?? width, opts.align, opts.size ?? 10);
+    else doc.text(text, opts.x ?? left, opts.y, { width: opts.width ?? width, align: opts.align });
+  }));
   // UAT D9: a heading moves to the next page unless the heading, a note and the table header with its first
   // rows (≈ 110pt) fit under it — never an orphaned heading at the foot of a page.
   const KEEP_WITH_NEXT = 110;
   const h2 = text => { ensure(KEEP_WITH_NEXT); doc.y += 8; doc.font('Helvetica-Bold').fontSize(12).fillColor(BLACK); P(text, {}, 'H2'); doc.font('Helvetica').fontSize(10); doc.y += 2; };
-  const note = text => { doc.font('Helvetica').fontSize(9).fillColor(GREY); P(text); doc.fillColor(BLACK).fontSize(10); };
+  const note = text => { doc.font('Helvetica').fontSize(9).fillColor(GREY); P(text, { size: 9 }); doc.fillColor(BLACK).fontSize(10); };
 
   function table(columns, rows) {
     const fixed = columns.filter(c => c.width).reduce((s, c) => s + c.width, 0);
@@ -69,11 +113,18 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
     header();
     doc.font('Helvetica').fontSize(9).fillColor(BLACK);
     for (const row of rows) {
-      const h = Math.max(...cols.map((c, i) => doc.heightOfString(String(row[i] ?? ''), { width: c.w - 4 }))) + 5;
+      const h = Math.max(...cols.map((c, i) => doc.heightOfString(String(row[i] ?? '').replaceAll(MINUS, '+'), { width: c.w - 4 }))) + 5;
       if (ensure(h)) { header(); doc.font('Helvetica').fontSize(9).fillColor(BLACK); }
       const y = doc.y;
       let x = left;
-      cols.forEach((c, i) => { root.add(doc.struct('TD', () => doc.text(String(row[i] ?? ''), x + 2, y + 2, { width: c.w - 4, align: c.align || 'left' }))); x += c.w; });
+      cols.forEach((c, i) => {
+        const cell = String(row[i] ?? '');
+        root.add(doc.struct('TD', () => {
+          if (cell.includes(MINUS)) putMinusText(cell, x + 2, y + 2, c.w - 4, c.align || 'left', 9);
+          else doc.text(cell, x + 2, y + 2, { width: c.w - 4, align: c.align || 'left' });
+        }));
+        x += c.w;
+      });
       doc.y = y + h;
     }
     doc.x = left;
@@ -98,9 +149,9 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
   const s = summary.sales;
   h2(L('net'));
   pairs([
-    [L('gross'), money(s.grossTzs)], [L('discounts'), minus(s.discountTzs)], [L('refunds'), minus(s.refundTzs)], [L('net'), money(s.netTzs)],
+    [L('gross'), money(s.grossTzs)], [L('discounts'), pdfDeduction(s.discountTzs)], [L('refunds'), pdfDeduction(s.refundTzs)], [L('net'), money(s.netTzs)],
     ...(s.vatIncludedTzs ? [[L('vatIncluded'), money(s.vatIncludedTzs)]] : []),
-    [L('salesCount'), String(s.saleCount + s.orderCount)], [L('itemsSold'), String(s.itemsSold)],
+    [L('salesCount'), String(s.saleCount + s.orderCount)], [L('itemsSold'), pdfUnits(s.itemsSold)],
   ]);
   if (s.voided?.count) note(reportCount(lang, 'voided', s.voided.count, { amount: money(s.voided.totalTzs) }));
   table([{ title: L('periodStart'), width: 90 }, { title: L('appNet'), align: 'right' }, { title: L('shopNet'), align: 'right' }, { title: L('net'), align: 'right' }, { title: L('salesCount'), width: 60, align: 'right' }],
@@ -110,11 +161,11 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
   const pdf = summary._pdf || { top: [], slow: [], methods: summary.methods };
   const pname = r => `${r.name || ''}${r.variant ? ` (${r.variant})` : ''}${r.removed ? ` ${L('removed')}` : ''}`;
   h2(L('topProducts'));
-  if (pdf.top.length) table([{ title: L('product') }, { title: L('unitsSold'), width: 70, align: 'right' }, { title: L('revenue'), width: 110, align: 'right' }], pdf.top.map(r => [pname(r), String(r.unitsSold), money(r.netRevenueTzs)]));
+  if (pdf.top.length) table([{ title: L('product') }, { title: L('unitsSold'), width: 70, align: 'right' }, { title: L('revenue'), width: 110, align: 'right' }], pdf.top.map(r => [pname(r), pdfUnits(r.unitsSold), money(r.netRevenueTzs)]));
   else note(L('none'));
   h2(L('slowSellers'));
   if (pdf.slow.length) table([{ title: L('product') }, { title: L('unitsSold'), width: 60, align: 'right' }, { title: L('lastSold'), width: 85 }, { title: L('inStock'), width: 55, align: 'right' }, { title: L('cover'), width: 100 }],
-    pdf.slow.map(r => [pname(r), String(r.unitsSold), r.lastSoldAt ? formatDay(r.lastSoldAt, lang) : L('never'), r.stock == null ? '—' : String(r.stock), coverText(lang, r)]));
+    pdf.slow.map(r => [pname(r), pdfUnits(r.unitsSold), r.lastSoldAt ? formatDay(r.lastSoldAt, lang) : L('never'), r.stock == null ? '—' : String(r.stock), coverText(lang, r)]));
   else note(L('none'));
 
   if (stock) {
@@ -126,15 +177,15 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
   if (summary.profit) {
     const p = summary.profit;
     h2(L('profit'));
-    pairs([[L('netExVat'), money(p.netExVatTzs)], [L('commission'), minus(p.commissionTzs)], [L('cogs'), minus(p.costTzs)], [L('profit'), p.profitTzs == null ? '—' : money(p.profitTzs)], [L('margin'), pctText(p.marginPct)]]);
-    if (p.uncosted.qty) note(reportCount(lang, 'uncosted', p.uncosted.qty, { amount: money(p.uncosted.revenueTzs) }));
+    pairs([[L('netExVat'), money(p.netExVatTzs)], [L('commission'), pdfDeduction(p.commissionTzs)], [L('cogs'), pdfDeduction(p.costTzs)], [L('profit'), p.profitTzs == null ? '—' : money(p.profitTzs)], [L('margin'), pctText(p.marginPct)]]);
+    if (p.uncosted.qty) note(reportCount(lang, 'uncosted', p.uncosted.qty, { n: pdfUnits(p.uncosted.qty), amount: money(p.uncosted.revenueTzs) }));
     if (s.vatIncludedTzs) note(L('profitNoVat'));
   }
   if (summary.payouts) {
     const p = summary.payouts;
     h2(L('payouts'));
     note(L('payoutsBasis'));
-    pairs([[L('appSales'), money(p.grossTzs)], [L('commission'), minus(p.commissionTzs)], [L('youReceive'), money(p.payoutTzs)], [L('paidOut'), money(p.paidOutTzs)], [L('waiting'), money(p.waitingTzs)], [L('notDelivered'), money(p.notDeliveredTzs)]]);
+    pairs([[L('appSales'), money(p.grossTzs)], [L('commission'), pdfDeduction(p.commissionTzs)], [L('youReceive'), money(p.payoutTzs)], [L('paidOut'), money(p.paidOutTzs)], [L('waiting'), money(p.waitingTzs)], [L('notDelivered'), money(p.notDeliveredTzs)]]);
     if (payoutWeeks?.length) table([{ title: L('weekStart'), width: 90 }, { title: L('orders'), width: 50, align: 'right' }, { title: L('appSales'), align: 'right' }, { title: L('youReceive'), align: 'right' }, { title: L('statement'), width: 110 }],
       payoutWeeks.map(w => [formatDay(w.periodStartDate, lang), String(w.orderCount), money(w.grossTzs), money(w.payoutTzs), statementLabel(lang, w)]));
   }
@@ -145,6 +196,8 @@ export async function renderReportPdf({ summary, salesRows, stock = null, payout
   h2(L('methods'));
   const groups = [[L('byYou'), pdf.methods.byYou.map(r => [r.method === 'cash' ? L('netOfChange') : methodName(lang, r.method), money(r.amountTzs), pctText(r.sharePct)])],
     [L('viaFitFlex'), pdf.methods.viaFitFlex.map(r => [methodName(lang, r.paymentMethod), money(r.amountTzs), pctText(r.sharePct)])]];
+  // Retest N6: no payments in the period reads like the other empty sections, not a bare heading.
+  if (!groups.some(([, rows]) => rows.length)) note(L('none'));
   for (const [group, rows] of groups) {
     if (!rows.length) continue;
     ensure(KEEP_WITH_NEXT - 30); doc.font('Helvetica-Bold').fontSize(10); P(group); doc.font('Helvetica');
