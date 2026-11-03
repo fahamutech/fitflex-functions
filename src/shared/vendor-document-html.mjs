@@ -24,7 +24,7 @@ h2{font-size:16px;margin:20px 0 6px}
 .badge{display:inline-block;min-width:auto;padding:2px 10px;border-radius:999px;font-size:14px;font-weight:600;border:1px solid}
 .paid{color:#14532D;background:#DCFCE7;border-color:#86EFAC}.pay_later{color:#1E3A8A;background:#DBEAFE;border-color:#93C5FD}
 .paid_in_full{color:#14532D;background:#DCFCE7;border-color:#86EFAC}.cancelled{color:#7F1D1D;background:#FEE2E2;border-color:#FCA5A5}
-.issued{color:#1F2937;background:#F3F4F6;border-color:#D1D5DB}
+.issued{color:#1F2937;background:#F3F4F6;border-color:#D1D5DB}.refunded,.settled_by_credit_note{color:#1F2937;background:#F3F4F6;border-color:#D1D5DB}
 .banner{border:2px solid #B91C1C;background:#FEF2F2;color:#7F1D1D;border-radius:8px;padding:10px 12px;margin:12px 0;font-weight:600}
 dl.line{margin:0;padding:8px 0;border-bottom:1px solid #E5E7EB;display:grid;grid-template-columns:1fr auto;gap:2px 12px}
 dl.line dt{font-weight:600}dl.line dd{margin:0;text-align:right}dl.line dd.sub{grid-column:1/3;text-align:left;color:#4B5563;font-size:14px}

@@ -47,7 +47,12 @@ function precheck(kind, access) {
 const allowed = (docType, access) => (DOC_PERMISSIONS[docType] || []).some(p => access?.[p]);
 const forbidden = docType => ({ error: 'vendor_permission_forbidden', status: 403, requiredPermission: DOC_PERMISSIONS[docType][0], acceptedPermissions: DOC_PERMISSIONS[docType] });
 
-export function createVendorDocumentService({ store, renderHtml, renderManyHtml, renderPdf, baseUrl = () => publicBaseUrl(), now = () => new Date() }) {
+export function createVendorDocumentService({
+  store, renderHtml, renderManyHtml, renderPdf, baseUrl = () => publicBaseUrl(), now = () => new Date(),
+  // S7 (security review #318 L1): credit notes are walk-in documents — off (not found) without VENDOR_WALKIN_SALES.
+  // Not VENDOR_REFUNDS: notes already issued keep opening when refunds are switched off (AC-2).
+  walkInSalesOn = () => false,
+}) {
   const today = () => eatDate(now());
 
   /**
@@ -70,6 +75,7 @@ export function createVendorDocumentService({ store, renderHtml, renderManyHtml,
       return { doc: paymentDocument(src, lang), docType: 'payment_receipt', docId: src.payment.id, customerId: src.customerId };
     }
     if (k === 'refund') {
+      if (!walkInSalesOn()) return { error: 'feature_disabled', status: 404 };
       // S7: a credit note. A reverted refund reads Cancelled (its links keep working; no new ones: Q-2 rule).
       const src = await store.refundSource(vendorId, id);
       if (!src) return { error: NOT_FOUND.refund, status: 404 };

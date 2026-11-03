@@ -1,8 +1,9 @@
 // Vendor business tools · S7 — partial and revertible refunds on walk-in sales (design spec
 // docs/design/vendor-refunds-s7.md, approved 2026-11-03). RULE 6 AREA: money records.
 // Writes (refund, undo; share is in vendor-documents.mjs) need VENDOR_TOOLS + VENDOR_WALKIN_SALES + VENDOR_REFUNDS
-// (off → 404 feature_disabled). Reads of refunds already made need only VENDOR_TOOLS + VENDOR_WALKIN_SALES: they are
-// bookkeeping facts of the sale and stay visible read-only when VENDOR_REFUNDS goes off (spec §0.2, §3.1, AC-2).
+// (off → 404 feature_disabled), and so does the list GET /vendor/refunds (spec §0.2). Only GET /vendor/refunds/:id
+// needs just VENDOR_TOOLS + VENDOR_WALKIN_SALES: a refund already made stays readable when VENDOR_REFUNDS goes off
+// (spec §3.1, AC-2; security review #318 L1).
 // Permission `sales` (stored staff record; staff of a suspended vendor → 403 vendor_suspended).
 // Walk-in money never passes through FitFlex: a refund records what the vendor gave back. No commission, no
 // PaymentRequest, never part of vendor settlement. Marketplace orders are out of scope (D-6).
@@ -23,7 +24,7 @@ const send = (res, result) => {
 const disabled = res => res.status(404).json({ error: 'feature_disabled' });
 
 const FLAGS = 'VENDOR_TOOLS + VENDOR_WALKIN_SALES + VENDOR_REFUNDS; any off → 404 feature_disabled';
-const READ_FLAGS = 'VENDOR_TOOLS + VENDOR_WALKIN_SALES; off → 404 feature_disabled. Works with VENDOR_REFUNDS off (refunds already made stay readable)';
+const READ_FLAGS = 'VENDOR_TOOLS + VENDOR_WALKIN_SALES; off → 404 feature_disabled. Works with VENDOR_REFUNDS off (a refund already made stays readable, AC-2)';
 const STAFF = 'Staff without `sales` → 403 vendor_permission_forbidden { requiredPermission: sales }; staff of a suspended vendor → 403 vendor_suspended.';
 export const REFUND_SHAPE = '{ id, number (CN-000001, continuous per vendor), status: active|reverted, saleId, saleNumber (R-…), saleInvoiceNumber (INV-… for a pay-later sale)|null, saleKind: cash|credit, refundedAt, createdBy { id, name }, reason, method|null, reference|null, amountTzs (= balanceReducedTzs + paidOutTzs; computed by the server), balanceReducedTzs (taken off a pay-later balance; 0 for cash), paidOutTzs (money the vendor gave back), vatTzs (VAT given back, inside amountTzs), vatSummary:[{ code, ratePct|null, netTzs, vatTzs }], customer { id, name|null, forgotten }|null, lines:[{ saleLineId, productId, variant|null, nameSnapshot, qty, unitPriceTzs, amountTzs, vatTzs, vatCode|null, restock }], revertedBy { id, name }|null, revertedAt|null, revertReason|null }. Never cost or internals.';
 
@@ -54,11 +55,17 @@ export const vendorRefundSale = {
 
 export const vendorRevertRefund = {
   created, method: 'post', path: '/vendor/refunds/:id/revert',
-  description: `Vendor / staff with \`sales\` (${FLAGS}): undo a refund made by mistake. Body { reason (3–200) }. Exactly reverses it: restocked units are taken out of stock again, the quantities and amounts count as sold again, a pay-later sale's balance gets balanceReducedTzs back (any money paid back is for the customer to return). The CN number is kept; the credit note reads Cancelled. → 200 { refund (status reverted, revertedBy, revertedAt, revertReason), sale }. 404 refund_not_found, 403 revert_not_allowed { reason: not_own | too_old } (staff who are not vendorRole admin: only their own refund, on the EAT day they made it), 409 already_reverted { revertedAt }, 409 sale_voided, 409 customer_archived { customerId } (restore the customer first), 409 insufficient_stock { productId, variant|null, available } (restocked units sold since; nothing changes), 400 reason_required { min } | reason_too_long { max }. An undo by staff notifies the vendor account (vendor_refund_reverted). ${STAFF}`,
+  description: `Vendor / staff with \`sales\` (${FLAGS}): undo a refund made by mistake. Body { reason (3–200) }. Exactly reverses it: restocked units are taken out of stock again, the quantities and amounts count as sold again, a pay-later sale's balance gets balanceReducedTzs back (any money paid back is for the customer to return). The CN number is kept; the credit note reads Cancelled. → 200 { refund (status reverted, revertedBy, revertedAt, revertReason), sale }. 404 refund_not_found, 403 revert_not_allowed { reason: not_own | too_old } (staff who are not vendorRole admin: only their own refund, on the EAT day they made it), 409 already_reverted { revertedAt }, 409 sale_voided, 409 customer_archived { customerId } (restore the customer first), 409 insufficient_stock { productId, variant|null, available } (restocked units sold since; nothing changes), 400 reason_required { min } | reason_too_long { max }, 429 rate_limited { retryAfterSeconds } (shares the 120/min/vendor sales limit; nothing changed — retry; a retry of an undo that did go through answers 409 already_reverted, which means done). An undo by staff notifies the vendor account (vendor_refund_reverted). ${STAFF}`,
   requestSample: { reason: 'Refunded the wrong sale' },
   onGuard: guards('post'),
   onRequest: async (req, res) => {
     if (!vendorRefundsOn()) return disabled(res);
+    // Security review #318 L2: undo shares the per-vendor sales limit (120/min) with sales and refunds.
+    const allowed = allowVendorSale(vendorOf(req.user));
+    if (!allowed.ok) {
+      res.set?.('Retry-After', String(allowed.retryAfterSeconds));
+      return res.status(429).json({ error: 'rate_limited', retryAfterSeconds: allowed.retryAfterSeconds });
+    }
     const result = await vendorRefundService.revertRefund({
       vendorId: vendorOf(req.user), actorId: req.user.sub, refundId: req.params.id, body: req.body || {}, refundsAny: await refundsAny(req.user),
     });
@@ -69,10 +76,10 @@ export const vendorRevertRefund = {
 
 export const vendorListRefunds = {
   created, method: 'get', path: '/vendor/refunds',
-  description: `Vendor / staff with \`sales\` (${READ_FLAGS}): refunds of my walk-in sales, newest first (refund time desc, id desc). Query: from, to (EAT days YYYY-MM-DD, inclusive, on the refund time), saleId, status (active | reverted | all; default all), limit (default 50, capped at 200), cursor. → { refunds:[{ id, number, status, refundedAt, revertedAt|null, saleId, saleNumber, amountTzs, paidOutTzs, balanceReducedTzs, method|null, restockedUnits, createdBy { id, name } }], nextCursor|null }. 400 invalid_date { field } | invalid_status | invalid_limit | invalid_cursor. ${STAFF}`,
+  description: `Vendor / staff with \`sales\` (${FLAGS}): refunds of my walk-in sales, newest first (refund time desc, id desc). Query: from, to (EAT days YYYY-MM-DD, inclusive, on the refund time), saleId, status (active | reverted | all; default all), limit (default 50, capped at 200), cursor. → { refunds:[{ id, number, status, refundedAt, revertedAt|null, saleId, saleNumber, amountTzs, paidOutTzs, balanceReducedTzs, method|null, restockedUnits, createdBy { id, name } }], nextCursor|null }. 400 invalid_date { field } | invalid_status | invalid_limit | invalid_cursor. ${STAFF}`,
   onGuard: guards('get'),
   onRequest: async (req, res) => {
-    if (!vendorWalkInSalesOn()) return disabled(res);
+    if (!vendorRefundsOn()) return disabled(res);
     const result = await vendorRefundService.listRefunds({ vendorId: vendorOf(req.user), query: req.query || {} });
     if (result.error) return send(res, result);
     res.json(result);

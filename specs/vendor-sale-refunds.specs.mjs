@@ -19,13 +19,13 @@ import { createPayoutEligibility } from '../src/services/payout-eligibility.mjs'
 import { createVendorSettlementService } from '../src/services/vendor-settlement-service.mjs';
 import { createPartnerNotifier } from '../src/services/partner-notifier.mjs';
 import { vendorToolsOptionsRoute, vendorCreateProduct, vendorStockMovements, createShopOrder, vendorPayments } from '../functions/shop.mjs';
-import { vendorRecordSale, vendorGetSale, vendorListSales, vendorVoidSale, resetVendorSalesLimits } from '../functions/vendor-sales.mjs';
+import { vendorRecordSale, vendorGetSale, vendorListSales, vendorVoidSale, resetVendorSalesLimits, allowVendorSale, VENDOR_SALES_LIMIT } from '../functions/vendor-sales.mjs';
 import { vendorRefundSale, vendorRevertRefund, vendorListRefunds, vendorGetRefund } from '../functions/vendor-refunds.mjs';
 import { vendorCustomersCreate, vendorCustomerGet, vendorCustomerUpdate, vendorCustomerRecordPayment, vendorCustomerVoidPayment, vendorReceivablesAging, resetVendorCustomerLimits } from '../functions/vendor-customers.mjs';
 import { vendorShareRefund, vendorShareSale, vendorDocumentView, resetVendorDocumentLimits } from '../functions/vendor-documents.mjs';
 import { vendorReportSales, vendorReportProfit, vendorReportRefunds, vendorReportPaymentMethods, vendorReportCustomers, vendorReportProducts, resetVendorReportCache, resetVendorReportLimits } from '../functions/vendor-reports.mjs';
 import { cumulativeShare, refundLineAmounts, splitRefund, refundMethod, parseRefund, refundFingerprint, creditNoteNumber, refundStateOf } from '../src/shared/vendor-refund.mjs';
-import { creditNoteDocument } from '../src/shared/vendor-documents.mjs';
+import { creditNoteDocument, saleDocumentStatus } from '../src/shared/vendor-documents.mjs';
 import { renderDocumentHtml } from '../src/shared/vendor-document-html.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
@@ -259,7 +259,7 @@ test('rules: M-2 cumulative rounding (3,333 / 3,333 / 3,334), the last unit take
 
 // ── gating and access ────────────────────────────────────────────────────────
 
-test('flags off: every refund route answers 404 feature_disabled and nothing moves; reads of refunds already made stay on with walk-in sales; options.refunds', async () => {
+test('flags off: every refund route answers 404 feature_disabled and nothing moves; one refund already made stays readable (detail, credit note) with walk-in sales; options.refunds', async () => {
   const v = await vendor();
   const p = await product(v, { priceTzs: 1_000, stock: 5 });
   on(['VENDOR_TOOLS', 'VENDOR_WALKIN_SALES']);
@@ -283,17 +283,22 @@ test('flags off: every refund route answers 404 feature_disabled and nothing mov
   on(['VENDOR_TOOLS', 'VENDOR_WALKIN_SALES', 'VENDOR_REFUNDS']);
   assert.equal((await call(vendorToolsOptionsRoute, as(v))).body.refunds, true);
   const made1 = await refundOk(as(v), sale.id, body([{ saleLineId: sale.lines[0].id, qty: 1 }]));
-  // VENDOR_REFUNDS goes off: the sale still shows its refunds; the refund reads stay (read-only); writes are off.
+  // VENDOR_REFUNDS goes off: the sale still shows its refunds; the refund detail and its credit note stay (read-only,
+  // AC-2); the list and every write are off (security review #318 L1).
+  process.env.VENDOR_DOCUMENTS = '1';
   delete process.env.VENDOR_REFUNDS;
   assert.equal((await call(vendorToolsOptionsRoute, as(v))).body.refunds, false);
   const s = await getSale(v, sale.id);
   assert.deepEqual([s.refundedTzs, s.netAfterRefundsTzs, s.refundState, s.refunds.map(r => r.number)], [1_000, 1_000, 'partial', ['CN-000001']]);
   assert.equal((await call(vendorGetRefund, as(v), { params: { id: made1.refund.id } })).status, 200);
-  assert.equal((await call(vendorListRefunds, as(v))).body.refunds.length, 1);
+  assert.deepEqual(await call(vendorListRefunds, as(v)), { status: 404, body: { error: 'feature_disabled' } });
+  assert.equal((await call(vendorDocumentView, as(v), { params: { docType: 'credit_note', docId: made1.refund.id } })).body.doc.number, 'CN-000001');
   assert.equal((await undo(as(v), made1.refund.id)).status, 404);
   assert.equal((await refund(as(v), sale.id, body([{ saleLineId: sale.lines[0].id, qty: 1 }]))).status, 404);
   delete process.env.VENDOR_WALKIN_SALES;
   assert.equal((await call(vendorGetRefund, as(v), { params: { id: made1.refund.id } })).status, 404, 'reads need walk-in sales');
+  assert.deepEqual(await call(vendorDocumentView, as(v), { params: { docType: 'credit_note', docId: made1.refund.id } }), { status: 404, body: { error: 'feature_disabled' } }, 'credit notes need walk-in sales');
+  assert.equal((await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: sale.id } })).status, 200, 'other documents unaffected');
 });
 
 test('access: staff without `sales` 403; staff of a suspended vendor 403 vendor_suspended; tenancy (another vendor 404 everywhere); mounted routes reach their own guards', async () => {
@@ -958,6 +963,75 @@ test('credit note (§6): JSON / HTML / PDF content, EN + SW; A-02 (no phone, rea
     sale: { number: 'R-000001', kind: 'cash', soldAt: '2026-11-01T08:00:00Z' }, customer: null, servedByName: null, seller: { businessName: 'Shop' },
   }, 'sw'), { lang: 'sw' });
   assert.ok(nothing.includes('Hakuna pesa iliyorudishwa.'));
+});
+
+test('sale document status after refunds (security review #318 M1): fully refunded → refunded; a pay-later balance cleared by a refund → settled_by_credit_note, never "Paid in full"; paid off by the customer → paid_in_full; a cash sale stays paid', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v, { name: 'Plates', priceTzs: 10_000, stock: 60 });
+  const c = await addCustomer(as(v), { name: 'Status Customer' });
+  const docOf = async id => (await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: id } })).body.doc;
+  const htmlOf = async (id, lang = 'en') => (await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: id }, query: { format: 'html', lang } })).body;
+
+  // An unpaid pay-later sale, all of it refunded → refunded (not paid_in_full).
+  const unpaid = await sell(as(v), [{ productId: p.id, qty: 2 }], [], { kind: 'credit', customerId: c.id });
+  await refundOk(as(v), unpaid.id, body([{ saleLineId: unpaid.lines[0].id, qty: 2 }]));
+  const d1 = await docOf(unpaid.id);
+  assert.equal(d1.status, 'refunded');
+  assert.equal(d1.liveStatus.paidInFullAt, undefined);
+  assert.ok((await htmlOf(unpaid.id)).includes('>Refunded<'));
+  assert.ok((await htmlOf(unpaid.id, 'sw')).includes('>Imerejeshwa<'));
+
+  // 50,000 sale, 10,000 paid now, the other 40,000 taken off by a refund → settled_by_credit_note.
+  const part = await sell(as(v), [{ productId: p.id, qty: 5 }], cash(10_000), { kind: 'credit', customerId: c.id });
+  const r = await refundOk(as(v), part.id, body([{ saleLineId: part.lines[0].id, qty: 4 }]));
+  assert.deepEqual([r.refund.balanceReducedTzs, r.refund.paidOutTzs, r.sale.balanceTzs], [40_000, 0, 0]);
+  const d2 = await docOf(part.id);
+  assert.equal(d2.status, 'settled_by_credit_note');
+  assert.ok((await htmlOf(part.id)).includes('Settled by credit note'));
+  assert.ok((await htmlOf(part.id, 'sw')).includes('Imelipwa kwa hati ya marejesho'));
+  assert.equal((await htmlOf(part.id)).includes('Paid in full'), false);
+  const pdf = await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: part.id }, query: { format: 'pdf' } });
+  assert.match(pdfText(Buffer.from(pdf.body)), /Settled by credit note/);
+  // Undo the refund: owed again → pay_later.
+  await undo(as(v), r.refund.id);
+  assert.equal((await docOf(part.id)).status, 'pay_later');
+
+  // Paid off by the customer, then part refunded with money back → still paid_in_full.
+  const paidOff = await sell(as(v), [{ productId: p.id, qty: 2 }], cash(5_000), { kind: 'credit', customerId: c.id });
+  assert.equal((await pay(as(v), c.id, { amountTzs: 15_000 + 40_000 })).status, 201, 'pays this sale and the reopened one');
+  await refundOk(as(v), paidOff.id, body([{ saleLineId: paidOff.lines[0].id, qty: 1 }]));
+  const d3 = await docOf(paidOff.id);
+  assert.equal(d3.status, 'paid_in_full');
+  assert.ok(d3.liveStatus.paidInFullAt);
+
+  // A fully paid cash sale, partly refunded → still paid; fully refunded → refunded.
+  const cashSale = await sell(as(v), [{ productId: p.id, qty: 2 }], cash(20_000));
+  await refundOk(as(v), cashSale.id, body([{ saleLineId: cashSale.lines[0].id, qty: 1 }]));
+  assert.equal((await docOf(cashSale.id)).status, 'paid');
+  await refundOk(as(v), cashSale.id, body([{ saleLineId: cashSale.lines[0].id, qty: 1 }]));
+  assert.equal((await docOf(cashSale.id)).status, 'refunded');
+
+  // The rule on its own (a free sale is never "refunded"; voided wins).
+  assert.equal(saleDocumentStatus({ status: 'completed', kind: 'cash', totalTzs: 0, refundedTzs: 0 }), 'paid');
+  assert.equal(saleDocumentStatus({ status: 'voided', kind: 'credit', totalTzs: 10, refundedTzs: 10, balanceTzs: 0 }), 'cancelled');
+});
+
+test('undo shares the sales rate limit (security review #318 L2): over 120 a minute → 429 rate_limited with Retry-After, nothing changes', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v, { priceTzs: 1_000, stock: 5 });
+  const sale = await sell(as(v), [{ productId: p.id, qty: 1 }], cash(1_000));
+  const r = await refundOk(as(v), sale.id, body([{ saleLineId: sale.lines[0].id, qty: 1 }]));
+  while (allowVendorSale(v).ok) { /* use up this minute's allowance */ }
+  const limited = await undo(as(v), r.refund.id);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.error, 'rate_limited');
+  assert.ok(limited.headers['Retry-After']);
+  assert.equal((await db('VendorSaleRefund').where({ id: r.refund.id }).first()).status, 'active');
+  assert.ok(VENDOR_SALES_LIMIT.perMinute >= 120);
+  resetVendorSalesLimits();
+  assert.equal((await undo(as(v), r.refund.id)).status, 200);
 });
 
 // ── migration ────────────────────────────────────────────────────────────────

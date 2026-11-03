@@ -474,6 +474,7 @@ export const vendorDocumentService = createVendorDocumentService({
   renderHtml: renderDocumentHtml,
   renderManyHtml: renderDocumentsHtml,
   renderPdf: renderDocumentPdf,
+  walkInSalesOn: vendorWalkInSalesOn,
 });
 // Vendor tools · S6: reports and their CSV / PDF exports — read only (dormant behind VENDOR_TOOLS +
 // VENDOR_REPORTS; the routes check the flag). Never writes orders, sales, statements or money.
