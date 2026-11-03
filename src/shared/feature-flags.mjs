@@ -250,7 +250,9 @@ export function vendorToolsOptions() {
     documents: vendorToolsFlag('VENDOR_DOCUMENTS'),
     vat: vendorToolsFlag('VENDOR_VAT'),
     reports: vendorToolsFlag('VENDOR_REPORTS'),
-    refunds: vendorToolsFlag('VENDOR_REFUNDS'),
+    // S7: the same answer as the refund routes (VENDOR_TOOLS + VENDOR_WALKIN_SALES + VENDOR_REFUNDS), so options
+    // never say true while the routes answer 404.
+    refunds: vendorRefundsOn(),
     barcodes: vendorToolsFlag('VENDOR_BARCODES'),
     purchases: vendorToolsFlag('VENDOR_PURCHASES'),
     fiscal,

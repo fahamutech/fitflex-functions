@@ -283,6 +283,22 @@ export function createVendorReportService({
     };
   }
 
+  /** S7: Refunds report rows and totals. App-only channel → none (credit notes are walk-in only). */
+  async function refundRows(vendorId, period) {
+    const rows = period.channel === 'app' ? [] : await store.refundEvents({ vendorId, from: period.from, to: period.to });
+    const refunds = rows.filter(r => r.type === 'refund');
+    const sum = k => rows.reduce((t, r) => t + r[k], 0);
+    const totals = {
+      count: refunds.length, amountTzs: sum('amountTzs'), paidOutTzs: sum('paidOutTzs'), balanceReducedTzs: sum('balanceReducedTzs'),
+      restockedUnits: sum('restockedUnits'), revertedCount: rows.length - refunds.length,
+    };
+    return { rows, totals };
+  }
+  async function refundTotals(vendorId, period) {
+    const { totals } = await refundRows(vendorId, period);
+    return { count: totals.count, amountTzs: totals.amountTzs, paidOutTzs: totals.paidOutTzs, balanceReducedTzs: totals.balanceReducedTzs };
+  }
+
   // ── sections ──────────────────────────────────────────────────────────────
 
   const GROUPED = new Set(['summary', 'sales', 'profit']);
@@ -315,13 +331,7 @@ export function createVendorReportService({
     if (section === 'refunds') {
       // S7 §2.11: walk-in credit notes made in the period and undos made in it (undo rows negative). Not cached:
       // refunds and undos are dated "now", so a closed period's rows never change anyway.
-      const rows = await store.refundEvents({ vendorId, from: period.from, to: period.to });
-      const refunds = rows.filter(r => r.type === 'refund');
-      const sum = k => rows.reduce((t, r) => t + r[k], 0);
-      const totals = {
-        count: refunds.length, amountTzs: sum('amountTzs'), paidOutTzs: sum('paidOutTzs'), balanceReducedTzs: sum('balanceReducedTzs'),
-        restockedUnits: sum('restockedUnits'), revertedCount: rows.length - refunds.length,
-      };
+      const { rows, totals } = await refundRows(vendorId, { ...period, channel: 'all' });
       return { period, data: { ...(await head(vendorId, period, { grouped: false })), rows, totals } };
     }
     if (section === 'stock-value') {
@@ -379,6 +389,8 @@ export function createVendorReportService({
       const s = stockValueData(products.inventory, access);
       out.stock = { atRetailTzs: s.totals.atRetailTzs, units: s.totals.units, ...(access.cost ? { atCostTzs: s.totals.atCostTzs, costUnknownCount: s.costUnknown.count } : {}) };
     }
+    // S7: walk-in credit notes in the period — the Refunds report's rules (refunds on their date, undos netted on theirs).
+    out.refunds = await refundTotals(vendorId, period);
     if (access.cost) {
       const p = await profitData(vendorId, period);
       out.profit = { profitTzs: p.totals.profitTzs, marginPct: p.totals.marginPct, netExVatTzs: p.totals.netExVatTzs, commissionTzs: p.totals.commissionTzs, costTzs: p.totals.costTzs, uncosted: { qty: p.uncosted.qty, revenueTzs: p.uncosted.revenueTzs } };

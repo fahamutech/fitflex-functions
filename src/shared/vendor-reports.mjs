@@ -211,7 +211,7 @@ export const REPORT_LABELS = {
     byYou: 'Uliyokusanya wewe', viaFitFlex: 'Yaliyolipwa kupitia FitFlex', netOfChange: 'Taslimu baada ya chenji',
     figure: 'Kipimo', value: 'Thamani', none: 'Hakuna',
     refundNumber: 'Hati ya marejesho', refundDate: 'Tarehe', saleNumber: 'Mauzo', restocked: 'Idadi iliyorudi kwenye Stock',
-    refundType: 'Aina', type_refund: 'Marejesho', type_revert: 'Yametenduliwa', paidBack: 'Uliyorudisha wewe (marejesho)', refundPaidOut: 'Yaliyorudishwa', offBalances: 'Yaliyopunguzwa kwenye madeni',
+    refundType: 'Kitendo', type_refund: 'Marejesho', type_revert: 'Yametenduliwa', paidBack: 'Uliyorudisha wewe (marejesho)', refundPaidOut: 'Yaliyorudishwa', offBalances: 'Yaliyopunguzwa kwenye madeni',
     method_: { cash: 'Taslimu', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Kadi', bank: 'Uhamisho wa benki', other: 'Nyingine', unknown: 'Nyingine' },
     months: ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'],
   },

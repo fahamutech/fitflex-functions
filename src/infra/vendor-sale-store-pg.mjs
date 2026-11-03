@@ -104,6 +104,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
         discountTzs: l.discountTzs, lineTotalTzs: l.lineTotalTzs,
         vatCode: l.vatCode ?? null, vatRatePct: Number(l.vatRatePct || 0), vatTzs: l.vatTzs ?? 0,
         lineNetTzs: lineNetOf(l), refundedQty: l.refundedQty || 0, refundableQty: l.qty - (l.refundedQty || 0), refundedTzs: l.refundedTzs || 0,
+        refundedVatTzs: l.refundedVatTzs || 0,
       })),
       payments: payments.map(plain).sort((a, b) => a.position - b.position).map(p => ({
         method: p.method, amountTzs: p.amountTzs, reference: p.reference ?? null,

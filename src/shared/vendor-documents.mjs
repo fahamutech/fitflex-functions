@@ -117,7 +117,7 @@ export const DOC_LABELS = {
     recentPayments: 'Malipo (siku 90 zilizopita)', totalOwed: 'Jumla inayodaiwa', daysOverdue: 'Imechelewa siku {n}', sold: 'Imeuzwa', due: 'Mwisho wa kulipa', balance: 'Salio',
     statusPaid: 'Imelipwa', statusPayLater: 'Mkopo', statusPaidInFull: 'Imelipwa yote', statusCancelled: 'Imebatilishwa',
     // S7 (security review #318 M1) — DRAFTS for native review.
-    statusRefunded: 'Imerejeshwa', statusSettledByCreditNote: 'Imelipwa kwa hati ya marejesho',
+    statusRefunded: 'Imerejeshwa yote', statusSettledByCreditNote: 'Deni limefutwa kwa hati ya marejesho',
     cancelled: 'Imebatilishwa tarehe {date}. {business} imebatilisha hati hii.', watermark: 'CANCELLED · IMEBATILISHWA',
     refunded: 'Imerejeshwa {amount} kwa {method}', receivedBy: 'Malipo yamepokelewa na {business}.', notFiscal: 'Hii si risiti ya kodi ya TRA.',
     copyNote: 'Hii ni nakala ya hati iliyotolewa na {business}.', pageOf: 'Ukurasa {n} kati ya {m}', langEn: 'English', langSw: 'Kiswahili',

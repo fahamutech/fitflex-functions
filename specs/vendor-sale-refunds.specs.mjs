@@ -23,7 +23,7 @@ import { vendorRecordSale, vendorGetSale, vendorListSales, vendorVoidSale, reset
 import { vendorRefundSale, vendorRevertRefund, vendorListRefunds, vendorGetRefund } from '../functions/vendor-refunds.mjs';
 import { vendorCustomersCreate, vendorCustomerGet, vendorCustomerUpdate, vendorCustomerRecordPayment, vendorCustomerVoidPayment, vendorReceivablesAging, resetVendorCustomerLimits } from '../functions/vendor-customers.mjs';
 import { vendorShareRefund, vendorShareSale, vendorDocumentView, resetVendorDocumentLimits } from '../functions/vendor-documents.mjs';
-import { vendorReportSales, vendorReportProfit, vendorReportRefunds, vendorReportPaymentMethods, vendorReportCustomers, vendorReportProducts, resetVendorReportCache, resetVendorReportLimits } from '../functions/vendor-reports.mjs';
+import { vendorReportSummary, vendorReportSales, vendorReportProfit, vendorReportRefunds, vendorReportPaymentMethods, vendorReportCustomers, vendorReportProducts, resetVendorReportCache, resetVendorReportLimits } from '../functions/vendor-reports.mjs';
 import { cumulativeShare, refundLineAmounts, splitRefund, refundMethod, parseRefund, refundFingerprint, creditNoteNumber, refundStateOf } from '../src/shared/vendor-refund.mjs';
 import { creditNoteDocument, saleDocumentStatus } from '../src/shared/vendor-documents.mjs';
 import { renderDocumentHtml } from '../src/shared/vendor-document-html.mjs';
@@ -276,6 +276,7 @@ test('flags off: every refund route answers 404 feature_disabled and nothing mov
   for (const set of [['VENDOR_TOOLS', 'VENDOR_REFUNDS'], ['VENDOR_WALKIN_SALES', 'VENDOR_REFUNDS']]) {
     on(set);
     assert.equal((await refund(as(v), sale.id, body([{ saleLineId: sale.lines[0].id, qty: 1 }]))).status, 404, set.join('+'));
+    assert.equal((await call(vendorToolsOptionsRoute, as(v))).body.refunds, false, `options.refunds false with ${set.join('+')}: same as the routes`);
     for (const f of FLAGS) delete process.env[f];
   }
   assert.equal((await row(p.id)).stock, 3);
@@ -542,6 +543,8 @@ test('VAT (M-3): cumulative per line, a full refund reverses exactly the line\'s
   assert.deepEqual(r1.refund.vatSummary, [{ code: 'A', ratePct: 18, netTzs: 2_825, vatTzs: 508 }]);
   assert.deepEqual(r2.refund.vatSummary.map(x => [x.code, x.netTzs, x.vatTzs]), [['A', 5_650, 1_017], ['E', 2_000, 0]]);
   assert.deepEqual(r2.refund.lines.map(l => l.vatCode), ['A', 'E']);
+  assert.deepEqual(r2.sale.lines.map(l => l.refundedVatTzs), [1_525, 0], 'the sale view gives the VAT refunded per line');
+  assert.equal(r1.sale.lines[0].refundedVatTzs, 508);
   const line = await db('VendorSaleLine').where({ id: sale.lines[0].id }).first();
   assert.deepEqual([line.refundedVatTzs, line.vatTzs], [1_525, 1_525]);
   await assert.rejects(db('VendorSaleLine').where({ id: line.id }).update({ refundedVatTzs: 1_526 }), /vendorsaleline_refunded_vat_range/);
@@ -807,13 +810,17 @@ test('reports (§2.11): refund rows on the refund date, Net = Gross − Discount
   assert.deepEqual(refunds.totals, { count: 1, amountTzs: 9_333, paidOutTzs: 9_333, balanceReducedTzs: 0, restockedUnits: 1, revertedCount: 0 });
   assert.equal(refunds.totals.amountTzs, w.refundTzs, 'Refunds view = Sales walk-in refunds');
   assert.deepEqual(refunds.rows.map(r => [r.type, r.number, r.date, r.saleNumber, r.amountTzs, r.method, r.restockedUnits, r.status]), [['refund', 'CN-000001', today, sale.number, 9_333, 'cash', 1, 'active']]);
+  const summary = (await call(vendorReportSummary, as(v), { query: q })).body;
+  assert.deepEqual(summary.refunds, { count: 1, amountTzs: 9_333, paidOutTzs: 9_333, balanceReducedTzs: 0 }, 'the summary carries the Refunds totals');
+  assert.deepEqual(summary.methods.paidBack, [{ method: 'cash', amountTzs: 9_333, count: 1 }]);
+  assert.deepEqual((await call(vendorReportSummary, as(v), { query: { ...q, channel: 'app' } })).body.refunds, { count: 0, amountTzs: 0, paidOutTzs: 0, balanceReducedTzs: 0 });
   const methods = (await call(vendorReportPaymentMethods, as(v), { query: q })).body;
   assert.deepEqual(methods.paidBack, [{ method: 'cash', amountTzs: 9_333, count: 1 }]);
   assert.deepEqual(methods.byYou.map(r => [r.method, r.amountTzs]), [['cash', 22_000]], '"Collected by you" is unchanged (money in)');
   const products = (await call(vendorReportProducts, as(v), { query: q })).body;
   assert.deepEqual(products.rows.map(r => [r.name, r.unitsSold]).sort(), [['Band', 1], ['Bar', 2], ['Shaker', 1]], 'units net of refunds');
   const csv = await call(vendorReportRefunds, as(v), { query: { ...q, format: 'csv', lang: 'sw' } });
-  assert.match(csv.body, /Hati ya marejesho,Tarehe,Mauzo,Aina,/);
+  assert.match(csv.body, /Hati ya marejesho,Tarehe,Mauzo,Kitendo,/);
   assert.match(csv.body, new RegExp(`CN-000001,${today},${sale.number},Marejesho,9333,9333,0,Taslimu,1`));
 
   // Customers: balance taken off by refunds in the period (not money).
@@ -846,6 +853,8 @@ test('reports: a refund in a closed period undone later leaves that period uncha
   const rows = (await call(vendorReportRefunds, as(v), { query: { from: '2026-10-14', to: '2026-10-15' } })).body;
   assert.deepEqual(rows.rows.map(x => [x.type, x.date, x.amountTzs, x.paidOutTzs, x.restockedUnits]), [['refund', '2026-10-14', 6_000, 6_000, 1], ['revert', '2026-10-15', -6_000, -6_000, -1]]);
   assert.deepEqual([rows.totals.count, rows.totals.revertedCount, rows.totals.amountTzs], [1, 1, 0]);
+  assert.deepEqual((await call(vendorReportSummary, as(v), { query: { from: '2026-10-14', to: '2026-10-14' } })).body.refunds, { count: 1, amountTzs: 6_000, paidOutTzs: 6_000, balanceReducedTzs: 0 });
+  assert.deepEqual((await call(vendorReportSummary, as(v), { query: { from: '2026-10-14', to: '2026-10-15' } })).body.refunds, { count: 1, amountTzs: 0, paidOutTzs: 0, balanceReducedTzs: 0 }, 'undo rows netted');
   const profit14 = (await call(vendorReportProfit, as(v), { query: { from: '2026-10-14', to: '2026-10-14' } })).body.totals;
   assert.deepEqual([profit14.netExVatTzs, profit14.costTzs, profit14.profitTzs], [-6_000, -4_000, -2_000]);
   const paid = (await call(vendorReportPaymentMethods, as(v), { query: { from: '2026-10-14', to: '2026-10-15' } })).body.paidBack;
@@ -980,7 +989,7 @@ test('sale document status after refunds (security review #318 M1): fully refund
   assert.equal(d1.status, 'refunded');
   assert.equal(d1.liveStatus.paidInFullAt, undefined);
   assert.ok((await htmlOf(unpaid.id)).includes('>Refunded<'));
-  assert.ok((await htmlOf(unpaid.id, 'sw')).includes('>Imerejeshwa<'));
+  assert.ok((await htmlOf(unpaid.id, 'sw')).includes('>Imerejeshwa yote<'));
 
   // 50,000 sale, 10,000 paid now, the other 40,000 taken off by a refund → settled_by_credit_note.
   const part = await sell(as(v), [{ productId: p.id, qty: 5 }], cash(10_000), { kind: 'credit', customerId: c.id });
@@ -989,7 +998,7 @@ test('sale document status after refunds (security review #318 M1): fully refund
   const d2 = await docOf(part.id);
   assert.equal(d2.status, 'settled_by_credit_note');
   assert.ok((await htmlOf(part.id)).includes('Settled by credit note'));
-  assert.ok((await htmlOf(part.id, 'sw')).includes('Imelipwa kwa hati ya marejesho'));
+  assert.ok((await htmlOf(part.id, 'sw')).includes('Deni limefutwa kwa hati ya marejesho'));
   assert.equal((await htmlOf(part.id)).includes('Paid in full'), false);
   const pdf = await call(vendorDocumentView, as(v), { params: { docType: 'sale', docId: part.id }, query: { format: 'pdf' } });
   assert.match(pdfText(Buffer.from(pdf.body)), /Settled by credit note/);
