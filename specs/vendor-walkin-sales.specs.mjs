@@ -611,8 +611,8 @@ test('GET /vendor/sales: newest first, paged, filters (dates, status, createdBy=
   assert.deepEqual(all.body.sales.map(s => s.number), [e.number, d.number, c.number, b.number, a.number]);
   // S4 added kind, balanceTzs, dueDate and customer to each row.
   // S4 added kind, balanceTzs, dueDate and customer; S7 refundedTzs and refundState.
-  assert.deepEqual(Object.keys(all.body.sales[0]).sort(), ['balanceTzs', 'createdBy', 'customer', 'discountTzs', 'dueDate', 'hasOverride', 'id', 'itemCount', 'kind', 'lateRecorded', 'methods', 'number', 'recordedAt', 'refundState', 'refundedTzs', 'soldAt', 'status', 'totalTzs']);
-  assert.deepEqual([all.body.sales[0].refundedTzs, all.body.sales[0].refundState], [0, 'none']);
+  assert.deepEqual(Object.keys(all.body.sales[0]).sort(), ['balanceTzs', 'createdBy', 'customer', 'discountTzs', 'dueDate', 'hasOverride', 'id', 'itemCount', 'kind', 'lateRecorded', 'methods', 'number', 'recordedAt', 'refundState', 'refundedTzs', 'balanceReducedTzs', 'soldAt', 'status', 'totalTzs'].sort());
+  assert.deepEqual([all.body.sales[0].refundedTzs, all.body.sales[0].refundState, all.body.sales[0].balanceReducedTzs], [0, 'none', 0]);
   assert.deepEqual([all.body.sales[0].kind, all.body.sales[0].balanceTzs, all.body.sales[0].dueDate, all.body.sales[0].customer], ['cash', 0, null, null]);
   const bRow = all.body.sales.find(s => s.id === b.id);
   assert.deepEqual([bRow.itemCount, bRow.methods, bRow.createdBy, bRow.totalTzs, bRow.hasOverride, bRow.discountTzs, bRow.lateRecorded], [3, ['cash', 'mpesa'], { id: seller, name: 'Juma Seller' }, 3_000, false, 0, true]);
