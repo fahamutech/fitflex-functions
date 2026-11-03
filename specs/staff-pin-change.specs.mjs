@@ -139,10 +139,11 @@ async function holdPinWithFitFlex(row, pin = OWNER_PIN) {
   });
   await pinAuthService.setPin(row.personId, pin);
 }
+const runOctet = Math.floor(Math.random() * 200) + 20; // per run: AuthAttempt rows outlive the run
 let addr = 0;
 const appPinLogin = (email, pin) => {
   const out = res();
-  return pinLogin.onRequest({ body: { email, pin }, headers: { 'x-forwarded-for': `10.33.${Math.floor(addr / 250)}.${(addr++ % 250) + 1}` } }, out).then(() => out);
+  return pinLogin.onRequest({ body: { email, pin }, headers: { 'x-forwarded-for': `10.${runOctet}.${Math.floor(addr / 250)}.${(addr++ % 250) + 1}` } }, out).then(() => out);
 };
 /** An older session (issued 10 s ago), as a phone that signed in earlier holds. */
 const olderSession = (row, extra = {}) => sign({ sub: row.id, userType: 'gym_staff', gymId: row.gymId, aclPermissions: row.aclPermissions || [], iat: nowSeconds() - 10, ...extra });

@@ -159,11 +159,14 @@ async function removeTrainerProfile(trx, userId) {
 }
 
 async function scrubAuditTrail(trx, id) {
+  // AuditLog is append-only; this transaction-local switch lets the trigger allow a change to before/after only.
+  await trx.raw(`SELECT set_config('fitflex.audit_scrub', 'on', true)`);
   await trx.raw(`UPDATE "AuditLog"
        SET before = CASE WHEN jsonb_typeof(before) = 'object' THEN before - ?::text[] ELSE before END,
            after  = CASE WHEN jsonb_typeof(after)  = 'object' THEN after  - ?::text[] ELSE after  END
      WHERE (target = ? OR actor = ?) AND (before IS NOT NULL OR after IS NOT NULL)`,
   [AUDIT_PERSONAL_KEYS, AUDIT_PERSONAL_KEYS, id, id]);
+  await trx.raw(`SELECT set_config('fitflex.audit_scrub', 'off', true)`);
 }
 
 /** Only for the last persona. Runs before the User row goes, while the identifiers can still be read. */

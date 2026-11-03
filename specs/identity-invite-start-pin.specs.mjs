@@ -23,8 +23,9 @@ function res() {
     json(b) { this.body = b; return this; },
   };
 }
+const runOctet = Math.floor(Math.random() * 200) + 20; // per run: AuthAttempt rows outlive the run
 let addressCounter = 0;
-const freshAddress = () => `10.11.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
+const freshAddress = () => `10.${runOctet}.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
 async function post(route, body) {
   const out = res();
   await route.onRequest({ body, headers: { 'x-forwarded-for': freshAddress() } }, out);

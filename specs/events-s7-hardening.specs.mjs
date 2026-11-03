@@ -108,6 +108,39 @@ test('H3: outbox rows older than 90 days go whether published or not, in batches
 
 // ── H4 ───────────────────────────────────────────────────────────────────────
 
+// The pooled connections carry the CI test bypass for AuditLog; production has none. Switch it off on every pooled connection for one call.
+const POOL = 10;
+const setBypass = async value => {
+  const conns = [];
+  try {
+    for (let i = 0; i < POOL; i += 1) conns.push(await db.client.acquireConnection());
+    for (const c of conns) await c.query(`SET fitflex.audit_test_bypass = '${value}'`);
+  } finally { for (const c of conns) db.client.releaseConnection(c); }
+};
+const withoutAuditBypass = async fn => { await setBypass('off'); try { return await fn(); } finally { await setBypass('on'); } };
+
+test('H4: redeliver works on a database WITHOUT the AuditLog test bypass (append-only): the outcome is a second row, the request row is never edited', async () => {
+  s7On();
+  await db('WebhookDeliveryAttempt').del(); await db('WebhookDelivery').del();
+  const f = await h.kitEvent({ n: 0 });
+  const lab = webhookLab();
+  const ep = await lab.endpoint(f.organizer, { events: ['kit.collected'] });
+  for (let i = 0; i < 2; i += 1) await lab.emit(f.event, f.organizer.id, 'kit.collected', null, `ereg_h4s_${i}`);
+  await lab.svc.fanout();
+  const range = { from: new Date(Date.now() - H).toISOString(), to: new Date().toISOString() };
+  const before = await db('AuditLog').where({ action: 'events.webhook_redelivery_requested', target: f.organizer.id }).count().then(r => Number(r[0].count));
+  const res = await withoutAuditBypass(() => call(organizerRedeliverWebhookEndpoint, f.organizer.owner, { params: { id: ep.id }, body: range }));
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.queued, 2);
+  const reqRows = await db('AuditLog').where({ action: 'events.webhook_redelivery_requested', target: f.organizer.id });
+  assert.equal(reqRows.length, before + 1);
+  const done = await db('AuditLog').where({ action: 'events.webhook_redelivery_completed', target: f.organizer.id }).orderBy('at', 'desc').first();
+  assert.ok(done, 'the outcome row exists');
+  assert.equal(done.after.queued, 2);
+  assert.ok(reqRows.some(r => r.id === done.after.requestId), 'the outcome row points at its request row');
+  await db('AuditLog').where({ target: f.organizer.id }).whereIn('action', ['events.webhook_redelivery_requested', 'events.webhook_redelivery_completed']).del();
+});
+
 test('H4: the OWNER can send a time range again to one endpoint; only that organizer\'s rows; at most 7 days; rate limited; audited', async () => {
   s7On();
   await db('WebhookDeliveryAttempt').del(); await db('WebhookDelivery').del();
@@ -268,6 +301,7 @@ test('retention: UNSET it does nothing and writes nothing; set, it clears contac
   const recent = await h.kitEvent({ n: 1 });
   for (const reg of f.regs) await db('EventRegistration').where({ id: reg.id }).update({ phone: '+255700000001', email: 'a@b.test', dateOfBirth: '1990-01-01', gender: 'f', emergencyContact: JSON.stringify({ name: 'X', phone: '+255700000002' }), phoneNormalized: '+255700000001', emailNormalized: 'a@b.test', bibNumber: `B${reg.id.slice(-8)}`, claimTokenHash: `h${reg.id}` });
   await db('EventRegistration').where({ id: recent.regs[0].id }).update({ phone: '+255700000003', email: 'c@d.test' });
+  const startedAt = new Date();
   const before = await db('AuditLog').where({ action: 'events.registration_anonymised' }).count().then(r => Number(r[0].count));
   assert.deepEqual(await eventsRetentionService.run(), { skipped: 'not_configured', rows: 0, events: 0 });
   assert.equal(await db('AuditLog').where({ action: 'events.registration_anonymised' }).count().then(r => Number(r[0].count)), before, 'unset: not even an audit row');
@@ -288,8 +322,9 @@ test('retention: UNSET it does nothing and writes nothing; set, it clears contac
     assert.equal(row.status, 'confirmed');
   }
   assert.equal((await db('EventRegistration').where({ id: recent.regs[0].id }).first()).phone, '+255700000003', 'a recent event is untouched');
-  const audit = await db('AuditLog').where({ action: 'events.registration_anonymised' }).orderBy('at', 'desc').first();
-  assert.ok(audit.after.rows >= 2 && audit.after.events >= 1);
+  // Not "the latest row": two runs a millisecond apart share the same `at` (timestamp(3)), so the order between them is arbitrary.
+  const audits = await db('AuditLog').where({ action: 'events.registration_anonymised' }).where('at', '>=', startedAt);
+  assert.ok(audits.some(a => a.after.rows >= 2 && a.after.events >= 1), JSON.stringify(audits.map(a => a.after)));
   assert.equal((await eventsRetentionService.run()).rows, 0, 'each registration is cleared once');
   delete process.env.EVENTS_RETENTION_MONTHS;
   // the deleted-purchaser setting
