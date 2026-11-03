@@ -439,7 +439,7 @@ export function createEventsWebhookService({
     if (recent >= 3) return fail('rate_limited', 429, { retryAfterSeconds: 3600 });
     // Low: the request counts against the hourly limit BEFORE any work is done, so a request that fails halfway (or a scripted burst) still uses its slot.
     const auditId = `aud_${randomUUID().slice(0, 12)}`;
-    await db('AuditLog').insert({ id: auditId, at: stamp(), actor: actorId, action: 'events.webhook_redelivery_requested', target: organizerId, before: null, after: JSON.stringify({ endpointId: e.id, from: from.toISOString(), to: to.toISOString(), queued: null, ...(types ? { types } : {}) }) });
+    await db('AuditLog').insert({ id: auditId, at: stamp(), actor: actorId, action: 'events.webhook_redelivery_requested', target: organizerId, before: null, after: JSON.stringify({ endpointId: e.id, from: from.toISOString(), to: to.toISOString(), ...(types ? { types } : {}) }) });
     const rows = (await db('OutboxEvent').where({ organizerId }).whereBetween('createdAt', [from, to]).orderBy([{ column: 'createdAt' }, { column: 'id' }]).limit(5001)).map(plain);
     if (rows.length > 5000) return fail('too_many_events', 422, { max: 5000 });
     const subscribed = Array.isArray(e.events) ? e.events : [];
@@ -454,7 +454,8 @@ export function createEventsWebhookService({
       await db('WebhookDelivery').insert({ id: `whd_${randomUUID().replace(/-/g, '').slice(0, 16)}`, endpointId: e.id, outboxEventId: row.id, status: 'pending', attemptCount: 0, nextAttemptAt: stamp(), createdAt: stamp(), updatedAt: stamp() }).onConflict(['endpointId', 'outboxEventId']).ignore();
       queued += 1;
     }
-    await db('AuditLog').where({ id: auditId }).update({ after: JSON.stringify({ endpointId: e.id, from: from.toISOString(), to: to.toISOString(), queued, ...(types ? { types } : {}) }) });
+    // AuditLog is append-only (the database refuses UPDATE), so the outcome is a second row, not an edit of the request row.
+    await db('AuditLog').insert({ id: `aud_${randomUUID().slice(0, 12)}`, at: stamp(), actor: actorId, action: 'events.webhook_redelivery_completed', target: organizerId, before: null, after: JSON.stringify({ requestId: auditId, endpointId: e.id, queued, scanned: rows.length }) });
     return { queued, scanned: rows.length };
   }
 
