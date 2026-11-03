@@ -250,7 +250,9 @@ export function vendorToolsOptions() {
     documents: vendorToolsFlag('VENDOR_DOCUMENTS'),
     vat: vendorToolsFlag('VENDOR_VAT'),
     reports: vendorToolsFlag('VENDOR_REPORTS'),
-    refunds: vendorToolsFlag('VENDOR_REFUNDS'),
+    // S7: the same answer as the refund routes (VENDOR_TOOLS + VENDOR_WALKIN_SALES + VENDOR_REFUNDS), so options
+    // never say true while the routes answer 404.
+    refunds: vendorRefundsOn(),
     barcodes: vendorToolsFlag('VENDOR_BARCODES'),
     purchases: vendorToolsFlag('VENDOR_PURCHASES'),
     fiscal,
@@ -298,6 +300,15 @@ export function partnerMediaOn() {
  */
 export function vendorWalkInSalesOn() {
   return vendorToolsFlag('VENDOR_WALKIN_SALES');
+}
+
+/**
+ * Vendor tools · S7: making, undoing and sharing refunds on walk-in sales. On only with VENDOR_TOOLS +
+ * VENDOR_WALKIN_SALES + VENDOR_REFUNDS (refunds live on walk-in sales). Reading refunds already made only
+ * needs walk-in sales: they are bookkeeping facts of the sale (design spec docs/design/vendor-refunds-s7.md §0.2).
+ */
+export function vendorRefundsOn() {
+  return vendorWalkInSalesOn() && vendorToolsFlag('VENDOR_REFUNDS');
 }
 
 /**

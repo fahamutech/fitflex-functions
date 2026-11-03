@@ -25,7 +25,7 @@ async function pdfkit() {
 }
 /** The pdfkit class, loaded lazily (shared with the S6 report PDF); throws code pdf_unavailable. */
 export const pdfkitClass = () => pdfkit();
-import { label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf } from './vendor-documents.mjs';
+import { label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf, creditNoteForLine, creditNoteSettlement } from './vendor-documents.mjs';
 
 const MM = 72 / 25.4;
 const GREEN = '#1F7A3A';
@@ -79,7 +79,8 @@ function renderA4(doc, d, lang, root) {
   doc.font('Helvetica-Bold').fontSize(18).fillColor(BLACK);
   P(heading, { x: left + width / 2 + 8, y: top, width: half, align: 'right' }, 'H1');
   doc.font('Helvetica').fontSize(10).fillColor(GREY);
-  for (const t of [d.saleRef && label(lang, 'saleRef', { number: d.saleRef }), d.orderShortRef && label(lang, 'orderRef', { ref: d.orderShortRef })]) {
+  const credit = d.docType === 'credit_note';
+  for (const t of [credit ? creditNoteForLine(d, lang) : d.saleRef && label(lang, 'saleRef', { number: d.saleRef }), d.orderShortRef && label(lang, 'orderRef', { ref: d.orderShortRef })]) {
     if (t) P(t, { x: left + width / 2 + 8, width: half, align: 'right' });
   }
   if (d.status) { doc.font('Helvetica-Bold').fillColor(d.status === 'cancelled' ? '#B91C1C' : BLACK); P(label(lang, statusKeyOf(d)), { x: left + width / 2 + 8, width: half, align: 'right' }); }
@@ -95,6 +96,7 @@ function renderA4(doc, d, lang, root) {
   if (d.dueDate) P(label(lang, 'dueBy', { date: formatDay(d.dueDate, lang) }));
   if (d.servedBy?.firstName) P(label(lang, 'servedBy', { name: d.servedBy.firstName }));
   if (d.paymentMethod) P(label(lang, 'paidBy', { method: methodLabel(lang, d.paymentMethod) }));
+  if (credit && d.saleRef?.soldAt) P(label(lang, 'saleDate', { date: formatDay(d.saleRef.soldAt, lang) }));
   doc.y += 6;
 
   if (d.status === 'cancelled') {
@@ -157,7 +159,21 @@ function renderA4(doc, d, lang, root) {
     doc.font('Helvetica').fontSize(10);
   };
 
-  if (d.lines?.length) {
+  if (credit) {
+    // S7 §6.1: returned items, refund total, VAT summary, then how it was settled. No restock flags or reasons.
+    heading2(label(lang, 'returnedItems'));
+    const hasVat = d.lines.some(l => l.vatCode);
+    table([
+      { title: label(lang, 'qty'), width: 40, align: 'right' },
+      { title: label(lang, 'item'), width: width - 40 - 95 - (hasVat ? 34 : 0) },
+      { title: label(lang, 'amount'), width: 95, align: 'right' },
+      ...(hasVat ? [{ title: label(lang, 'vat'), width: 34 }] : []),
+    ], d.lines.map(l => [l.qty, lineName(l), money(l.amountTzs), ...(hasVat ? [l.vatCode || ''] : [])]));
+    pair(label(lang, 'refundTotal'), money(d.totalTzs), { bold: true });
+    if (d.vatSummary?.length) pair(label(lang, 'includesVat', { amount: money(d.vatIncludedTzs) }), '');
+  }
+
+  if (!credit && d.lines?.length) {
     const hasVat = d.lines.some(l => l.vatCode);
     const fixed = [40, 80, 70, 85, ...(hasVat ? [34] : [])];
     const cols = [
@@ -171,7 +187,7 @@ function renderA4(doc, d, lang, root) {
     table(cols, d.lines.map(l => [lineName(l), l.qty, money(l.unitPriceTzs), l.discountTzs ? minusMoney(l.discountTzs) : '', money(l.amountTzs), ...(hasVat ? [l.vatCode || ''] : [])]));
   }
 
-  if (!['statement', 'payment_receipt'].includes(d.docType)) {
+  if (!['statement', 'payment_receipt', 'credit_note'].includes(d.docType)) {
     pair(label(lang, 'subtotal'), money(d.subtotalTzs));
     if (d.discountsTzs > 0) pair(label(lang, 'discounts'), minusMoney(d.discountsTzs));
     pair(label(lang, 'total'), money(d.totalTzs), { bold: true });
@@ -212,6 +228,17 @@ function renderA4(doc, d, lang, root) {
     }
   }
 
+  if (credit) {
+    doc.y += 4;
+    for (const t of creditNoteSettlement(d, lang)) P(t);
+  }
+  // S7 §6.3: the sale's active credit notes and the total after them.
+  if (d.refunds?.length) {
+    heading2(label(lang, 'refundsOnSale'));
+    for (const r of d.refunds) pair(`${r.number} · ${formatDay(r.refundedAt, lang)}`, minusMoney(r.amountTzs));
+    pair(label(lang, 'totalAfterRefunds'), money(d.totalAfterRefundsTzs), { bold: true });
+  }
+
   if (d.docType === 'statement') {
     const st = d.statement;
     heading2(label(lang, 'openSales'));
@@ -234,6 +261,7 @@ function renderA4(doc, d, lang, root) {
   doc.y += 10;
   doc.font('Helvetica').fontSize(9).fillColor(GREY);
   if (['receipt', 'payment_receipt'].includes(d.docType) && d.status !== 'cancelled') P(label(lang, 'receivedBy', { business }));
+  if (credit) P(label(lang, 'refundGivenBy', { business }));
   P(label(lang, 'copyNote', { business }));
 }
 
@@ -288,7 +316,9 @@ function render80(doc, d, lang, root) {
   for (const t of [d.seller?.address, d.seller?.contactNumber, d.seller?.tin && label(lang, 'tin', { tin: d.seller.tin }), d.seller?.vrn && label(lang, 'vrn', { vrn: d.seller.vrn }), d.soldVia]) if (t) P(t, { align: 'center' });
   rule();
   P(d.number ? `${titleOf(d, lang)} ${d.number}` : titleOf(d, lang), { bold: true, size: 9 }, 'H1');
-  if (d.saleRef) P(label(lang, 'saleRef', { number: d.saleRef }));
+  const credit = d.docType === 'credit_note';
+  if (credit) P(creditNoteForLine(d, lang));
+  else if (d.saleRef) P(label(lang, 'saleRef', { number: d.saleRef }));
   if (d.orderShortRef) P(label(lang, 'orderRef', { ref: d.orderShortRef }));
   if (d.status) P(label(lang, statusKeyOf(d)), { bold: true });
   if (d.status === 'cancelled') P(cancelledBanner(d, lang), { bold: true });
@@ -297,14 +327,21 @@ function render80(doc, d, lang, root) {
   if (d.dueDate) P(label(lang, 'dueBy', { date: formatDay(d.dueDate, lang) }));
   if (d.servedBy?.firstName) P(label(lang, 'servedBy', { name: d.servedBy.firstName }));
   if (d.paymentMethod) P(label(lang, 'paidBy', { method: methodLabel(lang, d.paymentMethod) }));
-  if (d.lines?.length) {
+  if (credit && d.saleRef?.soldAt) P(label(lang, 'saleDate', { date: formatDay(d.saleRef.soldAt, lang) }));
+  if (credit) {
+    rule();
+    P(label(lang, 'returnedItems'), { bold: true });
+    for (const l of d.lines) pair(`${l.qty} x ${lineName(l)}`, `${amountOnly(l.amountTzs)}${l.vatCode ? ` ${l.vatCode}` : ''}`);
+    rule();
+    pair(label(lang, 'refundTotal'), money(d.totalTzs), { bold: true });
+  } else if (d.lines?.length) {
     rule();
     for (const l of d.lines) {
       P(lineName(l));
       pair(`${l.qty} x ${amountOnly(l.unitPriceTzs)}${l.discountTzs ? ` ${minusMoney(l.discountTzs)}` : ''}`, `${amountOnly(l.amountTzs)}${l.vatCode ? ` ${l.vatCode}` : ''}`);
     }
   }
-  if (!['statement', 'payment_receipt'].includes(d.docType)) {
+  if (!['statement', 'payment_receipt', 'credit_note'].includes(d.docType)) {
     rule();
     pair(label(lang, 'subtotal'), money(d.subtotalTzs));
     if (d.discountsTzs > 0) pair(label(lang, 'discounts'), minusMoney(d.discountsTzs));
@@ -329,6 +366,16 @@ function render80(doc, d, lang, root) {
       if (d.stillOwedTzs != null) pair(label(lang, 'stillOwed'), money(d.stillOwedTzs), { bold: true });
     }
   }
+  if (credit) {
+    rule();
+    for (const t of creditNoteSettlement(d, lang)) P(t);
+  }
+  if (d.refunds?.length) {
+    rule();
+    P(label(lang, 'refundsOnSale'), { bold: true });
+    for (const r of d.refunds) pair(`${r.number} ${formatDay(r.refundedAt, lang)}`, minusMoney(r.amountTzs));
+    pair(label(lang, 'totalAfterRefunds'), money(d.totalAfterRefundsTzs), { bold: true });
+  }
   if (d.docType === 'statement') {
     rule();
     P(label(lang, 'openSales'), { bold: true });
@@ -339,6 +386,7 @@ function render80(doc, d, lang, root) {
   }
   rule();
   if (['receipt', 'payment_receipt'].includes(d.docType) && d.status !== 'cancelled') P(label(lang, 'receivedBy', { business }), { align: 'center' });
+  if (credit) P(label(lang, 'refundGivenBy', { business }), { align: 'center' });
   P(label(lang, 'notFiscal'), { align: 'center', bold: true });
   P(label(lang, 'copyNote', { business }), { align: 'center', color: GREY });
 }

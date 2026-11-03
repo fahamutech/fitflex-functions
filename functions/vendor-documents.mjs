@@ -7,7 +7,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { shopService, vendorDocumentService, users } from '../src/bootstrap/services.mjs';
-import { vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
+import { vendorDocumentsOn, vendorRefundsOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 import { langOf, PAPERS, pdfFileName, validToken } from '../src/shared/vendor-documents.mjs';
@@ -63,13 +63,13 @@ const FLAG = 'VENDOR_TOOLS + VENDOR_DOCUMENTS; off → 404 feature_disabled';
 const STAFF = 'Staff of a suspended vendor → 403 vendor_suspended; staff without the document\'s permission → 403 vendor_permission_forbidden { requiredPermission, acceptedPermissions }.';
 const SHARE = `→ 201 { linkId, url ({PUBLIC_API_URL}/d/{token}; 22-character token, shown ONCE — only its hash is stored, so it can never be listed again; "?lang=sw" when lang is sw), lang, docType, docId, number|null, texts: { en: { whatsapp, sms }, sw: { whatsapp, sms } } (ready to send; SMS ≤ 160 GSM-7 characters), whatsappText, smsText (in lang) }. Body { lang?: en|sw (default en: the page's default language) }. 503 public_url_not_configured (PUBLIC_API_URL not set on the server: offer text sharing), 409 document_cancelled (voided: links already sent keep working and show Cancelled; no new ones), 400 invalid_lang, 429 rate_limited { retryAfterSeconds } (more than 60 links a minute for the vendor). ${STAFF}`;
 
-function shareRoute(path, kind, { idParam = 'id', description, customerParam = null }) {
+function shareRoute(path, kind, { idParam = 'id', description, customerParam = null, alsoOn = null, flagText = FLAG }) {
   return {
-    created, method: 'post', path, description: `Vendor / staff (${FLAG}): make a share link for ${description}. ${SHARE}`,
+    created, method: 'post', path, description: `Vendor / staff (${flagText}): make a share link for ${description}. ${SHARE}`,
     requestSample: { lang: 'sw' },
     onGuard: guards('post'),
     onRequest: async (req, res) => {
-      if (!vendorDocumentsOn()) return disabled(res);
+      if (!vendorDocumentsOn() || (alsoOn && !alsoOn())) return disabled(res);
       if (limitOrNull(shareLimiter, vendorOf(req.user), res)) return;
       const result = await vendorDocumentService.share({
         vendorId: vendorOf(req.user), actorId: req.user.sub, access: req.vendorAccess, kind, id: req.params[idParam],
@@ -91,13 +91,18 @@ export const vendorShareOrder = shareRoute('/vendor/orders/:id/share', 'order', 
 export const vendorSharePayment = shareRoute('/vendor/customers/:id/payments/:paymentId/share', 'payment', {
   idParam: 'paymentId', customerParam: 'id', description: 'a customer payment receipt (PMT-…; needs `customers`). 404 payment_not_found (unknown, another customer\'s or another vendor\'s)',
 });
+// S7: a refund's credit note. Needs the documents flags AND the refunds flags (VENDOR_WALKIN_SALES + VENDOR_REFUNDS).
+export const vendorShareRefund = shareRoute('/vendor/refunds/:id/share', 'refund', {
+  alsoOn: vendorRefundsOn, flagText: 'VENDOR_TOOLS + VENDOR_DOCUMENTS + VENDOR_WALKIN_SALES + VENDOR_REFUNDS; any off → 404 feature_disabled',
+  description: 'a refund on a walk-in sale: its credit note (CN-…; needs `sales`). An undone refund → 409 document_cancelled (links already sent keep working and show Cancelled). 404 refund_not_found',
+});
 export const vendorShareStatement = shareRoute('/vendor/customers/:id/statement/share', 'statement', {
   description: 'a customer statement (needs `customers`). The link shows the statement FROZEN as of now (Q-9): open pay-later sales, payments of the last 90 days, total owed, aging. A later payment never changes it — share again for new figures. 404 customer_not_found',
 });
 
 export const vendorDocumentLinks = {
   created, method: 'get', path: '/vendor/document-links',
-  description: `Vendor / staff (${FLAG}): the links made for one document, oldest first. Query docType = sale (receipt and invoice) | receipt | invoice | payment | payment_receipt | statement | order | order_invoice, docId (the sale, payment, customer or order id). → { links: [{ id, n (Link 1, 2, …), docType, docId, lang, createdAt, createdBy { id, firstName|null }, lastOpenedAt|null, revokedAt|null, active }], activeCount }. Never the URL (only its hash exists). 400 invalid_doc_type | invalid_field { field: docId }. ${STAFF}`,
+  description: `Vendor / staff (${FLAG}): the links made for one document, oldest first. Query docType = sale (receipt and invoice) | receipt | invoice | payment | payment_receipt | statement | order | order_invoice | refund | credit_note (S7), docId (the sale, payment, customer, order or refund id). → { links: [{ id, n (Link 1, 2, …), docType, docId, lang, createdAt, createdBy { id, firstName|null }, lastOpenedAt|null, revokedAt|null, active }], activeCount }. Never the URL (only its hash exists). 400 invalid_doc_type | invalid_field { field: docId }. ${STAFF}`,
   onGuard: guards('get'),
   onRequest: async (req, res) => {
     if (!vendorDocumentsOn()) return disabled(res);
@@ -132,11 +137,11 @@ export const vendorRevokeDocumentLink = {
   },
 };
 
-const DOC_SHAPE = '{ docType: receipt|invoice|payment_receipt|statement|order_invoice, number|null (statement), saleRef? (R- of a credit invoice), orderShortRef? (order invoice), status: paid|pay_later|paid_in_full|cancelled|null, issuedAt, lang, seller { businessName, logoUrl|null, address|null, contactNumber|null, tin? , vrn? (only when VAT applied to this document: VRN verified) }, soldVia? (order invoice: "Seller: {business}. Sold through the FitFlex app."), customer? { name } (walk-in: the name the vendor entered; app buyer: display name only), servedBy? { firstName }, dueDate? (credit), lines: [{ name, variant|null, qty, unitPriceTzs, discountTzs, amountTzs, vatCode? }], subtotalTzs, discountsTzs, totalTzs, vatIncludedTzs (VAT contained in the prices; 0 when none), vatSummary: [{ code, ratePct|null (exempt), netTzs, vatTzs }], payments: [{ method, reference?, amountTzs }], changeTzs, paidNowTzs? + liveStatus? { asOf, balanceTzs, paidInFullAt?, paidWith: [PMT-…] } (credit invoice, live), paidTowards? [{ number, amountTzs }] + stillOwedTzs? (payment receipt: on those sales, now), receivedOn? (payment receipt), paymentMethod? (order invoice; never its reference), statement? { asOf, openSales: [{ number, soldAt, dueDate, totalTzs, balanceTzs, daysOverdue }], recentPayments: [{ number, receivedOn, method, amountTzs }], totalOwedTzs, aging { current, d1_30, d31_60, d61_90, d90plus } }, cancelledAt? }. Never: customer phone, email or address, buyer user id, cost, commission, payout, internal note, void reason, staff surname.';
+const DOC_SHAPE = '{ docType: receipt|invoice|payment_receipt|statement|order_invoice|credit_note, number|null (statement), saleRef? (R- of a credit invoice; for a credit_note an object { number (R-…), invoiceNumber? (INV-… of a pay-later sale), soldAt }), orderShortRef? (order invoice), status: paid|pay_later|paid_in_full|cancelled|refunded (S7: fully refunded)|settled_by_credit_note (S7: pay-later sale whose balance a refund cleared)|null, issuedAt, lang, seller { businessName, logoUrl|null, address|null, contactNumber|null, tin? , vrn? (only when VAT applied to this document: VRN verified) }, soldVia? (order invoice: "Seller: {business}. Sold through the FitFlex app."), customer? { name } (walk-in: the name the vendor entered; app buyer: display name only), servedBy? { firstName }, dueDate? (credit), lines: [{ name, variant|null, qty, unitPriceTzs, discountTzs, amountTzs, vatCode? }], subtotalTzs, discountsTzs, totalTzs, vatIncludedTzs (VAT contained in the prices; 0 when none), vatSummary: [{ code, ratePct|null (exempt), netTzs, vatTzs }], payments: [{ method, reference?, amountTzs }], changeTzs, paidNowTzs? + liveStatus? { asOf, balanceTzs, paidInFullAt?, paidWith: [PMT-…] } (credit invoice, live), paidTowards? [{ number, amountTzs }] + stillOwedTzs? (payment receipt: on those sales, now), receivedOn? (payment receipt), paymentMethod? (order invoice; never its reference), statement? { asOf, openSales: [{ number, soldAt, dueDate, totalTzs, balanceTzs, daysOverdue }], recentPayments: [{ number, receivedOn, method, amountTzs }], totalOwedTzs, aging { current, d1_30, d31_60, d61_90, d90plus } }, refunds? [{ number (CN-…), refundedAt, amountTzs }] + totalAfterRefundsTzs? (S7: a receipt / invoice with active credit notes), cancelledAt? }. S7 credit_note: { docType: credit_note, number (CN-…), saleRef { number, invoiceNumber?, soldAt }, status: issued|cancelled (undone), issuedAt, lang, seller, customer? { name }, servedBy? { firstName }, lines: [{ name, variant|null, qty, amountTzs, vatCode? }], totalTzs (refund total), vatIncludedTzs, vatSummary, balanceReducedTzs, paidOut { method, reference?, amountTzs }|null, cancelledAt? }. Never: customer phone, email or address, buyer user id, cost, commission, payout, internal note, void reason, staff surname.';
 
 export const vendorDocumentView = {
   created, method: 'get', path: '/vendor/documents/:docType/:docId',
-  description: `Vendor / staff (${FLAG}): one document, for the in-app view, the portal (format=html inside a sandboxed iframe) and "Send PDF" — no link is made. :docType = sale | receipt | invoice | payment | payment_receipt | statement | order | order_invoice; :docId = the sale, payment, customer (statement: LIVE, as of now) or order id. Query format = json (default) → { doc: ${DOC_SHAPE} } | html (text/html, no script) | pdf (application/pdf; Content-Disposition attachment; filename {number}_{business}.pdf, statement_{initials}_{date}.pdf), lang = en (default) | sw, paper = a4 (default) | 80mm (receipt printer). 404 sale_not_found | payment_not_found | customer_not_found | order_not_found, 409 invoice_not_ready (order not paid), 400 invalid_doc_type | invalid_format | invalid_paper, 503 pdf_unavailable (format=pdf while the PDF library cannot be loaded). ${STAFF}`,
+  description: `Vendor / staff (${FLAG}): one document, for the in-app view, the portal (format=html inside a sandboxed iframe) and "Send PDF" — no link is made. :docType = sale | receipt | invoice | payment | payment_receipt | statement | order | order_invoice | refund | credit_note (S7; needs \`sales\`); :docId = the sale, payment, customer (statement: LIVE, as of now), order or refund id (refund / credit_note also need VENDOR_WALKIN_SALES, else 404 feature_disabled; not VENDOR_REFUNDS, so notes already issued keep opening). Query format = json (default) → { doc: ${DOC_SHAPE} } | html (text/html, no script) | pdf (application/pdf; Content-Disposition attachment; filename {number}_{business}.pdf, statement_{initials}_{date}.pdf), lang = en (default) | sw, paper = a4 (default) | 80mm (receipt printer). 404 sale_not_found | payment_not_found | customer_not_found | order_not_found | refund_not_found, 409 invoice_not_ready (order not paid), 400 invalid_doc_type | invalid_format | invalid_paper, 503 pdf_unavailable (format=pdf while the PDF library cannot be loaded). ${STAFF}`,
   onGuard: guards('get'),
   onRequest: async (req, res) => {
     if (!vendorDocumentsOn()) return disabled(res);

@@ -321,6 +321,34 @@ export function createPartnerNotifier({
         data: { count: String(n), totalTzs: String(Number(d.totalTzs || 0)), open: 'customers', view: 'owed', titleSw: sw.title, bodySw: sw.body },
       };
     },
+    // Vendor tools · S7 (design spec §2.10, §8.8): a staff member refunded part of a walk-in sale, or undid a refund.
+    // To the vendor account only, never the customer. Opens /vendor/refunds/:refundId. Swahili is a DRAFT.
+    vendor_sale_refunded: (d, locale) => {
+      const who = d.createdByName || null;
+      const amount = tzs(Number(d.amountTzs || 0));
+      const en = { title: `Refund ${d.number} on sale ${d.saleNumber}`, body: `${who || 'A staff member'} refunded ${amount} on sale ${d.saleNumber}. Reason: ${d.reason || '-'}` };
+      const sw = { title: `Marejesho ${d.number} kwenye mauzo ${d.saleNumber}`, body: `${who || 'Mfanyakazi'} amefanya marejesho ya ${amount} kwenye mauzo ${d.saleNumber}. Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_sale_refunded',
+        title: text.title,
+        body: text.body,
+        data: { saleId: d.saleId ?? '', refundId: d.refundId ?? '', number: d.number ?? '', saleNumber: d.saleNumber ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
+    vendor_refund_reverted: (d, locale) => {
+      const who = d.revertedByName || null;
+      const amount = tzs(Number(d.amountTzs || 0));
+      const en = { title: `Refund ${d.number} undone`, body: `${who || 'A staff member'} undid refund ${d.number} (${amount}). Reason: ${d.reason || '-'}` };
+      const sw = { title: `Marejesho ${d.number} yametenduliwa`, body: `${who || 'Mfanyakazi'} ametendua marejesho ${d.number} (${amount}). Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_refund_reverted',
+        title: text.title,
+        body: text.body,
+        data: { saleId: d.saleId ?? '', refundId: d.refundId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
     // Vendor tools · S4: a staff member voided a customer payment (as vendor_sale_voided). Swahili is a DRAFT.
     vendor_customer_payment_voided: (d, locale) => {
       const who = d.voidedByName || null;
