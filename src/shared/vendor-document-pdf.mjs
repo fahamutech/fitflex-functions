@@ -25,6 +25,8 @@ async function pdfkit() {
 }
 /** The pdfkit class, loaded lazily (shared with the S6 report PDF); throws code pdf_unavailable. */
 export const pdfkitClass = () => pdfkit();
+// S7 UAT L-2: discounts and refunds print a real minus sign (U+2212) through the Symbol font, as the S6 report PDF.
+import { textWithMinus, heightWithMinus } from './pdf-minus.mjs';
 import { label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf, creditNoteForLine, creditNoteSettlement } from './vendor-documents.mjs';
 
 const MM = 72 / 25.4;
@@ -62,7 +64,7 @@ function renderA4(doc, d, lang, root) {
   const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
   const bottom = () => doc.page.height - doc.page.margins.bottom - 28; // room for the footer
   const ensure = (h) => { if (doc.y + h > bottom()) { doc.addPage(); return true; } return false; };
-  const P = (text, opts = {}, type = 'P') => root.add(doc.struct(type, () => { doc.text(text, opts.x ?? left, opts.y, { width: opts.width ?? width, align: opts.align, lineBreak: opts.lineBreak }); }));
+  const P = (text, opts = {}, type = 'P') => root.add(doc.struct(type, () => { textWithMinus(doc, text, opts.x ?? left, opts.y, { width: opts.width ?? width, align: opts.align, lineBreak: opts.lineBreak }); }));
   const business = d.seller?.businessName || '';
 
   // Header: seller on the left, title on the right.
@@ -101,7 +103,7 @@ function renderA4(doc, d, lang, root) {
 
   if (d.status === 'cancelled') {
     const text = cancelledBanner(d, lang);
-    const h = doc.heightOfString(text, { width: width - 16 }) + 12;
+    const h = heightWithMinus(doc, text, { width: width - 16 }) + 12;
     ensure(h);
     doc.save().rect(left, doc.y, width, h).lineWidth(1.5).strokeColor('#B91C1C').stroke().restore();
     const y0 = doc.y;
@@ -119,7 +121,7 @@ function renderA4(doc, d, lang, root) {
       const y = doc.y;
       let x = left;
       for (const c of columns) {
-        root.add(doc.struct('TH', () => doc.text(c.title, x + 2, y, { width: c.width - 4, align: c.align || 'left', lineBreak: false })));
+        root.add(doc.struct('TH', () => textWithMinus(doc, c.title, x + 2, y, { width: c.width - 4, align: c.align || 'left', lineBreak: false })));
         x += c.width;
       }
       doc.y = y + 14;
@@ -128,12 +130,12 @@ function renderA4(doc, d, lang, root) {
     drawHeader();
     doc.font('Helvetica').fontSize(10).fillColor(BLACK);
     for (const row of rows) {
-      const h = Math.max(...columns.map((c, i) => doc.heightOfString(String(row[i] ?? ''), { width: c.width - 4 }))) + 6;
+      const h = Math.max(...columns.map((c, i) => heightWithMinus(doc, String(row[i] ?? ''), { width: c.width - 4 }))) + 6;
       if (ensure(h)) { drawHeader(); doc.font('Helvetica').fontSize(10).fillColor(BLACK); }
       const y = doc.y;
       let x = left;
       columns.forEach((c, i) => {
-        root.add(doc.struct('TD', () => doc.text(String(row[i] ?? ''), x + 2, y + 2, { width: c.width - 4, align: c.align || 'left' })));
+        root.add(doc.struct('TD', () => textWithMinus(doc, String(row[i] ?? ''), x + 2, y + 2, { width: c.width - 4, align: c.align || 'left' })));
         x += c.width;
       });
       doc.y = y + h;
@@ -147,12 +149,12 @@ function renderA4(doc, d, lang, root) {
   const pair = (a, b, { bold = false } = {}) => {
     doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 12 : 10).fillColor(BLACK);
     const { labelX, labelW, amountX, amountW } = PAIR_COLUMNS(left, width);
-    const h = Math.max(doc.heightOfString(a || ' ', { width: labelW }), b ? doc.heightOfString(b, { width: amountW }) : 0);
+    const h = Math.max(heightWithMinus(doc, a || ' ', { width: labelW }), b ? heightWithMinus(doc, b, { width: amountW }) : 0);
     ensure(h + 3);
     const y = doc.y;
     root.add(doc.struct('P', () => {
-      doc.text(a, labelX, y, { width: labelW });
-      if (b) doc.text(b, amountX, y, { width: amountW, align: 'right' });
+      textWithMinus(doc, a, labelX, y, { width: labelW });
+      if (b) textWithMinus(doc, b, amountX, y, { width: amountW, align: 'right' });
     }));
     doc.y = y + h + (bold ? 5 : 3);
     doc.x = left;
@@ -214,7 +216,7 @@ function renderA4(doc, d, lang, root) {
         ls.paidInFullAt ? label(lang, 'paidInFull', { date: formatDay(ls.paidInFullAt, lang) }) : `${label(lang, 'balanceDue')}: ${money(ls.balanceTzs)}`,
         ...(ls.paidWith?.length ? [label(lang, 'paidWith', { numbers: ls.paidWith.join(', ') })] : [])];
       const text = lines.join('\n');
-      const h = doc.heightOfString(text, { width: width - 16 }) + 12;
+      const h = heightWithMinus(doc, text, { width: width - 16 }) + 12;
       ensure(h + 4);
       const y0 = doc.y + 4;
       doc.save().rect(left, y0, width, h).lineWidth(0.75).strokeColor('#9CA3AF').stroke().restore();
@@ -277,7 +279,7 @@ function finishPages(doc, d, lang, { footer = true } = {}) {
       doc.save();
       doc.rotate(-35, { origin: [doc.page.width / 2, doc.page.height / 2] });
       doc.fillOpacity(0.12).fillColor('#B91C1C').font('Helvetica-Bold').fontSize(doc.page.width > 400 ? 44 : 16);
-      doc.text(watermarkOf(d), 0, doc.page.height / 2 - 20, { width: doc.page.width, align: 'center', lineBreak: false });
+      textWithMinus(doc, watermarkOf(d), 0, doc.page.height / 2 - 20, { width: doc.page.width, align: 'center', lineBreak: false });
       doc.restore();
     }
     if (footer) {
@@ -286,7 +288,7 @@ function finishPages(doc, d, lang, { footer = true } = {}) {
       const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
       doc.fillOpacity(1).font('Helvetica').fontSize(8).fillColor(GREY);
       const pageText = label(lang, 'pageOf', { n: i - range.start + 1, m: range.count });
-      doc.text(`${label(lang, 'notFiscal')} · ${d.number ? `${d.number} · ` : ''}${pageText}`, left, y, { width, align: 'center', lineBreak: false });
+      textWithMinus(doc, `${label(lang, 'notFiscal')} · ${d.number ? `${d.number} · ` : ''}${pageText}`, left, y, { width, align: 'center', lineBreak: false });
     }
     doc.endMarkedContent();
     doc.page.margins.bottom = savedBottom;
@@ -300,14 +302,14 @@ function render80(doc, d, lang, root) {
   const width = doc.page.width - left - doc.page.margins.right;
   const P = (text, { align = 'left', bold = false, size = 8, color = BLACK } = {}, type = 'P') => {
     doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size).fillColor(color);
-    root.add(doc.struct(type, () => doc.text(text, left, doc.y, { width, align })));
+    root.add(doc.struct(type, () => textWithMinus(doc, text, left, doc.y, { width, align })));
   };
   const pair = (a, b, opts = {}) => {
     doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8).fillColor(BLACK);
     const y = doc.y;
-    root.add(doc.struct('P', () => { doc.text(a, left, y, { width: width * 0.6 }); }));
+    root.add(doc.struct('P', () => { textWithMinus(doc, a, left, y, { width: width * 0.6 }); }));
     const yEnd = doc.y;
-    root.add(doc.struct('P', () => { doc.text(b, left + width * 0.6, y, { width: width * 0.4, align: 'right' }); }));
+    root.add(doc.struct('P', () => { textWithMinus(doc, b, left + width * 0.6, y, { width: width * 0.4, align: 'right' }); }));
     doc.y = Math.max(yEnd, doc.y);
   };
   const rule = () => { doc.y += 2; doc.save().moveTo(left, doc.y).lineTo(left + width, doc.y).dash(1.5, { space: 1.5 }).lineWidth(0.5).strokeColor('#666').stroke().undash().restore(); doc.y += 3; };
