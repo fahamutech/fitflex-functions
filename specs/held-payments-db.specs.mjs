@@ -38,7 +38,7 @@ test('the held refund and its audit row are written together, once, and a null-s
 
   const out = await heldPaymentsService.raiseRefund({ paymentRequestId: reqId, body: { transactionId: `TX-${reqId}`, reasonCode: 'payment_error' }, actorId: null });
   assert.equal(out.error, undefined);
-  assert.equal(out.refund.status, 'approved');
+  assert.equal(out.refund.status, 'requested'); // held refunds are never policy-approved
   const row = await db('Refund').where({ id: out.refund.id }).first();
   assert.equal(row.subscriptionId, null);
   assert.equal(row.kind, 'subscription');
@@ -53,7 +53,9 @@ test('the held refund and its audit row are written together, once, and a null-s
   const resolved = (await heldPaymentsService.list({ status: 'resolved' })).items.find(i => i.paymentRequestId === reqId);
   assert.equal(resolved.refundId, out.refund.id);
 
-  // Paying it: no subscription to touch, no hook for this kind.
+  // Not payable until approved; then paying it: no subscription to touch, no hook for this kind.
+  assert.equal((await refundService.markPaid({ id: out.refund.id, body: { paymentReference: 'MPESA-HELD0' }, actorId: 'adm9' })).error, 'refund_not_approved');
+  assert.equal((await refundService.decide({ id: out.refund.id, body: { decision: 'approve' }, actorId: 'adm8' })).refund.status, 'approved');
   const paid = await refundService.markPaid({ id: out.refund.id, body: { paymentReference: 'MPESA-HELD1' }, actorId: 'adm9' });
   assert.equal(paid.refund.status, 'paid');
 });

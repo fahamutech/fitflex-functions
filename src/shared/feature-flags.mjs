@@ -640,7 +640,9 @@ export function webCheckinAlertsOn() {
  * "success" callback is confirmed with Selcom through an injectable client before a
  * subscription is activated; if the client cannot confirm (including "not configured",
  * the only implementation today) the callback is refused with 503 and the payment_id
- * is not consumed. Do not switch on until a real Selcom status client exists.
+ * is not consumed. Do not switch on until a real Selcom status client exists: createWebhookService
+ * refuses to be constructed (the backend does not boot) while this flag is on and the injected
+ * client is the not-configured one, so the flag cannot be enabled by mistake.
  */
 export function selcomWebhookServerConfirmOn() {
   return on('SELCOM_WEBHOOK_SERVER_CONFIRM');

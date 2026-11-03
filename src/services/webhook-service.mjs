@@ -16,6 +16,13 @@ export function createWebhookService({
   // Default fails closed ("not configured"); see integrations/payments/selcom-confirm.mjs.
   confirmClient = createNotConfiguredSelcomClient(),
 }) {
+  // Boot guard: the flag cannot be on without a real client. The only shipped client is
+  // "not configured" and always throws, so the flag would answer every genuine Selcom success
+  // with 503 and activate nothing. Refuse to start rather than run in that state.
+  if (selcomWebhookServerConfirmOn() && confirmClient?.configured === false) {
+    console.error('[webhook-service] SELCOM_WEBHOOK_SERVER_CONFIRM is on but no real Selcom confirm client is configured; refusing to start. Unset the flag.');
+    throw new Error('selcom_server_confirm_requires_client');
+  }
   /** Remember a payment_id; false when another delivery of it already got there. */
   async function claim(paymentId) {
     if (await webhookSeen.findAsync(w => w.id === paymentId)) return false;
