@@ -612,6 +612,48 @@ test('preview: read-only, problem rows first with a keyset cursor', async () => 
   assert.equal((await productsOf(v)).length, 0);
 });
 
+test('preview: applyState filter, combined with status, vendor-scoped, validated, keyset paging; failed rows rank after invalid', async () => {
+  importOn();
+  const v = await vendor();
+  const rows = ['ok1,1000,1', 'bad1,abc,1', 'ok2,1000,1', 'review,6000000,1', 'ok3,1000,1', 'ok4,1000,1'];
+  const up = must(await upload(as(v), 'products', csv('name,price_tzs,stock', rows)), 201).batch;
+  // rowNo: ok1=2 bad1=3 ok2=4 review=5 ok3=6 ok4=7. Failed: 2 and 6 (valid), 5 (needs_review); applied: 4; skipped: 3.
+  await db('VendorImportRow').where({ batchId: up.id }).whereIn('rowNo', [2, 5, 6]).update({ applyState: 'failed', lastError: JSON.stringify({ code: 'x' }) });
+  await db('VendorImportRow').where({ batchId: up.id, rowNo: 4 }).update({ applyState: 'applied' });
+  await db('VendorImportRow').where({ batchId: up.id, rowNo: 3 }).update({ applyState: 'skipped' });
+  const q = query => call(vendorImportPreview, as(v), { params: { id: up.id }, query });
+  const nos = out => out.rows.map(r => r.rowNo);
+  assert.deepEqual(nos(must(await q({}))), [3, 2, 5, 6, 4, 7], 'invalid, failed (any status, by row), valid');
+  assert.deepEqual(nos(must(await q({ applyState: 'failed' }))), [2, 5, 6], 'failed rows by row number');
+  assert.deepEqual(nos(must(await q({ applyState: 'applied' }))), [4]);
+  assert.deepEqual(nos(must(await q({ applyState: 'skipped' }))), [3]);
+  assert.deepEqual(nos(must(await q({ applyState: 'pending' }))), [7]);
+  assert.deepEqual(nos(must(await q({ applyState: 'failed', status: 'valid' }))), [2, 6], 'combined with status');
+  assert.deepEqual(nos(must(await q({ applyState: 'failed', status: 'invalid' }))), []);
+  // keyset paging across the filter and across the default order
+  const p1 = must(await q({ applyState: 'failed', limit: '2' }));
+  assert.equal(p1.rows.length, 2);
+  const p2 = must(await q({ applyState: 'failed', limit: '2', cursor: p1.nextCursor }));
+  assert.deepEqual([...nos(p1), ...nos(p2)], [2, 5, 6]);
+  assert.equal(p2.nextCursor, null);
+  const seen = [];
+  let cursor;
+  for (let i = 0; i < 6; i++) {
+    const pg = must(await q({ limit: '2', ...(cursor ? { cursor } : {}) }));
+    seen.push(...nos(pg));
+    cursor = pg.nextCursor;
+    if (!cursor) break;
+  }
+  assert.deepEqual(seen, [3, 2, 5, 6, 4, 7], 'default paging neither skips nor repeats');
+  const bad = await q({ applyState: 'bogus' });
+  assert.deepEqual([bad.status, bad.body.error], [400, 'invalid_apply_state']);
+  assert.ok(bad.body.message?.en && bad.body.message?.sw);
+  assert.equal((await q({ applyState: '' })).status, 200, 'empty means no filter');
+  const other = await vendor();
+  const hidden = await call(vendorImportPreview, as(other), { params: { id: up.id }, query: { applyState: 'failed' } });
+  assert.equal(hidden.status, 404, 'another vendor cannot see the batch through the filter');
+});
+
 // ── discard, errors, quotas, audit, minimisation ─────────────────────────────
 
 test('discard: before anything was applied only; after apply → 409 not_discardable; unmapped raw is dropped at the end', async () => {
