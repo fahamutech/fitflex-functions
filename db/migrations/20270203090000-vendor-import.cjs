@@ -2,8 +2,9 @@
 // Design: docs/design/vendor-import-v1.md (owner approved 2026-11-04). Additive and reversible.
 //
 // - VendorImportBatch: one uploaded CSV (entity products | inventory | profile). The file's bytes are never
-//   stored: only its sha256, which is unique per vendor while the batch is not discarded (the same file cannot
-//   be applied twice; discarding frees it).
+//   stored: only its sha256, which is unique per vendor while a batch is open (the same file cannot be
+//   in two open batches; once a batch ends (applied, partial, discarded) the same file may be uploaded again:
+//   its rows then meet the SKU / name checks against what the first import created).
 // - VendorImportRow: one data row: raw cells (unmapped columns are nulled when the batch ends), the checked
 //   values, issues, and what applying it did. vendorId is repeated on purpose: every query filters by it.
 // - Permission `import`: added to existing vendor staff with vendorRole admin (User.vendorPermissions, their
@@ -33,7 +34,10 @@ exports.up = async function up(knex) {
     table.text('status').notNullable();
     table.jsonb('counts').notNullable().defaultTo('{}');
     table.jsonb('mapping').notNullable().defaultTo('{}');
-    table.boolean('includeNeedsReview').notNullable().defaultTo(false);
+    // Decided by the FIRST apply and fixed for the batch's life (null until then).
+    table.boolean('includeNeedsReview');
+    // Who holds the apply right now: every write while applying must carry it, so a request that was taken over stops writing.
+    table.text('claimToken');
     table.timestamp('createdAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
     table.timestamp('updatedAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
     table.timestamp('applyStartedAt', { precision: 3 });
@@ -47,7 +51,7 @@ exports.up = async function up(knex) {
     ADD CONSTRAINT vendorimportbatch_filename_length CHECK (char_length(filename) <= 120),
     ADD CONSTRAINT vendorimportbatch_size_nonneg CHECK ("sizeBytes" >= 0)`);
   await knex.raw(`CREATE UNIQUE INDEX vendorimportbatch_vendor_sha_live
-    ON "VendorImportBatch" ("vendorId", "fileSha256") WHERE status <> 'discarded'`);
+    ON "VendorImportBatch" ("vendorId", "fileSha256") WHERE status IN ('mapping_required', 'ready', 'applying')`);
   await knex.raw('CREATE INDEX vendorimportbatch_vendor_created_desc_idx ON "VendorImportBatch" ("vendorId", "createdAt" DESC, id DESC)');
 
   await knex.schema.createTable('VendorImportRow', (table) => {

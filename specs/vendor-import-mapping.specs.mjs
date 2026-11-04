@@ -58,6 +58,11 @@ test('synonyms (English and Swahili) are matched but need a person to confirm a 
   assert.equal(needsConfirmation('products', cols.map(c => ({ ...c, confirmed: true }))), false);
   assert.deepEqual(by(suggestMapping('products', ['Product Name', 'Price (TZS)', 'Qty'])), { 'Product Name': 'name:synonym', 'Price (TZS)': 'price_tzs:synonym', Qty: 'stock:synonym' });
   assert.deepEqual(by(suggestMapping('inventory', ['code', 'counted'])), { code: 'sku:synonym', counted: 'quantity:synonym' });
+  // glossary: the Swahili template header for a variant is `chaguo`; stoki / hisa / stoo are accepted for stock; `jina` names a business
+  assert.deepEqual(by(suggestMapping('inventory', ['sku', 'idadi', 'chaguo'])), { sku: 'sku:exact', idadi: 'quantity:exact', chaguo: 'variant:exact' });
+  assert.equal(by(suggestMapping('inventory', ['sku', 'quantity', 'aina ndogo']))['aina ndogo'], 'variant:synonym');
+  for (const word of ['stoki', 'hisa', 'stoo']) assert.equal(by(suggestMapping('products', ['name', word]))[word], 'stock:synonym', word);
+  assert.equal(by(suggestMapping('profile', ['jina']))['jina'], 'businessName:synonym');
 });
 
 test('a synonym on a non-critical field does not stop the auto path; a fuzzy match always does', () => {

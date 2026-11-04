@@ -10,7 +10,7 @@ import { routeGuard } from '../src/shared/route-guard.mjs';
 import { createVendorLimiter } from '../src/shared/vendor-rate-limit.mjs';
 import { parseMultipartRequest } from '../src/infra/storage-client.mjs';
 import { IMPORT_LIMITS } from '../src/shared/vendor-import-rules.mjs';
-import { errorMessage } from '../src/shared/vendor-import-messages.mjs';
+import { errorMessage, reasonMessage } from '../src/shared/vendor-import-messages.mjs';
 
 const created = new Date().toISOString();
 
@@ -54,7 +54,9 @@ function send(res, result) {
   const body = { error, ...extra, ...(error === 'duplicate_file' ? { status: batchStatus } : batchStatus ? { batchStatus } : {}) };
   const message = errorMessage(error, extra);
   if (message) body.message = message;
-  if (error === 'rate_limited' && extra.retryAfterSeconds) setHeader(res, 'Retry-After', String(extra.retryAfterSeconds));
+  const why = reasonMessage(extra.reason ?? extra.hint, extra);
+  if (why) body.reasonMessage = why;
+  if (['rate_limited', 'import_busy'].includes(error) && extra.retryAfterSeconds) setHeader(res, 'Retry-After', String(extra.retryAfterSeconds));
   return res.status(status).json(body);
 }
 /** 429 rate_limited with English and Swahili text. */
@@ -63,6 +65,12 @@ function limited(limiter, vendorId, res) {
   if (allowed.ok) return false;
   send(res, { error: 'rate_limited', status: 429, retryAfterSeconds: allowed.retryAfterSeconds });
   return true;
+}
+/** Aborts when the client goes away before the answer is sent, so a queued apply leaves the queue. */
+function abortOnClose(res) {
+  const controller = new AbortController();
+  res.on?.('close', () => { if (!res.writableFinished) controller.abort(); });
+  return controller.signal;
 }
 const sendFile = (res, body, type, fileName, extraHeaders = {}) => {
   setHeader(res, 'Content-Type', type);
@@ -97,7 +105,7 @@ export const vendorImportDownloadTemplate = {
 
 export const vendorImportUpload = {
   created, method: 'post', path: '/vendor/imports',
-  description: `${COMMON} Upload a CSV: multipart/form-data with fields entity (products|inventory|profile) and file (one file, .csv, UTF-8; max ${IMPORT_LIMITS.maxBytes} bytes and ${IMPORT_LIMITS.maxRows} data rows, ${IMPORT_LIMITS.maxColumns} columns, ${IMPORT_LIMITS.maxCellChars} characters a cell). The file is parsed, its columns matched to fields (exact, synonym in English or Swahili, fuzzy) and, when every critical column is an exact header match (products: name, price_tzs, stock; inventory: sku, quantity) and none is fuzzy, every row is checked at once → status ready; otherwise status mapping_required (rows are checked after PUT /vendor/imports/:id/mapping). Nothing is created yet. The file's bytes are not stored (only a sha256). → 201 { batch } ${BATCH}. Errors: 400 invalid_entity | no_file_provided | invalid_multipart | invalid_csv { reason } | empty_file | header_invalid { reason: empty_name|duplicate_name } | too_many_columns { maxColumns } | cell_too_long { maxCellChars } | invalid_encoding (not UTF-8) | profile_single_row (profile files have exactly one data row); 413 file_too_large { maxBytes } | too_many_rows { maxRows }; 415 unsupported_file_type { hint: xlsx_not_supported_yet|binary_or_utf16 }; 409 duplicate_file { batchId, createdAt, status } (the same bytes were uploaded before and not discarded); 429 import_quota { reason: daily|open, max } (20 batches per vendor per EAT day, 3 not finished). 429 rate_limited (10 uploads a minute). A file that cannot be read creates no batch.`,
+  description: `${COMMON} Upload a CSV: multipart/form-data with fields entity (products|inventory|profile) and file (one file, .csv, UTF-8; max ${IMPORT_LIMITS.maxBytes} bytes and ${IMPORT_LIMITS.maxRows} data rows, ${IMPORT_LIMITS.maxColumns} columns, ${IMPORT_LIMITS.maxCellChars} characters a cell). The file is parsed, its columns matched to fields (exact, synonym in English or Swahili, fuzzy) and, when every critical column is an exact header match (products: name, price_tzs, stock; inventory: sku, quantity) and none is fuzzy, every row is checked at once → status ready; otherwise status mapping_required (rows are checked after PUT /vendor/imports/:id/mapping). Nothing is created yet. The file's bytes are not stored (only a sha256). → 201 { batch } ${BATCH}. Errors: 400 invalid_entity | no_file_provided | invalid_multipart | invalid_csv { reason } | empty_file | header_invalid { reason: empty_name|duplicate_name } | too_many_columns { maxColumns } | cell_too_long { maxCellChars } | invalid_encoding (not UTF-8) | profile_single_row (profile files have exactly one data row); 413 file_too_large { maxBytes } | too_many_rows { maxRows }; 415 unsupported_file_type { hint: xlsx_not_supported_yet|binary_or_utf16 }; 409 duplicate_file { batchId, createdAt, status } (the same bytes are in a batch that is still open: mapping_required, ready or applying; after it is applied, partial or discarded the file may be uploaded again); 429 import_quota { reason: daily|open, max } (20 batches per vendor per EAT day, 3 not finished). 429 rate_limited (10 uploads a minute). A file that cannot be read creates no batch.`,
   onGuard: guards('post'),
   onRequest: async (req, res) => {
     if (!vendorImportOn()) return disabled(res);
@@ -149,7 +157,7 @@ export const vendorImportGet = {
 
 export const vendorImportMapping = {
   created, method: 'put', path: '/vendor/imports/:id/mapping',
-  description: `${COMMON} Choose which file column feeds which field, then every row is checked again. Body { mapping: { "<source header>": "<field>"|null, … } (columns left out keep their match), confirm: true }. Only while status is mapping_required or ready (else 409 batch_not_editable). A critical column (products: name, price_tzs, stock; inventory: sku, quantity) that is not an exact header match, and any fuzzy match, needs confirm:true → else 409 mapping_confirmation_required { columns }. Required before rows can be checked: products name + price_tzs, inventory sku + quantity, profile at least one field → else 400 critical_field_unmapped { fields }. Never importable: payout account, logo, banner, commission, areas (profile). 400 invalid_mapping { source, reason: unknown_column|unknown_field } | duplicate_mapping { field }. → { batch ${BATCH} } with status ready.`,
+  description: `${COMMON} Choose which file column feeds which field, then every row is checked again. Body { mapping: { "<source header>": "<field>"|null, … } (columns left out keep their match), confirm: true }. Only while status is mapping_required or ready AND no row was applied or failed yet (else 409 batch_not_editable). A critical column (products: name, price_tzs, stock; inventory: sku, quantity) that is not an exact header match, and any fuzzy match, needs confirm:true → else 409 mapping_confirmation_required { columns }. Required before rows can be checked: products name + price_tzs, inventory sku + quantity, profile at least one field → else 400 critical_field_unmapped { fields }. Never importable: payout account, logo, banner, commission, areas (profile). 400 invalid_mapping { source, reason: unknown_column|unknown_field } | duplicate_mapping { field }. → { batch ${BATCH} } with status ready.`,
   requestSample: { mapping: { Bidhaa: 'name', 'Bei ya kuuza': 'price_tzs', Idadi: 'stock', Notes: null }, confirm: true },
   onGuard: guards('put'),
   onRequest: async (req, res) => {
@@ -178,14 +186,14 @@ export const vendorImportPreview = {
 
 export const vendorImportApply = {
   created, method: 'post', path: '/vendor/imports/:id/apply',
-  description: `${COMMON} Create the products / apply the counts / fill the profile. Body { includeNeedsReview: false }. Only status ready (else 409 not_ready { batchStatus }); one request at a time per batch (409 apply_in_progress). Each call works up to 200 rows (50 at a time, each through the normal service call) and answers { batch ${BATCH}, processed, remaining }; the client repeats the call while remaining > 0 (send the same includeNeedsReview each time) until batch.status is applied or partial (partial = some rows failed or were not applied). Only valid rows are applied; with includeNeedsReview also needs_review rows (an unknown category is left empty); invalid rows never. products: created PAUSED with approvalStatus pending (FitFlex review rules stay in force; the vendor restores the product to publish it); stock becomes a \`count\` stock-history row noted import:<batchId> (when the stock ledger is on); cost price only for callers who may see cost; no variants, no images; an applied row is never created twice (a retry finds it). inventory: each row sets the stock of the product with that SKU as a \`count\` adjustment (expected stock = the stock when the file was checked; changed since → that row fails stock_changed and can be retried). profile: fills only empty fields; never publishes; never touches payout account, logo, banner, commission or areas.`,
+  description: `${COMMON} Create the products / apply the counts / fill the profile. Body { includeNeedsReview: false }; the FIRST apply decides it for the batch's whole life (later calls and retries use the stored batch.includeNeedsReview, whatever they send). Only status ready (else 409 not_ready { batchStatus }); one request at a time per batch (409 apply_in_progress, also when another import of the vendor holds the vendor lock; 503 import_busy { retryAfterSeconds } when no place frees up within 15 seconds; a request whose client went away leaves the queue). Each call works up to 200 rows (50 at a time, each through the normal service call) and answers { batch ${BATCH}, processed, remaining }; the client repeats the call while remaining > 0 until batch.status is applied or partial (partial = some rows failed or were not applied). Only valid rows are applied; with includeNeedsReview also needs_review rows (an unknown category is left empty); invalid rows never. products: created PAUSED with approvalStatus pending (FitFlex review rules stay in force; the vendor restores the product to publish it); stock becomes a \`count\` stock-history row noted import:<batchId> (when the stock ledger is on); cost price only for callers who may see cost; no variants, no images; an applied row is never created twice (a retry finds it). inventory: each row sets the stock of the product with that SKU as a \`count\` adjustment (expected stock = the stock when the file was checked; changed since → that row fails stock_changed and can be retried). profile: fills only empty fields; never publishes; never touches payout account, logo, banner, commission or areas.`,
   requestSample: { includeNeedsReview: false },
   onGuard: guards('post'),
   onRequest: async (req, res) => {
     if (!vendorImportOn()) return disabled(res);
     const vendorId = vendorOf(req.user);
     if (limited(applyLimiter, vendorId, res)) return undefined;
-    const result = await vendorImportService.apply({ vendorId, actorId: req.user.sub, id: req.params.id, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user) });
+    const result = await vendorImportService.apply({ vendorId, actorId: req.user.sub, id: req.params.id, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user), signal: abortOnClose(res) });
     if (result.error) return send(res, result);
     return res.json({ batch: result.batch, processed: result.processed, remaining: result.remaining });
   },
@@ -199,7 +207,7 @@ export const vendorImportRetry = {
     if (!vendorImportOn()) return disabled(res);
     const vendorId = vendorOf(req.user);
     if (limited(applyLimiter, vendorId, res)) return undefined;
-    const result = await vendorImportService.retry({ vendorId, actorId: req.user.sub, id: req.params.id, costAllowed: await shopService.canSeeCost(req.user) });
+    const result = await vendorImportService.retry({ vendorId, actorId: req.user.sub, id: req.params.id, costAllowed: await shopService.canSeeCost(req.user), signal: abortOnClose(res) });
     if (result.error) return send(res, result);
     return res.json({ batch: result.batch, processed: result.processed, remaining: result.remaining });
   },

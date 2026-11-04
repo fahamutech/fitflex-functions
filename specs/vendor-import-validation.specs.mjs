@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateRow, PRICE_REVIEW_THRESHOLD_TZS, matchCategory } from '../src/shared/vendor-import-rules.mjs';
-import { ISSUE_SEVERITY, MESSAGES, issueMessage, errorMessage, issueView, messageFor } from '../src/shared/vendor-import-messages.mjs';
+import { ISSUE_SEVERITY, MESSAGES, issueMessage, errorMessage, reasonMessage, rowErrorView, issueView, messageFor } from '../src/shared/vendor-import-messages.mjs';
 
 const ctx = (extra = {}) => ({ costAllowed: false, seenSkus: new Set(), skus: new Map(), names: new Set(), profile: {}, ...extra });
 const product = (values, c = ctx(), image = false) => validateRow('products', { name: 'Whey', price_tzs: '45000', stock: '10', ...values }, image, c);
@@ -120,7 +120,7 @@ test('every issue code has a severity and an English and a Swahili message; ever
     assert.doesNotMatch(m.en + m.sw, /\{\w+\}/, `placeholders filled for ${code}`);
   }
   for (const [key, m] of Object.entries(MESSAGES)) {
-    assert.match(key, /^vendor_import\.(issue|error|status|entity|field|csv)\.[A-Za-z_]+$/);
+    assert.match(key, /^vendor_import\.(issue|error|status|entity|field|csv|row_error)\.[A-Za-z0-9_.]+$/);
     assert.ok(m.en && m.sw && m.en !== '', key);
   }
   for (const code of ['file_too_large', 'too_many_rows', 'unsupported_file_type', 'invalid_encoding', 'duplicate_file', 'apply_in_progress', 'import_quota', 'rate_limited', 'mapping_confirmation_required']) {
@@ -129,4 +129,46 @@ test('every issue code has a severity and an English and a Swahili message; ever
   for (const status of ['mapping_required', 'ready', 'applying', 'applied', 'partial', 'discarded']) assert.ok(messageFor(`vendor_import.status.${status}`)?.sw);
   for (const entity of ['products', 'inventory', 'profile']) assert.ok(messageFor(`vendor_import.entity.${entity}`)?.sw);
   assert.equal(issueView({ code: 'name_missing', field: 'name', severity: 'error', params: {} }).message.sw, 'Jina la bidhaa halijajazwa.');
+});
+
+test('Swahili (glossary): no unresolved placeholder, no raw field key, no TZS, no Hisa, no aina ndogo, no nguzo in any rendered message', () => {
+  const FIELDS = Object.keys(MESSAGES).filter(k => k.startsWith('vendor_import.field.')).map(k => k.split('.').pop());
+  const params = (field, extra = {}) => ({ field, max: 5, found: 2, expected: 3, suggestion: 'Equipment', suggestionSw: 'Vifaa vya gym na mazoezi', maxBytes: 2097152, maxRows: 2000, maxColumns: 40, maxCellChars: 5000, ...extra });
+  const rendered = [];
+  for (const key of Object.keys(MESSAGES)) for (const field of FIELDS) rendered.push([key, field, messageFor(key, params(field))]);
+  for (const [key, field, m] of rendered) {
+    assert.doesNotMatch(m.sw, /\{\w+\}/, `${key}: unresolved placeholder in sw`);
+    assert.doesNotMatch(m.en, /\{\w+\}/, `${key}: unresolved placeholder in en`);
+    for (const raw of FIELDS) {
+      // a field KEY is a snake/camel-case identifier: neither language may show one (labels are words)
+      if (/[_A-Z]/.test(raw)) { assert.equal(m.sw.includes(raw), false, `${key} (${field}): raw key ${raw} in sw`); assert.equal(m.en.includes(raw), false, `${key} (${field}): raw key ${raw} in en`); }
+    }
+    assert.doesNotMatch(m.sw, /TZS|\bHisa\b|\bhisa\b|aina ndogo|\bnguzo\b|Uzito/, `${key}: glossary term in sw`);
+  }
+  // the label is chosen per language
+  const price = issueMessage('price_invalid', { field: 'price_tzs' });
+  assert.deepEqual(price, { en: 'The value in Price (TSh) is not a valid amount.', sw: 'Thamani ya Bei (TSh) si kiasi sahihi.' });
+  const stock = issueMessage('stock_invalid', { field: 'stock' });
+  assert.match(stock.sw, /Thamani ya Stock /, 'Stock stays English in Swahili');
+  assert.equal(messageFor('vendor_import.field.variant').sw, 'Chaguo');
+  assert.equal(messageFor('vendor_import.csv.severity').sw, 'Kiwango');
+  assert.equal(messageFor('vendor_import.csv.row').sw, 'Safu mlalo');
+  assert.equal(errorMessage('invalid_multipart').sw, 'Upakiaji haukuweza kusomwa.');
+  assert.match(errorMessage('nothing_to_retry').sw, /zilizoshindikana/);
+  assert.match(issueMessage('row_shape', { found: 2, expected: 3 }).sw, /safu mlalo.*safu wima.*kichwa cha safu wima/i);
+});
+
+test('messages: category_unknown uses the Swahili suggestion; file_too_large says MB; error reasons and row errors exist in both languages', () => {
+  const c = issueMessage('category_unknown', { suggestion: 'Equipment', suggestionSw: 'Vifaa vya gym na mazoezi' });
+  assert.match(c.sw, /Karibu zaidi: Vifaa vya gym na mazoezi\./);
+  assert.match(c.en, /Closest: Equipment\./);
+  assert.deepEqual(errorMessage('file_too_large', { maxBytes: 2 * 1024 * 1024 }), { en: 'The file is larger than 2 MB.', sw: 'Faili ni kubwa kuliko MB 2.' });
+  for (const reason of ['unterminated_quote', 'empty_name', 'duplicate_name', 'header_only', 'daily', 'open', 'xlsx_not_supported_yet', 'binary_or_utf16', 'unknown_column', 'unknown_field']) {
+    assert.ok(reasonMessage(reason, { max: 20 })?.sw, reason);
+  }
+  assert.equal(reasonMessage(undefined), null);
+  assert.deepEqual(rowErrorView('stock_changed'), { code: 'stock_changed', message: { en: 'Stock changed since the file was checked.', sw: 'Stock ilibadilika tangu faili ilipokaguliwa.' } });
+  assert.ok(rowErrorView('some_service_error').message.sw, 'unknown codes get the generic text');
+  assert.equal(rowErrorView(null), null);
+  for (const code of ['stock_changed', 'sku_exists', 'product_not_found', 'product_deleted', 'variant_not_found', 'insufficient_stock', 'internal_error']) assert.ok(messageFor(`vendor_import.row_error.${code}`)?.sw);
 });

@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService, vendorImportService } from '../src/bootstrap/services.mjs';
+import { vendorImportOn, shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -433,5 +433,15 @@ export const eventRegistrationAnonymise = {
     const r = await opsService.runJob('event-registration-anonymise');
     const s = r?.stats ?? {};
     if (s.rows) console.log(`[events] anonymised: events=${s.events} rows=${s.rows}`);
+  }
+};
+
+export const vendorImportRetention = {
+  created, rule: '50 21 * * *', // every day 21:50 UTC = 00:50 EAT
+  description: 'Vendor smart import: discard import batches nobody finished (status mapping_required or ready, nothing applied, untouched for 30 days): the file lock is freed and every uploaded cell is dropped. Does nothing unless VENDOR_TOOLS + VENDOR_IMPORT are on. Idempotent, safe to overlap.',
+  onJob: async () => {
+    if (!vendorImportOn()) return;
+    const n = await vendorImportService.purgeAbandoned();
+    if (n) console.log(`[vendor-import] discarded ${n} abandoned batch(es)`);
   }
 };

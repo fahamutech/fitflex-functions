@@ -28,7 +28,7 @@ export const ENTITY_FIELDS = Object.freeze({
   products: [
     F('name', 'jina', ['productname', 'item', 'itemname', 'title', 'product', 'bidhaa', 'jinalabidhaa']),
     F('price_tzs', 'bei_tzs', ['price', 'unitprice', 'sellingprice', 'retailprice', 'bei', 'beiyakuuza', 'beiyarejareja']),
-    F('stock', 'idadi', ['quantity', 'qty', 'stockqty', 'onhand', 'instock', 'kiasi', 'hisa', 'stoo', 'idadiyahisa']),
+    F('stock', 'idadi', ['quantity', 'qty', 'stockqty', 'onhand', 'instock', 'kiasi', 'hisa', 'stoo', 'stoki', 'idadiyahisa']),
     F('category', 'aina', ['type', 'group', 'categoryname', 'kategoria', 'ainayabidhaa']),
     F('description', 'maelezo', ['details', 'desc', 'about', 'maelezoyabidhaa']),
     F('brand', 'chapa', ['make', 'manufacturer', 'brandname', 'kampuni']),
@@ -40,11 +40,11 @@ export const ENTITY_FIELDS = Object.freeze({
   ],
   inventory: [
     F('sku', 'sku', ['code', 'itemcode', 'productcode', 'barcode', 'msimbo']),
-    F('quantity', 'idadi', ['qty', 'stock', 'count', 'counted', 'onhand', 'stockcount', 'kiasi', 'hisa', 'hesabu']),
-    F('variant', 'aina_ndogo', ['option', 'size', 'flavour', 'flavor', 'colour', 'color', 'ainandogo', 'ukubwa', 'rangi']),
+    F('quantity', 'idadi', ['qty', 'stock', 'count', 'counted', 'onhand', 'stockcount', 'kiasi', 'hisa', 'stoo', 'stoki', 'hesabu']),
+    F('variant', 'chaguo', ['option', 'size', 'flavour', 'flavor', 'colour', 'color', 'ainandogo', 'ukubwa', 'rangi']),
   ],
   profile: [
-    F('businessName', 'jina_la_biashara', ['name', 'shopname', 'storename', 'company', 'jinalabiashara', 'bizname']),
+    F('businessName', 'jina_la_biashara', ['name', 'shopname', 'storename', 'company', 'jina', 'jinalabiashara', 'bizname']),
     F('description', 'maelezo', ['about', 'details', 'bio', 'maelezoyabiashara']),
     F('businessCategory', 'aina_ya_biashara', ['category', 'type', 'businesstype', 'ainayabiashara']),
     F('contactNumber', 'namba_ya_mawasiliano', ['phone', 'phonenumber', 'mobile', 'tel', 'telephone', 'contact', 'simu', 'namba', 'nambayasimu']),
@@ -343,8 +343,8 @@ const EXAMPLES = {
   },
   inventory: { en: [['WHEY-1KG', '18', ''], ['YOGA-MAT', '35', '']], sw: [['WHEY-1KG', '18', ''], ['YOGA-MAT', '35', '']] },
   profile: {
-    en: [['Dar Fitness Gear', 'Gym equipment and supplements', 'Sports & fitness', '0700000000', 'shop@example.com', 'Mikocheni, Dar es Salaam', 'Mon-Sat 08:00-18:00']],
-    sw: [['Dar Fitness Gear', 'Vifaa vya gym na virutubisho', 'Michezo na mazoezi', '0700000000', 'shop@example.com', 'Mikocheni, Dar es Salaam', 'Jumatatu-Jumamosi 08:00-18:00']],
+    en: [['Dar Fitness Gear', 'Gym equipment and supplements', 'Gym & fitness equipment', '0700000000', 'shop@example.com', 'Mikocheni, Dar es Salaam', 'Mon-Sat 08:00-18:00']],
+    sw: [['Dar Fitness Gear', 'Vifaa vya gym na virutubisho', 'Vifaa vya gym na mazoezi', '0700000000', 'shop@example.com', 'Mikocheni, Dar es Salaam', 'Jumatatu-Jumamosi 08:00-18:00']],
   },
 };
 

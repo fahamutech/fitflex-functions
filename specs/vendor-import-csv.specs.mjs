@@ -23,7 +23,14 @@ test('csv: BOM is stripped; blank lines and all-empty rows are skipped', () => {
   const out = ok('\uFEFFname,price\n\n,\nWhey,1\n\n');
   assert.deepEqual(out.header, ['name', 'price']);
   assert.equal(out.rows.length, 1);
-  assert.equal(out.rows[0].rowNo, 2);
+  assert.equal(out.rows[0].rowNo, 4, 'the blank line and the all-empty row count as rows 2 and 3, as in a spreadsheet');
+});
+
+test('csv: row numbers count blank lines but not newlines inside a quoted cell', () => {
+  const out = ok('a,b\n1,2\n\n3,"x\ny\nz"\n4,5\n');
+  assert.deepEqual(out.rows.map(r => r.rowNo), [2, 4, 5]);
+  assert.deepEqual(ok('a\r\n\r\n1\r\n').rows.map(r => r.rowNo), [3]);
+  assert.deepEqual(ok('a\n1\n2').rows.map(r => r.rowNo), [2, 3], 'no trailing newline');
 });
 
 test('csv: the delimiter is sniffed (semicolon, tab; comma on a tie); delimiters inside quotes do not count', () => {
@@ -33,6 +40,11 @@ test('csv: the delimiter is sniffed (semicolon, tab; comma on a tie); delimiters
   assert.equal(sniffDelimiter('a,b;c\n'), ',');
   assert.equal(sniffDelimiter('"a;b;c",d\n1,2'), ',', 'semicolons inside quotes are not delimiters');
   assert.equal(sniffDelimiter('single\n1'), ',');
+  // the sniffer reads quotes the way the parser does: a quote inside a cell is a plain character
+  assert.equal(sniffDelimiter('na"me;price;stock\n1;2;3'), ';');
+  assert.deepEqual(ok('na"me;price;stock\n1;2;3').header, ['na"me', 'price', 'stock']);
+  assert.equal(sniffDelimiter('"a,b,c";d;e\n'), ';', 'commas inside a quoted cell are not delimiters');
+  assert.equal(sniffDelimiter('"a""b;c";d,e\n'), ',', 'doubled quotes stay inside the cell');
 });
 
 test('csv: ragged rows are returned as they are (the service marks row_shape); a trailing line without newline is kept', () => {

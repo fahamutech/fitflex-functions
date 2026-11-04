@@ -10,7 +10,8 @@ import {
   IMPORT_ENTITIES, IMPORT_LIMITS, TEMPLATE_VERSION, CRITICAL_FIELDS, fieldDef, fieldKeys, suggestMapping, needsConfirmation, missingRequired,
   autoReady, templateVersionOf, valuesOf, validateRow, templateCsv, lowerKey,
 } from '../shared/vendor-import-rules.mjs';
-import { issueView } from '../shared/vendor-import-messages.mjs';
+import { issueView, rowErrorView } from '../shared/vendor-import-messages.mjs';
+import { ClaimLostError, SlotError } from '../infra/vendor-import-store-pg.mjs';
 
 const CHUNK = 50;
 const PER_CALL = 200;
@@ -58,6 +59,7 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
     return {
       id: batch.id, entity: batch.entity, status: batch.status, filename: batch.filename, sizeBytes: batch.sizeBytes,
       templateVersion: batch.templateVersion ?? null, delimiter: batch.delimiter, counts: batch.counts, createdBy: batch.createdBy,
+      includeNeedsReview: batch.includeNeedsReview ?? null,
       needsConfirmation: ['mapping_required', 'ready'].includes(batch.status) && needsConfirmation(batch.entity, columns),
       missingRequired: missingRequired(batch.entity, columns),
       createdAt: batch.createdAt, updatedAt: batch.updatedAt, applyStartedAt: batch.applyStartedAt ?? null, finishedAt: batch.finishedAt ?? null,
@@ -65,7 +67,7 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
   }
   const rowView = row => ({
     id: row.id, rowNo: row.rowNo, status: row.status, applyState: row.applyState, issues: (row.issues || []).map(issueView),
-    values: row.normalized || {}, resultId: row.resultId ?? null, lastError: row.lastError ?? null, attempts: row.attempts,
+    values: row.normalized || {}, resultId: row.resultId ?? null, lastError: rowErrorView(row.lastError), attempts: row.attempts,
   });
   const loadBatch = async (vendorId, id) => (typeof id === 'string' && id.length <= 40 ? store.getBatch(vendorId, id) : null);
   const notFound = () => fail('import_not_found', 404);
@@ -238,7 +240,9 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
     if (batch.entity === 'products') {
       const presetId = `prd_imp_${row.id}`;
       // A retry after a crash finds the product the first try made.
-      if (await store.productExists(presetId, batch.vendorId)) return { resultId: presetId };
+      const made = await store.productState(presetId, batch.vendorId);
+      if (made === 'live') return { resultId: presetId };
+      if (made === 'deleted') return { error: 'product_deleted' }; // made by an earlier try, then removed: never reported as imported
       if (n.sku && (await store.productsBySku(batch.vendorId, n.sku)).length) return { error: 'sku_exists' };
       const body = {
         name: n.name, priceTzs: n.priceTzs, stock: n.stock ?? 0,
@@ -288,30 +292,35 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
     return { resultId: batch.vendorId };
   }
 
+  const holder = ctx => ({ vendorId: ctx.batch.vendorId, batchId: ctx.batch.id, token: ctx.batch.claimToken });
+
   async function runRow(ctx, row) {
     const { batch } = ctx;
-    await store.bumpAttempt(batch.vendorId, row.id);
+    // Throws ClaimLostError (before anything is created) when another request has taken the batch over.
+    await store.bumpAttempt({ ...holder(ctx), id: row.id });
     let out;
     try {
       out = await applyRow({ batch, row, actorId: ctx.actorId, costAllowed: ctx.costAllowed });
     } catch (error) {
+      if (error instanceof ClaimLostError) throw error;
       // A unique-id clash means the earlier try already made it; anything else is logged without row data.
-      if (error?.code === '23505' && batch.entity === 'products' && await store.productExists(`prd_imp_${row.id}`, batch.vendorId)) out = { resultId: `prd_imp_${row.id}` };
+      if (error?.code === '23505' && batch.entity === 'products' && await store.productState(`prd_imp_${row.id}`, batch.vendorId) === 'live') out = { resultId: `prd_imp_${row.id}` };
       else {
         console.error('[vendor-import] row failed', { batchId: batch.id, rowNo: row.rowNo, error: error?.code || error?.message });
         out = { error: 'internal_error' };
       }
     }
     if (out.error) {
-      await store.markRow({ vendorId: batch.vendorId, id: row.id, patch: { applyState: 'failed', lastError: String(out.error).slice(0, 80) } });
+      await store.markRow({ ...holder(ctx), id: row.id, patch: { applyState: 'failed', lastError: String(out.error).slice(0, 80) } });
       return false;
     }
-    await store.markRow({ vendorId: batch.vendorId, id: row.id, patch: { applyState: 'applied', resultId: out.resultId, appliedAt: now(), lastError: null } });
+    // Applied rows keep their checked values and issues; the cells the vendor typed are dropped.
+    await store.markRow({ ...holder(ctx), id: row.id, patch: { applyState: 'applied', resultId: out.resultId, appliedAt: now(), lastError: null, raw: '{}' } });
     return true;
   }
 
   /** Shared by apply and retry: claim, work up to 200 rows, then release (more to do) or finish. */
-  async function drive({ vendorId, actorId, id, from, includeNeedsReview, costAllowed, action, beforeRun }) {
+  async function drive({ vendorId, actorId, id, from, includeNeedsReview, costAllowed, action, beforeRun, signal }) {
     const first = await loadBatch(vendorId, id);
     if (!first) return notFound();
     // A batch silent in `applying` for minutes was left by a crashed request: claim() takes it over.
@@ -319,9 +328,14 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
     if (!from.includes(first.status) && !takeover) {
       return first.status === 'applying' ? fail('apply_in_progress', 409) : fail('not_ready', 409, { batchStatus: first.status });
     }
-    const include = includeNeedsReview === true || first.includeNeedsReview === true;
-    const batch = await store.claim({ vendorId, id, from, includeNeedsReview: include });
-    if (!batch) return fail('apply_in_progress', 409);
+    // The first apply decides includeNeedsReview for the batch's whole life; later calls and retries use the stored value.
+    const claimed = await store.claim({ vendorId, id, from, includeNeedsReview: includeNeedsReview === true });
+    if (!claimed) return fail('apply_in_progress', 409);
+    if (claimed.duplicate) return fail('duplicate_file', 409, { batchId: claimed.duplicate.id, createdAt: claimed.duplicate.createdAt, batchStatus: claimed.duplicate.status });
+    const batch = claimed;
+    const token = batch.claimToken;
+    const include = batch.includeNeedsReview === true;
+    const give = status => store.release({ vendorId, id, token, status, finished: false }).catch(() => {});
     let processed = 0;
     let applied = 0;
     let failed = 0;
@@ -331,47 +345,58 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
         const rows = await store.nextEligible({ vendorId, id, limit: Math.min(CHUNK, PER_CALL - processed), includeNeedsReview: include });
         if (!rows.length) break;
         const ctx = { batch, actorId, costAllowed };
-        await store.withVendorLock(vendorId, async () => {
+        // Keep the claim fresh before waiting for a place or the vendor's lock (either may take a while).
+        await store.touch(vendorId, id, token);
+        const locked = await store.withVendorLock(vendorId, async () => {
           for (const row of rows) { if (await runRow(ctx, row)) applied += 1; else failed += 1; }
-        });
+        }, { signal });
+        if (locked.busy) { await give('ready'); return fail('apply_in_progress', 409); }
         processed += rows.length;
-        await store.touch(vendorId, id);
+        await store.touch(vendorId, id, token);
       }
       const remaining = await store.countEligible({ vendorId, id, includeNeedsReview: include });
+      await store.touch(vendorId, id, token); // still ours? (throws when the claim moved on)
       let released;
       if (remaining > 0) {
-        released = await store.release({ vendorId, id, status: 'ready', finished: false });
+        released = await store.release({ vendorId, id, token, status: 'ready', finished: false });
       } else {
-        await store.skipPending({ vendorId, id });
+        await store.skipPending({ vendorId, id, token });
         const counts = await store.refreshCounts(vendorId, id);
         const status = counts.applied === counts.total ? 'applied' : 'partial';
         const mapped = columnsOf(batch).filter(c => c.field && !fieldDef(batch.entity, c.field)?.ignored).map(c => c.source);
         await store.dropUnmappedRaw({ vendorId, id, mappedSources: mapped });
-        released = await store.release({ vendorId, id, status, finished: true });
+        released = await store.release({ vendorId, id, token, status, finished: true });
       }
-      const result = released || (await store.getBatch(vendorId, id));
-      await audit(actorId, action, result, { counts: result.counts, processed, applied, failed, remaining, status: result.status });
-      return { batch: batchView(result), processed, remaining };
+      // No release means the claim moved on while we worked: someone else owns the batch now.
+      if (!released) return fail('apply_in_progress', 409);
+      await audit(actorId, action, released, { counts: released.counts, processed, applied, failed, remaining, status: released.status });
+      return { batch: batchView(released), processed, remaining };
     } catch (error) {
-      // Give the claim back so the vendor can continue at once instead of waiting for the takeover window.
-      await store.release({ vendorId, id, status: 'ready', finished: false }).catch(() => {});
+      // Lost claim: another request owns the batch and we must not touch its state. Anything else: give the claim back so the
+      // vendor can continue at once instead of waiting for the takeover window.
+      if (error instanceof ClaimLostError) return fail('apply_in_progress', 409);
+      await give('ready');
+      if (error instanceof SlotError) {
+        return error.code === 'slot_timeout' ? fail('import_busy', 503, { retryAfterSeconds: 5 }) : fail('request_aborted', 499);
+      }
       throw error;
     }
   }
 
-  const apply = ({ vendorId, actorId, id, body = {}, costAllowed = false }) => drive({
-    vendorId, actorId, id, from: ['ready'], includeNeedsReview: body?.includeNeedsReview === true, costAllowed, action: 'vendor_import_applied',
+  const apply = ({ vendorId, actorId, id, body = {}, costAllowed = false, signal }) => drive({
+    vendorId, actorId, id, from: ['ready'], includeNeedsReview: body?.includeNeedsReview === true, costAllowed, action: 'vendor_import_applied', signal,
   });
 
-  async function retry({ vendorId, actorId, id, costAllowed = false }) {
+  async function retry({ vendorId, actorId, id, costAllowed = false, signal }) {
     const batch = await loadBatch(vendorId, id);
     if (!batch) return notFound();
     if (!['partial', 'ready'].includes(batch.status) && !store.isStale(batch)) return batch.status === 'applying' ? fail('apply_in_progress', 409) : fail('not_ready', 409, { batchStatus: batch.status });
     if (!(await store.countFailed(vendorId, id))) return fail('nothing_to_retry', 409);
     return drive({
-      vendorId, actorId, id, from: ['partial', 'ready'], includeNeedsReview: true, costAllowed, action: 'vendor_import_retried',
+      // includeNeedsReview is not passed: a retry uses the value the first apply stored.
+      vendorId, actorId, id, from: ['partial', 'ready'], includeNeedsReview: false, costAllowed, action: 'vendor_import_retried', signal,
       // Failed rows go back to pending only after this request owns the batch.
-      beforeRun: () => store.requeueFailed({ vendorId, id }),
+      beforeRun: claimed => store.requeueFailed({ vendorId, id, token: claimed.claimToken }),
     });
   }
 
@@ -411,5 +436,8 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
     return { csv: templateCsv(entity, lang, example), version: TEMPLATE_VERSION };
   }
 
-  return { upload, listBatches, getBatch, preview, putMapping, apply, retry, discard, errorsCsv, template };
+  /** Retention: discard batches nobody finished (open and untouched for 30 days) and drop their cells. → how many. */
+  const purgeAbandoned = (opts) => store.purgeAbandoned(opts);
+
+  return { purgeAbandoned, upload, listBatches, getBatch, preview, putMapping, apply, retry, discard, errorsCsv, template };
 }

@@ -101,14 +101,21 @@ test('backfill: vendorRole admin staff, their membership and pending admin invit
   assert.deepEqual(await perms(admin), ['products', 'staff', 'import']);
 });
 
-test('tables: the file lock is unique per vendor while the batch is live; checks refuse bad statuses and long file names', async () => {
+test('tables: the file lock is unique per vendor while a batch is open; checks refuse bad statuses and long file names', async () => {
   const v = await user('vendor');
   const base = { vendorId: v, createdBy: v, entity: 'products', filename: 'a.csv', sizeBytes: 1, delimiter: ',' };
   const id = n => `vib_t${n}_${v.slice(-6)}`;
   await db('VendorImportBatch').insert({ ...base, id: id(1), fileSha256: 'same', status: 'ready' });
   await assert.rejects(db('VendorImportBatch').insert({ ...base, id: id(2), fileSha256: 'same', status: 'ready' }), /vendorimportbatch_vendor_sha_live/);
+  // the file lock covers OPEN batches only: once a batch ends (discarded, applied, partial) the same file may come again
+  for (const ended of ['discarded', 'applied', 'partial']) {
+    await db('VendorImportBatch').where({ id: id(1) }).update({ status: ended });
+    await db('VendorImportBatch').insert({ ...base, id: id(9), fileSha256: 'same', status: 'mapping_required' });
+    await db('VendorImportBatch').where({ id: id(9) }).del();
+  }
   await db('VendorImportBatch').where({ id: id(1) }).update({ status: 'discarded' });
   await db('VendorImportBatch').insert({ ...base, id: id(2), fileSha256: 'same', status: 'ready' });
+  await assert.rejects(db('VendorImportBatch').where({ id: id(1) }).update({ status: 'applying' }), /vendorimportbatch_vendor_sha_live/, 'an ended batch cannot re-enter flight while the file is open elsewhere');
   await db('VendorImportBatch').insert({ ...base, id: id(3), vendorId: `${v}_other`, fileSha256: 'same', status: 'ready' });
   await assert.rejects(db('VendorImportBatch').insert({ ...base, id: id(4), fileSha256: 'x', status: 'bogus' }), /vendorimportbatch_status_check/);
   await assert.rejects(db('VendorImportBatch').insert({ ...base, id: id(5), fileSha256: 'y', status: 'ready', filename: 'x'.repeat(121) }), /vendorimportbatch_filename_length/);

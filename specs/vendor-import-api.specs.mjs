@@ -619,7 +619,8 @@ test('discard: before anything was applied only; after apply → 409 not_discard
   assert.equal((await db('VendorImportRow').where({ batchId: done.id }).first()).raw['Private notes'].length > 0, true);
   must(await call(vendorImportApply, as(v), { params: { id: done.id }, body: {} }));
   const rows = await db('VendorImportRow').where({ batchId: done.id });
-  assert.equal(rows.every(r => !('Private notes' in r.raw) && r.raw.name), true, 'unmapped columns dropped, mapped ones kept');
+  assert.equal(rows.every(r => Object.keys(r.raw).length === 0), true, 'applied rows keep no typed cells at all, mapped or not');
+  assert.deepEqual(rows.map(r => r.normalized.name).sort(), ['A', 'B'], 'but their checked values stay');
   const refused = await call(vendorImportDiscard, as(v), { params: { id: done.id } });
   assert.deepEqual([refused.status, refused.body.error], [409, 'not_discardable']);
   const spare = must(await upload(as(v), 'products', csv('name,price_tzs,stock,Other private', ['Z,1000,1,secret'])), 201).batch;
@@ -644,7 +645,7 @@ test('errors.csv: BOM, CRLF, English and Swahili messages, the offending value, 
   const lines = text.slice(1).split('\r\n').filter(Boolean);
   assert.equal(lines[0], 'row,field,severity,code,message_en,message_sw,value');
   assert.ok(lines.some(l => l.startsWith('2,name,warning,formula_like_text,') && l.endsWith(`,"'=HYPERLINK(""http://evil"")"`)), lines.join('\n'));
-  assert.ok(lines.some(l => l.startsWith('3,price_tzs,error,price_invalid,') && l.includes('Thamani ya price_tzs') && l.endsWith(',abc')));
+  assert.ok(lines.some(l => l.startsWith('3,price_tzs,error,price_invalid,') && l.includes('Thamani ya Bei (TSh)') && l.endsWith(',abc')));
   assert.ok(lines.some(l => l.startsWith('4,price_tzs,error,price_not_whole_tzs,') && l.endsWith(',2.5')));
   for (const line of lines.slice(1)) assert.doesNotMatch(line.split(',')[0], /^[=+\-@]/);
   assert.ok(lines.every(l => !/^[=+\-@]/.test(l)));
@@ -738,4 +739,349 @@ test('ledger off: products are still created paused + pending with their stock, 
   const products = await productsOf(v);
   assert.deepEqual(products.map(p => [p.status, p.approvalStatus, p.stock]), [['paused', 'pending', 6], ['paused', 'pending', 6]]);
   assert.equal((await db('ShopStockMovement').whereIn('productId', products.map(p => p.id))).length, 0);
+});
+
+// ═══ review round ═══════════════════════════════════════════════════════════
+import { createPgVendorImportStore, ClaimLostError } from '../src/infra/vendor-import-store-pg.mjs';
+import { createVendorImportService } from '../src/services/vendor-import-service.mjs';
+import { auditLog } from '../src/bootstrap/services.mjs';
+import { vendorImportRetention } from '../functions/jobs.mjs';
+
+const batchRow = id => db('VendorImportBatch').where({ id }).first();
+const makeProduct = async (v, body) => {
+  const o = await call(vendorCreateProduct, as(v), { body: { category: 'equipment', priceTzs: 1000, stock: 1, ...body } });
+  assert.equal(o.status, 201, JSON.stringify(o.body));
+  return o.body;
+};
+/** A fresh service over its own store, so a spec can use one apply place and a short wait. */
+const customService = (storeOptions = {}, shop = shopService) => {
+  const store = createPgVendorImportStore({ db, ...storeOptions });
+  return { store, service: createVendorImportService({ store, shop, auditLog }) };
+};
+
+test('M1 includeNeedsReview: the first apply decides for the batch\'s life; later calls and retry never change it', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const rows = [...Array.from({ length: 205 }, (_, i) => `M1 item ${i + 1},1000,2,equipment,M1-${i + 1}`), 'M1 review,6000000,2,equipment,M1-R'];
+  const up = must(await upload(as(v), 'products', csv('name,price_tzs,stock,category,sku', rows)), 201).batch;
+  assert.equal(up.includeNeedsReview, null, 'nothing decided before the first apply');
+  const first = must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: { includeNeedsReview: false } }));
+  assert.deepEqual([first.processed, first.remaining, first.batch.includeNeedsReview], [200, 5, false]);
+  // a later call asking for true does NOT widen the batch
+  const second = must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: { includeNeedsReview: true } }));
+  assert.deepEqual([second.processed, second.remaining, second.batch.includeNeedsReview, second.batch.status], [5, 0, false, 'partial']);
+  assert.equal((await productsOf(v)).some(p => p.sku === 'M1-R'), false, 'the needs_review row was never applied');
+  assert.equal((await db('VendorImportRow').where({ batchId: up.id, rowNo: 207 }).first()).applyState, 'skipped');
+  // the other way round: decided true, later false does not narrow it
+  const rows2 = [...Array.from({ length: 205 }, (_, i) => `M1b item ${i + 1},1000,2,equipment,M1B-${i + 1}`), 'M1b review,6000000,2,equipment,M1B-R'];
+  const up2 = must(await upload(as(v), 'products', csv('name,price_tzs,stock,category,sku', rows2)), 201).batch;
+  const a = must(await call(vendorImportApply, as(v), { params: { id: up2.id }, body: { includeNeedsReview: true } }));
+  assert.equal(a.batch.includeNeedsReview, true);
+  const b = must(await call(vendorImportApply, as(v), { params: { id: up2.id }, body: { includeNeedsReview: false } }));
+  assert.deepEqual([b.batch.includeNeedsReview, b.batch.status, b.batch.counts.applied], [true, 'applied', 206]);
+});
+
+test('M1 retry uses the stored value: a failed needs_review row is retried only because the first apply included them', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', csv('name,price_tzs,stock,sku', ['Review row,6000000,1,M1R-1', 'Plain,1000,1,M1R-2'])), 201).batch;
+  await makeProduct(v, { name: 'Squatter', sku: 'M1R-1' }); // appears after the check → the row fails at apply
+  const done = must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: { includeNeedsReview: true } }));
+  assert.deepEqual([done.batch.status, done.batch.counts.failed], ['partial', 1]);
+  await db('Product').where({ vendorId: v, sku: 'M1R-1' }).update({ sku: 'moved' });
+  const retried = must(await call(vendorImportRetry, as(v), { params: { id: up.id } }));
+  assert.deepEqual([retried.batch.status, retried.batch.counts.failed, retried.batch.includeNeedsReview], ['applied', 0, true]);
+  // the opposite: decided false → a retry never widens it (the failed row was a valid one; nothing else becomes eligible)
+  const up2 = must(await upload(as(v), 'products', csv('name,price_tzs,stock,sku', ['Valid,1000,1,M1R-3', 'Review 2,6000000,1,M1R-4'])), 201).batch;
+  await makeProduct(v, { name: 'Squatter 2', sku: 'M1R-3' });
+  const d2 = must(await call(vendorImportApply, as(v), { params: { id: up2.id }, body: { includeNeedsReview: false } }));
+  assert.deepEqual([d2.batch.counts.failed, d2.batch.counts.skipped, d2.batch.includeNeedsReview], [1, 1, false]);
+  await db('Product').where({ vendorId: v, sku: 'M1R-3' }).update({ sku: 'moved2' });
+  const r2 = must(await call(vendorImportRetry, as(v), { params: { id: up2.id } }));
+  assert.deepEqual([r2.batch.counts.applied, r2.batch.counts.skipped, r2.batch.includeNeedsReview], [1, 1, false]);
+  assert.equal((await productsOf(v)).some(p => p.sku === 'M1R-4'), false);
+});
+
+test('M2 mapping is fixed once any row was applied or failed; applied rows are never reset; discard stays refused', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const rows = Array.from({ length: 210 }, (_, i) => `M2 item ${i + 1},${1000 + i},1,equipment,M2-${i + 1}`);
+  const up = must(await upload(as(v), 'products', csv('Bidhaa,Bei,Idadi,Aina,sku', rows)), 201).batch;
+  must(await call(vendorImportMapping, as(v), { params: { id: up.id }, body: { mapping: {}, confirm: true } }));
+  const first = must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} }));
+  assert.deepEqual([first.batch.status, first.remaining], ['ready', 10], 'mid-way: status is ready again');
+  const snapshot = await db('VendorImportRow').where({ batchId: up.id }).orderBy('rowNo');
+  const put = await call(vendorImportMapping, as(v), { params: { id: up.id }, body: { mapping: { Bei: null, Idadi: 'price_tzs' }, confirm: true } });
+  assert.deepEqual([put.status, put.body.error], [409, 'batch_not_editable']);
+  assert.deepEqual(await db('VendorImportRow').where({ batchId: up.id }).orderBy('rowNo'), snapshot, 'nothing was rewritten');
+  assert.equal((await productsOf(v)).length, 200);
+  const dis = await call(vendorImportDiscard, as(v), { params: { id: up.id } });
+  assert.deepEqual([dis.status, dis.body.error], [409, 'not_discardable']);
+  // a batch whose only touched rows FAILED is fixed too
+  const v2 = await vendor();
+  const up2 = must(await upload(as(v2), 'products', csv('Bidhaa,Bei,Idadi,sku', ['A,1000,1,M2F-1'])), 201).batch;
+  must(await call(vendorImportMapping, as(v2), { params: { id: up2.id }, body: { mapping: {}, confirm: true } }));
+  await makeProduct(v2, { name: 'Squatter', sku: 'M2F-1' });
+  const failed = must(await call(vendorImportApply, as(v2), { params: { id: up2.id }, body: {} }));
+  assert.equal(failed.batch.counts.failed, 1);
+  assert.equal((await call(vendorImportMapping, as(v2), { params: { id: up2.id }, body: { mapping: {}, confirm: true } })).body.error, 'batch_not_editable');
+  assert.equal((await db('VendorImportRow').where({ batchId: up2.id }).first()).applyState, 'failed', 'the failed row stayed failed');
+  // the store refuses on its own too (not only the service)
+  const { store } = customService();
+  assert.equal(await store.saveMapping({ vendorId: v, id: up.id, mapping: { columns: [] }, status: 'ready', templateVersion: null, results: [] }), null);
+});
+
+test('M3 the vendor lock is tried, never waited for: a busy lock answers 409 apply_in_progress and gives the claim back', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', productsCsv(3, { prefix: 'M3' })), 201).batch;
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const holder = db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`vimp-apply:${v}`]);
+    await held;
+  });
+  await new Promise(r => setTimeout(r, 100));
+  const started = Date.now();
+  const busy = await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} });
+  assert.deepEqual([busy.status, busy.body.error], [409, 'apply_in_progress']);
+  assert.ok(Date.now() - started < 3000, 'did not wait for the lock');
+  assert.equal((await productsOf(v)).length, 0);
+  const after = await batchRow(up.id);
+  assert.deepEqual([after.status, after.claimToken], ['ready', null], 'the claim was given back');
+  release();
+  await holder;
+  assert.equal(must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} })).batch.status, 'applied');
+});
+
+test('M3 the per-server place queue: a wait that times out answers 503 import_busy; a request whose client left leaves the queue; others are not stalled', async () => {
+  ledgerOn();
+  const a = await vendor();
+  const b = await vendor();
+  const upB = must(await upload(as(b), 'products', productsCsv(2, { prefix: 'M3B' })), 201).batch;
+  const upB2 = must(await upload(as(b), 'products', productsCsv(2, { prefix: 'M3C' })), 201).batch;
+  const { store, service } = customService({ applySlots: 1, slotWaitMs: 150 });
+  let free;
+  const hold = new Promise(resolve => { free = resolve; });
+  // vendor a occupies the only place
+  const occupying = store.withVendorLock(a, async () => { await hold; });
+  await new Promise(r => setTimeout(r, 50));
+  const timedOut = await service.apply({ vendorId: b, actorId: b, id: upB.id, body: {}, costAllowed: true });
+  assert.deepEqual([timedOut.status, timedOut.error, timedOut.retryAfterSeconds], [503, 'import_busy', 5]);
+  assert.deepEqual([(await batchRow(upB.id)).status, (await batchRow(upB.id)).claimToken], ['ready', null], 'claim given back');
+  // an aborted waiter leaves the queue at once (no waiting for the timeout) and is not served later
+  const controller = new AbortController();
+  const waiting = service.apply({ vendorId: b, actorId: b, id: upB2.id, body: {}, costAllowed: true, signal: controller.signal });
+  setTimeout(() => controller.abort(), 30);
+  const t0 = Date.now();
+  const aborted = await waiting;
+  assert.deepEqual([aborted.error, aborted.status], ['request_aborted', 499]);
+  assert.ok(Date.now() - t0 < 140, 'left the queue when the client left');
+  free();
+  await occupying;
+  assert.equal((await productsOf(b)).length, 0, 'nothing ran for the waiters');
+  // the place is free again and a normal apply works
+  const ok = await service.apply({ vendorId: b, actorId: b, id: upB.id, body: {}, costAllowed: true });
+  assert.equal(ok.batch.status, 'applied');
+});
+
+test('M4 claim token: a request that was taken over cannot touch, mark rows or release; the new owner can', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', productsCsv(2, { prefix: 'M4' })), 201).batch;
+  const { store } = customService();
+  const A = await store.claim({ vendorId: v, id: up.id, from: ['ready'], includeNeedsReview: false });
+  assert.ok(A.claimToken);
+  assert.equal(await store.claim({ vendorId: v, id: up.id, from: ['ready'], includeNeedsReview: false }), null, 'a live claim cannot be taken');
+  await db('VendorImportBatch').where({ id: up.id }).update({ applyStartedAt: new Date(Date.now() - 5 * 60_000) });
+  const B = await store.claim({ vendorId: v, id: up.id, from: ['ready'], includeNeedsReview: true });
+  assert.notEqual(B.claimToken, A.claimToken);
+  assert.equal(B.includeNeedsReview, false, 'the first decision is kept across takeovers');
+  const row = (await db('VendorImportRow').where({ batchId: up.id }).orderBy('rowNo').first());
+  await assert.rejects(store.touch(v, up.id, A.claimToken), ClaimLostError);
+  await assert.rejects(store.markRow({ vendorId: v, batchId: up.id, id: row.id, token: A.claimToken, patch: { applyState: 'applied' } }), ClaimLostError);
+  await assert.rejects(store.bumpAttempt({ vendorId: v, batchId: up.id, id: row.id, token: A.claimToken }), ClaimLostError);
+  assert.equal(await store.release({ vendorId: v, id: up.id, token: A.claimToken, status: 'applied', finished: true }), null);
+  assert.equal(await store.skipPending({ vendorId: v, id: up.id, token: A.claimToken }), undefined);
+  const unchanged = await db('VendorImportRow').where({ id: row.id }).first();
+  assert.deepEqual([unchanged.applyState, unchanged.attempts], ['pending', 0]);
+  assert.equal((await batchRow(up.id)).status, 'applying');
+  await store.touch(v, up.id, B.claimToken);
+  await store.markRow({ vendorId: v, batchId: up.id, id: row.id, token: B.claimToken, patch: { applyState: 'applied' } });
+  assert.equal((await db('VendorImportRow').where({ id: row.id }).first()).applyState, 'applied');
+  assert.equal((await store.release({ vendorId: v, id: up.id, token: B.claimToken, status: 'ready', finished: false })).status, 'ready');
+  assert.equal((await batchRow(up.id)).claimToken, null);
+});
+
+test('M4 end to end: a request taken over mid-apply stops writing batch state and answers 409; the new owner finishes with no duplicates', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', productsCsv(4, { prefix: 'M4E' })), 201).batch;
+  const { store, service } = customService();
+  let stolen = null;
+  // the first product creation stalls "for minutes": meanwhile another request takes the batch over
+  const shop = new Proxy(shopService, {
+    get(target, prop) {
+      if (prop !== 'upsertProduct') return target[prop];
+      return async (args) => {
+        const out = await target.upsertProduct(args);
+        if (!stolen) {
+          await db('VendorImportBatch').where({ id: up.id }).update({ applyStartedAt: new Date(Date.now() - 5 * 60_000) });
+          stolen = await store.claim({ vendorId: v, id: up.id, from: ['ready'], includeNeedsReview: false });
+        }
+        return out;
+      };
+    },
+  });
+  const slow = createVendorImportService({ store, shop, auditLog });
+  const loser = await slow.apply({ vendorId: v, actorId: v, id: up.id, body: {}, costAllowed: true });
+  assert.deepEqual([loser.status, loser.error], [409, 'apply_in_progress']);
+  const mid = await batchRow(up.id);
+  assert.deepEqual([mid.status, mid.claimToken], ['applying', stolen.claimToken], 'the old request left the batch as the new owner has it');
+  assert.equal((await db('VendorImportRow').where({ batchId: up.id, applyState: 'applied' })).length, 0, 'it never marked its row');
+  assert.equal((await productsOf(v)).length, 1, 'it had already made one product');
+  // the new owner (a normal request, after its claim lapses) finishes; the product made earlier is found, not made again
+  await db('VendorImportBatch').where({ id: up.id }).update({ applyStartedAt: new Date(Date.now() - 5 * 60_000) });
+  const done = must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} }));
+  assert.equal(done.batch.status, 'applied');
+  assert.equal((await productsOf(v)).length, 4);
+});
+
+test('Low: an identical file may be uploaded again once its batch has ended; the in-flight guard stays; a retry that would reopen a duplicate is refused', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const content = csv('name,price_tzs,stock,sku', ['Again,1000,1,AGAIN-1', 'No sku,500,2,']);
+  const first = must(await upload(as(v), 'products', content), 201).batch;
+  assert.equal((await upload(as(v), 'products', content)).body.error, 'duplicate_file', 'open batch: guarded');
+  must(await call(vendorImportApply, as(v), { params: { id: first.id }, body: {} }));
+  const again = must(await upload(as(v), 'products', content), 201).batch;
+  assert.equal(again.status, 'ready');
+  const preview = must(await call(vendorImportPreview, as(v), { params: { id: again.id } }));
+  const codes = Object.fromEntries(preview.rows.map(r => [r.values.name, r.issues.map(i => i.code)]));
+  assert.deepEqual(codes, { Again: ['sku_exists', 'name_exists'], 'No sku': ['name_exists'] }, 'the second import meets what the first created');
+  // retry of a partial batch while the same file is open in another batch → 409 duplicate_file
+  const v2 = await vendor();
+  const file2 = csv('name,price_tzs,stock,sku', ['X,1000,1,DUP2-1']);
+  const a = must(await upload(as(v2), 'products', file2), 201).batch;
+  await makeProduct(v2, { name: 'Squatter', sku: 'DUP2-1' });
+  assert.equal(must(await call(vendorImportApply, as(v2), { params: { id: a.id }, body: {} })).batch.status, 'partial');
+  await db('Product').where({ vendorId: v2, sku: 'DUP2-1' }).update({ sku: 'moved' });
+  const b = must(await upload(as(v2), 'products', file2), 201).batch;
+  const retry = await call(vendorImportRetry, as(v2), { params: { id: a.id } });
+  assert.deepEqual([retry.status, retry.body.error, retry.body.batchId, retry.body.status], [409, 'duplicate_file', b.id, 'ready']);
+  assert.equal((await batchRow(a.id)).status, 'partial', 'the first batch stayed as it was');
+});
+
+test('Low: retention — untouched open batches older than 30 days are discarded and their cells dropped; applied or recent ones are not', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const mk = async (prefix, header = 'name,price_tzs,stock,Secret') => must(await upload(as(v), 'products', csv(header, [`${prefix} item,1000,1,confidential`])), 201).batch;
+  const oldReady = await mk('OLD1');
+  const oldMapping = must(await upload(as(v), 'products', csv('Bidhaa,Bei', ['OLD2 item,1000'])), 201).batch;
+  const touched = await mk('TOUCH');
+  must(await call(vendorImportApply, as(v), { params: { id: touched.id }, body: {} })); // ends applied
+  const partlyDone = must(await upload(as(v), 'products', csv('name,price_tzs,stock', Array.from({ length: 205 }, (_, i) => `PD ${i},1000,1`))), 201).batch;
+  must(await call(vendorImportApply, as(v), { params: { id: partlyDone.id }, body: {} })); // 200 applied, ready again
+  const old = new Date(Date.now() - 31 * 86_400_000);
+  await db('VendorImportBatch').whereIn('id', [oldReady.id, oldMapping.id, touched.id, partlyDone.id]).update({ updatedAt: old });
+  const n = await vendorImportService.purgeAbandoned();
+  assert.ok(n >= 2);
+  for (const id of [oldReady.id, oldMapping.id]) {
+    const b = await batchRow(id);
+    assert.equal(b.status, 'discarded');
+    const rows = await db('VendorImportRow').where({ batchId: id });
+    assert.equal(rows.every(r => Object.keys(r.raw).length === 0 && Object.keys(r.normalized).length === 0), true);
+  }
+  assert.equal((await batchRow(touched.id)).status, 'applied');
+  assert.equal((await batchRow(partlyDone.id)).status, 'ready', 'a batch with applied rows is never purged');
+  // a recent untouched batch survives the next purge with its cells
+  const recent = await mk('NEW');
+  assert.equal(await vendorImportService.purgeAbandoned(), 0);
+  assert.equal((await batchRow(recent.id)).status, 'ready');
+  assert.equal(Object.keys((await db('VendorImportRow').where({ batchId: recent.id }).first()).raw).length > 0, true);
+  await db('VendorImportBatch').where({ id: recent.id }).update({ status: 'discarded' });
+  // the file lock is free again
+  assert.equal((await upload(as(v), 'products', csv('name,price_tzs,stock,Secret', ['OLD1 item,1000,1,confidential']))).status, 201);
+  assert.equal(await vendorImportService.purgeAbandoned(), 0, 'idempotent');
+  // the scheduled job: nothing while the flag is off, the same purge when on
+  const stale = must(await upload(as(v), 'products', csv('name,price_tzs,stock,Secret', ['JOB item,1000,1,confidential'])), 201).batch;
+  await db('VendorImportBatch').where({ id: stale.id }).update({ updatedAt: old });
+  for (const f of FLAGS) delete process.env[f];
+  await vendorImportRetention.onJob();
+  assert.equal((await batchRow(stale.id)).status, 'ready', 'flag off: does nothing');
+  assert.match(vendorImportRetention.rule, /^\d+ \d+ \* \* \*$/);
+  importOn();
+  await vendorImportRetention.onJob();
+  assert.equal((await batchRow(stale.id)).status, 'discarded');
+});
+
+test('Low: a product an earlier try made and the vendor then deleted is NOT reported as imported (row fails product_deleted, with a message)', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', productsCsv(2, { prefix: 'DEL' })), 201).batch;
+  const rows = await db('VendorImportRow').where({ batchId: up.id }).orderBy('rowNo');
+  const made1 = await shopService.upsertProduct({ vendorId: v, actorId: v, body: { name: 'DEL item 1', priceTzs: 1000, stock: 5, category: 'equipment', sku: 'DEL-1' }, initialStatus: 'paused', presetId: `prd_imp_${rows[0].id}`, stockNote: `import:${up.id}` });
+  await shopService.deleteProduct({ vendorId: v, productId: made1.product.id });
+  await db('VendorImportBatch').where({ id: up.id }).update({ status: 'applying', applyStartedAt: new Date(Date.now() - 5 * 60_000) });
+  const done = must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} }));
+  assert.deepEqual([done.batch.status, done.batch.counts.applied, done.batch.counts.failed], ['partial', 1, 1]);
+  const preview = must(await call(vendorImportPreview, as(v), { params: { id: up.id }, query: { limit: '10' } }));
+  const failed = preview.rows.find(r => r.applyState === 'failed');
+  assert.equal(failed.lastError.code, 'product_deleted');
+  assert.ok(failed.lastError.message.en && failed.lastError.message.sw);
+  assert.equal(failed.resultId, null);
+  assert.equal((await productsOf(v)).filter(p => !p.deletedAt).length, 1);
+});
+
+test('Low: row numbers match the spreadsheet (blank lines count) in preview and in errors.csv', async () => {
+  importOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', 'name,price_tzs,stock\nOk,1000,1\n\nBad,abc,1\n'), 201).batch;
+  const preview = must(await call(vendorImportPreview, as(v), { params: { id: up.id } }));
+  assert.deepEqual(preview.rows.map(r => [r.rowNo, r.status]), [[4, 'invalid'], [2, 'valid']]);
+  const text = (await call(vendorImportErrorsCsv, as(v), { params: { id: up.id } })).body.toString('utf8');
+  assert.ok(text.split('\r\n').some(l => l.startsWith('4,price_tzs,error,price_invalid,')));
+});
+
+test('VERIFY (a): with VENDOR_STOCK_LEDGER off and VENDOR_IMPORT on, inventory rows still apply (adjustStock is not gated by the flag) and write a count row', async () => {
+  importOn();
+  const v = await vendor();
+  const p = await makeProduct(v, { name: 'NoLedger', sku: 'NL-INV', stock: 10 });
+  assert.equal((await db('ShopStockMovement').where({ productId: p.id })).length, 0, 'ledger off: creating wrote no row');
+  const up = must(await upload(as(v), 'inventory', csv('sku,quantity', ['NL-INV,25'])), 201).batch;
+  assert.equal(up.counts.valid, 1);
+  const done = must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} }));
+  assert.equal(done.batch.status, 'applied');
+  assert.equal((await db('Product').where({ id: p.id }).first()).stock, 25);
+  const ledger = await db('ShopStockMovement').where({ productId: p.id });
+  assert.deepEqual(ledger.map(r => [r.reason, r.delta, r.stockAfter]), [['count', 15, 25]]);
+});
+
+test('lastError is { code, message { en, sw } }; stock_changed has its own Swahili text', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const p = await makeProduct(v, { name: 'Moves', sku: 'LE-1', stock: 5 });
+  const up = must(await upload(as(v), 'inventory', csv('sku,quantity', ['LE-1,9'])), 201).batch;
+  await shopService.adjustStock({ vendorId: v, actorId: v, productId: p.id, body: { reason: 'damaged', quantity: 1, clientRef: `spec-${randomUUID()}` } });
+  must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} }));
+  const row = must(await call(vendorImportPreview, as(v), { params: { id: up.id } })).rows[0];
+  assert.deepEqual(row.lastError, { code: 'stock_changed', message: { en: 'Stock changed since the file was checked.', sw: 'Stock ilibadilika tangu faili ilipokaguliwa.' } });
+  const ok = must(await call(vendorImportPreview, as(v), { params: { id: (must(await upload(as(v), 'products', productsCsv(1, { prefix: 'LE2' })), 201)).batch.id } })).rows[0];
+  assert.equal(ok.lastError, null);
+});
+
+test('reasons: parse and quota errors explain themselves in both languages', async () => {
+  importOn();
+  const v = await vendor();
+  const q = await upload(as(v), 'products', 'name,price_tzs\n"open,1\n');
+  assert.deepEqual([q.body.error, q.body.reason, q.body.reasonMessage.sw], ['invalid_csv', 'unterminated_quote', 'Kisanduku chenye nukuu hakijafungwa.']);
+  resetVendorImportLimits();
+  const big = await upload(as(v), 'products', Buffer.alloc(2 * 1024 * 1024 + 10, 0x61));
+  assert.equal(big.body.message.sw, 'Faili ni kubwa kuliko MB 2.');
+  resetVendorImportLimits();
+  const dup = await upload(as(v), 'products', 'name,Name\nA,B\n');
+  assert.equal(dup.body.reasonMessage.en, 'Two columns have the same header.');
+  resetVendorImportLimits();
+  const pk = await upload(as(v), 'products', Buffer.from('PK\u0003\u0004x'));
+  assert.match(pk.body.reasonMessage.sw, /Excel/);
 });

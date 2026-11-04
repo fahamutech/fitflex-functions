@@ -7,7 +7,8 @@
 // - Blank records (every cell empty) are skipped. The first record is the header.
 // - Limits are enforced while reading, so a hostile file cannot grow memory beyond the caller's byte cap.
 //
-// → { delimiter, header: string[], rows: [{ rowNo, cells: string[] }] }   rowNo: 1 = the header, 2 = first data record
+// → { delimiter, header: string[], rows: [{ rowNo, cells: string[] }] }   rowNo = the record's position counting blank
+//   records too (a quoted cell's inner newlines do not count), i.e. the row a spreadsheet shows; the header is usually 1
 //   or { error, status, ...extra }
 
 const DELIMITERS = [',', ';', '\t'];
@@ -16,18 +17,31 @@ export const CSV_LIMITS = Object.freeze({ maxRows: 2000, maxColumns: 40, maxCell
 
 const fail = (error, extra = {}) => ({ error, status: 400, ...extra });
 
-/** The delimiter used by the first record (quotes respected). */
-export function sniffDelimiter(text) {
-  const counts = new Map(DELIMITERS.map(d => [d, 0]));
+/** Fields in the first record when split by `delimiter`, with the parser's own quote rule (a quote opens a quoted cell only at the start of a cell). */
+function firstRecordFields(text, delimiter) {
+  let fields = 1;
   let inQuotes = false;
+  let atFieldStart = true;
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
-    if (ch === '"') inQuotes = !inQuotes;
-    else if (!inQuotes && (ch === '\n' || ch === '\r')) break;
-    else if (!inQuotes && counts.has(ch)) counts.set(ch, counts.get(ch) + 1);
+    if (inQuotes) {
+      if (ch === '"') { if (text[i + 1] === '"') i += 1; else inQuotes = false; }
+    } else if (ch === '"' && atFieldStart) { inQuotes = true; atFieldStart = false; }
+    else if (ch === delimiter) { fields += 1; atFieldStart = true; }
+    else if (ch === '\n' || ch === '\r') break;
+    else atFieldStart = false;
   }
+  return fields;
+}
+
+/** The delimiter that splits the first record into the most cells (comma on a tie), using the parser's quote rule. */
+export function sniffDelimiter(text) {
   let best = ',';
-  for (const d of DELIMITERS) if (counts.get(d) > counts.get(best)) best = d;
+  let bestFields = firstRecordFields(text, ',');
+  for (const d of DELIMITERS.slice(1)) {
+    const n = firstRecordFields(text, d);
+    if (n > bestFields) { best = d; bestFields = n; }
+  }
   return best;
 }
 
@@ -42,6 +56,7 @@ export function parseCsv(input, limits = CSV_LIMITS) {
   let cell = '';
   let inQuotes = false;
   let atFieldStart = true;
+  let recordNo = 0; // every record counts, blank ones too, so numbers match the spreadsheet's rows (header = 1)
 
   const endCell = () => {
     cells.push(cell);
@@ -51,7 +66,8 @@ export function parseCsv(input, limits = CSV_LIMITS) {
   };
   const endRecord = () => {
     if (!endCell()) return fail('too_many_columns', { maxColumns });
-    if (!cells.every(c => c.trim() === '')) records.push({ cells });
+    recordNo += 1;
+    if (!cells.every(c => c.trim() === '')) records.push({ rowNo: recordNo, cells });
     cells = [];
     return null;
   };
@@ -91,7 +107,5 @@ export function parseCsv(input, limits = CSV_LIMITS) {
   if (head.cells.length > maxColumns) return fail('too_many_columns', { maxColumns });
   if (rows.length > maxRows) return { error: 'too_many_rows', status: 413, maxRows };
   if (!rows.length) return fail('empty_file', { reason: 'header_only' });
-  // Row numbers are the data records' positions (header = 1) so they match what a spreadsheet shows.
-  const numbered = rows.map((r, index) => ({ rowNo: index + 2, cells: r.cells }));
-  return { delimiter, header: head.cells.map(c => c.trim()), rows: numbered };
+  return { delimiter, header: head.cells.map(c => c.trim()), rows };
 }
