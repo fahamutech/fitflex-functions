@@ -3,6 +3,7 @@
 // and nothing loads a whole table. Design: docs/design/vendor-import-v1.md.
 import { randomUUID } from 'node:crypto';
 import { eatDayStart } from '../shared/vendor-stock.mjs';
+import { PROFILE_IMPORT_FIELDS } from '../shared/vendor-import-rules.mjs';
 
 /** The claim on a batch moved to another request (taken over after a stall): stop writing. */
 export class ClaimLostError extends Error { constructor() { super('claim_lost'); this.code = 'claim_lost'; } }
@@ -16,6 +17,14 @@ export const OPEN_BATCH_CAP = 3;
 export const ABANDONED_AFTER_DAYS = 30;
 /** How long a request may wait for one of the per-server apply places. */
 export const SLOT_WAIT_MS = 15_000;
+/** Ended batches keep their counts and codes but lose every typed cell after this many days. */
+export const ENDED_CLEAR_AFTER_DAYS = 30;
+
+/** Issue params that are ours (field names, limits, counts, category suggestions) — everything else may hold a cell. */
+const SAFE_PARAMS = ['field', 'max', 'found', 'expected', 'suggestion', 'suggestionSw', 'suggestionKey'];
+const SCRUB_ISSUES = `COALESCE((SELECT jsonb_agg(CASE WHEN (i->'params') IS NOT NULL THEN jsonb_set(i, '{params}', COALESCE((
+    SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(i->'params') AS e WHERE e.key IN (${SAFE_PARAMS.map(k => `'${k}'`).join(', ')})), '{}'::jsonb)) ELSE i END)
+    FROM jsonb_array_elements(issues) AS i), '[]'::jsonb)`;
 /** A batch stuck in `applying` longer than this was abandoned by a crashed request: the next apply may take it over. */
 export const STALE_APPLY_MS = 2 * 60 * 1000;
 
@@ -31,7 +40,7 @@ const RANK = `(CASE status WHEN 'invalid' THEN 0 WHEN 'needs_review' THEN 1 ELSE
 const IN_FLIGHT = ['mapping_required', 'ready', 'applying'];
 const EMPTY_COUNTS = Object.freeze({ total: 0, valid: 0, needs_review: 0, invalid: 0, pending: 0, applied: 0, failed: 0, skipped: 0 });
 
-export function createPgVendorImportStore({ db, now = () => new Date(), applySlots = 3, slotWaitMs = SLOT_WAIT_MS }) {
+export function createPgVendorImportStore({ db, now = () => new Date(), applySlots = 3, slotWaitMs = SLOT_WAIT_MS, staleApplyMs = STALE_APPLY_MS }) {
   /** The batch as the service sees it (jsonb already parsed by pg). */
   const batchOf = row => (row ? plain(row) : null);
 
@@ -165,7 +174,7 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
       const current = await trx('VendorImportBatch').where({ id, vendorId }).forUpdate().first();
       if (!current || !['mapping_required', 'ready'].includes(current.status)) return null;
       // Once any row was applied (or failed while applying) the mapping is fixed: re-checking would rewrite what was imported.
-      if (await trx('VendorImportRow').where({ batchId: id, vendorId }).whereIn('applyState', ['applied', 'failed']).first('id')) return null;
+      if (await touchedRows(trx, id, vendorId)) return null;
       for (const r of results) {
         await trx('VendorImportRow').where({ id: r.id, batchId: id, vendorId, applyState: 'pending' }).update({
           normalized: JSON.stringify(r.normalized ?? {}), status: r.status, issues: JSON.stringify(r.issues ?? []), lastError: null,
@@ -178,6 +187,11 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
       return batchOf(batch);
     });
   }
+
+  /** Has any row been tried (attempts > 0) or ended applied/failed? Then mapping and discard are refused. */
+  const touchedRows = (q, id, vendorId) => q('VendorImportRow').where({ batchId: id, vendorId }).where(function () {
+    this.where('attempts', '>', 0).orWhereIn('applyState', ['applied', 'failed']);
+  }).first('id');
 
   async function countsIn(q, id, vendorId) {
     const rows = await q('VendorImportRow').where({ batchId: id, vendorId }).select('status', 'applyState').count('* as n').groupBy('status', 'applyState');
@@ -198,13 +212,14 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
    */
   async function claim({ vendorId, id, from, includeNeedsReview }) {
     const at = now();
-    const stale = new Date(+at - STALE_APPLY_MS);
+    const stale = new Date(+at - staleApplyMs);
     const claimToken = randomUUID();
     try {
       const rows = await db('VendorImportBatch').where({ id, vendorId }).where(function () {
         this.whereIn('status', from).orWhere(function () { this.where({ status: 'applying' }).where('applyStartedAt', '<', stale); });
       }).update({
         status: 'applying', applyStartedAt: at, updatedAt: at, claimToken,
+        preClaimStatus: db.raw(`CASE WHEN status = 'applying' THEN "preClaimStatus" ELSE status END`),
         // The first apply decides, for the batch's whole life: later calls and retries use what is stored.
         includeNeedsReview: db.raw('COALESCE("includeNeedsReview", ?)', [Boolean(includeNeedsReview)]),
       }).returning('*');
@@ -219,7 +234,7 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
       throw err;
     }
   }
-  const isStale = batch => batch?.status === 'applying' && batch.applyStartedAt != null && +now() - +new Date(batch.applyStartedAt) > STALE_APPLY_MS;
+  const isStale = batch => batch?.status === 'applying' && batch.applyStartedAt != null && +now() - +new Date(batch.applyStartedAt) > staleApplyMs;
   /** Keep the claim alive (before waiting for a place or the lock, and between chunks). Throws when the claim moved on. */
   async function touch(vendorId, id, token) {
     const n = await db('VendorImportBatch').where({ id, vendorId, status: 'applying', claimToken: token }).update({ applyStartedAt: now() });
@@ -262,23 +277,15 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
   async function skipPending({ vendorId, id, token }) {
     await db('VendorImportRow').where({ batchId: id, vendorId, applyState: 'pending' }).whereExists(heldBy(vendorId, id, token)).update({ applyState: 'skipped' });
   }
-  /** Keep only the raw cells of the mapped columns (the rest were never imported and are not ours to keep). */
-  async function dropUnmappedRaw({ vendorId, id, mappedSources }) {
-    await db.raw(`UPDATE "VendorImportRow" SET raw = COALESCE((
-        SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(raw) AS e(key, value)
-        WHERE e.key IN (SELECT jsonb_array_elements_text(?::jsonb))
-      ), '{}'::jsonb)
-      WHERE "batchId" = ? AND "vendorId" = ?`, [JSON.stringify(mappedSources), id, vendorId]);
-  }
-  async function refreshCounts(vendorId, id) {
-    const counts = await countsIn(db, id, vendorId);
-    await db('VendorImportBatch').where({ id, vendorId }).update({ counts: JSON.stringify(counts) });
-    return counts;
-  }
-
   /** Failed rows → pending again (their attempts are kept). → how many. */
   async function requeueFailed({ vendorId, id, token }) {
-    return db('VendorImportRow').where({ batchId: id, vendorId, applyState: 'failed' }).whereExists(heldBy(vendorId, id, token)).update({ applyState: 'pending' });
+    const rows = await db('VendorImportRow').where({ batchId: id, vendorId, applyState: 'failed' }).whereExists(heldBy(vendorId, id, token)).update({ applyState: 'pending' }).returning('id');
+    return rows.map(r => r.id);
+  }
+  /** A retry that gave the batch back untouched: rows it had re-queued and nobody applied go back to failed. */
+  async function unrequeue({ vendorId, id, token, rowIds }) {
+    if (!rowIds?.length) return 0;
+    return db('VendorImportRow').where({ batchId: id, vendorId, applyState: 'pending' }).whereIn('id', rowIds).where('attempts', '>', 0).whereExists(heldBy(vendorId, id, token)).update({ applyState: 'failed' });
   }
   async function countFailed(vendorId, id) {
     return Number((await db('VendorImportRow').where({ batchId: id, vendorId, applyState: 'failed' }).count('* as n').first()).n);
@@ -292,9 +299,10 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
     return db.transaction(async (trx) => {
       const current = await trx('VendorImportBatch').where({ id, vendorId }).forUpdate().first();
       if (!current || !['mapping_required', 'ready'].includes(current.status)) return { error: 'not_discardable' };
-      if (await trx('VendorImportRow').where({ batchId: id, vendorId, applyState: 'applied' }).first('id')) return { error: 'not_discardable' };
+      if (await touchedRows(trx, id, vendorId)) return { error: 'not_discardable' };
       const at = now();
-      const [batch] = await trx('VendorImportBatch').where({ id, vendorId }).update({ status: 'discarded', updatedAt: at, finishedAt: at }).returning('*');
+      await clearCells(trx, { batchIds: [id], vendorId });
+      const [batch] = await trx('VendorImportBatch').where({ id, vendorId }).update({ status: 'discarded', updatedAt: at, finishedAt: at, cellsClearedAt: at, claimToken: null }).returning('*');
       return { batch: batchOf(batch) };
     });
   }
@@ -337,26 +345,119 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
     }
   }
 
+  /** Every typed cell of these batches goes: raw, checked values, and issue params that could hold a cell (codes and field names stay). */
+  async function clearCells(q, { batchIds, vendorId = null, where = '' }) {
+    await q.raw(`UPDATE "VendorImportRow" SET raw = '{}'::jsonb, normalized = '{}'::jsonb, issues = ${SCRUB_ISSUES}
+      WHERE "batchId" = ANY(?::text[]) ${vendorId ? 'AND "vendorId" = ?' : ''} ${where}`, vendorId ? [batchIds, vendorId] : [batchIds]);
+  }
+
   /** Discard batches nobody finished (open and untouched for `days`): frees the file lock and drops every cell. → how many. */
   async function purgeAbandoned({ days = ABANDONED_AFTER_DAYS } = {}) {
     const cutoff = new Date(+now() - days * 86_400_000);
     return db.transaction(async (trx) => {
       const stale = await trx('VendorImportBatch').whereIn('status', ['mapping_required', 'ready']).where('updatedAt', '<', cutoff)
         .whereNotExists(function () {
-          this.select(1).from('VendorImportRow').whereRaw('"VendorImportRow"."batchId" = "VendorImportBatch".id').whereIn('applyState', ['applied', 'failed']);
+          this.select(1).from('VendorImportRow').whereRaw('"VendorImportRow"."batchId" = "VendorImportBatch".id')
+            .where(function () { this.where('attempts', '>', 0).orWhereIn('applyState', ['applied', 'failed']); });
         }).forUpdate().skipLocked().select('id');
       const ids = stale.map(r => r.id);
       if (!ids.length) return 0;
       const at = now();
-      await trx('VendorImportRow').whereIn('batchId', ids).update({ raw: '{}', normalized: '{}' });
-      await trx('VendorImportBatch').whereIn('id', ids).update({ status: 'discarded', updatedAt: at, finishedAt: at, claimToken: null });
+      await clearCells(trx, { batchIds: ids });
+      await trx('VendorImportBatch').whereIn('id', ids).update({ status: 'discarded', updatedAt: at, finishedAt: at, cellsClearedAt: at, claimToken: null });
       return ids.length;
+    });
+  }
+
+  /**
+   * Ended batches (applied, partial, discarded) older than `days` lose every typed cell; the batch row and its counts stay as history.
+   * errors.csv of such a batch has the codes and messages but empty values. → how many batches.
+   */
+  async function clearEnded({ days = ENDED_CLEAR_AFTER_DAYS } = {}) {
+    const cutoff = new Date(+now() - days * 86_400_000);
+    return db.transaction(async (trx) => {
+      const ended = await trx('VendorImportBatch').whereIn('status', ['applied', 'partial', 'discarded']).whereNull('cellsClearedAt')
+        .whereRaw('COALESCE("finishedAt", "updatedAt") < ?', [cutoff]).forUpdate().skipLocked().limit(200).select('id');
+      const ids = ended.map(r => r.id);
+      if (!ids.length) return 0;
+      await clearCells(trx, { batchIds: ids });
+      await trx('VendorImportBatch').whereIn('id', ids).update({ cellsClearedAt: now() });
+      return ids.length;
+    });
+  }
+
+  /**
+   * A batch silent in `applying` for more than `days` (its request died long ago) goes to a safe state through the same
+   * claim-token guard as every write: `partial` when any row was tried, else `ready`. → how many.
+   */
+  async function resetStaleApplying({ days = ENDED_CLEAR_AFTER_DAYS } = {}) {
+    const cutoff = new Date(+now() - days * 86_400_000);
+    return db.transaction(async (trx) => {
+      const stuck = await trx('VendorImportBatch').where({ status: 'applying' }).where('applyStartedAt', '<', cutoff).forUpdate().skipLocked().select('id', 'vendorId', 'claimToken');
+      let n = 0;
+      for (const b of stuck) {
+        const tried = await touchedRows(trx, b.id, b.vendorId);
+        const at = now();
+        const q = trx('VendorImportBatch').where({ id: b.id, vendorId: b.vendorId, status: 'applying' });
+        const guarded = b.claimToken == null ? q.whereNull('claimToken') : q.where({ claimToken: b.claimToken });
+        n += await guarded.update({ status: tried ? 'partial' : 'ready', updatedAt: at, claimToken: null, ...(tried ? { finishedAt: at } : {}) });
+      }
+      return n;
+    });
+  }
+
+  /** The finish of an apply, ALL in one transaction guarded by the claim token (a request that lost it writes nothing). */
+  async function finish({ vendorId, id, token, mappedSources, entity }) {
+    return db.transaction(async (trx) => {
+      const held = await trx('VendorImportBatch').where({ id, vendorId, status: 'applying', claimToken: token }).forUpdate().first('id');
+      if (!held) throw new ClaimLostError();
+      await trx('VendorImportRow').where({ batchId: id, vendorId, applyState: 'pending' }).update({ applyState: 'skipped' });
+      const counts = await countsIn(trx, id, vendorId);
+      const status = counts.applied === counts.total ? 'applied' : 'partial';
+      // rows not applied keep only their mapped cells (errors.csv needs them); applied rows keep nothing but counts and codes
+      await trx.raw(`UPDATE "VendorImportRow" SET raw = COALESCE((
+          SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(raw) AS e(key, value)
+          WHERE e.key IN (SELECT jsonb_array_elements_text(?::jsonb))), '{}'::jsonb)
+        WHERE "batchId" = ? AND "vendorId" = ?`, [JSON.stringify(mappedSources), id, vendorId]);
+      await trx.raw(`UPDATE "VendorImportRow" SET raw = '{}'::jsonb, normalized = '{}'::jsonb, issues = ${SCRUB_ISSUES}
+        WHERE "batchId" = ? AND "vendorId" = ? AND "applyState" = 'applied'`, [id, vendorId]);
+      // the profile holds contact details: nothing of it stays once the row is no longer waiting for a retry
+      if (entity === 'profile') {
+        await trx.raw(`UPDATE "VendorImportRow" SET raw = '{}'::jsonb, normalized = '{}'::jsonb, issues = ${SCRUB_ISSUES}
+          WHERE "batchId" = ? AND "vendorId" = ? AND "applyState" <> 'failed'`, [id, vendorId]);
+      }
+      const at = now();
+      const [batch] = await trx('VendorImportBatch').where({ id, vendorId }).update({
+        status, counts: JSON.stringify(counts), updatedAt: at, finishedAt: at, claimToken: null,
+      }).returning('*');
+      return batchOf(batch);
+    });
+  }
+
+  /**
+   * Fill the empty profile fields of the account holder under a row lock on the User row (an owner save and an import
+   * cannot interleave a read-modify-write). Only the allowlisted fields; publish, payout account, logo, banner,
+   * commission and areas are never touched; status stays as it is. → { filled } | { error }.
+   */
+  async function fillProfile({ vendorId, patch }) {
+    return db.transaction(async (trx) => {
+      const row = await trx('User').where({ id: vendorId }).forUpdate().first('id', 'vendorProfile');
+      if (!row) return { error: 'vendor_not_found' };
+      const prior = row.vendorProfile || {};
+      const filled = {};
+      for (const key of PROFILE_IMPORT_FIELDS) {
+        if (patch[key] != null && String(patch[key]).trim() !== '' && (prior[key] == null || String(prior[key]).trim() === '')) filled[key] = patch[key];
+      }
+      if (!Object.keys(filled).length) return { filled };
+      const profile = { ...prior, ...filled, vendorId, status: prior.status || 'draft', updatedAt: now().toISOString() };
+      await trx('User').where({ id: vendorId }).update({ vendorProfile: JSON.stringify(profile), updatedAt: now() });
+      return { filled };
     });
   }
 
   return {
     vendorProducts, productRow, productState, productsBySku: productsBySkuOf, createBatch, getBatch, listBatches, sampleRaw, rowsPage, rowsWithIssues, eachRow,
-    saveMapping, claim, isStale, touch, purgeAbandoned, nextEligible, countEligible, markRow, bumpAttempt, release, skipPending, dropUnmappedRaw, refreshCounts,
-    requeueFailed, countFailed, anyApplied, discard, withVendorLock,
+    saveMapping, claim, isStale, touch, purgeAbandoned, clearEnded, resetStaleApplying, finish, fillProfile, staleApplyMs, nextEligible, countEligible, markRow, bumpAttempt, release, skipPending,
+    requeueFailed, unrequeue, countFailed, anyApplied, discard, withVendorLock,
   };
 }

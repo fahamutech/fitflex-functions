@@ -537,6 +537,8 @@ test('profile: fills only empty fields, never publishes, never touches the payou
   assert.equal(after.logo, undefined);
   assert.equal(after.commissionPct, undefined);
   assert.equal(after.deliveryRegions, before.deliveryRegions);
+  const row = await db('VendorImportRow').where({ batchId: up.id }).first();
+  assert.deepEqual([row.raw, row.normalized], [{}, {}], 'the contact details are gone from the import once it ended');
 });
 
 // ── tenancy, list ────────────────────────────────────────────────────────────
@@ -620,7 +622,8 @@ test('discard: before anything was applied only; after apply → 409 not_discard
   must(await call(vendorImportApply, as(v), { params: { id: done.id }, body: {} }));
   const rows = await db('VendorImportRow').where({ batchId: done.id });
   assert.equal(rows.every(r => Object.keys(r.raw).length === 0), true, 'applied rows keep no typed cells at all, mapped or not');
-  assert.deepEqual(rows.map(r => r.normalized.name).sort(), ['A', 'B'], 'but their checked values stay');
+  assert.equal(rows.every(r => Object.keys(r.normalized).length === 0), true, 'and nothing of their checked values stays once the batch ended');
+  assert.equal(rows.every(r => r.applyState === 'applied' && r.resultId), true);
   const refused = await call(vendorImportDiscard, as(v), { params: { id: done.id } });
   assert.deepEqual([refused.status, refused.body.error], [409, 'not_discardable']);
   const spare = must(await upload(as(v), 'products', csv('name,price_tzs,stock,Other private', ['Z,1000,1,secret'])), 201).batch;
@@ -743,7 +746,7 @@ test('ledger off: products are still created paused + pending with their stock, 
 
 // ═══ review round ═══════════════════════════════════════════════════════════
 import { createPgVendorImportStore, ClaimLostError } from '../src/infra/vendor-import-store-pg.mjs';
-import { createVendorImportService } from '../src/services/vendor-import-service.mjs';
+import { createVendorImportService, nextRecoveryId } from '../src/services/vendor-import-service.mjs';
 import { auditLog } from '../src/bootstrap/services.mjs';
 import { vendorImportRetention } from '../functions/jobs.mjs';
 
@@ -1007,12 +1010,9 @@ test('Low: retention — untouched open batches older than 30 days are discarded
   const stale = must(await upload(as(v), 'products', csv('name,price_tzs,stock,Secret', ['JOB item,1000,1,confidential'])), 201).batch;
   await db('VendorImportBatch').where({ id: stale.id }).update({ updatedAt: old });
   for (const f of FLAGS) delete process.env[f];
-  await vendorImportRetention.onJob();
-  assert.equal((await batchRow(stale.id)).status, 'ready', 'flag off: does nothing');
   assert.match(vendorImportRetention.rule, /^\d+ \d+ \* \* \*$/);
-  importOn();
   await vendorImportRetention.onJob();
-  assert.equal((await batchRow(stale.id)).status, 'discarded');
+  assert.equal((await batchRow(stale.id)).status, 'discarded', 'the cleanup runs even when the flag was switched off later');
 });
 
 test('Low: a product an earlier try made and the vendor then deleted is NOT reported as imported (row fails product_deleted, with a message)', async () => {
@@ -1029,7 +1029,7 @@ test('Low: a product an earlier try made and the vendor then deleted is NOT repo
   const failed = preview.rows.find(r => r.applyState === 'failed');
   assert.equal(failed.lastError.code, 'product_deleted');
   assert.ok(failed.lastError.message.en && failed.lastError.message.sw);
-  assert.equal(failed.resultId, null);
+  assert.match(failed.resultId, /^prd_imp_vir_/, 'resultId names the deleted product the retry will replace');
   assert.equal((await productsOf(v)).filter(p => !p.deletedAt).length, 1);
 });
 
@@ -1084,4 +1084,227 @@ test('reasons: parse and quota errors explain themselves in both languages', asy
   resetVendorImportLimits();
   const pk = await upload(as(v), 'products', Buffer.from('PK\u0003\u0004x'));
   assert.match(pk.body.reasonMessage.sw, /Excel/);
+});
+
+// ═══ review round 2 ═════════════════════════════════════════════════════════
+const DAY = 86_400_000;
+const rowsOf = id => db('VendorImportRow').where({ batchId: id }).orderBy('rowNo');
+const emptyCells = r => Object.keys(r.raw).length === 0 && Object.keys(r.normalized).length === 0;
+const paramKeys = r => r.issues.flatMap(i => Object.keys(i.params || {}));
+
+test('R2-M1 discard drops every typed cell (raw, checked values) and keeps codes; finish clears applied rows and keeps mapped cells only for rows not applied', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const d = must(await upload(as(v), 'products', csv('name,price_tzs,stock,category,Extra', ['Disc one,abc,1,Suplements,private cell'])), 201).batch;
+  assert.ok(paramKeys((await rowsOf(d.id))[0]).includes('suggestion'));
+  must(await call(vendorImportDiscard, as(v), { params: { id: d.id } }));
+  const discarded = (await rowsOf(d.id))[0];
+  assert.equal(emptyCells(discarded), true);
+  assert.deepEqual(discarded.issues.map(i => i.code), ['price_invalid', 'category_unknown'], 'codes stay');
+  assert.equal((await batchRow(d.id)).cellsClearedAt !== null, true);
+  // finish: one row applies, one is invalid
+  const f = must(await upload(as(v), 'products', csv('name,price_tzs,stock,Extra', ['Fin ok,1000,1,keep?', 'Fin bad,abc,1,secret'])), 201).batch;
+  must(await call(vendorImportApply, as(v), { params: { id: f.id }, body: {} }));
+  const [okRow, badRow] = await rowsOf(f.id);
+  assert.equal(emptyCells(okRow), true, 'applied: nothing typed stays');
+  assert.deepEqual(badRow.raw, { name: 'Fin bad', price_tzs: 'abc', stock: '1' }, 'not applied: mapped cells only (errors.csv needs them), the unmapped Extra is gone');
+  assert.deepEqual(badRow.issues.map(i => i.code), ['price_invalid']);
+  const csvText = (await call(vendorImportErrorsCsv, as(v), { params: { id: f.id } })).body.toString('utf8');
+  assert.ok(csvText.includes(',price_invalid,') && csvText.includes(',abc'));
+});
+
+test('R2-M1 retention: ended batches lose every cell after 30 days (counts and codes stay, errors.csv has empty values); retry then answers batch_expired; the job runs with the flag off', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const old = must(await upload(as(v), 'products', csv('name,price_tzs,stock,sku', ['Keep failing,1000,1,RET-1', 'Bad one,abc,1,RET-2'])), 201).batch;
+  await makeProduct(v, { name: 'Squatter', sku: 'RET-1' });
+  const done = must(await call(vendorImportApply, as(v), { params: { id: old.id }, body: {} }));
+  assert.equal(done.batch.status, 'partial');
+  const young = must(await upload(as(v), 'products', csv('name,price_tzs,stock', ['Young bad,abc,1'])), 201).batch;
+  must(await call(vendorImportApply, as(v), { params: { id: young.id }, body: {} }));
+  await db('VendorImportBatch').where({ id: old.id }).update({ finishedAt: new Date(Date.now() - 31 * DAY) });
+  for (const f of FLAGS) delete process.env[f];
+  await vendorImportRetention.onJob();
+  assert.equal((await rowsOf(old.id)).every(emptyCells), true);
+  assert.equal((await rowsOf(old.id)).every(r => paramKeys(r).every(k => ['field', 'max', 'found', 'expected', 'suggestion', 'suggestionSw', 'suggestionKey'].includes(k))), true);
+  assert.deepEqual((await rowsOf(old.id)).flatMap(r => r.issues.map(i => i.code)), ['price_invalid']);
+  const kept = await batchRow(old.id);
+  assert.deepEqual([kept.status, kept.counts.total, kept.counts.failed, kept.cellsClearedAt !== null], ['partial', 2, 1, true], 'history stays');
+  assert.equal(emptyCells((await rowsOf(young.id))[0]), false, 'a batch that ended recently keeps what errors.csv needs');
+  importOn();
+  const csvText = (await call(vendorImportErrorsCsv, as(v), { params: { id: old.id } })).body.toString('utf8');
+  const line = csvText.split('\r\n').find(l => l.includes(',price_invalid,'));
+  assert.ok(line.endsWith(','), 'the code and messages remain, the value is empty');
+  const expired = await call(vendorImportRetry, as(v), { params: { id: old.id } });
+  assert.deepEqual([expired.status, expired.body.error], [409, 'batch_expired']);
+  assert.ok(expired.body.message.sw);
+  // idempotent
+  assert.equal(await (await import('../src/bootstrap/services.mjs')).vendorImportService.retention().then(r => r.cleared), 0);
+  // a discarded batch's cells are cleared at once; the job also finishes the clearing of an old discarded one
+  const stuckOld = must(await upload(as(v), 'products', csv('name,price_tzs,stock', ['Stuck,1000,1'])), 201).batch;
+  await db('VendorImportBatch').where({ id: stuckOld.id }).update({ status: 'applying', claimToken: 'dead', applyStartedAt: new Date(Date.now() - 31 * DAY) });
+  const r1 = await vendorImportService.retention();
+  assert.equal(r1.reset, 1);
+  const reset = await batchRow(stuckOld.id);
+  assert.deepEqual([reset.status, reset.claimToken], ['ready', null], 'no row was tried: back to ready');
+  const stuckTried = must(await upload(as(v), 'products', csv('name,price_tzs,stock', ['Stuck2,1000,1'])), 201).batch;
+  await db('VendorImportRow').where({ batchId: stuckTried.id }).update({ attempts: 1 });
+  await db('VendorImportBatch').where({ id: stuckTried.id }).update({ status: 'applying', claimToken: 'dead2', applyStartedAt: new Date(Date.now() - 31 * DAY) });
+  assert.equal((await vendorImportService.retention()).reset, 1);
+  assert.equal((await batchRow(stuckTried.id)).status, 'partial', 'a tried row: partial, never back to an editable state');
+});
+
+test('R2-M1 the retention job does nothing when the tables are missing (42P01) and rethrows anything else', async () => {
+  const original = vendorImportService.retention;
+  try {
+    vendorImportService.retention = async () => { throw Object.assign(new Error('relation does not exist'), { code: '42P01' }); };
+    await vendorImportRetention.onJob();
+    vendorImportService.retention = async () => { throw new Error('boom'); };
+    await assert.rejects(vendorImportRetention.onJob(), /boom/);
+  } finally {
+    vendorImportService.retention = original;
+  }
+});
+
+test('R2-M2 profile import is for the account holder only: staff with `import` get 403 profile_import_owner_only on upload, mapping, apply and retry; products still work for them; the template downloads', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const s = await staff(v, ['import'], { vendorRole: 'admin' });
+  const as_ = staffOf(s, v);
+  const file = csv('businessName,address', ['X,Somewhere']);
+  const denied = await upload(as_, 'profile', file);
+  assert.deepEqual([denied.status, denied.body.error], [403, 'profile_import_owner_only']);
+  assert.ok(denied.body.message.en && denied.body.message.sw);
+  assert.equal((await call(vendorImportDownloadTemplate, as_, { query: { entity: 'profile' } })).status, 200);
+  assert.equal((await upload(as_, 'products', productsCsv(1, { prefix: 'ST' }))).status, 201);
+  assert.equal((await upload(as_, 'inventory', csv('sku,quantity', ['nope,1']))).status, 201);
+  // a profile batch the owner made: staff may read it but cannot map, apply or retry it
+  const mine = must(await upload(as(v), 'profile', csv('Bidhaa,address', ['Shop,Mikocheni'])), 201).batch;
+  assert.equal(must(await call(vendorImportGet, as_, { params: { id: mine.id } })).batch.id, mine.id);
+  for (const [route, opts] of [[vendorImportMapping, { body: { mapping: {}, confirm: true } }], [vendorImportApply, { body: {} }], [vendorImportRetry, {}]]) {
+    const out = await call(route, as_, { ...opts, params: { id: mine.id } });
+    assert.deepEqual([out.status, out.body.error], [403, 'profile_import_owner_only']);
+  }
+  const profile = (await db('User').where({ id: v }).first()).vendorProfile;
+  assert.equal(profile.address, undefined, 'nothing was written');
+  // the owner can
+  const ok = must(await call(vendorImportMapping, as(v), { params: { id: mine.id }, body: { mapping: {}, confirm: true } }));
+  assert.equal(ok.batch.status, 'ready');
+});
+
+test('R2-M2 the import fills the profile under a row lock on the User row: an owner save in flight is never overwritten', async () => {
+  importOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'profile', csv('businessName,address,description', ['Import name,Import address,Import description'])), 201).batch;
+  let commit;
+  const gate = new Promise(resolve => { commit = resolve; });
+  // the owner is saving: row locked, address typed but not committed yet
+  const owner = db.transaction(async (trx) => {
+    const row = await trx('User').where({ id: v }).forUpdate().first('vendorProfile');
+    await trx('User').where({ id: v }).update({ vendorProfile: JSON.stringify({ ...row.vendorProfile, address: 'Owner typed this' }) });
+    await gate;
+  });
+  await new Promise(r => setTimeout(r, 100));
+  let settled = false;
+  const applying = call(vendorImportApply, as(v), { params: { id: up.id }, body: {} }).then((o) => { settled = true; return o; });
+  await new Promise(r => setTimeout(r, 400));
+  assert.equal(settled, false, 'the import waits for the owner\'s save');
+  commit();
+  await owner;
+  const out = must(await applying);
+  assert.equal(out.batch.status, 'applied');
+  const profile = (await db('User').where({ id: v }).first()).vendorProfile;
+  assert.equal(profile.address, 'Owner typed this', 'the owner\'s value stays');
+  assert.equal(profile.description, 'Import description', 'what was empty is filled');
+  assert.equal(profile.businessName, 'Counter Shop', 'what was set is kept');
+  assert.equal(profile.status, 'draft');
+  assert.deepEqual(profile.settlementAccount, { method: 'bank', accountNumber: '0150001234' });
+});
+
+test('R2-L4 a long chunk keeps its claim fresh: a slowed row never lets the batch look dead', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', productsCsv(6, { prefix: 'SLOW' })), 201).batch;
+  const { store, service } = customService({ staleApplyMs: 400 });
+  const slowShop = new Proxy(shopService, {
+    get(target, prop) {
+      if (prop !== 'upsertProduct') return target[prop];
+      return async (args) => { await new Promise(r => setTimeout(r, 150)); return target.upsertProduct(args); };
+    },
+  });
+  const slow = createVendorImportService({ store, shop: slowShop, auditLog });
+  const running = slow.apply({ vendorId: v, actorId: v, id: up.id, body: {}, costAllowed: true });
+  await new Promise(r => setTimeout(r, 700)); // well past the 400 ms takeover window
+  assert.equal(await store.claim({ vendorId: v, id: up.id, from: ['ready'], includeNeedsReview: false }), null, 'not taken over');
+  const done = await running;
+  assert.equal(done.batch.status, 'applied');
+  assert.equal((await productsOf(v)).length, 6);
+  assert.ok(service);
+});
+
+test('R2-L5 a give-back restores the pre-claim status (partial stays partial); mapping and discard are refused for any tried row, consistently', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', csv('name,price_tzs,stock,sku', ['Will fail,1000,1,L5-1', 'Fine,1000,1,L5-2'])), 201).batch;
+  await makeProduct(v, { name: 'Squatter', sku: 'L5-1' });
+  assert.equal(must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} })).batch.status, 'partial');
+  await db('Product').where({ vendorId: v, sku: 'L5-1' }).update({ sku: 'moved' });
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const holder = db.transaction(async (trx) => { await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`vimp-apply:${v}`]); await held; });
+  await new Promise(r => setTimeout(r, 100));
+  const busy = await call(vendorImportRetry, as(v), { params: { id: up.id } });
+  assert.deepEqual([busy.status, busy.body.error], [409, 'apply_in_progress']);
+  const after = await batchRow(up.id);
+  assert.deepEqual([after.status, after.claimToken, after.preClaimStatus], ['partial', null, 'partial'], 'partial stayed partial');
+  release();
+  await holder;
+  assert.equal(must(await call(vendorImportRetry, as(v), { params: { id: up.id } })).batch.status, 'applied');
+  // a ready batch with a row that was ATTEMPTED (no outcome recorded) is fixed too: neither mapping nor discard
+  const v2 = await vendor();
+  const up2 = must(await upload(as(v2), 'products', csv('Bidhaa,Bei,Idadi', ['A,1000,1'])), 201).batch;
+  must(await call(vendorImportMapping, as(v2), { params: { id: up2.id }, body: { mapping: {}, confirm: true } }));
+  await db('VendorImportRow').where({ batchId: up2.id }).update({ attempts: 1 });
+  assert.equal((await call(vendorImportDiscard, as(v2), { params: { id: up2.id } })).body.error, 'not_discardable');
+  assert.equal((await call(vendorImportMapping, as(v2), { params: { id: up2.id }, body: { mapping: {}, confirm: true } })).body.error, 'batch_not_editable');
+  await db('VendorImportRow').where({ batchId: up2.id }).update({ attempts: 0 });
+  assert.equal((await call(vendorImportDiscard, as(v2), { params: { id: up2.id } })).status, 200, 'untried: both allowed');
+});
+
+test('R2-L7 the finish is one transaction guarded by the claim token: a stale token changes nothing at all', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', csv('name,price_tzs,stock,Extra', ['Fin1,abc,1,secret1', 'Fin2,1000,1,secret2'])), 201).batch;
+  const { store } = customService();
+  const A = await store.claim({ vendorId: v, id: up.id, from: ['ready'], includeNeedsReview: false });
+  const before = await rowsOf(up.id);
+  await assert.rejects(store.finish({ vendorId: v, id: up.id, token: 'not-mine', mappedSources: ['name'], entity: 'products' }), ClaimLostError);
+  assert.deepEqual(await rowsOf(up.id), before, 'no row was skipped, cleared or trimmed');
+  assert.equal((await batchRow(up.id)).status, 'applying');
+  const done = await store.finish({ vendorId: v, id: up.id, token: A.claimToken, mappedSources: ['name', 'price_tzs', 'stock'], entity: 'products' });
+  assert.deepEqual([done.status, done.counts.skipped, done.claimToken], ['partial', 2, null]);
+  assert.equal((await rowsOf(up.id)).every(r => !('Extra' in r.raw)), true);
+});
+
+test('R2-L6 a deleted imported product: the row fails product_deleted and the NEXT retry creates it again under a deterministic recovery id; a crash inside that retry is idempotent', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', csv('name,price_tzs,stock,sku', ['Phoenix,1000,3,PHX-1'])), 201).batch;
+  const [row] = await rowsOf(up.id);
+  const base = `prd_imp_${row.id}`;
+  const first = await shopService.upsertProduct({ vendorId: v, actorId: v, body: { name: 'Phoenix', priceTzs: 1000, stock: 3, category: null, sku: 'PHX-1' }, initialStatus: 'paused', presetId: base, stockNote: `import:${up.id}` });
+  await shopService.deleteProduct({ vendorId: v, productId: first.product.id });
+  await db('VendorImportBatch').where({ id: up.id }).update({ status: 'applying', claimToken: 'old', applyStartedAt: new Date(Date.now() - 5 * 60_000) });
+  assert.equal(must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} })).batch.counts.failed, 1);
+  assert.equal((await rowsOf(up.id))[0].resultId, base);
+  // crash inside the retry: the recovery product exists but the row was never marked
+  const recovered = await shopService.upsertProduct({ vendorId: v, actorId: v, body: { name: 'Phoenix', priceTzs: 1000, stock: 3, sku: 'PHX-1' }, initialStatus: 'paused', presetId: `${base}_r1`, stockNote: `import:${up.id}` });
+  assert.equal(recovered.created, true);
+  const retry = must(await call(vendorImportRetry, as(v), { params: { id: up.id } }));
+  assert.deepEqual([retry.batch.status, retry.batch.counts.applied], ['applied', 1]);
+  assert.equal((await rowsOf(up.id))[0].resultId, `${base}_r1`, 'found, not made twice');
+  assert.equal((await productsOf(v)).filter(p => !p.deletedAt).length, 1);
+  // deleted again and retried once more: the next id
+  assert.equal(nextRecoveryId(`${base}_r1`), `${base}_r2`);
+  assert.equal(nextRecoveryId(base), `${base}_r1`);
 });

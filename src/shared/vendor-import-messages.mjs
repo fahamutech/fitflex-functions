@@ -96,6 +96,8 @@ export const MESSAGES = Object.freeze({
   'vendor_import.error.reason.binary_or_utf16': M('The file is not plain text: save as CSV (UTF-8).', 'Faili si maandishi ya kawaida: ihifadhi kama CSV (UTF-8).'),
   'vendor_import.error.reason.unknown_column': M('That column is not in the file.', 'Safu wima hiyo haimo kwenye faili.'),
   'vendor_import.error.reason.unknown_field': M('That field does not exist.', 'Sehemu hiyo haipo.'),
+  'vendor_import.error.profile_import_owner_only': M('Only the account holder can import the business profile.', 'Ni mmiliki wa akaunti pekee anayeweza kuingiza wasifu wa biashara.'),
+  'vendor_import.error.batch_expired': M('This import ended more than 30 days ago and its data was cleared. Upload the file again.', 'Uingizaji huu uliisha zaidi ya siku 30 zilizopita na data yake ilifutwa. Pakia faili tena.'),
   'vendor_import.error.import_busy': M('Imports are busy. Try again shortly.', 'Uingizaji una shughuli nyingi. Jaribu tena baada ya muda mfupi.'),
   'vendor_import.error.invalid_preset_id': M('The product could not be created.', 'Bidhaa haikuweza kuundwa.'),
 
@@ -103,7 +105,7 @@ export const MESSAGES = Object.freeze({
   'vendor_import.row_error.stock_changed': M('Stock changed since the file was checked.', 'Stock ilibadilika tangu faili ilipokaguliwa.'),
   'vendor_import.row_error.sku_exists': M('A product with this SKU was added since the file was checked.', 'Bidhaa yenye SKU hii iliongezwa tangu faili ilipokaguliwa.'),
   'vendor_import.row_error.product_not_found': M('The product no longer exists.', 'Bidhaa haipo tena.'),
-  'vendor_import.row_error.product_deleted': M('The product created by this row was deleted.', 'Bidhaa iliyoundwa na safu mlalo hii ilifutwa.'),
+  'vendor_import.row_error.product_deleted': M('The product this row created was deleted. Retry will create it again.', 'Bidhaa iliyoundwa na safu mlalo hii ilifutwa. Kujaribu tena kutaiunda upya.'),
   'vendor_import.row_error.variant_not_found': M('The variant no longer exists.', 'Chaguo halipo tena.'),
   'vendor_import.row_error.insufficient_stock': M('Not enough Stock.', 'Stock haitoshi.'),
   'vendor_import.row_error.internal_error': M('Something went wrong. Try this row again.', 'Kuna hitilafu. Jaribu safu mlalo hii tena.'),

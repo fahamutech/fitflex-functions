@@ -44,6 +44,8 @@ const readLimiter = createVendorLimiter({ perMinute: VENDOR_IMPORT_RATE.readsPer
 export const resetVendorImportLimits = () => { uploadLimiter.reset(); applyLimiter.reset(); readLimiter.reset(); };
 
 const guards = method => routeGuard(method, [requireAuth('vendor', 'vendor_staff'), requireImportPermission]);
+/** The business profile is written only by the account holder (PUT /vendor/profile refuses vendor_staff, even admins). */
+const isOwner = user => user.userType === 'vendor';
 const vendorOf = user => (user.userType === 'vendor_staff' ? user.vendorId : user.sub);
 const disabled = res => res.status(404).json({ error: 'feature_disabled', message: errorMessage('feature_disabled') });
 const setHeader = (res, key, value) => (typeof res.setHeader === 'function' ? res.setHeader(key, value) : res.set?.(key, value));
@@ -87,7 +89,7 @@ const sendFile = (res, body, type, fileName, extraHeaders = {}) => {
 
 const BATCH = '{ id, entity: products|inventory|profile, status: mapping_required|ready|applying|applied|partial|discarded, filename, sizeBytes, templateVersion: "v1"|null, delimiter, counts { total, valid, needs_review, invalid, pending, applied, failed, skipped }, createdBy, needsConfirmation (a critical column is a synonym/fuzzy match, or any is fuzzy: confirm before rows are checked), missingRequired:[field], createdAt, updatedAt, applyStartedAt|null, finishedAt|null }';
 const ISSUE = '{ code, field|null, severity: error|warning|info, params, message { en, sw } } (Swahili is a draft for native review)';
-const COMMON = 'Vendor / staff with `import` (VENDOR_TOOLS + VENDOR_IMPORT; off → 404 feature_disabled; a FitFlex admin → 403). Another vendor\'s batch or an unknown id → 404 import_not_found. Staff of a suspended vendor → 403 vendor_suspended. 429 rate_limited { retryAfterSeconds } (+ Retry-After). Errors: { error, message { en, sw }, ...extra }.';
+const COMMON = 'Vendor / staff with `import` (VENDOR_TOOLS + VENDOR_IMPORT; off → 404 feature_disabled; a FitFlex admin → 403). Another vendor\'s batch or an unknown id → 404 import_not_found. Staff of a suspended vendor → 403 vendor_suspended. The `profile` entity is for the account holder only (like PUT /vendor/profile): vendor_staff, even with `import`, get 403 profile_import_owner_only on upload, mapping, apply and retry of a profile import (the template still downloads). 429 rate_limited { retryAfterSeconds } (+ Retry-After). Errors: { error, message { en, sw }, ...extra }.';
 
 export const vendorImportDownloadTemplate = {
   created, method: 'get', path: '/vendor/imports/template',
@@ -119,7 +121,7 @@ export const vendorImportUpload = {
     }
     const entity = parsed.fields.find(f => f.name === 'entity')?.value;
     const file = parsed.files.find(f => f.fieldname === 'file') || parsed.files[0];
-    const result = await vendorImportService.upload({ vendorId, actorId: req.user.sub, entity, file, costAllowed: await shopService.canSeeCost(req.user) });
+    const result = await vendorImportService.upload({ vendorId, actorId: req.user.sub, entity, file, costAllowed: await shopService.canSeeCost(req.user), owner: isOwner(req.user) });
     if (result.error) return send(res, result);
     return res.status(201).json({ batch: result.batch });
   },
@@ -164,7 +166,7 @@ export const vendorImportMapping = {
     if (!vendorImportOn()) return disabled(res);
     const vendorId = vendorOf(req.user);
     if (limited(applyLimiter, vendorId, res)) return undefined;
-    const result = await vendorImportService.putMapping({ vendorId, actorId: req.user.sub, id: req.params.id, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user) });
+    const result = await vendorImportService.putMapping({ vendorId, actorId: req.user.sub, id: req.params.id, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user), owner: isOwner(req.user) });
     if (result.error) return send(res, result);
     return res.json({ batch: result.batch });
   },
@@ -193,7 +195,7 @@ export const vendorImportApply = {
     if (!vendorImportOn()) return disabled(res);
     const vendorId = vendorOf(req.user);
     if (limited(applyLimiter, vendorId, res)) return undefined;
-    const result = await vendorImportService.apply({ vendorId, actorId: req.user.sub, id: req.params.id, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user), signal: abortOnClose(res) });
+    const result = await vendorImportService.apply({ vendorId, actorId: req.user.sub, id: req.params.id, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user), signal: abortOnClose(res), owner: isOwner(req.user) });
     if (result.error) return send(res, result);
     return res.json({ batch: result.batch, processed: result.processed, remaining: result.remaining });
   },
@@ -201,13 +203,13 @@ export const vendorImportApply = {
 
 export const vendorImportRetry = {
   created, method: 'post', path: '/vendor/imports/:id/retry',
-  description: `${COMMON} Put the failed rows back in the queue and apply them (same answer as apply). Only status partial or ready with failed rows → else 409 not_ready | nothing_to_retry; 409 apply_in_progress. A stock_changed inventory row is counted again against the stock as it is now.`,
+  description: `${COMMON} Put the failed rows back in the queue and apply them (same answer as apply). Only status partial or ready with failed rows → else 409 not_ready | nothing_to_retry; 409 apply_in_progress; 409 batch_expired (the batch ended more than 30 days ago and its cells were cleared). A row whose imported product the vendor deleted fails product_deleted and the next retry creates it again. A stock_changed inventory row is counted again against the stock as it is now.`,
   onGuard: guards('post'),
   onRequest: async (req, res) => {
     if (!vendorImportOn()) return disabled(res);
     const vendorId = vendorOf(req.user);
     if (limited(applyLimiter, vendorId, res)) return undefined;
-    const result = await vendorImportService.retry({ vendorId, actorId: req.user.sub, id: req.params.id, costAllowed: await shopService.canSeeCost(req.user), signal: abortOnClose(res) });
+    const result = await vendorImportService.retry({ vendorId, actorId: req.user.sub, id: req.params.id, costAllowed: await shopService.canSeeCost(req.user), signal: abortOnClose(res), owner: isOwner(req.user) });
     if (result.error) return send(res, result);
     return res.json({ batch: result.batch, processed: result.processed, remaining: result.remaining });
   },
@@ -215,7 +217,7 @@ export const vendorImportRetry = {
 
 export const vendorImportDiscard = {
   created, method: 'post', path: '/vendor/imports/:id/discard',
-  description: `${COMMON} Throw the import away (the same file may be uploaded again). Only before any row was applied and not while applying → else 409 not_discardable { batchStatus }. → { batch ${BATCH} } (status discarded).`,
+  description: `${COMMON} Throw the import away (the same file may be uploaded again). Only before any row was tried (no row applied, failed or attempted) and not while applying → else 409 not_discardable { batchStatus }. Discarding drops every typed cell. → { batch ${BATCH} } (status discarded).`,
   onGuard: guards('post'),
   onRequest: async (req, res) => {
     if (!vendorImportOn()) return disabled(res);
@@ -229,7 +231,7 @@ export const vendorImportDiscard = {
 
 export const vendorImportErrorsCsv = {
   created, method: 'get', path: '/vendor/imports/:id/errors.csv',
-  description: `${COMMON} Every issue of the import as a CSV: text/csv; charset=utf-8 attachment, UTF-8 with BOM, CRLF, columns row, field, severity, code, message_en, message_sw, value; formula-injection safe. Fetch it with the sign-in header and save the blob (a plain link carries no token).`,
+  description: `${COMMON} Every issue of the import as a CSV: text/csv; charset=utf-8 attachment, UTF-8 with BOM, CRLF, columns row, field, severity, code, message_en, message_sw, value; formula-injection safe. Cells are kept only for rows not applied, until the batch is discarded or 30 days after it ended; after that the rows still list their codes and messages but value is empty. Fetch it with the sign-in header and save the blob (a plain link carries no token).`,
   onGuard: guards('get'),
   onRequest: async (req, res) => {
     if (!vendorImportOn()) return disabled(res);

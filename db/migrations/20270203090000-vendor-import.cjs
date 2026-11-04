@@ -38,6 +38,10 @@ exports.up = async function up(knex) {
     table.boolean('includeNeedsReview');
     // Who holds the apply right now: every write while applying must carry it, so a request that was taken over stops writing.
     table.text('claimToken');
+    // The status the batch had before the current claim (a give-back restores it: partial stays partial).
+    table.text('preClaimStatus');
+    // When the typed cells were cleared (discard, abandoned, or 30 days after the batch ended). Counts and codes stay.
+    table.timestamp('cellsClearedAt', { precision: 3 });
     table.timestamp('createdAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
     table.timestamp('updatedAt', { precision: 3 }).notNullable().defaultTo(knex.fn.now());
     table.timestamp('applyStartedAt', { precision: 3 });
