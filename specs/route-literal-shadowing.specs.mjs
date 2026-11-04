@@ -29,6 +29,9 @@ const HANDLED = new Set([
   'GET /me/training-plans/offers <- /me/training-plans/:id',
   'GET /organizer/events/:id/results/imports <- /organizer/events/:id/results/:registrationId',
   'GET /organizer/events/:id/results/summary <- /organizer/events/:id/results/:registrationId',
+  // S9: vendorGetPurchase answers req.params.id === 'last-costs' with the last-costs handler (same guards);
+  // checked over HTTP in specs/vendor-purchases.specs.mjs.
+  'GET /vendor/purchases/last-costs <- /vendor/purchases/:id',
 ]);
 
 const routeRe = path => new RegExp(`^${path.replace(/\/:[^/]+/g, '/[^/]+')}/?$`);

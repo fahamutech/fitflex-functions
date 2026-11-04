@@ -39,7 +39,8 @@ export const REPORT_SECTIONS = ['summary', 'sales', 'products', 'stock-value', '
 export function createVendorReportService({
   store, users, auditLog,
   owedTotals = async () => null,          // (vendorId) → S4 aging totals { owedTzs, overdueTzs, current, d1_30, … }
-  flags = { stockLedger: () => false, walkInSales: () => false, customers: () => false },
+  flags = { stockLedger: () => false, walkInSales: () => false, customers: () => false, purchases: () => false },
+  paidToSuppliers = async () => [],         // S9: ({ vendorId, from, to }) → [{ method, amount, count }] recorded supplier payments by paidOn
   now = () => new Date(),
   cache = createReportCache(),
 } = {}) {
@@ -53,7 +54,8 @@ export function createVendorReportService({
     return value;
   }
   const cacheKey = (vendorId, section, period, access, extra = {}) => JSON.stringify([vendorId, section, period.from, period.to, period.channel, period.groupBy,
-    Boolean(access.cost), Boolean(access.payout), Boolean(access.customers), flags.stockLedger(), flags.customers(), extra]);
+    Boolean(access.cost), Boolean(access.payout), Boolean(access.customers), flags.stockLedger(), flags.customers(),
+    Boolean(access.purchases) && Boolean(flags.purchases?.()), extra]);
 
   async function head(vendorId, period, { channel = period.channel, grouped = true } = {}) {
     const walkIn = flags.walkInSales() || await store.hasWalkIn({ vendorId, from: period.from, to: period.to });
@@ -245,7 +247,7 @@ export function createVendorReportService({
 
   // ── payment methods, customers ────────────────────────────────────────────
 
-  async function methodsData(vendorId, period) {
+  async function methodsData(vendorId, period, access = {}) {
     const m = await store.paymentMethods({ vendorId, from: period.from, to: period.to });
     const withShare = list => {
       const total = list.reduce((s, r) => s + r.amountTzs, 0);
@@ -270,6 +272,16 @@ export function createVendorReportService({
     const paidBack = period.channel === 'app' ? [] : (m.paidBack || []).filter(r => r.amount !== 0 || r.count !== 0)
       .map(r => ({ method: r.method, amountTzs: r.amount, count: r.count }))
       .sort((a, b) => b.amountTzs - a.amountTzs || METHOD_ORDER.indexOf(a.method) - METHOD_ORDER.indexOf(b.method));
+    // S9: "Paid to suppliers (by you)" — money OUT, its own group, never summed with money in; recorded supplier
+    // payments by paid date (a voided payment drops out of every period). Only with `purchases` + VENDOR_PURCHASES;
+    // absent otherwise. Not a sales channel, so the channel filter does not apply.
+    if (access.purchases && flags.purchases?.()) {
+      const paidToSuppliersRows = (await paidToSuppliers({ vendorId, from: period.from, to: period.to }))
+        .filter(r => r.amount !== 0 || r.count !== 0)
+        .map(r => ({ method: r.method, amountTzs: r.amount, count: r.count }))
+        .sort((a, b) => b.amountTzs - a.amountTzs || METHOD_ORDER.indexOf(a.method) - METHOD_ORDER.indexOf(b.method));
+      return { byYou, viaFitFlex, paidBack, paidToSuppliers: paidToSuppliersRows };
+    }
     return { byYou, viaFitFlex, paidBack };
   }
 
@@ -367,7 +379,7 @@ export function createVendorReportService({
       if (section === 'sales') return { ...top, ...(await salesData(vendorId, period)) };
       if (section === 'profit') return { ...top, ...(await profitData(vendorId, period)) };
       if (section === 'marketplace-net') return { ...top, ...(await payoutData(vendorId, period)) };
-      if (section === 'payment-methods') return { ...top, ...(await methodsData(vendorId, period)) };
+      if (section === 'payment-methods') return { ...top, ...(await methodsData(vendorId, period, access)) };
       if (section === 'customers') return { ...top, ...(await customersData(vendorId, period)) };
       return { ...top, ...(await summaryData(vendorId, period, access)) };
     });

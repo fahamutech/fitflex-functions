@@ -181,6 +181,7 @@ export const REPORT_LABELS = {
     figure: 'Figure', value: 'Value', none: 'None',
     refundNumber: 'Credit note', refundDate: 'Date', saleNumber: 'Sale', restocked: 'Units back in stock',
     refundType: 'Type', type_refund: 'Refund', type_revert: 'Undone', paidBack: 'Paid back by you (refunds)', refundPaidOut: 'Paid back', offBalances: 'Taken off balances',
+    paidToSuppliers: 'Paid to suppliers (by you)',
     method_: { cash: 'Cash', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Card', bank: 'Bank transfer', other: 'Other', unknown: 'Other' },
     months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
   },
@@ -212,6 +213,7 @@ export const REPORT_LABELS = {
     figure: 'Kipimo', value: 'Thamani', none: 'Hakuna',
     refundNumber: 'Hati ya marejesho', refundDate: 'Tarehe', saleNumber: 'Mauzo', restocked: 'Idadi iliyorudi kwenye Stock',
     refundType: 'Kitendo', type_refund: 'Marejesho', type_revert: 'Yametenduliwa', paidBack: 'Uliyorudisha wewe (marejesho)', refundPaidOut: 'Yaliyorudishwa', offBalances: 'Yaliyopunguzwa kwenye madeni',
+    paidToSuppliers: 'Uliyowalipa wasambazaji (wewe)',
     method_: { cash: 'Taslimu', mpesa: 'M-Pesa', airtel_money: 'Airtel Money', mixx: 'Mixx by Yas', halopesa: 'HaloPesa', card: 'Kadi', bank: 'Uhamisho wa benki', other: 'Nyingine', unknown: 'Nyingine' },
     months: ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'],
   },
@@ -344,6 +346,8 @@ export function methodsCsv(data, lang) {
     ...data.viaFitFlex.map(r => [reportLabel(lang, 'viaFitFlex'), methodName(lang, r.paymentMethod), r.amountTzs, r.count, r.sharePct]),
     // S7: money paid back on refunds, its own group (no share: it is never summed with money in).
     ...(data.paidBack || []).map(r => [reportLabel(lang, 'paidBack'), methodName(lang, r.method), r.amountTzs, r.count, '']),
+    // S9: money paid to suppliers, its own group (money out; no share).
+    ...(data.paidToSuppliers || []).map(r => [reportLabel(lang, 'paidToSuppliers'), methodName(lang, r.method), r.amountTzs, r.count, '']),
   ];
   return { header, rows };
 }

@@ -34,7 +34,9 @@ export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manage
 // with vendorRole admin or sales by migration 20261230120000-vendor-walkin-sales.
 // `import` (vendor smart import V1): upload / map / apply CSV imports. Backfilled onto vendorRole admin staff by
 // migration 20270203090000-vendor-import; other staff get it only when an admin grants it.
-export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff', 'import']);
+// `purchases` (vendor tools · S9): suppliers, receiving stock, payables. Backfilled onto existing staff with
+// vendorRole admin only (design Q-2) by migration 20270203090100-vendor-purchases. RULE 6 (auth-adjacent).
+export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff', 'import', 'purchases']);
 // Smart import (INTERNAL create options, never read from a request body): the only product ids and statuses an import may preset.
 const IMPORT_PRESET_ID = /^prd_imp_[A-Za-z0-9_-]{1,60}$/;
 // Price and discount price are not reviewed (owner decision 2026-10-29): changing them never sends an approved

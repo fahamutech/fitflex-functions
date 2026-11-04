@@ -36,7 +36,7 @@ after(async () => {
 
 test('STAFF_PERMISSIONS carries `import`; a new vendor admin gets every permission, other roles only what they are given', async () => {
   assert.equal(STAFF_PERMISSIONS.has('import'), true);
-  assert.deepEqual([...STAFF_PERMISSIONS], ['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff', 'import']);
+  assert.deepEqual([...STAFF_PERMISSIONS], ['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff', 'import', 'purchases']);
   const v = await user('vendor');
   const mk = async (role, permissions) => {
     const out = await shopService.createVendorStaff({ vendorId: v, body: { name: 'S', email: `${uid('s')}@example.com`, phone: `07${Math.floor(10_000_000 + Math.random() * 89_999_999)}`, password: 'Secret123!', role, permissions } });
@@ -45,7 +45,7 @@ test('STAFF_PERMISSIONS carries `import`; a new vendor admin gets every permissi
     return out.staff;
   };
   const admin = await mk('admin');
-  assert.deepEqual([...admin.vendorPermissions].sort(), ['customers', 'import', 'orders', 'payments', 'products', 'reports', 'sales', 'staff']);
+  assert.deepEqual([...admin.vendorPermissions].sort(), ['customers', 'import', 'orders', 'payments', 'products', 'purchases', 'reports', 'sales', 'staff']);
   const inventory = await mk('inventory_manager', ['products', 'import', 'bogus']);
   assert.deepEqual([...inventory.vendorPermissions].sort(), ['import', 'products'], 'unknown permissions are dropped, `import` may be granted by an admin');
   const plain = await mk('inventory_manager', ['products']);
