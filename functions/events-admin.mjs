@@ -72,7 +72,11 @@ export const adminGetEvent = {
   created, method: 'get', path: '/admin/events/:id',
   description: 'Admin (scope events): the full document (as the organizer sees it, both languages) + organizer { id, name, status, kycCaseId, permitOnFile }, permitOnFile and the admin allowedActions (approve | reject | edit | cancel | complete | archive). 404 event_not_found.',
   onGuard: guard('get'),
-  onRequest: async (req, res) => send(res, await svc.detail({ eventId: req.params.id })),
+  // Mounted before adminListEventOrganizers (exports mount alphabetically): the fixed word means what it says.
+  // Same guard on both routes, so the organizer list keeps its own checks.
+  onRequest: async (req, res) => (req.params.id === 'organizers'
+    ? adminListEventOrganizers.onRequest(req, res)
+    : send(res, await svc.detail({ eventId: req.params.id }))),
 };
 
 export const adminDecideEvent = {
