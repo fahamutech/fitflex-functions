@@ -487,10 +487,23 @@ export function createPgVendorPurchaseStore({ db, now = () => new Date() }) {
   }
 
   /**
+   * M-1: the latest LATER (higher GRN seq) received purchase of this vendor with a line for the same product +
+   * variant at exactly `costTzs` (free lines never count). → { purchaseId, lineId, costUpdated } or null.
+   */
+  async function laterLiveSameCost(trx, vendorId, seq, line, costTzs) {
+    if (costTzs == null) return null;
+    const found = await trx('VendorPurchaseLine as l').join('VendorPurchase as p', function joinP() { this.on('p.id', 'l.purchaseId').andOn('p.vendorId', 'l.vendorId'); })
+      .where({ 'l.vendorId': vendorId, 'l.productId': line.productId, 'l.variant': line.variant || '', 'p.status': 'received', 'l.unitCostTzs': Number(costTzs) })
+      .where('p.seq', '>', seq).where('l.unitCostTzs', '>', 0)
+      .orderBy('p.seq', 'desc').first('p.id as purchaseId', 'l.id as lineId', 'l.costUpdated');
+    return found ? { purchaseId: found.purchaseId, lineId: found.lineId, costUpdated: Boolean(found.costUpdated) } : null;
+  }
+
+  /**
    * Void a received purchase. `canVoid(row)` → null or a refusal (M2, judged on the locked row).
    * → { purchase, costRestored, costKept, paymentsVoided, productIds, row } or { error, status, ... }.
    */
-  async function voidPurchase({ vendorId, purchaseId, actorId, reason, canVoid = () => null, canSeeCost = false, today }) {
+  async function voidPurchase({ vendorId, purchaseId, actorId, reason, canVoid = () => null, othersPaymentsBlock = false, canSeeCost = false, today }) {
     if (typeof purchaseId !== 'string' || !purchaseId) return fail('purchase_not_found', 404);
     const at = now();
     try {
@@ -503,6 +516,11 @@ export function createPgVendorPurchaseStore({ db, now = () => new Date() }) {
         const refused = canVoid(row);
         if (refused) throw asRefusal(refused);
         if (row.status === 'voided') throw refusal('already_voided', 409, { voidedAt: iso(row.voidedAt) });
+        // L-2: a void takes its payments with it, so a caller without voidsAny may not void payments recorded by others.
+        if (othersPaymentsBlock) {
+          const others = await trx('VendorPurchasePayment').where({ purchaseId, vendorId, status: 'recorded' }).whereNot('recordedBy', actorId).first('id');
+          if (others) throw refusal('void_not_allowed', 409, { reason: 'has_others_payments' });
+        }
 
         const lines = (await trx('VendorPurchaseLine').where({ purchaseId, vendorId }).orderBy('lineNo')).map(plain);
         const productIds = [...new Set(lines.map(l => l.productId))].sort();
@@ -548,7 +566,19 @@ export function createPgVendorPurchaseStore({ db, now = () => new Date() }) {
           for (const l of [...updated].sort(byKey)) {
             const priv = privs.find(r => r.productId === l.productId && r.variant === (l.variant || ''));
             const item = { productId: l.productId, variant: l.variant || null, name: l.nameSnapshot };
-            if (priv && priv.costSourceId === purchaseId) {
+            // M-1 (security review #327): a LATER delivery still received that set (or confirmed) this same cost keeps
+            // it standing — its line inherits what this one replaced, so voiding it later puts back the right cost.
+            const live = priv && priv.costSourceId === purchaseId ? await laterLiveSameCost(trx, vendorId, row.seq, l, priv.costTzs) : null;
+            if (live) {
+              await trx('ProductPrivate').where({ productId: l.productId, variant: l.variant || '' })
+                .update({ costSourceId: live.purchaseId, costUpdatedAt: at, updatedAt: at });
+              if (!live.costUpdated) {
+                await trx('VendorPurchaseLine').where({ id: live.lineId, vendorId })
+                  .update({ costUpdated: true, previousCostTzs: l.previousCostTzs ?? null, previousCostSourceId: l.previousCostSourceId ?? null });
+              }
+              await trx('VendorPurchaseLine').where({ id: l.id }).update({ costRestoredOnVoid: false });
+              costKept.push(item);
+            } else if (priv && priv.costSourceId === purchaseId) {
               const back = await restoredCost(trx, vendorId, l);
               await trx('ProductPrivate').where({ productId: l.productId, variant: l.variant || '' })
                 .update({ costTzs: back.costTzs, costSourceId: back.sourceId, costUpdatedAt: at, updatedAt: at });

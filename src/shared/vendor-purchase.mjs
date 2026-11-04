@@ -47,7 +47,8 @@ const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const textOf = v => (typeof v === 'string' ? v.trim() : '');
 export const validClientRef = ref => typeof ref === 'string' && CLIENT_REF.test(ref);
 /** The payment recorded at receipt carries the purchase's clientRef + ':paid' (spec §2.1). */
-export const atReceiptClientRef = clientRef => `${clientRef}:paid`;
+export const AT_RECEIPT_SUFFIX = ':paid';
+export const atReceiptClientRef = clientRef => `${clientRef}${AT_RECEIPT_SUFFIX}`;
 
 // ── suppliers ───────────────────────────────────────────────────────────────
 
@@ -257,7 +258,9 @@ export function planPurchaseMoney(parsed, { hasSupplier }) {
  */
 export function parsePurchasePayment(body, { today }) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fail('invalid_body', 400);
-  if (!validClientRef(body.clientRef)) return fail('invalid_client_ref', 400);
+  // Security review #327 L-5: ':paid' ends the clientRef of the payment recorded at receipt; a later payment may
+  // not use it (it would collide with, or be answered as, that payment).
+  if (!validClientRef(body.clientRef) || body.clientRef.endsWith(AT_RECEIPT_SUFFIX)) return fail('invalid_client_ref', 400);
   if (!Number.isInteger(body.amountTzs) || body.amountTzs < 1 || body.amountTzs > MAX_PURCHASE_TOTAL_TZS) return fail('invalid_amount', 400);
   const how = methodAndReference(body.method, body.reference);
   if (how.error) return how;

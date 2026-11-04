@@ -11,7 +11,7 @@
 // it (createdAt) → 403 void_not_allowed { reason: not_own | too_old }. A void by staff notifies the vendor account.
 import {
   parseSupplier, parseReceive, purchaseFingerprint, parsePurchasePayment, purchasePaymentFingerprint, parsePurchaseReason,
-  parseSchedule, validClientRef, SUPPLIER_FILTERS, SUPPLIER_SORTS, PAYABLES_SORTS, PURCHASE_STATUSES, PURCHASE_PAYMENT_FILTERS,
+  parseSchedule, validClientRef, AT_RECEIPT_SUFFIX, SUPPLIER_FILTERS, SUPPLIER_SORTS, PAYABLES_SORTS, PURCHASE_STATUSES, PURCHASE_PAYMENT_FILTERS,
   PURCHASES_PAGE_DEFAULT, PURCHASES_PAGE_MAX, MAX_LAST_COST_PRODUCTS,
 } from '../shared/vendor-purchase.mjs';
 import { eatToday, validDay, decodeOffset, pageLimit, AGING_BUCKETS } from '../shared/vendor-customer.mjs';
@@ -109,6 +109,8 @@ export function createVendorPurchaseService({
     const out = await store.voidPurchase({
       vendorId, purchaseId, actorId, reason: parsed.reason, canSeeCost, today: today(),
       canVoid: row => m2(voidsAny, actorId, row.createdBy, row.createdAt),
+      // Security review #327 L-2: staff who are not admins cannot void (with the purchase) payments someone else recorded.
+      othersPaymentsBlock: !voidsAny,
     });
     if (out.error) return out;
     await lowStockCheck(out.productIds);
@@ -126,7 +128,7 @@ export function createVendorPurchaseService({
     const fingerprint = purchasePaymentFingerprint(purchaseId, body);
     const parsed = parsePurchasePayment(body || {}, { today: day });
     if (parsed.error) {
-      if (validClientRef(body?.clientRef)) {
+      if (validClientRef(body?.clientRef) && !body.clientRef.endsWith(AT_RECEIPT_SUFFIX)) {
         const earlier = await store.replayPayment({ vendorId, purchaseId, clientRef: body.clientRef, fingerprint, canSeeCost, today: day });
         if (earlier) return earlier.error ? earlier : { ...earlier, status: 200 };
       }

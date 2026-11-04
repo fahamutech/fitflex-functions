@@ -394,7 +394,9 @@ test('migration: backfill adds `purchases` to admin staff, their vendor membersh
   });
   const adminInvite = inviteFor('admin');
   const invInvite = inviteFor('inventory_manager');
-  await db('Invitation').insert([adminInvite, invInvite]);
+  const claimedInvite = { ...inviteFor('admin'), status: 'claimed' };
+  const acceptedInvite = { ...inviteFor('admin'), status: 'accepted' };
+  await db('Invitation').insert([adminInvite, invInvite, claimedInvite, acceptedInvite]);
 
   const first = await migration.addPurchasesPermission(db);
   assert.ok(first.users >= 1 && first.memberships >= 1 && first.invitations >= 1, JSON.stringify(first));
@@ -406,6 +408,8 @@ test('migration: backfill adds `purchases` to admin staff, their vendor membersh
   assert.deepEqual((await db('OrgMembership').where({ personaId: admin }).first()).aclPermissions, ['products', 'purchases']);
   assert.deepEqual((await db('Invitation').where({ id: adminInvite.id }).first()).aclPermissions, ['orders', 'purchases']);
   assert.deepEqual((await db('Invitation').where({ id: invInvite.id }).first()).aclPermissions, ['orders']);
+  assert.deepEqual((await db('Invitation').where({ id: claimedInvite.id }).first()).aclPermissions, ['orders', 'purchases'], 'L-3: a claimed invitation too');
+  assert.deepEqual((await db('Invitation').where({ id: acceptedInvite.id }).first()).aclPermissions, ['orders'], 'closed invitations are left alone');
   assert.equal((await call(vendorListSuppliers, staffOf(admin, v))).status, 200, 'backfilled admin may open purchases');
 
   const p = await product(v, { stock: 1 });
@@ -1136,4 +1140,80 @@ test('rate limit: writes share 120 a minute per vendor → 429 rate_limited with
   assert.ok(limited.headers['Retry-After']);
   assert.equal(await db('VendorSupplier').where({ vendorId: v }).count('* as n').first().then(r => Number(r.n)), 0);
   assert.equal((await call(vendorListSuppliers, as(v))).status, 200, 'reads are not limited by writes');
+});
+
+// ── security review #327 fixes ───────────────────────────────────────────────
+
+test('security review #327 M-1: 50 → A 100 → B 100 → void A keeps 100 (source B, costKept); voiding B then puts 50 back', async () => {
+  on();
+  const v = await vendor();
+  const s = await supplier(as(v));
+  const p = await product(v, { stock: 0, costTzs: 50 });
+  const A = (await receiveOk(as(v), receiveBody([{ productId: p.id, qty: 2, unitCostTzs: 100 }], { supplierId: s.id }))).purchase;
+  const B = (await receiveOk(as(v), receiveBody([{ productId: p.id, qty: 2, unitCostTzs: 100 }], { supplierId: s.id }))).purchase;
+  assert.deepEqual([A.lines[0].costUpdated, B.lines[0].costUpdated, (await cost(p.id)).costSourceId], [true, false, A.id]);
+  const voidA = await voidP(as(v), A.id);
+  assert.deepEqual([voidA.body.costRestored, voidA.body.costKept], [[], [{ productId: p.id, variant: null, name: p.name }]]);
+  assert.deepEqual([(await cost(p.id)).costTzs, (await cost(p.id)).costSourceId], [100, B.id], 'B, still received, keeps the cost and becomes its source');
+  assert.equal(voidA.body.purchase.lines[0].costRestoredOnVoid, false);
+  const voidB = await voidP(as(v), B.id);
+  assert.equal(voidB.body.costRestored.length, 1);
+  assert.deepEqual([(await cost(p.id)).costTzs, (await cost(p.id)).costSourceId], [50, null], 'with both voided the hand-set 50 is back');
+  // A later delivery at a DIFFERENT cost is not a match: voiding the one that set the current cost still restores.
+  const C = (await receiveOk(as(v), receiveBody([{ productId: p.id, qty: 1, unitCostTzs: 70 }], { supplierId: s.id }))).purchase;
+  await receiveOk(as(v), receiveBody([{ productId: p.id, qty: 1, unitCostTzs: 0 }], { supplierId: s.id }));
+  assert.equal((await voidP(as(v), C.id)).body.costRestored.length, 1);
+  assert.equal((await cost(p.id)).costTzs, 50, 'a free later line never keeps a cost');
+});
+
+test('security review #327 L-2: staff without voidsAny cannot void a purchase carrying payments someone else recorded (409 void_not_allowed has_others_payments); their own payments do not block; admin staff may', async () => {
+  on();
+  await awayFromEatMidnight();
+  const v = await vendor();
+  const s = await supplier(as(v));
+  const p = await product(v, { stock: 0 });
+  const clerk = await staff(v, ['purchases']);
+  const admin = await staff(v, ['purchases'], { vendorRole: 'admin' });
+  const g = (await receiveOk(staffOf(clerk, v), receiveBody([{ productId: p.id, qty: 2, unitCostTzs: 1_000 }], { supplierId: s.id, paidNow: { amountTzs: 500, method: 'cash' } }))).purchase;
+  await pay(as(v), g.id, { amountTzs: 300 });
+  assert.deepEqual(await voidP(staffOf(clerk, v), g.id), { status: 409, body: { error: 'void_not_allowed', reason: 'has_others_payments' } });
+  assert.equal((await getP(as(v), g.id)).status, 'received', 'nothing changed');
+  // Once the owner's payment is voided, only the clerk's own (at receipt) remains: allowed.
+  const owners = (await getP(as(v), g.id)).payments.find(x => !x.atReceipt);
+  assert.equal((await voidPay(as(v), g.id, owners.id)).status, 200);
+  assert.equal((await voidP(staffOf(clerk, v), g.id)).status, 200);
+  // Admin staff (voidsAny) may void whatever recorded the payments.
+  const h = (await receiveOk(staffOf(clerk, v), receiveBody([{ productId: p.id, qty: 2, unitCostTzs: 1_000 }], { supplierId: s.id }))).purchase;
+  await pay(as(v), h.id, { amountTzs: 300 });
+  assert.equal((await voidP(staffOf(admin, v), h.id)).status, 200);
+});
+
+test('security review #327 L-4: GET /vendor/products accepts `purchases` only while S9 is on, and refuses purchases-only staff of a suspended vendor (vendor_suspended); `products` staff unchanged', async () => {
+  on();
+  const v = await vendor();
+  const buyerStaff = await staff(v, ['purchases']);
+  assert.equal((await call(vendorMyProducts, staffOf(buyerStaff, v))).status, 200);
+  delete process.env.VENDOR_PURCHASES;
+  assert.deepEqual(await call(vendorMyProducts, staffOf(buyerStaff, v)), { status: 403, body: { error: 'vendor_permission_forbidden', requiredPermission: 'products', acceptedPermissions: ['products', 'sales'] } });
+  on();
+  const none = await staff(v, ['reports']);
+  assert.deepEqual((await call(vendorMyProducts, staffOf(none, v))).body.acceptedPermissions, ['products', 'sales', 'purchases']);
+  const suspended = await vendor({ accountStatus: 'suspended' });
+  const paused = await staff(suspended, ['purchases']);
+  assert.deepEqual(await call(vendorMyProducts, staffOf(paused, suspended)), { status: 403, body: { error: 'vendor_suspended' } });
+  const productsStaff = await staff(suspended, ['products']);
+  assert.equal((await call(vendorMyProducts, staffOf(productsStaff, suspended))).status, 200, 'the products / sales paths are unchanged');
+});
+
+test('security review #327 L-5: a later payment may not use a clientRef ending in ":paid" (400 invalid_client_ref, never answered as the payment at receipt)', async () => {
+  on();
+  const v = await vendor();
+  const s = await supplier(as(v));
+  const p = await product(v, { stock: 0 });
+  const clientRef = randomUUID();
+  const g = (await receiveOk(as(v), { clientRef, lines: [{ productId: p.id, qty: 2, unitCostTzs: 1_000 }], supplierId: s.id, paidNow: { amountTzs: 500, method: 'cash' } })).purchase;
+  assert.deepEqual((await pay(as(v), g.id, { clientRef: `${clientRef}:paid`, amountTzs: 500 })).body, { error: 'invalid_client_ref' });
+  assert.deepEqual((await pay(as(v), g.id, { clientRef: 'another-ref:paid', amountTzs: 500 })).body, { error: 'invalid_client_ref' });
+  assert.equal((await pay(as(v), g.id, { clientRef: 'paid-ref:paidish', amountTzs: 500 })).status, 201);
+  assert.equal((await assertAddsUp(g.id)).paidTzs, 1_000);
 });

@@ -20,7 +20,7 @@
 // - ProductPrivate gains costSourceId (the purchase that set the cost; null = set by hand or unknown) and
 //   costUpdatedAt. Existing rows: both null.
 // - Permission `purchases` backfilled onto vendorRole admin staff only (Q-2): their User row, their vendor
-//   OrgMembership and pending vendor invitations for the admin role.
+//   OrgMembership and open (pending or claimed, security review #327 L-3) vendor invitations for the admin role.
 //
 // Down: REFUSES while any VendorPurchase row exists (prints the count). Otherwise removes the permission,
 // drops the ProductPrivate columns and the five tables, and deletes the `purchase` sequence rows. Ledger rows
@@ -199,7 +199,7 @@ exports.up = async function up(knex) {
 
 /**
  * Permission `purchases` for staff who already act as the vendor's admins (Q-2: vendorRole admin only): their
- * User row, their vendor OrgMembership and pending vendor invitations for the admin role. Safe to repeat.
+ * User row, their vendor OrgMembership and open (pending | claimed) vendor invitations for the admin role. Safe to repeat.
  * @param {import('knex').Knex} knex
  */
 exports.addPurchasesPermission = async function addPurchasesPermission(knex) {
@@ -211,7 +211,7 @@ exports.addPurchasesPermission = async function addPurchasesPermission(knex) {
       AND u."userType" = 'vendor_staff' AND u."vendorRole" = 'admin'
       AND NOT ('purchases' = ANY(m."aclPermissions")) RETURNING m.id`);
   const invitations = await knex.raw(`UPDATE "Invitation" SET "aclPermissions" = array_append("aclPermissions", 'purchases'), "updatedAt" = now()
-    WHERE "orgType" = 'vendor' AND status = 'pending' AND payload->>'vendorRole' = 'admin'
+    WHERE "orgType" = 'vendor' AND status IN ('pending', 'claimed') AND payload->>'vendorRole' = 'admin'
       AND NOT ('purchases' = ANY("aclPermissions")) RETURNING id`);
   console.log(`[migrate] vendor purchases: permission 'purchases' added to ${users.rows.length} admin staff, ${memberships.rows.length} membership(s), ${invitations.rows.length} pending invitation(s)`);
   return { users: users.rows.length, memberships: memberships.rows.length, invitations: invitations.rows.length };

@@ -3,9 +3,9 @@ import { PRODUCT_CATEGORIES } from '../src/shared/product-categories.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { areaHeaderOf, areaRedactGuard, redactAreaId } from '../src/shared/area-request.mjs';
-import { shopService, shopHomeService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService, vendorTaxService } from '../src/bootstrap/services.mjs';
+import { users, shopService, shopHomeService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService, vendorTaxService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
-import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn } from '../src/shared/feature-flags.mjs';
+import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn, vendorPurchasesOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { canShowFlashSales, withoutSale } from '../src/shared/shop-caps.mjs';
 import { shopFlashSalesOn } from '../src/shared/feature-flags.mjs';
@@ -49,6 +49,28 @@ function requireAnyVendorPermission(...permissions) {
     }
     return res.status(403).json({ error: 'vendor_permission_forbidden', requiredPermission: permissions[0], acceptedPermissions: permissions });
   };
+}
+
+/**
+ * GET /vendor/products for staff: `products` or `sales` as before; S9 `purchases` only while VENDOR_TOOLS +
+ * VENDOR_STOCK_LEDGER + VENDOR_PURCHASES are on, and (as the S9 guard) never for staff of a suspended vendor
+ * (403 vendor_suspended). Security review #327 L-4. Read from the stored staff record.
+ */
+async function requireProductListAccess(req, res, next) {
+  if (req.user?.userType !== 'vendor_staff') return next();
+  const accepted = vendorPurchasesOn() ? ['products', 'sales', 'purchases'] : ['products', 'sales'];
+  try {
+    for (const permission of ['products', 'sales']) if (await shopService.authorizeStaff(req.user, permission)) return next();
+    if (accepted.includes('purchases') && await shopService.authorizeStaff(req.user, 'purchases')) {
+      const vendor = await users.findByIdAsync(req.user.vendorId);
+      if (!vendor || vendor.userType !== 'vendor' || vendor.accountStatus === 'suspended') return res.status(403).json({ error: 'vendor_suspended' });
+      return next();
+    }
+  } catch (error) {
+    console.error('[marketplace] staff authorization lookup failed', { staffId: req.user.sub, error: error.message });
+    return res.status(503).json({ error: 'authorization_unavailable' });
+  }
+  return res.status(403).json({ error: 'vendor_permission_forbidden', requiredPermission: 'products', acceptedPermissions: accepted });
 }
 
 // An administrator acts on marketplace orders only with the `shop` scope (a super-admin has all).
@@ -126,8 +148,8 @@ export const getVendorStore = {
 
 export const vendorMyProducts = {
   created, method: 'get', path: '/vendor/products',
-  description: 'Vendor / staff with `products` OR `sales` OR `purchases` (S3: the POS loads the products to sell; S9: Receive stock picks the products received; read only — every write and stock route still needs `products`): list own products (including archived). Staff with none → 403 vendor_permission_forbidden { requiredPermission: products, acceptedPermissions: [products, sales, purchases] }. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
-  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireAnyVendorPermission('products', 'sales', 'purchases'), requireAdminShopScope]),
+  description: 'Vendor / staff with `products` OR `sales` OR (S9) `purchases` (S3: the POS loads the products to sell; S9: Receive stock picks the products received; read only — every write and stock route still needs `products`): list own products (including archived). `purchases` counts only while VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES are on, and staff who get in only through it are refused while their vendor is suspended (403 vendor_suspended). Staff with none → 403 vendor_permission_forbidden { requiredPermission: products, acceptedPermissions: [products, sales] (+ purchases while S9 is on) }. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
+  onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireProductListAccess, requireAdminShopScope]),
   onRequest: async (req, res) => {
     res.json(await shopService.vendorListProducts(req.user.vendorId || req.user.sub, { costAllowed: await shopService.canSeeCost(req.user) }));
   }
