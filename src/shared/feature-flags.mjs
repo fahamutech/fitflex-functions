@@ -219,7 +219,7 @@ export function statementPaySecondPersonOn() {
  */
 export const VENDOR_TOOLS_FLAGS = [
   'VENDOR_STOCK_LEDGER', 'VENDOR_PORTAL', 'VENDOR_ORDER_BUYER_CONTACT', 'VENDOR_WALKIN_SALES', 'VENDOR_CUSTOMERS',
-  'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL',
+  'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL', 'VENDOR_IMPORT',
 ];
 
 /** True when VENDOR_TOOLS and the given slice flag are both enabled. */
@@ -255,11 +255,25 @@ export function vendorToolsOptions() {
     refunds: vendorRefundsOn(),
     barcodes: vendorToolsFlag('VENDOR_BARCODES'),
     purchases: vendorToolsFlag('VENDOR_PURCHASES'),
+    // Smart import V1: CSV import of products, stock counts and profile. importLimits tell the apps the caps.
+    import: vendorImportOn(),
+    importLimits: { ...VENDOR_IMPORT_LIMITS },
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool).
     merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn(), flashSales: shopFlashSalesOn() },
   };
+}
+
+/** Smart import caps (owner default 2026-11-04: 2 MB, 2,000 rows). Shared with the rules and GET /vendor/tools/options. */
+export const VENDOR_IMPORT_LIMITS = Object.freeze({ maxBytes: 2 * 1024 * 1024, maxRows: 2000 });
+
+/**
+ * Smart import V1: CSV import of products, stock counts and the business profile (/vendor/imports/*). On only with
+ * VENDOR_TOOLS + VENDOR_IMPORT. Off → every route answers 404 feature_disabled; options say import: false.
+ */
+export function vendorImportOn() {
+  return vendorToolsFlag('VENDOR_IMPORT');
 }
 
 /** S2: the vendor web portal (GET /vendor/me opens it). */
