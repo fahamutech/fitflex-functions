@@ -126,8 +126,11 @@ export function createPgVendorPurchaseStore({ db, now = () => new Date() }) {
   async function duplicateOf(q, vendorId, name, exceptId = null) {
     const query = q('VendorSupplier').where({ vendorId }).whereNull('archivedAt').whereRaw('lower(name) = lower(?)', [name]);
     if (exceptId) query.whereNot('id', exceptId);
-    return (await query.first('id'))?.id ?? null;
+    const row = await query.first('id', 'name');
+    return row ? { id: row.id, name: row.name } : null;
   }
+  /** 409 duplicate_supplier body: supplierId (as before) + existing { id, name } (UAT L-4; this vendor's row only). */
+  const duplicate = clash => ({ supplierId: clash?.id ?? null, existing: clash ? { id: clash.id, name: clash.name } : null });
   const isNameClash = err => err?.code === UNIQUE_VIOLATION && /vendorsupplier_active_name_unique/.test(`${err.constraint || ''} ${err.message}`);
 
   async function createSupplier({ vendorId, actorId, fields }) {
@@ -136,14 +139,14 @@ export function createPgVendorPurchaseStore({ db, now = () => new Date() }) {
     try {
       return await db.transaction(async (trx) => {
         const clash = await duplicateOf(trx, vendorId, fields.name);
-        if (clash) throw refusal('duplicate_supplier', 409, { supplierId: clash });
+        if (clash) throw refusal('duplicate_supplier', 409, duplicate(clash));
         await trx('VendorSupplier').insert({ id, vendorId, ...fields, createdBy: actorId, createdAt: at, updatedAt: at });
         await audit(trx, { actor: actorId, action: 'vendor_supplier_created', target: id, after: { vendorId, ...fields } });
         return { supplier: supplierView(await trx('VendorSupplier').where({ id }).first()) };
       });
     } catch (err) {
       if (err.refusal) return err.refusal;
-      if (isNameClash(err)) return fail('duplicate_supplier', 409, { supplierId: await duplicateOf(db, vendorId, fields.name) });
+      if (isNameClash(err)) return fail('duplicate_supplier', 409, duplicate(await duplicateOf(db, vendorId, fields.name)));
       throw err;
     }
   }
@@ -169,7 +172,7 @@ export function createPgVendorPurchaseStore({ db, now = () => new Date() }) {
         nameForClash = name;
         if ((restoring || (changes.name && !row.archivedAt && !archiving))) {
           const clash = await duplicateOf(trx, vendorId, name, supplierId);
-          if (clash) throw refusal('duplicate_supplier', 409, { supplierId: clash });
+          if (clash) throw refusal('duplicate_supplier', 409, duplicate(clash));
         }
         if (Object.keys(changes).length) {
           await trx('VendorSupplier').where({ id: supplierId, vendorId }).update({ ...changes, updatedAt: at });
@@ -190,7 +193,7 @@ export function createPgVendorPurchaseStore({ db, now = () => new Date() }) {
       });
     } catch (err) {
       if (err.refusal) return err.refusal;
-      if (isNameClash(err)) return fail('duplicate_supplier', 409, { supplierId: await duplicateOf(db, vendorId, nameForClash, supplierId) });
+      if (isNameClash(err)) return fail('duplicate_supplier', 409, duplicate(await duplicateOf(db, vendorId, nameForClash, supplierId)));
       throw err;
     }
   }
