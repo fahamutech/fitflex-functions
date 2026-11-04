@@ -64,8 +64,12 @@ import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
 import { createPgVendorSaleStore } from '../infra/vendor-sale-store-pg.mjs';
 import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
+import { createPgVendorImportStore } from '../infra/vendor-import-store-pg.mjs';
+import { createVendorImportService } from '../services/vendor-import-service.mjs';
 import { createPgVendorRefundStore } from '../infra/vendor-refund-store-pg.mjs';
 import { createVendorRefundService } from '../services/vendor-refund-service.mjs';
+import { createPgVendorPurchaseStore } from '../infra/vendor-purchase-store-pg.mjs';
+import { createVendorPurchaseService } from '../services/vendor-purchase-service.mjs';
 import { createPgVendorCustomerStore } from '../infra/vendor-customer-store-pg.mjs';
 import { createVendorCustomerService } from '../services/vendor-customer-service.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
@@ -145,7 +149,7 @@ import { createTrainerSettlementService } from '../services/trainer-settlement-s
 import { createVendorSettlementService } from '../services/vendor-settlement-service.mjs';
 import { createVendorReportService } from '../services/vendor-report-service.mjs';
 import { createPgVendorReportStore } from '../infra/vendor-report-store-pg.mjs';
-import { vendorStockLedgerOn, vendorWalkInSalesOn, vendorCustomersOn } from '../shared/feature-flags.mjs';
+import { vendorStockLedgerOn, vendorWalkInSalesOn, vendorCustomersOn, vendorPurchasesOn } from '../shared/feature-flags.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createModerationGate } from '../services/moderation-gate.mjs';
 import { createEntityResolver } from '../services/promotion-entities.mjs';
@@ -448,11 +452,27 @@ export const vendorSaleService = createVendorSaleService({
   afterStockMoved: productIds => shopService.afterStockMoved(productIds),
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
+// Vendor tools · Smart import V1: CSV import of products, stock counts and profile (dormant behind VENDOR_TOOLS +
+// VENDOR_IMPORT; the routes check the flag). Rows go through shopService, so its validation and approval rules stay in force.
+export const vendorImportService = createVendorImportService({
+  store: createPgVendorImportStore({ db }),
+  shop: shopService,
+  auditLog,
+});
 // Vendor tools · S7: refunds on walk-in sales — credit notes, restock, undo (dormant behind VENDOR_TOOLS +
 // VENDOR_WALKIN_SALES + VENDOR_REFUNDS for writes; the routes check the flags). No commission, no settlement.
 const vendorRefundStore = createPgVendorRefundStore({ db, saleStore: vendorSaleStore });
 export const vendorRefundService = createVendorRefundService({
   store: vendorRefundStore,
+  afterStockMoved: productIds => shopService.afterStockMoved(productIds),
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
+// Vendor tools · S9: suppliers, receiving stock (GRN), cost price from purchases, payables with instalments
+// (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES; the routes check the flags).
+// FitFlex moves no money for payables: no PaymentRequest, no commission, no settlement.
+export const vendorPurchaseStore = createPgVendorPurchaseStore({ db });
+export const vendorPurchaseService = createVendorPurchaseService({
+  store: vendorPurchaseStore,
   afterStockMoved: productIds => shopService.afterStockMoved(productIds),
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
@@ -485,7 +505,9 @@ export const vendorReportService = createVendorReportService({
     const out = await vendorCustomerService.aging({ vendorId, query: { limit: 1 } });
     return out.error ? null : out.totals;
   },
-  flags: { stockLedger: vendorStockLedgerOn, walkInSales: vendorWalkInSalesOn, customers: vendorCustomersOn },
+  flags: { stockLedger: vendorStockLedgerOn, walkInSales: vendorWalkInSalesOn, customers: vendorCustomersOn, purchases: vendorPurchasesOn },
+  // S9: "Paid to suppliers (by you)" on Payment methods (reports + purchases + VENDOR_PURCHASES).
+  paidToSuppliers: args => vendorPurchaseStore.paidToSuppliers(args),
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const productStatsRecomputeService = createProductStatsRecomputeService({ db });

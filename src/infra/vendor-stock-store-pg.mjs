@@ -39,7 +39,10 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
         : ['sale', 'sale_void'].includes(r.kind) && r.sourceId ? { type: 'sale', id: r.sourceId, number: r.saleNumber ?? null }
           // S7: a refund's restock (or its undo) points at the refund and its credit-note number.
           : ['refund', 'refund_revert'].includes(r.kind) && r.sourceId ? { type: 'refund', id: r.sourceId, number: r.refundNumber ?? null }
-            : null,
+            // S9: stock received from a supplier (or its void) points at the purchase and its GRN number. Returned
+            // whatever the flags (spec §0.2: with VENDOR_PURCHASES off the apps show the number as plain text).
+            : ['stock_in', 'stock_in_void'].includes(r.kind) && r.sourceId ? { type: 'purchase', id: r.sourceId, number: r.purchaseNumber ?? null }
+              : null,
       createdAt: r.createdAt,
     };
   }
@@ -225,16 +228,27 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     });
   }
 
-  /** privates: [{ variant, costTzs?, reorderLevel? }] — only the keys present are written (null clears). */
+  /**
+   * privates: [{ variant, costTzs?, reorderLevel? }] — only the keys present are written (null clears).
+   * S9 (P-6): a cost price set here is a manual edit (product form, admin listing): when the value really
+   * changes, costSourceId becomes null (so voiding the purchase that set the old cost keeps this one) and
+   * costUpdatedAt is now. Re-sending the same cost (a form saved for another field) changes neither.
+   */
   async function writePrivates(q, productId, vendorId, privates, at) {
     for (const p of privates) {
       const set = {};
       if (p.costTzs !== undefined) set.costTzs = p.costTzs;
       if (p.reorderLevel !== undefined) set.reorderLevel = p.reorderLevel;
       if (!Object.keys(set).length) continue;
+      const merge = { ...set, updatedAt: at };
+      if (p.costTzs !== undefined) {
+        const changed = 'EXCLUDED."costTzs" IS DISTINCT FROM "ProductPrivate"."costTzs"';
+        merge.costSourceId = q.raw(`CASE WHEN ${changed} THEN NULL ELSE "ProductPrivate"."costSourceId" END`);
+        merge.costUpdatedAt = q.raw(`CASE WHEN ${changed} THEN EXCLUDED."costUpdatedAt" ELSE "ProductPrivate"."costUpdatedAt" END`);
+      }
       await q('ProductPrivate')
-        .insert({ productId, variant: p.variant || '', vendorId, ...set, updatedAt: at })
-        .onConflict(['productId', 'variant']).merge({ ...set, updatedAt: at });
+        .insert({ productId, variant: p.variant || '', vendorId, ...set, ...(p.costTzs !== undefined ? { costSourceId: null, costUpdatedAt: at } : {}), updatedAt: at })
+        .onConflict(['productId', 'variant']).merge(merge);
     }
   }
 
@@ -338,7 +352,8 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       // Only this vendor's sales: a ledger row of their product names a sale of theirs.
       .leftJoin('VendorSale as s', function joinSale() { this.on('s.id', '=', 'm.sourceId').andOn('s.vendorId', '=', db.raw('?', [vendorId])); })
       .leftJoin('VendorSaleRefund as vr', function joinRefund() { this.on('vr.id', '=', 'm.sourceId').andOn('vr.vendorId', '=', db.raw('?', [vendorId])); })
-      .select('m.*', 'u.displayName as actorName', 's.number as saleNumber', 'vr.number as refundNumber'));
+      .leftJoin('VendorPurchase as vp', function joinPurchase() { this.on('vp.id', '=', 'm.sourceId').andOn('vp.vendorId', '=', db.raw('?', [vendorId])); })
+      .select('m.*', 'u.displayName as actorName', 's.number as saleNumber', 'vr.number as refundNumber', 'vp.number as purchaseNumber'));
     if (from) q = q.where('m.createdAt', '>=', from);
     if (to) q = q.where('m.createdAt', '<', to);
     if (after) q = q.where(w => w.where('m.createdAt', '<', after.t).orWhere(x => x.where('m.createdAt', '=', after.t).andWhere('m.id', '<', after.id)));

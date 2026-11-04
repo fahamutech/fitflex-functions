@@ -32,7 +32,13 @@ const PROFILE_FIELDS = new Set([...PROFILE_REQUIRED, ...PROFILE_OPTIONAL]);
 export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
 // `sales` (vendor tools · S3): walk-in sales — record, history, void. Backfilled onto existing staff
 // with vendorRole admin or sales by migration 20261230120000-vendor-walkin-sales.
-export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff']);
+// `import` (vendor smart import V1): upload / map / apply CSV imports. Backfilled onto vendorRole admin staff by
+// migration 20270203090000-vendor-import; other staff get it only when an admin grants it.
+// `purchases` (vendor tools · S9): suppliers, receiving stock, payables. Backfilled onto existing staff with
+// vendorRole admin only (design Q-2) by migration 20270203090100-vendor-purchases. RULE 6 (auth-adjacent).
+export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff', 'import', 'purchases']);
+// Smart import (INTERNAL create options, never read from a request body): the only product ids and statuses an import may preset.
+const IMPORT_PRESET_ID = /^prd_imp_[A-Za-z0-9_-]{1,60}$/;
 // Price and discount price are not reviewed (owner decision 2026-10-29): changing them never sends an approved
 // product back to pending or hides it. They stay guarded by validation, the flash-sale price lock, the
 // ProductPriceChange history (trigger) and a `product_price_changed` audit row. Moderation can still hide a product.
@@ -429,7 +435,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
 
   // keptImages: images a copy may carry over unchanged (duplicateProduct: the source product's own).
   // priceGuard(current, store) → null | { error }: the flash-sale price lock, checked inside the save's transaction.
-  async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [], priceGuard = null }) {
+  // initialStatus / presetId / stockNote: INTERNAL options of vendor smart import (callers in code only, never the request
+  // body): a new product may start 'paused', with a deterministic id (so a retried import finds it), and its opening
+  // stock rows carry a note. Create path only; ignored when updating. Anything else is ignored.
+  async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [], priceGuard = null, initialStatus = null, presetId = null, stockNote = null }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
@@ -514,16 +523,18 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const ledger = ledgerOn();
     const plan = ledger ? planStock(null, input, { ledger: true }) : null;
     if (plan?.error) return plan;
+    if (plan && typeof stockNote === 'string' && stockNote) plan.movements = plan.movements.map(m => ({ ...m, note: stockNote }));
+    if (presetId != null && !IMPORT_PRESET_ID.test(presetId)) return { error: 'invalid_preset_id', status: 400 };
     const at = nowIso();
     const row = {
-      id: makeId('prd'), vendorId, name: input.name.trim(), description: input.description || null, category: input.category || null,
+      id: presetId || makeId('prd'), vendorId, name: input.name.trim(), description: input.description || null, category: input.category || null,
       brand: input.brand || null, priceTzs: Number(input.priceTzs), discountPriceTzs: input.discountPriceTzs == null ? null : Number(input.discountPriceTzs),
       stock: plan ? plan.stock : Number(input.stock ?? 0), sku: input.sku || null, weightKg: input.weightKg == null ? null : Number(input.weightKg), distanceKm: input.distanceKm == null ? null : Number(input.distanceKm),
       // Cost price and reorder level never go on the public row.
       variants: plan?.variants ?? (Array.isArray(input.variants) ? input.variants.map(stripPrivate) : []), images: Array.isArray(input.images) ? input.images : [], visibility: input.visibility || 'visible',
       // Rating, review count and sold count are the server's: reviewProduct recomputes the first two from real
       // reviews and the order store keeps soldCount. Whatever a vendor (or admin) sends for them is ignored.
-      deliveryAvailable: input.deliveryAvailable !== false, status: 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
+      deliveryAvailable: input.deliveryAvailable !== false, status: initialStatus === 'paused' ? 'paused' : 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
       homepageVisible: true, homepagePriority: 0, createdAt: at, updatedAt: at,
       targetGender: targets.patch.targetGender ?? null, targetAgeBands: targets.patch.targetAgeBands ?? [],
     };

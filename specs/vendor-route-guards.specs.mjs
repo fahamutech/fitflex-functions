@@ -321,3 +321,50 @@ test('GET /vendor/tools/options: suspended, other-vendor and unknown staff get 4
   assert.deepEqual(await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(moved, vendorId)), { status: 403, body: { error: 'vendor_staff_inactive' } });
   assert.deepEqual(await hit(realUrl, 'GET', '/vendor/tools/options', staffClaims(uid('ghost'), vendorId)), { status: 403, body: { error: 'vendor_staff_inactive' } });
 });
+
+test('vendor imports (V1): as mounted, each route is guarded for its own method and needs `import`; /vendor/imports/template is not swallowed by /:id; flag off is 404', async () => {
+  const vendorId = await user('vendor');
+  const withImport = await staff(vendorId, ['import']);
+  const without = await staff(vendorId, PERMS.filter(p => p !== 'import'));
+  const routes = [
+    ['GET', '/vendor/imports'], ['POST', '/vendor/imports'], ['GET', '/vendor/imports/template?entity=products'], ['GET', '/vendor/imports/vib_x'],
+    ['PUT', '/vendor/imports/vib_x/mapping'], ['GET', '/vendor/imports/vib_x/preview'], ['POST', '/vendor/imports/vib_x/apply'],
+    ['POST', '/vendor/imports/vib_x/retry'], ['POST', '/vendor/imports/vib_x/discard'], ['GET', '/vendor/imports/vib_x/errors.csv'],
+  ];
+  // the stubbed server runs only the guards: the route name proves which handler a request reaches
+  for (const [method, url] of routes) {
+    const ok = await hit(stubUrl, method, url, staffClaims(withImport, vendorId), method === 'GET' ? undefined : {});
+    assert.equal(ok.status, 200, `${method} ${url}: ${JSON.stringify(ok.body)}`);
+    const no = await hit(stubUrl, method, url, staffClaims(without, vendorId), method === 'GET' ? undefined : {});
+    assert.deepEqual([no.status, no.body.error, no.body.requiredPermission], [403, 'vendor_permission_forbidden', 'import'], `${method} ${url}`);
+    assert.equal((await hit(stubUrl, method, url, null, method === 'GET' ? undefined : {})).status, 401, `${method} ${url} without a token`);
+    assert.equal((await hit(stubUrl, method, url, { sub: 'adm_1', userType: 'admin' }, method === 'GET' ? undefined : {})).status, 403, `${method} ${url} for a FitFlex admin`);
+  }
+  // the real server: flag off answers 404 feature_disabled for the allowed caller; flag on, template is the CSV and an unknown id is 404 import_not_found
+  assert.deepEqual(await hit(realUrl, 'GET', '/vendor/imports', staffClaims(withImport, vendorId)), { status: 404, body: { error: 'feature_disabled', message: { en: 'Smart import is not switched on.', sw: 'Uingizaji wa haraka haujawashwa.' } } });
+  process.env.VENDOR_TOOLS = '1';
+  process.env.VENDOR_IMPORT = '1';
+  try {
+    const list = await hit(realUrl, 'GET', '/vendor/imports', staffClaims(withImport, vendorId));
+    assert.deepEqual([list.status, list.body.batches], [200, []]);
+    const template = await fetch(`${realUrl}/vendor/imports/template?entity=products&lang=sw`, { headers: { authorization: `Bearer ${sign(staffClaims(withImport, vendorId))}` } });
+    assert.equal(template.status, 200);
+    assert.equal(template.headers.get('x-template-version'), 'v1');
+    assert.match(await template.text(), /jina,bei_tzs,idadi/);
+    const missing = await hit(realUrl, 'GET', '/vendor/imports/vib_nope', staffClaims(withImport, vendorId));
+    assert.deepEqual([missing.status, missing.body.error], [404, 'import_not_found']);
+    // a real multipart upload through the real server (express.json leaves it alone)
+    const form = new FormData();
+    form.append('entity', 'products');
+    form.append('file', new Blob([`name,price_tzs,stock\nGuard item ${uid('g')},1000,1\n`], { type: 'text/csv' }), 'guard.csv');
+    const up = await fetch(`${realUrl}/vendor/imports`, { method: 'POST', headers: { authorization: `Bearer ${sign(staffClaims(withImport, vendorId))}` }, body: form });
+    const body = await up.json();
+    assert.equal(up.status, 201, JSON.stringify(body));
+    assert.equal(body.batch.status, 'ready');
+    await db('AuditLog').where({ target: body.batch.id }).del();
+    await db('VendorImportBatch').where({ vendorId }).del();
+  } finally {
+    delete process.env.VENDOR_TOOLS;
+    delete process.env.VENDOR_IMPORT;
+  }
+});

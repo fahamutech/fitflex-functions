@@ -219,7 +219,7 @@ export function statementPaySecondPersonOn() {
  */
 export const VENDOR_TOOLS_FLAGS = [
   'VENDOR_STOCK_LEDGER', 'VENDOR_PORTAL', 'VENDOR_ORDER_BUYER_CONTACT', 'VENDOR_WALKIN_SALES', 'VENDOR_CUSTOMERS',
-  'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL',
+  'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL', 'VENDOR_IMPORT',
 ];
 
 /** True when VENDOR_TOOLS and the given slice flag are both enabled. */
@@ -254,12 +254,29 @@ export function vendorToolsOptions() {
     // never say true while the routes answer 404.
     refunds: vendorRefundsOn(),
     barcodes: vendorToolsFlag('VENDOR_BARCODES'),
-    purchases: vendorToolsFlag('VENDOR_PURCHASES'),
+    // S9: the same answer as the purchase routes (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES; receiving
+    // stock depends on the ledger), so options never say true while the routes answer 404. Changed meaning: before
+    // S9 it ignored VENDOR_STOCK_LEDGER.
+    purchases: vendorPurchasesOn(),
+    // Smart import V1: CSV import of products, stock counts and profile. importLimits tell the apps the caps.
+    import: vendorImportOn(),
+    importLimits: { ...VENDOR_IMPORT_LIMITS },
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool).
     merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn(), flashSales: shopFlashSalesOn() },
   };
+}
+
+/** Smart import caps (owner default 2026-11-04: 2 MB, 2,000 rows). Shared with the rules and GET /vendor/tools/options. */
+export const VENDOR_IMPORT_LIMITS = Object.freeze({ maxBytes: 2 * 1024 * 1024, maxRows: 2000 });
+
+/**
+ * Smart import V1: CSV import of products, stock counts and the business profile (/vendor/imports/*). On only with
+ * VENDOR_TOOLS + VENDOR_IMPORT. Off → every route answers 404 feature_disabled; options say import: false.
+ */
+export function vendorImportOn() {
+  return vendorToolsFlag('VENDOR_IMPORT');
 }
 
 /** S2: the vendor web portal (GET /vendor/me opens it). */
@@ -309,6 +326,16 @@ export function vendorWalkInSalesOn() {
  */
 export function vendorRefundsOn() {
   return vendorWalkInSalesOn() && vendorToolsFlag('VENDOR_REFUNDS');
+}
+
+/**
+ * Vendor tools · S9: suppliers, receiving stock (GRN), cost price from purchases and payables with instalments.
+ * On only with VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES (design spec docs/design/vendor-purchases-s9.md
+ * §0.2). Off → every /vendor/suppliers, /vendor/purchases and /vendor/payables route answers 404 feature_disabled.
+ * FitFlex moves no money for payables: they are records only.
+ */
+export function vendorPurchasesOn() {
+  return vendorStockLedgerOn() && vendorToolsFlag('VENDOR_PURCHASES');
 }
 
 /**
