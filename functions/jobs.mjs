@@ -1,6 +1,6 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService, vendorImportService } from '../src/bootstrap/services.mjs';
 import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
@@ -433,5 +433,19 @@ export const eventRegistrationAnonymise = {
     const r = await opsService.runJob('event-registration-anonymise');
     const s = r?.stats ?? {};
     if (s.rows) console.log(`[events] anonymised: events=${s.events} rows=${s.rows}`);
+  }
+};
+
+export const vendorImportRetention = {
+  created, rule: '50 21 * * *', // every day 21:50 UTC = 00:50 EAT
+  description: 'Vendor smart import retention: (1) discard open batches nobody finished (mapping_required or ready, nothing tried, untouched for 30 days), (2) clear every typed cell (raw, checked values, issue params) of ended batches (applied, partial, discarded) 30 days after they ended — counts and codes stay as history, errors.csv then has codes but empty values, (3) reset batches stuck in applying for 30 days to a safe state. Runs even when VENDOR_IMPORT is later switched off (lingering data is worse than a cleanup); does nothing when there is nothing to do or the tables are absent. Idempotent, safe to overlap.',
+  onJob: async () => {
+    try {
+      const r = await vendorImportService.retention();
+      if (r.discarded || r.cleared || r.reset) console.log(`[vendor-import] retention: discarded=${r.discarded} cleared=${r.cleared} reset=${r.reset}`);
+    } catch (error) {
+      if (error?.code === '42P01') return; // tables not there (migration not run): nothing to clean
+      throw error;
+    }
   }
 };
