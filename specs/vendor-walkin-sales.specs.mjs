@@ -781,7 +781,7 @@ test('GET /vendor/products: staff with only `sales` may load products for the PO
   assert.deepEqual((await hit('GET', '/vendor/products', staffOf(productsStaff, v))).body, list.body);
   // The vendor account still sees the cost.
   assert.equal((await hit('GET', '/vendor/products', as(v))).body.find(x => x.id === p.id).costTzs, 600);
-  assert.deepEqual(await hit('GET', '/vendor/products', staffOf(nothing, v)), { status: 403, body: { error: 'vendor_permission_forbidden', requiredPermission: 'products', acceptedPermissions: ['products', 'sales'] } });
+  assert.deepEqual(await hit('GET', '/vendor/products', staffOf(nothing, v)), { status: 403, body: { error: 'vendor_permission_forbidden', requiredPermission: 'products', acceptedPermissions: ['products', 'sales', 'purchases'] } });
 
   const productsOnly = { status: 403, body: { error: 'vendor_permission_forbidden', requiredPermission: 'products' } };
   for (const [method, url, body] of [

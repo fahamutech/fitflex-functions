@@ -32,7 +32,9 @@ const PROFILE_FIELDS = new Set([...PROFILE_REQUIRED, ...PROFILE_OPTIONAL]);
 export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
 // `sales` (vendor tools · S3): walk-in sales — record, history, void. Backfilled onto existing staff
 // with vendorRole admin or sales by migration 20261230120000-vendor-walkin-sales.
-export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff']);
+// `purchases` (vendor tools · S9): suppliers, receiving stock, payables. Backfilled onto existing staff with
+// vendorRole admin only (design Q-2) by migration 20270202090500-vendor-purchases. RULE 6 (auth-adjacent).
+export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff', 'purchases']);
 // Price and discount price are not reviewed (owner decision 2026-10-29): changing them never sends an approved
 // product back to pending or hides it. They stay guarded by validation, the flash-sale price lock, the
 // ProductPriceChange history (trigger) and a `product_price_changed` audit row. Moderation can still hide a product.

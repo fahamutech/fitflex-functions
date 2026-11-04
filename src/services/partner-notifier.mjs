@@ -349,6 +349,34 @@ export function createPartnerNotifier({
         data: { saleId: d.saleId ?? '', refundId: d.refundId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
       };
     },
+    // Vendor tools · S9 (design spec §2.12, §8.8): a staff member voided a delivery (GRN) or a supplier payment.
+    // To the vendor account only, never the supplier. Opens /vendor/purchases/:purchaseId. Swahili is a DRAFT.
+    vendor_purchase_voided: (d, locale) => {
+      const who = d.byName || null;
+      const amount = tzs(Number(d.totalTzs || 0));
+      const en = { title: `Delivery ${d.number} voided`, body: `${who || 'A staff member'} voided delivery ${d.number} (${amount}). Reason: ${d.reason || '-'}` };
+      const sw = { title: `Mzigo ${d.number} umebatilishwa`, body: `${who || 'Mfanyakazi'} amebatilisha mzigo ${d.number} (${amount}). Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_purchase_voided',
+        title: text.title,
+        body: text.body,
+        data: { purchaseId: d.purchaseId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
+    vendor_purchase_payment_voided: (d, locale) => {
+      const who = d.byName || null;
+      const amount = tzs(Number(d.amountTzs || 0));
+      const en = { title: 'Supplier payment voided', body: `${who || 'A staff member'} voided a payment of ${amount} on ${d.number}. Reason: ${d.reason || '-'}` };
+      const sw = { title: 'Malipo kwa msambazaji yamebatilishwa', body: `${who || 'Mfanyakazi'} amebatilisha malipo ya ${amount} kwenye ${d.number}. Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_purchase_payment_voided',
+        title: text.title,
+        body: text.body,
+        data: { purchaseId: d.purchaseId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
     // Vendor tools · S4: a staff member voided a customer payment (as vendor_sale_voided). Swahili is a DRAFT.
     vendor_customer_payment_voided: (d, locale) => {
       const who = d.voidedByName || null;

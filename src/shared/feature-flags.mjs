@@ -254,7 +254,10 @@ export function vendorToolsOptions() {
     // never say true while the routes answer 404.
     refunds: vendorRefundsOn(),
     barcodes: vendorToolsFlag('VENDOR_BARCODES'),
-    purchases: vendorToolsFlag('VENDOR_PURCHASES'),
+    // S9: the same answer as the purchase routes (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES; receiving
+    // stock depends on the ledger), so options never say true while the routes answer 404. Changed meaning: before
+    // S9 it ignored VENDOR_STOCK_LEDGER.
+    purchases: vendorPurchasesOn(),
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool).
@@ -309,6 +312,16 @@ export function vendorWalkInSalesOn() {
  */
 export function vendorRefundsOn() {
   return vendorWalkInSalesOn() && vendorToolsFlag('VENDOR_REFUNDS');
+}
+
+/**
+ * Vendor tools · S9: suppliers, receiving stock (GRN), cost price from purchases and payables with instalments.
+ * On only with VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES (design spec docs/design/vendor-purchases-s9.md
+ * §0.2). Off → every /vendor/suppliers, /vendor/purchases and /vendor/payables route answers 404 feature_disabled.
+ * FitFlex moves no money for payables: they are records only.
+ */
+export function vendorPurchasesOn() {
+  return vendorStockLedgerOn() && vendorToolsFlag('VENDOR_PURCHASES');
 }
 
 /**
