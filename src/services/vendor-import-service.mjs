@@ -19,6 +19,7 @@ const TOUCH_EVERY_ROWS = 10;
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const ROW_STATUSES = ['valid', 'needs_review', 'invalid'];
+const APPLY_STATES = ['pending', 'applied', 'failed', 'skipped'];
 const BATCH_STATUSES = ['mapping_required', 'ready', 'applying', 'applied', 'partial', 'discarded'];
 
 /** The file name as stored: no path, no control characters, at most 120 characters. Never used to build a path or header. */
@@ -185,9 +186,11 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
     if (!batch) return notFound();
     const status = query.status == null || query.status === '' ? null : String(query.status);
     if (status && !ROW_STATUSES.includes(status)) return fail('invalid_status', 400, { allowed: ROW_STATUSES });
+    const applyState = query.applyState == null || query.applyState === '' ? null : String(query.applyState);
+    if (applyState && !APPLY_STATES.includes(applyState)) return fail('invalid_apply_state', 400, { allowed: APPLY_STATES });
     const limit = query.limit == null || query.limit === '' ? 50 : Number(query.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) return fail('invalid_limit', 400, { max: 200 });
-    const page = await store.rowsPage({ vendorId, id, status, limit, cursor: query.cursor || null });
+    const page = await store.rowsPage({ vendorId, id, status, applyState, limit, cursor: query.cursor || null });
     if (page.error) return page;
     return { batch: batchView(batch), counts: batch.counts, rows: page.rows.map(rowView), nextCursor: page.nextCursor };
   }

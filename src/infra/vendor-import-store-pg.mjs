@@ -34,7 +34,8 @@ const batchId = () => `vib_${short()}`;
 const rowId = () => `vir_${short()}`;
 const encode = value => Buffer.from(value, 'utf8').toString('base64url');
 const decode = value => { try { return Buffer.from(String(value), 'base64url').toString('utf8'); } catch { return ''; } };
-const RANK = `(CASE status WHEN 'invalid' THEN 0 WHEN 'needs_review' THEN 1 ELSE 2 END)`;
+// invalid → failed (an apply that did not go through) → needs_review → valid. Failed rows are `valid` by status, so applyState decides.
+const RANK = `(CASE WHEN status = 'invalid' THEN 0 WHEN "applyState" = 'failed' THEN 1 WHEN status = 'needs_review' THEN 2 ELSE 3 END)`;
 
 /** Statuses where a batch is still open: the same file may not be uploaded again until it ends (applied, partial or discarded). */
 const IN_FLIGHT = ['mapping_required', 'ready', 'applying'];
@@ -136,10 +137,11 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
     return (await db('VendorImportRow').where({ batchId: id, vendorId }).orderBy('rowNo').limit(n).select('raw')).map(r => r.raw);
   }
 
-  /** Keyset page of rows, problem rows first (invalid, needs_review, valid), then by row number. */
-  async function rowsPage({ vendorId, id, status = null, limit, cursor = null }) {
+  /** Keyset page of rows, problem rows first (invalid, failed, needs_review, valid), then by row number. */
+  async function rowsPage({ vendorId, id, status = null, applyState = null, limit, cursor = null }) {
     const q = db('VendorImportRow').where({ batchId: id, vendorId });
     if (status) q.where({ status });
+    if (applyState) q.where({ applyState });
     if (cursor) {
       const [rank, rowNo] = decode(cursor).split(':').map(Number);
       if (!Number.isInteger(rank) || !Number.isInteger(rowNo)) return { error: 'invalid_cursor', status: 400 };
@@ -148,7 +150,7 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
     const rows = plain(await q.orderByRaw(`${RANK}, "rowNo"`).limit(limit + 1));
     const page = rows.slice(0, limit);
     const last = page[page.length - 1];
-    const rank = r => ({ invalid: 0, needs_review: 1, valid: 2 })[r.status];
+    const rank = r => (r.status === 'invalid' ? 0 : r.applyState === 'failed' ? 1 : r.status === 'needs_review' ? 2 : 3);
     return { rows: page, nextCursor: rows.length > limit && last ? encode(`${rank(last)}:${last.rowNo}`) : null };
   }
 

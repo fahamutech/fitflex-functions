@@ -81,6 +81,7 @@ export const MESSAGES = Object.freeze({
   'vendor_import.error.vendor_suspended': M('This vendor account is suspended.', 'Akaunti hii ya muuzaji imesimamishwa.'),
   'vendor_import.error.authorization_unavailable': M('Permissions could not be checked. Try again.', 'Ruhusa hazikuweza kukaguliwa. Jaribu tena.'),
   'vendor_import.error.invalid_status': M('Unknown status filter.', 'Kichujio cha hali hakijulikani.'),
+  'vendor_import.error.invalid_apply_state': M('Unknown apply-state filter.', 'Kichujio cha hali ya uingizaji hakijulikani.'),
   'vendor_import.error.invalid_limit': M('Limit is not valid.', 'Kikomo si sahihi.'),
   'vendor_import.error.invalid_cursor': M('Cursor is not valid.', 'Kielekezi si sahihi.'),
 
