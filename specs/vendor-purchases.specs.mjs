@@ -441,8 +441,14 @@ test('suppliers: validation codes, duplicate name among active suppliers (case-i
   assert.deepEqual((await mk({ name: 'Juma', address: 'x'.repeat(301) })).body, { error: 'field_too_long', field: 'address', max: 300 });
   const juma = (await mk({ name: 'Juma Supplies', phone: '0712 345 678', contactPerson: 'Mzee Juma', email: 'Juma@Example.com', tin: '123-456-789' })).body.supplier;
   assert.deepEqual([juma.phone, juma.email, juma.archived], ['+255712345678', 'juma@example.com', false]);
-  assert.deepEqual(await mk({ name: '  juma supplies ' }), { status: 409, body: { error: 'duplicate_supplier', supplierId: juma.id } });
+  assert.deepEqual(await mk({ name: '  juma supplies ' }), { status: 409, body: { error: 'duplicate_supplier', supplierId: juma.id, existing: { id: juma.id, name: juma.name } } });
   const kariakoo = (await mk({ name: 'Kariakoo Traders', contactPerson: 'Neema' })).body.supplier;
+  // UAT L-4: `existing` names only this vendor's supplier; another vendor's same name is no clash at all.
+  const otherVendor = await vendor();
+  const theirs = await call(vendorCreateSupplier, as(otherVendor), { body: { name: 'Juma Supplies' } });
+  assert.equal(theirs.status, 201, 'same name at another vendor is allowed');
+  const again = await call(vendorCreateSupplier, as(otherVendor), { body: { name: 'JUMA supplies' } });
+  assert.deepEqual(again.body, { error: 'duplicate_supplier', supplierId: theirs.body.supplier.id, existing: { id: theirs.body.supplier.id, name: 'Juma Supplies' } });
 
   const search = async q => (await call(vendorListSuppliers, as(v), { query: { q } })).body.suppliers.map(x => x.name);
   assert.deepEqual(await search('juma'), ['Juma Supplies']);
@@ -465,10 +471,10 @@ test('suppliers: validation codes, duplicate name among active suppliers (case-i
   // Its purchases stay readable.
   assert.equal((await getP(as(v), purchase.id)).supplier.archived, true);
   const newJuma = (await mk({ name: 'JUMA SUPPLIES' })).body.supplier;
-  assert.deepEqual(await call(vendorUpdateSupplier, as(v), { params: { id: juma.id }, body: { archived: false } }), { status: 409, body: { error: 'duplicate_supplier', supplierId: newJuma.id } });
+  assert.deepEqual(await call(vendorUpdateSupplier, as(v), { params: { id: juma.id }, body: { archived: false } }), { status: 409, body: { error: 'duplicate_supplier', supplierId: newJuma.id, existing: { id: newJuma.id, name: newJuma.name } } });
   assert.equal((await call(vendorUpdateSupplier, as(v), { params: { id: newJuma.id }, body: { name: 'Juma Supplies 2' } })).status, 200);
   assert.equal((await call(vendorUpdateSupplier, as(v), { params: { id: juma.id }, body: { archived: false } })).body.supplier.archived, false);
-  assert.deepEqual(await call(vendorUpdateSupplier, as(v), { params: { id: kariakoo.id }, body: { name: 'juma supplies' } }), { status: 409, body: { error: 'duplicate_supplier', supplierId: juma.id } });
+  assert.deepEqual(await call(vendorUpdateSupplier, as(v), { params: { id: kariakoo.id }, body: { name: 'juma supplies' } }), { status: 409, body: { error: 'duplicate_supplier', supplierId: juma.id, existing: { id: juma.id, name: juma.name } } });
   // Partial edit: null clears; name cannot be null.
   const edited = await call(vendorUpdateSupplier, as(v), { params: { id: juma.id }, body: { tin: null, note: 'Delivers Tuesdays' } });
   assert.deepEqual([edited.body.supplier.tin, edited.body.supplier.note, edited.body.supplier.phone], [null, 'Delivers Tuesdays', '+255712345678']);
