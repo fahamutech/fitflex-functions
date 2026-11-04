@@ -106,7 +106,7 @@ export const vendorCustomersCreate = {
 
 export const vendorCustomerGet = {
   created, method: 'get', path: '/vendor/customers/:id',
-  description: `Vendor / staff with \`customers\` (${FLAG}): one customer's profile → { customer: ${CUSTOMER} + { lastPurchaseAt|null, totals { shopSalesTzs, shopSalesCount (completed walk-in sales, cash and pay later), appOrdersTzs, appOrdersCount (my own lines of paid app orders, not cancelled or refunded), lastPurchaseAt|null }, ${MONEY}, asOf (EAT day), openSales:[{ id, number, soldAt, dueDate, totalTzs, balanceTzs, daysOverdue (0 when not yet due), overdue }] (oldest due first) } }. Another vendor's customer or an unknown id → 404 customer_not_found. ${STAFF}`,
+  description: `Vendor / staff with \`customers\` (${FLAG}): one customer's profile → { customer: ${CUSTOMER} + { lastPurchaseAt|null, totals { shopSalesTzs, shopSalesCount (completed walk-in sales, cash and pay later), appOrdersTzs, appOrdersCount (my own lines of paid app orders, not cancelled or refunded), lastPurchaseAt|null }, ${MONEY}, asOf (EAT day), openSales:[{ id, number, soldAt, dueDate, totalTzs, balanceTzs, balanceReducedTzs (S7: taken off by active refunds), daysOverdue (0 when not yet due), overdue }] (oldest due first) } }. Another vendor's customer or an unknown id → 404 customer_not_found. ${STAFF}`,
   onGuard: guards('get', 'customers'),
   onRequest: async (req, res) => {
     if (!vendorCustomersOn()) return disabled(res);

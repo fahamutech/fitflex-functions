@@ -270,7 +270,7 @@ export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn 
     if (!row) return null;
     const [owed, open, shop] = await Promise.all([
       owedOf(db, vendorId, customerId, today),
-      db.raw(`SELECT s.id, s.number, s."invoiceNumber", s."soldAt", s."dueDate"::text AS "dueDate", s."totalTzs", s."balanceTzs", (?::date - s."dueDate")::int AS "daysPastDue"
+      db.raw(`SELECT s.id, s.number, s."invoiceNumber", s."soldAt", s."dueDate"::text AS "dueDate", s."totalTzs", s."balanceTzs", s."balanceReducedTzs", (?::date - s."dueDate")::int AS "daysPastDue"
                 FROM "VendorSale" s
                WHERE s."vendorId" = ? AND s."customerId" = ? AND s.kind = 'credit' AND s.status = 'completed' AND s."balanceTzs" > 0
                ORDER BY s."dueDate", s."soldAt", s.id`, [today, vendorId, customerId]),
@@ -294,6 +294,8 @@ export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn 
       money: owed,
       openSales: open.rows.map(plain).map(s => ({
         id: s.id, number: s.number, invoiceNumber: s.invoiceNumber ?? null, soldAt: iso(s.soldAt), dueDate: s.dueDate, totalTzs: s.totalTzs, balanceTzs: s.balanceTzs,
+        // S7: taken off this sale's balance by active refunds (paid − change + balance + balanceReduced = total).
+        balanceReducedTzs: s.balanceReducedTzs || 0,
         daysOverdue: Math.max(0, s.daysPastDue), overdue: s.daysPastDue >= 1,
       })),
       totals: {

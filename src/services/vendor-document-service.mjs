@@ -112,9 +112,6 @@ export function createVendorDocumentService({
 
   /** POST …/share { lang } → the link (token in the URL, returned once) and the share texts in both languages. */
   async function share({ vendorId, actorId, access, kind, id, customerId = null, body = {} }) {
-    const base = baseUrl();
-    // Q-1: no link without a configured public address (the app falls back to text sharing).
-    if (!base) return { error: 'public_url_not_configured', status: 503 };
     if (body?.lang != null && !LANGS.includes(body.lang)) return { error: 'invalid_lang', status: 400, allowed: LANGS };
     const lang = langOf(body?.lang);
     const refused = precheck(kind, access);
@@ -124,6 +121,10 @@ export function createVendorDocumentService({
     if (!allowed(out.docType, access)) return forbidden(out.docType);
     // Q-2: a cancelled document keeps the links already sent; no new ones.
     if (out.doc.status === 'cancelled') return { error: 'document_cancelled', status: 409 };
+    // Q-1: no link without a configured public address (the app falls back to text sharing). Checked only after
+    // permission and tenancy (S7 UAT): another vendor's document is 404 whether or not the address is set.
+    const base = baseUrl();
+    if (!base) return { error: 'public_url_not_configured', status: 503 };
     const { token, tokenHash } = newToken();
     const link = await store.createLink({ vendorId, docType: out.docType, docId: out.docId, tokenHash, lang, snapshot: out.snapshot ?? null, createdBy: actorId });
     const plainUrl = `${base}/d/${token}`;

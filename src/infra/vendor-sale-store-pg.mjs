@@ -500,7 +500,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
         createdBy: person(r.createdBy, names.get(r.createdBy)),
         kind: r.kind, balanceTzs: r.balanceTzs, dueDate: dayOf(r.dueDate),
         customer: r.customerId ? { id: r.customerId, name: customerNames.get(r.customerId)?.name ?? null, forgotten: customerNames.get(r.customerId)?.forgotten ?? false } : null,
-        refundedTzs: r.refundedTzs || 0, refundState: refundStates.get(r.id) || 'none',
+        refundedTzs: r.refundedTzs || 0, refundState: refundStates.get(r.id) || 'none', balanceReducedTzs: r.balanceReducedTzs || 0,
       })),
       nextCursor: rows.length > limit ? encodeCursor(page[page.length - 1]) : null,
       summary: {
