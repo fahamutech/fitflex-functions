@@ -98,7 +98,7 @@ export const vendorListSuppliers = {
 
 export const vendorCreateSupplier = {
   created, method: 'post', path: '/vendor/suppliers',
-  description: `Vendor / staff with \`purchases\` (${FLAGS}): add a supplier. Body { name (2–120), phone? (a Tanzanian number is stored as +255…; another country's as digits, ≤ 20), email?, contactPerson? (≤ 120), address? (≤ 300), tin? (≤ 20), note? (≤ 500) }. → 201 { supplier { id, name, phone, email, contactPerson, address, tin, note, archived, archivedAt, createdAt, updatedAt } }. 400 name_required { min } | name_too_long { max } | invalid_phone | invalid_email | field_too_long { field, max } | invalid_field { field }; 409 duplicate_supplier { supplierId } (an active supplier with that name, case-insensitive). Audited. ${RATE} ${STAFF}`,
+  description: `Vendor / staff with \`purchases\` (${FLAGS}): add a supplier. Body { name (2–120), phone? (a Tanzanian number is stored as +255…; another country's as digits, ≤ 20), email?, contactPerson? (≤ 120), address? (≤ 300), tin? (≤ 20), note? (≤ 500) }. → 201 { supplier { id, name, phone, email, contactPerson, address, tin, note, archived, archivedAt, createdAt, updatedAt } }. 400 name_required { min } | name_too_long { max } | invalid_phone | invalid_email | field_too_long { field, max } | invalid_field { field }; 409 duplicate_supplier { supplierId, existing { id, name } } (an active supplier of mine with that name, case-insensitive; existing names it so the app can link it). Audited. ${RATE} ${STAFF}`,
   requestSample: { name: 'Juma Supplies', phone: '0712 345 678', contactPerson: 'Juma' },
   onGuard: guards('post'),
   onRequest: async (req, res) => {
@@ -122,7 +122,7 @@ export const vendorGetSupplier = {
 
 export const vendorUpdateSupplier = {
   created, method: 'put', path: '/vendor/suppliers/:id',
-  description: `Vendor / staff with \`purchases\` (${FLAGS}): edit a supplier (partial: only the fields sent change; null clears an optional field; name cannot be null) and/or archived: true | false. Archiving is refused while the supplier is owed anything → 409 supplier_has_balance { owedTzs }; restoring (or renaming) onto an active supplier's name → 409 duplicate_supplier { supplierId }. → { supplier }. Same 400s as POST; 404 supplier_not_found. Audited (vendor_supplier_updated / _archived / _restored). ${RATE} ${STAFF}`,
+  description: `Vendor / staff with \`purchases\` (${FLAGS}): edit a supplier (partial: only the fields sent change; null clears an optional field; name cannot be null) and/or archived: true | false. Archiving is refused while the supplier is owed anything → 409 supplier_has_balance { owedTzs }; restoring (or renaming) onto an active supplier's name → 409 duplicate_supplier { supplierId, existing { id, name } }. → { supplier }. Same 400s as POST; 404 supplier_not_found. Audited (vendor_supplier_updated / _archived / _restored). ${RATE} ${STAFF}`,
   requestSample: { phone: '+255712345678', archived: false },
   onGuard: guards('put'),
   onRequest: async (req, res) => {
