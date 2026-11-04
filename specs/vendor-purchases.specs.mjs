@@ -34,7 +34,7 @@ import {
 import { eatToday, addDays } from '../src/shared/vendor-customer.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
-const migration = createRequire(import.meta.url)('../db/migrations/20270202090500-vendor-purchases.cjs');
+const migration = createRequire(import.meta.url)('../db/migrations/20270203090100-vendor-purchases.cjs');
 
 await ensureInit();
 
