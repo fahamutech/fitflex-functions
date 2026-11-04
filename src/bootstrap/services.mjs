@@ -64,6 +64,8 @@ import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
 import { createPgVendorSaleStore } from '../infra/vendor-sale-store-pg.mjs';
 import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
+import { createPgVendorImportStore } from '../infra/vendor-import-store-pg.mjs';
+import { createVendorImportService } from '../services/vendor-import-service.mjs';
 import { createPgVendorRefundStore } from '../infra/vendor-refund-store-pg.mjs';
 import { createVendorRefundService } from '../services/vendor-refund-service.mjs';
 import { createPgVendorCustomerStore } from '../infra/vendor-customer-store-pg.mjs';
@@ -447,6 +449,13 @@ export const vendorSaleService = createVendorSaleService({
   store: vendorSaleStore,
   afterStockMoved: productIds => shopService.afterStockMoved(productIds),
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
+// Vendor tools · Smart import V1: CSV import of products, stock counts and profile (dormant behind VENDOR_TOOLS +
+// VENDOR_IMPORT; the routes check the flag). Rows go through shopService, so its validation and approval rules stay in force.
+export const vendorImportService = createVendorImportService({
+  store: createPgVendorImportStore({ db }),
+  shop: shopService,
+  auditLog,
 });
 // Vendor tools · S7: refunds on walk-in sales — credit notes, restock, undo (dormant behind VENDOR_TOOLS +
 // VENDOR_WALKIN_SALES + VENDOR_REFUNDS for writes; the routes check the flags). No commission, no settlement.
