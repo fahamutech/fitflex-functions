@@ -158,6 +158,12 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
   async function rowsWithIssues(vendorId, id) {
     return plain(await db('VendorImportRow').where({ batchId: id, vendorId }).whereRaw(`jsonb_array_length(issues) > 0`).orderBy('rowNo').select('rowNo', 'raw', 'normalized', 'issues'));
   }
+  /** Rows for the errors file: at least one issue, or failed while applying. Row order. */
+  async function rowsForErrors(vendorId, id) {
+    return plain(await db('VendorImportRow').where({ batchId: id, vendorId })
+      .where(q => q.whereRaw(`jsonb_array_length(issues) > 0`).orWhere('applyState', 'failed')).orderBy('rowNo')
+      .select('rowNo', 'raw', 'normalized', 'issues', 'applyState', 'lastError'));
+  }
   /** Every row's raw cells, in row order, 500 at a time through `each`. */
   async function eachRow(vendorId, id, each) {
     let after = 0;
@@ -458,7 +464,7 @@ export function createPgVendorImportStore({ db, now = () => new Date(), applySlo
   }
 
   return {
-    vendorProducts, productRow, productState, productsBySku: productsBySkuOf, createBatch, getBatch, listBatches, sampleRaw, rowsPage, rowsWithIssues, eachRow,
+    vendorProducts, productRow, productState, productsBySku: productsBySkuOf, createBatch, getBatch, listBatches, sampleRaw, rowsPage, rowsWithIssues, rowsForErrors, eachRow,
     saveMapping, claim, isStale, touch, purgeAbandoned, clearEnded, resetStaleApplying, finish, fillProfile, staleApplyMs, nextEligible, countEligible, markRow, bumpAttempt, release, skipPending,
     requeueFailed, unrequeue, countFailed, anyApplied, discard, withVendorLock,
   };
