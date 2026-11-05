@@ -105,7 +105,7 @@ export function createNotificationService({
    * finds the inbox row already there and sends nothing more.
    * @param {{ id?:string, type:string, title:string, body:string, data?:object, whatsapp?:(user)=>Promise<any> }} message
    */
-  async function notify(userId, { id = null, type, title, body, data = {}, pushData = null, whatsapp }) {
+  async function notify(userId, { id = null, type, title, body, data = {}, pushData = null, pushTitle = null, pushBody = null, whatsapp }) {
     if (!userId) return { ok: false, skipped: 'no_user' };
     let row = {
       id: id || `ntf_${randomUUID().slice(0, 8)}`, userId, type, title, body,
@@ -120,8 +120,8 @@ export function createNotificationService({
     }
     let push = null;
     try {
-      // pushData (optional) is a smaller payload for the phone than the inbox row's data.
-      push = await sendPush(userId, { title, body, data: { ...(pushData || data), type, notificationId: row.id } });
+      // pushData / pushTitle / pushBody (optional) are a smaller payload for the phone than the inbox row; null = same as the row.
+      push = await sendPush(userId, { title: pushTitle ?? title, body: pushBody ?? body, data: { ...(pushData || data), type, notificationId: row.id } });
     } catch (err) {
       logger.warn?.(`[notify] push failed for ${userId}/${type}: ${err.message}`);
     }
