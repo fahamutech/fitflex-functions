@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 import { moneySecondApproverOn, refundSplitScopesOn } from '../shared/feature-flags.mjs';
 import { refundView } from '../shared/events-money-views.mjs';
 import { staffNameLookup } from '../shared/staff-names.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 export const REFUND_KINDS = ['subscription', 'trainer_booking', 'shop_order', 'event_order'];
 export const REFUND_STATUSES = ['requested', 'approved', 'paid', 'rejected'];
@@ -50,14 +51,16 @@ export function createRefundService({
 
   const EVENT_TELL = { refund_requested: 'requested', refund_preparing: 'requested_by_fitflex', refund_approved: 'approved', refund_rejected: 'rejected', refund_paid: 'paid' };
 
-  async function tell(refund, type, title, body) {
-    // Event refunds are told bilingually by the events refund service; the other kinds keep their English push.
+  // `textKey` names the wording (shared/notification-texts.mjs); several share one `type`.
+  async function tell(refund, type, textKey, params) {
+    // Event refunds are told bilingually by the events refund service; the other kinds go through
+    // notification-texts in the member's language. A rejection's note is the reviewer's own words.
     if (refund.kind === 'event_order' && tellEvent) {
-      try { await tellEvent(refund, EVENT_TELL[type] ?? 'requested', { note: type === 'refund_rejected' ? body : null, noteSw: type === 'refund_rejected' ? (refund.decisionNoteSw ?? null) : null, reference: refund.paymentReference ?? null }); } catch { /* a notification never blocks a refund */ }
+      try { await tellEvent(refund, EVENT_TELL[type] ?? 'requested', { note: type === 'refund_rejected' ? (params?.note ?? null) : null, noteSw: type === 'refund_rejected' ? (refund.decisionNoteSw ?? null) : null, reference: refund.paymentReference ?? null }); } catch { /* a notification never blocks a refund */ }
       return;
     }
     try {
-      await notify(refund.memberId, { id: `ntf_${type}_${refund.id}`, type, title, body, data: { refundId: refund.id, kind: refund.kind } });
+      await notify(refund.memberId, { id: `ntf_${type}_${refund.id}`, type, ...notificationText(textKey, params), data: { refundId: refund.id, kind: refund.kind } });
     } catch { /* a notification never blocks a refund */ }
   }
 
@@ -116,13 +119,13 @@ export function createRefundService({
     }
     await audit('refund_raised', requestedBy, null, refund, auditStore);
     if (approved) {
-      await tell(refund, 'refund_approved', 'Refund on its way', `Your refund of ${money(amount)} is approved. FitFlex will send it to the account you paid from.`);
+      await tell(refund, 'refund_approved', 'refund_on_its_way', { amount: money(amount) });
     } else if (requestedRole === 'admin' && adminRaiseWaits()) {
       // Flag on: FitFlex raised it and a second admin still has to approve it. The member never asked,
-      // so "we have your request" would be wrong. (Server notifications are English only: known gap.)
-      await tell(refund, 'refund_preparing', 'Refund being prepared', `FitFlex is preparing a refund of ${money(amount)} for your payment. We will tell you when it is sent.`);
+      // so "we have your request" would be wrong.
+      await tell(refund, 'refund_preparing', 'refund_preparing', { amount: money(amount) });
     } else {
-      await tell(refund, 'refund_requested', 'Refund request received', `We have your request for ${money(amount)} and will reply soon.`);
+      await tell(refund, 'refund_requested', 'refund_requested', { amount: money(amount) });
     }
     return { refund };
   }
@@ -219,9 +222,9 @@ export function createRefundService({
       try { await audit('refund_decided_source_not_updated', actorId, null, { id: refund.id, kind: refund.kind, error: String(err?.message || err).slice(0, 300) }); } catch { /* logged above */ }
     }
     if (refund.status === 'approved') {
-      await tell(refund, 'refund_approved', 'Refund approved', `Your refund of ${money(refund.amountTzs)} is approved. FitFlex will send it to the account you paid from.`);
+      await tell(refund, 'refund_approved', 'refund_approved', { amount: money(refund.amountTzs) });
     } else {
-      await tell(refund, 'refund_rejected', 'Refund not approved', note);
+      await tell(refund, 'refund_rejected', 'refund_rejected', { note });
     }
     return { refund };
   }
@@ -240,7 +243,7 @@ export function createRefundService({
       status: 'rejected', decidedBy: actorId || 'policy', decidedAt: at, decisionNote: text(note) || 'No longer owed', updatedAt: at,
     });
     await audit('refund_withdrawn', actorId, prior, refund);
-    await tell(refund, 'refund_rejected', 'Refund withdrawn', refund.decisionNote);
+    await tell(refund, 'refund_rejected', 'refund_withdrawn', { note: refund.decisionNote });
     return { refund, withdrawn: true };
   }
 
@@ -280,7 +283,7 @@ export function createRefundService({
       console.error('[refunds] paid refund not applied to its source:', refund.id, err?.message);
       try { await audit('refund_paid_source_not_updated', actorId, null, { id: refund.id, kind: refund.kind, error: String(err?.message || err).slice(0, 300) }); } catch { /* logged above */ }
     }
-    await tell(refund, 'refund_paid', 'Refund sent', `We sent ${money(refund.amountTzs)} back to you. Reference: ${reference}.`);
+    await tell(refund, 'refund_paid', 'refund_paid', { amount: money(refund.amountTzs), reference });
     return { refund };
   }
 

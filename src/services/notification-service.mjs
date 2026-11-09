@@ -11,6 +11,7 @@
 // dispatcher calls, and `onOpened` / `onClicked` let it record opens and
 // taps against its delivery ledger.
 import { randomUUID } from 'node:crypto';
+import { formatSlots, notificationLocale, notificationText, renderNotificationText } from '../shared/notification-texts.mjs';
 
 // FCM error codes meaning the token will never work again.
 const DEAD_TOKEN_CODES = new Set([
@@ -77,6 +78,16 @@ export function createNotificationService({
     return { sent: res.successCount, failed: res.failureCount, messageIds, errors };
   }
 
+  /** The language a person chose in the app ('en' | 'sw'); English when they have not, or it cannot be read. */
+  async function recipientLocale(userId) {
+    try {
+      return notificationLocale(await localeOf(userId));
+    } catch (err) {
+      logger.warn?.(`[notify] locale lookup failed for ${userId}: ${err.message}`);
+      return notificationLocale(null);
+    }
+  }
+
   /**
    * Adds one message to a user's inbox. A caller-chosen `id` makes the write
    * idempotent: writing the same id again returns the existing row with
@@ -103,10 +114,20 @@ export function createNotificationService({
    * @param {string} userId
    * An `id` makes the call idempotent: notifying again with the same id
    * finds the inbox row already there and sends nothing more.
-   * @param {{ id?:string, type:string, title:string, body:string, data?:object, whatsapp?:(user)=>Promise<any> }} message
+   *
+   * Text: pass `text: { key, params }` (see shared/notification-texts.mjs,
+   * usually via `notificationText(key, params)`) and it is written in the
+   * recipient's language. A plain `title` / `body` still works and is sent
+   * as given; it is also what goes out if the key is unknown.
+   * `locale` skips the lookup when the caller already knows the language.
+   * @param {{ id?:string, type:string, title?:string, body?:string, text?:{key:string, params?:object}, locale?:string, data?:object, whatsapp?:(user)=>Promise<any> }} message
    */
-  async function notify(userId, { id = null, type, title, body, data = {}, pushData = null, pushTitle = null, pushBody = null, whatsapp }) {
+  async function notify(userId, { id = null, type, title, body, text = null, locale = null, data = {}, pushData = null, pushTitle = null, pushBody = null, whatsapp }) {
     if (!userId) return { ok: false, skipped: 'no_user' };
+    if (text?.key) {
+      const rendered = renderNotificationText(text.key, text.params, locale ? notificationLocale(locale) : await recipientLocale(userId));
+      if (rendered) ({ title, body } = rendered);
+    }
     let row = {
       id: id || `ntf_${randomUUID().slice(0, 8)}`, userId, type, title, body,
       data: { ...data, type }, readAt: null, createdAt: new Date().toISOString(),
@@ -195,65 +216,40 @@ export function createNotificationService({
 
   // ── Domain events ──────────────────────────────────────────────────────
 
-  const fmtSlots = (bookings) => bookings.map(b => `${b.date} ${b.slot}`).join(', ');
-
   /** Trainer booking lifecycle (UAT #58: trainer notified on booking and payment). */
   async function notifyTrainerBooking(event, { trainer, memberId, bookings = [] }) {
     try {
       const member = await users.findByIdAsync(memberId);
-      const memberName = member?.displayName || 'A member';
+      // A missing name becomes "A member" / "your trainer" in the reader's language.
+      const names = { memberName: member?.displayName || null, trainerName: trainer?.displayName || null };
+      const params = { ...names, count: bookings.length, slots: formatSlots(bookings) };
       const data = { bookingGroupId: bookings[0]?.groupId || '', trainerId: trainer?.id || '' };
       if (event === 'trainer_booking_requested') {
-        await notify(trainer?.userId, {
-          type: event, data,
-          title: 'New booking request',
-          body: `${memberName} booked ${bookings.length} session(s): ${fmtSlots(bookings)}. Awaiting payment confirmation.`,
-        });
+        await notify(trainer?.userId, { type: event, data, ...notificationText('trainer_booking_requested', params) });
       } else if (event === 'trainer_booking_confirmed') {
         await notify(trainer?.userId, {
-          type: event, data,
-          title: 'Booking paid and confirmed',
-          body: `${memberName}'s ${bookings.length} session(s) are confirmed: ${fmtSlots(bookings)}.`,
-          whatsapp: () => whatsApp.sendBookingConfirmed(trainer.userId, memberName, bookings[0]?.date, bookings[0]?.slot),
+          type: event, data, ...notificationText('trainer_booking_confirmed_trainer', params),
+          whatsapp: () => whatsApp.sendBookingConfirmed(trainer.userId, names.memberName || 'A member', bookings[0]?.date, bookings[0]?.slot),
         });
-        await notify(memberId, {
-          type: event, data,
-          title: 'Trainer session confirmed',
-          body: `Your ${bookings.length} session(s) with ${trainer?.displayName || 'your trainer'} are confirmed: ${fmtSlots(bookings)}.`,
-        });
+        await notify(memberId, { type: event, data, ...notificationText('trainer_booking_confirmed_member', params) });
       } else if (event === 'trainer_booking_cancelled_by_member') {
-        await notify(trainer?.userId, {
-          type: 'trainer_booking_cancelled', data,
-          title: 'Session cancelled',
-          body: `${memberName} cancelled: ${fmtSlots(bookings)}. The slot is free again.`,
-        });
+        await notify(trainer?.userId, { type: 'trainer_booking_cancelled', data, ...notificationText('trainer_booking_cancelled_by_member', params) });
       } else if (event === 'trainer_booking_no_show') {
         // Sent in the member's chosen language (CommunicationPreference.locale): 'sw' → Swahili,
         // otherwise (en or nothing saved) English as before. Both are always in `data` for the inbox.
-        // Swahili is a DRAFT for native review.
-        const en = {
-          title: 'Missed session',
-          body: `${trainer?.displayName || 'Your trainer'} recorded that you missed your session: ${fmtSlots(bookings)}. Missed sessions are not refunded. If this is wrong, contact FitFlex.`,
-        };
-        const sw = {
-          title: 'Hukuhudhuria kipindi',
-          body: `${trainer?.displayName || 'Trainer wako'} amerekodi kwamba hukuhudhuria kipindi chako: ${fmtSlots(bookings)}. Hutarejeshewa pesa za kipindi hiki. Ukiona si sahihi, wasiliana na FitFlex.`,
-        };
-        let locale = null;
-        try { locale = await localeOf(memberId); } catch { locale = null; }
+        // Swahili is a DRAFT for native review (texts in shared/notification-texts.mjs).
+        const en = renderNotificationText('trainer_booking_no_show', params, 'en');
+        const sw = renderNotificationText('trainer_booking_no_show', params, 'sw');
+        const locale = await recipientLocale(memberId);
         const text = locale === 'sw' ? sw : en;
         await notify(memberId, {
           type: event,
-          data: { ...data, bookingId: bookings[0]?.id || '', locale: locale === 'sw' ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body },
+          data: { ...data, bookingId: bookings[0]?.id || '', locale, titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body },
           title: text.title,
           body: text.body,
         });
       } else if (event === 'trainer_booking_cancelled_by_trainer') {
-        await notify(memberId, {
-          type: 'trainer_booking_cancelled', data,
-          title: 'Trainer session cancelled',
-          body: `${trainer?.displayName || 'Your trainer'} cancelled your session: ${fmtSlots(bookings)}. Anything you paid for it will be refunded.`,
-        });
+        await notify(memberId, { type: 'trainer_booking_cancelled', data, ...notificationText('trainer_booking_cancelled_by_trainer', params) });
       }
     } catch (err) {
       logger.warn?.(`[notify] ${event} failed: ${err.message}`);
@@ -262,8 +258,6 @@ export function createNotificationService({
 
   /** BL-008 renewal sequence: T-3, T-1 and T-0 before renewsAt. */
   async function notifyRenewal(sub, daysLeft) {
-    const tier = sub.tier ? sub.tier[0].toUpperCase() + sub.tier.slice(1) : 'membership';
-    const when = daysLeft === 0 ? 'today' : daysLeft === 1 ? 'tomorrow' : `in ${daysLeft} days`;
     // One reminder per subscription, renewal date and day — a rerun of the
     // job the same day finds it already sent.
     const day = new Date(sub.renewsAt).toISOString().slice(0, 10);
@@ -271,8 +265,7 @@ export function createNotificationService({
       id: `ntf_renew_${sub.id}_${day}_${daysLeft}`,
       type: 'subscription_renewal',
       // Passes are prepaid and never charged automatically (Member Terms 3.4).
-      title: `Your ${tier} pass ends ${when}`,
-      body: 'To keep training, renew it from the Passes screen. You can also choose a different tier.',
+      ...notificationText('subscription_renewal', { tier: sub.tier || null, daysLeft }),
       data: { subscriptionId: sub.id, daysLeft },
     });
   }
@@ -280,19 +273,15 @@ export function createNotificationService({
   /** US030: activation confirmation once payment is approved. */
   async function notifySubscriptionActivated(sub) {
     if (sub.type === 'trainer_pass') {
-      const period = { daily: 'daily', weekly: 'weekly', monthly: 'monthly' }[sub.plan] || '';
       return notify(sub.memberId, {
         type: 'trainer_pass_activated',
-        title: 'Trainer pass active',
-        body: `Your ${period ? `${period} ` : ''}trainer pass is active. Show your check-in QR at reception to train your clients.`,
+        ...notificationText('trainer_pass_activated', { plan: sub.plan || null }),
         data: { subscriptionId: sub.id, gymId: sub.homeGymId || '' },
       });
     }
-    const tier = sub.tier ? `${sub.tier[0].toUpperCase()}${sub.tier.slice(1)} pass` : 'gym membership';
     return notify(sub.memberId, {
       type: 'subscription_activated',
-      title: 'Payment confirmed',
-      body: `Your ${tier} is active. Show your QR code at the gym to check in.`,
+      ...notificationText('subscription_activated', { tier: sub.tier || null }),
       data: { subscriptionId: sub.id },
     });
   }

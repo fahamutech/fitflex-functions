@@ -1088,7 +1088,8 @@ export const notificationService = createNotificationService({
   // deliveryService is defined further down; these only run later.
   onOpened: (rows) => deliveryService.onOpened(rows),
   onClicked: (row, opts) => deliveryService.onClicked(row, opts),
-  // The member's chosen message language (trainer_booking_no_show is sent in it).
+  // The member's chosen message language: every text the server builds through
+  // shared/notification-texts.mjs (and trainer_booking_no_show) is sent in it.
   localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
 });
 

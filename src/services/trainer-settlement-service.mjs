@@ -22,6 +22,7 @@ import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.m
 import {
   createStatementWorkflow, fail, weekOf, lastEndedWeek, weekToPrepare, eatDate, partnerView, STATEMENT_STATUSES, VISIBLE_TO_PARTNER,
 } from './partner-statement-workflow.mjs';
+import { notificationText } from '../shared/notification-texts.mjs';
 
 export { weekOf, lastEndedWeek };
 /** Today's date in East Africa Time (YYYY-MM-DD). */
@@ -144,8 +145,11 @@ export function createTrainerSettlementService({
       const s = out.statement;
       try {
         await notify(trainerOf(s.trainerId)?.userId, {
-          id: `ntf_trainer_payout_${s.id}`, type: 'trainer_payout_paid', title: 'Payout sent',
-          body: `FitFlex sent you ${money(s.finalNetTzs)} for ${s.sessionCount} session(s), ${s.periodStartDate} to ${s.periodEndDate}. Reference: ${s.paymentReference}.`,
+          id: `ntf_trainer_payout_${s.id}`, type: 'trainer_payout_paid',
+          ...notificationText('trainer_payout_paid', {
+            amount: money(s.finalNetTzs), sessionCount: s.sessionCount,
+            from: s.periodStartDate, to: s.periodEndDate, reference: s.paymentReference,
+          }),
           data: { statementId: s.id },
         });
       } catch { /* the payment itself is recorded */ }
