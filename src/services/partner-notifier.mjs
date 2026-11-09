@@ -7,6 +7,7 @@
 // best-effort.
 
 import { formatTsh } from '../shared/money-display.mjs';
+import { eatDate } from '../shared/eat-time.mjs';
 
 const tzs = formatTsh;
 
@@ -184,20 +185,16 @@ export function createPartnerNotifier({
 
   // ── Vendors ───────────────────────────────────────────────────────────────
 
-  // dd/mm/yyyy HH:mm in Tanzania time: the same in both languages.
-  const eatDate = (v) => {
-    const t = new Date(v);
-    if (Number.isNaN(t.getTime())) return '';
-    return new Intl.DateTimeFormat('en-GB', { timeZone: 'Africa/Dar_es_Salaam', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(t).replace(',', '');
-  };
+  // eatDate / eatParts (Tanzania time) live in src/shared/eat-time.mjs; used by banner and flash-sale notices.
   function bannerMessage(kind, d, locale) {
     const en = d.headline || 'your banner';
     const sw = d.headlineSw || d.headline || 'bango lako';
-    const when = eatDate(d.startsAt);
+    const when = eatDate(d.startsAt, 'en');
+    const whenSw = eatDate(d.startsAt, 'sw');
     const texts = {
       approved: {
         en: { title: 'Banner approved', body: `Your banner "${en}" is approved. It goes live ${when}.` },
-        sw: { title: 'Bango limeidhinishwa', body: `Bango lako "${sw}" limeidhinishwa. Litaanza ${when}.` },
+        sw: { title: 'Bango limeidhinishwa', body: `Bango lako "${sw}" limeidhinishwa. Litaanza ${whenSw}.` },
       },
       rejected: {
         en: { title: 'Banner rejected', body: `Your banner "${en}" wasn't approved. See why.` },
@@ -221,6 +218,44 @@ export function createPartnerNotifier({
       body: text.body,
       data: {
         bannerId: d.bannerId ?? '', open: 'merch', item: d.bannerId ?? '', reason: d.reason ?? '',
+        titleSw: texts.sw.title, bodySw: texts.sw.body,
+      },
+    };
+  }
+
+  // Flash sales (SHOP_FLASH_SALES; spec shop-home-phase2 §4.3). Opens /vendor/merch?tab=sales&item=<saleId>.
+  // Swahili is a DRAFT for native review ("flash sale" = ofa ya muda mfupi, P1 glossary; End = sitisha).
+  function flashSaleMessage(kind, d, locale) {
+    const en = d.productName || 'your product';
+    const sw = d.productName || 'bidhaa yako';
+    const when = eatDate(d.startsAt, 'en');
+    const whenSw = eatDate(d.startsAt, 'sw');
+    const texts = {
+      approved: {
+        en: { title: 'Flash sale approved', body: `Your flash sale on "${en}" is approved. It goes live ${when}.` },
+        sw: { title: 'Ofa ya muda mfupi imeidhinishwa', body: `Ofa yako ya muda mfupi kwa "${sw}" imeidhinishwa. Itaanza ${whenSw}.` },
+      },
+      rejected: {
+        en: { title: 'Flash sale rejected', body: `Your flash sale on "${en}" wasn't approved. See why.` },
+        // i18n review 2026-10-29: "imekataliwa", matching the title and the status label. [SW review]
+        sw: { title: 'Ofa ya muda mfupi imekataliwa', body: `Ofa yako ya muda mfupi kwa "${sw}" imekataliwa. Tazama sababu.` },
+      },
+      expired: {
+        en: { title: 'Flash sale expired', body: `Your flash sale on "${en}" expired before review.` },
+        sw: { title: 'Ofa ya muda mfupi imeisha muda', body: `Ofa yako ya muda mfupi kwa "${sw}" imeisha muda kabla ya kukaguliwa.` },
+      },
+      ended: {
+        en: { title: 'Flash sale ended by FitFlex', body: `FitFlex ended your flash sale on "${en}".` },
+        sw: { title: 'Ofa ya muda mfupi imesitishwa na FitFlex', body: `FitFlex imesitisha ofa yako ya muda mfupi kwa "${sw}".` },
+      },
+    }[kind];
+    const text = locale === 'en' ? texts.en : texts.sw;
+    return {
+      type: `vendor_flash_sale_${kind}`,
+      title: text.title,
+      body: text.body,
+      data: {
+        saleId: d.saleId ?? '', open: 'merch', tab: 'sales', item: d.saleId ?? '', reason: d.reason ?? '',
         titleSw: texts.sw.title, bodySw: texts.sw.body,
       },
     };
@@ -286,6 +321,62 @@ export function createPartnerNotifier({
         data: { count: String(n), totalTzs: String(Number(d.totalTzs || 0)), open: 'customers', view: 'owed', titleSw: sw.title, bodySw: sw.body },
       };
     },
+    // Vendor tools · S7 (design spec §2.10, §8.8): a staff member refunded part of a walk-in sale, or undid a refund.
+    // To the vendor account only, never the customer. Opens /vendor/refunds/:refundId. Swahili is a DRAFT.
+    vendor_sale_refunded: (d, locale) => {
+      const who = d.createdByName || null;
+      const amount = tzs(Number(d.amountTzs || 0));
+      const en = { title: `Refund ${d.number} on sale ${d.saleNumber}`, body: `${who || 'A staff member'} refunded ${amount} on sale ${d.saleNumber}. Reason: ${d.reason || '-'}` };
+      const sw = { title: `Marejesho ${d.number} kwenye mauzo ${d.saleNumber}`, body: `${who || 'Mfanyakazi'} amefanya marejesho ya ${amount} kwenye mauzo ${d.saleNumber}. Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_sale_refunded',
+        title: text.title,
+        body: text.body,
+        data: { saleId: d.saleId ?? '', refundId: d.refundId ?? '', number: d.number ?? '', saleNumber: d.saleNumber ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
+    vendor_refund_reverted: (d, locale) => {
+      const who = d.revertedByName || null;
+      const amount = tzs(Number(d.amountTzs || 0));
+      const en = { title: `Refund ${d.number} undone`, body: `${who || 'A staff member'} undid refund ${d.number} (${amount}). Reason: ${d.reason || '-'}` };
+      const sw = { title: `Marejesho ${d.number} yametenduliwa`, body: `${who || 'Mfanyakazi'} ametendua marejesho ${d.number} (${amount}). Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_refund_reverted',
+        title: text.title,
+        body: text.body,
+        data: { saleId: d.saleId ?? '', refundId: d.refundId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
+    // Vendor tools · S9 (design spec §2.12, §8.8): a staff member voided a delivery (GRN) or a supplier payment.
+    // To the vendor account only, never the supplier. Opens /vendor/purchases/:purchaseId. Swahili is a DRAFT.
+    vendor_purchase_voided: (d, locale) => {
+      const who = d.byName || null;
+      const amount = tzs(Number(d.totalTzs || 0));
+      const en = { title: `Delivery ${d.number} voided`, body: `${who || 'A staff member'} voided delivery ${d.number} (${amount}). Reason: ${d.reason || '-'}` };
+      const sw = { title: `Mzigo ${d.number} umebatilishwa`, body: `${who || 'Mfanyakazi'} amebatilisha mzigo ${d.number} (${amount}). Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_purchase_voided',
+        title: text.title,
+        body: text.body,
+        data: { purchaseId: d.purchaseId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
+    vendor_purchase_payment_voided: (d, locale) => {
+      const who = d.byName || null;
+      const amount = tzs(Number(d.amountTzs || 0));
+      const en = { title: 'Supplier payment voided', body: `${who || 'A staff member'} voided a payment of ${amount} on ${d.number}. Reason: ${d.reason || '-'}` };
+      const sw = { title: 'Malipo kwa msambazaji yamebatilishwa', body: `${who || 'Mfanyakazi'} amebatilisha malipo ya ${amount} kwenye ${d.number}. Sababu: ${d.reason || '-'}` };
+      const text = locale === 'en' ? en : sw;
+      return {
+        type: 'vendor_purchase_payment_voided',
+        title: text.title,
+        body: text.body,
+        data: { purchaseId: d.purchaseId ?? '', number: d.number ?? '', titleSw: sw.title, bodySw: sw.body },
+      };
+    },
     // Vendor tools · S4: a staff member voided a customer payment (as vendor_sale_voided). Swahili is a DRAFT.
     vendor_customer_payment_voided: (d, locale) => {
       const who = d.voidedByName || null;
@@ -327,6 +418,12 @@ export function createPartnerNotifier({
     shop_banner_rejected: (d, locale) => bannerMessage('rejected', d, locale),
     shop_banner_expired: (d, locale) => bannerMessage('expired', d, locale),
     shop_banner_ended: (d, locale) => bannerMessage('ended', d, locale),
+  });
+  Object.assign(VENDOR_MESSAGES, {
+    flash_sale_approved: (d, locale) => flashSaleMessage('approved', d, locale),
+    flash_sale_rejected: (d, locale) => flashSaleMessage('rejected', d, locale),
+    flash_sale_expired: (d, locale) => flashSaleMessage('expired', d, locale),
+    flash_sale_ended: (d, locale) => flashSaleMessage('ended', d, locale),
   });
 
   /** Something happened in a vendor's shop. Events with no message here stay in the shop's own list only. */

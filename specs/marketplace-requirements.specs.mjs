@@ -44,8 +44,8 @@ function makeService() {
 }
 
 const completeProfile = {
-  businessName: 'Fit Fuel Tanzania', logo: 'data:image/png;base64,logo',
-  banner: 'data:image/png;base64,banner', description: 'Sports nutrition',
+  businessName: 'Fit Fuel Tanzania', logo: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWOQr7ICAAGPANREi4XaAAAAAElFTkSuQmCC',
+  banner: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWOQr7ICAAGPANREi4XaAAAAAElFTkSuQmCC', description: 'Sports nutrition',
   businessCategory: 'supplements', contactNumber: '+255700000001',
   email: 'sales@fitfuel.test', address: 'Masaki, Dar es Salaam',
   deliveryRegions: ['Dar es Salaam'],
@@ -60,7 +60,7 @@ async function approvedProduct(service, overrides = {}) {
       name: 'Whey Protein', description: 'One kilogram tub', category: 'supplements_nutrition',
       brand: 'Fit Fuel', priceTzs: 85000, discountPriceTzs: 75000, stock: 10,
       sku: 'FF-WHEY-1', weightKg: 1, variants: [{ name: 'Vanilla', stock: 4 }],
-      images: ['one.jpg', 'two.jpg'], visibility: 'visible', deliveryAvailable: true,
+      images: ['/storage/bafytest/one.jpg', '/storage/bafytest/two.jpg'], visibility: 'visible', deliveryAvailable: true,
       distanceKm: 4.5,
       ...overrides,
     },
@@ -128,12 +128,18 @@ test('marketplace: rich products are approval gated, filterable and sortable', a
   assert.equal(popular[0].name, 'Yoga Mat');
 });
 
-test('marketplace: material vendor edits return an approved product to review', async () => {
+test('marketplace: material vendor edits return an approved product to review (price edits do not: owner decision 2026-10-29)', async () => {
   const { service } = makeService();
   const productId = await approvedProduct(service);
 
-  const updated = await service.upsertProduct({
+  const repriced = await service.upsertProduct({
     vendorId: 'vendor-1', productId, body: { priceTzs: 90000 },
+  });
+  assert.equal(repriced.product.approvalStatus, 'approved');
+  assert.equal((await service.listProducts({})).some(product => product.id === productId), true);
+
+  const updated = await service.upsertProduct({
+    vendorId: 'vendor-1', productId, body: { name: 'Renamed product' },
   });
 
   assert.equal(updated.product.approvalStatus, 'pending');

@@ -117,8 +117,8 @@ test('GET /vendor/tools/options: everything off by default; a tool needs the umb
   const off = await call(vendorToolsOptionsRoute, as(v));
   assert.equal(off.status, 200);
   assert.deepEqual(off.body, {
-    canSeeCost: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false,
-    vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false },
+    canSeeCost: true, canSeeOrderMoney: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false,
+    vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, import: false, importLimits: { maxBytes: 2097152, maxRows: 2000 }, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false, flashSales: false },
   });
   process.env.VENDOR_STOCK_LEDGER = '1';
   assert.equal((await call(vendorToolsOptionsRoute, as(v))).body.stockLedger, false, 'no umbrella, no tool');
@@ -392,8 +392,8 @@ for (const mode of ['off', 'on']) {
   test(`F1 (ledger ${mode}): an approved product goes back to review only when a reviewed value actually changes`, async () => {
     if (mode === 'on') ledgerOn();
     const v = await vendor();
-    const p = await listed(v, { description: 'Tasty', brand: 'FF', images: ['a.webp'], variants: [{ name: 'Vanilla' }] });
-    const formAsSent = { name: 'Whey', description: 'Tasty', category: 'supplements_nutrition', brand: 'FF', priceTzs: 20_000, discountPriceTzs: null, images: ['a.webp'], variants: [{ name: 'Vanilla' }] };
+    const p = await listed(v, { description: 'Tasty', brand: 'FF', images: ['/storage/bafytest/a.webp'], variants: [{ name: 'Vanilla' }] });
+    const formAsSent = { name: 'Whey', description: 'Tasty', category: 'supplements_nutrition', brand: 'FF', priceTzs: 20_000, discountPriceTzs: null, images: ['/storage/bafytest/a.webp'], variants: [{ name: 'Vanilla' }] };
     const status = async () => (await row(p.id)).approvalStatus;
     assert.equal((await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: formAsSent })).status, 200);
     assert.equal(await status(), 'approved', 'saving the form unchanged keeps it listed');
@@ -406,8 +406,10 @@ for (const mode of ['off', 'on']) {
     assert.equal((await call(listShopProducts, { sub: uid('usr'), userType: 'member' }, { query: { vendorId: v } })).body.some(x => x.id === p.id), true);
     await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, name: 'Whey  ' } });
     assert.equal(await status(), 'approved', 'surrounding spaces are not a change');
-    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, priceTzs: 21_000 } });
-    assert.equal(await status(), 'pending', 'a new price is reviewed');
+    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, priceTzs: 21_000, discountPriceTzs: 19_000 } });
+    assert.equal(await status(), 'approved', 'price and discount are not reviewed (owner decision 2026-10-29)');
+    await call(vendorUpdateProduct, as(v), { params: { id: p.id }, body: { ...formAsSent, name: 'Whey Gold' } });
+    assert.equal(await status(), 'pending', 'a new name is reviewed');
   });
 }
 

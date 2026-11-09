@@ -143,6 +143,17 @@ export function shopNearYouOn() {
 }
 
 /**
+ * Shop home Phase 2 · slice 4: flash sales (docs/shop-flash-sales-api.md). PRICING PATH. Off unless
+ * SHOP_FLASH_SALES is set: every /vendor/flash-sales and /admin/flash-sales route answers 404
+ * feature_disabled before sign-in, and every price, product list, store, home and checkout answer is
+ * byte-identical to before (no sale fields, no flash_sale section, items[].expectedPriceTzs ignored,
+ * no price lock). Approved sales stay stored and apply again when it is back on.
+ */
+export function shopFlashSalesOn() {
+  return on('SHOP_FLASH_SALES');
+}
+
+/**
  * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
  * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
  * carries no `manual` block and subscribe / upgrade take no reference, exactly
@@ -170,6 +181,37 @@ export function moneySecondApproverOn() {
 }
 
 /**
+ * Held-payments worklist (audit M5): money a provider confirmed that no request could take
+ * (request cancelled or rejected meanwhile, amount or transaction mismatch, reference reused)
+ * is listed for staff at GET /admin/payments/held and refunded from POST
+ * /admin/payments/held/:paymentRequestId/refund. Off unless HELD_PAYMENTS_WORKLIST is set:
+ * both routes answer 404 feature_disabled.
+ */
+export function heldPaymentsWorklistOn() {
+  return on('HELD_PAYMENTS_WORKLIST');
+}
+
+/**
+ * Phase 1 slice A · split refund scopes. Off unless REFUND_SPLIT_SCOPES is set: refund decisions and
+ * paying (POST /admin/refunds/:id/decision, /paid, /batch-decision, /batch-paid) stay open to staff
+ * holding `payments`, exactly as before. On, deciding needs `refunds_approve` and paying needs
+ * `refunds_pay`; listing and raising stay on `payments`. Super-admins are unaffected. Grant the new
+ * scopes to existing staff BEFORE turning it on: a `payments`-only user loses approve and pay.
+ */
+export function refundSplitScopesOn() {
+  return on('REFUND_SPLIT_SCOPES');
+}
+
+/**
+ * Phase 1 slice A · F2. Off unless STATEMENT_PAY_SECOND_PERSON is set. On, the admin who approved a gym,
+ * trainer or vendor payout statement cannot mark it paid (403 cannot_pay_own_approval). Independent
+ * of MONEY_SECOND_APPROVER.
+ */
+export function statementPaySecondPersonOn() {
+  return on('STATEMENT_PAY_SECOND_PERSON');
+}
+
+/**
  * Vendor business tools (plan docs/plans/vendor-business-tools-plan.md).
  * VENDOR_TOOLS is the umbrella: a slice flag is on only when both it and
  * VENDOR_TOOLS are on. Everything is off unless set. Writes that are pure
@@ -177,7 +219,7 @@ export function moneySecondApproverOn() {
  */
 export const VENDOR_TOOLS_FLAGS = [
   'VENDOR_STOCK_LEDGER', 'VENDOR_PORTAL', 'VENDOR_ORDER_BUYER_CONTACT', 'VENDOR_WALKIN_SALES', 'VENDOR_CUSTOMERS',
-  'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL',
+  'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL', 'VENDOR_IMPORT',
 ];
 
 /** True when VENDOR_TOOLS and the given slice flag are both enabled. */
@@ -208,14 +250,36 @@ export function vendorToolsOptions() {
     documents: vendorToolsFlag('VENDOR_DOCUMENTS'),
     vat: vendorToolsFlag('VENDOR_VAT'),
     reports: vendorToolsFlag('VENDOR_REPORTS'),
-    refunds: vendorToolsFlag('VENDOR_REFUNDS'),
-    barcodes: vendorToolsFlag('VENDOR_BARCODES'),
-    purchases: vendorToolsFlag('VENDOR_PURCHASES'),
+    // S7: the same answer as the refund routes (VENDOR_TOOLS + VENDOR_WALKIN_SALES + VENDOR_REFUNDS), so options
+    // never say true while the routes answer 404.
+    refunds: vendorRefundsOn(),
+    // S8: the same answer as the barcode routes and fields (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES; codes
+    // are written inside the ledger's product-form transaction), so options never say true while the lookup answers
+    // 404. Changed meaning: before S8 it ignored VENDOR_STOCK_LEDGER.
+    barcodes: vendorBarcodesOn(),
+    // S9: the same answer as the purchase routes (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES; receiving
+    // stock depends on the ledger), so options never say true while the routes answer 404. Changed meaning: before
+    // S9 it ignored VENDOR_STOCK_LEDGER.
+    purchases: vendorPurchasesOn(),
+    // Smart import V1: CSV import of products, stock counts and profile. importLimits tell the apps the caps.
+    import: vendorImportOn(),
+    importLimits: { ...VENDOR_IMPORT_LIMITS },
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
-    // umbrella (a shop feature, not a vendor tool). Flash sales (slice 4) will add `flashSales`.
-    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn() },
+    // umbrella (a shop feature, not a vendor tool).
+    merch: { banners: shopBannersOn(), productTargets: shopPersonalisationOn(), shopAreas: shopNearYouOn(), flashSales: shopFlashSalesOn() },
   };
+}
+
+/** Smart import caps (owner default 2026-11-04: 2 MB, 2,000 rows). Shared with the rules and GET /vendor/tools/options. */
+export const VENDOR_IMPORT_LIMITS = Object.freeze({ maxBytes: 2 * 1024 * 1024, maxRows: 2000 });
+
+/**
+ * Smart import V1: CSV import of products, stock counts and the business profile (/vendor/imports/*). On only with
+ * VENDOR_TOOLS + VENDOR_IMPORT. Off → every route answers 404 feature_disabled; options say import: false.
+ */
+export function vendorImportOn() {
+  return vendorToolsFlag('VENDOR_IMPORT');
 }
 
 /** S2: the vendor web portal (GET /vendor/me opens it). */
@@ -242,11 +306,49 @@ export function heroImagesCmsOn() {
 }
 
 /**
+ * Partner hero photo and logo (plan partner-hero-media-plan.md slice 1). Off unless PARTNER_MEDIA is
+ * set: every /partner/media* and /admin/partner-media* route (file serving included) answers 404
+ * feature_disabled before sign-in is checked.
+ */
+export function partnerMediaOn() {
+  return on('PARTNER_MEDIA');
+}
+
+/**
  * S3: walk-in (counter) sales recorded by the vendor — POS, sales history, void. Off → the
  * /vendor/sales endpoints answer 404 feature_disabled.
  */
 export function vendorWalkInSalesOn() {
   return vendorToolsFlag('VENDOR_WALKIN_SALES');
+}
+
+/**
+ * Vendor tools · S7: making, undoing and sharing refunds on walk-in sales. On only with VENDOR_TOOLS +
+ * VENDOR_WALKIN_SALES + VENDOR_REFUNDS (refunds live on walk-in sales). Reading refunds already made only
+ * needs walk-in sales: they are bookkeeping facts of the sale (design spec docs/design/vendor-refunds-s7.md §0.2).
+ */
+export function vendorRefundsOn() {
+  return vendorWalkInSalesOn() && vendorToolsFlag('VENDOR_REFUNDS');
+}
+
+/**
+ * Vendor tools · S9: suppliers, receiving stock (GRN), cost price from purchases and payables with instalments.
+ * On only with VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES (design spec docs/design/vendor-purchases-s9.md
+ * §0.2). Off → every /vendor/suppliers, /vendor/purchases and /vendor/payables route answers 404 feature_disabled.
+ * FitFlex moves no money for payables: they are records only.
+ */
+export function vendorPurchasesOn() {
+  return vendorStockLedgerOn() && vendorToolsFlag('VENDOR_PURCHASES');
+}
+
+/**
+ * S8: barcodes on products (design docs/design/vendor-barcodes-s8.md §0.2). Needs the stock ledger too: codes are
+ * written inside the ledger's product-form transaction. Off → GET /vendor/products/lookup answers 404
+ * feature_disabled, GET /vendor/products has no `barcodes` key, and `barcodes` / `addBarcodes` in a product save
+ * are ignored (stored codes untouched). Nothing reads or writes ProductCode while it is off.
+ */
+export function vendorBarcodesOn() {
+  return vendorStockLedgerOn() && vendorToolsFlag('VENDOR_BARCODES');
 }
 
 /**
@@ -282,6 +384,14 @@ export function vendorDocumentsOn() {
 }
 
 /**
+ * S6: vendor reports and their CSV / PDF exports (/vendor/reports/*). Off → every /vendor/reports route
+ * answers 404 feature_disabled. GET /vendor/tools/options says reports: false.
+ */
+export function vendorReportsOn() {
+  return vendorToolsFlag('VENDOR_REPORTS');
+}
+
+/**
  * S5: VAT — the vendor tax profile and its KYC review, product VAT codes, admin tax rates (maker ≠
  * checker) and VAT worked out on walk-in sales and on the vendor's part of paid app orders. Off →
  * those endpoints answer 404 feature_disabled and no sale or order gets VAT. Marketplace prices,
@@ -309,6 +419,32 @@ export function vendorDocumentsTinWithoutVatOn() {
  */
 export function partnerProgressOn() {
   return on('PARTNER_PROGRESS');
+}
+
+/**
+ * Phase B · B3a: gym staff whose PIN an owner chose must change it before
+ * anything else (owner decisions 2026-10-20). Off unless
+ * STAFF_PIN_CHANGE_REQUIRED is set: a gym_staff row's passwordChangeRequired
+ * is then ignored (no `pwc` on its sessions, no 403 password_change_required),
+ * POST /auth/pin/change and POST /owner/staff/:id/pin answer 404
+ * feature_disabled, and staff responses are unchanged. Portal admins (#219)
+ * are held regardless of this flag. See src/shared/credential-change.mjs.
+ */
+export function staffPinChangeRequiredOn() {
+  return on('STAFF_PIN_CHANGE_REQUIRED');
+}
+
+/**
+ * A gym shared by several owners has ONE named payout owner (owner decision
+ * 2026-10-22; Gym.payoutOwnerId). Off unless GYM_PAYOUT_OWNER is set: payout
+ * eligibility, settlement payout gating and invoice payouts keep using the
+ * first owner account found for the gym, as before. On: the named payout
+ * owner; a gym with exactly one owner uses that owner without any admin step;
+ * a gym with two or more owners and none named is not payable
+ * (payout_owner_required). See src/services/gym-payout-owner.mjs.
+ */
+export function gymPayoutOwnerOn() {
+  return on('GYM_PAYOUT_OWNER');
 }
 
 // ── Default-ON switches ──────────────────────────────────────────────────────
@@ -349,6 +485,24 @@ export function vendorStatementDraftsOn() {
  */
 export function eventsModuleOn() {
   return on('EVENTS_MODULE');
+}
+
+/**
+ * Phase B · B5a: company sponsors move from the legacy HR area (/hr) to the
+ * organisation area (/org). Off unless ORG_ONLY_SPONSORS is set; off, nothing
+ * changes. On:
+ *  - a company HR login's session (POST /auth/login, Firebase, PIN, switch)
+ *    carries organizationUser / organizationRoles / organizationIds, so the
+ *    portal opens /org for it;
+ *  - people of a company's organisation are added, changed, linked and
+ *    imported through /b2b/organizations/:id/beneficiaries..., which write
+ *    through the company staff list (no managed_by_corporate dead end);
+ *  - a company HR login only ever reaches its own company's organisation;
+ *  - new HR logins are also made organisation users (role hr).
+ * The conversion of existing HR logins is scripts/hr-to-org.mjs.
+ */
+export function orgOnlySponsorsOn() {
+  return on('ORG_ONLY_SPONSORS');
 }
 
 /** S2: saving events and the Saved filter (GET /events/options.favourites). Needs EVENTS_MODULE too. */
@@ -428,6 +582,46 @@ export function requireEventsPaymentIntake(req, res, next) {
 }
 
 /**
+ * S5 (docs/design/events-s5-venue-api-and-webhooks.md §11.1): three dormant flags, each on only together with
+ * EVENTS_MODULE and EVENTS_REGISTRATION. KIT_OPS: ticket verification, kit handover, bibs, lookup, export and the
+ * live ticket wording. ORGANIZER_API: API clients and /v1/organizer. WEBHOOKS: endpoints, deliveries and the
+ * dispatcher jobs (which additionally need EVENTS_WEBHOOK_SECRET_KEY; see webhook-signing.mjs).
+ */
+export const eventsKitOpsOn = () => eventsRegistrationOn() && on('EVENTS_KIT_OPS');
+export const eventsOrganizerApiOn = () => eventsRegistrationOn() && on('EVENTS_ORGANIZER_API');
+export const eventsWebhooksOn = () => eventsRegistrationOn() && on('EVENTS_WEBHOOKS');
+const gate = test => (_req, res, next) => (test() ? next() : res.status(404).json({ error: 'feature_disabled' }));
+export const requireEventsKitOps = gate(eventsKitOpsOn);
+export const requireEventsOrganizerApi = gate(eventsOrganizerApiOn);
+export const requireEventsWebhooks = gate(eventsWebhooksOn);
+
+/**
+ * S6 (docs/design/events-s6-runs-results-medals-rewards.md §13.1): five dormant flags, all off by default; every one needs
+ * EVENTS_MODULE and EVENTS_REGISTRATION. RESULTS: results, disputes, visibility, /v1 results routes, result webhooks, award jobs.
+ * RUNS (needs RESULTS): run links. RESULTS_PUBLIC (needs RESULTS): the signed-in board. REWARDS (needs RESULTS): medals,
+ * achievements, ledger, wallet, redemption, the admin reward desk. MEDAL_ART (needs REWARDS): organizer medal artwork.
+ */
+export const eventsResultsOn = () => eventsRegistrationOn() && on('EVENTS_RESULTS');
+export const eventsRunsOn = () => eventsResultsOn() && on('EVENTS_RUNS');
+export const eventsResultsPublicOn = () => eventsResultsOn() && on('EVENTS_RESULTS_PUBLIC');
+export const eventsRewardsOn = () => eventsResultsOn() && on('EVENTS_REWARDS');
+export const eventsMedalArtOn = () => eventsRewardsOn() && on('EVENTS_MEDAL_ART');
+export const requireEventsResults = gate(eventsResultsOn);
+export const requireEventsRuns = gate(eventsRunsOn);
+export const requireEventsResultsPublic = gate(eventsResultsPublicOn);
+export const requireEventsRewards = gate(eventsRewardsOn);
+export const requireEventsMedalArt = gate(eventsMedalArtOn);
+
+// S7 (docs/design/events-s7-hardening-and-pilot.md §7.1): three dormant flags, each needing EVENTS_MODULE and EVENTS_REGISTRATION
+// (the offline desk also needs EVENTS_KIT_OPS). With all three off S6 behaviour is unchanged. Guards answer 404 feature_disabled.
+export const eventsKitOfflineOn = () => eventsKitOpsOn() && on('EVENTS_KIT_OFFLINE');
+export const eventsWaitlistOn = () => eventsRegistrationOn() && on('EVENTS_WAITLIST');
+export const eventsAnalyticsOn = () => eventsRegistrationOn() && on('EVENTS_ANALYTICS');
+export const requireEventsKitOffline = gate(eventsKitOfflineOn);
+export const requireEventsWaitlist = gate(eventsWaitlistOn);
+export const requireEventsAnalytics = gate(eventsAnalyticsOn);
+
+/**
  * Partner date of birth · slice 2 (docs/partner-dob-api.md). Off unless PARTNER_DOB_REQUIRED is set:
  * GET/PUT /me/personal-details and the admin GET /admin/trainers/:id/personal-details and
  * /admin/gym-owners/:id/personal-details answer 404 feature_disabled, and /trainer/register and
@@ -437,4 +631,88 @@ export function requireEventsPaymentIntake(req, res, next) {
  */
 export function partnerDobRequiredOn() {
   return on('PARTNER_DOB_REQUIRED');
+}
+
+/**
+ * Admin-portal audit M3. Off unless SELCOM_STRICT_AMOUNT is set. On: a Selcom
+ * "success" callback activates a waiting subscription only when it carries an
+ * `amount` AND an open payment request exists AND the amount equals the request's.
+ * Otherwise it is refused (409 amount_required / no_open_request / amount_mismatch)
+ * before the payment_id is claimed, so a corrected redelivery still works.
+ * Off: the old rule (amount compared only when both sides are present).
+ */
+export function selcomStrictAmountOn() {
+  return on('SELCOM_STRICT_AMOUNT');
+}
+
+/**
+ * Admin-portal audit S4. Off unless ADMIN_EMAILS_STRICT is set. On, in production
+ * with FITFLEX_ADMIN_EMAILS unset or blank: no email is trusted as a configured
+ * super-admin (the built-in fallback address is not used). Off: the fallback
+ * stays in use and a one-time warning is logged. Set FITFLEX_ADMIN_EMAILS before
+ * switching this on, or nobody signs in as an env super-admin. Note: with strict on and the
+ * variable unset, isConfiguredAdminEmail() is false for everyone, so the `env_admin_immutable`
+ * protection (env super-admins cannot be edited or deleted in the portal) also stops applying.
+ * A variable that is set but blank trusts nobody whether or not this flag is on.
+ */
+export function adminEmailsStrictOn(env = process.env) {
+  return TRUE_VALUES.has(String(env.ADMIN_EMAILS_STRICT ?? '').trim().toLowerCase());
+}
+
+/**
+ * Browser gym profile: the open, read-only gym page behind the printed gym QR (POST /public/gyms/resolve).
+ * Off unless WEB_GYM_PROFILE is set: the route answers 404 not_found, as if it did not exist.
+ */
+export function webGymProfileOn() {
+  return on('WEB_GYM_PROFILE');
+}
+
+/**
+ * Browser gym QR check-in (S2): the intent / preview / confirm routes and the short-lived web check-in session.
+ * Off unless WEB_QR_CHECKIN is set: every one of those routes answers 404 not_found, as if it did not exist.
+ * Also needs QR_HMAC_SECRET (without it the routes stay 404).
+ */
+export function webQrCheckinOn() {
+  return on('WEB_QR_CHECKIN');
+}
+
+/**
+ * Browser check-in security alert (S3): a push + inbox message to the member when a gym check-in was made from a web
+ * browser, and the "Security activity" list. Off unless WEB_CHECKIN_ALERTS is set, and only effective while
+ * WEB_QR_CHECKIN is also on. With it off the SecurityEvent record is still written but nothing is sent.
+ * Launch gate: keep OFF until the app's security-activity screen (S4) is live.
+ */
+export function webCheckinAlertsOn() {
+  return webQrCheckinOn() && on('WEB_CHECKIN_ALERTS');
+}
+
+/**
+ * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_SERVER_CONFIRM is set. On: a Selcom
+ * "success" callback is confirmed with Selcom through an injectable client before a
+ * subscription is activated; if the client cannot confirm (including "not configured",
+ * the only implementation today) the callback is refused with 503 and the payment_id
+ * is not consumed. Do not switch on until a real Selcom status client exists: createWebhookService
+ * refuses to be constructed (the backend does not boot) while this flag is on and the injected
+ * client is the not-configured one, so the flag cannot be enabled by mistake.
+ */
+export function selcomWebhookServerConfirmOn() {
+  return on('SELCOM_WEBHOOK_SERVER_CONFIRM');
+}
+
+/**
+ * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_QUERY_TOKEN_OFF is set. On: the Selcom
+ * webhook rejects the legacy ?token= query form and accepts only the x-selcom-webhook-token
+ * header. Switch on once Selcom has been reconfigured to send the header.
+ */
+export function selcomWebhookQueryTokenOff() {
+  return on('SELCOM_WEBHOOK_QUERY_TOKEN_OFF');
+}
+
+/**
+ * Admin-portal audit S2/S3. Off unless ADMIN_REASONS_REQUIRED is set. On, an admin must give a non-empty `reason`
+ * to suspend a member, delete a gym owner, or change pricing/payout/payment platform settings: 400 reason_required
+ * otherwise. Off, a reason is optional (and stored in AuditLog.reason when given).
+ */
+export function adminReasonsRequiredOn() {
+  return on('ADMIN_REASONS_REQUIRED');
 }

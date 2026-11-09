@@ -446,12 +446,12 @@ export function createSegmentService({
    * Without a purpose the stricter marketing rules apply.
    */
   async function previewAudience({ sender, recipients = 'members', preset, filter, purpose }) {
-    // Vendors get service messages only for now (review of #257), so their reach is counted as such.
-    let category = recipients === 'vendors' ? 'transactional' : 'marketing';
+    // Vendors too (owner decision 2026-10-29): they can switch offers off in
+    // the app's message settings, so the same rules apply as for members.
+    let category = 'marketing';
     if (purpose != null) {
       category = categoryForPurpose(purpose);
       if (!category) return { error: 'invalid_purpose', status: 400 };
-      if (recipients === 'vendors' && category === 'marketing') return { error: 'vendor_marketing_not_available', status: 400 };
     }
     const r = await resolveAudience({ sender, recipients, preset, filter });
     if (r.error) return r;

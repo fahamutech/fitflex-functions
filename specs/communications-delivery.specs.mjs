@@ -131,6 +131,38 @@ test('each member gets their own message in the inbox and by push, once', async 
   assert.ok(c.sentAt);
 });
 
+test('offers switched off after queueing are not delivered in the app or by push; service messages still are (review of #274)', async () => {
+  fcm.mode = 'ok'; fcm.sent.length = 0;
+  const promo = await sendNew({ purpose: 'promotion', content: { title: 'Offer', body: 'Hi {{member_name}}, 20% off.' } });
+  const ann = await sendNew();
+  let rows = await ledger(promo);
+  assert.ok(rows.filter(r => r.channel === 'in_app').every(r => r.status === 'queued' && r.category === 'marketing'));
+  // After the send was queued: Amani turns in-app offers off, Bahati push offers.
+  await prefs.update(w.Amani, { inAppMarketing: false });
+  await prefs.update(w.Bahati, { pushMarketing: false });
+  try {
+    await deliverAll(promo);
+    await deliverAll(ann);
+    rows = await ledger(promo);
+    const row = (m, ch) => rows.find(r => r.memberId === m && r.channel === ch);
+    assert.deepEqual([row(w.Amani, 'in_app').status, row(w.Amani, 'in_app').skipReason], ['skipped', 'in_app_marketing_off']);
+    assert.equal(row(w.Amani, 'push').status, 'sent', 'Amani still allows push offers');
+    assert.deepEqual([row(w.Bahati, 'push').status, row(w.Bahati, 'push').skipReason], ['skipped', 'push_marketing_off']);
+    assert.equal(row(w.Bahati, 'in_app').status, 'delivered', 'Bahati still allows in-app offers');
+    assert.equal(row(w.Cheka, 'in_app').status, 'delivered');
+    const amaniInbox = (await notificationService.inbox({ userId: w.Amani })).notifications;
+    assert.equal(amaniInbox.find(n => n.campaignId === promo), undefined);
+    assert.ok(!fcm.sent.some(s => s.data?.campaignId === promo && s.notification.body.startsWith('Hi Bahati')));
+    // The announcement (a service message) goes out to both regardless.
+    const annRows = await ledger(ann);
+    assert.equal(annRows.find(r => r.memberId === w.Amani && r.channel === 'in_app').status, 'delivered');
+    assert.equal(annRows.find(r => r.memberId === w.Bahati && r.channel === 'push').status, 'sent');
+  } finally {
+    await prefs.update(w.Amani, { inAppMarketing: true });
+    await prefs.update(w.Bahati, { pushMarketing: true });
+  }
+});
+
 test('delivering the same in-app message again never adds a second inbox row', async () => {
   const id = await sendNew({ channels: ['in_app'] });
   await deliverAll(id);

@@ -2,6 +2,7 @@
 // over the existing catalogue. Additive: /shop/products, /discover/products,
 // cart and checkout are unchanged. Dormant unless SHOP_HOME_V2 is set.
 // Contract: docs/shop-home-api.md.
+import { canShowFlashSales } from '../src/shared/shop-caps.mjs';
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { isTokenSession } from '../src/auth/promotion-token.mjs';
@@ -52,6 +53,8 @@ export const shopHome = {
     const q = req.query || {};
     const out = await shopHomeService.home({
       claims: req.user,
+      // SHOP_FLASH_SALES: the flash_sale section and `sale` objects only for clients that send X-FF-Shop-Caps: flash_sale.
+      caps: { flashSale: canShowFlashSales(req) },
       query: { mode: q.mode, recent: q.recent, session: isTokenSession(q.session) ? q.session : undefined, areaId: areaFromRequest(req) },
     });
     if (out.error) return res.status(out.status).json({ error: out.error });

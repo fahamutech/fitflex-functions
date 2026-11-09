@@ -42,7 +42,7 @@ test('an invitation SMS goes through the shared SMS service and is logged as an 
   assert.deepEqual([sent.sms.sent, sent.sms.failed], [1, 0]);
 
   const [log] = await db('SmsLog').where({ phone });
-  assert.deepEqual([log.category, log.status, /^Wiring Co added you to its wellness programme on FitFlex\./.test(log.message)], ['invitation', 'accepted', true]);
+  assert.deepEqual([log.category, log.status, /^Wiring Co invites you to its wellness programme on FitFlex\./.test(log.message)], ['invitation', 'accepted', true]);
   assert.ok(SMS_CATEGORIES.includes('invitation'));
   // The admin SMS log can be filtered to invitations.
   const listed = await smsService.logs({ category: 'invitation', limit: 5 });

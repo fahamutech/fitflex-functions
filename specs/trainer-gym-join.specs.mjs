@@ -41,7 +41,7 @@ async function registerTrainer(userId) {
     user: { sub: userId, userType: 'trainer' },
     body: {
       displayName: 'Join-Flow Trainer',
-      photoUrl: 'https://example.com/photo.jpg',
+      photoUrl: '/storage/bafytest/photo.jpg',
       gender: 'female',
       bio: 'Strength coach',
       hourlyRateTzs: 15000,

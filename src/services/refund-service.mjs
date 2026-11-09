@@ -15,7 +15,7 @@
 import { formatTsh } from '../shared/money-display.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
-import { moneySecondApproverOn } from '../shared/feature-flags.mjs';
+import { moneySecondApproverOn, refundSplitScopesOn } from '../shared/feature-flags.mjs';
 import { refundView } from '../shared/events-money-views.mjs';
 import { staffNameLookup } from '../shared/staff-names.mjs';
 
@@ -44,6 +44,7 @@ export function createRefundService({
   raiseForEventPayment = null,      // ({ body, actorId, secondApprover }) → the unfulfilled-payment refund of an event payment
   // A1: two admins on refunds (MONEY_SECOND_APPROVER). Off: unchanged.
   secondApprover = moneySecondApproverOn,
+  splitScopes = refundSplitScopesOn,   // REFUND_SPLIT_SCOPES: an admin-raised refund waits for a refunds_approve holder
 }) {
   const money = formatTsh;
 
@@ -60,15 +61,18 @@ export function createRefundService({
     } catch { /* a notification never blocks a refund */ }
   }
 
-  async function audit(action, actor, before, after) {
-    await auditLog.insertAsync({ id: randomUUID(), at: nowIso(), actor: actor || null, action, target: after.id, before, after });
+  async function audit(action, actor, before, after, store = auditLog) {
+    await store.insertAsync({ id: randomUUID(), at: nowIso(), actor: actor || null, action, target: after.id, before, after });
   }
 
   /** The refund still in play (not rejected) for a booking, order or payment, if any. */
-  async function liveFor(kind, sourceId) {
+  async function liveFor(kind, sourceId, store = refunds) {
     const field = SOURCE_FIELD[kind];
-    return (await refunds.filterByColumnAsync(field, sourceId)).find(r => r.kind === kind && r.status !== 'rejected') || null;
+    return (await store.filterByColumnAsync(field, sourceId)).find(r => r.kind === kind && r.status !== 'rejected') || null;
   }
+
+  // A refund a staff member raises is not approved by the raise when either flag is on: someone else decides it.
+  const adminRaiseWaits = () => secondApprover() || splitScopes();
 
   /**
    * Raise a refund. `approved: true` is for refunds the terms grant outright
@@ -76,12 +80,19 @@ export function createRefundService({
    * Raising one that is already in play returns the existing refund.
    */
   async function raise({ memberId, kind, sourceId, subscriptionId = null, paymentRequestId = null, amountTzs, currency = 'TZS',
-    reasonCode, note = null, requestedBy = null, requestedRole = 'system', approved = false }) {
+    reasonCode, note = null, requestedBy = null, requestedRole = 'system', approved = false, tx = null }) {
+    // `tx` ({ refunds, auditLog }) is the held-payments worklist writing the refund and its audit rows inside its own
+    // database transaction; every other caller leaves it null and uses the shared stores.
+    const refundStore = tx?.refunds ?? refunds;
+    const auditStore = tx?.auditLog ?? auditLog;
     if (!REFUND_KINDS.includes(kind)) return fail('invalid_kind');
+    // REFUND_SPLIT_SCOPES: raising must not stand in for approving. Any staff-started refund (raise endpoint, shop raise-refund,
+    // admin cancellation) is left requested, whatever the caller asked for.
+    if (requestedRole === 'admin' && approved && splitScopes()) approved = false;
     if (!REASONS.has(reasonCode)) return fail('invalid_reason', 400, { allowed: [...REASONS] });
     const amount = Math.round(Number(amountTzs));
     if (!Number.isFinite(amount) || amount <= 0) return fail('nothing_to_refund', 409);
-    const existing = await liveFor(kind, sourceId);
+    const existing = await liveFor(kind, sourceId, refundStore);
     if (existing) return { refund: existing, existing: true };
     const at = nowIso();
     const row = {
@@ -98,15 +109,15 @@ export function createRefundService({
     };
     let refund;
     try {
-      refund = await refunds.insertAsync(row);
+      refund = await refundStore.insertAsync(row);
     } catch (err) {
-      if (err.code !== '23505') throw err; // raised at the same moment by someone else
+      if (err.code !== '23505' || tx) throw err; // raised at the same moment by someone else; in a transaction the caller maps the conflict (it is already aborted)
       return { refund: await liveFor(kind, sourceId), existing: true };
     }
-    await audit('refund_raised', requestedBy, null, refund);
+    await audit('refund_raised', requestedBy, null, refund, auditStore);
     if (approved) {
       await tell(refund, 'refund_approved', 'Refund on its way', `Your refund of ${money(amount)} is approved. FitFlex will send it to the account you paid from.`);
-    } else if (requestedRole === 'admin' && secondApprover()) {
+    } else if (requestedRole === 'admin' && adminRaiseWaits()) {
       // Flag on: FitFlex raised it and a second admin still has to approve it. The member never asked,
       // so "we have your request" would be wrong. (Server notifications are English only: known gap.)
       await tell(refund, 'refund_preparing', 'Refund being prepared', `FitFlex is preparing a refund of ${money(amount)} for your payment. We will tell you when it is sent.`);
@@ -143,20 +154,27 @@ export function createRefundService({
   /**
    * Admin: raise a refund for any confirmed pass or plan payment. Approved at
    * once, unless MONEY_SECOND_APPROVER is on: then it waits for another admin.
+   * A refund raised from the held-payments worklist (`held`) is the exception: it is always left `requested`.
    */
-  async function adminRaise({ body = {}, actorId }) {
+  async function adminRaise({ body = {}, actorId, held = null }) {
+    // `held` ({ maxAmountTzs, tx? }) is passed only by the held-payments worklist, which has already checked that the
+    // request has a provider-confirmed payment nobody could take. It alone relaxes payment_not_confirmed and
+    // cancel_instead below; the amount cap, the two-admin rule and one-refund-per-payment all still apply.
     // S4: money that arrived for an event order whose places are not possible (kind event_order, unfulfilled payment only).
-    if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: secondApprover() });
+    if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: adminRaiseWaits() });
     const request = body.paymentRequestId ? await paymentRequests.findByIdAsync(body.paymentRequestId) : null;
     if (!request) return fail('payment_not_found', 404);
-    if (!request.subscriptionId) return fail('cancel_instead', 409);
-    if (request.status !== 'approved') return fail('payment_not_confirmed', 409);
-    const amountTzs = body.amountTzs ?? request.amountTzs;
-    if (Number(amountTzs) > Number(request.amountTzs)) return fail('amount_exceeds_payment', 400);
+    if (!held && !request.subscriptionId) return fail('cancel_instead', 409);
+    if (!held && request.status !== 'approved') return fail('payment_not_confirmed', 409);
+    const amountTzs = body.amountTzs ?? (held ? held.maxAmountTzs : null) ?? request.amountTzs;
+    if (held && !(Number(amountTzs) > 0)) return fail('nothing_to_refund', 409);
+    if (Number(amountTzs) > Number(held ? held.maxAmountTzs : request.amountTzs)) return fail('amount_exceeds_payment', 400);
     const out = await raise({
-      memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId,
+      memberId: request.memberId, kind: 'subscription', sourceId: request.id, subscriptionId: request.subscriptionId ?? null,
       amountTzs, currency: request.currency || 'TZS', reasonCode: body.reasonCode || 'payment_error', note: body.note,
-      requestedBy: actorId, requestedRole: 'admin', approved: !secondApprover(),
+      requestedBy: actorId, requestedRole: 'admin', // A held-payment refund is never policy-approved: it is always left `requested`, whatever the second-person flags say,
+      // so a separate approve step (and then the mark-paid step) is always needed.
+      approved: held ? false : !adminRaiseWaits(), tx: held?.tx ?? null,
     });
     if (out.existing) return fail('refund_already_requested', 409, { refund: out.refund });
     return out;
@@ -169,7 +187,7 @@ export function createRefundService({
     if (!prior) return fail('refund_not_found', 404);
     if (prior.status !== 'requested') return fail('already_decided', 409, { refundStatus: prior.status });
     // Flag on: whoever raised a refund cannot approve it (rejecting your own is allowed: no money moves).
-    if (body.decision === 'approve' && secondApprover() && prior.requestedRole === 'admin' && prior.requestedBy === actorId) {
+    if (body.decision === 'approve' && adminRaiseWaits() && prior.requestedRole === 'admin' && prior.requestedBy === actorId) {
       return fail('cannot_approve_own_request', 403);
     }
     const note = text(body.note);
@@ -233,7 +251,8 @@ export function createRefundService({
     if (prior.status === 'paid') return fail('already_paid', 409, { refundStatus: 'paid' });
     if (prior.status !== 'approved') return fail('refund_not_approved', 409, { refundStatus: prior.status });
     // Flag on: whoever approved a refund does not also record it paid. Policy approvals ('policy') are not people.
-    if (secondApprover() && prior.decidedBy && prior.decidedBy === actorId) return fail('cannot_pay_own_approval', 403);
+    // REFUND_SPLIT_SCOPES counts too: one person holding both refunds_approve and refunds_pay still cannot do both (super-admin included).
+    if (adminRaiseWaits() && prior.decidedBy && prior.decidedBy === actorId) return fail('cannot_pay_own_approval', 403);
     // A refund approved by policy but started by a staff member (admin cancelling a paid session or
     // order, re-raising a missing shop refund) had one person behind it: someone else records it paid.
     // Refunds a member, vendor or trainer started stay payable by any admin.

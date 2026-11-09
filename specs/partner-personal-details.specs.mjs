@@ -102,7 +102,7 @@ after(async () => {
   await db.destroy();
 });
 
-const trainerBody = extra => ({ displayName: 'Dob Trainer', photoUrl: 'https://example.com/t.jpg', gender: 'female', bio: 'x', ...extra });
+const trainerBody = extra => ({ displayName: 'Dob Trainer', photoUrl: '/storage/bafytest/t.jpg', gender: 'female', bio: 'x', ...extra });
 const ownerBody = extra => ({ displayName: 'Dob Owner', gyms: [{ name: `Dob Gym ${uid('g')}`, tier: 'standard', location: 'Dar es Salaam' }], ...extra });
 async function registerOwner(userId, extra) {
   const r = await call(gymOwnerRegister, as(userId, 'gym_operator'), { body: ownerBody(extra) });

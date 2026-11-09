@@ -32,7 +32,7 @@ import { storeRefusal } from '../infra/event-store-pg.mjs';
 import { refundView } from '../shared/events-money-views.mjs';
 import { paginate } from '../shared/pagination.mjs';
 import {
-  eventsMaxParticipantsPerOrder, eventsCorporateMaxRows, eventsTeamMaxMembers, eventsClaimTokenDays, eventsConsentTextVersion, eventsFeeRule, eventsOrgDiscounts, feeLabelFor, ORG_DISCOUNT_LABEL,
+  eventsMaxUnpaidPlacesPerUser, eventsMaxParticipantsPerOrder, eventsCorporateMaxRows, eventsTeamMaxMembers, eventsClaimTokenDays, eventsConsentTextVersion, eventsFeeRule, eventsOrgDiscounts, feeLabelFor, ORG_DISCOUNT_LABEL,
 } from '../shared/events-config.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -57,13 +57,22 @@ export function createEventsRegistrationService({
   config = {},
   // S4: the payment and refund services (declared after this one in bootstrap; read at request time).
   getPayments = () => null, getRefunds = () => null,
+  // S5: the keyset roster (events-sync-service.mjs); null while EVENTS_KIT_OPS is off, where the S3/S4 roster below is exactly as before.
+  getRosterSync = () => null,
+  // S7 (waitlist): { gate(trx, created) throws a store refusal while a queue exists for a line's ticket type (409 waitlist_active),
+  // source(orderIds) → Map(orderId → 'waitlist') for the `source` field of the member's order list, view() → { on, paymentsOk } }.
+  // null while EVENTS_WAITLIST is off: every answer is then exactly as in S6.
+  getWaitlist = () => null,
 }) {
   const cfg = {
     maxParticipantsPerOrder: eventsMaxParticipantsPerOrder, corporateMaxRows: eventsCorporateMaxRows, teamMaxMembers: eventsTeamMaxMembers,
-    claimTokenDays: eventsClaimTokenDays, consentTextVersion: eventsConsentTextVersion, feeRule: eventsFeeRule, orgDiscounts: eventsOrgDiscounts, ...config,
+    claimTokenDays: eventsClaimTokenDays, consentTextVersion: eventsConsentTextVersion, feeRule: eventsFeeRule, orgDiscounts: eventsOrgDiscounts, maxUnpaidPlaces: eventsMaxUnpaidPlacesPerUser, ...config,
   };
   const nowIso = () => now().toISOString();
-  const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
+  const viewOpts = () => {
+    const w = getWaitlist()?.view?.();
+    return { now: now(), closingSoonHours: closingSoonHours(), ...(w?.on ? { waitlist: true, waitlistPaymentsOk: w.paymentsOk !== false } : {}) };
+  };
 
   const audit = async (actor, action, target, before, after) => {
     if (!auditLog) return;
@@ -113,6 +122,8 @@ export function createEventsRegistrationService({
     id: r.id, ticketTypeId: r.ticketTypeId, categoryId: r.categoryId, orderId: r.orderId, firstName: r.firstName, lastName: r.lastName,
     status: r.status, consentBasis: r.consentBasis, isSelf: claimStateOf(r) === 'self', claimState: claimStateOf(r),
     cancelReason: r.cancelReason ?? null, groupLabel: r.groupLabel ?? null, createdAt: iso(r.createdAt),
+    // S5: the bib the participant sees (behind EVENTS_KIT_OPS; absent otherwise, so the S4 answer is unchanged).
+    ...(getRosterSync() ? { bibNumber: r.bibNumber ?? null } : {}),
     ...(full ? {
       phone: r.phone ?? null, email: r.email ?? null, dateOfBirth: r.dateOfBirth ? String(r.dateOfBirth).slice(0, 10) : null, gender: r.gender ?? null,
       kitSize: r.kitSize ?? null, emergencyContact: r.emergencyContact ?? null, consentAt: iso(r.consentAt), consentTextVersion: r.consentTextVersion ?? null, claimedAt: iso(r.claimedAt),
@@ -404,7 +415,7 @@ export function createEventsRegistrationService({
     return { status: 200, ...(await orderResponse(earlier, { viewerUserId })), replayed: true };
   }
 
-  async function placeOrder({ mode, purchaserUserId = null, organizationId = null, createdByUserId = null, body = {}, rawBody = body, idempotencyKey, replayScope }) {
+  async function placeOrder({ mode, purchaserUserId = null, organizationId = null, createdByUserId = null, body = {}, rawBody = body, idempotencyKey, replayScope, system = null }) {
     const k = readIdempotencyKey(idempotencyKey);
     if (k.error) return k;
     // The fingerprint is of the body as the client sent it (corporate rows are transformed before pricing).
@@ -415,8 +426,11 @@ export function createEventsRegistrationService({
 
     if (mode === 'member' && body.organizationId != null) return fail('organization_not_allowed', 400);
     // The total the client was quoted is mandatory (review M2): an order is never placed blind. The quote stays free of it.
-    if (body.expectedTotalTzs === undefined || body.expectedTotalTzs === null) return fail('expected_total_required', 400);
-    if (!isInt(body.expectedTotalTzs) || body.expectedTotalTzs < 0) return fail('invalid_expected_total', 400);
+    // A waitlist offer (system actor, S7) is priced by the server at the moment of the offer; the member then sees the order and chooses to pay or not.
+    if (!system) {
+      if (body.expectedTotalTzs === undefined || body.expectedTotalTzs === null) return fail('expected_total_required', 400);
+      if (!isInt(body.expectedTotalTzs) || body.expectedTotalTzs < 0) return fail('invalid_expected_total', 400);
+    }
     for (const field of ['costCentre', 'purchaserReference']) {
       if (body[field] !== undefined && body[field] !== null && (!isStr(body[field]) || body[field].length > 80 || startsLikeFormula(body[field]))) return fail('invalid_text', 400, { field });
     }
@@ -451,27 +465,37 @@ export function createEventsRegistrationService({
     };
     // Hold abuse (review M3): a member keeps one live unpaid order per event and at most the per-order place limit held.
     if (mode === 'member') {
-      const limited = await holdLimit(db, purchaserUserId, prep.event.id, prep.totalQuantity);
+      const limited = await holdLimit(db, purchaserUserId, prep.event.id, prep.totalQuantity) ?? await unpaidCap(db, purchaserUserId, prep.totalQuantity);
       if (limited) return limited;
     }
+    const waitlist = getWaitlist();
     const result = await eventStore.createOrderWithHolds({
       eventId: prep.event.id, purchaserUserId, organizationId, lines: prep.lines, participants,
-      idempotencyKey: k.key, fingerprint, discounts: prep.discounts, expectedTotalTzs: body.expectedTotalTzs,
+      idempotencyKey: k.key, fingerprint, discounts: prep.discounts, expectedTotalTzs: system ? prep.quote.totalTzs : body.expectedTotalTzs,
       bulk: mode === 'corporate', orderExtra, feeRule: prep.feeRule,
-      afterCreate: (mode === 'member' || prep.team) ? async (trx, created) => {
+      ...(system?.holdTtlMinutes ? { holdTtlMinutes: system.holdTtlMinutes } : {}),
+      afterCreate: (mode === 'member' || prep.team || waitlist || system) ? async (trx, created) => {
         if (mode === 'member') {
           // Serialise this user's orders for this event; the earlier committed order is then visible (a race loses here).
           await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`evh:${purchaserUserId}:${prep.event.id}`]);
           const limited = await holdLimit(trx, purchaserUserId, prep.event.id, 0, created.order.id);
           if (limited) throw storeRefusal(limited.error, limited.status, { limit: limited.limit, ...(limited.max ? { max: limited.max } : {}) });
+          // S7 (H5): one lock per member across events, then the cap on unpaid places, so two events cannot race past it.
+          await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`evu:${purchaserUserId}`]);
+          const capped = await unpaidCap(trx, purchaserUserId, 0, created.order.id, created.registrations.length);
+          if (capped) throw storeRefusal(capped.error, capped.status, { limit: capped.limit });
         }
         if (prep.team) await attachTeam(trx, created, { team: prep.team, organizationId, purchaserUserId: purchaserUserId ?? createdByUserId, at });
+        // S7: the queue gate runs with the ticket type rows still locked FOR UPDATE by the creation transaction, so a buyer cannot slip
+        // between two promoter runs; the promoter's own order (system) is the one thing that passes.
+        if (!system && waitlist) await waitlist.gate(trx, created);
+        if (system?.afterCreate) await system.afterCreate(trx, created);
       } : null,
     });
     if (result.error) return result;
     if (result.replayed) return { status: 200, ...(await orderResponse(result, { viewerUserId: purchaserUserId })), replayed: true };
 
-    await afterOrderCreated(result, { mode, purchaserUserId, createdByUserId: orderExtra.createdByUserId, joined: prep.joined });
+    await afterOrderCreated(result, { mode, purchaserUserId, createdByUserId: orderExtra.createdByUserId, joined: prep.joined, system });
     return { status: 201, ...(await orderResponse(result, { viewerUserId: purchaserUserId, joined: prep.joined })), replayed: false };
   }
 
@@ -484,6 +508,22 @@ export function createEventsRegistrationService({
     const held = orders.length ? Number((await q('EventRegistration').whereIn('orderId', orders.map(o => o.id)).where({ status: 'reserved' }).count({ n: '*' }).first())?.n || 0) : 0;
     if (held + newPlaces > cfg.maxParticipantsPerOrder()) return fail('hold_limit_reached', 409, { limit: 'places', max: cfg.maxParticipantsPerOrder() });
     return null;
+  }
+
+  /**
+   * S7 (H5, follow-up S4 L6): a member's unpaid places across ALL events. A first order is never limited here (the per-order maximum and the
+   * one-unpaid-order-per-event rule already apply); a second concurrent unpaid order must fit, together with what is already held, under
+   * EVENTS_MAX_UNPAID_PLACES_PER_USER (default 4). `already` counts places of OTHER live unpaid orders; `inThisOrder` is the new order's own count
+   * when it is already inserted (inside the creation transaction). Organisation orders are exempt (they never reach this).
+   */
+  async function unpaidCap(q, userId, newPlaces, exceptOrderId = null, inThisOrder = 0) {
+    const live = q('EventOrder').where({ purchaserUserId: userId, status: 'awaiting_payment' }).where('holdExpiresAt', '>', now()).whereNull('organizationId');
+    if (exceptOrderId) live.whereNot({ id: exceptOrderId });
+    const orders = await live.select('id');
+    if (!orders.length) return null;
+    const held = Number((await q('EventRegistration').whereIn('orderId', orders.map(o => o.id)).where({ status: 'reserved' }).count({ n: '*' }).first())?.n || 0);
+    const cap = cfg.maxUnpaidPlaces();
+    return held > 0 && held + newPlaces + inThisOrder > cap ? fail('unpaid_places_limit', 409, { limit: cap }) : null;
   }
 
   /** In the order's transaction: create / join the team and enrol every registration (spec §3.5 step 6, §3.9). */
@@ -535,12 +575,13 @@ export function createEventsRegistrationService({
   }
 
   /** After commit: notifications 1 and 3 (§3.14) and analytics. Failures are logged by id only. */
-  async function afterOrderCreated(result, { mode, purchaserUserId, createdByUserId, joined }) {
+  async function afterOrderCreated(result, { mode, purchaserUserId, createdByUserId, joined, system = null }) {
     const order = result.order;
     try {
+      // A waitlist offer is announced by its own notice (event_waitlist_offer), not by "registration received".
       const recipient = purchaserUserId ?? createdByUserId;
-      if (recipient) await sendOrderCreated(recipient, order, result.registrations.length, joined.event);
-      await notifyMatchingMembers(result.registrations, order, joined.event);
+      if (recipient && !system) await sendOrderCreated(recipient, order, result.registrations.length, joined.event);
+      if (!system) await notifyMatchingMembers(result.registrations, order, joined.event);
     } catch (err) {
       console.warn('[events] order notifications skipped:', order.id, err?.message);
     }
@@ -693,6 +734,36 @@ export function createEventsRegistrationService({
     };
   }
 
+  // ── S7: the waitlist's two doors into this service ────────────────────────────
+
+  /**
+   * Validate a self registration for the waitlist with exactly the checks of a checkout quote (fields, consent basis, verified contact,
+   * duplicates, age rules). The only problem a sold-out place is expected to have, capacity_unavailable, is not reported.
+   * → { error } | { joined, event, participant, problems [{ field, code }], duplicate: bool }
+   */
+  async function validateWaitlistJoin({ userId, eventId, ticketTypeId, participants }) {
+    if (!Array.isArray(participants) || participants.length !== 1 || typeof participants[0] !== 'object' || participants[0] === null) return fail('validation_failed', 422, { fields: [{ field: 'participants', code: 'exactly_one' }] });
+    if ((participants[0].consentBasis ?? 'self') !== 'self') return fail('validation_failed', 422, { fields: [{ field: 'consentBasis', code: 'self_only' }] });
+    const body = { eventId, lines: [{ ticketTypeId, quantity: 1 }], participants: [{ ...participants[0], ticketTypeId, consentBasis: 'self' }] };
+    const prep = await prepare({ mode: 'member', purchaserUserId: userId, body });
+    if (prep.error) return prep;
+    const report = prep.report[0];
+    const orderProblems = prep.problems.filter(p => p.code !== 'capacity_unavailable');
+    return {
+      joined: prep.joined, event: prep.event, participant: prep.participants[0], names: prep.names,
+      problems: report.problems, orderProblems, duplicate: report.problems.some(p => p.code === 'duplicate_participant'),
+    };
+  }
+
+  /**
+   * The promoter's order: a normal member order for `userId` created by a system actor. Every validator of placeOrder runs again (sale window,
+   * per-order limits, duplicate policy, age rules, consent snapshot, hold limits). `system` = { holdTtlMinutes, afterCreate(trx, created) }:
+   * it is NOT reachable from any route body (createOrder never forwards it). The inventory primitive is not modified.
+   */
+  async function placeSystemOrder({ userId, body, idempotencyKey, system }) {
+    return placeOrder({ mode: 'member', purchaserUserId: userId, body, rawBody: body, idempotencyKey, replayScope: { purchaserUserId: userId }, system: system ?? {} });
+  }
+
   // ── Member orders (§3.6, §3.8) ─────────────────────────────────────────────
 
   async function createOrder({ userId, body = {}, idempotencyKey }) {
@@ -712,11 +783,14 @@ export function createEventsRegistrationService({
     const placesOf = new Map(counts.map(c => [c.orderId, Number(c.n)]));
     const events = eventCache();
     const items = [];
+    // S7 (additive): `source: "waitlist"` on orders that were offered from the waitlist; the key is absent while EVENTS_WAITLIST is off.
+    const waitlist = getWaitlist();
+    const sources = waitlist && rows.length ? await waitlist.source(rows.map(r => r.id)) : null;
     for (const o of rows) {
       const j = await events(o.eventId);
       const s = summaryOf(j);
       items.push({
-        id: o.id, reference: o.reference, status: o.status,
+        id: o.id, reference: o.reference, status: o.status, ...(sources ? { source: sources.get(o.id) ?? null } : {}),
         event: s ? { id: s.id, slug: s.slug, title: s.title, startsAt: s.startsAt, timezone: s.timezone, utcOffsetMinutes: s.utcOffsetMinutes, timezoneAbbr: s.timezoneAbbr, heroThumbUrl: s.heroThumbUrl } : null,
         placesCount: placesOf.get(o.id) ?? 0, totalTzs: o.totalTzs, currency: o.currency, holdExpiresAt: iso(o.holdExpiresAt), createdAt: iso(o.createdAt), closedAt: iso(o.closedAt), closeReason: o.closeReason ?? null,
       });
@@ -815,6 +889,7 @@ export function createEventsRegistrationService({
       event: summaryOf(j), category: c ? { id: c.id, name: c.name, distanceM: Number(c.distanceMeters), startsAt: iso(c.startTime) } : null,
       ticketType: t ? { name: t.name } : null, status: r.status, orderId: r.orderId, orderReference: o?.reference ?? null, orderStatus: o?.status ?? null,
       holdExpiresAt: iso(o?.holdExpiresAt), claimState: claimStateOf(r), team: teams.get(r.id) ? { id: teams.get(r.id).id, name: teams.get(r.id).name } : null,
+      ...(getRosterSync() ? { bibNumber: r.bibNumber ?? null } : {}),   // S5: behind EVENTS_KIT_OPS
     };
   }
 
@@ -994,8 +1069,16 @@ export function createEventsRegistrationService({
     // (d) the purchaser entered someone else with their own number.
     if (r.purchaserUserId === userId && r.consentBasis === 'purchaser_authorised') return fail('claim_own_contact', 409);
     const at = now();
-    const [updated] = await db('EventRegistration').where({ id: r.id }).whereNull('participantUserId')
-      .update({ participantUserId: userId, claimedAt: at, claimTokenHash: null, updatedAt: at }).returning('*');
+    // S5: the claim and its `registration.updated` outbox row commit together (organizers' change feed and webhooks); only a paid place is visible to them.
+    const updated = await db.transaction(async (trx) => {
+      const [row] = await trx('EventRegistration').where({ id: r.id }).whereNull('participantUserId')
+        .update({ participantUserId: userId, claimedAt: at, claimTokenHash: null, updatedAt: at }).returning('*');
+      if (row && row.status === 'confirmed') {
+        const ev = await trx('Event').where({ id: row.eventId }).first('organizerId');
+        await eventStore.appendOutbox(trx, { type: 'registration.updated', aggregateType: 'registration', aggregateId: row.id, organizerId: ev?.organizerId ?? null, eventId: row.eventId, payload: { registrationId: row.id, changed: ['claimed'] } });
+      }
+      return row;
+    });
     if (!updated) return fail('already_claimed', 409);
     await analytics('registration_claimed', { eventId: r.eventId, registrationId: r.id, via });
     // S4 (§3.8.5): when someone other than the purchaser claims a paid place, its ticket code changes at that moment.
@@ -1091,6 +1174,8 @@ export function createEventsRegistrationService({
   async function organizerListRegistrations({ ctx, eventId, query = {} }) {
     const joined = await organizerEvent(ctx, eventId);
     if (joined.error) return joined;
+    const sync = getRosterSync();
+    if (sync) return sync.rosterPage({ organizerId: ctx.organizer.id, eventId, query });
     const page = paginate(await rosterRows(joined, { status: query.status, categoryId: query.categoryId, q: query.q }), pageOpts(query));
     return { items: page.items, nextCursor: page.nextCursor === null ? null : String(page.nextCursor), total: page.total };
   }
@@ -1219,7 +1304,7 @@ export function createEventsRegistrationService({
     createTeam, lookupTeam, getTeam,
     organizerListRegistrations, organizerRegistrationsSummary, organizerListOrders, organizerTotals,
     adminListOrders, adminGetOrder, adminListRegistrations, adminCancelOrder,
-    onOrderExpired, inviteClaims, claimInvitationText,
+    onOrderExpired, inviteClaims, claimInvitationText, validateWaitlistJoin, placeSystemOrder,
     // shared with events-roster-service.mjs (corporate)
     internals: { paymentSubmitted, prepare, placeOrder, replay, quoteResponse, orderDetail, orderView, registrationView, viewsOf, lineView, namesOf, joinedOf, summaryOf, releaseWholeOrder, participantsReport, publicAvailability, eventBlock, teamView, loadOrder: id => eventStore.getOrder(id) },
   };

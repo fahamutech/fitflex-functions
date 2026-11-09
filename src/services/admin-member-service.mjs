@@ -1,13 +1,15 @@
 // Admin member management — list/upsert/status + per-member payments/check-ins/QR.
 // List responses are kept lean (lean subscription + pendingPayment projections)
 // so the admin members table gets a fast first paint even with many rows.
+import { publicCheckin } from '../shared/checkin-status.mjs';
 import { randomUUID } from 'node:crypto';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
 import { userAuditSnapshot } from '../shared/audit-redact.mjs';
+import { checkReason } from '../shared/admin-reason.mjs';
 
-export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr }) {
+export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr, transaction = null }) {
   async function latestMemberSubscription(memberId) {
     const subs = await subscriptions.filterByColumnAsync('memberId', memberId);
     return subs.sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
@@ -145,29 +147,40 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
     return (await checkins.filterAsync(c => c.memberId === memberId))
       .filter(c => { const ts = +new Date(c.timestamp); return ts >= fromTs && ts <= toTs; })
       .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
-      .map(c => ({ ...c, gym: gyms.find(g => g.id === c.gymId) || null }));
+      .map(c => ({ ...publicCheckin(c), gym: gyms.find(g => g.id === c.gymId) || null }));
   }
 
-  async function setStatus({ memberId, status, actorId }) {
+  async function setStatus({ memberId, status, actorId, reason: rawReason }) {
     if (!['active', 'suspended'].includes(status)) return { error: 'invalid_status', status: 400 };
+    // Suspending needs a reason when ADMIN_REASONS_REQUIRED is on; activating never does.
+    const checked = checkReason(rawReason, { required: status === 'suspended' });
+    if (checked.error) return checked;
     const member = await users.findAsync(u => u.id === memberId && u.userType === 'member');
     if (!member) return { error: 'not_found', status: 404 };
     const beforeSub = await latestMemberSubscription(member.id);
     const before = { ...member, subscription: beforeSub };
-    const updatedUser = await users.updateByIdAsync(member.id, { accountStatus: status });
     const sub = await latestMemberSubscription(member.id);
-    let updatedSub = sub;
-    if (sub) {
-      updatedSub = await subscriptions.updateByIdAsync(sub.id, {
-        status: status === 'suspended' ? 'suspended' : (sub.status === 'suspended' ? 'active' : sub.status)
-      });
-    }
-    const after = { ...updatedUser, subscription: updatedSub };
-    await auditLog.insertAsync({
-      id: randomUUID(), at: new Date().toISOString(),
-      actor: actorId, action: `member_${status}`,
-      target: member.id, before: userAuditSnapshot(before), after: userAuditSnapshot(after)
-    });
+    const subStatus = status === 'suspended' ? 'suspended' : (sub?.status === 'suspended' ? 'active' : sub?.status);
+    // One database transaction: the status change(s) and the audit row commit together or not at all.
+    // `transaction` is always wired in production (bootstrap/services.mjs); specs with in-memory stores omit it.
+    const write = async (trx) => {
+      const t = (fn, fallback) => (trx ? fn(trx) : fallback());
+      const updatedUser = await t(x => users.updateByIdTrxAsync(x, member.id, { accountStatus: status }),
+        () => users.updateByIdAsync(member.id, { accountStatus: status }));
+      const updatedSub = sub
+        ? await t(x => subscriptions.updateByIdTrxAsync(x, sub.id, { status: subStatus }), () => subscriptions.updateByIdAsync(sub.id, { status: subStatus }))
+        : sub;
+      const result = { ...updatedUser, subscription: updatedSub };
+      const row = {
+        id: randomUUID(), at: new Date().toISOString(),
+        actor: actorId, action: `member_${status}`,
+        target: member.id, before: userAuditSnapshot(before), after: userAuditSnapshot(result),
+        reason: checked.reason
+      };
+      await t(x => auditLog.insertTrxAsync(x, row), () => auditLog.insertAsync(row));
+      return result;
+    };
+    const after = transaction ? await transaction(write) : await write(null);
     return { member: after };
   }
 

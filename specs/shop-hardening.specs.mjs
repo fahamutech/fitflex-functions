@@ -231,7 +231,7 @@ test('product input is bounded: sizes, integers, option lists', async () => {
   await bad({ variants: Array.from({ length: 31 }, (_, i) => ({ name: `v${i}` })) }, 'variants');
   await bad({ variants: [{ name: '' }] }, 'variants');
   await bad({ variants: [{ name: 'S', stock: -1 }] }, 'variants');
-  const ok = await shopService.upsertProduct({ vendorId, body: { ...base, variants: [{ name: 'Vanilla', stock: 3 }, { name: 'Choc' }], images: ['a.webp'] } });
+  const ok = await shopService.upsertProduct({ vendorId, body: { ...base, variants: [{ name: 'Vanilla', stock: 3 }, { name: 'Choc' }], images: ['/storage/bafytest/a.webp'] } });
   made.products.push(ok.product.id);
   assert.ok(ok.product);
 });

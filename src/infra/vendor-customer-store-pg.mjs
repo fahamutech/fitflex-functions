@@ -270,12 +270,13 @@ export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn 
     if (!row) return null;
     const [owed, open, shop] = await Promise.all([
       owedOf(db, vendorId, customerId, today),
-      db.raw(`SELECT s.id, s.number, s."invoiceNumber", s."soldAt", s."dueDate"::text AS "dueDate", s."totalTzs", s."balanceTzs", (?::date - s."dueDate")::int AS "daysPastDue"
+      db.raw(`SELECT s.id, s.number, s."invoiceNumber", s."soldAt", s."dueDate"::text AS "dueDate", s."totalTzs", s."balanceTzs", s."balanceReducedTzs", (?::date - s."dueDate")::int AS "daysPastDue"
                 FROM "VendorSale" s
                WHERE s."vendorId" = ? AND s."customerId" = ? AND s.kind = 'credit' AND s.status = 'completed' AND s."balanceTzs" > 0
                ORDER BY s."dueDate", s."soldAt", s.id`, [today, vendorId, customerId]),
       db('VendorSale').where({ vendorId, customerId, status: 'completed' })
-        .first(db.raw('count(*)::int AS n'), db.raw('COALESCE(sum("totalTzs"), 0)::bigint AS total'), db.raw('max("soldAt") AS last')),
+        // S7: shop sales after refunds (net of ACTIVE refunds; "after refunds" in the apps).
+        .first(db.raw('count(*)::int AS n'), db.raw('COALESCE(sum("totalTzs" - "refundedTzs"), 0)::bigint AS total'), db.raw('max("soldAt") AS last')),
     ]);
     let app = { n: 0, total: 0, last: null };
     if (row.source === 'marketplace' && row.buyerUserId) {
@@ -293,6 +294,8 @@ export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn 
       money: owed,
       openSales: open.rows.map(plain).map(s => ({
         id: s.id, number: s.number, invoiceNumber: s.invoiceNumber ?? null, soldAt: iso(s.soldAt), dueDate: s.dueDate, totalTzs: s.totalTzs, balanceTzs: s.balanceTzs,
+        // S7: taken off this sale's balance by active refunds (paid − change + balance + balanceReduced = total).
+        balanceReducedTzs: s.balanceReducedTzs || 0,
         daysOverdue: Math.max(0, s.daysPastDue), overdue: s.daysPastDue >= 1,
       })),
       totals: {
@@ -361,12 +364,13 @@ export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn 
    * deleted at every vendor. Where nothing is owed the
    * link to the account (buyerUserId) is dropped too; where pay-later money is still owed it is kept,
    * nameless, until that is paid off (recordPayment then drops it). The row itself stays: sales and
-   * payments reference it. Audited without personal data. → { forgotten, unlinked, refsDeleted }
+   * payments reference it. Audited without personal data. `q` lets account deletion run this inside its
+   * own transaction. → { forgotten, unlinked, refsDeleted }
    */
-  async function forgetBuyer(userId) {
+  async function forgetBuyer(userId, { q = db } = {}) {
     if (!userId) return { forgotten: 0, unlinked: 0, refsDeleted: 0 };
     const at = now();
-    const { rows } = await db.raw(`UPDATE "VendorCustomer" c
+    const { rows } = await q.raw(`UPDATE "VendorCustomer" c
          SET name = NULL, note = NULL, "forgottenAt" = COALESCE(c."forgottenAt", ?), "updatedAt" = ?,
              "buyerUserId" = CASE WHEN EXISTS (SELECT 1 FROM "VendorSale" s
                                   WHERE s."vendorId" = c."vendorId" AND s."customerId" = c.id AND s.kind = 'credit'
@@ -376,15 +380,15 @@ export function createPgVendorCustomerStore({ db, now = () => new Date(), vatOn 
        RETURNING c.id, c."vendorId", c."buyerUserId"`, [at, at, String(userId)]);
     let snapshotsScrubbed = 0;
     for (const r of rows) {
-      await audit(db, { actor: 'system:account_deleted', action: 'vendor_customer_forgotten', target: r.id, after: { vendorId: r.vendorId, unlinked: r.buyerUserId == null } });
+      await audit(q, { actor: 'system:account_deleted', action: 'vendor_customer_forgotten', target: r.id, after: { vendorId: r.vendorId, unlinked: r.buyerUserId == null } });
       // S5 (security review #229 M1): statement links shared earlier froze the customer's name in their
       // snapshot; it is cleared there too (the page also checks forgottenAt). Links stay valid, nameless.
-      const scrubbed = await db.raw(`UPDATE "VendorDocumentLink"
+      const scrubbed = await q.raw(`UPDATE "VendorDocumentLink"
            SET snapshot = jsonb_set(snapshot, '{customer}', jsonb_build_object('name', NULL::text), true)
          WHERE "vendorId" = ? AND "docId" = ? AND "docType" = 'statement' AND snapshot IS NOT NULL`, [r.vendorId, r.id]);
       snapshotsScrubbed += scrubbed.rowCount || 0;
     }
-    const refsDeleted = await db('VendorBuyerRef').where({ buyerId: String(userId) }).del();
+    const refsDeleted = await q('VendorBuyerRef').where({ buyerId: String(userId) }).del();
     return { forgotten: rows.length, unlinked: rows.filter(r => r.buyerUserId == null).length, refsDeleted, snapshotsScrubbed };
   }
 

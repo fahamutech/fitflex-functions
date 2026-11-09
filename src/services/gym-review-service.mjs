@@ -6,6 +6,7 @@
 // the tier, which stays admin/rubric-driven).
 import { randomUUID } from 'node:crypto';
 import { shortName } from '../shared/public-name.mjs';
+import { DELETED_PERSON_LABEL } from '../shared/deleted-person.mjs';
 
 const MIN_RATING = 1;
 const MAX_RATING = 5;
@@ -182,7 +183,7 @@ export function createGymReviewService({ usernames = null, gymReviews, gyms, che
     return Promise.all(rows.map(async r => {
       const u = await users.findByIdAsync(r.memberId);
       const g = await gyms.findByIdAsync(r.gymId);
-      return { ...r, memberName: u?.displayName || null, gymName: g?.name || null };
+      return { ...r, memberName: u ? u.displayName || null : DELETED_PERSON_LABEL, gymName: g?.name || null };
     }));
   }
 
@@ -195,7 +196,7 @@ export function createGymReviewService({ usernames = null, gymReviews, gyms, che
     return Promise.all(rows.map(async r => {
       const u = await users.findByIdAsync(r.memberId);
       const g = await gyms.findByIdAsync(r.gymId);
-      return { ...r, memberName: u?.displayName || null, gymName: g?.name || null };
+      return { ...r, memberName: u ? u.displayName || null : DELETED_PERSON_LABEL, gymName: g?.name || null };
     }));
   }
 

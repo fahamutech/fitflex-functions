@@ -23,7 +23,11 @@ async function pdfkit() {
   if (typeof PDFDocument !== 'function') { PDFDocument = null; throw Object.assign(new Error('pdf_unavailable'), { code: 'pdf_unavailable' }); }
   return PDFDocument;
 }
-import { label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf } from './vendor-documents.mjs';
+/** The pdfkit class, loaded lazily (shared with the S6 report PDF); throws code pdf_unavailable. */
+export const pdfkitClass = () => pdfkit();
+// S7 UAT L-2: discounts and refunds print a real minus sign (U+2212) through the Symbol font, as the S6 report PDF.
+import { textWithMinus, heightWithMinus } from './pdf-minus.mjs';
+import { label, langOf, money, minusMoney, formatDay, formatDateTime, methodLabel, titleOf, statusKeyOf, cancelledBanner, watermarkOf, creditNoteForLine, creditNoteSettlement } from './vendor-documents.mjs';
 
 const MM = 72 / 25.4;
 const GREEN = '#1F7A3A';
@@ -60,7 +64,7 @@ function renderA4(doc, d, lang, root) {
   const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
   const bottom = () => doc.page.height - doc.page.margins.bottom - 28; // room for the footer
   const ensure = (h) => { if (doc.y + h > bottom()) { doc.addPage(); return true; } return false; };
-  const P = (text, opts = {}, type = 'P') => root.add(doc.struct(type, () => { doc.text(text, opts.x ?? left, opts.y, { width: opts.width ?? width, align: opts.align, lineBreak: opts.lineBreak }); }));
+  const P = (text, opts = {}, type = 'P') => root.add(doc.struct(type, () => { textWithMinus(doc, text, opts.x ?? left, opts.y, { width: opts.width ?? width, align: opts.align, lineBreak: opts.lineBreak }); }));
   const business = d.seller?.businessName || '';
 
   // Header: seller on the left, title on the right.
@@ -77,7 +81,8 @@ function renderA4(doc, d, lang, root) {
   doc.font('Helvetica-Bold').fontSize(18).fillColor(BLACK);
   P(heading, { x: left + width / 2 + 8, y: top, width: half, align: 'right' }, 'H1');
   doc.font('Helvetica').fontSize(10).fillColor(GREY);
-  for (const t of [d.saleRef && label(lang, 'saleRef', { number: d.saleRef }), d.orderShortRef && label(lang, 'orderRef', { ref: d.orderShortRef })]) {
+  const credit = d.docType === 'credit_note';
+  for (const t of [credit ? creditNoteForLine(d, lang) : d.saleRef && label(lang, 'saleRef', { number: d.saleRef }), d.orderShortRef && label(lang, 'orderRef', { ref: d.orderShortRef })]) {
     if (t) P(t, { x: left + width / 2 + 8, width: half, align: 'right' });
   }
   if (d.status) { doc.font('Helvetica-Bold').fillColor(d.status === 'cancelled' ? '#B91C1C' : BLACK); P(label(lang, statusKeyOf(d)), { x: left + width / 2 + 8, width: half, align: 'right' }); }
@@ -93,11 +98,12 @@ function renderA4(doc, d, lang, root) {
   if (d.dueDate) P(label(lang, 'dueBy', { date: formatDay(d.dueDate, lang) }));
   if (d.servedBy?.firstName) P(label(lang, 'servedBy', { name: d.servedBy.firstName }));
   if (d.paymentMethod) P(label(lang, 'paidBy', { method: methodLabel(lang, d.paymentMethod) }));
+  if (credit && d.saleRef?.soldAt) P(label(lang, 'saleDate', { date: formatDay(d.saleRef.soldAt, lang) }));
   doc.y += 6;
 
   if (d.status === 'cancelled') {
     const text = cancelledBanner(d, lang);
-    const h = doc.heightOfString(text, { width: width - 16 }) + 12;
+    const h = heightWithMinus(doc, text, { width: width - 16 }) + 12;
     ensure(h);
     doc.save().rect(left, doc.y, width, h).lineWidth(1.5).strokeColor('#B91C1C').stroke().restore();
     const y0 = doc.y;
@@ -115,7 +121,7 @@ function renderA4(doc, d, lang, root) {
       const y = doc.y;
       let x = left;
       for (const c of columns) {
-        root.add(doc.struct('TH', () => doc.text(c.title, x + 2, y, { width: c.width - 4, align: c.align || 'left', lineBreak: false })));
+        root.add(doc.struct('TH', () => textWithMinus(doc, c.title, x + 2, y, { width: c.width - 4, align: c.align || 'left', lineBreak: false })));
         x += c.width;
       }
       doc.y = y + 14;
@@ -124,12 +130,12 @@ function renderA4(doc, d, lang, root) {
     drawHeader();
     doc.font('Helvetica').fontSize(10).fillColor(BLACK);
     for (const row of rows) {
-      const h = Math.max(...columns.map((c, i) => doc.heightOfString(String(row[i] ?? ''), { width: c.width - 4 }))) + 6;
+      const h = Math.max(...columns.map((c, i) => heightWithMinus(doc, String(row[i] ?? ''), { width: c.width - 4 }))) + 6;
       if (ensure(h)) { drawHeader(); doc.font('Helvetica').fontSize(10).fillColor(BLACK); }
       const y = doc.y;
       let x = left;
       columns.forEach((c, i) => {
-        root.add(doc.struct('TD', () => doc.text(String(row[i] ?? ''), x + 2, y + 2, { width: c.width - 4, align: c.align || 'left' })));
+        root.add(doc.struct('TD', () => textWithMinus(doc, String(row[i] ?? ''), x + 2, y + 2, { width: c.width - 4, align: c.align || 'left' })));
         x += c.width;
       });
       doc.y = y + h;
@@ -143,19 +149,33 @@ function renderA4(doc, d, lang, root) {
   const pair = (a, b, { bold = false } = {}) => {
     doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 12 : 10).fillColor(BLACK);
     const { labelX, labelW, amountX, amountW } = PAIR_COLUMNS(left, width);
-    const h = Math.max(doc.heightOfString(a || ' ', { width: labelW }), b ? doc.heightOfString(b, { width: amountW }) : 0);
+    const h = Math.max(heightWithMinus(doc, a || ' ', { width: labelW }), b ? heightWithMinus(doc, b, { width: amountW }) : 0);
     ensure(h + 3);
     const y = doc.y;
     root.add(doc.struct('P', () => {
-      doc.text(a, labelX, y, { width: labelW });
-      if (b) doc.text(b, amountX, y, { width: amountW, align: 'right' });
+      textWithMinus(doc, a, labelX, y, { width: labelW });
+      if (b) textWithMinus(doc, b, amountX, y, { width: amountW, align: 'right' });
     }));
     doc.y = y + h + (bold ? 5 : 3);
     doc.x = left;
     doc.font('Helvetica').fontSize(10);
   };
 
-  if (d.lines?.length) {
+  if (credit) {
+    // S7 §6.1: returned items, refund total, VAT summary, then how it was settled. No restock flags or reasons.
+    heading2(label(lang, 'returnedItems'));
+    const hasVat = d.lines.some(l => l.vatCode);
+    table([
+      { title: label(lang, 'qty'), width: 40, align: 'right' },
+      { title: label(lang, 'item'), width: width - 40 - 95 - (hasVat ? 34 : 0) },
+      { title: label(lang, 'amount'), width: 95, align: 'right' },
+      ...(hasVat ? [{ title: label(lang, 'vat'), width: 34 }] : []),
+    ], d.lines.map(l => [l.qty, lineName(l), money(l.amountTzs), ...(hasVat ? [l.vatCode || ''] : [])]));
+    pair(label(lang, 'refundTotal'), money(d.totalTzs), { bold: true });
+    if (d.vatSummary?.length) pair(label(lang, 'includesVat', { amount: money(d.vatIncludedTzs) }), '');
+  }
+
+  if (!credit && d.lines?.length) {
     const hasVat = d.lines.some(l => l.vatCode);
     const fixed = [40, 80, 70, 85, ...(hasVat ? [34] : [])];
     const cols = [
@@ -169,7 +189,7 @@ function renderA4(doc, d, lang, root) {
     table(cols, d.lines.map(l => [lineName(l), l.qty, money(l.unitPriceTzs), l.discountTzs ? minusMoney(l.discountTzs) : '', money(l.amountTzs), ...(hasVat ? [l.vatCode || ''] : [])]));
   }
 
-  if (!['statement', 'payment_receipt'].includes(d.docType)) {
+  if (!['statement', 'payment_receipt', 'credit_note'].includes(d.docType)) {
     pair(label(lang, 'subtotal'), money(d.subtotalTzs));
     if (d.discountsTzs > 0) pair(label(lang, 'discounts'), minusMoney(d.discountsTzs));
     pair(label(lang, 'total'), money(d.totalTzs), { bold: true });
@@ -196,7 +216,7 @@ function renderA4(doc, d, lang, root) {
         ls.paidInFullAt ? label(lang, 'paidInFull', { date: formatDay(ls.paidInFullAt, lang) }) : `${label(lang, 'balanceDue')}: ${money(ls.balanceTzs)}`,
         ...(ls.paidWith?.length ? [label(lang, 'paidWith', { numbers: ls.paidWith.join(', ') })] : [])];
       const text = lines.join('\n');
-      const h = doc.heightOfString(text, { width: width - 16 }) + 12;
+      const h = heightWithMinus(doc, text, { width: width - 16 }) + 12;
       ensure(h + 4);
       const y0 = doc.y + 4;
       doc.save().rect(left, y0, width, h).lineWidth(0.75).strokeColor('#9CA3AF').stroke().restore();
@@ -208,6 +228,17 @@ function renderA4(doc, d, lang, root) {
       for (const a of d.paidTowards) pair(a.number, money(a.amountTzs));
       if (d.stillOwedTzs != null) pair(label(lang, 'stillOwed'), money(d.stillOwedTzs), { bold: true });
     }
+  }
+
+  if (credit) {
+    doc.y += 4;
+    for (const t of creditNoteSettlement(d, lang)) P(t);
+  }
+  // S7 §6.3: the sale's active credit notes and the total after them.
+  if (d.refunds?.length) {
+    heading2(label(lang, 'refundsOnSale'));
+    for (const r of d.refunds) pair(`${r.number} · ${formatDay(r.refundedAt, lang)}`, minusMoney(r.amountTzs));
+    pair(label(lang, 'totalAfterRefunds'), money(d.totalAfterRefundsTzs), { bold: true });
   }
 
   if (d.docType === 'statement') {
@@ -232,6 +263,7 @@ function renderA4(doc, d, lang, root) {
   doc.y += 10;
   doc.font('Helvetica').fontSize(9).fillColor(GREY);
   if (['receipt', 'payment_receipt'].includes(d.docType) && d.status !== 'cancelled') P(label(lang, 'receivedBy', { business }));
+  if (credit) P(label(lang, 'refundGivenBy', { business }));
   P(label(lang, 'copyNote', { business }));
 }
 
@@ -247,7 +279,7 @@ function finishPages(doc, d, lang, { footer = true } = {}) {
       doc.save();
       doc.rotate(-35, { origin: [doc.page.width / 2, doc.page.height / 2] });
       doc.fillOpacity(0.12).fillColor('#B91C1C').font('Helvetica-Bold').fontSize(doc.page.width > 400 ? 44 : 16);
-      doc.text(watermarkOf(d), 0, doc.page.height / 2 - 20, { width: doc.page.width, align: 'center', lineBreak: false });
+      textWithMinus(doc, watermarkOf(d), 0, doc.page.height / 2 - 20, { width: doc.page.width, align: 'center', lineBreak: false });
       doc.restore();
     }
     if (footer) {
@@ -256,7 +288,7 @@ function finishPages(doc, d, lang, { footer = true } = {}) {
       const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
       doc.fillOpacity(1).font('Helvetica').fontSize(8).fillColor(GREY);
       const pageText = label(lang, 'pageOf', { n: i - range.start + 1, m: range.count });
-      doc.text(`${label(lang, 'notFiscal')} · ${d.number ? `${d.number} · ` : ''}${pageText}`, left, y, { width, align: 'center', lineBreak: false });
+      textWithMinus(doc, `${label(lang, 'notFiscal')} · ${d.number ? `${d.number} · ` : ''}${pageText}`, left, y, { width, align: 'center', lineBreak: false });
     }
     doc.endMarkedContent();
     doc.page.margins.bottom = savedBottom;
@@ -270,14 +302,14 @@ function render80(doc, d, lang, root) {
   const width = doc.page.width - left - doc.page.margins.right;
   const P = (text, { align = 'left', bold = false, size = 8, color = BLACK } = {}, type = 'P') => {
     doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size).fillColor(color);
-    root.add(doc.struct(type, () => doc.text(text, left, doc.y, { width, align })));
+    root.add(doc.struct(type, () => textWithMinus(doc, text, left, doc.y, { width, align })));
   };
   const pair = (a, b, opts = {}) => {
     doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8).fillColor(BLACK);
     const y = doc.y;
-    root.add(doc.struct('P', () => { doc.text(a, left, y, { width: width * 0.6 }); }));
+    root.add(doc.struct('P', () => { textWithMinus(doc, a, left, y, { width: width * 0.6 }); }));
     const yEnd = doc.y;
-    root.add(doc.struct('P', () => { doc.text(b, left + width * 0.6, y, { width: width * 0.4, align: 'right' }); }));
+    root.add(doc.struct('P', () => { textWithMinus(doc, b, left + width * 0.6, y, { width: width * 0.4, align: 'right' }); }));
     doc.y = Math.max(yEnd, doc.y);
   };
   const rule = () => { doc.y += 2; doc.save().moveTo(left, doc.y).lineTo(left + width, doc.y).dash(1.5, { space: 1.5 }).lineWidth(0.5).strokeColor('#666').stroke().undash().restore(); doc.y += 3; };
@@ -286,7 +318,9 @@ function render80(doc, d, lang, root) {
   for (const t of [d.seller?.address, d.seller?.contactNumber, d.seller?.tin && label(lang, 'tin', { tin: d.seller.tin }), d.seller?.vrn && label(lang, 'vrn', { vrn: d.seller.vrn }), d.soldVia]) if (t) P(t, { align: 'center' });
   rule();
   P(d.number ? `${titleOf(d, lang)} ${d.number}` : titleOf(d, lang), { bold: true, size: 9 }, 'H1');
-  if (d.saleRef) P(label(lang, 'saleRef', { number: d.saleRef }));
+  const credit = d.docType === 'credit_note';
+  if (credit) P(creditNoteForLine(d, lang));
+  else if (d.saleRef) P(label(lang, 'saleRef', { number: d.saleRef }));
   if (d.orderShortRef) P(label(lang, 'orderRef', { ref: d.orderShortRef }));
   if (d.status) P(label(lang, statusKeyOf(d)), { bold: true });
   if (d.status === 'cancelled') P(cancelledBanner(d, lang), { bold: true });
@@ -295,14 +329,21 @@ function render80(doc, d, lang, root) {
   if (d.dueDate) P(label(lang, 'dueBy', { date: formatDay(d.dueDate, lang) }));
   if (d.servedBy?.firstName) P(label(lang, 'servedBy', { name: d.servedBy.firstName }));
   if (d.paymentMethod) P(label(lang, 'paidBy', { method: methodLabel(lang, d.paymentMethod) }));
-  if (d.lines?.length) {
+  if (credit && d.saleRef?.soldAt) P(label(lang, 'saleDate', { date: formatDay(d.saleRef.soldAt, lang) }));
+  if (credit) {
+    rule();
+    P(label(lang, 'returnedItems'), { bold: true });
+    for (const l of d.lines) pair(`${l.qty} x ${lineName(l)}`, `${amountOnly(l.amountTzs)}${l.vatCode ? ` ${l.vatCode}` : ''}`);
+    rule();
+    pair(label(lang, 'refundTotal'), money(d.totalTzs), { bold: true });
+  } else if (d.lines?.length) {
     rule();
     for (const l of d.lines) {
       P(lineName(l));
       pair(`${l.qty} x ${amountOnly(l.unitPriceTzs)}${l.discountTzs ? ` ${minusMoney(l.discountTzs)}` : ''}`, `${amountOnly(l.amountTzs)}${l.vatCode ? ` ${l.vatCode}` : ''}`);
     }
   }
-  if (!['statement', 'payment_receipt'].includes(d.docType)) {
+  if (!['statement', 'payment_receipt', 'credit_note'].includes(d.docType)) {
     rule();
     pair(label(lang, 'subtotal'), money(d.subtotalTzs));
     if (d.discountsTzs > 0) pair(label(lang, 'discounts'), minusMoney(d.discountsTzs));
@@ -327,6 +368,16 @@ function render80(doc, d, lang, root) {
       if (d.stillOwedTzs != null) pair(label(lang, 'stillOwed'), money(d.stillOwedTzs), { bold: true });
     }
   }
+  if (credit) {
+    rule();
+    for (const t of creditNoteSettlement(d, lang)) P(t);
+  }
+  if (d.refunds?.length) {
+    rule();
+    P(label(lang, 'refundsOnSale'), { bold: true });
+    for (const r of d.refunds) pair(`${r.number} ${formatDay(r.refundedAt, lang)}`, minusMoney(r.amountTzs));
+    pair(label(lang, 'totalAfterRefunds'), money(d.totalAfterRefundsTzs), { bold: true });
+  }
   if (d.docType === 'statement') {
     rule();
     P(label(lang, 'openSales'), { bold: true });
@@ -337,6 +388,7 @@ function render80(doc, d, lang, root) {
   }
   rule();
   if (['receipt', 'payment_receipt'].includes(d.docType) && d.status !== 'cancelled') P(label(lang, 'receivedBy', { business }), { align: 'center' });
+  if (credit) P(label(lang, 'refundGivenBy', { business }), { align: 'center' });
   P(label(lang, 'notFiscal'), { align: 'center', bold: true });
   P(label(lang, 'copyNote', { business }), { align: 'center', color: GREY });
 }

@@ -18,7 +18,10 @@ import { createCampaignService } from '../src/services/campaign-service.mjs';
 import { createDeliveryService } from '../src/services/delivery-service.mjs';
 import { createCommunicationPreferenceService } from '../src/services/communication-preference-service.mjs';
 import { audienceScope, buildAudienceFilter, audienceCatalog, RECIPIENTS } from '../src/shared/audience.mjs';
+import { createSmsService } from '../src/services/sms-service.mjs';
+import { createFakeSmsProvider } from '../src/integrations/sms/provider.mjs';
 import * as routes from '../functions/communications.mjs';
+import * as meRoutes from '../functions/notifications.mjs';
 
 const uid = (p) => `${p}_${randomUUID().slice(0, 8)}`;
 const daysAgo = (n) => new Date(Date.now() - n * 86_400_000);
@@ -161,6 +164,7 @@ after(async () => {
     await db('CommunicationCampaign').whereIn('id', ids).del();
   }
   if (made.users.length) {
+    await db('SmsLog').whereIn('userId', made.users).del().catch(() => {});
     await db('Notification').whereIn('userId', made.users).del().catch(() => {});
     await db('DeviceToken').whereIn('userId', made.users).del();
     await db('CommunicationPreference').whereIn('id', made.users).del().catch(() => {});
@@ -231,7 +235,7 @@ test('audience counts: accounts plus active admin staff; suspended, closed, reje
 
   const p = await preview('all');
   assert.equal(p.recipients, 'vendors');
-  assert.equal(p.category, 'transactional', 'without a purpose, vendor reach is counted for service messages');
+  assert.equal(p.category, 'marketing', 'without a purpose the stricter marketing rules apply, as for members');
   assert.equal(p.count, 5);
   assert.equal(p.channels.in_app.eligible, 5);
   assert.equal(p.channels.push.eligible, 1, 'push only where there is a device');
@@ -285,34 +289,53 @@ test('gym owners cannot target vendors', async () => {
   assert.ok(!audienceCatalog('platform').fields.some(f => f.key.startsWith('vendor')));
 });
 
-test('marketing to vendors is refused until the vendor app has message settings (review of #257)', async () => {
+test('marketing to vendors is accepted now vendors can opt out (owner decision 2026-10-29)', async () => {
   const body = (purpose) => ({
     purpose, audience: { recipients: 'vendors', preset: 'all', filter: ours() },
     content: { locale: 'sw', title: 'Ofa', body: 'Punguzo.' }, channels: ['in_app'],
   });
-  for (const purpose of ['promotion', 'engagement', 'general']) {
-    assert.equal((await campaigns.create(w.FF, body(purpose))).error, 'vendor_marketing_not_available', purpose);
-    assert.equal((await campaigns.preview(w.FF, { body: body(purpose) })).error, 'vendor_marketing_not_available', purpose);
-    const pv = await segments.previewAudience({ sender: w.FF, recipients: 'vendors', preset: 'all', purpose });
-    assert.equal(pv.error, 'vendor_marketing_not_available', purpose);
+  const ids = [];
+  try {
+    for (const purpose of ['promotion', 'engagement', 'general']) {
+      const r = await campaigns.create(w.FF, body(purpose));
+      assert.equal(r.error, undefined, `${purpose}: ${JSON.stringify(r)}`);
+      assert.equal(r.campaign.category, 'marketing', purpose);
+      ids.push(r.campaign.id);
+      const pv = await campaigns.preview(w.FF, { body: body(purpose) });
+      assert.equal(pv.error, undefined, `${purpose}: ${JSON.stringify(pv)}`);
+      const aud = await segments.previewAudience({ sender: w.FF, recipients: 'vendors', preset: 'all', filter: ours(), purpose });
+      assert.equal(aud.error, undefined, purpose);
+      assert.equal(aud.category, 'marketing', purpose);
+      assert.equal(aud.count, 5, purpose);
+    }
+    // Service messages are unchanged: still transactional.
+    for (const purpose of ['announcement', 'renewal', 'payment']) {
+      const r = await campaigns.create(w.FF, body(purpose));
+      assert.equal(r.error, undefined, purpose);
+      assert.equal(r.campaign.category, 'transactional', purpose);
+      ids.push(r.campaign.id);
+      const aud = await segments.previewAudience({ sender: w.FF, recipients: 'vendors', preset: 'all', filter: ours(), purpose });
+      assert.equal(aud.category, 'transactional', purpose);
+    }
+    // Either way round through an edit: a vendor announcement made a promotion, or a member promotion sent to vendors.
+    const ann = await campaigns.create(w.FF, body('announcement'));
+    ids.push(ann.campaign.id);
+    const edited = await campaigns.update(w.FF, ann.campaign.id, { purpose: 'promotion' });
+    assert.equal(edited.error, undefined, JSON.stringify(edited));
+    assert.equal(edited.campaign.category, 'marketing');
+    const promo = await campaigns.create(w.FF, { ...body('promotion'), audience: { preset: 'all' } });
+    ids.push(promo.campaign.id);
+    const moved = await campaigns.update(w.FF, promo.campaign.id, { audience: { recipients: 'vendors', preset: 'all', filter: ours() } });
+    assert.equal(moved.error, undefined, JSON.stringify(moved));
+    assert.equal(moved.campaign.audience.recipients, 'vendors');
+    // And it can be scheduled.
+    const sch = await campaigns.schedule(w.FF, ann.campaign.id, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() });
+    assert.equal(sch.error, undefined, JSON.stringify(sch));
+    assert.equal(sch.campaign.status, 'scheduled');
+  } finally {
+    await db('CommunicationMessage').whereIn('campaignId', ids).del();
+    await db('CommunicationCampaign').whereIn('id', ids).del();
   }
-  // Service messages are fine.
-  for (const purpose of ['announcement', 'renewal', 'payment']) {
-    const r = await campaigns.create(w.FF, body(purpose));
-    assert.equal(r.error, undefined, purpose);
-    await db('CommunicationCampaign').where({ id: r.campaign.id }).del();
-  }
-  // Neither way round through an edit: a vendor announcement made a promotion, or a member promotion sent to vendors.
-  const ann = await campaigns.create(w.FF, body('announcement'));
-  assert.equal((await campaigns.update(w.FF, ann.campaign.id, { purpose: 'promotion' })).error, 'vendor_marketing_not_available');
-  const promo = await campaigns.create(w.FF, { ...body('promotion'), audience: { preset: 'all' } });
-  assert.equal(promo.error, undefined);
-  assert.equal((await campaigns.update(w.FF, promo.campaign.id, { audience: { recipients: 'vendors', preset: 'all', filter: ours() } })).error, 'vendor_marketing_not_available');
-  // A draft that got that way some other way still can't be sent or scheduled.
-  await db('CommunicationCampaign').where({ id: ann.campaign.id }).update({ purpose: 'promotion', category: 'marketing' });
-  assert.equal((await campaigns.send(w.FF, ann.campaign.id, { sendRequestId: uid('req') })).error, 'vendor_marketing_not_available');
-  assert.equal((await campaigns.schedule(w.FF, ann.campaign.id, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })).error, 'vendor_marketing_not_available');
-  assert.equal(await db('CommunicationMessage').where({ campaignId: ann.campaign.id }).count({ n: '*' }).then(r => Number(r[0].n)), 0);
 });
 
 test('each vendor gets the message in their language: English only if they chose it, Swahili otherwise', async () => {
@@ -429,4 +452,188 @@ test('delivery re-checks staff: no longer the vendor\'s admin → skipped', asyn
   );
   assert.equal(rows[w.vAAdmin].status, 'skipped');
   assert.equal(rows[w.vAAdmin].skipReason, 'not_vendor_admin');
+});
+
+// ── Vendors' own message settings (mobile#228) ─────────────────────────────
+// Vendors save offers on/off per channel through the same endpoint as
+// members (PUT /me/communication-preferences → CommunicationPreference, keyed
+// by the signed-in user's id), and the same per-channel rules decide who gets
+// a marketing message: in-app and push offers on unless switched off, SMS and
+// WhatsApp offers only once opted in, and the SMS/WhatsApp opt-out flag
+// (smsOptedOutAt / whatsappOptedOutAt) blocks all. Nothing handles an inbound
+// SMS STOP yet: the spec sets the SMS flag directly, it does not test STOP.
+test('marketing to vendors honours each vendor\'s own opt-out per channel (SMS opt-out flag set directly); service messages unchanged', async () => {
+  const CAT2 = uid('vndcat2');
+  const mine = { all: [{ field: 'vendorCategory', op: 'eq', value: CAT2 }] };
+  const smsProvider = createFakeSmsProvider();
+  const sms = createSmsService({ db, provider: smsProvider, logger: quiet });
+  const segAll = createSegmentService({
+    db, communicationPreferences, deviceTokens,
+    pushAvailable: () => true, whatsappAvailable: () => true, smsAvailable: () => true,
+  });
+  const campaignsAll = createCampaignService({
+    db, campaigns: communicationCampaigns, gyms, segmentService: segAll, auditLog: null,
+    largeSendThreshold: 50, marketingWeeklyCap: 5,
+  });
+  const deliveryAll = createDeliveryService({ db, notificationService, campaignService: campaignsAll, smsChannel: sms, logger: quiet });
+
+  const phones = new Map();
+  const tokens = new Map();
+  async function reachable(id) {
+    const local = `07${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
+    phones.set(id, `+255${local.slice(1)}`);
+    await db('User').where({ id }).update({ phone: local });
+    const token = uid('tok');
+    tokens.set(id, token);
+    await db('DeviceToken').insert({ id: uid('dvt'), userId: id, token, platform: 'android' });
+    return id;
+  }
+  const mk = async (name) => reachable(await user({
+    userType: 'vendor', displayName: name, approvalStatus: 'approved', accountStatus: 'active',
+    vendorProfile: { businessName: `${name} Shop`, businessCategory: CAT2 },
+  }));
+  const v = {};
+  v.in = await mk('Imani OptedIn');
+  v.inAdmin = await reachable(await staff(v.in, 'Ida Admin'));
+  v.noInApp = await mk('Neema NoInApp');
+  v.noPush = await mk('Nuru NoPush');
+  v.noSms = await mk('Nasra NoSms');
+  v.smsFlag = await mk('Saidi SmsOptOutFlag');
+  v.noWa = await mk('Nadia NoWhatsApp');
+  v.defaults = await mk('Dalila Defaults'); // never opened message settings
+
+  // Each vendor saves their choices through the app's endpoint, signed in as themselves.
+  const put = async (id, userType, body) => {
+    const r = await invoke(meRoutes.updateMyCommunicationPreferences, { sub: id, userType }, { body });
+    assert.equal(r.statusCode, 200, JSON.stringify(r.body));
+    return r.body.preferences;
+  };
+  const both = { smsMarketing: true, whatsappMarketing: true };
+  await put(v.in, 'vendor', both);
+  await put(v.inAdmin, 'vendor_staff', { ...both, pushMarketing: false }); // staff choose for themselves
+  await put(v.noInApp, 'vendor', { ...both, inAppMarketing: false });
+  await put(v.noPush, 'vendor', { ...both, pushMarketing: false });
+  await put(v.noSms, 'vendor', { whatsappMarketing: true });
+  await put(v.smsFlag, 'vendor', both);
+  // The SMS opt-out flag set directly: no code sets it today (no inbound STOP handler).
+  await db('CommunicationPreference').where({ id: v.smsFlag }).update({ smsOptedOutAt: new Date() });
+  await put(v.noWa, 'vendor', { smsMarketing: true });
+  const got = await invoke(meRoutes.myCommunicationPreferences, { sub: v.noPush, userType: 'vendor' });
+  assert.equal(got.statusCode, 200);
+  assert.equal(got.body.preferences.pushMarketing, false, 'the vendor reads back what they saved');
+
+  // Per channel, per vendor, for a promotion.
+  const everyone = Object.values(v);
+  const reach = await segAll.reachByMember((await segAll.resolveAudience({ sender: w.FF, recipients: 'vendors', filter: mine })).members, 'marketing');
+  assert.deepEqual([...reach.keys()].sort(), [...everyone].sort());
+  const expect = {
+    [v.in]: { in_app: null, push: null, whatsapp: null, sms: null },
+    [v.inAdmin]: { in_app: null, push: 'push_marketing_off', whatsapp: null, sms: null },
+    [v.noInApp]: { in_app: 'in_app_marketing_off', push: null, whatsapp: null, sms: null },
+    [v.noPush]: { in_app: null, push: 'push_marketing_off', whatsapp: null, sms: null },
+    [v.noSms]: { in_app: null, push: null, whatsapp: null, sms: 'sms_marketing_not_opted_in' },
+    [v.smsFlag]: { in_app: null, push: null, whatsapp: null, sms: 'sms_opted_out' },
+    [v.noWa]: { in_app: null, push: null, whatsapp: 'whatsapp_marketing_not_opted_in', sms: null },
+    [v.defaults]: { in_app: null, push: null, whatsapp: 'whatsapp_marketing_not_opted_in', sms: 'sms_marketing_not_opted_in' },
+  };
+  for (const id of everyone) assert.deepEqual(reach.get(id), expect[id], id);
+
+  const promoPv = await segAll.previewAudience({ sender: w.FF, recipients: 'vendors', filter: mine, purpose: 'promotion' });
+  assert.equal(promoPv.category, 'marketing');
+  assert.deepEqual(promoPv.channels.push, { eligible: 6, excluded: { push_marketing_off: 2 } });
+  assert.deepEqual(promoPv.channels.in_app, { eligible: 7, excluded: { in_app_marketing_off: 1 } });
+  assert.deepEqual(promoPv.channels.sms, { eligible: 5, excluded: { sms_marketing_not_opted_in: 2, sms_opted_out: 1 } });
+  assert.deepEqual(promoPv.channels.whatsapp, { eligible: 6, excluded: { whatsapp_marketing_not_opted_in: 2 } });
+
+  // Service messages are unchanged: offers switched off don't stop them; the SMS opt-out flag still does.
+  const annPv = await segAll.previewAudience({ sender: w.FF, recipients: 'vendors', filter: mine, purpose: 'announcement' });
+  assert.equal(annPv.category, 'transactional');
+  assert.deepEqual(annPv.channels.in_app, { eligible: 8, excluded: {} });
+  assert.deepEqual(annPv.channels.push, { eligible: 8, excluded: {} });
+  assert.deepEqual(annPv.channels.sms, { eligible: 7, excluded: { sms_opted_out: 1 } });
+
+  // A real promotion over in-app, push and SMS: opted-out vendors are skipped per channel, the rest get it.
+  const sendPromo = async (channels) => {
+    const { campaign, error } = await campaignsAll.create(w.FF, {
+      purpose: 'promotion', audience: { recipients: 'vendors', filter: mine },
+      content: { locale: 'sw', title: 'Ofa ya wauzaji', body: 'Punguzo kwa {{member_name}}.' }, channels,
+    });
+    assert.equal(error, undefined);
+    const sent = await campaignsAll.send(w.FF, campaign.id, { sendRequestId: uid('req') });
+    assert.equal(sent.error, undefined, JSON.stringify(sent));
+    return campaign.id;
+  };
+  const rowsOf = async (campaignId) => Object.fromEntries((await db('CommunicationMessage').where({ campaignId }))
+    .map(r => [`${r.memberId}:${r.channel}`, r]));
+  const promoId = await sendPromo(['in_app', 'push', 'sms']);
+  let rows = await rowsOf(promoId);
+  for (const id of everyone) {
+    for (const ch of ['in_app', 'push', 'sms']) {
+      const r = rows[`${id}:${ch}`];
+      assert.ok(r, `${id}:${ch}`);
+      assert.equal(r.category, 'marketing');
+      assert.equal(r.skipReason ?? null, expect[id][ch], `${id}:${ch}`);
+      assert.equal(r.status, expect[id][ch] ? 'skipped' : 'queued', `${id}:${ch}`);
+    }
+  }
+
+  fcm.sent.length = 0;
+  smsProvider.sent.length = 0;
+  await deliveryAll.runOnce();
+  rows = await rowsOf(promoId);
+  const inboxHas = async (id) => Boolean((await notificationService.inbox({ userId: id })).notifications.find(n => n.campaignId === promoId));
+  const pushedTo = (id) => fcm.sent.some(s => s.data?.campaignId === promoId && s.tokens.includes(tokens.get(id)));
+  const textedTo = (id) => smsProvider.sent.some(s => s.to.includes(phones.get(id)));
+  // The opted-in vendor gets it on every channel.
+  assert.equal(await inboxHas(v.in), true, 'opted-in vendor: inbox');
+  assert.equal(pushedTo(v.in), true, 'opted-in vendor: push');
+  assert.equal(textedTo(v.in), true, 'opted-in vendor: SMS');
+  assert.equal(rows[`${v.in}:sms`].status, 'sent');
+  // Each opted-out vendor misses only the channel they switched off.
+  assert.equal(await inboxHas(v.noInApp), false);
+  assert.equal(pushedTo(v.noInApp), true);
+  assert.equal(pushedTo(v.noPush), false);
+  assert.equal(await inboxHas(v.noPush), true);
+  assert.equal(pushedTo(v.inAdmin), false, "staff's own push opt-out, not the vendor account's");
+  assert.equal(textedTo(v.inAdmin), true);
+  for (const id of [v.noSms, v.smsFlag, v.defaults]) assert.equal(textedTo(id), false, id);
+  assert.equal(textedTo(v.noWa), true);
+
+  // Opting out after the message was queued is honoured at delivery (SMS checks again just before sending).
+  const lateId = await sendPromo(['sms']);
+  await put(v.in, 'vendor', { smsMarketing: false });
+  smsProvider.sent.length = 0;
+  await deliveryAll.runOnce();
+  rows = await rowsOf(lateId);
+  assert.equal(rows[`${v.in}:sms`].status, 'skipped');
+  assert.equal(rows[`${v.in}:sms`].skipReason, 'sms_marketing_not_opted_in');
+  assert.equal(textedTo(v.in), false);
+  assert.equal(rows[`${v.noWa}:sms`].status, 'sent', 'another opted-in vendor still gets it');
+
+  // In-app and push offers switched off after an immediate send was queued: not delivered (review of #274).
+  const appId = await sendPromo(['in_app', 'push']);
+  rows = await rowsOf(appId);
+  assert.equal(rows[`${v.noSms}:in_app`].status, 'queued');
+  await put(v.noSms, 'vendor', { inAppMarketing: false, pushMarketing: false });
+  fcm.sent.length = 0;
+  await deliveryAll.runOnce();
+  rows = await rowsOf(appId);
+  assert.deepEqual([rows[`${v.noSms}:in_app`].status, rows[`${v.noSms}:in_app`].skipReason], ['skipped', 'in_app_marketing_off']);
+  assert.deepEqual([rows[`${v.noSms}:push`].status, rows[`${v.noSms}:push`].skipReason], ['skipped', 'push_marketing_off']);
+  assert.equal((await notificationService.inbox({ userId: v.noSms })).notifications.find(n => n.campaignId === appId), undefined);
+  assert.ok(!fcm.sent.some(s => s.data?.campaignId === appId && s.tokens.includes(tokens.get(v.noSms))));
+  assert.equal(rows[`${v.noWa}:in_app`].status, 'delivered', 'another vendor still gets it');
+  assert.equal(rows[`${v.noWa}:push`].status, 'sent');
+
+  // A service SMS still reaches the vendor who switched SMS offers off.
+  const { campaign: svc } = await campaignsAll.create(w.FF, {
+    purpose: 'announcement', audience: { recipients: 'vendors', filter: mine },
+    content: { locale: 'sw', title: 'Taarifa', body: 'Taarifa ya huduma.' }, channels: ['sms'],
+  });
+  assert.equal((await campaignsAll.send(w.FF, svc.id, { sendRequestId: uid('req') })).error, undefined);
+  smsProvider.sent.length = 0;
+  await deliveryAll.runOnce();
+  rows = await rowsOf(svc.id);
+  assert.equal(rows[`${v.in}:sms`].status, 'sent');
+  assert.equal(rows[`${v.smsFlag}:sms`].skipReason, 'sms_opted_out', 'the SMS opt-out flag still blocks service SMS');
 });

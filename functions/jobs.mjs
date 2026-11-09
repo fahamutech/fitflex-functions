@@ -1,7 +1,7 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService } from '../src/bootstrap/services.mjs';
-import { shopBannersOn, eventsModuleOn, eventsRegistrationOn } from '../src/shared/feature-flags.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService, vendorImportService } from '../src/bootstrap/services.mjs';
+import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
 import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
@@ -129,6 +129,16 @@ export const shopBannerLifecycle = {
   }
 };
 
+export const flashSaleLifecycle = {
+  created, rule: '*/5 * * * *', // every 5 minutes
+  description: 'Shop flash sales: write down what time has decided — proposals not reviewed within SHOP_PROPOSAL_EXPIRY_DAYS (14) or by their start become expired (a vendor\'s own proposal: the vendor is told), approved sales past their end become ended. Prices never wait for this: every price read works the window out from the server clock. Does nothing unless SHOP_FLASH_SALES is on. Idempotent.',
+  onJob: async () => {
+    if (!shopFlashSalesOn()) return;
+    const r = await flashSaleService.runLifecycle();
+    if (r.expired || r.ended) console.log(`[flash-sales] expired=${r.expired} ended=${r.ended}`);
+  }
+};
+
 export const eventHoldExpiry = {
   created, rule: '*/5 * * * *', // every 5 minutes
   description: 'Events: give back the places of unpaid event orders whose hold has lapsed — the order becomes expired, its registrations cancelled, and one outbox row per registration is written. Does nothing unless EVENTS_MODULE is on. Safe to rerun and to overlap: each order is released once (FOR UPDATE SKIP LOCKED, unique inventory movement keys). The work, its run record and lock are in src/bootstrap/services.mjs (event-hold-expiry) and ops-service.mjs.',
@@ -159,6 +169,72 @@ export const eventPaymentReconciliation = {
     const r = await opsService.runJob('event-payment-reconciliation');
     const s = r?.stats ?? {};
     if (s.repaired || s.settled || s.expired || s.invited || s.refundsApplied || s.failed) console.log(`[events] payment reconciliation: repaired=${s.repaired} settled=${s.settled} expired=${s.expired} invited=${s.invited} refunds=${s.refundsApplied} failed=${s.failed}`);
+  }
+};
+
+export const eventWebhookFanout = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events webhooks (S5): fan unpublished outbox rows out to the SAME organizer\'s verified, subscribed endpoints (organizer match in the SQL join) and mark them published. Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set. Safe to rerun and to overlap (FOR UPDATE SKIP LOCKED, unique endpoint × event). The work, its run record and lock are in src/bootstrap/services.mjs (event-webhook-fanout).',
+  onJob: async () => {
+    if (!eventsWebhooksOn()) return;
+    const r = await opsService.runJob('event-webhook-fanout');
+    const s = r?.stats ?? {};
+    if (s.deliveries) console.log(`[events] webhook fan-out: rows=${s.rows} deliveries=${s.deliveries}`);
+  }
+};
+
+export const eventWebhookDeliver = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events webhooks (S5): deliver due webhook deliveries (lease claim, SSRF re-check and pinned connection on every attempt, retry schedule, dead letter, auto-disable). Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set. Safe to overlap (advisory lock and leases). The work is in src/bootstrap/services.mjs (event-webhook-deliver).',
+  onJob: async () => {
+    if (!eventsWebhooksOn()) return;
+    const r = await opsService.runJob('event-webhook-deliver');
+    const s = r?.stats ?? {};
+    if (s.claimed) console.log(`[events] webhook delivery: claimed=${s.claimed} delivered=${s.delivered} failed=${s.failed} dead=${s.dead}`);
+  }
+};
+
+export const eventWebhookRetention = {
+  created, rule: '40 2 * * *', // every day 02:40 UTC
+  description: 'Events (S5): webhook attempts kept 30 days, deliveries and published outbox rows 90 days, idempotency rows 7 days, API usage rows 90 days; API client expiry notices at 14 and 3 days. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Idempotent.',
+  onJob: async () => {
+    if (!eventsRegistrationOn()) return;
+    const r = await opsService.runJob('event-webhook-retention');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] retention: attempts=${s.attempts} deliveries=${s.deliveries} outbox=${s.outbox} idempotency=${s.idempotency} notices=${s.notices}`);
+  }
+};
+
+export const eventAwardsRun = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events (S6): take a batch of award tasks (FOR UPDATE SKIP LOCKED) and award or revoke medals, achievements and earned rewards from the current results. The only writer of awards. Does nothing unless EVENTS_REWARDS is on. Safe to rerun and to overlap. The work is in src/bootstrap/services.mjs (event-awards-run).',
+  onJob: async () => {
+    if (!eventsRewardsOn()) return;
+    const r = await opsService.runJob('event-awards-run');
+    const s = r?.stats ?? {};
+    if (s.claimed) console.log(`[events] awards: claimed=${s.claimed} done=${s.done} failed=${s.failed} retried=${s.retried}`);
+  }
+};
+
+export const eventAwardsReconcile = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'Events (S6): queue award tasks for cancelled or refunded places, cancelled events and new claims; lapse reserved perks past their expiry. Does nothing unless EVENTS_REWARDS is on. Idempotent. The work is in src/bootstrap/services.mjs (event-awards-reconcile).',
+  onJob: async () => {
+    if (!eventsRewardsOn()) return;
+    const r = await opsService.runJob('event-awards-reconcile');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] awards reconcile: queued=${s.queued} reservations=${s.expiredReservations}`);
+  }
+};
+
+export const eventRewardExpire = {
+  created, rule: '0 23 * * *', // 23:00 UTC = 02:00 Africa/Dar_es_Salaam
+  description: 'Events (S6): expire unspent reward units older than their definition\'s expiryDays and sweep medal-art upload attempts older than two days. Does nothing unless EVENTS_REWARDS is on. Idempotent (expire:<earnEntryId> keys). The work is in src/bootstrap/services.mjs (event-reward-expire).',
+  onJob: async () => {
+    if (!eventsRewardsOn()) return;
+    const r = await opsService.runJob('event-reward-expire');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] reward expiry: expired=${s.expired} attemptsSwept=${s.attemptsSwept}`);
   }
 };
 
@@ -281,4 +357,95 @@ export const opsDailySummary = {
   created, rule: '30 5 * * *', // every day 05:30 UTC = 08:30 EAT
   description: 'Operations: email the addresses in OPS_ALERT_EMAILS a summary of the exceptions still waiting. Sent only when something is waiting.',
   onJob: () => opsService.runJob('ops-daily-summary'),
+};
+
+export const eventAnalyticsRollup = {
+  created, rule: '20 * * * *', // hourly at :20
+  description: 'Events (S7): sum the existing analytics audit rows into daily counters (cursor, exactly once) and delete counters older than EVENTS_ANALYTICS_KEEP_DAYS. Does nothing unless EVENTS_ANALYTICS is on. Safe to rerun and to overlap. The work is in src/bootstrap/services.mjs (event-analytics-rollup).',
+  onJob: async () => {
+    if (!eventsAnalyticsOn()) return;
+    const r = await opsService.runJob('event-analytics-rollup');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] analytics roll-up: rows=${s.rows} purged=${s.purged}`);
+  }
+};
+
+export const eventHealthAlert = {
+  created, rule: '*/15 * * * *', // every 15 minutes
+  description: 'Events (S7): evaluate the alert rules A1 to A13 and email OPS_ALERT_EMAILS (ids and counts only; one email per rule and subject per 6 hours). Does nothing unless EVENTS_ANALYTICS is on. The work is in src/bootstrap/services.mjs (event-health-alert).',
+  onJob: async () => {
+    if (!eventsAnalyticsOn()) return;
+    const r = await opsService.runJob('event-health-alert');
+    const s = r?.stats ?? {};
+    if (s.firing) console.log(`[events] health alerts: firing=${s.firing} sent=${s.sent} skipped=${s.skipped}`);
+  }
+};
+
+export const eventKitOfflinePurge = {
+  created, rule: '30 23 * * *', // every day 23:30 UTC
+  description: 'Events (S7): mark offline desks past their expiry as expired, remove desks of staff who left the organizer, delete offline scan records older than EVENTS_OFFLINE_SCAN_KEEP_DAYS. Does nothing unless EVENTS_KIT_OFFLINE is on. Idempotent. The work is in src/bootstrap/services.mjs (event-kit-offline-purge).',
+  onJob: async () => {
+    if (!eventsKitOfflineOn()) return;
+    const r = await opsService.runJob('event-kit-offline-purge');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] offline purge: expired=${s.expired} revoked=${s.revoked} scans=${s.scans} devices=${s.devices}`);
+  }
+};
+
+export const eventWaitlistPromote = {
+  created, rule: '* * * * *', // every minute
+  description: 'Events (S7): reconcile waitlist offers and offer freed places to the head of each line (a normal order for the member; quiet hours 21:00 to 07:00 event time). Does nothing unless EVENTS_WAITLIST is on. Safe to overlap (advisory lock per ticket type, one order per entry by idempotency key). The work is in src/bootstrap/services.mjs (event-waitlist-promote).',
+  onJob: async () => {
+    if (!eventsWaitlistOn()) return;
+    const r = await opsService.runJob('event-waitlist-promote');
+    const s = r?.stats ?? {};
+    if (s.offered || s.closed) console.log(`[events] waitlist: offered=${s.offered} closed=${s.closed} skippedEntries=${s.skippedEntries}`);
+  }
+};
+
+export const eventWaitlistPurge = {
+  created, rule: '15 23 * * *', // every day 23:15 UTC
+  description: 'Events (S7): clear stored registration details of ended waitlist entries after 24 hours and delete old ended entries. Does nothing unless EVENTS_WAITLIST is on. Idempotent. The work is in src/bootstrap/services.mjs (event-waitlist-purge).',
+  onJob: async () => {
+    if (!eventsWaitlistOn()) return;
+    const r = await opsService.runJob('event-waitlist-purge');
+    const s = r?.stats ?? {};
+    if (s.processed) console.log(`[events] waitlist purge: cleared=${s.cleared} deleted=${s.deleted}`);
+  }
+};
+
+export const eventOrganizerStatusSweep = {
+  created, rule: '25 * * * *', // hourly at :25
+  description: 'Events (S7): re-derive every event organizer\'s status from its KYC case and audit each correction. Does nothing unless EVENTS_MODULE is on. Idempotent. The work is in src/bootstrap/services.mjs (event-organizer-status-sweep).',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-organizer-status-sweep');
+    const s = r?.stats ?? {};
+    if (s.corrected) console.log(`[events] organizer status sweep: checked=${s.checked} corrected=${s.corrected}`);
+  }
+};
+
+export const eventRegistrationAnonymise = {
+  created, rule: '10 1 * * *', // every day 01:10 UTC
+  description: 'Events (S7): clear contact and sensitive fields of registrations older than EVENTS_RETENTION_MONTHS (keeps first name, last initial, bib and results). Ships UNSET: with EVENTS_RETENTION_MONTHS and EVENTS_DELETED_USER_ANONYMISE_DAYS unset it does nothing. Idempotent. The work is in src/bootstrap/services.mjs (event-registration-anonymise).',
+  onJob: async () => {
+    if (!eventsModuleOn()) return;
+    const r = await opsService.runJob('event-registration-anonymise');
+    const s = r?.stats ?? {};
+    if (s.rows) console.log(`[events] anonymised: events=${s.events} rows=${s.rows}`);
+  }
+};
+
+export const vendorImportRetention = {
+  created, rule: '50 21 * * *', // every day 21:50 UTC = 00:50 EAT
+  description: 'Vendor smart import retention: (1) discard open batches nobody finished (mapping_required or ready, nothing tried, untouched for 30 days), (2) clear every typed cell (raw, checked values, issue params) of ended batches (applied, partial, discarded) 30 days after they ended — counts and codes stay as history, errors.csv then has codes but empty values, (3) reset batches stuck in applying for 30 days to a safe state. Runs even when VENDOR_IMPORT is later switched off (lingering data is worse than a cleanup); does nothing when there is nothing to do or the tables are absent. Idempotent, safe to overlap.',
+  onJob: async () => {
+    try {
+      const r = await vendorImportService.retention();
+      if (r.discarded || r.cleared || r.reset) console.log(`[vendor-import] retention: discarded=${r.discarded} cleared=${r.cleared} reset=${r.reset}`);
+    } catch (error) {
+      if (error?.code === '42P01') return; // tables not there (migration not run): nothing to clean
+      throw error;
+    }
+  }
 };

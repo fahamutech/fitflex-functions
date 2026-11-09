@@ -35,7 +35,7 @@ async function place(f, b, n = 1) {
   const participants = Array.from({ length: n }, (_, i) => (i === 0
     ? { ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: b.phone, consentBasis: 'self' }
     : { ticketTypeId: f.ticket.id, firstName: 'Zawadi', lastName: 'Mollel', phone: phone(), consentBasis: 'purchaser_authorised' }));
-  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: n }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants };
+  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: n }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants };
   const q = await call(quoteEventOrder, b.claims, { body });
   const r = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } });
   assert.equal(r.status, 201, JSON.stringify(r.body));
@@ -269,7 +269,7 @@ test('ruling (b): an organisation refund reaches only a coordinator who still ho
   const org = await h.organization();
   const finance = await org.member('finance');
   const owner = await org.member('owner');
-  const body = { eventId: f.event.id, rows: [{ firstName: 'Asha', lastName: 'Mollel', phone: phone(), category: '10K' }], acceptedTerms: true, consentTextVersion: '2026-10-draft', expectedTotalTzs: 20000 };
+  const body = { eventId: f.event.id, rows: [{ firstName: 'Asha', lastName: 'Mollel', phone: phone(), category: '10K' }], acceptedTerms: true, consentTextVersion: '2026-11-draft', expectedTotalTzs: 20000 };
   const placed = await call(createB2BEventOrder, finance, { params: { id: org.id }, headers: { 'Idempotency-Key': key() }, body });
   assert.equal(placed.status, 201, JSON.stringify(placed.body));
   const orderId = placed.body.order.id;
@@ -460,7 +460,7 @@ test('Swahili: an unfulfilled payment says "Malipo yatarejeshwa"; the cancelled-
   const g = await eventWith(POLICY.until_close);
   const buyer = await member();
   const participants = [{ ticketTypeId: g.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: buyer.phone, consentBasis: 'self' }, { ticketTypeId: g.ticket.id, firstName: 'Zawadi', lastName: 'Mollel', phone: phone(), email: 'zawadi@example.test', consentBasis: 'purchaser_authorised' }];
-  const body = { eventId: g.event.id, lines: [{ ticketTypeId: g.ticket.id, quantity: 2 }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants };
+  const body = { eventId: g.event.id, lines: [{ ticketTypeId: g.ticket.id, quantity: 2 }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants };
   const q = await call(quoteEventOrder, buyer.claims, { body });
   const ord = (await call(createEventOrder, buyer.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
   const rq = await submit(buyer, ord.order.id);
@@ -480,7 +480,7 @@ test('(4) a corporate order shows next.payment "none" while the launch gate is c
   const f = await eventWith(POLICY.until_close);
   const org = await h.organization();
   const finance = await org.member('finance');
-  const body = { eventId: f.event.id, rows: [{ firstName: 'Asha', lastName: 'Mollel', phone: phone(), category: '10K' }], acceptedTerms: true, consentTextVersion: '2026-10-draft', expectedTotalTzs: 20000 };
+  const body = { eventId: f.event.id, rows: [{ firstName: 'Asha', lastName: 'Mollel', phone: phone(), category: '10K' }], acceptedTerms: true, consentTextVersion: '2026-11-draft', expectedTotalTzs: 20000 };
   const placed = await call(createB2BEventOrder, finance, { params: { id: org.id }, headers: { 'Idempotency-Key': key() }, body });
   assert.equal(placed.body.next.payment, 'manual');
   delete process.env.EVENTS_ALLOW_SINGLE_APPROVER;

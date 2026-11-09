@@ -2,7 +2,7 @@
 // check-in (DR-14). Every change is audited in AuditLog; a void keeps who,
 // when and why on the check-in itself, forever. Check-ins are never deleted.
 import { randomUUID } from 'node:crypto';
-import { CHECKIN_STATUS, STATUS_AUDIT_ACTION, checkStatusChange, currentStatus } from '../shared/checkin-status.mjs';
+import { CHECKIN_STATUS, STATUS_AUDIT_ACTION, checkStatusChange, currentStatus, publicCheckin } from '../shared/checkin-status.mjs';
 
 export function createCheckinStatusService({ checkins, auditLog, onVoided = null }) {
   /**
@@ -35,7 +35,7 @@ export function createCheckinStatusService({ checkins, auditLog, onVoided = null
         console.warn('[check-in] onVoided failed:', err?.message);
       }
     }
-    return { checkin: updated };
+    return { checkin: publicCheckin(updated) };
   }
 
   return { setStatus };

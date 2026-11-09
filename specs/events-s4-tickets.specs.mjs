@@ -26,7 +26,7 @@ async function paidOrder() {
   const b = await member();
   const friendPhone = phone();
   const body = {
-    eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 2 }], acceptedTerms: true, consentTextVersion: '2026-10-draft',
+    eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 2 }], acceptedTerms: true, consentTextVersion: '2026-11-draft',
     participants: [
       { ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: b.phone, consentBasis: 'self' },
       { ticketTypeId: f.ticket.id, firstName: 'Zawadi', lastName: 'Mollel', phone: friendPhone, consentBasis: 'purchaser_authorised' },
@@ -153,7 +153,7 @@ test('a reserved (unpaid) place has no ticket; integrity: a ticket whose stored 
   s4On();
   const f = await h.sellingEvent({});
   const u = await member();
-  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-10-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: u.phone, consentBasis: 'self' }] };
+  const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: u.phone, consentBasis: 'self' }] };
   const q = await call(quoteEventOrder, u.claims, { body });
   const o = await call(createEventOrder, u.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } });
   const none = await call(getEventTicket, u.claims, { params: { id: o.body.registrations[0].id } });

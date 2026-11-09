@@ -20,9 +20,10 @@ function res() {
     json(b) { this.body = b; return this; },
   };
 }
+const runOctet = Math.floor(Math.random() * 200) + 20; // per run: AuthAttempt rows outlive the run
 let addressCounter = 0;
 /** Each test signs in from its own address unless it says otherwise. */
-const freshAddress = () => `10.7.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
+const freshAddress = () => `10.${runOctet}.${Math.floor(addressCounter / 250)}.${(addressCounter++ % 250) + 1}`;
 async function post(route, body, ip = freshAddress()) {
   const out = res();
   await route.onRequest({ body, headers: { 'x-forwarded-for': ip } }, out);
@@ -182,7 +183,8 @@ test('guessing is limited per identifier and per network address', async () => {
     assert.equal(limited.body.error, 'too_many_attempts');
   }, { PIN_FAILURES_PER_IDENTIFIER: '3' });
   await on(async () => {
-    const ip = '203.0.113.77';
+    // A fresh address per run: failures are stored in AuthAttempt and outlive the run.
+    const ip = `198.18.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
     for (let i = 0; i < 3; i += 1) assert.equal((await post(pinLogin, { phone: localPhone(), pin: '0000' }, ip)).statusCode, 401);
     const p = await personWithPin();
     assert.equal((await post(pinLogin, { phone: p.local, pin: p.pin }, ip)).statusCode, 429, 'one address cannot try many accounts');

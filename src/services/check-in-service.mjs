@@ -2,7 +2,7 @@
 // Pure DI: receives repos via constructor.
 
 import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry, fundedBySubscription, visitNeedsVerifiedGym } from '../shared/check-in-rules.mjs';
-import { CHECKIN_STATUS, sourceForMethod, isDuplicateVisit } from '../shared/checkin-status.mjs';
+import { CHECKIN_STATUS, sourceForMethod, isDuplicateVisit, isDuplicateIntent } from '../shared/checkin-status.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -55,6 +55,28 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
   }
 
   /**
+   * Web check-in metadata (S2) as columns: only the three known keys, only when given, so rows from the
+   * other methods are unchanged. clientMeta is whatever the caller already reduced to non-identifying fields.
+   */
+  const metaColumns = (meta) => (meta && typeof meta === 'object'
+    ? Object.fromEntries(['intentId', 'authSessionId', 'clientMeta'].filter(k => meta[k] != null).map(k => [k, meta[k]]))
+    : {});
+
+  /** The visit an earlier confirm of the same intent recorded, as an idempotent success. */
+  async function visitForIntent(intentId) {
+    if (!intentId) return null;
+    const existing = await checkins.findAsync(c => c.intentId === intentId && c.status !== CHECKIN_STATUS.VOIDED);
+    return existing ? { ok: true, checkin: existing, visitNumberInCycle: existing.visitNumberInCycle, idempotent: true } : null;
+  }
+
+  /** An insert that lost a race: the same member's visit at this gym today, or the same intent's visit. */
+  async function lostRace(err, { memberId, gymId, now, meta }) {
+    if (isDuplicateIntent(err)) return visitForIntent(meta?.intentId);
+    if (isDuplicateVisit(err)) return visitAlreadyRecorded(memberId, gymId, now);
+    return null;
+  }
+
+  /**
    * Check in on a B2B benefit: reserve the allowance, record the visit, then
    * confirm. Returns null when no benefit covers the visit. The member's own
    * pass is not consulted and no pass visit is used.
@@ -64,7 +86,7 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
    * whose visit exists is approved, here or by the reconciler
    * (b2bFunding.reconcileHolds) a few minutes later.
    */
-  async function performWithBenefit({ memberId, gym, method, now }) {
+  async function performWithBenefit({ memberId, gym, method, now, meta }) {
     const checkinId = randomUUID();
     let hold = null;
     try {
@@ -90,17 +112,20 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
       status: CHECKIN_STATUS.VALID,
       subscriptionId: null,
       businessDate: localDay(now),
-      source: sourceForMethod(method)
+      source: sourceForMethod(method),
+      ...metaColumns(meta)
     };
     try {
       await checkins.insertAsync(row);
     } catch (err) {
-      const duplicate = isDuplicateVisit(err);
+      const duplicate = isDuplicateVisit(err) || isDuplicateIntent(err);
       await b2bFunding.cancel({ consumptionId: hold.consumption.id, reason: duplicate ? 'duplicate_scan' : 'checkin_not_recorded' })
         .catch(e => console.warn('[check-in] could not release a B2B hold (the reconciler will):', e?.message));
       // Another scan recorded this visit a moment ago: one visit, one charge.
-      const existing = duplicate ? await visitAlreadyRecorded(memberId, gym.id, now) : null;
+      const existing = duplicate ? await lostRace(err, { memberId, gymId: gym.id, now, meta }) : null;
       if (existing) return existing;
+      // The intent's earlier visit was voided since: final, this intent cannot make another.
+      if (isDuplicateIntent(err)) return { ok: false, failure: 'intent_used' };
       throw err;
     }
     recorded(row);
@@ -129,76 +154,97 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
     };
   }
 
+  /**
+   * Everything perform() and probe() decide before the sponsor step, read-only. `done` carries a final answer
+   * (member/gym missing, a repeat visit today, a gym not yet verified); otherwise the facts validation needs.
+   */
+  async function assess({ memberId, gymId, now }) {
+    const member = await users.findByIdAsync(memberId);
+    if (!member) return { done: true, result: { ok: false, failure: 'member_not_found' } };
+    const gym = gyms.find(g => g.id === gymId);
+    if (!gym) return { done: true, result: { ok: false, failure: 'gym_not_found' } };
+
+    const subs = await subscriptions.filterAsync(s => s.memberId === memberId);
+    const sub  = pickSubscriptionForGym(
+      subs.filter(s => ['active', 'expired', 'suspended'].includes(s.status)),
+      gym,
+    );
+
+    const cycleUsage = { visitsUsedInCycle: await visitsUsedInCycle(memberId, sub) };
+    const todays = await todaysCheckins(memberId, now);
+
+    // Idempotency: re-entering the SAME gym on the same EAT day returns the
+    // existing record. A different gym still goes through validation, so
+    // Basic's one-gym-per-day rule applies and that gym gets its own
+    // check-in row (its payout depends on it). A second gym the same day
+    // consumes a second visit (classifyVisit), so it needs one left.
+    const existingToday = todays.find(c => c.gymId === gymId);
+    if (existingToday) {
+      return { done: true, result: {
+        ok: true,
+        checkin: existingToday,
+        visitNumberInCycle: existingToday.visitNumberInCycle,
+        idempotent: true
+      } };
+    }
+
+    const homeTrainer = isHomeGymTrainer(memberId, gymId);
+
+    // Until the gym's owner is verified, only the gym's own people get in:
+    // its direct members and its home trainers. FitFlex Pass members, and
+    // visits a sponsor would pay for through FitFlex, wait for verification.
+    // (Same rule as the scanner preview: visitNeedsVerifiedGym.)
+    if (gymOpenToPass && visitNeedsVerifiedGym({ subscription: sub, gym, homeTrainer }) && !(await gymOpenToPass(gymId))) {
+      return { done: true, result: { ok: false, failure: 'gym_not_verified' } };
+    }
+    return { done: false, gym, sub, homeTrainer, cycleUsage, todays };
+  }
+
+  /** The member's own entitlement (home trainer, or pass + gym + cap + hours) for this visit. */
+  function validateOwn({ gym, sub, homeTrainer, todays, cycleUsage, now }) {
+    return homeTrainer
+      ? validateTrainerHomeEntry({ gym, now })
+      : validateCheckIn({
+        subscription: sub,
+        gym,
+        // Only this subscription's visits today: a company-funded visit or a
+        // visit on another membership earlier in the day doesn't make this
+        // one a "second gym".
+        todaysCheckins: todays.filter(fundedBySubscription(sub)),
+        cycleUsage,
+        now,
+        tierConfig: getTierConfig?.(sub?.tier),
+      });
+  }
+
   return {
     homeGymIds,
     isHomeGymTrainer,
 
     /**
      * Perform a check-in for memberId at gymId, scanned by operator.
+     * `meta` ({ intentId, authSessionId, clientMeta }) is the browser check-in's record of how it happened.
      * @returns { ok, failure?, checkin?, visitNumberInCycle? }
      */
-    async perform({ memberId, gymId, method = 'gym_scanned', now = new Date() }) {
-      const member = await users.findByIdAsync(memberId);
-      if (!member) return { ok: false, failure: 'member_not_found' };
-      const gym = gyms.find(g => g.id === gymId);
-      if (!gym) return { ok: false, failure: 'gym_not_found' };
+    async perform({ memberId, gymId, method = 'gym_scanned', now = new Date(), meta = null }) {
+      const a = await assess({ memberId, gymId, now });
+      if (a.done) return a.result;
+      const { gym, sub, homeTrainer, cycleUsage, todays } = a;
 
-      const subs = await subscriptions.filterAsync(s => s.memberId === memberId);
-      const sub  = pickSubscriptionForGym(
-        subs.filter(s => ['active', 'expired', 'suspended'].includes(s.status)),
-        gym,
-      );
-
-      const cycleUsage = { visitsUsedInCycle: await visitsUsedInCycle(memberId, sub) };
-      const todays = await todaysCheckins(memberId, now);
-
-      // Idempotency: re-entering the SAME gym on the same EAT day returns the
-      // existing record. A different gym still goes through validation, so
-      // Basic's one-gym-per-day rule applies and that gym gets its own
-      // check-in row (its payout depends on it). A second gym the same day
-      // consumes a second visit (classifyVisit), so it needs one left.
-      const existingToday = todays.find(c => c.gymId === gymId);
-      if (existingToday) {
-        return {
-          ok: true,
-          checkin: existingToday,
-          visitNumberInCycle: existingToday.visitNumberInCycle,
-          idempotent: true
-        };
-      }
-
-      const homeTrainer = isHomeGymTrainer(memberId, gymId);
-
-      // Until the gym's owner is verified, only the gym's own people get in:
-      // its direct members and its home trainers. FitFlex Pass members, and
-      // visits a sponsor would pay for through FitFlex, wait for verification.
-      // (Same rule as the scanner preview: visitNeedsVerifiedGym.)
-      if (gymOpenToPass && visitNeedsVerifiedGym({ subscription: sub, gym, homeTrainer }) && !(await gymOpenToPass(gymId))) {
-        return { ok: false, failure: 'gym_not_verified' };
-      }
+      // The same intent already recorded its visit (a replayed confirm): idempotent, nothing new.
+      const replay = await visitForIntent(meta?.intentId);
+      if (replay) return replay;
 
       // A sponsor's B2B benefit pays for the visit before the member's own
       // pass is touched. When none applies (no benefit, wrong gym, allowance
       // used up, anything going wrong) the normal validation below decides,
       // exactly as it always has.
       if (b2bFunding && !homeTrainer && validateTrainerHomeEntry({ gym, now }).ok) {
-        const funded = await performWithBenefit({ memberId, gym, method, now });
+        const funded = await performWithBenefit({ memberId, gym, method, now, meta });
         if (funded) return funded;
       }
 
-      const result = homeTrainer
-        ? validateTrainerHomeEntry({ gym, now })
-        : validateCheckIn({
-          subscription: sub,
-          gym,
-          // Only this subscription's visits today: a company-funded visit or a
-          // visit on another membership earlier in the day doesn't make this
-          // one a "second gym".
-          todaysCheckins: todays.filter(fundedBySubscription(sub)),
-          cycleUsage,
-          now,
-          tierConfig: getTierConfig?.(sub?.tier),
-        });
+      const result = validateOwn({ gym, sub, homeTrainer, todays, cycleUsage, now });
       if (!result.ok) return result;
 
       // Log check-in (all 8 BL-015 fields)
@@ -223,18 +269,42 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         status: CHECKIN_STATUS.VALID,
         subscriptionId: homeTrainer ? null : (sub.id ?? null),
         businessDate: localDay(now),
-        source: sourceForMethod(method)
+        source: sourceForMethod(method),
+        ...metaColumns(meta)
       };
       try {
         await checkins.insertAsync(row);
       } catch (err) {
         // Another scan recorded this visit a moment ago: return that one.
-        const existing = isDuplicateVisit(err) ? await visitAlreadyRecorded(memberId, gymId, now) : null;
+        const existing = await lostRace(err, { memberId, gymId, now, meta });
         if (existing) return existing;
+        // The intent's visit exists but was voided since: a voided visit is final, this intent cannot make another.
+        if (isDuplicateIntent(err)) return { ok: false, failure: 'intent_used' };
         throw err;
       }
       recorded(row);
       return { ok: true, checkin: row, visitNumberInCycle: row.visitNumberInCycle };
+    },
+
+    /**
+     * Read-only eligibility probe for the browser preview: the same decisions perform() makes, with no write,
+     * no B2B hold and no visit consumed. → { ok: false, failure } | { ok: true, alreadyCheckedIn, funding, visitsLeft }
+     * (`visitsLeft` is null when the visit is not counted against a cap).
+     */
+    async probe({ memberId, gymId, now = new Date() }) {
+      const a = await assess({ memberId, gymId, now });
+      if (a.done) return a.result.ok ? { ok: true, alreadyCheckedIn: true, funding: 'existing', visitsLeft: null } : a.result;
+      const { gym, sub, homeTrainer, cycleUsage, todays } = a;
+      if (b2bFunding && !homeTrainer && validateTrainerHomeEntry({ gym, now }).ok) {
+        let covered = false;
+        try { covered = !!(await b2bFunding.wouldCoverGymVisit({ memberId, gym })); } catch { covered = false; }
+        if (covered) return { ok: true, alreadyCheckedIn: false, funding: 'sponsor_benefit', visitsLeft: null };
+      }
+      const result = validateOwn({ gym, sub, homeTrainer, todays, cycleUsage, now });
+      if (!result.ok) return result;
+      const cap = homeTrainer ? null : getTierConfig?.(sub?.tier)?.visitCap;
+      const visitsLeft = result.visitConsumed && Number.isFinite(cap) ? Math.max(0, cap - cycleUsage.visitsUsedInCycle) : null;
+      return { ok: true, alreadyCheckedIn: false, funding: homeTrainer ? 'trainer_home' : 'pass', visitsLeft };
     }
   };
 }

@@ -5,7 +5,7 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { requireGymOwner, effectiveOperator } from '../src/auth/org-authz.mjs';
-import { identityFlag } from '../src/shared/feature-flags.mjs';
+import { identityFlag, staffPinChangeRequiredOn } from '../src/shared/feature-flags.mjs';
 import { ownerStaffService, resolveRequestUser } from '../src/bootstrap/services.mjs';
 
 const created = new Date().toISOString();
@@ -62,5 +62,22 @@ export const ownerRemoveStaff = {
     const result = await ownerStaffService.remove({ ownerGymIds: ownerGymIdsOf(owner), staffId: req.params.id, actorId: req.user?.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json({ ok: true });
+  }
+};
+
+export const ownerResetStaffPin = {
+  created, method: 'post', path: '/owner/staff/:id/pin',
+  description: 'Owner: give a gym staff member a new start PIN (they forgot theirs). Body { pin } (exactly 4 digits). Signs the staff member out everywhere; at their next sign-in they must choose their own PIN (POST /auth/pin/change) before anything else. Returns the staff row with passwordChangeRequired: true. 400 pin_must_be_4_digits; 403 staff_not_at_your_gym; 404 staff_not_found; 409 staff_identity_shared (the staff profile signs in with the person\u2019s own account, e.g. joined by invitation: they use Forgot PIN instead); 502 firebase_update_failed (the staff member is signed out and still held, the old PIN unchanged). 404 feature_disabled while STAFF_PIN_CHANGE_REQUIRED is off; 400 credentials_not_accepted while invitations (V2_INVITES) are on.',
+  requestSample: { pin: '4821' },
+  onGuard: [requireAuth('gym_operator'), requireGymOwner('POST /owner/staff/:id/pin')],
+  onRequest: async (req, res) => {
+    if (!staffPinChangeRequiredOn()) return res.status(404).json({ error: 'feature_disabled' });
+    // With invitations on, an organisation no longer sets a person's credentials (as create).
+    if (identityFlag('V2_INVITES')) return res.status(400).json(CREDENTIALS_NOT_ACCEPTED);
+    const owner = effectiveOperator(req, await resolveRequestUser(req));
+    if (!owner) return res.status(404).json({ error: 'user_not_found' });
+    const result = await ownerStaffService.resetPin({ ownerGymIds: ownerGymIdsOf(owner), staffId: req.params.id, body: req.body || {}, actorId: req.user?.sub });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result.staff);
   }
 };

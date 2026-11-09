@@ -32,7 +32,8 @@ import {
   eventManualHoldExtendHours, eventManualHoldMaxHours, eventsOrgHoldMaxHours, eventsProviderHoldExtendMinutes, eventsRejectedRetryMinutes,
   eventsLatePaymentGraceHours, eventsManualConfirmSlaHours, eventTicketKeyRing,
 } from '../shared/events-config.mjs';
-import { eventsApproverGateOpen } from '../shared/feature-flags.mjs';
+import { eventsApproverGateOpen, eventsKitOpsOn } from '../shared/feature-flags.mjs';
+import { kitStateOf, scanningOf, participantKitState } from '../shared/events-kit-view.mjs';
 import { ORG_BILLING_ROLES } from './events-roster-service.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -101,7 +102,7 @@ export function createEventsPaymentService({
       payment,
       ...(payment === 'manual' ? { manualConfirmHours: eventsManualConfirmSlaHours() } : {}),
       hold: { manualExtendHours: eventManualHoldExtendHours(), manualMaxHours: eventManualHoldMaxHours(), providerExtendMinutes: eventsProviderHoldExtendMinutes(), lateGraceHours: eventsLatePaymentGraceHours() },
-      tickets: { qr: true, scanning: false },
+      tickets: { qr: true, scanning: eventsKitOpsOn() },
     };
   }
 
@@ -911,7 +912,7 @@ export function createEventsPaymentService({
         registrationId: r.id, ticketId: t.id, displayCode: t.displayCode ?? null, state: t.status === 'active' ? 'active' : 'revoked',
         event: R().summaryOf(j), category: c ? { name: c.name, distanceM: Number(c.distanceMeters), startsAt: iso(c.startTime) } : null, ticketType: tt ? { name: tt.name } : null,
         participant: { firstName: r.firstName, lastName: r.lastName }, relation: relationOf(r, userId), orderReference: orders.get(r.orderId) ?? null, issuedAt: iso(t.issuedAt),
-        kit: { state: r.kitStatus === 'exception' ? 'not_ready' : r.kitStatus },
+        ...(eventsKitOpsOn() ? { kit: { state: participantKitState(kitStateOf({ reg: r, hasActiveTicket: t.status === 'active', event: j.event })) }, bibNumber: r.bibNumber ?? null } : { kit: { state: r.kitStatus === 'exception' ? 'not_ready' : r.kitStatus } }),
       });
     }
     // Soonest event first; revoked after; past last.
@@ -920,6 +921,25 @@ export function createEventsPaymentService({
     items.sort((a, b) => rank(a) - rank(b) || String(a.event?.startsAt ?? '').localeCompare(String(b.event?.startsAt ?? '')) || a.registrationId.localeCompare(b.registrationId));
     const page = paginate(items, pageOpts(query));
     return { items: page.items, nextCursor: page.nextCursor === null ? null : String(page.nextCursor) };
+  }
+
+  /**
+   * S5 (spec §4.6): what the ticket page says about the kit. EVENTS_KIT_OPS off → exactly the S4 answer (scanning false, the stored state).
+   * On → `scanning` true while the event hands out a kit and is open, the COMPUTED state, the bib, where and when to collect.
+   */
+  async function kitFields(reg, ticket, j) {
+    if (!eventsKitOpsOn()) return { scanning: false, kit: { state: reg.kitStatus === 'exception' ? 'not_ready' : reg.kitStatus } };
+    const kit = { state: participantKitState(kitStateOf({ reg, hasActiveTicket: ticket.status === 'active', event: j.event })) };
+    if (reg.kitStatus === 'collected') {
+      const k = plain(await db('EventKitCollection').where({ registrationId: reg.id, status: 'collected' }).first('collectedAt', 'collectionPointId'));
+      const point = k?.collectionPointId ? plain(await db('EventCollectionPoint').where({ id: k.collectionPointId }).first('name')) : null;
+      if (k) { kit.collectedAt = iso(k.collectedAt); kit.collectionPointName = point?.name ?? null; }
+    }
+    const points = (j.collectionPoints ?? []).filter(p => (p.status ?? 'active') === 'active').map(p => ({
+      id: p.id, name: p.name, address: p.address ?? null, lat: p.lat == null ? null : Number(p.lat), lng: p.lng == null ? null : Number(p.lng),
+      windows: Array.isArray(p.openingWindows) ? p.openingWindows : [], instructions: { en: p.instructions?.en ?? null, sw: p.instructions?.sw ?? null },
+    }));
+    return { scanning: scanningOf(j.event, true), kit, bibNumber: reg.bibNumber ?? null, collectionPoints: points };
   }
 
   async function ticketBody(reg, ticket, userId) {
@@ -940,8 +960,8 @@ export function createEventsPaymentService({
       ticket: { id: ticket.id, displayCode: ticket.displayCode ?? displayCodeOf(ticket.id, reg.id), state: 'active', issuedAt: iso(ticket.issuedAt), rotatedAt: iso(ticket.rotatedAt) },
       token, qrPayload: qrPayloadOf(token), event: R().summaryOf(j), ticketType: names.tickets.get(reg.ticketTypeId) ? { id: reg.ticketTypeId, name: names.tickets.get(reg.ticketTypeId).name } : null,
       category: c ? { id: c.id, name: c.name, distanceM: Number(c.distanceMeters), startsAt: iso(c.startTime) } : null,
-      participant: { firstName: reg.firstName, lastName: reg.lastName }, relation: relationOf(reg, userId), scanning: false,
-      kit: { state: reg.kitStatus === 'exception' ? 'not_ready' : reg.kitStatus },
+      participant: { firstName: reg.firstName, lastName: reg.lastName }, relation: relationOf(reg, userId),
+      ...(await kitFields(reg, ticket, j)),
     };
   }
 
@@ -1070,7 +1090,7 @@ export function createEventsPaymentService({
     const types = (await db('EventTicketType as t').where('t.eventId', eventId).orderBy('t.id').select('t.id', 't.name', 't.sold')).map(plain);
     const gross = new Map((await db('EventRegistration').where({ eventId }).whereNotNull('paidAt').groupBy('ticketTypeId').select('ticketTypeId').sum({ gross: 'paidAmountTzs' })).map(r => [r.ticketTypeId, Number(r.gross)]));
     const out = {
-      eventId, currency: 'TZS', asOf: nowIso(), paidTzs, refundedTzs: refunded, refundPendingTzs: pending, awaitingPaymentTzs: awaiting,
+      eventId, currency: 'TZS', asOf: nowIso(), payoutSchedule: event.payoutSchedule ?? null, paidTzs, refundedTzs: refunded, refundPendingTzs: pending, awaitingPaymentTzs: awaiting,
       commissionPct: organizer?.commissionPct ?? null, commissionTzs, expectedNetTzs: paidTzs - refunded - pending - commissionTzs,
       orders: { paid: paidOrders, refunded: refundedOrders, partlyRefunded: partly },
       byTicketType: types.map(t => ({ ticketTypeId: t.id, name: t.name, sold: Number(t.sold), grossTzs: gross.get(t.id) ?? 0 })),

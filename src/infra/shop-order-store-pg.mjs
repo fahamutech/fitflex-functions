@@ -7,6 +7,7 @@
 // The service never sees knex; it talks to the port described in
 // src/services/shop-order-store-memory.mjs (which is also the contract).
 import { randomUUID } from 'node:crypto';
+import { standingPrice } from '../shared/shop-pricing.mjs';
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
@@ -16,11 +17,13 @@ const json = (value) => (value === undefined || value === null || typeof value =
 const at = (value) => (value ? new Date(value) : null);
 
 const ORDER_JSON = ['items', 'timeline', 'fulfilments'];
-const ORDER_DATES = ['createdAt', 'updatedAt', 'reservationExpiresAt'];
+const ORDER_DATES = ['createdAt', 'updatedAt', 'reservationExpiresAt', 'paidAt'];
 const ORDER_COLUMNS = new Set([
   'id', 'buyerId', 'buyerRole', 'items', 'totalTzs', 'status', 'deliveryMethod', 'pickupGymId', 'deliveryAddress',
   'paymentMethod', 'paymentStatus', 'paymentReference', 'timeline', 'settlementStatus', 'note', 'createdAt', 'updatedAt',
   'idempotencyKey', 'idempotencyFingerprint', 'stockState', 'reservationExpiresAt', 'reservationCycle', 'fulfilments',
+  // S6: when the payment was confirmed (vendor reports date app sales by it; settlement never reads it).
+  'paidAt',
 ]);
 const PAYMENT_COLUMNS = new Set([
   'id', 'memberId', 'orderId', 'amountTzs', 'currency', 'status', 'provider', 'reference', 'requestedAt', 'decidedAt', 'decidedBy', 'note',
@@ -120,6 +123,29 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
 
 
   /**
+   * PRICING PATH (flash sales). For each line priced with checkSale, the sale that applies now must be the
+   * one it was priced with (flashSaleId, or none): the window may have closed, a sale may have started,
+   * or staff may have ended it between pricing and this lock → price_changed (nothing reserved). The rows
+   * are read FOR SHARE, so ending or editing a sale waits for this order to commit. A live sale applies
+   * only when below the line's standing price (the price and discount are checked unchanged by reserveLine).
+   */
+  async function recheckSales(trx, lines, atTime) {
+    const checked = lines.filter(l => l.checkSale);
+    if (!checked.length) return;
+    const ids = [...new Set(checked.map(l => l.productId))].sort();
+    const live = await trx('FlashSale').whereIn('productId', ids).where({ status: 'approved' })
+      .where('startsAt', '<=', atTime).where('endsAt', '>', atTime).orderBy('id').forShare();
+    // L1: products an admin took off the shop (homepageVisible false) never get a sale price (shop-pricing.saleLiveFor).
+    const offShop = new Set((await trx('Product').whereIn('id', ids).where({ homepageVisible: false }).select('id')).map(r => r.id));
+    for (const line of [...checked].sort(byLine)) {
+      const standing = standingPrice(line);
+      const applies = live.filter(r => r.productId === line.productId && !offShop.has(line.productId) && Number(r.salePriceTzs) > 0 && Number(r.salePriceTzs) < standing)
+        .sort((a, b) => Number(a.salePriceTzs) - Number(b.salePriceTzs))[0] || null;
+      if ((applies?.id ?? null) !== (line.flashSaleId ?? null)) throw shopError('price_changed', 409, line.productId);
+    }
+  }
+
+  /**
    * Reserve stock, create the order and its payment request — all or nothing.
    * lines: [{ productId, variant?, variantTracked?, qty, priceTzs, discountPriceTzs }] — the prices the order
    * was priced at; if the product's price moved in between, nothing is reserved and the buyer is asked to retry.
@@ -132,6 +158,9 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     const atTime = now();
     try {
       return await db.transaction(async (trx) => {
+        // Flash sales (SHOP_FLASH_SALES on: lines carry checkSale): re-read the live sales under a share
+        // lock, by this server's clock, before any stock moves.
+        await recheckSales(trx, lines, atTime);
         // Always in the same order, so two checkouts never wait on each other in a circle.
         for (const line of [...lines].sort(byLine)) {
           const taken = await reserveLine(trx, line, { requirePrice: true, atTime });
@@ -241,12 +270,16 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
     });
   }
 
-  /** The payment was confirmed. Only an order that is not cancelled and not already paid becomes paid. */
+  /**
+   * The payment was confirmed. Only an order that is not cancelled and not already paid becomes paid.
+   * S6: paidAt records when (vendor reports date app sales by it).
+   */
   async function markPaid(orderId, { patch = {} } = {}) {
+    const atTime = now();
     const rows = await db('ShopOrder')
       .where({ id: orderId }).whereNot({ status: 'cancelled' })
       .where((q) => q.whereNull('paymentStatus').orWhereNot('paymentStatus', 'paid'))
-      .update(orderRow({ ...patch, paymentStatus: 'paid', reservationExpiresAt: null, updatedAt: now() }))
+      .update(orderRow({ ...patch, paymentStatus: 'paid', reservationExpiresAt: null, paidAt: atTime, updatedAt: atTime }))
       .returning('*');
     if (rows.length) return { outcome: 'paid', order: out(rows[0]) };
     const order = out(await db('ShopOrder').where({ id: orderId }).first());
@@ -277,7 +310,7 @@ export function createPgShopOrderStore({ db, now = () => new Date() }) {
           await trx('ShopStockMovement').insert(ledgerRow(orderId, line, 'reserve', cycle, -line.qty, atTime, taken.stock, taken.vendorId));
         }
         await trx('ShopOrder').where({ id: orderId }).update(orderRow({
-          ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved', reservationCycle: cycle, reservationExpiresAt: null, updatedAt: atTime,
+          ...applied, status: 'pending', paymentStatus: 'paid', stockState: 'reserved', reservationCycle: cycle, reservationExpiresAt: null, paidAt: atTime, updatedAt: atTime,
         }));
         return { revived: true, order: out(await trx('ShopOrder').where({ id: orderId }).first()) };
       });

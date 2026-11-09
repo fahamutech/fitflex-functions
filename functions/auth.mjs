@@ -1,6 +1,7 @@
 // Auth REST surface — thin controllers delegating to authService.
 import '../src/bootstrap/init.mjs';
-import { authService, partnerVerifiedFor, portalUserService } from '../src/bootstrap/services.mjs';
+import { authService, partnerVerifiedFor, portalUserService, ownerStaffService } from '../src/bootstrap/services.mjs';
+import { staffPinChangeRequiredOn } from '../src/shared/feature-flags.mjs';
 import { requireAuth, requireAcl, requireAuthAllowingPasswordChange } from '../src/auth/jwt.mjs';
 import { orgAuthzStats } from '../src/auth/org-authz.mjs';
 
@@ -102,6 +103,32 @@ export const authPortalChangeStartPassword = {
     if (result.error) {
       return res.status(result.status).json({ error: result.error, ...(result.minLength ? { minLength: result.minLength } : {}) });
     }
+    const session = authService.sessionFor(result.user);
+    res.json({ ...session, partnerVerified: await partnerVerifiedFor(session.user) });
+  },
+};
+
+// ───────────────────────────── Gym staff: forced start-PIN change (B3a) ─────────────────────
+// Owner decisions 2026-10-20: staff whose PIN their owner chose (at creation or
+// by a reset) replace it before doing anything else. While
+// STAFF_PIN_CHANGE_REQUIRED is on, such a session carries pwc: true and every
+// other route answers 403 password_change_required; this is the one route that
+// lets it through. Off: 404 feature_disabled.
+
+export const authStaffChangeStartPin = {
+  created, method: 'post', path: '/auth/pin/change',
+  description: 'Gym staff: replace the start PIN the owner chose (at creation or by an owner reset), at sign-in. The only route a gym_staff session with pwc: true may use. Body { newPin } (exactly 4 digits, not the start PIN). Sets the sign-in password (Firebase `fitflex-pin:<pin>`) and, when the person already keeps a PIN with FitFlex, that PIN too; clears the hold, ends every earlier session of the person (all devices, all roles) and returns a new session { token, user } without pwc. A Firebase ID token from before the change can no longer open a session (401 session_ended). 400 pin_must_be_4_digits | pin_unchanged; 409 pin_change_not_required | pin_change_in_progress; 502 firebase_update_failed (nothing changed); 500 pin_changed_session_failed (the PIN WAS changed: sign in again with the new PIN). 404 feature_disabled while STAFF_PIN_CHANGE_REQUIRED is off.',
+  requestSample: { newPin: '4821' },
+  responseSample: { token: 'jwt...', user: { id: 'usr_x', userType: 'gym_staff', passwordChangeRequired: false } },
+  onGuard: requireAuthAllowingPasswordChange('gym_staff'),
+  onRequest: async (req, res) => {
+    if (!staffPinChangeRequiredOn()) return res.status(404).json({ error: 'feature_disabled' });
+    const result = await ownerStaffService.changeStartPin({
+      userId: req.user.sub, newPin: req.body?.newPin,
+      ip: String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || req.socket?.remoteAddress || null,
+      userAgent: req.headers?.['user-agent'] ? String(req.headers['user-agent']).slice(0, 300) : null,
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
     const session = authService.sessionFor(result.user);
     res.json({ ...session, partnerVerified: await partnerVerifiedFor(session.user) });
   },

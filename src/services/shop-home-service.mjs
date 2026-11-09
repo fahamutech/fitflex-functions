@@ -12,7 +12,9 @@
 // The areas, vendors' areas and pickup gyms' cities (non-personal) are part of the shared cache.
 import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recommendations.mjs';
 import { purchaseHistoryFrom, audienceFrom, historyDaysFromEnv } from './shop-personalisation.mjs';
-import { shopBannersOn, shopPersonalisationOn, shopNearYouOn } from '../shared/feature-flags.mjs';
+import { shopBannersOn, shopPersonalisationOn, shopNearYouOn, shopFlashSalesOn } from '../shared/feature-flags.mjs';
+import { saleLiveFor, saleView, withPrice } from '../shared/shop-pricing.mjs';
+import { withoutSale } from '../shared/shop-caps.mjs';
 import { indexAreas, resolveViewerArea, vendorAreasOf, deliversTo, deliversExactly, basedIn, publicAreas, minRadiusFromEnv } from '../shared/shop-areas.mjs';
 
 /**
@@ -61,6 +63,10 @@ export function createShopHomeService({
   nearYouOn = shopNearYouOn,
   // M1: the minimum area size the shop uses ({ district, city } km; floors 2 and 5).
   minRadius = () => minRadiusFromEnv(),
+  // Slice 4 (SHOP_FLASH_SALES; PRICING PATH): flash-sale-service `pricing` ({ liveByProduct(ids|null, at) → Map }).
+  // Read on every request by the server clock, never cached: the shared catalogue cache holds stored prices only.
+  flashSales = null,
+  flashSalesOn = shopFlashSalesOn,
   logger = console,
   config = () => shopHomeConfigFromEnv(),
   now = () => new Date(),
@@ -119,7 +125,8 @@ export function createShopHomeService({
     const since = new Date(at - 30 * 86_400_000);
     const [products, orders, discovered] = await Promise.all([
       // With the vendor's target tags (for the gender/age reorder); they are taken off every row before it is sent.
-      shopService.listProducts({ includeTargets: true }),
+      // applySales false: sale prices are worked out per answer (below), never cached here.
+      shopService.listProducts({ includeTargets: true, applySales: false }),
       recentPaidOrders({ since }),
       discoveryService.discover({ entityType: 'product', sort: 'relevance', limit: 1 }),
     ]);
@@ -203,7 +210,10 @@ export function createShopHomeService({
     return (await identityLink.personasOf(user.personId)).filter(usable);
   }
 
-  async function home({ claims, query = {} }) {
+  // caps.flashSale: the client sent X-FF-Shop-Caps: flash_sale (route). Without it there is no
+  // flash_sale section and no `sale` objects, but rows still carry effectivePriceTzs and Deals still
+  // leaves out products in a live sale (everyone pays the lowest price).
+  async function home({ claims, query = {}, caps = {} }) {
     const user = await users.findByIdAsync(claims.sub);
     const personas = await personasOf(user);
     const heldUserTypes = personas.map(p => p.userType);
@@ -220,6 +230,7 @@ export function createShopHomeService({
     const shared = await loadShared();
     const cfg = config();
     const at = now();
+    const rows0 = new Map(shared.products.map(p => [p.id, p]));
 
     // Slice 2: read per request for this person only; never cached, never stored as a profile.
     let personalisation = null;
@@ -247,11 +258,27 @@ export function createShopHomeService({
         audienceFor: mode => (state.enabled && state.audienceAllowed ? audienceFrom({ mode, memberProfile, age: state.age }) : null),
       };
     }
+    // Slice 4: the sales live now, for products this catalogue lists (its listing, KYC, moderation and
+    // suspension gates already applied). A failed read leaves the page at stored prices, with no rail.
+    let liveSales = null;
+    if (flashSales && flashSalesOn()) {
+      liveSales = new Map();
+      try {
+        const live = await flashSales.liveByProduct(null, at);
+        for (const row of shared.products) {
+          const sale = live.get(row.id);
+          if (sale && saleLiveFor(row, sale, at)) liveSales.set(row.id, sale);
+        }
+      } catch (err) {
+        logger.error?.('[shop-home] flash sales failed:', err?.message);
+      }
+    }
+    const railSales = liveSales ? new Map([...liveSales].map(([id, sale]) => [id, saleView(rows0.get(id), sale, at)])) : null;
     const out = buildShopHome({
       mode: query.mode, sessionUserType: claims.userType, heldUserTypes,
       memberProfile, trainerProfile, recentIds: query.recent, ownVendorIds,
       products: shared.products, suspendedVendorIds: shared.suspendedVendorIds, featured: shared.featured, paidPlacementIds: shared.paidPlacementIds, orders: shared.orders,
-      config: cfg, now: at, personalisation,
+      config: cfg, now: at, personalisation, flashSales: railSales, flashSaleRail: caps.flashSale === true,
     });
     if (out.error) return { error: out.error, status: 403 };
 
@@ -263,7 +290,13 @@ export function createShopHomeService({
     const products = {};
     // Slice 3: the "Delivers to your area" badge. Set only to true, never false.
     const delivers = id => Boolean(viewer) && deliversTo(shared.near.vendorAreas.get(rows.get(id)?.vendorId), viewer);
-    const badge = (id, row) => (delivers(id) ? { ...row, deliversToViewerArea: true } : row);
+    // Slice 4: + effectivePriceTzs, + sale while live (flag on only; off the rows are exactly as before).
+    const priceRow = (row) => {
+      if (!liveSales) return row;
+      const r = withPrice(row, id => liveSales.get(id), at);
+      return caps.flashSale === true ? r : withoutSale(r); // effectivePriceTzs (what is charged) stays for everyone
+    };
+    const badge = (id, row) => { const r = priceRow(row); return delivers(id) ? { ...r, deliversToViewerArea: true } : r; };
     for (const section of out.sections) {
       for (const id of section.productIds) {
         const row = rows.get(id);
@@ -286,6 +319,8 @@ export function createShopHomeService({
       ...(state ? { personalisation: { available: state.available, enabled: state.enabled } } : {}),
       // Slice 3: only with SHOP_NEAR_YOU on; off, the body is exactly as before.
       ...(nearYouOn() ? { nearYou: nearYouOf(state, viewer, shared) } : {}),
+      // Slice 4: only with SHOP_FLASH_SALES on; off, the body is exactly as before.
+      ...(liveSales ? { flashSales: { enabled: true } } : {}),
       signalsUsed: out.signalsUsed,
       categories: out.categories,
       allProductsCount: out.allProductsCount,

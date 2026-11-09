@@ -27,6 +27,18 @@ const MIGRATIONS = [
   // S4: payments, tickets and event refunds (additive columns / indexes on EventPayment, EventOrder, EventRegistration, EventTicket,
   // EventInventoryMovement and Refund; it must come down BEFORE the tables it widens).
   '20270110091100-events-payments-tickets.cjs',
+  // S5: venue operations / payout schedule and the API + webhook columns. Down FAILS CLOSED on data; the suite's tables hold none at this point.
+  '20270126090000-events-ops-s5.cjs',
+  '20270126090100-events-integrations-s5.cjs',
+  // S6: results, rewards and medal artwork (they reference ApiClient, EventRegistration and the S1 reward tables, so they come down first).
+  '20270131090000-events-results-s6.cjs',
+  '20270131090100-events-rewards-s6.cjs',
+  '20270131090200-events-medal-art-s6.cjs',
+  // S7: analytics counters, the offline kit desk, the waitlist (they reference EventKitCollection, EventBibAssignment, EventOrder and Event, so they come down first). Down FAILS CLOSED on data.
+  '20270202090000-events-analytics-s7.cjs',
+  '20270202090100-events-kit-offline-s7.cjs',
+  '20270202090200-events-waitlist-s7.cjs',
+  '20270202090300-events-hardening-s7.cjs',
 ].map(file => ({ file, ...require(`../db/migrations/${file}`) }));
 
 const ROLLBACK = Symbol('rollback');
@@ -50,7 +62,7 @@ const TABLES = [
   'EventOrder', 'EventOrderLine', 'EventRegistration', 'EventTeam', 'EventTeamMember', 'EventInventoryMovement',
   'EventPayment', 'EventTicket', 'EventKitCollection', 'EventBibAssignment', 'EventResult', 'EventActivityLink',
   'EventMedalTemplate', 'EventMedalAward', 'AchievementDefinition', 'UserAchievement', 'RewardDefinition', 'RewardLedgerEntry', 'RewardRedemption',
-  'ApiClient', 'OutboxEvent', 'WebhookEndpoint', 'WebhookDelivery',
+  'ApiClient', 'OutboxEvent', 'WebhookEndpoint', 'WebhookDelivery', 'OrganizerIdempotency', 'ApiClientUsageDay', 'WebhookDeliveryAttempt',
 ];
 
 test('each foundation migration goes up, down and up again (newest first on the way down)', async () => {

@@ -650,14 +650,20 @@ test('finding 3: approving a shrunk group payment leaves its cancelled slots can
   assert.deepEqual(updated.map(b => b.id), [kept]);
   assert.deepEqual(await Promise.all([kept, dropped].map(statusOf)), ['confirmed', 'cancelled']);
 
-  // A whole group's payment rejected, then approved after all: back to confirmed — but not a slot booked again meanwhile.
+  // A whole group's payment rejected, then approved after all, with one slot booked again meanwhile:
+  // the approval is refused as a whole and nothing moves (security review of #231, race 1).
   const other = uid('tbg');
   const free = await mk('12:00', 'payment_rejected', other);
   const rebooked = await mk('13:00', 'payment_rejected', other);
   const someoneElse = await mk('13:00', 'confirmed', uid('tbg'));
   const again = await trainerBookingService.applyPaymentToGroup(other, 'approved');
-  assert.deepEqual(again.map(b => b.id), [free]);
-  assert.deepEqual(await Promise.all([free, rebooked, someoneElse].map(statusOf)), ['confirmed', 'payment_rejected', 'confirmed']);
+  assert.deepEqual(again, { error: 'group_slot_rebooked', status: 409, bookingIds: [rebooked] });
+  assert.deepEqual(await Promise.all([free, rebooked, someoneElse].map(statusOf)), ['payment_rejected', 'payment_rejected', 'confirmed']);
+  // Back to pending instead: the free one is held again, the rebooked one stays rejected, on the record.
+  const pending = await trainerBookingService.applyPaymentToGroup(other, 'pending', { actorId: s.adminId });
+  assert.deepEqual(pending.map(b => b.id), [free]);
+  assert.deepEqual(await Promise.all([free, rebooked, someoneElse].map(statusOf)), ['payment_pending', 'payment_rejected', 'confirmed']);
+  assert.equal((await auditFor(rebooked, 'trainer_booking_kept_rejected')).length, 1);
 });
 
 test('finding 4: a statement line that appears between the two reads stops the change (booking_changed); nothing is written', async () => {

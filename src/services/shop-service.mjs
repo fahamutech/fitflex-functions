@@ -7,15 +7,19 @@ import { storeNameOf } from '../shared/vendor-name.mjs';
 import { createMemoryShopOrderStore } from './shop-order-store-memory.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { decideTransition, combinedStatus, fulfilmentsOf, anyAtLeast, canonicalStatus, nextStatuses, STATUSES, LEGACY_INPUTS } from '../shared/order-lifecycle.mjs';
-import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine } from '../shared/marketplace-pricing.mjs';
+import { VENDOR_COMMISSION_PCT, vendorCommissionPct, priceOrderLine, vendorShareOfOrder } from '../shared/marketplace-pricing.mjs';
+import { csvDocument } from '../shared/csv-export.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
-import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn } from '../shared/feature-flags.mjs';
+import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn, shopFlashSalesOn, vendorBarcodesOn } from '../shared/feature-flags.mjs';
+import { parseBarcodeFields, parseLookupCode, barcodeError } from '../shared/vendor-barcode.mjs';
+import { standingPrice, priceBreakdown, withPrice } from '../shared/shop-pricing.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
 import { indexAreas, validateVendorAreas, touchesAreas } from '../shared/shop-areas.mjs';
 import { planStock, reviewChanged, stripPrivate, invalidPrivateField, parseAdjustment, variantsOf, isTracked, eatDayStart } from '../shared/vendor-stock.mjs';
+import { checkMediaFields, storedMedia, mediaSrcMaxBytes } from '../shared/media-src.mjs';
 
 const PRODUCT_STATUSES = new Set(['active', 'paused', 'archived']);
 const ORDER_STATUSES = new Set([...STATUSES, ...LEGACY_INPUTS]);
@@ -29,8 +33,17 @@ const PROFILE_FIELDS = new Set([...PROFILE_REQUIRED, ...PROFILE_OPTIONAL]);
 export const STAFF_ROLES = new Set(['admin', 'inventory_manager', 'orders_manager', 'sales', 'customer_care']);
 // `sales` (vendor tools · S3): walk-in sales — record, history, void. Backfilled onto existing staff
 // with vendorRole admin or sales by migration 20261230120000-vendor-walkin-sales.
-export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff']);
-const PRODUCT_REVIEW_FIELDS = new Set(['name', 'description', 'category', 'brand', 'priceTzs', 'discountPriceTzs', 'images', 'variants']);
+// `import` (vendor smart import V1): upload / map / apply CSV imports. Backfilled onto vendorRole admin staff by
+// migration 20270203090000-vendor-import; other staff get it only when an admin grants it.
+// `purchases` (vendor tools · S9): suppliers, receiving stock, payables. Backfilled onto existing staff with
+// vendorRole admin only (design Q-2) by migration 20270203090100-vendor-purchases. RULE 6 (auth-adjacent).
+export const STAFF_PERMISSIONS = new Set(['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff', 'import', 'purchases']);
+// Smart import (INTERNAL create options, never read from a request body): the only product ids and statuses an import may preset.
+const IMPORT_PRESET_ID = /^prd_imp_[A-Za-z0-9_-]{1,60}$/;
+// Price and discount price are not reviewed (owner decision 2026-10-29): changing them never sends an approved
+// product back to pending or hides it. They stay guarded by validation, the flash-sale price lock, the
+// ProductPriceChange history (trigger) and a `product_price_changed` audit row. Moderation can still hide a product.
+const PRODUCT_REVIEW_FIELDS = new Set(['name', 'description', 'category', 'brand', 'images', 'variants']);
 const PUBLIC_PROFILE_FIELDS = ['vendorId', 'businessName', 'logo', 'banner', 'description', 'businessCategory', 'contactNumber', 'email', 'address', 'deliveryRegions', 'businessHours', 'status'];
 const publicProfile = profile => profile?.status === 'published'
   ? Object.fromEntries(PUBLIC_PROFILE_FIELDS.filter(key => profile[key] !== undefined).map(key => [key, profile[key]]))
@@ -60,8 +73,10 @@ export function buyerOrderView(order) {
 /** A review as the public sees it: no buyer or order identifiers. */
 export const publicReview = ({ id, productId, rating, comment, createdAt }) => ({ id, productId, rating, comment, createdAt });
 const bool = value => value === true || value === 'true' || value === '1' ? true : value === false || value === 'false' || value === '0' ? false : undefined;
-const priceOf = product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0) ? Number(product.discountPriceTzs) : Number(product.priceTzs || 0);
-const csv = value => /[,"\n]/.test(String(value ?? '')) ? `"${String(value ?? '').replaceAll('"', '""')}"` : String(value ?? '');
+// The seller's own price (discount price when below the price). Same rule as before flash sales; with
+// SHOP_FLASH_SALES on, buyer rows carry effectivePriceTzs (shop-pricing.mjs) and that is used instead.
+const priceOf = standingPrice;
+const priceNow = product => (product.effectivePriceTzs != null ? Number(product.effectivePriceTzs) : standingPrice(product));
 
 export function createShopService({ products, shopOrders, users, auditLog, marketplaceEnquiries, marketplaceNotifications, productReviews, paymentRequests = null, partnerGate = OPEN_GATE, partnerKycCases = null,
   // Moderation: pending, rejected, suspended and hidden products and vendors are not shown to buyers.
@@ -80,6 +95,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // VENDOR_VAT applies). A side table only; the order, its prices, commission and payout are untouched.
   // Never allowed to fail the order.
   onVendorOrderInvoices = async () => null,
+  // Payout display (security review #275 M1): (vendorId) → Set of order ids whose share for THIS vendor sits on a
+  // paid vendor statement. ShopOrder.settlementStatus is order-wide (set when any vendor's statement for the
+  // order is paid), so on a multi-vendor order it cannot say whether this vendor was paid. null = not wired
+  // (in-memory specs): the order-wide status is used as before.
+  vendorPaidOrderIds = null,
   // Vendor tools · S5: the product's VAT code (ProductPrivate.vatCode; private, never on /shop/*, never
   // re-queues approval). { on(), allowedCodes(), set({ vendorId, productId, vatCode, actorId }), codesOf(vendorId, ids), codesById(ids) }.
   productVat = null,
@@ -98,6 +118,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // what vendors see of it runs only while `stockLedgerOn()` (VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
   stockLedger = null,
   stockLedgerOn = vendorStockLedgerOn,
+  // Vendor tools · S8: product barcodes (src/infra/product-code-store-pg.mjs; design docs/design/vendor-barcodes-s8.md).
+  // Used only while `barcodesOn()` (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES) and the ledger store is wired:
+  // codes are written inside the ledger's product-form transaction. Off (or not wired): nothing reads ProductCode.
+  productCodes = null,
+  barcodesOn = vendorBarcodesOn,
   // Vendor tools · S2: pickup gym names on vendor orders (gyms collection), the vendor-scoped buyer
   // pseudonyms (src/infra/vendor-buyer-ref-store-pg.mjs; in memory when not given) and whether vendors
   // see the buyer's phone (VENDOR_TOOLS + VENDOR_ORDER_BUYER_CONTACT).
@@ -108,8 +133,25 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   customersOn = vendorCustomersOn,
   // Shop home slice 3: GeoArea rows ({ allAsync }) for the vendor area fields. null → area fields are refused.
   geoAreas = null,
+  // Shop Phase 2 · slice 4 (SHOP_FLASH_SALES; PRICING PATH): flash-sale-service `pricing` —
+  // { liveByProduct(ids|null, at) → Map, lockOf(productId, at), locksOf(ids, at) → Map, wasSalePrice(productId, price, at),
+  //   withProductLock(productId, fn), effectiveStatus(sale) }. null, or the flag off: prices exactly as before.
+  flashSales = null,
+  flashSalesOn = shopFlashSalesOn,
+  // Security review L2: an admin suspended a vendor → (vendorId, actorId) → end its scheduled and live flash sales.
+  onVendorSuspended = async () => null,
   now = () => new Date() }) {
-  orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now });
+  orderStore ||= createMemoryShopOrderStore({ products, shopOrders, paymentRequests, now,
+    // The lock re-check of a flash sale's window (memory store; the Postgres store reads FlashSale itself).
+    liveSaleOf: async (productId, at) => (flashSales ? (await flashSales.liveByProduct([productId], at)).get(productId) || null : null) });
+  /** Flash sales apply now (flag on and wired). Off: every price path is exactly as before. */
+  const salesActive = () => Boolean(flashSales) && flashSalesOn();
+  /** Buyer rows + effectivePriceTzs (+ sale while live), read now by the server clock. Nothing cached. */
+  async function priced(rows, at = now()) {
+    if (!salesActive() || !rows.length) return rows;
+    const live = await flashSales.liveByProduct(rows.map(r => r.id), at);
+    return rows.map(r => withPrice(r, id => live.get(id), at));
+  }
   buyerRefs ||= createMemoryVendorBuyerRefStore();
   marketplaceEnquiries ||= { filterAsync: async () => [], findByIdAsync: async () => null };
   marketplaceNotifications ||= { insertAsync: async row => row, filterAsync: async () => [] };
@@ -171,6 +213,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         return { error: 'invalid_product_category', status: 400, allowed: PRODUCT_CATEGORIES.map(c => c.key) };
       }
     }
+    // Logo and banner: an image the app shows to every buyer, so only a data URI or our own storage path (media-src.mjs).
+    const badMedia = await checkMediaFields({ logo: body?.logo, banner: body?.banner }, {
+      kept: { logo: storedMedia(prior.logo), banner: storedMedia(prior.banner) }, actor: current?.personId || vendorId,
+    });
+    if (badMedia) return badMedia;
     const profile = { ...prior, ...Object.fromEntries(Object.entries(body || {}).filter(([key]) => PROFILE_FIELDS.has(key))), ...areas.patch, vendorId, status: publish ? 'published' : prior.status || 'draft', updatedAt: nowIso() };
     const missing = PROFILE_REQUIRED.filter(key => {
       const value = profile[key];
@@ -212,7 +259,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   // includeTargets: internal (the shop home's personalisation); buyer rows never carry targetGender / targetAgeBands.
-  async function listProducts({ category, search, vendorId, includeArchived = false, includeTargets = false, brand, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort } = {}) {
+  // applySales (flag on): buyer rows get effectivePriceTzs / sale. The shop home passes false: it caches the
+  // catalogue and prices each answer itself. flashSale=true (flag on): only products in a live sale.
+  async function listProducts({ category, search, vendorId, includeArchived = false, includeTargets = false, brand, minPrice, maxPrice, minRating, maxDistanceKm, delivery, promotions, sort, flashSale, applySales = true } = {}) {
     let rows = await products.filterAsync(product => {
       if (product.deletedAt) return false;
       if (includeArchived) return true;
@@ -231,21 +280,25 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       rows = rows.filter(product => ok.has(product.vendorId) && !blockedProducts.has(product.id) && !blockedVendors.has(product.vendorId) && !suspendedVendors.has(product.vendorId))
         // Buyer-facing rows carry the seller's store name (QA round 2: the Visit-store heading survives a reload).
         .map(product => ({ ...(includeTargets === true ? product : withoutTargets(product)), vendorName: names.get(product.vendorId) ?? null }));
+      // Flash sales (flag on): priced only after every listing, KYC, moderation and suspension gate above.
+      if (applySales) rows = await priced(rows);
     }
+    const sales = !includeArchived && applySales && salesActive();
+    if (sales && bool(flashSale) === true) rows = rows.filter(product => product.sale);
     if (category) rows = rows.filter(product => String(product.category || '').toLowerCase() === String(category).toLowerCase());
     if (brand) rows = rows.filter(product => String(product.brand || '').toLowerCase() === String(brand).toLowerCase());
     const deliveryFlag = bool(delivery);
     if (deliveryFlag !== undefined) rows = rows.filter(product => Boolean(product.deliveryAvailable) === deliveryFlag);
     if (minRating !== undefined) rows = rows.filter(product => Number(product.rating || 0) >= Number(minRating));
     if (maxDistanceKm !== undefined) rows = rows.filter(product => Number(product.distanceKm ?? Number.POSITIVE_INFINITY) <= Number(maxDistanceKm));
-    if (minPrice !== undefined) rows = rows.filter(product => priceOf(product) >= Number(minPrice));
-    if (maxPrice !== undefined) rows = rows.filter(product => priceOf(product) <= Number(maxPrice));
-    if (bool(promotions) === true) rows = rows.filter(product => Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0));
+    if (minPrice !== undefined) rows = rows.filter(product => priceNow(product) >= Number(minPrice));
+    if (maxPrice !== undefined) rows = rows.filter(product => priceNow(product) <= Number(maxPrice));
+    if (bool(promotions) === true) rows = rows.filter(product => (Number(product.discountPriceTzs || 0) > 0 && Number(product.discountPriceTzs) < Number(product.priceTzs || 0)) || (sales && Boolean(product.sale)));
     const query = String(search || '').trim().toLowerCase();
     if (query) rows = rows.filter(product => [product.name, product.description, product.category, product.brand, product.sku].some(value => String(value || '').toLowerCase().includes(query)));
     if (sort === 'popularity') return rows.sort((a, b) => Number(b.soldCount || 0) - Number(a.soldCount || 0));
-    if (sort === 'price_asc') return rows.sort((a, b) => priceOf(a) - priceOf(b));
-    if (sort === 'price_desc') return rows.sort((a, b) => priceOf(b) - priceOf(a));
+    if (sort === 'price_asc') return rows.sort((a, b) => priceNow(a) - priceNow(b));
+    if (sort === 'price_desc') return rows.sort((a, b) => priceNow(b) - priceNow(a));
     if (sort === 'rating') return rows.sort((a, b) => Number(b.rating || 0) - Number(a.rating || 0));
     return rows.sort((a, b) => Number(b.homepagePriority || 0) - Number(a.homepagePriority || 0) || +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
@@ -256,7 +309,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (!includeUnlisted && !(await listProducts({})).some(row => row.id === productId)) return null;
     const reviews = (await productReviews.filterAsync(review => review.productId === productId)).map(publicReview);
     const vendorUser = await users.findByIdAsync(product.vendorId);
-    return { ...withoutTargets(product), vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
+    // Flash sales (flag on): the listed product is priced now; an unlisted one never gets a sale price.
+    const base = includeUnlisted ? withoutTargets(product) : (await priced([withoutTargets(product)]))[0];
+    return { ...base, vendorName: storeNameOf(vendorUser), vendor: publicProfile(vendorUser?.vendorProfile || null), reviews, similarProducts: (await listProducts({ category: product.category })).filter(row => row.id !== productId).slice(0, 6) };
   }
 
   /** Shape and size limits on what a vendor may store; null when fine. */
@@ -270,11 +325,17 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (input[field] != null && !isMoneyInt(input[field], { allowZero: field === 'discountPriceTzs' })) return { error: field === 'priceTzs' ? 'priceTzs_required' : 'invalid_field', status: 400, field };
     }
     if (input.stock != null && (!Number.isInteger(Number(input.stock)) || Number(input.stock) < 0 || Number(input.stock) > 1_000_000)) return { error: 'invalid_stock', status: 400 };
-    if (input.images != null && (!Array.isArray(input.images) || input.images.length > 10 || input.images.some(i => typeof i !== 'string' || i.length > 500))) return { error: 'invalid_field', status: 400, field: 'images' };
+    // The app sends each photo inline as a data URI, far over 500 characters: those are capped at the
+    // media-src size (checkMediaFields then decodes them); any other string (a /storage path) stays ≤ 500.
+    const dataUriMax = 64 + 4 * Math.ceil(mediaSrcMaxBytes() / 3);
+    if (input.images != null && (!Array.isArray(input.images) || input.images.length > 10 || input.images.some(i => typeof i !== 'string' || i.length > (i.startsWith('data:') ? dataUriMax : 500)))) return { error: 'invalid_field', status: 400, field: 'images' };
     if (input.variants != null) {
       const v = input.variants;
       const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && x.name.length <= 60
-        && (x.stock == null || (Number.isInteger(x.stock) && x.stock >= 0 && x.stock <= 1_000_000)) && !invalidPrivateField(x));
+        && (x.stock == null || (Number.isInteger(x.stock) && x.stock >= 0 && x.stock <= 1_000_000)) && !invalidPrivateField(x)
+        // S8 (B-8): codes are top-level body fields only. Inside a variant they would be stored on the public row
+        // and re-queue review, so they are refused whatever the flags.
+        && x.barcodes === undefined && x.addBarcodes === undefined);
       if (!ok) return { error: 'invalid_field', status: 400, field: 'variants' };
     }
     const privateField = invalidPrivateField(input);
@@ -283,6 +344,38 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   const ledgerOn = () => Boolean(stockLedger) && stockLedgerOn();
+  /** S8: barcodes apply now (flags on, both stores wired). */
+  const codesActive = () => Boolean(productCodes) && ledgerOn() && barcodesOn();
+  /**
+   * S8: the barcode step of a ledger save, run inside its transaction after the product row is written. Always
+   * (flag on) drops the codes of variants the product no longer has (B-6); with codes in the body (`parsed`), applies them.
+   */
+  const codesStep = ({ vendorId, productId = null, actorId, parsed }) => (codesActive()
+    ? (trx, { current, saved }) => productCodes.applyInSave(trx, { vendorId, productId: productId || saved.id, actorId, saved, current, parsed })
+    : null);
+  /**
+   * Security review #334 L-1: codes are locked in codeKey order, so two saves should only queue, never deadlock. If
+   * Postgres still picks this save as a deadlock victim (40P01) or refuses it for serialization (40001), the whole
+   * save was rolled back: it is retried once, and a second failure answers 409 (never a 500): barcode_in_use (holder
+   * unknown: productId / name null, message "try again") when the save sent at least one code, else save_conflict.
+   * Only while barcodes apply (the only path that adds locks to a product save).
+   */
+  const RETRYABLE = new Set(['40P01', '40001']);
+  async function withCodeRetry(parsed, run) {
+    if (!codesActive()) return run();
+    try {
+      return await run();
+    } catch (err) {
+      if (!RETRYABLE.has(err?.code)) throw err;
+    }
+    try {
+      return await run();
+    } catch (err) {
+      if (!RETRYABLE.has(err?.code)) throw err;
+      if (parsed?.items?.length) return barcodeError('barcode_in_use', 409, { code: parsed.items[0].code, productId: null, name: null, variant: null });
+      return barcodeError('save_conflict', 409);
+    }
+  }
   /** Cost price and reorder level in the body: [{ variant, costTzs?, reorderLevel? }] ('' = the product). */
   function privatesFrom(input) {
     const out = [];
@@ -336,10 +429,65 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { ...out, product: (await withVatCodes(args.vendorId, [out.product]))[0] };
   }
 
-  async function upsertProductCore({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true }) {
+  /** Which price fields this body would change on `prior` (a missing discount counts as 0). */
+  const priceFieldsChanged = (prior, input) => [
+    input.priceTzs !== undefined && Number(input.priceTzs) !== Number(prior.priceTzs || 0) ? 'priceTzs' : null,
+    input.discountPriceTzs !== undefined && Number(input.discountPriceTzs || 0) !== Number(prior.discountPriceTzs || 0) ? 'discountPriceTzs' : null,
+  ].filter(Boolean);
+
+  /**
+   * Flash sales (flag on; spec DD-P2-4): while an approved sale of the product has not ended (scheduled
+   * or live), its price and discount price are locked → 409 sale_conflict. The check and the save run
+   * under the product's flash-sale lock, the one approvals take, so neither can slip in between the
+   * other's check and write. Sending the same values (old app builds send the whole form) is fine.
+   */
+  async function upsertProductCore(args) {
+    const input = args.body || {};
+    if (!args.productId || !salesActive() || (input.priceTzs === undefined && input.discountPriceTzs === undefined)) return upsertProductFields(args);
+    // Run against the Product row as locked by the save's own transaction (review L4: one connection).
+    const priceGuard = async (current, q) => {
+      if (current.vendorId !== args.vendorId) return null; // the save refuses it itself
+      const fields = priceFieldsChanged(current, input);
+      if (!fields.length) return null;
+      const lock = await flashSales.lockOf(args.productId, now(), q);
+      return lock ? {
+        error: 'sale_conflict', status: 409, reason: 'price_locked_by_flash_sale', fields,
+        saleId: lock.id, startsAt: lock.startsAt, endsAt: lock.endsAt, effectiveStatus: flashSales.effectiveStatus(lock),
+      } : null;
+    };
+    return upsertProductFields({ ...args, priceGuard });
+  }
+
+  const pricesOf = row => ({ priceTzs: Number(row?.priceTzs || 0), discountPriceTzs: row?.discountPriceTzs == null ? null : Number(row.discountPriceTzs) });
+  /**
+   * Who changed a product's price (owner decision 2026-10-29: price edits are not reviewed, so admins see them here).
+   * One `product_price_changed` audit row when the saved price or discount price differs from the one before the
+   * save; the ProductPriceChange rows (trigger) stay the price history the 14-day rule reads.
+   */
+  async function auditPriceEdit(productId, actorId, before, saved) {
+    if (!before || !saved) return;
+    const after = pricesOf(saved);
+    if (after.priceTzs === before.priceTzs && Number(after.discountPriceTzs || 0) === Number(before.discountPriceTzs || 0)) return;
+    await auditLog.insertAsync({
+      id: randomUUID(), at: nowIso(), actor: actorId, action: 'product_price_changed', target: productId,
+      before, after: { ...after, vendorId: saved.vendorId, approvalStatus: saved.approvalStatus || null },
+    });
+  }
+
+  // keptImages: images a copy may carry over unchanged (duplicateProduct: the source product's own).
+  // priceGuard(current, store) → null | { error }: the flash-sale price lock, checked inside the save's transaction.
+  // initialStatus / presetId / stockNote: INTERNAL options of vendor smart import (callers in code only, never the request
+  // body): a new product may start 'paused', with a deterministic id (so a retried import finds it), and its opening
+  // stock rows carry a note. Create path only; ignored when updating. Anything else is ignored.
+  // barcodesAllowed (S8): the caller is the vendor account or vendor staff (the /vendor/products routes). Anyone else
+  // (FitFlex admins, duplicate, import) has `barcodes` / `addBarcodes` ignored. Ignored too while the flag is off.
+  async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [], priceGuard = null, initialStatus = null, presetId = null, stockNote = null, barcodesAllowed = false }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
+    // S8 §2.3 step 1: every code checked (B-1, B-3) and duplicates in the body (B-4) before anything is written.
+    const codes = codesActive() && barcodesAllowed ? parseBarcodeFields(input) : null;
+    if (codes?.error) return codes;
     // Who it's for (optional vendor tags): not reviewed, so changing them never re-queues approval.
     const targets = parseProductTargets(input);
     if (targets.error) return targets;
@@ -348,6 +496,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const prior = await products.findByIdAsync(productId);
       if (!prior || prior.deletedAt) return { error: 'product_not_found', status: 404 };
       if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
+      const badMedia = await checkMediaFields({ images: input.images }, { kept: { images: storedMedia(prior.images) }, actor: actorId });
+      if (badMedia) return badMedia;
       if (input.name !== undefined && !String(input.name).trim()) return { error: 'name_required', status: 400 };
       if (input.priceTzs !== undefined && Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
       if (input.stock !== undefined && Number(input.stock) < 0) return { error: 'invalid_stock', status: 400 };
@@ -361,22 +511,31 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       for (const field of ['priceTzs', 'discountPriceTzs', 'weightKg', 'distanceKm']) if (input[field] !== undefined) patch[field] = input[field] === null ? null : Number(input[field]);
       if (Array.isArray(input.images)) patch.images = input.images;
       if (input.status && PRODUCT_STATUSES.has(input.status)) patch.status = input.status;
+      let pricesBefore = pricesOf(prior); // replaced by the locked row's prices where the save takes a lock
       const needsReview = (current, variants) => current.approvalStatus === 'approved'
         && Object.keys(input).some(field => PRODUCT_REVIEW_FIELDS.has(field)) && reviewChanged(current, input, variants);
       if (ledgerOn()) {
         // Stock moves only with a ledger row: a changed count from the form (old app builds send `stock`
         // on every save) is recorded as a `count`, decided under the product's row lock.
         // Fields, approval status, stock and ledger rows are written together, in one transaction.
-        const saved = await stockLedger.applyProductForm({
+        const saved = await withCodeRetry(codes, () => stockLedger.applyProductForm({
           productId, vendorId, actorId,
-          decide: (current) => {
+          decide: async (current, trx) => {
+            if (priceGuard) {
+              const refused = await priceGuard(current, flashSales.using(trx));
+              if (refused) return refused;
+            }
             const plan = planStock(current, input, { ledger: true });
             if (plan.error) return plan;
             const fields = needsReview(current, plan.variants || null) ? { ...patch, approvalStatus: 'pending' } : patch;
+            pricesBefore = pricesOf(current);
             return { ...plan, fields, privates: privatesFrom(input) };
           },
-        });
+          // S8: codes in the same transaction; a refused code (409 barcode_in_use …) rolls the whole save back.
+          inTransaction: codesStep({ vendorId, productId, actorId, parsed: codes }),
+        }));
         if (saved.error) return saved;
+        await auditPriceEdit(productId, actorId, pricesBefore, saved.product);
         await afterStockMoved([productId]);
         return { product: (await vendorProductsView(vendorId, [saved.product], { costAllowed }))[0] };
       }
@@ -387,7 +546,19 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       if (plan.stock !== undefined) patch.stock = plan.stock;
       // Back to review only when something FitFlex reviews actually changed (F1).
       if (needsReview(prior, plan.variants || null)) patch.approvalStatus = 'pending';
-      return { product: await products.updateByIdAsync(productId, patch) };
+      if (priceGuard) {
+        // Flash sales on and a price in the body: check and save in one transaction under the row lock.
+        const saved = await flashSales.updateProductLocked(productId, async (current, q) => {
+          pricesBefore = pricesOf(current);
+          return (await priceGuard(current, q)) || { patch };
+        });
+        if (saved.error) return saved;
+        await auditPriceEdit(productId, actorId, pricesBefore, saved.product);
+        return { product: saved.product };
+      }
+      const updated = await products.updateByIdAsync(productId, patch);
+      await auditPriceEdit(productId, actorId, pricesBefore, updated);
+      return { product: updated };
     }
     if (!input.name?.trim()) return { error: 'name_required', status: 400 };
     if (input.category && !keepCategory && !PRODUCT_CATEGORY_KEYS.has(input.category)) {
@@ -395,25 +566,33 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     }
     if (input.priceTzs == null || Number(input.priceTzs) <= 0) return { error: 'priceTzs_required', status: 400 };
     if (Number(input.stock ?? 0) < 0) return { error: 'invalid_stock', status: 400 };
+    const badMedia = await checkMediaFields({ images: input.images }, { kept: { images: storedMedia(keptImages) }, actor: actorId });
+    if (badMedia) return badMedia;
     const ledger = ledgerOn();
     const plan = ledger ? planStock(null, input, { ledger: true }) : null;
     if (plan?.error) return plan;
+    if (plan && typeof stockNote === 'string' && stockNote) plan.movements = plan.movements.map(m => ({ ...m, note: stockNote }));
+    if (presetId != null && !IMPORT_PRESET_ID.test(presetId)) return { error: 'invalid_preset_id', status: 400 };
     const at = nowIso();
     const row = {
-      id: makeId('prd'), vendorId, name: input.name.trim(), description: input.description || null, category: input.category || null,
+      id: presetId || makeId('prd'), vendorId, name: input.name.trim(), description: input.description || null, category: input.category || null,
       brand: input.brand || null, priceTzs: Number(input.priceTzs), discountPriceTzs: input.discountPriceTzs == null ? null : Number(input.discountPriceTzs),
       stock: plan ? plan.stock : Number(input.stock ?? 0), sku: input.sku || null, weightKg: input.weightKg == null ? null : Number(input.weightKg), distanceKm: input.distanceKm == null ? null : Number(input.distanceKm),
       // Cost price and reorder level never go on the public row.
       variants: plan?.variants ?? (Array.isArray(input.variants) ? input.variants.map(stripPrivate) : []), images: Array.isArray(input.images) ? input.images : [], visibility: input.visibility || 'visible',
       // Rating, review count and sold count are the server's: reviewProduct recomputes the first two from real
       // reviews and the order store keeps soldCount. Whatever a vendor (or admin) sends for them is ignored.
-      deliveryAvailable: input.deliveryAvailable !== false, status: 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
+      deliveryAvailable: input.deliveryAvailable !== false, status: initialStatus === 'paused' ? 'paused' : 'active', approvalStatus: 'pending', rating: 0, reviewCount: 0, soldCount: 0,
       homepageVisible: true, homepagePriority: 0, createdAt: at, updatedAt: at,
       targetGender: targets.patch.targetGender ?? null, targetAgeBands: targets.patch.targetAgeBands ?? [],
     };
     if (ledger) {
       // The product and the first rows of its stock history are written together, in one transaction.
-      const product = await stockLedger.createProduct({ product: row, actorId, movements: plan.movements, privates: privatesFrom(input) });
+      const product = await withCodeRetry(codes, () => stockLedger.createProduct({
+        product: row, actorId, movements: plan.movements, privates: privatesFrom(input),
+        inTransaction: codesStep({ vendorId, actorId, parsed: codes }),
+      }));
+      if (product.error) return product;
       await afterStockMoved([product.id]);
       return { product: (await vendorProductsView(vendorId, [product], { costAllowed }))[0], created: true };
     }
@@ -428,7 +607,26 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * vendorId null = FitFlex admin views across vendors (the rows' own ids scope the read).
    */
   async function vendorProductsView(vendorId, rows, opts = {}) {
-    return withVatCodes(vendorId, await vendorProductsViewCore(vendorId, rows, opts));
+    return withBarcodes(vendorId, await withVatCodes(vendorId, await vendorProductsViewCore(vendorId, rows, opts)));
+  }
+  /**
+   * S8 §2.2: each of the vendor's own products gains barcodes [{ code, variant|null }] (whole product first) — flag on
+   * only, one query for the list. Never on admin views (vendorId null) and never on /shop/*.
+   */
+  async function withBarcodes(vendorId, rows) {
+    if (!codesActive() || !vendorId || !rows.length) return rows;
+    const codes = await productCodes.codesOf(vendorId, rows);
+    return rows.map(p => ({ ...p, barcodes: codes.get(p.id) || [] }));
+  }
+
+  /**
+   * GET /vendor/products/lookup?code= (S8 §2.4). The caller checks the flag, the guards and the rate limits.
+   * → { code, codeKey, matches } (matches [] when nothing matches) | { error, status, ... }.
+   */
+  async function lookupProductCode({ vendorId, code }) {
+    const parsed = parseLookupCode(code);
+    if (parsed.error) return parsed;
+    return { code: parsed.code, codeKey: parsed.codeKey, matches: await productCodes.lookup(vendorId, parsed) };
   }
   async function vendorProductsViewCore(vendorId, rows, { costAllowed = true } = {}) {
     if (!ledgerOn() || !rows.length) return rows;
@@ -458,7 +656,14 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
 
   /** GET /vendor/products: own products, including archived (private fields with the ledger on; cost only with cost rights). */
   async function vendorListProducts(vendorId, { costAllowed = true } = {}) {
-    return vendorProductsView(vendorId, await listProducts({ vendorId, includeArchived: true }), { costAllowed });
+    const rows = await vendorProductsView(vendorId, await listProducts({ vendorId, includeArchived: true }), { costAllowed });
+    if (!salesActive() || !rows.length) return rows;
+    // Flash sales (flag on): which products have their prices locked by a scheduled or live sale.
+    const locks = await flashSales.locksOf(rows.map(r => r.id), now());
+    return rows.map((r) => {
+      const lock = locks.get(r.id);
+      return lock ? { ...r, priceLock: { saleId: lock.id, startsAt: lock.startsAt, endsAt: lock.endsAt, effectiveStatus: flashSales.effectiveStatus(lock) } } : r;
+    });
   }
 
   /**
@@ -514,13 +719,17 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
     if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
-    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true });
+    return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true, keptImages: prior.images || [] });
   }
-  async function deleteProduct({ vendorId, productId }) {
+  async function deleteProduct({ vendorId, productId, actorId = vendorId }) {
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
     if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
     await products.updateByIdAsync(productId, { deletedAt: nowIso(), status: 'archived', updatedAt: nowIso() });
+    // S8 (B-7): the product's codes go with it, best effort; a code a deleted product still holds counts as free anyway.
+    if (codesActive()) {
+      try { await productCodes.deleteForProduct({ vendorId, productId, actorId }); } catch (err) { console.warn('[shop] barcode cleanup after delete failed:', productId, err?.message); }
+    }
     return { deleted: true };
   }
   /** GET /admin/products. With the ledger on, admins see the private fields too (cost included). */
@@ -677,6 +886,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       after: { ...patch, ...(patch.vendorProfile ? { vendorProfile: undefined } : {}), ...(body?.commissionPct != null ? { commissionPct: patch.vendorProfile.commissionPct } : {}), ...(Object.keys(areas.patch).length ? { areas: areasOf(patch.vendorProfile) } : {}) },
     });
     if (patch.approvalStatus) await notifyVendor(vendorId, `vendor_${patch.approvalStatus}`, { approvalNote: patch.approvalNote });
+    // Flash sales (flag on; review L2): a newly suspended vendor's scheduled and live sales end now.
+    // The lifecycle job sweeps again (moderation suspensions too), so a failure here is only logged.
+    if (patch.accountStatus === 'suspended' && vendor.accountStatus !== 'suspended' && salesActive()) {
+      try { await onVendorSuspended(vendorId, actorId); } catch (err) { console.error('[shop] ending flash sales of suspended vendor failed:', err?.message); }
+    }
     return { vendor: updated };
   }
 
@@ -687,6 +901,34 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     pickupGymId: deliveryMethod === 'gym_pickup' ? body.pickupGymId : null,
     deliveryAddress: deliveryMethod === 'home_delivery' ? body.deliveryAddress : null,
   })).digest('hex');
+
+  /**
+   * One line of a 409 price_changed: { productId, variant, expectedPriceTzs, currentPriceTzs, reason }.
+   * reason: sale_started (a sale is live now) · sale_ended (the price the app had was one of this
+   * product's flash-sale prices and none is live now) · price_changed (anything else).
+   */
+  async function changedLine(product, variant, expectedTzs, current, at = now()) {
+    let reason = 'price_changed';
+    if (current.sale) reason = 'sale_started';
+    else if (expectedTzs != null && await flashSales.wasSalePrice(product.id, expectedTzs, at)) reason = 'sale_ended';
+    return { productId: product.id, variant: variant || null, expectedPriceTzs: expectedTzs, currentPriceTzs: current.priceTzs, reason };
+  }
+  /** 409 price_changed (flag on): the first changed line on top (older clients), every changed line, both totals. */
+  function priceChangedError(changed, resolved, pricedLines, expected, fresh = null, liveNow = null, at = null) {
+    const unitNow = i => (pricedLines ? pricedLines[i].priceTzs : priceBreakdown(fresh[i], liveNow.get(fresh[i].id), at).priceTzs);
+    let totalTzs = 0;
+    let expectedTotalTzs = 0;
+    for (const [i, r] of resolved.entries()) {
+      const current = unitNow(i);
+      const e = expected.get(`${r.product.id}\u0000${r.variant || ''}`);
+      totalTzs += current * r.qty;
+      expectedTotalTzs += (e === undefined || e === -1 ? current : e) * r.qty;
+    }
+    return {
+      error: 'price_changed', status: 409, productId: changed[0].productId, currentPriceTzs: changed[0].currentPriceTzs,
+      lines: changed, expectedTotalTzs, totalTzs,
+    };
+  }
 
   /**
    * Place an order. Prices come from the product rows, never from the request.
@@ -715,6 +957,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (body?.paymentOutcome === 'failed') return { error: 'payment_failed', status: 402 };
     // The same product (and variant) on two lines is one line: stock is checked and reserved for the total.
     const wanted = new Map();
+    // Flash sales (flag on): the unit price the app showed, per line (optional; old clients send none).
+    const sales = salesActive();
+    const expected = new Map();
     for (const item of items) {
       const qty = Number(item?.qty || 0);
       if (!Number.isSafeInteger(qty) || qty <= 0 || qty > MAX_QTY_PER_LINE) return { error: 'invalid_quantity', status: 400 };
@@ -722,6 +967,12 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       const variant = item.variant == null || item.variant === '' ? null : String(item.variant).trim();
       if (item.variant != null && typeof item.variant !== 'string') return { error: 'invalid_variant', status: 400, productId: item.productId };
       const lineKey = `${item.productId}\u0000${variant || ''}`;
+      if (sales && item.expectedPriceTzs != null) {
+        const e = Number(item.expectedPriceTzs);
+        if (!Number.isSafeInteger(e) || e < 0 || e > MAX_ORDER_TOTAL_TZS) return { error: 'invalid_expected_price', status: 400, productId: item.productId };
+        // Two lines of the same product and variant saying different prices: neither can be right.
+        expected.set(lineKey, expected.has(lineKey) && expected.get(lineKey) !== e ? -1 : e);
+      }
       const line = wanted.get(lineKey) || { productId: item.productId, variant, qty: 0 };
       line.qty += qty;
       wanted.set(lineKey, line);
@@ -772,12 +1023,31 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     for (const vendorId of new Set(resolved.map(({ product }) => product.vendorId).filter(Boolean))) {
       rates.set(vendorId, vendorCommissionPct(await users.findByIdAsync(vendorId)));
     }
-    const orderItems = resolved.map(({ product, qty, variant, variantTracked }) => {
-      const priceTzs = priceOf(product);
+    // PRICING PATH. Flag off: the seller's own price, exactly as before. Flag on: the effective price now
+    // (shop-pricing.mjs: the lowest of price, discount price and a live approved flash sale, by this
+    // server's clock). Either way the commission is worked out on the price charged (the vendor bears
+    // any discount) and the line keeps that price for good: paying later, revival, refunds and
+    // settlement all read the line, never the product.
+    const pricedAt = now();
+    const live = sales ? await flashSales.liveByProduct(resolved.map(r => r.product.id), pricedAt) : null;
+    const pricedLines = resolved.map(r => (live ? priceBreakdown(r.product, live.get(r.product.id), pricedAt) : { priceTzs: priceOf(r.product), sale: null }));
+    if (sales && expected.size) {
+      const changed = [];
+      for (const [i, { product, variant }] of resolved.entries()) {
+        const e = expected.get(`${product.id}\u0000${variant || ''}`);
+        if (e === undefined || e === pricedLines[i].priceTzs) continue;
+        changed.push(await changedLine(product, variant, e === -1 ? null : e, pricedLines[i]));
+      }
+      if (changed.length) return priceChangedError(changed, resolved, pricedLines, expected);
+    }
+    const orderItems = resolved.map(({ product, qty, variant, variantTracked }, i) => {
+      const priceTzs = pricedLines[i].priceTzs;
       const { commissionPct, commissionTzs, vendorPayoutTzs } = priceOrderLine({ priceTzs, qty, commissionPct: rates.get(product.vendorId) ?? VENDOR_COMMISSION_PCT.default });
       return {
         productId: product.id, vendorId: product.vendorId, name: product.name, qty, priceTzs, image: product.images?.[0] || null, commissionPct, commissionTzs, vendorPayoutTzs,
         ...(variant ? { variant, ...(variantTracked ? { variantStockReserved: true } : {}) } : {}),
+        // Which flash sale set this line's price (flag on, sale live when priced).
+        ...(pricedLines[i].sale ? { flashSaleId: pricedLines[i].sale.id } : {}),
       };
     });
     const totalTzs = orderItems.reduce((sum, item) => sum + item.priceTzs * item.qty, 0);
@@ -795,6 +1065,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       // One fulfilment per vendor: each vendor moves only their own.
       fulfilments: [...new Set(orderItems.map(item => item.vendorId).filter(Boolean))].map(vendorId => ({ vendorId, status: 'pending', timeline: [{ status: 'pending', at }], updatedAt: at })),
       reservationExpiresAt: free ? null : new Date(+placedAt + reservationTtlMinutes * 60_000).toISOString(),
+      // S6: an order with nothing to pay is paid when it is placed (vendor reports date app sales by paidAt).
+      ...(free ? { paidAt: at } : {}),
       createdAt: at, updatedAt: at,
     };
     // Stock stays reserved while the payment is confirmed.
@@ -805,10 +1077,29 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     };
     const placed = await orderStore.placeOrder({
       order,
-      lines: resolved.map(({ product, qty, variant, variantTracked }) => ({ productId: product.id, variant, variantTracked, qty, priceTzs: Number(product.priceTzs || 0), discountPriceTzs: Number(product.discountPriceTzs || 0) })),
+      lines: resolved.map(({ product, qty, variant, variantTracked }, i) => ({
+        productId: product.id, variant, variantTracked, qty, priceTzs: Number(product.priceTzs || 0), discountPriceTzs: Number(product.discountPriceTzs || 0),
+        // Flag on: under the stock lock the store re-reads the live sale; a different one (window closed,
+        // a sale started or was ended) → price_changed and nothing is reserved.
+        ...(sales ? { checkSale: true, flashSaleId: pricedLines[i].sale?.id ?? null } : {}),
+      })),
       paymentRequest,
       idempotency: key ? { key: String(key), fingerprint } : null,
     });
+    if (placed.error === 'price_changed' && sales) {
+      // The price moved between pricing and the stock lock: say which lines and what they cost now.
+      const at = now();
+      const fresh = await Promise.all(resolved.map(async r => (await products.findByIdAsync(r.product.id)) || r.product));
+      const liveNow = await flashSales.liveByProduct(fresh.map(p => p.id), at);
+      const changed = [];
+      for (const [i, product] of fresh.entries()) {
+        const current = priceBreakdown(product, liveNow.get(product.id), at);
+        if (current.priceTzs === pricedLines[i].priceTzs && product.id !== placed.productId) continue;
+        const e = expected.get(`${product.id}\u0000${resolved[i].variant || ''}`);
+        changed.push(await changedLine(product, resolved[i].variant, e === undefined || e === -1 ? null : e, current, at));
+      }
+      return priceChangedError(changed, resolved, null, expected, fresh, liveNow, at);
+    }
     if (placed.error) return { error: placed.error, status: placed.status, productId: placed.productId };
     if (placed.replayed) return placed.order.paymentStatus === 'paid' ? { order: placed.order, status: 201, replayed: true } : { order: placed.order, paymentRequest: placed.paymentRequest, status: 202, replayed: true };
     await afterStockMoved(lines.map(l => l.productId));
@@ -1268,24 +1559,47 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * Sales dashboard. todaySalesTzs (Q-3, S2): this vendor's own lines of the orders placed today (EAT
    * calendar day) that are paid — not cancelled, refunded or still unpaid — whatever their delivery
    * status. The other figures still count delivered, paid orders.
+   * S6 (additive): each figure also comes as …NetTzs = what the vendor receives after FitFlex's
+   * commission on the same orders (vendorShareOfOrder, read only: the order lines' commission and payout
+   * as fixed when the order was placed; the payout engine is not involved), and each settlements[] row
+   * carries netTzs.
+   * Settled / pending (security review #275 M1, payout display): settled = this vendor's own share of the order is
+   * on a paid statement (vendorPaidOrderIds), never the order-wide settlementStatus.
    */
   async function vendorPayments(vendorId) {
     const orders = await ordersOfVendor(vendorId);
     const delivered = orders.filter(order => order.paymentStatus === 'paid' && ['delivered', 'fulfilled'].includes(order.status));
     const value = order => ownLines(order, vendorId).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
+    const net = order => (ownLines(order, vendorId).length ? vendorShareOfOrder(order, vendorId).payoutTzs : 0);
     const current = now(), week = +current - 7 * 86400000, month = +current - 30 * 86400000;
     const today = eatDayBounds(eatDate(current));
     const placedToday = order => { const t = +new Date(order.createdAt); return t >= today.start && t < today.end; };
-    const total = rows => rows.reduce((sum, order) => sum + value(order), 0);
-    return { todaySalesTzs: total(orders.filter(order => order.paymentStatus === 'paid' && order.status !== 'cancelled' && placedToday(order))), weeklySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week)), monthlySalesTzs: total(delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month)), pendingSettlementTzs: total(delivered.filter(order => order.settlementStatus !== 'settled')), settledPaymentsTzs: total(delivered.filter(order => order.settlementStatus === 'settled')), settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), status: order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })) };
+    const total = (rows, of = value) => rows.reduce((sum, order) => sum + of(order), 0);
+    const paidToday = orders.filter(order => order.paymentStatus === 'paid' && order.status !== 'cancelled' && placedToday(order));
+    const weekly = delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= week);
+    const monthly = delivered.filter(order => +new Date(order.updatedAt || order.createdAt) >= month);
+    const paidIds = vendorPaidOrderIds ? await vendorPaidOrderIds(vendorId) : null;
+    const isSettled = order => (paidIds ? paidIds.has(order.id) : order.settlementStatus === 'settled');
+    const pending = delivered.filter(order => !isSettled(order));
+    const settled = delivered.filter(isSettled);
+    return {
+      todaySalesTzs: total(paidToday), weeklySalesTzs: total(weekly), monthlySalesTzs: total(monthly), pendingSettlementTzs: total(pending), settledPaymentsTzs: total(settled),
+      todayNetTzs: total(paidToday, net), weeklyNetTzs: total(weekly, net), monthlyNetTzs: total(monthly, net), pendingSettlementNetTzs: total(pending, net), settledNetTzs: total(settled, net),
+      settlements: delivered.map(order => ({ orderId: order.id, amountTzs: value(order), netTzs: net(order), status: paidIds ? (isSettled(order) ? 'settled' : 'pending') : order.settlementStatus || 'pending', at: order.updatedAt || order.createdAt })),
+    };
   }
+  /**
+   * GET /vendor/payments/statement. S6: written with the shared CSV helper — UTF-8 with a BOM, CRLF,
+   * formula-injection safe. Same header and columns as before.
+   */
   async function vendorStatement(vendorId) {
-    const lines = ['order_id,amount_tzs,order_status,payment_status,settlement_status,date'];
+    const rows = [];
     for (const order of await ordersOfVendor(vendorId)) {
       const amount = ownLines(order, vendorId).reduce((sum, item) => sum + Number(item.priceTzs || 0) * Number(item.qty || 0), 0);
-      lines.push([order.id, amount, order.status, order.paymentStatus || 'unknown', order.settlementStatus || 'pending', order.updatedAt || order.createdAt].map(csv).join(','));
+      const at = order.updatedAt || order.createdAt;
+      rows.push([order.id, amount, order.status, order.paymentStatus || 'unknown', order.settlementStatus || 'pending', at instanceof Date ? at.toISOString() : at]);
     }
-    return `${lines.join('\n')}\n`;
+    return csvDocument(['order_id', 'amount_tzs', 'order_status', 'payment_status', 'settlement_status', 'date'], rows);
   }
 
   async function sendEnquiry({ buyerId, body }) {
@@ -1377,7 +1691,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       permissions,
       approvalStatus: vendor?.approvalStatus ?? null,
       accountStatus: vendor?.accountStatus ?? null,
-      tools: { ...vendorToolsOptions(), canSeeCost: await canSeeCost(claims) },
+      tools: { ...vendorToolsOptions(), canSeeCost: await canSeeCost(claims), canSeeOrderMoney: await canSeeOrderMoney(claims) },
     };
   }
   const staffView = ({ passwordHash, ...staff }) => staff;
@@ -1417,5 +1731,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { canSeeCost, afterStockMoved, notifyVendor, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
+  return { lookupProductCode, canSeeCost, afterStockMoved, notifyVendor, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
 }

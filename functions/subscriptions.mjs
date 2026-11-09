@@ -66,25 +66,25 @@ export const me = {
 
 export const deleteMyAccount = {
   created, method: 'delete', path: '/me',
-  description: 'Authenticated user: permanently delete own account + Firebase identity (Play Store account-deletion requirement). Blocked if the account has data that requires an assisted transfer first (gym owner with check-in activity, trainer with bookings).',
+  description: 'Authenticated user: permanently delete own account + Firebase identity (Play Store account-deletion requirement). Only this persona goes: another role on the same sign-in keeps the shared login and details. Personal data is removed; payments, check-ins, bookings and orders stay, anonymised, so no statement or total changes. All of it happens in one transaction: 200 { ok, message }, or 503 { error: account_deletion_failed, message, messageSw } and nothing changed, so it can be retried. 404 user_not_found: already deleted (a retry whose first answer was lost counts as success). 409 gym_owner_has_checkin_activity | trainer_has_bookings | organizer_owner: needs an assisted transfer first. 409 open_paid_order { message, messageSw }: a paid shop order is not delivered or cancelled yet.',
   onGuard: routeGuard('delete', requireAuth()),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
     if (!user) return res.status(404).json({ error: 'user_not_found' });
     const result = await accountService.deleteMyAccount(user);
-    if (result.error) return res.status(result.status).json({ error: result.error, message: result.message });
+    if (result.error) return res.status(result.status).json({ error: result.error, message: result.message, ...(result.messageSw ? { messageSw: result.messageSw } : {}) });
     res.json(result);
   }
 };
 
 export const updateMemberProfile = {
   created, method: 'post', path: '/me/profile',
-  description: 'Authenticated user: save profile details; members can also save onboarding goals and preferences. Members: dateOfBirth must be "YYYY-MM-DD", a real calendar date from 1901-01-01 to today (East Africa day), else 400 invalid_field { field: "dateOfBirth" }; "" (or only spaces) clears it; null or leaving it out keeps the stored one. With PARTNER_DOB_REQUIRED on, a date of birth under 18 for a person who also holds a trainer or gym-owner role is refused: 400 { error: "partner_under_18" }.',
+  description: 'Authenticated user: save profile details; members can also save onboarding goals and preferences. Members: dateOfBirth must be "YYYY-MM-DD", a real calendar date from 1901-01-01 to today (East Africa day), else 400 invalid_field { field: "dateOfBirth" }; "" (or only spaces) clears it; null or leaving it out keeps the stored one. With PARTNER_DOB_REQUIRED on, a date of birth under 18 for a person who also holds a trainer or gym-owner role is refused: 400 { error: "partner_under_18" }. photoUrl (security fix 2026-10-28): data:image/(png|jpeg|webp);base64,… (≤ 1.4 MB decoded (MEDIA_SRC_MAX_BYTES), a real image of that kind) or our own /storage/<cid>/<file> path; the stored photo is accepted unchanged; null / "" as before; else 400 invalid_media_src { field: "photoUrl", reason }.',
   onGuard: routeGuard('post', requireAuth()),
   onRequest: async (req, res) => {
     const user = await resolveRequestUser(req);
     const result = await accountService.updateMemberProfile({ claims: req.user, user, body: req.body || {} });
-    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.field ? { field: result.field } : {}) });
+    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.field ? { field: result.field } : {}), ...(result.reason ? { reason: result.reason } : {}), ...(result.retryAfterSeconds ? { retryAfterSeconds: result.retryAfterSeconds } : {}) });
     res.json(result);
   }
 };

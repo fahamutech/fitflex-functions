@@ -10,6 +10,7 @@ import { db } from '../src/infra/knex-store.mjs';
 import { checkins, auditLog } from '../src/bootstrap/collections.mjs';
 import { createCheckinStatusService } from '../src/services/checkin-status-service.mjs';
 import migration from '../db/migrations/20261026090000-checkin-settlement-integrity.cjs';
+import webQrMigration from '../db/migrations/20270129090000-checkin-web-qr.cjs';
 
 const uid = (p) => `${p}_${randomUUID().slice(0, 8)}`;
 const created = { users: [], gyms: [], checkins: [] };
@@ -82,6 +83,7 @@ test('the backfill sets businessDate to the EAT day of existing rows', async () 
   const early = baseRow(f, { timestamp: '2026-10-05T20:59:00.000Z' });  // 23:59 EAT 5 Oct
   await db('Checkin').insert([late, early]);
   await migration.up(db);   // idempotent: only fills rows with no business date
+  await webQrMigration.up(db);   // re-running the older migration re-adds the older source list: put the current one back
   const rows = Object.fromEntries((await db('Checkin').whereIn('id', [late.id, early.id])).map((r) => [r.id, r.businessDate]));
   assert.equal(rows[late.id], '2026-10-06');
   assert.equal(rows[early.id], '2026-10-05');

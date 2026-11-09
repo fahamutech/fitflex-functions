@@ -675,6 +675,8 @@ test('account deletion (H1): the buyer is forgotten at every vendor — name cle
   }
   assert.equal(await db('VendorBuyerRef').where({ buyerId: buyer }).count('* as n').first().then(r => Number(r.n)), 2);
 
+  // A paid order on its way would block the deletion (open_paid_order).
+  await db('ShopOrder').where({ buyerId: buyer }).update({ status: 'delivered' });
   const deleted = await accountService.deleteMyAccount({ id: buyer, userType: 'member' });
   assert.equal(deleted.ok, true, JSON.stringify(deleted));
   const [o, c] = await Promise.all([db('VendorCustomer').where({ id: atOwes.id }).first(), db('VendorCustomer').where({ id: atClear.id }).first()]);

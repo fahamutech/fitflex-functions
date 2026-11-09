@@ -22,7 +22,10 @@ const FILTER_KEYS = ['tier', 'verified', 'specialty', 'category', 'brand', 'minP
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const bool = v => (v === true || v === 'true' || v === '1' ? true : v === false || v === 'false' || v === '0' ? false : undefined);
 const num = v => (v === undefined || v === null || v === '' ? undefined : Number.isFinite(Number(v)) ? Number(v) : undefined);
-const priceOf = p => Number(p.discountPriceTzs || 0) > 0 && Number(p.discountPriceTzs) < Number(p.priceTzs || 0) ? Number(p.discountPriceTzs) : Number(p.priceTzs || 0);
+// Product rows from shopService.listProducts carry effectivePriceTzs only with SHOP_FLASH_SALES on (a live
+// flash sale included); without it this is the seller's own price, as before.
+const priceOf = p => (p.effectivePriceTzs != null ? Number(p.effectivePriceTzs)
+  : Number(p.discountPriceTzs || 0) > 0 && Number(p.discountPriceTzs) < Number(p.priceTzs || 0) ? Number(p.discountPriceTzs) : Number(p.priceTzs || 0));
 const pointOf = g => {
   const c = g?.coordinates || {};
   const lat = Number(c.lat ?? g?.lat ?? g?.latitude);

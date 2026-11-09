@@ -7,7 +7,7 @@
 // `shareUrl` is built from the same host as friend-invite links (FRIEND_INVITE_BASE_URL / APP_DOWNLOAD_LINK).
 import {
   summaryView, detailView, distanceBucket, PUBLIC_STATUSES, EVENT_TYPES, DISTANCE_BUCKETS, PRICE_BUCKETS, SORTS, REGIONS, REGION_CODES, TIMEZONES,
-  DEFAULT_CLOSING_SOON_HOURS,
+  DEFAULT_CLOSING_SOON_HOURS, PAYOUT_SCHEDULES,
 } from '../shared/events-document.mjs';
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
@@ -36,9 +36,16 @@ export function createEventsDiscoveryService({
   shareBase = () => process.env.FRIEND_INVITE_BASE_URL || process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
   // S3 (spec §3.1): the registration keys added to the probe while EVENTS_REGISTRATION is on (holdTtlMinutes, maxParticipantsPerOrder, payment, teams, corporate, claim, consentTextVersion).
   registrationOptions = () => ({}),
+  // S5 (spec §11.1): which of the three ops flags are usable now ({ kit, api, webhooks }); all false while off.
+  opsOptions = () => ({ kit: false, api: false, webhooks: false, kitOffline: false }),
+  // S7: { on, paymentsOk } while EVENTS_WAITLIST is on (ticket types then carry `waitlist: { state }`), else null.
+  waitlistView = () => null,
 }) {
   const on = name => Boolean(flags[name]?.());
-  const viewOpts = () => ({ now: now(), closingSoonHours: closingSoonHours() });
+  const viewOpts = () => {
+    const w = waitlistView();
+    return { now: now(), closingSoonHours: closingSoonHours(), ...(w?.on ? { waitlist: true, waitlistPaymentsOk: w.paymentsOk !== false } : {}) };
+  };
 
   /** Spec §13: the flag probe. Never 404s; `discovery` false while EVENTS_MODULE is off. */
   function options() {
@@ -49,6 +56,8 @@ export function createEventsDiscoveryService({
       favourites: discovery && on('favourites'),
       registration,
       ...(registration ? registrationOptions() : {}),
+      ops: registration ? opsOptions() : { kit: false, api: false, webhooks: false, kitOffline: false },
+      payoutSchedules: [...PAYOUT_SCHEDULES],
       currency: 'TZS',
       closingSoonHours: closingSoonHours(),
       regions: REGIONS.map(r => ({ code: r.code, name: { ...r.name } })),

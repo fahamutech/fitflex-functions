@@ -184,7 +184,7 @@ test('input rules: role, staff role, permissions, the admin role, and staff at a
 
     const admin = await invite(v, { email: p.email, vendorRole: 'admin', permissions: ['orders'] });
     assert.equal(admin.statusCode, 201);
-    assert.deepEqual([...admin.body.invitation.aclPermissions].sort(), ['customers', 'orders', 'payments', 'products', 'reports', 'sales', 'staff']);
+    assert.deepEqual([...admin.body.invitation.aclPermissions].sort(), ['customers', 'import', 'orders', 'payments', 'products', 'purchases', 'reports', 'sales', 'staff']);
     await call(acceptMyInvitation, p.claims, { params: { invitationId: admin.body.invitation.id } });
 
     const other = await makeVendor('Second Shop');

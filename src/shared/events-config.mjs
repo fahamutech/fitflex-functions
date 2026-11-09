@@ -6,7 +6,7 @@
 //   EVENTS_CORPORATE_MAX_ROWS          500    roster rows one corporate order may hold (413 too_many_rows above)
 //   EVENTS_TEAM_MAX_MEMBERS            50     default team size when EventTeam.maxMembers is null
 //   EVENTS_CLAIM_TOKEN_DAYS            90     claim link lifetime
-//   EVENTS_CONSENT_TEXT_VERSION        2026-10-draft
+//   EVENTS_CONSENT_TEXT_VERSION        2026-11-draft
 //   EVENTS_FEE_RULE                    (none) JSON fee rule for src/shared/events-pricing.mjs (D21: no member fee unless set)
 //   EVENTS_ORG_DISCOUNTS               {}     JSON { "<organizationId>": { "pct": 10 } } — server-side only (follow-ups S3)
 //   EVENT_HOLD_TTL_MINUTES             30     S1 (read through the store's holdTtlMinutes)
@@ -29,7 +29,7 @@ export const DEFAULT_MAX_PARTICIPANTS_PER_ORDER = 10;
 export const DEFAULT_CORPORATE_MAX_ROWS = 500;
 export const DEFAULT_TEAM_MAX_MEMBERS = 50;
 export const DEFAULT_CLAIM_TOKEN_DAYS = 90;
-export const DEFAULT_CONSENT_TEXT_VERSION = '2026-10-draft';
+export const DEFAULT_CONSENT_TEXT_VERSION = '2026-11-draft';   // S7: the rewritten draft text (kit status and bib added, over-statement removed)
 
 export const eventsMaxParticipantsPerOrder = () => intOr('EVENTS_MAX_PARTICIPANTS_PER_ORDER', DEFAULT_MAX_PARTICIPANTS_PER_ORDER, { max: 1000 });
 export const eventsCorporateMaxRows = () => intOr('EVENTS_CORPORATE_MAX_ROWS', DEFAULT_CORPORATE_MAX_ROWS, { max: 5000 });
@@ -90,3 +90,88 @@ export const eventsLatePaymentGraceHours = () => intOr('EVENTS_LATE_PAYMENT_GRAC
 
 /** The ticket key ring, or null when EVENT_TICKET_SECRET is missing or shorter than 32 characters (fail closed: no payment is taken). */
 export const eventTicketKeyRing = () => ticketKeyRing(process.env);
+
+// ── S5: venue operations, the organizer API and webhooks (docs/design/events-s5-venue-api-and-webhooks.md §11.3) ──
+//   EVENTS_API_TOKEN_TTL_SECONDS 900   EVENTS_API_MAX_CLIENTS 10   EVENTS_API_DEFAULT_RATE 120
+//   EVENTS_WEBHOOK_MAX_ENDPOINTS 5     EVENTS_WEBHOOK_TIMEOUT_MS 10000   EVENTS_WEBHOOK_MAX_ATTEMPTS 10   EVENTS_WEBHOOK_BATCH 50
+//   EVENTS_FEED_LAG_SECONDS 5          EVENTS_EXPORT_MAX_ROWS 20000
+//   EVENTS_API_ORGANIZER_ALLOWLIST     optional comma list of organizer ids (the D39 pilot gate, besides the admin switch)
+//   EVENTS_WEBHOOK_SECRET_KEY (32 bytes, base64), EVENTS_WEBHOOK_SECRET_KEY_ID (k1), EVENTS_WEBHOOK_SECRET_KEY_PREVIOUS (JSON): see webhook-signing.mjs
+export const eventsApiTokenTtlSeconds = () => intOr('EVENTS_API_TOKEN_TTL_SECONDS', 900, { min: 60, max: 3600 });
+export const eventsApiMaxClients = () => intOr('EVENTS_API_MAX_CLIENTS', 10, { max: 100 });
+export const eventsApiDefaultRate = () => intOr('EVENTS_API_DEFAULT_RATE', 120, { max: 600 });
+export const eventsWebhookMaxEndpoints = () => intOr('EVENTS_WEBHOOK_MAX_ENDPOINTS', 5, { max: 50 });
+export const eventsWebhookTimeoutMs = () => intOr('EVENTS_WEBHOOK_TIMEOUT_MS', 10_000, { min: 1000, max: 30_000 });
+export const eventsWebhookMaxAttempts = () => intOr('EVENTS_WEBHOOK_MAX_ATTEMPTS', 10, { max: 20 });
+export const eventsWebhookBatch = () => intOr('EVENTS_WEBHOOK_BATCH', 50, { max: 200 });
+export const eventsFeedLagSeconds = () => intOr('EVENTS_FEED_LAG_SECONDS', 5, { min: 0, max: 300 });
+export const eventsExportMaxRows = () => intOr('EVENTS_EXPORT_MAX_ROWS', 20_000, { max: 200_000 });
+/** The env part of the D39 pilot gate: a Set of organizer ids (empty when unset). The admin switch (EventOrganizer.apiAccessEnabledAt) is the other part. */
+export const eventsApiAllowlist = () => new Set(String(process.env.EVENTS_API_ORGANIZER_ALLOWLIST ?? '').split(',').map(s => s.trim()).filter(Boolean));
+
+// ── S6: runs, results, medals and rewards (docs/design/events-s6-runs-results-medals-rewards.md §13.2) ──
+//   EVENTS_RUN_DISTANCE_TOLERANCE_BPS 200      EVENTS_RUN_LINK_MAX_DAYS_AFTER 7       EVENTS_RESULTS_IMPORT_MAX_ROWS 5000
+//   EVENTS_RESULTS_DISPUTE_DEFAULT_HOURS 168   EVENTS_AWARD_BATCH 200                 EVENTS_RESULTS_PUSH_MAX 500
+//   EVENTS_MEDAL_ART_MAX_BYTES 2097152         EVENTS_MEDAL_ART_MAX_PIXELS 16000000   EVENTS_MEDAL_ART_UPLOADS_PER_DAY 20
+//   EVENTS_RESULTS_CONSENT_VERSIONS            comma list of consent-text versions that carry the public-results clause (unset = none: everyone starts bib-only)
+// Reward codes reuse EVENT_TICKET_SECRET through a derived key (events-reward-code.mjs); there is no new secret.
+export const eventsRunDistanceToleranceBps = () => intOr('EVENTS_RUN_DISTANCE_TOLERANCE_BPS', 200, { min: 0, max: 500 });
+export const eventsRunLinkMaxDaysAfter = () => intOr('EVENTS_RUN_LINK_MAX_DAYS_AFTER', 7, { min: 0, max: 60 });
+export const eventsResultsImportMaxRows = () => intOr('EVENTS_RESULTS_IMPORT_MAX_ROWS', 5000, { max: 20_000 });
+export const eventsResultsDisputeDefaultHours = () => intOr('EVENTS_RESULTS_DISPUTE_DEFAULT_HOURS', 168, { min: 24, max: 720 });
+export const eventsAwardBatch = () => intOr('EVENTS_AWARD_BATCH', 200, { max: 2000 });
+export const eventsResultsPushMax = () => intOr('EVENTS_RESULTS_PUSH_MAX', 500, { min: 0, max: 100_000 });
+export const eventsMedalArtMaxBytes = () => intOr('EVENTS_MEDAL_ART_MAX_BYTES', 2_097_152, { min: 65_536, max: 2_097_152 });
+export const eventsMedalArtMaxPixels = () => intOr('EVENTS_MEDAL_ART_MAX_PIXELS', 16_000_000, { min: 262_144, max: 16_000_000 });
+export const eventsMedalArtUploadsPerDay = () => intOr('EVENTS_MEDAL_ART_UPLOADS_PER_DAY', 20, { max: 200 });
+export const eventsResultsConsentVersions = () => String(process.env.EVENTS_RESULTS_CONSENT_VERSIONS ?? '').split(',').map(s => s.trim()).filter(Boolean);
+
+// ── S7: offline kit desk, waitlist, analytics and hardening (docs/design/events-s7-hardening-and-pilot.md §7.2) ──
+// Invalid values fall back to the default and report nothing about the variable (S3 review L8).
+//   Offline:   EVENTS_OFFLINE_SESSION_HOURS 36   EVENTS_OFFLINE_MAX_DEVICES 10   EVENTS_OFFLINE_MAX_PER_USER 2   EVENTS_OFFLINE_MAX_ROWS 20000
+//              EVENTS_OFFLINE_SYNC_BATCH 200     EVENTS_OFFLINE_MAX_PENDING 2000   EVENTS_OFFLINE_CLOCK_TOLERANCE_SECONDS 300
+//              EVENTS_OFFLINE_MIN_DESK_BUILD (unset)   EVENTS_OFFLINE_SCAN_KEEP_DAYS 180   EVENTS_OFFLINE_MAX_BIB_RANGE 5000
+//   Waitlist:  EVENTS_WAITLIST_OFFER_HOURS 12   EVENTS_WAITLIST_MIN_OFFER_MINUTES 120   EVENTS_WAITLIST_MAX_ACTIVE_PER_USER 5
+//              EVENTS_WAITLIST_MAX_QUEUE 500    EVENTS_WAITLIST_MAX_LAPSES 2   EVENTS_WAITLIST_QUIET_HOURS 21-7 | off   EVENTS_WAITLIST_KEEP_DAYS 90
+//   Analytics: EVENTS_ANALYTICS_KEEP_DAYS 730   EVENTS_ALERT_RULES (optional JSON overrides)   OPS_ALERT_EMAILS (existing)
+//   Hardening: EVENTS_WEBHOOK_PER_HOST_BATCH 5   EVENTS_MAX_UNPAID_PLACES_PER_USER 4   EVENTS_RETENTION_MONTHS (unset)   EVENTS_DELETED_USER_ANONYMISE_DAYS (unset)
+export const eventsOfflineSessionHours = () => intOr('EVENTS_OFFLINE_SESSION_HOURS', 36, { max: 168 });
+export const eventsOfflineMaxDevices = () => intOr('EVENTS_OFFLINE_MAX_DEVICES', 10, { max: 100 });
+export const eventsOfflineMaxPerUser = () => intOr('EVENTS_OFFLINE_MAX_PER_USER', 2, { max: 20 });
+export const eventsOfflineMaxRows = () => intOr('EVENTS_OFFLINE_MAX_ROWS', 20_000, { max: 200_000 });
+export const eventsOfflineSyncBatch = () => intOr('EVENTS_OFFLINE_SYNC_BATCH', 200, { max: 500 });
+export const eventsOfflineMaxPending = () => intOr('EVENTS_OFFLINE_MAX_PENDING', 2000, { max: 20_000 });
+export const eventsOfflineMaxStoredScans = () => eventsOfflineMaxPending() * 5;
+export const eventsOfflineClockToleranceSeconds = () => intOr('EVENTS_OFFLINE_CLOCK_TOLERANCE_SECONDS', 300, { max: 3600 });
+export const eventsOfflineMinDeskBuild = () => intOr('EVENTS_OFFLINE_MIN_DESK_BUILD', 0, { min: 0, max: 1_000_000 });
+export const eventsOfflineScanKeepDays = () => intOr('EVENTS_OFFLINE_SCAN_KEEP_DAYS', 180, { max: 3650 });
+export const eventsOfflineMaxBibRange = () => intOr('EVENTS_OFFLINE_MAX_BIB_RANGE', 5000, { max: 5000 });   // the database CHECK allows at most 5,000 numbers per block
+
+export const eventsWaitlistOfferHours = () => intOr('EVENTS_WAITLIST_OFFER_HOURS', 12, { max: 72 });
+export const eventsWaitlistMinOfferMinutes = () => intOr('EVENTS_WAITLIST_MIN_OFFER_MINUTES', 120, { max: 1440 });
+export const eventsWaitlistMaxActivePerUser = () => intOr('EVENTS_WAITLIST_MAX_ACTIVE_PER_USER', 5, { max: 50 });
+export const eventsWaitlistMaxQueue = () => intOr('EVENTS_WAITLIST_MAX_QUEUE', 500, { max: 10_000 });
+export const eventsWaitlistMaxLapses = () => intOr('EVENTS_WAITLIST_MAX_LAPSES', 2, { max: 20 });
+export const eventsWaitlistKeepDays = () => intOr('EVENTS_WAITLIST_KEEP_DAYS', 90, { max: 3650 });
+/** { off: true } | { from, to } hours in the event timezone (default 21 to 7). */
+export function eventsWaitlistQuietHours() {
+  const raw = String(process.env.EVENTS_WAITLIST_QUIET_HOURS ?? '').trim().toLowerCase();
+  if (raw === 'off') return { off: true };
+  const m = /^(\d{1,2})-(\d{1,2})$/.exec(raw);
+  if (m && Number(m[1]) <= 23 && Number(m[2]) <= 23 && m[1] !== m[2]) return { off: false, from: Number(m[1]), to: Number(m[2]) };
+  return { off: false, from: 21, to: 7 };
+}
+
+export const eventsAnalyticsKeepDays = () => intOr('EVENTS_ANALYTICS_KEEP_DAYS', 730, { max: 3650 });
+/** Optional per-rule overrides { A1: { thresholdHours }, … }; anything malformed is ignored (the defaults stand). */
+export function eventsAlertRules() {
+  const parsed = parseJsonEnv('EVENTS_ALERT_RULES');
+  if (parsed.error || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) return {};
+  return parsed.value;
+}
+
+export const eventsWebhookPerHostBatch = () => intOr('EVENTS_WEBHOOK_PER_HOST_BATCH', 5, { max: 50 });
+export const eventsMaxUnpaidPlacesPerUser = () => intOr('EVENTS_MAX_UNPAID_PLACES_PER_USER', 4, { max: 100 });
+/** Months after an event ends before contact and sensitive fields are cleared; null (unset or invalid) = the job does nothing. */
+export const eventsRetentionMonths = () => intOr('EVENTS_RETENTION_MONTHS', null, { max: 240 });
+export const eventsDeletedUserAnonymiseDays = () => intOr('EVENTS_DELETED_USER_ANONYMISE_DAYS', null, { max: 3650 });

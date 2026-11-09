@@ -229,9 +229,9 @@ export function createPromotionEventsService({ db, promotions, now = () => new D
   }
 
   /** The customer deleted their account: their events stay as counts but no longer say who. */
-  async function forgetUser(userId) {
+  async function forgetUser(userId, { q = db } = {}) {
     if (!userId) return { cleared: 0 };
-    return { cleared: await db(TABLE).where({ userId }).update({ userId: null }) };
+    return { cleared: await q(TABLE).where({ userId }).update({ userId: null }) };
   }
 
   /** Delete raw events older than the retention period (calendar months back, clamped to the month's length). Idempotent. */

@@ -154,7 +154,7 @@ async function createTrainerLinkedToGym(ownerId, gym, displayName) {
 
   const register = res();
   await trainerRegister.onRequest(
-    { user: { sub: trainerId, userType: 'trainer' }, body: { displayName, photoUrl: 'https://example.com/p.jpg', gender: 'male' } },
+    { user: { sub: trainerId, userType: 'trainer' }, body: { displayName, photoUrl: '/storage/bafytest/p.jpg', gender: 'male' } },
     register,
   );
   assert.equal(register.statusCode, 200, `trainer register failed: ${JSON.stringify(register.body)}`);

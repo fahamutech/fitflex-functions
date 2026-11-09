@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import { claimHoldsSession } from '../shared/credential-change.mjs';
 
 const IS_PROD = process.env.NODE_ENV === 'production';
 const SECRET = process.env.JWT_SECRET || (IS_PROD ? null : 'fitflex-dev-secret-change-me');
@@ -42,8 +43,16 @@ export function registerAccountStatusLookup(fn) {
   statusCache.clear();
 }
 
+// Cache scope (admin-portal audit S1): this cache is per PROCESS. forgetSession/invalidateAccountStatus
+// only clears the instance that handled the change; other server instances keep serving the cached
+// status for up to STATUS_CACHE_MS (30 s) before they re-read it. Accepted, no shared infrastructure.
+// `epoch` closes the in-process race: a lookup that started before an invalidation must not write
+// its (possibly stale) answer into the cache afterwards.
+let epoch = 0;
+
 /** Drop a cached status so the next request re-reads it (call after a status change). */
 export function invalidateAccountStatus(userId) {
+  epoch += 1;
   statusCache.delete(userId);
 }
 
@@ -52,6 +61,7 @@ async function accountStatusOf(userId) {
   const hit = statusCache.get(userId);
   if (hit && Date.now() - hit.at < STATUS_CACHE_MS) return hit;
   let found = null;
+  const startedAt = epoch;
   try {
     found = await accountStatusLookup(userId);
   } catch (err) {
@@ -63,10 +73,13 @@ async function accountStatusOf(userId) {
     ? {
       status: found.status ?? null,
       validAfter: found.sessionsValidAfter ? +new Date(found.sessionsValidAfter) : null,
+      missing: found.missing === true,
       passwordChangeRequired: found.passwordChangeRequired === true,
       at: Date.now(),
     }
     : { status: found, validAfter: null, passwordChangeRequired: false, at: Date.now() };
+  // An invalidation happened while this lookup was in flight: serve it once, but do not cache it.
+  if (epoch !== startedAt) return entry;
   if (statusCache.size >= STATUS_CACHE_MAX) statusCache.clear();
   statusCache.set(userId, entry);
   return entry;
@@ -92,13 +105,20 @@ function authGuard(roles, { allowPasswordChange }) {
     if (account?.status === 'suspended') {
       return res.status(403).json({ error: 'account_suspended' });
     }
+    // Fail closed (admin-portal audit S1): a portal staff token whose account no longer
+    // exists (deleted staff member) is over. Super-admin and other roles are unchanged.
+    if (account?.missing && claims.userType === 'admin' && claims.portalUser === true) {
+      return res.status(401).json({ error: 'session_ended' });
+    }
     // Sessions issued before the person reset or changed their PIN (or an
     // admin changed their start password) are over.
     if (account?.validAfter && Number(claims.iat) * 1000 < account.validAfter) {
       return res.status(401).json({ error: 'session_ended' });
     }
     // Fail closed: only routes that opt in serve a session that must change its start password.
-    if (!allowPasswordChange && (claims.pwc === true || account?.passwordChangeRequired === true)) {
+    // The claim counts for gym staff only while STAFF_PIN_CHANGE_REQUIRED is on (B3a); the
+    // account answer is already worked out that way (src/shared/credential-change.mjs).
+    if (!allowPasswordChange && (claimHoldsSession(claims) || account?.passwordChangeRequired === true)) {
       return res.status(403).json({ error: PASSWORD_CHANGE_REQUIRED });
     }
     req.user = claims;
@@ -128,7 +148,7 @@ export function requireAuthAllowingPasswordChange(...roles) {
 export function optionalSessionClaims(req) {
   const token = bearerFrom(req);
   const claims = token ? verify(token) : null;
-  if (!claims || claims.purpose || claims.pwc === true) return null;
+  if (!claims || claims.purpose || claimHoldsSession(claims)) return null;
   return claims;
 }
 

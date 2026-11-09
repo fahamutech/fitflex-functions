@@ -232,9 +232,9 @@ export function createVendorCustomerService({
     return { asOf, ...(await store.aging({ vendorId, today: asOf, bucket, sort, limit, offset })) };
   }
 
-  /** The buyer deleted their FitFlex account (account-service onAccountDeleted, review #224 H1). Never fails the deletion. */
-  async function forgetBuyer(userId) {
-    try { return await store.forgetBuyer(userId); } catch (err) {
+  /** The buyer deleted their FitFlex account (account deletion, review #224 H1). A failure fails the deletion: it rolls back and can be retried. */
+  async function forgetBuyer(userId, options = {}) {
+    try { return await store.forgetBuyer(userId, options); } catch (err) {
       console.warn('[vendor-customers] deleted buyer not forgotten', { error: err?.message });
       throw err;
     }

@@ -77,7 +77,7 @@ async function user(userType, extra = {}) {
   made.users.push(id);
   return id;
 }
-const PROFILE = { businessName: 'Dar Fitness Gear', address: { line1: 'Plot 12, Mikocheni', city: 'Dar es Salaam' }, contactNumber: '+255700111222', status: 'published', logo: 'https://cdn.example.com/logo.png' };
+const PROFILE = { businessName: 'Dar Fitness Gear', address: { line1: 'Plot 12, Mikocheni', city: 'Dar es Salaam' }, contactNumber: '+255700111222', status: 'published', logo: '/storage/bafylogo/logo.webp' };
 async function vendor(extra = {}) {
   const id = await user('vendor', { createdAt: new Date('2026-01-01T00:00:00Z'), displayName: 'Asha Owner', vendorProfile: JSON.stringify(PROFILE), ...extra });
   const caseId = uid('kyc');
@@ -131,17 +131,24 @@ async function paidOrder(buyerId, items) {
 const shareSale = (claims, id, body = {}) => call(vendorShareSale, claims, { params: { id }, body });
 const tokenOf = url => url.split('/d/')[1].split('?')[0];
 
+/**
+ * The data of a stream that starts at `start`, cut by its dictionary's /Length. Never trim the newline before
+ * `endstream` instead: a deflate stream ends in its Adler-32 checksum, so 1 in 256 end in 0x0D and a
+ * `/\r?\n$/` trim eats that byte — the stream no longer inflates and the PDF reads as empty (CI run 40639757780).
+ */
+const streamData = (s, dictStart, start) => s.slice(start, start + Number(s.slice(dictStart, start).match(/\/Length (\d+)/)[1]));
+
 /** Text drawn in a pdfkit PDF (inflates the content streams, decodes the hex strings). */
 function pdfText(buffer) {
   const s = buffer.toString('latin1');
   let out = '';
-  const re = /stream\r?\n/g;
-  let m;
-  while ((m = re.exec(s))) {
-    const start = m.index + m[0].length;
-    const end = s.indexOf('endstream', start);
-    let data;
-    try { data = zlib.inflateSync(Buffer.from(s.slice(start, end).replace(/\r?\n$/, ''), 'latin1')).toString('latin1'); } catch { continue; }
+  for (let i = s.indexOf('\nstream\n'); i !== -1;) {
+    const dictStart = s.lastIndexOf(' 0 obj', i);
+    const start = i + '\nstream\n'.length;
+    const raw = streamData(s, dictStart, start);
+    i = s.indexOf('\nstream\n', start + raw.length);
+    if (!/\/Filter \/FlateDecode/.test(s.slice(dictStart, start))) continue;
+    const data = zlib.inflateSync(Buffer.from(raw, 'latin1')).toString('latin1');
     for (const t of data.matchAll(/\[(.*?)\]\s*TJ/g)) out += `${[...t[1].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join('')}\n`;
   }
   return out;
@@ -332,7 +339,9 @@ test('share a receipt: one link, token returned once, only its hash stored; publ
   assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
   assert.equal(page.headers.get('x-frame-options'), 'DENY');
   assert.match(page.headers.get('content-type'), /^text\/html; charset=utf-8/);
-  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; img-src 'self' https:\/\/cdn\.example\.com; style-src 'unsafe-inline'/);
+  // The logo is on our storage, shown from our own host (security fix 2026-10-28).
+  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; img-src 'self' https:\/\/docs\.fitflex\.example( \S+)?; style-src 'unsafe-inline'/);
+  assert.match(page.text, /<img class="logo" src="https:\/\/docs\.fitflex\.example\/storage\/bafylogo\/logo\.webp"/);
   assert.match(page.text, /<meta name="robots" content="noindex,nofollow">/);
   assert.equal(/<script/i.test(page.text), false, 'no JavaScript');
   assert.match(page.text, /<html lang="en">/);
@@ -910,7 +919,7 @@ function pdfRuns(buffer) {
     for (const f of fontDict.matchAll(/\/(F\d+) (\d+) 0 R/g)) fonts.set(f[1], objects.get(f[2]).match(/\/BaseFont \/([\w-]+)/)[1]);
     for (const ref of (body.match(/\/Contents \[?([\d\s0R]+)\]?/)?.[1] || '').matchAll(/(\d+) 0 R/g)) {
       const obj = objects.get(ref[1]);
-      const raw = obj.slice(obj.indexOf('stream') + 7, obj.lastIndexOf('endstream')).replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+      const raw = streamData(obj, 0, obj.indexOf('\nstream\n') + '\nstream\n'.length);
       const data = zlib.inflateSync(Buffer.from(raw, 'latin1')).toString('latin1');
       let font = 'Helvetica', size = 10, x = 0, y = 0;
       for (const op of data.matchAll(/\/(F\d+) ([\d.]+) Tf|1 0 0 1 ([-\d.]+) ([-\d.]+) Tm|\[(.*?)\] TJ/g)) {
@@ -987,24 +996,58 @@ test('#229 contract: pdfkit is loaded lazily — without it the backend runs, HT
 
 // ── UAT (S5) ─────────────────────────────────────────────────────────────────
 
-test('UAT D4: discounts read "-TSh 1,500" on the page (list, table, totals), the A4 PDF and the 80mm PDF', async () => {
+/**
+ * Every text run of a pdfkit PDF in drawing order; a run in the Symbol font with code 0x2D is the real minus sign
+ * U+2212 (S6 retest N5 approach) and is glued to the run after it. A plain text extract cannot tell that from garbage.
+ */
+function minusRuns(buffer) {
+  const s = buffer.toString('latin1');
+  const symbolObject = /(\d+) 0 obj\s*<<[^>]*\/BaseFont \/Symbol/.exec(s)?.[1];
+  const symbolName = symbolObject ? new RegExp(`/(F\\d+) ${symbolObject} 0 R`).exec(s)?.[1] : undefined;
+  const runs = [];
+  for (let i = s.indexOf('\nstream\n'); i !== -1;) {
+    const dictStart = s.lastIndexOf(' 0 obj', i);
+    const start = i + '\nstream\n'.length;
+    const raw = streamData(s, dictStart, start);
+    i = s.indexOf('\nstream\n', start + raw.length);
+    if (!/\/Filter \/FlateDecode/.test(s.slice(dictStart, start))) continue;
+    const data = zlib.inflateSync(Buffer.from(raw, 'latin1')).toString('latin1');
+    let font = null;
+    let pending = false;
+    for (const t of data.matchAll(/\/(F\d+) [\d.]+ Tf|\[(.*?)\]\s*TJ/g)) {
+      if (t[1]) { font = t[1]; continue; }
+      const text = [...t[2].matchAll(/<([0-9a-fA-F]*)>/g)].map(h => Buffer.from(h[1], 'hex').toString('latin1')).join('');
+      if (font === symbolName && text === '-') { pending = true; continue; }
+      runs.push(`${pending ? '−' : ''}${text}`);
+      pending = false;
+    }
+  }
+  return runs;
+}
+/** No U+2212 reached Helvetica (its bytes would print garbage) and no ASCII "-TSh" is left. */
+function assertRealMinus(runs, amounts, where) {
+  assert.ok(runs.every(t => !t.includes('"\x12') && !t.includes('-TSh')), `${where}: one negative format, drawn from Symbol`);
+  for (const a of amounts) assert.ok(runs.some(t => t.includes(`−TSh ${a}`)), `${where}: −TSh ${a}`);
+}
+
+test('UAT D4 + S7 UAT L-2: discounts read "−TSh 1,500" (U+2212) on the page (list, table, totals), the A4 PDF and the 80mm PDF', async () => {
   on();
   const v = await vendor();
   const p = await product(v, { name: 'Socks', priceTzs: 10_000, stock: 50 });
   const sale = await sell(as(v), saleBody([{ productId: p.id, qty: 1, discountTzs: 1_500 }], cash(7_500), { discountTzs: 1_000 }));
   const token = tokenOf((await shareSale(as(v), sale.id)).body.url);
   const page = (await open(`/d/${token}`)).text;
-  assert.match(page, /Discount -TSh 1,500/, 'line, phone layout');
-  assert.match(page, /<td class="n">-TSh 1,500<\/td>/, 'line, table');
-  assert.match(page, /Discounts<\/span><span>-TSh 2,500</, 'totals');
-  assert.equal(/[\s>]-\d{1,3}(,\d{3})*\b/.test(page), false, 'no bare "-1,500"');
-  const a4 = pdfText((await open(`/d/${token}.pdf`)).buffer);
-  assert.match(a4, /-TSh 1,500/);
-  assert.match(a4, /-TSh 2,500/);
-  assert.equal(/(^|\s)-\d{1,3}(,\d{3})*\b/m.test(a4), false, 'no bare discount in the A4 PDF');
-  const thermal = pdfText((await open(`/d/${token}.pdf?paper=80mm`)).buffer);
-  assert.match(thermal, /-TSh 1,500/);
-  assert.match(thermal, /-TSh 2,500/);
+  assert.match(page, /Discount \u2212TSh 1,500/, 'line, phone layout');
+  assert.match(page, /<td class="n">\u2212TSh 1,500<\/td>/, 'line, table');
+  assert.match(page, /Discounts<\/span><span>\u2212TSh 2,500</, 'totals');
+  assert.equal(page.includes('-TSh'), false, 'no ASCII hyphen');
+  assert.equal(/[\s>][-\u2212]\d{1,3}(,\d{3})*\b/.test(page), false, 'no bare "−1,500"');
+  assert.match((await open(`/d/${token}?lang=sw`)).text, /Punguzo \u2212TSh 1,500/);
+  const a4 = minusRuns((await open(`/d/${token}.pdf`)).buffer);
+  assertRealMinus(a4, ['1,500', '2,500'], 'A4');
+  assert.equal(a4.some(t => /^[-\u2212]\d/.test(t)), false, 'no bare discount in the A4 PDF');
+  assertRealMinus(minusRuns((await open(`/d/${token}.pdf?paper=80mm`)).buffer), ['1,500', '2,500'], '80mm');
+  assertRealMinus(minusRuns((await open(`/d/${token}.pdf?paper=80mm&lang=sw`)).buffer), ['1,500', '2,500'], '80mm sw');
 });
 
 test('UAT D6: listing and turning off links follow the document\'s own permission (customers-only staff on a cash receipt → 403)', async () => {

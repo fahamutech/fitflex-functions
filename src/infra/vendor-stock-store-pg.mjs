@@ -14,6 +14,15 @@ const plain = row => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v =
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const stockId = () => `stk_${randomUUID().slice(0, 12)}`;
 
+/**
+ * S8: thrown inside a save's transaction to roll it back and answer `result` (an { error, status } object).
+ * The barcode step (`inTransaction`) runs after the product row is written, so a refused code must undo
+ * the fields, stock rows and private fields written before it.
+ */
+class RollbackWith extends Error {
+  constructor(result) { super('rollback'); this.result = result; }
+}
+
 /** A product as the stock endpoints return it: its count and its variants' counts (no private fields). */
 export const stockView = product => ({
   id: product.id,
@@ -37,7 +46,12 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       document: r.orderId ? { type: 'order', id: r.orderId, number: null, shortRef: shortRef(r.orderId) }
         // S3: a walk-in sale (or its void) points at the sale and its receipt number.
         : ['sale', 'sale_void'].includes(r.kind) && r.sourceId ? { type: 'sale', id: r.sourceId, number: r.saleNumber ?? null }
-          : null,
+          // S7: a refund's restock (or its undo) points at the refund and its credit-note number.
+          : ['refund', 'refund_revert'].includes(r.kind) && r.sourceId ? { type: 'refund', id: r.sourceId, number: r.refundNumber ?? null }
+            // S9: stock received from a supplier (or its void) points at the purchase and its GRN number. Returned
+            // whatever the flags (spec §0.2: with VENDOR_PURCHASES off the apps show the number as plain text).
+            : ['stock_in', 'stock_in_void'].includes(r.kind) && r.sourceId ? { type: 'purchase', id: r.sourceId, number: r.purchaseNumber ?? null }
+              : null,
       createdAt: r.createdAt,
     };
   }
@@ -162,15 +176,18 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
    * decide(current) → { error, status, ... } | { fields, stock?, variants?, movements, removed, privates, value }
    * Writes the fields, stock/variants, one `count` ledger row per changed count, and the private fields — all or nothing.
    * A variant that open orders still hold units of cannot be removed (409 variant_has_reservations).
+   * S8: inTransaction(trx, { current, saved }) → null | { error, status, ... } runs last, in the same transaction
+   * (the product's barcodes); an error rolls the whole save back and is returned.
    */
-  async function applyProductForm({ productId, vendorId, actorId, decide }) {
+  async function applyProductForm({ productId, vendorId, actorId, decide, inTransaction = null }) {
     const at = now();
     try {
       return await db.transaction(async (trx) => {
         const current = plain(await trx('Product').where({ id: productId }).forUpdate().first());
         if (!current || current.deletedAt) return fail('product_not_found', 404);
         if (current.vendorId !== vendorId) return fail('not_your_product', 403);
-        const plan = decide(current);
+        // decide may be async and read on this transaction (flash-sale price lock, review L4).
+        const plan = await decide(current, trx);
         if (plan.error) return plan;
         const trackedRemoved = variantsOf(current).filter(v => isTracked(v) && (plan.removed || []).includes(v.name)).map(v => v.name);
         const held = await reservedVariants(trx, productId, trackedRemoved);
@@ -193,16 +210,25 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
         const countedBefore = new Set(variantsOf(current).filter(isTracked).map(v => v.name));
         const startingNow = variantsOf(saved).filter(v => isTracked(v) && !countedBefore.has(v.name)).map(v => v.name);
         if (startingNow.length) await markStartingLow(trx, saved, startingNow, at);
+        if (inTransaction) {
+          const refused = await inTransaction(trx, { current, saved });
+          if (refused?.error) throw new RollbackWith(refused);
+        }
         return { product: saved, value: plan.value };
       });
     } catch (err) {
+      if (err instanceof RollbackWith) return err.result;
       if (err.code === CHECK_VIOLATION && /product_stock_non_negative/.test(err.constraint || err.message)) return fail('insufficient_stock', 409);
       throw err;
     }
   }
 
-  /** Create a product with its starting counts as the first rows of its history, and its private fields — one transaction. */
-  async function createProduct({ product, actorId, movements, privates = [] }) {
+  /**
+   * Create a product with its starting counts as the first rows of its history, and its private fields — one transaction.
+   * S8: inTransaction(trx, { current: null, saved }) as in applyProductForm; an error rolls the create back and is
+   * returned as { error, status, ... } (otherwise the created product row is returned).
+   */
+  async function createProduct({ product, actorId, movements, privates = [], inTransaction = null }) {
     const at = now();
     const productId = product.id;
     const vendorId = product.vendorId;
@@ -218,20 +244,38 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       // Opening stock is not a crossing: a unit that starts at or below its level is marked as already
       // reported, so the vendor hears about it only after it has been above its level again.
       await markStartingLow(trx, created, null, at);
+      if (inTransaction) {
+        const refused = await inTransaction(trx, { current: null, saved: created });
+        if (refused?.error) throw new RollbackWith(refused);
+      }
       return created;
+    }).catch((err) => {
+      if (err instanceof RollbackWith) return err.result;
+      throw err;
     });
   }
 
-  /** privates: [{ variant, costTzs?, reorderLevel? }] — only the keys present are written (null clears). */
+  /**
+   * privates: [{ variant, costTzs?, reorderLevel? }] — only the keys present are written (null clears).
+   * S9 (P-6): a cost price set here is a manual edit (product form, admin listing): when the value really
+   * changes, costSourceId becomes null (so voiding the purchase that set the old cost keeps this one) and
+   * costUpdatedAt is now. Re-sending the same cost (a form saved for another field) changes neither.
+   */
   async function writePrivates(q, productId, vendorId, privates, at) {
     for (const p of privates) {
       const set = {};
       if (p.costTzs !== undefined) set.costTzs = p.costTzs;
       if (p.reorderLevel !== undefined) set.reorderLevel = p.reorderLevel;
       if (!Object.keys(set).length) continue;
+      const merge = { ...set, updatedAt: at };
+      if (p.costTzs !== undefined) {
+        const changed = 'EXCLUDED."costTzs" IS DISTINCT FROM "ProductPrivate"."costTzs"';
+        merge.costSourceId = q.raw(`CASE WHEN ${changed} THEN NULL ELSE "ProductPrivate"."costSourceId" END`);
+        merge.costUpdatedAt = q.raw(`CASE WHEN ${changed} THEN EXCLUDED."costUpdatedAt" ELSE "ProductPrivate"."costUpdatedAt" END`);
+      }
       await q('ProductPrivate')
-        .insert({ productId, variant: p.variant || '', vendorId, ...set, updatedAt: at })
-        .onConflict(['productId', 'variant']).merge({ ...set, updatedAt: at });
+        .insert({ productId, variant: p.variant || '', vendorId, ...set, ...(p.costTzs !== undefined ? { costSourceId: null, costUpdatedAt: at } : {}), updatedAt: at })
+        .onConflict(['productId', 'variant']).merge(merge);
     }
   }
 
@@ -334,7 +378,9 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
     let q = scope(db('ShopStockMovement as m').leftJoin('User as u', 'u.id', 'm.actorId')
       // Only this vendor's sales: a ledger row of their product names a sale of theirs.
       .leftJoin('VendorSale as s', function joinSale() { this.on('s.id', '=', 'm.sourceId').andOn('s.vendorId', '=', db.raw('?', [vendorId])); })
-      .select('m.*', 'u.displayName as actorName', 's.number as saleNumber'));
+      .leftJoin('VendorSaleRefund as vr', function joinRefund() { this.on('vr.id', '=', 'm.sourceId').andOn('vr.vendorId', '=', db.raw('?', [vendorId])); })
+      .leftJoin('VendorPurchase as vp', function joinPurchase() { this.on('vp.id', '=', 'm.sourceId').andOn('vp.vendorId', '=', db.raw('?', [vendorId])); })
+      .select('m.*', 'u.displayName as actorName', 's.number as saleNumber', 'vr.number as refundNumber', 'vp.number as purchaseNumber'));
     if (from) q = q.where('m.createdAt', '>=', from);
     if (to) q = q.where('m.createdAt', '<', to);
     if (after) q = q.where(w => w.where('m.createdAt', '<', after.t).orWhere(x => x.where('m.createdAt', '=', after.t).andWhere('m.id', '<', after.id)));

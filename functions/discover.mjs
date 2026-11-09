@@ -8,6 +8,7 @@ import { hideTrainerPass, canSeeTrainerPass } from '../src/shared/trainer-access
 import { isTokenSession } from '../src/auth/promotion-token.mjs';
 import { discoveryService, trainerService, shopHomeService } from '../src/bootstrap/services.mjs';
 import { publicGym } from '../src/services/gym-service.mjs';
+import { canShowFlashSales, withoutSale } from '../src/shared/shop-caps.mjs';
 
 const created = new Date().toISOString();
 
@@ -55,5 +56,6 @@ export const discoverProducts = {
   created, method: 'get', path: '/discover/products',
   description: `Any signed-in user: shop products ranked for the viewer, with a Featured section and labelled promotions. Filters: ?category= &brand= &minPrice= &maxPrice= &minRating= &delivery=true &maxDistanceKm= (ignored when SHOP_NEAR_YOU is on and areas exist). Also sorts price_asc and price_desc. ${QUERY_DOC}`,
   onGuard: requireAuth(),
-  onRequest: async (req, res) => run('product', req, res, p => p),
+  // SHOP_FLASH_SALES: the `sale` object only for clients that send X-FF-Shop-Caps: flash_sale (docs/shop-flash-sales-api.md).
+  onRequest: async (req, res) => run('product', req, res, canShowFlashSales(req) ? p => p : withoutSale),
 };

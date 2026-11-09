@@ -11,12 +11,15 @@ import { createIdentifierChangeService } from '../services/identifier-change-ser
 import { createAccountRecoveryService } from '../services/account-recovery-service.mjs';
 import { randomUUID } from 'node:crypto';
 import { verifyFirebaseIdToken, initFirebaseAdmin, getAdminAuth } from '../auth/firebase.mjs';
+import { firebaseAdminConfigured } from '../shared/firebase-identity.mjs';
+import { createAccountErasure } from '../infra/account-erasure-store-pg.mjs';
 import { issue as issueQr } from '../auth/qr-token.mjs';
 import { createCheckInService } from '../services/check-in-service.mjs';
 import { createSettlementConfigService } from '../services/settlement-config-service.mjs';
 import { createSettlementService } from '../services/settlement-service.mjs';
 import { createSettlementWorkflowService } from '../services/settlement-workflow-service.mjs';
 import { createPayoutEligibility } from '../services/payout-eligibility.mjs';
+import { createGymPayoutOwner } from '../services/gym-payout-owner.mjs';
 import { createSettlementViewService } from '../services/settlement-view-service.mjs';
 import { createSettlementClawbackService } from '../services/settlement-clawback-service.mjs';
 import { createCheckinStatusService } from '../services/checkin-status-service.mjs';
@@ -31,7 +34,8 @@ import { createIdentityLinkService } from '../services/identity-link-service.mjs
 import { createOrgMembershipService } from '../services/org-membership-service.mjs';
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
-import { identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
+import { createHrOrgConversionService } from '../services/hr-org-conversion-service.mjs';
+import { orgOnlySponsorsOn, identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
 import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
@@ -42,6 +46,7 @@ import { attachOrgMembershipSync } from './org-membership-hooks.mjs';
 import { registerOrgMembershipLookup } from '../auth/org-authz.mjs';
 import { createSubscriptionService } from '../services/subscription-service.mjs';
 import { createAccountService } from '../services/account-service.mjs';
+import { TERMINAL as ORDER_TERMINAL_STATUSES } from '../shared/order-lifecycle.mjs';
 import { createOperatorService } from '../services/operator-service.mjs';
 import { createOwnerGymService } from '../services/owner-gym-service.mjs';
 import { createOwnerStaffService, GYM_STAFF_ACL_SCOPES } from '../services/owner-staff-service.mjs';
@@ -59,6 +64,12 @@ import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
 import { createPgVendorStockStore } from '../infra/vendor-stock-store-pg.mjs';
 import { createPgVendorSaleStore } from '../infra/vendor-sale-store-pg.mjs';
 import { createVendorSaleService } from '../services/vendor-sale-service.mjs';
+import { createPgVendorImportStore } from '../infra/vendor-import-store-pg.mjs';
+import { createVendorImportService } from '../services/vendor-import-service.mjs';
+import { createPgVendorRefundStore } from '../infra/vendor-refund-store-pg.mjs';
+import { createVendorRefundService } from '../services/vendor-refund-service.mjs';
+import { createPgVendorPurchaseStore } from '../infra/vendor-purchase-store-pg.mjs';
+import { createVendorPurchaseService } from '../services/vendor-purchase-service.mjs';
 import { createPgVendorCustomerStore } from '../infra/vendor-customer-store-pg.mjs';
 import { createVendorCustomerService } from '../services/vendor-customer-service.mjs';
 import { createPgVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
@@ -70,6 +81,7 @@ import { renderDocumentHtml, renderDocumentsHtml } from '../shared/vendor-docume
 import { renderDocumentPdf } from '../shared/vendor-document-pdf.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
 import { createProductStatsRecomputeService } from '../services/product-stats-recompute-service.mjs';
+import { createPgProductCodeStore } from '../infra/product-code-store-pg.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -79,6 +91,8 @@ import { createActivityService } from '../services/activity-service.mjs';
 import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
 import { createPartnerNotifier } from '../services/partner-notifier.mjs';
+import { createSecurityEventService } from '../services/security-event-service.mjs';
+import { webCheckinAlertsOn } from '../shared/feature-flags.mjs';
 import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createRecommendationEngine } from '../services/training/recommendation-engine.mjs';
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
@@ -126,19 +140,29 @@ import { createPartnerKycService } from '../services/partner-kyc-service.mjs';
 import { createPartnerProgressService } from '../services/partner-progress-service.mjs';
 import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
+import { createHeldPaymentsService } from '../services/held-payments-service.mjs';
+import { heldPaymentsWorklistOn } from '../shared/feature-flags.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createCompanyDirectory } from '../services/company-directory.mjs';
 import { createB2BEngagementAccess } from '../services/b2b-engagement-access.mjs';
 import { createTrainerSettlementService } from '../services/trainer-settlement-service.mjs';
 import { createVendorSettlementService } from '../services/vendor-settlement-service.mjs';
+import { createVendorReportService } from '../services/vendor-report-service.mjs';
+import { createPgVendorReportStore } from '../infra/vendor-report-store-pg.mjs';
+import { vendorStockLedgerOn, vendorWalkInSalesOn, vendorCustomersOn, vendorPurchasesOn } from '../shared/feature-flags.mjs';
 import { createB2BSponsorRefundService } from '../services/b2b-sponsor-refund-service.mjs';
 import { createModerationGate } from '../services/moderation-gate.mjs';
 import { createEntityResolver } from '../services/promotion-entities.mjs';
 import { createModerationService } from '../services/moderation-service.mjs';
 import { createPromotionService } from '../services/promotion-service.mjs';
 import { createShopBannerService } from '../services/shop-banner-service.mjs';
+import { createFlashSaleService } from '../services/flash-sale-service.mjs';
+import { createPgFlashSaleStore } from '../infra/flash-sale-store-pg.mjs';
 import { createPgShopBannerStore } from '../infra/shop-banner-store-pg.mjs';
+import { createPartnerMediaService } from '../services/partner-media-service.mjs';
+import { createPgPartnerMediaStore } from '../infra/partner-media-store-pg.mjs';
+import { orgAuthzMode } from '../shared/feature-flags.mjs';
 import { createDiscoveryService } from '../services/discovery-service.mjs';
 import { createShopHomeService } from '../services/shop-home-service.mjs';
 import { createShopPreferenceService } from '../services/shop-preference-service.mjs';
@@ -160,11 +184,42 @@ import { eventsPaymentsManualOn, eventsPaymentsTunzaaOn } from '../shared/featur
 import { eventTicketKeyRing, eventsRefundTargetDays } from '../shared/events-config.mjs';
 import { eventsMaxParticipantsPerOrder, eventsConsentTextVersion } from '../shared/events-config.mjs';
 import { registerOrganizerLookup } from '../auth/events-authz.mjs';
+import { registerApiClientStore } from '../auth/organizer-api-auth.mjs';
+import { createEventsOpsService } from '../services/events-ops-service.mjs';
+import { createEventsSyncService } from '../services/events-sync-service.mjs';
+import { createEventsIntegrationsService } from '../services/events-integrations-service.mjs';
+import { createEventsWebhookService } from '../services/events-webhook-service.mjs';
+import { createEventsResultsService } from '../services/events-results-service.mjs';
+import { eventsResultsOn, eventsRunsOn, eventsRewardsOn, eventsMedalArtOn, eventsResultsPublicOn } from '../shared/feature-flags.mjs';
+import { createEventsRewardService } from '../services/events-reward-service.mjs';
+import { createEventsMedalService } from '../services/events-medal-service.mjs';
+import { createEventsAwardService } from '../services/events-award-service.mjs';
+import { eventsAwardBatch } from '../shared/events-config.mjs';
+import { createEventsRunLinkService } from '../services/events-run-link-service.mjs';
+import { eventsRunDistanceToleranceBps, eventsRunLinkMaxDaysAfter, eventsResultsImportMaxRows, eventsResultsDisputeDefaultHours, eventsResultsPushMax, eventsResultsConsentVersions } from '../shared/events-config.mjs';
+import { webhookKeyRing } from '../shared/webhook-signing.mjs';
+import { eventsKitOpsOn, eventsOrganizerApiOn, eventsWebhooksOn } from '../shared/feature-flags.mjs';
+import { eventsKitOfflineOn, eventsWaitlistOn, eventsAnalyticsOn } from '../shared/feature-flags.mjs';
+import { createEventsAnalyticsService } from '../services/events-analytics-service.mjs';
+import { createEventsRetentionService } from '../services/events-retention-service.mjs';
+import { eventsDeletedUserAnonymiseDays } from '../shared/events-config.mjs';
+import { createEventsWaitlistService } from '../services/events-waitlist-service.mjs';
+import { eventsWaitlistOfferHours, eventsWaitlistMinOfferMinutes, eventsWaitlistMaxActivePerUser, eventsWaitlistMaxQueue, eventsWaitlistMaxLapses, eventsWaitlistQuietHours, eventsWaitlistKeepDays } from '../shared/events-config.mjs';
+import { createEventsKitOfflineService } from '../services/events-kit-offline-service.mjs';
+import { eventsOfflineSessionHours, eventsOfflineMaxDevices, eventsOfflineMaxPerUser, eventsOfflineMaxRows, eventsOfflineSyncBatch, eventsOfflineMaxPending, eventsOfflineMaxStoredScans, eventsOfflineClockToleranceSeconds, eventsOfflineMinDeskBuild, eventsOfflineScanKeepDays, eventsOfflineMaxBibRange } from '../shared/events-config.mjs';
+import { setApiErrorSink } from '../shared/events-api-error.mjs';
+import { eventsWebhookPerHostBatch, eventsAnalyticsKeepDays, eventsAlertRules, eventsManualConfirmSlaHours, eventsRetentionMonths } from '../shared/events-config.mjs';
+import {
+  eventsApiTokenTtlSeconds, eventsApiMaxClients, eventsApiDefaultRate, eventsApiAllowlist, eventsWebhookMaxEndpoints, eventsWebhookTimeoutMs, eventsWebhookMaxAttempts,
+  eventsWebhookBatch, eventsFeedLagSeconds, eventsExportMaxRows,
+} from '../shared/events-config.mjs';
 import { eventsFavouritesOn, eventsRegistrationOn, eventsClosingSoonHours, eventAutoCompleteGraceHours } from '../shared/feature-flags.mjs';
+import { mustChangeStartCredential } from '../shared/credential-change.mjs';
 import { createHeroImageService } from '../services/hero-image-service.mjs';
 import { createPgHeroImageStore } from '../infra/hero-image-store-pg.mjs';
 import { db } from '../infra/knex-store.mjs';
 import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
+import { createPgTrainerSlotStore } from '../infra/trainer-slot-store-pg.mjs';
 import { createPersonalDetailsService } from '../services/personal-details-service.mjs';
 import { forgetPersonDetails } from '../infra/person-details-store-pg.mjs';
 import {
@@ -209,7 +264,13 @@ function pinPepper() {
 // persona never suspends the Person (invariant 30).
 registerAccountStatusLookup(async id => {
   const user = await users.findByIdAsync(id);
-  if (!user) return null;
+  if (!user) {
+    // S1: a portal user who was DELETED (remove() audits portal_user_deleted) is reported missing,
+    // and requireAuth fails closed on it for portal staff tokens. An id with no row and no such
+    // record keeps the old pass-through (existing behaviour; such a token cannot be minted in production).
+    const deleted = await db('AuditLog').where({ action: 'portal_user_deleted', target: id }).first('id');
+    return deleted ? { status: null, missing: true } : null;
+  }
   if (user.accountStatus === 'suspended') return 'suspended';
   // Sessions issued before this are over: the later of the profile's own cut-off
   // (a portal admin changed their start password) and the Person's (I7a: a PIN
@@ -220,12 +281,13 @@ registerAccountStatusLookup(async id => {
     if (person?.status === 'suspended') return 'suspended';
     if (person?.sessionsValidAfter) validAfter = Math.max(validAfter ?? 0, +new Date(person.sessionsValidAfter));
   }
-  const passwordChangeRequired = user.passwordChangeRequired === true;
+  // Still on a start credential someone else chose (admin start password; gym staff
+  // owner-chosen PIN while STAFF_PIN_CHANGE_REQUIRED is on): held to the change route.
+  const passwordChangeRequired = mustChangeStartCredential(user);
   if (validAfter || passwordChangeRequired) {
     return {
       status: user.accountStatus ?? null,
       sessionsValidAfter: validAfter ? new Date(validAfter) : null,
-      // Still on the start password another admin chose: held to the change-password route.
       passwordChangeRequired,
     };
   }
@@ -244,8 +306,14 @@ export const partnerVerifiedFor = async user => (
 const { resolveRequestUser, publicUserId } = identityService;
 
 // A tier members still hold cannot be removed, renamed or switched off in Settings (409 tier_in_use).
-export const settingsService = createSettingsService({ platformSettings, auditLog, tierHolders: createTierHolders({ db }) });
-export const gymService = createGymService({ gyms, users, checkins, auditLog });
+export const settingsService = createSettingsService({ platformSettings, auditLog, tierHolders: createTierHolders({ db }), transaction: fn => db.transaction(fn) });
+// partnerMediaService is defined further down; the follow-ups are only called later.
+export const gymService = createGymService({
+  gyms, users, checkins, auditLog,
+  onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
+});
+// Who is paid for a gym shared by several owners (GYM_PAYOUT_OWNER, dormant by default).
+export const gymPayoutOwner = createGymPayoutOwner({ users, gyms, auditLog });
 // Tells gym owners, staff and vendors what happens at their gym or shop (inbox + push).
 export const partnerNotifier = createPartnerNotifier({
   usernames: { handleOf: userId => usernameService.handleOf(userId) }, users, gyms, trainers, subscriptions, paymentRequests, preferences: communicationPreferences,
@@ -259,8 +327,12 @@ export const trainerService = createTrainerService({
   // Partner DOB review L3: the declared date of birth goes once the Person has no personas left
   // (deleting only the profile leaves the trainer's account, so this usually keeps it).
   onTrainerRemoved: async prior => {
+    // Partner media (functions#277 review M2): the profile's photo and logo go with it, whatever else fails.
+    const purged = partnerMediaService.purgeSubject('trainer', prior?.id, { cause: 'trainer_profile_deleted' }).catch(err => err);
     const row = prior?.userId ? await db('User').where({ id: prior.userId }).first('personId') : null;
     await forgetPersonDetails(db, { personId: row?.personId || null });
+    const result = await purged;
+    if (result instanceof Error) throw result;
   },
 });
 export const trainerBookingService = createTrainerBookingService({
@@ -273,6 +345,8 @@ export const trainerBookingService = createTrainerBookingService({
   outcomesOn: trainerSessionOutcomesOn,
   // Outcome changes lock the statement and the booking, write conditionally and keep draft lines in step.
   outcomeStore: createPgTrainerOutcomeStore({ db }),
+  // New bookings and revived sessions take the trainer slot's lock, so a slot is never held twice.
+  slotStore: createPgTrainerSlotStore({ db }),
   // Sessions on a live trainer statement line, with that statement's status.
   statementLines: async (bookingIds) => {
     const rows = await db('TrainerSettlementLine as l').join('TrainerSettlement as s', 's.id', 'l.trainerSettlementId')
@@ -310,14 +384,27 @@ export const trainerEngagementService = createTrainerEngagementService({
   // notificationService is created further down; this only runs later.
   notify: (userId, message) => notificationService.notify(userId, message),
 });
+// Shop flash sales (SHOP_FLASH_SALES, Phase 2 slice 4; PRICING PATH): vendor proposals, staff approval
+// (two-person), and the live sale prices the shop, the home and checkout read (`pricing`). The routes,
+// the job and every pricing path check the flag; with it off no price changes.
+export const flashSaleService = createFlashSaleService({
+  store: createPgFlashSaleStore({ db }),
+  partnerGate, moderationGate,
+  // shopService is defined just below; this only runs later.
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
 export const shopService = createShopService({
   products, shopOrders, users, auditLog, paymentRequests,
+  flashSales: flashSaleService.pricing,
+  onVendorSuspended: (vendorId, actorId) => flashSaleService.endForSuspendedVendor(vendorId, actorId),
   // Shop home slice 3: vendor "Based in" / "Delivers to" are checked against usable GeoAreas.
   geoAreas,
   // Stock reservation and cancellation are single database transactions.
   orderStore: createPgShopOrderStore({ db }),
   // Vendor tools · S1: stock ledger, cost price, reorder level (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
   stockLedger: createPgVendorStockStore({ db }),
+  // Vendor tools · S8: product barcodes (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES).
+  productCodes: createPgProductCodeStore({ db }),
   // Vendor tools · S2: pickup gym names and vendor-scoped buyer ids on vendor orders.
   gyms, buyerRefs: createPgVendorBuyerRefStore({ db }),
   requireVariantChoice: process.env.SHOP_REQUIRE_VARIANT === 'on',
@@ -339,6 +426,11 @@ export const shopService = createShopService({
   onVendorCustomerOrder: order => vendorCustomerService.marketplaceOrderPaid(order),
   // Vendor tools · S5: each vendor's invoice for the paid order is numbered (defined below; runs later).
   onVendorOrderInvoices: order => vendorDocumentService.orderPaid(order),
+  // Payout display (security review #275 M1): an order is settled FOR THIS VENDOR only when the vendor's own live
+  // statement line is on a paid statement; ShopOrder.settlementStatus is order-wide.
+  vendorPaidOrderIds: async (vendorId) => new Set((await db('VendorSettlementLine as l')
+    .join('VendorSettlement as s', 's.id', 'l.vendorSettlementId')
+    .where({ 'l.vendorId': vendorId, 'l.voided': false, 's.status': 'paid' }).select('l.orderId')).map(r => r.orderId)),
   // Vendor tools · S5: product VAT codes (VENDOR_TOOLS + VENDOR_VAT).
   productVat: {
     on: vendorVatOn,
@@ -363,6 +455,30 @@ export const vendorSaleService = createVendorSaleService({
   afterStockMoved: productIds => shopService.afterStockMoved(productIds),
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
+// Vendor tools · Smart import V1: CSV import of products, stock counts and profile (dormant behind VENDOR_TOOLS +
+// VENDOR_IMPORT; the routes check the flag). Rows go through shopService, so its validation and approval rules stay in force.
+export const vendorImportService = createVendorImportService({
+  store: createPgVendorImportStore({ db }),
+  shop: shopService,
+  auditLog,
+});
+// Vendor tools · S7: refunds on walk-in sales — credit notes, restock, undo (dormant behind VENDOR_TOOLS +
+// VENDOR_WALKIN_SALES + VENDOR_REFUNDS for writes; the routes check the flags). No commission, no settlement.
+const vendorRefundStore = createPgVendorRefundStore({ db, saleStore: vendorSaleStore });
+export const vendorRefundService = createVendorRefundService({
+  store: vendorRefundStore,
+  afterStockMoved: productIds => shopService.afterStockMoved(productIds),
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
+// Vendor tools · S9: suppliers, receiving stock (GRN), cost price from purchases, payables with instalments
+// (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES; the routes check the flags).
+// FitFlex moves no money for payables: no PaymentRequest, no commission, no settlement.
+export const vendorPurchaseStore = createPgVendorPurchaseStore({ db });
+export const vendorPurchaseService = createVendorPurchaseService({
+  store: vendorPurchaseStore,
+  afterStockMoved: productIds => shopService.afterStockMoved(productIds),
+  notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
+});
 // Vendor tools · S4: customers, pay-later balances, customer payments, aging and the overdue digest
 // (dormant behind VENDOR_TOOLS + VENDOR_CUSTOMERS; the routes and the digest job check the flag).
 const vendorCustomerStore = createPgVendorCustomerStore({ db });
@@ -377,10 +493,24 @@ export const vendorCustomerService = createVendorCustomerService({
 // Vendor tools · S5: share links, public page, PDF, order invoices (dormant behind VENDOR_TOOLS +
 // VENDOR_DOCUMENTS; order invoice numbering on payment is bookkeeping and runs regardless).
 export const vendorDocumentService = createVendorDocumentService({
-  store: createPgVendorDocumentStore({ db, customerStore: vendorCustomerStore, vatOn: vendorVatOn }),
+  store: createPgVendorDocumentStore({ db, customerStore: vendorCustomerStore, refundStore: vendorRefundStore, vatOn: vendorVatOn }),
   renderHtml: renderDocumentHtml,
   renderManyHtml: renderDocumentsHtml,
   renderPdf: renderDocumentPdf,
+  walkInSalesOn: vendorWalkInSalesOn,
+});
+// Vendor tools · S6: reports and their CSV / PDF exports — read only (dormant behind VENDOR_TOOLS +
+// VENDOR_REPORTS; the routes check the flag). Never writes orders, sales, statements or money.
+export const vendorReportService = createVendorReportService({
+  store: createPgVendorReportStore({ db }), users, auditLog,
+  // "Owed to you" / "Overdue" / aging come from S4 so the two screens always agree.
+  owedTotals: async (vendorId) => {
+    const out = await vendorCustomerService.aging({ vendorId, query: { limit: 1 } });
+    return out.error ? null : out.totals;
+  },
+  flags: { stockLedger: vendorStockLedgerOn, walkInSales: vendorWalkInSalesOn, customers: vendorCustomersOn, purchases: vendorPurchasesOn },
+  // S9: "Paid to suppliers (by you)" on Payment methods (reports + purchases + VENDOR_PURCHASES).
+  paidToSuppliers: args => vendorPurchaseStore.paidToSuppliers(args),
 });
 export const shopReconciliationService = createShopReconciliationService({ db });
 export const productStatsRecomputeService = createProductStatsRecomputeService({ db });
@@ -395,6 +525,9 @@ const memberRequestsLater = {
   stub: args => b2bMemberRequestService.stub(args),
   adminAdded: args => b2bMemberRequestService.adminAdded(args),
   create: args => b2bMemberRequestService.create(args),
+  createByContact: args => b2bMemberRequestService.createByContact(args),
+  createFromInvite: args => b2bMemberRequestService.createFromInvite(args),
+  cancelForInvite: args => b2bMemberRequestService.cancelForInvite(args),
   pendingForOrganization: args => b2bMemberRequestService.pendingForOrganization(args),
   pendingForCorporate: args => b2bMemberRequestService.pendingForCorporate(args),
   cancelForEmployee: args => b2bMemberRequestService.cancelForEmployee(args),
@@ -407,12 +540,20 @@ export const corporateService = createCorporateService({
   onAccountCreated: (account, actorId) => b2bService.ensureOrganizationForCorporate({ corporateId: account.id, actorId }),
   // A company moved onto a programme is invoiced there, not by seat bills.
   billedByProgramme: corporateId => b2bBillingService.billedByProgramme(corporateId),
+  // B5a: with ORG_ONLY_SPONSORS on, a new HR login is also an organisation user (role hr).
+  onHrUserCreated: (row, actorId) => (orgOnlySponsorsOn() ? hrOrgConversionService.convertHrUser({ userId: row.id, actorId }) : null),
 });
 // B2B Foundation V1: generalised organisations next to Corporate (which it reads through).
 export const b2bService = createB2BService({
   users, corporateAccounts, corporateEmployees, partnerKycCases,
   organizations: b2bOrganizations, organizationUsers: b2bOrganizationUsers, beneficiaries: b2bBeneficiaries,
   auditLog, verifiedContacts, memberRequests: memberRequestsLater,
+  // B5a: people of a company's organisation are written through the company staff path (flag ORG_ONLY_SPONSORS).
+  corporateStaff: corporateService,
+});
+// B5a: company HR logins → organisation users with role hr (scripts/hr-to-org.mjs runs the same code).
+export const hrOrgConversionService = createHrOrgConversionService({
+  users, corporateAccounts, organizations: b2bOrganizations, organizationUsers: b2bOrganizationUsers, auditLog, b2bService,
 });
 // B2B Phase 2: wellness programmes and benefit rules (no usage counting or payouts).
 export const b2bProgramService = createB2BProgramService({
@@ -478,6 +619,8 @@ export const opsService = createOpsService({ db });
 // Bulk import of an organisation's people, invites for those who have not joined yet, and their emails.
 export const b2bBeneficiaryImportService = createB2BBeneficiaryImportService({
   db, b2bService, emailSender: () => emailSender(), verifiedContacts,
+  // Consent slice (a): an invite that matches a member asks them (B2BMemberRequest) instead of enrolling them.
+  memberRequests: memberRequestsLater,
   // Whether FitFlex can send email codes, i.e. whether someone listed by email
   // only can verify that address in the app (same source as emailCodes in GET /auth/options).
   emailCodes: () => emailSender().configured === true,
@@ -519,12 +662,12 @@ export const eventStore = createPgEventStore({
   db,
   // S3: after an expired order's release commits, the purchaser is told once (eventsRegistrationService is
   // defined further down; the hook only runs later, from the job).
-  hooks: { afterExpire: result => eventsRegistrationService.onOrderExpired(result) },
+  hooks: { afterExpire: async (result) => { await eventsRegistrationService.onOrderExpired(result); if (eventsWaitlistOn()) await eventsWaitlistService.nudge(result); } },
 });
 // S4: the composable money primitives (confirm / rehold / cancel paid places / refund effects). Dormant with the payment flags.
 export const eventMoneyStore = createPgEventMoneyStore({ db, eventStore });
 opsService.register({
-  name: 'event-hold-expiry', title: 'Event hold expiry', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  name: 'event-hold-expiry', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event hold expiry', schedule: { type: 'every', minutes: 5 }, quiet: true,
   description: 'Gives back the places of unpaid event orders whose hold has lapsed (order expired, registrations cancelled). Does nothing unless EVENTS_MODULE is on.',
   run: async () => {
     if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -547,6 +690,8 @@ export const authService = createAuthService({
   users, gyms, subscriptions, trainers, otps, products,
   signJwt, verifyFirebaseIdToken, publicUserId, gymService, trainerService,
   identityLink: identityLinkService, auditLog, orgMemberships: orgMembershipService,
+  // B5a: a company HR login's session says which organisations it opens (ORG_ONLY_SPONSORS).
+  organizationMarks: user => b2bService.organizationSessionMarks({ userId: user.id, userType: user.userType }),
   partnerAgeGuard: ({ user }) => personalDetailsService.assertPartnerAge({ user }),
 });
 
@@ -565,36 +710,51 @@ export const subscriptionService = createSubscriptionService({
   auditLog, referenceStore: paymentReferenceStore,
   eventLabels: requests => eventsPaymentsService.paymentLabels(requests),
 });
+// Account deletion (owner decision 2026-10-30). usernames are handled inside the erasure itself; the
+// services below are defined further down this file, and these only run later.
+const accountErasure = createAccountErasure({
+  db,
+  steps: [
+    // Promotion analytics stop saying who a customer was.
+    (trx, { userId }) => promotionEventsService.forgetUser(userId, { q: trx }),
+    // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
+    // their link to the account unless money is owed.
+    (trx, { userId }) => vendorCustomerService.forgetBuyer(userId, { q: trx }),
+    // The "Personalised shop" switch goes once the Person has no personas left.
+    (trx, { userId, personId }) => forgetShopPreference(trx, { userId, personId }),
+    // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
+    (trx, { personId }) => forgetPersonDetails(trx, { personId }),
+  ],
+});
 export const accountService = createAccountService({
-  users, trainers, trainerBookings, checkins, auditLog, initFirebaseAdmin, getAdminAuth, approvalStatusForRole,
+  users, trainers, trainerBookings, checkins, approvalStatusForRole,
+  eraseAccount: (userId, options) => accountErasure.erase(userId, options),
+  initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
+  firebaseConfigured: () => portalFirebaseAdmin.configured(),
   memberDobGuard: args => personalDetailsService.assertMemberProfileAge(args),
-  // promotionEventsService is defined at the end of this file; this only runs later.
-  // A deleted account lets its username go (held 90 days). usernameService is defined further down.
-  // Vendor tools · S4 (review #224 H1): vendors' app-customer records of the buyer lose their name, and
-  // their link to the account unless money is owed. Each step runs even if another fails.
-  onAccountDeleted: async (userId, deleted = null) => {
-    const errors = [];
-    for (const step of [
-      () => promotionEventsService.forgetUser(userId),
-      () => usernameService.forgetUser(userId),
-      () => vendorCustomerService.forgetBuyer(userId),
-      // The "Personalised shop" switch goes once the Person has no personas left.
-      () => forgetShopPreference(db, { userId, personId: deleted?.personId || null }),
-      // Partner DOB slice 2: the declared date of birth and gender go with the last persona.
-      () => forgetPersonDetails(db, { personId: deleted?.personId || null }),
-    ]) {
-      try { await step(); } catch (err) { errors.push(err); }
-    }
-    if (errors.length) throw errors[0];
-  },
+  ownsEventOrganizer: async ({ userId }) => Boolean(await db('EventOrganizer').where({ ownerUserId: userId }).first('id')),
+  hasOpenPaidOrder: async ({ userId }) => Boolean(await db('ShopOrder')
+    .where({ buyerId: userId, paymentStatus: 'paid' })
+    .whereNotIn('status', [...ORDER_TERMINAL_STATUSES, 'fulfilled']).first('id')),
+  // Partner media (functions#277 review M2): a vendor's, a trainer's or an owner's last gyms' photos and logos.
+  // The stored row goes along so this can see which ones. Nothing here touches another table's data.
+  onAccountDeleted: (userId, deleted = null) => partnerMediaService.purgeAccount(deleted || { id: userId }, { cause: 'account_deleted' }),
 });
 
 // Until a gym's owner is verified, only the gym's own members check in there.
 // One check for the check-in and the scanner preview.
 const gymOpenToPass = gymId => partnerGate.isGymOperational(gymId);
+// Security events + web check-in alert (S3). notificationService is created further down; this only runs later.
+export const securityEventService = createSecurityEventService({
+  db, gyms, deviceTokens,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  alertsOn: webCheckinAlertsOn,
+});
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
-  onCheckin: checkin => partnerNotifier.gymCheckin(checkin),
+  // Two independent reactions; neither can block or fail the other or the check-in (S3: web check-in security alert).
+  onCheckin: checkin => Promise.allSettled([partnerNotifier.gymCheckin(checkin), securityEventService.handleCheckin(checkin)]),
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
   gymOpenToPass,
@@ -650,11 +810,23 @@ export const operatorService = createOperatorService({
   gymOpenToPass,
 });
 
-export const ownerGymService = createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate });
-export const ownerStaffService = createOwnerStaffService({ users, auditLog, initFirebaseAdmin, getAdminAuth });
+export const ownerGymService = createOwnerGymService({
+  gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate, gymPayoutOwner,
+  onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
+});
+export const ownerStaffService = createOwnerStaffService({
+  users, auditLog, db,
+  // Through the replaceable holder (defined below; read at call time), so specs can stand in for Firebase.
+  initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
+  // B3a: the start-PIN digest uses the same server key as PINs; the held PIN is the I7a service's.
+  pepper: () => pinPepper(), pinAuth: () => pinAuthService, forgetSession: invalidateAccountStatus,
+  // Read at call time through the replaceable holder (defined below), as the PIN service does.
+  verifyFirebasePassword: (...args) => firebasePasswordCheck.verify(...args),
+});
 
 export const adminMemberService = createAdminMemberService({
   users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr,
+  transaction: fn => db.transaction(fn),
 });
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog, gyms,
@@ -669,9 +841,19 @@ export const adminPaymentService = createAdminPaymentService({
   // An upgraded pass is the same plan: tell the member, nothing else (it is no new membership or conversion).
   onPassUpgraded: sub => notificationService.notifySubscriptionActivated(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
-  onBookingPayment: (groupId, status) => trainerBookingService.applyPaymentToGroup(groupId, status),
+  onBookingPayment: (groupId, status, opts) => trainerBookingService.applyPaymentToGroup(groupId, status, opts),
   // 409 group_slot_rebooked { bookingIds } when a rejected session's slot was booked by someone else since.
   beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
+  // The same, found only after the decision was written (a race): the decision was undone; staff must look.
+  onBookingPaymentRefused: ({ request, refusal, rolledBack, actorId }) => opsService.raise({
+    type: 'payment_conflict', severity: 'high',
+    title: rolledBack
+      ? `Trainer booking payment ${request.id} was put back: a session's slot was booked by someone else`
+      : `Trainer booking payment ${request.id} could not be put back after its group refused it — check it by hand`,
+    dedupeKey: `trainer_group_slot_rebooked:${request.id}`,
+    entityType: 'payment_request', entityId: request.id,
+    detail: { bookingGroupId: request.bookingGroupId, bookingIds: refusal.bookingIds || [], rolledBack, actorId },
+  }),
   onOrderPayment: (orderId, status) => shopService.applyPaymentToOrder(orderId, status),
   beforeOrderPayment: (request, opts) => shopService.checkOrderPayment(request, opts),
   // Marathon & Events S4 (EVENT_ORDER; eventsPaymentsService is defined further down, these only run at request time).
@@ -719,13 +901,19 @@ export const mobileMoneyService = createMobileMoneyService({
   },
 });
 export const adminOwnerService = createAdminOwnerService({
-  users, gyms, checkins, auditLog, gymService,
-  onOwnerRemoved: prior => forgetPersonDetails(db, { personId: prior?.personId || null }),
+  users, gyms, checkins, auditLog, gymService, gymPayoutOwner,
+  onOwnerRemoved: async (prior) => {
+    // Partner media (functions#277 review M2): gyms no open owner runs any more lose their photo and logo.
+    const purged = partnerMediaService.purgeAccount(prior, { cause: 'owner_deleted' }).catch(err => err);
+    await forgetPersonDetails(db, { personId: prior?.personId || null });
+    const result = await purged;
+    if (result instanceof Error) throw result;
+  },
 });
 export const adminApprovalService = createAdminApprovalService({ users, auditLog, partnerKycCases, partnerGate });
 export const financeService = createFinanceService({ gyms, checkins, invoices, users, gymPayouts, settingsService });
 // Gym settlement workflow (settlement Phase 4): submit, approve, hold, pay.
-export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts, trainers });
+export const payoutEligibility = createPayoutEligibility({ users, gyms, partnerGate, partnerSettlementAccounts, trainers, payoutOwner: gymPayoutOwner });
 // Trainer payouts: a weekly statement per trainer on the same path as a gym statement.
 export const trainerSettlementService = createTrainerSettlementService({
   trainers, users, payoutEligibility,
@@ -740,15 +928,15 @@ export const vendorSettlementService = createVendorSettlementService({
 export const settlementWorkflowService = createSettlementWorkflowService({
   payoutEligibility, onStep: (statement, action) => partnerNotifier.gymStatement(statement, action),
 });
-export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId });
+export const settlementViewService = createSettlementViewService({ gyms, users, publicUserId, gymPayoutOwner });
 // Recalculates a settled member cycle when one of its check-ins is voided and
 // raises each gym's difference as an adjustment (settlement Phase 6).
 export const settlementClawbackService = createSettlementClawbackService({ configService: settlementConfigService, workflow: settlementWorkflowService });
 export const invoiceService = createInvoiceService({
-  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts,
+  invoices, gyms, users, gymPayouts, auditLog, partnerGate, partnerSettlementAccounts, gymPayoutOwner, db,
 });
 // Replaceable, so specs can stand in for the Firebase admin SDK.
-export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth };
+export const portalFirebaseAdmin = { init: initFirebaseAdmin, auth: getAdminAuth, configured: firebaseAdminConfigured };
 export const portalUserService = createPortalUserService({
   users, auditLog, isConfiguredAdminEmail, db,
   initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
@@ -917,6 +1105,19 @@ export const refundService = createRefundService({
   enrichRows: rows => eventsRefundsService.enrich(rows),
   raiseForEventPayment: args => eventsRefundsService.adminRaiseForPayment(args),
 });
+// Held payments worklist (audit M5; HELD_PAYMENTS_WORKLIST): provider money no request could take, and its refund.
+export const heldPaymentsService = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: heldPaymentsWorklistOn,
+  // The request row is locked and re-read, and the refund and its audit rows are written, in one transaction.
+  transact: fn => db.transaction(async trx => fn({
+    lockTransaction: txn => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`held-refund:${txn}`]),
+    lockRequest: id => trx('PaymentRequest').where({ id }).forUpdate().first(),
+    refunds: {
+      filterByColumnAsync: (col, value) => trx('Refund').where({ [col]: value }),
+      insertAsync: async row => (await trx('Refund').insert(row).returning('*'))[0],
+    },
+    auditLog: { insertAsync: row => trx('AuditLog').insert(row) },
+  })),
+});
 // A sponsor-covered trainer session returns what the member paid for it (no double charge).
 export const b2bSponsorRefundService = createB2BSponsorRefundService({ db, refundService, trainerBookings });
 
@@ -978,6 +1179,7 @@ export const registrationService = createRegistrationService({
   approvalStatusForRole, signPurpose, verifyPurpose,
   claimInvitations: personId => invitationService.claimFor(personId),
   linkingEnabled: () => identityFlag('V2_LINKING'),
+  onAccountClosed: row => partnerMediaService.purgeAccount(row, { cause: 'registration_withdrawn' }),
 });
 // A person with no profile yet: invited with a start PIN, or still to choose a role.
 export const onboardingService = createOnboardingService({
@@ -1143,6 +1345,14 @@ export const shopBannerService = createShopBannerService({
   partnerGate, moderationGate,
   notifyVendor: (vendorId, type, data) => shopService.notifyVendor(vendorId, type, data),
 });
+// Partner hero photo and logo (PARTNER_MEDIA; plan partner-hero-media-plan.md): bytes in Postgres,
+// live at once, FitFlex reviews afterwards; takedowns tell the partner (inbox + push).
+export const partnerMediaService = createPartnerMediaService({
+  store: createPgPartnerMediaStore({ db }),
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  orgAuthzMode,
+});
 // "Personalised shop" switch (SHOP_PERSONALISATION, Phase 2 slice 2): one row per Person, no row = on.
 export const shopPreferenceService = createShopPreferenceService({
   store: createPgShopPreferenceStore({ db }), users, identityLink: identityLinkService,
@@ -1152,6 +1362,7 @@ export const shopPreferenceService = createShopPreferenceService({
 const SHOP_HISTORY_MAX_ORDERS = 500;
 export const shopHomeService = createShopHomeService({
   bannerFeed: args => shopBannerService.feed(args),
+  flashSales: flashSaleService.pricing,
   preferences: shopPreferenceService,
   buyerPaidOrders: ({ buyerIds, since }) => (buyerIds.length ? db('ShopOrder')
     .whereIn('buyerId', buyerIds).where({ paymentStatus: 'paid' }).whereNot({ status: 'cancelled' }).where('createdAt', '>=', since)
@@ -1180,7 +1391,7 @@ export const heroImageService = createHeroImageService({
 
 // Marathon & running events · S2: organizer capability, event management, admin moderation, discovery.
 // Dormant behind EVENTS_MODULE (every route but GET /events/options answers 404 feature_disabled).
-export const eventCatalogueStore = createPgEventCatalogueStore({ db });
+export const eventCatalogueStore = createPgEventCatalogueStore({ db, waitlistOn: eventsWaitlistOn });
 registerOrganizerLookup(userId => eventCatalogueStore.organizerForUser(userId));
 export const eventsOrganizerService = createEventsOrganizerService({
   db, eventStore, catalogue: eventCatalogueStore, users, identityLink: identityLinkService, partnerKyc: partnerKycService,
@@ -1190,10 +1401,22 @@ export const eventsOrganizerService = createEventsOrganizerService({
   // S3: the overview counters (eventsRegistrationService is defined below; only called later).
   registrationTotals: organizerId => eventsRegistrationService.organizerTotals(organizerId),
 });
-export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService });
+// S5: a bilingual in-app notice to an organizer's owner and admins (payout schedule changed, API client events, webhook auto-disabled).
+const notifyOrganizerTeam = async (organizerId, { id, type, en, sw, roles = ['owner', 'admin'] }) => {
+  const staff = await db('EventOrganizerStaff').where({ organizerId, status: 'active' }).whereIn('role', roles).select('userId');
+  for (const s of staff) {
+    const locale = await communicationPreferences.findByIdAsync(s.userId).then(p => p?.locale ?? null).catch(() => null);
+    const t = locale === 'sw' ? sw : en;
+    await notificationService.notify(s.userId, { id: `${id}_${s.userId}`.slice(0, 60), type, title: t.title, body: t.body, data: { organizerId, locale: locale === 'sw' ? 'sw' : 'en', titleEn: en.title, bodyEn: en.body, titleSw: sw.title, bodySw: sw.body } });
+  }
+};
+export const eventsAdminService = createEventsAdminService({ db, catalogue: eventCatalogueStore, organizerService: eventsOrganizerService, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService, notifyTeam: notifyOrganizerTeam });
 export const eventsDiscoveryService = createEventsDiscoveryService({
   catalogue: eventCatalogueStore, closingSoonHours: eventsClosingSoonHours,
   flags: { module: eventsModuleOn, favourites: eventsFavouritesOn, registration: eventsRegistrationOn },
+  // S5: the ops switches the apps and the portal read (webhooks is false without EVENTS_WEBHOOK_SECRET_KEY: fail closed).
+  waitlistView: () => (eventsWaitlistOn() ? eventsWaitlistService.view() : null),
+  opsOptions: () => ({ kit: eventsKitOpsOn(), api: eventsOrganizerApiOn(), webhooks: eventsWebhooksOn() && Boolean(webhookKeyRing()), kitOffline: eventsKitOfflineOn() && Boolean(eventTicketKeyRing()) }),
   // S3 (spec §3.1): the registration keys of the probe. payment is 'none' in S3 (S4 derives manual / provider).
   registrationOptions: () => ({
     holdTtlMinutes: eventStore.holdTtlMinutes(), maxParticipantsPerOrder: eventsMaxParticipantsPerOrder(), teams: true, corporate: true,
@@ -1227,6 +1450,10 @@ export const eventsRegistrationService = createEventsRegistrationService({
   senders: eventSenders,
   // S4: payments and refunds (defined below; read at request time).
   getPayments: () => eventsPaymentsService, getRefunds: () => eventsRefundsService,
+  // S5: the keyset roster, only while EVENTS_KIT_OPS is on.
+  getRosterSync: () => (eventsKitOpsOn() ? eventsSyncService : null),
+  // S7: the queue gate, the order `source` and the view flags, only while EVENTS_WAITLIST is on.
+  getWaitlist: () => (eventsWaitlistOn() ? eventsWaitlistService : null),
 });
 export const eventsRosterService = createEventsRosterService({ db, registration: eventsRegistrationService, users, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService });
 
@@ -1248,7 +1475,7 @@ export const eventsRefundsService = createEventsRefundService({
   senders: eventSenders, ops: opsService,
 });
 opsService.register({
-  name: 'event-payment-reconciliation', title: 'Event payment reconciliation', schedule: { type: 'every', minutes: 60 }, quiet: true, domain: 'finance',
+  name: 'event-payment-reconciliation', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event payment reconciliation', schedule: { type: 'every', minutes: 60 }, quiet: true, domain: 'finance',
   description: 'Event payments: re-applies approved payments whose order is not confirmed, settles Tunzaa prompts whose callback was lost (and expires stale ones), retries unsent claim invitations once, and re-applies paid refunds whose places were not updated. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Bounded to 100 rows per step; safe to run twice.',
   run: async () => {
     if (!eventsRegistrationOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1258,7 +1485,7 @@ opsService.register({
   },
 });
 opsService.register({
-  name: 'event-lifecycle', title: 'Event lifecycle', schedule: { type: 'every', minutes: 5 }, quiet: true,
+  name: 'event-lifecycle', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event lifecycle', schedule: { type: 'every', minutes: 5 }, quiet: true,
   description: 'Moves events along automatically: published → registration_closed at registrationClosesAt, → in_progress at startsAt, in_progress → completed at endsAt + EVENT_AUTO_COMPLETE_GRACE_HOURS (default 6). Does nothing unless EVENTS_MODULE is on.',
   run: async () => {
     if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
@@ -1266,3 +1493,224 @@ opsService.register({
     return { processed: r.due, succeeded: r.moved, failed: r.failed, ...r };
   },
 });
+
+// Marathon & running events · S5: venue operations, the organizer API and signed webhooks. All dormant: every route answers
+// 404 feature_disabled unless EVENTS_KIT_OPS / EVENTS_ORGANIZER_API / EVENTS_WEBHOOKS (each with EVENTS_MODULE and EVENTS_REGISTRATION) is on,
+// and the webhook jobs also need EVENTS_WEBHOOK_SECRET_KEY. docs/design/events-s5-venue-api-and-webhooks.md.
+export const eventsOpsService = createEventsOpsService({
+  db, eventStore, ticketRing: eventTicketKeyRing, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message),
+});
+export const eventsSyncService = createEventsSyncService({ db, feedLagSeconds: eventsFeedLagSeconds, exportMaxRows: eventsExportMaxRows });
+export const eventsIntegrationsService = createEventsIntegrationsService({
+  db, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message),
+  maxClients: eventsApiMaxClients, defaultRate: eventsApiDefaultRate, tokenTtlSeconds: eventsApiTokenTtlSeconds, allowlist: eventsApiAllowlist,
+});
+registerApiClientStore(eventsIntegrationsService.authStore);
+export const eventsWebhookService = createEventsWebhookService({
+  db, localeOf: eventsLocaleOf, notify: (userId, message) => notificationService.notify(userId, message), keyRing: webhookKeyRing,
+  track: (name, props, opts) => eventsAnalyticsService.track(name, props, opts),
+  config: { perHostBatch: eventsWebhookPerHostBatch, maxEndpoints: eventsWebhookMaxEndpoints, timeoutMs: eventsWebhookTimeoutMs, maxAttempts: eventsWebhookMaxAttempts, batch: eventsWebhookBatch, lagSeconds: eventsFeedLagSeconds },
+});
+opsService.register({
+  name: 'event-webhook-fanout', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event webhook fan-out', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events webhooks (S5): turns unpublished outbox rows into deliveries for the SAME organizer\'s verified, subscribed endpoints (the organizer match is in the SQL join) and marks them published. Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set.',
+  run: async () => {
+    if (!eventsWebhooksOn() || !eventsWebhookService.enabled()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.fanout();
+    return { processed: r.rows, succeeded: r.rows, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-webhook-deliver', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event webhook delivery', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events webhooks (S5): sends due deliveries (SKIP LOCKED claim with a lease, SSRF re-check and pinned connection on every attempt, backoff 1m·5m·15m·1h·3h·6h·12h·24h, dead letter, auto-disable with a notice). Does nothing unless EVENTS_WEBHOOKS is on and EVENTS_WEBHOOK_SECRET_KEY is set.',
+  run: async () => {
+    if (!eventsWebhooksOn() || !eventsWebhookService.enabled()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.deliverDue();
+    return { processed: r.claimed, succeeded: r.delivered, failed: r.failed + r.dead, ...r };
+  },
+});
+opsService.register({
+  name: 'event-webhook-retention', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event webhook retention', schedule: { type: 'daily', utc: '02:40' }, quiet: true,
+  description: 'Events webhooks and API (S5): attempts kept 30 days, deliveries and published outbox rows 90 days, idempotency rows 7 days, API usage rows 90 days; API client expiry notices at 14 and 3 days. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on.',
+  run: async () => {
+    if (!eventsRegistrationOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWebhookService.retention();
+    const s = await eventsIntegrationsService.sweep();
+    const processed = r.attempts + r.deliveries + r.outbox + r.idempotency + s.notices + s.purged;
+    return { processed, succeeded: processed, failed: 0, ...r, ...s };
+  },
+});
+
+// Marathon & running events · S6: results, run links, medals and rewards (docs/design/events-s6-runs-results-medals-rewards.md).
+// Dormant behind EVENTS_RESULTS / EVENTS_RUNS / EVENTS_RESULTS_PUBLIC / EVENTS_REWARDS / EVENTS_MEDAL_ART (each with EVENTS_MODULE and
+// EVENTS_REGISTRATION): with all five off every S6 route answers 404 feature_disabled and S5 behaviour is unchanged.
+export const eventsResultsService = createEventsResultsService({
+  db, eventStore, localeOf: eventsLocaleOf,
+  notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+  importMaxRows: eventsResultsImportMaxRows, disputeDefaultHours: eventsResultsDisputeDefaultHours, pushMax: eventsResultsPushMax, clauseVersions: eventsResultsConsentVersions,
+  rewardsOn: eventsRewardsOn,
+});
+export const eventsRunLinkService = createEventsRunLinkService({
+  db, results: eventsResultsService, recordRun: (memberId, body) => activityService.recordRun(memberId, body),
+  toleranceBps: eventsRunDistanceToleranceBps, maxDaysAfter: eventsRunLinkMaxDaysAfter,
+});
+export const eventsRewardService = createEventsRewardService({
+  db, ticketRing: eventTicketKeyRing, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+});
+import { createEventsMedalArtService, MEDAL_ART_CONFIRMATION } from '../services/events-medal-art-service.mjs';
+import { eventsMedalArtMaxBytes, eventsMedalArtMaxPixels, eventsMedalArtUploadsPerDay } from '../shared/events-config.mjs';
+export const eventsMedalService = createEventsMedalService({ db, results: eventsResultsService, medalArtOn: eventsMedalArtOn, artConfirmation: () => MEDAL_ART_CONFIRMATION });
+export const eventsMedalArtService = createEventsMedalArtService({
+  db, results: eventsResultsService, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+  maxBytes: eventsMedalArtMaxBytes, maxPixels: eventsMedalArtMaxPixels, uploadsPerDay: eventsMedalArtUploadsPerDay,
+});
+export const eventsAwardService = createEventsAwardService({
+  db, results: eventsResultsService, medals: eventsMedalService, rewards: eventsRewardService, notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message), batch: eventsAwardBatch,
+});
+// S6 jobs. The award jobs run only while EVENTS_REWARDS is on, so tasks queued by releases wait (and are processed) once rewards are switched on.
+opsService.register({
+  name: 'event-awards-run', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event awards', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events (S6): takes a batch of award tasks (FOR UPDATE SKIP LOCKED) and awards or revokes medals, achievements and earned rewards from the current results. The only writer of awards. Does nothing unless EVENTS_REWARDS is on.',
+  run: async () => {
+    if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsAwardService.runBatch();
+    return { processed: r.claimed, succeeded: r.done, failed: r.failed, ...r };
+  },
+});
+opsService.register({
+  name: 'event-awards-reconcile', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event awards reconcile', schedule: { type: 'every', minutes: 10 }, quiet: true,
+  description: 'Events (S6): finds cancelled or refunded places, cancelled events and new claims and queues award tasks; lapses reserved perks past their expiry. Reads registrations, so no payment code changes. Does nothing unless EVENTS_REWARDS is on.',
+  run: async () => {
+    if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsAwardService.reconcile();
+    return { processed: r.queued + r.expiredReservations, succeeded: r.queued + r.expiredReservations, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-reward-expire', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event reward expiry', schedule: { type: 'daily', utc: '23:00' }, quiet: true,
+  description: 'Events (S6): writes an expire entry for unspent reward units older than their definition\'s expiryDays (02:00 Africa/Dar_es_Salaam). Does nothing unless EVENTS_REWARDS is on.',
+  run: async () => {
+    if (!eventsRewardsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsRewardService.expireUnits();
+    const sweep = await db('EventMedalArtUploadAttempt').where('createdAt', '<', new Date(Date.now() - 2 * 86_400_000)).del();
+    return { processed: r.expired + sweep, succeeded: r.expired + sweep, failed: 0, ...r, attemptsSwept: sweep };
+  },
+});
+
+// Marathon & running events · S7: analytics counters, the launch dashboard and the alert rules (docs/design/events-s7-hardening-and-pilot.md §5).
+// Dormant behind EVENTS_ANALYTICS (needs EVENTS_MODULE and EVENTS_REGISTRATION): track() does nothing, the endpoint and the Health tab answer
+// 404 feature_disabled, and both jobs return at once while it is off.
+export const eventsAnalyticsService = createEventsAnalyticsService({
+  db, enabled: eventsAnalyticsOn, emailSender: () => emailSender(), keepDays: eventsAnalyticsKeepDays, alertRules: eventsAlertRules,
+  jobStatus: () => opsService.jobStatus(),
+  // Which flag a job needs before it is expected to run (alert A5 and the "late" marker only count jobs whose flag is on).
+  jobFlags: {
+    'event-hold-expiry': eventsModuleOn, 'event-lifecycle': eventsModuleOn, 'event-payment-reconciliation': eventsRegistrationOn,
+    'event-webhook-fanout': eventsWebhooksOn, 'event-webhook-deliver': eventsWebhooksOn, 'event-webhook-retention': eventsRegistrationOn,
+    'event-awards-run': eventsRewardsOn, 'event-awards-reconcile': eventsRewardsOn, 'event-reward-expire': eventsRewardsOn,
+    'event-waitlist-promote': eventsWaitlistOn, 'event-waitlist-purge': eventsWaitlistOn, 'event-kit-offline-purge': eventsKitOfflineOn,
+    'event-analytics-rollup': eventsAnalyticsOn, 'event-health-alert': eventsAnalyticsOn, 'event-organizer-status-sweep': eventsModuleOn,
+    'event-registration-anonymise': () => eventsRetentionMonths() !== null || eventsDeletedUserAnonymiseDays() !== null,
+  },
+  setup: () => ({
+    flags: {
+      module: eventsModuleOn(), registration: eventsRegistrationOn(), kitOps: eventsKitOpsOn(), kitOffline: eventsKitOfflineOn(), waitlist: eventsWaitlistOn(), analytics: eventsAnalyticsOn(),
+      webhooks: eventsWebhooksOn(), organizerApi: eventsOrganizerApiOn(), results: eventsResultsOn(), rewards: eventsRewardsOn(), medalArt: eventsMedalArtOn(),
+    },
+    payment: eventsPaymentsService.mode(), retentionConfigured: eventsRetentionMonths() !== null || eventsDeletedUserAnonymiseDays() !== null, consentTextVersion: eventsConsentTextVersion(),
+  }),
+  manualConfirmHours: eventsManualConfirmSlaHours, refundTargetDays: eventsRefundTargetDays,
+});
+setApiErrorSink((group, cls) => eventsAnalyticsService.track('api_error', { group, class: cls }));
+// S7 · B1: the offline kit desk (docs/design/events-s7-hardening-and-pilot.md §3). RULE 6 AREA. Dormant behind EVENTS_KIT_OFFLINE (needs EVENTS_KIT_OPS).
+export const eventsKitOfflineService = createEventsKitOfflineService({
+  db, ops: eventsOpsService, ticketRing: eventTicketKeyRing, feedLagSeconds: eventsFeedLagSeconds, localeOf: eventsLocaleOf,
+  track: (name, props, opts) => eventsAnalyticsService.track(name, props, opts),
+  notice: (userId, message) => eventsOpsService.internals.notice(userId, message),
+  notifyTeam: (organizerId, message) => notifyOrganizerTeam(organizerId, message),
+  config: {
+    sessionHours: eventsOfflineSessionHours, maxDevices: eventsOfflineMaxDevices, maxPerUser: eventsOfflineMaxPerUser, maxRows: eventsOfflineMaxRows, syncBatch: eventsOfflineSyncBatch,
+    maxPending: eventsOfflineMaxPending, maxStoredScans: eventsOfflineMaxStoredScans, clockToleranceSeconds: eventsOfflineClockToleranceSeconds, minDeskBuild: eventsOfflineMinDeskBuild, scanKeepDays: eventsOfflineScanKeepDays, maxBibRange: eventsOfflineMaxBibRange,
+  },
+});
+// S7 · B2: the waitlist (docs/design/events-s7-hardening-and-pilot.md §4). RULE 6 AREA. Dormant behind EVENTS_WAITLIST. An offer is a real order
+// created through the registration service with a system actor; nothing in the store, payment or refund code changes.
+export const eventsWaitlistService = createEventsWaitlistService({
+  db, registration: eventsRegistrationService, eventStore, users, verifiedContacts, localeOf: eventsLocaleOf,
+  track: (name, props, opts) => eventsAnalyticsService.track(name, props, opts),
+  notice: (userId, message) => eventsPaymentsService.internals.notice(userId, message),
+  paymentsMode: () => eventsPaymentsService.mode(), consentVersion: eventsConsentTextVersion,
+  config: {
+    offerHours: eventsWaitlistOfferHours, minOfferMinutes: eventsWaitlistMinOfferMinutes, maxActivePerUser: eventsWaitlistMaxActivePerUser, maxQueue: eventsWaitlistMaxQueue,
+    maxLapses: eventsWaitlistMaxLapses, quietHours: eventsWaitlistQuietHours, keepDays: eventsWaitlistKeepDays,
+  },
+});
+opsService.register({
+  name: 'event-waitlist-promote', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event waitlist promotion', schedule: { type: 'every', minutes: 1 }, quiet: true,
+  description: 'Events (S7): reconciles waitlist offers (converted, expired, declined, one-hour reminder), ends entries whose sale closed, and offers freed places to the head of each line by creating a normal order for the member (hold = the offer window, quiet hours 21:00 to 07:00 event time). Does nothing unless EVENTS_WAITLIST is on.',
+  run: async () => {
+    if (!eventsWaitlistOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const rec = await eventsWaitlistService.reconcile();
+    const r = await eventsWaitlistService.promote();
+    const processed = r.attempted + r.closed + rec.converted + rec.expired + rec.declined + rec.reminded;
+    return { processed, succeeded: processed, failed: 0, ...r, reconciled: rec };
+  },
+});
+opsService.register({
+  name: 'event-waitlist-purge', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event waitlist purge', schedule: { type: 'daily', utc: '23:15' }, quiet: true,
+  description: 'Events (S7): clears the stored registration details of waitlist entries 24 hours after they ended and deletes ended entries older than EVENTS_WAITLIST_KEEP_DAYS. Does nothing unless EVENTS_WAITLIST is on.',
+  run: async () => {
+    if (!eventsWaitlistOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsWaitlistService.purge();
+    return { processed: r.cleared + r.deleted, succeeded: r.cleared + r.deleted, failed: 0, ...r };
+  },
+});
+// S7 · retention (RULE 6 AREA): ships UNSET. Both settings unset = the job does nothing.
+export const eventsRetentionService = createEventsRetentionService({ db, months: eventsRetentionMonths, deletedUserDays: eventsDeletedUserAnonymiseDays });
+opsService.register({
+  name: 'event-registration-anonymise', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event registration anonymisation', schedule: { type: 'daily', utc: '01:10' }, quiet: true,
+  description: 'Events (S7, D79): for events completed, cancelled or archived more than EVENTS_RETENTION_MONTHS ago (and places of deleted purchasers after EVENTS_DELETED_USER_ANONYMISE_DAYS), clears phone, email, date of birth, gender, emergency contact and claim token data; keeps first name, last initial, bib and results. With both settings unset it does nothing.',
+  run: async () => {
+    const r = await eventsRetentionService.run();
+    return { processed: r.rows, succeeded: r.rows, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-organizer-status-sweep', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event organizer status sweep', schedule: { type: 'every', minutes: 60 }, quiet: true,
+  description: 'Events (S7, H7): re-derives every event organizer\'s status from its KYC case through the same primitive the KYC hook uses and audits each correction (a failed hook after a committed decision is then repaired within the hour). Does nothing unless EVENTS_MODULE is on.',
+  run: async () => {
+    if (!eventsModuleOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsOrganizerService.sweepOrganizerStatus();
+    return { processed: r.corrected, succeeded: r.corrected, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-kit-offline-purge', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event offline desk purge', schedule: { type: 'daily', utc: '23:30' }, quiet: true,
+  description: 'Events (S7): marks offline desks past their expiry as expired, removes desks of staff who left the organizer, and deletes offline scan records older than EVENTS_OFFLINE_SCAN_KEEP_DAYS (scans still waiting for review are kept). Does nothing unless EVENTS_KIT_OFFLINE is on.',
+  run: async () => {
+    if (!eventsKitOfflineOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsKitOfflineService.purge();
+    const processed = r.expired + r.revoked + r.scans + r.devices;
+    return { processed, succeeded: processed, failed: 0, ...r };
+  },
+});
+opsService.register({
+  name: 'event-analytics-rollup', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event analytics roll-up', schedule: { type: 'every', minutes: 60 }, quiet: true,
+  description: 'Events (S7): sums the existing `analytics.%` audit rows into daily counters (cursor, exactly once) and deletes counters older than EVENTS_ANALYTICS_KEEP_DAYS. Does nothing unless EVENTS_ANALYTICS is on.',
+  run: async () => {
+    if (!eventsAnalyticsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsAnalyticsService.rollup();
+    const p = await eventsAnalyticsService.purge();
+    return { processed: r.rows + p.deleted, succeeded: r.rows + p.deleted, failed: 0, ...r, purged: p.deleted };
+  },
+});
+opsService.register({
+  name: 'event-health-alert', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event health alerts', schedule: { type: 'every', minutes: 15 }, quiet: true,
+  description: 'Events (S7): evaluates the alert rules A1 to A13 and emails OPS_ALERT_EMAILS (one email per rule and subject per 6 hours; ids and counts only). With no recipients nothing is sent; the Health tab still shows what fires. Does nothing unless EVENTS_ANALYTICS is on.',
+  run: async () => {
+    if (!eventsAnalyticsOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
+    const r = await eventsAnalyticsService.runAlerts();
+    return { processed: r.firing, succeeded: r.sent, failed: 0, ...r };
+  },
+});
+void eventsRunsOn; void eventsMedalArtOn; void eventsResultsPublicOn; void eventsResultsOn;

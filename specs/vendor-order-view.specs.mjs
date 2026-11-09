@@ -638,7 +638,7 @@ test('GET /vendor/me: 404 feature_disabled unless VENDOR_TOOLS + VENDOR_PORTAL; 
     assert.equal(me.status, 200, JSON.stringify(me.body));
     assert.deepEqual(Object.keys(me.body).sort(), ['accountStatus', 'approvalStatus', 'businessName', 'permissions', 'tools', 'userType', 'vendorId', 'vendorRole']);
     assert.deepEqual([me.body.vendorId, me.body.businessName, me.body.userType, me.body.vendorRole, me.body.approvalStatus, me.body.accountStatus], [vendor, 'Me Shop', 'vendor', null, 'pending_approval', 'active']);
-    assert.deepEqual(me.body.permissions, ['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff']);
+    assert.deepEqual(me.body.permissions, ['products', 'orders', 'sales', 'customers', 'reports', 'payments', 'staff', 'import', 'purchases']);
     assert.deepEqual([me.body.tools.portal, me.body.tools.buyerContact, me.body.tools.stockLedger, me.body.tools.canSeeCost], [true, false, false, true]);
     const options = await hit('GET', '/vendor/tools/options', vendorClaims(vendor));
     assert.deepEqual(me.body.tools, options.body, 'tools = /vendor/tools/options');
@@ -679,10 +679,11 @@ test('GET /vendor/me: staff no longer active, of another vendor, or unknown → 
 
 const localPhone = () => `07${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
 const e164 = l => `+255${l.slice(1)}`;
+const runOctet = Math.floor(Math.random() * 200) + 20; // per run: AuthAttempt rows outlive the run
 let ipCounter = 0;
 async function pinPost(body) {
   const out = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
-  await pinLogin.onRequest({ body, headers: { 'x-forwarded-for': `10.92.${Math.floor(ipCounter / 250)}.${(ipCounter++ % 250) + 1}` } }, out);
+  await pinLogin.onRequest({ body, headers: { 'x-forwarded-for': `10.${runOctet}.${Math.floor(ipCounter / 250)}.${(ipCounter++ % 250) + 1}` } }, out);
   return out;
 }
 const PIN_ON = { IDENTITY_V2: 'true', V2_PIN_LOGIN: 'true', V2_PERSONAS: 'true', V2_IDENTIFIERS: 'true', V2_LINKING: null, VERIFICATION_EMAIL_PROVIDER: 'fake' };
