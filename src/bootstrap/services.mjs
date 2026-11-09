@@ -81,6 +81,7 @@ import { renderDocumentHtml, renderDocumentsHtml } from '../shared/vendor-docume
 import { renderDocumentPdf } from '../shared/vendor-document-pdf.mjs';
 import { createShopReconciliationService } from '../services/shop-reconciliation-service.mjs';
 import { createProductStatsRecomputeService } from '../services/product-stats-recompute-service.mjs';
+import { createPgProductCodeStore } from '../infra/product-code-store-pg.mjs';
 import { createShopService, STAFF_ROLES as VENDOR_STAFF_ROLES, STAFF_PERMISSIONS as VENDOR_STAFF_PERMISSIONS } from '../services/shop-service.mjs';
 import { createGymReviewService } from '../services/gym-review-service.mjs';
 import { createTrainerReviewService } from '../services/trainer-review-service.mjs';
@@ -402,6 +403,8 @@ export const shopService = createShopService({
   orderStore: createPgShopOrderStore({ db }),
   // Vendor tools · S1: stock ledger, cost price, reorder level (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
   stockLedger: createPgVendorStockStore({ db }),
+  // Vendor tools · S8: product barcodes (dormant behind VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES).
+  productCodes: createPgProductCodeStore({ db }),
   // Vendor tools · S2: pickup gym names and vendor-scoped buyer ids on vendor orders.
   gyms, buyerRefs: createPgVendorBuyerRefStore({ db }),
   requireVariantChoice: process.env.SHOP_REQUIRE_VARIANT === 'on',

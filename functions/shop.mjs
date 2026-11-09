@@ -5,7 +5,9 @@ import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { areaHeaderOf, areaRedactGuard, redactAreaId } from '../src/shared/area-request.mjs';
 import { users, shopService, shopHomeService, vendorSettlementService, shopReconciliationService, productStatsRecomputeService, vendorCustomerService, vendorDocumentService, vendorTaxService } from '../src/bootstrap/services.mjs';
 import { buyerOrderView } from '../src/services/shop-service.mjs';
-import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn, vendorPurchasesOn } from '../src/shared/feature-flags.mjs';
+import { identityFlag, vendorStockLedgerOn, vendorToolsOptions, vendorPortalOn, vendorCustomersOn, vendorDocumentsOn, vendorPurchasesOn, vendorBarcodesOn } from '../src/shared/feature-flags.mjs';
+import { createVendorLimiter } from '../src/shared/vendor-rate-limit.mjs';
+import { lookupCodeRedactGuard, barcodeMessage } from '../src/shared/vendor-barcode.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 import { canShowFlashSales, withoutSale } from '../src/shared/shop-caps.mjs';
 import { shopFlashSalesOn } from '../src/shared/feature-flags.mjs';
@@ -148,11 +150,42 @@ export const getVendorStore = {
 
 export const vendorMyProducts = {
   created, method: 'get', path: '/vendor/products',
-  description: 'Vendor / staff with `products` OR `sales` OR (S9) `purchases` (S3: the POS loads the products to sell; S9: Receive stock picks the products received; read only — every write and stock route still needs `products`): list own products (including archived). `purchases` counts only while VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES are on, and staff who get in only through it are refused while their vendor is suspended (403 vendor_suspended). Staff with none → 403 vendor_permission_forbidden { requiredPermission: products, acceptedPermissions: [products, sales] (+ purchases while S9 is on) }. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`).',
+  description: 'Vendor / staff with `products` OR `sales` OR (S9) `purchases` (S3: the POS loads the products to sell; S9: Receive stock picks the products received; read only — every write and stock route still needs `products`): list own products (including archived). `purchases` counts only while VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES are on, and staff who get in only through it are refused while their vendor is suspended (403 vendor_suspended). Staff with none → 403 vendor_permission_forbidden { requiredPermission: products, acceptedPermissions: [products, sales] (+ purchases while S9 is on) }. With VENDOR_TOOLS + VENDOR_STOCK_LEDGER on, each product also carries its private costTzs and reorderLevel (null when not set), and each variant { name, stock|null, costTzs|null, reorderLevel|null, effectiveCostTzs|null, effectiveReorderLevel|null } — effective = the variant\'s own value, else the product\'s. costTzs / effectiveCostTzs are left out (product and variants) unless the caller is the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin (scope `shop`). S8 (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES on): each product also carries barcodes: [{ code, variant: string|null }] (null = the whole product; whole-product codes first, then by variant and when added); absent when the flag is off. Codes are private shop data: never on /shop/*.',
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireProductListAccess, requireAdminShopScope]),
   onRequest: async (req, res) => {
     res.json(await shopService.vendorListProducts(req.user.vendorId || req.user.sub, { costAllowed: await shopService.canSeeCost(req.user) }));
   }
+};
+
+// ── vendor tools · S8: barcodes ──────────────────────────────────────────────
+
+/** S8 §2.4: continuous scanning is about one a second and the apps match their loaded list first. */
+export const VENDOR_BARCODE_LIMITS = Object.freeze({ lookupsPerPersonPerMinute: 120, lookupsPerVendorPerMinute: 600 });
+const lookupPersonLimiter = createVendorLimiter({ perMinute: VENDOR_BARCODE_LIMITS.lookupsPerPersonPerMinute });
+const lookupVendorLimiter = createVendorLimiter({ perMinute: VENDOR_BARCODE_LIMITS.lookupsPerVendorPerMinute });
+export const resetVendorBarcodeLimits = () => { lookupPersonLimiter.reset(); lookupVendorLimiter.reset(); };
+
+export const vendorProductLookup = {
+  created, method: 'get', path: '/vendor/products/lookup',
+  description: 'Vendor / vendor staff with `products` or `sales`, or (S9 on) `purchases` — the GET /vendor/products guard, including 403 vendor_suspended for purchases-only staff of a suspended vendor (S8, VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES; off → 404 feature_disabled): find this vendor\'s product by a scanned or typed code. Query code (required; trimmed; 1–100 printable ASCII): empty → 400 code_required; too long or other characters → 400 invalid_code { reason: too_long | bad_characters }. Codes are compared by codeKey (UPC-A 12 digits = its EAN-13 with a leading 0; a GTIN-14 with a leading 0 = its EAN-13; letters upper case). → 200 { code, codeKey, matches: [{ productId, name, variant|null, variants: [{ name, stock }]|null (only for a whole-product code on a product whose variants keep stock), priceTzs, discountPriceTzs, stock (the variant\'s own when variant is set), status (archived products are included), approvalStatus, sku, matchedBy: barcode | sku }] } — [] when nothing matches (also when another vendor has the code: the answer is the same). A barcode match always wins; with none, the SKU is matched exactly (trimmed, case-insensitive), up to 10 products by name. Deleted products never match. Never cost, images or reorder level. Limits: 120 per person and 600 per vendor per minute → 429 rate_limited { retryAfterSeconds, message } + Retry-After. The 404 and 429 carry message { en, sw } (Swahili draft). FitFlex admins → 403.',
+  responseSample: { code: '6201234567893', codeKey: '6201234567893', matches: [{ productId: 'prd_1a2b3c4d', name: 'Whey Protein 1kg', variant: 'M', variants: null, priceTzs: 85000, discountPriceTzs: null, stock: 4, status: 'active', approvalStatus: 'approved', sku: 'WP-1KG', matchedBy: 'barcode' }] },
+  // Security review #334 M-1: redact first, so the request log line (morgan writes req.originalUrl) never has the code,
+  // whatever the answer. req.url / req.query are untouched. Platform / ingress logs (BFast) are outside this repo.
+  onGuard: routeGuard('get', [lookupCodeRedactGuard, requireAuth('vendor', 'vendor_staff'), requireActiveVendorStaff, requireProductListAccess]),
+  onRequest: async (req, res) => {
+    if (!vendorBarcodesOn()) return res.status(404).json({ error: 'feature_disabled', message: barcodeMessage('feature_disabled') });
+    const vendorId = req.user.userType === 'vendor' ? req.user.sub : req.user.vendorId;
+    for (const [limiter, key] of [[lookupPersonLimiter, req.user.sub], [lookupVendorLimiter, vendorId]]) {
+      const allowed = limiter.allow(key);
+      if (allowed.ok) continue;
+      res.set?.('Retry-After', String(allowed.retryAfterSeconds));
+      return res.status(429).json({ error: 'rate_limited', retryAfterSeconds: allowed.retryAfterSeconds, message: barcodeMessage('rate_limited', { retryAfterSeconds: allowed.retryAfterSeconds }) });
+    }
+    // This handler writes no log line with the code; the request logger's URL was redacted by the first guard.
+    const result = await shopService.lookupProductCode({ vendorId, code: req.query?.code });
+    if (result.error) return sendError(res, result);
+    return res.json(result);
+  },
 };
 
 // ── vendor tools · S1: stock ledger ──────────────────────────────────────────
@@ -165,7 +198,7 @@ const ledgerDisabled = res => res.status(404).json({ error: 'feature_disabled' }
 
 export const vendorToolsOptionsRoute = {
   created, method: 'get', path: '/vendor/tools/options',
-  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). merch.productTargets: SHOP_PERSONALISATION is on (show the product form "Who it is for" fields: targetGender, targetAgeBands). merch.shopAreas: SHOP_NEAR_YOU is on (show the profile form "Where you sell" pickers: cityId, regionId, deliveryAreaIds; areas from GET /shop/areas). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). import (smart import V1): VENDOR_TOOLS + VENDOR_IMPORT are on (the CSV import routes /vendor/imports/* answer; staff also need the `import` permission); importLimits { maxBytes, maxRows }: the caps the apps must show before uploading. canSeeOrderMoney (S6): this caller may see commission and payouts — per-order commission / you receive, and the report App sales after commission (/vendor/reports/marketplace-net): the vendor account, vendor_staff with vendorRole admin or the `payments` permission (read from the stored staff record), or a FitFlex admin. Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
+  description: 'Vendor / vendor staff: which vendor tools this server has switched on (VENDOR_TOOLS umbrella + one flag per tool; all off unless set). The apps show a tool only when its value is true (fiscal: off | manual | vfd). canSeeCost: this caller may see and set cost prices (the vendor account, vendor_staff with vendorRole admin, or a FitFlex admin with scope `shop`). merch.banners: SHOP_BANNERS is on (vendors may propose shop home banners: /vendor/shop-banners). merch.productTargets: SHOP_PERSONALISATION is on (show the product form "Who it is for" fields: targetGender, targetAgeBands). merch.shopAreas: SHOP_NEAR_YOU is on (show the profile form "Where you sell" pickers: cityId, regionId, deliveryAreaIds; areas from GET /shop/areas). vatInForce (S5): true only when VENDOR_TOOLS + VENDOR_VAT are on and the VAT registration of my vendor is in force now (verified, registered, certificate still standing) — show the product VAT code field then; no other tax detail is given here (always false for a FitFlex admin). import (smart import V1): VENDOR_TOOLS + VENDOR_IMPORT are on (the CSV import routes /vendor/imports/* answer; staff also need the `import` permission); importLimits { maxBytes, maxRows }: the caps the apps must show before uploading. canSeeOrderMoney (S6): this caller may see commission and payouts — per-order commission / you receive, and the report App sales after commission (/vendor/reports/marketplace-net): the vendor account, vendor_staff with vendorRole admin or the `payments` permission (read from the stored staff record), or a FitFlex admin. barcodes (S8): true only when VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES are all on (changed meaning: before S8 it ignored VENDOR_STOCK_LEDGER) — the same answer as GET /vendor/products/lookup. Staff no longer active, or of another vendor → 403 vendor_staff_inactive.',
   responseSample: { canSeeCost: true, canSeeOrderMoney: true, stockLedger: false, portal: false, buyerContact: false, walkInSales: false, customers: false, documents: false, vat: false, vatInForce: false, reports: false, refunds: false, barcodes: false, purchases: false, import: false, importLimits: { maxBytes: 2097152, maxRows: 2000 }, fiscal: 'off', merch: { banners: false, productTargets: false, shopAreas: false } },
   onGuard: routeGuard('get', [requireAuth('vendor', 'vendor_staff', 'admin'), requireActiveVendorStaff]),
   onRequest: async (req, res) => {
@@ -232,13 +265,20 @@ export const shopCategories = {
   onRequest: async (_req, res) => res.json({ categories: PRODUCT_CATEGORIES }),
 };
 
+/** S8 (docs/design/vendor-barcodes-s8.md §2.3): what POST and PUT /vendor/products say about barcodes. */
+const BARCODE_BODY_DOC = 'S8 barcodes (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES; off → both fields are ignored, the rest of the save works and stored codes are untouched; also ignored for FitFlex admins): optional barcodes: [{ code, variant? }] = the product\'s WHOLE set after the save ([] clears it), or addBarcodes: [{ code, variant? }] = codes to add (one already on this product and variant is a no-op; never removes anything) — not both (400 barcodes_conflict). variant left out, null or \'\' = the whole product, else the name of a variant the product has after this save. A code: 4–48 printable characters, no spaces (400 invalid_barcode { code, reason: too_short | too_long | bad_characters }); 12-, 13- and 14-digit codes must pass the GTIN check digit (400 invalid_check_digit { code }); the same code twice in the body → 400 duplicate_barcode { code }; more than 20 per product → 400 too_many_barcodes { max: 20 }; an unknown variant → 400 barcode_variant_not_found { code, variant }; not a list of objects with a string code → 400 invalid_field { field: barcodes | addBarcodes }. A code on another live product of this vendor → 409 barcode_in_use { code, productId, name, variant } and NOTHING of the save is applied. Two saves that still collide in the database (deadlock / serialization, after one retry) → 409 barcode_in_use with productId and name null (message "This barcode is in use. Try again.") when the body had codes, else 409 save_conflict ("Someone else saved this at the same time. Try again."); the save was not applied. Codes are not reviewed: they never send the product back to pending. A variant object carrying barcodes → 400 invalid_field { field: variants }. Codes of a variant the save drops are deleted with it. The response product carries barcodes as GET /vendor/products. Each S8 error also has message { en, sw } (Swahili draft).';
+
 export const vendorCreateProduct = {
   created, method: 'post', path: '/vendor/products',
-  description: 'Vendor: create a product. Tags left out start as targetGender null and targetAgeBands []. Optional "who it is for" tags (docs/shop-personalisation-api.md): targetGender = women | men | null (everyone) and targetAgeBands = a list of 18_29, 30_44, 45_59, 60_plus ([] or all four = all ages; stored as []). Anything else → 400 invalid_field { field: targetGender | targetAgeBands, allowed }. They are not reviewed (never send the product back to pending) and are never on buyer-facing rows.',
-  requestSample: { name: 'Whey Protein 1kg', category: 'supplements', priceTzs: 85000, stock: 20, targetGender: null, targetAgeBands: ['18_29', '30_44'] },
+  description: 'Vendor: create a product. Tags left out start as targetGender null and targetAgeBands []. Optional "who it is for" tags (docs/shop-personalisation-api.md): targetGender = women | men | null (everyone) and targetAgeBands = a list of 18_29, 30_44, 45_59, 60_plus ([] or all four = all ages; stored as []). Anything else → 400 invalid_field { field: targetGender | targetAgeBands, allowed }. They are not reviewed (never send the product back to pending) and are never on buyer-facing rows. ' + BARCODE_BODY_DOC,
+  requestSample: { name: 'Whey Protein 1kg', category: 'supplements', priceTzs: 85000, stock: 20, targetGender: null, targetAgeBands: ['18_29', '30_44'], barcodes: [{ code: '6201234567893' }] },
   onGuard: routeGuard('post', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
   onRequest: async (req, res) => {
-    const result = await shopService.upsertProduct({ vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user) });
+    const result = await shopService.upsertProduct({
+      vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, body: req.body || {}, costAllowed: await shopService.canSeeCost(req.user),
+      // S8: codes are the vendor's (and their staff's) to set; a FitFlex admin's are ignored in v1.
+      barcodesAllowed: req.user.userType !== 'admin',
+    });
     if (result.error) return sendError(res, result);
     res.status(201).json(result.product);
   }
@@ -246,12 +286,13 @@ export const vendorCreateProduct = {
 
 export const vendorUpdateProduct = {
   created, method: 'put', path: '/vendor/products/:id',
-  description: 'Vendor: update own product (price, stock, status...). The product goes back to review only when a reviewed field (name, description, category, brand, images, variant names) actually changes. Price and discount price are not reviewed (owner decision 2026-10-29): changing them keeps an approved product approved and listed; each change is audited (product_price_changed) and kept in the price history; while an approved flash sale of the product is scheduled or live they are locked → 409 sale_conflict { reason: price_locked_by_flash_sale }. `variants` are merged by name: a variant sent without `stock` keeps its stored stock. With VENDOR_STOCK_LEDGER on: a `stock` that differs is recorded as a `count` adjustment (note product_form); costTzs / reorderLevel (product and per variant; null clears) are stored privately; when variants keep stock, every variant must (400 variant_stock_mixed), the body `stock` is ignored and the product stock moves only by what variant counts moved (each recorded); optional `stockSeen` (product) / `variants[].stockSeen` = the count the form showed → 409 stock_changed { currentStock, variant? } if it has moved; dropping a variant that still has stock → 409 variant_has_stock { variant, stock }, or that an open order holds units of → 409 variant_has_reservations { variant }; duplicate names → 400 duplicate_variant. costTzs (product or variant) may be sent only by the vendor account or vendor_staff with vendorRole admin, else 403 cost_forbidden; leaving it out keeps the stored cost. Also with the ledger on, checkout of a product whose variants keep stock requires `variant` (400 variant_required { variants }). Tags left out keep their stored values; targetGender null clears it, targetAgeBands [] clears the bands. Optional "who it is for" tags (docs/shop-personalisation-api.md): targetGender = women | men | null (everyone) and targetAgeBands = a list of 18_29, 30_44, 45_59, 60_plus ([] or all four = all ages; stored as []). Anything else → 400 invalid_field { field: targetGender | targetAgeBands, allowed }. They are not reviewed (never send the product back to pending) and are never on buyer-facing rows.',
+  description: 'Vendor: update own product (price, stock, status...). The product goes back to review only when a reviewed field (name, description, category, brand, images, variant names) actually changes. Price and discount price are not reviewed (owner decision 2026-10-29): changing them keeps an approved product approved and listed; each change is audited (product_price_changed) and kept in the price history; while an approved flash sale of the product is scheduled or live they are locked → 409 sale_conflict { reason: price_locked_by_flash_sale }. `variants` are merged by name: a variant sent without `stock` keeps its stored stock. With VENDOR_STOCK_LEDGER on: a `stock` that differs is recorded as a `count` adjustment (note product_form); costTzs / reorderLevel (product and per variant; null clears) are stored privately; when variants keep stock, every variant must (400 variant_stock_mixed), the body `stock` is ignored and the product stock moves only by what variant counts moved (each recorded); optional `stockSeen` (product) / `variants[].stockSeen` = the count the form showed → 409 stock_changed { currentStock, variant? } if it has moved; dropping a variant that still has stock → 409 variant_has_stock { variant, stock }, or that an open order holds units of → 409 variant_has_reservations { variant }; duplicate names → 400 duplicate_variant. costTzs (product or variant) may be sent only by the vendor account or vendor_staff with vendorRole admin, else 403 cost_forbidden; leaving it out keeps the stored cost. Also with the ledger on, checkout of a product whose variants keep stock requires `variant` (400 variant_required { variants }). Tags left out keep their stored values; targetGender null clears it, targetAgeBands [] clears the bands. Optional "who it is for" tags (docs/shop-personalisation-api.md): targetGender = women | men | null (everyone) and targetAgeBands = a list of 18_29, 30_44, 45_59, 60_plus ([] or all four = all ages; stored as []). Anything else → 400 invalid_field { field: targetGender | targetAgeBands, allowed }. They are not reviewed (never send the product back to pending) and are never on buyer-facing rows. ' + BARCODE_BODY_DOC,
   onGuard: routeGuard('put', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
   onRequest: async (req, res) => {
     const result = await shopService.upsertProduct({
       vendorId: req.user.vendorId || req.user.sub, actorId: req.user.sub, body: req.body || {}, productId: req.params.id,
       costAllowed: await shopService.canSeeCost(req.user),
+      barcodesAllowed: req.user.userType !== 'admin',
     });
     if (result.error) return sendError(res, result);
     res.json(result.product);
@@ -271,10 +312,10 @@ export const vendorDuplicateProduct = {
 
 export const vendorDeleteProduct = {
   created, method: 'delete', path: '/vendor/products/:id',
-  description: 'Vendor: soft-delete an owned product.',
+  description: 'Vendor: soft-delete an owned product. S8 (flag on): its barcodes are deleted too (best effort; a code a deleted product still holds is free for another product anyway).',
   onGuard: routeGuard('delete', [requireAuth('vendor', 'vendor_staff', 'admin'), requireVendorPermission('products'), requireAdminShopScope]),
   onRequest: async (req, res) => {
-    const result = await shopService.deleteProduct({ vendorId: req.user.vendorId || req.user.sub, productId: req.params.id });
+    const result = await shopService.deleteProduct({ vendorId: req.user.vendorId || req.user.sub, productId: req.params.id, actorId: req.user.sub });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result);
   },
