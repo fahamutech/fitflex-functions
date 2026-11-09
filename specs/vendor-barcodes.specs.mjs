@@ -201,6 +201,9 @@ test('rules: the shared vectors (codeKey, check digit, B-1 reasons), GTIN check,
   assert.deepEqual(q(' bnd '), { code: 'bnd', codeKey: 'BND', barcode: false }, 'short SKUs can be looked up');
   assert.deepEqual(q('6201234567891'), { code: '6201234567891', codeKey: '6201234567891', barcode: false }, 'a bad check digit can still match a SKU');
   for (const [key, m] of Object.entries(BARCODE_MESSAGES)) assert.ok(m.en && m.sw, key);
+  // Every placeholder in EN is also in SW, and the other way round.
+  for (const [key, m] of Object.entries(BARCODE_MESSAGES)) assert.deepEqual((m.en.match(/\{\w+\}/g) || []).sort(), (m.sw.match(/\{\w+\}/g) || []).sort(), key);
+  assert.equal(Object.values(BARCODE_MESSAGES).some(m => /Hakiki/.test(m.sw)), false, 'Hakiki means Preview in the glossary');
 });
 
 // ── migration ────────────────────────────────────────────────────────────────
@@ -234,7 +237,7 @@ test('gating: tools.barcodes needs all three flags (changed meaning: the ledger 
     on(S8.filter(f => f !== missing));
     assert.equal(vendorToolsOptions().barcodes, false, `${missing} off`);
     assert.equal((await call(vendorToolsOptionsRoute, as(v))).body.barcodes, false);
-    assert.deepEqual((await lookup(as(v), '6201234567893')), { status: 404, body: { error: 'feature_disabled' } });
+    assert.deepEqual((await lookup(as(v), '6201234567893')), { status: 404, body: { error: 'feature_disabled', message: { en: 'Barcodes aren\'t available right now.', sw: 'Misimbopau haipatikani kwa sasa.' } } });
     for (const f of S8) delete process.env[f];
   }
   on();
@@ -310,6 +313,8 @@ test('saves: every error code over the route, nothing written on any of them; st
   assert.deepEqual(await e({ barcodes: [{ code: 'X-1234' }, { code: 'x-1234' }] }), { status: 400, body: { error: 'duplicate_barcode', code: 'x-1234' } });
   assert.deepEqual(await e({ barcodes: Array.from({ length: 21 }, (_, i) => ({ code: `C-${1000 + i}` })) }), { status: 400, body: { error: 'too_many_barcodes', max: 20 } });
   assert.deepEqual(await e({ barcodes: [{ code: 'X-1234', variant: 'XL' }] }), { status: 400, body: { error: 'barcode_variant_not_found', code: 'X-1234', variant: 'XL' } });
+  assert.deepEqual((await put(as(v), p.id, { barcodes: [{ code: 'X-1234', variant: 'XL' }] })).body.message,
+    { en: 'The variant XL no longer exists. Choose again.', sw: 'Chaguo XL halipo tena. Chagua tena.' });
   assert.deepEqual(await e({ barcodes: [], addBarcodes: [] }), { status: 400, body: { error: 'barcodes_conflict' } });
   assert.deepEqual(await e({ addBarcodes: { code: 'X-1234' } }), { status: 400, body: { error: 'invalid_field', field: 'addBarcodes' } });
   // variants[].barcodes is refused (it would be stored on the public row), whatever the flags.
@@ -324,7 +329,7 @@ test('saves: every error code over the route, nothing written on any of them; st
   assert.deepEqual(await e({ addBarcodes: [{ code: 'ONE-MORE' }] }), { status: 400, body: { error: 'too_many_barcodes', max: 20 } });
   // The message comes in English and Swahili.
   assert.deepEqual((await put(as(v), p.id, { barcodes: [{ code: '6201234567891' }] })).body.message,
-    { en: 'This number doesn\'t look right. Check the last digit.', sw: 'Namba hii haionekani sahihi. Hakiki tarakimu ya mwisho.' });
+    { en: 'This number doesn\'t look right. Check the last digit.', sw: 'Namba hii haionekani sahihi. Angalia tarakimu ya mwisho ya msimbopau huu.' });
   assert.equal((await stored(p.id)).length, 20, 'the refused saves wrote nothing');
   // A code already on this product for another variant: adding never moves it.
   assert.deepEqual(await e({ addBarcodes: [{ code: '12345670', variant: 'S' }] }), { status: 409, body: { error: 'barcode_in_use', code: '12345670', productId: p.id, name: p.name, variant: null } });
@@ -533,6 +538,8 @@ test('lookup rate limits: 120 per person and 600 per vendor per minute → 429 r
   assert.equal(limited.body.error, 'rate_limited');
   assert.ok(limited.body.retryAfterSeconds >= 1 && limited.body.retryAfterSeconds <= 60);
   assert.equal(limited.headers['Retry-After'], String(limited.body.retryAfterSeconds));
+  const s = limited.body.retryAfterSeconds;
+  assert.deepEqual(limited.body.message, { en: `Too many scans. Wait ${s} seconds.`, sw: `Umeskani mara nyingi mno. Subiri sekunde ${s}.` });
   // Per vendor: four more people reach 600 in all, the sixth person is refused on their first call.
   const people = [];
   for (let i = 0; i < 5; i += 1) people.push(await staff(v, ['sales']));
@@ -557,7 +564,7 @@ test('route order over HTTP (mounted as bfast-function mounts it): GET /vendor/p
   assert.equal((await hit('GET', '/vendor/products/lookup?code=x', admin)).status, 403);
   assert.equal((await hit('GET', '/vendor/products/lookup')).status, 401);
   delete process.env.VENDOR_BARCODES;
-  assert.deepEqual(await hit('GET', '/vendor/products/lookup?code=HTTP-0001', as(v)), { status: 404, body: { error: 'feature_disabled' } });
+  assert.deepEqual(await hit('GET', '/vendor/products/lookup?code=HTTP-0001', as(v)), { status: 404, body: { error: 'feature_disabled', message: { en: 'Barcodes aren\'t available right now.', sw: 'Misimbopau haipatikani kwa sasa.' } } });
 });
 
 // ── privacy ──────────────────────────────────────────────────────────────────
@@ -714,7 +721,16 @@ test('L-1: a deadlock (40P01) or serialization failure (40001) in a barcode save
   const twice = make(2);
   const refused = await twice.service.upsertProduct({ vendorId: prior.vendorId, productId: prior.id, body, barcodesAllowed: true });
   assert.equal(twice.calls(), 2, 'no third try');
-  assert.deepEqual([refused.error, refused.status, refused.code], ['barcode_in_use', 409, 'RETRY-0001']);
+  assert.deepEqual([refused.error, refused.status, refused.code, refused.productId, refused.name], ['barcode_in_use', 409, 'RETRY-0001', null, null]);
+  // Holder unknown: no "{name}" left in the text, the user is told to try again.
+  assert.deepEqual(refused.message, { en: 'This barcode is in use. Try again.', sw: 'Msimbopau huu unatumika. Jaribu tena.' });
+  // A save that sent no codes (only a name change, or barcodes: []) is not a barcode problem: 409 save_conflict.
+  for (const noCodes of [{ name: 'Renamed' }, { name: 'Renamed', barcodes: [] }]) {
+    const plain = make(2);
+    const conflict = await plain.service.upsertProduct({ vendorId: prior.vendorId, productId: prior.id, body: noCodes, barcodesAllowed: true });
+    assert.equal(plain.calls(), 2);
+    assert.deepEqual(conflict, { error: 'save_conflict', status: 409, message: { en: 'Someone else saved this at the same time. Try again.', sw: 'Mtu mwingine amehifadhi hii wakati huo huo. Jaribu tena.' } });
+  }
   // Anything else is not swallowed.
   const other = createShopService({
     products: { findByIdAsync: async () => prior }, shopOrders: {}, users: { findByIdAsync: async () => null }, auditLog: { insertAsync: async r => r },

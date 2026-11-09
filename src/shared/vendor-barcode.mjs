@@ -25,11 +25,19 @@ export const BARCODE_MESSAGES = Object.freeze({
   'invalid_barcode.too_short': M('A barcode has at least 4 characters.', 'Msimbopau una angalau herufi 4.'),
   'invalid_barcode.too_long': M('A barcode has at most 48 characters.', 'Msimbopau hauzidi herufi 48.'),
   'invalid_barcode.bad_characters': M('Use letters, numbers and symbols only, with no spaces.', 'Tumia herufi, namba na alama tu, bila nafasi.'),
-  invalid_check_digit: M('This number doesn\'t look right. Check the last digit.', 'Namba hii haionekani sahihi. Hakiki tarakimu ya mwisho.'),
+  // "Angalia" (check), not "Hakiki": the glossary uses Hakiki for Preview.
+  invalid_check_digit: M('This number doesn\'t look right. Check the last digit.', 'Namba hii haionekani sahihi. Angalia tarakimu ya mwisho ya msimbopau huu.'),
   duplicate_barcode: M('This barcode is already in the list.', 'Msimbopau huu tayari upo kwenye orodha.'),
   barcode_in_use: M('Already on {name}.', 'Tayari upo kwenye {name}.'),
+  // The holder is not known (a save retried after a deadlock still failed): the user just tries again.
+  'barcode_in_use.retry': M('This barcode is in use. Try again.', 'Msimbopau huu unatumika. Jaribu tena.'),
+  // Contract check #334: the same deadlock fallback on a save that sent no codes.
+  save_conflict: M('Someone else saved this at the same time. Try again.', 'Mtu mwingine amehifadhi hii wakati huo huo. Jaribu tena.'),
+  // The lookup's 429 and 404 (spec strings vendor.scan.rateLimited, vendor.barcodes.unavailable).
+  rate_limited: M('Too many scans. Wait {retryAfterSeconds} seconds.', 'Umeskani mara nyingi mno. Subiri sekunde {retryAfterSeconds}.'),
+  feature_disabled: M('Barcodes aren\'t available right now.', 'Misimbopau haipatikani kwa sasa.'),
   too_many_barcodes: M('A product can have up to {max} barcodes.', 'Bidhaa inaweza kuwa na misimbopau hadi {max}.'),
-  barcode_variant_not_found: M('The option {variant} no longer exists. Choose again.', 'Chaguo {variant} halipo tena. Chagua tena.'),
+  barcode_variant_not_found: M('The variant {variant} no longer exists. Choose again.', 'Chaguo {variant} halipo tena. Chagua tena.'),
   barcodes_conflict: M('Send either the full list of barcodes or the barcodes to add, not both.', 'Tuma orodha kamili ya misimbopau au misimbopau ya kuongeza, si zote mbili.'),
   invalid_field: M('This list of barcodes is not valid.', 'Orodha hii ya misimbopau si sahihi.'),
   code_required: M('Enter or scan a code.', 'Andika au skani msimbo.'),
@@ -40,7 +48,8 @@ export const BARCODE_MESSAGES = Object.freeze({
 const fill = (text, vars) => text.replace(/\{(\w+)\}/g, (all, k) => (vars[k] != null ? String(vars[k]) : all));
 /** `message: { en, sw }` for an S8 error (by `error`, and `reason` where the error has one). */
 export function barcodeMessage(error, vars = {}) {
-  const m = BARCODE_MESSAGES[vars.reason ? `${error}.${vars.reason}` : error] || BARCODE_MESSAGES[error];
+  const key = error === 'barcode_in_use' && vars.name == null ? 'barcode_in_use.retry' : vars.reason ? `${error}.${vars.reason}` : error;
+  const m = BARCODE_MESSAGES[key] || BARCODE_MESSAGES[error];
   return m ? { en: fill(m.en, vars), sw: fill(m.sw, vars) } : undefined;
 }
 const fail = (error, status, extra = {}) => ({ error, status, ...extra, message: barcodeMessage(error, extra) });

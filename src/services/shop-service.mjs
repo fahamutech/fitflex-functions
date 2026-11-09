@@ -356,8 +356,9 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   /**
    * Security review #334 L-1: codes are locked in codeKey order, so two saves should only queue, never deadlock. If
    * Postgres still picks this save as a deadlock victim (40P01) or refuses it for serialization (40001), the whole
-   * save was rolled back: it is retried once, and a second failure answers 409 barcode_in_use (never a 500). Only
-   * while barcodes apply (the only path that adds locks to a product save).
+   * save was rolled back: it is retried once, and a second failure answers 409 (never a 500): barcode_in_use (holder
+   * unknown: productId / name null, message "try again") when the save sent at least one code, else save_conflict.
+   * Only while barcodes apply (the only path that adds locks to a product save).
    */
   const RETRYABLE = new Set(['40P01', '40001']);
   async function withCodeRetry(parsed, run) {
@@ -371,7 +372,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
       return await run();
     } catch (err) {
       if (!RETRYABLE.has(err?.code)) throw err;
-      return barcodeError('barcode_in_use', 409, { code: parsed?.items?.[0]?.code ?? null, productId: null, name: null, variant: null });
+      if (parsed?.items?.length) return barcodeError('barcode_in_use', 409, { code: parsed.items[0].code, productId: null, name: null, variant: null });
+      return barcodeError('save_conflict', 409);
     }
   }
   /** Cost price and reorder level in the body: [{ variant, costTzs?, reorderLevel? }] ('' = the product). */
