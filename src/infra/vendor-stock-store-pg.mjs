@@ -14,6 +14,15 @@ const plain = row => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v =
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const stockId = () => `stk_${randomUUID().slice(0, 12)}`;
 
+/**
+ * S8: thrown inside a save's transaction to roll it back and answer `result` (an { error, status } object).
+ * The barcode step (`inTransaction`) runs after the product row is written, so a refused code must undo
+ * the fields, stock rows and private fields written before it.
+ */
+class RollbackWith extends Error {
+  constructor(result) { super('rollback'); this.result = result; }
+}
+
 /** A product as the stock endpoints return it: its count and its variants' counts (no private fields). */
 export const stockView = product => ({
   id: product.id,
@@ -167,8 +176,10 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
    * decide(current) → { error, status, ... } | { fields, stock?, variants?, movements, removed, privates, value }
    * Writes the fields, stock/variants, one `count` ledger row per changed count, and the private fields — all or nothing.
    * A variant that open orders still hold units of cannot be removed (409 variant_has_reservations).
+   * S8: inTransaction(trx, { current, saved }) → null | { error, status, ... } runs last, in the same transaction
+   * (the product's barcodes); an error rolls the whole save back and is returned.
    */
-  async function applyProductForm({ productId, vendorId, actorId, decide }) {
+  async function applyProductForm({ productId, vendorId, actorId, decide, inTransaction = null }) {
     const at = now();
     try {
       return await db.transaction(async (trx) => {
@@ -199,16 +210,25 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
         const countedBefore = new Set(variantsOf(current).filter(isTracked).map(v => v.name));
         const startingNow = variantsOf(saved).filter(v => isTracked(v) && !countedBefore.has(v.name)).map(v => v.name);
         if (startingNow.length) await markStartingLow(trx, saved, startingNow, at);
+        if (inTransaction) {
+          const refused = await inTransaction(trx, { current, saved });
+          if (refused?.error) throw new RollbackWith(refused);
+        }
         return { product: saved, value: plan.value };
       });
     } catch (err) {
+      if (err instanceof RollbackWith) return err.result;
       if (err.code === CHECK_VIOLATION && /product_stock_non_negative/.test(err.constraint || err.message)) return fail('insufficient_stock', 409);
       throw err;
     }
   }
 
-  /** Create a product with its starting counts as the first rows of its history, and its private fields — one transaction. */
-  async function createProduct({ product, actorId, movements, privates = [] }) {
+  /**
+   * Create a product with its starting counts as the first rows of its history, and its private fields — one transaction.
+   * S8: inTransaction(trx, { current: null, saved }) as in applyProductForm; an error rolls the create back and is
+   * returned as { error, status, ... } (otherwise the created product row is returned).
+   */
+  async function createProduct({ product, actorId, movements, privates = [], inTransaction = null }) {
     const at = now();
     const productId = product.id;
     const vendorId = product.vendorId;
@@ -224,7 +244,14 @@ export function createPgVendorStockStore({ db, now = () => new Date() }) {
       // Opening stock is not a crossing: a unit that starts at or below its level is marked as already
       // reported, so the vendor hears about it only after it has been above its level again.
       await markStartingLow(trx, created, null, at);
+      if (inTransaction) {
+        const refused = await inTransaction(trx, { current: null, saved: created });
+        if (refused?.error) throw new RollbackWith(refused);
+      }
       return created;
+    }).catch((err) => {
+      if (err instanceof RollbackWith) return err.result;
+      throw err;
     });
   }
 
