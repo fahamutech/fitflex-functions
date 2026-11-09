@@ -56,20 +56,30 @@ export function createPgProductCodeStore({ db, now = () => new Date() }) {
 
   /**
    * Inside the product save's transaction (applyProductForm / createProduct), under the product row lock, after
-   * the product row is written (`saved`). §2.3 step 2:
-   *  - codes of variants the product no longer has are deleted (B-6; reason variant_removed), whatever the body;
+   * the product row is written (`saved`; `current` = the product as locked before the save, null when creating).
+   * §2.3 step 2:
+   *  - codes of variants the product does not have are deleted (B-6; reason variant_removed), whatever the body:
+   *    a variant this save drops, and (security review #334 L-2) a variant that was ALREADY gone before this save
+   *    (dropped while the flag was off), so an old code never comes back when a variant of the same name is added;
    *  - parsed (from parseBarcodeFields; null = the body has no codes): variants checked (B-5), the 20 cap,
    *    added/removed computed against the LOCKED current set, codes held by deleted products freed (B-7),
    *    rows inserted and deleted, one audit row (B-12).
+   * Locks (security review #334 L-1): this product's codes and the holders of every code in the body are locked in
+   * ONE statement, in codeKey order, before anything is deleted; new codes are inserted in codeKey order. Two saves
+   * that swap codes between two products therefore queue on the first shared code instead of deadlocking.
    * → null when done, or { error, status, ... } (the caller rolls the whole save back).
    * reason: form (replace) | add_from_scan (add).
    */
-  async function applyInSave(trx, { vendorId, productId, actorId, saved, parsed }) {
+  async function applyInSave(trx, { vendorId, productId, actorId, saved, current: before = null, parsed }) {
     const at = now();
     const names = variantNames(saved);
-    const current = await trx('ProductCode').where({ vendorId, productId })
-      .orderBy([{ column: 'variant' }, { column: 'createdAt' }, { column: 'id' }]).forUpdate();
-    const gone = current.filter(r => r.variant !== '' && !names.has(r.variant));
+    const hadNames = before ? variantNames(before) : null;
+    const bodyKeys = [...new Set((parsed?.items || []).map(i => i.codeKey))];
+    const locked = (await trx.raw(`SELECT * FROM "ProductCode" WHERE "vendorId" = ? AND ("productId" = ? OR "codeKey" = ANY(?::text[]))
+      ORDER BY "codeKey", id FOR UPDATE`, [vendorId, productId, bodyKeys])).rows;
+    const byOrder = (a, b) => (a.variant < b.variant ? -1 : a.variant > b.variant ? 1 : 0) || (+new Date(a.createdAt) - +new Date(b.createdAt)) || (a.id < b.id ? -1 : 1);
+    const current = locked.filter(r => r.productId === productId).sort(byOrder);
+    const gone = current.filter(r => r.variant !== '' && (!names.has(r.variant) || (hadNames && !hadNames.has(r.variant))));
     if (gone.length) {
       await trx('ProductCode').whereIn('id', gone.map(r => r.id)).del();
       await audit(trx, { actorId, productId, vendorId, removed: gone, reason: 'variant_removed', at });
@@ -96,9 +106,15 @@ export function createPgProductCodeStore({ db, now = () => new Date() }) {
     const same = (a, b) => a.codeKey === b.codeKey && (a.variant || '') === (b.variant || '');
     const removed = live.filter(r => !desired.some(d => same(d, r)));
     const added = desired.filter(d => !live.some(r => same(d, r)));
+    // Another product's live code: refused before anything is deleted or inserted (the holders are locked above).
+    for (const item of added) {
+      const holder = await holderOf(trx, vendorId, item.codeKey);
+      if (holder && holder.productId !== productId && !isDead(holder, holder)) return inUse(item.code, holder);
+    }
     if (removed.length) await trx('ProductCode').whereIn('id', removed.map(r => r.id)).del();
-    // Codes added in one save keep the order they were sent in (createdAt one millisecond apart), so lists read back stable.
-    for (const [i, item] of added.entries()) {
+    // Inserted in codeKey order (lock order); createdAt keeps the order they were sent in (one millisecond apart).
+    const ordered = added.map((item, i) => ({ item, i })).sort((a, b) => (a.item.codeKey < b.item.codeKey ? -1 : 1));
+    for (const { item, i } of ordered) {
       const holder = await holderOf(trx, vendorId, item.codeKey, { lock: true });
       if (holder) {
         if (!isDead(holder, holder)) return inUse(item.code, holder);

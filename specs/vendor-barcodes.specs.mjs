@@ -24,7 +24,8 @@ import {
 import { vendorRecordSale, resetVendorSalesLimits } from '../functions/vendor-sales.mjs';
 import { vendorDocumentView } from '../functions/vendor-documents.mjs';
 import { shopHome, resetShopHomeLimits } from '../functions/shop-home.mjs';
-import { codeKey, checkGtin, validateBarcode, parseBarcodeFields, parseLookupCode, BARCODE_MESSAGES } from '../src/shared/vendor-barcode.mjs';
+import { codeKey, checkGtin, validateBarcode, parseBarcodeFields, parseLookupCode, BARCODE_MESSAGES, withoutLookupCode } from '../src/shared/vendor-barcode.mjs';
+import { createShopService } from '../src/services/shop-service.mjs';
 import { mountGuards, mountHttpRoutes } from 'bfast-function/src/controllers/index.mjs';
 
 const require = createRequire(import.meta.url);
@@ -143,6 +144,9 @@ for (const file of fs.readdirSync(functionsDir).filter(f => f.endsWith('.mjs') &
 }
 const app = express();
 app.use(express.json());
+// What the in-process request logger (morgan in bfast-function) would write: req.originalUrl when the response finishes.
+const logged = [];
+app.use((req, res, next) => { res.on('finish', () => logged.push(req.originalUrl)); next(); });
 mountGuards(Object.keys(functions).filter(k => functions[k].onGuard), functions, app);
 mountHttpRoutes(Object.keys(functions).filter(k => functions[k].onRequest), functions, app);
 const servers = [app.listen(0)];
@@ -618,4 +622,124 @@ test('structure: ProductCode is read and written only by the barcode store (and 
     scan(dir);
   }
   assert.deepEqual(importers, ['src/bootstrap/services.mjs']);
+});
+
+// ── security review #334 ─────────────────────────────────────────────────────
+
+test('M-1: the scanned code never reaches the request log URL (req.originalUrl), on 200 and on 401 / 403 / 404 / 429; req.query keeps it', async () => {
+  assert.equal(withoutLookupCode('/vendor/products/lookup?code=6201234567893'), '/vendor/products/lookup');
+  assert.equal(withoutLookupCode('/vendor/products/lookup?x=1&code=ABC&CODE=d&%63ode=e&code[]=f&y=2'), '/vendor/products/lookup?x=1&y=2');
+  assert.equal(withoutLookupCode('/vendor/products/lookup?codes=1'), '/vendor/products/lookup?codes=1', 'only the code parameter');
+  assert.equal(withoutLookupCode('/vendor/products/lookup'), '/vendor/products/lookup');
+  // The route's own guards: the first one redacts, before auth runs; req.query is untouched.
+  const req = { method: 'GET', originalUrl: '/vendor/products/lookup?code=SECRET-0001', query: { code: 'SECRET-0001' }, headers: {}, get: () => null };
+  const out = res();
+  for (const guard of [vendorProductLookup.onGuard].flat()) {
+    let passed = false;
+    await guard(req, out, () => { passed = true; });
+    if (!passed) break;
+  }
+  assert.equal(out.statusCode, 401, 'stopped by auth');
+  assert.equal(req.originalUrl, '/vendor/products/lookup');
+  assert.equal(req.query.code, 'SECRET-0001');
+
+  on();
+  const v = await vendor();
+  await product(v, { barcodes: [{ code: 'LOGGED-0001' }] });
+  logged.length = 0;
+  assert.equal((await hit('GET', '/vendor/products/lookup?code=LOGGED-0001', as(v))).body.matches.length, 1, 'the handler still read the code');
+  await hit('GET', '/vendor/products/lookup?code=LOGGED-0001');
+  await hit('GET', '/vendor/products/lookup?code=LOGGED-0001', admin);
+  for (let i = 0; i < 121; i += 1) await hit('GET', `/vendor/products/lookup?code=LOGGED-0001&n=${i}`, as(v));
+  delete process.env.VENDOR_BARCODES;
+  await hit('GET', '/vendor/products/lookup?code=LOGGED-0001', as(v));
+  const mine = logged.filter(u => u.startsWith('/vendor/products/lookup'));
+  assert.equal(mine.length, 125);
+  assert.deepEqual(mine.filter(u => /LOGGED|code=/i.test(u)), []);
+});
+
+test('L-1: two saves swapping codes between two products at once never deadlock or 500; each code stays on exactly one product', async () => {
+  on();
+  const v = await vendor();
+  const waitingOnLocks = async () => Number((await db.raw(`SELECT count(*)::int AS n FROM pg_stat_activity
+    WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%ProductCode%'`)).rows[0].n);
+  for (let round = 0; round < 3; round += 1) {
+    const x = `SWAP-X-${round}`;
+    const y = `SWAP-Y-${round}`;
+    const one = await product(v, { barcodes: [{ code: x }] });
+    const two = await product(v, { barcodes: [{ code: y }] });
+    // Line both saves up on the two code rows (a third transaction holds them), then let both go at once: without
+    // ordered locking each deletes its own code and waits for the other's (40P01 → 500 before the fix).
+    const blocker = await db.transaction();
+    await blocker.raw('SELECT id FROM "ProductCode" WHERE "vendorId" = ? AND "codeKey" IN (?, ?) FOR UPDATE', [v, x, y]);
+    const racing = Promise.all([
+      put(as(v), one.id, { name: `One ${round}`, barcodes: [{ code: y }] }),
+      put(as(v), two.id, { name: `Two ${round}`, barcodes: [{ code: x }] }),
+    ]);
+    for (let i = 0; i < 100 && (await waitingOnLocks()) < 2; i += 1) await new Promise(r => setTimeout(r, 20));
+    assert.equal(await waitingOnLocks(), 2, 'both saves are waiting on the code rows');
+    await blocker.commit();
+    const outs = await racing;
+    for (const out of outs) {
+      assert.ok([200, 409].includes(out.status), JSON.stringify(out.body));
+      if (out.status === 409) assert.equal(out.body.error, 'barcode_in_use');
+    }
+    for (const code of [x, y]) assert.equal((await db('ProductCode').where({ vendorId: v, codeKey: code })).length, 1, code);
+    // A refused save changed nothing (its name included).
+    for (const [p, out, name] of [[one, outs[0], `One ${round}`], [two, outs[1], `Two ${round}`]]) {
+      assert.equal((await db('Product').where({ id: p.id }).first()).name, out.status === 200 ? name : p.name);
+    }
+  }
+});
+
+test('L-1: a deadlock (40P01) or serialization failure (40001) in a barcode save is retried once, then answered 409 barcode_in_use (never a 500)', async () => {
+  const prior = { id: 'prd_retry', vendorId: 'usr_retry', name: 'Retry', priceTzs: 1000, stock: 1, variants: [], images: [], approvalStatus: 'approved' };
+  const make = (failures) => {
+    let calls = 0;
+    const service = createShopService({
+      products: { findByIdAsync: async () => prior }, shopOrders: {}, users: { findByIdAsync: async () => null }, auditLog: { insertAsync: async r => r },
+      stockLedger: {
+        applyProductForm: async () => { calls += 1; if (calls <= failures) throw Object.assign(new Error('deadlock detected'), { code: calls % 2 ? '40P01' : '40001' }); return { product: prior }; },
+        checkLow: async () => [], privatesOf: async () => new Map(),
+      },
+      stockLedgerOn: () => true, barcodesOn: () => true, productCodes: { codesOf: async () => new Map([[prior.id, []]]) },
+    });
+    return { service, calls: () => calls };
+  };
+  const body = { addBarcodes: [{ code: 'RETRY-0001' }] };
+  const once = make(1);
+  const ok = await once.service.upsertProduct({ vendorId: prior.vendorId, productId: prior.id, body, barcodesAllowed: true });
+  assert.equal(ok.error, undefined, JSON.stringify(ok));
+  assert.equal(once.calls(), 2, 'retried once');
+  const twice = make(2);
+  const refused = await twice.service.upsertProduct({ vendorId: prior.vendorId, productId: prior.id, body, barcodesAllowed: true });
+  assert.equal(twice.calls(), 2, 'no third try');
+  assert.deepEqual([refused.error, refused.status, refused.code], ['barcode_in_use', 409, 'RETRY-0001']);
+  // Anything else is not swallowed.
+  const other = createShopService({
+    products: { findByIdAsync: async () => prior }, shopOrders: {}, users: { findByIdAsync: async () => null }, auditLog: { insertAsync: async r => r },
+    stockLedger: { applyProductForm: async () => { throw Object.assign(new Error('boom'), { code: '23502' }); } },
+    stockLedgerOn: () => true, barcodesOn: () => true, productCodes: {},
+  });
+  await assert.rejects(other.upsertProduct({ vendorId: prior.vendorId, productId: prior.id, body, barcodesAllowed: true }), /boom/);
+});
+
+test('L-2: a code left on a variant dropped while the flag was off does not come back when a variant of the same name is added later (deleted, audit variant_removed)', async () => {
+  on();
+  const v = await vendor();
+  const p = await product(v, { name: 'Old Band', variants: [{ name: 'S', stock: 1 }, { name: 'M', stock: 0 }], stock: undefined, barcodes: [{ code: 'BAND-M-01', variant: 'M' }, { code: 'BAND-S-01', variant: 'S' }] });
+  delete process.env.VENDOR_BARCODES;
+  assert.equal((await put(as(v), p.id, { variants: [{ name: 'S', stock: 1 }] })).status, 200, 'M dropped while the flag is off');
+  assert.equal((await stored(p.id)).length, 2, 'nothing touched the codes while off');
+  on();
+  // The first flag-on save adds a NEW variant called M: the old M code is dead and is deleted, not revived.
+  const readded = await put(as(v), p.id, { variants: [{ name: 'S', stock: 1 }, { name: 'M', stock: 0 }] });
+  assert.equal(readded.status, 200, JSON.stringify(readded.body));
+  assert.deepEqual(readded.body.barcodes, [{ code: 'BAND-S-01', variant: 'S' }]);
+  assert.deepEqual((await stored(p.id)).map(r => r.code), ['BAND-S-01']);
+  assert.deepEqual((await lookup(as(v), 'BAND-M-01')).body.matches, []);
+  const last = afterOf((await audits(p.id)).at(-1));
+  assert.deepEqual([last.reason, last.removed], ['variant_removed', [{ code: 'BAND-M-01', variant: 'M' }]]);
+  // And a variant that was kept keeps its codes through a flag-on save.
+  assert.deepEqual((await put(as(v), p.id, { name: 'Old Band 2' })).body.barcodes, [{ code: 'BAND-S-01', variant: 'S' }]);
 });

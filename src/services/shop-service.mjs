@@ -13,7 +13,7 @@ import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
 import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn, shopFlashSalesOn, vendorBarcodesOn } from '../shared/feature-flags.mjs';
-import { parseBarcodeFields, parseLookupCode } from '../shared/vendor-barcode.mjs';
+import { parseBarcodeFields, parseLookupCode, barcodeError } from '../shared/vendor-barcode.mjs';
 import { standingPrice, priceBreakdown, withPrice } from '../shared/shop-pricing.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
@@ -351,8 +351,29 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * (flag on) drops the codes of variants the product no longer has (B-6); with codes in the body (`parsed`), applies them.
    */
   const codesStep = ({ vendorId, productId = null, actorId, parsed }) => (codesActive()
-    ? (trx, { saved }) => productCodes.applyInSave(trx, { vendorId, productId: productId || saved.id, actorId, saved, parsed })
+    ? (trx, { current, saved }) => productCodes.applyInSave(trx, { vendorId, productId: productId || saved.id, actorId, saved, current, parsed })
     : null);
+  /**
+   * Security review #334 L-1: codes are locked in codeKey order, so two saves should only queue, never deadlock. If
+   * Postgres still picks this save as a deadlock victim (40P01) or refuses it for serialization (40001), the whole
+   * save was rolled back: it is retried once, and a second failure answers 409 barcode_in_use (never a 500). Only
+   * while barcodes apply (the only path that adds locks to a product save).
+   */
+  const RETRYABLE = new Set(['40P01', '40001']);
+  async function withCodeRetry(parsed, run) {
+    if (!codesActive()) return run();
+    try {
+      return await run();
+    } catch (err) {
+      if (!RETRYABLE.has(err?.code)) throw err;
+    }
+    try {
+      return await run();
+    } catch (err) {
+      if (!RETRYABLE.has(err?.code)) throw err;
+      return barcodeError('barcode_in_use', 409, { code: parsed?.items?.[0]?.code ?? null, productId: null, name: null, variant: null });
+    }
+  }
   /** Cost price and reorder level in the body: [{ variant, costTzs?, reorderLevel? }] ('' = the product). */
   function privatesFrom(input) {
     const out = [];
@@ -495,7 +516,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
         // Stock moves only with a ledger row: a changed count from the form (old app builds send `stock`
         // on every save) is recorded as a `count`, decided under the product's row lock.
         // Fields, approval status, stock and ledger rows are written together, in one transaction.
-        const saved = await stockLedger.applyProductForm({
+        const saved = await withCodeRetry(codes, () => stockLedger.applyProductForm({
           productId, vendorId, actorId,
           decide: async (current, trx) => {
             if (priceGuard) {
@@ -510,7 +531,7 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
           },
           // S8: codes in the same transaction; a refused code (409 barcode_in_use …) rolls the whole save back.
           inTransaction: codesStep({ vendorId, productId, actorId, parsed: codes }),
-        });
+        }));
         if (saved.error) return saved;
         await auditPriceEdit(productId, actorId, pricesBefore, saved.product);
         await afterStockMoved([productId]);
@@ -565,10 +586,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     };
     if (ledger) {
       // The product and the first rows of its stock history are written together, in one transaction.
-      const product = await stockLedger.createProduct({
+      const product = await withCodeRetry(codes, () => stockLedger.createProduct({
         product: row, actorId, movements: plan.movements, privates: privatesFrom(input),
         inTransaction: codesStep({ vendorId, actorId, parsed: codes }),
-      });
+      }));
       if (product.error) return product;
       await afterStockMoved([product.id]);
       return { product: (await vendorProductsView(vendorId, [product], { costAllowed }))[0], created: true };

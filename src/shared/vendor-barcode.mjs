@@ -123,3 +123,32 @@ export function parseLookupCode(raw) {
   if (!PRINTABLE.test(code)) return fail('invalid_code', 400, { reason: 'bad_characters' });
   return { code, codeKey: codeKey(code), barcode: !validateBarcode(code).error };
 }
+
+/**
+ * Security review #334 M-1: a scanned code must not reach the request log. The in-process request logger (morgan
+ * 'dev' in bfast-function) writes req.originalUrl when the response finishes, so the lookup's first guard drops
+ * every `code` parameter from it (key percent-decoded, any [..] suffix removed, any case; the pattern of
+ * withoutAreaId in area-request.mjs). Routing and req.query read req.url, which is left alone. Platform / ingress
+ * logs (BFast) are outside this repo and may still see the query string.
+ */
+const queryKeyOf = (pair) => {
+  let key = pair.split('=')[0].replace(/\+/g, ' ');
+  for (let i = 0; i < 3; i += 1) { try { const next = decodeURIComponent(key); if (next === key) break; key = next; } catch { break; } }
+  return key.trim().toLowerCase().replace(/\[.*$/, '');
+};
+const isCodeKey = pair => queryKeyOf(pair) === 'code';
+export function withoutLookupCode(url) {
+  if (typeof url !== 'string') return url;
+  const at = url.indexOf('?');
+  if (at < 0) return url;
+  const hash = url.indexOf('#', at);
+  const pairs = url.slice(at + 1, hash < 0 ? undefined : hash).split('&');
+  if (!pairs.some(p => p && isCodeKey(p))) return url;
+  const kept = pairs.filter(p => p && !isCodeKey(p));
+  return kept.length ? `${url.slice(0, at)}?${kept.join('&')}` : url.slice(0, at);
+}
+/** A guard that only redacts; put it first, so even a 401 / 403 / 429 log line has no code. */
+export const lookupCodeRedactGuard = (req, _res, next) => {
+  if (req && typeof req.originalUrl === 'string') req.originalUrl = withoutLookupCode(req.originalUrl);
+  return next();
+};
