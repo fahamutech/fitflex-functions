@@ -1350,3 +1350,66 @@ test('R2-L6 a deleted imported product: the row fails product_deleted and the NE
   assert.equal(nextRecoveryId(`${base}_r1`), `${base}_r2`);
   assert.equal(nextRecoveryId(base), `${base}_r1`);
 });
+
+// ── errors.csv lists rows that failed while applying ─────────────────────────
+const errorsText = async (claims, id) => (await call(vendorImportErrorsCsv, claims, { params: { id } })).body.toString('utf8');
+const errorLines = text => text.slice(1).split('\r\n').filter(Boolean);
+
+test('errors.csv: a row that failed while applying has its own line (issues first, then the failure, in row order, BOM kept, tenancy kept)', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const other = await vendor();
+  const make = async (name, sku, stock) => (await call(vendorCreateProduct, as(v), { body: { name, category: 'equipment', priceTzs: 1000, stock, sku } })).body;
+  await make('Whey', 'ECS-1', 10);
+  const mat = await make('Mat', 'ECS-2', 4);
+  const up = must(await upload(as(v), 'inventory', csv('sku,quantity', ['ECS-1,18', 'ECS-2,7', 'NOPE,1'])), 201).batch;
+  await shopService.adjustStock({ vendorId: v, actorId: v, productId: mat.id, body: { reason: 'damaged', quantity: 1, clientRef: `spec-${randomUUID()}` } });
+  must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} }));
+  // The failed row also gets an issue: its issue line comes first, the failure line follows, once.
+  const failedRow = await db('VendorImportRow').where({ batchId: up.id, applyState: 'failed' }).first();
+  assert.equal(failedRow.lastError, 'stock_changed');
+  await db('VendorImportRow').where({ id: failedRow.id }).update({ issues: JSON.stringify([{ code: 'formula_like_text', severity: 'warning', field: 'sku', params: {} }]) });
+  const text = await errorsText(as(v), up.id);
+  assert.equal(text.charCodeAt(0), 0xFEFF);
+  const lines = errorLines(text);
+  assert.equal(lines[0], 'row,field,severity,code,message_en,message_sw,value');
+  assert.deepEqual(lines.slice(1).map(l => l.split(',').slice(0, 4).join(',')), [
+    '3,sku,warning,formula_like_text', '3,sku,error,stock_changed', '4,sku,error,product_not_found']);
+  const failure = lines.find(l => l.startsWith('3,sku,error,stock_changed,'));
+  assert.ok(failure.includes('Stock changed since the file was checked.') && failure.includes('Stock ilibadilika tangu faili ilipokaguliwa.'));
+  assert.ok(failure.endsWith(',ECS-2'), failure);
+  assert.equal(lines.filter(l => l.includes(',stock_changed,')).length, 1, 'no duplicate');
+  // another vendor cannot read it
+  const foreign = await call(vendorImportErrorsCsv, as(other), { params: { id: up.id } });
+  assert.deepEqual([foreign.status, foreign.body.error], [404, 'import_not_found']);
+  // after a retry nothing failed is left, so the failure line is gone
+  must(await call(vendorImportRetry, as(v), { params: { id: up.id } }));
+  assert.ok(!(await errorsText(as(v), up.id)).includes('stock_changed'));
+});
+
+test('errors.csv: a failed row of a batch whose cells were cleared keeps its code and messages with an empty value; formula-like names stay safe', async () => {
+  ledgerOn();
+  const v = await vendor();
+  const up = must(await upload(as(v), 'products', csv('name,price_tzs,stock,sku', ['Plain one,1000,1,ECF-1', 'Fine,1000,1,ECF-2'])), 201).batch;
+  const rows = await db('VendorImportRow').where({ batchId: up.id }).orderBy('rowNo');
+  const made1 = await shopService.upsertProduct({ vendorId: v, actorId: v, body: { name: 'ECF item 1', priceTzs: 1000, stock: 5, category: 'equipment', sku: 'ECF-1' }, initialStatus: 'paused', presetId: `prd_imp_${rows[0].id}`, stockNote: `import:${up.id}` });
+  await shopService.deleteProduct({ vendorId: v, productId: made1.product.id });
+  await db('VendorImportBatch').where({ id: up.id }).update({ status: 'applying', applyStartedAt: new Date(Date.now() - 5 * 60_000) });
+  must(await call(vendorImportApply, as(v), { params: { id: up.id }, body: {} }));
+  const failedRow = await db('VendorImportRow').where({ batchId: up.id, applyState: 'failed' }).first();
+  assert.equal(failedRow?.lastError, 'product_deleted');
+  const pick = async () => errorLines(await errorsText(as(v), up.id)).find(l => l.startsWith(`${failedRow.rowNo},`) && l.includes(',error,product_deleted,'));
+  const before = await pick();
+  assert.ok(before, 'the failure line is there');
+  assert.ok(before.endsWith(',ECF-1'), before);
+  // a formula-like value is neutralised
+  await db('VendorImportRow').where({ id: failedRow.id }).update({ normalized: JSON.stringify({ name: '=cmd|calc' }) });
+  assert.ok((await pick()).endsWith(",'=cmd|calc"), await pick());
+  await db('VendorImportBatch').where({ id: up.id }).update({ finishedAt: new Date(Date.now() - 31 * DAY) });
+  await vendorImportService.retention();
+  assert.ok((await batchRow(up.id)).cellsClearedAt, 'cells cleared');
+  const after = await pick();
+  assert.ok(after, 'code and messages remain after the cells are cleared');
+  assert.ok(after.endsWith(','), after);
+  assert.ok(after.startsWith(`${failedRow.rowNo},,error,`), 'no field when there is no value to show');
+});

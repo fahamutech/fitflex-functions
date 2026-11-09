@@ -430,12 +430,19 @@ export function createVendorImportService({ store, shop, auditLog, now = () => n
     if (!batch) return notFound();
     const sourceOf = new Map(columnsOf(batch).filter(c => c.field).map(c => [c.field, c.source]));
     const lines = [];
-    for (const row of await store.rowsWithIssues(vendorId, id)) {
-      for (const i of row.issues) {
+    for (const row of await store.rowsForErrors(vendorId, id)) {
+      for (const i of row.issues || []) {
         const view = issueView(i);
         const source = i.field ? sourceOf.get(i.field) : null;
         const value = source && row.raw && hasOwn(row.raw, source) ? row.raw[source] : (i.field && row.normalized?.[i.field] != null ? row.normalized[i.field] : '');
         lines.push([row.rowNo, i.field || '', i.severity, i.code, view.message?.en || '', view.message?.sw || '', String(value ?? '').slice(0, 200)]);
+      }
+      // A row that failed while applying (no matter whether it also had issues): one line after its issues.
+      if (row.applyState === 'failed' && row.lastError) {
+        const err = rowErrorView(row.lastError);
+        const field = !batch.cellsClearedAt ? ['sku', 'name'].find(f => row.normalized?.[f] != null && row.normalized[f] !== '') || '' : '';
+        const value = field ? row.normalized[field] : '';
+        lines.push([row.rowNo, field, 'error', err.code, err.message?.en || '', err.message?.sw || '', String(value ?? '').slice(0, 200)]);
       }
     }
     const csv = csvDocument(['row', 'field', 'severity', 'code', 'message_en', 'message_sw', 'value'], lines);
