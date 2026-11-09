@@ -344,7 +344,10 @@ export function createSmsService({
         await db('SmsLog').insert({
           id: id('sms'), phone: validateRecipient(to).to || String(to), category: 'otp', message: 'Verification code [redacted]',
           status: r?.ok ? 'accepted' : 'failed', provider: String(env.VERIFICATION_SMS_PROVIDER || '').trim().toLowerCase() || null,
-          error: r?.ok ? null : r?.error ?? 'unknown', createdAt: at, updatedAt: at,
+          error: r?.ok ? null : r?.error ?? 'unknown',
+          providerMessageId: r?.ok && r.requestId != null ? String(r.requestId) : null,
+          providerCode: !r?.ok && Number.isFinite(Number(r?.providerCode)) && r?.providerCode != null ? Number(r.providerCode) : null,
+          createdAt: at, updatedAt: at,
         }).catch(err => logger.warn?.(`[sms] verification log failed: ${err.message}`));
         return r;
       },

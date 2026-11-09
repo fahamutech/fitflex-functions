@@ -8,7 +8,7 @@ checked.
 | Was (Supabase) | Is (here) |
 |---|---|
 | `_shared/beem.ts` — Beem client, `sms_logs`, send-once keys | `src/integrations/sms/beem.mjs` (the one Beem call), `src/integrations/sms/provider.mjs` (provider seam), `src/services/sms-service.mjs` (`send`, the `SmsLog` table) |
-| `send-sms-hook` — login codes | Verification codes already went through Beem here (`src/infra/verification-senders.mjs`). They now use the shared Beem client and are written, redacted, to `SmsLog`. Their limits are the identity module's (`VERIFY_CODE_*`). |
+| `send-sms-hook` — login codes | Verification codes already went through Beem here (`src/infra/verification-senders.mjs`). They now use the shared Beem client and are written, redacted, to `SmsLog`. Their limits are the identity module's (`VERIFY_CODE_*`). Registration adds a per-address limit (`REGISTER_STARTS_PER_ADDRESS_PER_HOUR`, default 30; mobile networks share addresses) and a daily cap (`REGISTER_CODES_PER_DAY`); a limited request gets `retryAfterSeconds` from the oldest attempt in the hour (min 60). Each accepted code's Beem `request_id` is stored in `SmsLog.providerMessageId`, a refusal's code in `providerCode`, so a delivery can be traced in the Beem dashboard. |
 | `sms-dispatch` — hourly session and renewal reminders | The `smsReminders` job (`functions/jobs.mjs`, hourly) → `smsService.sendDueReminders()` |
 | `sms-promo` — a promotion by SMS to members who opted in | SMS is a channel of the Communication Center: a gym or FitFlex campaign (or a gym automation) with `channels: ['sms']`. It gets the audience rules, consent, weekly marketing cap, large-send confirmation, scheduling, retries and history every other channel has. |
 
