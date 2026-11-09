@@ -253,7 +253,10 @@ export function vendorToolsOptions() {
     // S7: the same answer as the refund routes (VENDOR_TOOLS + VENDOR_WALKIN_SALES + VENDOR_REFUNDS), so options
     // never say true while the routes answer 404.
     refunds: vendorRefundsOn(),
-    barcodes: vendorToolsFlag('VENDOR_BARCODES'),
+    // S8: the same answer as the barcode routes and fields (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES; codes
+    // are written inside the ledger's product-form transaction), so options never say true while the lookup answers
+    // 404. Changed meaning: before S8 it ignored VENDOR_STOCK_LEDGER.
+    barcodes: vendorBarcodesOn(),
     // S9: the same answer as the purchase routes (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_PURCHASES; receiving
     // stock depends on the ledger), so options never say true while the routes answer 404. Changed meaning: before
     // S9 it ignored VENDOR_STOCK_LEDGER.
@@ -336,6 +339,16 @@ export function vendorRefundsOn() {
  */
 export function vendorPurchasesOn() {
   return vendorStockLedgerOn() && vendorToolsFlag('VENDOR_PURCHASES');
+}
+
+/**
+ * S8: barcodes on products (design docs/design/vendor-barcodes-s8.md §0.2). Needs the stock ledger too: codes are
+ * written inside the ledger's product-form transaction. Off → GET /vendor/products/lookup answers 404
+ * feature_disabled, GET /vendor/products has no `barcodes` key, and `barcodes` / `addBarcodes` in a product save
+ * are ignored (stored codes untouched). Nothing reads or writes ProductCode while it is off.
+ */
+export function vendorBarcodesOn() {
+  return vendorStockLedgerOn() && vendorToolsFlag('VENDOR_BARCODES');
 }
 
 /**

@@ -1,0 +1,29 @@
+{
+  "about": "S8 shared barcode vectors (docs/design/vendor-barcodes-s8.md §14). The same file is copied into the portal and mobile tests. Each vector: input → codeKey, or input → error (+ reason).",
+  "version": 1,
+  "vectors": [
+    { "input": "6201234567893", "codeKey": "6201234567893", "note": "EAN-13, valid" },
+    { "input": "  6201234567893  ", "codeKey": "6201234567893", "note": "trimmed" },
+    { "input": "036000291452", "codeKey": "0036000291452", "note": "UPC-A 12 → leading 0 (same item as its EAN-13)" },
+    { "input": "0036000291452", "codeKey": "0036000291452", "note": "EAN-13 form of the UPC-A" },
+    { "input": "00036000291452", "codeKey": "0036000291452", "note": "GTIN-14 with a leading 0 → drop it" },
+    { "input": "10036000291459", "codeKey": "10036000291459", "note": "GTIN-14 not starting with 0: unchanged" },
+    { "input": "12345670", "codeKey": "12345670", "note": "8 digits: not expanded, check digit not checked" },
+    { "input": "01234565", "codeKey": "01234565", "note": "UPC-E-like 8 digits: unchanged" },
+    { "input": "12345671", "codeKey": "12345671", "note": "8 digits with a 'wrong' EAN-8 digit: still accepted (UPC-E)" },
+    { "input": "abc-123", "codeKey": "ABC-123", "note": "letters → upper case" },
+    { "input": "ABC-123", "codeKey": "ABC-123" },
+    { "input": "wp-1kg/x", "codeKey": "WP-1KG/X", "note": "symbols allowed" },
+    { "input": "12345", "codeKey": "12345", "note": "short all-digit in-store code" },
+    { "input": "6201234567891", "error": "invalid_check_digit", "note": "EAN-13 with a wrong check digit" },
+    { "input": "036000291453", "error": "invalid_check_digit", "note": "UPC-A with a wrong check digit" },
+    { "input": "00036000291453", "error": "invalid_check_digit", "note": "GTIN-14 with a wrong check digit" },
+    { "input": "123", "error": "invalid_barcode", "reason": "too_short" },
+    { "input": "   ", "error": "invalid_barcode", "reason": "too_short" },
+    { "input": "A123456789012345678901234567890123456789012345678", "error": "invalid_barcode", "reason": "too_long", "note": "49 characters" },
+    { "input": "A12345678901234567890123456789012345678901234567", "codeKey": "A12345678901234567890123456789012345678901234567", "note": "48 characters: the maximum" },
+    { "input": "AB 12", "error": "invalid_barcode", "reason": "bad_characters", "note": "space" },
+    { "input": "ABC\t12", "error": "invalid_barcode", "reason": "bad_characters", "note": "control character" },
+    { "input": "MSIMBOé1", "error": "invalid_barcode", "reason": "bad_characters", "note": "non-ASCII letter" }
+  ]
+}

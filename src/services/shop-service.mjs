@@ -12,7 +12,8 @@ import { csvDocument } from '../shared/csv-export.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { OPEN_PUBLIC_GATE } from './moderation-gate.mjs';
-import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn, shopFlashSalesOn } from '../shared/feature-flags.mjs';
+import { vendorStockLedgerOn, vendorBuyerContactOn, vendorToolsOptions, vendorCustomersOn, shopFlashSalesOn, vendorBarcodesOn } from '../shared/feature-flags.mjs';
+import { parseBarcodeFields, parseLookupCode } from '../shared/vendor-barcode.mjs';
 import { standingPrice, priceBreakdown, withPrice } from '../shared/shop-pricing.mjs';
 import { vendorOrderView, ownLines, eatDate, eatDayBounds, ORDERS_PAGE_DEFAULT, ORDERS_PAGE_MAX, encodeOrderCursor, decodeOrderCursor } from '../shared/vendor-order-view.mjs';
 import { createMemoryVendorBuyerRefStore } from '../infra/vendor-buyer-ref-store-pg.mjs';
@@ -117,6 +118,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // what vendors see of it runs only while `stockLedgerOn()` (VENDOR_TOOLS + VENDOR_STOCK_LEDGER).
   stockLedger = null,
   stockLedgerOn = vendorStockLedgerOn,
+  // Vendor tools · S8: product barcodes (src/infra/product-code-store-pg.mjs; design docs/design/vendor-barcodes-s8.md).
+  // Used only while `barcodesOn()` (VENDOR_TOOLS + VENDOR_STOCK_LEDGER + VENDOR_BARCODES) and the ledger store is wired:
+  // codes are written inside the ledger's product-form transaction. Off (or not wired): nothing reads ProductCode.
+  productCodes = null,
+  barcodesOn = vendorBarcodesOn,
   // Vendor tools · S2: pickup gym names on vendor orders (gyms collection), the vendor-scoped buyer
   // pseudonyms (src/infra/vendor-buyer-ref-store-pg.mjs; in memory when not given) and whether vendors
   // see the buyer's phone (VENDOR_TOOLS + VENDOR_ORDER_BUYER_CONTACT).
@@ -326,7 +332,10 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (input.variants != null) {
       const v = input.variants;
       const ok = Array.isArray(v) && v.length <= 30 && v.every(x => x && typeof x === 'object' && typeof x.name === 'string' && x.name.trim() && x.name.length <= 60
-        && (x.stock == null || (Number.isInteger(x.stock) && x.stock >= 0 && x.stock <= 1_000_000)) && !invalidPrivateField(x));
+        && (x.stock == null || (Number.isInteger(x.stock) && x.stock >= 0 && x.stock <= 1_000_000)) && !invalidPrivateField(x)
+        // S8 (B-8): codes are top-level body fields only. Inside a variant they would be stored on the public row
+        // and re-queue review, so they are refused whatever the flags.
+        && x.barcodes === undefined && x.addBarcodes === undefined);
       if (!ok) return { error: 'invalid_field', status: 400, field: 'variants' };
     }
     const privateField = invalidPrivateField(input);
@@ -335,6 +344,15 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   }
 
   const ledgerOn = () => Boolean(stockLedger) && stockLedgerOn();
+  /** S8: barcodes apply now (flags on, both stores wired). */
+  const codesActive = () => Boolean(productCodes) && ledgerOn() && barcodesOn();
+  /**
+   * S8: the barcode step of a ledger save, run inside its transaction after the product row is written. Always
+   * (flag on) drops the codes of variants the product no longer has (B-6); with codes in the body (`parsed`), applies them.
+   */
+  const codesStep = ({ vendorId, productId = null, actorId, parsed }) => (codesActive()
+    ? (trx, { saved }) => productCodes.applyInSave(trx, { vendorId, productId: productId || saved.id, actorId, saved, parsed })
+    : null);
   /** Cost price and reorder level in the body: [{ variant, costTzs?, reorderLevel? }] ('' = the product). */
   function privatesFrom(input) {
     const out = [];
@@ -438,10 +456,15 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
   // initialStatus / presetId / stockNote: INTERNAL options of vendor smart import (callers in code only, never the request
   // body): a new product may start 'paused', with a deterministic id (so a retried import finds it), and its opening
   // stock rows carry a note. Create path only; ignored when updating. Anything else is ignored.
-  async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [], priceGuard = null, initialStatus = null, presetId = null, stockNote = null }) {
+  // barcodesAllowed (S8): the caller is the vendor account or vendor staff (the /vendor/products routes). Anyone else
+  // (FitFlex admins, duplicate, import) has `barcodes` / `addBarcodes` ignored. Ignored too while the flag is off.
+  async function upsertProductFields({ vendorId, body, productId, keepCategory = false, actorId = vendorId, costAllowed = true, keptImages = [], priceGuard = null, initialStatus = null, presetId = null, stockNote = null, barcodesAllowed = false }) {
     const input = body || {};
     const bad = validateProductInput(input);
     if (bad) return bad;
+    // S8 §2.3 step 1: every code checked (B-1, B-3) and duplicates in the body (B-4) before anything is written.
+    const codes = codesActive() && barcodesAllowed ? parseBarcodeFields(input) : null;
+    if (codes?.error) return codes;
     // Who it's for (optional vendor tags): not reviewed, so changing them never re-queues approval.
     const targets = parseProductTargets(input);
     if (targets.error) return targets;
@@ -485,6 +508,8 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
             pricesBefore = pricesOf(current);
             return { ...plan, fields, privates: privatesFrom(input) };
           },
+          // S8: codes in the same transaction; a refused code (409 barcode_in_use …) rolls the whole save back.
+          inTransaction: codesStep({ vendorId, productId, actorId, parsed: codes }),
         });
         if (saved.error) return saved;
         await auditPriceEdit(productId, actorId, pricesBefore, saved.product);
@@ -540,7 +565,11 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     };
     if (ledger) {
       // The product and the first rows of its stock history are written together, in one transaction.
-      const product = await stockLedger.createProduct({ product: row, actorId, movements: plan.movements, privates: privatesFrom(input) });
+      const product = await stockLedger.createProduct({
+        product: row, actorId, movements: plan.movements, privates: privatesFrom(input),
+        inTransaction: codesStep({ vendorId, actorId, parsed: codes }),
+      });
+      if (product.error) return product;
       await afterStockMoved([product.id]);
       return { product: (await vendorProductsView(vendorId, [product], { costAllowed }))[0], created: true };
     }
@@ -555,7 +584,26 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
    * vendorId null = FitFlex admin views across vendors (the rows' own ids scope the read).
    */
   async function vendorProductsView(vendorId, rows, opts = {}) {
-    return withVatCodes(vendorId, await vendorProductsViewCore(vendorId, rows, opts));
+    return withBarcodes(vendorId, await withVatCodes(vendorId, await vendorProductsViewCore(vendorId, rows, opts)));
+  }
+  /**
+   * S8 §2.2: each of the vendor's own products gains barcodes [{ code, variant|null }] (whole product first) — flag on
+   * only, one query for the list. Never on admin views (vendorId null) and never on /shop/*.
+   */
+  async function withBarcodes(vendorId, rows) {
+    if (!codesActive() || !vendorId || !rows.length) return rows;
+    const codes = await productCodes.codesOf(vendorId, rows);
+    return rows.map(p => ({ ...p, barcodes: codes.get(p.id) || [] }));
+  }
+
+  /**
+   * GET /vendor/products/lookup?code= (S8 §2.4). The caller checks the flag, the guards and the rate limits.
+   * → { code, codeKey, matches } (matches [] when nothing matches) | { error, status, ... }.
+   */
+  async function lookupProductCode({ vendorId, code }) {
+    const parsed = parseLookupCode(code);
+    if (parsed.error) return parsed;
+    return { code: parsed.code, codeKey: parsed.codeKey, matches: await productCodes.lookup(vendorId, parsed) };
   }
   async function vendorProductsViewCore(vendorId, rows, { costAllowed = true } = {}) {
     if (!ledgerOn() || !rows.length) return rows;
@@ -650,11 +698,15 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
     return upsertProduct({ vendorId, body: { ...prior, name: `${prior.name} Copy`, sku: null }, keepCategory: true, keptImages: prior.images || [] });
   }
-  async function deleteProduct({ vendorId, productId }) {
+  async function deleteProduct({ vendorId, productId, actorId = vendorId }) {
     const prior = await products.findByIdAsync(productId);
     if (!prior) return { error: 'product_not_found', status: 404 };
     if (prior.vendorId !== vendorId) return { error: 'not_your_product', status: 403 };
     await products.updateByIdAsync(productId, { deletedAt: nowIso(), status: 'archived', updatedAt: nowIso() });
+    // S8 (B-7): the product's codes go with it, best effort; a code a deleted product still holds counts as free anyway.
+    if (codesActive()) {
+      try { await productCodes.deleteForProduct({ vendorId, productId, actorId }); } catch (err) { console.warn('[shop] barcode cleanup after delete failed:', productId, err?.message); }
+    }
     return { deleted: true };
   }
   /** GET /admin/products. With the ledger on, admins see the private fields too (cost included). */
@@ -1656,5 +1708,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { canSeeCost, afterStockMoved, notifyVendor, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
+  return { lookupProductCode, canSeeCost, afterStockMoved, notifyVendor, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
 }
