@@ -1,10 +1,11 @@
 // Security events (S3): when a gym check-in is made from a web browser, record a SecurityEvent for the member and
 // (flag WEB_CHECKIN_ALERTS) tell them by inbox message + push, so a check-in they did not make is noticed.
+// The inbox row carries gym name and time; the phone push (lock screen) is a GENERIC title/body with no gym or time.
 //
 // Rules: nothing here may fail or slow the check-in (handleCheckin never throws); the handler is idempotent (the event
 // id and the notification id are derived from the check-in id, so calling it twice leaves one of each); only
-// source 'web_gym_qr_by_member' check-ins are handled (in-app scans never create an event). Stored and sent: who,
-// gym, when (Tanzania time in the text) and a gym-name snapshot. NEVER stored or sent: IP, user agent, clientMeta,
+// source 'web_gym_qr_by_member' check-ins are handled (in-app scans never create an event). Stored: who, gym,
+// when and a gym-name snapshot. Inbox text: gym name and Tanzania time. Push text: generic only. NEVER stored or sent: IP, user agent, clientMeta,
 // session id, intent id, PIN or any token.
 import { CHECKIN_SOURCE } from '../shared/checkin-status.mjs';
 import { eatDate } from '../shared/eat-time.mjs';
@@ -33,6 +34,12 @@ export function alertText({ gymName, when }) {
     },
   };
 }
+
+/** Generic lock-screen text: no gym, no time. Swahili is a DRAFT for native review. */
+export const PUSH_TEXT = {
+  en: { title: 'Security alert', body: 'New activity on your FitFlex account. Open the app to review.' },
+  sw: { title: 'Tahadhari ya usalama', body: 'Kuna shughuli mpya kwenye akaunti yako ya FitFlex. Fungua programu kukagua.' },
+};
 
 export function createSecurityEventService({
   db, gyms, deviceTokens, notify, localeOf = async () => null, alertsOn = () => false, logger = console,
@@ -75,7 +82,9 @@ export function createSecurityEventService({
       await notify(row.memberId, {
         id: nid, type: NOTIFICATION_TYPE, title: chosen.title, body: chosen.body,
         data: { ...data, locale: locale === 'sw' ? 'sw' : 'en', titleEn: text.en.title, bodyEn: text.en.body, titleSw: text.sw.title, bodySw: text.sw.body },
-        // The phone push carries ids only (the notification itself shows gym and time).
+        // The phone push shows a generic title/body (no gym, no time) and ids only; the inbox row has the details.
+        pushTitle: (locale === 'sw' ? PUSH_TEXT.sw : PUSH_TEXT.en).title,
+        pushBody: (locale === 'sw' ? PUSH_TEXT.sw : PUSH_TEXT.en).body,
         pushData: data,
       });
       await db('SecurityEvent').where({ id }).whereNull('notifiedAt').update({ notifiedAt: now() });
@@ -103,7 +112,7 @@ export function createSecurityEventService({
       id: r.id, kind: r.kind, occurredAt: new Date(r.occurredAt).toISOString(),
       gym: { id: r.gymId, name: r.details?.gymName || null },
       channel: r.channel || 'web',
-      status: r.notifiedAt ? 'notified' : 'recorded',
+      status: r.notifiedAt ? 'inbox' : 'recorded',
     }));
     const last = page[page.length - 1];
     return { events, ...(rows.length > n && last ? { next: `${new Date(last.occurredAt).toISOString()}~${last.id}` } : {}) };
