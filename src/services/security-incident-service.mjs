@@ -4,7 +4,9 @@
 //   same incident (idempotent). With secureAccount (default true) the member's sessions are ended and, when FitFlex holds
 //   a PIN for them, the PIN must be reset before the next PIN sign-in. After 2 such "secure" actions in 24 hours further
 //   reports are still recorded but do NOT lock the account again (protection.limited). More than
-//   SECURITY_REPORT_MAX_PER_DAY new incidents in 24 hours is refused with 429.
+//   SECURITY_REPORT_MAX_PER_DAY new incidents in a rolling 24 hours is refused with 429 and the real wait
+//   (retryAfterSeconds: until the oldest counted report is 24 hours old). A repeat ignores secureAccount: what the
+//   first report asked for stands, so a report-only cannot later be upgraded to "secure".
 // Staff side   list / get / acknowledge / resolve. Every action writes an AuditLog row and an append-only
 //   SecurityIncidentEvent row. The staff reason (10-500 chars) is kept on the incident row, never in the trail or audit.
 //
@@ -31,6 +33,16 @@ export const notificationIdFor = incidentId => `ntf_secinc_${safeId(incidentId)}
 const iso = v => (v ? new Date(v).toISOString() : null);
 const json = v => (v == null ? null : JSON.stringify(v));
 const obj = v => (typeof v === 'string' ? JSON.parse(v) : v ?? null);
+
+/**
+ * THE one rule for "protection was asked for but is not in place": requested, not applied, and not held back by the
+ * 2-per-day limit. A repeat report retries exactly these; the POST response says `failed: true` for exactly these; the
+ * member list says `protectionPending: true` for exactly these. It also covers a crash between recording the incident
+ * and applying protection (applied is still false, nothing else is set).
+ */
+export const protectionPending = (p) => Boolean(p && p.requested && !p.applied && !p.limited);
+/** False only when a retry cannot help as things stand: the account has no Person record to protect. */
+export const protectionRetryable = (p) => !(protectionPending(p) && p.failure === 'no_person');
 
 /** Neutral on purpose: the same words whatever the outcome. Swahili is a DRAFT for native review. */
 /** Lock-screen push line for the resolution message. Swahili is a DRAFT for native review. */
@@ -81,15 +93,28 @@ export function createSecurityIncidentService({
       requested: Boolean(q.requested), sessionsEnded: Boolean(q.sessionsEnded),
       pinResetRequired: q.pinResetRequired === undefined ? false : q.pinResetRequired,
       ...(q.limited ? { limited: true } : {}),
-      ...(q.failed ? { failed: true } : {}),
+      ...(protectionPending(q) ? { failed: true } : {}),
+      ...(protectionRetryable(q) ? {} : { retryable: false }),
     };
   }
 
-  /** How each of the caller's events is reported: { [eventId]: { incidentId, status, reportedAt } }. Flag-gated. */
+  /**
+   * How each of the caller's events is reported:
+   * { [eventId]: { incidentId, status, reportedAt, protectionPending, protectionRetryable? } }. Flag-gated.
+   * protectionPending is true exactly when reporting the event again would retry protection. protectionRetryable is
+   * present only as `false` (no Person record: a retry cannot help). Nothing else of the stored protection is shown.
+   */
   async function reportsFor(userId, eventIds) {
     if (!reportsOn() || !eventIds.length) return {};
-    const rows = await db('SecurityIncident').where({ userId }).whereIn('eventId', eventIds).select('id', 'eventId', 'status', 'reportedAt');
-    return Object.fromEntries(rows.map(r => [r.eventId, { incidentId: r.id, status: r.status, reportedAt: iso(r.reportedAt) }]));
+    const rows = await db('SecurityIncident').where({ userId }).whereIn('eventId', eventIds).select('id', 'eventId', 'status', 'reportedAt', 'protection');
+    return Object.fromEntries(rows.map((r) => {
+      const p = obj(r.protection);
+      return [r.eventId, {
+        incidentId: r.id, status: r.status, reportedAt: iso(r.reportedAt),
+        protectionPending: protectionPending(p),
+        ...(protectionRetryable(p) ? {} : { protectionRetryable: false }),
+      }];
+    }));
   }
 
   /** End sessions + require a PIN reset; records the outcome on the incident. → true when sessions were ended now. */
@@ -104,7 +129,7 @@ export function createSecurityIncidentService({
         protection.sessionsEnded = true; protection.applied = true; delete protection.failed; delete protection.failure;
       }
     } catch (err) {
-      protection.failed = true;
+      protection.failed = true; delete protection.failure;
       logger.warn?.(`[security-incident] protection for ${incidentId} failed: ${err?.message}`);
     }
     await db('SecurityIncident').where({ id: incidentId }).update({ protection: json(protection), updatedAt: now() });
@@ -114,7 +139,8 @@ export function createSecurityIncidentService({
   /** Same event reported again: same incident; protection that was asked for but never applied is retried. */
   async function repeat(row) {
     const p = obj(row.protection) || {};
-    if (!(p.requested && !p.applied && !p.limited)) return memberView(row, { idempotent: true });
+    if (!protectionPending(p)) return memberView(row, { idempotent: true });
+    // A "no Person" failure is retried too: the lookup is one read, and it heals by itself if a Person is linked later.
     const personId = (await db('User').where({ id: row.userId }).first('personId'))?.personId || null;
     const protection = { ...p };
     const signedOut = await applyProtection(row.id, row.userId, personId, protection);
@@ -143,8 +169,16 @@ export function createSecurityIncidentService({
       await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`secinc:${userId}`]);
       const again = await trx('SecurityIncident').where({ userId, eventId: id }).first();
       if (again) return { existing: again };
-      const recent = await trx('SecurityIncident').where({ userId }).where('reportedAt', '>=', since).select('protection');
-      if (recent.length >= maxPerDay()) return { capped: true };
+      const recent = await trx('SecurityIncident').where({ userId }).where('reportedAt', '>=', since).select('protection', 'reportedAt');
+      const max = maxPerDay();
+      if (recent.length >= max) {
+        // Rolling 24 hours: a new report fits once enough counted ones have aged out to be back under the cap, which is
+        // the oldest one when the member is exactly at the cap. Seconds until then, rounded up, never less than 1.
+        const times = recent.map(r => +new Date(r.reportedAt)).sort((a, b) => a - b);
+        const frees = times[Math.min(Math.max(recent.length - max, 0), times.length - 1)];
+        const waitMs = Number.isFinite(frees) ? frees - +since : DAY_MS;
+        return { capped: true, retryAfterSeconds: Math.min(Math.max(Math.ceil(waitMs / 1000), 1), DAY_MS / 1000) };
+      }
       // Intended protection is recorded in this same transaction, so concurrent reports cannot exceed the cap.
       const secured = recent.filter((r) => { const q = obj(r.protection); return q?.requested === true && !q?.limited; }).length;
       const limited = secure && secured >= SECURE_ACTIONS_PER_DAY;
@@ -157,7 +191,7 @@ export function createSecurityIncidentService({
       return { protection, limited };
     });
     if (decided.existing) return repeat(decided.existing);
-    if (decided.capped) return { error: 'report_limit_reached', status: 429, retryAfterSeconds: 3600 };
+    if (decided.capped) return { error: 'report_limit_reached', status: 429, retryAfterSeconds: decided.retryAfterSeconds };
 
     // The incident now exists whatever happens next. Protection is applied after, and a failure is recorded, not hidden.
     const protection = { ...decided.protection };

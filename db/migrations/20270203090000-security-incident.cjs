@@ -8,7 +8,7 @@
 //                          the SecurityEvent away, but the incident stays as an anonymised record (resolutionReason is
 //                          cleared by account erasure). Resolved incidents are purged 24 months after resolution (COALESCE(resolvedAt, reportedAt));
 //                          open or acknowledged ones are never auto-deleted (see docs: orphaned-user open incidents).
-//   SecurityIncidentEvent  append-only trail (reported, protection_applied, acknowledged, resolved). No free text: the
+//   SecurityIncidentEvent  append-only trail (reported, protection, acknowledged, resolved). No free text: the
 //                          admin's reason lives on the incident row so it can be erased. UPDATE and DELETE are refused
 //                          by a trigger; deleting the parent incident (retention) is allowed to cascade.
 //
