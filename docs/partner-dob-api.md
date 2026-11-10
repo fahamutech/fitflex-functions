@@ -1,6 +1,6 @@
 # Partner date of birth: API contract (slice 2, backend)
 
-Plan: partner DOB personalisation, owner go-ahead 2026-10-22. Trainers and gym owners give a date of birth, and owners can also give a gender, so that slice 4 can use age and gender for shop personalisation in those modes. This slice stores the values, adds the endpoints and gives admins a view-only read. Shop eligibility does not change yet. Communications and challenge targeting do not change.
+Plan: partner DOB personalisation, owner go-ahead 2026-10-22. Trainers and gym owners give a date of birth, and owners can also give a gender, so that slice 4 can use age and gender for shop personalisation in those modes. This slice stores the values, adds the endpoints and gives admins a view-only read. Shop eligibility does not change in this slice (slice 4, below, adds it behind `SHOP_PERSONALISATION_PARTNERS`). Communications and challenge targeting do not change.
 
 ## Flag
 
@@ -195,9 +195,21 @@ Errors:
 
 Each successful read is audit-logged as `personal_details_viewed`, with the actor set to the admin, the target set to the persona's user id (or the trainer id), and `after: { subject: { type, id } }`. No values are logged.
 
+## Shop personalisation in trainer and owner mode (slice 4)
+
+Built 2026-11-10 behind `SHOP_PERSONALISATION_PARTNERS` (off by default; has an effect only while `SHOP_PERSONALISATION` is on too). Full contract: `docs/shop-personalisation-api.md`, section "Trainer and owner mode". In short, the shop reads, per request and never cached or stored:
+
+| Value | Used in | Order |
+|---|---|---|
+| Date of birth | trainer and owner mode | `Person.dateOfBirth`, else the member profile's (as `assertPartnerAge`); a present but invalid `Person.dateOfBirth` fails closed (no fall-through) |
+| Gender | trainer mode | `TrainerProfile.gender`, else `Person.gender` |
+| Gender | owner mode | `Person.gender` |
+
+No date of birth → purchase history only; invalid → nothing; under 18 → nothing; 18 or over → purchase history plus a gender/age **reorder only** (never a filter, never in a title). `other` or `NULL` gender → no gender signal. KYC data is never read. Member mode and vendor_personal mode are unchanged. With the flag off nothing here is read and every response is byte-identical.
+
 ## Not in this slice
 
-- Shop eligibility for partners (slice 4, `SHOP_PERSONALISATION_PARTNERS`).
+- Shop eligibility for partners — now built as slice 4 (above), dormant.
 - App onboarding step, home card and settings tile (slice 3).
-- Privacy text (slice 5, draft pending counsel).
+- Privacy text (slice 5, draft pending Tanzanian counsel).
 - Under-18 is not checked for admin-created or invited partners, or for identity merges (see above).
