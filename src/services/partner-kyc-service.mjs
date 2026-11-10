@@ -35,6 +35,7 @@ import { GYM_TIERS } from '../shared/constants.mjs';
 import { VENDOR_POSITIONS } from '../shared/product-categories.mjs';
 import { requiredAgreements, agreementText } from '../shared/partner-agreements.mjs';
 import { prepareDocumentFile, displayFileName, sha256 } from '../infra/document-file.mjs';
+import { notificationText, renderNotificationText } from '../shared/notification-texts.mjs';
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -49,14 +50,7 @@ const ADMIN_EDITABLE = new Set(['draft', 'info_requested', 'submitted', 'in_revi
 // accepts or rejects the new document on its own (owner decision, 28 Sep).
 const RENEWABLE = new Set(['approved', 'suspended']);
 
-const REQUIREMENT_NAMES = {
-  owner_id: 'ID', trainer_id: 'ID', representative_id: 'representative ID',
-  business_registration: 'business registration certificate', tin_certificate: 'TIN certificate',
-  business_licence: 'business licence', certification: 'certification', liability_insurance: 'liability cover',
-  representative_authority: 'proof of authority',
-  vat_certificate: 'VAT certificate', // vendor tools · S5
-  event_permit: 'event permit', // events · S2
-};
+// Document names for the expiry reminder live in shared/notification-texts.mjs (English and Swahili).
 /** What this partner type may upload now (S5: + vat_certificate for vendors while VENDOR_VAT is on). */
 const uploadable = partnerType => documentsFor(partnerType, { vatOn: vendorVatOn() });
 
@@ -712,38 +706,28 @@ export function createPartnerKycService({
 
   // ── Status changes ────────────────────────────────────────────────────────
 
-  // What the partner is told at each step.
-  const MESSAGES = {
-    submitted: () => ({ title: 'Verification details received', body: 'Thank you. FitFlex will review your details and let you know the outcome.' }),
-    info_requested: note => ({ title: 'More information needed', body: note || 'FitFlex needs more information to finish verifying you. Open your verification to see what to update.' }),
-    approved: () => ({ title: 'You are verified', body: 'Your FitFlex partner verification is approved.' }),
-    rejected: note => ({ title: 'Verification not approved', body: note || 'Your FitFlex partner verification was not approved.' }),
-    suspended: note => ({ title: 'Verification suspended', body: note || 'Your FitFlex partner verification has been suspended.' }),
-    reinstated: () => ({ title: 'Verification restored', body: 'Your FitFlex partner verification is active again.' }),
-    reopened: () => ({ title: 'Verification reopened', body: 'You can update your details and submit them again.' }),
-  };
+  // What the partner is told at each step (texts: shared/notification-texts.mjs).
+  // Only these steps carry the reviewer's note; it is sent in their own words.
+  const TOLD = new Set(['submitted', 'info_requested', 'approved', 'rejected', 'suspended', 'reinstated', 'reopened']);
+  const WITH_NOTE = new Set(['info_requested', 'rejected', 'suspended']);
 
   // A decision with a sensitive reason (suspected_fraud, …) is never explained
   // to the partner: they are told it is under review and to contact support,
   // and the reviewer's note is not sent. The type stays, so the app still
-  // opens Verification. Swahili is a draft for native review.
-  const UNDER_REVIEW_MESSAGE = {
-    title: 'Verification under review',
-    body: 'Your FitFlex partner verification is under review. Please contact FitFlex support.',
-    titleSw: 'Uthibitishaji unakaguliwa',
-    bodySw: 'Uthibitishaji wako wa mshirika wa FitFlex unakaguliwa. Tafadhali wasiliana na huduma kwa wateja ya FitFlex.',
-  };
+  // opens Verification. Both languages stay in `data` as before; the title and
+  // body follow the partner's language (text: kyc_under_review).
+  // Swahili is a draft for native review.
   const NEUTRAL_ON = new Set(['rejected', 'suspended', 'info_requested']);
 
   async function tell(kycCase, key, note, reasonCode = null) {
-    if (!kycCase.userId || !MESSAGES[key]) return;
+    if (!kycCase.userId || !TOLD.has(key)) return;
     const sensitive = isSensitiveReason(reasonCode);
     let message;
     if (sensitive && NEUTRAL_ON.has(key)) {
-      const { titleSw, bodySw, ...text } = UNDER_REVIEW_MESSAGE;
-      message = { type: `kyc_${key}`, data: { caseId: kycCase.id, reasonCode: 'under_review', titleSw, bodySw }, ...text };
+      const sw = renderNotificationText('kyc_under_review', {}, 'sw');
+      message = { type: `kyc_${key}`, data: { caseId: kycCase.id, reasonCode: 'under_review', titleSw: sw.title, bodySw: sw.body }, ...notificationText('kyc_under_review') };
     } else {
-      message = { type: `kyc_${key}`, data: { caseId: kycCase.id }, ...MESSAGES[key](sensitive ? null : note) };
+      message = { type: `kyc_${key}`, data: { caseId: kycCase.id }, ...notificationText(`kyc_${key}`, { note: WITH_NOTE.has(key) && !sensitive ? note || null : null }) };
     }
     try {
       await notify(kycCase.userId, message);
@@ -1010,15 +994,13 @@ export function createPartnerKycService({
         const window = EXPIRY_REMINDER_DAYS.filter(d => daysLeft <= d).pop();
         if (window === undefined) continue;
         if (reminded.has(`${doc.id}:${window}`)) { already += 1; continue; }
-        const name = REQUIREMENT_NAMES[requirementKey] || 'document';
-        const body = daysLeft > 0
-          ? `Your ${name} expires on ${doc.expiresOn}. Upload the renewed one in Verification.`
-          : `Your ${name} expired on ${doc.expiresOn}. Upload the renewed one in Verification.`;
+        const message = notificationText('kyc_document_expiring', { requirementKey, daysLeft, expiresOn: doc.expiresOn });
+        // The case history keeps the English wording, whatever language the partner reads.
+        const body = message.body;
         try {
           await notify(kycCase.userId, {
             type: 'kyc_document_expiring',
-            title: daysLeft > 0 ? `Your ${name} expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}` : `Your ${name} has expired`,
-            body,
+            ...message,
             data: { caseId: kycCase.id, requirementKey, expiresOn: doc.expiresOn },
           });
         } catch { /* a failed notification is retried on the next run */ continue; }

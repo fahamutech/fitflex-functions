@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { createTrainerClientService } from '../src/services/trainer-client-service.mjs';
 import { createGoalService } from '../src/services/goal-service.mjs';
 import { goalProgress } from '../src/shared/member-progress.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 function store(rows = []) {
   const clone = (r) => JSON.parse(JSON.stringify(r));
@@ -74,6 +75,8 @@ test('trainer sets a weekly workout goal; member sees who assigned it', async ()
     ['trainer', 'trn_1', 'trainer', 'usr_t1', 'm1'],
   );
   assert.equal(s.sent.at(-1).type, 'trainer_goal_assigned');
+  assert.equal((await deliveredTo(s.sent.at(-1), 'sw')).title, 'Lengo jipya kutoka kwa trainer wako');
+  assert.equal((await deliveredTo(s.sent.at(-1), null)).title, 'New goal from your trainer');
 
   const { goals } = await s.goalSvc.list('m1');
   const mine = goals.find(g => g.id === r.goal.id);
