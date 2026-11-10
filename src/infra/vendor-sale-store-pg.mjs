@@ -85,6 +85,8 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
       // S4: the customer (name only, never contact details), the due date and what is still owed.
       // paidTzs = paid at the counter + later customer payments; paidAtSaleTzs = at the counter only.
       customer: s.customerId ? { id: s.customerId, name: customer?.name ?? null, forgotten: customer?.forgottenAt != null } : null,
+      // Sale extras §2.3: new | returning | walk_in | online | other | null — a label for this purchase (never on receipts).
+      customerType: s.customerType ?? null,
       dueDate: dayOf(sale.dueDate), balanceTzs: s.balanceTzs, paidAtSaleTzs: s.paidTzs - (s.allocatedTzs || 0),
       allocations: allocations.map(a => ({ paymentId: a.paymentId, number: a.number, amountTzs: a.amountTzs, receivedOn: dayOf(a.receivedOn), voided: a.voidedAt != null })),
       soldAt: iso(s.soldAt), clientSoldAt: iso(s.clientSoldAt), recordedAt: iso(s.createdAt), lateRecorded: lateRecorded(s), clientRef: s.clientRef,
@@ -271,7 +273,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
           soldAt: sale.soldAt, clientSoldAt: sale.clientSoldAt ?? null, subtotalTzs: totals.subtotalTzs, lineDiscountTzs: totals.lineDiscountTzs, discountTzs: totals.discountTzs,
           vatTzs: 0, totalTzs: totals.totalTzs, paidTzs: totals.paidTzs, changeTzs: totals.changeTzs, balanceTzs: totals.balanceTzs,
           invoiceSeq, invoiceNumber: invoiceSeq == null ? null : invoiceNumber(invoiceSeq), vatIncludedTzs, sellerSnapshot: JSON.stringify(sellerSnapshot),
-          dueDate: sale.kind === 'credit' ? sale.dueDate : null,
+          dueDate: sale.kind === 'credit' ? sale.dueDate : null, customerType: sale.customerType ?? null,
           clientRef: sale.clientRef, fingerprint, note: sale.note, createdBy: actorId, createdAt: at, updatedAt: at,
         });
         await trx('VendorSaleLine').insert(totals.lines.map((l, i) => ({
@@ -500,6 +502,7 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
         createdBy: person(r.createdBy, names.get(r.createdBy)),
         kind: r.kind, balanceTzs: r.balanceTzs, dueDate: dayOf(r.dueDate),
         customer: r.customerId ? { id: r.customerId, name: customerNames.get(r.customerId)?.name ?? null, forgotten: customerNames.get(r.customerId)?.forgotten ?? false } : null,
+        customerType: r.customerType ?? null,
         refundedTzs: r.refundedTzs || 0, refundState: refundStates.get(r.id) || 'none', balanceReducedTzs: r.balanceReducedTzs || 0,
       })),
       nextCursor: rows.length > limit ? encodeCursor(page[page.length - 1]) : null,

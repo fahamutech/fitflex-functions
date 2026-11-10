@@ -6,6 +6,11 @@
 // - A line's discountTzs is the discount for the whole line (not per unit); subtotalTzs is
 //   Σ qty × unit price, before any discount; the sale discount comes off after line discounts.
 // - Payment references are required for mobile money and bank, optional for card and other.
+//   Sale extras (docs/design/vendor-sale-extras-1110.md §1.2, owner 2026-11-10, Q-1/Q-2): on a walk-in sale
+//   (cash mode and the pay-later "paid now" rows) a reference is optional for every method and a cash reference
+//   is kept. Unconditional on the server; REFERENCE_REQUIRED stays as it was for customer payments, refunds and
+//   supplier payments.
+// - customerType (§2.3, Q-5/Q-8): an optional label for this purchase, stored always (the app section is flagged).
 // - A sale whose total is 0 is allowed, with no payments. Only cash may exceed its share
 //   (it gives change); Σ payments below the total → 409 payment_short (a cash sale; S4 pay later is kind credit).
 // - soldAt from 7 days in the past (offline sales sync late) to 24 hours in the future: a device clock
@@ -15,7 +20,12 @@
 import { createHash } from 'node:crypto';
 
 export const PAYMENT_METHODS = ['cash', 'mpesa', 'airtel_money', 'mixx', 'halopesa', 'card', 'bank', 'other'];
+/** Customer payments (S4), refunds (S7) and supplier payments (S9): a reference for mobile money and bank. Not sales. */
 export const REFERENCE_REQUIRED = new Set(['mpesa', 'airtel_money', 'mixx', 'halopesa', 'bank']);
+/** Walk-in sale payments (sale extras §1.2): no method needs a reference. */
+export const SALE_REFERENCE_REQUIRED = new Set();
+/** Sale extras §2.3: what kind of customer this purchase was from (single choice, optional). */
+export const SALE_CUSTOMER_TYPES = ['new', 'returning', 'walk_in', 'online', 'other'];
 export const MAX_LINES = 100;
 export const MAX_PAYMENTS = 10;
 export const MAX_QTY_PER_LINE = 1000;
@@ -51,7 +61,7 @@ export const receiptNumber = seq => `R-${String(seq).padStart(6, '0')}`;
  * Validate POST /vendor/sales. Prices and stock are checked later against the product rows; here
  * only the shape. → { error, status, ... } or
  * { clientRef, soldAtInput, soldAt (Date|null = now), lines:[{ productId, variant, qty, unitPriceTzs|null, discountTzs }],
- *   discountTzs, payments:[{ method, amountTzs, reference }], note }
+ *   discountTzs, payments:[{ method, amountTzs, reference }], note, kind, customerId, dueDate, customerType|null }
  */
 export function parseSale(body = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fail('invalid_body', 400);
@@ -100,11 +110,11 @@ export function parseSale(body = {}) {
   for (const [index, raw] of rawPayments.entries()) {
     if (!raw || typeof raw !== 'object' || !PAYMENT_METHODS.includes(raw.method)) return fail('invalid_payment', 400, { index, field: 'method', allowed: PAYMENT_METHODS });
     if (!isMoney(raw.amountTzs, { min: 1 })) return fail('invalid_payment', 400, { index, field: 'amountTzs' });
-    // Cash has no reference: anything sent with it is ignored.
-    if (raw.method !== 'cash' && raw.reference != null && typeof raw.reference !== 'string') return fail('invalid_payment', 400, { index, field: 'reference' });
-    const reference = raw.method !== 'cash' && typeof raw.reference === 'string' && raw.reference.trim() ? raw.reference.trim() : null;
+    // Sale extras §1.2: every method may carry a reference (cash too, kept); none needs one.
+    if (raw.reference != null && typeof raw.reference !== 'string') return fail('invalid_payment', 400, { index, field: 'reference' });
+    const reference = typeof raw.reference === 'string' && raw.reference.trim() ? raw.reference.trim() : null;
     if (reference && reference.length > MAX_REFERENCE) return fail('invalid_payment', 400, { index, field: 'reference', max: MAX_REFERENCE });
-    if (REFERENCE_REQUIRED.has(raw.method) && !reference) return fail('reference_required', 400, { index, method: raw.method });
+    if (SALE_REFERENCE_REQUIRED.has(raw.method) && !reference) return fail('reference_required', 400, { index, method: raw.method });
     payments.push({ method: raw.method, amountTzs: raw.amountTzs, reference });
   }
 
@@ -115,7 +125,18 @@ export function parseSale(body = {}) {
   const credit = parseCreditFields(body);
   if (credit.error) return credit;
 
-  return { clientRef, soldAtInput, soldAt, lines, discountTzs, payments, note, ...credit };
+  let customerType = null;
+  if (body.customerType != null && body.customerType !== '') {
+    if (!SALE_CUSTOMER_TYPES.includes(body.customerType)) {
+      return fail('invalid_field', 400, {
+        field: 'customerType', allowed: SALE_CUSTOMER_TYPES,
+        message: { en: 'Choose a customer type from the list.', sw: 'Chagua aina ya mteja kutoka kwenye orodha.' },
+      });
+    }
+    customerType = body.customerType;
+  }
+
+  return { clientRef, soldAtInput, soldAt, lines, discountTzs, payments, note, ...credit, customerType };
 }
 
 /**
@@ -151,6 +172,8 @@ export function saleFingerprint(sale) {
     note: sale.note || null,
     // S4 fields only when used, so fingerprints of S3 sales (and their retries) do not change.
     ...(sale.kind === 'credit' || sale.customerId ? { kind: sale.kind, customerId: sale.customerId, dueDate: sale.dueDate || null } : {}),
+    // Sale extras: customerType only when set, so sales queued before it (and their retries) keep their fingerprint.
+    ...(sale.customerType ? { customerType: sale.customerType } : {}),
   })).digest('hex');
 }
 
