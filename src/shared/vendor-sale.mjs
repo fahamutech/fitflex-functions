@@ -42,6 +42,8 @@ export const SOLD_AT_FUTURE_MS = 24 * 3_600_000;
 export const SALES_PAGE_DEFAULT = 50;
 export const SALES_PAGE_MAX = 200;
 const CLIENT_REF = /^[A-Za-z0-9._:-]{8,100}$/;
+/** A control character (security review L-3): refused in a sale payment reference, never stripped. */
+const CONTROL_CHAR = /\p{Cc}/u;
 
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const isMoney = (v, { min = 0 } = {}) => Number.isInteger(v) && v >= min && v <= MAX_SALE_TZS;
@@ -114,6 +116,8 @@ export function parseSale(body = {}) {
     if (raw.reference != null && typeof raw.reference !== 'string') return fail('invalid_payment', 400, { index, field: 'reference' });
     const reference = typeof raw.reference === 'string' && raw.reference.trim() ? raw.reference.trim() : null;
     if (reference && reference.length > MAX_REFERENCE) return fail('invalid_payment', 400, { index, field: 'reference', max: MAX_REFERENCE });
+    // Refused rather than stripped, so what is stored (and printed on receipts) is exactly what the seller typed.
+    if (reference && CONTROL_CHAR.test(reference)) return fail('invalid_payment', 400, { index, field: 'reference' });
     if (SALE_REFERENCE_REQUIRED.has(raw.method) && !reference) return fail('reference_required', 400, { index, method: raw.method });
     payments.push({ method: raw.method, amountTzs: raw.amountTzs, reference });
   }

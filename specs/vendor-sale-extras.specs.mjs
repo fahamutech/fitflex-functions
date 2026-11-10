@@ -20,12 +20,15 @@ import { parsePayment } from '../src/shared/vendor-customer.mjs';
 import { refundMethod } from '../src/shared/vendor-refund.mjs';
 import { methodAndReference } from '../src/shared/vendor-purchase.mjs';
 import { VENDOR_TOOLS_FLAGS, vendorToolsOptions } from '../src/shared/feature-flags.mjs';
+import fs from 'node:fs';
+import { createPgVendorSaleStore } from '../src/infra/vendor-sale-store-pg.mjs';
 import { createPgVendorDocumentStore } from '../src/infra/vendor-document-store-pg.mjs';
 import { saleDocument } from '../src/shared/vendor-documents.mjs';
 import { renderDocumentHtml } from '../src/shared/vendor-document-html.mjs';
 import { renderDocumentPdf } from '../src/shared/vendor-document-pdf.mjs';
 
-const migration = createRequire(import.meta.url)('../db/migrations/20270203090300-vendor-sale-customer-type.cjs');
+const MIGRATION = '../db/migrations/20270203090300-vendor-sale-customer-type.cjs';
+const migration = createRequire(import.meta.url)(MIGRATION);
 
 await ensureInit();
 
@@ -172,6 +175,21 @@ test('rules #1 (Q-1): customer payments, refunds and supplier payments still nee
   assert.deepEqual(methodAndReference('cash', 'C-1'), { method: 'cash', reference: null });
 });
 
+test('rules #1 (security review L-3): a sale reference holding a control character is refused (never stripped); other text is kept as typed', () => {
+  for (const bad of ['QK1\u0000', 'QK\n12', 'QK\t12', 'QK\r12', 'A\u001bB', 'A\u007fB', 'A\u0085B', 'A\u009fB']) {
+    for (const method of ['cash', 'mpesa', 'card']) {
+      assert.deepEqual(parseSale({ ...base, payments: [{ method, amountTzs: 1_000, reference: bad }] }), { error: 'invalid_payment', status: 400, index: 0, field: 'reference' }, `${method} ${JSON.stringify(bad)}`);
+    }
+  }
+  // The index points at the offending row.
+  assert.deepEqual(parseSale({ ...base, payments: [{ method: 'cash', amountTzs: 1_000, reference: 'ok' }, { method: 'bank', amountTzs: 1, reference: 'B\u00001' }] }).index, 1);
+  // Leading/trailing whitespace is trimmed as before (that trim already removed edge tabs/newlines); inside it is refused.
+  assert.equal(parseSale({ ...base, payments: [{ method: 'cash', amountTzs: 1_000, reference: '\tTILL-889\n' }] }).payments[0].reference, 'TILL-889');
+  for (const fine of ['TILL 889', 'Malipo ya Ñ/é – 12', 'CRDB TT 2026/10/20', 'نمبر ١٢', 'A\u00a0B']) {
+    assert.equal(parseSale({ ...base, payments: [{ method: 'mpesa', amountTzs: 1_000, reference: fine }] }).payments[0].reference, fine, JSON.stringify(fine));
+  }
+});
+
 // ── #2 customerType: rules ───────────────────────────────────────────────────
 
 test('rules #2: customerType is one of the five, or none; anything else → 400 invalid_field { field, allowed, message en + sw }', () => {
@@ -257,6 +275,9 @@ test('POST /vendor/sales #1: every method records with no reference, flag on or 
   assert.deepEqual((await getSale(as(v), tilled.body.sale.id)).body.sale.payments, [{ method: 'cash', amountTzs: 10_000, reference: 'TILL-889' }]);
   assert.equal((await db('VendorSalePayment').where({ saleId: tilled.body.sale.id }).first()).reference, 'TILL-889', 'stored');
   assert.deepEqual((await sell(as(v), saleBody(one, [{ method: 'cash', amountTzs: 10_000, reference: 'x'.repeat(101) }]))).body, { error: 'invalid_payment', index: 0, field: 'reference', max: 100 });
+  const stockBefore = (await db('Product').where({ id: p.id }).first()).stock;
+  assert.deepEqual((await sell(as(v), saleBody(one, [{ method: 'mpesa', amountTzs: 10_000, reference: 'QK\u000012' }]))).body, { error: 'invalid_payment', index: 0, field: 'reference' }, 'L-3: control character refused');
+  assert.equal((await db('Product').where({ id: p.id }).first()).stock, stockBefore, 'nothing recorded');
 
   // A retry with the same cash reference replays; with another reference it is a different sale.
   const body = saleBody(one, [{ method: 'cash', amountTzs: 10_000, reference: 'T-1' }]);
@@ -368,9 +389,13 @@ test('replay #2 (AC-23): the same clientRef and type replays; a sale sent withou
 
 test('migration: VendorSale.customerType (nullable text) with its CHECK; down drops both, up restores them', async () => {
   const col = q => q.raw(`SELECT is_nullable, data_type FROM information_schema.columns WHERE table_name = 'VendorSale' AND column_name = 'customerType'`);
-  const check = q => q.raw(`SELECT conname FROM pg_constraint WHERE conname = 'vendorsale_customer_type_check'`);
+  const check = q => q.raw(`SELECT conname, convalidated FROM pg_constraint WHERE conname = 'vendorsale_customer_type_check'`);
   assert.deepEqual((await col(db)).rows, [{ is_nullable: 'YES', data_type: 'text' }]);
-  assert.equal((await check(db)).rows.length, 1);
+  assert.deepEqual((await check(db)).rows, [{ conname: 'vendorsale_customer_type_check', convalidated: true }], 'validated after up');
+  // L-1: added NOT VALID, then VALIDATEd in its own statement, under a lock_timeout.
+  const src = fs.readFileSync(new URL(MIGRATION, import.meta.url), 'utf8');
+  assert.match(src, /CHECK \([^;]*\) NOT VALID`\);\s*await knex\.raw\('ALTER TABLE "VendorSale" VALIDATE CONSTRAINT vendorsale_customer_type_check'\)/);
+  assert.match(src, /SET LOCAL lock_timeout/);
   salesOn();
   const v = await vendor();
   const p = await product(v);
@@ -385,7 +410,28 @@ test('migration: VendorSale.customerType (nullable text) with its CHECK; down dr
     await migration.up(trx);
     assert.deepEqual((await col(trx)).rows, [{ is_nullable: 'YES', data_type: 'text' }]);
     assert.equal((await trx('VendorSale').where({ id: sale.id }).first()).customerType, null, 'no backfill');
+    assert.deepEqual((await check(trx)).rows, [{ conname: 'vendorsale_customer_type_check', convalidated: true }]);
     throw ROLLBACK;
   }), err => err === ROLLBACK);
   assert.equal((await check(db)).rows.length, 1, 'rolled back');
+});
+
+test('rollback order (security review L-2): with the column gone, a sale without customerType still records; one with a type is refused, nothing kept', async () => {
+  salesOn();
+  const v = await vendor();
+  const p = await product(v);
+  const parsed = body => Object.assign(parseSale(body), { soldAt: new Date(), clientSoldAt: null });
+  const ROLLBACK = new Error('rollback');
+  await assert.rejects(db.transaction(async (trx) => {
+    await migration.down(trx);
+    const store = createPgVendorSaleStore({ db: trx });
+    const plainSale = parsed(saleBody([{ productId: p.id, qty: 1 }], [{ method: 'cash', amountTzs: 10_000 }]));
+    const out = await store.record({ vendorId: v, actorId: v, sale: plainSale, fingerprint: saleFingerprint(plainSale) });
+    assert.equal(out.error, undefined, JSON.stringify(out));
+    assert.equal(out.sale.customerType, null, 'the view still answers null without the column');
+    const typedSale = parsed(saleBody([{ productId: p.id, qty: 1 }], [{ method: 'cash', amountTzs: 10_000 }], { customerType: 'new' }));
+    await assert.rejects(trx.transaction(t2 => createPgVendorSaleStore({ db: t2 }).record({ vendorId: v, actorId: v, sale: typedSale, fingerprint: saleFingerprint(typedSale) })), /customerType/);
+    throw ROLLBACK;
+  }), err => err === ROLLBACK);
+  assert.equal((await db('VendorSale').where({ vendorId: v }).count({ n: '*' }).first()).n, '0', 'rolled back');
 });

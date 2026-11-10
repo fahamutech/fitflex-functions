@@ -273,7 +273,10 @@ export function createPgVendorSaleStore({ db, now = () => new Date(), vatOn = ve
           soldAt: sale.soldAt, clientSoldAt: sale.clientSoldAt ?? null, subtotalTzs: totals.subtotalTzs, lineDiscountTzs: totals.lineDiscountTzs, discountTzs: totals.discountTzs,
           vatTzs: 0, totalTzs: totals.totalTzs, paidTzs: totals.paidTzs, changeTzs: totals.changeTzs, balanceTzs: totals.balanceTzs,
           invoiceSeq, invoiceNumber: invoiceSeq == null ? null : invoiceNumber(invoiceSeq), vatIncludedTzs, sellerSnapshot: JSON.stringify(sellerSnapshot),
-          dueDate: sale.kind === 'credit' ? sale.dueDate : null, customerType: sale.customerType ?? null,
+          dueDate: sale.kind === 'credit' ? sale.dueDate : null,
+          // Sale extras (security review L-2): the column is named only when a type was sent, so a sale without one
+          // still records if the code is ahead of (or rolled back past) the migration.
+          ...(sale.customerType ? { customerType: sale.customerType } : {}),
           clientRef: sale.clientRef, fingerprint, note: sale.note, createdBy: actorId, createdAt: at, updatedAt: at,
         });
         await trx('VendorSaleLine').insert(totals.lines.map((l, i) => ({
