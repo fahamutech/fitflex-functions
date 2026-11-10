@@ -203,6 +203,23 @@ export function refundSplitScopesOn() {
 }
 
 /**
+ * Phase 1 slice D · refund-to-statement clawback. Off unless REFUND_STATEMENT_CLAWBACK is set. On, a PAID pass
+ * refund whose cycle was already settled to a gym is clawed back through a proposed SettlementAdjustment
+ * (type clawback, linked by refundId, once per refund and statement). Used visits stand; only money moves.
+ */
+export function refundStatementClawbackOn() {
+  return on('REFUND_STATEMENT_CLAWBACK');
+}
+
+/**
+ * Phase 1 slice D · decision 4. Off unless REFUND_END_ACCESS_DEFAULT is set. On, approving a FULL pass refund
+ * ends access unless the admin explicitly sends endAccess: false. Off: access ends only when endAccess is true.
+ */
+export function refundEndAccessDefaultOn() {
+  return on('REFUND_END_ACCESS_DEFAULT');
+}
+
+/**
  * Phase 1 slice A · F2. Off unless STATEMENT_PAY_SECOND_PERSON is set. On, the admin who approved a gym,
  * trainer or vendor payout statement cannot mark it paid (403 cannot_pay_own_approval). Independent
  * of MONEY_SECOND_APPROVER.

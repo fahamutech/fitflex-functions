@@ -5,7 +5,8 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
-import { settlementService, settlementWorkflowService, settlementViewService, settlementClawbackService } from '../src/bootstrap/services.mjs';
+import { settlementService, settlementWorkflowService, settlementViewService, settlementClawbackService, refundClawbackService } from '../src/bootstrap/services.mjs';
+import { refundStatementClawbackOn } from '../src/shared/feature-flags.mjs';
 import { periodForMonth } from '../src/services/settlement-service.mjs';
 
 const created = new Date().toISOString();
@@ -43,6 +44,7 @@ export const adminRunSettlement = {
     if (result.skipped) return res.status(409).json({ error: 'settlement_run_in_progress' });
     // New draft statements can take clawbacks that were waiting for one.
     if (mode === 'live' && !result.alreadyRun) await settlementClawbackService.sweepQuietly({ actorId: req.user?.sub });
+    if (mode === 'live' && !result.alreadyRun && refundStatementClawbackOn()) await refundClawbackService.sweepPendingQuietly({ actorId: req.user?.sub });
     res.status(result.alreadyRun ? 200 : 201).json(result);
   }
 };
@@ -91,6 +93,7 @@ export const adminRejectStatement = {
     const result = await settlementWorkflowService.reject({ id: req.params.id, reason: req.body?.reason, actorId: req.user?.sub });
     // Back in draft, the statement can take a clawback that was waiting.
     if (!result.error) await settlementClawbackService.sweepQuietly({ actorId: req.user?.sub });
+    if (!result.error && refundStatementClawbackOn()) await refundClawbackService.sweepPendingQuietly({ actorId: req.user?.sub });
     respond(res, result);
   }
 };
@@ -155,6 +158,7 @@ export const adminVoidStatement = {
   onRequest: async (req, res) => {
     const result = await settlementWorkflowService.voidStatement({ id: req.params.id, actorId: req.user?.sub });
     if (!result.error) await settlementClawbackService.sweepQuietly({ actorId: req.user?.sub });
+    if (!result.error && refundStatementClawbackOn()) await refundClawbackService.sweepPendingQuietly({ actorId: req.user?.sub });
     respond(res, result);
   }
 };
@@ -205,4 +209,28 @@ export const adminSweepSettlementClawbacks = {
   description: 'Admin: recalculate settled member cycles that have a check-in voided since, and propose each gym\'s difference on its draft statement. Runs by itself when a check-in is voided, after each live run, and when a statement is rejected or voided; safe to repeat.',
   onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('settlements_prepare')]),
   onRequest: async (req, res) => res.json(withGyms(await settlementClawbackService.sweep({ actorId: req.user?.sub })))
+};
+
+// ── Slice D: pass-refund clawbacks (REFUND_STATEMENT_CLAWBACK) ───────────────────────────────────────────────
+
+export const adminRefundClawback = {
+  created, method: 'get', path: '/admin/refunds/:id/clawback',
+  description: 'Admin (scope payments): the settlement clawbacks raised for one pass refund (REFUND_STATEMENT_CLAWBACK). → { refundId, enabled, adjustments: [{ id, gymSettlementId, sourceSettlementId, gymId, amountTzs, status, reason, createdBy, createdAt }] }. Empty when the pass was never settled or the flag is off.',
+  onGuard: routeGuard('get', guard),
+  onRequest: async (req, res) => {
+    const rows = await refundClawbackService.listForRefund(req.params.id);
+    res.json({ refundId: req.params.id, enabled: refundStatementClawbackOn(), adjustments: rows });
+  }
+};
+
+export const adminRetryRefundClawback = {
+  created, method: 'post', path: '/admin/refunds/:id/clawback',
+  description: 'Admin (scope settlements_prepare): raise the clawback of a PAID pass refund again; idempotent (what is already raised is reported, never doubled). 404 refund_not_found, 409 refund_not_paid, 404 feature_disabled while REFUND_STATEMENT_CLAWBACK is off. → { status: raised | pending | already_raised | unsettled | nothing_to_claw_back | not_applicable, raised, existing, pending, skipped, held }.',
+  onGuard: routeGuard('post', [requireAuth('admin'), requireAcl('settlements_prepare')]),
+  onRequest: async (req, res) => {
+    if (!refundStatementClawbackOn()) return res.status(404).json({ error: 'feature_disabled' });
+    const out = await refundClawbackService.retryForRefundId({ id: req.params.id, actorId: req.user?.sub });
+    if (out.error) return res.status(out.status).json({ error: out.error });
+    res.json(out);
+  }
 };
