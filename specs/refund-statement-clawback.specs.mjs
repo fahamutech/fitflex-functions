@@ -204,10 +204,11 @@ test('clawback: with no draft statement it waits, and the sweep raises it once w
   assert.equal((await refundAdjustments(trx, refund.id)).length, 0);
 
   const dec = await december(trx, x.w);
-  const swept = await dec.refundClawback.sweepPending({ actorId: 'system' });
+  process.env.REFUND_CLAWBACK_FROM = '2026-01-01T00:00:00Z';
+  let swept;
+  try { swept = await dec.refundClawback.sweepPending({ actorId: 'system' }); } finally { delete process.env.REFUND_CLAWBACK_FROM; }
   assert.equal(swept.results.length, 1);
   assert.equal((await refundAdjustments(trx, refund.id)).length, 2);
-  assert.deepEqual((await dec.refundClawback.sweepPending()).results, []);
   assert.equal((await refundAdjustments(trx, refund.id)).length, 2);
   assert.deepEqual((await dec.refundClawback.listForRefund(refund.id)).map((r) => r.amountTzs).sort((a, b) => a - b), [-161638, -25862]);
 }));
@@ -263,14 +264,14 @@ function memStore(rows = []) {
   };
 }
 
-function refundFixture({ clawbackOn, endAccess = false, clawback = null, amount = 250000 } = {}) {
+function refundFixture({ clawbackOn, endAccess = false, clawback = null, amount = 250000, reasonCode = 'member_cancelled', extraPayments = [], extraRefunds = [] } = {}) {
   const payment = { id: 'pay1', memberId: 'm1', subscriptionId: 'sub1', amountTzs: 250000, status: 'approved' };
-  const refunds = memStore([{ id: 'rfd1', memberId: 'm1', kind: 'subscription', subscriptionId: 'sub1', paymentRequestId: 'pay1', amountTzs: amount, status: 'approved', decidedBy: 'checker', requestedRole: 'member', createdAt: new Date().toISOString() }]);
+  const refunds = memStore([{ id: 'rfd1', memberId: 'm1', kind: 'subscription', subscriptionId: 'sub1', paymentRequestId: 'pay1', amountTzs: amount, reasonCode, status: 'approved', decidedBy: 'checker', requestedRole: 'member', createdAt: new Date().toISOString() }, ...extraRefunds]);
   const subscriptions = memStore([{ id: 'sub1', memberId: 'm1', expiresAt: '2099-01-01T00:00:00.000Z', renewsAt: '2099-01-01T00:00:00.000Z' }]);
   const auditRows = memStore();
   const calls = [];
   const service = createRefundService({
-    refunds, paymentRequests: memStore([payment]), subscriptions, users: memStore(), auditLog: auditRows,
+    refunds, paymentRequests: memStore([payment, ...extraPayments]), subscriptions, users: memStore(), auditLog: auditRows,
     secondApprover: () => false, splitScopes: () => false,
     clawbackOn: () => clawbackOn, endAccessDefault: () => endAccess,
     clawback: clawback ?? (async (args) => { calls.push(args.refund.id); return { status: 'raised', raised: [], existing: [], pending: [], skipped: [], held: [] }; }),
@@ -361,14 +362,14 @@ test('end access: flag on, an admin raise approved at once follows the same defa
     return f;
   };
   let f = mk();
-  let out = await f.service.adminRaise({ body: { paymentRequestId: 'pay1' }, actorId: 'raiser' });
+  let out = await f.service.adminRaise({ body: { paymentRequestId: 'pay1', reasonCode: 'member_cancelled' }, actorId: 'raiser' });
   assert.equal(out.refund.status, 'approved');
   assert.equal(endedOf(f), true);
   f = mk();
-  out = await f.service.adminRaise({ body: { paymentRequestId: 'pay1', endAccess: false }, actorId: 'raiser' });
+  out = await f.service.adminRaise({ body: { paymentRequestId: 'pay1', reasonCode: 'member_cancelled', endAccess: false }, actorId: 'raiser' });
   assert.equal(endedOf(f), false);
   f = mk();
-  out = await f.service.adminRaise({ body: { paymentRequestId: 'pay1', amountTzs: 100000 }, actorId: 'raiser' });
+  out = await f.service.adminRaise({ body: { paymentRequestId: 'pay1', reasonCode: 'member_cancelled', amountTzs: 100000 }, actorId: 'raiser' });
   assert.equal(endedOf(f), false);
 });
 
@@ -391,4 +392,166 @@ test('migration: refundId column and the once-per-refund index go away and come 
   await migration.up(trx);   // idempotent
   assert.equal(await trx.schema.hasColumn('SettlementAdjustment', 'refundId'), true);
   assert.equal((await trx.raw(`select 1 from pg_indexes where indexname = 'settlement_adjustment_refund_once_uq'`)).rows.length, 1);
+}));
+
+// ── review fixes (H1, H2, M1-M4, L3) ─────────────────────────────────────────
+
+test('H1: a duplicate or mistaken charge refunded in full does not end access by default; an explicit true still does', async () => {
+  for (const reasonCode of ['charged_twice', 'payment_error']) {
+    const f = refundFixture({ endAccess: true, reasonCode });
+    await approveRequested(f);
+    assert.equal(endedOf(f), false, reasonCode);
+  }
+  const f = refundFixture({ endAccess: true, reasonCode: 'charged_twice' });
+  await approveRequested(f, { endAccess: true });
+  assert.equal(endedOf(f), true);
+  for (const reasonCode of ['not_activated', 'member_cancelled', 'other']) {
+    const g = refundFixture({ endAccess: true, reasonCode });
+    await approveRequested(g);
+    assert.equal(endedOf(g), true, reasonCode);
+  }
+});
+
+test('H1: a subscription with a top-up payment ends only when the refunds cover every approved payment', async () => {
+  const topUp = { id: 'pay2', memberId: 'm1', subscriptionId: 'sub1', amountTzs: 50000, status: 'approved' };
+  let f = refundFixture({ endAccess: true, extraPayments: [topUp] });          // refunds the 250,000 payment only
+  await approveRequested(f);
+  assert.equal(endedOf(f), false);
+  f = refundFixture({ endAccess: true, extraPayments: [topUp], extraRefunds: [{ id: 'rfd2', kind: 'subscription', subscriptionId: 'sub1', amountTzs: 50000, status: 'paid' }] });
+  await approveRequested(f);                                                    // the top-up was refunded already
+  assert.equal(endedOf(f), true);
+  f = refundFixture({ endAccess: true, extraPayments: [topUp], extraRefunds: [{ id: 'rfd2', kind: 'subscription', subscriptionId: 'sub1', amountTzs: 50000, status: 'rejected' }] });
+  await approveRequested(f);                                                    // a rejected refund covers nothing
+  assert.equal(endedOf(f), false);
+});
+
+const insertRefund = (trx, refund) => trx('Refund').insert(refund);
+const voidCheckin = (trx, id, by = 'voider') => trx('Checkin').where({ id })
+  .update({ status: 'voided', statusReason: 'Not a real visit', voidedAt: new Date('2026-12-02T08:00:00Z'), voidedBy: by, voidReason: 'Not a real visit' });
+/** Everything raised against gym D's November line, refund and visit clawbacks together. */
+async function takenFromLine(trx, sourceId) {
+  const [{ t }] = await trx('SettlementAdjustment').where({ sourceSettlementId: sourceId }).whereIn('status', ['proposed', 'applied']).sum({ t: 'amountTzs' });
+  return Number(t) || 0;
+}
+
+test('H2: a refund clawback and a later check-in void never take more than the line paid (refund first)', () => inRollback(async (trx) => {
+  const x = await settledPass(trx);
+  await pay(x.workflow, x.d.id);
+  await pay(x.workflow, x.c.id);
+  const dec = await december(trx, x.w);
+  const refund = paidRefund(x.m, 250000);
+  await insertRefund(trx, refund);
+  await dec.refundClawback.raiseForRefund({ refund, actorId: 'payer' });
+  await voidCheckin(trx, x.atD[14].id);
+  const out = await dec.voidSweep.sweep({ checkinId: x.atD[14].id });
+  assert.equal(out.raised.filter((r) => r.gymId === x.w.gymD).length, 0);
+  assert.equal(await takenFromLine(trx, x.d.id), -161638);
+}));
+
+test('H2: a check-in void and a later refund clawback never take more than the line paid (void first)', () => inRollback(async (trx) => {
+  const x = await settledPass(trx);
+  await pay(x.workflow, x.d.id);
+  await pay(x.workflow, x.c.id);
+  const dec = await december(trx, x.w);
+  await voidCheckin(trx, x.atD[14].id);
+  const out = await dec.voidSweep.sweep({ checkinId: x.atD[14].id });
+  assert.equal(out.raised.find((r) => r.gymId === x.w.gymD).amountTzs, -61638);
+  const refund = paidRefund(x.m, 250000);
+  await insertRefund(trx, refund);
+  const r = await dec.refundClawback.raiseForRefund({ refund, actorId: 'payer' });
+  assert.equal(r.raised.find((i) => i.gymId === x.w.gymD).amountTzs, -(161638 - 61638));
+  assert.equal(await takenFromLine(trx, x.d.id), -161638);
+  // and the void sweep stays quiet afterwards
+  assert.deepEqual((await dec.voidSweep.sweep()).raised.filter((i) => i.gymId === x.w.gymD), []);
+}));
+
+test('M1: a rejected refund clawback can be raised again; a rejected one does not count against room', () => inRollback(async (trx) => {
+  const x = await settledPass(trx);
+  await pay(x.workflow, x.d.id);
+  await pay(x.workflow, x.c.id);
+  const dec = await december(trx, x.w);
+  const refund = paidRefund(x.m, 250000);
+  await insertRefund(trx, refund);
+  await dec.refundClawback.raiseForRefund({ refund, actorId: 'payer' });
+  const [first] = await trx('SettlementAdjustment').where({ refundId: refund.id, sourceSettlementId: x.d.id });
+  assert.equal((await dec.workflow.decideAdjustment({ id: first.id, decision: 'reject', reason: 'Wrong', actorId: 'checker' })).adjustment.status, 'rejected');
+  const again = await dec.refundClawback.raiseForRefund({ refund, actorId: 'payer' });
+  assert.equal(again.raised.length, 1);
+  assert.equal(again.raised[0].amountTzs, -161638);
+  assert.equal((await trx('SettlementAdjustment').where({ refundId: refund.id }).whereIn('status', ['proposed', 'applied'])).length, 2);
+}));
+
+test('M4: the person who paid the refund cannot apply or reject its clawback; sweep-created ones are theirs too', () => inRollback(async (trx) => {
+  const x = await settledPass(trx);
+  await pay(x.workflow, x.d.id);
+  await pay(x.workflow, x.c.id);
+  const refund = paidRefund(x.m, 250000);
+  await insertRefund(trx, refund);
+  await x.refundClawback.raiseForRefund({ refund, actorId: 'payer' });                // pending: no draft yet
+  const dec = await december(trx, x.w);
+  const swept = await dec.refundClawback.raiseForRefund({ refund, actorId: 'system:sweep' });
+  const rows = await trx('SettlementAdjustment').where({ refundId: refund.id });
+  assert.equal(swept.raised.length, 2);
+  assert.deepEqual([...new Set(rows.map((r) => r.createdBy))], ['payer']);           // the refund's paidBy, not the sweeping actor
+  for (const decision of ['apply', 'reject']) {
+    assert.equal((await dec.workflow.decideAdjustment({ id: rows[0].id, decision, reason: 'x', actorId: 'payer' })).error, 'cannot_decide_own_refund_adjustment');
+  }
+  await trx('SettlementAdjustment').where({ id: rows[0].id }).update({ createdBy: 'someone' });   // even if created by another, the payer is still barred
+  assert.equal((await dec.workflow.decideAdjustment({ id: rows[0].id, decision: 'apply', actorId: 'payer' })).error, 'cannot_decide_own_refund_adjustment');
+}));
+
+test('M2: voiding the source statement cancels the refund clawbacks taken from its lines', () => inRollback(async (trx) => {
+  const x = await settledPass(trx);
+  await x.workflow.submit({ id: x.d.id, actorId: 'maker' });                        // frozen, so the clawback lands on December's draft
+  await x.workflow.submit({ id: x.c.id, actorId: 'maker' });
+  const dec = await december(trx, x.w);
+  const refund = paidRefund(x.m, 250000);
+  await insertRefund(trx, refund);
+  await dec.refundClawback.raiseForRefund({ refund, actorId: 'payer' });
+  assert.equal((await dec.workflow.requestVoid({ id: x.d.id, reason: 'Gym left', actorId: 'maker' })).error, undefined);
+  assert.equal((await dec.workflow.voidStatement({ id: x.d.id, actorId: 'checker' })).error, undefined);
+  const rows = await trx('SettlementAdjustment').where({ refundId: refund.id, sourceSettlementId: x.d.id });
+  assert.deepEqual(rows.map((r) => r.status), ['voided']);
+  assert.equal((await trx('SettlementAdjustment').where({ refundId: refund.id, sourceSettlementId: x.c.id })).at(0).status, 'proposed');
+  assert.equal((await trx('AuditLog').where({ action: 'refund_clawback_voided', target: rows[0].id })).length, 1);
+}));
+
+test('L3: rejecting a clawback lifts the hold it set, but not a hold something else set', () => inRollback(async (trx) => {
+  const x = await settledPass(trx);
+  await x.workflow.submit({ id: x.d.id, actorId: 'maker' });
+  await x.workflow.submit({ id: x.c.id, actorId: 'maker' });
+  await x.workflow.hold({ id: x.c.id, reason: 'Bank query', actorId: 'maker' });     // C is held for another reason
+  const dec = await december(trx, x.w);
+  const refund = paidRefund(x.m, 250000);
+  await insertRefund(trx, refund);
+  const out = await dec.refundClawback.raiseForRefund({ refund, actorId: 'payer' });
+  assert.deepEqual(out.held, [x.d.id]);
+  assert.ok((await trx('GymSettlement').where({ id: x.d.id }).first()).holdReason);
+  const rows = await trx('SettlementAdjustment').where({ refundId: refund.id });
+  for (const r of rows) await dec.workflow.decideAdjustment({ id: r.id, decision: 'reject', reason: 'Not owed', actorId: 'checker' });
+  assert.equal((await trx('GymSettlement').where({ id: x.d.id }).first()).holdReason, null);
+  assert.equal((await trx('GymSettlement').where({ id: x.c.id }).first()).holdReason, 'Bank query');
+}));
+
+test('M3: the background sweep does nothing without REFUND_CLAWBACK_FROM, ignores older refunds, and is bounded to settled refunds', () => inRollback(async (trx) => {
+  const x = await settledPass(trx);
+  await pay(x.workflow, x.d.id);
+  await pay(x.workflow, x.c.id);
+  const dec = await december(trx, x.w);
+  const refund = paidRefund(x.m, 250000, { paidAt: new Date('2027-01-01T00:00:00Z') });
+  await insertRefund(trx, refund);
+  const before = process.env.REFUND_CLAWBACK_FROM;
+  try {
+    delete process.env.REFUND_CLAWBACK_FROM;
+    assert.equal((await dec.refundClawback.sweepPending()).skipped, 'REFUND_CLAWBACK_FROM not set');
+    assert.equal((await trx('SettlementAdjustment').where({ refundId: refund.id })).length, 0);
+    process.env.REFUND_CLAWBACK_FROM = '2027-01-02T00:00:00Z';                    // refund was paid before the cutoff
+    assert.deepEqual((await dec.refundClawback.sweepPending()).results, []);
+    process.env.REFUND_CLAWBACK_FROM = '2026-12-01T00:00:00Z';
+    assert.equal((await dec.refundClawback.sweepPending()).results.length, 1);
+    assert.equal((await trx('SettlementAdjustment').where({ refundId: refund.id })).length, 2);
+    assert.deepEqual((await dec.refundClawback.sweepPending()).results, []);       // finished refunds are not reloaded
+  } finally {
+    if (before === undefined) delete process.env.REFUND_CLAWBACK_FROM; else process.env.REFUND_CLAWBACK_FROM = before;
+  }
 }));

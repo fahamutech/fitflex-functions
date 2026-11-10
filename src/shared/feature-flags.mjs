@@ -212,6 +212,16 @@ export function refundStatementClawbackOn() {
 }
 
 /**
+ * Slice D: REFUND_CLAWBACK_FROM (ISO date). The background sweep of pass-refund clawbacks (after settlement runs, statement
+ * rejects and voids) only looks at refunds paid on or after it, and does nothing while it is unset. The markPaid hook and
+ * the manual retry endpoint always work. Returns a Date or null.
+ */
+export function refundClawbackFrom() {
+  const t = Date.parse(String(process.env.REFUND_CLAWBACK_FROM ?? '').trim());
+  return Number.isFinite(t) ? new Date(t) : null;
+}
+
+/**
  * Phase 1 slice D · decision 4. Off unless REFUND_END_ACCESS_DEFAULT is set. On, approving a FULL pass refund
  * ends access unless the admin explicitly sends endAccess: false. Off: access ends only when endAccess is true.
  */

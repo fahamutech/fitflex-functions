@@ -215,9 +215,10 @@ export const adminSweepSettlementClawbacks = {
 
 export const adminRefundClawback = {
   created, method: 'get', path: '/admin/refunds/:id/clawback',
-  description: 'Admin (scope payments): the settlement clawbacks raised for one pass refund (REFUND_STATEMENT_CLAWBACK). → { refundId, enabled, adjustments: [{ id, gymSettlementId, sourceSettlementId, gymId, amountTzs, status, reason, createdBy, createdAt }] }. Empty when the pass was never settled or the flag is off.',
-  onGuard: routeGuard('get', guard),
+  description: 'Admin (scope settlements_prepare, settlements_approve or settlements_pay): the settlement clawbacks raised for one pass refund (REFUND_STATEMENT_CLAWBACK). → { refundId, enabled, adjustments: [{ id, gymSettlementId, sourceSettlementId, gymId, amountTzs, status, reason, createdBy, createdAt, heldSource }] }. Empty when the pass was never settled or the flag is off. 404 refund_not_found.',
+  onGuard: routeGuard('get', [requireAuth('admin'), requireAcl('settlements_prepare', 'settlements_approve', 'settlements_pay')]),
   onRequest: async (req, res) => {
+    if (!(await refundClawbackService.refundExists(req.params.id))) return res.status(404).json({ error: 'refund_not_found' });
     const rows = await refundClawbackService.listForRefund(req.params.id);
     res.json({ refundId: req.params.id, enabled: refundStatementClawbackOn(), adjustments: rows });
   }

@@ -27,6 +27,8 @@ export const MEMBER_REASONS = ['charged_twice', 'not_activated', 'other'];
 const REASONS = new Set([
   ...MEMBER_REASONS, 'member_cancelled', 'trainer_cancelled', 'vendor_cancelled', 'cancelled_by_fitflex', 'payment_error', 'sponsor_paid',
 ]);
+/** Slice D: reasons for which a full refund ends access by default (REFUND_END_ACCESS_DEFAULT). */
+const END_ACCESS_DEFAULT_REASONS = ['not_activated', 'member_cancelled', 'other'];
 const SOURCE_FIELD = { subscription: 'paymentRequestId', trainer_booking: 'bookingId', shop_order: 'orderId', event_order: 'eventOrderId' };
 const fail = (error, status = 400, extra = {}) => ({ error, status, ...extra });
 const nowIso = () => new Date().toISOString();
@@ -79,16 +81,24 @@ export function createRefundService({
   }
 
   /**
-   * Slice D (decision 4): does approving this refund end the pass now? An explicit true/false always wins; with
-   * REFUND_END_ACCESS_DEFAULT on and nothing sent, a FULL refund of a pass or plan payment ends access.
+   * Slice D (decision 4): does approving this refund end the pass now? An explicit true/false always wins. With
+   * REFUND_END_ACCESS_DEFAULT on and nothing sent, access ends only when the refund puts the WHOLE subscription back:
+   * this refund together with the subscription's other approved or paid refunds covers every approved payment, and the
+   * reason is not charged_twice or payment_error (a duplicate or mistaken charge says nothing about the pass itself).
    * Flag off: only an explicit true ends it (unchanged).
    */
   async function endsAccess(refund, explicit) {
     if (!refund.subscriptionId || !subscriptions) return false;
     if (explicit === true) return true;
     if (explicit === false || !endAccessDefault() || refund.kind !== 'subscription') return false;
-    const request = refund.paymentRequestId ? await paymentRequests.findByIdAsync(refund.paymentRequestId) : null;
-    return !!request && Number(request.amountTzs) > 0 && Number(refund.amountTzs) >= Number(request.amountTzs);
+    if (!END_ACCESS_DEFAULT_REASONS.includes(refund.reasonCode)) return false;
+    const payments = (await paymentRequests.filterByColumnAsync('subscriptionId', refund.subscriptionId)).filter(p => p.status === 'approved');
+    const owed = payments.reduce((t, p) => t + (Number(p.amountTzs) || 0), 0);
+    if (!(owed > 0)) return false;
+    const others = (await refunds.filterByColumnAsync('subscriptionId', refund.subscriptionId))
+      .filter(r => r.id !== refund.id && r.kind === 'subscription' && ['approved', 'paid'].includes(r.status));
+    const covered = Number(refund.amountTzs) + others.reduce((t, r) => t + (Number(r.amountTzs) || 0), 0);
+    return covered >= owed;
   }
 
   // A refund a staff member raises is not approved by the raise when either flag is on: someone else decides it.
