@@ -92,7 +92,8 @@ import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
 import { createPartnerNotifier } from '../services/partner-notifier.mjs';
 import { createSecurityEventService } from '../services/security-event-service.mjs';
-import { webCheckinAlertsOn } from '../shared/feature-flags.mjs';
+import { createSecurityIncidentService } from '../services/security-incident-service.mjs';
+import { webCheckinAlertsOn, securityIncidentReportsOn, securityReportMaxPerDay } from '../shared/feature-flags.mjs';
 import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createRecommendationEngine } from '../services/training/recommendation-engine.mjs';
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
@@ -750,6 +751,9 @@ export const securityEventService = createSecurityEventService({
   notify: (userId, message) => notificationService.notify(userId, message),
   localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
   alertsOn: webCheckinAlertsOn,
+  // S4b: the incident service is created further down (after pinAuthService); these only run when a list is read.
+  reportsOn: securityIncidentReportsOn,
+  reportsFor: (userId, ids) => securityIncidentService.reportsFor(userId, ids),
 });
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
@@ -1171,6 +1175,13 @@ export const pinAuthService = createPinAuthService({
   // The key the PIN is mixed with before hashing. It must be set in production
   // and never change afterwards, or every stored PIN stops matching.
   pepper: () => pinPepper(),
+});
+// Security incident reports (S4b). Dormant behind SECURITY_INCIDENT_REPORTS (needs WEB_QR_CHECKIN).
+export const securityIncidentService = createSecurityIncidentService({
+  db, pinAuth: pinAuthService, ops: opsService, auditLog,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  reportsOn: securityIncidentReportsOn, maxPerDay: securityReportMaxPerDay,
 });
 // Identity V2 · I7b: register with a number or email, a code, then a PIN.
 export const registrationService = createRegistrationService({

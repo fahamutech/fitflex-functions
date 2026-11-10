@@ -42,7 +42,7 @@ export const PUSH_TEXT = {
 };
 
 export function createSecurityEventService({
-  db, gyms, deviceTokens, notify, localeOf = async () => null, alertsOn = () => false, logger = console,
+  db, gyms, deviceTokens, notify, localeOf = async () => null, alertsOn = () => false, reportsOn = () => false, reportsFor = async () => ({}), logger = console,
   now = () => new Date(),
 }) {
   /** Would a new alert reach this member's phone? Needs the flags and at least one registered device. */
@@ -108,14 +108,19 @@ export function createSecurityEventService({
     }
     const rows = await q.orderBy([{ column: 'occurredAt', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(n + 1);
     const page = rows.slice(0, n);
+    // S4b: with SECURITY_INCIDENT_REPORTS on, each event says whether the member has reported it (report: null = not yet).
+    const reportEnabled = Boolean(reportsOn());
+    let reports = {};
+    if (reportEnabled) { try { reports = await reportsFor(userId, page.map(r => r.id)); } catch { reports = {}; } }
     const events = page.map(r => ({
       id: r.id, kind: r.kind, occurredAt: new Date(r.occurredAt).toISOString(),
       gym: { id: r.gymId, name: r.details?.gymName || null },
       channel: r.channel || 'web',
       status: r.notifiedAt ? 'inbox' : 'recorded',
+      report: reports[r.id] || null,
     }));
     const last = page[page.length - 1];
-    return { events, ...(rows.length > n && last ? { next: `${new Date(last.occurredAt).toISOString()}~${last.id}` } : {}) };
+    return { events, reportEnabled, ...(rows.length > n && last ? { next: `${new Date(last.occurredAt).toISOString()}~${last.id}` } : {}) };
   }
 
   /** Retention: events older than RETENTION_MONTHS go. → rows deleted. */

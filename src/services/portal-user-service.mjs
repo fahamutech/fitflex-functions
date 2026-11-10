@@ -27,6 +27,8 @@ export const PORTAL_ACL_SCOPES = [
   'audit',
   // Refunds: deciding and paying are separate grants once REFUND_SPLIT_SCOPES is on (listing/raising stay `payments`).
   'refunds_approve', 'refunds_pay',
+  // Security incidents: members' "this check-in was not me" reports (GET/POST /admin/security-incidents*).
+  'security_incidents',
 ];
 
 /** Shortest password accepted when an admin replaces the start password (Firebase's own floor is 6). */
