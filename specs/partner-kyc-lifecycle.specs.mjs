@@ -220,6 +220,26 @@ test('a document that is no longer asked for gets no reminder', async () => {
   assert.equal((await remindersFor(t.userId)).length, 0);
 });
 
+test('an expiry reminder is in the partner\'s language; the case history keeps the English wording', async () => {
+  const sw = await verifiedTrainer({ expiresIn: 25 });
+  const en = await verifiedTrainer({ expiresIn: 25 });
+  await db('CommunicationPreference').insert({ id: sw.userId, locale: 'sw', createdAt: new Date(), updatedAt: new Date() });
+  try {
+    await svc.sendExpiryReminders();
+    const [inSw] = await remindersFor(sw.userId);
+    assert.equal(inSw.title, 'Cheti cha taaluma: muda wake unaisha baada ya siku 25');
+    assert.equal(inSw.body, `Muda wa cheti cha taaluma unaisha tarehe ${day(25)}. Pakia hati mpya kwenye Uthibitisho.`);
+    assert.deepEqual(inSw.data, { caseId: sw.caseId, requirementKey: 'certification', expiresOn: day(25), type: 'kyc_document_expiring' });
+    const [inEn] = await remindersFor(en.userId);
+    assert.equal(inEn.title, 'Your certification expires in 25 days');
+    assert.equal(inEn.body, `Your certification expires on ${day(25)}. Upload the renewed one in Verification.`);
+    const note = await db('PartnerKycEvent').where({ caseId: sw.caseId, eventType: 'note' }).first();
+    assert.equal(note.note, inEn.body);
+  } finally {
+    await db('CommunicationPreference').where('id', sw.userId).del();
+  }
+});
+
 test('far-off and long-expired documents get no reminder', async () => {
   const far = await verifiedTrainer({ expiresIn: 90 });
   const gone = await verifiedTrainer({ expiresIn: -60 });

@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createChallengeService } from '../src/services/challenge-service.mjs';
 import { createChallengeRewardService } from '../src/services/challenge-reward-service.mjs';
+import { deliveredTo } from './fixtures/notification-language.mjs';
 
 function store(rows = []) {
   const clone = (r) => JSON.parse(JSON.stringify(r));
@@ -38,7 +39,7 @@ function setup() {
     teams: store(),
     awards: store(),
     auditLog: store(),
-    sent: [],
+    sent: [], messages: [],
     users: store(ids.map(id => ({ id, userType: 'member', displayName: `${id.toUpperCase()} Person`, corporateId: 'corp_1' }))),
     corporateEmployees: store(ids.map(id => ({ id: `e_${id}`, userId: id, corporateId: 'corp_1', displayName: `${id.toUpperCase()} Staff`, department: 'Finance', status: 'active' }))),
     subscriptions: store([]),
@@ -58,7 +59,7 @@ function setup() {
   s.rw = createChallengeRewardService({
     challenges: s.challenges, participants: s.participants, awards: s.awards, users: s.users,
     corporateEmployees: s.corporateEmployees, challengeService: s.svc, auditLog: s.auditLog,
-    notify: async (userId, m) => { s.sent.push({ userId, type: m.type }); }, now,
+    notify: async (userId, m) => { s.messages.push(m); s.sent.push({ userId, type: m.type }); }, now,
   });
   return s;
 }
@@ -97,6 +98,13 @@ test('finishers earn as soon as they hit the target, once', async () => {
   assert.deepEqual(await statuses(s, 'm1'), ['7-day FitFlex Gym Pass:pending'], 'not twice');
   assert.deepEqual(await statuses(s, 'm2'), [], 'not there yet');
   assert.deepEqual(s.sent, [{ userId: 'm1', type: 'challenge_reward_earned' }]);
+  // Swahili for a member who chose it; the challenge and reward names stay as written.
+  const sw = await deliveredTo(s.messages[0], 'sw');
+  assert.equal(sw.title, 'Umepata zawadi');
+  assert.match(sw.body, /: 7-day FitFlex Gym Pass\. Inasubiri kutolewa\.$/);
+  const en = await deliveredTo(s.messages[0], null);
+  assert.equal(en.title, 'Reward earned');
+  assert.match(en.body, /: 7-day FitFlex Gym Pass\. Pending fulfilment\.$/);
   const r = (await s.rw.memberRewards('m1')).rewards[0];
   assert.equal(r.challenge.name, 'FitFlex 50K Steps');
   assert.equal(r.reward.value, '7 days');
