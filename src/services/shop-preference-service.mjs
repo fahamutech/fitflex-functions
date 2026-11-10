@@ -7,7 +7,7 @@
 // Partner DOB slice 4 (SHOP_PERSONALISATION_PARTNERS, effective only with SHOP_PERSONALISATION on):
 // in trainer and owner mode `available` comes from the Person's declared date of birth instead
 // (shop-personalisation.partnerEligibility), so a trainer- or owner-only account can be personalised.
-import { personalisationEligibility, partnerEligibility, partnerGender, PARTNER_MODES, historyDaysFromEnv } from './shop-personalisation.mjs';
+import { personalisationEligibility, partnerEligibility, partnerGender, personDobVerdict, blockedByVerdict, PARTNER_MODES, historyDaysFromEnv } from './shop-personalisation.mjs';
 import { buildNeeds, resolveShoppingMode } from './shop-recommendations.mjs';
 import { shopPersonalisationOn, shopPersonalisationPartnersOn, shopNearYouOn } from '../shared/feature-flags.mjs';
 
@@ -32,6 +32,10 @@ export function createShopPreferenceService({
   // mode with both flags on; never KYC, activity, health, training, sponsor or company data.
   partnersOn = shopPersonalisationPartnersOn,
   personDetailsOf = async () => null,
+  // Security review M1: (personId) → [{ id, memberProfile }] of EVERY member persona of the Person,
+  // suspended ones included (as personal-details-service.memberDateOfBirth). Default: the identity
+  // link's persona rows, unfiltered.
+  memberRowsOf = null,
 }) {
   /** Whose setting this is: the Person, else (an account without a Person) the user itself. */
   const subjectOf = (user, claims) => (user?.personId
@@ -50,6 +54,27 @@ export function createShopPreferenceService({
     if (!persona) return { has: false, profile: null };
     const row = persona.memberProfile !== undefined ? persona : await users.findByIdAsync(persona.id);
     return { has: true, profile: row?.memberProfile || null };
+  }
+
+  async function allMemberRows(personId) {
+    if (memberRowsOf) return memberRowsOf(personId);
+    if (!identityLink) return [];
+    const rows = (await identityLink.personasOf(personId)).filter(p => p.userType === 'member');
+    return Promise.all(rows.map(async p => (p.memberProfile !== undefined ? p : (await users.findByIdAsync(p.id)) || p)));
+  }
+
+  /**
+   * M1: every member date of birth of this Person, the signed-in member's first. An account without
+   * a Person: only its own member profile (when it is a member).
+   */
+  async function memberDobsFor(u, claims, member) {
+    const parse = v => (typeof v === 'string' ? safeJson(v) : v);
+    if (!u?.personId) return member.has ? [member.profile?.dateOfBirth ?? null] : [];
+    const rows = [...(await allMemberRows(u.personId))];
+    rows.sort((a, b) => (a.id === claims.sub ? -1 : b.id === claims.sub ? 1 : 0));
+    const dobs = rows.map(r => parse(r.memberProfile)?.dateOfBirth ?? null);
+    if (member.has && member.profile) dobs.unshift(member.profile.dateOfBirth ?? null); // the profile in use, even if not linked yet
+    return dobs;
   }
 
   /** The trainer persona's id in trainer mode: the signed-in trainer, else a usable trainer persona. */
@@ -75,21 +100,30 @@ export function createShopPreferenceService({
     let declaredGender = null;
     const shoppingMode = mode !== undefined ? mode
       : resolveShoppingMode({ requested: undefined, sessionUserType: claims.userType, heldUserTypes: ps.map(p => p.userType) }).mode;
-    if (on && partnersOn() && PARTNER_MODES.includes(shoppingMode)) {
+    if (on && partnersOn()) {
       // Slice 4: the Person's own declared details only (never KYC). An account without a Person has none.
+      // M1: one verdict per Person (Person.dateOfBirth + every member date of birth), in EVERY mode.
       const person = u?.personId ? await personDetailsOf(u.personId) : null;
-      const trainerId = shoppingMode === 'trainer' ? trainerIdOf(claims, ps) : null;
-      const trainerProfile = trainerId ? await trainerProfileOf(trainerId) : null;
-      eligibility = partnerEligibility({ flagOn: on, person, memberProfile: member.profile, now: now() });
-      partnerMode = shoppingMode;
-      declaredGender = eligibility.audienceAllowed ? partnerGender({ mode: shoppingMode, trainerProfile, person }) : null;
+      const verdict = personDobVerdict({ personDob: person?.dateOfBirth ?? null, memberDobs: await memberDobsFor(u, claims, member), now: now() });
+      if (PARTNER_MODES.includes(shoppingMode)) {
+        const trainerId = shoppingMode === 'trainer' ? trainerIdOf(claims, ps) : null;
+        const trainerProfile = trainerId ? await trainerProfileOf(trainerId) : null;
+        eligibility = partnerEligibility({ flagOn: on, verdict });
+        partnerMode = shoppingMode;
+        declaredGender = eligibility.audienceAllowed ? partnerGender({ mode: shoppingMode, trainerProfile, person }) : null;
+      } else {
+        // Member and vendor_personal mode: an invalid or under-18 date anywhere on the Person stops
+        // everything; otherwise the member rules exactly as before.
+        eligibility = blockedByVerdict(verdict)
+          || personalisationEligibility({ flagOn: on, hasMember: member.has, memberProfile: member.profile, now: now() });
+      }
     } else {
       eligibility = personalisationEligibility({ flagOn: on, hasMember: member.has, memberProfile: member.profile, now: now() });
     }
     const stored = await store.get(subject.personId);
     const personalised = stored ? stored.personalised : true;
     const buyerIds = [...new Set([claims.sub, u?.id, ...ps.map(p => p.id)].filter(Boolean))];
-    return { flagOn: on, ...eligibility, personalised, enabled: eligibility.available && personalised, subject, buyerIds, memberProfile: member.profile, personas: ps, user: u, partnerMode, partnerGender: declaredGender };
+    return { flagOn: on, partnersOn: Boolean(on && partnersOn()), ...eligibility, personalised, enabled: eligibility.available && personalised, subject, buyerIds, memberProfile: member.profile, personas: ps, user: u, partnerMode, partnerGender: declaredGender };
   }
 
   /**
@@ -135,7 +169,11 @@ export function createShopPreferenceService({
     if (resolved.error) return { error: resolved.error, status: 403 };
     // `available` is for this mode (slice 4: trainer/owner mode may differ from member mode).
     const s = await stateFor({ claims, user, personas, mode: resolved.mode });
-    return { body: { personalised: s.personalised, available: s.available, historyDays: historyDays(), mode: resolved.mode, uses: await usesOf(s, claims, resolved.mode) } };
+    const body = { personalised: s.personalised, available: s.available, historyDays: historyDays(), mode: resolved.mode, uses: await usesOf(s, claims, resolved.mode) };
+    // Contract check 1: trainer/owner mode with both flags on → the app may ask for a date of birth.
+    // Absent otherwise, so flag-off bodies stay byte-identical.
+    if (s.partnersOn && PARTNER_MODES.includes(resolved.mode)) body.profileSignals = true;
+    return { body };
   }
 
   async function set({ claims, body = {}, mode = undefined }) {
@@ -152,4 +190,8 @@ export function createShopPreferenceService({
   }
 
   return { get, set, stateFor };
+}
+
+function safeJson(text) {
+  try { return JSON.parse(text); } catch { return null; }
 }

@@ -1371,6 +1371,8 @@ export const shopPreferenceService = createShopPreferenceService({
   trainerProfileOf: userId => trainerService.findProfileByUser(userId),
   // Partner DOB slice 4 (SHOP_PERSONALISATION_PARTNERS): the Person's declared date of birth and gender only.
   personDetailsOf: personId => readPersonDetails(db, personId),
+  // Security review M1: every member persona of the Person, suspended or not (as memberDateOfBirth).
+  memberRowsOf: personId => db('User').where({ personId, userType: 'member' }).select('id', 'memberProfile'),
 });
 // Purchase history is the person's own orders only, read per request; capped so memory stays bounded.
 const SHOP_HISTORY_MAX_ORDERS = 500;

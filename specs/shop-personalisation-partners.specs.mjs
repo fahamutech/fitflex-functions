@@ -4,7 +4,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  partnerEligibility, partnerDateOfBirth, partnerGender, partnerAudienceFrom, audienceFrom, reorderForAudience,
+  partnerEligibility, personDobVerdict, blockedByVerdict, partnerGender, partnerAudienceFrom, audienceFrom, reorderForAudience,
 } from '../src/services/shop-personalisation.mjs';
 import { buildShopHome } from '../src/services/shop-recommendations.mjs';
 import { createShopService } from '../src/services/shop-service.mjs';
@@ -118,18 +118,27 @@ test('flag: SHOP_PERSONALISATION_PARTNERS has effect only with SHOP_PERSONALISAT
 
 // ── pure rules ──────────────────────────────────────────────────────────────
 
-test('rules: effective date of birth is Person.dateOfBirth, else the member profile; an invalid Person one fails closed', () => {
-  assert.equal(partnerDateOfBirth({ person: { dateOfBirth: '1980-01-01' }, memberProfile: { dateOfBirth: '1990-01-01' } }), '1980-01-01');
-  assert.equal(partnerDateOfBirth({ person: { dateOfBirth: null }, memberProfile: { dateOfBirth: '1990-01-01' } }), '1990-01-01');
-  assert.equal(partnerDateOfBirth({ person: null, memberProfile: null }), null);
-  const e = args => { const r = partnerEligibility({ flagOn: true, now: NOW, ...args }); return [r.available, r.reason, r.audienceAllowed, r.age]; };
-  assert.deepEqual(e({ person: null }), [true, null, false, null], 'absent: history only');
-  assert.deepEqual(e({ person: { dateOfBirth: '2027-01-01' }, memberProfile: { dateOfBirth: ADULT_DOB } }), [false, 'invalid_dob', false, null], 'future Person DOB never falls through');
-  assert.deepEqual(e({ person: null, memberProfile: { dateOfBirth: '03/05/1990' } }), [false, 'invalid_dob', false, null]);
-  assert.deepEqual(e({ person: { dateOfBirth: MINOR_DOB } }), [false, 'under_18', false, 16]);
-  assert.deepEqual(e({ person: { dateOfBirth: ADULT_DOB } }), [true, null, true, 36]);
-  assert.deepEqual(e({ person: null, memberProfile: { dateOfBirth: ADULT_DOB } }), [true, null, true, 36], 'member profile fallback');
-  assert.equal(partnerEligibility({ flagOn: false, person: { dateOfBirth: ADULT_DOB }, now: NOW }).reason, 'flag_off');
+test('rules (M1): one verdict per Person from Person.dateOfBirth and every member date of birth', () => {
+  const v = (personDob, memberDobs = []) => { const r = personDobVerdict({ personDob, memberDobs, now: NOW }); return [r.status, r.age]; };
+  assert.deepEqual(v(null), ['absent', null]);
+  assert.deepEqual(v(null, [null, '', '  ']), ['absent', null], 'blank member dates are absent');
+  assert.deepEqual(v('1980-01-01', ['1990-01-01']), ['adult', 46], 'age from the Person');
+  assert.deepEqual(v(null, [null, '1990-01-01', '1970-01-01']), ['adult', 36], 'else the first valid member date');
+  // Conflicts: any invalid or under-18 date anywhere → nothing.
+  assert.deepEqual(v(ADULT_DOB, [MINOR_DOB]), ['under_18', 16], 'Person adult, member under 18');
+  assert.deepEqual(v(MINOR_DOB, [ADULT_DOB]), ['under_18', 16], 'Person under 18, member adult');
+  assert.deepEqual(v('2027-01-01', [ADULT_DOB]), ['invalid', null], 'future Person date never falls through');
+  assert.deepEqual(v(ADULT_DOB, ['03/05/1990']), ['invalid', null], 'an invalid member date blocks an adult Person');
+  assert.deepEqual(v(MINOR_DOB, ['bad']), ['invalid', null], 'invalid wins over under 18');
+  assert.equal(blockedByVerdict({ status: 'adult', age: 30 }), null);
+  assert.equal(blockedByVerdict({ status: 'absent' }), null);
+  assert.equal(blockedByVerdict({ status: 'under_18', age: 16 }).reason, 'under_18');
+  const e = verdict => { const r = partnerEligibility({ flagOn: true, verdict }); return [r.available, r.reason, r.audienceAllowed, r.age]; };
+  assert.deepEqual(e({ status: 'absent', age: null }), [true, null, false, null], 'absent: history only');
+  assert.deepEqual(e({ status: 'invalid', age: null }), [false, 'invalid_dob', false, null]);
+  assert.deepEqual(e({ status: 'under_18', age: 16 }), [false, 'under_18', false, 16]);
+  assert.deepEqual(e({ status: 'adult', age: 36 }), [true, null, true, 36]);
+  assert.equal(partnerEligibility({ flagOn: false, verdict: { status: 'adult', age: 36 } }).reason, 'flag_off');
 });
 
 test('rules: gender — trainer profile first, then Person; owner Person only; other / NULL give no signal', () => {
@@ -235,7 +244,6 @@ test('flag on: member mode and vendor_personal are unchanged (same bodies as wit
     assert.equal(JSON.stringify(a.body), JSON.stringify(b.body), `home ${u.id} ${mode}`);
     assert.equal(JSON.stringify(await s.preferences.get({ claims: claimsOf(u), mode })), JSON.stringify(await s.legacyPreferences.get({ claims: claimsOf(u), mode })), `prefs ${u.id} ${mode}`);
   }
-  assert.deepEqual(s.reads, [], 'member and vendor_personal mode never read the Person details');
   const minor = await s.service.home({ claims: claimsOf(users[3]) });
   assert.deepEqual(minor.body.personalisation, { available: false, enabled: false }, 'an under-18 member stays off even with an adult Person date of birth');
   const vendorOnly = await s.preferences.get({ claims: claimsOf(users[4]) });
@@ -400,4 +408,101 @@ test('one opt-out per Person: switched off in trainer mode is off in owner and m
     assert.deepEqual(home.body.personalisation, { available: true, enabled: false });
     assert.ok(!home.body.sections.flatMap(x => x.reasonCodes).some(c => PERSONAL_CODES.includes(c)), mode);
   }
+});
+
+// ── security review M1: one under-18 answer per Person, every mode ─────────
+
+for (const [label, personDob, memberDob] of [
+  ['Person adult, member persona under 18', ADULT_DOB, MINOR_DOB],
+  ['Person under 18, member persona adult', MINOR_DOB, ADULT_DOB],
+  ['Person date invalid (future), member persona adult', '2027-01-01', ADULT_DOB],
+]) {
+  test(`M1 conflict: ${label} → nothing in member, trainer and owner mode; flag off: member mode as before`, async () => {
+    const M = { id: 'mc', userType: 'member', personId: 'pc', memberProfile: { gender: 'female', dateOfBirth: memberDob } };
+    const T = { id: 'tc', userType: 'trainer', personId: 'pc' };
+    const O = { id: 'oc', userType: 'gym_operator', personId: 'pc' };
+    const s = setup({ users: [M, T, O], persons: { pc: { dateOfBirth: personDob, gender: 'female' } }, trainerProfiles: { tc: { gender: 'female' } }, orders: [order('mc', [line('prd_001')])], env: { SHOP_HOME_SECTIONS: 'recommended' } });
+    tagged(s);
+    for (const [claims, mode] of [[claimsOf(M), 'member'], [claimsOf(T), 'member'], [claimsOf(M), 'trainer'], [claimsOf(O), 'owner'], [claimsOf(T), undefined]]) {
+      const prefs = (await s.preferences.get({ claims, mode })).body;
+      assert.deepEqual([prefs.available, prefs.uses], [false, []], `${claims.sub} ${mode}`);
+      const home = await s.service.home({ claims, query: { mode } });
+      assert.deepEqual(home.body.personalisation, { available: false, enabled: false }, `${claims.sub} ${mode}`);
+      assert.ok(!home.body.signalsUsed.some(x => PERSONAL_SIGNALS.includes(x)));
+    }
+    assert.deepEqual(s.seen, [], 'no orders read');
+    // Partners flag off: member mode is exactly as before (it reads only the member profile).
+    s.flags.partners = false;
+    for (const mode of ['member', 'trainer']) {
+      const a = await s.service.home({ claims: claimsOf(M), query: { mode } });
+      const b = await s.legacy.home({ claims: claimsOf(M), query: { mode } });
+      assert.equal(JSON.stringify(a.body), JSON.stringify(b.body), mode);
+      assert.equal(JSON.stringify(await s.preferences.get({ claims: claimsOf(M), mode })), JSON.stringify(await s.legacyPreferences.get({ claims: claimsOf(M), mode })));
+    }
+  });
+}
+
+test('M1: a suspended member persona with an under-18 date of birth still blocks every mode', async () => {
+  const T = { id: 'ts', userType: 'trainer', personId: 'ps' };
+  const M = { id: 'ms', userType: 'member', personId: 'ps', accountStatus: 'suspended', memberProfile: { dateOfBirth: MINOR_DOB } };
+  const s = setup({ users: [T, M], persons: { ps: { dateOfBirth: ADULT_DOB, gender: 'male' } } });
+  tagged(s);
+  const prefs = (await s.preferences.get({ claims: claimsOf(T) })).body;
+  assert.deepEqual([prefs.available, prefs.uses], [false, []]);
+  // Without the suspended persona the same trainer is an adult.
+  const s2 = setup({ users: [T], persons: { ps: { dateOfBirth: ADULT_DOB, gender: 'male' } } });
+  assert.equal((await s2.preferences.get({ claims: claimsOf(T) })).body.available, true);
+});
+
+test('M1: two member personas, one adult and one invalid → nothing; both adult → age from the Person', async () => {
+  const T = { id: 'tw', userType: 'trainer', personId: 'pw' };
+  const M1 = { id: 'mw1', userType: 'member', personId: 'pw', memberProfile: { dateOfBirth: ADULT_DOB } };
+  const M2 = { id: 'mw2', userType: 'member', personId: 'pw', memberProfile: { dateOfBirth: '1990-02-30' } };
+  const s = setup({ users: [T, M1, M2], persons: { pw: { dateOfBirth: null } } });
+  assert.equal((await s.preferences.get({ claims: claimsOf(T) })).body.available, false);
+  assert.equal((await s.preferences.get({ claims: claimsOf(M1), mode: 'member' })).body.available, false, 'member mode too');
+  // Both adult: Person 1960 (60_plus) vs member 1990 (30_44) → the Person's age band reorders.
+  const ok = setup({ users: [T, { ...M2, memberProfile: { dateOfBirth: ADULT_DOB } }], persons: { pw: { dateOfBirth: '1960-01-01', gender: null } }, env: { SHOP_HOME_SECTIONS: 'recommended' } });
+  tagged(ok);
+  const rec = sec((await ok.service.home({ claims: claimsOf(T) })).body, 'recommended');
+  assert.equal(rec.productIds[0], 'prd_003', 'the 60+ product first');
+});
+
+// ── contract check 1: profileSignals ────────────────────────────────────────
+
+test('profileSignals: true in trainer and owner mode only with both flags on; absent otherwise (any availability)', async () => {
+  const M = { id: 'mp', userType: 'member', personId: 'pp', memberProfile: { dateOfBirth: ADULT_DOB } };
+  const T = { id: 'tp', userType: 'trainer', personId: 'pp' };
+  const O = { id: 'op', userType: 'gym_operator', personId: 'pp' };
+  const V = { id: 'vp', userType: 'vendor', personId: 'pp' };
+  for (const personDob of [null, ADULT_DOB, MINOR_DOB]) {
+    const s = setup({ users: [M, T, O, V], persons: { pp: { dateOfBirth: personDob } } });
+    for (const mode of ['trainer', 'owner']) {
+      const body = (await s.preferences.get({ claims: claimsOf(T), mode })).body;
+      assert.equal(body.profileSignals, true, `${personDob} ${mode}`);
+      const put = await s.preferences.set({ claims: claimsOf(T), mode, body: { personalised: true, source: 'privacy_page' } });
+      assert.equal(put.body.profileSignals, true, 'PUT answer too');
+    }
+    for (const mode of ['member', 'vendor_personal']) assert.ok(!('profileSignals' in (await s.preferences.get({ claims: claimsOf(T), mode })).body), mode);
+    s.flags.partners = false;
+    for (const mode of ['trainer', 'owner']) assert.ok(!('profileSignals' in (await s.preferences.get({ claims: claimsOf(T), mode })).body));
+    s.flags.on = false; s.flags.partners = true;
+    for (const mode of ['trainer', 'owner']) assert.ok(!('profileSignals' in (await s.preferences.get({ claims: claimsOf(T), mode })).body), 'base flag off');
+  }
+});
+
+// ── security review L2 ──────────────────────────────────────────────────────
+
+test('L2: a refused ?mode is 403 mode_not_allowed before any preference, Person detail or order is read', async () => {
+  const s = setup({ users: [TRAINER], persons: { pt: { dateOfBirth: ADULT_DOB } }, orders: [order('t1', [line('prd_001')])] });
+  tagged(s);
+  let storeReads = 0;
+  const get = s.store.get.bind(s.store);
+  s.store.get = async (...a) => { storeReads += 1; return get(...a); };
+  for (const mode of ['owner', 'member', 'nonsense']) {
+    const out = await s.service.home({ claims: claimsOf(TRAINER), query: { mode } });
+    assert.deepEqual(out, { error: 'mode_not_allowed', status: 403 }, mode);
+    assert.deepEqual(await s.preferences.get({ claims: claimsOf(TRAINER), mode }), { error: 'mode_not_allowed', status: 403 });
+  }
+  assert.deepEqual([s.reads, s.seen, storeReads], [[], [], 0]);
 });

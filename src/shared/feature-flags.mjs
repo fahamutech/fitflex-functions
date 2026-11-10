@@ -137,7 +137,10 @@ export function shopPersonalisationOn() {
  * accounts are not available; gender and age apply in member mode only). On: trainer and owner mode
  * are personalised from the Person's declared date of birth (Person.dateOfBirth, else the member
  * profile's) and gender (trainer mode: TrainerProfile.gender, else Person.gender; owner mode:
- * Person.gender). Member and vendor_personal mode are unchanged.
+ * Person.gender). Security review M1: an invalid or under-18 date of birth on the Person or on any of
+ * its member personas then switches personalisation off in EVERY mode (member mode included);
+ * otherwise member and vendor_personal mode are unchanged. GET/PUT /shop/preferences carry
+ * profileSignals: true in trainer/owner mode only while this is on.
  */
 export function shopPersonalisationPartnersOn() {
   return shopPersonalisationOn() && on('SHOP_PERSONALISATION_PARTNERS');
