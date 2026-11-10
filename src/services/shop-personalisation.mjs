@@ -3,7 +3,8 @@
 //
 // Owner decisions (2026-10-20): purchase history and gender/age on by default with one opt-out;
 // gender/age only REORDER products a vendor tagged, member mode only, never filter, never in a
-// title; under-18 → personalisation fully off. Only the declared profile and the person's own paid
+// title; under-18 → personalisation fully off. Partner DOB slice 4 (SHOP_PERSONALISATION_PARTNERS,
+// owner go-ahead 2026-11-10): trainer and owner mode too, from the Person's declared details. Only the declared profile and the person's own paid
 // orders are read: never activity, health, training, sponsor/company or KYC data.
 import { readDateOfBirth } from '../shared/date-of-birth.mjs';
 import { ageBandOf, targetsOf } from '../shared/product-targets.mjs';
@@ -40,11 +41,57 @@ const time = v => { const t = +new Date(v || 0); return Number.isFinite(t) ? t :
 export function personalisationEligibility({ flagOn, hasMember, memberProfile, now }) {
   if (!flagOn) return { available: false, reason: 'flag_off', age: null, audienceAllowed: false };
   if (!hasMember) return { available: false, reason: 'no_member', age: null, audienceAllowed: false };
-  const dob = readDateOfBirth(memberProfile?.dateOfBirth, now);
+  return eligibilityFromDateOfBirth(memberProfile?.dateOfBirth, now);
+}
+
+/** The date-of-birth rules shared by member mode and (slice 4) trainer/owner mode. */
+function eligibilityFromDateOfBirth(value, now) {
+  const dob = readDateOfBirth(value, now);
   if (dob.status === 'absent') return { available: true, reason: null, age: null, audienceAllowed: false };
   if (dob.status === 'invalid') return { available: false, reason: 'invalid_dob', age: null, audienceAllowed: false };
   if (dob.age < 18) return { available: false, reason: 'under_18', age: dob.age, audienceAllowed: false };
   return { available: true, reason: null, age: dob.age, audienceAllowed: true };
+}
+
+/** The shopping modes slice 4 (SHOP_PERSONALISATION_PARTNERS) personalises from the Person's declared details. */
+export const PARTNER_MODES = Object.freeze(['trainer', 'owner']);
+
+/**
+ * The date of birth that counts in trainer/owner mode (partner DOB slice 4): the Person's declared one
+ * (Person.dateOfBirth) when there is one, else the member profile's — the same order as
+ * personal-details-service.assertPartnerAge. Unlike assertPartnerAge, a present but invalid
+ * Person.dateOfBirth (in the future, before 1901) does not fall through to the member profile: it
+ * fails closed. → the raw value (string) or null.
+ */
+export function partnerDateOfBirth({ person, memberProfile }) {
+  const own = person?.dateOfBirth;
+  if (own !== undefined && own !== null && !(typeof own === 'string' && own.trim() === '')) return own;
+  return memberProfile?.dateOfBirth ?? null;
+}
+
+/**
+ * Who may be personalised in trainer or owner mode (SHOP_PERSONALISATION_PARTNERS on; partner DOB
+ * slice 4). No member persona is needed; otherwise the member rules apply to partnerDateOfBirth():
+ *   absent → purchase history only (never gender or age); invalid → nothing (invalid_dob);
+ *   under 18 → nothing (under_18); 18 or over → purchase history, gender and age.
+ * → same shape as personalisationEligibility.
+ */
+export function partnerEligibility({ flagOn, person, memberProfile, now }) {
+  if (!flagOn) return { available: false, reason: 'flag_off', age: null, audienceAllowed: false };
+  return eligibilityFromDateOfBirth(partnerDateOfBirth({ person, memberProfile }), now);
+}
+
+/**
+ * The declared gender for trainer/owner mode: trainer mode uses the trainer profile's gender (shown
+ * to clients), else the Person's; owner mode uses the Person's. Any other mode → null.
+ * → 'male' | 'female' | 'other' | null ("prefer not to say" or not given)
+ */
+const DECLARED_GENDERS = ['male', 'female', 'other'];
+export function partnerGender({ mode, trainerProfile, person }) {
+  const own = DECLARED_GENDERS.includes(person?.gender) ? person.gender : null;
+  if (mode === 'trainer') return DECLARED_GENDERS.includes(trainerProfile?.gender) ? trainerProfile.gender : own;
+  if (mode === 'owner') return own;
+  return null;
 }
 
 /**
@@ -94,6 +141,15 @@ export function purchaseHistoryFrom(orders, { buyerIds, now, days = HISTORY_DAYS
  * memberProfile.gender: female → women, male → men; other/unset → none.
  * → { gender: 'women'|'men'|null, ageBand: band|null }
  */
+/**
+ * Trainer/owner mode (slice 4): the same reorder audience from the Person's declared gender
+ * (partnerGender) and a valid adult age. → { gender: 'women'|'men'|null, ageBand: band|null }
+ */
+export function partnerAudienceFrom({ mode, gender, age }) {
+  if (!PARTNER_MODES.includes(mode) || !Number.isInteger(age) || age < 18) return { gender: null, ageBand: null };
+  return { gender: gender === 'female' ? 'women' : gender === 'male' ? 'men' : null, ageBand: ageBandOf(age) };
+}
+
 export function audienceFrom({ mode, memberProfile, age }) {
   // Only with a valid adult age: no date of birth means no gender either (owner, 2026-10-22).
   if (mode !== 'member' || !memberProfile || !Number.isInteger(age) || age < 18) return { gender: null, ageBand: null };
