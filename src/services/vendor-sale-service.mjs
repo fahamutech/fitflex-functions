@@ -6,7 +6,7 @@
 //
 // Persistence is the Postgres store (src/infra/vendor-sale-store-pg.mjs). The routes check the
 // flag (VENDOR_TOOLS + VENDOR_WALKIN_SALES) and the `sales` permission before calling in here.
-import { parseSale, saleFingerprint, soldAtOutOfRange, clampSoldAt, parseVoid, SALES_PAGE_DEFAULT, SALES_PAGE_MAX } from '../shared/vendor-sale.mjs';
+import { parseSale, saleFingerprint, saleInsertRefusal, soldAtOutOfRange, clampSoldAt, parseVoid, SALES_PAGE_DEFAULT, SALES_PAGE_MAX } from '../shared/vendor-sale.mjs';
 import { eatDayStart } from '../shared/vendor-stock.mjs';
 import { eatDate } from '../shared/vendor-order-view.mjs';
 import { addDays, dueDateOutOfRange, DEFAULT_DUE_DAYS } from '../shared/vendor-customer.mjs';
@@ -45,6 +45,9 @@ export function createVendorSaleService({
     const earlier = await store.replayOf(vendorId, sale.clientRef, fingerprint);
     if (earlier?.error) return earlier;
     if (earlier) return { sale: earlier.sale, status: 200 };
+    // Only now (MED-1): a retry of a sale already recorded was answered above, whatever its references hold.
+    const refusal = saleInsertRefusal(sale);
+    if (refusal) return refusal;
     if ((sale.kind === 'credit' || sale.customerId) && !customersOn()) return { error: 'feature_disabled', status: 404, feature: 'customers' };
     if (sale.kind === 'credit' && !canCredit) return { error: 'credit_not_allowed', status: 403, requiredPermission: 'customers' };
     const at = now();
