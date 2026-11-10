@@ -33,17 +33,24 @@ const json = v => (v == null ? null : JSON.stringify(v));
 const obj = v => (typeof v === 'string' ? JSON.parse(v) : v ?? null);
 
 /** Neutral on purpose: the same words whatever the outcome. Swahili is a DRAFT for native review. */
+/** Lock-screen push line for the resolution message. Swahili is a DRAFT for native review. */
+export const PUSH_TEXT = {
+  en: { body: 'Open the app to read it.' },
+  sw: { body: 'Fungua programu kusoma.' },
+};
+
 export function resolutionText({ gymName, when }) {
-  const gym = gymName || 'FitFlex gym';
+  const gymEn = gymName || 'FitFlex gym';
+  const gymSw = gymName || 'gym ya FitFlex';
   const at = (l) => (when ? eatDate(when, l) : '');
   return {
     en: {
       title: 'We reviewed your security report',
-      body: `Thank you for telling us. We have reviewed your report about the check-in at ${gym}${when ? ` on ${at('en')}` : ''} and closed it. If anything still looks wrong, open Security activity or contact FitFlex support.`,
+      body: `Thank you for telling us. We have reviewed your report about the check-in at ${gymEn}${when ? ` on ${at('en')}` : ''} and closed it. If anything still looks wrong, open Security activity or contact FitFlex support.`,
     },
     sw: {
       title: 'Tumepitia ripoti yako ya usalama',
-      body: `Asante kwa kutuambia. Tumepitia ripoti yako kuhusu kujiandikisha ${gym}${when ? ` tarehe ${at('sw')}` : ''} na tumeifunga. Ikiwa kuna kitu bado hakionekani sawa, fungua Shughuli za usalama au wasiliana na msaada wa FitFlex.`,
+      body: `Asante kwa kutuambia. Tumepitia ripoti yako kuhusu kujiandikisha ${gymSw}${when ? ` tarehe ${at('sw')}` : ''} na tumeifunga. Ikiwa kuna kitu bado hakionekani sawa, fungua Shughuli za usalama au wasiliana na msaada wa FitFlex.`,
     },
   };
 }
@@ -55,15 +62,17 @@ export function createSecurityIncidentService({
   const trail = (q, incidentId, kind, actor, detail = null) => q('SecurityIncidentEvent').insert({
     id: newId('sie'), incidentId, kind, actor: actor ?? null, detail: json(detail), createdAt: now(),
   });
-  const audit = (action, actor, target, before, after) => auditLog?.insertAsync({
-    id: randomUUID(), at: now().toISOString(), actor: actor ?? null, action, target, before, after,
-  });
+  // Inside a transaction the audit row is written with it (AuditLog table, same shape the collection store writes).
+  const audit = (action, actor, target, before, after, trx = null) => (trx
+    ? trx('AuditLog').insert({ id: randomUUID(), at: now(), actor: actor ?? null, action, target, before: json(before), after: json(after) })
+    : auditLog?.insertAsync({ id: randomUUID(), at: now().toISOString(), actor: actor ?? null, action, target, before, after }));
 
+  // signedOut is true only on the call that ended the sessions; a repeat does not re-assert it.
   const memberView = (row, extra = {}) => ({
     ok: true, idempotent: false,
     incident: { id: row.id, status: row.status, reportedAt: iso(row.reportedAt) },
     protection: protectionView(obj(row.protection)),
-    signedOut: Boolean(obj(row.protection)?.sessionsEnded),
+    signedOut: false,
     ...extra,
   });
   function protectionView(p) {
@@ -72,6 +81,7 @@ export function createSecurityIncidentService({
       requested: Boolean(q.requested), sessionsEnded: Boolean(q.sessionsEnded),
       pinResetRequired: q.pinResetRequired === undefined ? false : q.pinResetRequired,
       ...(q.limited ? { limited: true } : {}),
+      ...(q.failed ? { failed: true } : {}),
     };
   }
 
@@ -82,6 +92,36 @@ export function createSecurityIncidentService({
     return Object.fromEntries(rows.map(r => [r.eventId, { incidentId: r.id, status: r.status, reportedAt: iso(r.reportedAt) }]));
   }
 
+  /** End sessions + require a PIN reset; records the outcome on the incident. → true when sessions were ended now. */
+  async function applyProtection(incidentId, userId, personId, protection) {
+    try {
+      if (!personId) {
+        // No Person to protect (legacy account): say so, do not pretend it worked.
+        protection.pinResetRequired = 'not_applicable'; protection.sessionsEnded = false; protection.failed = true; protection.failure = 'no_person';
+      } else {
+        protection.pinResetRequired = (await pinAuth.requirePinReset(personId, userId)) ? true : 'not_applicable';
+        await pinAuth.endSessions(personId);
+        protection.sessionsEnded = true; protection.applied = true; delete protection.failed; delete protection.failure;
+      }
+    } catch (err) {
+      protection.failed = true;
+      logger.warn?.(`[security-incident] protection for ${incidentId} failed: ${err?.message}`);
+    }
+    await db('SecurityIncident').where({ id: incidentId }).update({ protection: json(protection), updatedAt: now() });
+    return protection.sessionsEnded === true;
+  }
+
+  /** Same event reported again: same incident; protection that was asked for but never applied is retried. */
+  async function repeat(row) {
+    const p = obj(row.protection) || {};
+    if (!(p.requested && !p.applied && !p.limited)) return memberView(row, { idempotent: true });
+    const personId = (await db('User').where({ id: row.userId }).first('personId'))?.personId || null;
+    const protection = { ...p };
+    const signedOut = await applyProtection(row.id, row.userId, personId, protection);
+    await trail(db, row.id, 'protection', row.userId, { retry: true, sessionsEnded: protection.sessionsEnded, pinResetRequired: protection.pinResetRequired, failed: Boolean(protection.failed) }).catch(() => {});
+    return memberView(await db('SecurityIncident').where({ id: row.id }).first(), { idempotent: true, signedOut });
+  }
+
   async function report({ userId, eventId, secureAccount }) {
     if (secureAccount !== undefined && secureAccount !== null && typeof secureAccount !== 'boolean') return { error: 'invalid_secure_account', status: 400 };
     const secure = secureAccount !== false;
@@ -90,7 +130,7 @@ export function createSecurityIncidentService({
     if (!event) return { error: 'not_found', status: 404 };
 
     const existing = await db('SecurityIncident').where({ userId, eventId: id }).first();
-    if (existing) return memberView(existing, { idempotent: true });
+    if (existing) return repeat(existing);
 
     const person = (await db('User').where({ id: userId }).first('personId'))?.personId || null;
     const details = obj(event.details) || {};
@@ -105,7 +145,8 @@ export function createSecurityIncidentService({
       if (again) return { existing: again };
       const recent = await trx('SecurityIncident').where({ userId }).where('reportedAt', '>=', since).select('protection');
       if (recent.length >= maxPerDay()) return { capped: true };
-      const secured = recent.filter(r => obj(r.protection)?.applied === true).length;
+      // Intended protection is recorded in this same transaction, so concurrent reports cannot exceed the cap.
+      const secured = recent.filter((r) => { const q = obj(r.protection); return q?.requested === true && !q?.limited; }).length;
       const limited = secure && secured >= SECURE_ACTIONS_PER_DAY;
       const protection = { requested: secure, applied: false, limited, sessionsEnded: false, pinResetRequired: false };
       const at = now();
@@ -115,22 +156,14 @@ export function createSecurityIncidentService({
       await trail(trx, incidentId, 'reported', userId, { secureAccount: secure, limited });
       return { protection, limited };
     });
-    if (decided.existing) return memberView(decided.existing, { idempotent: true });
+    if (decided.existing) return repeat(decided.existing);
     if (decided.capped) return { error: 'report_limit_reached', status: 429, retryAfterSeconds: 3600 };
 
     // The incident now exists whatever happens next. Protection is applied after, and a failure is recorded, not hidden.
     const protection = { ...decided.protection };
-    if (secure && !decided.limited) {
-      try {
-        protection.pinResetRequired = person ? ((await pinAuth.requirePinReset(person, userId)) ? true : 'not_applicable') : 'not_applicable';
-        if (person) { await pinAuth.endSessions(person); protection.sessionsEnded = true; }
-        protection.applied = Boolean(protection.sessionsEnded);
-      } catch (err) {
-        protection.failed = true;
-        logger.warn?.(`[security-incident] protection for ${incidentId} failed: ${err?.message}`);
-      }
-    }
-    await db('SecurityIncident').where({ id: incidentId }).update({ protection: json(protection), updatedAt: now() });
+    let signedOut = false;
+    if (secure && !decided.limited) signedOut = await applyProtection(incidentId, userId, person, protection);
+    else await db('SecurityIncident').where({ id: incidentId }).update({ protection: json(protection), updatedAt: now() });
     if (secure) await trail(db, incidentId, 'protection', userId, { sessionsEnded: protection.sessionsEnded, pinResetRequired: protection.pinResetRequired, limited: Boolean(protection.limited), failed: Boolean(protection.failed) }).catch(() => {});
 
     // Tell staff. Never fails the report: if this breaks, the incident is still listed in the admin screen.
@@ -150,7 +183,7 @@ export function createSecurityIncidentService({
       logger.warn?.(`[security-incident] ops alert for ${incidentId} failed: ${err?.message}`);
     }
     const row = await db('SecurityIncident').where({ id: incidentId }).first();
-    return memberView(row, { signedOut: protection.sessionsEnded === true });
+    return memberView(row, { signedOut });
   }
 
   // ── Staff ────────────────────────────────────────────────────────────────
@@ -191,11 +224,15 @@ export function createSecurityIncidentService({
     const row = await db('SecurityIncident').where({ id: String(id || '') }).first();
     if (!row) return { error: 'not_found', status: 404 };
     const at = now();
-    const n = await db('SecurityIncident').where({ id: row.id, status: STATUS.OPEN })
-      .update({ status: STATUS.ACKNOWLEDGED, acknowledgedBy: actorId, acknowledgedAt: at, updatedAt: at });
-    if (!n) return { error: 'invalid_state', status: 409, current: row.status };
-    await trail(db, row.id, 'acknowledged', actorId);
-    await audit('security_incident_acknowledged', actorId, row.id, { status: row.status }, { status: STATUS.ACKNOWLEDGED });
+    const done = await db.transaction(async (trx) => {
+      const n = await trx('SecurityIncident').where({ id: row.id, status: STATUS.OPEN })
+        .update({ status: STATUS.ACKNOWLEDGED, acknowledgedBy: actorId, acknowledgedAt: at, updatedAt: at });
+      if (!n) return false;
+      await trail(trx, row.id, 'acknowledged', actorId);
+      await audit('security_incident_acknowledged', actorId, row.id, { status: row.status }, { status: STATUS.ACKNOWLEDGED }, trx);
+      return true;
+    });
+    if (!done) return { error: 'invalid_state', status: 409, current: row.status };
     return get({ id: row.id });
   }
 
@@ -206,11 +243,15 @@ export function createSecurityIncidentService({
     const row = await db('SecurityIncident').where({ id: String(id || '') }).first();
     if (!row) return { error: 'not_found', status: 404 };
     const at = now();
-    const n = await db('SecurityIncident').where({ id: row.id }).whereIn('status', [STATUS.OPEN, STATUS.ACKNOWLEDGED])
-      .update({ status: STATUS.RESOLVED, outcome, resolutionReason: text, resolvedBy: actorId, resolvedAt: at, updatedAt: at });
-    if (!n) return { error: 'invalid_state', status: 409, current: row.status };
-    await trail(db, row.id, 'resolved', actorId, { outcome });
-    await audit('security_incident_resolved', actorId, row.id, { status: row.status }, { status: STATUS.RESOLVED, outcome });
+    const done = await db.transaction(async (trx) => {
+      const n = await trx('SecurityIncident').where({ id: row.id }).whereIn('status', [STATUS.OPEN, STATUS.ACKNOWLEDGED])
+        .update({ status: STATUS.RESOLVED, outcome, resolutionReason: text, resolvedBy: actorId, resolvedAt: at, updatedAt: at });
+      if (!n) return false;
+      await trail(trx, row.id, 'resolved', actorId, { outcome });
+      await audit('security_incident_resolved', actorId, row.id, { status: row.status }, { status: STATUS.RESOLVED, outcome }, trx);
+      return true;
+    });
+    if (!done) return { error: 'invalid_state', status: 409, current: row.status };
     if (ops && row.opsExceptionId) {
       try { await ops.clear(`security_incident:${row.id}`, { by: actorId, resolution: `Incident resolved (${outcome}).` }); } catch { /* the incident is resolved either way */ }
     }
@@ -230,18 +271,18 @@ export function createSecurityIncidentService({
       await notify(row.userId, {
         id: notificationIdFor(row.id), type: NOTIFICATION_TYPE, title: chosen.title, body: chosen.body,
         data: { ...data, locale: locale === 'sw' ? 'sw' : 'en', titleEn: text.en.title, bodyEn: text.en.body, titleSw: text.sw.title, bodySw: text.sw.body },
-        pushTitle: chosen.title, pushBody: locale === 'sw' ? 'Fungua programu kusoma.' : 'Open the app to read it.', pushData: data,
+        pushTitle: chosen.title, pushBody: (locale === 'sw' ? PUSH_TEXT.sw : PUSH_TEXT.en).body, pushData: data,
       });
     } catch (err) {
       logger.warn?.(`[security-incident] resolution message for ${row.id} failed: ${err?.message}`);
     }
   }
 
-  /** Retention: resolved incidents older than RETENTION_MONTHS go (their trail goes with them). → rows deleted. */
+  /** Retention: resolved incidents resolved more than RETENTION_MONTHS ago go (COALESCE(resolvedAt, reportedAt)) (their trail goes with them). → rows deleted. */
   async function purgeExpired({ months = RETENTION_MONTHS } = {}) {
     const c = new Date(now());
     c.setUTCMonth(c.getUTCMonth() - months);
-    return db('SecurityIncident').where({ status: STATUS.RESOLVED }).where('reportedAt', '<', c).del();
+    return db('SecurityIncident').where({ status: STATUS.RESOLVED }).whereRaw('COALESCE("resolvedAt", "reportedAt") < ?', [c]).del();
   }
 
   return { report, reportsFor, list, get, acknowledge, resolve, purgeExpired };

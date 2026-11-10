@@ -9,7 +9,7 @@ import { users } from '../src/bootstrap/collections.mjs';
 import { pinAuthService, opsService, securityIncidentService, securityEventService } from '../src/bootstrap/services.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { createB2BWatchService } from '../src/services/b2b-watch-service.mjs';
-import { createSecurityIncidentService, resolutionText, notificationIdFor } from '../src/services/security-incident-service.mjs';
+import { createSecurityIncidentService, resolutionText, notificationIdFor, PUSH_TEXT } from '../src/services/security-incident-service.mjs';
 import { PORTAL_ACL_SCOPES } from '../src/services/portal-user-service.mjs';
 import { securityIncidentReportsOn, securityReportMaxPerDay } from '../src/shared/feature-flags.mjs';
 import * as fn from '../functions/security-activity.mjs';
@@ -481,4 +481,107 @@ test('web check-in security event service still lists with the old shape when re
   const out = await securityEventService.list({ userId: m.id });
   assert.equal(out.reportEnabled, false);
   assert.equal(out.events[0].report, null);
+});
+
+test('fix pass: a repeat retries protection that failed, exposes protection.failed, and signedOut is true only when sessions end now', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  let broken = true; const calls = [];
+  const pa = { requirePinReset: async (p) => { if (broken) throw new Error('boom'); calls.push(p); return true; }, endSessions: async (p) => { calls.push(`end:${p}`); } };
+  const svc = createSecurityIncidentService({ db, pinAuth: pa, logger: { warn() {} } });
+  const first = await svc.report({ userId: m.id, eventId: ev });
+  assert.equal(first.protection.failed, true);
+  assert.equal(first.protection.sessionsEnded, false);
+  assert.equal(first.signedOut, false);
+  broken = false;
+  const again = await svc.report({ userId: m.id, eventId: ev });
+  assert.equal(again.idempotent, true);
+  assert.equal(again.incident.id, first.incident.id);
+  assert.equal(again.protection.sessionsEnded, true);
+  assert.equal(again.protection.failed, undefined);
+  assert.equal(again.signedOut, true, 'sessions ended by this retry');
+  assert.deepEqual(calls, [m.personId, `end:${m.personId}`]);
+  const third = await svc.report({ userId: m.id, eventId: ev });
+  assert.equal(third.idempotent, true);
+  assert.equal(third.signedOut, false, 'a plain repeat never re-asserts signedOut');
+  assert.equal(calls.length, 2, 'no further retry once applied');
+});
+
+test('fix pass: a plain idempotent repeat of a protected report has signedOut false', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  assert.equal((await report(m.id, ev)).body.signedOut, true);
+  const b = await report(m.id, ev);
+  assert.equal(b.body.idempotent, true);
+  assert.equal(b.body.signedOut, false);
+  assert.equal(b.body.protection.sessionsEnded, true);
+});
+
+test('fix pass: a user with no Person is recorded as protection failed, not silently ok; repeat keeps trying', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  // A DB guard keeps User.personId set, so present "no Person" through a thin wrapper around the User lookup.
+  const noPerson = Object.assign((t) => (t === 'User' ? { where: () => ({ first: async () => ({ personId: null }) }) } : db(t)), { transaction: (...a) => db.transaction(...a), raw: (...a) => db.raw(...a), fn: db.fn });
+  const svc = createSecurityIncidentService({ db: noPerson, pinAuth: pinAuthService, logger: { warn() {} } });
+  const out = await svc.report({ userId: m.id, eventId: ev });
+  assert.equal(out.protection.sessionsEnded, false);
+  assert.equal(out.protection.failed, true);
+  assert.equal(out.signedOut, false);
+  const again = await svc.report({ userId: m.id, eventId: ev });
+  assert.equal(again.protection.failed, true);
+  assert.equal((await db('Person').where({ id: m.personId }).first()).sessionsValidAfter, null);
+});
+
+test('fix pass: concurrent reports of different events cannot exceed 2 secure actions in 24h', async () => {
+  const m = await makeUser(); const evs = [];
+  for (let i = 0; i < 3; i++) evs.push(await makeEvent(m.id, { hoursAgo: i + 1 }));
+  const outs = await Promise.all(evs.map(e => report(m.id, e)));
+  assert.ok(outs.every(o => o.statusCode === 200));
+  assert.equal(outs.filter(o => o.body.protection.limited).length, 1, 'exactly one was limited');
+  const rows = await db('SecurityIncident').where({ userId: m.id });
+  assert.equal(rows.filter(r => r.protection.requested && !r.protection.limited).length, 2);
+});
+
+test('fix pass: retention keys on resolution time', async () => {
+  const m = await makeUser(); const [e1, e2] = [await makeEvent(m.id), await makeEvent(m.id)];
+  const ids = [];
+  for (const e of [e1, e2]) ids.push((await report(m.id, e, { secureAccount: false })).body.incident.id);
+  const old = new Date(); old.setUTCMonth(old.getUTCMonth() - 25);
+  const recent = new Date();
+  // Reported long ago but resolved recently: kept. Reported and resolved long ago: purged.
+  await db('SecurityIncident').where({ id: ids[0] }).update({ reportedAt: old, status: 'resolved', outcome: 'inconclusive', resolvedAt: recent });
+  await db('SecurityIncident').where({ id: ids[1] }).update({ reportedAt: old, status: 'resolved', outcome: 'inconclusive', resolvedAt: old });
+  await securityIncidentService.purgeExpired();
+  assert.equal((await db('SecurityIncident').where({ id: ids[0] })).length, 1);
+  assert.equal((await db('SecurityIncident').where({ id: ids[1] })).length, 0);
+});
+
+test('fix pass: acknowledge and resolve are atomic: a failing trail/audit write leaves status unchanged', async () => {
+  const admin = await makeAdmin(['security_incidents']);
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  const id = (await report(m.id, ev, { secureAccount: false })).body.incident.id;
+  // Make the trail insert fail inside the transaction.
+  await db.raw(`CREATE OR REPLACE FUNCTION sinc_test_fail() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'trail down'; END; $$ LANGUAGE plpgsql`);
+  await db.raw(`CREATE TRIGGER sinc_test_fail_trg BEFORE INSERT ON "SecurityIncidentEvent" FOR EACH ROW WHEN (NEW.kind IN ('acknowledged', 'resolved')) EXECUTE FUNCTION sinc_test_fail()`);
+  try {
+    const ack = await run(fn.adminAcknowledgeSecurityIncident, { token: admin.token, params: { id } });
+    assert.equal(ack.statusCode, 500);
+    const res1 = await run(fn.adminResolveSecurityIncident, { token: admin.token, params: { id }, body: { outcome: 'inconclusive', reason: 'long enough reason' } });
+    assert.equal(res1.statusCode, 500);
+  } finally {
+    await db.raw('DROP TRIGGER IF EXISTS sinc_test_fail_trg ON "SecurityIncidentEvent"');
+    await db.raw('DROP FUNCTION IF EXISTS sinc_test_fail()');
+  }
+  const row = await db('SecurityIncident').where({ id }).first();
+  assert.equal(row.status, 'open');
+  assert.equal(row.acknowledgedBy, null);
+  assert.equal(row.resolutionReason, null);
+  assert.equal((await db('AuditLog').where({ target: id })).length, 0, 'no audit row for a rolled-back change');
+  assert.equal((await run(fn.adminAcknowledgeSecurityIncident, { token: admin.token, params: { id } })).statusCode, 200);
+});
+
+test('fix pass: Swahili text never falls back to English gym name; push lines come from PUSH_TEXT', () => {
+  const t = resolutionText({ gymName: null, when: null });
+  assert.match(t.sw.body, /gym ya FitFlex/);
+  assert.doesNotMatch(t.sw.body, /FitFlex gym/);
+  assert.match(t.en.body, /FitFlex gym/);
+  assert.equal(PUSH_TEXT.sw.body, 'Fungua programu kusoma.');
+  assert.equal(PUSH_TEXT.en.body, 'Open the app to read it.');
 });
