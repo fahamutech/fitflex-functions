@@ -220,6 +220,7 @@ export function statementPaySecondPersonOn() {
 export const VENDOR_TOOLS_FLAGS = [
   'VENDOR_STOCK_LEDGER', 'VENDOR_PORTAL', 'VENDOR_ORDER_BUYER_CONTACT', 'VENDOR_WALKIN_SALES', 'VENDOR_CUSTOMERS',
   'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL', 'VENDOR_IMPORT',
+  'VENDOR_SALE_REFERENCE_OPTIONAL', 'VENDOR_SALE_CUSTOMER_DETAILS',
 ];
 
 /** True when VENDOR_TOOLS and the given slice flag are both enabled. */
@@ -264,6 +265,11 @@ export function vendorToolsOptions() {
     // Smart import V1: CSV import of products, stock counts and profile. importLimits tell the apps the caps.
     import: vendorImportOn(),
     importLimits: { ...VENDOR_IMPORT_LIMITS },
+    // Sale extras (docs/design/vendor-sale-extras-1110.md §5): app UI switches only. The server already accepts a
+    // sale with no reference on any method (cash references kept) and stores customerType whatever these say, so a
+    // queued sale still syncs after either is turned off.
+    referenceOptional: vendorToolsFlag('VENDOR_SALE_REFERENCE_OPTIONAL'),
+    saleCustomerDetails: vendorToolsFlag('VENDOR_SALE_CUSTOMER_DETAILS'),
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool).
