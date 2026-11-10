@@ -1,6 +1,6 @@
 # Partner date of birth: API contract (slice 2, backend)
 
-Plan: partner DOB personalisation, owner go-ahead 2026-10-22. Trainers and gym owners give a date of birth, and owners can also give a gender, so that slice 4 can use age and gender for shop personalisation in those modes. This slice stores the values, adds the endpoints and gives admins a view-only read. Shop eligibility does not change yet. Communications and challenge targeting do not change.
+Plan: partner DOB personalisation, owner go-ahead 2026-10-22. Trainers and gym owners give a date of birth, and owners can also give a gender, so that slice 4 can use age and gender for shop personalisation in those modes. This slice stores the values, adds the endpoints and gives admins a view-only read. Shop eligibility does not change in this slice (slice 4, below, adds it behind `SHOP_PERSONALISATION_PARTNERS`). Communications and challenge targeting do not change.
 
 ## Flag
 
@@ -195,9 +195,22 @@ Errors:
 
 Each successful read is audit-logged as `personal_details_viewed`, with the actor set to the admin, the target set to the persona's user id (or the trainer id), and `after: { subject: { type, id } }`. No values are logged.
 
+## Shop personalisation in trainer and owner mode (slice 4)
+
+Built 2026-11-10 behind `SHOP_PERSONALISATION_PARTNERS`, which is off by default and has an effect only while `SHOP_PERSONALISATION` is on too. The full contract is in `docs/shop-personalisation-api.md`, section "Trainer and owner mode". The shop reads these values per request and never caches or stores them:
+
+| Value | Used in | Rule |
+|---|---|---|
+| Date of birth verdict | **every mode** while the flag is on | One verdict per Person, built from `Person.dateOfBirth` plus every member persona's date of birth (suspended ones included). If any of them is invalid or under 18, the shop gives nothing in every mode. If none is present, purchase history only. If all are adult, the age comes from `Person.dateOfBirth`, else the first valid member date. |
+| Invalid stored `Person.dateOfBirth` | shop vs this API | **The two differ.** `GET /me/personal-details` and the admin view treat a present but invalid `Person.dateOfBirth` as absent and fall back to the member date. That behaviour is unchanged. The shop treats it as **invalid** and gives nothing (fail closed). |
+| Gender | trainer mode | `TrainerProfile.gender`, else `Person.gender` |
+| Gender | owner mode | `Person.gender` |
+
+Gender and age only **reorder** products: they never filter and never appear in a title. `other` or `NULL` gender gives no gender signal. KYC data is never read. Member mode keeps its own age and gender from the member profile; the Person-wide verdict can only switch it off. With the flag off, none of this is read and every response is byte-identical. Release rule: the flag stays off until mobile#299 is widely installed, the slice 2 migration is confirmed in production, and the slice 5 privacy text is approved by counsel.
+
 ## Not in this slice
 
-- Shop eligibility for partners (slice 4, `SHOP_PERSONALISATION_PARTNERS`).
+- Shop eligibility for partners — now built as slice 4 (above), dormant.
 - App onboarding step, home card and settings tile (slice 3).
-- Privacy text (slice 5, draft pending counsel).
+- Privacy text (slice 5, draft pending Tanzanian counsel).
 - Under-18 is not checked for admin-created or invited partners, or for identity merges (see above).
