@@ -116,8 +116,6 @@ export function parseSale(body = {}) {
     if (raw.reference != null && typeof raw.reference !== 'string') return fail('invalid_payment', 400, { index, field: 'reference' });
     const reference = typeof raw.reference === 'string' && raw.reference.trim() ? raw.reference.trim() : null;
     if (reference && reference.length > MAX_REFERENCE) return fail('invalid_payment', 400, { index, field: 'reference', max: MAX_REFERENCE });
-    // Refused rather than stripped, so what is stored (and printed on receipts) is exactly what the seller typed.
-    if (reference && CONTROL_CHAR.test(reference)) return fail('invalid_payment', 400, { index, field: 'reference' });
     if (SALE_REFERENCE_REQUIRED.has(raw.method) && !reference) return fail('reference_required', 400, { index, method: raw.method });
     payments.push({ method: raw.method, amountTzs: raw.amountTzs, reference });
   }
@@ -164,6 +162,18 @@ function parseCreditFields(body) {
   }
   if (kind === 'credit' && !customerId) return fail('customer_required', 400);
   return { kind, customerId, dueDate };
+}
+
+/**
+ * Refusals that apply only when a sale would be newly recorded, never to a replay (contract check MED-1): the service
+ * answers a retry of a sale already recorded first, so an older app's queued sale whose reference holds a pasted tab
+ * still gets its 200 replay. Security review L-3: a payment reference holding a control character (\p{Cc}) →
+ * 400 invalid_payment { index, field: reference }; refused rather than stripped, so what is stored (and printed on
+ * receipts) is exactly what the seller typed. `sale` = parseSale's result. → null or the refusal.
+ */
+export function saleInsertRefusal(sale) {
+  const index = sale.payments.findIndex(p => p.reference && CONTROL_CHAR.test(p.reference));
+  return index === -1 ? null : fail('invalid_payment', 400, { index, field: 'reference' });
 }
 
 /** What makes two requests with the same clientRef "the same sale" (a retry, not a reuse). */

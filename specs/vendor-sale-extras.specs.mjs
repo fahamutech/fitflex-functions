@@ -14,7 +14,7 @@ import { vendorToolsOptionsRoute, vendorCreateProduct, vendorMeRoute } from '../
 import { vendorRecordSale, vendorListSales, vendorGetSale, resetVendorSalesLimits } from '../functions/vendor-sales.mjs';
 import { vendorCustomersCreate, vendorCustomerSales, vendorCustomerSale, vendorCustomerRecordPayment, resetVendorCustomerLimits } from '../functions/vendor-customers.mjs';
 import {
-  parseSale, saleFingerprint, PAYMENT_METHODS, REFERENCE_REQUIRED, SALE_REFERENCE_REQUIRED, SALE_CUSTOMER_TYPES,
+  parseSale, saleFingerprint, saleInsertRefusal, PAYMENT_METHODS, REFERENCE_REQUIRED, SALE_REFERENCE_REQUIRED, SALE_CUSTOMER_TYPES,
 } from '../src/shared/vendor-sale.mjs';
 import { parsePayment } from '../src/shared/vendor-customer.mjs';
 import { refundMethod } from '../src/shared/vendor-refund.mjs';
@@ -175,19 +175,26 @@ test('rules #1 (Q-1): customer payments, refunds and supplier payments still nee
   assert.deepEqual(methodAndReference('cash', 'C-1'), { method: 'cash', reference: null });
 });
 
-test('rules #1 (security review L-3): a sale reference holding a control character is refused (never stripped); other text is kept as typed', () => {
+test('rules #1 (security review L-3, MED-1): a sale reference holding a control character is refused for a new sale (never stripped); parseSale and the fingerprint keep it as before', () => {
   for (const bad of ['QK1\u0000', 'QK\n12', 'QK\t12', 'QK\r12', 'A\u001bB', 'A\u007fB', 'A\u0085B', 'A\u009fB']) {
     for (const method of ['cash', 'mpesa', 'card']) {
-      assert.deepEqual(parseSale({ ...base, payments: [{ method, amountTzs: 1_000, reference: bad }] }), { error: 'invalid_payment', status: 400, index: 0, field: 'reference' }, `${method} ${JSON.stringify(bad)}`);
+      const parsed = parseSale({ ...base, payments: [{ method, amountTzs: 1_000, reference: bad }] });
+      assert.equal(parsed.error, undefined, 'parsing does not refuse it (a replay must still be found)');
+      assert.equal(parsed.payments[0].reference, bad.trim(), 'kept as sent (trimmed only), so the fingerprint is the pre-L-3 one');
+      assert.equal(saleFingerprint(parsed), fingerprintBefore(parsed));
+      assert.deepEqual(saleInsertRefusal(parsed), { error: 'invalid_payment', status: 400, index: 0, field: 'reference' }, `${method} ${JSON.stringify(bad)}`);
     }
   }
   // The index points at the offending row.
-  assert.deepEqual(parseSale({ ...base, payments: [{ method: 'cash', amountTzs: 1_000, reference: 'ok' }, { method: 'bank', amountTzs: 1, reference: 'B\u00001' }] }).index, 1);
+  assert.deepEqual(saleInsertRefusal(parseSale({ ...base, payments: [{ method: 'cash', amountTzs: 1_000, reference: 'ok' }, { method: 'bank', amountTzs: 1, reference: 'B\u00001' }] })).index, 1);
   // Leading/trailing whitespace is trimmed as before (that trim already removed edge tabs/newlines); inside it is refused.
-  assert.equal(parseSale({ ...base, payments: [{ method: 'cash', amountTzs: 1_000, reference: '\tTILL-889\n' }] }).payments[0].reference, 'TILL-889');
+  const edged = parseSale({ ...base, payments: [{ method: 'cash', amountTzs: 1_000, reference: '\tTILL-889\n' }] });
+  assert.deepEqual([edged.payments[0].reference, saleInsertRefusal(edged)], ['TILL-889', null]);
   for (const fine of ['TILL 889', 'Malipo ya Ñ/é – 12', 'CRDB TT 2026/10/20', 'نمبر ١٢', 'A\u00a0B']) {
-    assert.equal(parseSale({ ...base, payments: [{ method: 'mpesa', amountTzs: 1_000, reference: fine }] }).payments[0].reference, fine, JSON.stringify(fine));
+    const parsed = parseSale({ ...base, payments: [{ method: 'mpesa', amountTzs: 1_000, reference: fine }] });
+    assert.deepEqual([parsed.payments[0].reference, saleInsertRefusal(parsed)], [fine, null], JSON.stringify(fine));
   }
+  assert.equal(saleInsertRefusal(parseSale({ ...base, payments: [] })), null);
 });
 
 // ── #2 customerType: rules ───────────────────────────────────────────────────
@@ -434,4 +441,31 @@ test('rollback order (security review L-2): with the column gone, a sale without
     throw ROLLBACK;
   }), err => err === ROLLBACK);
   assert.equal((await db('VendorSale').where({ vendorId: v }).count({ n: '*' }).first()).n, '0', 'rolled back');
+});
+
+test('replay (contract check MED-1): a sale already recorded with a control character in a reference (older app/server) still replays 200 on retry; a new one is refused 400, nothing recorded', async () => {
+  salesOn();
+  const v = await vendor();
+  const p = await product(v);
+  const one = [{ productId: p.id, qty: 1 }];
+  // Recorded the way the server before L-3 did: parse → fingerprint → store, with no control-character check.
+  const body = saleBody(one, [{ method: 'mpesa', amountTzs: 4_000, reference: 'QK\t12' }, { method: 'cash', amountTzs: 6_000 }]);
+  const parsed = Object.assign(parseSale(body), { soldAt: new Date(), clientSoldAt: null });
+  const old = await createPgVendorSaleStore({ db }).record({ vendorId: v, actorId: v, sale: parsed, fingerprint: saleFingerprint(parsed) });
+  assert.equal(old.error, undefined, JSON.stringify(old));
+  assert.equal(old.sale.payments[0].reference, 'QK\t12');
+  const stock = (await db('Product').where({ id: p.id }).first()).stock;
+
+  const retried = await sell(as(v), body);
+  assert.deepEqual([retried.status, retried.headers['Idempotent-Replay'], retried.body.sale?.id], [200, 'true', old.sale.id], JSON.stringify(retried.body));
+  const viaCustomerType = await sell(as(v), { ...body, customerType: null });
+  assert.deepEqual([viaCustomerType.status, viaCustomerType.body.sale?.id], [200, old.sale.id], 'customerType null is the same body');
+  // The same clientRef with another body is still a reuse, not a refusal.
+  assert.deepEqual((await sell(as(v), { ...body, note: 'other' })).body, { error: 'client_ref_reused' });
+
+  // A new sale with a control character is refused, and nothing moves.
+  const fresh = await sell(as(v), saleBody(one, [{ method: 'mpesa', amountTzs: 10_000, reference: 'QK\t12' }]));
+  assert.deepEqual([fresh.status, fresh.body], [400, { error: 'invalid_payment', index: 0, field: 'reference' }]);
+  assert.equal((await db('Product').where({ id: p.id }).first()).stock, stock, 'nothing recorded');
+  assert.equal((await db('VendorSale').where({ vendorId: v }).count({ n: '*' }).first()).n, '1');
 });
