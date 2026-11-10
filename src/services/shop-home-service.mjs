@@ -219,6 +219,10 @@ export function createShopHomeService({
     const personas = await personasOf(user);
     const heldUserTypes = personas.map(p => p.userType);
     const personaOf = type => (claims.userType === type ? claims.sub : personas.find(p => p.userType === type)?.id || null);
+    // Security review L2: a mode this person does not hold is refused before any profile, preference or
+    // order is read (buildShopHome checks the same rule again below).
+    const resolvedMode = resolveShoppingMode({ requested: query.mode, sessionUserType: claims.userType, heldUserTypes });
+    if (resolvedMode.error) return { error: resolvedMode.error, status: 403 };
 
     // Declared profile fields only: a member's fitness goal, a trainer's specialties.
     const memberId = personaOf('member');
@@ -238,9 +242,7 @@ export function createShopHomeService({
     let state = null;
     let viewer = null;
     if (personalisationOn() && preferences) {
-      // The mode buildShopHome will use (a refused mode is answered 403 there; the state is then unused).
-      const shoppingMode = resolveShoppingMode({ requested: query.mode, sessionUserType: claims.userType, heldUserTypes }).mode;
-      state = await preferences.stateFor({ claims, user, personas, memberProfile, mode: shoppingMode });
+      state = await preferences.stateFor({ claims, user, personas, memberProfile, mode: resolvedMode.mode });
       let history = null;
       if (state.enabled && buyerPaidOrders) {
         const since = new Date(at.getTime() - historyDays() * 86_400_000);

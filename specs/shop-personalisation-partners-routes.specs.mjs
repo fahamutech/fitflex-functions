@@ -127,7 +127,7 @@ test('trainer-only, flag on: Person date of birth from the database; TrainerProf
   const t = await user('trainer');
   await trainerProfile(t.id, null);
   await declare(t.personId, { dateOfBirth: yearsAgo(35), gender: 'female' });
-  assert.deepEqual(await prefs(as(t, 'trainer')), { personalised: true, available: true, historyDays: 365, mode: 'trainer', uses: ['purchase_history', 'profile_gender', 'profile_age'] });
+  assert.deepEqual(await prefs(as(t, 'trainer')), { personalised: true, available: true, historyDays: 365, mode: 'trainer', uses: ['purchase_history', 'profile_gender', 'profile_age'], profileSignals: true });
   const on = await home(as(t, 'trainer'));
   assert.deepEqual(on.personalisation, { available: true, enabled: true });
   const rec = on.sections.find(s => s.key === 'recommended');
@@ -167,7 +167,7 @@ test('owner-only: no date of birth → purchase history only; invalid (future) a
   const future = new Date(Date.now() + 400 * 86_400_000).toISOString().slice(0, 10);
   for (const dob of [future, yearsAgo(17)]) {
     await declare(o.personId, { dateOfBirth: dob, gender: 'female' });
-    assert.deepEqual(await prefs(claims), { personalised: true, available: false, historyDays: 365, mode: 'owner', uses: [] }, dob);
+    assert.deepEqual(await prefs(claims), { personalised: true, available: false, historyDays: 365, mode: 'owner', uses: [], profileSignals: true }, dob);
     const body = await home(claims);
     assert.deepEqual(body.personalisation, { available: false, enabled: false });
     assert.ok(!body.signalsUsed.some(x => PERSONAL_SIGNALS.includes(x)));
@@ -177,23 +177,69 @@ test('owner-only: no date of birth → purchase history only; invalid (future) a
   assert.deepEqual((await prefs(claims)).uses, ['purchase_history', 'profile_age']);
 });
 
-test('member + trainer + owner: member mode keeps the member profile; trainer/owner use the Person; one opt-out for all', async () => {
+test('M1 (CI DB): Person adult + member persona under 18 → nothing in every mode, member mode included; flag off member mode as before', async () => {
   process.env.SHOP_PERSONALISATION_PARTNERS = '1';
   const m = await user('member', { memberProfile: JSON.stringify({ gender: 'male', dateOfBirth: yearsAgo(16) }) });
+  const t = await user('trainer', { personId: m.personId });
+  await user('gym_operator', { personId: m.personId });
+  await trainerProfile(t.id, 'female');
+  await declare(m.personId, { dateOfBirth: yearsAgo(30), gender: null });
+  for (const mode of ['member', 'trainer', 'owner']) {
+    const body = await prefs(as(m, 'member'), mode);
+    assert.deepEqual([body.available, body.uses], [false, []], mode);
+    assert.deepEqual((await home(as(t, 'trainer'), mode)).personalisation, { available: false, enabled: false }, mode);
+  }
+  delete process.env.SHOP_PERSONALISATION_PARTNERS;
+  assert.deepEqual(await prefs(as(m, 'member'), 'member'), { personalised: true, available: false, historyDays: 365, mode: 'member', uses: [] });
+});
+
+test('M1 (CI DB): Person under 18 + member persona adult → nothing in every mode while the flag is on; flag off member mode is available as before', async () => {
+  process.env.SHOP_PERSONALISATION_PARTNERS = '1';
+  const m = await user('member', { memberProfile: JSON.stringify({ gender: 'female', dateOfBirth: yearsAgo(30) }) });
+  await user('trainer', { personId: m.personId });
+  await declare(m.personId, { dateOfBirth: yearsAgo(17), gender: 'female' });
+  for (const mode of ['member', 'trainer']) assert.deepEqual((await prefs(as(m, 'member'), mode)).uses, [], mode);
+  assert.equal((await prefs(as(m, 'member'), 'member')).available, false);
+  delete process.env.SHOP_PERSONALISATION_PARTNERS;
+  const off = await prefs(as(m, 'member'), 'member');
+  assert.deepEqual([off.available, off.uses.slice(0, 3)], [true, ['purchase_history', 'profile_gender', 'profile_age']]);
+  assert.ok(!('profileSignals' in off));
+});
+
+test('M1 (CI DB): a suspended member persona under 18 blocks the trainer', async () => {
+  process.env.SHOP_PERSONALISATION_PARTNERS = '1';
+  const t = await user('trainer');
+  await declare(t.personId, { dateOfBirth: yearsAgo(30), gender: 'male' });
+  assert.equal((await prefs(as(t, 'trainer'))).available, true);
+  await user('member', { personId: t.personId, accountStatus: 'suspended', memberProfile: JSON.stringify({ dateOfBirth: yearsAgo(15) }) });
+  assert.deepEqual(await prefs(as(t, 'trainer')), { personalised: true, available: false, historyDays: 365, mode: 'trainer', uses: [], profileSignals: true });
+});
+
+test('member + trainer + owner, all adult: member mode keeps the member profile; trainer/owner use the Person; one opt-out for all', async () => {
+  process.env.SHOP_PERSONALISATION_PARTNERS = '1';
+  const m = await user('member', { memberProfile: JSON.stringify({ gender: 'male', dateOfBirth: yearsAgo(40) }) });
   const t = await user('trainer', { personId: m.personId });
   const o = await user('gym_operator', { personId: m.personId });
   await trainerProfile(t.id, 'female');
   await declare(m.personId, { dateOfBirth: yearsAgo(30), gender: null });
-  // Member mode: the member profile says 16 → off, exactly as before.
-  assert.deepEqual(await prefs(as(m, 'member'), 'member'), { personalised: true, available: false, historyDays: 365, mode: 'member', uses: [] });
-  // Trainer mode: Person (30) + trainer profile gender (female).
+  const member = await prefs(as(m, 'member'), 'member');
+  assert.deepEqual(member.uses, ['purchase_history', 'profile_gender', 'profile_age']);
+  assert.ok(!('profileSignals' in member), 'not in member mode');
+  // Trainer mode: trainer profile gender (female). Owner mode: Person gender NULL → age only.
   assert.deepEqual((await prefs(as(m, 'member'), 'trainer')).uses, ['purchase_history', 'profile_gender', 'profile_age']);
-  // Owner mode: Person (30), Person gender NULL.
   assert.deepEqual((await prefs(as(t, 'trainer'), 'owner')).uses, ['purchase_history', 'profile_age']);
   // One switch per Person: off from owner mode → off in every mode.
   const put = await call(putShopPreferences, as(o, 'gym_operator'), { body: { personalised: false, source: 'privacy_page' } });
   assert.equal(put.statusCode, 200, JSON.stringify(put.body));
-  assert.deepEqual([put.body.personalised, put.body.available, put.body.uses], [false, true, []]);
+  assert.deepEqual([put.body.personalised, put.body.available, put.body.uses, put.body.profileSignals], [false, true, [], true]);
   for (const mode of ['member', 'trainer', 'owner']) assert.deepEqual((await prefs(as(t, 'trainer'), mode)).uses, [], mode);
   assert.equal((await db('ShopPreference').where({ personId: m.personId })).length, 1);
+});
+
+test('L2 (CI DB): /shop/home with a mode the person does not hold is 403 mode_not_allowed', async () => {
+  process.env.SHOP_PERSONALISATION_PARTNERS = '1';
+  const t = await user('trainer');
+  shopHomeService.clearCache();
+  const out = await call(shopHome, as(t, 'trainer'), { query: { mode: 'owner' } });
+  assert.deepEqual([out.statusCode, out.body], [403, { error: 'mode_not_allowed' }]);
 });

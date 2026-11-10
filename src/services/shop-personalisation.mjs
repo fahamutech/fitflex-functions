@@ -44,7 +44,7 @@ export function personalisationEligibility({ flagOn, hasMember, memberProfile, n
   return eligibilityFromDateOfBirth(memberProfile?.dateOfBirth, now);
 }
 
-/** The date-of-birth rules shared by member mode and (slice 4) trainer/owner mode. */
+/** The member-mode date-of-birth rules. */
 function eligibilityFromDateOfBirth(value, now) {
   const dob = readDateOfBirth(value, now);
   if (dob.status === 'absent') return { available: true, reason: null, age: null, audienceAllowed: false };
@@ -57,28 +57,47 @@ function eligibilityFromDateOfBirth(value, now) {
 export const PARTNER_MODES = Object.freeze(['trainer', 'owner']);
 
 /**
- * The date of birth that counts in trainer/owner mode (partner DOB slice 4): the Person's declared one
- * (Person.dateOfBirth) when there is one, else the member profile's — the same order as
- * personal-details-service.assertPartnerAge. Unlike assertPartnerAge, a present but invalid
- * Person.dateOfBirth (in the future, before 1901) does not fall through to the member profile: it
- * fails closed. → the raw value (string) or null.
+ * Security review M1 (functions#346): ONE date-of-birth verdict per Person, the same in every mode,
+ * used only while SHOP_PERSONALISATION_PARTNERS is on. It looks at Person.dateOfBirth AND every member
+ * persona's memberProfile.dateOfBirth (suspended ones too, as personal-details-service.memberDateOfBirth):
+ *   any present date invalid (not strict YYYY-MM-DD, not a real day, before 1901, in the future)
+ *                               → { status: 'invalid' }  (nothing, every mode — fail closed)
+ *   any present date under 18   → { status: 'under_18', age }  (nothing, every mode)
+ *   none present                → { status: 'absent' }  (purchase history only)
+ *   otherwise (all adult)       → { status: 'adult', age }: Person.dateOfBirth's age, else the first
+ *                                 valid member date of birth (`memberDobs` in preference order)
+ * Invalid wins over under 18 (both give nothing). Note: /me/personal-details treats a present but
+ * invalid Person.dateOfBirth as absent; the shop deliberately does not (docs/partner-dob-api.md).
  */
-export function partnerDateOfBirth({ person, memberProfile }) {
-  const own = person?.dateOfBirth;
-  if (own !== undefined && own !== null && !(typeof own === 'string' && own.trim() === '')) return own;
-  return memberProfile?.dateOfBirth ?? null;
+export function personDobVerdict({ personDob = null, memberDobs = [], now }) {
+  const reads = [personDob, ...memberDobs].map(v => readDateOfBirth(v, now)).filter(r => r.status !== 'absent');
+  if (!reads.length) return { status: 'absent', age: null };
+  if (reads.some(r => r.status === 'invalid')) return { status: 'invalid', age: null };
+  const minor = reads.find(r => r.age < 18);
+  if (minor) return { status: 'under_18', age: minor.age };
+  return { status: 'adult', age: reads[0].age }; // reads[0] is the Person's when it has one
+}
+
+/** A blocking verdict as eligibility (every mode while the partners flag is on). → null when not blocking. */
+export function blockedByVerdict(verdict) {
+  if (verdict?.status === 'invalid') return { available: false, reason: 'invalid_dob', age: null, audienceAllowed: false };
+  if (verdict?.status === 'under_18') return { available: false, reason: 'under_18', age: verdict.age, audienceAllowed: false };
+  return null;
 }
 
 /**
  * Who may be personalised in trainer or owner mode (SHOP_PERSONALISATION_PARTNERS on; partner DOB
- * slice 4). No member persona is needed; otherwise the member rules apply to partnerDateOfBirth():
+ * slice 4), from personDobVerdict. No member persona is needed:
  *   absent → purchase history only (never gender or age); invalid → nothing (invalid_dob);
- *   under 18 → nothing (under_18); 18 or over → purchase history, gender and age.
+ *   under 18 → nothing (under_18); adult → purchase history, gender and age.
  * → same shape as personalisationEligibility.
  */
-export function partnerEligibility({ flagOn, person, memberProfile, now }) {
+export function partnerEligibility({ flagOn, verdict }) {
   if (!flagOn) return { available: false, reason: 'flag_off', age: null, audienceAllowed: false };
-  return eligibilityFromDateOfBirth(partnerDateOfBirth({ person, memberProfile }), now);
+  const blocked = blockedByVerdict(verdict);
+  if (blocked) return blocked;
+  if (verdict?.status === 'adult') return { available: true, reason: null, age: verdict.age, audienceAllowed: true };
+  return { available: true, reason: null, age: null, audienceAllowed: false };
 }
 
 /**

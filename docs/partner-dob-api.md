@@ -197,15 +197,16 @@ Each successful read is audit-logged as `personal_details_viewed`, with the acto
 
 ## Shop personalisation in trainer and owner mode (slice 4)
 
-Built 2026-11-10 behind `SHOP_PERSONALISATION_PARTNERS` (off by default; has an effect only while `SHOP_PERSONALISATION` is on too). Full contract: `docs/shop-personalisation-api.md`, section "Trainer and owner mode". In short, the shop reads, per request and never cached or stored:
+Built 2026-11-10 behind `SHOP_PERSONALISATION_PARTNERS`, which is off by default and has an effect only while `SHOP_PERSONALISATION` is on too. The full contract is in `docs/shop-personalisation-api.md`, section "Trainer and owner mode". The shop reads these values per request and never caches or stores them:
 
-| Value | Used in | Order |
+| Value | Used in | Rule |
 |---|---|---|
-| Date of birth | trainer and owner mode | `Person.dateOfBirth`, else the member profile's (as `assertPartnerAge`); a present but invalid `Person.dateOfBirth` fails closed (no fall-through) |
+| Date of birth verdict | **every mode** while the flag is on | One verdict per Person, built from `Person.dateOfBirth` plus every member persona's date of birth (suspended ones included). If any of them is invalid or under 18, the shop gives nothing in every mode. If none is present, purchase history only. If all are adult, the age comes from `Person.dateOfBirth`, else the first valid member date. |
+| Invalid stored `Person.dateOfBirth` | shop vs this API | **The two differ.** `GET /me/personal-details` and the admin view treat a present but invalid `Person.dateOfBirth` as absent and fall back to the member date. That behaviour is unchanged. The shop treats it as **invalid** and gives nothing (fail closed). |
 | Gender | trainer mode | `TrainerProfile.gender`, else `Person.gender` |
 | Gender | owner mode | `Person.gender` |
 
-No date of birth → purchase history only; invalid → nothing; under 18 → nothing; 18 or over → purchase history plus a gender/age **reorder only** (never a filter, never in a title). `other` or `NULL` gender → no gender signal. KYC data is never read. Member mode and vendor_personal mode are unchanged. With the flag off nothing here is read and every response is byte-identical.
+Gender and age only **reorder** products: they never filter and never appear in a title. `other` or `NULL` gender gives no gender signal. KYC data is never read. Member mode keeps its own age and gender from the member profile; the Person-wide verdict can only switch it off. With the flag off, none of this is read and every response is byte-identical. Release rule: the flag stays off until mobile#299 is widely installed, the slice 2 migration is confirmed in production, and the slice 5 privacy text is approved by counsel.
 
 ## Not in this slice
 
