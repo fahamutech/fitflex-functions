@@ -146,6 +146,7 @@ export function createSecurityIncidentService({
    */
   async function applyProtection(incidentId, userId, personId, protection) {
     const step = { ...protection };
+    let ranPinStep = false;
     try {
       if (!personId) {
         // No Person to protect (legacy account): say so, do not pretend it worked.
@@ -155,7 +156,7 @@ export function createSecurityIncidentService({
         delete step.failure;
         if (!step.pinResetAt) {
           step.pinResetRequired = (await pinAuth.requirePinReset(personId, userId)) ? true : 'not_applicable';
-          step.pinResetAt = iso(now());
+          step.pinResetAt = iso(now()); ranPinStep = true;
         }
         await pinAuth.endSessions(personId);
         step.sessionsEnded = true; step.applied = true; delete step.failed;
@@ -167,7 +168,10 @@ export function createSecurityIncidentService({
     const stored = await locked(userId, async (trx) => {
       const cur = obj((await trx('SecurityIncident').where({ id: incidentId }).first('protection'))?.protection) || {};
       if (cur.applied && !step.applied) return cur;
-      const next = { ...cur, sessionsEnded: Boolean(step.sessionsEnded), pinResetRequired: step.pinResetRequired, applied: Boolean(step.applied) };
+      // If another attempt has completed the PIN step meanwhile and this one did not run it, that attempt's
+      // pinResetRequired stands: this call's value is its stale starting view.
+      const pinResetRequired = !ranPinStep && cur.pinResetAt ? cur.pinResetRequired : step.pinResetRequired;
+      const next = { ...cur, sessionsEnded: Boolean(step.sessionsEnded), pinResetRequired, applied: Boolean(step.applied) };
       if (cur.pinResetAt || step.pinResetAt) next.pinResetAt = cur.pinResetAt || step.pinResetAt;
       if (step.failed) next.failed = true; else delete next.failed;
       if (step.failure) next.failure = step.failure; else delete next.failure;

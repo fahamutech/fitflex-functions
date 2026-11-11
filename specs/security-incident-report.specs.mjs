@@ -1048,3 +1048,46 @@ test('L4: once staff resolve the incident a failed protection is not pending and
   assert.deepEqual(await db('SecurityIncident').where({ id }).first(), rowBefore);
   assert.equal(+(await person(m.personId)).sessionsValidAfter, +stampBefore);
 });
+
+test('L3 follow-on: a slow failing attempt that ends after another attempt completed the PIN step does not reset pinResetRequired', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  let t = Date.now();
+  const clock = () => new Date(t);
+  // Attempt A (the first report) hangs in the PIN step.
+  let entered; const atGate = new Promise((r) => { entered = r; });
+  let release; const gate = new Promise((r) => { release = r; });
+  const slow = createSecurityIncidentService({
+    db, logger: quiet, now: clock,
+    pinAuth: { requirePinReset: async () => { entered(); await gate; throw new Error('timed out'); }, endSessions: async () => {} },
+  });
+  const slowCall = slow.report({ userId: m.id, eventId: ev });
+  await atGate;
+
+  // Attempt B, a cooldown later: completes the PIN step, fails ending sessions, and records that.
+  t += PROTECTION_RETRY_COOLDOWN_MS;
+  const b = countingPinAuth({ failEnd: () => true });
+  const mid = await createSecurityIncidentService({ db, pinAuth: b, logger: quiet, now: clock }).report({ userId: m.id, eventId: ev });
+  assert.deepEqual(b.calls, { pin: 1, end: 1 });
+  assert.deepEqual(mid.protection, { requested: true, sessionsEnded: false, pinResetRequired: true, failed: true });
+  const id = mid.incident.id;
+  const pinResetAt = (await db('SecurityIncident').where({ id }).first()).protection.pinResetAt;
+  assert.ok(pinResetAt);
+
+  // Now A fails. Its stale "pinResetRequired: false" must not replace what B recorded.
+  release();
+  const late = await slowCall;
+  assert.equal(late.protection.pinResetRequired, true);
+  assert.equal(late.protection.failed, true);
+  const row = await db('SecurityIncident').where({ id }).first();
+  assert.equal(row.protection.pinResetRequired, true);
+  assert.equal(row.protection.pinResetAt, pinResetAt, 'pinResetAt kept');
+
+  // The next retry skips the PIN step and still reports that a PIN reset is required.
+  t += PROTECTION_RETRY_COOLDOWN_MS;
+  const good = countingPinAuth();
+  const done = await createSecurityIncidentService({ db, pinAuth: good, logger: quiet, now: clock }).report({ userId: m.id, eventId: ev });
+  assert.deepEqual(good.calls, { pin: 0, end: 1 });
+  assert.deepEqual(done.protection, { requested: true, sessionsEnded: true, pinResetRequired: true });
+  assert.equal(done.signedOut, true);
+  assert.equal((await db('SecurityIncident').where({ id }).first()).protection.pinResetRequired, true);
+});
