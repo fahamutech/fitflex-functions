@@ -6,6 +6,7 @@ Builds on `docs/shop-home-api.md` (Phase 1) and `docs/shop-banners-api.md` (slic
 
 Owner decisions this implements (final, 2026-10-20): purchase history and gender/age are **on by default with one opt-out** ("Personalised shop"); gender/age only **reorder** products a vendor tagged, **member mode only**, never filter, never in a title; **under-18 → personalisation fully off** (spec Q-6 recommendation accepted); nothing is ever inferred from activity, health, training, sponsor/company or KYC data; the flag may go on right after QA. The privacy text describing this is a **draft pending Tanzanian counsel**.
 Owner decision 2026-10-22: an account with **no date of birth** gets **purchase history only** (never gender or age) until a valid adult date of birth is set; trainer/owner-only accounts stay without personalisation for now (date of birth at their onboarding is a separate fix).
+Owner go-ahead 2026-11-10 (partner DOB slice 4): **trainer and owner mode** are personalised from the Person's own declared details behind `SHOP_PERSONALISATION_PARTNERS` (off by default). See [Trainer and owner mode](#trainer-and-owner-mode-shop_personalisation_partners). The privacy text that describes it is still a **draft pending Tanzanian counsel** (partner DOB slice 5).
 
 ## Release rule (must hold before the flag goes on)
 
@@ -16,6 +17,7 @@ Owner decision 2026-10-22: an account with **no date of birth** gets **purchase 
 | Env | Default | Meaning |
 |---|---|---|
 | `SHOP_PERSONALISATION` | off | Turns on everything below. Off: `GET /shop/home` is **byte-identical** to before (no `personalisation` key, no new reasons), `PUT /shop/preferences` is `404 feature_disabled`, `GET /shop/preferences` says `available: false`, `/vendor/tools/options` says `merch.productTargets: false`. |
+| `SHOP_PERSONALISATION_PARTNERS` | off | Partner DOB slice 4. Has an effect **only while `SHOP_PERSONALISATION` is on too**. Off: every `/shop/home` and `/shop/preferences` body is **byte-identical** to before (trainer/owner-only accounts `available: false`; gender/age member mode only). On: trainer and owner mode follow [Trainer and owner mode](#trainer-and-owner-mode-shop_personalisation_partners). |
 | `SHOP_HISTORY_DAYS` | 365 | How far back purchase history is read (whole days, 1–730; anything else = 365). |
 
 Fixed in code (`src/services/shop-personalisation.mjs`): non-consumables bought in the last **30 days** are not suggested again; consumable categories = `supplements_nutrition`, `food_drinks`.
@@ -35,6 +37,59 @@ Examples that count as **not valid** (fail closed): `2011/05/03`, `03/05/2011`, 
 - No member persona (e.g. a trainer-only or owner-only account) → `available: false` (no date of birth to rule out a minor). **Deviation from spec §6.3**, which shows the switch with the partner hint in every mode: with this rule a trainer/owner sees personalisation only if the same Person also holds a member persona that allows it (table above). Then purchase history applies in trainer/owner/vendor_personal mode too; gender/age never do. Owner 2026-10-22: stays so in this PR.
 
 `enabled` = `available` **and** the stored preference is on.
+
+The table above is **member mode** (and vendor_personal; and every mode while `SHOP_PERSONALISATION_PARTNERS` is off). With `SHOP_PERSONALISATION_PARTNERS` on, `available` in trainer and owner mode follows the next section instead, so `available` can differ per `?mode`.
+
+## Trainer and owner mode (`SHOP_PERSONALISATION_PARTNERS`)
+
+Applies only when **both** `SHOP_PERSONALISATION` and `SHOP_PERSONALISATION_PARTNERS` are on. Trainer and owner mode (the `?mode` the caller holds, defaulting to the signed-in role) are then personalised from the Person's own declared details. With `SHOP_PERSONALISATION_PARTNERS` off, nothing in this section applies and every body is byte-identical to before.
+
+### One date-of-birth verdict per Person (security review M1)
+
+While the flag is on, the shop gives **one** answer per Person, and that answer is the same **in every mode, member mode and vendor_personal included**. It is built from `Person.dateOfBirth` **and every member persona's** `memberProfile.dateOfBirth`, including suspended personas (the same rows `memberDateOfBirth` in `personal-details-service` reads). An account without a Person uses only its own member profile.
+
+| Dates found (Person + all member personas) | Verdict | Effect |
+|---|---|---|
+| none present | absent | trainer/owner: `available: true`, purchase history only (never gender or age). Member/vendor_personal: the member rules as before. |
+| **any** present date invalid (not strict `YYYY-MM-DD`, not a real day, before 1901, in the future) | invalid | **nothing, in every mode** (fail closed; `available: false`, `uses: []`) |
+| **any** present date under 18 | under 18 | **nothing, in every mode** |
+| all present dates adult | adult | trainer/owner: purchase history plus gender and age. The age comes from `Person.dateOfBirth`, or from the first valid member date (the signed-in member's first) when the Person has none. Member/vendor_personal: the member rules as before (member mode still takes its age and gender from the member profile). |
+
+Both conflict directions block: an adult Person with an under-18 member persona, and an under-18 (or invalid) Person with an adult member persona. A present but invalid `Person.dateOfBirth` never falls through to the member profile. **Difference from `/me/personal-details`**: that endpoint treats an invalid stored `Person.dateOfBirth` as absent (unchanged). The shop treats it as invalid, so the shop gives nothing.
+
+**Gender** (adults, trainer/owner mode): trainer mode uses `TrainerProfile.gender` (the gender shown to clients), else `Person.gender`. Owner mode uses `Person.gender` and never a trainer profile. `female` maps to women and `male` to men. `other` or `NULL` ("prefer not to say") gives **no gender signal**, but the age band still applies. A declared `other` on the trainer profile is not overridden by `Person.gender`.
+
+Gender and age **only reorder** `recommended` and `essentials` (the same `reorderForAudience` as member mode). They never filter, and they never appear in a title or reason text. The shop reads only `Person.dateOfBirth`, `Person.gender`, `TrainerProfile.gender`, the member personas' dates of birth, and the person's own paid orders. It never reads activity, health, training, KYC, sponsor or company data. The one opt-out per Person applies in every mode.
+
+| Mode (enabled) | `uses` |
+|---|---|
+| trainer, adult | `purchase_history`, `profile_gender` (declared `female`/`male`), `profile_age`, `location` (SHOP_NEAR_YOU), `specialty` (declared specialties that map to categories) |
+| trainer, no date of birth | `purchase_history`, `location`, `specialty` |
+| owner, adult | `purchase_history`, `profile_gender` (declared `female`/`male`), `profile_age`, `location` |
+| owner, no date of birth | `purchase_history`, `location` |
+| any mode, verdict invalid or under 18 | `[]` |
+| switched off | `[]` |
+
+### `profileSignals` (contract check 1)
+
+`GET /shop/preferences` and the `PUT` answer carry **`"profileSignals": true` in trainer and owner mode, only while both flags are on**, whatever the availability. In every other case the key is **absent**: member or vendor_personal mode, or either flag off. That keeps flag-off bodies byte-identical. The app shows its "add your date of birth" hint only when the key is `true`.
+
+```json
+{ "personalised": true, "available": true, "historyDays": 365, "mode": "trainer", "uses": ["purchase_history", "specialty"], "profileSignals": true }
+```
+
+### `GET /shop/home` in these modes
+
+`personalisation: { available, enabled }` follows the tables above. `signalsUsed` may now hold `profile_gender` / `profile_age`, and `recommended` / `essentials` may carry the `reasonCodes` `profile_gender` / `profile_age`. These are the existing codes and reason sentences: there is **no new user-facing text**. A trainer- or owner-only account is no longer `no_member` in those modes. A `?mode` the person does not hold is answered `403 mode_not_allowed` **before** any profile, preference, Person detail or order is read (security review L2).
+
+`GET /shop/products` and `/shop/products/:id` take no `?mode`, so their "Delivers to your area" badge uses the **session's default shopping mode** (security review L3, contract check 3: accepted as is).
+
+### Release rule
+
+`SHOP_PERSONALISATION_PARTNERS` stays **off** until all three are true:
+1. **mobile#299** is widely installed. mobile#233 alone is not enough.
+2. The slice 2 Person migration (`20270110091000-person-declared-details`) is confirmed in production.
+3. The slice 5 privacy text, currently a **draft pending Tanzanian counsel**, has been approved by counsel.
 
 ## `GET /shop/preferences`
 
@@ -58,8 +113,8 @@ Signed in, any role. Always `200` (also with the flag off), except a refused mod
   | flag on, switched off | `[]` (every mode) |
   | flag on, not available (no member persona, invalid date of birth, under 18) | `[]` (every mode; a 16-year-old never gets `specialty` or `goal`) |
   | member mode | `purchase_history`; `profile_gender` (valid adult DOB and gender `female`/`male`); `profile_age` (valid adult DOB); `goal` (a declared fitness goal that maps to categories) |
-  | trainer mode | `purchase_history`; `specialty` (declared specialties that map to categories). Never gender or age. |
-  | owner, vendor_personal | `purchase_history` |
+  | trainer mode | `purchase_history`; `specialty` (declared specialties that map to categories). Never gender or age (with `SHOP_PERSONALISATION_PARTNERS` on: see [Trainer and owner mode](#trainer-and-owner-mode-shop_personalisation_partners)). |
+  | owner, vendor_personal | `purchase_history` (owner mode with `SHOP_PERSONALISATION_PARTNERS` on: see the same section) |
   | flag off | what the Phase 1 page uses: `goal` in member mode, `specialty` in trainer mode |
 - The setting belongs to the **Person** (all roles of the account share it). An account with no Person uses its own user id.
 - **Person link / merge** (verified sign-in links personas onto one Person): the switch follows the moved personas, and **an opt-out on either side wins** (the merged Person is opted out). The change is audited with `source: "identity_link"` (a server-only value; PUT does not accept it). The old Person's row goes when it becomes a tombstone.
@@ -120,7 +175,7 @@ Everything from `docs/shop-home-api.md` stays. Additions, **only with the flag o
 **Gender / age** (`profile_gender`, `profile_age`): **member mode only**, **only with a valid adult date of birth** (none at all when it is absent), declared `memberProfile.gender` (`female` → `women`, `male` → `men`; `other`/unset → not used) and `memberProfile.dateOfBirth` (band `18_29`, `30_44`, `45_59`, `60_plus`).
 - `profile_gender` / `profile_age` are reported only when the **final** order of that rail differs from the order without gender/age; if both tags point the same way both are reported, if they cancel out neither is.
 - Applied **after** the sections are filled, within `recommended` and `essentials` only: a stable reorder that moves products whose vendor tag matches (gender match +1, age band match +1) earlier. The **set of products in every section is identical with or without it**; untagged products and products tagged for another group stay where they are relative to each other.
-- Never in trainer, owner or vendor_personal mode.
+- Never in trainer, owner or vendor_personal mode — except trainer and owner mode with `SHOP_PERSONALISATION_PARTNERS` on (from the Person's declared details; see [Trainer and owner mode](#trainer-and-owner-mode-shop_personalisation_partners)).
 
 ### Switch off (stored `personalised: false`, flag on)
 
@@ -161,7 +216,7 @@ Before this, any text was stored. Dates already stored in another format are not
 
 1. Endpoints are `GET/PUT /shop/preferences` (spec B-P2-5 suggested `/me/shop-preferences`; P1 suggested `/me/...`).
 2. The preference belongs to the Person (`ShopPreference.personId`), not a single user row, so all roles share it (P1 D-2).
-3. `available` needs an adult member persona (see above); spec §6.3 shows the switch in every mode.
+3. `available` needs an adult member persona (see above); spec §6.3 shows the switch in every mode. With `SHOP_PERSONALISATION_PARTNERS` on, trainer and owner mode no longer need one (partner DOB slice 4).
 4. Switch off also drops the declared goal and specialty (stricter reading of "no personal reasons").
 5. `reasonParams` is a new optional object; `reasonCodes` stays a string array.
 
@@ -171,7 +226,7 @@ Before this, any text was stored. Dates already stored in another format are not
 
 ## Code
 
-- `src/services/shop-personalisation.mjs`: pure signal rules (history, rebuy window, audience, stable reorder).
+- `src/services/shop-personalisation.mjs`: pure signal rules (history, rebuy window, audience, stable reorder; slice 4: `partnerEligibility`, `partnerDateOfBirth`, `partnerGender`, `partnerAudienceFrom`).
 - `src/services/shop-preference-service.mjs` + `src/infra/shop-preference-store-pg.mjs`: the preference and its audit.
 - `src/services/shop-home-service.mjs` / `shop-recommendations.mjs`: wiring into the page.
 - `functions/shop-preferences.mjs`: routes.

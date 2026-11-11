@@ -131,6 +131,22 @@ export function shopPersonalisationOn() {
 }
 
 /**
+ * Partner DOB · slice 4 (docs/shop-personalisation-api.md "Trainer and owner mode"). Off unless
+ * SHOP_PERSONALISATION_PARTNERS is set, and only has an effect while SHOP_PERSONALISATION is on too.
+ * Off: GET /shop/home and GET /shop/preferences are byte-identical to before (trainer/owner-only
+ * accounts are not available; gender and age apply in member mode only). On: trainer and owner mode
+ * are personalised from the Person's declared date of birth (Person.dateOfBirth, else the member
+ * profile's) and gender (trainer mode: TrainerProfile.gender, else Person.gender; owner mode:
+ * Person.gender). Security review M1: an invalid or under-18 date of birth on the Person or on any of
+ * its member personas then switches personalisation off in EVERY mode (member mode included);
+ * otherwise member and vendor_personal mode are unchanged. GET/PUT /shop/preferences carry
+ * profileSignals: true in trainer/owner mode only while this is on.
+ */
+export function shopPersonalisationPartnersOn() {
+  return shopPersonalisationOn() && on('SHOP_PERSONALISATION_PARTNERS');
+}
+
+/**
  * Shop home Phase 2 · slice 3: "Popular near you" (docs/shop-near-you-api.md). Off unless SHOP_NEAR_YOU
  * is set: GET /shop/home is byte-identical to before (no `nearYou` key, no popular_near_you section,
  * `areaId` ignored), GET /shop/areas answers 404 feature_disabled, /shop/preferences never lists

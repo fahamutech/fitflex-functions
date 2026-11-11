@@ -10,8 +10,8 @@
 // "Personalised shop" switch and their own paid orders (purchase history), and, with SHOP_NEAR_YOU on,
 // the `areaId` the device worked out: used for this one answer only, never cached, stored or logged.
 // The areas, vendors' areas and pickup gyms' cities (non-personal) are part of the shared cache.
-import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY } from './shop-recommendations.mjs';
-import { purchaseHistoryFrom, audienceFrom, historyDaysFromEnv } from './shop-personalisation.mjs';
+import { buildShopHome, parseSectionList, DEFAULT_ASSEMBLY, resolveShoppingMode } from './shop-recommendations.mjs';
+import { purchaseHistoryFrom, audienceFrom, partnerAudienceFrom, historyDaysFromEnv } from './shop-personalisation.mjs';
 import { shopBannersOn, shopPersonalisationOn, shopNearYouOn, shopFlashSalesOn } from '../shared/feature-flags.mjs';
 import { saleLiveFor, saleView, withPrice } from '../shared/shop-pricing.mjs';
 import { withoutSale } from '../shared/shop-caps.mjs';
@@ -182,6 +182,7 @@ export function createShopHomeService({
     if (!areaId || !nearWanted() || !personalisationOn() || !preferences) return null;
     const shared = await loadShared();
     if (!shared.near) return null;
+    // No ?mode here: the session's default shopping mode (only matters with SHOP_PERSONALISATION_PARTNERS on).
     const state = await preferences.stateFor({ claims });
     if (!state.enabled) return null;
     const viewer = resolveViewerArea(shared.near.index, areaId, minRadius());
@@ -218,6 +219,10 @@ export function createShopHomeService({
     const personas = await personasOf(user);
     const heldUserTypes = personas.map(p => p.userType);
     const personaOf = type => (claims.userType === type ? claims.sub : personas.find(p => p.userType === type)?.id || null);
+    // Security review L2: a mode this person does not hold is refused before any profile, preference or
+    // order is read (buildShopHome checks the same rule again below).
+    const resolvedMode = resolveShoppingMode({ requested: query.mode, sessionUserType: claims.userType, heldUserTypes });
+    if (resolvedMode.error) return { error: resolvedMode.error, status: 403 };
 
     // Declared profile fields only: a member's fitness goal, a trainer's specialties.
     const memberId = personaOf('member');
@@ -237,7 +242,7 @@ export function createShopHomeService({
     let state = null;
     let viewer = null;
     if (personalisationOn() && preferences) {
-      state = await preferences.stateFor({ claims, user, personas, memberProfile });
+      state = await preferences.stateFor({ claims, user, personas, memberProfile, mode: resolvedMode.mode });
       let history = null;
       if (state.enabled && buyerPaidOrders) {
         const since = new Date(at.getTime() - historyDays() * 86_400_000);
@@ -250,12 +255,16 @@ export function createShopHomeService({
       personalisation = {
         location: viewer ? nearLocation(shared, viewer) : null,
         optedOut: state.personalised === false,
-        // Not available (no member persona, invalid date of birth, under 18): no declared goal or
+        // Not available (no member persona, invalid date of birth, under 18; slice 4: in trainer/owner mode the
+        // Person's date of birth decides instead of the member persona): no declared goal or
         // specialty either, so the page matches GET /shop/preferences `uses: []` (QA 2026-10-22).
         profileSignals: state.available,
         history,
         // Gender/age only with a valid adult date of birth (no date of birth: purchase history only).
-        audienceFor: mode => (state.enabled && state.audienceAllowed ? audienceFrom({ mode, memberProfile, age: state.age }) : null),
+        // Slice 4 (SHOP_PERSONALISATION_PARTNERS): in trainer/owner mode from the Person's declared details.
+        audienceFor: mode => (!state.enabled || !state.audienceAllowed ? null
+          : state.partnerMode ? (mode === state.partnerMode ? partnerAudienceFrom({ mode, gender: state.partnerGender, age: state.age }) : null)
+            : audienceFrom({ mode, memberProfile, age: state.age })),
       };
     }
     // Slice 4: the sales live now, for products this catalogue lists (its listing, KYC, moderation and
