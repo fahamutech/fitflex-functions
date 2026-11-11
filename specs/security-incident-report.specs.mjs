@@ -9,7 +9,7 @@ import { users } from '../src/bootstrap/collections.mjs';
 import { pinAuthService, opsService, securityIncidentService, securityEventService } from '../src/bootstrap/services.mjs';
 import { sign } from '../src/auth/jwt.mjs';
 import { createB2BWatchService } from '../src/services/b2b-watch-service.mjs';
-import { createSecurityIncidentService, resolutionText, notificationIdFor, PUSH_TEXT, protectionPending, protectionRetryable } from '../src/services/security-incident-service.mjs';
+import { createSecurityIncidentService, resolutionText, notificationIdFor, PUSH_TEXT, protectionPending, protectionRetryable, PROTECTION_RETRY_COOLDOWN_MS, PROTECTION_MAX_RETRIES } from '../src/services/security-incident-service.mjs';
 import { PORTAL_ACL_SCOPES } from '../src/services/portal-user-service.mjs';
 import { securityIncidentReportsOn, securityReportMaxPerDay } from '../src/shared/feature-flags.mjs';
 import * as fn from '../functions/security-activity.mjs';
@@ -76,6 +76,13 @@ async function run(route, { token = null, body = {}, query = {}, params = {} } =
 }
 const report = (userId, eventId, body = {}) => run(fn.reportSecurityEvent, { token: bearer(userId), params: { eventId }, body });
 const person = id => db('Person').where({ id }).first();
+// A retry of protection waits PROTECTION_RETRY_COOLDOWN_MS after the last attempt; this moves that attempt into the past.
+const ageAttempt = (incidentId, ms = 2 * 60_000) => db.raw(
+  `UPDATE "SecurityIncident" SET protection = jsonb_set(protection, '{lastAttemptAt}', to_jsonb(?::text)) WHERE id = ?`,
+  [new Date(Date.now() - ms).toISOString(), incidentId],
+);
+const trailCount = incidentId => db('SecurityIncidentEvent').where({ incidentId }).then(r => r.length);
+const INTERNAL = /retryCount|lastAttemptAt|pinResetAt|"applied"|"failure"|no_person/;
 
 async function makeAdmin(scopes) {
   const id = uid('usr_sadm');
@@ -493,6 +500,7 @@ test('fix pass: a repeat retries protection that failed, exposes protection.fail
   assert.equal(first.protection.sessionsEnded, false);
   assert.equal(first.signedOut, false);
   broken = false;
+  await ageAttempt(first.incident.id); // past the retry cooldown
   const again = await svc.report({ userId: m.id, eventId: ev });
   assert.equal(again.idempotent, true);
   assert.equal(again.incident.id, first.incident.id);
@@ -515,7 +523,7 @@ test('fix pass: a plain idempotent repeat of a protected report has signedOut fa
   assert.equal(b.body.protection.sessionsEnded, true);
 });
 
-test('fix pass: a user with no Person is recorded as protection failed, not silently ok; repeat keeps trying', async () => {
+test('fix pass: a user with no Person is recorded as protection failed, not silently ok; a repeat says the same', async () => {
   const m = await makeUser(); const ev = await makeEvent(m.id);
   // A DB guard keeps User.personId set, so present "no Person" through a thin wrapper around the User lookup.
   const noPerson = Object.assign((t) => (t === 'User' ? { where: () => ({ first: async () => ({ personId: null }) }) } : db(t)), { transaction: (...a) => db.transaction(...a), raw: (...a) => db.raw(...a), fn: db.fn });
@@ -603,6 +611,16 @@ test('follow-up: one rule decides pending protection (requested, not applied, no
   assert.equal(protectionRetryable({ requested: true, applied: false, failed: true }), true);
   assert.equal(protectionRetryable({ requested: true, applied: true, failure: 'no_person' }), true, 'only a pending one can be not retryable');
   assert.equal(protectionRetryable(null), true);
+  // Fix pass 2: a resolved incident is never pending; an incident that used all its retries is not retryable.
+  const pending = { requested: true, applied: false, limited: false, failed: true };
+  assert.equal(protectionPending(pending, 'open'), true);
+  assert.equal(protectionPending(pending, 'acknowledged'), true);
+  assert.equal(protectionPending(pending, 'resolved'), false);
+  assert.equal(protectionRetryable({ ...pending, failure: 'no_person' }, 'resolved'), true, 'not pending, so no marker');
+  assert.equal(protectionRetryable({ ...pending, retryCount: PROTECTION_MAX_RETRIES - 1 }, 'open'), true);
+  assert.equal(protectionRetryable({ ...pending, retryCount: PROTECTION_MAX_RETRIES }, 'open'), false);
+  assert.equal(PROTECTION_RETRY_COOLDOWN_MS, 60_000);
+  assert.equal(PROTECTION_MAX_RETRIES, 5);
 });
 
 test('follow-up: the list shows protectionPending true after a failed protection and false after a successful repeat; older fields unchanged', async () => {
@@ -615,7 +633,8 @@ test('follow-up: the list shows protectionPending true after a failed protection
   const before = await listReport(m.id, ev);
   assert.deepEqual(before, { incidentId: first.incident.id, status: 'open', reportedAt: first.incident.reportedAt, protectionPending: true });
 
-  // The member comes back later and taps retry: the real service applies protection.
+  // The member comes back later (past the retry cooldown) and taps retry: the real service applies protection.
+  await ageAttempt(first.incident.id);
   const again = await report(m.id, ev);
   assert.equal(again.statusCode, 200);
   assert.equal(again.body.idempotent, true);
@@ -687,7 +706,8 @@ test('follow-up: no Person record is marked not retryable on the POST and on the
   // Staff still see the internal reason.
   assert.equal((await db('SecurityIncident').where({ id: out.incident.id }).first()).protection.failure, 'no_person');
 
-  // Later the account has a Person (here: the real lookup): the repeat is still tried and now works.
+  // Later the account has a Person (here: the real lookup): the repeat is tried and now works.
+  await ageAttempt(out.incident.id);
   const healed = await report(m.id, ev);
   assert.deepEqual(healed.body.protection, { requested: true, sessionsEnded: true, pinResetRequired: true });
   assert.equal(healed.body.signedOut, true);
@@ -699,6 +719,7 @@ test('follow-up: a no-Person failure followed by an error is retryable again (st
   const noPerson = Object.assign((t) => (t === 'User' ? { where: () => ({ first: async () => ({ personId: null }) }) } : db(t)), { transaction: (...a) => db.transaction(...a), raw: (...a) => db.raw(...a), fn: db.fn });
   const first = await createSecurityIncidentService({ db: noPerson, pinAuth: pinAuthService, logger: { warn() {} } }).report({ userId: m.id, eventId: ev });
   assert.equal(first.protection.retryable, false);
+  await ageAttempt(first.incident.id);
   const boom = createSecurityIncidentService({ db, pinAuth: { requirePinReset: async () => { throw new Error('boom'); }, endSessions: async () => {} }, logger: { warn() {} } });
   const again = await boom.report({ userId: m.id, eventId: ev });
   assert.equal(again.protection.failed, true);
@@ -785,4 +806,245 @@ test('follow-up: with the flag off, staff without the scope get 403, a member to
       assert.equal(off.headers['Cache-Control'], 'no-store');
     }
   }
+});
+
+// ── Fix pass 2 (security review L1-L4): bounded, single-runner retries; PIN step once; nothing after resolution ──
+
+const noPersonDb = () => Object.assign((t) => (t === 'User' ? { where: () => ({ first: async () => ({ personId: null }) }) } : db(t)), { transaction: (...a) => db.transaction(...a), raw: (...a) => db.raw(...a), fn: db.fn });
+const quiet = { warn() {} };
+function countingPinAuth({ failEnd = () => false, delayMs = 0 } = {}) {
+  const calls = { pin: 0, end: 0 };
+  return {
+    calls,
+    requirePinReset: async () => { calls.pin += 1; return true; },
+    endSessions: async () => {
+      calls.end += 1;
+      if (delayMs) await new Promise(r => setTimeout(r, delayMs));
+      if (failEnd()) throw new Error('sessions down');
+    },
+  };
+}
+
+test('L1: a repeat on a no-Person incident does no work and writes no trail or audit row, however often; it heals once a Person exists', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  const svc = createSecurityIncidentService({ db: noPersonDb(), pinAuth: pinAuthService, logger: quiet });
+  const first = await svc.report({ userId: m.id, eventId: ev });
+  const id = first.incident.id;
+  assert.equal(first.protection.retryable, false);
+  await ageAttempt(id); // the cooldown is not what stops it
+  const rowBefore = await db('SecurityIncident').where({ id }).first();
+  const trailBefore = await trailCount(id);
+  const auditBefore = (await db('AuditLog').whereIn('target', [m.personId, id])).length;
+  for (let i = 0; i < 8; i++) {
+    const again = await svc.report({ userId: m.id, eventId: ev });
+    assert.equal(again.idempotent, true);
+    assert.deepEqual(again.protection, first.protection);
+    assert.equal(again.signedOut, false);
+  }
+  assert.equal(await trailCount(id), trailBefore, 'no trail rows');
+  assert.equal((await db('AuditLog').whereIn('target', [m.personId, id])).length, auditBefore, 'no audit rows');
+  assert.deepEqual(await db('SecurityIncident').where({ id }).first(), rowBefore, 'the incident row was not written');
+  assert.equal(rowBefore.protection.retryCount, undefined, 'these do not use up retries');
+
+  const healed = await report(m.id, ev);
+  assert.deepEqual(healed.body.protection, { requested: true, sessionsEnded: true, pinResetRequired: true });
+  assert.equal(healed.body.signedOut, true);
+  assert.equal(await trailCount(id), trailBefore + 1);
+});
+
+test('L1: retries are bounded per incident: 60 s cooldown and 5 retries on a fixed clock; beyond that no work and no rows', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  let t = Date.now();
+  const pa = countingPinAuth({ failEnd: () => true });
+  const svc = createSecurityIncidentService({ db, pinAuth: pa, logger: quiet, now: () => new Date(t) });
+  const first = await svc.report({ userId: m.id, eventId: ev });
+  const id = first.incident.id;
+  assert.deepEqual(first.protection, { requested: true, sessionsEnded: false, pinResetRequired: true, failed: true });
+  assert.deepEqual(pa.calls, { pin: 1, end: 1 });
+  const protectionRows = () => db('SecurityIncidentEvent').where({ incidentId: id, kind: 'protection' }).then(r => r.length);
+  assert.equal(await protectionRows(), 1);
+
+  // Inside the cooldown: the current view, unchanged; nothing runs, nothing is written.
+  for (const dt of [1_000, 30_000, 28_999]) {
+    t += dt;
+    const rowBefore = await db('SecurityIncident').where({ id }).first();
+    const cool = await svc.report({ userId: m.id, eventId: ev });
+    assert.deepEqual(cool, { ...first, idempotent: true });
+    assert.deepEqual(await db('SecurityIncident').where({ id }).first(), rowBefore);
+  }
+  assert.deepEqual(pa.calls, { pin: 1, end: 1 });
+  assert.equal(await protectionRows(), 1);
+
+  // Exactly at the cooldown the first retry runs; five in all.
+  t += 1;
+  for (let i = 1; i <= PROTECTION_MAX_RETRIES; i++) {
+    if (i > 1) t += PROTECTION_RETRY_COOLDOWN_MS;
+    const out = await svc.report({ userId: m.id, eventId: ev });
+    assert.equal(out.protection.failed, true);
+    assert.equal(pa.calls.end, 1 + i, `retry ${i} ran`);
+    assert.equal(await protectionRows(), 1 + i);
+    assert.equal('retryable' in out.protection, i === PROTECTION_MAX_RETRIES, `retryable marker after retry ${i}`);
+    assert.doesNotMatch(JSON.stringify(out), INTERNAL);
+  }
+  assert.equal(pa.calls.pin, 1, 'the PIN step ran once for the whole incident');
+  const stored = await db('SecurityIncident').where({ id }).first();
+  assert.equal(stored.protection.retryCount, PROTECTION_MAX_RETRIES);
+
+  // All retries used: however long the member waits, nothing more runs and nothing is written.
+  for (const dt of [PROTECTION_RETRY_COOLDOWN_MS, 3_600_000, 86_400_000]) {
+    t += dt;
+    const done = await svc.report({ userId: m.id, eventId: ev });
+    assert.deepEqual(done.protection, { requested: true, sessionsEnded: false, pinResetRequired: true, failed: true, retryable: false });
+    assert.equal(done.signedOut, false);
+  }
+  assert.deepEqual(pa.calls, { pin: 1, end: 1 + PROTECTION_MAX_RETRIES });
+  assert.equal(await protectionRows(), 1 + PROTECTION_MAX_RETRIES);
+  assert.deepEqual(await db('SecurityIncident').where({ id }).first(), stored);
+
+  // The list agrees with the POST, and shows none of the bookkeeping.
+  const r = await listReport(m.id, ev);
+  assert.deepEqual(r, { incidentId: id, status: 'open', reportedAt: first.incident.reportedAt, protectionPending: true, protectionRetryable: false });
+  assert.doesNotMatch(JSON.stringify((await run(fn.securityActivity, { token: bearer(m.id) })).body), INTERNAL);
+});
+
+test('L2: two concurrent repeats run protection once', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  const bad = createSecurityIncidentService({ db, pinAuth: countingPinAuth({ failEnd: () => true }), logger: quiet });
+  const id = (await bad.report({ userId: m.id, eventId: ev })).incident.id;
+  await ageAttempt(id);
+  const pa = countingPinAuth({ delayMs: 40 });
+  const svc = createSecurityIncidentService({ db, pinAuth: pa, logger: quiet });
+  const outs = await Promise.all([1, 2, 3].map(() => svc.report({ userId: m.id, eventId: ev })));
+  assert.equal(pa.calls.end, 1, 'sessions ended once');
+  assert.equal(outs.filter(o => o.signedOut).length, 1, 'only the call that ended the sessions says so');
+  const row = await db('SecurityIncident').where({ id }).first();
+  assert.equal(row.protection.applied, true);
+  assert.equal(row.protection.retryCount, 1);
+  assert.equal(await db('SecurityIncidentEvent').where({ incidentId: id, kind: 'protection' }).then(r => r.length), 2, 'first attempt + one retry');
+  assert.equal((await listReport(m.id, ev)).protectionPending, false);
+});
+
+test('L2: a failing attempt that finishes after a successful one does not undo it', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  let t = Date.now();
+  const clock = () => new Date(t);
+  const bad = createSecurityIncidentService({ db, pinAuth: countingPinAuth({ failEnd: () => true }), logger: quiet, now: clock });
+  const id = (await bad.report({ userId: m.id, eventId: ev })).incident.id;
+
+  // A slow retry: it has claimed the attempt and is stuck ending sessions.
+  let entered; const atGate = new Promise((r) => { entered = r; });
+  let release; const gate = new Promise((r) => { release = r; });
+  const slow = createSecurityIncidentService({
+    db, logger: quiet, now: clock,
+    pinAuth: { requirePinReset: async () => true, endSessions: async () => { entered(); await gate; throw new Error('timed out'); } },
+  });
+  t += PROTECTION_RETRY_COOLDOWN_MS;
+  const slowCall = slow.report({ userId: m.id, eventId: ev });
+  await atGate;
+
+  // More than a cooldown later the member tries again and this one works.
+  t += PROTECTION_RETRY_COOLDOWN_MS;
+  const good = countingPinAuth();
+  const ok = await createSecurityIncidentService({ db, pinAuth: good, logger: quiet, now: clock }).report({ userId: m.id, eventId: ev });
+  assert.equal(ok.signedOut, true);
+  assert.equal(ok.protection.sessionsEnded, true);
+  assert.deepEqual(good.calls, { pin: 0, end: 1 }, 'PIN step was already done by the first attempt');
+
+  // Now the slow one fails. Its failure must not replace the success.
+  release();
+  const late = await slowCall;
+  assert.equal(late.signedOut, false);
+  assert.equal(late.protection.sessionsEnded, true);
+  assert.equal(late.protection.failed, undefined);
+  const row = await db('SecurityIncident').where({ id }).first();
+  assert.equal(row.protection.applied, true);
+  assert.equal(row.protection.sessionsEnded, true);
+  assert.equal(row.protection.failed, undefined);
+  assert.equal((await listReport(m.id, ev)).protectionPending, false);
+});
+
+test('L2: a double tap during the first report runs protection once', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  const pa = countingPinAuth({ delayMs: 60 });
+  const svc = createSecurityIncidentService({ db, pinAuth: pa, logger: quiet });
+  const outs = await Promise.all([1, 2, 3].map(() => svc.report({ userId: m.id, eventId: ev })));
+  assert.deepEqual(pa.calls, { pin: 1, end: 1 });
+  assert.equal(new Set(outs.map(o => o.incident.id)).size, 1);
+  assert.equal(outs.filter(o => o.signedOut).length, 1);
+  assert.equal(outs.filter(o => !o.idempotent).length, 1);
+  const row = await db('SecurityIncident').where({ userId: m.id }).first();
+  assert.equal(row.protection.applied, true);
+  assert.equal(row.protection.retryCount, undefined, 'no retry was used');
+  assert.equal(await db('SecurityIncidentEvent').where({ incidentId: row.id, kind: 'protection' }).then(r => r.length), 1);
+  // Same through the real service and routes.
+  const m2 = await makeUser(); const ev2 = await makeEvent(m2.id);
+  const real = await Promise.all([report(m2.id, ev2), report(m2.id, ev2)]);
+  assert.equal(real.filter(o => o.body.signedOut).length, 1);
+  assert.equal((await db('AuditLog').where({ action: 'pin_reset_required', target: m2.personId })).length, 1);
+});
+
+test('L3: a retry after "PIN reset done, sessions failed" does not switch off the PIN the member has set since', async () => {
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  let pinCalls = 0;
+  const partial = createSecurityIncidentService({
+    db, logger: quiet,
+    pinAuth: { requirePinReset: async (...a) => { pinCalls += 1; return pinAuthService.requirePinReset(...a); }, endSessions: async () => { throw new Error('sessions down'); } },
+  });
+  const first = await partial.report({ userId: m.id, eventId: ev });
+  assert.deepEqual(first.protection, { requested: true, sessionsEnded: false, pinResetRequired: true, failed: true });
+  assert.equal((await pinAuthService.verifyPin({ personId: m.personId, pin: m.pin })).error, 'pin_reset_required');
+
+  // The member completes "Forgot PIN" and has a new PIN.
+  await pinAuthService.setPin(m.personId, '7391');
+  assert.equal((await pinAuthService.verifyPin({ personId: m.personId, pin: '7391' })).ok, true);
+
+  // A retry that fails again, then one that works: neither touches the PIN.
+  await ageAttempt(first.incident.id);
+  assert.equal((await partial.report({ userId: m.id, eventId: ev })).protection.failed, true);
+  await ageAttempt(first.incident.id);
+  const done = await report(m.id, ev);
+  assert.equal(done.body.signedOut, true);
+  assert.deepEqual(done.body.protection, { requested: true, sessionsEnded: true, pinResetRequired: true }, 'still says what this report did');
+  assert.equal(pinCalls, 1);
+  assert.equal((await db('AuditLog').where({ action: 'pin_reset_required', target: m.personId })).length, 1);
+  assert.equal((await person(m.personId)).pinFailedCount, 0);
+  assert.equal((await pinAuthService.verifyPin({ personId: m.personId, pin: '7391' })).ok, true, 'the new PIN still works');
+  assert.ok((await person(m.personId)).sessionsValidAfter, 'sessions were ended by the retry');
+});
+
+test('L4: once staff resolve the incident a failed protection is not pending and a repeat does nothing', async () => {
+  const admin = await makeAdmin(['security_incidents']);
+  const m = await makeUser(); const ev = await makeEvent(m.id);
+  const bad = createSecurityIncidentService({ db, pinAuth: countingPinAuth({ failEnd: () => true }), logger: quiet });
+  const first = await bad.report({ userId: m.id, eventId: ev });
+  const id = first.incident.id;
+  assert.equal((await listReport(m.id, ev)).protectionPending, true);
+  // Acknowledged is still open work: pending stays.
+  assert.equal((await run(fn.adminAcknowledgeSecurityIncident, { token: admin.token, params: { id } })).statusCode, 200);
+  assert.equal((await listReport(m.id, ev)).protectionPending, true);
+
+  const res1 = await run(fn.adminResolveSecurityIncident, { token: admin.token, params: { id }, body: { outcome: 'inconclusive', reason: 'Spoke to the member; closing.' } });
+  assert.equal(res1.statusCode, 200, JSON.stringify(res1.body));
+  assert.equal(res1.body.incident.protection.failed, true, 'staff still see that protection failed');
+  assert.deepEqual(await listReport(m.id, ev), { incidentId: id, status: 'resolved', reportedAt: first.incident.reportedAt, protectionPending: false });
+
+  await ageAttempt(id);
+  const rowBefore = await db('SecurityIncident').where({ id }).first();
+  const trailBefore = await trailCount(id);
+  const stampBefore = (await person(m.personId)).sessionsValidAfter;
+  const pa = countingPinAuth();
+  const again = await createSecurityIncidentService({ db, pinAuth: pa, logger: quiet }).report({ userId: m.id, eventId: ev });
+  assert.equal(again.idempotent, true);
+  assert.equal(again.incident.status, 'resolved');
+  assert.deepEqual(again.protection, { requested: true, sessionsEnded: false, pinResetRequired: true });
+  assert.equal(again.signedOut, false);
+  assert.deepEqual(pa.calls, { pin: 0, end: 0 });
+  // And through the real route.
+  const viaRoute = await report(m.id, ev);
+  assert.equal(viaRoute.statusCode, 200);
+  assert.equal(viaRoute.body.protection.failed, undefined);
+  assert.equal(viaRoute.body.signedOut, false);
+  assert.equal(await trailCount(id), trailBefore);
+  assert.deepEqual(await db('SecurityIncident').where({ id }).first(), rowBefore);
+  assert.equal(+(await person(m.personId)).sessionsValidAfter, +stampBefore);
 });

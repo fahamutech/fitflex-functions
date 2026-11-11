@@ -5,8 +5,11 @@
 //   a PIN for them, the PIN must be reset before the next PIN sign-in. After 2 such "secure" actions in 24 hours further
 //   reports are still recorded but do NOT lock the account again (protection.limited). More than
 //   SECURITY_REPORT_MAX_PER_DAY new incidents in a rolling 24 hours is refused with 429 and the real wait
-//   (retryAfterSeconds: until the oldest counted report is 24 hours old). A repeat ignores secureAccount: what the
-//   first report asked for stands, so a report-only cannot later be upgraded to "secure".
+//   (retryAfterSeconds: until enough counted reports are 24 hours old to free a slot). A repeat ignores secureAccount: what the
+//   first report asked for stands, so a report-only cannot later be upgraded to "secure". A repeat retries protection
+//   that is still pending, but only one caller at a time, at most once per PROTECTION_RETRY_COOLDOWN_MS and
+//   PROTECTION_MAX_RETRIES times per incident, never after staff resolved it, and never while the account still has
+//   no Person record; outside those bounds it does no work and writes no row. The PIN-reset step runs once per incident.
 // Staff side   list / get / acknowledge / resolve. Every action writes an AuditLog row and an append-only
 //   SecurityIncidentEvent row. The staff reason (10-500 chars) is kept on the incident row, never in the trail or audit.
 //
@@ -26,6 +29,10 @@ export const NOTIFICATION_TYPE = 'security_report_resolved';
 export const DEFAULT_LIMIT = 25;
 export const MAX_LIMIT = 100;
 const DAY_MS = 86_400_000;
+// Retrying protection that did not complete (same event reported again). Per incident, kept in `protection`:
+// at least this long between two attempts (the first attempt counts), and at most this many retries in total.
+export const PROTECTION_RETRY_COOLDOWN_MS = 60_000;
+export const PROTECTION_MAX_RETRIES = 5;
 
 const newId = p => `${p}_${randomUUID().replace(/-/g, '').slice(0, 14)}`;
 const safeId = s => String(s).replace(/[^A-Za-z0-9_]/g, '').slice(0, 60);
@@ -35,14 +42,19 @@ const json = v => (v == null ? null : JSON.stringify(v));
 const obj = v => (typeof v === 'string' ? JSON.parse(v) : v ?? null);
 
 /**
- * THE one rule for "protection was asked for but is not in place": requested, not applied, and not held back by the
- * 2-per-day limit. A repeat report retries exactly these; the POST response says `failed: true` for exactly these; the
- * member list says `protectionPending: true` for exactly these. It also covers a crash between recording the incident
- * and applying protection (applied is still false, nothing else is set).
+ * THE one rule for "protection was asked for but is not in place": requested, not applied, not held back by the
+ * 2-per-day limit, and the incident is not resolved (once staff close it, nothing is pending or retried any more).
+ * A repeat report retries only these; the POST response says `failed: true` for exactly these; the member list says
+ * `protectionPending: true` for exactly these. It also covers a crash between recording the incident and applying
+ * protection (applied is still false, nothing else is set). Always pass the incident's status.
  */
-export const protectionPending = (p) => Boolean(p && p.requested && !p.applied && !p.limited);
-/** False only when a retry cannot help as things stand: the account has no Person record to protect. */
-export const protectionRetryable = (p) => !(protectionPending(p) && p.failure === 'no_person');
+export const protectionPending = (p, status) => Boolean(p && p.requested && !p.applied && !p.limited && status !== STATUS.RESOLVED);
+/**
+ * False when offering a retry is pointless: the account has no Person record to protect, or this incident has used
+ * all its retries. (A no-Person incident is still picked up by a repeat once a Person is linked.)
+ */
+export const protectionRetryable = (p, status) => !(protectionPending(p, status)
+  && (p.failure === 'no_person' || (Number(p.retryCount) || 0) >= PROTECTION_MAX_RETRIES));
 
 /** Neutral on purpose: the same words whatever the outcome. Swahili is a DRAFT for native review. */
 /** Lock-screen push line for the resolution message. Swahili is a DRAFT for native review. */
@@ -83,18 +95,19 @@ export function createSecurityIncidentService({
   const memberView = (row, extra = {}) => ({
     ok: true, idempotent: false,
     incident: { id: row.id, status: row.status, reportedAt: iso(row.reportedAt) },
-    protection: protectionView(obj(row.protection)),
+    protection: protectionView(obj(row.protection), row.status),
     signedOut: false,
     ...extra,
   });
-  function protectionView(p) {
+  // Only these keys reach the member; retryCount, lastAttemptAt, pinResetAt, applied and failure stay internal.
+  function protectionView(p, status) {
     const q = p || {};
     return {
       requested: Boolean(q.requested), sessionsEnded: Boolean(q.sessionsEnded),
       pinResetRequired: q.pinResetRequired === undefined ? false : q.pinResetRequired,
       ...(q.limited ? { limited: true } : {}),
-      ...(protectionPending(q) ? { failed: true } : {}),
-      ...(protectionRetryable(q) ? {} : { retryable: false }),
+      ...(protectionPending(q, status) ? { failed: true } : {}),
+      ...(protectionRetryable(q, status) ? {} : { retryable: false }),
     };
   }
 
@@ -102,7 +115,7 @@ export function createSecurityIncidentService({
    * How each of the caller's events is reported:
    * { [eventId]: { incidentId, status, reportedAt, protectionPending, protectionRetryable? } }. Flag-gated.
    * protectionPending is true exactly when reporting the event again would retry protection. protectionRetryable is
-   * present only as `false` (no Person record: a retry cannot help). Nothing else of the stored protection is shown.
+   * present only as `false` (no Person record, or all retries used). Nothing else of the stored protection is shown.
    */
   async function reportsFor(userId, eventIds) {
     if (!reportsOn() || !eventIds.length) return {};
@@ -111,41 +124,86 @@ export function createSecurityIncidentService({
       const p = obj(r.protection);
       return [r.eventId, {
         incidentId: r.id, status: r.status, reportedAt: iso(r.reportedAt),
-        protectionPending: protectionPending(p),
-        ...(protectionRetryable(p) ? {} : { protectionRetryable: false }),
+        protectionPending: protectionPending(p, r.status),
+        ...(protectionRetryable(p, r.status) ? {} : { protectionRetryable: false }),
       }];
     }));
   }
 
-  /** End sessions + require a PIN reset; records the outcome on the incident. → true when sessions were ended now. */
+  /** The member's advisory lock (the one the insert takes): one short transaction, never held across protection calls. */
+  const locked = (userId, fn) => db.transaction(async (trx) => {
+    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`secinc:${userId}`]);
+    return fn(trx);
+  });
+
+  /**
+   * Require a PIN reset, then end sessions; record the outcome on the incident.
+   * → { protection: what is stored now, endedNow: true when THIS call ended the sessions }.
+   * - The PIN step runs once per incident (pinResetAt): a retry after "PIN done, sessions failed" only ends sessions,
+   *   so a PIN the member has set since is not switched off again.
+   * - The outcome is merged onto the row as it is NOW, under the member's lock, and a failure never replaces a success
+   *   recorded by another call.
+   */
   async function applyProtection(incidentId, userId, personId, protection) {
+    const step = { ...protection };
     try {
       if (!personId) {
         // No Person to protect (legacy account): say so, do not pretend it worked.
-        protection.pinResetRequired = 'not_applicable'; protection.sessionsEnded = false; protection.failed = true; protection.failure = 'no_person';
+        if (!step.pinResetAt) step.pinResetRequired = 'not_applicable';
+        step.sessionsEnded = false; step.failed = true; step.failure = 'no_person';
       } else {
-        protection.pinResetRequired = (await pinAuth.requirePinReset(personId, userId)) ? true : 'not_applicable';
+        delete step.failure;
+        if (!step.pinResetAt) {
+          step.pinResetRequired = (await pinAuth.requirePinReset(personId, userId)) ? true : 'not_applicable';
+          step.pinResetAt = iso(now());
+        }
         await pinAuth.endSessions(personId);
-        protection.sessionsEnded = true; protection.applied = true; delete protection.failed; delete protection.failure;
+        step.sessionsEnded = true; step.applied = true; delete step.failed;
       }
     } catch (err) {
-      protection.failed = true; delete protection.failure;
+      step.failed = true; delete step.failure;
       logger.warn?.(`[security-incident] protection for ${incidentId} failed: ${err?.message}`);
     }
-    await db('SecurityIncident').where({ id: incidentId }).update({ protection: json(protection), updatedAt: now() });
-    return protection.sessionsEnded === true;
+    const stored = await locked(userId, async (trx) => {
+      const cur = obj((await trx('SecurityIncident').where({ id: incidentId }).first('protection'))?.protection) || {};
+      if (cur.applied && !step.applied) return cur;
+      const next = { ...cur, sessionsEnded: Boolean(step.sessionsEnded), pinResetRequired: step.pinResetRequired, applied: Boolean(step.applied) };
+      if (cur.pinResetAt || step.pinResetAt) next.pinResetAt = cur.pinResetAt || step.pinResetAt;
+      if (step.failed) next.failed = true; else delete next.failed;
+      if (step.failure) next.failure = step.failure; else delete next.failure;
+      await trx('SecurityIncident').where({ id: incidentId }).update({ protection: json(next), updatedAt: now() });
+      return next;
+    });
+    return { protection: stored, endedNow: step.applied === true };
   }
 
-  /** Same event reported again: same incident; protection that was asked for but never applied is retried. */
-  async function repeat(row) {
-    const p = obj(row.protection) || {};
-    if (!protectionPending(p)) return memberView(row, { idempotent: true });
-    // A "no Person" failure is retried too: the lookup is one read, and it heals by itself if a Person is linked later.
-    const personId = (await db('User').where({ id: row.userId }).first('personId'))?.personId || null;
-    const protection = { ...p };
-    const signedOut = await applyProtection(row.id, row.userId, personId, protection);
-    await trail(db, row.id, 'protection', row.userId, { retry: true, sessionsEnded: protection.sessionsEnded, pinResetRequired: protection.pinResetRequired, failed: Boolean(protection.failed) }).catch(() => {});
-    return memberView(await db('SecurityIncident').where({ id: row.id }).first(), { idempotent: true, signedOut });
+  /**
+   * Same event reported again: same incident. Protection that is still pending is retried, within bounds; everything
+   * else returns the stored view and writes nothing. The decision is taken under the member's lock on a fresh read,
+   * and the attempt is claimed there (retryCount + lastAttemptAt), so only one caller runs protection; the lock is
+   * released before protection runs.
+   */
+  async function repeat(seen) {
+    const same = r => memberView(r, { idempotent: true });
+    if (!protectionPending(obj(seen.protection), seen.status)) return same(seen);
+    const personId = (await db('User').where({ id: seen.userId }).first('personId'))?.personId || null;
+    const claim = await locked(seen.userId, async (trx) => {
+      const row = await trx('SecurityIncident').where({ id: seen.id }).first();
+      if (!row) return { row: seen };
+      const p = obj(row.protection) || {};
+      if (!protectionPending(p, row.status)) return { row }; // applied meanwhile, or resolved by staff
+      if ((Number(p.retryCount) || 0) >= PROTECTION_MAX_RETRIES) return { row }; // all retries used
+      if (p.failure === 'no_person' && !personId) return { row }; // still nobody to protect: nothing to do, nothing to write
+      const last = p.lastAttemptAt ? +new Date(p.lastAttemptAt) : NaN;
+      if (Number.isFinite(last) && +now() - last < PROTECTION_RETRY_COOLDOWN_MS) return { row }; // an attempt is running or was just made
+      const claimed = { ...p, retryCount: (Number(p.retryCount) || 0) + 1, lastAttemptAt: iso(now()) };
+      await trx('SecurityIncident').where({ id: row.id }).update({ protection: json(claimed), updatedAt: now() });
+      return { row, claimed };
+    });
+    if (!claim.claimed) return same(claim.row);
+    const { protection, endedNow } = await applyProtection(seen.id, seen.userId, personId, claim.claimed);
+    await trail(db, seen.id, 'protection', seen.userId, { retry: true, sessionsEnded: Boolean(protection.sessionsEnded), pinResetRequired: protection.pinResetRequired, failed: Boolean(protection.failed) }).catch(() => {});
+    return memberView(await db('SecurityIncident').where({ id: seen.id }).first(), { idempotent: true, signedOut: endedNow });
   }
 
   async function report({ userId, eventId, secureAccount }) {
@@ -182,8 +240,9 @@ export function createSecurityIncidentService({
       // Intended protection is recorded in this same transaction, so concurrent reports cannot exceed the cap.
       const secured = recent.filter((r) => { const q = obj(r.protection); return q?.requested === true && !q?.limited; }).length;
       const limited = secure && secured >= SECURE_ACTIONS_PER_DAY;
-      const protection = { requested: secure, applied: false, limited, sessionsEnded: false, pinResetRequired: false };
       const at = now();
+      // lastAttemptAt marks the first attempt as under way, so a second tap (a repeat) waits instead of running it again.
+      const protection = { requested: secure, applied: false, limited, sessionsEnded: false, pinResetRequired: false, ...(secure && !limited ? { lastAttemptAt: iso(at) } : {}) };
       await trx('SecurityIncident').insert({
         id: incidentId, userId, eventId: id, status: STATUS.OPEN, snapshot: json(snapshot), protection: json(protection), reportedAt: at, updatedAt: at,
       });
@@ -194,10 +253,12 @@ export function createSecurityIncidentService({
     if (decided.capped) return { error: 'report_limit_reached', status: 429, retryAfterSeconds: decided.retryAfterSeconds };
 
     // The incident now exists whatever happens next. Protection is applied after, and a failure is recorded, not hidden.
-    const protection = { ...decided.protection };
+    let protection = { ...decided.protection };
     let signedOut = false;
-    if (secure && !decided.limited) signedOut = await applyProtection(incidentId, userId, person, protection);
-    else await db('SecurityIncident').where({ id: incidentId }).update({ protection: json(protection), updatedAt: now() });
+    if (secure && !decided.limited) {
+      const done = await applyProtection(incidentId, userId, person, protection);
+      protection = done.protection; signedOut = done.endedNow;
+    }
     if (secure) await trail(db, incidentId, 'protection', userId, { sessionsEnded: protection.sessionsEnded, pinResetRequired: protection.pinResetRequired, limited: Boolean(protection.limited), failed: Boolean(protection.failed) }).catch(() => {});
 
     // Tell staff. Never fails the report: if this breaks, the incident is still listed in the admin screen.
