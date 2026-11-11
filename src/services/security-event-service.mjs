@@ -109,6 +109,8 @@ export function createSecurityEventService({
     const rows = await q.orderBy([{ column: 'occurredAt', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(n + 1);
     const page = rows.slice(0, n);
     // S4b: with SECURITY_INCIDENT_REPORTS on, each event says whether the member has reported it (report: null = not yet).
+    // A report carries protectionPending (true = "secure my account" was asked for but is not in place; reporting the
+    // event again retries it) and, only when a retry cannot help, protectionRetryable: false.
     const reportEnabled = Boolean(reportsOn());
     let reports = {};
     if (reportEnabled) { try { reports = await reportsFor(userId, page.map(r => r.id)); } catch { reports = {}; } }
