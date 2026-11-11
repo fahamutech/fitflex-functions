@@ -47,9 +47,13 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
 
   const ownerGymIdsOf = (owner) => owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
 
-  // Sync the trainer↔gym join so a gym's trainerIds list becomes the source of
-  // truth: any trainer not in the new list loses this gym, any new one gains it.
-  async function syncTrainersForGym(gymId, trainerIdList) {
+  // Sync the trainer↔gym join from an owner's trainerIds list. Removals are the
+  // owner's call: any trainer at this gym who is not in the list loses it. Adds
+  // are not: a trainer joins a gym only by asking (applyToGym) and the owner
+  // approving, so an id in the list links only a trainer with a pending request
+  // for this gym — that counts as approving it. Any other id is skipped and
+  // returned, never linked (owner-side linking without consent, 2026-10-22).
+  async function syncTrainersForGym(gymId, trainerIdList, actorId = null) {
     const desired = new Set(Array.isArray(trainerIdList) ? trainerIdList.filter(Boolean) : []);
     const current = trainers.filter(t => Array.isArray(t.gymIds) && t.gymIds.includes(gymId));
     for (const t of current) {
@@ -58,14 +62,22 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
         await trainers.updateAsync(x => x.id === t.id, { gymIds: remaining });
       }
     }
+    const notLinked = [];
     for (const tid of desired) {
       const t = trainers.find(x => x.id === tid);
-      if (!t) continue;
+      if (!t) { notLinked.push(tid); continue; }
       const existing = t.gymIds || [];
-      if (!existing.includes(gymId)) {
-        await trainers.updateAsync(x => x.id === tid, { gymIds: [...existing, gymId] });
-      }
+      if (existing.includes(gymId)) continue;
+      const pendingGymIds = t.pendingGymIds || [];
+      if (!pendingGymIds.includes(gymId)) { notLinked.push(tid); continue; }
+      const patch = { gymIds: [...existing, gymId], pendingGymIds: pendingGymIds.filter(id => id !== gymId) };
+      await trainers.updateAsync(x => x.id === tid, patch);
+      await auditLog.insertAsync({
+        id: randomUUID(), at: new Date().toISOString(), actor: actorId, action: 'trainer_join_approved',
+        target: tid, before: { pendingGymIds }, after: patch,
+      });
     }
+    return { notLinked };
   }
 
   async function registerOwner({ user, body }) {
@@ -85,6 +97,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const createdGyms = [];
     const gymIds = [];
     const rows = [];
+    const trainersNotLinked = [];
     for (const [index, g] of gymList.entries()) {
       const gymData = ownerInput(g);
       if (!gymData.images && Array.isArray(gymData.imagePaths)) {
@@ -105,15 +118,10 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       createdGyms.push(row);
       gymIds.push(row.id);
 
-      const trainerIdList = Array.isArray(g.trainerIds) ? g.trainerIds : [];
-      for (const tid of trainerIdList) {
-        const trainer = trainers.find(t => t.id === tid);
-        if (trainer) {
-          const existingGymIds = trainer.gymIds || [];
-          if (!existingGymIds.includes(row.id)) {
-            await trainers.updateAsync(t => t.id === tid, { gymIds: [...existingGymIds, row.id] });
-          }
-        }
+      // A brand-new gym has no join requests yet, so no trainer is linked from here.
+      if (Array.isArray(g.trainerIds) && g.trainerIds.length) {
+        const { notLinked } = await syncTrainersForGym(row.id, g.trainerIds, actorOf(user));
+        trainersNotLinked.push(...notLinked);
       }
     }
     await users.upsertAsync(u => u.id === user.id, {
@@ -124,7 +132,7 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
       gymIds,
       onboardingCompleted: true,
     });
-    return { gyms: createdGyms, gymIds };
+    return { gyms: createdGyms, gymIds, ...(trainersNotLinked.length ? { trainersNotLinked } : {}) };
   }
 
   async function myGyms(owner) {
@@ -176,8 +184,8 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const badMedia = await gymMediaProblem(row, prior, actorOf(owner));
     if (badMedia) return badMedia;
     await gyms.upsertAsync(g => g.id === row.id, row);
-    if (Array.isArray(body.trainerIds)) await syncTrainersForGym(row.id, body.trainerIds);
-    return { gym: row };
+    const { notLinked } = Array.isArray(body.trainerIds) ? await syncTrainersForGym(row.id, body.trainerIds, actorOf(owner)) : { notLinked: [] };
+    return { gym: row, trainersNotLinked: notLinked };
   }
 
   async function createGym({ owner, body }) {
@@ -188,11 +196,12 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     if (badMedia) return badMedia;
     row.status = await newGymStatus(owner);
     await gyms.upsertAsync(g => g.id === row.id, row);
-    if (Array.isArray(body.trainerIds) && body.trainerIds.length) await syncTrainersForGym(row.id, body.trainerIds);
+    const { notLinked } = Array.isArray(body.trainerIds) && body.trainerIds.length
+      ? await syncTrainersForGym(row.id, body.trainerIds, actorOf(owner)) : { notLinked: [] };
     const currentGymIds = ownerGymIdsOf(owner);
     const updatedGymIds = [...currentGymIds, id];
     await users.upsertAsync(u => u.id === owner.id, { ...owner, gymIds: updatedGymIds, gymId: updatedGymIds[0], onboardingCompleted: true });
-    return { gym: row };
+    return { gym: row, trainersNotLinked: notLinked };
   }
 
   async function deleteGym({ owner, gymId }) {
