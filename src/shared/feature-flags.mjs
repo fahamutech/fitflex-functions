@@ -709,6 +709,23 @@ export function webCheckinAlertsOn() {
 }
 
 /**
+ * Security incident reports (S4b): the member reports a web check-in they did not make (POST
+ * /me/security-activity/:eventId/report) and staff work the report (/admin/security-incidents*). Off unless
+ * SECURITY_INCIDENT_REPORTS is set, and only effective while WEB_QR_CHECKIN is also on. Dormant: the report route
+ * answers 404 not_found and the staff routes answer 404 feature_disabled.
+ * Launch gate: WEB_CHECKIN_ALERTS stays off until the app's S4a + S4b + S4c are all live.
+ */
+export function securityIncidentReportsOn() {
+  return webQrCheckinOn() && on('SECURITY_INCIDENT_REPORTS');
+}
+
+/** New incidents one member may create per rolling 24 hours (SECURITY_REPORT_MAX_PER_DAY, default 3). */
+export function securityReportMaxPerDay() {
+  const n = Math.floor(Number(process.env.SECURITY_REPORT_MAX_PER_DAY));
+  return Number.isFinite(n) && n >= 1 ? n : 3;
+}
+
+/**
  * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_SERVER_CONFIRM is set. On: a Selcom
  * "success" callback is confirmed with Selcom through an injectable client before a
  * subscription is activated; if the client cannot confirm (including "not configured",

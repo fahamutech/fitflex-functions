@@ -374,7 +374,9 @@ test('/me/security-activity: dormant 404; own rows only; shape; limit clamp; pag
   assert.equal(p1.headers['Cache-Control'], 'no-store');
   assert.equal(p1.body.events.length, 2);
   const e = p1.body.events[0];
-  assert.deepEqual(Object.keys(e).sort(), ['channel', 'gym', 'id', 'kind', 'occurredAt', 'status']);
+  // `report` and `reportEnabled` are S4b additions: null / false while SECURITY_INCIDENT_REPORTS is off.
+  assert.deepEqual(Object.keys(e).sort(), ['channel', 'gym', 'id', 'kind', 'occurredAt', 'report', 'status']);
+  assert.equal(e.report, null); assert.equal(p1.body.reportEnabled, false);
   assert.equal(e.kind, 'web_checkin'); assert.equal(e.channel, 'web'); assert.equal(e.status, 'inbox');
   assert.equal(e.occurredAt, new Date(base + 4 * 60_000).toISOString());
   assert.equal(e.gym.id, gymB);

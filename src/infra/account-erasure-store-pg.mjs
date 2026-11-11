@@ -63,6 +63,16 @@ async function anonymiseAccess(trx, id) {
     .update({ customerName: DELETED_PERSON_LABEL, customerEmail: null, customerPhone: null });
 }
 
+/**
+ * Security incident reports (S4b) are kept 24 months as an anonymised record: `userId` and `eventId` are plain
+ * references (the SecurityEvent itself goes with the account), the snapshot holds a gym and a time, and the one free-text
+ * field, staff's resolution reason, is cleared. The trail never held free text. Skipped where the table is not there yet.
+ */
+async function anonymiseSecurityIncidents(trx, id) {
+  if (!(await trx.schema.hasTable('SecurityIncident'))) return;
+  await trx('SecurityIncident').where({ userId: id }).update({ resolutionReason: null });
+}
+
 async function anonymiseOrders(trx, id) {
   await trx('ShopOrder').where({ buyerId: id }).update({ deliveryAddress: null, note: null });
 }
@@ -229,6 +239,7 @@ export function createAccountErasure({ db, steps = [], now = () => new Date() })
 
       await anonymisePayments(trx, user.id);
       await anonymiseAccess(trx, user.id);
+      await anonymiseSecurityIncidents(trx, user.id);
       await anonymiseOrders(trx, user.id);
       await detachReviews(trx, user.id);
       await anonymiseEvents(trx, user.id, at);
