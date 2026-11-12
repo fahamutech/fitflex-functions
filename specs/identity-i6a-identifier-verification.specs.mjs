@@ -336,7 +336,7 @@ test('Beem SMS: needs its credentials and a sender name, and sends the number wi
   await withEnv({ ...env, BEEM_SECRET_KEY: null }, async () => assert.equal(smsSender().configured, false));
   await withEnv(env, async () => {
     await withFetch(() => json(200, { successful: true, request_id: 1, code: 100, valid: 1, invalid: 0 }), async calls => {
-      assert.deepEqual(await smsSender().send('+255712345678', { text: 'code 123456' }), { ok: true });
+      assert.deepEqual(await smsSender().send('+255712345678', { text: 'code 123456' }), { ok: true, requestId: '1' });
       assert.equal(calls[0].url, 'https://apisms.beem.africa/v1/send');
       assert.equal(calls[0].headers.Authorization, `Basic ${Buffer.from('key:secret').toString('base64')}`);
       const body = JSON.parse(calls[0].body);
@@ -348,7 +348,7 @@ test('Beem SMS: needs its credentials and a sender name, and sends the number wi
       assert.equal((await smsSender().send('+255712345678', { text: 'x' })).ok, false, 'a number Beem calls invalid is not a send');
     });
     await withFetch(() => json(401, { code: 120, message: 'Invalid Authentication Parameters' }), async () => {
-      assert.deepEqual(await smsSender().send('+255712345678', { text: 'x' }), { ok: false, error: 'provider_rejected' });
+      assert.deepEqual(await smsSender().send('+255712345678', { text: 'x' }), { ok: false, error: 'provider_rejected', providerCode: 120 });
     });
     await withFetch(() => { throw new Error('network down'); }, async () => {
       assert.deepEqual(await smsSender().send('+255712345678', { text: 'x' }), { ok: false, error: 'provider_unreachable' });

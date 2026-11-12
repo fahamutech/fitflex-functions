@@ -32,9 +32,10 @@ function beemSms() {
     configured: true,
     send: async (to, { text }) => {
       const r = await beemSend({ ...settings, sender, text, to: [to] });
-      if (r.ok) return { ok: true };
+      // Beem's request id / refusal code let a delivery be traced in the Beem dashboard. Never the code or credentials.
+      if (r.ok) return { ok: true, requestId: r.requestId ?? null };
       console.warn('[verification] SMS not sent:', r.error, r.code ?? '', r.message ?? '');
-      return { ok: false, error: r.error };
+      return { ok: false, error: r.error, ...(r.code != null ? { providerCode: r.code } : {}) };
     },
   };
 }
