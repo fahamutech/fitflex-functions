@@ -462,3 +462,34 @@ test('verification codes go out through their own sender and are logged without 
   const offSender = { configured: false, send: async () => ({ ok: false, error: 'not_configured' }) };
   assert.equal(sms.verificationSender(offSender), offSender);
 });
+
+test('the Beem verification sender returns Beem\'s request id and refusal code, and the log keeps them', async () => {
+  const { smsSender } = await import('../src/infra/verification-senders.mjs');
+  const names = ['VERIFICATION_SMS_PROVIDER', 'BEEM_API_KEY', 'BEEM_SECRET_KEY', 'VERIFICATION_SMS_SENDER_ID'];
+  const saved = Object.fromEntries(names.map(n => [n, process.env[n]]));
+  const realFetch = globalThis.fetch;
+  Object.assign(process.env, { VERIFICATION_SMS_PROVIDER: 'beem', BEEM_API_KEY: 'k', BEEM_SECRET_KEY: 's', VERIFICATION_SMS_SENDER_ID: 'FitFlex' });
+  const number = phone();
+  const warn = console.warn; console.warn = () => {};
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ successful: true, request_id: 98765, code: 100, valid: 1 }), { status: 200 });
+    const sender = smsSender();
+    const sent = await sms.verificationSender(sender).send(e164(number), { text: 'FitFlex code: 482913' });
+    assert.deepEqual(sent, { ok: true, requestId: '98765' });
+    const ok = await db('SmsLog').where({ phone: e164(number), status: 'accepted' }).first();
+    assert.equal(ok.providerMessageId, '98765');
+    assert.equal(ok.providerCode, null);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ code: 102, message: 'No Sender' }), { status: 400 });
+    const refused = await sms.verificationSender(smsSender()).send(e164(number), { text: 'FitFlex code: 111111' });
+    assert.deepEqual(refused, { ok: false, error: 'provider_rejected', providerCode: 102 });
+    const bad = await db('SmsLog').where({ phone: e164(number), status: 'failed' }).first();
+    assert.equal(bad.providerCode, 102);
+    assert.equal(bad.providerMessageId, null);
+    const rows = await db('SmsLog').where({ phone: e164(number) });
+    assert.ok(!rows.some(r => JSON.stringify(r).match(/482913|111111|"k"|"s"/)), 'no code or credential is logged');
+  } finally {
+    globalThis.fetch = realFetch; console.warn = warn;
+    for (const n of names) { if (saved[n] === undefined) delete process.env[n]; else process.env[n] = saved[n]; }
+  }
+});
