@@ -2,7 +2,7 @@
 // Derived from the references the row already carries (no stored column), so
 // existing records keep their meaning:
 //   FITFLEX_PASS      a platform pass tier (Basic / Pro / Premium / Executive)
-//   GYM_SUBSCRIPTION  one gym's own daily / weekly / monthly plan
+//   GYM_SUBSCRIPTION  one gym's own daily / weekly / monthly plan, or a custom gym pass (passPurchaseId)
 //   TRAINER_SERVICE   trainer session booking (bookingGroupId)
 //   TRAINER_GYM_PASS  a trainer's pass to train at a gym
 //   SHOP_ORDER        marketplace order (orderId)
@@ -32,6 +32,9 @@ export function productTypeOfPayment(request, sub = null) {
   if (request.eventOrderId) return PRODUCT_TYPES.EVENT_ORDER;
   if (request.bookingGroupId) return PRODUCT_TYPES.TRAINER_SERVICE;
   if (request.orderId) return PRODUCT_TYPES.SHOP_ORDER;
+  // A custom gym pass has no subscription of its own while it is unpaid (and never a payment of its own for the
+  // people it covers): it is still a gym subscription, never a FitFlex Pass.
+  if (request.passPurchaseId) return PRODUCT_TYPES.GYM_SUBSCRIPTION;
   const fromSub = productTypeOfSubscription(sub);
   if (fromSub) return fromSub;
   // Subscription row missing: fall back to what the request itself says.

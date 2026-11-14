@@ -270,6 +270,8 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
         subscriptionId: homeTrainer ? null : (sub.id ?? null),
         businessDate: localDay(now),
         source: sourceForMethod(method),
+        // Custom gym passes: a visit on a pass's own child subscription says which sale and which person it was.
+        ...(!homeTrainer && sub?.passPurchaseId ? { passPurchaseId: sub.passPurchaseId, beneficiaryId: sub.passBeneficiaryId ?? null } : {}),
         ...metaColumns(meta)
       };
       try {
