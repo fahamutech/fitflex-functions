@@ -31,6 +31,9 @@ export function createAdminPaymentService({
   // The booking group refused a decision already written (a rejected session's slot was booked by someone
   // else between the check and the write): ({ request, refusal, rolledBack, actorId }) → void. Wired to an ops alert.
   onBookingPaymentRefused = async () => {},
+  // Custom gym passes (GYM_CUSTOM_PASSES): a request with `passPurchaseId` was decided: (request, status, { actorId }) →
+  // null | { error, status } (a refusal puts the decision back, as for a booking group). Idempotent.
+  onPassPayment = async () => null,
   onSubscriptionActivated = async () => {},
   // A rejected payment for a membership (lifecycle automations).
   onPaymentRejected = async () => {},
@@ -94,6 +97,11 @@ export function createAdminPaymentService({
     if (request.orderId) {
       await onOrderPayment(request.orderId, status);
       return;
+    }
+    // A custom gym pass: one payment for the whole purchase; the people it covers get their own subscriptions.
+    if (request.passPurchaseId) {
+      const out = await onPassPayment(request, status, { actorId });
+      return out?.error ? out : null;
     }
     // An upgrade changes the plan it upgrades, in place; it has no plan of its own.
     if (upgradeOf(request)) {

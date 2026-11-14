@@ -104,6 +104,8 @@ import { createExerciseAdminService } from '../services/training/exercise-admin-
 import { createSocialService } from '../services/social-service.mjs';
 import { createUsernameService } from '../services/username-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
+import { createGymPassService } from '../services/gym-pass-service.mjs';
+import { createPgGymPassStore } from '../infra/gym-pass-store-pg.mjs';
 import { createVerifiedContacts } from '../shared/verified-contacts.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
@@ -846,15 +848,21 @@ export const adminPaymentService = createAdminPaymentService({
   onPassUpgraded: sub => notificationService.notifySubscriptionActivated(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status, opts) => trainerBookingService.applyPaymentToGroup(groupId, status, opts),
+  // Custom gym passes: one payment, one purchase; every covered person gets their own subscription (gymPassService is defined further down).
+  onPassPayment: (request, status, opts) => gymPassService.onPaymentStatus(request, status, opts),
   // 409 group_slot_rebooked { bookingIds } when a rejected session's slot was booked by someone else since.
   beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
   // The same, found only after the decision was written (a race): the decision was undone; staff must look.
   onBookingPaymentRefused: ({ request, refusal, rolledBack, actorId }) => opsService.raise({
     type: 'payment_conflict', severity: 'high',
-    title: rolledBack
-      ? `Trainer booking payment ${request.id} was put back: a session's slot was booked by someone else`
-      : `Trainer booking payment ${request.id} could not be put back after its group refused it — check it by hand`,
-    dedupeKey: `trainer_group_slot_rebooked:${request.id}`,
+    title: request.passPurchaseId
+      ? (rolledBack
+        ? `Gym pass payment ${request.id} was put back: the pass could not be activated (${refusal.error})`
+        : `Gym pass payment ${request.id} could not be put back after the pass failed to activate — check it by hand`)
+      : (rolledBack
+        ? `Trainer booking payment ${request.id} was put back: a session's slot was booked by someone else`
+        : `Trainer booking payment ${request.id} could not be put back after its group refused it — check it by hand`),
+    dedupeKey: `${request.passPurchaseId ? 'gym_pass_activation_failed' : 'trainer_group_slot_rebooked'}:${request.id}`,
     entityType: 'payment_request', entityId: request.id,
     detail: { bookingGroupId: request.bookingGroupId, bookingIds: refusal.bookingIds || [], rolledBack, actorId },
   }),
@@ -1034,6 +1042,48 @@ export const friendInvitationService = createFriendInvitationService({
     const q = db('FriendInvitation').where({ id, [opts.column ?? 'status']: from });
     if (opts.whereRecipientNull) q.whereNull('recipientUserId');
     return (await q.update(patch)) === 1;
+  },
+});
+// Custom gym passes (GYM_CUSTOM_PASSES): plans, one-payment purchases and per-person subscriptions. The people a pass
+// covers are notified (not asked): in-app + push, then WhatsApp, with SMS when WhatsApp cannot be used. WhatsApp needs
+// an approved template per kind (GYM_PASS_WHATSAPP_TEMPLATE_ADDED / _INVITE) and a configured provider; until then SMS
+// (through the shared SMS service, category 'invitation') carries the message. Contacts are VERIFIED ones only.
+const gymPassWhatsapp = (kind) => ({
+  template: kind === 'invite' ? (process.env.GYM_PASS_WHATSAPP_TEMPLATE_INVITE || 'gym_pass_invite') : (process.env.GYM_PASS_WHATSAPP_TEMPLATE_ADDED || 'gym_pass_added'),
+  parameters: p => (kind === 'invite' ? [p.buyerName, p.planName, p.gymName, p.link] : [p.buyerName, p.planName, p.gymName, p.until]),
+});
+export const gymPassStore = createPgGymPassStore({ db });
+export const gymPassService = createGymPassService({
+  store: gymPassStore, gyms, users, auditLog,
+  contacts: { findMember: verifiedContacts.findMember, contactsFor: verifiedContacts.contactsFor },
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  memberReference: (reference, payerPhone, memberId, product) => subscriptionService.memberReferenceFor(reference, payerPhone, memberId, product),
+  referenceFields: ref => subscriptionService.referenceFields(ref),
+  channels: {
+    whatsapp: async ({ phone, kind, params, locale, reference }) => {
+      if (!whatsappChannelService.available()) return { status: 'skipped:whatsapp_not_available' };
+      const language = locale === 'sw' ? 'sw' : 'en';
+      const cfg = gymPassWhatsapp(kind);
+      const approved = await db('WhatsAppTemplate')
+        .where({ provider: whatsAppProvider.name, providerTemplateName: cfg.template, language, approvalStatus: 'approved' }).first('id');
+      if (!approved) return { status: 'skipped:whatsapp_template_not_approved' };
+      const to = whatsAppProvider.validateRecipient(phone);
+      if (!to.ok) return { status: `skipped:${to.reason}` };
+      const r = await whatsAppProvider.sendTemplate({
+        to: to.to, templateName: cfg.template, language, parameters: cfg.parameters({ ...params, buyerName: params.buyerName || 'FitFlex' }).map(whatsappParameter), category: 'utility', reference,
+      });
+      if (r.ok) return { status: 'sent' };
+      return { status: r.error === 'recipient_opted_out' ? 'skipped:recipient_opted_out' : 'failed' };
+    },
+    sms: async ({ phone, text, reference }) => {
+      const r = await smsService.send({
+        category: 'invitation', text, maxAttempts: 1,
+        recipients: [{ phone, dedupeKey: `gym-pass:${reference}` }],
+      });
+      const x = r.results?.[0] ?? {};
+      return { status: x.outcome === 'sent' ? 'sent' : (x.outcome === 'skipped' ? `skipped:${x.reason ?? 'not_sent'}` : 'failed') };
+    },
   },
 });
 export const activityService = createActivityService({
