@@ -44,7 +44,7 @@ test('member scan: URL form is verified like the payload; forged, unsigned, wron
   const w = await world();
   const payload = issueGymQr(w.gymId);
   const bad = [
-    `https://portal.example.test/g/?q=${encodeURIComponent(payload.slice(0, -2))}xx`,
+    `https://portal.example.test/g/?q=${encodeURIComponent(payload.slice(0, -2))}${payload.endsWith('xx') ? 'yy' : 'xx'}`,
     `https://portal.example.test/g/?q=${encodeURIComponent(payload.replace(w.gymId, 'gym_other'))}`,
     `http://portal.example.test/g/?q=${encodeURIComponent(payload)}`,
     `https://portal.example.test/g/`,
