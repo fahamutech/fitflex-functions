@@ -22,6 +22,7 @@ import { createPayoutEligibility } from '../services/payout-eligibility.mjs';
 import { createGymPayoutOwner } from '../services/gym-payout-owner.mjs';
 import { createSettlementViewService } from '../services/settlement-view-service.mjs';
 import { createSettlementClawbackService } from '../services/settlement-clawback-service.mjs';
+import { createRefundClawbackService } from '../services/refund-clawback-service.mjs';
 import { createCheckinStatusService } from '../services/checkin-status-service.mjs';
 import { createMemberManagementService } from '../services/member-management-service.mjs';
 import { createIdentityService } from '../services/identity-service.mjs';
@@ -1110,7 +1111,10 @@ export const refundService = createRefundService({
   tellEvent: async (refund, type, extra) => eventsRefundsService.tellRefund(refund, await db('Event').where({ id: refund.eventId }).first('title'), type, extra),
   enrichRows: rows => eventsRefundsService.enrich(rows),
   raiseForEventPayment: args => eventsRefundsService.adminRaiseForPayment(args),
+  // Slice D (REFUND_STATEMENT_CLAWBACK, off by default): reached lazily, it runs at request time only.
+  clawback: args => refundClawbackService.raiseForRefund(args),
 });
+export const refundClawbackService = createRefundClawbackService({ workflow: settlementWorkflowService });
 // Held payments worklist (audit M5; HELD_PAYMENTS_WORKLIST): provider money no request could take, and its refund.
 export const heldPaymentsService = createHeldPaymentsService({ auditLog, paymentRequests, refunds, refundService, enabled: heldPaymentsWorklistOn,
   // The request row is locked and re-read, and the refund and its audit rows are written, in one transaction.

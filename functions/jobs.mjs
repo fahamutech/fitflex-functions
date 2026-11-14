@@ -1,9 +1,9 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService, vendorImportService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, refundClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService, vendorImportService } from '../src/bootstrap/services.mjs';
 import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
-import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
+import { refundStatementClawbackOn, trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
 
@@ -291,6 +291,7 @@ export const settlementCloser = {
     const r = await settlementService.runDue();
     // New live statements can take clawbacks that were waiting for one.
     if (r.run?.mode === 'live' && !r.alreadyRun) await settlementClawbackService.sweepQuietly();
+    if (r.run?.mode === 'live' && !r.alreadyRun && refundStatementClawbackOn()) await refundClawbackService.sweepPendingQuietly();   // Slice D: pass-refund clawbacks that were waiting for a draft
     if (r.run && !r.alreadyRun) console.log(`[settlement] ${r.run.mode} ${r.run.periodStartDate} cycles=${r.stats.settledCycles} skipped=${r.stats.skippedCycles} statements=${r.stats.statements} final=${r.stats.totalFinalTzs}`);
     else if (r.error) console.error(`[settlement] ${r.error}${r.message ? `: ${r.message}` : ''}`);
   }

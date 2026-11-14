@@ -29,6 +29,7 @@ import { db as defaultDb } from '../infra/knex-store.mjs';
 import { calculateMemberSettlement } from '../shared/settlement-engine.mjs';
 import { resolveGymRateSnapshot, resolutionDateForCycle } from '../shared/settlement-config.mjs';
 import { CHECKIN_STATUS } from '../shared/checkin-status.mjs';
+import { LIVE_ADJUSTMENT_STATUSES } from '../shared/refund-clawback.mjs';
 
 const SYSTEM_ACTOR = 'system:clawback';
 const B2B = 'b2b_benefit';
@@ -57,6 +58,7 @@ export function createSettlementClawbackService({ db = defaultDb, configService,
       for (const cycleId of cycleIds) {
         const cycle = await q('MemberCycleSettlement').where({ id: cycleId }).forUpdate().first();
         if (!cycle?.active) continue;
+        await q.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`settlement-cycle:${cycleId}`]);   // the pass-refund clawback takes the same lock
         const skip = (reason, extra = {}) => out.skipped.push({ memberCycleSettlementId: cycleId, memberId: cycle.memberId, reason, ...extra });
 
         const stored = await q('SettlementVisit').where({ memberCycleSettlementId: cycleId, active: true });
@@ -142,7 +144,17 @@ export function createSettlementClawbackService({ db = defaultDb, configService,
           if (source?.status === 'voided') continue;   // never paid
           const [{ total }] = await q('SettlementAdjustment as a').join('GymSettlement as s', 's.id', 'a.gymSettlementId')
             .where({ 'a.sourceMemberCycleSettlementId': cycleId, 's.gymId': gymId }).whereIn('a.status', COUNTED).sum({ total: 'a.amountTzs' });
-          const amountTzs = (recalculated.get(gymId) ?? 0) - (line?.finalTzs ?? 0) - (Number(total) || 0);
+          let amountTzs = (recalculated.get(gymId) ?? 0) - (line?.finalTzs ?? 0) - (Number(total) || 0);
+          // Pass-refund clawbacks (REFUND_STATEMENT_CLAWBACK) already took part of this line: a further clawback never
+          // takes the gym below zero for the line, so refund + visit corrections together stay within what it paid.
+          if (amountTzs < 0 && line) {
+            const [{ total: refunded }] = await q('SettlementAdjustment as a').join('Refund as r', 'r.id', 'a.refundId').join('GymSettlement as src', 'src.id', 'a.sourceSettlementId')
+              .where({ 'r.subscriptionId': cycle.subscriptionId, 'src.gymId': gymId }).whereIn('a.status', LIVE_ADJUSTMENT_STATUSES).sum({ total: 'a.amountTzs' });
+            const [{ total: visitRaised }] = await q('SettlementAdjustment as a').join('GymSettlement as s', 's.id', 'a.gymSettlementId')
+              .where({ 'a.sourceMemberCycleSettlementId': cycleId, 's.gymId': gymId }).whereIn('a.status', LIVE_ADJUSTMENT_STATUSES).sum({ total: 'a.amountTzs' });
+            const room = Math.max(0, line.finalTzs + (Number(visitRaised) || 0) + (Number(refunded) || 0));
+            amountTzs = -Math.min(-amountTzs, room);
+          }
           if (amountTzs === 0) continue;
 
           const here = voidedSince.filter((c) => c.gymId === gymId);

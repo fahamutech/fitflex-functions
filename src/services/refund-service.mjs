@@ -15,7 +15,7 @@
 import { formatTsh } from '../shared/money-display.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import { randomUUID } from 'node:crypto';
-import { moneySecondApproverOn, refundSplitScopesOn } from '../shared/feature-flags.mjs';
+import { moneySecondApproverOn, refundSplitScopesOn, refundStatementClawbackOn, refundEndAccessDefaultOn } from '../shared/feature-flags.mjs';
 import { refundView } from '../shared/events-money-views.mjs';
 import { staffNameLookup } from '../shared/staff-names.mjs';
 import { notificationText } from '../shared/notification-texts.mjs';
@@ -27,6 +27,8 @@ export const MEMBER_REASONS = ['charged_twice', 'not_activated', 'other'];
 const REASONS = new Set([
   ...MEMBER_REASONS, 'member_cancelled', 'trainer_cancelled', 'vendor_cancelled', 'cancelled_by_fitflex', 'payment_error', 'sponsor_paid',
 ]);
+/** Slice D: reasons for which a full refund ends access by default (REFUND_END_ACCESS_DEFAULT). */
+const END_ACCESS_DEFAULT_REASONS = ['not_activated', 'member_cancelled', 'other'];
 const SOURCE_FIELD = { subscription: 'paymentRequestId', trainer_booking: 'bookingId', shop_order: 'orderId', event_order: 'eventOrderId' };
 const fail = (error, status = 400, extra = {}) => ({ error, status, ...extra });
 const nowIso = () => new Date().toISOString();
@@ -46,6 +48,10 @@ export function createRefundService({
   // A1: two admins on refunds (MONEY_SECOND_APPROVER). Off: unchanged.
   secondApprover = moneySecondApproverOn,
   splitScopes = refundSplitScopesOn,   // REFUND_SPLIT_SCOPES: an admin-raised refund waits for a refunds_approve holder
+  // Slice D. Both default to the flags (off): with both off nothing below changes.
+  clawback = null,                     // ({ refund, actorId }) → refund-clawback-service raiseForRefund result (REFUND_STATEMENT_CLAWBACK)
+  clawbackOn = refundStatementClawbackOn,
+  endAccessDefault = refundEndAccessDefaultOn, // REFUND_END_ACCESS_DEFAULT: a full pass refund ends access unless endAccess:false
 }) {
   const money = formatTsh;
 
@@ -72,6 +78,27 @@ export function createRefundService({
   async function liveFor(kind, sourceId, store = refunds) {
     const field = SOURCE_FIELD[kind];
     return (await store.filterByColumnAsync(field, sourceId)).find(r => r.kind === kind && r.status !== 'rejected') || null;
+  }
+
+  /**
+   * Slice D (decision 4): does approving this refund end the pass now? An explicit true/false always wins. With
+   * REFUND_END_ACCESS_DEFAULT on and nothing sent, access ends only when the refund puts the WHOLE subscription back:
+   * this refund together with the subscription's other approved or paid refunds covers every approved payment, and the
+   * reason is not charged_twice or payment_error (a duplicate or mistaken charge says nothing about the pass itself).
+   * Flag off: only an explicit true ends it (unchanged).
+   */
+  async function endsAccess(refund, explicit) {
+    if (!refund.subscriptionId || !subscriptions) return false;
+    if (explicit === true) return true;
+    if (explicit === false || !endAccessDefault() || refund.kind !== 'subscription') return false;
+    if (!END_ACCESS_DEFAULT_REASONS.includes(refund.reasonCode)) return false;
+    const payments = (await paymentRequests.filterByColumnAsync('subscriptionId', refund.subscriptionId)).filter(p => p.status === 'approved');
+    const owed = payments.reduce((t, p) => t + (Number(p.amountTzs) || 0), 0);
+    if (!(owed > 0)) return false;
+    const others = (await refunds.filterByColumnAsync('subscriptionId', refund.subscriptionId))
+      .filter(r => r.id !== refund.id && r.kind === 'subscription' && ['approved', 'paid'].includes(r.status));
+    const covered = Number(refund.amountTzs) + others.reduce((t, r) => t + (Number(r.amountTzs) || 0), 0);
+    return covered >= owed;
   }
 
   // A refund a staff member raises is not approved by the raise when either flag is on: someone else decides it.
@@ -180,6 +207,11 @@ export function createRefundService({
       approved: held ? false : !adminRaiseWaits(), tx: held?.tx ?? null,
     });
     if (out.existing) return fail('refund_already_requested', 409, { refund: out.refund });
+    // Slice D: a refund approved by the raise itself (no second approver) takes the same end-access rule as a decision.
+    if (endAccessDefault() && out.refund?.status === 'approved' && await endsAccess(out.refund, body.endAccess)) {
+      const at = nowIso();
+      await subscriptions.updateByIdAsync(out.refund.subscriptionId, { expiresAt: at, renewsAt: at });
+    }
     return out;
   }
 
@@ -209,7 +241,7 @@ export function createRefundService({
     });
     if (!refund) return fail('already_decided', 409);
     // A pass or plan refunded in full stops giving access, when the reviewer says so.
-    if (refund.status === 'approved' && body.endAccess === true && refund.subscriptionId && subscriptions) {
+    if (refund.status === 'approved' && (endAccessDefault() ? await endsAccess(refund, body.endAccess) : (body.endAccess === true && refund.subscriptionId && subscriptions))) {
       await subscriptions.updateByIdAsync(refund.subscriptionId, { expiresAt: at, renewsAt: at });
     }
     await audit(`refund_${refund.status}`, actorId, prior, refund);
@@ -284,6 +316,19 @@ export function createRefundService({
       try { await audit('refund_paid_source_not_updated', actorId, null, { id: refund.id, kind: refund.kind, error: String(err?.message || err).slice(0, 300) }); } catch { /* logged above */ }
     }
     await tell(refund, 'refund_paid', 'refund_paid', { amount: money(refund.amountTzs), reference });
+    // Slice D: a pass refund paid after its cycle was settled claws the money back through a settlement adjustment.
+    // Off: the response is exactly { refund }. Never blocks the refund (it is recorded already); a failure is audited and retried by the sweep.
+    if (clawback && clawbackOn() && refund.kind === 'subscription') {
+      let result;
+      try {
+        result = await clawback({ refund, actorId });
+      } catch (err) {
+        console.error('[refunds] paid refund not clawed back:', refund.id, err?.message);
+        try { await audit('refund_clawback_failed', actorId, null, { id: refund.id, kind: refund.kind, error: String(err?.message || err).slice(0, 300) }); } catch { /* logged above */ }
+        result = { status: 'failed', error: 'clawback_failed' };
+      }
+      return { refund, clawback: result };
+    }
     return { refund };
   }
 
