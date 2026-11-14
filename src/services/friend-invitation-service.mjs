@@ -78,6 +78,8 @@ export function createFriendInvitationService({
   //   handleOf(userId) → the member's @username, or null
   delivery = () => ({ sms: false, whatsapp: false }),
   channels = null,
+  // What became of the SMS sent for an invitation: 'delivered' | 'undelivered' | 'pending' | 'unknown' | 'failed' | null.
+  smsDeliveryOf = async () => null,
   handleOf = async () => null,
   // (id, fromStatus, patch) → true when that row was in `fromStatus` and is now patched. Atomic.
   transition,
@@ -118,6 +120,8 @@ export function createFriendInvitationService({
   async function view(inv, viewerId) {
     const mine = inv.inviterId === viewerId;
     const otherId = mine ? inv.recipientUserId : inv.inviterId;
+    const sentBySms = mine && inv.sentAt && String(inv.sentVia || '').split(',').includes('sms');
+    const smsDelivery = sentBySms ? await smsDeliveryOf(inv.id).catch(() => null) : null;
     return {
       id: inv.id,
       status: inv.status === 'pending' && expired(inv) ? 'expired' : inv.status,
@@ -136,6 +140,8 @@ export function createFriendInvitationService({
       sentBy: mine && inv.sentAt ? String(inv.sentVia || '').split(',').filter(Boolean) : [],
       sentAt: mine && inv.sentAt ? iso(inv.sentAt) : null,
       whatsappFailed: mine ? inv.waState === 'failed' : false,
+      // What the SMS provider later reported about the SMS (inviter only; null until known or when not tracked).
+      smsDelivery,
       createdAt: iso(inv.createdAt),
       expiresAt: iso(inv.expiresAt),
       respondedAt: inv.respondedAt ? iso(inv.respondedAt) : null,

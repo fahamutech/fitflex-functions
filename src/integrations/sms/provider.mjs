@@ -21,8 +21,11 @@
 //   send({ to: ['+255…'], text })
 //       → { ok: true, providerMessageId }
 //       | { ok: false, error, retryable, code?, message? }
+//   deliveryReport({ to, providerMessageId })      (optional)
+//       → { ok: true, status: 'delivered'|'undelivered'|'pending'|null }   null: no report yet
+//       | { ok: false, error }                      could not ask; try later
 import { toE164 } from '../../shared/phone.mjs';
-import { beemSend, beemSettings, BEEM_MAX_RECIPIENTS } from './beem.mjs';
+import { beemSend, beemSettings, beemDeliveryReport, BEEM_MAX_RECIPIENTS } from './beem.mjs';
 
 export const ERRORS = {
   notConfigured: 'sms_not_configured',
@@ -65,6 +68,9 @@ export function createBeemSmsProvider({ env = process.env, fetchImpl = fetch } =
       const r = await beemSend({ ...settings, sender, text, to, fetchImpl });
       return r.ok ? { ok: true, providerMessageId: r.requestId } : r;
     },
+    deliveryReport: ({ to, providerMessageId }) => settings
+      ? beemDeliveryReport({ ...settings, to, requestId: providerMessageId, fetchImpl })
+      : Promise.resolve({ ok: false, error: ERRORS.notConfigured }),
   };
 }
 
@@ -77,6 +83,9 @@ export function createFakeSmsProvider() {
     maxRecipients: BEEM_MAX_RECIPIENTS,
     sent: [],
     failWith: null,
+    /** providerMessageId → status the fake reports; anything else has no report yet. */
+    reports: {},
+    deliveryReport: async ({ providerMessageId }) => ({ ok: true, status: provider.reports[providerMessageId] ?? null }),
     send: async ({ to, text }) => {
       if (provider.failWith) return { ok: false, ...provider.failWith };
       provider.sent.push({ to: [...to], text });

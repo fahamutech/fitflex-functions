@@ -43,6 +43,7 @@ import { readReceiptUrl } from '../shared/receipt-url.mjs';
 import { statementPaySecondPersonOn } from '../shared/feature-flags.mjs';
 import { db as defaultDb } from '../infra/knex-store.mjs';
 import { statementNet } from '../shared/settlement-rows.mjs';
+import { REFUND_CLAWBACK_HOLD_REASON, LIVE_ADJUSTMENT_STATUSES } from '../shared/refund-clawback.mjs';
 
 const fail = (error, status = 409, extra = {}) => ({ error, status, ...extra });
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -87,6 +88,24 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
     const [{ total }] = await q('SettlementAdjustment').where({ gymSettlementId: statement.id, status: 'applied' }).sum({ total: 'amountTzs' });
     const adjustmentsTzs = Number(total) || 0;
     return { adjustmentsTzs, ...statementNet({ preliminaryTzs: statement.preliminaryTzs, networkAdjustmentTzs: statement.networkAdjustmentTzs, adjustmentsTzs }) };
+  }
+
+  /**
+   * Slice D (L3): a pass-refund clawback that put its source statement on hold no longer needs the hold once it is
+   * rejected or voided, unless another live refund clawback still depends on the same statement. Lifts only the
+   * hold this feature set (same reason text).
+   */
+  async function releaseRefundHold(q, adjustment, actorId, at) {
+    if (!adjustment.refundId || !adjustment.heldSource || !adjustment.sourceSettlementId) return false;
+    const other = await q('SettlementAdjustment').where({ sourceSettlementId: adjustment.sourceSettlementId }).whereNotNull('refundId')
+      .whereNot('id', adjustment.id).whereIn('status', LIVE_ADJUSTMENT_STATUSES).first('id');
+    if (other) return false;
+    const source = await q('GymSettlement').where({ id: adjustment.sourceSettlementId }).forUpdate().first();
+    if (!source || source.holdReason !== REFUND_CLAWBACK_HOLD_REASON) return false;
+    await q('GymSettlement').where({ id: source.id }).update({ holdReason: null, heldBy: null, heldAt: null, updatedAt: at });
+    await q('AuditLog').insert({ id: randomUUID(), at, actor: actorId, action: 'settlement_released', target: source.id,
+      before: JSON.stringify({ status: source.status, holdReason: source.holdReason }), after: JSON.stringify({ status: source.status, holdReason: null, releasedBecause: 'refund_clawback_ended', adjustmentId: adjustment.id }) });
+    return true;
   }
 
   /**
@@ -230,8 +249,25 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
     if (!s.voidRequestedBy) return fail('void_not_requested');
     if (s.voidRequestedBy === actorId) return fail('cannot_void_own_request', 403);
     const at = now();
+    const onIt = await q('SettlementAdjustment').where({ gymSettlementId: id }).whereIn('status', ['proposed', 'applied']);
     const cancelledAdjustments = await q('SettlementAdjustment').where({ gymSettlementId: id }).whereIn('status', ['proposed', 'applied'])
       .update({ status: 'voided', updatedAt: at });
+    for (const a of onIt) await releaseRefundHold(q, a, actorId, at);
+    // Slice D (M2): pass-refund clawbacks taken from THIS statement's lines on other statements are not owed: it is never paid.
+    const fromIt = await q('SettlementAdjustment').where({ sourceSettlementId: id }).whereNotNull('refundId').whereIn('status', LIVE_ADJUSTMENT_STATUSES);
+    for (const a of fromIt) {
+      const target = await q('GymSettlement').where({ id: a.gymSettlementId }).forUpdate().first();
+      if (a.status === 'applied' && target && target.status !== 'draft') {
+        // An applied one on a statement that is already frozen can't be taken back here: leave it for a person.
+        await q('AuditLog').insert({ id: randomUUID(), at, actor: actorId, action: 'refund_clawback_source_voided_not_cancelled', target: a.id, before: null,
+          after: JSON.stringify({ refundId: a.refundId, gymSettlementId: a.gymSettlementId, sourceSettlementId: id, status: a.status, amountTzs: a.amountTzs }) });
+        continue;
+      }
+      await q('SettlementAdjustment').where({ id: a.id }).update({ status: 'voided', updatedAt: at });
+      if (a.status === 'applied' && target) await q('GymSettlement').where({ id: target.id }).update({ ...(await retotal(q, target)), updatedAt: at });
+      await q('AuditLog').insert({ id: randomUUID(), at, actor: actorId, action: 'refund_clawback_voided', target: a.id, before: JSON.stringify({ status: a.status }),
+        after: JSON.stringify({ refundId: a.refundId, reason: 'source_statement_voided', sourceSettlementId: id }) });
+    }
     return {
       patch: { status: 'voided', voidedBy: actorId, voidedAt: at, voidReason: s.voidRequestReason },
       audit: { reason: s.voidRequestReason, requestedBy: s.voidRequestedBy, finalNetTzs: s.finalNetTzs, cancelledAdjustments },
@@ -273,11 +309,14 @@ export function createSettlementWorkflowService({ db = defaultDb, payoutEligibil
       const adjustment = await q('SettlementAdjustment').where({ id }).forUpdate().first();
       if (!adjustment) return fail('adjustment_not_found', 404);
       if (adjustment.status !== 'proposed') return fail('invalid_status', 409, { currentStatus: adjustment.status, expected: 'proposed' });
+      // Slice D (M4): whoever paid the refund neither applies nor rejects its clawback.
+      if (adjustment.refundId && (await q('Refund').where({ id: adjustment.refundId }).first('paidBy'))?.paidBy === actorId) return fail('cannot_decide_own_refund_adjustment', 403);
       const statement = await q('GymSettlement').where({ id: adjustment.gymSettlementId }).forUpdate().first();
       const at = now();
       if (decision === 'reject') {
         if (!text(reason)) return fail('reason_required', 400);
         await q('SettlementAdjustment').where({ id }).update({ status: 'rejected', rejectedBy: actorId, rejectReason: text(reason), updatedAt: at });
+        await releaseRefundHold(q, adjustment, actorId, at);
       } else {
         if (adjustment.createdBy === actorId) return fail('cannot_approve_own_adjustment', 403);
         if (statement.status !== 'draft') return wrongStatus(statement, 'draft');

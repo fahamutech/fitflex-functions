@@ -1,9 +1,9 @@
 // Scheduled jobs.
 import '../src/bootstrap/init.mjs';
-import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService, vendorImportService } from '../src/bootstrap/services.mjs';
+import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, refundClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService, vendorImportService } from '../src/bootstrap/services.mjs';
 import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
-import { trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
+import { refundStatementClawbackOn, trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
 
@@ -39,6 +39,15 @@ export const smsReminders = {
     const r = await smsService.sendDueReminders();
     const n = (x) => x.sent + x.failed;
     if (n(r.bookings) || n(r.renewals)) console.log(`[sms] bookings sent=${r.bookings.sent} failed=${r.bookings.failed} · renewals sent=${r.renewals.sent} failed=${r.renewals.failed}`);
+  }
+};
+
+export const smsDeliveryCheck = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'SMS delivery tracking: asks the SMS provider (Beem) what became of the messages it accepted in the last day, from 5 minutes after sending, and records delivered / undelivered / pending in the SMS log. Does nothing unless SMS_DELIVERY_TRACKING is on. Safe to rerun and to overlap.',
+  onJob: async () => {
+    const r = await smsService.checkDeliveries();
+    if (r.checked || r.errors) console.log(`[sms] delivery checked=${r.checked} delivered=${r.delivered} undelivered=${r.undelivered} pending=${r.pending} unknown=${r.unknown} errors=${r.errors}`);
   }
 };
 
@@ -282,6 +291,7 @@ export const settlementCloser = {
     const r = await settlementService.runDue();
     // New live statements can take clawbacks that were waiting for one.
     if (r.run?.mode === 'live' && !r.alreadyRun) await settlementClawbackService.sweepQuietly();
+    if (r.run?.mode === 'live' && !r.alreadyRun && refundStatementClawbackOn()) await refundClawbackService.sweepPendingQuietly();   // Slice D: pass-refund clawbacks that were waiting for a draft
     if (r.run && !r.alreadyRun) console.log(`[settlement] ${r.run.mode} ${r.run.periodStartDate} cycles=${r.stats.settledCycles} skipped=${r.stats.skippedCycles} statements=${r.stats.statements} final=${r.stats.totalFinalTzs}`);
     else if (r.error) console.error(`[settlement] ${r.error}${r.message ? `: ${r.message}` : ''}`);
   }
