@@ -101,6 +101,45 @@ export function tunzaaSandboxSettlesOn() {
 }
 
 /**
+ * Pay by mobile money through AzamPay (POST /me/payments/:id/mobile-money).
+ * Off unless AZAMPAY_PAYMENTS is set (and the AzamPay credentials are present).
+ * On: AzamPay REPLACES Malipo by Tunzaa for new payments (owner decision
+ * 2026-11-15); prompts already out with Tunzaa still settle through Tunzaa.
+ */
+export function azampayPaymentsOn() {
+  return on('AZAMPAY_PAYMENTS');
+}
+
+/** Trainer sessions and trainer gym passes payable through AzamPay; effective only with AZAMPAY_PAYMENTS. */
+export function azampayTrainerProductsOn() {
+  return on('AZAMPAY_TRAINER_PRODUCTS') && azampayPaymentsOn();
+}
+
+/**
+ * An AzamPay sandbox payment still activates a real plan in FitFlex, so against
+ * the sandbox paying is offered only when AZAMPAY_SANDBOX_SETTLES is set on
+ * purpose (a test server). Live needs nothing extra.
+ */
+export function azampaySandboxSettlesOn() {
+  return on('AZAMPAY_SANDBOX_SETTLES');
+}
+
+/**
+ * A plan paid while the member's current plan of the same product is still
+ * running starts when that plan ends, instead of at once (owner decision
+ * 2026-11-15). Off unless SCHEDULED_RENEWALS is set: off, every paid plan
+ * starts at payment as before.
+ */
+export function scheduledRenewalsOn() {
+  return on('SCHEDULED_RENEWALS');
+}
+
+/** Trainer products by mobile money, for whichever provider takes new payments. */
+export function mobileMoneyTrainerProductsOn() {
+  return azampayPaymentsOn() ? azampayTrainerProductsOn() : tunzaaTrainerProductsOn();
+}
+
+/**
  * The Shop home (GET /shop/home). Off unless SHOP_HOME_V2 is set: the
  * endpoint answers 404 feature_disabled and the app
  * keeps today's shop.

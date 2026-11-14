@@ -15,7 +15,7 @@ export const listPasses = {
 
 export const subscribe = {
   created, method: 'post', path: '/me/subscribe',
-  description: 'Create a pilot Platform Pass (or gym plan) payment request. Admin approval activates the subscription. While manual payment is on (GET /payments/options manual.enabled) `reference` (the mobile-money transaction ID) and `payerPhone` (the number paid from) are required: 400 payment_reference_required / payment_reference_invalid / payer_phone_required / payer_phone_invalid, 409 payment_reference_duplicate, 429 too_many_attempts.',
+  description: 'Create a pilot Platform Pass (or gym plan) payment request. Admin approval activates the subscription; when the member already has a running plan of the same product (FitFlex Pass, or the same gym\'s plan), the paid plan is scheduled instead and starts when the current one ends (GET /me scheduledRenewals). 409 renewal_already_scheduled: one renewal may wait at a time. While manual payment is on (GET /payments/options manual.enabled) `reference` (the mobile-money transaction ID) and `payerPhone` (the number paid from) are required: 400 payment_reference_required / payment_reference_invalid / payer_phone_required / payer_phone_invalid, 409 payment_reference_duplicate, 429 too_many_attempts.',
   requestSample: { tier: 'pro', type: 'platform_pass', reference: 'QGH7XK2L9P', payerPhone: '0712345678' },
   onGuard: routeGuard('post', requireAuth('member')),
   onRequest: async (req, res) => {

@@ -10,7 +10,8 @@
 // Returns the number of holder rows across these (0 = free to change).
 import { localDay } from '../shared/member-progress.mjs';
 
-export const HELD_SUBSCRIPTION_STATUSES = Object.freeze(['active', 'payment_pending', 'pending', 'suspended']);
+// 'scheduled': a renewal already paid for holds its tier too.
+export const HELD_SUBSCRIPTION_STATUSES = Object.freeze(['active', 'payment_pending', 'pending', 'suspended', 'scheduled']);
 export const HELD_CORPORATE_STATUSES = Object.freeze(['pending', 'active', 'suspended']);
 
 export function createTierHolders({ db, now = () => new Date() }) {

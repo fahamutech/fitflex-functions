@@ -8,7 +8,9 @@ import { randomUUID } from 'node:crypto';
 
 export function createCheckInService({ users, gyms, subscriptions, checkins, getTierConfig, trainers = null, b2bFunding = null, gymOpenToPass = null,
   // A visit was recorded: (checkin) → void. Told to the gym; never allowed to fail the check-in.
-  onCheckin = async () => {} }) {
+  onCheckin = async () => {},
+  // A renewal paid early becomes active when its start comes: (subs, now) → subs with started ones promoted.
+  promoteStarted = async (subs) => subs }) {
   const recorded = row => { Promise.resolve().then(() => onCheckin(row)).catch(() => {}); };
   /** T5: the user is an active trainer linked to this gym (trains there free). */
   function homeGymIds(userId) {
@@ -164,7 +166,7 @@ export function createCheckInService({ users, gyms, subscriptions, checkins, get
     const gym = gyms.find(g => g.id === gymId);
     if (!gym) return { done: true, result: { ok: false, failure: 'gym_not_found' } };
 
-    const subs = await subscriptions.filterAsync(s => s.memberId === memberId);
+    const subs = await promoteStarted(await subscriptions.filterAsync(s => s.memberId === memberId), now);
     const sub  = pickSubscriptionForGym(
       subs.filter(s => ['active', 'expired', 'suspended'].includes(s.status)),
       gym,
