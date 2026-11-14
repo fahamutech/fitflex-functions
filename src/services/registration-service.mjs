@@ -28,9 +28,13 @@ const num = (name, fallback) => {
   const v = Number(process.env[name]);
   return Number.isFinite(v) && v > 0 ? v : fallback;
 };
-/** Defaults; env-overridable. */
+/**
+ * Defaults; env-overridable. Mobile networks in Tanzania put many people behind
+ * one address (CGNAT), so the per-address limit is generous (30/hour); the
+ * per-identifier limits and the daily cap are what protect the SMS bill.
+ */
 export const registrationLimits = () => ({
-  startsPerAddressPerHour: num('REGISTER_STARTS_PER_ADDRESS_PER_HOUR', 10),
+  startsPerAddressPerHour: num('REGISTER_STARTS_PER_ADDRESS_PER_HOUR', 30),
   codesPerDay: num('REGISTER_CODES_PER_DAY', 1000),
 });
 
@@ -65,9 +69,16 @@ export function createRegistrationService({
     if (!identifier) return { error: 'one_phone_or_email_required', status: 400 };
     const limits = registrationLimits();
     if (ip) {
-      const recent = Number((await db('AuthAttempt').where({ kind: 'register_start', ip })
-        .where('createdAt', '>', new Date(Date.now() - 3600e3)).count({ n: '*' }).first()).n);
-      if (recent >= limits.startsPerAddressPerHour) return { error: 'too_many_attempts', status: 429, retryAfterSeconds: 3600 };
+      const since = new Date(Date.now() - 3600e3);
+      const counted = db('AuthAttempt').where({ kind: 'register_start', ip }).where('createdAt', '>', since);
+      const recent = Number((await counted.clone().count({ n: '*' }).first()).n);
+      if (recent >= limits.startsPerAddressPerHour) {
+        // Free again when the oldest counted attempt leaves the one-hour window.
+        const oldest = await counted.clone().min({ at: 'createdAt' }).first();
+        const freeAt = oldest?.at ? new Date(oldest.at).getTime() + 3600e3 : Date.now() + 3600e3;
+        const retryAfterSeconds = Math.min(3600, Math.max(60, Math.ceil((freeAt - Date.now()) / 1000)));
+        return { error: 'too_many_attempts', status: 429, retryAfterSeconds };
+      }
     }
     await db('AuthAttempt').insert({
       id: `aat_${randomUUID().replace(/-/g, '').slice(0, 12)}`, kind: 'register_start',

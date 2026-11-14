@@ -1,13 +1,14 @@
 # Browser check-in security alert (S3) - API contract
 
-Flags: `WEB_QR_CHECKIN` (S2, must be on), `WEB_CHECKIN_ALERTS` (this slice, default off; effective only while WEB_QR_CHECKIN is on), `PUSH_NOTIFICATIONS=on` for the phone push. Launch gate: keep WEB_CHECKIN_ALERTS off until the app's security-activity screen (S4) is live.
+Flags: `WEB_QR_CHECKIN` (S2, must be on), `WEB_CHECKIN_ALERTS` (this slice, default off; effective only while WEB_QR_CHECKIN is on), `PUSH_NOTIFICATIONS=on` for the phone push. Launch gate: keep WEB_CHECKIN_ALERTS off until the app's security-activity screen and the incident report (S4a + S4b + S4c, see `docs/security-incident-report-api.md`) are all live.
 
 ## POST /me/web-checkins (confirm) - new field
 `alertQueued: boolean`. True only when this call recorded a NEW visit, both flags are on and the member has at least one registered device token. False on idempotent repeats and in every other case. It does not wait for the push.
 
 ## GET /me/security-activity?limit=&before=
 Member or trainer; 404 `{ error: "not_found" }` while WEB_QR_CHECKIN is off. The list is gated by WEB_QR_CHECKIN alone, not by WEB_CHECKIN_ALERTS: with alerts off, events are still listed, with `status: "recorded"`. `Cache-Control: no-store`.
-`{ events: [{ id, kind: "web_checkin", occurredAt (ISO), gym: { id, name }, channel: "web", status: "inbox" | "recorded" }], next? }`
+`{ events: [{ id, kind: "web_checkin", occurredAt (ISO), gym: { id, name }, channel: "web", status: "inbox" | "recorded", report: null | { incidentId, status, reportedAt, protectionPending, protectionRetryable? } }], reportEnabled, next? }`
+(`status` is only ever `inbox` or `recorded`; the old value `notified` no longer exists. `report` and `reportEnabled` were added by S4b, see `docs/security-incident-report-api.md`; with SECURITY_INCIDENT_REPORTS off they are `null` and `false`.)
 Newest first, caller's own rows only, limit default 20 / max 50. `next` is an OPAQUE cursor: pass it back unchanged as `before`, never parse it. Bad `before` gives 400 `invalid_before`. `status`: `inbox` = the inbox message was written (it does NOT mean the phone push was delivered); `recorded` = event stored, no message (alerts off, or the message write failed and has not been retried). **Contract change in the fix pass: this value was `notified` before; no consumer exists yet.** `gym.id` and `gym.name` can each be null (gym removed or unnamed); handle both. `gym.id` is the Gym id (the same `id` the member gym APIs return). `name` is the snapshot taken at check-in time.
 
 ## Notification

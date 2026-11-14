@@ -131,6 +131,22 @@ export function shopPersonalisationOn() {
 }
 
 /**
+ * Partner DOB · slice 4 (docs/shop-personalisation-api.md "Trainer and owner mode"). Off unless
+ * SHOP_PERSONALISATION_PARTNERS is set, and only has an effect while SHOP_PERSONALISATION is on too.
+ * Off: GET /shop/home and GET /shop/preferences are byte-identical to before (trainer/owner-only
+ * accounts are not available; gender and age apply in member mode only). On: trainer and owner mode
+ * are personalised from the Person's declared date of birth (Person.dateOfBirth, else the member
+ * profile's) and gender (trainer mode: TrainerProfile.gender, else Person.gender; owner mode:
+ * Person.gender). Security review M1: an invalid or under-18 date of birth on the Person or on any of
+ * its member personas then switches personalisation off in EVERY mode (member mode included);
+ * otherwise member and vendor_personal mode are unchanged. GET/PUT /shop/preferences carry
+ * profileSignals: true in trainer/owner mode only while this is on.
+ */
+export function shopPersonalisationPartnersOn() {
+  return shopPersonalisationOn() && on('SHOP_PERSONALISATION_PARTNERS');
+}
+
+/**
  * Shop home Phase 2 · slice 3: "Popular near you" (docs/shop-near-you-api.md). Off unless SHOP_NEAR_YOU
  * is set: GET /shop/home is byte-identical to before (no `nearYou` key, no popular_near_you section,
  * `areaId` ignored), GET /shop/areas answers 404 feature_disabled, /shop/preferences never lists
@@ -247,6 +263,7 @@ export function statementPaySecondPersonOn() {
 export const VENDOR_TOOLS_FLAGS = [
   'VENDOR_STOCK_LEDGER', 'VENDOR_PORTAL', 'VENDOR_ORDER_BUYER_CONTACT', 'VENDOR_WALKIN_SALES', 'VENDOR_CUSTOMERS',
   'VENDOR_DOCUMENTS', 'VENDOR_VAT', 'VENDOR_REPORTS', 'VENDOR_REFUNDS', 'VENDOR_BARCODES', 'VENDOR_PURCHASES', 'VENDOR_FISCAL', 'VENDOR_IMPORT',
+  'VENDOR_SALE_REFERENCE_OPTIONAL', 'VENDOR_SALE_CUSTOMER_DETAILS',
 ];
 
 /** True when VENDOR_TOOLS and the given slice flag are both enabled. */
@@ -291,6 +308,11 @@ export function vendorToolsOptions() {
     // Smart import V1: CSV import of products, stock counts and profile. importLimits tell the apps the caps.
     import: vendorImportOn(),
     importLimits: { ...VENDOR_IMPORT_LIMITS },
+    // Sale extras (docs/design/vendor-sale-extras-1110.md §5): app UI switches only. The server already accepts a
+    // sale with no reference on any method (cash references kept) and stores customerType whatever these say, so a
+    // queued sale still syncs after either is turned off.
+    referenceOptional: vendorToolsFlag('VENDOR_SALE_REFERENCE_OPTIONAL'),
+    saleCustomerDetails: vendorToolsFlag('VENDOR_SALE_CUSTOMER_DETAILS'),
     fiscal,
     // Shop home Phase 2: what a vendor may propose for the shop home. Not under the VENDOR_TOOLS
     // umbrella (a shop feature, not a vendor tool).
@@ -711,6 +733,23 @@ export function webQrCheckinOn() {
  */
 export function webCheckinAlertsOn() {
   return webQrCheckinOn() && on('WEB_CHECKIN_ALERTS');
+}
+
+/**
+ * Security incident reports (S4b): the member reports a web check-in they did not make (POST
+ * /me/security-activity/:eventId/report) and staff work the report (/admin/security-incidents*). Off unless
+ * SECURITY_INCIDENT_REPORTS is set, and only effective while WEB_QR_CHECKIN is also on. Dormant: the report route
+ * answers 404 not_found and the staff routes answer 404 feature_disabled.
+ * Launch gate: WEB_CHECKIN_ALERTS stays off until the app's S4a + S4b + S4c are all live.
+ */
+export function securityIncidentReportsOn() {
+  return webQrCheckinOn() && on('SECURITY_INCIDENT_REPORTS');
+}
+
+/** New incidents one member may create per rolling 24 hours (SECURITY_REPORT_MAX_PER_DAY, default 3). */
+export function securityReportMaxPerDay() {
+  const n = Math.floor(Number(process.env.SECURITY_REPORT_MAX_PER_DAY));
+  return Number.isFinite(n) && n >= 1 ? n : 3;
 }
 
 /**

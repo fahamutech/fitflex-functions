@@ -179,7 +179,8 @@ test('rules: walk-in price, line discount for the whole line, subtotal before di
   assert.equal(priceSale(priced, 0, cash(95_000 + 95_000 + 1_000_000)).changeTzs, 1_095_000);
   assert.deepEqual(priceSale(priced, 0, cash(95_000 + 95_000 + 1_000_001)), { error: 'invalid_payment', status: 400, reason: 'change_too_large', maxChangeTzs: 1_095_000 });
   assert.equal(priceSale(priced, 0, [{ method: 'cash', amountTzs: 60_000_000 }, { method: 'cash', amountTzs: 60_000_000 }]).reason, 'paid_too_large');
-  assert.equal(parseSale({ clientRef: 'x'.repeat(10), lines: [{ productId: 'a', qty: 1 }], payments: [{ method: 'bank', amountTzs: 1 }] }).error, 'reference_required');
+  // Sale extras 2026-11-10 (Q-1/Q-2): no method needs a reference on a sale any more (specs/vendor-sale-extras.specs.mjs).
+  assert.equal(parseSale({ clientRef: 'x'.repeat(10), lines: [{ productId: 'a', qty: 1 }], payments: [{ method: 'bank', amountTzs: 1 }] }).error, undefined, 'bank: reference optional on a sale');
   assert.equal(parseSale({ clientRef: 'x'.repeat(10), lines: [{ productId: 'a', qty: 1 }], payments: [{ method: 'card', amountTzs: 1 }] }).error, undefined, 'card: reference optional');
   assert.equal(parseSale({ clientRef: 'x'.repeat(10), lines: [{ productId: 'a', qty: 1 }], payments: [{ method: 'cheque', amountTzs: 1 }] }).error, 'invalid_payment');
 });
@@ -276,13 +277,14 @@ test('prices and discounts (O-14): walk-in price = discount price; a changed pri
   assert.equal((await row(p.id)).stock, 7, 'refused sales took nothing');
 });
 
-test('payments: reference required for mobile money and bank, optional for card/other; short → 409; non-cash over the total → 400; zero-total sale with no payments', async () => {
+test('payments: reference optional for every method (sale extras), kept for cash; short → 409; non-cash over the total → 400; zero-total sale with no payments', async () => {
   salesOn();
   const v = await vendor();
   const p = await product(v, { priceTzs: 10_000, stock: 20 });
   const one = [{ productId: p.id, qty: 1 }];
   for (const method of ['mpesa', 'airtel_money', 'mixx', 'halopesa', 'bank']) {
-    assert.deepEqual(await sell(as(v), saleBody(one, [{ method, amountTzs: 10_000, reference: '  ' }])), { status: 400, body: { error: 'reference_required', index: 0, method } }, method);
+    const out = await sell(as(v), saleBody(one, [{ method, amountTzs: 10_000, reference: '  ' }]));
+    assert.deepEqual([out.status, out.body.sale?.payments], [201, [{ method, amountTzs: 10_000, reference: null }]], method);
   }
   for (const method of ['card', 'other']) assert.equal((await sell(as(v), saleBody(one, [{ method, amountTzs: 10_000 }]))).status, 201, method);
   assert.equal((await sell(as(v), saleBody(one, [{ method: 'mpesa', amountTzs: 4_000, reference: 'A1' }, { method: 'halopesa', amountTzs: 6_000, reference: 'B2' }]))).status, 201, 'two mobile-money payments');
@@ -293,7 +295,7 @@ test('payments: reference required for mobile money and bank, optional for card/
   const over = await sell(as(v), saleBody(one, [{ method: 'cash', amountTzs: 1_000 }, { method: 'card', amountTzs: 10_001 }]));
   assert.deepEqual([over.status, over.body.error, over.body.reason], [400, 'invalid_payment', 'non_cash_over_total']);
   assert.equal((await sell(as(v), saleBody(one, [{ method: 'cash', amountTzs: 0 }]))).body.error, 'invalid_payment');
-  assert.equal((await sell(as(v), saleBody(one, [{ method: 'cash', amountTzs: 10_000, reference: 'x'.repeat(101) }]))).status, 201, 'a reference on cash is ignored');
+  assert.deepEqual((await sell(as(v), saleBody(one, [{ method: 'cash', amountTzs: 10_000, reference: 'x'.repeat(101) }]))).body, { error: 'invalid_payment', index: 0, field: 'reference', max: 100 }, 'a cash reference is checked like any other');
   assert.equal((await sell(as(v), saleBody(one, [{ method: 'card', amountTzs: 10_000, reference: 'x'.repeat(101) }]))).body.error, 'invalid_payment');
 
   const giveaway = await sell(as(v), saleBody([{ productId: p.id, qty: 1, discountTzs: 10_000 }], []));
@@ -611,7 +613,7 @@ test('GET /vendor/sales: newest first, paged, filters (dates, status, createdBy=
   assert.deepEqual(all.body.sales.map(s => s.number), [e.number, d.number, c.number, b.number, a.number]);
   // S4 added kind, balanceTzs, dueDate and customer to each row.
   // S4 added kind, balanceTzs, dueDate and customer; S7 refundedTzs and refundState.
-  assert.deepEqual(Object.keys(all.body.sales[0]).sort(), ['balanceTzs', 'createdBy', 'customer', 'discountTzs', 'dueDate', 'hasOverride', 'id', 'itemCount', 'kind', 'lateRecorded', 'methods', 'number', 'recordedAt', 'refundState', 'refundedTzs', 'balanceReducedTzs', 'soldAt', 'status', 'totalTzs'].sort());
+  assert.deepEqual(Object.keys(all.body.sales[0]).sort(), ['balanceTzs', 'createdBy', 'customer', 'customerType', 'discountTzs', 'dueDate', 'hasOverride', 'id', 'itemCount', 'kind', 'lateRecorded', 'methods', 'number', 'recordedAt', 'refundState', 'refundedTzs', 'balanceReducedTzs', 'soldAt', 'status', 'totalTzs'].sort());
   assert.deepEqual([all.body.sales[0].refundedTzs, all.body.sales[0].refundState, all.body.sales[0].balanceReducedTzs], [0, 'none', 0]);
   assert.deepEqual([all.body.sales[0].kind, all.body.sales[0].balanceTzs, all.body.sales[0].dueDate, all.body.sales[0].customer], ['cash', 0, null, null]);
   const bRow = all.body.sales.find(s => s.id === b.id);

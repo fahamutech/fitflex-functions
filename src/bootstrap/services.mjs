@@ -93,7 +93,8 @@ import { createGoalService } from '../services/goal-service.mjs';
 import { createWorkoutService } from '../services/workout-service.mjs';
 import { createPartnerNotifier } from '../services/partner-notifier.mjs';
 import { createSecurityEventService } from '../services/security-event-service.mjs';
-import { webCheckinAlertsOn } from '../shared/feature-flags.mjs';
+import { createSecurityIncidentService } from '../services/security-incident-service.mjs';
+import { webCheckinAlertsOn, securityIncidentReportsOn, securityReportMaxPerDay } from '../shared/feature-flags.mjs';
 import { createTrainingPreferenceService } from '../services/training/training-preference-service.mjs';
 import { createRecommendationEngine } from '../services/training/recommendation-engine.mjs';
 import { createRulesRecommendationProvider } from '../services/training/rules-recommendation-provider.mjs';
@@ -222,7 +223,7 @@ import { db } from '../infra/knex-store.mjs';
 import { createPgTrainerOutcomeStore } from '../infra/trainer-outcome-store-pg.mjs';
 import { createPgTrainerSlotStore } from '../infra/trainer-slot-store-pg.mjs';
 import { createPersonalDetailsService } from '../services/personal-details-service.mjs';
-import { forgetPersonDetails } from '../infra/person-details-store-pg.mjs';
+import { forgetPersonDetails, readPersonDetails } from '../infra/person-details-store-pg.mjs';
 import {
   moderationStates, moderationEvents, geoAreas, promotionCampaigns, promotions, promotionPlacements, placementConfigs,
   refunds,
@@ -751,6 +752,9 @@ export const securityEventService = createSecurityEventService({
   notify: (userId, message) => notificationService.notify(userId, message),
   localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
   alertsOn: webCheckinAlertsOn,
+  // S4b: the incident service is created further down (after pinAuthService); these only run when a list is read.
+  reportsOn: securityIncidentReportsOn,
+  reportsFor: (userId, ids) => securityIncidentService.reportsFor(userId, ids),
 });
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
@@ -993,6 +997,7 @@ export const friendInvitationService = createFriendInvitationService({
     whatsapp: String(process.env.FRIEND_INVITE_WHATSAPP || '').toLowerCase() === 'on',
   }),
   handleOf: userId => usernameService.handleOf(userId),
+  smsDeliveryOf: invitationId => smsService.deliveryOf(`friend-invite:${invitationId}:`),
   // WhatsApp first (needs the channel enabled + configured and an approved
   // template); SMS through the shared SMS service when WhatsApp can't be used
   // or the number has no WhatsApp (the job in functions/jobs.mjs asks the
@@ -1176,6 +1181,13 @@ export const pinAuthService = createPinAuthService({
   // The key the PIN is mixed with before hashing. It must be set in production
   // and never change afterwards, or every stored PIN stops matching.
   pepper: () => pinPepper(),
+});
+// Security incident reports (S4b). Dormant behind SECURITY_INCIDENT_REPORTS (needs WEB_QR_CHECKIN).
+export const securityIncidentService = createSecurityIncidentService({
+  db, pinAuth: pinAuthService, ops: opsService, auditLog,
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  reportsOn: securityIncidentReportsOn, maxPerDay: securityReportMaxPerDay,
 });
 // Identity V2 · I7b: register with a number or email, a code, then a PIN.
 export const registrationService = createRegistrationService({
@@ -1362,6 +1374,10 @@ export const partnerMediaService = createPartnerMediaService({
 export const shopPreferenceService = createShopPreferenceService({
   store: createPgShopPreferenceStore({ db }), users, identityLink: identityLinkService,
   trainerProfileOf: userId => trainerService.findProfileByUser(userId),
+  // Partner DOB slice 4 (SHOP_PERSONALISATION_PARTNERS): the Person's declared date of birth and gender only.
+  personDetailsOf: personId => readPersonDetails(db, personId),
+  // Security review M1: every member persona of the Person, suspended or not (as memberDateOfBirth).
+  memberRowsOf: personId => db('User').where({ personId, userType: 'member' }).select('id', 'memberProfile'),
 });
 // Purchase history is the person's own orders only, read per request; capped so memory stays bounded.
 const SHOP_HISTORY_MAX_ORDERS = 500;

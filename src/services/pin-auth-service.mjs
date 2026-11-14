@@ -268,6 +268,24 @@ export function createPinAuthService({
     for (const row of await db('User').where({ personId }).select('id')) forgetSession(row.id);
   }
 
+  /**
+   * Make this person choose a new PIN before the old one works again (a member reported an account they did not
+   * recognise). Uses the existing lockout: PIN sign-in answers 403 pin_reset_required until "forgot PIN" sets a new
+   * one (setPin clears it). No new column. A person with no PIN held by FitFlex has nothing to reset.
+   * → true when the PIN was switched off, false when there is no PIN (not_applicable).
+   */
+  async function requirePinReset(personId, actorId = null) {
+    const person = await db('Person').where({ id: personId }).first('id', 'pinHash', 'pinFailedCount');
+    if (!person?.pinHash) return false;
+    await db('Person').where({ id: personId }).update({
+      pinFailedCount: Math.max(Number(person.pinFailedCount) || 0, pinLimits().disableAfter), pinLockedUntil: null, updatedAt: db.fn.now(),
+    });
+    if (auditLog) {
+      await auditLog.insertAsync({ id: randomUUID(), at: new Date().toISOString(), actor: actorId, action: 'pin_reset_required', target: personId, before: null, after: { reason: 'security_incident_report' } });
+    }
+    return true;
+  }
+
   // ── Forgot PIN (I7c) ──────────────────────────────────────────────────────
 
   /**
@@ -404,5 +422,5 @@ export function createPinAuthService({
     return checked.error === 'invalid_credentials' ? { error: 'pin_incorrect', status: 400 } : checked;
   }
 
-  return { login, setup, setPin, endSessions, configured, resetStart, resetConfirm, resetComplete, changePin, startPinHash, onboarding, enter, verifyPin };
+  return { login, setup, setPin, endSessions, requirePinReset, configured, resetStart, resetConfirm, resetComplete, changePin, startPinHash, onboarding, enter, verifyPin };
 }

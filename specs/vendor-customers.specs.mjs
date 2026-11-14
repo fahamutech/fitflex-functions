@@ -483,7 +483,8 @@ test('pay later: paid now + balance, default due = sale EAT day + 7, range check
   assert.equal((await refuse(cash(100_000), {})).error, 'change_not_allowed');
   assert.equal((await refuse([], { customerId: undefined })).error, 'customer_required');
   assert.equal((await refuse([], { customerId: 'cus_doesnotexist0000' })).error, 'customer_not_found');
-  assert.equal((await refuse([{ method: 'mpesa', amountTzs: 1_000 }], {})).error, 'reference_required', 'S3 reference rules still apply');
+  // Sale extras: a paid-now row needs no reference any more (specs/vendor-sale-extras.specs.mjs); the length rule stays.
+  assert.equal((await refuse([{ method: 'mpesa', amountTzs: 1_000, reference: 'x'.repeat(101) }], {})).error, 'invalid_payment', 'S3 reference length rule still applies');
   assert.equal((await db('Product').where({ id: p.id }).first()).stock, 8, 'refusals moved nothing');
 
   const list = await call(vendorListSales, as(v), { query: { kind: 'credit' } });

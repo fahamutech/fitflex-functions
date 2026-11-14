@@ -8,7 +8,7 @@ checked.
 | Was (Supabase) | Is (here) |
 |---|---|
 | `_shared/beem.ts` — Beem client, `sms_logs`, send-once keys | `src/integrations/sms/beem.mjs` (the one Beem call), `src/integrations/sms/provider.mjs` (provider seam), `src/services/sms-service.mjs` (`send`, the `SmsLog` table) |
-| `send-sms-hook` — login codes | Verification codes already went through Beem here (`src/infra/verification-senders.mjs`). They now use the shared Beem client and are written, redacted, to `SmsLog`. Their limits are the identity module's (`VERIFY_CODE_*`). |
+| `send-sms-hook` — login codes | Verification codes already went through Beem here (`src/infra/verification-senders.mjs`). They now use the shared Beem client and are written, redacted, to `SmsLog`. Their limits are the identity module's (`VERIFY_CODE_*`). Registration adds a per-address limit (`REGISTER_STARTS_PER_ADDRESS_PER_HOUR`, default 30; mobile networks share addresses) and a daily cap (`REGISTER_CODES_PER_DAY`); a limited request gets `retryAfterSeconds` from the oldest attempt in the hour (min 60). Each accepted code's Beem `request_id` is stored in `SmsLog.providerMessageId`, a refusal's code in `providerCode`, so a delivery can be traced in the Beem dashboard. |
 | `sms-dispatch` — hourly session and renewal reminders | The `smsReminders` job (`functions/jobs.mjs`, hourly) → `smsService.sendDueReminders()` |
 | `sms-promo` — a promotion by SMS to members who opted in | SMS is a channel of the Communication Center: a gym or FitFlex campaign (or a gym automation) with `channels: ['sms']`. It gets the audience rules, consent, weekly marketing cap, large-send confirmation, scheduling, retries and history every other channel has. |
 
@@ -21,6 +21,7 @@ Credentials come from the environment only.
 | `SMS_PROVIDER` | `beem`, or unset for off. Reminders and campaigns send nothing until it is set, so a deploy on its own never starts sending. (`fake` is for tests and is ignored in production.) |
 | `BEEM_API_KEY`, `BEEM_SECRET_KEY` | The Beem API pair. Shared with verification codes. |
 | `BEEM_SENDER_ID` | The sender name members see. `INFO` (Beem's shared name, the default) until Beem approves FitFlex's own. |
+| `SMS_DELIVERY_TRACKING` | `on` to ask Beem, every 10 minutes, what became of the messages it accepted (delivered, undelivered, still pending) and keep the answer in `SmsLog`. Off by default; nothing is asked while it is off. |
 | `VERIFICATION_SMS_PROVIDER`, `VERIFICATION_SMS_SENDER_ID` | Verification codes only — unchanged. The sender name falls back to `BEEM_SENDER_ID`. |
 
 ## What is sent
@@ -37,6 +38,15 @@ Credentials come from the environment only.
   3 days, one SMS part each. `B2B_INVITE_SMS=off` turns these off on their
   own. See `B2B_AUTOMATION.md` §11.
 - **Verification codes** (identity).
+
+**Delivery tracking.** "accepted" means Beem took the message, not that it reached
+the phone. With `SMS_DELIVERY_TRACKING=on` the `smsDeliveryCheck` job (every 10
+minutes) asks Beem's delivery-report API about each accepted message from 5
+minutes after sending, up to a day, and writes `deliveryStatus` (`delivered`,
+`undelivered`, `pending`, or `unknown` when Beem has no report after three tries)
+to `SmsLog`. `GET /admin/sms/status` shows the counts for the last 24 hours
+(`delivery24h`) and `GET /admin/sms/logs` each message's `deliveryStatus`. A
+friend invitation's sender sees it as `smsDelivery` on their sent invitations.
 
 Each SMS is one row in `SmsLog`: number, kind (`otp`, `reminder`, `campaign`,
 `invitation`, `test`), text (codes are stored as "Verification code [redacted]"), status

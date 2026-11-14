@@ -54,6 +54,7 @@ function setup() {
     contactsFor: async (userId) => s.extraContacts?.[userId] ?? [],
     delivery: () => s.on ?? { sms: false, whatsapp: false },
     handleOf: async (id) => (id === 'neema' ? 'neema_star' : null),
+    smsDeliveryOf: async (id) => { if (s.smsDeliveryFails) throw new Error('log down'); return s.smsDelivery?.[id] ?? null; },
     channels: {
       whatsapp: async (a) => { s.delivered.push({ channel: 'whatsapp', ...a }); return s.wa ?? { status: 'skipped:whatsapp_not_available' }; },
       sms: async (a) => { s.delivered.push({ channel: 'sms', ...a }); return { status: s.smsStatus ?? 'sent' }; },
@@ -239,6 +240,25 @@ test('with only SMS on, FitFlex sends the SMS once, naming the inviter by @usern
   const mine = (await s.svc.list('neema')).outgoing[0];
   assert.deepEqual(mine.sentBy, ['sms']);
   assert.ok(mine.sentAt);
+});
+
+test('the inviter sees what the SMS provider later reported; nobody else does, and a failing lookup changes nothing', async () => {
+  const s = setup();
+  s.on = { sms: true, whatsapp: false };
+  const r = await s.svc.invite('neema', { phone: '0650387211' });
+  assert.equal((await s.svc.list('neema')).outgoing[0].smsDelivery, null, 'not reported yet');
+  s.smsDelivery = { [r.invitation.id]: 'undelivered' };
+  assert.equal((await s.svc.list('neema')).outgoing[0].smsDelivery, 'undelivered');
+  s.smsDelivery = { [r.invitation.id]: 'delivered' };
+  assert.equal((await s.svc.list('neema')).outgoing[0].smsDelivery, 'delivered');
+  s.smsDeliveryFails = true;
+  assert.equal((await s.svc.list('neema')).outgoing[0].smsDelivery, null);
+  // A member-to-member request has no SMS, so nothing to report.
+  s.smsDeliveryFails = false;
+  const toMember = await s.svc.invite('neema', { userId: 'juma' });
+  s.smsDelivery = { [toMember.invitation.id]: 'delivered' };
+  const incoming = (await s.svc.list('juma')).incoming[0];
+  assert.equal(incoming.smsDelivery, null);
 });
 
 test('WhatsApp first: when it accepts the message, no SMS goes', async () => {

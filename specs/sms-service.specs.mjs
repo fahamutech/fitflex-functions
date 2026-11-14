@@ -16,7 +16,7 @@ import { createCommunicationPreferenceService } from '../src/services/communicat
 import { createCommunicationHistoryService } from '../src/services/communication-history-service.mjs';
 import { createSmsService, smsText, SMS_MAX_LENGTH, REMINDER_MAX_ATTEMPTS } from '../src/services/sms-service.mjs';
 import { createSmsProvider, createFakeSmsProvider, createBeemSmsProvider } from '../src/integrations/sms/provider.mjs';
-import { beemSend, beemSettings, beemCredentialShape, BEEM_SEND_URL } from '../src/integrations/sms/beem.mjs';
+import { beemSend, beemSettings, beemCredentialShape, beemDeliveryReport, BEEM_SEND_URL, BEEM_DLR_URL } from '../src/integrations/sms/beem.mjs';
 import { channelAllowed, CHANNELS } from '../src/shared/communications.mjs';
 
 const uid = (p) => `${p}_${randomUUID().slice(0, 8)}`;
@@ -461,4 +461,160 @@ test('verification codes go out through their own sender and are logged without 
   // A sender that is switched off is passed through untouched.
   const offSender = { configured: false, send: async () => ({ ok: false, error: 'not_configured' }) };
   assert.equal(sms.verificationSender(offSender), offSender);
+});
+
+test('the Beem verification sender returns Beem\'s request id and refusal code, and the log keeps them', async () => {
+  const { smsSender } = await import('../src/infra/verification-senders.mjs');
+  const names = ['VERIFICATION_SMS_PROVIDER', 'BEEM_API_KEY', 'BEEM_SECRET_KEY', 'VERIFICATION_SMS_SENDER_ID'];
+  const saved = Object.fromEntries(names.map(n => [n, process.env[n]]));
+  const realFetch = globalThis.fetch;
+  Object.assign(process.env, { VERIFICATION_SMS_PROVIDER: 'beem', BEEM_API_KEY: 'k', BEEM_SECRET_KEY: 's', VERIFICATION_SMS_SENDER_ID: 'FitFlex' });
+  const number = phone();
+  const warn = console.warn; console.warn = () => {};
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ successful: true, request_id: 98765, code: 100, valid: 1 }), { status: 200 });
+    const sender = smsSender();
+    const sent = await sms.verificationSender(sender).send(e164(number), { text: 'FitFlex code: 482913' });
+    assert.deepEqual(sent, { ok: true, requestId: '98765' });
+    const ok = await db('SmsLog').where({ phone: e164(number), status: 'accepted' }).first();
+    assert.equal(ok.providerMessageId, '98765');
+    assert.equal(ok.providerCode, null);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ code: 102, message: 'No Sender' }), { status: 400 });
+    const refused = await sms.verificationSender(smsSender()).send(e164(number), { text: 'FitFlex code: 111111' });
+    assert.deepEqual(refused, { ok: false, error: 'provider_rejected', providerCode: 102 });
+    const bad = await db('SmsLog').where({ phone: e164(number), status: 'failed' }).first();
+    assert.equal(bad.providerCode, 102);
+    assert.equal(bad.providerMessageId, null);
+    const rows = await db('SmsLog').where({ phone: e164(number) });
+    assert.ok(!rows.some(r => JSON.stringify(r).match(/482913|111111|"k"|"s"/)), 'no code or credential is logged');
+  } finally {
+    globalThis.fetch = realFetch; console.warn = warn;
+    for (const n of names) { if (saved[n] === undefined) delete process.env[n]; else process.env[n] = saved[n]; }
+  }
+});
+
+// ── delivery tracking ──────────────────────────────────────────────────────
+
+const dlrFetch = (status, body, seen = []) => async (url, init) => {
+  seen.push({ url, init });
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+};
+
+test('Beem delivery report: asked per message with Basic auth and no "+", and its answers told apart', async () => {
+  const seen = [];
+  const ask = (fetchImpl) => beemDeliveryReport({ apiKey: 'k', secretKey: 's', to: '+255712345678', requestId: '31951', fetchImpl });
+  assert.deepEqual(await ask(dlrFetch(200, [{ dest_addr: '255712345678', status: 'DELIVERED', request_id: '31951' }], seen)), { ok: true, status: 'delivered' });
+  const url = new URL(seen[0].url);
+  assert.equal(`${url.origin}${url.pathname}`, BEEM_DLR_URL);
+  assert.equal(url.searchParams.get('dest_addr'), '255712345678');
+  assert.equal(url.searchParams.get('request_id'), '31951');
+  assert.equal(seen[0].init.headers.Authorization, `Basic ${Buffer.from('k:s').toString('base64')}`);
+  assert.deepEqual(await ask(dlrFetch(200, [{ status: 'UNDELIVERED' }])), { ok: true, status: 'undelivered' });
+  assert.deepEqual(await ask(dlrFetch(200, [{ status: 'PENDING' }])), { ok: true, status: 'pending' });
+  assert.deepEqual(await ask(dlrFetch(404, {})), { ok: true, status: null }, 'no report yet is not an error');
+  assert.equal((await ask(dlrFetch(401, {}))).ok, false);
+  assert.equal((await ask(dlrFetch(200, [{ status: 'SOMETHING_NEW' }]))).ok, false);
+  assert.equal((await ask(async () => { throw new Error('down'); })).ok, false);
+});
+
+test('delivery tracking: off by default; on, it records what the provider reports, once the message is old enough', async () => {
+  const fake = createFakeSmsProvider();
+  const clock = { t: Date.now() };
+  const mk = (env) => createSmsService({ db, provider: fake, logger: quiet, env, now: () => new Date(clock.t) });
+  const off = mk({});
+  const tracked = mk({ SMS_DELIVERY_TRACKING: 'on' });
+  const row = async (fields) => {
+    const id = uid('sms');
+    await db('SmsLog').insert({
+      id, phone: e164(phone()), category: 'invitation', message: 'x', status: 'accepted', provider: 'fake',
+      providerMessageId: uid('m'), createdAt: new Date(clock.t - 10 * 60_000), updatedAt: new Date(), ...fields,
+    });
+    return db('SmsLog').where({ id }).first();
+  };
+  const a = await row({}), b = await row({}), c = await row({}), young = await row({ createdAt: new Date(clock.t - 60_000) });
+  const failedRow = await row({ status: 'failed', providerMessageId: null });
+  const old = await row({ createdAt: new Date(clock.t - 30 * 3600_000) });
+  fake.reports[a.providerMessageId] = 'delivered';
+  fake.reports[b.providerMessageId] = 'undelivered';
+  fake.reports[c.providerMessageId] = 'pending';
+  fake.reports[young.providerMessageId] = 'delivered';
+
+  assert.equal((await off.checkDeliveries()).skipped, 'tracking_off');
+  assert.equal((await db('SmsLog').where({ id: a.id }).first()).deliveryStatus, null);
+
+  const done = await tracked.checkDeliveries();
+  assert.ok(done.checked >= 3 && done.delivered >= 1 && done.undelivered >= 1 && done.pending >= 1);
+  const status = async (r) => (await db('SmsLog').where({ id: r.id }).first());
+  assert.equal((await status(a)).deliveryStatus, 'delivered');
+  assert.equal((await status(b)).deliveryStatus, 'undelivered');
+  assert.equal((await status(c)).deliveryStatus, 'pending');
+  assert.equal((await status(c)).deliveryChecks, 1);
+  assert.ok((await status(a)).deliveryCheckedAt);
+  assert.equal((await status(young)).deliveryStatus, null, 'not before 5 minutes');
+  assert.equal((await status(failedRow)).deliveryStatus, null, 'a refused message has nothing to track');
+  assert.equal((await status(old)).deliveryStatus, null, 'a day after sending it is left alone');
+
+  // Delivered and undelivered are final; pending is asked again and moves on.
+  fake.reports[a.providerMessageId] = 'undelivered';
+  fake.reports[c.providerMessageId] = 'delivered';
+  await tracked.checkDeliveries();
+  assert.equal((await status(a)).deliveryStatus, 'delivered');
+  assert.equal((await status(c)).deliveryStatus, 'delivered');
+
+  // The status route and the log carry it.
+  const st = await tracked.status();
+  assert.equal(st.deliveryTracking, true);
+  assert.ok(st.delivery24h.delivered >= 2 && st.delivery24h.undelivered >= 1);
+  const logged = (await tracked.logs({ limit: 200 })).logs.find(l => l.id === b.id);
+  assert.equal(logged.deliveryStatus, 'undelivered');
+  assert.ok(logged.deliveryCheckedAt);
+  assert.equal((await off.status()).deliveryTracking, false);
+});
+
+test('delivery tracking: a message the provider has no report for is let go after a few tries; a provider that cannot be asked is retried', async () => {
+  const fake = createFakeSmsProvider();
+  const tracked = createSmsService({ db, provider: fake, logger: quiet, env: { SMS_DELIVERY_TRACKING: 'on' } });
+  const id = uid('sms'), number = e164(phone());
+  await db('SmsLog').insert({
+    id, phone: number, category: 'invitation', message: 'x', status: 'accepted', provider: 'fake', providerMessageId: uid('m'),
+    createdAt: new Date(Date.now() - 10 * 60_000), updatedAt: new Date(),
+  });
+  for (let i = 1; i < 3; i++) {
+    await tracked.checkDeliveries();
+    assert.equal((await db('SmsLog').where({ id }).first()).deliveryStatus, null, `try ${i}: still waiting for a report`);
+  }
+  await tracked.checkDeliveries();
+  const row = await db('SmsLog').where({ id }).first();
+  assert.equal(row.deliveryStatus, 'unknown');
+  assert.equal(row.deliveryChecks, 3);
+
+  // Cannot be asked (provider down): nothing is spent on the message.
+  const id2 = uid('sms');
+  await db('SmsLog').insert({
+    id: id2, phone: number, category: 'invitation', message: 'x', status: 'accepted', provider: 'fake', providerMessageId: uid('m'),
+    createdAt: new Date(Date.now() - 10 * 60_000), updatedAt: new Date(),
+  });
+  fake.deliveryReport = async () => ({ ok: false, error: 'provider_unreachable' });
+  assert.ok((await tracked.checkDeliveries()).errors >= 1);
+  assert.deepEqual(
+    { s: (await db('SmsLog').where({ id: id2 }).first()).deliveryStatus, n: (await db('SmsLog').where({ id: id2 }).first()).deliveryChecks },
+    { s: null, n: 0 },
+  );
+});
+
+test('delivery of one invitation\'s SMS: the latest SMS for that invitation, "failed" when it was refused, null when there is none', async () => {
+  const ref = uid('fri'), number = e164(phone());
+  const put = (fields) => db('SmsLog').insert({
+    id: uid('sms'), phone: number, category: 'invitation', message: 'x', provider: 'fake', createdAt: new Date(), updatedAt: new Date(), ...fields,
+  });
+  assert.equal(await sms.deliveryOf(`friend-invite:${ref}:`), null);
+  await put({ status: 'accepted', dedupeKey: `friend-invite:${ref}:2026-11-14T10`, deliveryStatus: 'undelivered', createdAt: new Date(Date.now() - 5000) });
+  assert.equal(await sms.deliveryOf(`friend-invite:${ref}:`), 'undelivered');
+  await put({ status: 'accepted', dedupeKey: `friend-invite:${ref}:2026-11-14T11`, deliveryStatus: 'delivered' });
+  assert.equal(await sms.deliveryOf(`friend-invite:${ref}:`), 'delivered');
+  const other = uid('fri');
+  await put({ status: 'failed', dedupeKey: `friend-invite:${other}:2026-11-14T11` });
+  assert.equal(await sms.deliveryOf(`friend-invite:${other}:`), 'failed');
+  assert.equal(await sms.deliveryOf(`friend-invite:${ref.slice(0, -1)}:`), null, 'a different id never matches by prefix');
 });

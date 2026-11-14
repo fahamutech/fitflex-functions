@@ -74,3 +74,8 @@ test('every admin guard in functions/ also requires an ACL scope (or is allowlis
   const stale = Object.keys(ADMIN_GUARD_ALLOWLIST).filter(k => !found.some(g => g.key === k));
   assert.deepEqual(stale, [], `allowlist entries no longer needed: ${stale.join(', ')}`);
 });
+
+test('security_incidents (S4b) is grantable and guards the admin security-incident routes', () => {
+  assert.ok(PORTAL_ACL_SCOPES.includes('security_incidents'));
+  assert.equal(requireAclScopes().get('security_incidents'), 'security-activity.mjs');
+});

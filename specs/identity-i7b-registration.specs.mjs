@@ -7,6 +7,7 @@ import { gymCreateInvitation, myInvitations } from '../functions/invitations.mjs
 import { users } from '../src/bootstrap/services.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { requireAuth, sign } from '../src/auth/jwt.mjs';
+import { registrationLimits } from '../src/services/registration-service.mjs';
 import { fakeOutbox } from '../src/infra/verification-senders.mjs';
 
 const uniq = p => `${p}_${randomUUID().slice(0, 8)}`;
@@ -212,3 +213,50 @@ test('a provider that is not configured sends nothing and creates nothing', asyn
     assert.deepEqual([out.statusCode, out.body.error], [503, 'sms_not_configured']);
   }, { VERIFICATION_SMS_PROVIDER: null });
 });
+
+test('the per-address default is 30 an hour and a limited request says when the oldest attempt expires', async () => {
+  await withEnv({ REGISTER_STARTS_PER_ADDRESS_PER_HOUR: null }, async () => {
+    assert.equal(registrationLimits().startsPerAddressPerHour, 30);
+  });
+  await withEnv({ REGISTER_STARTS_PER_ADDRESS_PER_HOUR: '5' }, async () => {
+    assert.equal(registrationLimits().startsPerAddressPerHour, 5, 'still overridable');
+  });
+  await on(async () => {
+    const ip = `198.19.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
+    const mk = (minutesAgo, n) => ({
+      id: `aat_t${randomUUID().replace(/-/g, '').slice(0, 10)}${n}`, kind: 'register_start', identifierHash: 'x', ip, outcome: 'ok',
+      createdAt: new Date(Date.now() - minutesAgo * 60e3),
+    });
+    // Three attempts in the hour (oldest 40 min ago) and one outside it that must not count.
+    await db('AuthAttempt').insert([mk(40, 1), mk(20, 2), mk(5, 3), mk(90, 4)]);
+    const limited = await post(registerStart, { phone: localPhone() }, ip);
+    assert.deepEqual([limited.statusCode, limited.body.error], [429, 'too_many_attempts']);
+    assert.ok(limited.body.retryAfterSeconds >= 19 * 60 && limited.body.retryAfterSeconds <= 20 * 60 + 5, String(limited.body.retryAfterSeconds));
+
+    // Minimum 60 seconds, even when the oldest attempt is about to expire.
+    const ip2 = `198.19.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
+    await db('AuthAttempt').insert([{ ...mk(59.9, 5), ip: ip2 }, { ...mk(1, 6), ip: ip2 }, { ...mk(1, 7), ip: ip2 }]);
+    const soon = await post(registerStart, { phone: localPhone() }, ip2);
+    assert.equal(soon.statusCode, 429);
+    assert.equal(soon.body.retryAfterSeconds, 60);
+  }, { REGISTER_STARTS_PER_ADDRESS_PER_HOUR: '3' });
+});
+
+test('an already-registered attempt counts toward the address limit like any other (no enumeration gap)', async () => {
+  await on(async () => {
+    const local = localPhone();
+    await verifiedAndRegister(local);
+    const ip = `198.19.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
+    const first = await post(registerStart, { phone: local }, ip);
+    assert.deepEqual([first.statusCode, first.body.error], [409, 'already_registered']);
+    const second = await post(registerStart, { phone: local }, ip);
+    assert.equal(second.statusCode, 409);
+    const third = await post(registerStart, { phone: local }, ip);
+    assert.deepEqual([third.statusCode, third.body.error], [429, 'too_many_attempts']);
+  }, { REGISTER_STARTS_PER_ADDRESS_PER_HOUR: '2' });
+});
+async function verifiedAndRegister(local) {
+  const { token } = await verified({ phone: local });
+  const done = await post(registerComplete, { registrationToken: token, role: 'member', pin: '2468' });
+  assert.equal(done.statusCode, 200, JSON.stringify(done.body));
+}
