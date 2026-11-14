@@ -383,7 +383,7 @@ test('end access: flag off, an admin raise never ends access (unchanged)', async
 // ── migration ────────────────────────────────────────────────────────────────
 
 test('migration: refundId column and the once-per-refund index go away and come back cleanly', () => inRollback(async (trx) => {
-  const migration = require('../db/migrations/20270210090000-settlement-adjustment-refund.cjs');
+  const migration = require('../db/migrations/20270216090000-settlement-adjustment-refund.cjs');
   assert.equal(await trx.schema.hasColumn('SettlementAdjustment', 'refundId'), true);
   await migration.down(trx);
   assert.equal(await trx.schema.hasColumn('SettlementAdjustment', 'refundId'), false);
