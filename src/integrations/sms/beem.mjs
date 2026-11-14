@@ -7,6 +7,8 @@
 export const BEEM_SEND_URL = 'https://apisms.beem.africa/v1/send';
 /** Beem takes up to this many recipients in one request. */
 export const BEEM_MAX_RECIPIENTS = 100;
+/** Beem's delivery reports, asked for one message at a time, at least 5 minutes after it was sent. */
+export const BEEM_DLR_URL = 'https://dlrapi.beem.africa/public/v1/delivery-reports';
 
 // A value pasted into a server's settings often arrives with spaces, a line
 // break or quotes around it; Beem then answers 120 "Invalid Authentication
@@ -82,4 +84,31 @@ export async function beemSend({ apiKey, secretKey, apiUrl = BEEM_SEND_URL, send
     code: Number.isFinite(code) ? code : response.status,
     message: String(body?.message ?? body?.data?.message ?? response.statusText ?? '').slice(0, 200),
   };
+}
+
+const DLR_STATUS = { DELIVERED: 'delivered', UNDELIVERED: 'undelivered', PENDING: 'pending' };
+
+/**
+ * What Beem reports about one message it accepted.
+ * @returns {Promise<{ ok: true, status: 'delivered'|'undelivered'|'pending' }
+ *   | { ok: true, status: null }       Beem has no report (yet): 404
+ *   | { ok: false, error: string }>}   could not ask (credentials, network, Beem down); try later
+ */
+export async function beemDeliveryReport({ apiKey, secretKey, to, requestId, apiUrl = BEEM_DLR_URL, fetchImpl = fetch }) {
+  const url = `${apiUrl}?${new URLSearchParams({ dest_addr: String(to).replace(/^\+/, ''), request_id: String(requestId) })}`;
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from(`${apiKey}:${secretKey}`).toString('base64')}` },
+    });
+  } catch (err) {
+    return { ok: false, error: 'provider_unreachable', message: String(err?.message || err).slice(0, 200) };
+  }
+  if (response.status === 404) return { ok: true, status: null };
+  if (!response.ok) return { ok: false, error: 'provider_rejected', code: response.status };
+  const body = await response.json().catch(() => null);
+  const row = Array.isArray(body) ? body[0] : body;
+  const status = DLR_STATUS[String(row?.status ?? '').toUpperCase()];
+  return status ? { ok: true, status } : { ok: false, error: 'provider_unexpected_answer' };
 }
