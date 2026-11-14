@@ -3,12 +3,13 @@
 import { randomUUID } from 'node:crypto';
 import { CHECKIN_STATUS, publicCheckin } from '../shared/checkin-status.mjs';
 import { PASS_TIERS } from '../shared/constants.mjs';
-import { currentSubscription, effectiveSubscriptionStatus } from '../shared/subscription-status.mjs';
+import { currentSubscription, effectiveSubscriptionStatus, SCHEDULED } from '../shared/subscription-status.mjs';
 import { trainerPassOptions, trainerGymAccess, hideTrainerPass } from '../shared/trainer-access.mjs';
 import { publicGym } from './gym-service.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { fundedBySubscription } from '../shared/check-in-rules.mjs';
 import { PRODUCT_TYPES, MEMBER_ACCESS_PRODUCTS, productTypeOfPayment } from '../shared/payment-product.mjs';
+import { isMobileMoneyProvider } from '../shared/mobile-money-claim.mjs';
 import { upgradeNote, upgradeOf, upgradeDifference, isSponsoredPassId } from '../shared/pass-upgrade.mjs';
 import {
   normalizePaymentReference, normalizePayerPhone, memoryReferenceStore, DUPLICATE_ATTEMPT_ACTION, DUPLICATE_ATTEMPT_LIMIT,
@@ -31,6 +32,8 @@ export function createSubscriptionService({
   referenceStore = null,
   // Marathon & Events S4: the event title / order reference of open EVENT_ORDER requests, one batch: (requests) → Map<requestId, { eventTitle, eventOrderReference }>.
   eventLabels = async () => new Map(),
+  // A renewal paid early becomes active when its start comes: (subs, now) → subs with started ones promoted.
+  promoteStarted = async (subs) => subs,
   now = () => Date.now(),
 }) {
   const references = referenceStore || memoryReferenceStore({ paymentRequests, auditLog });
@@ -82,6 +85,14 @@ export function createSubscriptionService({
     const n = Math.round(Number(v));
     return Number.isFinite(n) && n > 0 ? n : null;
   };
+
+  /** A renewal of this kind (and gym) already paid for and waiting to start: one at a time. */
+  async function scheduledRenewal(memberId, type, gymId = null) {
+    const rows = await subscriptions.filterAsync(s =>
+      s.memberId === memberId && s.type === type && s.status === SCHEDULED
+      && (type === 'platform_pass' || s.homeGymId === gymId));
+    return rows[0] || null;
+  }
 
   /** A subscription of this kind (and gym) still waiting on its payment. */
   async function pendingSubscription(memberId, type, gymId = null) {
@@ -161,6 +172,7 @@ export function createSubscriptionService({
     // One open request per gym: a repeated tap or a retry must not charge twice.
     const open = await pendingSubscription(memberId, 'direct_sub', homeGymId);
     if (open) return { error: 'payment_already_pending', status: 409 };
+    if (await scheduledRenewal(memberId, 'direct_sub', homeGymId)) return { error: 'renewal_already_scheduled', status: 409 };
     // Member-bought plans only (POST /me/subscribe); a trainer's member plan is unchanged.
     const ref = manual ? await memberReferenceFor(reference, payerPhone, memberId, 'gym_plan') : {};
     if (ref.error) return ref;
@@ -312,7 +324,7 @@ export function createSubscriptionService({
     }
     if (sub.status !== 'payment_pending') return { error: 'not_cancellable', status: 409 };
     // A mobile-money prompt is on the member's phone: cancelling now would strand the money.
-    const live = await paymentRequests.filterAsync(p => p.subscriptionId === sub.id && p.status === 'pending' && p.provider === 'tunzaa' && p.reference);
+    const live = await paymentRequests.filterAsync(p => p.subscriptionId === sub.id && p.status === 'pending' && isMobileMoneyProvider(p.provider) && p.reference);
     if (live.length) return { error: 'payment_in_progress', status: 409 };
     const updated = await subscriptions.updateByIdAsync(sub.id, { status: 'payment_cancelled' });
     const requests = await paymentRequests.filterAsync(p => p.subscriptionId === sub.id && p.status === 'pending');
@@ -333,6 +345,7 @@ export function createSubscriptionService({
     if (offer.error) return offer;
     const amountTzs = offer.cfg.price;
     if (await openPassPayment(memberId)) return { error: 'payment_already_pending', status: 409 };
+    if (await scheduledRenewal(memberId, 'platform_pass')) return { error: 'renewal_already_scheduled', status: 409 };
     const ref = await memberReferenceFor(reference, payerPhone, memberId, 'fitflex_pass');
     if (ref.error) return ref;
     const now = new Date();
@@ -464,7 +477,7 @@ export function createSubscriptionService({
 
   async function me(user) {
     const uid = user.id;
-    const subs = await subscriptions.filterAsync(s => s.memberId === uid);
+    const subs = await promoteStarted(await subscriptions.filterAsync(s => s.memberId === uid), new Date(now()));
     let sub = currentSubscription(subs);
     // A1: expiry is derived from expiresAt — lazily persist the transition.
     if (sub) {
@@ -520,7 +533,12 @@ export function createSubscriptionService({
       visitCap = settingsService.visitCapForTier(sub.tier);
     }
     const pubId = await publicUserId(user);
-    return { user: { ...toSessionUser(user), publicId: pubId, userCode: pubId }, subscription: sub, pendingPayment, pendingPayments, entitlements, visitsUsed, visitCap };
+    // Renewals already paid for, waiting for the current plan to end (startsAt = when they begin).
+    const scheduledRenewals = subs
+      .filter(s => s.status === SCHEDULED)
+      .sort((a, b) => +new Date(a.startedAt) - +new Date(b.startedAt))
+      .map(s => ({ id: s.id, type: s.type, tier: s.tier ?? null, plan: s.plan ?? null, homeGymId: s.homeGymId ?? null, startsAt: s.startedAt, expiresAt: s.expiresAt }));
+    return { user: { ...toSessionUser(user), publicId: pubId, userCode: pubId }, subscription: sub, pendingPayment, pendingPayments, entitlements, visitsUsed, visitCap, scheduledRenewals };
   }
 
   // GET /me/checkins. Without from/to: the newest 50 (what older app builds
