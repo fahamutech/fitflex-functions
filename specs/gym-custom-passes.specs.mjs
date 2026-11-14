@@ -312,7 +312,13 @@ test('flag on, owner routes: scopes and ownership are enforced; people can be ma
   assert.equal((await call(routes.ownerGymPassRemove, OWN, { params: path })).body.beneficiary.status, 'removed');
   const added = await call(routes.ownerGymPassAddPerson, OWN, { params: { gymId: g, purchaseId }, body: { phone: friend.phone } });
   assert.equal(added.status, 201);
-  assert.equal(added.body.beneficiary.status, 'active');
+  // The owner's add answers masked data and 'invited' only: no id, no name, no account state.
+  assert.equal(added.body.beneficiary.status, 'invited');
+  assert.equal(added.body.beneficiary.userId, undefined);
+  assert.equal(added.body.beneficiary.displayName, undefined);
+  assert.equal(JSON.stringify(added.body).includes(friend.id), false);
+  assert.equal(JSON.stringify(added.body).includes(friend.phone), false);
+  assert.equal((await db('GymPassBeneficiary').where({ id: added.body.beneficiary.id }).first()).status, 'active', 'attached at once all the same');
   // a purchase of this gym is "not found" through another gym's path
   const elsewhere = await owner([await gym()]);
   assert.equal((await call(routes.ownerGymPassPurchase, { sub: elsewhere.id, userType: 'gym_operator' }, { params: { gymId: elsewhere.gymIds[0], purchaseId } })).status, 404);
@@ -436,7 +442,8 @@ test('couples needs exactly two people in all; group needs 3 up to its limit; yo
   assert.equal(await err(couples.id, [{ phone: buyer.phone }]), 'cannot_add_yourself');
   assert.equal(await err(couples.id, 'nope'), 'invalid_beneficiaries');
   const twoWays = await member({ email: `two.${tag}@x.test` });
-  assert.equal(await err(group.id, [{ phone: twoWays.phone }, { email: twoWays.email }]), 'duplicate_beneficiary', 'one account named by phone and by email');
+  // One account named by phone and by email must NOT be told apart from any other refusal that depends on who owns a contact.
+  assert.equal(await err(group.id, [{ phone: twoWays.phone }, { email: twoWays.email }]), 'invalid_beneficiaries', 'one account named by phone and by email');
   // Valid: couples with one other; group at the limit
   const ok1 = await k.svc.purchase({ memberId: buyer.id, planId: couples.id, beneficiaries: [{ phone: a }] });
   assert.equal(ok1.status, 202);
@@ -871,7 +878,8 @@ test('buyer and owner add, suspend, remove and replace people; removal never ref
   // add into the free slot (an account: active at once and notified); the 5th is over the limit
   const added = await k.svc.addBeneficiary({ purchaseId: out.purchase.id, actor: { userId: buyer.id }, body: { phone: c.phone } });
   assert.equal(added.status, 201);
-  assert.equal(added.beneficiary.status, 'active');
+  assert.equal(added.beneficiary.status, 'invited', 'an account reads exactly like a stranger to the buyer');
+  assert.equal((await db('GymPassBeneficiary').where({ id: added.beneficiary.id }).first()).status, 'active');
   assert.equal(added.beneficiary.userId, undefined, 'the buyer never sees another person\'s user id');
   assert.ok(added.beneficiary.contact.includes('•'));
   assert.equal(k.sent.notify.filter(n => n.userId === c.id && n.message.type === 'gym_pass_added').length, 1);
@@ -884,8 +892,10 @@ test('buyer and owner add, suspend, remove and replace people; removal never ref
   // the replacement (the freed slot) works, and the money and the pass are untouched
   const replacement = await k.svc.addBeneficiary({ purchaseId: out.purchase.id, actor: { owner: o }, body: { phone: phoneNo() } });
   assert.equal(replacement.status, 201);
-  assert.equal(replacement.beneficiary.status, 'pending_registration');
-  assert.ok(replacement.beneficiary.userId === null && replacement.beneficiary.displayName === null);
+  assert.equal(replacement.beneficiary.status, 'invited');
+  assert.equal(replacement.beneficiary.userId, undefined);
+  assert.equal(replacement.beneficiary.displayName, undefined);
+  assert.equal((await rows()).find(r => r.id === replacement.beneficiary.id).status, 'pending_registration');
   const slots = (await rows()).filter(r => r.slot != null).map(r => r.slot).sort();
   assert.deepEqual(slots, [1, 2, 3, 4]);
   assert.equal((await db('PaymentRequest').where({ id: out.paymentRequest.id }).first()).status, 'approved');
@@ -1109,8 +1119,14 @@ test('privacy: the buyer sees masked names and contacts and no ids; before payme
   await approve(k, asRegistered.paymentRequest.id);
   const mine = await k.svc.myPasses(buyer.id);
   const view = mine.purchased[0].beneficiaries.find(b => !b.isPurchaser);
-  assert.equal(view.displayName, 'N**** A*******');
+  assert.equal(view.status, 'invited', 'an attached account still reads invited: no first visit yet');
+  assert.equal(view.displayName, null, 'no name until the person has used the pass');
   assert.equal(view.userId, undefined);
+  const visit = await checkInService.perform({ memberId: registered.id, gymId: g });
+  assert.equal(visit.ok, true, JSON.stringify(visit));
+  const after = (await k.svc.myPasses(buyer.id)).purchased[0].beneficiaries.find(b => !b.isPurchaser);
+  assert.equal(after.status, 'active', 'after a first visit the buyer sees the person as active');
+  assert.equal(after.displayName, 'N**** A*******');
   assert.equal(view.contact.includes(registered.phone.slice(5, 9)), false);
   assert.equal(mine.purchased[0].beneficiaries.find(b => b.isPurchaser).displayName, 'Buyer Bee', 'the buyer sees their own name in full');
   // the covered person sees their membership, not the buyer's other contacts

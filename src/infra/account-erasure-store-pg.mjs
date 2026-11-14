@@ -16,7 +16,8 @@
 // Two kinds of step:
 //  - persona steps always run; each User row is one role of a person, and only this one is deleted.
 //  - person steps run only for the last persona (the sign-in, PIN and contact details are shared).
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 import { UPGRADE_NOTE_PREFIX } from '../shared/pass-upgrade.mjs';
 import { DELETED_PERSON_FIRST_NAME, DELETED_PERSON_LABEL, DELETED_PERSON_LAST_NAME } from '../shared/deleted-person.mjs';
 
@@ -131,6 +132,53 @@ async function leaveSponsors(trx, id, contacts, at) {
   }
 }
 
+/**
+ * Custom gym passes (GYM_CUSTOM_PASSES). A sale is a money record and stays; the PEOPLE data on it does not.
+ *  - Rows of the erased person: contact, its hash and mask, and any invite token go; the row is marked removed and its
+ *    slot is freed (`removedByRole: 'erasure'`), the pass keeps running for everyone else. The id stays as an opaque
+ *    reference, like `memberId` elsewhere.
+ *  - An erased BUYER: the same for the contacts and tokens of everybody on the purchases they bought; people still
+ *    waiting for an account (pending_registration) are removed with them (nobody is left to be attached for).
+ *  - Pending invitations of other buyers to the erased person's own contacts go too (like FriendInvitation).
+ *  - Contact blocks: the erased buyer's, those about the erased person, and those for the erased person's contacts.
+ * Skipped where the tables are not there yet.
+ */
+async function anonymiseGymPasses(trx, id, at, ownContactValues) {
+  if (!(await trx.schema.hasTable('GymPassBeneficiary'))) return;
+  const sha = (v) => createHash('sha256').update(v).digest('hex');
+  const hashes = [...new Set(ownContactValues.flatMap((v) => {
+    const out = [];
+    const phone = v.includes('@') ? null : normalizePhone(v);
+    const email = v.includes('@') ? normalizeEmail(v) : null;
+    if (phone) out.push(sha(`phone:${phone}`));
+    if (email) out.push(sha(`email:${email}`));
+    return out;
+  }))];
+  const wipe = { contactValue: null, contactHash: null, contactMask: null, inviteTokenHash: null, inviteExpiresAt: null, updatedAt: at };
+  const free = { ...wipe, status: 'removed', slot: null, suspendedByRole: null, removedAt: at, removedByRole: 'erasure' };
+
+  const bought = trx('GymPassPurchase').where({ purchaserId: id }).select('id');
+  // The person's own rows: freed.
+  await trx('GymPassBeneficiary').where({ userId: id }).whereNot({ status: 'removed' }).update(free);
+  await trx('GymPassBeneficiary').where({ userId: id, status: 'removed' }).update(wipe);
+  // Rows of purchases this person bought: pending people go with them, attached people keep their pass but lose the stored contact.
+  await trx('GymPassBeneficiary').whereIn('purchaseId', bought).where({ status: 'pending_registration' }).update(free);
+  await trx('GymPassBeneficiary').whereIn('purchaseId', bought).whereNot({ status: 'pending_registration' }).update(wipe);
+  // Other buyers' pending invitations to this person's contacts.
+  if (hashes.length) {
+    await trx('GymPassBeneficiary').where({ status: 'pending_registration' }).whereIn('contactHash', hashes).update(free);
+    await trx('GymPassBeneficiary').whereIn('contactHash', hashes).update({ contactHash: null, contactMask: null, contactValue: null });
+  }
+  if (await trx.schema.hasTable('GymPassContactBlock')) {
+    await trx('GymPassContactBlock').where((q) => {
+      q.where({ buyerId: id }).orWhere({ userId: id });
+      if (hashes.length) q.orWhereIn('contactHash', hashes);
+    }).del();
+  }
+  // The erased person's own subscriptions under a pass end with the row.
+  await trx('Subscription').where({ memberId: id }).whereNotNull('passPurchaseId').whereIn('status', ['active', 'suspended']).update({ status: 'cancelled' });
+}
+
 /** A closed shop leaves the catalogue, as if each product had been deleted. Past orders keep their own copy of the items. */
 async function takeVendorOffSale(trx, vendorId, at) {
   await trx('Product').where({ vendorId }).whereNull('deletedAt').update({ deletedAt: at, status: 'archived', updatedAt: at });
@@ -239,6 +287,7 @@ export function createAccountErasure({ db, steps = [], now = () => new Date() })
 
       await anonymisePayments(trx, user.id);
       await anonymiseAccess(trx, user.id);
+      await anonymiseGymPasses(trx, user.id, at, contacts.contacts);
       await anonymiseSecurityIncidents(trx, user.id);
       await anonymiseOrders(trx, user.id);
       await detachReviews(trx, user.id);

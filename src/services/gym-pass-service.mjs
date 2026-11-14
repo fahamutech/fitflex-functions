@@ -12,10 +12,14 @@
 //    anyone; the buyer a limited number of times; a person may leave themself.
 //
 // Privacy: the buyer types contacts, never user ids, and the responses show only masked contacts and masked names.
-// After activation the buyer can tell "has an account" (active) from "invited" (pending) for the contacts they
-// added; that is the same fact the friend-invitation lookup already tells any member, and nothing else about the
-// person is shown (no id, no full name, no unmasked contact).
+// Nobody learns from this module whether a typed contact has an account: every person the buyer attached reads
+// 'invited' until they have made a first visit on the pass, an owner's add answers masked data and 'invited' only,
+// and any problem that depends on account resolution is the one generic error `invalid_beneficiaries`.
+// Abuse limits (security review of PR #355): per-actor and per-target-contact caps, a cooldown after a person LEAVES
+// (they are blocked from that buyer's passes), a cap on SMS/WhatsApp sends per purchase, a sanitised buyer name in
+// every outgoing text, and a rule that the buyer may resume only what the buyer suspended.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { friendInvitationLimits } from './friend-invitation-service.mjs';
 import { gymPassMessage, gymPassNotice } from '../shared/gym-pass-texts.mjs';
 import { eatParts } from '../shared/eat-time.mjs';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
@@ -33,6 +37,42 @@ const inviteExpiryDays = () => {
   return Number.isFinite(n) && n > 0 ? n : 30;
 };
 const RESEND_WAIT_MS = 60 * 60 * 1000;
+const HOUR_MS = 3_600_000;
+const num = (name, fallback) => {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+};
+/** Abuse limits, read when used so a deploy can tune them without a code change. */
+export const gymPassLimits = () => ({
+  // Every add attempt by one actor (failed ones too: the failures are the oracle). Same default as the friend lookup.
+  attemptsPerHour: num('GYM_PASS_ADD_ATTEMPTS_PER_HOUR', friendInvitationLimits().lookupPerHour),
+  buyerAddsPerHour: num('GYM_PASS_BUYER_ADDS_PER_HOUR', 20),
+  ownerAddsPerGymPerHour: num('GYM_PASS_OWNER_ADDS_PER_GYM_PER_HOUR', 30),
+  // People ever attached for one contact, across all purchases and actors, in 24 hours.
+  perTargetPerDay: num('GYM_PASS_TARGET_PER_DAY', 3),
+  sendsPerPurchase: (limit) => num('GYM_PASS_SENDS_PER_PURCHASE', Math.max(8, Number(limit) * 4)),
+});
+const contactHash = (c) => sha256(`${c.type}:${c.value}`);
+const rateLimited = (retryAfterSeconds = 3600) => ({ error: 'rate_limited', status: 429, retryAfterSeconds });
+
+/**
+ * The buyer's name as it appears in a text we send to a stranger: no links, no long digit runs (phone numbers,
+ * payment codes), no control or markup characters, at most 30 characters. null when nothing usable is left.
+ */
+export function safeDisplayName(name) {
+  const cleaned = String(name ?? '')
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f<>{}[\]\\|`"]/g, ' ')
+    .replace(/\b(?:https?:\/\/|www\.)\S*/gi, ' ')
+    .replace(/\S+\.(?:com|net|org|io|co|tz|me|ly|app|link|info|biz|xyz|top|site|online)\b\S*/gi, ' ')
+    .replace(/\+?\d[\d\s().-]{2,}\d/g, (m) => (m.replace(/\D/g, '').length >= 4 ? ' ' : m))
+    .replace(/\d{4,}/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 30)
+    .trim();
+  return cleaned.length >= 2 ? cleaned : null;
+}
 const untilOf = (v) => eatParts(v)?.date ?? '';
 
 const ownedGymIds = (owner) => owner?.gymIds || (owner?.gymId ? [owner.gymId] : []);
@@ -43,6 +83,8 @@ export function createGymPassService({
   store, gyms, users, auditLog,
   // { findMember({type,value}) → member|null, contactsFor(userId) → [{type,value}] }: VERIFIED contacts only.
   contacts,
+  // Member blocks (the friends feature's `blocks` collection, rows { blockerId, blockedId }); optional.
+  blocks = null,
   notify = async () => ({}),
   // { whatsapp({ phone, kind, params, locale, reference }) → { status }, sms({ phone, text, reference }) → { status } }.
   // WhatsApp may be dormant (status 'skipped:...'); SMS is then used. Either may be null.
@@ -62,9 +104,30 @@ export function createGymPassService({
     try {
       await auditLog.insertAsync({ id: randomUUID(), at: iso(), actor: actor ?? null, action, target, before, after });
     } catch (err) {
-      console.warn(`[gym-pass] audit ${action} failed: ${err?.message}`);
+      // Money / privacy actions: a missing audit row must be seen. Still non-fatal (the action already happened).
+      console.error(`[gym-pass] AUDIT WRITE FAILED ${action} target=${target}: ${err?.message}`);
     }
   };
+
+  // One member blocked the other (either way): the friends feature's rule, honoured here too.
+  const blockedBetween = async (a, b) => {
+    if (!blocks || !a || !b) return false;
+    const mine = await blocks.filterByColumnAsync('blockerId', a);
+    if (mine.some(x => x.blockedId === b)) return true;
+    return (await blocks.filterByColumnAsync('blockerId', b)).some(x => x.blockedId === a);
+  };
+
+  // Per-instance attempt throttle (the friend lookup's pattern); the caps below are counted from the table.
+  const attempts = new Map();
+  function throttleAttempts(key) {
+    const hour = Math.floor(+now() / HOUR_MS);
+    const rec = attempts.get(key);
+    const count = rec && rec.hour === hour ? rec.count + 1 : 1;
+    attempts.set(key, { hour, count });
+    if (attempts.size > 5000) for (const [k, v] of attempts) if (v.hour !== hour) attempts.delete(k);
+    return count > gymPassLimits().attemptsPerHour;
+  }
+  const retryAfterHour = () => Math.max(1, Math.ceil((HOUR_MS - (+now() % HOUR_MS)) / 1000));
 
   // ── views ──────────────────────────────────────────────────────────────────
 
@@ -91,22 +154,40 @@ export function createGymPassService({
     return new Map(rows.map(u => [u.id, u.displayName || null]));
   }
 
+  /** Masked contact: from the plain value while it is held, from the stored mask once it has been cleared. */
+  const shownContact = (b) => (b.contactValue ? maskContact(b.contactType, b.contactValue) : (b.contactMask ?? null));
+
   /** One person as the owner sees them: the person's name (they hold a subscription at this gym), masked contact. */
   const ownerBeneficiary = (b, purchase, names, attendance) => ({
     id: b.id, slot: b.slot, isPurchaser: b.isPurchaser, status: shownStatus(b, purchase),
     userId: b.userId ?? null, displayName: b.userId ? (names.get(b.userId) ?? null) : null,
-    contactType: b.contactType ?? null, contact: maskContact(b.contactType, b.contactValue),
+    contactType: b.contactType ?? null, contact: shownContact(b),
     subscriptionId: b.subscriptionId ?? null, notifiedAt: b.notifiedAt ?? null, notifiedVia: b.notifiedVia ? b.notifiedVia.split(',') : [],
     claimedAt: b.claimedAt ?? null, removedAt: b.removedAt ?? null, removedByRole: b.removedByRole ?? null,
     ...(attendance ? { attendance: attendance.get(b.id) ?? { visits: 0, lastVisitAt: null } } : {}),
   });
 
-  /** One person as the BUYER sees them: masked names and contacts, no user ids (the buyer's own row excepted). */
-  const buyerBeneficiary = (b, purchase, names, viewerId) => ({
-    id: b.id, slot: b.slot, isPurchaser: b.isPurchaser, status: shownStatus(b, purchase),
-    you: b.userId === viewerId,
-    displayName: b.userId === viewerId ? (names.get(b.userId) ?? null) : maskName(names.get(b.userId)),
-    contactType: b.contactType ?? null, contact: maskContact(b.contactType, b.contactValue),
+  /**
+   * One person as the BUYER sees them: masked names and contacts, no user ids (the buyer's own row excepted).
+   * Someone the buyer attached reads 'invited' (and carries no name) until they have made a first visit on the pass,
+   * whether or not they already have an account: the status never says whether a typed contact is a member.
+   */
+  const buyerBeneficiary = (b, purchase, names, viewerId, attendance = new Map()) => {
+    const you = b.userId === viewerId;
+    const used = (attendance.get(b.id)?.visits ?? 0) > 0;
+    let status = shownStatus(b, purchase);
+    if (!you && !b.isPurchaser && ['active', 'pending_registration'].includes(status)) status = used ? 'active' : 'invited';
+    return {
+      id: b.id, slot: b.slot, isPurchaser: b.isPurchaser, status,
+      you,
+      displayName: you ? (names.get(b.userId) ?? null) : (b.isPurchaser || used ? maskName(names.get(b.userId)) : null),
+      contactType: b.contactType ?? null, contact: shownContact(b),
+    };
+  };
+
+  /** The owner's add answer: what the owner typed, masked, and 'invited'. Never an id, a name, or the account state. */
+  const ownerAddView = (b) => ({
+    id: b.id, slot: b.slot, isPurchaser: false, status: 'invited', contactType: b.contactType ?? null, contact: shownContact(b),
   });
 
   const slotsOf = (rows, purchase) => ({
@@ -192,8 +273,11 @@ export function createGymPassService({
 
   /**
    * The people a buyer names, as verified contacts → { people: [{ contact, memberId|null }] } | { error }.
-   * Contacts are resolved here only to refuse the buyer's own number or the same person twice; the answer is never
-   * sent back as "has an account".
+   * Contacts are resolved here only to refuse the buyer's own account or the same person twice, and EVERY refusal that
+   * depends on that resolution (a phone and an email of one account, another contact of the buyer, a person who left
+   * this buyer's passes) is the one generic `invalid_beneficiaries`: it must not tell the buyer that two contacts are
+   * one account. Refusals that depend only on what was typed (invalid, the buyer's typed own contact, the same
+   * contact twice) keep their codes. Per-contact caps are counted per CONTACT, never per account.
    */
   async function resolvePeople(buyerId, list) {
     if (!Array.isArray(list)) return { error: 'invalid_beneficiaries', status: 400 };
@@ -209,11 +293,14 @@ export function createGymPassService({
       if (mine.includes(key)) return { error: 'cannot_add_yourself', status: 400, index };
       if (seenContacts.has(key)) return { error: 'duplicate_beneficiary', status: 400, index };
       seenContacts.add(key);
+      const hash = contactHash(contact);
+      if (await store.countByHashSince(hash, new Date(+now() - 24 * HOUR_MS)) >= gymPassLimits().perTargetPerDay) return rateLimited();
       const member = await contacts.findMember(contact);
-      if (member?.id === buyerId) return { error: 'cannot_add_yourself', status: 400, index };
-      if (member && seenMembers.has(member.id)) return { error: 'duplicate_beneficiary', status: 400, index };
+      if (member?.id === buyerId) return { error: 'invalid_beneficiaries', status: 400 };
+      if (member && seenMembers.has(member.id)) return { error: 'invalid_beneficiaries', status: 400 };
+      if (await store.leftBlock({ buyerId, contactHash: hash, userId: member?.id ?? null })) return { error: 'invalid_beneficiaries', status: 400 };
       if (member) seenMembers.add(member.id);
-      people.push({ contact, memberId: member?.id ?? null });
+      people.push({ contact, memberId: member?.id ?? null, hash });
     }
     return { people };
   }
@@ -258,6 +345,7 @@ export function createGymPassService({
       id: store.newId('gpb'), purchaseId, userId: memberId, isPurchaser: true, slot: 1, status: 'active', createdAt: at, updatedAt: at,
     }, ...resolved.people.map((p, i) => ({
       id: store.newId('gpb'), purchaseId, userId: null, contactType: p.contact.type, contactValue: p.contact.value,
+      contactHash: p.hash, contactMask: maskContact(p.contact.type, p.contact.value), addedBy: memberId, addedByRole: 'checkout',
       isPurchaser: false, slot: i + 2, status: 'pending_registration', createdAt: at, updatedAt: at,
     }))];
     const created = await store.createPurchase({
@@ -293,10 +381,16 @@ export function createGymPassService({
     } catch { return 'en'; }
   };
 
-  /** WhatsApp first, SMS when WhatsApp cannot be used (dormant, no approved template, opted out is final). */
-  async function deliver({ phone, kind, params, locale, reference }) {
+  /**
+   * WhatsApp first, SMS when WhatsApp cannot be used (dormant, no approved template, opted out is final).
+   * At most `sendsPerPurchase` attempts per purchase (the counter is on the person's row); past it nothing is sent.
+   * The SMS log keeps the text WITHOUT the invite link (`logText`): the link is a bearer-style secret.
+   */
+  async function deliver({ phone, kind, params, locale, reference, purchase = null, beneficiaryId = null }) {
     const via = [];
     if (!channels || !phone) return via;
+    if (purchase && await store.sendsOfPurchase(purchase.id) >= gymPassLimits().sendsPerPurchase(purchase.snapshot.beneficiaryLimit)) return via;
+    if (beneficiaryId) await store.bumpSends(beneficiaryId);
     let wa = null;
     if (channels.whatsapp) {
       try { wa = await channels.whatsapp({ phone, kind, params, locale, reference }); } catch { wa = { status: 'failed' }; }
@@ -304,7 +398,10 @@ export function createGymPassService({
     }
     if (!via.length && channels.sms && wa?.status !== 'skipped:recipient_opted_out') {
       try {
-        const r = await channels.sms({ phone, text: gymPassMessage(kind, params, locale), reference });
+        const r = await channels.sms({
+          phone, text: gymPassMessage(kind, params, locale), reference,
+          logText: gymPassMessage(kind, { ...params, link: params.link ? '[invite link removed]' : params.link }, locale),
+        });
         if (r?.status === 'sent') via.push('sms');
       } catch { /* a failed text never fails the pass */ }
     }
@@ -324,9 +421,11 @@ export function createGymPassService({
   }
 
   async function phoneOf(b) {
-    if (b.contactType === 'phone') return b.contactValue;
+    if (b.contactValue && b.contactType === 'phone') return b.contactValue;
     if (!b.userId) return null;
-    return (await contacts.contactsFor(b.userId)).find(c => c.type === 'phone')?.value ?? null;
+    // The plain contact is cleared once a person is attached: prefer the very number that was typed (by hash).
+    const phones = (await contacts.contactsFor(b.userId)).filter(c => c.type === 'phone');
+    return (phones.find(c => contactHash({ type: 'phone', value: normalizePhone(c.value) }) === b.contactHash) ?? phones[0])?.value ?? null;
   }
 
   async function issueInvite(b, purchase) {
@@ -346,7 +445,7 @@ export function createGymPassService({
   async function announce(purchase, rows) {
     const gym = gymOf(purchase.gymId);
     const buyer = await users.findByIdAsync(purchase.purchaserId);
-    const base = { planName: purchase.snapshot.name, gymName: gym?.name ?? '', until: untilOf(purchase.expiresAt), buyerName: buyer?.displayName ?? null };
+    const base = { planName: purchase.snapshot.name, gymName: gym?.name ?? '', until: untilOf(purchase.expiresAt), buyerName: safeDisplayName(buyer?.displayName) || 'A FitFlex member' };
     const sent = [];
     for (const b of rows) {
       if (b.status === 'removed') continue;
@@ -364,14 +463,17 @@ export function createGymPassService({
             id: `ntf_gpb_${b.id}`, type: 'gym_pass_added', ...await noticeFor('added', base, b.userId, purchase),
           });
           const locale = await localeFor(b.userId, purchase.purchaserId);
-          via.push(...await deliver({ phone: await phoneOf(b), kind: 'added', params: base, locale, reference: b.id }));
+          via.push(...await deliver({ phone: await phoneOf(b), kind: 'added', params: base, locale, reference: b.id, purchase, beneficiaryId: b.id }));
           await store.recordNotified(b.id, via);
           sent.push({ beneficiaryId: b.id, kind: 'added', via });
         } else {
+          // Someone who blocked the buyer (or whom the buyer blocked) is told nothing and gets no link.
+          const known = b.contactValue ? await contacts.findMember({ type: b.contactType, value: b.contactValue }) : null;
+          if (known && await blockedBetween(purchase.purchaserId, known.id)) { sent.push({ beneficiaryId: b.id, kind: 'suppressed', via: [] }); continue; }
           const invite = await issueInvite(b, purchase);
           const locale = await localeFor(null, purchase.purchaserId);
-          const via = b.contactType === 'phone'
-            ? await deliver({ phone: b.contactValue, kind: 'invite', params: { ...base, link: invite.link }, locale, reference: b.id }) : [];
+          const via = b.contactType === 'phone' && b.contactValue
+            ? await deliver({ phone: b.contactValue, kind: 'invite', params: { ...base, link: invite.link }, locale, reference: b.id, purchase, beneficiaryId: b.id }) : [];
           // The "last sent" stamp (which paces resends) is set only when something actually went out.
           if (via.length) await store.recordSent(b.id, via, now()); else await store.recordNotified(b.id, via);
           sent.push({ beneficiaryId: b.id, kind: 'invite', via });
@@ -400,8 +502,10 @@ export function createGymPassService({
       if (!pending) return { error: 'gym_pass_purchase_missing', status: 409 };
       const resolved = new Map();
       for (const b of await store.pendingContactsOf(pending.id)) {
+        if (!b.contactValue) continue;
         const member = await contacts.findMember({ type: b.contactType, value: b.contactValue });
-        if (member) resolved.set(b.id, member.id);
+        // Only an active member account is attached: a suspended, deleted or non-member account stays pending.
+        if (member && await memberOk(member.id) && !await blockedBetween(pending.purchaserId, member.id)) resolved.set(b.id, member.id);
       }
       const out = await store.activate({ paymentRequestId: request.id, resolved, at: now() });
       if (out.outcome === 'activated') {
@@ -429,10 +533,15 @@ export function createGymPassService({
 
   const memberOk = async (userId) => {
     const u = await users.findByIdAsync(userId);
-    return u && u.userType === 'member' && u.accountStatus !== 'suspended' ? u : null;
+    return u && u.userType === 'member' && !['suspended', 'deleted'].includes(u.accountStatus) ? u : null;
   };
 
-  /** What an invitation link is for, before anyone signs in. No contact detail. */
+  /**
+   * What an invitation link is for, before anyone signs in. No contact detail.
+   * Expiry, consistently with claimForUser: the LINK expires (status 'expired' here, 410 on a claim made with its token),
+   * which stops the link being used. It does not stop the person: signing up and VERIFYING the invited contact still
+   * attaches them (claim without a token, or GET /me/gym-passes) until the pass itself ends.
+   */
   async function previewInvite(token) {
     if (!isTokenShape(token)) return { error: 'invalid_invitation', status: 404 };
     const b = await store.findByToken(sha256(token));
@@ -444,7 +553,7 @@ export function createGymPassService({
       invitation: {
         status: usable ? 'pending' : 'expired',
         contactType: b.contactType,
-        ...(usable ? { gymName: gymOf(p.gymId)?.name ?? null, planName: p.snapshot.name, until: p.expiresAt, buyerName: buyer?.displayName ?? null } : {}),
+        ...(usable ? { gymName: gymOf(p.gymId)?.name ?? null, planName: p.snapshot.name, until: p.expiresAt, buyerName: safeDisplayName(buyer?.displayName) } : {}),
       },
     };
   }
@@ -468,7 +577,10 @@ export function createGymPassService({
       }
     }
     const claimed = [];
-    for (const b of await store.pendingForContacts(mine, now())) {
+    for (const b of await store.pendingForContacts(mine, now(), { tokenHash: token != null ? sha256(token) : null })) {
+      // A person who left this buyer's passes is not re-attached by a pending row; nor across a member block.
+      if (await store.leftBlock({ buyerId: b.purchaserId, contactHash: b.contactHash ?? null, userId })) continue;
+      if (await blockedBetween(b.purchaserId, userId)) continue;
       const out = await store.claim({ beneficiaryId: b.id, userId, at: now() });
       if (out.outcome === 'claimed') {
         claimed.push(out.beneficiary.id);
@@ -487,6 +599,7 @@ export function createGymPassService({
     const bought = await store.purchasesForPurchaser(userId);
     const people = await store.beneficiariesOfMany(bought.map(p => p.id));
     const names = await namesOf(people.map(b => b.userId));
+    const visits = await store.attendanceCounts(bought.map(p => p.id));
     const mine = await store.membershipsOfUser(userId);
     return {
       purchased: bought.map(p => {
@@ -494,7 +607,7 @@ export function createGymPassService({
         return purchaseCore(p, {
           gym: gymSummary(p.gymId),
           payment: { status: p.paymentStatus ?? null, amountTzs: p.paymentAmountTzs ?? null },
-          beneficiaries: rows.map(b => buyerBeneficiary(b, p, names, userId)),
+          beneficiaries: rows.map(b => buyerBeneficiary(b, p, names, userId, visits)),
           slots: slotsOf(rows, p),
         });
       }),
@@ -523,24 +636,52 @@ export function createGymPassService({
   }
   async function personView(role, purchase, b, viewerId) {
     const names = await namesOf([b.userId]);
-    return role === 'owner' ? ownerBeneficiary(b, purchase, names) : buyerBeneficiary(b, purchase, names, viewerId);
+    if (role === 'owner') return ownerBeneficiary(b, purchase, names);
+    return buyerBeneficiary(b, purchase, names, viewerId, await store.attendanceCounts([purchase.id]));
   }
 
+  /**
+   * Add one person (buyer or owner). The answer never says whether the contact is a member: the buyer gets the
+   * normal buyer view ('invited'), the owner a masked view ('invited', no ids, no name).
+   * Limits (429 rate_limited): every attempt per actor per hour (failures included), successful adds per buyer per
+   * hour / per owner per gym per hour, and per contact per day across everyone. Refusals: a contact the OWNER removed
+   * from this purchase cannot be re-added by the buyer (the owner may); a person who LEFT is blocked for everybody.
+   */
   async function addBeneficiary({ purchaseId, actor, body }) {
     const p = await purchaseFor(purchaseId, actor);
     if (p.error) return p;
+    const actorId = actor.userId ?? actor.owner?.id ?? null;
+    const lim = gymPassLimits();
+    if (throttleAttempts(`${p.role}:${actorId}:${p.role === 'owner' ? p.purchase.gymId : ''}`)) return rateLimited(retryAfterHour());
     const contact = parseContact({ email: body?.email, phone: body?.phone });
     if (!contact) return { error: 'invalid_contact', status: 400 };
-    const buyerContacts = (await contacts.contactsFor(p.purchase.purchaserId)).map(c => `${c.type}:${c.value}`);
+    const hash = contactHash(contact);
+    const since = new Date(+now() - HOUR_MS);
+    // Caps first (they depend on the contact and the actor only, never on whether an account exists).
+    if (await store.countByHashSince(hash, new Date(+now() - 24 * HOUR_MS)) >= lim.perTargetPerDay) return rateLimited();
+    const cap = p.role === 'owner' ? lim.ownerAddsPerGymPerHour : lim.buyerAddsPerHour;
+    if (await store.countAddedSince({ addedBy: actorId, gymId: p.role === 'owner' ? p.purchase.gymId : null, since }) >= cap) return rateLimited(retryAfterHour());
+    const buyerContacts = (await contacts.contactsFor(p.purchase.purchaserId)).map(c => `${c.type}:${c.type === 'email' ? normalizeEmail(c.value) : normalizePhone(c.value)}`);
     if (buyerContacts.includes(`${contact.type}:${contact.value}`)) return { error: 'cannot_add_yourself', status: 400 };
-    const member = await contacts.findMember(contact);
-    if (member?.id === p.purchase.purchaserId) return { error: 'cannot_add_yourself', status: 400 };
-    const out = await store.addBeneficiary({ purchaseId: p.purchase.id, userId: member?.id ?? null, contact, at: now() });
+    const found = await contacts.findMember(contact);
+    if (found?.id === p.purchase.purchaserId) return { error: 'cannot_add_person', status: 409 };
+    if (await store.leftBlock({ buyerId: p.purchase.purchaserId, contactHash: hash, userId: found?.id ?? null })) return { error: 'cannot_add_person', status: 409 };
+    if (p.role === 'purchaser' && await store.ownerRemoved({ purchaseId: p.purchase.id, contactHash: hash, userId: found?.id ?? null })) {
+      return { error: 'removed_by_owner', status: 403 };
+    }
+    // Attached at once only if it is an active member account and no block stands between it and the buyer.
+    const member = found && await memberOk(found.id) && !await blockedBetween(p.purchase.purchaserId, found.id) ? found : null;
+    const out = await store.addBeneficiary({
+      purchaseId: p.purchase.id, userId: member?.id ?? null, contact, contactHash: hash, contactMask: maskContact(contact.type, contact.value),
+      addedBy: actorId, addedByRole: p.role === 'owner' ? 'owner' : 'buyer', at: now(),
+    });
     if (out.error) return out;
-    await audit(actor.userId ?? actor.owner?.id, 'gym_pass_beneficiary_added', out.beneficiary.id, null, { purchaseId: p.purchase.id, slot: out.beneficiary.slot, role: p.role });
+    await audit(actorId, 'gym_pass_beneficiary_added', out.beneficiary.id, null, { purchaseId: p.purchase.id, slot: out.beneficiary.slot, role: p.role });
     await announce(out.purchase, [out.beneficiary]);
     const fresh = await store.getBeneficiary(out.beneficiary.id);
-    return { status: 201, beneficiary: await personView(p.role, out.purchase, fresh, actor.userId) };
+    if (p.role === 'owner') return { status: 201, beneficiary: ownerAddView(fresh) };
+    // The buyer's answer is 'invited' for everyone (a person with an account reads the same as one without).
+    return { status: 201, beneficiary: { ...(await personView(p.role, out.purchase, fresh, actor.userId)), status: 'invited' } };
   }
 
   async function changePerson({ purchaseId, beneficiaryId, actor, to }) {
@@ -552,7 +693,11 @@ export function createGymPassService({
     const out = await store.changeStatus({
       beneficiaryId: b.id, to, role: p.role, actorId, removalCap: purchaserRemovalCap(p.purchase.snapshot), at: now(),
     });
-    if (out.error) return out;
+    if (out.error) {
+      // The buyer is not told what state a person is really in (it would say whether they have an account).
+      if (p.role === 'purchaser') delete out.from;
+      return out;
+    }
     const action = { suspended: 'gym_pass_beneficiary_suspended', active: 'gym_pass_beneficiary_resumed', removed: 'gym_pass_beneficiary_removed' }[to];
     await audit(actorId, action, b.id, { status: out.before.status }, { status: out.beneficiary.status, role: p.role, purchaseId: p.purchase.id });
     return { beneficiary: await personView(p.role, out.purchase, out.beneficiary, actor.userId) };
@@ -567,7 +712,9 @@ export function createGymPassService({
     const mine = rows.find(r => r.userId === userId && r.status !== 'removed');
     if (!mine) return { error: 'not_found', status: 404 };
     if (mine.isPurchaser) return { error: 'cannot_remove_purchaser', status: 409 };
-    const out = await store.changeStatus({ beneficiaryId: mine.id, to: 'removed', role: 'self', actorId: userId, at: now() });
+    // Leaving blocks this person (by every verified contact and by account) from this buyer's passes, see the store.
+    const blockHashes = (await verifiedContactsOf(userId)).map(contactHash);
+    const out = await store.changeStatus({ beneficiaryId: mine.id, to: 'removed', role: 'self', actorId: userId, blockHashes, at: now() });
     if (out.error) return out;
     await audit(userId, 'gym_pass_beneficiary_left', mine.id, { status: mine.status }, { status: 'removed', purchaseId: String(purchaseId) });
     return { ok: true };
@@ -580,13 +727,15 @@ export function createGymPassService({
     const b = await store.getBeneficiary(String(beneficiaryId));
     if (!b || b.purchaseId !== p.purchase.id || b.status !== 'pending_registration') return { error: 'not_found', status: 404 };
     if (effectivePurchaseStatus(p.purchase, now()) !== 'active') return { error: 'pass_not_active', status: 409 };
+    if (throttleAttempts(`resend:${actor.userId ?? actor.owner?.id}`)) return rateLimited(retryAfterHour());
     if (b.inviteSentAt && +now() - +new Date(b.inviteSentAt) < RESEND_WAIT_MS) return { error: 'too_soon', status: 429 };
     const invite = await issueInvite(b, p.purchase);
     const gym = gymOf(p.purchase.gymId);
     const buyer = await users.findByIdAsync(p.purchase.purchaserId);
-    const params = { buyerName: buyer?.displayName || 'A FitFlex member', planName: p.purchase.snapshot.name, gymName: gym?.name ?? '', link: invite.link };
+    const params = { buyerName: safeDisplayName(buyer?.displayName) || 'A FitFlex member', planName: p.purchase.snapshot.name, gymName: gym?.name ?? '', link: invite.link };
     const locale = await localeFor(null, p.purchase.purchaserId);
-    const via = b.contactType === 'phone' ? await deliver({ phone: b.contactValue, kind: 'invite', params, locale, reference: `${b.id}:r` }) : [];
+    const via = b.contactType === 'phone' && b.contactValue
+      ? await deliver({ phone: b.contactValue, kind: 'invite', params, locale, reference: `${b.id}:r`, purchase: p.purchase, beneficiaryId: b.id }) : [];
     if (via.length) await store.recordSent(b.id, via, now());
     return { share: { link: invite.link, text: gymPassMessage('invite', params, locale) }, delivery: via };
   }

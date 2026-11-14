@@ -1054,7 +1054,7 @@ const gymPassWhatsapp = (kind) => ({
 });
 export const gymPassStore = createPgGymPassStore({ db });
 export const gymPassService = createGymPassService({
-  store: gymPassStore, gyms, users, auditLog,
+  store: gymPassStore, gyms, users, auditLog, blocks,
   contacts: { findMember: verifiedContacts.findMember, contactsFor: verifiedContacts.contactsFor },
   notify: (userId, message) => notificationService.notify(userId, message),
   localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
@@ -1076,9 +1076,9 @@ export const gymPassService = createGymPassService({
       if (r.ok) return { status: 'sent' };
       return { status: r.error === 'recipient_opted_out' ? 'skipped:recipient_opted_out' : 'failed' };
     },
-    sms: async ({ phone, text, reference }) => {
+    sms: async ({ phone, text, reference, logText }) => {
       const r = await smsService.send({
-        category: 'invitation', text, maxAttempts: 1,
+        category: 'invitation', text, logText: logText ?? text, maxAttempts: 1,
         recipients: [{ phone, dedupeKey: `gym-pass:${reference}` }],
       });
       const x = r.results?.[0] ?? {};

@@ -11,6 +11,8 @@ const plain = (row) => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v
 const fail = (error, status, extra = {}) => ({ error, status, ...extra });
 const newId = (prefix) => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const UNIQUE_VIOLATION = '23505';
+/** Who suspended, as stored on the row (suspendedByRole). */
+const SUSPENDER = { owner: 'owner', purchaser: 'buyer', admin: 'admin' };
 const constraintOf = (err) => String(err?.constraint || err?.detail || err?.message || '');
 
 export function createPgGymPassStore({ db, now = () => new Date() }) {
@@ -138,7 +140,8 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
         await trx('Subscription').insert(sub);
         await trx('GymPassBeneficiary').where({ id: b.id }).update({
           userId, status: suspended ? 'suspended' : 'active', subscriptionId: sub.id,
-          claimedAt: b.isPurchaser ? null : startsAt, inviteTokenHash: null, inviteExpiresAt: null, updatedAt: startsAt,
+          claimedAt: b.isPurchaser ? null : startsAt, inviteTokenHash: null, inviteExpiresAt: null,
+          contactValue: null, updatedAt: startsAt,
         });
       }
       return { outcome: 'activated', purchase: plain(active), beneficiaries: await beneficiariesOf(purchase.id, trx) };
@@ -181,7 +184,7 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
    * otherwise the contact is stored as pending_registration. Locks the purchase, counts the people holding a slot
    * and refuses past the limit the buyer paid for.
    */
-  async function addBeneficiary({ purchaseId, userId = null, contact = null, at = now() }) {
+  async function addBeneficiary({ purchaseId, userId = null, contact = null, contactHash = null, contactMask = null, addedBy = null, addedByRole = null, at = now() }) {
     try {
       return await db.transaction(async (trx) => {
         const purchase = await trx('GymPassPurchase').where({ id: purchaseId }).forUpdate().first();
@@ -191,11 +194,13 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
         const held = await trx('GymPassBeneficiary').where({ purchaseId }).whereIn('status', SLOT_HOLDING);
         if (held.length >= limit) return fail('beneficiary_limit_exceeded', 409, { limit });
         if (userId && held.some(h => h.userId === userId)) return fail('already_beneficiary', 409);
-        if (contact && held.some(h => h.contactType === contact.type && h.contactValue === contact.value)) return fail('already_beneficiary', 409);
+        if (contact && held.some(h => (h.contactType === contact.type && h.contactValue === contact.value) || (contactHash && h.contactHash === contactHash))) return fail('already_beneficiary', 409);
         const slot = lowestFreeSlot(held, limit);
         const id = newId('gpb');
         const row = {
-          id, purchaseId, userId, contactType: contact?.type ?? null, contactValue: contact?.value ?? null,
+          id, purchaseId, userId, contactType: contact?.type ?? null,
+          // The plain contact is kept only while the person has no account to attach to (pending_registration).
+          contactValue: userId ? null : (contact?.value ?? null), contactHash, contactMask, addedBy, addedByRole,
           isPurchaser: false, slot, status: userId ? 'active' : 'pending_registration', claimedAt: userId ? at : null,
           createdAt: at, updatedAt: at,
         };
@@ -217,7 +222,7 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
    * suspended | active (resume) | removed, for one person. `role` is who asks: 'owner', 'purchaser' or 'self'.
    * Removing never refunds and never cancels the package: it frees the slot (and cancels that person's own subscription).
    */
-  async function changeStatus({ beneficiaryId, to, role, actorId, removalCap = Infinity, at = now() }) {
+  async function changeStatus({ beneficiaryId, to, role, actorId, removalCap = Infinity, blockHashes = [], at = now() }) {
     return db.transaction(async (trx) => {
       const first = await trx('GymPassBeneficiary').where({ id: beneficiaryId }).first('purchaseId');
       if (!first) return fail('not_found', 404);
@@ -228,11 +233,13 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
       if (to === 'suspended') {
         if (b.status !== 'active') return fail('invalid_transition', 409, { from: b.status });
         await trx('Subscription').where({ id: b.subscriptionId }).update({ status: 'suspended' });
-        await trx('GymPassBeneficiary').where({ id: b.id }).update({ status: 'suspended', updatedAt: at });
+        await trx('GymPassBeneficiary').where({ id: b.id }).update({ status: 'suspended', suspendedByRole: SUSPENDER[role] ?? 'admin', updatedAt: at });
       } else if (to === 'active') {
         if (b.status !== 'suspended') return fail('invalid_transition', 409, { from: b.status });
+        // A buyer may undo only what a buyer did: an owner's (or admin's) suspension stands.
+        if (role === 'purchaser' && b.suspendedByRole !== 'buyer') return fail('suspended_by_other', 403);
         await trx('Subscription').where({ id: b.subscriptionId }).update({ status: 'active' });
-        await trx('GymPassBeneficiary').where({ id: b.id }).update({ status: 'active', updatedAt: at });
+        await trx('GymPassBeneficiary').where({ id: b.id }).update({ status: 'active', suspendedByRole: null, updatedAt: at });
       } else if (to === 'removed') {
         if (!SLOT_HOLDING.includes(b.status)) return fail('invalid_transition', 409, { from: b.status });
         if (role === 'purchaser') {
@@ -241,9 +248,17 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
         }
         if (b.subscriptionId) await trx('Subscription').where({ id: b.subscriptionId }).update({ status: 'cancelled' });
         await trx('GymPassBeneficiary').where({ id: b.id }).update({
-          status: 'removed', slot: null, inviteTokenHash: null, inviteExpiresAt: null,
+          status: 'removed', slot: null, inviteTokenHash: null, inviteExpiresAt: null, contactValue: null, suspendedByRole: null,
           removedAt: at, removedBy: actorId, removedByRole: role, updatedAt: at,
         });
+        if (role === 'self') {
+          // Leaving is final for this buyer: nobody re-attaches the person to this purchase or any other of this buyer's.
+          const hashes = [...new Set([...blockHashes, b.contactHash].filter(Boolean))];
+          const rows = (hashes.length ? hashes : [null]).map(h => ({
+            id: newId('gpk'), buyerId: purchase.purchaserId, contactHash: h, userId: b.userId ?? null, purchaseId: purchase.id, reason: 'left', createdAt: at,
+          }));
+          await trx('GymPassContactBlock').insert(rows).onConflict().ignore();
+        }
       } else {
         return fail('invalid_transition', 409);
       }
@@ -270,18 +285,26 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
     await db('GymPassBeneficiary').where({ id: beneficiaryId }).update({ notifiedVia: via.join(',') || null });
   }
 
-  /** Pending people (of purchases still running) whose contact is in this verified list. */
-  async function pendingForContacts(contacts, at = now()) {
+  /**
+   * Pending people (of purchases still running) whose contact is in this verified list. A verified contact attaches a
+   * person until the PASS ends, whatever happened to the invite link; only a claim made WITH a link token
+   * (`tokenHash`) also requires that link's own expiry to be in the future.
+   */
+  async function pendingForContacts(contacts, at = now(), { tokenHash = null } = {}) {
     const phones = contacts.filter(c => c.type === 'phone').map(c => c.value);
     const emails = contacts.filter(c => c.type === 'email').map(c => c.value);
     if (!phones.length && !emails.length) return [];
     const rows = await db('GymPassBeneficiary as b').join('GymPassPurchase as p', 'p.id', 'b.purchaseId')
       .where('b.status', 'pending_registration').where('p.status', 'active').where('p.expiresAt', '>', at)
       .where((w) => {
+        if (!tokenHash) return;
+        w.whereNull('b.inviteTokenHash').orWhere('b.inviteTokenHash', '<>', tokenHash).orWhere('b.inviteExpiresAt', '>', at);
+      })
+      .where((w) => {
         if (phones.length) w.orWhere((x) => x.where('b.contactType', 'phone').whereIn('b.contactValue', phones));
         if (emails.length) w.orWhere((x) => x.where('b.contactType', 'email').whereIn('b.contactValue', emails));
       })
-      .select('b.*');
+      .select('b.*', 'p.purchaserId as purchaserId');
     return rows.map(plain);
   }
 
@@ -300,7 +323,8 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
         const sub = childSubscription({ memberId: userId, purchase: plain(purchase), beneficiaryId: b.id, startedAt: new Date(at) });
         await trx('Subscription').insert(sub);
         await trx('GymPassBeneficiary').where({ id: b.id }).update({
-          userId, status: 'active', subscriptionId: sub.id, claimedAt: at, inviteTokenHash: null, inviteExpiresAt: null, updatedAt: at,
+          userId, status: 'active', subscriptionId: sub.id, claimedAt: at, inviteTokenHash: null, inviteExpiresAt: null,
+          contactValue: null, updatedAt: at,
         });
         return { outcome: 'claimed', purchase: plain(purchase), beneficiary: plain(await trx('GymPassBeneficiary').where({ id: b.id }).first()) };
       });
@@ -370,7 +394,46 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
     return { purchases, people: people.map(r => ({ purchaseId: r.purchaseId, status: r.status, n: Number(r.n) })) };
   }
 
+  // ── limits, blocks, send counts ────────────────────────────────────────────
+
+  /** People attached AFTER checkout since `since` by one actor (optionally only on purchases of one gym). */
+  async function countAddedSince({ addedBy, gymId = null, since }) {
+    const q = db('GymPassBeneficiary as b').join('GymPassPurchase as p', 'p.id', 'b.purchaseId')
+      .where('b.addedBy', addedBy).whereNot('b.addedByRole', 'checkout').where('b.createdAt', '>=', since);
+    if (gymId) q.where('p.gymId', gymId);
+    return Number((await q.count({ n: '*' }).first()).n);
+  }
+  /** Rows (any purchase, any actor, any state) created for one contact since `since`. */
+  async function countByHashSince(contactHash, since) {
+    return Number((await db('GymPassBeneficiary').where({ contactHash }).where('createdAt', '>=', since).count({ n: '*' }).first()).n);
+  }
+  /** The person left a purchase of this buyer earlier: by contact or by account. */
+  async function leftBlock({ buyerId, contactHash = null, userId = null }) {
+    if (!contactHash && !userId) return false;
+    const row = await db('GymPassContactBlock').where({ buyerId }).where((w) => {
+      if (contactHash) w.orWhere({ contactHash });
+      if (userId) w.orWhere({ userId });
+    }).first('id');
+    return Boolean(row);
+  }
+  /** The gym owner removed this person (by contact or account) from THIS purchase. */
+  async function ownerRemoved({ purchaseId, contactHash = null, userId = null }) {
+    if (!contactHash && !userId) return false;
+    const row = await db('GymPassBeneficiary').where({ purchaseId, status: 'removed', removedByRole: 'owner' }).where((w) => {
+      if (contactHash) w.orWhere({ contactHash });
+      if (userId) w.orWhere({ userId });
+    }).first('id');
+    return Boolean(row);
+  }
+  async function sendsOfPurchase(purchaseId) {
+    return Number((await db('GymPassBeneficiary').where({ purchaseId }).sum({ n: 'sendCount' }).first()).n ?? 0);
+  }
+  async function bumpSends(beneficiaryId) {
+    await db('GymPassBeneficiary').where({ id: beneficiaryId }).increment('sendCount', 1);
+  }
+
   return {
+    countAddedSince, countByHashSince, leftBlock, ownerRemoved, sendsOfPurchase, bumpSends,
     insertPlan, updatePlan, getPlan, listPlans,
     getPurchase, purchaseForPayment, openPurchase, beneficiariesOf, getBeneficiary,
     createPurchase, cancelOpen, pendingContactsOf, activate, reverse,

@@ -24,6 +24,7 @@ const ownerGuard = (method, scope, label) => routeGuard(method, [requireGymCusto
 const send = (res, result, okStatus = 200) => {
   if (result.error) {
     const { error, status, ...extra } = result;
+    if (status === 429 && extra.retryAfterSeconds) res.set?.('Retry-After', String(extra.retryAfterSeconds));
     return res.status(status || 400).json({ error, ...extra });
   }
   const { status, ...rest } = result;
@@ -35,11 +36,18 @@ const ownerActor = async (req) => ({ owner: await ownerOf(req) });
 
 // The invite preview is public (the link is a random 256-bit token): per-address limit on top.
 const previewLimiter = createVendorLimiter({ perMinute: 30 });
-export const resetGymPassLimits = () => previewLimiter.reset();
+// Buying: per member per hour (the checkout resolves typed contacts, so it must not be a free probe).
+const purchaseLimiterOf = () => {
+  const n = Number(process.env.GYM_PASS_PURCHASE_PER_HOUR);
+  return createVendorLimiter({ perMinute: Number.isFinite(n) && n > 0 ? n : 20, windowMs: 3_600_000 });
+};
+const purchaseLimiter = purchaseLimiterOf();
+export const resetGymPassLimits = () => { previewLimiter.reset(); purchaseLimiter.reset(); };
 
 const FLAG = 'Needs GYM_CUSTOM_PASSES (off → 404 feature_disabled, checked before sign-in).';
 const PLAN_SHAPE = '{ id, gymId, name, description|null, category: individual|couples|group, durationValue, durationUnit: days|weeks|months, beneficiaryLimit (individual 1, couples 2, group 3..50), priceTzs, currency: "TZS", startPolicy: "immediate", terms|null, termsVersion }';
-const PERSON_NOTE = 'Buyer view: masked name and contact, no user id (your own row excepted). Owner view: the person\'s name and user id, masked contact.';
+const PERSON_NOTE = 'Buyer view: masked contact, no user id (your own row excepted); a person you added reads status "invited" (no name) until their first visit on the pass, whether or not they have an account. Owner lists: the person\'s name and user id, masked contact. The owner\'s ADD answer is masked only (see that route).';
+const RATE = '429 rate_limited { retryAfterSeconds } (+ Retry-After header).';
 
 // ── public ──────────────────────────────────────────────────────────────────
 
@@ -66,10 +74,11 @@ export const gymPassInvitePreview = {
 
 export const gymPassPurchase = {
   created, method: 'post', path: '/me/gym-pass-purchases',
-  description: `Member: buy a custom pass. Body { planId, beneficiaries?: [{ phone } | { email }], reference?, payerPhone?, termsVersion? }. The price is the plan's, never the client's. ONE payment request for the full price; nothing is active until staff approve it. Headcount: individual — no beneficiaries; couples — exactly 1; group — 2 up to limit-1 (3..limit people with you). You are always the first person covered. Contacts are typed, never ids; the same person (or you) twice is refused. While manual payment is on, reference + payerPhone are required as for POST /me/subscribe. If the plan has terms, termsVersion must be the version shown. → 202 { purchase { id, status: pending_payment, gymId, plan (snapshot), priceTzs, currency, beneficiaries (statuses read awaiting_payment), slots { used, limit } }, paymentRequest }. 400 invalid_contact { index } | cannot_add_yourself | duplicate_beneficiary | beneficiaries_not_allowed | couples_needs_two_people | group_needs_minimum | beneficiary_limit_exceeded | terms_not_accepted; 404 plan_not_found | gym_not_found; 409 plan_not_available | gym_not_available | payment_already_pending | terms_changed | payment_reference_duplicate; 403 not_allowed; 429 too_many_attempts. ${FLAG}`,
+  description: `Member: buy a custom pass. Body { planId, beneficiaries?: [{ phone } | { email }], reference?, payerPhone?, termsVersion? }. The price is the plan's, never the client's. ONE payment request for the full price; nothing is active until staff approve it. Headcount: individual — no beneficiaries; couples — exactly 1; group — 2 up to limit-1 (3..limit people with you). You are always the first person covered. Contacts are typed, never ids; the same person (or you) twice is refused. While manual payment is on, reference + payerPhone are required as for POST /me/subscribe. If the plan has terms, termsVersion must be the version shown. → 202 { purchase { id, status: pending_payment, gymId, plan (snapshot), priceTzs, currency, beneficiaries (statuses read awaiting_payment), slots { used, limit } }, paymentRequest }. 400 invalid_contact { index } | cannot_add_yourself { index } (a contact you typed that is one of yours) | duplicate_beneficiary { index } (the SAME contact typed twice) | invalid_beneficiaries (any problem that depends on who owns a contact: one account typed twice by phone and email, one of your own accounts, a person who left your passes; deliberately no index and no detail) | beneficiaries_not_allowed | couples_needs_two_people | group_needs_minimum | beneficiary_limit_exceeded { limit: the absolute group maximum, 50 } | terms_not_accepted { termsVersion }; 404 plan_not_found | gym_not_found; 409 plan_not_available | gym_not_available | payment_already_pending | terms_changed { termsVersion } | payment_reference_duplicate; 403 not_allowed; ${RATE} (per member per hour: GYM_PASS_PURCHASE_PER_HOUR, and per typed contact per day) | too_many_attempts (from the payment reference check). The 202 body is { purchase { id, status, gymId, planId, plan, priceTzs, currency, paymentRequestId, startsAt: null, expiresAt: null, createdAt, beneficiaries, slots }, paymentRequest: the raw inserted PaymentRequest row }. ${FLAG}`,
   requestSample: { planId: 'gpp_abc123abc123', beneficiaries: [{ phone: '0712345678' }], reference: 'QGH7XK2L9P', payerPhone: '0712345678' },
   onGuard: memberGuard('post'),
   onRequest: async (req, res) => {
+    if (limitOrNull(purchaseLimiter, String(req.user.sub), res)) return undefined;
     const { planId, beneficiaries, reference, payerPhone, termsVersion } = req.body || {};
     send(res, await gymPassService.purchase({ memberId: req.user.sub, planId, beneficiaries: beneficiaries ?? [], reference, payerPhone, termsVersion }));
   },
@@ -91,41 +100,41 @@ export const gymPassMine = {
 
 export const gymPassClaim = {
   created, method: 'post', path: '/me/gym-passes/claim',
-  description: `Member: attach me to passes waiting for a contact I have VERIFIED. Body { token? } (the invite link's token): with a token the call also checks the link is for one of my verified contacts — 403 contact_mismatch, 404 invalid_invitation, 410 invitation_expired. The token alone grants nothing. → { claimed: [beneficiaryId] }. Idempotent. ${FLAG}`,
+  description: `Member: attach me to passes waiting for a contact I have VERIFIED. Body { token? } (the invite link's token): with a token the call also checks the link is for one of my verified contacts — 403 contact_mismatch, 404 invalid_invitation, 410 invitation_expired. The token alone grants nothing. → { claimed: [beneficiaryId] }. Idempotent. A link token expires (GYM_PASS_INVITE_EXPIRY_DAYS or the pass end); a VERIFIED contact keeps attaching until the pass itself ends. Skipped silently: a pass whose buyer left/blocked me. ${FLAG}`,
   onGuard: memberGuard('post'),
   onRequest: async (req, res) => send(res, await gymPassService.claimForUser(req.user.sub, { token: req.body?.token ?? null })),
 };
 
 export const gymPassLeave = {
   created, method: 'post', path: '/me/gym-passes/:purchaseId/leave',
-  description: `Member: leave a pass I was added to (the buyer cannot: 409 cannot_remove_purchaser). The slot is freed; nothing is refunded. → { ok: true }. 404 not_found. ${FLAG}`,
+  description: `Member: leave a pass I was added to (the buyer cannot: 409 cannot_remove_purchaser). The slot is freed; nothing is refunded. Leaving is final for that buyer: nobody (buyer or gym owner) can attach me again to that pass or to any other pass that buyer bought; there is no unblock route in this version. → { ok: true }. 404 not_found. ${FLAG}`,
   onGuard: memberGuard('post'),
   onRequest: async (req, res) => send(res, await gymPassService.leave({ userId: req.user.sub, purchaseId: req.params.purchaseId })),
 };
 
 // ── buyer: people on a purchase ─────────────────────────────────────────────
 
-const BENEFICIARY_ERRORS = '400 invalid_contact | cannot_add_yourself; 404 not_found; 409 pass_not_active | beneficiary_limit_exceeded { limit } | already_beneficiary | invalid_transition | cannot_remove_purchaser | cannot_modify_purchaser | replacement_limit_reached { limit }';
+const BENEFICIARY_ERRORS = `400 invalid_contact | cannot_add_yourself; 403 removed_by_owner (buyer re-adding a contact the gym owner removed; the owner may) | suspended_by_other (buyer resuming a suspension an owner made); 404 not_found; 409 pass_not_active | beneficiary_limit_exceeded { limit: THIS pass's slot count } | already_beneficiary | cannot_add_person (the person left this buyer's passes, or is the buyer; deliberately vague) | invalid_transition (no state detail for buyers) | cannot_remove_purchaser | cannot_modify_purchaser | replacement_limit_reached { limit }; ${RATE}`;
 
 export const gymPassBuyerAddPerson = {
   created, method: 'post', path: '/me/gym-pass-purchases/:purchaseId/beneficiaries',
-  description: `Buyer: add a person to an ACTIVE pass (free slot needed: the sale's limit is never exceeded, even by concurrent adds). Body { phone } | { email }. No approval is asked: a person with an account gets their own subscription at once and is notified (in-app, push, WhatsApp/SMS); anyone else is kept as pending_registration and gets an invite link, attached when they sign up and verify that contact. → 201 { beneficiary }. ${PERSON_NOTE} ${BENEFICIARY_ERRORS}. ${FLAG}`,
+  description: `Buyer: add a person to an ACTIVE pass (free slot needed: the sale's limit is never exceeded, even by concurrent adds). Body { phone } | { email }. No approval is asked: a person with an account gets their own subscription at once and is notified (in-app, push, WhatsApp/SMS); anyone else is kept as pending_registration and gets an invite link, attached when they sign up and verify that contact. → 201 { beneficiary { id, slot, isPurchaser, status: 'invited', you, displayName: null, contactType, contact (masked) } } for every contact, with or without an account. Limits: attempts per buyer per hour (GYM_PASS_ADD_ATTEMPTS_PER_HOUR, default as the friend lookup), adds per buyer per hour (GYM_PASS_BUYER_ADDS_PER_HOUR), adds per contact per day across everyone (GYM_PASS_TARGET_PER_DAY). ${PERSON_NOTE} ${BENEFICIARY_ERRORS}. ${FLAG}`,
   requestSample: { phone: '0712345678' },
   onGuard: memberGuard('post'),
   onRequest: async (req, res) => send(res, await gymPassService.addBeneficiary({ purchaseId: req.params.purchaseId, actor: memberActor(req), body: req.body || {} }), 201),
 };
 const buyerChange = (action, fn, text) => ({
   created, method: 'post', path: `/me/gym-pass-purchases/:purchaseId/beneficiaries/:beneficiaryId/${action}`,
-  description: `Buyer: ${text} → { beneficiary }. ${BENEFICIARY_ERRORS}. ${FLAG}`,
+  description: `Buyer: ${text} → { beneficiary } (buyer view). ${BENEFICIARY_ERRORS}. ${FLAG}`,
   onGuard: memberGuard('post'),
   onRequest: async (req, res) => send(res, await gymPassService[fn]({ purchaseId: req.params.purchaseId, beneficiaryId: req.params.beneficiaryId, actor: memberActor(req) })),
 });
 export const gymPassBuyerSuspend = buyerChange('suspend', 'suspendBeneficiary', 'stop one person\'s entry for now (their subscription is suspended; the slot stays theirs).');
 export const gymPassBuyerResume = buyerChange('resume', 'resumeBeneficiary', 'let a suspended person in again.');
-export const gymPassBuyerRemove = buyerChange('remove', 'removeBeneficiary', 'take a person off the pass. Never refunds or cancels the pass; frees the slot so someone else can be added (a replacement). The buyer cannot be removed; a buyer may remove at most beneficiaryLimit people per purchase (409 replacement_limit_reached), the gym owner without limit.');
+export const gymPassBuyerRemove = buyerChange('remove', 'removeBeneficiary', 'take a person off the pass. Never refunds or cancels the pass; frees the slot so someone else can be added (a replacement). A buyer may resume (…/resume) only a person the BUYER suspended; the same suspension by the gym owner stands (403 suspended_by_other). The buyer cannot be removed; a buyer may remove at most beneficiaryLimit people per purchase (409 replacement_limit_reached), the gym owner without limit.');
 export const gymPassBuyerResendInvite = {
   created, method: 'post', path: '/me/gym-pass-purchases/:purchaseId/beneficiaries/:beneficiaryId/invite',
-  description: `Buyer: a fresh invite link for a person still waiting for an account (sent to their number by WhatsApp/SMS where possible). → { share { link, text }, delivery:[in whatsapp|sms] }. 429 too_soon (once an hour). ${BENEFICIARY_ERRORS}. ${FLAG}`,
+  description: `Buyer: a fresh invite link for a person still waiting for an account (sent to their number by WhatsApp/SMS where possible). → { share { link, text }, delivery:[in whatsapp|sms] } (delivery is [] when the per-purchase send cap is reached: GYM_PASS_SENDS_PER_PURCHASE, default max(8, 4 × slots); the link is still returned). 429 too_soon (once an hour per person) | rate_limited. ${BENEFICIARY_ERRORS}. ${FLAG}`,
   onGuard: memberGuard('post'),
   onRequest: async (req, res) => send(res, await gymPassService.resendInvite({ purchaseId: req.params.purchaseId, beneficiaryId: req.params.beneficiaryId, actor: memberActor(req) })),
 };
@@ -179,7 +188,7 @@ export const ownerGymPassSales = {
 
 export const ownerGymPassMemberships = {
   created, method: 'get', path: '/owner/gyms/:gymId/pass-memberships',
-  description: `Owner (scope members): running (state=active, default) or ended (state=expired) pass purchases with their people and each person's visits. Query: state, planId, before, limit. → { state, memberships:[sale + beneficiaries:[{ id, slot, isPurchaser, status, userId, displayName, contact (masked), subscriptionId, notifiedAt, notifiedVia, claimedAt, attendance { visits, lastVisitAt } }]] }. ${FLAG}`,
+  description: `Owner (scope members): running (state=active, default) or ended (state=expired) pass purchases with their people and each person's visits. Query: state, planId, before, limit. → { state, memberships:[sale + beneficiaries:[{ id, slot, isPurchaser, status, userId|null, displayName|null, contactType|null, contact (masked)|null, subscriptionId, notifiedAt, notifiedVia: [] of in_app|whatsapp|sms, claimedAt, removedAt, removedByRole (owner|purchaser|self|erasure), attendance { visits, lastVisitAt } }]] }. ${FLAG}`,
   onGuard: ownerGuard('get', 'members', 'GET /owner/gyms/:gymId/pass-memberships'),
   onRequest: async (req, res) => send(res, await gymPassService.memberships({ owner: await ownerOf(req), gymId: req.params.gymId, query: req.query || {} })),
 };
@@ -222,7 +231,7 @@ export const ownerGymPassResume = ownerChange('resume', 'resumeBeneficiary', 'le
 export const ownerGymPassRemove = ownerChange('remove', 'removeBeneficiary', 'take a person off the pass (no refund, the pass keeps running; the slot is freed for a replacement).');
 export const ownerGymPassAddPerson = {
   created, method: 'post', path: '/owner/gyms/:gymId/pass-purchases/:purchaseId/beneficiaries',
-  description: `Owner (scope members): add a person to an ACTIVE pass of my gym (free slot needed). Body { phone } | { email }. Same behaviour as the buyer's add (attached at once and notified, or invited). → 201 { beneficiary }. ${BENEFICIARY_ERRORS}. ${FLAG}`,
+  description: `Owner (scope members): add a person to an ACTIVE pass of my gym (free slot needed). Body { phone } | { email }. Same behaviour as the buyer's add (attached at once and notified, or invited), but the ANSWER is masked only: → 201 { beneficiary { id, slot, isPurchaser: false, status: 'invited', contactType, contact (masked) } }, never a user id, a name or the account state (the owner can read people who hold a subscription at the gym in the lists). Limits per owner per gym per hour (GYM_PASS_OWNER_ADDS_PER_GYM_PER_HOUR) and per contact per day (GYM_PASS_TARGET_PER_DAY). The owner may re-add a contact the owner removed; nobody can re-add a person who left. ${BENEFICIARY_ERRORS}. ${FLAG}`,
   onGuard: ownerGuard('post', 'members', 'POST /owner/gyms/:gymId/pass-purchases/:purchaseId/beneficiaries'),
   onRequest: async (req, res) => {
     const o = await ownerActor(req);
