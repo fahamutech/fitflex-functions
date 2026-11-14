@@ -23,7 +23,7 @@ import { channelAllowed } from '../shared/communications.mjs';
 import { maskPhone } from '../shared/phone.mjs';
 import { addDays, eatToday, slotStartMs } from '../shared/trainer-access.mjs';
 import { ERRORS, validateRecipient } from '../integrations/sms/provider.mjs';
-import { beemCredentialShape } from '../integrations/sms/beem.mjs';
+import { beemCredentialShape, beemDeliveryReport, beemSettings } from '../integrations/sms/beem.mjs';
 
 /** Two SMS parts. Longer messages are cut, never split into a third. */
 export const SMS_MAX_LENGTH = 306;
@@ -33,6 +33,13 @@ export const BOOKING_REMINDER_HOURS = 3;
 export const RENEWAL_REMINDER_DAYS = 3;
 export const SMS_CATEGORIES = ['otp', 'reminder', 'campaign', 'invitation', 'test'];
 export const SMS_STATUSES = ['queued', 'accepted', 'failed'];
+/** What the provider later reports about an accepted SMS (null: not asked yet). */
+export const SMS_DELIVERY_STATUSES = ['delivered', 'undelivered', 'pending', 'unknown'];
+/** Beem asks for at least 5 minutes before a message is checked. */
+export const DELIVERY_CHECK_AFTER_MINUTES = 5;
+/** A message still pending, or without a report, after this many checks (or a day) is let go. */
+export const DELIVERY_MAX_CHECKS = 12;
+export const DELIVERY_NO_REPORT_CHECKS = 3;
 
 const OPT_OUT = { en: ' Opt out: App > Settings.', sw: ' Kujiondoa: App > Settings.' };
 const EAT = 'Africa/Dar_es_Salaam';
@@ -271,11 +278,74 @@ export function createSmsService({
     return summary;
   }
 
+  // ── delivery tracking ──────────────────────────────────────────────────
+
+  const trackingOn = () => String(env.SMS_DELIVERY_TRACKING || '').trim().toLowerCase() === 'on';
+
+  /** Who can say what became of a message: the provider that sent it. Verification codes go out through their own sender but the same Beem account. */
+  function reporterFor(row) {
+    if (row.provider === provider.name && provider.deliveryReport) return provider.deliveryReport;
+    if (row.provider === 'beem') {
+      const settings = beemSettings(env);
+      return settings ? ({ to, providerMessageId }) => beemDeliveryReport({ ...settings, to, requestId: providerMessageId }) : null;
+    }
+    return null;
+  }
+
+  /**
+   * Asks the provider what became of the SMS it accepted in the last day,
+   * from five minutes after sending. Does nothing unless SMS_DELIVERY_TRACKING
+   * is on. Safe to run often and to overlap: a message is only ever moved on
+   * (null → pending → delivered or undelivered), and a provider that cannot
+   * be asked leaves the message for the next run.
+   */
+  async function checkDeliveries({ limit = 100 } = {}) {
+    const summary = { checked: 0, delivered: 0, undelivered: 0, pending: 0, unknown: 0, errors: 0 };
+    if (!trackingOn()) return { skipped: 'tracking_off', ...summary };
+    const t = now();
+    const rows = await db('SmsLog').where({ status: 'accepted' }).whereNotNull('providerMessageId')
+      .where(q => q.whereNull('deliveryStatus').orWhere('deliveryStatus', 'pending'))
+      .where('createdAt', '<=', new Date(+t - DELIVERY_CHECK_AFTER_MINUTES * 60_000))
+      .where('createdAt', '>=', new Date(+t - 86_400_000))
+      .where('deliveryChecks', '<', DELIVERY_MAX_CHECKS)
+      .orderBy('createdAt', 'asc').limit(Math.min(Math.max(Number(limit) || 100, 1), 500));
+    for (const row of rows) {
+      const report = reporterFor(row);
+      if (!report) continue;
+      let r;
+      try { r = await report({ to: row.phone, providerMessageId: row.providerMessageId }); } catch { r = { ok: false }; }
+      if (!r?.ok) { summary.errors++; continue; }
+      const checks = Number(row.deliveryChecks || 0) + 1;
+      // No report at all after a few tries: stop asking, say so.
+      const next = r.status ?? (checks >= DELIVERY_NO_REPORT_CHECKS ? 'unknown' : null);
+      await db('SmsLog').where({ id: row.id }).whereIn('status', ['accepted'])
+        .where(q => q.whereNull('deliveryStatus').orWhere('deliveryStatus', 'pending'))
+        .update({ deliveryStatus: next, deliveryCheckedAt: t, deliveryChecks: checks, updatedAt: t });
+      summary.checked++;
+      if (next && next in summary) summary[next]++;
+    }
+    return summary;
+  }
+
+  /**
+   * What became of the SMS sent for one thing, e.g. a friend invitation
+   * (dedupeKey "friend-invite:<id>:<hour>"): 'failed' when the provider
+   * refused it, the delivery status once known, null when there is none.
+   */
+  async function deliveryOf(keyPrefix) {
+    const row = await db('SmsLog').whereRaw('left("dedupeKey", ?) = ?', [keyPrefix.length, keyPrefix])
+      .orderBy('createdAt', 'desc').first('status', 'deliveryStatus');
+    if (!row) return null;
+    return row.status === 'failed' ? 'failed' : row.deliveryStatus ?? null;
+  }
+
   // ── admin ──────────────────────────────────────────────────────────────
 
   async function status() {
     const since = new Date(+now() - 86_400_000);
     const rows = await db('SmsLog').where('createdAt', '>=', since).groupBy('status').select('status').count({ n: '*' });
+    const delivery = await db('SmsLog').where('createdAt', '>=', since).where({ status: 'accepted' })
+      .groupBy('deliveryStatus').select('deliveryStatus').count({ n: '*' });
     return {
       provider: provider.name,
       configured: Boolean(provider.configured),
@@ -286,6 +356,12 @@ export function createSmsService({
       // The shape of the stored Beem pair (lengths, stray spaces or quotes) — never the values.
       beemCredentials: beemCredentialShape(env),
       last24h: Object.fromEntries(SMS_STATUSES.map(s => [s, Number(rows.find(r => r.status === s)?.n || 0)])),
+      // Of the accepted ones: what the provider reported. Only filled in while SMS_DELIVERY_TRACKING is on.
+      deliveryTracking: trackingOn(),
+      delivery24h: {
+        ...Object.fromEntries(SMS_DELIVERY_STATUSES.map(s => [s, Number(delivery.find(r => r.deliveryStatus === s)?.n || 0)])),
+        notChecked: Number(delivery.find(r => r.deliveryStatus == null)?.n || 0),
+      },
     };
   }
 
@@ -323,6 +399,8 @@ export function createSmsService({
         id: r.id, userId: r.userId, phone: maskPhone(r.phone), category: r.category, message: r.message,
         status: r.status, provider: r.provider, providerMessageId: r.providerMessageId, providerCode: r.providerCode,
         error: r.error, attempts: r.attempts, createdAt: new Date(r.createdAt).toISOString(),
+        deliveryStatus: r.deliveryStatus ?? null,
+        deliveryCheckedAt: r.deliveryCheckedAt ? new Date(r.deliveryCheckedAt).toISOString() : null,
       })),
       nextBefore: rows.length > max ? new Date(page[page.length - 1].createdAt).toISOString() : null,
     };
@@ -354,5 +432,5 @@ export function createSmsService({
     };
   }
 
-  return { available, send, deliver, sendDueReminders, status, testSend, logs, verificationSender };
+  return { available, send, deliver, sendDueReminders, status, testSend, logs, verificationSender, checkDeliveries, deliveryOf };
 }

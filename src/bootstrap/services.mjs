@@ -996,6 +996,7 @@ export const friendInvitationService = createFriendInvitationService({
     whatsapp: String(process.env.FRIEND_INVITE_WHATSAPP || '').toLowerCase() === 'on',
   }),
   handleOf: userId => usernameService.handleOf(userId),
+  smsDeliveryOf: invitationId => smsService.deliveryOf(`friend-invite:${invitationId}:`),
   // WhatsApp first (needs the channel enabled + configured and an approved
   // template); SMS through the shared SMS service when WhatsApp can't be used
   // or the number has no WhatsApp (the job in functions/jobs.mjs asks the

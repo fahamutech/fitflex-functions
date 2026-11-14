@@ -21,6 +21,7 @@ Credentials come from the environment only.
 | `SMS_PROVIDER` | `beem`, or unset for off. Reminders and campaigns send nothing until it is set, so a deploy on its own never starts sending. (`fake` is for tests and is ignored in production.) |
 | `BEEM_API_KEY`, `BEEM_SECRET_KEY` | The Beem API pair. Shared with verification codes. |
 | `BEEM_SENDER_ID` | The sender name members see. `INFO` (Beem's shared name, the default) until Beem approves FitFlex's own. |
+| `SMS_DELIVERY_TRACKING` | `on` to ask Beem, every 10 minutes, what became of the messages it accepted (delivered, undelivered, still pending) and keep the answer in `SmsLog`. Off by default; nothing is asked while it is off. |
 | `VERIFICATION_SMS_PROVIDER`, `VERIFICATION_SMS_SENDER_ID` | Verification codes only — unchanged. The sender name falls back to `BEEM_SENDER_ID`. |
 
 ## What is sent
@@ -37,6 +38,15 @@ Credentials come from the environment only.
   3 days, one SMS part each. `B2B_INVITE_SMS=off` turns these off on their
   own. See `B2B_AUTOMATION.md` §11.
 - **Verification codes** (identity).
+
+**Delivery tracking.** "accepted" means Beem took the message, not that it reached
+the phone. With `SMS_DELIVERY_TRACKING=on` the `smsDeliveryCheck` job (every 10
+minutes) asks Beem's delivery-report API about each accepted message from 5
+minutes after sending, up to a day, and writes `deliveryStatus` (`delivered`,
+`undelivered`, `pending`, or `unknown` when Beem has no report after three tries)
+to `SmsLog`. `GET /admin/sms/status` shows the counts for the last 24 hours
+(`delivery24h`) and `GET /admin/sms/logs` each message's `deliveryStatus`. A
+friend invitation's sender sees it as `smsDelivery` on their sent invitations.
 
 Each SMS is one row in `SmsLog`: number, kind (`otp`, `reminder`, `campaign`,
 `invitation`, `test`), text (codes are stored as "Verification code [redacted]"), status

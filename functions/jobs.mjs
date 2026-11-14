@@ -42,6 +42,15 @@ export const smsReminders = {
   }
 };
 
+export const smsDeliveryCheck = {
+  created, rule: '*/10 * * * *', // every 10 minutes
+  description: 'SMS delivery tracking: asks the SMS provider (Beem) what became of the messages it accepted in the last day, from 5 minutes after sending, and records delivered / undelivered / pending in the SMS log. Does nothing unless SMS_DELIVERY_TRACKING is on. Safe to rerun and to overlap.',
+  onJob: async () => {
+    const r = await smsService.checkDeliveries();
+    if (r.checked || r.errors) console.log(`[sms] delivery checked=${r.checked} delivered=${r.delivered} undelivered=${r.undelivered} pending=${r.pending} unknown=${r.unknown} errors=${r.errors}`);
+  }
+};
+
 export const friendInviteFallback = {
   created, rule: '*/5 * * * *', // every 5 minutes
   description: 'Friend invitations: for invitations WhatsApp accepted, ask the provider whether it was delivered; when the number has no WhatsApp, send the SMS instead (once). Does nothing unless FRIEND_INVITE_WHATSAPP and FRIEND_INVITE_SMS are on. Safe to overlap.',
