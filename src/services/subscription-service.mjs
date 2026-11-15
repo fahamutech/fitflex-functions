@@ -583,6 +583,8 @@ export function createSubscriptionService({
   }
 
   return {
+    // Custom gym passes reuse the member-reference checks (transaction ID, payer phone, duplicate rules).
+    memberReferenceFor, referenceFields,
     listPasses, subscribe, upgradeOptions, upgradePass, trainerPassPurchase, trainerMemberPlanPurchase, trainerPasses, cancelTrainerPass,
     me, memberCheckIns, memberPaymentHistory,
   };

@@ -43,6 +43,17 @@ export function checkinVisitorNamesOn() {
 }
 
 /**
+ * Custom gym passes & flexible membership (GYM_CUSTOM_PASSES; docs/custom-gym-passes-api.md): gym owners design
+ * individual / couples / group passes, members buy them with one payment, and every covered person gets their own
+ * subscription. Off unless GYM_CUSTOM_PASSES is set: every new route (plans, purchases, owner sales, invitations)
+ * answers 404 feature_disabled before any sign-in check, and the legacy daily / weekly / monthly plans are untouched.
+ * Payments already made for a pass are still applied while it is off (the money was taken).
+ */
+export function gymCustomPassesOn() {
+  return on('GYM_CUSTOM_PASSES');
+}
+
+/**
  * Members may choose a username shown in public places (migration
  * member-usernames, /me/username endpoints, admin clear on reports). Off
  * unless MEMBER_USERNAMES is set: the endpoints answer 404 feature_disabled

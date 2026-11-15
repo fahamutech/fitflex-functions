@@ -9,7 +9,8 @@ import {
 } from '../shared/member-status.mjs';
 import { toSessionUser } from '../shared/session-user.mjs';
 import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
-import { CHECKIN_STATUS, CHECKIN_SOURCE, isDuplicateVisit, publicCheckin } from '../shared/checkin-status.mjs';
+import { CHECKIN_STATUS, CHECKIN_SOURCE, currentStatus, isDuplicateVisit, publicCheckin } from '../shared/checkin-status.mjs';
+import { maskContact } from '../shared/gym-pass-rules.mjs';
 import { localDay } from '../shared/member-progress.mjs';
 
 export function createMemberManagementService({
@@ -109,13 +110,16 @@ export function createMemberManagementService({
       ? await statusForDirect(member, sub, gymIds, now)
       : await statusForRoaming(member, gymIds, now);
     const recent = await ownerCheckinsFor(member.id, gymIds);
+    // A custom gym pass (GYM_CUSTOM_PASSES) attaches a person without their consent: until they have made one valid
+    // visit at this gym the owner sees neither their full number nor their photo. Rows without a pass are unchanged.
+    const hidden = Boolean(sub?.passPurchaseId) && !recent.some((c) => currentStatus(c) === CHECKIN_STATUS.VALID);
     return {
       id: member.id,
       publicId: await publicUserId(member, 'member'),
       displayName: member.displayName || null,
       ...(await usernameField(member.id)),
-      phone: member.phone || null,
-      photoUrl: member.photoUrl || null,
+      phone: hidden ? maskContact('phone', member.phone) : (member.phone || null),
+      photoUrl: hidden ? null : (member.photoUrl || null),
       memberType,
       tier: sub?.tier || null,
       status,
@@ -379,6 +383,8 @@ export function createMemberManagementService({
     const status = sub ? await statusForDirect(member, sub, gymIds, now) : await statusForRoaming(member, gymIds, now);
 
     const sorted = await ownerCheckinsFor(memberId, gymIds);
+    // Same rule as the Members list: a person attached by a custom pass stays masked until a first valid visit here.
+    const hidden = Boolean(sub?.passPurchaseId) && !sorted.some((c) => currentStatus(c) === CHECKIN_STATUS.VALID);
     const recentCheckins = sorted.slice(0, 10).map((c) => {
       const gym = gyms.find((g) => g.id === c.gymId);
       return { id: c.id, timestamp: c.timestamp, gymId: c.gymId, gymName: gym?.name || null };
@@ -404,9 +410,9 @@ export function createMemberManagementService({
         publicId: await publicUserId(member, 'member'),
         displayName: member.displayName || null,
         ...(await usernameField(member.id)),
-        email: member.email || null,
-        phone: member.phone || null,
-        photoUrl: member.photoUrl || null,
+        email: hidden ? maskContact('email', member.email) : (member.email || null),
+        phone: hidden ? maskContact('phone', member.phone) : (member.phone || null),
+        photoUrl: hidden ? null : (member.photoUrl || null),
         memberType,
         status,
         accountStatus: member.accountStatus || 'active',
