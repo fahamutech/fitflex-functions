@@ -93,7 +93,8 @@ export function createGymPassService({
   // (reference, payerPhone, memberId, product) → { error, status } | { memberReference, memberReferenceKey, payerPhone } | {}
   memberReference = async () => ({}),
   referenceFields = () => ({}),
-  baseLink = () => process.env.FRIEND_INVITE_BASE_URL || process.env.APP_DOWNLOAD_LINK || 'https://fitflex-af-app.web.app',
+  // The /gym-pass page lives in the portal: GYM_PASS_INVITE_BASE_URL, else PORTAL_PUBLIC_URL. Neither set → '' → no link is built or sent.
+  baseLink = () => String(process.env.GYM_PASS_INVITE_BASE_URL || process.env.PORTAL_PUBLIC_URL || '').trim(),
   now = () => new Date(),
 }) {
   const iso = (d = now()) => new Date(d).toISOString();
@@ -310,7 +311,7 @@ export function createGymPassService({
    * nothing is active until it is approved. Coverage by category: individual = the buyer; couples = the buyer and
    * exactly one other person; group = the buyer and 2 up to (limit - 1) others.
    */
-  async function purchase({ memberId, planId, beneficiaries = [], reference, payerPhone, termsVersion }) {
+  async function purchase({ memberId, planId, beneficiaries = [], reference, payerPhone, termsVersion, expectedPriceTzs }) {
     const member = await users.findByIdAsync(memberId);
     if (!member || member.userType !== 'member' || member.accountStatus === 'suspended') return { error: 'not_allowed', status: 403 };
     const plan = planId ? await store.getPlan(String(planId)) : null;
@@ -322,6 +323,10 @@ export function createGymPassService({
     if (plan.terms) {
       if (termsVersion == null) return { error: 'terms_not_accepted', status: 400, termsVersion: plan.termsVersion };
       if (Number(termsVersion) !== plan.termsVersion) return { error: 'terms_changed', status: 409, termsVersion: plan.termsVersion };
+    }
+    // Optional price check: a client that showed a price may ask us to refuse if it has changed since. Absent = no check.
+    if (expectedPriceTzs !== undefined && expectedPriceTzs !== null && Number(expectedPriceTzs) !== plan.priceTzs) {
+      return { error: 'price_changed', status: 409, priceTzs: plan.priceTzs, currency: CURRENCY };
     }
     const snapshot = { ...planSnapshot(plan), ...(plan.terms ? { termsAcceptedVersion: plan.termsVersion } : {}) };
 
@@ -392,7 +397,8 @@ export function createGymPassService({
     if (purchase && await store.sendsOfPurchase(purchase.id) >= gymPassLimits().sendsPerPurchase(purchase.snapshot.beneficiaryLimit)) return via;
     if (beneficiaryId) await store.bumpSends(beneficiaryId);
     let wa = null;
-    if (channels.whatsapp) {
+    // The invite template carries the link as a parameter: with no link there is nothing to put in it, so SMS only.
+    if (channels.whatsapp && !(kind === 'invite' && !params.link)) {
       try { wa = await channels.whatsapp({ phone, kind, params, locale, reference }); } catch { wa = { status: 'failed' }; }
       if (wa?.status === 'sent') via.push('whatsapp');
     }
@@ -428,12 +434,17 @@ export function createGymPassService({
     return (phones.find(c => contactHash({ type: 'phone', value: normalizePhone(c.value) }) === b.contactHash) ?? phones[0])?.value ?? null;
   }
 
+  const linkFor = (token) => {
+    const base = String(baseLink() ?? '').trim().replace(/\/+$/, '');
+    return base ? `${base}/gym-pass/#${token}` : null;
+  };
+
   async function issueInvite(b, purchase) {
     const token = newToken();
     const cap = +now() + inviteExpiryDays() * 86_400_000;
     const expiresAt = new Date(Math.min(cap, +new Date(purchase.expiresAt)));
     await store.setInvite(b.id, { tokenHash: sha256(token), expiresAt });
-    return { token, link: `${String(baseLink()).replace(/\/+$/, '')}/gym-pass/#${token}` };
+    return { token, link: linkFor(token) };
   }
 
   /**
@@ -445,7 +456,7 @@ export function createGymPassService({
   async function announce(purchase, rows) {
     const gym = gymOf(purchase.gymId);
     const buyer = await users.findByIdAsync(purchase.purchaserId);
-    const base = { planName: purchase.snapshot.name, gymName: gym?.name ?? '', until: untilOf(purchase.expiresAt), buyerName: safeDisplayName(buyer?.displayName) || 'A FitFlex member' };
+    const base = { planName: purchase.snapshot.name, gymName: gym?.name ?? '', until: untilOf(purchase.expiresAt), buyerName: safeDisplayName(buyer?.displayName) || null };
     const sent = [];
     for (const b of rows) {
       if (b.status === 'removed') continue;
@@ -464,7 +475,8 @@ export function createGymPassService({
           });
           const locale = await localeFor(b.userId, purchase.purchaserId);
           via.push(...await deliver({ phone: await phoneOf(b), kind: 'added', params: base, locale, reference: b.id, purchase, beneficiaryId: b.id }));
-          await store.recordNotified(b.id, via);
+          // Same pacing stamp as an invite: the buyer's "send again" must not tell an account from no account (too_soon).
+          if (via.length > 1) await store.recordSent(b.id, via, now()); else await store.recordNotified(b.id, via);
           sent.push({ beneficiaryId: b.id, kind: 'added', via });
         } else {
           // Someone who blocked the buyer (or whom the buyer blocked) is told nothing and gets no link.
@@ -720,22 +732,39 @@ export function createGymPassService({
     return { ok: true };
   }
 
-  /** A fresh invite link for a person still waiting (the plain token is never stored). Returns the link to share. */
+  /**
+   * A fresh invite link for a person still waiting (the plain token is never stored). Returns the link to share
+   * (null when no portal host is configured: GYM_PASS_INVITE_BASE_URL / PORTAL_PUBLIC_URL).
+   * The answer must not tell the buyer whether the person already has an account (buyer views read "invited" for both):
+   * a person already attached gets the same checks, the same pacing, the same answer shape (a link that opens to
+   * "invitation not valid") and is told through the normal "added" notice instead of an invite.
+   */
   async function resendInvite({ purchaseId, beneficiaryId, actor }) {
     const p = await purchaseFor(purchaseId, actor);
     if (p.error) return p;
     const b = await store.getBeneficiary(String(beneficiaryId));
-    if (!b || b.purchaseId !== p.purchase.id || b.status !== 'pending_registration') return { error: 'not_found', status: 404 };
+    if (!b || b.purchaseId !== p.purchase.id || b.isPurchaser || !['pending_registration', 'active'].includes(b.status)) return { error: 'not_found', status: 404 };
     if (effectivePurchaseStatus(p.purchase, now()) !== 'active') return { error: 'pass_not_active', status: 409 };
     if (throttleAttempts(`resend:${actor.userId ?? actor.owner?.id}`)) return rateLimited(retryAfterHour());
     if (b.inviteSentAt && +now() - +new Date(b.inviteSentAt) < RESEND_WAIT_MS) return { error: 'too_soon', status: 429 };
-    const invite = await issueInvite(b, p.purchase);
+    const pending = b.status === 'pending_registration';
+    // A real token for a person waiting; a well-formed token that matches nothing for one already attached.
+    const invite = pending ? await issueInvite(b, p.purchase) : { token: null, link: linkFor(newToken()) };
     const gym = gymOf(p.purchase.gymId);
     const buyer = await users.findByIdAsync(p.purchase.purchaserId);
-    const params = { buyerName: safeDisplayName(buyer?.displayName) || 'A FitFlex member', planName: p.purchase.snapshot.name, gymName: gym?.name ?? '', link: invite.link };
+    const params = { buyerName: safeDisplayName(buyer?.displayName) || null, planName: p.purchase.snapshot.name, gymName: gym?.name ?? '', link: invite.link };
     const locale = await localeFor(null, p.purchase.purchaserId);
-    const via = b.contactType === 'phone' && b.contactValue
-      ? await deliver({ phone: b.contactValue, kind: 'invite', params, locale, reference: `${b.id}:r`, purchase: p.purchase, beneficiaryId: b.id }) : [];
+    let via = [];
+    if (pending) {
+      via = b.contactType === 'phone' && b.contactValue
+        ? await deliver({ phone: b.contactValue, kind: 'invite', params, locale, reference: `${b.id}:r`, purchase: p.purchase, beneficiaryId: b.id }) : [];
+    } else if (b.contactType === 'phone') {
+      const own = await localeFor(b.userId, p.purchase.purchaserId);
+      via = await deliver({
+        phone: await phoneOf(b), kind: 'added', locale: own, reference: `${b.id}:r`, purchase: p.purchase, beneficiaryId: b.id,
+        params: { buyerName: params.buyerName, planName: params.planName, gymName: params.gymName, until: untilOf(p.purchase.expiresAt) },
+      });
+    }
     if (via.length) await store.recordSent(b.id, via, now());
     return { share: { link: invite.link, text: gymPassMessage('invite', params, locale) }, delivery: via };
   }
