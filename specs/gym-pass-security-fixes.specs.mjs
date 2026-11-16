@@ -408,7 +408,7 @@ test('F3 the buyer\'s name in a text is sanitised: no links, no digit runs, 30 c
   assert.equal(/evil|0712345678/.test(texts), false, texts);
   const notice = k.sent.notify.find(n => n.message.type === 'gym_pass_added').message;
   assert.equal(/evil|0712345678/.test(JSON.stringify(notice)), false);
-  assert.ok(texts.includes('A FitFlex member'), 'a name with nothing left falls back to a neutral one');
+  assert.ok(texts.includes('A member'), 'a name with nothing left falls back to a neutral one');
 });
 
 test('F3 a member block (friends feature) keeps the buyer from attaching, notifying or inviting the blocker', async () => {

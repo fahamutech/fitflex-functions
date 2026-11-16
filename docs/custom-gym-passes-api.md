@@ -29,9 +29,12 @@ moment the payment is **approved**, not from the request.
   (`gym_pass_added`) + push + WhatsApp, falling back to SMS. Without (or with a suspended / deleted / non-member account, or
   across a member block): `pending_registration` + invite link
   (`<base>/gym-pass/#<token>`, token only in the hash, stored hashed, expires in `GYM_PASS_INVITE_EXPIRY_DAYS` (30) or at the
-  pass's end, whichever is first). `<base>` is `FRIEND_INVITE_BASE_URL`, else `APP_DOWNLOAD_LINK`, else
-  `https://fitflex-af-app.web.app`. Email-only contacts have no send channel: use `…/invite` to get the link to share.
-  The buyer's name in every outgoing text is sanitised (no links, no digit runs, 30 characters; falls back to "A FitFlex member").
+  pass's end, whichever is first). The `/gym-pass` page is in the **portal**, so `<base>` is `GYM_PASS_INVITE_BASE_URL`, else
+  `PORTAL_PUBLIC_URL` (trimmed, trailing slashes stripped); `FRIEND_INVITE_BASE_URL` / `APP_DOWNLOAD_LINK` are no longer used here.
+  **If neither is set no link is built or sent** (`share.link` is `null`): the person is still invited, still attached by their
+  verified contact, and the SMS reads "...Sign up on FitFlex with this number to start using it." (WhatsApp's invite template needs
+  the link, so it is skipped and SMS is used). Email-only contacts have no send channel: use `…/invite` to get the link to share.
+  The buyer's name in every outgoing text is sanitised (no links, no digit runs, 30 characters; falls back, per reader language, to the shared "a member" word: "A member" / "Mwanachama").
 * **Invite expiry, one rule everywhere.** The *link* expires (`invitation.status: expired` in the preview, `410 invitation_expired` on
   a claim made with its token). The *person* does not: signing up and verifying the invited contact still attaches them
   (`POST /me/gym-passes/claim` without a token, or `GET /me/gym-passes`) until the pass itself ends. A claim made with a token
@@ -60,6 +63,11 @@ moment the payment is **approved**, not from the request.
   reads `awaiting_payment`. The buyer's add answers `invited` for everyone. A buyer's transition error `invalid_transition`
   carries no `from`. (Residual: a buyer who tries to suspend a person who has not got a subscription yet gets `invalid_transition`;
   attempts are throttled below.)
+* **`POST …/beneficiaries/:id/invite` does not reveal an account.** It answers the same for a person waiting for an account and one
+  already attached (both read "invited" to the buyer): same checks, same 429 `too_soon` pacing, same `{ share { link, text }, delivery }`
+  shape. For an attached person `link` is a well-formed token that matches nothing (it opens to "invitation not valid"), and the
+  person is sent the normal "added" text, not an invite. 404 `not_found` only for a removed person, the buyer's own row, another
+  purchase's row or an unknown id. (Residual: the waiting path writes a token, the other does not: a few ms of timing.)
 * **Owner add answer is masked**: `{ id, slot, isPurchaser: false, status: "invited", contactType, contact (masked) }`, no `userId`,
   no name, no `notifiedVia`, whatever the account state. Owner *lists* (`pass-memberships`, `pass-purchases/:id`) still show the
   name and `userId` of people who hold a subscription at the gym, as for any member.
@@ -111,6 +119,8 @@ Owner (`gym_operator`, or `gym_staff` with the scope): plans need scope `gyms`
   plus the route's extras (`beneficiaries`, `slots`, `gym`, `payment`, …). `startsAt` / `expiresAt` are `null` until the payment is approved.
 * `POST /me/gym-pass-purchases` → `202 { purchase, paymentRequest }`; `paymentRequest` is the **raw inserted `PaymentRequest` row**
   (all columns, e.g. `id, memberId, gymId, amountTzs, status, provider, passPurchaseId, requestedAt, …`), not a reduced view.
+* `POST /me/gym-pass-purchases` accepts an optional **`expectedPriceTzs`** (the price the member was shown). If present and not equal to
+  the plan's current price: `409 { error: "price_changed", priceTzs, currency }` and nothing is created. Absent or `null` = no check.
 * `beneficiary_limit_exceeded`: **`400` at checkout** with `{ limit }` = the absolute group maximum (50); **`409` on an add** with
   `{ limit }` = that pass's slot count.
 * Owner memberships `beneficiaries[]`: `{ id, slot, isPurchaser, status, userId|null, displayName|null, contactType|null, contact (masked)|null,
@@ -129,7 +139,7 @@ where a person invited without an account is attached.
 
 * `GYM_CUSTOM_PASSES` — the flag.
 * `GYM_PASS_INVITE_EXPIRY_DAYS` — invite link life, default 30.
-* `FRIEND_INVITE_BASE_URL` (else `APP_DOWNLOAD_LINK`, else `https://fitflex-af-app.web.app`) — the base of the invite link
+* `GYM_PASS_INVITE_BASE_URL` (else `PORTAL_PUBLIC_URL`; neither → no link is sent) — the base of the invite link (the portal host that serves `/gym-pass`)
   (`<base>/gym-pass/#<token>`; shared with friend invitations).
 * Limits: `GYM_PASS_ADD_ATTEMPTS_PER_HOUR`, `GYM_PASS_BUYER_ADDS_PER_HOUR`, `GYM_PASS_OWNER_ADDS_PER_GYM_PER_HOUR`,
   `GYM_PASS_TARGET_PER_DAY`, `GYM_PASS_PURCHASE_PER_HOUR`, `GYM_PASS_SENDS_PER_PURCHASE` (table above).
