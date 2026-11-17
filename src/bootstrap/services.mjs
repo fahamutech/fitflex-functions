@@ -822,10 +822,13 @@ export const operatorService = createOperatorService({
   settlementSummary: (args) => settlementViewService.ownerDashboard(args),
   // The scanner preview refuses as the check-in would (gym_not_verified).
   gymOpenToPass,
+  // Defined further down; read at call time.
+  passLabels: ids => gymPassStore.passLabels(ids),
 });
 
 export const ownerGymService = createOwnerGymService({
   gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate, gymPayoutOwner,
+  passLabels: ids => gymPassStore.passLabels(ids),
   onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
 });
 export const ownerStaffService = createOwnerStaffService({

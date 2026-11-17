@@ -209,9 +209,9 @@ export const ownerGymPassAttendance = {
 
 export const ownerGymPassSummary = {
   created, method: 'get', path: '/owner/gyms/:gymId/pass-summary',
-  description: `Owner (scope payments): totals for my gym's custom passes → { gymId, currency, plans { total, active }, sales { count, revenueTzs, pendingPayment }, byCategory { individual|couples|group: { sales, revenueTzs, beneficiaries } }, byDuration:[{ durationValue, durationUnit, sales, revenueTzs }], beneficiaries { active, pendingRegistration, suspended } (running passes), memberships { active, expired } }. Revenue is the approved payment, counted ONCE per purchase however many people it covers. ${FLAG}`,
+  description: `Owner (scope payments): totals for my gym's custom passes → { gymId, currency, plans { total, active }, sales { count, revenueTzs, pendingPayment }, byCategory { individual|couples|group: { sales, revenueTzs, beneficiaries } }, byDuration:[{ durationValue, durationUnit, sales, revenueTzs }], beneficiaries { active, pendingRegistration, suspended } (running passes), memberships { active, expired }, byPlan:[{ planId, name, category, sales, revenueTzs, people }], expiring { withinDays, purchases, people }, utilisation { visits, peopleWithVisit, peopleNeverVisited, activePeople, visitsPerActivePerson }, groups { slots, filled, fillRate } }. Revenue is the approved payment, counted ONCE per purchase however many people it covers. Optional ?from (inclusive) & ?to (exclusive): only sales whose payment was approved in that range. ${FLAG}`,
   onGuard: ownerGuard('get', 'payments', 'GET /owner/gyms/:gymId/pass-summary'),
-  onRequest: async (req, res) => send(res, await gymPassService.summary({ owner: await ownerOf(req), gymId: req.params.gymId })),
+  onRequest: async (req, res) => send(res, await gymPassService.summary({ owner: await ownerOf(req), gymId: req.params.gymId, query: req.query || {} })),
 };
 
 const ownerChange = (action, fn, text) => ({
