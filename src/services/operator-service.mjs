@@ -6,6 +6,7 @@ import { CHECKIN_STATUS, publicCheckin } from '../shared/checkin-status.mjs';
 import { validateCheckIn, pickSubscriptionForGym, validateTrainerHomeEntry, fundedBySubscription, visitNeedsVerifiedGym } from '../shared/check-in-rules.mjs';
 import { issue as issueQr, verify as verifyQrToken, issueGymQr, verifyGymQr } from '../auth/qr-token.mjs';
 import { extractQrPayload } from './web-gym-profile-service.mjs';
+import { gymCustomPassesOn } from '../shared/feature-flags.mjs';
 
 function sameEatDate(a, b) {
   const fmt = new Intl.DateTimeFormat('en-CA', {
@@ -22,6 +23,8 @@ export function createOperatorService({
   // (gymId) → boolean: is the gym open to FitFlex Pass / sponsored visitors
   // (owner verified)? The same check the check-in itself makes.
   gymOpenToPass = null,
+  // (purchaseIds) → Map id → { name, category }: the custom pass a visit was made with (GYM_CUSTOM_PASSES), one batched lookup.
+  passLabels = null,
 }) {
   // B2B lookups must never break scanning: on any error, behave as before.
   const sponsored = async (fn) => {
@@ -143,6 +146,16 @@ export function createOperatorService({
     };
   }
 
+  /**
+   * GYM_CUSTOM_PASSES: `pass: { name, category } | null` on each row, from ONE lookup of the page's purchase ids.
+   * Null for every visit that was not made with a custom pass. Off: no key is added.
+   */
+  async function attachPass(list) {
+    if (!passLabels || !gymCustomPassesOn()) return;
+    const labels = await passLabels(list.map(c => c.passPurchaseId));
+    for (const c of list) c.pass = (c.passPurchaseId && labels.get(c.passPurchaseId)) || null;
+  }
+
   async function recentCheckIns(operator) {
     const ids = operatorGymIds(operator);
     const allCheckins = await checkins.filterAsync(c => ids.includes(c.gymId));
@@ -155,6 +168,7 @@ export function createOperatorService({
       list[i].memberPhone = null;
       list[i].memberEmail = null;
     }
+    await attachPass(list);
     return list;
   }
 
@@ -201,6 +215,10 @@ export function createOperatorService({
     const ownedPeriodCheckins = allCheckins.filter(c => ownedGymIds.includes(c.gymId) && inPeriod(c));
     const ownedFilteredCheckins = ownedPeriodCheckins.filter(matchesMemberType);
     const unique = rows => new Set(rows.map(c => c.memberId).filter(Boolean)).size;
+    // GYM_CUSTOM_PASSES: visits made with a custom pass (never voided), from the same rows. Off: no new keys.
+    const withPass = gymCustomPassesOn();
+    const isPassVisit = c => Boolean(c.passPurchaseId) && c.status !== CHECKIN_STATUS.VOIDED;
+    const passFields = rows => (withPass ? { passVisits: rows.filter(isPassVisit).length, passMembers: unique(rows.filter(isPassVisit)) } : {});
 
     // ── Previous period (same duration, immediately before current period) ──
     const periodDurationMs = +periodEnd - +periodStart;
@@ -249,6 +267,7 @@ export function createOperatorService({
         directMembers: unique(directRows),
         fitflexVisits: fitflexRows.length,
         fitflexMembers: unique(fitflexRows),
+        ...passFields(rows),
       };
     });
     // What FitFlex pays this gym, from the settlement engine. A failure
@@ -285,6 +304,7 @@ export function createOperatorService({
       directMembers: unique(selectedGymPeriodCheckins.filter(isDirectVisit)),
       fitflexVisits: selectedGymPeriodCheckins.filter(isFitFlexVisit).length,
       fitflexMembers: unique(selectedGymPeriodCheckins.filter(isFitFlexVisit)),
+      ...passFields(selectedGymPeriodCheckins),
       overall: {
         gymCount: ownedGyms.length,
         totalVisits: ownedFilteredCheckins.length,
@@ -293,6 +313,7 @@ export function createOperatorService({
         directMembers: unique(ownedPeriodCheckins.filter(isDirectVisit)),
         fitflexVisits: ownedPeriodCheckins.filter(isFitFlexVisit).length,
         fitflexMembers: unique(ownedPeriodCheckins.filter(isFitFlexVisit)),
+        ...passFields(ownedPeriodCheckins),
       },
       gymSummaries,
       settlement,

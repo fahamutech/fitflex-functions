@@ -78,9 +78,42 @@ export const PHOTO_BYTE_BUDGET = 1_500_000;     // decoded bytes across the thum
 export const TRAINER_PHOTO_MAX_BYTES = 100_000;
 const decodedBytes = uri => Math.floor(((uri.length - uri.indexOf(',') - 1) * 3) / 4);
 
+// A stored file name as uploads made it before the strict storage-path rule: one path segment of unreserved
+// characters, a few literal marks ("(1)", "!") and percent-escapes ("%20").
+const CID_SEGMENT = /^[A-Za-z0-9._~-]+$/;
+const ENCODED_FILE_SEGMENT = /^(?:[A-Za-z0-9._~()!'*@$&+,;=:-]|%[0-9A-Fa-f]{2})+$/;
+const DOT_SEGMENT = /^\.+$/;
+
+/**
+ * An image already on OUR storage whose file name carries spaces or symbols ("/storage/<cid>/Gym%20Old%20School.webp"):
+ * the strict rule (media-src isStoragePath) refuses any "%", so such a photo, which the apps already show, was dropped
+ * from the page. Still ours only: same origin and base path as PUBLIC_API_URL, exactly /storage/<cid>/<file>, no query,
+ * fragment or credentials, and the decoded name holds no slash, backslash, control character or dot segment.
+ * Display only: what may be STORED is unchanged (media-src). → the absolute URL | null.
+ */
+export function ownStorageUrl(value, base = publicBaseUrl()) {
+  if (!base || typeof value !== 'string' || !value || value.length > 2048) return null;
+  try {
+    const ours = new URL(base);
+    const url = value.startsWith('/storage/') ? new URL(`${base}${value}`) : new URL(value);
+    if (url.origin !== ours.origin || url.search || url.hash || url.username || url.password) return null;
+    const prefix = ours.pathname === '/' ? '' : ours.pathname;
+    if (!url.pathname.startsWith(`${prefix}/storage/`)) return null;
+    const segments = url.pathname.slice(prefix.length).split('/');   // ['', 'storage', cid, file]
+    if (segments.length !== 4) return null;
+    const [, , cid, file] = segments;
+    if (!CID_SEGMENT.test(cid) || DOT_SEGMENT.test(cid) || !ENCODED_FILE_SEGMENT.test(file)) return null;
+    const name = decodeURIComponent(file);
+    // eslint-disable-next-line no-control-regex
+    if (DOT_SEGMENT.test(name) || /[/\\\u0000-\u001f\u007f]/.test(name)) return null;
+    return url.href;
+  } catch { return null; }                                           // not a URL, or a broken escape
+}
+
 /**
  * One image as the page may show it: a valid-shaped data:image URI (png/jpeg/webp, no SVG) or one of OUR storage
- * paths made absolute on PUBLIC_API_URL; anything else (any other remote URL, unset base) → null.
+ * paths made absolute on PUBLIC_API_URL (also with an escaped file name, see ownStorageUrl); anything else (any
+ * other remote URL, unset base) → null.
  * → { src, bytes } | null. The bytes of a storage URL cost nothing here (the browser fetches it separately).
  */
 export function cleanImage(value, { maxBytes = PHOTO_BYTE_BUDGET } = {}) {
@@ -90,7 +123,8 @@ export function cleanImage(value, { maxBytes = PHOTO_BYTE_BUDGET } = {}) {
     const bytes = decodedBytes(value);
     return bytes > 0 && bytes <= maxBytes ? { src: value, bytes } : null;
   }
-  const url = documentLogoUrl(value, publicBaseUrl());
+  const base = publicBaseUrl();
+  const url = documentLogoUrl(value, base) ?? ownStorageUrl(value, base);
   return url ? { src: url, bytes: 0 } : null;
 }
 

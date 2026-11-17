@@ -22,6 +22,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { friendInvitationLimits } from './friend-invitation-service.mjs';
 import { gymPassMessage, gymPassNotice } from '../shared/gym-pass-texts.mjs';
 import { eatParts } from '../shared/eat-time.mjs';
+import { EXPIRING_SOON_DAYS } from '../shared/member-status.mjs';
 import { normalizeEmail, normalizePhone } from '../shared/identifiers.mjs';
 import {
   validatePlanInput, planSnapshot, checkoutHeadcount, purchaserRemovalCap, maskContact, effectivePurchaseStatus,
@@ -841,12 +842,19 @@ export function createGymPassService({
   }
 
   /** Counts by category and duration, revenue (approved payments, once per purchase), people, expired. */
-  async function summary({ owner, gymId }) {
+  async function summary({ owner, gymId, query = {} }) {
     const g = await ownGym(owner, gymId);
     if (g.error) return g;
-    await store.expireDue({ gymId, at: now() });
+    const at = now();
+    await store.expireDue({ gymId, at });
     const plans = await store.listPlans(gymId);
-    const { purchases, people } = await store.summaryRows(gymId);
+    // ?from (inclusive) / ?to (exclusive): sales whose payment was approved in the range (PaymentRequest.decidedAt).
+    const { purchases, people } = await store.summaryRows(gymId, { from: asDate(query?.from), to: asDate(query?.to) });
+    const byPlan = new Map();
+    const counted = new Set();
+    const groups = { slots: 0, filled: 0 };
+    const expiring = { withinDays: EXPIRING_SOON_DAYS, purchases: 0, people: 0 };
+    const soon = +at + EXPIRING_SOON_DAYS * 86_400_000;
     const peopleBy = new Map();
     for (const r of people) peopleBy.set(r.purchaseId, [...(peopleBy.get(r.purchaseId) ?? []), r]);
     const byCategory = Object.fromEntries(PASS_CATEGORIES.map(c => [c, { sales: 0, revenueTzs: 0, beneficiaries: 0 }]));
@@ -870,6 +878,12 @@ export function createGymPassService({
       byCategory[s.category].sales += 1;
       byCategory[s.category].revenueTzs += p.amountTzs ?? 0;
       byCategory[s.category].beneficiaries += covered;
+      counted.add(p.id);
+      const bp = byPlan.get(p.planId) ?? { planId: p.planId, name: s.name ?? null, category: s.category, sales: 0, revenueTzs: 0, people: 0 };
+      bp.sales += 1; bp.revenueTzs += p.amountTzs ?? 0; bp.people += covered;
+      byPlan.set(p.planId, bp);
+      if (s.category === 'group') { groups.slots += Number(s.beneficiaryLimit) || 0; groups.filled += covered; }
+      if (p.status === 'active' && p.expiresAt && +new Date(p.expiresAt) > +at && +new Date(p.expiresAt) <= soon) { expiring.purchases += 1; expiring.people += covered; }
       const key = `${s.durationValue}:${s.durationUnit}`;
       const d = byDuration.get(key) ?? { durationValue: s.durationValue, durationUnit: s.durationUnit, sales: 0, revenueTzs: 0 };
       d.sales += 1; d.revenueTzs += p.amountTzs ?? 0;
@@ -883,7 +897,28 @@ export function createGymPassService({
         }
       } else out.memberships.expired += 1;
     }
-    return { ...out, byCategory, byDuration: [...byDuration.values()].sort((a, b) => b.sales - a.sales) };
+    // Utilisation: visits on the counted sales (valid, disputed or flagged; never voided) against the people whose account is attached.
+    const util = await store.utilisationRows(gymId);
+    const visitsBy = new Map();
+    let visits = 0;
+    for (const v of util.visits) {
+      if (!counted.has(v.purchaseId)) continue;
+      visits += v.visits;
+      visitsBy.set(v.beneficiaryId, (visitsBy.get(v.beneficiaryId) ?? 0) + v.visits);
+    }
+    const activeRows = util.active.filter(r => counted.has(r.purchaseId));
+    const activePeople = activeRows.length;
+    const withVisit = activeRows.filter(r => visitsBy.has(r.id)).length;
+    const utilisation = {
+      visits, peopleWithVisit: withVisit, peopleNeverVisited: activePeople - withVisit, activePeople,
+      visitsPerActivePerson: activePeople ? Math.round((visits / activePeople) * 100) / 100 : 0,
+    };
+    return {
+      ...out, byCategory, byDuration: [...byDuration.values()].sort((a, b) => b.sales - a.sales),
+      byPlan: [...byPlan.values()].sort((a, b) => b.sales - a.sales || b.revenueTzs - a.revenueTzs),
+      expiring, utilisation,
+      groups: { slots: groups.slots, filled: groups.filled, fillRate: groups.slots ? Math.round((groups.filled / groups.slots) * 10000) / 10000 : 0 },
+    };
   }
 
   return {
