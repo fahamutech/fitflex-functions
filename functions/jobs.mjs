@@ -3,6 +3,8 @@ import '../src/bootstrap/init.mjs';
 import { subscriptions, notificationService, challengeRewardService, deliveryService, automationService, partnerKycService, b2bProgramService, b2bBillingService, b2bConsumptionService, b2bSponsorRefundService, b2bFinanceService, b2bCollectionsService, b2bAnalyticsService, opsService, settlementService, settlementClawbackService, refundClawbackService, trainerSettlementService, vendorSettlementService, smsService, shopService, shopReconciliationService, friendInvitationService, vendorCustomerService, shopBannerService, flashSaleService, vendorImportService } from '../src/bootstrap/services.mjs';
 import { shopBannersOn, shopFlashSalesOn, eventsModuleOn, eventsRegistrationOn, eventsWebhooksOn, eventsRewardsOn, eventsAnalyticsOn, eventsKitOfflineOn, eventsWaitlistOn } from '../src/shared/feature-flags.mjs';
 import { b2bPrograms } from '../src/bootstrap/collections.mjs';
+import { promoteStartedPlans } from '../src/bootstrap/services.mjs';
+import { SCHEDULED, sameProduct, scheduledHasStarted } from '../src/shared/subscription-status.mjs';
 import { refundStatementClawbackOn, trainerStatementDraftsOn, vendorStatementDraftsOn } from '../src/shared/feature-flags.mjs';
 
 const created = new Date().toISOString();
@@ -13,13 +15,28 @@ export const renewalNotifier = {
   onJob: async () => {
     const now = Date.now();
     const gymsRemind = await automationService.gymsWithReminders();
+    // A plan whose renewal is already paid for (scheduled) needs no reminder.
+    const scheduled = await subscriptions.filterAsync(s => s.status === SCHEDULED);
     for (const s of await subscriptions.filterAsync(s => s.status === 'active')) {
       const days = Math.round((+new Date(s.renewsAt) - now) / 86_400_000);
       if (![3, 1, 0].includes(days)) continue;
+      if (scheduled.some(r => sameProduct(r, s))) continue;
       if (s.type === 'direct_sub' && gymsRemind.has(s.homeGymId)) continue;
       const r = await notificationService.notifyRenewal(s, days);
       if (!r?.duplicate) console.log(`[renewal] member=${s.memberId} sub=${s.id} T-${days} renewsAt=${s.renewsAt}`);
     }
+  }
+};
+
+export const scheduledPlanStarter = {
+  created, rule: '*/15 * * * *', // every 15 minutes
+  description: 'Renewals paid before the current plan ended start when it ends: plans scheduled to start by now become active and the member is told. Safe to rerun and to overlap (the change is conditional on still being scheduled). Members are also promoted on their next app read or check-in.',
+  onJob: async () => {
+    const now = new Date();
+    const due = await subscriptions.filterAsync(s => scheduledHasStarted(s, now));
+    if (!due.length) return;
+    await promoteStartedPlans(due, now);
+    console.log(`[scheduled-plans] started=${due.length}`);
   }
 };
 

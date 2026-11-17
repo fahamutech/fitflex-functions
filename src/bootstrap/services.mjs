@@ -2,6 +2,9 @@
 // dependencies injected, then imported by the thin REST modules in functions/.
 import { createMobileMoneyService } from '../services/mobile-money-service.mjs';
 import { createTunzaaClient, tunzaaSettings } from '../integrations/payments/tunzaa.mjs';
+import { createAzamPayClient, azampaySettings } from '../integrations/payments/azampay.mjs';
+import { AZAMPAY_PROVIDER } from '../shared/mobile-money-claim.mjs';
+import { promoteStartedSubscriptions } from '../shared/subscription-status.mjs';
 import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose, invalidateAccountStatus } from '../auth/jwt.mjs';
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
 import { createPinAuthService } from '../services/pin-auth-service.mjs';
@@ -36,6 +39,7 @@ import { createOrgMembershipService } from '../services/org-membership-service.m
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
 import { createHrOrgConversionService } from '../services/hr-org-conversion-service.mjs';
+import { azampayPaymentsOn, azampayTrainerProductsOn, azampaySandboxSettlesOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
 import { orgOnlySponsorsOn, identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
 import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
@@ -105,6 +109,8 @@ import { createExerciseAdminService } from '../services/training/exercise-admin-
 import { createSocialService } from '../services/social-service.mjs';
 import { createUsernameService } from '../services/username-service.mjs';
 import { createFriendInvitationService } from '../services/friend-invitation-service.mjs';
+import { createGymPassService } from '../services/gym-pass-service.mjs';
+import { createPgGymPassStore } from '../infra/gym-pass-store-pg.mjs';
 import { createVerifiedContacts } from '../shared/verified-contacts.mjs';
 import { createTrainerClientService } from '../services/trainer-client-service.mjs';
 import { createGymSharingService } from '../services/gym-sharing-service.mjs';
@@ -707,10 +713,26 @@ export const manualPayment = {
   options: () => manualPaymentOptions(settingsService.manualPaymentSettings(), manualPayInstructionsOn()),
 };
 export const paymentReferenceStore = createPaymentReferenceStore({ db });
+// A renewal paid before the member's current plan ended is stored 'scheduled' and becomes
+// active when its start comes: on the member's next read or check-in, or by the sweep job.
+// When it starts the member is told and the usual activation events run (they did not run
+// at payment time); the promotion analytics were recorded when it was paid.
+async function onScheduledPlanStarted(sub) {
+  await finishSponsoredPass(sub);
+  try { await notificationService.notifySubscriptionActivated(sub); } catch { /* best-effort */ }
+  try { await partnerNotifier.gymMemberJoined(sub); } catch { /* best-effort */ }
+  try { await automationService.handleEvent({ type: 'membership_activated', subscription: sub }); } catch { /* best-effort */ }
+}
+export const promoteStartedPlans = (subs, now = new Date()) =>
+  promoteStartedSubscriptions(subscriptions, subs, { now, onStarted: onScheduledPlanStarted });
+const onSubscriptionScheduled = async (sub, ctx) => {
+  try { await promotionEventsService.recordSubscription(sub, ctx); } catch { /* best-effort */ }
+};
 export const subscriptionService = createSubscriptionService({
   subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId, manualPayment,
   auditLog, referenceStore: paymentReferenceStore,
   eventLabels: requests => eventsPaymentsService.paymentLabels(requests),
+  promoteStarted: promoteStartedPlans,
 });
 // Account deletion (owner decision 2026-10-30). usernames are handled inside the erasure itself; the
 // services below are defined further down this file, and these only run later.
@@ -763,6 +785,7 @@ export const checkInService = createCheckInService({
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
   gymOpenToPass,
+  promoteStarted: promoteStartedPlans,
 });
 // Gym settlement configuration (settlement Phase 2): not used by any payout flow yet.
 export const settlementConfigService = createSettlementConfigService();
@@ -842,20 +865,28 @@ export const adminPaymentService = createAdminPaymentService({
     await notificationService.notifySubscriptionActivated(sub);
     await lifecycle.activated(sub, ctx);
   },
+  onSubscriptionScheduled,
+  scheduleRenewals: scheduledRenewalsOn,
   onSubscriptionPaymentReversed: sub => promotionEventsService.reverseSubscription(sub),
   // An upgraded pass is the same plan: tell the member, nothing else (it is no new membership or conversion).
   onPassUpgraded: sub => notificationService.notifySubscriptionActivated(sub),
   onPaymentRejected: (sub, request) => lifecycle.paymentFailed(sub, { paymentRequestId: request.id, amountTzs: request.amountTzs }),
   onBookingPayment: (groupId, status, opts) => trainerBookingService.applyPaymentToGroup(groupId, status, opts),
+  // Custom gym passes: one payment, one purchase; every covered person gets their own subscription (gymPassService is defined further down).
+  onPassPayment: (request, status, opts) => gymPassService.onPaymentStatus(request, status, opts),
   // 409 group_slot_rebooked { bookingIds } when a rejected session's slot was booked by someone else since.
   beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
   // The same, found only after the decision was written (a race): the decision was undone; staff must look.
   onBookingPaymentRefused: ({ request, refusal, rolledBack, actorId }) => opsService.raise({
     type: 'payment_conflict', severity: 'high',
-    title: rolledBack
-      ? `Trainer booking payment ${request.id} was put back: a session's slot was booked by someone else`
-      : `Trainer booking payment ${request.id} could not be put back after its group refused it — check it by hand`,
-    dedupeKey: `trainer_group_slot_rebooked:${request.id}`,
+    title: request.passPurchaseId
+      ? (rolledBack
+        ? `Gym pass payment ${request.id} was put back: the pass could not be activated (${refusal.error})`
+        : `Gym pass payment ${request.id} could not be put back after the pass failed to activate — check it by hand`)
+      : (rolledBack
+        ? `Trainer booking payment ${request.id} was put back: a session's slot was booked by someone else`
+        : `Trainer booking payment ${request.id} could not be put back after its group refused it — check it by hand`),
+    dedupeKey: `${request.passPurchaseId ? 'gym_pass_activation_failed' : 'trainer_group_slot_rebooked'}:${request.id}`,
     entityType: 'payment_request', entityId: request.id,
     detail: { bookingGroupId: request.bookingGroupId, bookingIds: refusal.bookingIds || [], rolledBack, actorId },
   }),
@@ -877,7 +908,7 @@ export const tunzaaSecretKey = tunzaaConfig?.secretKey ?? null;
 if (tunzaaConfig && tunzaaPaymentsOn() && tunzaaConfig.environment !== 'live') {
   console.warn(`[tunzaa] payments are ON against the SANDBOX${tunzaaSandboxSettlesOn() ? ' and sandbox payments settle real plans (TUNZAA_SANDBOX_SETTLES)' : ' but will not be offered (set TUNZAA_SANDBOX_SETTLES to rehearse)'}`);
 }
-export const mobileMoneyService = createMobileMoneyService({
+export const tunzaaMobileMoneyService = createMobileMoneyService({
   paymentRequests, subscriptions, adminPaymentService, auditLog,
   client: tunzaaConfig ? createTunzaaClient({ settings: tunzaaConfig }) : null,
   enabled: tunzaaPaymentsOn,
@@ -905,6 +936,52 @@ export const mobileMoneyService = createMobileMoneyService({
     mark: async id => { await db('WebhookSeen').insert({ id, at: new Date() }).onConflict('id').ignore(); },
   },
 });
+// Pay by mobile money through AzamPay. Dormant unless AZAMPAY_PAYMENTS is set; the client
+// exists only when AZAMPAY_APP_NAME, AZAMPAY_CLIENT_ID and AZAMPAY_CLIENT_SECRET are set.
+// On, AzamPay REPLACES Tunzaa for new payments (owner decision 2026-11-15). Event orders stay
+// on Tunzaa's dormant flow (EVENTS_PAYMENTS_TUNZAA) until they are moved separately.
+const azampayConfig = azampaySettings();
+export const azampayClient = azampayConfig ? createAzamPayClient({ settings: azampayConfig }) : null;
+if (azampayConfig && azampayPaymentsOn() && azampayConfig.environment !== 'live') {
+  console.warn(`[azampay] payments are ON against the SANDBOX${azampaySandboxSettlesOn() ? ' and sandbox payments settle real plans (AZAMPAY_SANDBOX_SETTLES)' : ' but will not be offered (set AZAMPAY_SANDBOX_SETTLES to rehearse)'}`);
+}
+export const azampayMobileMoneyService = createMobileMoneyService({
+  paymentRequests, subscriptions, adminPaymentService, auditLog,
+  client: azampayClient,
+  provider: AZAMPAY_PROVIDER,
+  enabled: azampayPaymentsOn,
+  canSettle: () => azampayConfig?.environment === 'live' || azampaySandboxSettlesOn(),
+  tierSellable: settingsService.isTierSellable,
+  trainerProducts: azampayTrainerProductsOn,
+  beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
+  // Event orders are not payable through AzamPay yet.
+  eventOrders: null,
+  webhookSeen: null,
+});
+/**
+ * The mobile-money service the routes use. New payments go to AzamPay while
+ * AZAMPAY_PAYMENTS is on, else to Tunzaa as before. A refresh is answered by the
+ * provider the request was sent through, so a Tunzaa prompt that is out when
+ * AzamPay is switched on still settles.
+ */
+const newPaymentsService = () => (azampayPaymentsOn() ? azampayMobileMoneyService : tunzaaMobileMoneyService);
+async function serviceForRequest(paymentRequestId) {
+  const request = paymentRequestId ? await paymentRequests.findByIdAsync(paymentRequestId) : null;
+  if (request?.provider === AZAMPAY_PROVIDER) return azampayMobileMoneyService;
+  if (request?.provider === 'tunzaa') return tunzaaMobileMoneyService;
+  return newPaymentsService();
+}
+export const mobileMoneyService = {
+  options: () => newPaymentsService().options(),
+  payableProducts: role => newPaymentsService().payableProducts(role),
+  pay: args => newPaymentsService().pay(args),
+  refresh: async args => (await serviceForRequest(args?.paymentRequestId)).refresh(args),
+  settleById: async id => (await serviceForRequest(id)).settleById(id),
+  /** Tunzaa's signed callback (POST /webhooks/tunzaa). */
+  handleCallback: payload => tunzaaMobileMoneyService.handleCallback(payload),
+  /** AzamPay's callback (POST /webhooks/azampay); the route verifies the signature first. */
+  handleAzamPayCallback: payload => azampayMobileMoneyService.handleCallback(payload),
+};
 export const adminOwnerService = createAdminOwnerService({
   users, gyms, checkins, auditLog, gymService, gymPayoutOwner,
   onOwnerRemoved: async (prior) => {
@@ -951,6 +1028,8 @@ export const portalUserService = createPortalUserService({
 export const webhookService = createWebhookService({
   subscriptions, webhookSeen, paymentRequests,
   onSubscriptionActivated: lifecycle.activated,
+  onSubscriptionScheduled,
+  scheduleRenewals: scheduledRenewalsOn,
   onPaymentFailed: (sub, paymentId) => lifecycle.paymentFailed(sub, { reference: `selcom:${paymentId}` }),
 });
 export const gymReviewService = createGymReviewService({
@@ -1036,6 +1115,48 @@ export const friendInvitationService = createFriendInvitationService({
     const q = db('FriendInvitation').where({ id, [opts.column ?? 'status']: from });
     if (opts.whereRecipientNull) q.whereNull('recipientUserId');
     return (await q.update(patch)) === 1;
+  },
+});
+// Custom gym passes (GYM_CUSTOM_PASSES): plans, one-payment purchases and per-person subscriptions. The people a pass
+// covers are notified (not asked): in-app + push, then WhatsApp, with SMS when WhatsApp cannot be used. WhatsApp needs
+// an approved template per kind (GYM_PASS_WHATSAPP_TEMPLATE_ADDED / _INVITE) and a configured provider; until then SMS
+// (through the shared SMS service, category 'invitation') carries the message. Contacts are VERIFIED ones only.
+const gymPassWhatsapp = (kind) => ({
+  template: kind === 'invite' ? (process.env.GYM_PASS_WHATSAPP_TEMPLATE_INVITE || 'gym_pass_invite') : (process.env.GYM_PASS_WHATSAPP_TEMPLATE_ADDED || 'gym_pass_added'),
+  parameters: p => (kind === 'invite' ? [p.buyerName, p.planName, p.gymName, p.link] : [p.buyerName, p.planName, p.gymName, p.until]),
+});
+export const gymPassStore = createPgGymPassStore({ db });
+export const gymPassService = createGymPassService({
+  store: gymPassStore, gyms, users, auditLog, blocks,
+  contacts: { findMember: verifiedContacts.findMember, contactsFor: verifiedContacts.contactsFor },
+  notify: (userId, message) => notificationService.notify(userId, message),
+  localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
+  memberReference: (reference, payerPhone, memberId, product) => subscriptionService.memberReferenceFor(reference, payerPhone, memberId, product),
+  referenceFields: ref => subscriptionService.referenceFields(ref),
+  channels: {
+    whatsapp: async ({ phone, kind, params, locale, reference }) => {
+      if (!whatsappChannelService.available()) return { status: 'skipped:whatsapp_not_available' };
+      const language = locale === 'sw' ? 'sw' : 'en';
+      const cfg = gymPassWhatsapp(kind);
+      const approved = await db('WhatsAppTemplate')
+        .where({ provider: whatsAppProvider.name, providerTemplateName: cfg.template, language, approvalStatus: 'approved' }).first('id');
+      if (!approved) return { status: 'skipped:whatsapp_template_not_approved' };
+      const to = whatsAppProvider.validateRecipient(phone);
+      if (!to.ok) return { status: `skipped:${to.reason}` };
+      const r = await whatsAppProvider.sendTemplate({
+        to: to.to, templateName: cfg.template, language, parameters: cfg.parameters({ ...params, buyerName: params.buyerName || 'FitFlex' }).map(whatsappParameter), category: 'utility', reference,
+      });
+      if (r.ok) return { status: 'sent' };
+      return { status: r.error === 'recipient_opted_out' ? 'skipped:recipient_opted_out' : 'failed' };
+    },
+    sms: async ({ phone, text, reference, logText }) => {
+      const r = await smsService.send({
+        category: 'invitation', text, logText: logText ?? text, maxAttempts: 1,
+        recipients: [{ phone, dedupeKey: `gym-pass:${reference}` }],
+      });
+      const x = r.results?.[0] ?? {};
+      return { status: x.outcome === 'sent' ? 'sent' : (x.outcome === 'skipped' ? `skipped:${x.reason ?? 'not_sent'}` : 'failed') };
+    },
   },
 });
 export const activityService = createActivityService({
@@ -1483,8 +1604,9 @@ export const eventsRosterService = createEventsRosterService({ db, registration:
 export const eventsPaymentsService = createEventsPaymentService({
   db, eventStore, money: eventMoneyStore, registration: eventsRegistrationService, users, references: paymentReferenceStore, manualPayment,
   flags: { manual: eventsPaymentsManualOn, tunzaa: eventsPaymentsTunzaaOn },
-  providerEffective: () => mobileMoneyService.options().enabled === true,
-  providerSettle: requestId => mobileMoneyService.settleById(requestId),
+  // Event orders are paid through Tunzaa only (not moved to AzamPay yet).
+  providerEffective: () => tunzaaMobileMoneyService.options().enabled === true,
+  providerSettle: requestId => tunzaaMobileMoneyService.settleById(requestId),
   notify: (userId, message) => notificationService.notify(userId, message),
   localeOf: eventsLocaleOf,
   ops: opsService,

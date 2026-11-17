@@ -1,4 +1,7 @@
-// Mobile-money payment of a payment request (Malipo by Tunzaa).
+// Mobile-money payment of a payment request (Malipo by Tunzaa or AzamPay).
+// One instance per provider (`provider` = 'tunzaa' | 'azampay'); bootstrap picks which
+// one takes new payments (AZAMPAY_PAYMENTS replaces Tunzaa) and routes refreshes and
+// callbacks to the provider a request was sent through.
 //
 // A payment request is created as before (pass, upgrade, gym plan; with
 // TUNZAA_TRAINER_PRODUCTS also trainer sessions and a trainer's gym pass). "Pay now"
@@ -12,9 +15,12 @@
 //      ── sent ──▶ pending (provider tunzaa, reference = transaction id)  prompt on the phone
 //      ── COMPLETED ──▶ approved       ── FAILED ──▶ pending again (member may retry)
 //
-// Nothing the callback says is taken on trust: a COMPLETED callback is only a
-// trigger, and the transaction's status and amount are read back from Tunzaa
-// before the request is approved. A callback is tied to its request by OUR
+// Nothing the callback says is taken on trust: with Tunzaa a COMPLETED callback
+// is only a trigger, and the transaction's status and amount are read back from
+// Tunzaa before the request is approved. AzamPay offers no status query for
+// collections: its callback is verified by RSA signature against AzamPay's own
+// public key (by the route), and the client says so (`confirmsByCallback`); the
+// amount, the transaction and its single use are then checked here the same way. A callback is tied to its request by OUR
 // reference (reference_id = "<request id>.<attempt>"), which only a signed
 // callback from Tunzaa can carry, so a prompt whose answer was lost (timeout)
 // still settles the right request.
@@ -26,7 +32,6 @@ import {
   MOBILE_MONEY_PROVIDER, CLAIM_PLACEHOLDER, isClaimPlaceholder, claimAge, mobileMoneyInFlight,
 } from '../shared/mobile-money-claim.mjs';
 
-const PROVIDER = MOBILE_MONEY_PROVIDER;
 const MANUAL = 'admin_approved';
 /** Products paid this way: FitFlex Pass (incl. upgrades) and a gym's own plans. */
 const BASE_PAYABLE = Object.freeze([PRODUCT_TYPES.FITFLEX_PASS, PRODUCT_TYPES.GYM_SUBSCRIPTION]);
@@ -46,7 +51,6 @@ const ROLE_PRODUCTS = Object.freeze({
 });
 /** Mobile money is in Tanzanian shillings only. */
 const CURRENCY = 'TZS';
-const ACTOR = 'tunzaa';
 const PLACEHOLDER = CLAIM_PLACEHOLDER;
 /** At most this many prompts per member / per phone in the window. */
 const LIMITS = { member: 5, phone: 3, windowMs: 10 * 60_000 };
@@ -58,7 +62,8 @@ export const requestIdOf = (referenceId) => String(referenceId ?? '').split('.')
 
 export function createMobileMoneyService({
   paymentRequests, subscriptions, adminPaymentService, auditLog,
-  client = null,           // null while Tunzaa's credentials are not set
+  client = null,           // null while the provider's credentials are not set
+  provider = MOBILE_MONEY_PROVIDER, // 'tunzaa' (default) | 'azampay': written on the request and the audit actor
   enabled = () => false,   // the TUNZAA_PAYMENTS flag
   canSettle = () => true,  // false against the sandbox unless opted into
   scenario = null,         // sandbox only: 'success' | 'failure'
@@ -79,6 +84,8 @@ export function createMobileMoneyService({
   // Callbacks already fully processed: { has(id) → bool, mark(id) } (WebhookSeen). Used for event requests only.
   webhookSeen = null,
 }) {
+  const PROVIDER = provider;
+  const ACTOR = provider;
   const fail = (error, status, extra = {}) => ({ error, status, ...extra });
   const audit = (action, target, before, after) => auditLog?.insertAsync?.({
     id: randomUUID(), at: new Date(now()).toISOString(), actor: ACTOR, action, target, before, after,
@@ -145,7 +152,7 @@ export function createMobileMoneyService({
   const isPlaceholder = isClaimPlaceholder;
   const placeholderAge = (ref) => claimAge(ref, now());
   /** A prompt is out, or a call to send one is under way and recent. */
-  const inFlight = (r) => mobileMoneyInFlight(r, now());
+  const inFlight = (r) => r?.provider === PROVIDER && mobileMoneyInFlight(r, now());
 
   /**
    * Has this transaction already confirmed another approved payment? Checked on every
@@ -174,7 +181,7 @@ export function createMobileMoneyService({
    * Ask the payer's phone to approve the request's amount. `role` is the caller's
    * session role: 'member' (default) or, with B6a, 'trainer' for their own trainer pass.
    */
-  async function pay({ memberId, paymentRequestId, phone, role = 'member' }) {
+  async function pay({ memberId, paymentRequestId, phone, role = 'member', network = null }) {
     if (!enabled() || !client || !canSettle()) return fail('feature_disabled', 404);
     if (roleOf(role) === 'trainer' && !trainerProducts()) return fail('feature_disabled', 404);
     const own = await ownRequest(memberId, paymentRequestId);
@@ -232,6 +239,8 @@ export function createMobileMoneyService({
       // The amount is the request's own, never one the app sent.
       ({ transactionId } = await client.initiatePayment({
         msisdn, amountTzs: request.amountTzs, reference: referenceFor(request.id, now()), scenario,
+        // AzamPay needs the wallet (Mpesa, Tigo, Airtel, Halopesa, Azampesa); Tunzaa ignores it.
+        network,
       }));
     } catch (err) {
       if (maybeSent(err)) {
@@ -243,6 +252,7 @@ export function createMobileMoneyService({
       await updateIf(paymentRequests, request.id, { provider: PROVIDER, reference: claim }, { provider: MANUAL, reference: null });
       await audit('payment_mobile_money_failed_to_start', request.id, null, { code: err?.code || 'error' });
       if (err?.code === 'rejected') return fail('provider_rejected', 422);
+      if (err?.code === 'unknown_network') return fail('network_required', 400);
       return fail('provider_unavailable', 503);
     }
     try {
@@ -272,15 +282,25 @@ export function createMobileMoneyService({
    * a repeat callback or a refresh finds the request already decided.
    * Returns { state: 'completed' | 'failed' | 'in_progress' | 'held' | 'none', ... }.
    */
-  async function settle(request, { transactionId = null } = {}) {
+  /**
+   * The transaction's state: what a verified callback said about it (AzamPay), or read
+   * back from the provider (Tunzaa). null when neither is available (AzamPay refresh).
+   */
+  async function remoteStatus(txn, confirmed) {
+    if (confirmed) return confirmed;
+    if (typeof client?.checkStatus !== 'function') return null;
+    return client.checkStatus(txn);
+  }
+
+  async function settle(request, { transactionId = null, confirmed = null } = {}) {
     if (request.status === 'approved') return { state: 'completed', paymentRequest: view(request) };
     if (request.status !== 'pending') {
       // Cancelled or rejected: if the money turned up anyway, staff must hear of it.
       const late = transactionId || (request.provider === PROVIDER && !isPlaceholder(request.reference) ? request.reference : null);
       if (late) {
         try {
-          const remote = await client.checkStatus(late);
-          if (remote.status === 'COMPLETED') {
+          const remote = await remoteStatus(late, late === transactionId ? confirmed : null);
+          if (remote?.status === 'COMPLETED') {
             await audit('payment_mobile_money_orphaned', request.id, { status: request.status }, { transactionId: late, amountTzs: remote.amountTzs });
             if (request.eventOrderId) await eventOrders.onHeld(request, 'request_closed', { transactionId: late });
           }
@@ -297,10 +317,12 @@ export function createMobileMoneyService({
 
     let remote;
     try {
-      remote = await client.checkStatus(txn);
+      remote = await remoteStatus(txn, txn === transactionId ? confirmed : null);
     } catch {
       return { state: 'in_progress', paymentRequest: view(request), unconfirmed: true };
     }
+    // AzamPay: no callback yet and nothing to ask — the prompt is still out.
+    if (!remote) return { state: 'in_progress', paymentRequest: view(request) };
     if (remote.status === 'COMPLETED') {
       // Money received must be what was asked: an amount we cannot read is not good enough.
       if (remote.amountTzs == null || remote.amountTzs !== Number(request.amountTzs)) {
@@ -393,17 +415,23 @@ export function createMobileMoneyService({
    */
   async function handleCallback(payload) {
     if (!client) return fail('feature_disabled', 404);
-    const requestId = requestIdOf(payload?.reference_id);
-    const transactionId = payload?.transaction_id ? String(payload.transaction_id) : null;
-    if (!requestId || !transactionId) return fail('invalid_payload', 400);
+    // AzamPay: the route verified the signature; the client turns the callback into our terms.
+    const parsed = typeof client.parseCallback === 'function'
+      ? client.parseCallback(payload)
+      : { referenceId: payload?.reference_id, transactionId: payload?.transaction_id ? String(payload.transaction_id) : null, confirmed: null };
+    const requestId = requestIdOf(parsed.referenceId);
+    if (!requestId || !parsed.transactionId) return fail('invalid_payload', 400);
     const request = await paymentRequests.findByIdAsync(requestId);
     if (!request) return { status: 200, ok: true, ignored: 'unknown_reference' };
+    // AzamPay names a transaction more than one way: use the one the request recorded, if any.
+    const transactionId = (parsed.transactionIds || []).includes(request.reference) ? request.reference : parsed.transactionId;
+    const confirmed = client.confirmsByCallback ? (parsed.confirmed ?? null) : null;
     // S4 (event requests only): a callback that was fully processed once is a no-op the second time, without calling Tunzaa.
     // It is recorded AFTER processing, so a crash midway does not swallow Tunzaa's retry. The state machine, the database's
     // one-success-per-order index and the idempotent confirmation are the guarantees; this is the belt.
-    const seenKey = request.eventOrderId && webhookSeen ? `tunzaa:${transactionId}:${String(payload?.status ?? '').toUpperCase()}` : null;
+    const seenKey = request.eventOrderId && webhookSeen ? `${PROVIDER}:${transactionId}:${String(payload?.status ?? payload?.transactionstatus ?? '').toUpperCase()}` : null;
     if (seenKey && await webhookSeen.has(seenKey)) return { status: 200, ok: true, duplicate: true };
-    const out = await settle(request, { transactionId });
+    const out = await settle(request, { transactionId, confirmed });
     if (seenKey && ['completed', 'failed'].includes(out.state)) await webhookSeen.mark(seenKey);
     return { status: 200, ok: true, state: out.state };
   }

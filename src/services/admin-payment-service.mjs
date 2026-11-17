@@ -2,7 +2,7 @@
 // embed a LEAN member/subscription projection only (not the full user row
 // with memberProfile/aclPermissions) to keep the list endpoint's payload small.
 import { randomUUID } from 'node:crypto';
-import { activationDates } from '../shared/subscription-status.mjs';
+import { paidPlanPatch, SCHEDULED } from '../shared/subscription-status.mjs';
 import { productTypeOfPayment, PRODUCT_TYPES } from '../shared/payment-product.mjs';
 import { upgradeOf, upgradeApprovable, applyUpgradeStatus } from '../shared/pass-upgrade.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
@@ -31,7 +31,15 @@ export function createAdminPaymentService({
   // The booking group refused a decision already written (a rejected session's slot was booked by someone
   // else between the check and the write): ({ request, refusal, rolledBack, actorId }) → void. Wired to an ops alert.
   onBookingPaymentRefused = async () => {},
+  // Custom gym passes (GYM_CUSTOM_PASSES): a request with `passPurchaseId` was decided: (request, status, { actorId }) →
+  // null | { error, status } (a refusal puts the decision back, as for a booking group). Idempotent.
+  onPassPayment = async () => null,
   onSubscriptionActivated = async () => {},
+  // A renewal paid before the member's current plan ends: it is scheduled to start when that
+  // plan ends, not activated now. (subscription, ctx) => void. Best-effort.
+  onSubscriptionScheduled = async () => {},
+  // SCHEDULED_RENEWALS: may an early renewal be scheduled (true) or does every paid plan start now (false)?
+  scheduleRenewals = () => false,
   // A rejected payment for a membership (lifecycle automations).
   onPaymentRejected = async () => {},
   // A membership's payment was rejected, cancelled or put back to pending: (subscription) => void. Promotion analytics takes the conversion back.
@@ -95,6 +103,11 @@ export function createAdminPaymentService({
       await onOrderPayment(request.orderId, status);
       return;
     }
+    // A custom gym pass: one payment for the whole purchase; the people it covers get their own subscriptions.
+    if (request.passPurchaseId) {
+      const out = await onPassPayment(request, status, { actorId });
+      return out?.error ? out : null;
+    }
     // An upgrade changes the plan it upgrades, in place; it has no plan of its own.
     if (upgradeOf(request)) {
       const out = await applyUpgradeStatus(subscriptions, request, status);
@@ -115,12 +128,18 @@ export function createAdminPaymentService({
       status: subStatus,
       paymentRef: status === 'approved' ? (reference || `ADMIN_${request.id}`) : null
     };
-    // Every paid plan runs from the moment it is paid for, not from the request.
+    // Every paid plan runs from the moment it is paid for, not from the request — or, when the
+    // member already has a running plan of the same product, from the day that plan ends
+    // (a renewal paid early is never lost; owner decision 2026-11-15).
     if (status === 'approved') {
-      Object.assign(patch, activationDates(await subscriptions.findByIdAsync(request.subscriptionId)));
+      const sub = await subscriptions.findByIdAsync(request.subscriptionId);
+      const memberSubs = sub ? await subscriptions.filterAsync(s => s.memberId === sub.memberId) : [];
+      Object.assign(patch, paidPlanPatch(sub, memberSubs, new Date(), { scheduleRenewals: Boolean(scheduleRenewals()) }));
     }
     const updated = await subscriptions.updateByIdAsync(request.subscriptionId, patch);
-    if (subStatus === 'active' && updated) {
+    if (updated?.status === SCHEDULED) {
+      try { await onSubscriptionScheduled(updated, { requestedAt: request.requestedAt, amountTzs: request.amountTzs }); } catch { /* best-effort */ }
+    } else if (subStatus === 'active' && updated) {
       // The request says when the member asked and what they paid, which is what promotion analytics needs.
       try { await onSubscriptionActivated(updated, { requestedAt: request.requestedAt, amountTzs: request.amountTzs }); } catch { /* notification is best-effort */ }
     }

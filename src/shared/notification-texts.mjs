@@ -42,6 +42,12 @@ const WORDS = {
   },
 };
 
+// Marks Swahili text that is a placeholder awaiting native-speaker review (custom gym passes, gym-pass-texts.mjs).
+export const SW_PENDING = '[SW pending review]';
+
+/** The "a member" word for a missing name, in the reader's language (the existing WORDS table; no new wording). */
+export const aMemberWord = locale => (locale === 'sw' ? WORDS.sw : WORDS.en).aMember;
+
 // Trainer pass periods.
 const PERIOD_EN = { daily: 'daily', weekly: 'weekly', monthly: 'monthly' };
 const PERIOD_SW = { daily: 'siku', weekly: 'wiki', monthly: 'mwezi' };

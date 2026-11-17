@@ -1,8 +1,8 @@
-// Pay a payment request by mobile money (Malipo by Tunzaa).
+// Pay a payment request by mobile money (AzamPay while AZAMPAY_PAYMENTS is on, else Malipo by Tunzaa).
 import '../src/bootstrap/init.mjs';
 import { requireAuth } from '../src/auth/jwt.mjs';
 import { mobileMoneyService, manualPayment } from '../src/bootstrap/services.mjs';
-import { tunzaaTrainerProductsOn, eventsPaymentsTunzaaOn } from '../src/shared/feature-flags.mjs';
+import { mobileMoneyTrainerProductsOn, eventsPaymentsTunzaaOn } from '../src/shared/feature-flags.mjs';
 import { routeGuard } from '../src/shared/route-guard.mjs';
 
 const created = new Date().toISOString();
@@ -27,7 +27,7 @@ function send(res, result) {
 // the pay guard on /mobile-money/refresh too.
 const memberGuard = requireAuth('member');
 const memberOrTrainerGuard = requireAuth('member', 'trainer');
-const payerGuard = (req, res, next) => (tunzaaTrainerProductsOn() ? memberOrTrainerGuard : memberGuard)(req, res, next);
+const payerGuard = (req, res, next) => (mobileMoneyTrainerProductsOn() ? memberOrTrainerGuard : memberGuard)(req, res, next);
 const payerRole = req => (req.user?.userType === 'trainer' ? 'trainer' : 'member');
 
 export const paymentOptions = {
@@ -40,24 +40,26 @@ export const paymentOptions = {
     ...(manualPayment.flagOn() ? { manual: manualPayment.options() } : {}),
     // B6a flag off: no `mobileMoney` key (members: FITFLEX_PASS + GYM_SUBSCRIPTION, as before).
     // S4: also while event orders are payable this way (EVENTS_PAYMENTS_TUNZAA effective), so the app can offer EVENT_ORDER.
-    ...(tunzaaTrainerProductsOn() || (eventsPaymentsTunzaaOn() && mobileMoneyService.payableProducts(req?.user?.userType).includes('EVENT_ORDER'))
+    ...(mobileMoneyTrainerProductsOn() || (eventsPaymentsTunzaaOn() && mobileMoneyService.payableProducts(req?.user?.userType).includes('EVENT_ORDER'))
       ? { mobileMoney: { products: mobileMoneyService.payableProducts(req?.user?.userType) } } : {}),
   })
 };
 
 export const payByMobileMoney = {
   created, method: 'post', path: '/me/payments/:id/mobile-money',
-  description: 'Ask the payer\'s phone to approve one of their own pending payment requests (member: pass, upgrade, gym plan and, with TUNZAA_TRAINER_PRODUCTS, trainer sessions; trainer, with TUNZAA_TRAINER_PRODUCTS: their own trainer gym pass). Body {phone}. The amount is always the request\'s own. 404 feature_disabled while off; 404 not_found for someone else\'s request; 403 not_payable_by_role (an EVENT_ORDER is a member\'s purchase only); 409 hold_expired | event_not_open | order_amount_mismatch | payment_row_mismatch (EVENT_ORDER pre-checks); 409 payment_not_pending / manual_payment_submitted / not_payable_this_way / tier_not_available / invalid_amount / unsupported_currency / group_slot_rebooked {bookingIds}; 400 invalid_phone; 429 too_many_attempts.',
-  requestSample: { phone: '0712345678' },
+  description: 'Ask the payer\'s phone to approve one of their own pending payment requests (member: pass, upgrade, gym plan and, with TUNZAA_TRAINER_PRODUCTS, trainer sessions; trainer, with TUNZAA_TRAINER_PRODUCTS: their own trainer gym pass). Body {phone, network?}: network is the wallet (Mpesa | Tigo | Airtel | Halopesa | Azampesa) and is used by AzamPay; without it the network is taken from the number (400 network_required when it cannot be). The amount is always the request\'s own. 404 feature_disabled while off; 404 not_found for someone else\'s request; 403 not_payable_by_role (an EVENT_ORDER is a member\'s purchase only); 409 hold_expired | event_not_open | order_amount_mismatch | payment_row_mismatch (EVENT_ORDER pre-checks); 409 payment_not_pending / manual_payment_submitted / not_payable_this_way / tier_not_available / invalid_amount / unsupported_currency / group_slot_rebooked {bookingIds}; 400 invalid_phone; 429 too_many_attempts.',
+  requestSample: { phone: '0712345678', network: 'Mpesa' },
   onGuard: routeGuard('post', payerGuard),
   onRequest: async (req, res) => send(res, await mobileMoneyService.pay({
     memberId: req.user.sub, role: payerRole(req), paymentRequestId: req.params.id, phone: req.body?.phone,
+    // AzamPay: the wallet paid from (Mpesa | Tigo | Airtel | Halopesa | Azampesa); optional, else taken from the number.
+    network: typeof req.body?.network === 'string' ? req.body.network : null,
   }))
 };
 
 export const refreshMobileMoneyPayment = {
   created, method: 'post', path: '/me/payments/:id/mobile-money/refresh',
-  description: 'Has the mobile-money payment gone through? Reads the transaction back from Tunzaa and settles the request when it is complete. state: in_progress | completed | failed | held | none. Same roles as paying (a trainer only for their own trainer gym pass); with TUNZAA_TRAINER_PRODUCTS off, a trainer may still refresh their own trainer pass while its prompt is out (anything else: 403 forbidden as before). state held comes with reason (e.g. amount_mismatch, transaction_mismatch, reference_already_used, group_slot_rebooked).',
+  description: 'Has the mobile-money payment gone through? Tunzaa: reads the transaction back and settles the request when it is complete. AzamPay has no status query: the request settles when AzamPay\'s signed callback arrives, and refresh reports where it stands. state: in_progress | completed | failed | held | none. Same roles as paying (a trainer only for their own trainer gym pass); with TUNZAA_TRAINER_PRODUCTS off, a trainer may still refresh their own trainer pass while its prompt is out (anything else: 403 forbidden as before). state held comes with reason (e.g. amount_mismatch, transaction_mismatch, reference_already_used, group_slot_rebooked).',
   onGuard: routeGuard('post', memberOrTrainerGuard),
   onRequest: async (req, res) => send(res, await mobileMoneyService.refresh({
     memberId: req.user.sub, role: payerRole(req), paymentRequestId: req.params.id,

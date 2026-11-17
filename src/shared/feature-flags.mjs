@@ -43,6 +43,17 @@ export function checkinVisitorNamesOn() {
 }
 
 /**
+ * Custom gym passes & flexible membership (GYM_CUSTOM_PASSES; docs/custom-gym-passes-api.md): gym owners design
+ * individual / couples / group passes, members buy them with one payment, and every covered person gets their own
+ * subscription. Off unless GYM_CUSTOM_PASSES is set: every new route (plans, purchases, owner sales, invitations)
+ * answers 404 feature_disabled before any sign-in check, and the legacy daily / weekly / monthly plans are untouched.
+ * Payments already made for a pass are still applied while it is off (the money was taken).
+ */
+export function gymCustomPassesOn() {
+  return on('GYM_CUSTOM_PASSES');
+}
+
+/**
  * Members may choose a username shown in public places (migration
  * member-usernames, /me/username endpoints, admin clear on reports). Off
  * unless MEMBER_USERNAMES is set: the endpoints answer 404 feature_disabled
@@ -98,6 +109,45 @@ export function tunzaaTrainerProductsOn() {
  */
 export function tunzaaSandboxSettlesOn() {
   return on('TUNZAA_SANDBOX_SETTLES');
+}
+
+/**
+ * Pay by mobile money through AzamPay (POST /me/payments/:id/mobile-money).
+ * Off unless AZAMPAY_PAYMENTS is set (and the AzamPay credentials are present).
+ * On: AzamPay REPLACES Malipo by Tunzaa for new payments (owner decision
+ * 2026-11-15); prompts already out with Tunzaa still settle through Tunzaa.
+ */
+export function azampayPaymentsOn() {
+  return on('AZAMPAY_PAYMENTS');
+}
+
+/** Trainer sessions and trainer gym passes payable through AzamPay; effective only with AZAMPAY_PAYMENTS. */
+export function azampayTrainerProductsOn() {
+  return on('AZAMPAY_TRAINER_PRODUCTS') && azampayPaymentsOn();
+}
+
+/**
+ * An AzamPay sandbox payment still activates a real plan in FitFlex, so against
+ * the sandbox paying is offered only when AZAMPAY_SANDBOX_SETTLES is set on
+ * purpose (a test server). Live needs nothing extra.
+ */
+export function azampaySandboxSettlesOn() {
+  return on('AZAMPAY_SANDBOX_SETTLES');
+}
+
+/**
+ * A plan paid while the member's current plan of the same product is still
+ * running starts when that plan ends, instead of at once (owner decision
+ * 2026-11-15). Off unless SCHEDULED_RENEWALS is set: off, every paid plan
+ * starts at payment as before.
+ */
+export function scheduledRenewalsOn() {
+  return on('SCHEDULED_RENEWALS');
+}
+
+/** Trainer products by mobile money, for whichever provider takes new payments. */
+export function mobileMoneyTrainerProductsOn() {
+  return azampayPaymentsOn() ? azampayTrainerProductsOn() : tunzaaTrainerProductsOn();
 }
 
 /**

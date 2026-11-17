@@ -1,6 +1,7 @@
 import { selcomStrictAmountOn, selcomWebhookServerConfirmOn } from '../shared/feature-flags.mjs';
 import { createNotConfiguredSelcomClient } from '../integrations/payments/selcom-confirm.mjs';
-import { activationDates } from '../shared/subscription-status.mjs';
+import { paidPlanPatch, SCHEDULED } from '../shared/subscription-status.mjs';
+import { isMobileMoneyProvider } from '../shared/mobile-money-claim.mjs';
 
 // Payment-provider webhook handling — Selcom (idempotent on payment_id).
 export function createWebhookService({
@@ -11,6 +12,9 @@ export function createWebhookService({
   paymentRequests = null,
   // Lifecycle automations: a membership paid for, or a payment that failed.
   onSubscriptionActivated = async () => {},
+  // A renewal paid early starts when the current plan ends (see paidPlanPatch).
+  onSubscriptionScheduled = async () => {},
+  scheduleRenewals = () => false,
   onPaymentFailed = async () => {},
   // Audit M2 (SELCOM_WEBHOOK_SERVER_CONFIRM): asks Selcom whether the payment is real.
   // Default fails closed ("not configured"); see integrations/payments/selcom-confirm.mjs.
@@ -51,7 +55,7 @@ export function createWebhookService({
       if (!sub) return { error: 'subscription_not_found', status: 404 };
       const request = await openRequestFor(sub.id);
       // A mobile-money prompt is out for this request: that answer settles it, not this one.
-      if (request?.provider === 'tunzaa' && request.reference) return { ok: true, ignored: 'tunzaa_in_flight' };
+      if (isMobileMoneyProvider(request?.provider) && request.reference) return { ok: true, ignored: `${request.provider}_in_flight` };
       // Audit M3 (SELCOM_STRICT_AMOUNT): an activation needs the amount and a matching open
       // request. Refused before claim(), so the payment_id stays free for a corrected delivery.
       if (selcomStrictAmountOn() && sub.status === 'payment_pending') {
@@ -85,13 +89,19 @@ export function createWebhookService({
       if (!(await claim(payment_id))) return { ok: true, idempotent: true };
       if (sub.status !== 'payment_pending') return { ok: true, ignored: 'not_payment_pending' };
       // The plan's period starts now that it is paid for.
-      const updated = await subscriptions.updateByIdAsync(subscription_id, { status: 'active', paymentRef: payment_id, ...activationDates(sub) });
+      const memberSubs = typeof subscriptions.filterAsync === 'function' && sub.memberId ? await subscriptions.filterAsync(s => s.memberId === sub.memberId) : [];
+      const updated = await subscriptions.updateByIdAsync(subscription_id, { paymentRef: payment_id, ...paidPlanPatch(sub, memberSubs, new Date(), { scheduleRenewals: Boolean(scheduleRenewals()) }) });
       if (request) {
         await paymentRequests.updateByIdAsync(request.id, {
           status: 'approved', reference: payment_id, decidedAt: new Date().toISOString(), decidedBy: 'selcom',
         });
       }
-      try { await onSubscriptionActivated(updated || { ...sub, status: 'active' }, request ? { requestedAt: request.requestedAt, amountTzs: request.amountTzs } : undefined); } catch { /* best-effort */ }
+      const ctx = request ? { requestedAt: request.requestedAt, amountTzs: request.amountTzs } : undefined;
+      if (updated?.status === SCHEDULED) {
+        try { await onSubscriptionScheduled(updated, ctx); } catch { /* best-effort */ }
+      } else {
+        try { await onSubscriptionActivated(updated || { ...sub, status: 'active' }, ctx); } catch { /* best-effort */ }
+      }
       return { ok: true };
     }
     if (!(await claim(payment_id))) return { ok: true, idempotent: true };
