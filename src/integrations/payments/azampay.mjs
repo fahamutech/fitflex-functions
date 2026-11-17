@@ -260,6 +260,13 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
   let cachedKey = null;
   let lastForcedKeyAt = null;
 
+  // One line per failed call to AzamPay: what failed, the HTTP status and AzamPay's own message.
+  // Never the token, the client secret, the API key or a request body.
+  const logCallError = (what, err) => console.warn('[azampay] call_failed', JSON.stringify({
+    what, code: err?.code ?? null, status: err?.status ?? null,
+    message: typeof err?.body?.message === 'string' ? err.body.message.slice(0, 200) : (err instanceof AzamPayError ? err.message.slice(0, 200) : null),
+  }));
+
   async function call(method, url, { body, token, apiKey = false } = {}) {
     const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -281,9 +288,12 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
 
   async function token(force = false) {
     if (!force && cachedToken && cachedToken.expiresAt > now() + 60_000) return cachedToken.value;
-    const out = await call('POST', `${settings.hosts.auth}/AppRegistration/GenerateToken`, {
-      body: { appName: settings.appName, clientId: settings.clientId, clientSecret: settings.clientSecret },
-    });
+    let out;
+    try {
+      out = await call('POST', `${settings.hosts.auth}/AppRegistration/GenerateToken`, {
+        body: { appName: settings.appName, clientId: settings.clientId, clientSecret: settings.clientSecret },
+      });
+    } catch (err) { logCallError('token', err); throw err; }
     const value = out?.data?.accessToken;
     if (!value || typeof value !== 'string') throw new AzamPayError('AzamPay gave no access token', { code: 'no_token' });
     const expires = Date.parse(out?.data?.expire);
@@ -311,6 +321,35 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
     return value;
   }
 
+  /**
+   * verifyCallback with the reason: { ok, signed, reason }. `reason` is one of
+   * not_an_object, client_id_mismatch, callback_auth_mismatch, unsigned,
+   * public_key_unavailable, signature_invalid, or 'signed' when it verified.
+   * With `allowUnsigned` (sandbox only — the caller decides), a callback whose
+   * clientId and user/password pass but whose signature cannot be checked answers
+   * { ok: true, signed: false, reason }: the caller must then match it to an open
+   * attempt of ours before acting on it.
+   */
+  async function checkCallback(payload, { allowUnsigned = false } = {}) {
+    const no = (reason) => ({ ok: false, signed: false, reason });
+    if (!payload || typeof payload !== 'object') return no('not_an_object');
+    const unsigned = (reason) => (allowUnsigned && settings.environment === 'sandbox' ? { ok: true, signed: false, reason } : no(reason));
+    // A clientId that is someone else's is always refused; one that is missing only leaves the sandbox's unsigned path.
+    const givenClient = typeof payload.clientId === 'string' ? payload.clientId : '';
+    if (givenClient && givenClient !== settings.clientId) return no('client_id_mismatch');
+    if (settings.callbackUser && !sameSecret(payload.user, settings.callbackUser)) return no('callback_auth_mismatch');
+    if (settings.callbackPassword && !sameSecret(payload.password, settings.callbackPassword)) return no('callback_auth_mismatch');
+    if (!givenClient) return unsigned('client_id_missing');
+    if (!callbackIsSigned(payload)) return unsigned('unsigned');
+    let key;
+    try { key = await publicKey(); } catch (err) { logCallError('public_key', err); return unsigned('public_key_unavailable'); }
+    if (verifyCallbackSignature(payload, key)) return { ok: true, signed: true, reason: 'signed' };
+    if (lastForcedKeyAt !== null && now() - lastForcedKeyAt < KEY_REFETCH_MIN_MS) return unsigned('signature_invalid');
+    lastForcedKeyAt = now();
+    try { key = await publicKey(true); } catch (err) { logCallError('public_key', err); return unsigned('public_key_unavailable'); }
+    return verifyCallbackSignature(payload, key) ? { ok: true, signed: true, reason: 'signed' } : unsigned('signature_invalid');
+  }
+
   function disburseKey() {
     if (!settings.hosts.disburse) throw new AzamPayError('Payouts need AZAMPAY_DISBURSE_URL', { code: 'payouts_not_configured', status: 503 });
     if (!settings.disbursePublicKey) throw new AzamPayError('Payouts need AZAMPAY_DISBURSE_PUBLIC_KEY', { code: 'payouts_not_configured', status: 503 });
@@ -328,11 +367,18 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
     async initiatePayment({ msisdn, amountTzs, reference, network = null }) {
       const provider = networkFor(msisdn, network);
       if (!provider) throw new AzamPayError('Unknown mobile-money network for this number', { code: 'unknown_network', status: 400 });
-      const out = await authed((t) => call('POST', `${settings.hosts.checkout}/azampay/mno/checkout`, {
-        token: t, apiKey: true,
-        body: { accountNumber: msisdn, amount: String(Math.round(amountTzs)), currency: 'TZS', externalId: reference, provider },
-      }));
+      let out;
+      try {
+        out = await authed((t) => call('POST', `${settings.hosts.checkout}/azampay/mno/checkout`, {
+          token: t, apiKey: true,
+          body: { accountNumber: msisdn, amount: String(Math.round(amountTzs)), currency: 'TZS', externalId: reference, provider },
+        }));
+      } catch (err) { logCallError('mno_checkout', err); throw err; }
       const transactionId = out?.transactionId ? String(out.transactionId) : null;
+      console.info('[azampay] mno_checkout', JSON.stringify({
+        reference, provider, amountTzs: Math.round(amountTzs), success: out?.success ?? null, transactionId,
+        message: typeof out?.message === 'string' ? out.message.slice(0, 200) : null,
+      }));
       if (out?.success === false || !transactionId) {
         throw new AzamPayError(out?.message || 'AzamPay did not accept the payment', { body: out, code: 'rejected', status: 422 });
       }
@@ -348,19 +394,10 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
      * route cannot make this server call AzamPay at will.
      */
     async verifyCallback(payload) {
-      if (!payload || typeof payload !== 'object') return false;
-      if (typeof payload.clientId !== 'string' || payload.clientId !== settings.clientId) return false;
-      if (settings.callbackUser && !sameSecret(payload.user, settings.callbackUser)) return false;
-      if (settings.callbackPassword && !sameSecret(payload.password, settings.callbackPassword)) return false;
-      if (!callbackIsSigned(payload)) return false;
-      let key;
-      try { key = await publicKey(); } catch { return false; }
-      if (verifyCallbackSignature(payload, key)) return true;
-      if (lastForcedKeyAt !== null && now() - lastForcedKeyAt < KEY_REFETCH_MIN_MS) return false;
-      lastForcedKeyAt = now();
-      try { key = await publicKey(true); } catch { return false; }
-      return verifyCallbackSignature(payload, key);
+      return (await checkCallback(payload)).ok;
     },
+
+    checkCallback,
 
     // ── payouts (disbursement) ────────────────────────────────────────────
     payoutsConfigured: () => Boolean(settings.disbursePublicKey && settings.hosts.disburse),

@@ -119,6 +119,19 @@ export function azampaySandboxSettlesOn() {
 }
 
 /**
+ * AzamPay's sandbox has no public key to check callback signatures with (its
+ * /azampay/v1/public-key answered 404 on 2026-11-17), so every sandbox callback
+ * was refused (403). Off unless AZAMPAY_SANDBOX_UNSIGNED_CALLBACKS is set, and it
+ * never applies to AZAMPAY_ENV=live (owner decision 2026-11-17). On, a sandbox
+ * callback whose signature cannot be checked is acted on only when it names an
+ * attempt of ours that is open right now — our reference and the transaction id
+ * AzamPay gave us when the prompt went out — and the amount matches; else 403.
+ */
+export function azampaySandboxUnsignedCallbacksOn() {
+  return on('AZAMPAY_SANDBOX_UNSIGNED_CALLBACKS');
+}
+
+/**
  * A plan paid while the member's current plan of the same product is still
  * running starts when that plan ends, instead of at once (owner decision
  * 2026-11-15). Off unless SCHEDULED_RENEWALS is set: off, every paid plan
