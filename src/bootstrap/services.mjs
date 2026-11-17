@@ -37,7 +37,7 @@ import { createOrgMembershipService } from '../services/org-membership-service.m
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
 import { createHrOrgConversionService } from '../services/hr-org-conversion-service.mjs';
-import { azampayPaymentsOn, azampayTrainerProductsOn, azampayShopOrdersOn, azampaySandboxSettlesOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
+import { azampayPaymentsOn, azampayTrainerProductsOn, azampayShopOrdersOn, azampaySandboxSettlesOn, azampaySandboxUnsignedCallbacksOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
 import { orgOnlySponsorsOn, identityFlag, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
 import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
@@ -897,6 +897,15 @@ if (azampayProblem) {
   console.error(`[azampay] MISCONFIGURED (${azampayProblem}): AZAMPAY_ENV is live but ${azampayProblem === 'live_hosts_not_https' ? 'a live host is not https://' : 'AZAMPAY_AUTH_URL / AZAMPAY_CHECKOUT_URL are not both set'}. AzamPay is CLOSED: nothing is offered and no callback settles until this is fixed.`);
 }
 export const azampayClient = azampayConfig ? createAzamPayClient({ settings: azampayConfig }) : null;
+// One line at start-up: what AzamPay configuration this server sees (yes/no only, never a value).
+console.info('[azampay] config', JSON.stringify({
+  appName: Boolean(process.env.AZAMPAY_APP_NAME), clientId: Boolean(process.env.AZAMPAY_CLIENT_ID),
+  clientSecret: Boolean(process.env.AZAMPAY_CLIENT_SECRET), apiKey: Boolean(process.env.AZAMPAY_API_KEY),
+  callbackUser: Boolean(process.env.AZAMPAY_CALLBACK_USER), callbackPassword: Boolean(process.env.AZAMPAY_CALLBACK_PASSWORD),
+  envSetting: process.env.AZAMPAY_ENV ?? null, environment: azampayConfig?.environment ?? null, client: Boolean(azampayConfig),
+  problem: azampayProblem ?? null, payments: azampayPaymentsOn(), sandboxSettles: azampaySandboxSettlesOn(),
+  sandboxUnsignedCallbacks: azampaySandboxUnsignedCallbacksOn(),
+}));
 if (azampayConfig && azampayPaymentsOn() && azampayConfig.environment !== 'live') {
   console.warn(`[azampay] payments are ON against the SANDBOX${azampaySandboxSettlesOn() ? ' and sandbox payments settle real plans (AZAMPAY_SANDBOX_SETTLES)' : ' but will not be offered (set AZAMPAY_SANDBOX_SETTLES to rehearse)'}`);
 }
