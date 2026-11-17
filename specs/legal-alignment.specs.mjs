@@ -187,9 +187,13 @@ test('an order waits for FitFlex to confirm payment; the app saying "success" is
   // Admin approval of the payment request pays the order.
   const admin = createAdminPaymentService({ paymentRequests, subscriptions: memStore(), users: memStore(), auditLog: audit,
     onOrderPayment: (orderId, status) => service.applyPaymentToOrder(orderId, status) });
+  // The order list names the pending payment request to pay; once it is paid there is none.
+  assert.equal((await service.myOrders('m1'))[0].paymentRequestId, placed.paymentRequest.id);
+  assert.equal((await service.myOrders('someone-else')).length, 0);
   await admin.decide({ id: placed.paymentRequest.id, decision: 'approve', actorId: 'adm' });
   const paid = (await service.myOrders('m1'))[0];
   assert.equal(paid.paymentStatus, 'paid');
+  assert.equal(paid.paymentRequestId, null);
   assert.equal(marketplaceNotifications.rows.filter(n => n.userId === 'ven_1').length, 1);
   assert.ok(!(await service.updateOrderStatus({ orderId: paid.id, status: 'accepted', actorId: 'ven_1' })).error);
 });

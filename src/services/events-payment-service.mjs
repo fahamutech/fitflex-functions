@@ -100,6 +100,9 @@ export function createEventsPaymentService({
     const payment = mode();
     return {
       payment,
+      // How long FitFlex takes to check an ORGANISATION's payment notice (EVENTS_MANUAL_CONFIRM_SLA_HOURS; the same figure
+      // as each notice's confirmTargetAt). Present while organisation notices can be taken; a member pays through AzamPay.
+      ...(flags.manual() && keyRing() && approverGate() ? { manualConfirmHours: eventsManualConfirmSlaHours() } : {}),
       hold: { manualExtendHours: eventManualHoldExtendHours(), manualMaxHours: eventManualHoldMaxHours(), providerExtendMinutes: eventsProviderHoldExtendMinutes(), lateGraceHours: eventsLatePaymentGraceHours() },
       tickets: { qr: true, scanning: eventsKitOpsOn() },
     };

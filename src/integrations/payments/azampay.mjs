@@ -6,6 +6,10 @@
 //
 //   token       POST {auth}/AppRegistration/GenerateToken      {appName, clientId, clientSecret}
 //   charge      POST {checkout}/azampay/mno/checkout           {accountNumber, amount, currency, externalId, provider} → USSD push
+//   bank        POST {checkout}/azampay/bank/checkout          {amount, currencyCode, merchantAccountNumber, merchantMobileNumber, otp, provider: CRDB|NMB, referenceId}
+//   page        POST {checkout}/api/v1/Partner/PostCheckout    {appName, clientId, vendorId, vendorName, language, currency, externalId (30 chars), requestOrigin,
+//                                                               redirectFailURL, redirectSuccessURL, amount, cart} → the URL of AzamPay's payment page
+//   partners    GET  {checkout}/api/v1/Partner/GetPaymentPartners  (vendorId / vendorName for the page)
 //   public key  GET  {checkout}/azampay/v1/public-key?format=Pem   (verifies callback signatures)
 //   callback    POST <our url>   signature = RSA-SHA256 (PKCS#1 v1.5), base64, over
 //                                {utilityref}{externalreference}{transactionstatus}{operator}
@@ -25,6 +29,33 @@ export const AZAMPAY_SANDBOX_HOSTS = Object.freeze({
   checkout: 'https://sandbox.azampay.co.tz',
   disburse: 'https://api-disbursement-sandbox.azampay.co.tz',
 });
+
+/** The banks AzamPay's bank checkout accepts (its `provider` enum). */
+export const AZAMPAY_BANKS = Object.freeze(['CRDB', 'NMB']);
+/** Bank checkout takes an amount of 0 to 5,000,000 (AzamPay's documented range). */
+export const AZAMPAY_BANK_MAX_TZS = 5_000_000;
+/** The languages offered for AzamPay's payment page. */
+export const AZAMPAY_PAGE_LANGUAGES = Object.freeze(['en', 'sw']);
+
+/** The bank for a bank checkout: CRDB or NMB (any case), else null. */
+export const bankFor = (raw) => AZAMPAY_BANKS.find((b) => b === String(raw ?? '').trim().toUpperCase()) ?? null;
+
+/** A bank account number as the payer typed it: 5–30 letters, digits, dashes, slashes or spaces (trimmed), else null. */
+export function toBankAccount(raw) {
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  const value = String(raw).trim();
+  return /^[0-9A-Za-z][0-9A-Za-z\-/ ]{4,29}$/.test(value) ? value : null;
+}
+
+/**
+ * The one-time password the payer's bank gave them, checked for SHAPE only (4–12 letters or digits):
+ * it is passed to AzamPay and nowhere else — never stored, logged or audited.
+ */
+export function toOtp(raw) {
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  const value = String(raw).trim();
+  return /^[0-9A-Za-z]{4,12}$/.test(value) ? value : null;
+}
 
 /** The wallets AzamPay's MNO checkout accepts (its `provider` enum). */
 export const AZAMPAY_PROVIDERS = Object.freeze(['Airtel', 'Tigo', 'Halopesa', 'Azampesa', 'Mpesa']);
@@ -99,6 +130,9 @@ export function azampaySettings(env = process.env) {
     // Optional extra checks on a callback: AzamPay can be asked to send these.
     callbackUser: first(env, ['AZAMPAY_CALLBACK_USER']) || null,
     callbackPassword: first(env, ['AZAMPAY_CALLBACK_PASSWORD']) || null,
+    // The checkout page: the vendor AzamPay knows this merchant as (GET …/GetPaymentPartners). The page stays closed without both.
+    vendorId: first(env, ['AZAMPAY_VENDOR_ID']) || null,
+    vendorName: first(env, ['AZAMPAY_VENDOR_NAME']) || null,
     // Payouts: the RSA public key AzamPay gives for the disbursement checksum (PEM). Payouts stay off without it.
     disbursePublicKey: (env.AZAMPAY_DISBURSE_PUBLIC_KEY ? String(env.AZAMPAY_DISBURSE_PUBLIC_KEY).replace(/\\n/g, '\n').trim() : '') || null,
   };
@@ -246,6 +280,26 @@ export class AzamPayError extends Error {
   }
 }
 
+/**
+ * The payment page's address from PostCheckout's answer: a bare string, JSON-quoted or not (some gateways wrap it
+ * as { data | url }). Only an absolute http(s) URL is accepted — https only outside the sandbox — so nothing else
+ * (a script address, a relative path) is ever handed to a client to open.
+ */
+export function pageUrlOf(text, environment = 'live') {
+  let value = typeof text === 'string' ? text.trim() : '';
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === 'string') value = parsed.trim();
+    else if (parsed && typeof parsed === 'object') value = String(parsed.data ?? parsed.url ?? '').trim();
+  } catch { /* plain text */ }
+  if (!value || /\s/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' || (url.protocol === 'http:' && environment !== 'live')) return url.toString();
+  } catch { /* not a URL */ }
+  return null;
+}
+
 const KEY_TTL_MS = 24 * 60 * 60_000;
 /** A signature that does not verify makes us fetch AzamPay's key again (it may have rotated) at most this often. */
 export const KEY_REFETCH_MIN_MS = 5 * 60_000;
@@ -277,6 +331,24 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
       throw new AzamPayError(`AzamPay answered ${res.status}`, { status: res.status, body: json, code: res.status === 401 ? 'unauthorised' : 'provider_error' });
     }
     return json ?? {};
+  }
+
+  /** As `call`, for an endpoint that answers a bare string (JSON-quoted or plain text): resolves with that string. */
+  async function callText(method, url, { body, token, apiKey = false } = {}) {
+    const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/plain' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (apiKey && settings.apiKey) headers['X-API-Key'] = settings.apiKey;
+    let res;
+    try {
+      res = await fetchFn(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      throw new AzamPayError(`AzamPay unreachable: ${err?.message || err}`, { code: 'unreachable' });
+    }
+    const text = await res.text();
+    if (!res.ok) {
+      throw new AzamPayError(`AzamPay answered ${res.status}`, { status: res.status, code: res.status === 401 ? 'unauthorised' : 'provider_error' });
+    }
+    return text;
   }
 
   async function token(force = false) {
@@ -337,6 +409,58 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
         throw new AzamPayError(out?.message || 'AzamPay did not accept the payment', { body: out, code: 'rejected', status: 422 });
       }
       return { transactionId, network: provider };
+    },
+
+    /**
+     * Bank checkout (CRDB | NMB): the payer gives the account, the mobile number registered with the bank and the
+     * one-time password their bank gave them. Resolves with AzamPay's transaction id. The OTP goes into the request
+     * body and nowhere else: errors carry AzamPay's ANSWER, never what was sent.
+     */
+    async initiateBankPayment({ bank, accountNumber, msisdn, otp, amountTzs, reference }) {
+      const provider = bankFor(bank);
+      if (!provider) throw new AzamPayError('Unknown bank', { code: 'unknown_bank', status: 400 });
+      const out = await authed((t) => call('POST', `${settings.hosts.checkout}/azampay/bank/checkout`, {
+        token: t, apiKey: true,
+        body: { amount: Math.round(amountTzs), currencyCode: 'TZS', merchantAccountNumber: accountNumber, merchantMobileNumber: msisdn, merchantName: null, otp, provider, referenceId: reference },
+      }));
+      const transactionId = out?.transactionId ? String(out.transactionId) : null;
+      if (out?.success === false || !transactionId) {
+        throw new AzamPayError(out?.message || 'AzamPay did not accept the payment', { body: out, code: 'rejected', status: 422 });
+      }
+      return { transactionId, bank: provider };
+    },
+
+    /** Can AzamPay's payment page be opened (the vendor it needs is configured)? */
+    pageConfigured: () => Boolean(settings.vendorId && settings.vendorName),
+
+    /**
+     * AzamPay's hosted payment page for `amountTzs`. `externalId` is ours (exactly 30 characters); the redirect
+     * URLs are built by the caller from the server's own configuration. Resolves with the page's URL, which must
+     * be an absolute http(s) address (https outside the sandbox) or the answer is refused.
+     */
+    async createCheckoutPage({ amountTzs, externalId, language = 'en', itemName, requestOrigin, redirectSuccessUrl, redirectFailUrl }) {
+      if (!settings.vendorId || !settings.vendorName) throw new AzamPayError('The checkout page needs AZAMPAY_VENDOR_ID and AZAMPAY_VENDOR_NAME', { code: 'page_not_configured', status: 503 });
+      if (typeof externalId !== 'string' || externalId.length !== 30) throw new AzamPayError('externalId must be exactly 30 characters', { code: 'invalid_reference', status: 400 });
+      const res = await authed((t) => callText('POST', `${settings.hosts.checkout}/api/v1/Partner/PostCheckout`, {
+        token: t, apiKey: true,
+        body: {
+          appName: settings.appName, clientId: settings.clientId, vendorId: settings.vendorId, vendorName: settings.vendorName,
+          language, currency: 'TZS', externalId, requestOrigin, redirectFailURL: redirectFailUrl, redirectSuccessURL: redirectSuccessUrl,
+          amount: String(Math.round(amountTzs)), cart: { items: [{ name: String(itemName || 'FitFlex').slice(0, 100) }] },
+        },
+      }));
+      const url = pageUrlOf(res, settings.environment);
+      if (!url) throw new AzamPayError('AzamPay gave no payment page', { code: 'rejected', status: 422 });
+      return { url };
+    },
+
+    /** The payment partners of this app (where the page's vendorId / vendorName come from). */
+    async paymentPartners() {
+      const out = await authed((t) => call('GET', `${settings.hosts.checkout}/api/v1/Partner/GetPaymentPartners`, { token: t, apiKey: true }));
+      return (Array.isArray(out) ? out : []).map((p) => ({
+        partnerName: p?.partnerName ?? null, provider: p?.provider ?? null, vendorName: p?.vendorName ?? null,
+        paymentVendorId: p?.paymentVendorId ?? null, paymentPartnerId: p?.paymentPartnerId ?? null, currency: p?.currency ?? null,
+      }));
     },
 
     /**

@@ -2,6 +2,7 @@
 // dependencies injected, then imported by the thin REST modules in functions/.
 import { createMobileMoneyService } from '../services/mobile-money-service.mjs';
 import { createAzamPayClient, azampaySettings, azampayConfigProblem } from '../integrations/payments/azampay.mjs';
+import { pageReturnTargets, pageReturnUrls } from '../shared/azampay-return.mjs';
 import { promoteStartedSubscriptions } from '../shared/subscription-status.mjs';
 import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose, invalidateAccountStatus } from '../auth/jwt.mjs';
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
@@ -37,7 +38,7 @@ import { createOrgMembershipService } from '../services/org-membership-service.m
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
 import { createHrOrgConversionService } from '../services/hr-org-conversion-service.mjs';
-import { azampayPaymentsOn, azampayTrainerProductsOn, azampayShopOrdersOn, azampaySandboxSettlesOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
+import { azampayPaymentsOn, azampayTrainerProductsOn, azampayShopOrdersOn, azampaySandboxSettlesOn, azampayBankCheckoutOn, azampayCheckoutPageOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
 import { orgOnlySponsorsOn, identityFlag, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
 import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
@@ -922,6 +923,19 @@ export const mobileMoneyService = createMobileMoneyService({
     onHeld: (request, reason, detail) => eventsPaymentsService.hooks.onHeld(request, reason, detail),
     onFailed: (request, remark) => eventsPaymentsService.hooks.onFailed(request, remark),
   },
+  // Bank checkout and AzamPay's payment page (AZAMPAY_BANK_CHECKOUT / AZAMPAY_CHECKOUT_PAGE, off).
+  bankCheckout: azampayBankCheckoutOn,
+  checkoutPage: azampayCheckoutPageOn,
+  // Where the page sends the payer afterwards: this server's own return page, or the member web portal. Built from
+  // PUBLIC_API_URL / PORTAL_PUBLIC_URL only (src/shared/azampay-return.mjs); a client names the target, never an address.
+  pageReturn: { targets: () => pageReturnTargets(), urls: (target, request) => pageReturnUrls(target, request) },
+  // A verified success callback that names no payment request we know: staff are told, once per transaction.
+  onUnmatched: detail => opsService.raise({
+    type: 'payment_conflict', severity: 'high',
+    title: 'AzamPay confirmed a payment that matches no payment request — check it by hand',
+    dedupeKey: `azampay_unmatched:${detail.transactionId ?? detail.reference}`,
+    entityType: 'payment_request', entityId: null, detail,
+  }),
   // Money AzamPay confirmed that was not approved (passes, plans, trainer products, shop orders): staff are told
   // the way they are for events — an ops exception, one per request and transaction. Event orders raise their own.
   onHeld: (request, reason, detail) => opsService.raise({

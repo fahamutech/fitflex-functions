@@ -110,7 +110,10 @@ test('gating: a member\'s order is payable only through AzamPay — the event fl
   const { b } = await setup();
   assert.equal(eventsPaymentsService.mode(), 'provider');
   assert.equal(eventsPaymentsService.optionsBlock().payment, 'provider');
-  assert.ok(!('manualConfirmHours' in eventsPaymentsService.optionsBlock()));
+  assert.equal(eventsPaymentsService.optionsBlock().manualConfirmHours, 24, 'the organisation-notice confirm time (EVENTS_MANUAL_CONFIRM_SLA_HOURS), while notices are on');
+  delete process.env.EVENTS_PAYMENTS_MANUAL;
+  assert.ok(!('manualConfirmHours' in eventsPaymentsService.optionsBlock()), 'not without organisation notices');
+  process.env.EVENTS_PAYMENTS_MANUAL = '1';
   const listed = async () => (await call(paymentOptions, b.claims, {})).body;
   assert.deepEqual((await listed()).mobileMoney.products, ['FITFLEX_PASS', 'GYM_SUBSCRIPTION', 'EVENT_ORDER']);
   assert.deepEqual([(await listed()).provider, 'manual' in (await listed())], ['azampay', false]);

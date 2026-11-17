@@ -15,6 +15,12 @@
 //      ── success ──▶ approved       ── failure ──▶ pending again (member may retry)
 //      ── no answer for PROMPT_TTL_MS ──▶ the member may ask for a new prompt
 //
+// Three ways in, one way out. A request is paid by a phone prompt (`pay`), by bank checkout with the
+// one-time password the payer's bank gave them (`payByBank`, AZAMPAY_BANK_CHECKOUT) or on AzamPay's hosted
+// payment page (`payByPage`, AZAMPAY_CHECKOUT_PAGE). All three claim the request the same way, and all three
+// are settled ONLY by AzamPay's verified callback: the page's redirect back to us proves nothing.
+// The OTP is handed to AzamPay and nowhere else — never stored, logged or audited.
+//
 // AzamPay offers no status query for collections: its callback is verified by
 // RSA signature against AzamPay's own public key (by the route), and nothing
 // else the callback says is taken on trust: the amount, the transaction and its
@@ -34,11 +40,13 @@
 // held, even in the moment a new prompt is being sent and `reference` is only
 // a claim placeholder.
 import { randomUUID } from 'node:crypto';
-import { toMsisdn, maybeSent } from '../integrations/payments/azampay.mjs';
+import {
+  toMsisdn, maybeSent, bankFor, toBankAccount, toOtp, AZAMPAY_BANKS, AZAMPAY_BANK_MAX_TZS, AZAMPAY_PAGE_LANGUAGES,
+} from '../integrations/payments/azampay.mjs';
 import { productTypeOfPayment, PRODUCT_TYPES } from '../shared/payment-product.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import {
-  MOBILE_MONEY_PROVIDER, CLAIM_PLACEHOLDER, isClaimPlaceholder, mobileMoneyInFlight,
+  MOBILE_MONEY_PROVIDER, CLAIM_PLACEHOLDER, isClaimPlaceholder, mobileMoneyInFlight, pageReferenceFor, parsePageReference,
 } from '../shared/mobile-money-claim.mjs';
 
 const MANUAL = 'admin_approved';
@@ -68,8 +76,11 @@ const SUPERSEDED_MAX = 10;
 
 /** Our reference for one attempt: "<request id>.<attempt>" (unique per prompt). */
 const referenceFor = (requestId, now) => `${requestId}.${now.toString(36)}`;
-/** The request id inside a reference (or the id itself). */
-export const requestIdOf = (referenceId) => String(referenceId ?? '').split('.')[0];
+/** The request id inside a reference: a checkout-page reference (30 characters), "<request id>.<attempt>", or the id itself. */
+export const requestIdOf = (referenceId) => parsePageReference(referenceId)?.requestId ?? String(referenceId ?? '').split('.')[0];
+
+/** The ways a request can be paid through AzamPay. */
+export const PAYMENT_METHODS = Object.freeze({ MOBILE_MONEY: 'mobile_money', BANK: 'bank', PAGE: 'page' });
 
 export function createMobileMoneyService({
   paymentRequests, subscriptions, adminPaymentService, auditLog,
@@ -96,6 +107,15 @@ export function createMobileMoneyService({
   shopOrders = null,
   // Callbacks already fully processed: { has(id) → bool, mark(id) } (WebhookSeen). Used for event requests only.
   webhookSeen = null,
+  // Bank checkout (AZAMPAY_BANK_CHECKOUT) and AzamPay's payment page (AZAMPAY_CHECKOUT_PAGE); each effective only with `enabled`.
+  bankCheckout = () => false,
+  checkoutPage = () => false,
+  // Where AzamPay's page sends the payer afterwards, built from the SERVER's configuration only:
+  // { targets() → ['app', 'web'] (those that are configured), urls(target, request) → { successUrl, failUrl, origin } | null }.
+  // Nothing a client sends ever becomes part of these addresses.
+  pageReturn = null,
+  // A verified SUCCESS callback whose reference matches no payment request: ({ reference, transactionId, amountTzs }) → void.
+  onUnmatched = null,
   // Confirmed money that was not approved, for a request that is NOT an event order (those go to eventOrders.onHeld):
   // (request, reason, { transactionId, amountTzs }) → void. Wired to an ops exception in bootstrap. Best-effort.
   onHeld = null,
@@ -163,10 +183,24 @@ export function createMobileMoneyService({
     return !trainerProducts() || ROLE_PRODUCTS[roleOf(role)].includes(product);
   };
 
-  /** What the app needs to know before showing "Pay now". */
+  const bankOn = () => Boolean(isOn() && bankCheckout() && typeof client.initiateBankPayment === 'function');
+  const pageTargets = () => (pageReturn?.targets?.() ?? []).filter((t) => ['app', 'web'].includes(t));
+  const pageOn = () => Boolean(isOn() && checkoutPage() && client.pageConfigured?.() && pageTargets().length);
+  /** The ways a request can be paid right now (empty while paying is off). */
+  function methods() {
+    if (!isOn()) return [];
+    return [PAYMENT_METHODS.MOBILE_MONEY, ...(bankOn() ? [PAYMENT_METHODS.BANK] : []), ...(pageOn() ? [PAYMENT_METHODS.PAGE] : [])];
+  }
+
+  /** What the app needs to know before showing "Pay now". `methods` (and what each needs) is additive. */
   function options() {
     const on = isOn();
-    return { enabled: on, provider: PROVIDER, environment: on ? client.environment : null };
+    return {
+      enabled: on, provider: PROVIDER, environment: on ? client.environment : null,
+      methods: methods(),
+      ...(bankOn() ? { bank: { providers: [...AZAMPAY_BANKS], maxAmountTzs: AZAMPAY_BANK_MAX_TZS } } : {}),
+      ...(pageOn() ? { page: { returnTo: pageTargets(), languages: [...AZAMPAY_PAGE_LANGUAGES] } } : {}),
+    };
   }
 
   /**
@@ -215,11 +249,53 @@ export function createMobileMoneyService({
   });
 
   /**
-   * Ask the payer's phone to approve the request's amount. `role` is the caller's
-   * session role: 'member' (default) or, with B6a, 'trainer' for their own trainer pass.
+   * What a method needs from the caller, checked for shape before anything is claimed. → { error… } or the
+   * values the send step uses. The OTP lives only in the returned object, which is never stored or logged.
    */
-  async function pay({ memberId, paymentRequestId, phone, role = 'member', network = null }) {
+  function prepare(method, request, { phone, network, bank, accountNumber, otp, returnTo, language }) {
+    if (method === PAYMENT_METHODS.PAGE) {
+      const target = returnTo == null || returnTo === '' ? pageTargets()[0] : returnTo;
+      if (!pageTargets().includes(target)) return fail('invalid_return_to', 400, { allowed: pageTargets() });
+      const lang = language == null || language === '' ? AZAMPAY_PAGE_LANGUAGES[0] : String(language).toLowerCase();
+      if (!AZAMPAY_PAGE_LANGUAGES.includes(lang)) return fail('invalid_language', 400, { allowed: [...AZAMPAY_PAGE_LANGUAGES] });
+      const externalId = pageReferenceFor(request.id, now());
+      if (!externalId) return fail('not_payable_this_way', 409);
+      const urls = pageReturn.urls(target, request);
+      if (!urls?.successUrl || !urls?.failUrl || !urls?.origin) return fail('return_not_configured', 409);
+      return { externalId, urls, language: lang, returnTo: target };
+    }
+    const msisdn = toMsisdn(phone);
+    if (method === PAYMENT_METHODS.BANK) {
+      const chosen = bankFor(bank);
+      if (!chosen) return fail('invalid_bank', 400, { allowed: [...AZAMPAY_BANKS] });
+      const account = toBankAccount(accountNumber);
+      if (!account) return fail('invalid_account_number', 400);
+      if (!msisdn) return fail('invalid_phone', 400);
+      const code = toOtp(otp);
+      if (!code) return fail('invalid_otp', 400);
+      if (Number(request.amountTzs) > AZAMPAY_BANK_MAX_TZS) return fail('amount_over_bank_limit', 409, { maxTzs: AZAMPAY_BANK_MAX_TZS });
+      return { msisdn, bank: chosen, accountNumber: account, otp: code };
+    }
+    if (!msisdn) return fail('invalid_phone', 400);
+    return { msisdn, network };
+  }
+
+  /** Ask the payer's phone to approve the request's amount (AzamPay MNO checkout). */
+  const pay = (args) => attempt({ ...args, method: PAYMENT_METHODS.MOBILE_MONEY });
+  /** Bank checkout: { bank: CRDB | NMB, accountNumber, phone, otp }. */
+  const payByBank = (args) => attempt({ ...args, method: PAYMENT_METHODS.BANK });
+  /** AzamPay's hosted payment page: { returnTo?: app | web, language?: en | sw } → checkoutUrl. */
+  const payByPage = (args) => attempt({ ...args, method: PAYMENT_METHODS.PAGE });
+
+  /**
+   * Start paying a request by one of the three methods. `role` is the caller's session role: 'member'
+   * (default) or, with B6a, 'trainer' for their own trainer pass. Ownership, product and role gates, the
+   * claim, the rate limits and the in-flight rule are the same for every method.
+   */
+  async function attempt({ memberId, paymentRequestId, role = 'member', method = PAYMENT_METHODS.MOBILE_MONEY, ...input }) {
     if (!enabled() || !client || !canSettle()) return fail('feature_disabled', 404);
+    if (method === PAYMENT_METHODS.BANK && !bankOn()) return fail('feature_disabled', 404);
+    if (method === PAYMENT_METHODS.PAGE && !pageOn()) return fail('feature_disabled', 404);
     if (roleOf(role) === 'trainer' && !trainerProducts()) return fail('feature_disabled', 404);
     const own = await ownRequest(memberId, paymentRequestId);
     if (own.error) return own.error;
@@ -255,13 +331,21 @@ export function createMobileMoneyService({
       const problem = await beforeBookingPayment(request);
       if (problem?.error) return fail(problem.error, problem.status || 409, problem.bookingIds ? { bookingIds: problem.bookingIds } : {});
     }
-    const msisdn = toMsisdn(phone);
-    if (!msisdn) return fail('invalid_phone', 400);
+    const prepared = prepare(method, request, input);
+    if (prepared.error) return prepared;
+    const { msisdn = null } = prepared;
 
-    // A prompt is already on the phone: do not send a second one for the same request.
-    if (inFlight(request)) return { status: 200, state: 'in_progress', paymentRequest: view(request), alreadyRequested: true };
+    // An attempt is already out (a prompt on the phone, a bank checkout, an open payment page): no second one for
+    // the same request, whatever the method asked for now. An open page is handed back so it can be opened again.
+    if (inFlight(request)) {
+      return {
+        status: 200, state: 'in_progress', paymentRequest: view(request), alreadyRequested: true,
+        ...(method === PAYMENT_METHODS.PAGE && request.checkoutUrl ? { method, checkoutUrl: request.checkoutUrl } : {}),
+      };
+    }
 
-    if (!allowAttempt(`m:${memberId}`, LIMITS.member) || !allowAttempt(`p:${msisdn}`, LIMITS.phone)) {
+    // Prompts and OTP attempts are limited per member and per phone; a page per member.
+    if (!allowAttempt(`m:${memberId}`, LIMITS.member) || (msisdn && !allowAttempt(`p:${msisdn}`, LIMITS.phone))) {
       return fail('too_many_attempts', 429);
     }
 
@@ -273,8 +357,8 @@ export function createMobileMoneyService({
     // The prompt that is given up keeps its transaction id on the request (supersededReferences), so its late
     // success is recognised even while `reference` is only this claim.
     const claimed = stale
-      ? await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: stale }, { reference: claim, promptedAt: null, supersededReferences: supersededWith(request, stale) })
-      : await updateIf(paymentRequests, request.id, { status: 'pending', provider: MANUAL }, { provider: PROVIDER, reference: claim, promptedAt: null });
+      ? await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: stale }, { reference: claim, promptedAt: null, checkoutUrl: null, supersededReferences: supersededWith(request, stale) })
+      : await updateIf(paymentRequests, request.id, { status: 'pending', provider: MANUAL }, { provider: PROVIDER, reference: claim, promptedAt: null, checkoutUrl: null });
     if (!claimed) {
       const now_ = (await paymentRequests.findByIdAsync(request.id)) ?? request;
       return { status: 200, state: 'in_progress', paymentRequest: view(now_), alreadyRequested: true };
@@ -292,22 +376,38 @@ export function createMobileMoneyService({
     }
 
     let transactionId;
+    let checkoutUrl = null;
     try {
       // The amount is the request's own, never one the app sent.
-      ({ transactionId } = await client.initiatePayment({
-        msisdn, amountTzs: request.amountTzs, reference: referenceFor(request.id, now()),
-        // The wallet paid from (Mpesa, Tigo, Airtel, Halopesa, Azampesa); else taken from the number.
-        network,
-      }));
+      if (method === PAYMENT_METHODS.BANK) {
+        ({ transactionId } = await client.initiateBankPayment({
+          bank: prepared.bank, accountNumber: prepared.accountNumber, msisdn, otp: prepared.otp,
+          amountTzs: request.amountTzs, reference: referenceFor(request.id, now()),
+        }));
+      } else if (method === PAYMENT_METHODS.PAGE) {
+        // The page has no transaction yet: the request waits on OUR reference for it, which AzamPay signs back.
+        ({ url: checkoutUrl } = await client.createCheckoutPage({
+          amountTzs: request.amountTzs, externalId: prepared.externalId, language: prepared.language, itemName: 'FitFlex',
+          requestOrigin: prepared.urls.origin, redirectSuccessUrl: prepared.urls.successUrl, redirectFailUrl: prepared.urls.failUrl,
+        }));
+        transactionId = prepared.externalId;
+      } else {
+        ({ transactionId } = await client.initiatePayment({
+          msisdn, amountTzs: request.amountTzs, reference: referenceFor(request.id, now()),
+          // The wallet paid from (Mpesa, Tigo, Airtel, Halopesa, Azampesa); else taken from the number.
+          network: prepared.network,
+        }));
+      }
     } catch (err) {
-      if (maybeSent(err)) {
+      // A page that was never handed out cannot have been paid: only a prompt or a bank checkout may be out already.
+      if (method !== PAYMENT_METHODS.PAGE && maybeSent(err)) {
         // The prompt may be on the phone already: keep the claim (no second prompt, the
         // callback still finds the request by its reference), and let it expire.
-        await audit('payment_mobile_money_uncertain', request.id, null, { code: err?.code || 'error' });
+        await audit('payment_mobile_money_uncertain', request.id, null, { code: err?.code || 'error', method });
         return fail('provider_unavailable', 503);
       }
       await updateIf(paymentRequests, request.id, { provider: PROVIDER, reference: claim }, { provider: MANUAL, reference: null });
-      await audit('payment_mobile_money_failed_to_start', request.id, null, { code: err?.code || 'error' });
+      await audit('payment_mobile_money_failed_to_start', request.id, null, { code: err?.code || 'error', method });
       if (err?.code === 'rejected') return fail('provider_rejected', 422);
       if (err?.code === 'unknown_network') return fail('network_required', 400);
       return fail('provider_unavailable', 503);
@@ -315,7 +415,7 @@ export function createMobileMoneyService({
     try {
       // Recorded only on the claim this call made: a callback that already settled the request
       // (AzamPay can answer before its own checkout call returns) is never written over.
-      const updated = await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: claim }, { reference: transactionId, promptedAt: new Date(now()).toISOString() });
+      const updated = await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: claim }, { reference: transactionId, promptedAt: new Date(now()).toISOString(), ...(checkoutUrl ? { checkoutUrl } : {}) });
       if (!updated) {
         const latest = (await paymentRequests.findByIdAsync(request.id)) ?? request;
         const settled = latest.status === 'approved';
@@ -324,12 +424,16 @@ export function createMobileMoneyService({
         }
         return { status: settled ? 200 : 202, state: settled ? 'completed' : 'in_progress', paymentRequest: view(latest) };
       }
-      await audit('payment_mobile_money_requested', request.id, null, { transactionId, amountTzs: request.amountTzs });
+      // What was used is on record (never the OTP, the account number or the phone): the method, and the bank or the wallet chosen.
+      await audit('payment_mobile_money_requested', request.id, null, {
+        transactionId, amountTzs: request.amountTzs, method,
+        ...(prepared.bank ? { bank: prepared.bank } : {}), ...(prepared.network ? { network: String(prepared.network).slice(0, 20) } : {}),
+      });
       // S4: the event payment becomes pending with the provider's transaction, and the hold is extended a little.
       if (request.eventOrderId) {
         try { await eventOrders.afterPrompt(request, transactionId); } catch (err) { await audit('payment_mobile_money_unrecorded', request.id, null, { transactionId, error: String(err?.message || err) }); }
       }
-      return { status: 202, state: 'in_progress', paymentRequest: view(updated) };
+      return { status: 202, state: 'in_progress', paymentRequest: view(updated), method, ...(checkoutUrl ? { checkoutUrl } : {}) };
     } catch (err) {
       // The prompt is out but we could not record it: keep the claim; the callback settles it.
       await audit('payment_mobile_money_unrecorded', request.id, null, { transactionId, error: String(err?.message || err) });
@@ -339,7 +443,7 @@ export function createMobileMoneyService({
 
   /** Put an attempt back so the member can try again. */
   async function release(request, why) {
-    const back = await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: request.reference ?? null }, { provider: MANUAL, reference: null, promptedAt: null, supersededReferences: supersededWith(request, request.reference) });
+    const back = await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: request.reference ?? null }, { provider: MANUAL, reference: null, promptedAt: null, checkoutUrl: null, supersededReferences: supersededWith(request, request.reference) });
     if (back) await audit('payment_mobile_money_failed', request.id, { reference: request.reference }, { why });
     return Boolean(back);
   }
@@ -356,7 +460,7 @@ export function createMobileMoneyService({
    * reports where it stands. Idempotent: a repeat callback finds the request already decided.
    * Returns { state: 'completed' | 'failed' | 'in_progress' | 'held' | 'none', ... }.
    */
-  async function settle(request, { transactionId = null, confirmed = null } = {}) {
+  async function settle(request, { transactionId = null, confirmed = null, settleAs = null } = {}) {
     const paid = Boolean(transactionId) && confirmed?.status === 'COMPLETED';
     if (request.status === 'approved') {
       // Settled already. The same transaction again is a repeat; a DIFFERENT one means money came in twice.
@@ -420,7 +524,9 @@ export function createMobileMoneyService({
         return { state: 'held', reason: 'transaction_mismatch', paymentRequest: view(request) };
       }
       // One transaction confirms one payment, flags or not.
-      if (await transactionUsedElsewhere(request, txn)) {
+      // A page attempt is matched on our own reference; what is recorded and kept single-use is AzamPay's transaction (`settleAs`).
+      const finalRef = settleAs || txn;
+      if (await transactionUsedElsewhere(request, finalRef)) {
         await audit('payment_mobile_money_held', request.id, null, { error: 'reference_already_used', transactionId: txn });
         if (!request.eventOrderId) await tellStaff(request, 'reference_already_used', { transactionId: txn, amountTzs: remote.amountTzs });
         return { state: 'held', reason: 'reference_already_used', paymentRequest: view(request) };
@@ -430,7 +536,7 @@ export function createMobileMoneyService({
         return { state: 'held', reason: 'sandbox_not_settled', paymentRequest: view(request) };
       }
       const out = await adminPaymentService.decide({
-        id: request.id, decision: 'approve', reference: txn, actorId: ACTOR, amountTzs: request.amountTzs,
+        id: request.id, decision: 'approve', reference: finalRef, actorId: ACTOR, amountTzs: request.amountTzs,
         // The provider confirmed the money: that is the verification (MONEY_SECOND_APPROVER does not apply).
         automated: true,
         // Event payments keep an allowlist-redacted copy of what the provider said (never the signature or a phone number).
@@ -488,7 +594,9 @@ export function createMobileMoneyService({
     // B6a: the same role rule as paying (a trainer looks at their own trainer pass only).
     if (trainerProducts() && !roleMayPay(role, await productOf(own.request))) return fail('not_payable_by_role', 403);
     const { state, reason, paymentRequest, remark } = await settle(own.request);
-    return { status: 200, state, reason, paymentRequest, remark };
+    // An open payment page can be opened again from here (same page, same attempt).
+    const open = state === 'in_progress' && own.request.checkoutUrl && inFlight(own.request) ? { checkoutUrl: own.request.checkoutUrl } : {};
+    return { status: 200, state, reason, paymentRequest, remark, ...open };
   }
 
   /**
@@ -503,19 +611,34 @@ export function createMobileMoneyService({
     const requestId = requestIdOf(parsed.referenceId);
     if (!requestId || !parsed.transactionId) return fail('invalid_payload', 400);
     const request = await paymentRequests.findByIdAsync(requestId);
-    if (!request) return { status: 200, ok: true, ignored: 'unknown_reference' };
+    if (!request) {
+      // Money AzamPay says it took, for a reference we cannot place: never dropped quietly. (Which field carries our
+      // reference for bank and page payments is not documented; if it is not `utilityref`, this is where it shows.)
+      if (parsed.confirmed?.status === 'COMPLETED') {
+        const detail = { reference: String(parsed.referenceId).slice(0, 140), transactionId: parsed.transactionId, amountTzs: parsed.confirmed.amountTzs };
+        await audit('payment_mobile_money_unmatched', detail.reference, null, { transactionId: detail.transactionId, amountTzs: detail.amountTzs });
+        try { await onUnmatched?.(detail); } catch (err) { console.warn('[mobile-money] staff were not told about an unmatched payment:', detail.transactionId, err?.message); }
+      }
+      return { status: 200, ok: true, ignored: 'unknown_reference' };
+    }
     // AzamPay names a transaction more than one way: use the one the request recorded, if any.
     // Failing that, one it gave up earlier (a late answer for an old prompt); else the callback's own.
     const ids = parsed.transactionIds || [];
     const given = supersededOf(request);
-    const transactionId = ids.includes(request.reference) ? request.reference : (ids.find((id) => given.includes(id)) ?? parsed.transactionId);
+    // A payment page has no transaction id until it is paid: its attempt is OUR reference (30 characters), which
+    // AzamPay signs back as utilityref. It settles on that; AzamPay's own id is what gets recorded (settleAs).
+    const attemptRef = String(parsed.referenceId).trim().toLowerCase();
+    const isPage = parsePageReference(attemptRef) !== null;
+    const pageAttempt = isPage && Boolean(request.checkoutUrl) && request.reference === attemptRef;
+    const transactionId = pageAttempt || ids.includes(request.reference) ? request.reference
+      : (ids.find((id) => given.includes(id)) ?? (isPage && given.includes(attemptRef) ? attemptRef : parsed.transactionId));
     const confirmed = parsed.confirmed ?? null;
     // S4 (event requests only): a callback that was fully processed once is a no-op the second time.
     // It is recorded AFTER processing, so a crash midway does not swallow AzamPay's retry. The state machine, the database's
     // one-success-per-order index and the idempotent confirmation are the guarantees; this is the belt.
     const seenKey = request.eventOrderId && webhookSeen ? `${PROVIDER}:${transactionId}:${String(payload?.transactionstatus ?? '').toUpperCase()}` : null;
     if (seenKey && await webhookSeen.has(seenKey)) return { status: 200, ok: true, duplicate: true };
-    const out = await settle(request, { transactionId, confirmed });
+    const out = await settle(request, { transactionId, confirmed, settleAs: pageAttempt ? parsed.transactionId : null });
     if (seenKey && ['completed', 'failed'].includes(out.state)) await webhookSeen.mark(seenKey);
     return { status: 200, ok: true, state: out.state, ...(out.reason ? { reason: out.reason } : {}) };
   }
@@ -528,5 +651,5 @@ export function createMobileMoneyService({
     return settle(request);
   }
 
-  return { options, payableProducts, pay, refresh, handleCallback, settleById };
+  return { options, methods, payableProducts, pay, payByBank, payByPage, refresh, handleCallback, settleById };
 }
