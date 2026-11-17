@@ -109,9 +109,23 @@ Member (`member` token): `POST /me/gym-pass-purchases`, `POST /me/gym-pass-purch
 
 Owner (`gym_operator`, or `gym_staff` with the scope): plans need scope `gyms`
 (`GET|POST /owner/gyms/:gymId/pass-plans`, `PUT …/:planId`, `POST …/:planId/(activate|deactivate)`); sales and revenue need
-`payments` (`GET …/pass-sales`, `GET …/pass-summary`); people need `members` (`GET …/pass-memberships`,
+`payments` (`GET …/pass-sales`, `GET …/pass-summary[?from&to]`); people need `members` (`GET …/pass-memberships`,
 `GET …/pass-purchases/:purchaseId`, `…/beneficiaries/:beneficiaryId/attendance`, `POST …/beneficiaries`,
 `POST …/beneficiaries/:beneficiaryId/(suspend|resume|remove)`).
+
+### Owner analytics (phase 5B, additive; all behind `GYM_CUSTOM_PASSES`)
+
+No endpoint signature, migration or env var changed. Every field below is **added**; existing fields keep their names, types and values.
+
+* **`GET /owner/gyms/:gymId/pass-summary`** (scope `payments`) adds:
+  * `byPlan[]`: `{ planId, name (from the sale's snapshot), category, sales, revenueTzs, people }`, best-selling first. Sums equal `sales.count`, `sales.revenueTzs` and the `byCategory` people total.
+  * `expiring { withinDays, purchases, people }`: running (`active`) passes ending within `withinDays` (= `EXPIRING_SOON_DAYS`, 7, shared with the Members list) and the people they cover.
+  * `utilisation { visits, peopleWithVisit, peopleNeverVisited, activePeople, visitsPerActivePerson }`: `visits` = check-ins made with these sales' passes that are **not voided** (valid, disputed and flagged all count, as on the per-person attendance); `activePeople` = people whose account is attached (`status: active`) on the counted sales; `peopleWithVisit + peopleNeverVisited = activePeople`; `visitsPerActivePerson` = `visits / activePeople`, 2 decimals, `0` when nobody is active.
+  * `groups { slots, filled, fillRate }`: over **group** sales only; `slots` = the sold pass's slot limit summed per sale, `filled` = people not removed, `fillRate` = `filled / slots` (4 decimals, `0` when no group sale).
+  * Optional **`?from` (inclusive) and `?to` (exclusive)**: only sales whose payment was **approved** in the range (`PaymentRequest.decidedAt`, the date Finance reports on). With a range every sale-derived figure (sales, byCategory, byDuration, byPlan, beneficiaries, memberships, expiring, utilisation, groups) covers those sales; `plans` and `sales.pendingPayment` (no approval date yet) always describe now. An unreadable date is ignored, as on the sales list.
+  * A group purchase is ONE sale with N people; revenue is counted once. Rejected, cancelled and refunded (payment no longer approved) purchases are excluded exactly as before.
+* **`GET /operator/dashboard`** adds `passVisits` and `passMembers` (visits made with a custom pass, not voided, and the distinct members behind them, in the selected period) at the top level (selected gym), in `overall`, and on each `gymSummaries[]` row. They ignore the `memberType` filter. Absent while the flag is off.
+* **`GET /owner/gyms/:gymId/checkins`** and **`GET /operator/checkins`** add `pass: { name, category } | null` to each row (the page's purchase ids are resolved with ONE lookup; `null` for every visit not made with a custom pass). Nothing about the buyer, the other people, contacts or ids beyond the row's existing `passPurchaseId` / `beneficiaryId` is added. The key is absent while the flag is off.
 
 ### Response and error details (contract drift fixed)
 
