@@ -101,6 +101,24 @@ export function azampayTrainerProductsOn() {
 }
 
 /**
+ * AzamPay bank checkout (CRDB, NMB): POST /me/payments/:id/bank. Off unless AZAMPAY_BANK_CHECKOUT is set, and
+ * effective only while AZAMPAY_PAYMENTS is on too. Off: the route answers 404 feature_disabled and
+ * /payments/options does not list the method.
+ */
+export function azampayBankCheckoutOn() {
+  return on('AZAMPAY_BANK_CHECKOUT') && azampayPaymentsOn();
+}
+
+/**
+ * AzamPay's hosted payment page: POST /me/payments/:id/checkout-page. Off unless AZAMPAY_CHECKOUT_PAGE is set, and
+ * effective only while AZAMPAY_PAYMENTS is on too (it also needs AZAMPAY_VENDOR_ID / AZAMPAY_VENDOR_NAME and a
+ * configured return address). Off: the route answers 404 feature_disabled and /payments/options does not list it.
+ */
+export function azampayCheckoutPageOn() {
+  return on('AZAMPAY_CHECKOUT_PAGE') && azampayPaymentsOn();
+}
+
+/**
  * A member's shop (marketplace) order payable through AzamPay. Off unless
  * AZAMPAY_SHOP_ORDERS is set, and effective only while AZAMPAY_PAYMENTS is on too.
  * Off: a shop order answers 409 not_payable_this_way and is confirmed by staff as before.

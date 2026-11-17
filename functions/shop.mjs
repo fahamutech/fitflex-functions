@@ -453,7 +453,7 @@ export const adminRecomputeProductStats = {
 
 export const createShopOrder = {
   created, method: 'post', path: '/me/shop-orders',
-  description: 'Any signed-in user: place a shop order. Stock is validated and reserved atomically. SHOP_FLASH_SALES on (PRICING PATH, docs/shop-flash-sales-api.md): each line is charged its effective price now (a live approved flash sale included; the line then has flashSaleId), items[].expectedPriceTzs (optional) = the unit price the app showed; a difference, or a sale window closing between pricing and the stock lock → 409 price_changed { productId, currentPriceTzs, lines: [{ productId, variant, expectedPriceTzs, currentPriceTzs, reason: sale_ended|sale_started|price_changed }], expectedTotalTzs, totalTzs } and nothing is reserved; expectedPriceTzs not a whole number ≥ 0 → 400 invalid_expected_price. Off: expectedPriceTzs is ignored and prices are as before. Send an Idempotency-Key header (8–100 chars) so a retry returns the original order instead of a second one; the order is unpaid (paymentStatus pending) until FitFlex confirms the payment.',
+  description: 'Any signed-in user: place a shop order. The answer carries `paymentRequestId` (the pending payment request to pay, or null for a free order). Stock is validated and reserved atomically. SHOP_FLASH_SALES on (PRICING PATH, docs/shop-flash-sales-api.md): each line is charged its effective price now (a live approved flash sale included; the line then has flashSaleId), items[].expectedPriceTzs (optional) = the unit price the app showed; a difference, or a sale window closing between pricing and the stock lock → 409 price_changed { productId, currentPriceTzs, lines: [{ productId, variant, expectedPriceTzs, currentPriceTzs, reason: sale_ended|sale_started|price_changed }], expectedTotalTzs, totalTzs } and nothing is reserved; expectedPriceTzs not a whole number ≥ 0 → 400 invalid_expected_price. Off: expectedPriceTzs is ignored and prices are as before. Send an Idempotency-Key header (8–100 chars) so a retry returns the original order instead of a second one; the order is unpaid (paymentStatus pending) until FitFlex confirms the payment.',
   requestSample: { items: [{ productId: 'prd_x', qty: 2 }], deliveryMethod: 'gym_pickup', pickupGymId: 'gym_x', paymentMethod: 'mpesa', paymentOutcome: 'success' },
   onGuard: routeGuard('post', requireAuth()),
   onRequest: async (req, res) => {
@@ -470,13 +470,14 @@ export const createShopOrder = {
       });
     }
     if (result.replayed) res.set?.('Idempotent-Replay', 'true');
-    res.status(201).json(buyerOrderView(result.order));
+    // The payment request this order waits on (null once paid, or for a free order), so the app can pay it without reading /me/payments.
+    res.status(201).json({ ...buyerOrderView(result.order), paymentRequestId: result.paymentRequest?.status === 'pending' ? result.paymentRequest.id : null });
   }
 };
 
 export const myShopOrders = {
   created, method: 'get', path: '/me/shop-orders',
-  description: 'Any signed-in user: list own shop orders.',
+  description: 'Any signed-in user: list own shop orders. Each order carries `paymentRequestId`: the pending payment request it waits on (pay it with POST /me/payments/:id/mobile-money | bank | checkout-page), or null once it is paid, cancelled or free.',
   onGuard: routeGuard('get', requireAuth()),
   onRequest: async (req, res) => res.json(await shopService.myOrders(req.user.sub))
 };

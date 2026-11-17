@@ -116,13 +116,20 @@ test('options.payment: provider (AzamPay) only with its flags and a ticket secre
   assert.deepEqual(o.hold, { manualExtendHours: 24, manualMaxHours: 48, providerExtendMinutes: 10, lateGraceHours: 24 });
   assert.deepEqual(o.tickets, { qr: true, scanning: false });
   assert.equal(o.refundDays, 5);
-  assert.ok(!('manualConfirmHours' in o));
+  // organisation notices are on: how long FitFlex takes to check one (the existing EVENTS_MANUAL_CONFIRM_SLA_HOURS, default 24)
+  assert.equal(o.manualConfirmHours, 24);
+  process.env.EVENTS_MANUAL_CONFIRM_SLA_HOURS = '6';
+  assert.equal((await optionsNow()).manualConfirmHours, 6);
+  delete process.env.EVENTS_MANUAL_CONFIRM_SLA_HOURS;
   process.env.MANUAL_PAY_INSTRUCTIONS = '1';   // a removed flag changes nothing
   assert.equal((await optionsNow()).payment, 'none');
   delete process.env.MANUAL_PAY_INSTRUCTIONS;
   s4On();
   o = await optionsNow();
-  assert.equal(o.payment, 'provider'); assert.ok(!('manualConfirmHours' in o));
+  assert.equal(o.payment, 'provider'); assert.equal(o.manualConfirmHours, 24);
+  delete process.env.EVENTS_PAYMENTS_MANUAL;
+  assert.ok(!('manualConfirmHours' in (await optionsNow())), 'no organisation notices, no figure');
+  process.env.EVENTS_PAYMENTS_MANUAL = '1';
   delete process.env.EVENT_TICKET_SECRET;
   assert.equal((await optionsNow()).payment, 'none', 'no ticket secret: nothing is taken');
   process.env.EVENT_TICKET_SECRET = 'too-short';

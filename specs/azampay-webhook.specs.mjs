@@ -11,7 +11,7 @@ delete process.env.AZAMPAY_CLIENT_SECRET;
 
 const { azampayWebhook } = await import('../functions/webhooks.mjs');
 const { payByMobileMoney, paymentOptions } = await import('../functions/mobile-money.mjs');
-const { azampayTrainerProductsOn, azampayShopOrdersOn, eventsPaymentsAzampayOn } = await import('../src/shared/feature-flags.mjs');
+const { azampayTrainerProductsOn, azampayShopOrdersOn, eventsPaymentsAzampayOn, azampayBankCheckoutOn, azampayCheckoutPageOn } = await import('../src/shared/feature-flags.mjs');
 const flags = await import('../src/shared/feature-flags.mjs');
 
 const res = () => ({ statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } });
@@ -33,7 +33,7 @@ test('with AzamPay off, paying is 404 and the options say so; there is no manual
   try {
     const opts = res();
     await paymentOptions.onRequest({ user: { userType: 'member' } }, opts);
-    assert.deepEqual(opts.body, { enabled: false, provider: 'azampay', environment: null });
+    assert.deepEqual(opts.body, { enabled: false, provider: 'azampay', environment: null, methods: [] });
   } finally { if (saved === undefined) delete process.env.MANUAL_PAY_INSTRUCTIONS; else process.env.MANUAL_PAY_INSTRUCTIONS = saved; }
 });
 
@@ -46,16 +46,18 @@ test('AzamPay is the only provider: the Tunzaa and Selcom routes, flags and manu
 });
 
 test('trainer products, shop orders and event orders each need their own switch AND AZAMPAY_PAYMENTS', () => {
-  const KEYS = ['AZAMPAY_PAYMENTS', 'AZAMPAY_TRAINER_PRODUCTS', 'AZAMPAY_SHOP_ORDERS', 'EVENTS_PAYMENTS_AZAMPAY', 'EVENTS_MODULE', 'EVENTS_REGISTRATION', 'TUNZAA_PAYMENTS', 'TUNZAA_TRAINER_PRODUCTS'];
+  const KEYS = ['AZAMPAY_PAYMENTS', 'AZAMPAY_TRAINER_PRODUCTS', 'AZAMPAY_SHOP_ORDERS', 'AZAMPAY_BANK_CHECKOUT', 'AZAMPAY_CHECKOUT_PAGE', 'EVENTS_PAYMENTS_AZAMPAY', 'EVENTS_MODULE', 'EVENTS_REGISTRATION', 'TUNZAA_PAYMENTS', 'TUNZAA_TRAINER_PRODUCTS'];
   const saved = { ...process.env };
   try {
     for (const k of KEYS) delete process.env[k];
     process.env.TUNZAA_PAYMENTS = 'on'; process.env.TUNZAA_TRAINER_PRODUCTS = 'on';
     assert.equal(azampayTrainerProductsOn(), false, 'the old provider\'s flags mean nothing');
-    process.env.AZAMPAY_TRAINER_PRODUCTS = 'on'; process.env.AZAMPAY_SHOP_ORDERS = 'on';
-    assert.deepEqual([azampayTrainerProductsOn(), azampayShopOrdersOn()], [false, false]);
+    process.env.AZAMPAY_TRAINER_PRODUCTS = 'on'; process.env.AZAMPAY_SHOP_ORDERS = 'on'; process.env.AZAMPAY_BANK_CHECKOUT = 'on'; process.env.AZAMPAY_CHECKOUT_PAGE = 'on';
+    assert.deepEqual([azampayTrainerProductsOn(), azampayShopOrdersOn(), azampayBankCheckoutOn(), azampayCheckoutPageOn()], [false, false, false, false]);
     process.env.AZAMPAY_PAYMENTS = 'on';
-    assert.deepEqual([azampayTrainerProductsOn(), azampayShopOrdersOn()], [true, true]);
+    assert.deepEqual([azampayTrainerProductsOn(), azampayShopOrdersOn(), azampayBankCheckoutOn(), azampayCheckoutPageOn()], [true, true, true, true]);
+    delete process.env.AZAMPAY_BANK_CHECKOUT; delete process.env.AZAMPAY_CHECKOUT_PAGE;
+    assert.deepEqual([azampayBankCheckoutOn(), azampayCheckoutPageOn()], [false, false], 'off unless set');
     process.env.EVENTS_PAYMENTS_AZAMPAY = 'on';
     assert.equal(eventsPaymentsAzampayOn(), false, 'needs the events module and registration');
     process.env.EVENTS_MODULE = 'on'; process.env.EVENTS_REGISTRATION = 'on';

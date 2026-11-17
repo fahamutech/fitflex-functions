@@ -1295,10 +1295,18 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return { due: due.length, expired };
   }
   async function myOrders(buyerId) {
+    // The pending payment request of each order (one read for the buyer), so the app can pay without scanning /me/payments.
+    const open = new Map();
+    if (paymentRequests) {
+      const own = typeof paymentRequests.filterByColumnAsync === 'function'
+        ? await paymentRequests.filterByColumnAsync('memberId', buyerId)
+        : await paymentRequests.filterAsync(p => p.memberId === buyerId);
+      for (const p of own) if (p.orderId && p.status === 'pending' && !open.has(p.orderId)) open.set(p.orderId, p.id);
+    }
     return (await shopOrders.filterAsync(order => order.buyerId === buyerId))
       .sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0))
       // Whether the buyer can still cancel it themselves (before it is on its way).
-      .map(order => ({ ...buyerOrderView(order), canCancel: CANCELLABLE.has(order.status) }));
+      .map(order => ({ ...buyerOrderView(order), canCancel: CANCELLABLE.has(order.status), paymentRequestId: open.get(order.id) ?? null }));
   }
   /**
    * Every order with a line naming this vendor, newest first (one indexed query in Postgres).

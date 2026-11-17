@@ -321,8 +321,8 @@ const PAY = { memberId: 'm1', paymentRequestId: 'pay_1', phone: '0754123456' };
 
 test('options name AzamPay; pay sends the request\'s own amount, our reference and the chosen wallet', async () => {
   const w = world();
-  assert.deepEqual(w.service.options(), { enabled: true, provider: 'azampay', environment: 'sandbox' });
-  assert.deepEqual(world({ canSettle: false }).service.options(), { enabled: false, provider: 'azampay', environment: null });
+  assert.deepEqual(w.service.options(), { enabled: true, provider: 'azampay', environment: 'sandbox', methods: ['mobile_money'] });
+  assert.deepEqual(world({ canSettle: false }).service.options(), { enabled: false, provider: 'azampay', environment: null, methods: [] });
   const out = await w.service.pay({ ...PAY, network: 'Azampesa' });
   assert.equal(out.status, 202);
   const sent = w.remote.initiated[0];
