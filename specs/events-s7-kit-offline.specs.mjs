@@ -1,5 +1,6 @@
 // Marathon & running events · S7 (B1) — the offline kit desk: registry, ticket list, sync, conflicts, offline bib recording, review.
 // docs/design/events-s7-hardening-and-pilot.md §3 (D63 to D69, D66 changed). RULE 6 AREA: a second writer of EventKitCollection and EventBibAssignment.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

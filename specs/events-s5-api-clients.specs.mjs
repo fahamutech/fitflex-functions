@@ -1,5 +1,6 @@
 // Marathon & running events · S5 — API client management (spec §5.1): secret shown once and stored as a hash, scopes, the D39 pilot gate,
 // rotation with grace, revocation, limits, notices, audit without secrets.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';

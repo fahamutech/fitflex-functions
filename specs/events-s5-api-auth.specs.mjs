@@ -1,5 +1,6 @@
 // Marathon & running events · S5 — organizer API authentication (spec §5.2). OWNER REVIEW (D35): the token exchange, the one-answer rule,
 // brute-force controls, token isolation in both directions, row-level revocation / scope / suspension, rate limits.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';

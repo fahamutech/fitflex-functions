@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
 import { createRefundService } from '../src/services/refund-service.mjs';
 import { createMobileMoneyService } from '../src/services/mobile-money-service.mjs';
+import { parseCallback } from '../src/integrations/payments/azampay.mjs';
 import { moneySecondApproverOn } from '../src/shared/feature-flags.mjs';
 import { db } from '../src/infra/knex-store.mjs';
 import { ensureInit } from '../functions/index.mjs';
@@ -169,7 +170,7 @@ test('payments, flag on: rejecting a pending payment stays single-admin (no mone
 
 test('payments, flag on: provider-confirmed (automated) approvals are not held for a second admin', async () => {
   const p = payments(true);
-  const out = await p.svc.decide({ id: 'pr1', decision: 'approve', reference: 'TZ1', actorId: 'tunzaa', automated: true });
+  const out = await p.svc.decide({ id: 'pr1', decision: 'approve', reference: 'TZ1', actorId: 'azampay', automated: true });
   assert.equal(out.paymentRequest.status, 'approved');
   assert.deepEqual(p.activated, ['sub1']);
 });
@@ -259,14 +260,14 @@ test('payments, flag on: a change request can be withdrawn; pending and order pa
 // ── Security review fixes (functions#184) ───────────────────────────────────
 
 test('fix 2, flag on: a mobile-money payment keeps its provider reference (verify and update)', async () => {
-  const p = payments(true, { provider: 'tunzaa', reference: 'TXN_REAL' });
+  const p = payments(true, { provider: 'azampay', reference: 'TXN_REAL' });
   assert.deepEqual(await p.svc.verify({ id: 'pr1', reference: 'TXN_OTHER', actorId: 'a1' }), { error: 'reference_locked_provider', status: 409 });
   assert.deepEqual(await p.svc.update({ id: 'pr1', reference: 'TXN_OTHER', actorId: 'a1' }), { error: 'reference_locked_provider', status: 409 });
   assert.equal(p.row().reference, 'TXN_REAL');
   // verifying without touching the reference is fine
   assert.equal((await p.svc.verify({ id: 'pr1', actorId: 'a1' })).paymentRequest.reference, 'TXN_REAL');
   // flag off: unchanged (staff can still edit it)
-  const off = payments(false, { provider: 'tunzaa', reference: 'TXN_REAL' });
+  const off = payments(false, { provider: 'azampay', reference: 'TXN_REAL' });
   assert.equal((await off.svc.update({ id: 'pr1', reference: 'TXN_OTHER', actorId: 'a1' })).paymentRequest.reference, 'TXN_OTHER');
 });
 
@@ -278,8 +279,8 @@ test('fix 2, flag on: a reference already on another approved payment is refused
   // update → approved
   assert.deepEqual(await a.svc.update({ id: 'pr1', status: 'approved', actorId: 'a2' }), { error: 'reference_already_used', status: 409 });
   // automated (provider) decide
-  const b = payments(true, { provider: 'tunzaa', reference: 'DUP' }, { others: [other] });
-  assert.deepEqual(await b.svc.decide({ id: 'pr1', decision: 'approve', reference: 'DUP', actorId: 'tunzaa', automated: true }), { error: 'reference_already_used', status: 409 });
+  const b = payments(true, { provider: 'azampay', reference: 'DUP' }, { others: [other] });
+  assert.deepEqual(await b.svc.decide({ id: 'pr1', decision: 'approve', reference: 'DUP', actorId: 'azampay', automated: true }), { error: 'reference_already_used', status: 409 });
   // confirmChange → approved
   const c = payments(true, { status: 'rejected', decidedBy: 'a2', reference: 'DUP' }, { others: [other] });
   await c.svc.requestChange({ id: 'pr1', status: 'approved', reason: 'money found', actorId: 'a1' });
@@ -295,19 +296,16 @@ test('fix 2, flag on: a reference already on another approved payment is refused
 
 test('fix 2, flag on: mobile money cannot settle a request on a transaction another payment already used', async () => {
   const paymentRequests = memStore([
-    { id: 'pay_old', memberId: 'm2', subscriptionId: 'subX', amountTzs: 60_000, status: 'approved', provider: 'tunzaa', reference: 'TXN_9' },
-    { id: 'pay_1', memberId: 'm1', subscriptionId: 'sub1', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'tunzaa', reference: 'TXN_9', requestedAt: new Date().toISOString() },
+    { id: 'pay_old', memberId: 'm2', subscriptionId: 'subX', amountTzs: 60_000, status: 'approved', provider: 'azampay', reference: 'TXN_9' },
+    { id: 'pay_1', memberId: 'm1', subscriptionId: 'sub1', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'azampay', reference: 'TXN_9', requestedAt: new Date().toISOString() },
   ]);
   const subscriptions = memStore([pendingSub()]);
   const auditLog = memStore();
   const admin = createAdminPaymentService({ paymentRequests, subscriptions, users: memStore(), auditLog, secondApprover: () => true });
-  const client = {
-    environment: 'sandbox',
-    async initiatePayment() { throw new Error('not used'); },
-    async checkStatus(id) { return { status: 'COMPLETED', amountTzs: 60_000, transactionId: id, remark: null }; },
-  };
+  const client = { environment: 'sandbox', confirmsByCallback: true, parseCallback, async initiatePayment() { throw new Error('not used'); } };
   const mm = createMobileMoneyService({ paymentRequests, subscriptions, adminPaymentService: admin, auditLog, client, enabled: () => true });
-  const out = await mm.refresh({ memberId: 'm1', paymentRequestId: 'pay_1' });
+  // AzamPay's verified callback (it has no status query) for the transaction pay_1 is waiting on.
+  const out = await mm.handleCallback({ transactionstatus: 'success', operator: 'Mpesa', utilityref: 'pay_1.a', transid: 'TXN_9', amount: '60000' });
   assert.equal(out.state, 'held');
   assert.equal(out.reason, 'reference_already_used');
   assert.equal(paymentRequests.rows[1].status, 'pending');

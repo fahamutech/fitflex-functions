@@ -1,5 +1,6 @@
 // Marathon & running events · S5 — the OpenAPI document is the contract (spec §5.5, API-010): it matches the committed file, documents exactly
 // the mounted /v1/organizer routes with the scope each one enforces, and real responses (sandbox and live) validate against its schemas.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';

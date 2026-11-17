@@ -6,7 +6,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 import { createSubscriptionService } from '../src/services/subscription-service.mjs';
-import { createWebhookService } from '../src/services/webhook-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
 import { productTypeOfPayment, PRODUCT_TYPES } from '../src/shared/payment-product.mjs';
 
@@ -211,15 +210,11 @@ test('productTypeOfPayment: existing rows keep their meaning', () => {
 function lifecycle() {
   const { service, subscriptions, paymentRequests } = setup();
   const activated = [];
-  const webhook = createWebhookService({
-    subscriptions, paymentRequests, webhookSeen: memStore(),
-    onSubscriptionActivated: async (sub) => { activated.push(sub.id); },
-  });
   const admin = createAdminPaymentService({
     paymentRequests, subscriptions, users: memStore(), auditLog: memStore(), gyms: [gymA],
     onSubscriptionActivated: async (sub) => { activated.push(sub.id); },
   });
-  return { service, subscriptions, paymentRequests, webhook, admin, activated };
+  return { service, subscriptions, paymentRequests, admin, activated };
 }
 
 test('pending and rejected payments grant nothing; approval activates exactly the purchased product', async () => {
@@ -239,44 +234,19 @@ test('pending and rejected payments grant nothing; approval activates exactly th
   assert.equal(paymentRequests.rows.find(p => p.id === gym.paymentRequest.id).status, 'rejected');
 });
 
-test('webhook success activates once, settles the request and ignores replays', async () => {
-  const { service, subscriptions, paymentRequests, webhook, admin, activated } = lifecycle();
+// A provider's answer (success once, wrong amount, failure, duplicates) is AzamPay's now:
+// specs/azampay-billing-edge-cases.specs.mjs.
+
+test('a payment AzamPay confirmed activates once, settles the request, and an admin cannot approve it again', async () => {
+  const { service, subscriptions, paymentRequests, admin, activated } = lifecycle();
   const out = await service.subscribe({ memberId: 'u1', type: 'direct_sub', homeGymId: 'gym_a', plan: 'daily' });
-  const body = { payment_id: 'sel_1', status: 'success', subscription_id: out.subscription.id, amount: 5000 };
-  assert.deepEqual(await webhook.handleSelcom(body), { ok: true });
-  assert.deepEqual(await webhook.handleSelcom(body), { ok: true, idempotent: true });
+  const settle = () => admin.decide({ id: out.paymentRequest.id, decision: 'approve', reference: 'TXN_1', actorId: 'azampay', amountTzs: 5000, automated: true });
+  assert.equal((await settle()).error, undefined);
+  assert.equal((await settle()).error, 'already_decided');
   assert.equal(subscriptions.rows[0].status, 'active');
-  assert.equal(paymentRequests.rows[0].status, 'approved');
-  assert.equal(paymentRequests.rows[0].reference, 'sel_1');
+  assert.deepEqual([paymentRequests.rows[0].status, paymentRequests.rows[0].reference, paymentRequests.rows[0].decidedBy], ['approved', 'TXN_1', 'azampay']);
   assert.deepEqual(activated, [out.subscription.id], 'activated once');
-  // an admin cannot approve the already-settled request again
   assert.equal((await admin.decide({ id: out.paymentRequest.id, decision: 'approve', actorId: 'adm' })).error, 'already_decided');
-});
-
-test('webhook with the wrong amount does not activate and can be retried with the right one', async () => {
-  const { service, subscriptions, webhook } = lifecycle();
-  const out = await service.subscribe({ memberId: 'u1', tier: 'pro' });
-  const wrong = await webhook.handleSelcom({ payment_id: 'sel_2', status: 'success', subscription_id: out.subscription.id, amount: 1000 });
-  assert.equal(wrong.error, 'amount_mismatch');
-  assert.equal(subscriptions.rows[0].status, 'payment_pending');
-  assert.deepEqual(await webhook.handleSelcom({ payment_id: 'sel_2', status: 'success', subscription_id: out.subscription.id, amount: 120000 }), { ok: true });
-  assert.equal(subscriptions.rows[0].status, 'active');
-});
-
-test('webhook failure leaves the subscription pending so the member can retry', async () => {
-  const { service, subscriptions, paymentRequests, webhook } = lifecycle();
-  const out = await service.subscribe({ memberId: 'u1', tier: 'basic' });
-  await webhook.handleSelcom({ payment_id: 'sel_3', status: 'failed', subscription_id: out.subscription.id });
-  assert.equal(subscriptions.rows[0].status, 'payment_pending');
-  assert.equal(paymentRequests.rows[0].status, 'pending');
-});
-
-test('concurrent duplicate deliveries activate once', async () => {
-  const { service, activated, webhook } = lifecycle();
-  const out = await service.subscribe({ memberId: 'u1', tier: 'basic' });
-  const body = { payment_id: 'sel_4', status: 'success', subscription_id: out.subscription.id };
-  await Promise.all([webhook.handleSelcom(body), webhook.handleSelcom(body)]);
-  assert.equal(activated.length, 1);
 });
 
 test('admin payment list labels every row with its product', async () => {

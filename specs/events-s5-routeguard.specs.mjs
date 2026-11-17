@@ -1,6 +1,7 @@
 // Marathon & running events · S5 — bfast mounts every `onGuard` with a METHOD-BLIND PREFIX match (app.use(path, guard)); every S5 guard must be
 // wrapped in routeGuard so it applies only to its own route (spec §5.2), and no /v1/organizer route may be reachable without requireApiClient
 // other than `token` and `openapi.json`.
+import './fixtures/azampay-env.mjs';
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';

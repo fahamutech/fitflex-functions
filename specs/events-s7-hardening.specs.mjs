@@ -1,6 +1,7 @@
 // Marathon & running events · S7 (B4) — hardening carried in from earlier slices: webhook fairness and redelivery (H1, H4), post-commit safety (H2),
 // outbox retention (H3), organizer status sweep (H7), timezone at submit (H8), team-code limiter (H9), payments reason (H14), pause registrations
 // (H16), organizer search (H17), the retention job and the consent text draft (§6.2). docs/design/events-s7-hardening-and-pilot.md §6.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -13,7 +14,6 @@ import { eventsOptions } from '../functions/events-public.mjs';
 import { quoteEventOrder, resetEventsRegistrationLimits } from '../functions/events-registration.mjs';
 import { harness, s7On, s7Off, db, uid, H, D } from './fixtures/events-s7.mjs';
 import { webhookLab } from './fixtures/events-s5.mjs';
-import { saveManualDetails, clearManualDetails } from './fixtures/events-s4.mjs';
 import { eventsWebhookService, eventsOrganizerService, eventsRetentionService, opsService, eventStore, eventsOpsService } from '../src/bootstrap/services.mjs';
 import { createEventsOpsService } from '../src/services/events-ops-service.mjs';
 import { validateEvent, TIMEZONES } from '../src/shared/events-document.mjs';
@@ -25,7 +25,7 @@ await ensureInit();
 const h = harness();
 const { call } = h;
 afterEach(() => { resetEventsIntegrationsLimits(); resetEventsRegistrationLimits(); s7Off(); });
-after(async () => { await clearManualDetails(); await h.cleanup(); await db.destroy(); });
+after(async () => { await h.cleanup(); await db.destroy(); });
 
 const key = () => `k_${uid('').slice(1)}`;
 
@@ -229,7 +229,6 @@ test('H9: joining a team by code inside a quote shares the lookup limiter (30 an
 
 test('H14: GET /events/options says why payments are off', async () => {
   s7On();
-  await saveManualDetails();
   assert.equal((await call(eventsOptions, null, {})).body.payments.blockedReason, null);
   delete process.env.EVENT_TICKET_SECRET;
   assert.equal((await call(eventsOptions, null, {})).body.payments.blockedReason, 'no_ticket_secret');
@@ -237,7 +236,7 @@ test('H14: GET /events/options says why payments are off', async () => {
   delete process.env.EVENTS_ALLOW_SINGLE_APPROVER;
   assert.equal((await call(eventsOptions, null, {})).body.payments.blockedReason, 'second_approver_off');
   process.env.EVENTS_ALLOW_SINGLE_APPROVER = '1';
-  delete process.env.EVENTS_PAYMENTS_MANUAL;
+  delete process.env.EVENTS_PAYMENTS_AZAMPAY;
   assert.equal((await call(eventsOptions, null, {})).body.payments.blockedReason, 'flag_off');
 });
 

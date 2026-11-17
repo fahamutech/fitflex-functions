@@ -1,4 +1,5 @@
 // Marathon & running events · S5 — bib numbers (spec §4.3, D40): single, release, bulk by rule (atomic), CSV import (dry run, all or nothing).
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';

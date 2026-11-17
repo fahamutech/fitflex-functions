@@ -78,52 +78,35 @@ export function recordFirebaseEvidenceOn() {
 
 
 /**
- * Pay by mobile money through Malipo by Tunzaa (POST /me/payments/:id/mobile-money).
- * Off unless TUNZAA_PAYMENTS is set (and the Tunzaa credentials are present):
- * the endpoint answers 404 feature_disabled and /payments/options says
- * `enabled: false`, so members keep the manual flow. Callbacks for payments
- * already in flight are always honoured (see mobile-money-service).
- */
-export function tunzaaPaymentsOn() {
-  return on('TUNZAA_PAYMENTS');
-}
-
-/**
- * Phase B · B6a: trainer products paid by mobile money (Malipo by Tunzaa) —
- * TRAINER_SERVICE (a member paying for trainer sessions) and TRAINER_GYM_PASS
- * (a trainer buying a gym's trainer pass). Off unless TUNZAA_TRAINER_PRODUCTS
- * is set, and effective only while TUNZAA_PAYMENTS is on too. Off: trainers
- * get 403 on the mobile-money routes as before, trainer products answer
- * 409 not_payable_this_way, and /payments/options has no `mobileMoney` key.
- * SHOP_ORDER is never paid this way (marketplace D-9: manual).
- */
-export function tunzaaTrainerProductsOn() {
-  return on('TUNZAA_TRAINER_PRODUCTS') && tunzaaPaymentsOn();
-}
-
-/**
- * Sandbox payments settle real entitlements (an approved sandbox transaction
- * still activates a pass). So against Tunzaa's sandbox, paying is offered only
- * when TUNZAA_SANDBOX_SETTLES is set on purpose: a test server says so, a
- * production server can never do it by accident. Live needs no such flag.
- */
-export function tunzaaSandboxSettlesOn() {
-  return on('TUNZAA_SANDBOX_SETTLES');
-}
-
-/**
  * Pay by mobile money through AzamPay (POST /me/payments/:id/mobile-money).
- * Off unless AZAMPAY_PAYMENTS is set (and the AzamPay credentials are present).
- * On: AzamPay REPLACES Malipo by Tunzaa for new payments (owner decision
- * 2026-11-15); prompts already out with Tunzaa still settle through Tunzaa.
+ * AzamPay is the only payment provider (owner decision 2026-11-17).
+ * Off unless AZAMPAY_PAYMENTS is set (and the AzamPay credentials are present):
+ * the endpoint answers 404 feature_disabled and /payments/options says
+ * `enabled: false`; payment requests are then settled by staff only.
  */
 export function azampayPaymentsOn() {
   return on('AZAMPAY_PAYMENTS');
 }
 
-/** Trainer sessions and trainer gym passes payable through AzamPay; effective only with AZAMPAY_PAYMENTS. */
+/**
+ * Phase B · B6a: trainer products paid by mobile money — TRAINER_SERVICE (a member
+ * paying for trainer sessions) and TRAINER_GYM_PASS (a trainer buying a gym's trainer
+ * pass). Off unless AZAMPAY_TRAINER_PRODUCTS is set, and effective only while
+ * AZAMPAY_PAYMENTS is on too. Off: trainers get 403 on the mobile-money routes,
+ * trainer products answer 409 not_payable_this_way, and /payments/options has no
+ * `mobileMoney` key.
+ */
 export function azampayTrainerProductsOn() {
   return on('AZAMPAY_TRAINER_PRODUCTS') && azampayPaymentsOn();
+}
+
+/**
+ * A member's shop (marketplace) order payable through AzamPay. Off unless
+ * AZAMPAY_SHOP_ORDERS is set, and effective only while AZAMPAY_PAYMENTS is on too.
+ * Off: a shop order answers 409 not_payable_this_way and is confirmed by staff as before.
+ */
+export function azampayShopOrdersOn() {
+  return on('AZAMPAY_SHOP_ORDERS') && azampayPaymentsOn();
 }
 
 /**
@@ -143,11 +126,6 @@ export function azampaySandboxSettlesOn() {
  */
 export function scheduledRenewalsOn() {
   return on('SCHEDULED_RENEWALS');
-}
-
-/** Trainer products by mobile money, for whichever provider takes new payments. */
-export function mobileMoneyTrainerProductsOn() {
-  return azampayPaymentsOn() ? azampayTrainerProductsOn() : tunzaaTrainerProductsOn();
 }
 
 /**
@@ -220,17 +198,6 @@ export function shopFlashSalesOn() {
 }
 
 /**
- * Manual mobile-money payment (Lipa Namba / till) with a member-supplied
- * transaction ID. Off unless MANUAL_PAY_INSTRUCTIONS is set: /payments/options
- * carries no `manual` block and subscribe / upgrade take no reference, exactly
- * as before. On, it takes effect only once the admin has saved the Lipa Namba
- * and account name in platform settings (`manualPayment`).
- */
-export function manualPayInstructionsOn() {
-  return on('MANUAL_PAY_INSTRUCTIONS');
-}
-
-/**
  * A1 · second approver on money. Off unless MONEY_SECOND_APPROVER is set, so a
  * deploy never changes how payments and refunds are decided on its own. On:
  *   - a manual payment is verified by one admin and approved by a different one
@@ -240,7 +207,7 @@ export function manualPayInstructionsOn() {
  *   - an admin-raised refund waits for approval by someone other than the raiser
  *     (403 cannot_approve_own_request), and a refund is marked paid by someone
  *     other than its approver (403 cannot_pay_own_approval).
- * Payments a provider confirms (mobile money, Selcom) are not affected.
+ * Payments the provider confirms (AzamPay) are not affected.
  */
 export function moneySecondApproverOn() {
   return on('MONEY_SECOND_APPROVER');
@@ -615,20 +582,20 @@ export function eventsRegistrationOn() {
 }
 
 /**
- * S4: payment intake on the labelled manual confirmation path (D1). Needs EVENTS_MODULE and EVENTS_REGISTRATION.
- * Off: GET /events/options.payment stays 'none' and S3 behaviour is unchanged.
+ * S4: an ORGANISATION's payment notice for its event order (bank transfer or mobile money, checked by FitFlex finance; D1).
+ * Needs EVENTS_MODULE and EVENTS_REGISTRATION. Members do not pay by hand any more (owner decision 2026-11-17): a
+ * member's event order is paid through AzamPay (EVENTS_PAYMENTS_AZAMPAY) or not at all.
  */
 export function eventsPaymentsManualOn() {
   return eventsRegistrationOn() && on('EVENTS_PAYMENTS_MANUAL');
 }
 
 /**
- * S4: event orders payable by mobile money (Malipo by Tunzaa). Built dormant; stays off until the owner confirms
- * Tunzaa as the launch provider (D1). Needs EVENTS_MODULE and EVENTS_REGISTRATION (the client, TUNZAA_PAYMENTS and
- * canSettle() are checked where the provider is used).
+ * S4: event orders payable by mobile money through AzamPay (owner decision 2026-11-17). Off unless set. Needs
+ * EVENTS_MODULE and EVENTS_REGISTRATION (the client, AZAMPAY_PAYMENTS and canSettle() are checked where the provider is used).
  */
-export function eventsPaymentsTunzaaOn() {
-  return eventsRegistrationOn() && on('EVENTS_PAYMENTS_TUNZAA');
+export function eventsPaymentsAzampayOn() {
+  return eventsRegistrationOn() && on('EVENTS_PAYMENTS_AZAMPAY');
 }
 
 /**
@@ -639,9 +606,9 @@ export function eventsApproverGateOpen() {
   return moneySecondApproverOn() || on('EVENTS_ALLOW_SINGLE_APPROVER');
 }
 
-/** S4: payment intake (initiate, provider prompt, corporate notice) is on in either mode. */
+/** S4: payment intake (initiate, AzamPay prompt, organisation notice) is on with either switch. */
 export function eventsPaymentIntakeOn() {
-  return eventsPaymentsManualOn() || eventsPaymentsTunzaaOn();
+  return eventsPaymentsManualOn() || eventsPaymentsAzampayOn();
 }
 
 const positiveNumber = (name, fallback) => {
@@ -733,18 +700,6 @@ export function partnerDobRequiredOn() {
 }
 
 /**
- * Admin-portal audit M3. Off unless SELCOM_STRICT_AMOUNT is set. On: a Selcom
- * "success" callback activates a waiting subscription only when it carries an
- * `amount` AND an open payment request exists AND the amount equals the request's.
- * Otherwise it is refused (409 amount_required / no_open_request / amount_mismatch)
- * before the payment_id is claimed, so a corrected redelivery still works.
- * Off: the old rule (amount compared only when both sides are present).
- */
-export function selcomStrictAmountOn() {
-  return on('SELCOM_STRICT_AMOUNT');
-}
-
-/**
  * Admin-portal audit S4. Off unless ADMIN_EMAILS_STRICT is set. On, in production
  * with FITFLEX_ADMIN_EMAILS unset or blank: no email is trusted as a configured
  * super-admin (the built-in fallback address is not used). Off: the fallback
@@ -800,28 +755,6 @@ export function securityIncidentReportsOn() {
 export function securityReportMaxPerDay() {
   const n = Math.floor(Number(process.env.SECURITY_REPORT_MAX_PER_DAY));
   return Number.isFinite(n) && n >= 1 ? n : 3;
-}
-
-/**
- * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_SERVER_CONFIRM is set. On: a Selcom
- * "success" callback is confirmed with Selcom through an injectable client before a
- * subscription is activated; if the client cannot confirm (including "not configured",
- * the only implementation today) the callback is refused with 503 and the payment_id
- * is not consumed. Do not switch on until a real Selcom status client exists: createWebhookService
- * refuses to be constructed (the backend does not boot) while this flag is on and the injected
- * client is the not-configured one, so the flag cannot be enabled by mistake.
- */
-export function selcomWebhookServerConfirmOn() {
-  return on('SELCOM_WEBHOOK_SERVER_CONFIRM');
-}
-
-/**
- * Admin-portal audit M2. Off unless SELCOM_WEBHOOK_QUERY_TOKEN_OFF is set. On: the Selcom
- * webhook rejects the legacy ?token= query form and accepts only the x-selcom-webhook-token
- * header. Switch on once Selcom has been reconfigured to send the header.
- */
-export function selcomWebhookQueryTokenOff() {
-  return on('SELCOM_WEBHOOK_QUERY_TOKEN_OFF');
 }
 
 /**

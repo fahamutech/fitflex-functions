@@ -166,7 +166,7 @@ export function createPgEventMoneyStore({ db, eventStore, now = () => new Date()
     }
 
     const organizer = await trx('EventOrganizer').where({ id: event.organizerId }).first('commissionPct');
-    const method = payment.method ?? (payment.provider === 'tunzaa' ? 'provider' : payment.provider === 'free' ? 'free' : 'manual');
+    const method = payment.method ?? (payment.provider === 'azampay' ? 'provider' : payment.provider === 'free' ? 'free' : 'manual');
     const [savedOrder] = await trx('EventOrder').where({ id: orderId }).update({
       status: 'confirmed', holdExpiresAt: null, confirmedAt: at, closedAt: null, closeReason: null, holdCycle: cycle,
       organizerId: event.organizerId, commissionPctSnapshot: organizer?.commissionPct ?? null, paymentMethod: method, updatedAt: at,

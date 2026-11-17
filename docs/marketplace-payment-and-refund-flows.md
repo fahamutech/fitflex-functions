@@ -11,7 +11,7 @@ behaviour is assumed.
 |---|---|
 | Payment initiation (create a charge at a provider) | **Does not exist.** An order creates a `PaymentRequest` with `provider: 'admin_approved'`; the buyer pays outside the app and may type a reference |
 | Payment confirmation | **Manual**: FitFlex staff approve the request in the portal (`POST /admin/payment-requests/:id/decision`) |
-| Provider webhook | `POST /webhooks/selcom` exists, protected by a shared token (`SELCOM_WEBHOOK_SECRET`; signature verification is open item OI-004). It settles **subscriptions only** (`subscription_id`); it has no order path, and nothing initiates a Selcom charge for an order |
+| Provider webhook | Since 2026-11-17 AzamPay is the only payment method: `POST /webhooks/azampay` (RSA-signed callback; `PAYMENTS_AZAMPAY.md`). The Selcom webhook was removed. A member's shop order is payable through AzamPay only while `AZAMPAY_SHOP_ORDERS` is on (off by default); otherwise an order's payment is confirmed by staff as described here. |
 | Refund payout | **Manual**: staff send the money and record it (`POST /admin/refunds/:id/paid` with a reference) |
 | Reconciliation against a provider ledger | **Not possible** (no provider data). Internal reconciliation added (below) |
 

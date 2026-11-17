@@ -4,7 +4,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { db } from '../src/infra/knex-store.mjs';
-import { promotionEventsService, promotionAnalyticsService, adminPaymentService, webhookService } from '../src/bootstrap/services.mjs';
+import { promotionEventsService, promotionAnalyticsService, adminPaymentService } from '../src/bootstrap/services.mjs';
 
 const uid = p => `${p}_${randomUUID().slice(0, 8)}`;
 const HOUR = 3_600_000;
@@ -188,12 +188,13 @@ test('approving a payment records the conversion with what was paid; changing it
   assert.equal((await conversions(p, 'subscription')).length, 1);
 });
 
-test('the provider webhook that activates a membership records the conversion too', async () => {
+test('a payment the provider (AzamPay) confirmed records the conversion too', async () => {
   const gymId = uid('gym'); const m = await member();
   const p = await promotion('gym', gymId);
   await tap(p, m, 'gym', gymId, DAY);
   const a = await pendingMembership(m, gymId);
-  const out = await webhookService.handleSelcom({ payment_id: uid('selcom'), status: 'success', subscription_id: a.subscriptionId });
-  assert.equal(out.ok, true);
+  // AzamPay's verified callback settles the request through the same approval path, as actor azampay.
+  const out = await adminPaymentService.decide({ id: a.paymentId, decision: 'approve', reference: uid('TXN'), actorId: 'azampay', amountTzs: 60000, automated: true });
+  assert.equal(out.error, undefined);
   assert.equal((await conversions(p, 'subscription')).length, 1);
 });

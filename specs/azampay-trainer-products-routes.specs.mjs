@@ -1,14 +1,15 @@
 // Phase B · B6a, the routes: who gets past the mobile-money guards under each flag
 // combination, and the additive `mobileMoney.products` on GET /payments/options.
-// Route handlers and guards as exported; no Tunzaa call is ever made (sandbox
+// Route handlers and guards as exported; no AzamPay call is ever made (sandbox
 // credentials are fake and no request reaches the provider: unknown request ids).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 
-process.env.MALIPO_API_KEY = 'spec-key';
-process.env.MALIPO_API_SECRET = 'spec-secret';
-delete process.env.MALIPO_ENV; // sandbox
-const FLAGS = ['TUNZAA_PAYMENTS', 'TUNZAA_TRAINER_PRODUCTS', 'TUNZAA_SANDBOX_SETTLES'];
+process.env.AZAMPAY_APP_NAME = 'spec-app';
+process.env.AZAMPAY_CLIENT_ID = 'spec-client';
+process.env.AZAMPAY_CLIENT_SECRET = 'spec-secret';
+delete process.env.AZAMPAY_ENV; // sandbox
+const FLAGS = ['AZAMPAY_PAYMENTS', 'AZAMPAY_TRAINER_PRODUCTS', 'AZAMPAY_SANDBOX_SETTLES'];
 const saved = Object.fromEntries(FLAGS.map((k) => [k, process.env[k]]));
 for (const k of FLAGS) delete process.env[k];
 
@@ -34,7 +35,7 @@ async function guard(route, userType) {
 const FORBIDDEN_MEMBER_ONLY = { status: 403, body: { error: 'forbidden', requiredRoles: ['member'] } };
 
 test('guards: flags off → paying is members only, exactly as before; refresh lets trainers reach the service', async () => {
-  for (const flags of [{}, { TUNZAA_PAYMENTS: 1 }, { TUNZAA_TRAINER_PRODUCTS: 1 }]) {
+  for (const flags of [{}, { AZAMPAY_PAYMENTS: 1 }, { AZAMPAY_TRAINER_PRODUCTS: 1 }]) {
     setFlags(flags);
     assert.equal(await guard(payByMobileMoney, 'member'), 'next', JSON.stringify(flags));
     assert.deepEqual(await guard(payByMobileMoney, 'trainer'), FORBIDDEN_MEMBER_ONLY, JSON.stringify(flags));
@@ -57,7 +58,7 @@ test('guards are scoped to their own route: the pay guard does not run on /refre
 });
 
 test('guards: both flags on → members and trainers; every other role still refused', async () => {
-  setFlags({ TUNZAA_PAYMENTS: 1, TUNZAA_TRAINER_PRODUCTS: 1 });
+  setFlags({ AZAMPAY_PAYMENTS: 1, AZAMPAY_TRAINER_PRODUCTS: 1 });
   for (const route of [payByMobileMoney, refreshMobileMoneyPayment]) {
     assert.equal(await guard(route, 'member'), 'next');
     assert.equal(await guard(route, 'trainer'), 'next');
@@ -70,32 +71,32 @@ test('guards: both flags on → members and trainers; every other role still ref
 });
 
 test('options: no mobileMoney key while trainer products are off; products per caller when on', async () => {
-  setFlags({ TUNZAA_PAYMENTS: 1 });
+  setFlags({ AZAMPAY_PAYMENTS: 1 });
   const legacy = res();
   await paymentOptions.onRequest({ user: { sub: 'm1', userType: 'member' } }, legacy);
   assert.equal('mobileMoney' in legacy.body, false, 'flag off: response unchanged');
 
-  // Effective only with TUNZAA_PAYMENTS.
-  setFlags({ TUNZAA_TRAINER_PRODUCTS: 1 });
+  // Effective only with AZAMPAY_PAYMENTS.
+  setFlags({ AZAMPAY_TRAINER_PRODUCTS: 1 });
   const notEffective = res();
   await paymentOptions.onRequest({ user: { sub: 'm1', userType: 'member' } }, notEffective);
   assert.equal('mobileMoney' in notEffective.body, false);
   assert.equal(notEffective.body.enabled, false);
 
-  // On against the sandbox without TUNZAA_SANDBOX_SETTLES: paying is not offered, so nothing is payable.
-  setFlags({ TUNZAA_PAYMENTS: 1, TUNZAA_TRAINER_PRODUCTS: 1 });
+  // On against the sandbox without AZAMPAY_SANDBOX_SETTLES: paying is not offered, so nothing is payable.
+  setFlags({ AZAMPAY_PAYMENTS: 1, AZAMPAY_TRAINER_PRODUCTS: 1 });
   const closed = res();
   await paymentOptions.onRequest({ user: { sub: 't1', userType: 'trainer' } }, closed);
   assert.deepEqual([closed.body.enabled, closed.body.mobileMoney], [false, { products: [] }]);
 
-  setFlags({ TUNZAA_PAYMENTS: 1, TUNZAA_TRAINER_PRODUCTS: 1, TUNZAA_SANDBOX_SETTLES: 1 });
+  setFlags({ AZAMPAY_PAYMENTS: 1, AZAMPAY_TRAINER_PRODUCTS: 1, AZAMPAY_SANDBOX_SETTLES: 1 });
   const as = async (userType) => {
     const out = res();
     await paymentOptions.onRequest({ user: { sub: 'x', userType } }, out);
     return out.body;
   };
   const member = await as('member');
-  assert.deepEqual([member.enabled, member.environment, member.provider], [true, 'sandbox', 'tunzaa']);
+  assert.deepEqual([member.enabled, member.environment, member.provider], [true, 'sandbox', 'azampay']);
   assert.deepEqual(member.mobileMoney, { products: ['FITFLEX_PASS', 'GYM_SUBSCRIPTION', 'TRAINER_SERVICE'] });
   assert.deepEqual((await as('trainer')).mobileMoney, { products: ['TRAINER_GYM_PASS'] });
   assert.deepEqual((await as('vendor')).mobileMoney, { products: [] });
@@ -106,7 +107,7 @@ test('options: no mobileMoney key while trainer products are off; products per c
 });
 
 test('handlers: a trainer session is told feature_disabled while trainer products are off; unknown requests are 404', async () => {
-  setFlags({ TUNZAA_PAYMENTS: 1, TUNZAA_SANDBOX_SETTLES: 1 });
+  setFlags({ AZAMPAY_PAYMENTS: 1, AZAMPAY_SANDBOX_SETTLES: 1 });
   const off = res();
   await payByMobileMoney.onRequest({ user: { sub: 't1', userType: 'trainer' }, params: { id: 'pay_b6_none' }, body: { phone: '0712345678' } }, off);
   assert.deepEqual([off.statusCode, off.body], [404, { error: 'feature_disabled' }]);
@@ -115,7 +116,7 @@ test('handlers: a trainer session is told feature_disabled while trainer product
   await refreshMobileMoneyPayment.onRequest({ user: { sub: 't1', userType: 'trainer' }, params: { id: 'pay_b6_none' } }, refreshOff);
   assert.deepEqual([refreshOff.statusCode, refreshOff.body], [403, { error: 'forbidden', requiredRoles: ['member'] }]);
 
-  setFlags({ TUNZAA_PAYMENTS: 1, TUNZAA_TRAINER_PRODUCTS: 1, TUNZAA_SANDBOX_SETTLES: 1 });
+  setFlags({ AZAMPAY_PAYMENTS: 1, AZAMPAY_TRAINER_PRODUCTS: 1, AZAMPAY_SANDBOX_SETTLES: 1 });
   for (const route of [payByMobileMoney, refreshMobileMoneyPayment]) {
     const out = res();
     await route.onRequest({ user: { sub: 't1', userType: 'trainer' }, params: { id: 'pay_b6_none' }, body: { phone: '0712345678' } }, out);

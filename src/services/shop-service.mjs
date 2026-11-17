@@ -1188,6 +1188,16 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return null;
   }
 
+  /** Before a mobile-money prompt goes out for a shop order: the same checks, and the order must still be waiting for this payment. */
+  async function checkOrderPrompt(request) {
+    const problem = await checkOrderPayment(request);
+    if (problem) return problem;
+    const order = await shopOrders.findByIdAsync(request.orderId);
+    const lapsed = order.reservationExpiresAt && +new Date(order.reservationExpiresAt) <= +now();
+    if (order.status !== 'pending' || order.paymentStatus !== 'pending' || lapsed) return { error: 'order_not_payable', status: 409, orderStatus: order.status };
+    return null;
+  }
+
   /**
    * The patch that cancels an order as it stands (locked): its own timeline entry, every vendor's part
    * cancelled with the same entry. `extra` carries the payment status the cancellation leaves behind.
@@ -1731,5 +1741,5 @@ export function createShopService({ products, shopOrders, users, auditLog, marke
     return (await marketplaceNotifications.filterAsync(notification => notification.userId === userId)).sort((a, b) => +new Date(b.createdAt || 0) - +new Date(a.createdAt || 0));
   }
 
-  return { lookupProductCode, canSeeCost, afterStockMoved, notifyVendor, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
+  return { lookupProductCode, canSeeCost, afterStockMoved, notifyVendor, vendorListProducts, adjustStock, stockMovements, lowStock, getVendorProfile, saveVendorProfile, getVendorStore, listProducts, getProduct, upsertProduct, duplicateProduct, deleteProduct, adminListProducts, adminCreateProduct, adminUpdateProductListing, adminListVendors, adminUpdateVendor, createOrder, applyPaymentToOrder, expireStaleReservations, buyerCancelOrder, markOrderRefunded, raiseMissingRefund, repairOrderPayment, checkOrderPayment, checkOrderPrompt, myOrders, vendorOrders, vendorOrdersPage, vendorOrder, canSeeOrderMoney, vendorMe, updateOrderStatus, vendorPayments, vendorStatement, sendEnquiry, vendorEnquiries, replyEnquiry, resolveEnquiry, createVendorStaff, listVendorStaff, disableVendorStaff, canStaff, authorizeStaff, isActiveStaff, vendorProfileFor, reviewProduct, orderInvoice, reorder, notifications };
 }

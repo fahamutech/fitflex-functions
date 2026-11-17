@@ -5,7 +5,6 @@
 // caps (owner decision 2026-10-19: no tier may be sold unless it is configured
 // in Settings; fail closed). There is no fallback to built-in constants.
 import { randomUUID } from 'node:crypto';
-import { validateManualPaymentSettings } from '../shared/manual-payment.mjs';
 import { defaultSubscriptionTiers } from '../shared/default-subscription-tiers.mjs';
 import { PASS_GYM_ACCESS } from '../shared/check-in-rules.mjs';
 import { checkReason } from '../shared/admin-reason.mjs';
@@ -186,7 +185,7 @@ export function createSettingsService({ platformSettings, auditLog, tierHolders 
   }
 
   // Cosmetic settings (trainer specialties) need no reason; pricing, payout and payment settings do.
-  const REASONED_KEYS = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency', 'manualPayment'];
+  const REASONED_KEYS = ['subscriptionTiers', 'payoutBands', 'paymentPeriodDays', 'payoutModel', 'currency'];
 
   async function adminUpdate({ body, actorId }) {
     const sensitive = REASONED_KEYS.some(k => body[k] !== undefined);
@@ -204,12 +203,6 @@ export function createSettingsService({ platformSettings, auditLog, tierHolders 
     const updates = {};
     for (const k of allowed) {
       if (body[k] !== undefined) updates[k] = body[k];
-    }
-    // Manual mobile-money details (slice A3): validated, replaced whole; null clears them.
-    if (body.manualPayment !== undefined) {
-      const checked = validateManualPaymentSettings(body.manualPayment);
-      if (checked.error) return { error: checked.error, field: checked.field, status: 400 };
-      updates.manualPayment = checked.value;
     }
     updates.updatedAt = new Date().toISOString();
     // One database transaction: the settings change and its audit row commit together or not at all
@@ -232,11 +225,6 @@ export function createSettingsService({ platformSettings, auditLog, tierHolders 
       await auditLog.insertAsync(auditRow(updated));
     }
     return updated;
-  }
-
-  /** The saved manual-payment details ({ lipaNamba, accountName, network, instructions }), or null. */
-  function manualPaymentSettings() {
-    return ensureDefaultSettings().manualPayment ?? null;
   }
 
   function getSpecialtiesList() {
@@ -263,6 +251,6 @@ export function createSettingsService({ platformSettings, auditLog, tierHolders 
 
   return {
     ensureDefaultSettings, getTierConfig, sellableTier, isTierSellable, sellableTierKeys, visitCapForTier, priceForTier,
-    publicTiers, adminGet, adminUpdate, manualPaymentSettings, getSpecialtiesList, addSpecialty, deleteSpecialty,
+    publicTiers, adminGet, adminUpdate, getSpecialtiesList, addSpecialty, deleteSpecialty,
   };
 }

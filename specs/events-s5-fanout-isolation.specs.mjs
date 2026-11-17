@@ -1,4 +1,5 @@
 // Marathon & running events · S5 — webhook fan-out isolation (spec §7.4; follow-up "fan-out strictly on organizerId"). SCENARIO 19 for webhooks.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
